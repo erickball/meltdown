@@ -1,0 +1,277 @@
+/**
+ * Simulation State Types
+ *
+ * The simulation uses a node-based approach where the plant is discretized
+ * into thermal nodes (solid materials) and flow nodes (fluid volumes).
+ * These are connected via heat transfer and flow connections.
+ */
+
+// ============================================================================
+// Fluid Properties
+// ============================================================================
+
+export interface FluidState {
+  // CONSERVED QUANTITIES (primary state variables)
+  mass: number;           // kg - total fluid mass in this node
+  internalEnergy: number; // J - total internal energy in this node
+
+  // DERIVED QUANTITIES (computed from mass, energy, and volume)
+  temperature: number;    // K
+  pressure: number;       // Pa
+  phase: 'liquid' | 'vapor' | 'two-phase';
+  quality: number;        // Vapor mass fraction (0-1), only meaningful for two-phase
+}
+
+// ============================================================================
+// Thermal Nodes - Solid materials that conduct heat
+// ============================================================================
+
+export interface ThermalNode {
+  id: string;
+  label: string;                    // Human-readable name
+
+  // Thermal state
+  temperature: number;              // K
+
+  // Material properties
+  mass: number;                     // kg
+  specificHeat: number;             // J/kg-K (can be temperature-dependent later)
+  thermalConductivity: number;      // W/m-K
+
+  // Geometry (for conduction calculations)
+  characteristicLength: number;     // m - typical dimension for conduction
+  surfaceArea: number;              // m² - for convection to fluid
+
+  // Heat sources
+  heatGeneration: number;           // W - internal heat generation (fission, decay)
+
+  // Limits for damage modeling
+  maxTemperature: number;           // K - failure/damage threshold
+}
+
+// ============================================================================
+// Flow Nodes - Fluid volumes that exchange mass and energy
+// ============================================================================
+
+export interface FlowNode {
+  id: string;
+  label: string;
+
+  // Fluid state
+  fluid: FluidState;
+
+  // Geometry
+  volume: number;                   // m³
+  hydraulicDiameter: number;        // m - for heat transfer correlations
+  flowArea: number;                 // m² - cross-sectional flow area
+
+  // Elevation for natural circulation
+  elevation: number;                // m - height relative to reference
+}
+
+// ============================================================================
+// Connections between nodes
+// ============================================================================
+
+export interface ThermalConnection {
+  id: string;
+  fromNodeId: string;               // Thermal node ID
+  toNodeId: string;                 // Thermal node ID
+
+  // Conduction parameters
+  conductance: number;              // W/K - k*A/L for this connection
+}
+
+export interface ConvectionConnection {
+  id: string;
+  thermalNodeId: string;            // Solid node
+  flowNodeId: string;               // Fluid node
+
+  // Heat transfer parameters
+  surfaceArea: number;              // m² - wetted surface area
+  // Heat transfer coefficient computed dynamically based on flow
+}
+
+export interface FlowConnection {
+  id: string;
+  fromNodeId: string;               // Upstream flow node
+  toNodeId: string;                 // Downstream flow node
+
+  // Flow parameters
+  flowArea: number;                 // m² - pipe cross-section
+  hydraulicDiameter: number;        // m
+  length: number;                   // m - for pressure drop
+  elevation: number;               // m - elevation change (+ = upward)
+
+  // Flow resistance (K-factor for pressure drop)
+  resistanceCoeff: number;          // ΔP = K * 0.5 * ρ * v²
+
+  // Current flow state (computed by solver)
+  massFlowRate: number;             // kg/s (positive = from -> to)
+
+  // Target flow rate (computed from pressure balance, for debugging)
+  targetFlowRate?: number;          // kg/s - what flow would be at equilibrium
+}
+
+// ============================================================================
+// Neutronics State (simplified point kinetics)
+// ============================================================================
+
+export interface NeutronicsState {
+  // Reactor power
+  power: number;                    // W - current fission power
+  nominalPower: number;             // W - 100% rated power
+
+  // Reactivity (dimensionless, often expressed in $ or pcm)
+  reactivity: number;               // Δk/k
+
+  // Point kinetics parameters
+  promptNeutronLifetime: number;    // s (Λ) - typically ~1e-5 to 1e-4 for LWRs
+  delayedNeutronFraction: number;   // β - typically ~0.0065 for U-235
+
+  // Delayed neutron precursor groups (simplified to 1 group for now)
+  precursorConcentration: number;   // Relative units
+  precursorDecayConstant: number;   // 1/s (λ) - effective value ~0.08
+
+  // Reactivity feedback coefficients
+  fuelTempCoeff: number;            // Δρ/ΔT_fuel (Doppler), typically negative
+  coolantTempCoeff: number;         // Δρ/ΔT_coolant, sign varies
+  coolantDensityCoeff: number;      // Δρ/Δρ_coolant (void coefficient)
+
+  // Reference conditions for feedback
+  refFuelTemp: number;              // K
+  refCoolantTemp: number;           // K
+  refCoolantDensity: number;        // kg/m³
+
+  // Control rod worth
+  controlRodPosition: number;       // 0-1 (0 = fully inserted, 1 = fully withdrawn)
+  controlRodWorth: number;          // Total reactivity worth when fully inserted
+
+  // Decay heat (fraction of nominal power)
+  decayHeatFraction: number;        // Computed from operating history
+
+  // SCRAM state
+  scrammed: boolean;
+  scramTime: number;                // Simulation time when SCRAM occurred
+
+  // Reactivity breakdown (for debugging)
+  reactivityBreakdown: {
+    controlRods: number;            // Reactivity from control rods
+    doppler: number;                // Fuel temperature feedback
+    coolantTemp: number;            // Coolant temperature feedback
+    coolantDensity: number;         // Coolant density feedback
+  };
+
+  // Diagnostic values (for debugging feedback calculations)
+  diagnostics: {
+    fuelTemp: number;               // Current average fuel temperature (K)
+    coolantTemp: number;            // Current average coolant temperature (K)
+    coolantDensity: number;         // Current average coolant density (kg/m³)
+  };
+}
+
+// ============================================================================
+// Energy Balance Diagnostics
+// ============================================================================
+
+export interface EnergyDiagnostics {
+  // Total energy in system
+  totalFluidEnergy: number;         // J - sum of all flow node internal energies
+  totalSolidEnergy: number;         // J - sum of all thermal node energies (m*cp*T)
+
+  // Heat transfer rates (W)
+  heatTransferRates: Map<string, number>;  // Connection ID -> heat rate (W)
+
+  // Key flows for display
+  fuelToCoreCoolant: number;        // W - heat from fuel to core coolant
+  coreCoolantToSG: number;          // W - heat from SG primary to secondary
+  sgToSecondary: number;            // W - heat from SG tubes to secondary side
+
+  // Energy added/removed this timestep
+  heatGenerationTotal: number;      // W - total fission + decay heat
+  advectedEnergy: number;           // J - energy moved by flow this timestep
+}
+
+// ============================================================================
+// Complete Simulation State
+// ============================================================================
+
+export interface SimulationState {
+  time: number;                     // s - simulation time
+
+  // Node collections
+  thermalNodes: Map<string, ThermalNode>;
+  flowNodes: Map<string, FlowNode>;
+
+  // Connections
+  thermalConnections: ThermalConnection[];
+  convectionConnections: ConvectionConnection[];
+  flowConnections: FlowConnection[];
+
+  // Reactor physics
+  neutronics: NeutronicsState;
+
+  // Component states (valves, pumps, etc.)
+  components: ComponentStates;
+
+  // Energy balance diagnostics (populated by operators)
+  energyDiagnostics?: EnergyDiagnostics;
+
+  // Pressure model diagnostics (populated by FluidStateOperator)
+  // Maps flow node ID to the base pressure used for pressure feedback calculation
+  liquidBasePressures?: Map<string, number>;
+}
+
+export interface ComponentStates {
+  pumps: Map<string, PumpState>;
+  valves: Map<string, ValveState>;
+}
+
+export interface PumpState {
+  id: string;
+  running: boolean;
+  speed: number;                    // 0-1 fraction of rated speed
+  ratedHead: number;                // m - head at rated conditions
+  ratedFlow: number;                // kg/s - flow at rated conditions
+  connectedFlowPath: string;        // Flow connection ID this pump drives
+}
+
+export interface ValveState {
+  id: string;
+  position: number;                 // 0 = closed, 1 = fully open
+  failPosition: number;             // Position on loss of power/signal
+  connectedFlowPath: string;        // Flow connection ID
+}
+
+// ============================================================================
+// Solver Performance Metrics
+// ============================================================================
+
+export interface SolverMetrics {
+  // Timing
+  lastStepWallTime: number;         // ms - wall clock time for last physics step
+  avgStepWallTime: number;          // ms - rolling average
+
+  // Timestep info
+  currentDt: number;                // s - current physics timestep
+  minDtUsed: number;                // s - smallest dt used recently
+  subcycleCount: number;            // Number of substeps in last frame
+  totalSteps: number;               // Total simulation steps taken (cumulative)
+
+  // Adaptive timestep info
+  retriesThisFrame: number;         // Number of step retries due to state changes
+  maxPressureChange: number;        // Maximum relative pressure change in last accepted step
+  maxFlowChange: number;            // Maximum absolute flow rate change in last accepted step (kg/s)
+  maxMassChange: number;            // Maximum relative mass change in last accepted step
+  consecutiveSuccesses: number;     // Steps since last retry (for dt growth)
+
+  // Performance ratio
+  realTimeRatio: number;            // sim_time / wall_time (< 1 means falling behind)
+
+  // Warnings
+  isFallingBehind: boolean;         // True if can't keep up with real time
+  fallingBehindSince: number;       // Simulation time when we started falling behind
+
+  // Per-operator timing (for profiling)
+  operatorTimes: Map<string, number>;
+}
