@@ -1203,19 +1203,39 @@ function loadData(): void {
     addInterpolatedCompressedLiquidPoints();
 
     // Build Delaunay triangulation
+    console.time("[WaterProps] buildTriangulation");
+
     buildTriangulation();
 
+    console.timeEnd("[WaterProps] buildTriangulation");
+
     // Build spatial index for fast lookup
+    console.time("[WaterProps] buildSpatialIndex");
+
     buildSpatialIndex();
 
+    console.timeEnd("[WaterProps] buildSpatialIndex");
+
     // Build phase detection caches
+    console.time("[WaterProps] buildPhaseDetectionCaches");
+
     buildPhaseDetectionCaches();
 
+    console.timeEnd("[WaterProps] buildPhaseDetectionCaches");
+
     // Build compressed liquid (P,u)->rho interpolation
+    console.time("[WaterProps] buildCompressedLiquidInterpolation");
+
     buildCompressedLiquidInterpolation();
 
+    console.timeEnd("[WaterProps] buildCompressedLiquidInterpolation");
+
     // Build liquid-only (V,u)->P interpolation for round-trip verification
+    console.time("[WaterProps] buildLiquidVUInterpolation");
+
     buildLiquidVUInterpolation();
+
+    console.timeEnd("[WaterProps] buildLiquidVUInterpolation");
 
     console.log(`[WaterProps v3 OPTIMIZED] Loaded ${dataPoints.length} data points`);
     console.log(`[WaterProps v3 OPTIMIZED] Built ${triangles.length} triangles`);
@@ -1523,8 +1543,9 @@ function insertPoint(pIdx: number, x: number, y: number): void {
     }
   }
 
-  // Find boundary edges of the cavity
-  const polygon: [number, number][] = [];
+  // Find boundary edges of the cavity using edge counting
+  // An edge is on the boundary if it appears exactly once among bad triangles
+  const edgeCount = new Map<string, { a: number; b: number; count: number }>();
 
   for (const tIdx of badTriangles) {
     const t = triangles[tIdx];
@@ -1535,19 +1556,22 @@ function insertPoint(pIdx: number, x: number, y: number): void {
     ];
 
     for (const [a, b] of edges) {
-      // Check if edge is shared with another bad triangle
-      let shared = false;
-      for (const otherIdx of badTriangles) {
-        if (otherIdx === tIdx) continue;
-        const other = triangles[otherIdx];
-        if (hasEdge(other, a, b)) {
-          shared = true;
-          break;
-        }
+      // Normalize edge key so (a,b) and (b,a) map to the same key
+      const key = a < b ? a + ',' + b : b + ',' + a;
+      const existing = edgeCount.get(key);
+      if (existing) {
+        existing.count++;
+      } else {
+        edgeCount.set(key, { a, b, count: 1 });
       }
-      if (!shared) {
-        polygon.push([a, b]);
-      }
+    }
+  }
+
+  // Boundary edges are those with count === 1
+  const polygon: [number, number][] = [];
+  for (const edge of edgeCount.values()) {
+    if (edge.count === 1) {
+      polygon.push([edge.a, edge.b]);
     }
   }
 
