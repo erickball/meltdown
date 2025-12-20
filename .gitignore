@@ -2,3 +2,28 @@ node_modules/
 dist/
 .vite/
 *.log
+
+# IDE and tool config
+.claude/
+.vscode/
+
+# Temporary test/debug scripts
+*.cjs
+*.py
+nul
+temp-*.ts
+test-results.txt
+tsconfig.test.json
+vite.config.test.ts
+
+# Debug/analysis files
+src/simulation/diagnose-*.ts
+src/simulation/test-*.ts
+src/simulation/analyze-*.ts
+src/simulation/check-*.ts
+src/simulation/export-*.ts
+src/simulation/find-*.ts
+
+# Generated plots and images
+*.png
+*.html

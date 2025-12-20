@@ -27,4 +27,5 @@ export {
   enableCalculationDebug,
   getCalculationDebugLog,
   lookupCompressedLiquidDensity,
+  distanceToSaturationLine,
 } from './water-properties';

@@ -308,116 +308,6 @@ export class HeatGenerationOperator implements PhysicsOperator {
 }
 
 // ============================================================================
-// Phase Hysteresis - Prevents rapid oscillation between phases
-// ============================================================================
-
-type Phase = 'liquid' | 'two-phase' | 'vapor';
-
-/**
- * Apply hysteresis to phase transitions to prevent oscillation.
- *
- * When the calculated phase differs from the previous phase, we only allow
- * the transition if the state has moved significantly into the new phase region.
- * This prevents flickering at phase boundaries due to small numerical variations.
- */
-function applyPhaseHysteresis(
-  previousPhase: Phase,
-  calculatedPhase: Phase,
-  quality: number,
-  mass: number,
-  internalEnergy: number,
-  volume: number
-): Phase {
-  const density = mass / volume;
-  const specificEnergy = internalEnergy / mass;
-
-  // Get saturation properties for hysteresis thresholds
-  const T_for_energy = findTemperatureForEnergy(specificEnergy);
-  const rho_f = Water.saturatedLiquidDensity(T_for_energy);
-  const rho_g = Water.saturatedVaporDensity(T_for_energy);
-  const u_f = Water.saturatedLiquidEnergy(T_for_energy);
-  const u_g = Water.saturatedVaporEnergy(T_for_energy);
-
-  // Hysteresis thresholds (require 5% margin to switch phases)
-  const QUALITY_THRESHOLD_LOW = 0.05;   // Must be below 5% to switch from two-phase to liquid
-  const QUALITY_THRESHOLD_HIGH = 0.95;  // Must be above 95% to switch from two-phase to vapor
-  const DENSITY_MARGIN = 0.05;          // 5% density margin for phase switches
-  const ENERGY_MARGIN = 0.02;           // 2% energy margin
-
-  // Case: was liquid, now calculated as two-phase or vapor
-  if (previousPhase === 'liquid') {
-    if (calculatedPhase === 'two-phase') {
-      // Only switch to two-phase if quality is clearly above 0
-      if (quality < QUALITY_THRESHOLD_LOW) {
-        return 'liquid'; // Stay liquid
-      }
-    } else if (calculatedPhase === 'vapor') {
-      // Only switch to vapor if energy is clearly above u_g
-      if (specificEnergy < u_g * (1 + ENERGY_MARGIN)) {
-        return 'liquid'; // Stay liquid
-      }
-    }
-  }
-
-  // Case: was vapor, now calculated as two-phase or liquid
-  if (previousPhase === 'vapor') {
-    if (calculatedPhase === 'two-phase') {
-      // Only switch to two-phase if quality is clearly below 1
-      if (quality > QUALITY_THRESHOLD_HIGH) {
-        return 'vapor'; // Stay vapor
-      }
-    } else if (calculatedPhase === 'liquid') {
-      // Only switch to liquid if energy is clearly below u_f
-      if (specificEnergy > u_f * (1 - ENERGY_MARGIN)) {
-        return 'vapor'; // Stay vapor
-      }
-    }
-  }
-
-  // Case: was two-phase, now calculated as liquid or vapor
-  if (previousPhase === 'two-phase') {
-    if (calculatedPhase === 'liquid') {
-      // Only switch to liquid if quality is clearly 0 and density is high
-      if (quality > QUALITY_THRESHOLD_LOW || density < rho_f * (1 - DENSITY_MARGIN)) {
-        return 'two-phase'; // Stay two-phase
-      }
-    } else if (calculatedPhase === 'vapor') {
-      // Only switch to vapor if quality is clearly 1 and density is low
-      if (quality < QUALITY_THRESHOLD_HIGH || density > rho_g * (1 + DENSITY_MARGIN)) {
-        return 'two-phase'; // Stay two-phase
-      }
-    }
-  }
-
-  // Allow the phase change
-  return calculatedPhase;
-}
-
-/**
- * Find saturation temperature where the given energy falls in the dome
- */
-function findTemperatureForEnergy(specificEnergy: number): number {
-  let T_low = 373;
-  let T_high = 640;
-
-  for (let i = 0; i < 20; i++) {
-    const T_mid = (T_low + T_high) / 2;
-    const u_f = Water.saturatedLiquidEnergy(T_mid);
-    const u_g = Water.saturatedVaporEnergy(T_mid);
-
-    if (specificEnergy < u_f) {
-      T_high = T_mid;
-    } else if (specificEnergy > u_g) {
-      T_low = T_mid;
-    } else {
-      return T_mid;
-    }
-  }
-
-  return (T_low + T_high) / 2;
-}
-
-// ============================================================================
 // Fluid State Update Operator - Ensures consistency after all operations
 // ============================================================================
 
@@ -434,30 +324,14 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
       finalPhase: 'liquid' | 'two-phase' | 'vapor';
     }>();
 
-    for (const [nodeId, flowNode] of newState.flowNodes) {
-      const originalNode = state.flowNodes.get(nodeId);
-      const previousPhase = originalNode?.fluid.phase;
-
+    for (const [, flowNode] of newState.flowNodes) {
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
         flowNode.fluid.internalEnergy,
         flowNode.volume
       );
 
-      // Apply phase hysteresis
-      let finalPhase = waterState.phase;
-      if (previousPhase && previousPhase !== waterState.phase) {
-        finalPhase = applyPhaseHysteresis(
-          previousPhase,
-          waterState.phase,
-          waterState.quality,
-          flowNode.fluid.mass,
-          flowNode.fluid.internalEnergy,
-          flowNode.volume
-        );
-      }
-
-      nodeStates.set(nodeId, { waterState, finalPhase });
+      nodeStates.set(flowNode.id, { waterState, finalPhase: waterState.phase });
     }
 
     // Build connectivity map from flow connections
@@ -596,32 +470,24 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
         flowNode.fluid.pressure = waterState.pressure;
       } else {
         // LIQUID: Hybrid pressure model
-        // P = P_base + K_feedback * (ρ - ρ_expected) / ρ_expected
+        // P = P_base + K * (ρ - ρ_expected) / ρ_expected
         //
         // Where ρ_expected is the density of compressed liquid at the current
         // temperature T and the base pressure P_base. This accounts for thermal
         // expansion: as fluid heats up and expands, ρ_expected decreases, so
         // there's no spurious pressure rise from expansion alone.
         //
-        // IMPORTANT: We use TWO different bulk moduli:
-        // 1. K_physical = 2.2e9 Pa (real water compressibility) for computing
-        //    the expected density at temperature T and pressure P_base.
-        //    This gives realistic values: water is nearly incompressible.
-        // 2. K_feedback = 1e8 Pa for the pressure RESPONSE to mass deviation.
-        //    This is softer for numerical stability but still provides
-        //    meaningful feedback (10x higher than before for stronger response).
-        //
-        // The key insight: real water barely compresses, so if we see
-        // ρ >> ρ_sat at the current temperature, that excess mass MUST
-        // cause significant pressure rise to drive flow out.
+        // We use temperature-dependent bulk modulus via Water.bulkModulus(T_C).
+        // This varies from ~2200 MPa at 50°C to ~60 MPa at 350°C, which is
+        // physically accurate - water becomes much more compressible near the
+        // critical point.
 
         const rho = flowNode.fluid.mass / flowNode.volume;
         const T = waterState.temperature;
         const T_C = T - 273.15;
-        
-        // Use temperature-dependent bulk modulus
-        const K_physical = Water.bulkModulus(T_C);
-        const K_feedback = K_physical;  // Use actual bulk modulus for pressure response
+
+        // Temperature-dependent bulk modulus
+        const K = Water.bulkModulus(T_C);
 
         if (liquidPressures.has(nodeId)) {
           // Connected to two-phase - use base pressure + local deviation
@@ -630,6 +496,7 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           // Expected density from steam table interpolation at (P_base, u)
           // This uses actual compressed liquid data rather than saturation approximation
           const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;  // J/kg
+          const v_specific = flowNode.volume / flowNode.fluid.mass;  // m³/kg
           const rho_table = Water.lookupCompressedLiquidDensity(P_base, u_specific);
 
           // Fallback to saturation-based calculation if outside interpolation domain
@@ -645,20 +512,42 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           } else {
             // Fallback: saturation + bulk modulus adjustment
             const dP_compression_base = Math.max(0, P_base - P_sat);
-            rho_expected = rho_sat * (1 + dP_compression_base / K_physical);
+            rho_expected = rho_sat * (1 + dP_compression_base / K);
           }
 
           // Pressure deviation from mass accumulation/depletion
-          // Using K_feedback for the response strength
           const densityRatio = (rho - rho_expected) / rho_expected;
-          const dP = K_feedback * densityRatio;
+          const dP = K * densityRatio;
 
-          flowNode.fluid.pressure = P_base + dP;
+          let P_feedback = P_base + dP;
+
+          // Floor: liquid pressure cannot be below saturation pressure at this temperature
+          // This enforces the thermodynamic constraint that subcooled liquid P >= P_sat(T)
+          P_feedback = Math.max(P_feedback, P_sat);
+
+          // Near the liquid/supercritical boundary (u > 1750 kJ/kg), the bulk modulus
+          // model diverges from true thermodynamics. Blend toward triangulation lookup
+          // to ensure smooth transition when crossing the 1800 kJ/kg boundary.
+          const u_kJkg = u_specific / 1000;
+          const U_BLEND_START = 1750;  // Start blending at this u (kJ/kg)
+          const U_BLEND_END = 1800;    // Full triangulation at this u (kJ/kg)
+
+          if (u_kJkg > U_BLEND_START) {
+            const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
+            if (P_triangulation !== null) {
+              const blend = Math.min(1, (u_kJkg - U_BLEND_START) / (U_BLEND_END - U_BLEND_START));
+              flowNode.fluid.pressure = (1 - blend) * P_feedback + blend * P_triangulation;
+            } else {
+              flowNode.fluid.pressure = P_feedback;
+            }
+          } else {
+            flowNode.fluid.pressure = P_feedback;
+          }
 
           // DEBUG: Log full pressure calculation for connected liquid
           if (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX) {
             console.log(`[FluidStateDebug] ${nodeId} (connected liquid):`);
-            console.log(`  T=${(T-273.15).toFixed(1)}°C, ρ=${rho.toFixed(1)}, P_base=${(P_base/1e5).toFixed(2)}bar`);
+            console.log(`  T=${(T-273.15).toFixed(1)}°C, ρ=${rho.toFixed(1)}, P_base=${(P_base/1e5).toFixed(2)}bar, K=${(K/1e6).toFixed(0)}MPa`);
             console.log(`  u=${(u_specific/1000).toFixed(1)}kJ/kg, ρ_table=${rho_table?.toFixed(1) ?? 'null'}, used_table=${usedTableLookup}`);
             console.log(`  ρ_sat=${rho_sat.toFixed(1)}, P_sat=${(P_sat/1e5).toFixed(2)}bar`);
             console.log(`  ρ_expected=${rho_expected.toFixed(1)}, ratio=${(densityRatio*100).toFixed(2)}%, dP=${(dP/1e5).toFixed(2)}bar`);
@@ -675,14 +564,13 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           const P_sat = Water.saturationPressure(T);
           // For isolated region, expected density is just saturation density
           const densityRatio = (rho - rho_sat) / rho_sat;
-          // Use temperature-dependent bulk modulus for pressure response
-          const dP_compression = K_physical * densityRatio;
+          const dP_compression = K * densityRatio;
           flowNode.fluid.pressure = P_sat + Math.max(0, dP_compression);
 
           // DEBUG: Log isolated liquid calculation
           if (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX) {
             console.log(`[FluidStateDebug] ${nodeId} (ISOLATED liquid - no P_base!):`);
-            console.log(`  T=${(T-273.15).toFixed(1)}°C, ρ=${rho.toFixed(1)}`);
+            console.log(`  T=${(T-273.15).toFixed(1)}°C, ρ=${rho.toFixed(1)}, K=${(K/1e6).toFixed(0)}MPa`);
             console.log(`  ρ_sat=${rho_sat.toFixed(1)}, P_sat=${(P_sat/1e5).toFixed(2)}bar`);
             console.log(`  ratio=${(densityRatio*100).toFixed(2)}%, dP=${(dP_compression/1e5).toFixed(2)}bar`);
             console.log(`  P_final=${(flowNode.fluid.pressure/1e5).toFixed(2)}bar`);

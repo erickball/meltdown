@@ -466,13 +466,34 @@ export class FlowOperator implements PhysicsOperator {
         // Vapor: use steam table pressure
         pressures.set(nodeId, waterState.pressure);
       } else {
-        // Liquid: hybrid pressure model using shared utility
+        // Liquid: hybrid pressure model - MUST match FluidStateUpdateOperator exactly
+        // to ensure flow calculations use consistent pressures
         if (liquidBasePressures.has(nodeId)) {
           // Connected to two-phase - use shared pressure feedback calculation
           const P_base = liquidBasePressures.get(nodeId)!;
           const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;
+          const v_specific = flowNode.volume / flowNode.fluid.mass;
           const result = Water.computePressureFeedback(rho, P_base, u_specific, T);
-          pressures.set(nodeId, result.P_final);
+
+          // Floor: liquid pressure cannot be below saturation pressure at this temperature
+          const P_sat = Water.saturationPressure(T);
+          let P_final = Math.max(result.P_final, P_sat);
+
+          // Near the liquid/supercritical boundary (u > 1750 kJ/kg), blend toward
+          // triangulation lookup to ensure smooth transition
+          const u_kJkg = u_specific / 1000;
+          const U_BLEND_START = 1750;
+          const U_BLEND_END = 1800;
+
+          if (u_kJkg > U_BLEND_START) {
+            const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
+            if (P_triangulation !== null) {
+              const blend = Math.min(1, (u_kJkg - U_BLEND_START) / (U_BLEND_END - U_BLEND_START));
+              P_final = (1 - blend) * P_final + blend * P_triangulation;
+            }
+          }
+
+          pressures.set(nodeId, P_final);
         } else {
           // Isolated liquid region
           pressures.set(nodeId, Water.computeIsolatedLiquidPressure(rho, T));
@@ -498,9 +519,8 @@ export class PressureOperator implements PhysicsOperator {
   // in FluidStateUpdateOperator, which properly accounts for temperature-dependent
   // density and provides physically meaningful pressure feedback.
   //
-  // The FluidStateUpdateOperator uses:
-  // - K_physical = 2.2e9 Pa for computing expected density (water is incompressible)
-  // - K_feedback = 1e8 Pa for pressure response to mass deviation
+  // The FluidStateUpdateOperator uses temperature-dependent bulk modulus via
+  // Water.bulkModulus(T_celsius), which varies from ~2200 MPa at 50°C to ~60 MPa at 350°C.
   //
   // This operator is kept for reference but should not be in the operator chain.
 

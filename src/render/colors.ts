@@ -31,22 +31,66 @@ export function rgbToString(c: RGB, alpha: number = 1): string {
 const WATER_COLD: RGB = { r: 20, g: 50, b: 120 };       // 0°C - dark blue
 const WATER_COOL: RGB = { r: 30, g: 80, b: 160 };       // ~30% to sat - medium dark blue
 const WATER_WARM: RGB = { r: 50, g: 120, b: 200 };      // ~70% to sat - medium blue
-const WATER_SAT: RGB = { r: 120, g: 180, b: 240 };      // at saturation - light blue
+const WATER_SAT_LOW_P: RGB = { r: 120, g: 180, b: 240 };// at saturation (low P) - light blue
 
 // Color stops for steam
 // Steam: white (saturated) -> yellow (100°C superheat) -> orange (500°C superheat)
-const STEAM_SAT: RGB = { r: 255, g: 255, b: 255 };      // saturated - white
+const STEAM_SAT_LOW_P: RGB = { r: 255, g: 255, b: 255 };// saturated (low P) - white
 const STEAM_SUPER_100: RGB = { r: 255, g: 240, b: 130 };// 100°C superheat - yellow
 const STEAM_SUPER_500: RGB = { r: 255, g: 140, b: 50 }; // 500°C superheat - orange
 
+// At the critical point (220.64 bar, 374°C), liquid and vapor become indistinguishable
+// Both converge to a pale blue-white color
+const CRITICAL_POINT: RGB = { r: 200, g: 220, b: 240 }; // pale blue-white
+
+// Critical point temperature (374°C in Kelvin)
+const T_CRITICAL = 647.3;
+
+/**
+ * Get saturated liquid color at a given pressure/temperature.
+ * As pressure approaches critical, the color becomes paler (converging with vapor).
+ */
+function getSaturatedLiquidColor(T_sat: number): RGB {
+  // Blend from light blue to critical color as T_sat approaches T_critical
+  // Start blending around 300°C (573K) for gradual transition
+  const T_BLEND_START = 573; // 300°C
+  if (T_sat <= T_BLEND_START) {
+    return WATER_SAT_LOW_P;
+  } else if (T_sat >= T_CRITICAL) {
+    return CRITICAL_POINT;
+  } else {
+    const t = (T_sat - T_BLEND_START) / (T_CRITICAL - T_BLEND_START);
+    return lerpRGB(WATER_SAT_LOW_P, CRITICAL_POINT, t);
+  }
+}
+
+/**
+ * Get saturated vapor color at a given pressure/temperature.
+ * As pressure approaches critical, the color gets a slight blue tinge (converging with liquid).
+ */
+function getSaturatedVaporColor(T_sat: number): RGB {
+  // Blend from white to critical color as T_sat approaches T_critical
+  const T_BLEND_START = 573; // 300°C
+  if (T_sat <= T_BLEND_START) {
+    return STEAM_SAT_LOW_P;
+  } else if (T_sat >= T_CRITICAL) {
+    return CRITICAL_POINT;
+  } else {
+    const t = (T_sat - T_BLEND_START) / (T_CRITICAL - T_BLEND_START);
+    return lerpRGB(STEAM_SAT_LOW_P, CRITICAL_POINT, t);
+  }
+}
+
 // Saturation temperature as function of pressure (simplified)
-// For water: T_sat ≈ 373K at 1 atm, ~617K at 155 bar
-function getSaturationTemp(pressure: number): number {
-  // Simplified correlation: T_sat = 373 + 35 * ln(P/101325)
-  // This gives roughly: 1 bar -> 373K, 10 bar -> 453K, 155 bar -> 617K
+// For water: T_sat ≈ 373K at 1 atm, ~617K at 155 bar, ~647K at 220 bar (critical)
+export function getSaturationTemp(pressure: number): number {
+  // Antoine-like correlation fitted to steam tables
+  // T_sat = 373 + 48.5 * ln(P/101325)
+  // This gives: 1 bar -> 373K (100°C), 10 bar -> 485K (212°C),
+  //            155 bar -> 617K (344°C), 220 bar -> 647K (374°C critical)
   const P_atm = pressure / 101325;
   if (P_atm <= 1) return 373;
-  return 373 + 35 * Math.log(P_atm);
+  return 373 + 48.5 * Math.log(P_atm);
 }
 
 // Steam table data for saturated water (IAPWS-IF97)
@@ -134,8 +178,8 @@ export function getFluidColor(fluid: Fluid): string {
   // Handle two-phase specially - we return a simple blend here,
   // but components use getTwoPhaseColors for pixelated rendering
   if (fluid.phase === 'two-phase') {
-    const liquidColor = WATER_SAT;
-    const vaporColor = STEAM_SAT;
+    const liquidColor = getSaturatedLiquidColor(T_sat);
+    const vaporColor = getSaturatedVaporColor(T_sat);
     // Default to 50% quality if undefined
     const quality = fluid.quality ?? 0.5;
     const blended = lerpRGB(liquidColor, vaporColor, quality);
@@ -145,11 +189,12 @@ export function getFluidColor(fluid: Fluid): string {
   // Handle vapor explicitly - always use steam colors regardless of temperature
   // This ensures vapor is never shown as blue even with impossible state values
   if (fluid.phase === 'vapor') {
+    const steamSat = getSaturatedVaporColor(T_sat);
     const superheat = T - T_sat;
     if (superheat <= 0) {
-      return rgbToString(STEAM_SAT, 1.0);  // White
+      return rgbToString(steamSat, 1.0);
     } else if (superheat <= 100) {
-      return rgbToString(lerpRGB(STEAM_SAT, STEAM_SUPER_100, superheat / 100), 1.0);
+      return rgbToString(lerpRGB(steamSat, STEAM_SUPER_100, superheat / 100), 1.0);
     } else if (superheat <= 500) {
       return rgbToString(lerpRGB(STEAM_SUPER_100, STEAM_SUPER_500, (superheat - 100) / 400), 1.0);
     } else {
@@ -170,47 +215,63 @@ export function getTwoPhaseColors(fluid: Fluid): { liquid: RGB; vapor: RGB; qual
   // Volume fraction represents what fraction of SPACE is occupied by vapor
   // which is what we want for pixel-based rendering
   const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
+  // Get temperature-dependent saturation colors (converge near critical point)
+  const T_sat = getSaturationTemp(fluid.pressure);
   return {
-    liquid: WATER_SAT,
-    vapor: STEAM_SAT,
+    liquid: getSaturatedLiquidColor(T_sat),
+    vapor: getSaturatedVaporColor(T_sat),
     quality: volumeFraction,  // Note: this is actually volume fraction now
   };
 }
 
 function getTemperatureColor(T: number, T_sat: number, phase: 'liquid' | 'vapor' | 'two-phase'): RGB {
-  // Dark blue represents 50°C subcooling, light blue is at saturation
-  // T_cold = T_sat - 50K (50°C subcooling)
-  const T_cold = T_sat - 50;
+  // Get temperature-dependent saturation colors
+  const waterSat = getSaturatedLiquidColor(T_sat);
+  const steamSat = getSaturatedVaporColor(T_sat);
 
   if (phase === 'liquid') {
-    // Liquid water: dark blue (50°C subcooling) -> light blue (saturation)
-    // t=0 at T_cold (50°C below sat), t=1 at T_sat
-    const t = Math.max(0, Math.min(1, (T - T_cold) / 50));
+    // Liquid water color based on absolute temperature
+    // Reference points:
+    //   20°C (293K) = very dark blue (cold water)
+    //   180°C (453K) = medium blue (BWR conditions, ~70 bar saturation)
+    //   344°C (617K) = light blue (PWR conditions, ~155 bar saturation)
+    //   374°C (647K) = pale blue-white (critical point)
+    //
+    // The gradient goes from cold to the current saturation color
+    const T_COLD = 293;      // 20°C - very cold water
+    const T_PWR_SAT = 617;   // 344°C - PWR saturation temperature at 155 bar
 
-    if (t <= 0.3) {
-      // 50°C subcooling to ~35°C subcooling: dark -> medium dark
-      return lerpRGB(WATER_COLD, WATER_COOL, t / 0.3);
-    } else if (t <= 0.7) {
-      // ~35°C to ~15°C subcooling: medium dark -> medium
-      return lerpRGB(WATER_COOL, WATER_WARM, (t - 0.3) / 0.4);
+    // Clamp T to valid range
+    const T_clamped = Math.max(T_COLD, Math.min(T, T_sat));
+
+    // Calculate how far we are from cold to PWR saturation temp
+    // This gives a consistent color scale regardless of current pressure
+    const t = (T_clamped - T_COLD) / (T_PWR_SAT - T_COLD);
+
+    if (t <= 0.25) {
+      // 20°C to ~100°C: very dark blue -> dark blue
+      return lerpRGB(WATER_COLD, WATER_COOL, t / 0.25);
+    } else if (t <= 0.55) {
+      // ~100°C to ~200°C: dark blue -> medium blue (around BWR temps)
+      return lerpRGB(WATER_COOL, WATER_WARM, (t - 0.25) / 0.3);
     } else {
-      // ~15°C subcooling to saturation: medium -> light
-      return lerpRGB(WATER_WARM, WATER_SAT, (t - 0.7) / 0.3);
+      // ~200°C to saturation: medium blue -> pressure-dependent saturation color
+      return lerpRGB(WATER_WARM, waterSat, (t - 0.55) / 0.45);
     }
   } else if (phase === 'two-phase') {
     // Two-phase: handled in getFluidColor, but if we get here, blend based on quality
     // This shouldn't normally be called for two-phase, but provide a reasonable fallback
-    // Blend from light blue (liquid) to white (vapor)
-    return lerpRGB(WATER_SAT, STEAM_SAT, 0.5); // Default to 50% blend
+    // Blend from light blue (liquid) to white (vapor) using pressure-dependent colors
+    return lerpRGB(waterSat, steamSat, 0.5); // Default to 50% blend
   } else {
     // Vapor/steam: white (saturated) -> yellow (100°C SH) -> orange (500°C SH)
     const superheat = T - T_sat;
 
     if (superheat <= 0) {
-      return STEAM_SAT;
+      return steamSat;
     } else if (superheat <= 100) {
-      // 0 to 100°C superheat: white -> yellow
-      return lerpRGB(STEAM_SAT, STEAM_SUPER_100, superheat / 100);
+      // 0 to 100°C superheat: saturation color -> yellow
+      return lerpRGB(steamSat, STEAM_SUPER_100, superheat / 100);
     } else if (superheat <= 500) {
       // 100 to 500°C superheat: yellow -> orange
       return lerpRGB(STEAM_SUPER_100, STEAM_SUPER_500, (superheat - 100) / 400);

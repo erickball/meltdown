@@ -12,7 +12,7 @@ import {
   PlantState,
 } from '../types';
 import { SimulationState } from '../simulation';
-import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction } from './colors';
+import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction, getSaturationTemp } from './colors';
 
 // Convert world coordinates (meters) to screen coordinates (pixels)
 export function worldToScreen(point: Point, view: ViewState): Point {
@@ -165,10 +165,10 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
       const liquidHeight = innerH * liquidFraction;
       const vaporHeight = innerH - liquidHeight;
 
-      // Saturation temperature for coloring
-      const T_sat = 373 + 35 * Math.log(Math.max(1, tank.fluid.pressure / 101325));
+      // Saturation temperature for coloring (use consistent formula from colors.ts)
+      const T_sat = getSaturationTemp(tank.fluid.pressure);
 
-      // Draw vapor space (top)
+      // Draw vapor space (top) - use saturation temperature for proper coloring
       if (vaporHeight > 0) {
         const vaporFluid: Fluid = {
           temperature: T_sat,
@@ -180,7 +180,7 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
         ctx.fillRect(-innerW / 2, -innerH / 2, innerW, vaporHeight);
       }
 
-      // Draw liquid (bottom)
+      // Draw liquid (bottom) - use saturation temperature for proper coloring
       if (liquidHeight > 0) {
         const liquidFluid: Fluid = {
           temperature: T_sat,
@@ -192,33 +192,12 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
         ctx.fillRect(-innerW / 2, -innerH / 2 + vaporHeight, innerW, liquidHeight);
       }
     } else {
-      // Single phase fluid
-      if (tank.fluid.phase === 'vapor') {
-        // Vapor fills the entire tank interior (no separate vapor space)
-        ctx.fillStyle = getFluidColor(tank.fluid);
-        ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH);
-      } else {
-        // Liquid - show fill level with vapor space above
-        const fluidHeight = innerH * tank.fillLevel;
-        const fluidTop = innerH / 2 - fluidHeight;
-
-        ctx.fillStyle = getFluidColor(tank.fluid);
-        ctx.fillRect(-innerW / 2, fluidTop, innerW, fluidHeight);
-
-        // Show vapor space above liquid if not full
-        if (tank.fillLevel < 1) {
-          // Create vapor at saturation temperature (not superheated)
-          const T_sat = 373 + 35 * Math.log(Math.max(1, tank.fluid.pressure / 101325));
-          const vaporFluid: Fluid = {
-            temperature: T_sat,
-            pressure: tank.fluid.pressure,
-            phase: 'vapor',
-            flowRate: 0,
-          };
-          ctx.fillStyle = getFluidColor(vaporFluid);
-          ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH - fluidHeight);
-        }
-      }
+      // Single phase fluid - fills the entire tank
+      // When phase is 'liquid', the tank is completely filled with compressed liquid
+      // (no vapor space - the "pressurizer has gone solid")
+      // When phase is 'vapor', the tank is completely filled with superheated vapor
+      ctx.fillStyle = getFluidColor(tank.fluid);
+      ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH);
     }
   } else {
     // Empty - dark interior
@@ -585,9 +564,10 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
       const liquidHeight = innerH * liquidFraction;
       const vaporHeight = innerH - liquidHeight;
 
-      const T_sat = 373 + 35 * Math.log(Math.max(1, hx.secondaryFluid.pressure / 101325));
+      // Use consistent saturation temperature formula
+      const T_sat = getSaturationTemp(hx.secondaryFluid.pressure);
 
-      // Vapor (top)
+      // Vapor (top) - with pressure-dependent color
       if (vaporHeight > 0) {
         const vaporFluid: Fluid = {
           temperature: T_sat,
@@ -599,7 +579,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.fillRect(innerLeft, innerTop, innerW, vaporHeight);
       }
 
-      // Liquid (bottom)
+      // Liquid (bottom) - with pressure-dependent color
       if (liquidHeight > 0) {
         const liquidFluid: Fluid = {
           temperature: T_sat,

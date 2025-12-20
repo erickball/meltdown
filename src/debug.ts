@@ -2,7 +2,7 @@
  * Debug utilities for monitoring simulation state
  */
 
-import { SimulationState, SolverMetrics, calculateWaterState, lookupCompressedLiquidDensity } from './simulation';
+import { SimulationState, SolverMetrics, calculateWaterState, lookupCompressedLiquidDensity, distanceToSaturationLine, saturationPressure } from './simulation';
 
 /**
  * Format a number with appropriate precision and color coding
@@ -117,7 +117,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `<span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
       html += `${node.fluid.phase}`;
       if (node.fluid.phase === 'two-phase') {
-        html += ` x=${(node.fluid.quality * 100).toFixed(0)}%`;
+        html += ` x=${(node.fluid.quality * 100).toFixed(1)}%`;
       }
       // Show density for debugging pressure deviation
       const rho = massKg / node.volume;
@@ -174,6 +174,27 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
         html += ` (P<sub>wp</sub>=${rawP_bar.toFixed(1)}bar)`;
       }
 
+      html += `</span><br>`;
+
+      // Third line: saturation margin info (v, P_sat(T), distance to saturation)
+      const v_m3kg = node.volume / massKg;  // specific volume m³/kg
+      const u_Jkg = node.fluid.internalEnergy / massKg;  // specific energy J/kg
+      const P_sat_T = saturationPressure(node.fluid.temperature);
+      const satDist = distanceToSaturationLine(u_Jkg, v_m3kg);
+
+      // Color code based on distance to saturation
+      // Positive = compressed (safe), negative = expanded (approaching two-phase)
+      // Distance is in scaled units where v is mL/kg and u is kJ/kg (both ~1000-1700)
+      const absDistance = Math.abs(satDist.distance);
+      const distClass = satDist.distance < 0 ? 'debug-danger' :  // Expanded past v_f - danger!
+                       absDistance < 50 ? 'debug-warning' :      // Close to boundary
+                       'debug-value';                            // Safe compressed liquid
+
+      html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
+      html += `v=${satDist.v_mLkg.toFixed(1)}`;
+      html += `, v<sub>f</sub>=${satDist.v_f_closest.toFixed(1)}`;
+      html += `, P<sub>sat</sub>(T)=${(P_sat_T/1e5).toFixed(1)}bar`;
+      html += `, <span class="${distClass}">Δsat=${satDist.distance >= 0 ? '+' : ''}${satDist.distance.toFixed(1)}</span>`;
       html += `</span><br>`;
     }
 

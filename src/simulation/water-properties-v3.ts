@@ -1333,9 +1333,12 @@ function addInterpolatedSaturationPoints(): void {
     // Add interpolated saturated liquid points
     for (let j = 1; j <= numInterp; j++) {
       const t = j / (numInterp + 1);
+      // Linear interpolation in (log(v), u) space - this produces a straight line
+      // in the triangulation's coordinate system and a more convex curve in (v, u) space
       const P_interp = sat1.P + t * (sat2.P - sat1.P);
       const T_interp = sat1.T + t * (sat2.T - sat1.T);
-      const v_f_interp = sat1.v_f + t * (sat2.v_f - sat1.v_f);
+      const logV_f_interp = Math.log10(sat1.v_f) + t * (Math.log10(sat2.v_f) - Math.log10(sat1.v_f));
+      const v_f_interp = Math.pow(10, logV_f_interp);
       const u_f_interp = sat1.u_f + t * (sat2.u_f - sat1.u_f);
 
       // Add saturated liquid point
@@ -1344,13 +1347,14 @@ function addInterpolatedSaturationPoints(): void {
         T: T_interp,
         v: v_f_interp,
         u: u_f_interp,
-        logV: Math.log10(v_f_interp),
+        logV: logV_f_interp,
         logP: Math.log10(P_interp),
         phase: 'saturated liquid',
       });
 
-      // Also add saturated vapor point
-      const v_g_interp = sat1.v_g + t * (sat2.v_g - sat1.v_g);
+      // Also add saturated vapor point (also interpolate in log space)
+      const logV_g_interp = Math.log10(sat1.v_g) + t * (Math.log10(sat2.v_g) - Math.log10(sat1.v_g));
+      const v_g_interp = Math.pow(10, logV_g_interp);
       const u_g_interp = sat1.u_g + t * (sat2.u_g - sat1.u_g);
 
       newPoints.push({
@@ -1369,6 +1373,61 @@ function addInterpolatedSaturationPoints(): void {
   if (newPoints.length > 0) {
     dataPoints.push(...newPoints);
     console.log(`[WaterProps v3] Added ${newPoints.length} interpolated saturation points`);
+  }
+
+  // ALSO add interpolated saturation pairs for phase detection
+  // This ensures phase detection uses the same fine resolution as triangulation
+  const newPairs: SaturationPair[] = [];
+  for (let i = 0; i < saturationPairs.length - 1; i++) {
+    const sat1 = saturationPairs[i];
+    const sat2 = saturationPairs[i + 1];
+
+    const P_avg = (sat1.P + sat2.P) / 2;
+    const P_diff = sat2.P - sat1.P;
+
+    if (P_diff < 0.5e6) continue;
+
+    let numInterp: number;
+    if (P_avg > 16e6) {
+      numInterp = Math.ceil(P_diff / 0.25e6);
+    } else if (P_avg > 15e6) {
+      numInterp = Math.ceil(P_diff / 0.5e6);
+    } else if (P_avg > 10e6) {
+      numInterp = Math.min(5, Math.ceil(P_diff / 1e6));
+    } else {
+      numInterp = Math.min(3, Math.ceil(P_diff / 2e6));
+    }
+
+    if (numInterp < 1) continue;
+
+    for (let j = 1; j <= numInterp; j++) {
+      const t = j / (numInterp + 1);
+      const P_interp = sat1.P + t * (sat2.P - sat1.P);
+      const T_interp = sat1.T + t * (sat2.T - sat1.T);
+
+      // Interpolate v in log space for consistency
+      const logV_f_interp = Math.log10(sat1.v_f) + t * (Math.log10(sat2.v_f) - Math.log10(sat1.v_f));
+      const logV_g_interp = Math.log10(sat1.v_g) + t * (Math.log10(sat2.v_g) - Math.log10(sat1.v_g));
+      const v_f_interp = Math.pow(10, logV_f_interp);
+      const v_g_interp = Math.pow(10, logV_g_interp);
+      const u_f_interp = sat1.u_f + t * (sat2.u_f - sat1.u_f);
+      const u_g_interp = sat1.u_g + t * (sat2.u_g - sat1.u_g);
+
+      newPairs.push({
+        P: P_interp,
+        T: T_interp,
+        v_f: v_f_interp,
+        v_g: v_g_interp,
+        u_f: u_f_interp,
+        u_g: u_g_interp,
+      });
+    }
+  }
+
+  if (newPairs.length > 0) {
+    saturationPairs.push(...newPairs);
+    saturationPairs.sort((a, b) => a.P - b.P);
+    console.log(`[WaterProps v3] Added ${newPairs.length} interpolated saturation pairs for phase detection`);
   }
 }
 
@@ -1432,9 +1491,11 @@ function addInterpolatedCompressedLiquidPoints(): void {
       for (let j = 1; j <= numInterp; j++) {
         const t = j / (numInterp + 1);
 
-        // Linear interpolation of all properties
+        // Interpolate linearly in (log(v), u) space for consistency with saturation interpolation
+        // This ensures interpolated points form straight lines in the triangulation's coordinate system
         const T_interp = pt1.T + t * (pt2.T - pt1.T);
-        const v_interp = pt1.v + t * (pt2.v - pt1.v);
+        const logV_interp = Math.log10(pt1.v) + t * (Math.log10(pt2.v) - Math.log10(pt1.v));
+        const v_interp = Math.pow(10, logV_interp);
         const u_interp = pt1.u + t * (pt2.u - pt1.u);
         const P_interp = pt1.P + t * (pt2.P - pt1.P); // Should be ~same for isobar
 
@@ -1443,7 +1504,7 @@ function addInterpolatedCompressedLiquidPoints(): void {
           T: T_interp,
           v: v_interp,
           u: u_interp,
-          logV: Math.log10(v_interp),
+          logV: logV_interp,
           logP: Math.log10(P_interp),
           phase: 'liquid',
         });
@@ -1826,6 +1887,7 @@ function determinePhaseFromUV(v: number, u: number): {
   // Key test: is the point below or above the saturation line?
   // Below the line = two-phase
   // Above the line = single-phase
+
   if (u < u_sat) {
     // BELOW the saturation line = TWO-PHASE
     // Find the exact saturation state by interpolating between saturation pairs
@@ -1852,11 +1914,30 @@ function determinePhaseFromUV(v: number, u: number): {
     }
   } else {
     // ABOVE the saturation line = SINGLE PHASE
-    // Use u < 1.8 MJ/kg as the liquid/vapor boundary
-    if (u < 1.8e6) {
+    // Determine liquid vs vapor based on both energy and density
+    //
+    // For subcritical states: u < 1.8 MJ/kg → liquid, otherwise vapor
+    // For supercritical states (very high density): use density as a guide
+    //   - ρ > 1.5 × ρ_crit → liquid-like behavior (bulk modulus physics)
+    //   - ρ < 0.5 × ρ_crit → vapor-like behavior (ideal gas physics)
+    //   - In between: use energy threshold
+    const rho = 1 / v;
+
+    if (rho > 1.5 * RHO_CRIT) {
+      // Very high density - treat as liquid regardless of energy
+      // This handles supercritical compressed fluid correctly
+      lastPhaseDetectionDebug.decisionReason = `above ${satResult.side} line, ρ=${rho.toFixed(0)} > 1.5×ρ_crit -> liquid (high density)`;
+      return { phase: 'liquid' };
+    } else if (rho < 0.5 * RHO_CRIT) {
+      // Very low density - treat as vapor regardless of energy
+      lastPhaseDetectionDebug.decisionReason = `above ${satResult.side} line, ρ=${rho.toFixed(0)} < 0.5×ρ_crit -> vapor (low density)`;
+      return { phase: 'vapor' };
+    } else if (u < 1.8e6) {
+      // Intermediate density, low energy - liquid
       lastPhaseDetectionDebug.decisionReason = `above ${satResult.side} line, u < 1.8 MJ/kg -> liquid`;
       return { phase: 'liquid' };
     } else {
+      // Intermediate density, high energy - vapor
       lastPhaseDetectionDebug.decisionReason = `above ${satResult.side} line, u >= 1.8 MJ/kg -> vapor`;
       return { phase: 'vapor' };
     }
@@ -1947,8 +2028,11 @@ function findTwoPhaseState(v: number, u: number): {
     u_f_t: number;
     u_g_t: number;
   } {
-    const v_f_t = sat1.v_f + t * (sat2.v_f - sat1.v_f);
-    const v_g_t = sat1.v_g + t * (sat2.v_g - sat1.v_g);
+    // Interpolate v in log space for consistency with triangulation
+    const logV_f_t = Math.log10(sat1.v_f) + t * (Math.log10(sat2.v_f) - Math.log10(sat1.v_f));
+    const logV_g_t = Math.log10(sat1.v_g) + t * (Math.log10(sat2.v_g) - Math.log10(sat1.v_g));
+    const v_f_t = Math.pow(10, logV_f_t);
+    const v_g_t = Math.pow(10, logV_g_t);
     const u_f_t = sat1.u_f + t * (sat2.u_f - sat1.u_f);
     const u_g_t = sat1.u_g + t * (sat2.u_g - sat1.u_g);
 
@@ -2301,11 +2385,8 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   let T: number;
 
   if (phase === 'liquid') {
-    // LIQUID: Always use energy-based temperature estimation
-    // This is more stable than triangulation because:
-    // 1. For liquid, T(u) is nearly independent of pressure (incompressible)
-    // 2. The triangulation may have nearby vapor points that cause discontinuities
-    // 3. The saturation curve u_f(T) provides a smooth, physical relationship
+    // LIQUID: Use energy-based temperature estimation
+    // For liquid, T(u) is nearly independent of pressure (incompressible)
     T = estimateTemperatureFromLiquidEnergy(u);
     debugInfo.intermediateValues.T_fromEnergy = T;
     debugInfo.calculationPath = 'LIQUID_ENERGY_BASED';
@@ -2317,17 +2398,32 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       debugInfo.intermediateValues.T_fallback = T;
     }
 
-    // Pressure from saturation + bulk modulus compression
-    const P_sat = saturationPressure(T);
-    const rho_sat = saturatedLiquidDensity(T);
-    const K_water = 1e7; // Pa - soft bulk modulus for stability
-    const compressionRatio = Math.max(0, (rho - rho_sat) / rho_sat);
-    P = P_sat + K_water * compressionRatio;
-    P = Math.max(P_sat, P);
+    // PRESSURE: Use liquid-only triangulation for accurate compressed liquid pressure
+    // This uses steam table data to interpolate P from (v, u)
+    const P_lookup = lookupPressureFromUV_LiquidOnly(u, v);
 
-    debugInfo.intermediateValues.P_sat = P_sat;
-    debugInfo.intermediateValues.rho_sat = rho_sat;
-    debugInfo.intermediateValues.compressionRatio = compressionRatio;
+    if (P_lookup !== null) {
+      // Triangulation succeeded - use interpolated pressure
+      P = P_lookup;
+      debugInfo.calculationPath = 'LIQUID_TRIANGULATION';
+      debugInfo.intermediateValues.P_triangulation = P;
+    } else {
+      // Fallback for isolated liquid or outside triangulation domain:
+      // Use saturation pressure + temperature-dependent bulk modulus compression
+      const P_sat = saturationPressure(T);
+      const rho_sat = saturatedLiquidDensity(T);
+      const T_C = T - 273.15;
+      const K = bulkModulus(T_C);  // Temperature-dependent bulk modulus
+      const compressionRatio = Math.max(0, (rho - rho_sat) / rho_sat);
+      P = P_sat + K * compressionRatio;
+      P = Math.max(P_sat, P);
+
+      debugInfo.calculationPath = 'LIQUID_SATURATION_FALLBACK';
+      debugInfo.intermediateValues.P_sat = P_sat;
+      debugInfo.intermediateValues.rho_sat = rho_sat;
+      debugInfo.intermediateValues.compressionRatio = compressionRatio;
+      debugInfo.intermediateValues.K_bulkModulus = K;
+    }
   } else {
     // VAPOR: Use Delaunay interpolation for P and T
     // Try to find containing triangle
@@ -2348,18 +2444,64 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       debugInfo.calculationPath = 'VAPOR_TRIANGULATION';
       debugInfo.intermediateValues.trianglePoints = `[${tri.i}, ${tri.j}, ${tri.k}]`;
     } else {
-      // Vapor outside triangulation - use nearest point or ideal gas
+      // Vapor outside triangulation - use ideal gas with corrections for supercritical states
       const nearest = findNearestPoint(logV, u);
-      T = nearest.T;
-      P = nearest.P;
-      debugInfo.calculationPath = 'VAPOR_NEAREST_POINT';
-      debugInfo.intermediateValues.nearestPhase = nearest.phase;
 
-      // If nearest is bad, fall back to ideal gas
-      if (!isFinite(P) || P <= 0) {
-        // P = ρRT for ideal gas
-        P = rho * R_WATER * T;
-        debugInfo.calculationPath = 'VAPOR_IDEAL_GAS';
+      // For temperature, use the nearest point as a reference
+      T = nearest.T;
+      debugInfo.calculationPath = 'VAPOR_EXTRAPOLATION';
+      debugInfo.intermediateValues.nearestPhase = nearest.phase;
+      debugInfo.intermediateValues.nearestP = nearest.P;
+
+      // For pressure, use ideal gas law with compressibility correction
+      // P = Z * ρ * R * T, where Z is compressibility factor
+      // Near critical point, Z can be significantly less than 1
+      // Use a simple correlation: Z ≈ 1 for low ρ, decreasing as ρ approaches ρ_crit
+      const P_ideal = rho * R_WATER * T;
+
+      // Compressibility factor: Z = 1 at low density, ~0.23 at critical point
+      // Use a smooth blend based on reduced density (ρ/ρ_crit)
+      const rho_reduced = rho / RHO_CRIT;
+      if (rho_reduced < 0.5) {
+        // Low density - nearly ideal
+        const Z = 1 - 0.1 * rho_reduced;
+        P = Z * P_ideal;
+        debugInfo.intermediateValues.Z_factor = Z;
+        debugInfo.intermediateValues.P_ideal = P_ideal;
+      } else if (rho_reduced < 1.5) {
+        // Near critical - significant non-ideality
+        // At ρ = ρ_crit, Z ≈ 0.23 for water
+        const Z = 0.95 - 0.72 * (rho_reduced - 0.5);
+        P = Z * P_ideal;
+        debugInfo.intermediateValues.Z_factor = Z;
+        debugInfo.intermediateValues.P_ideal = P_ideal;
+      } else {
+        // High density (compressed) - blend toward liquid-like behavior
+        // Use bulk modulus extrapolation for very high density
+        const T_C = T - 273.15;
+        const K = bulkModulus(T_C);
+        // Estimate pressure from compression relative to critical density
+        const dP = K * (rho - RHO_CRIT) / RHO_CRIT;
+        P = P_CRIT + dP;
+        debugInfo.calculationPath = 'VAPOR_HIGH_DENSITY_EXTRAPOLATION';
+        debugInfo.intermediateValues.bulkModulus = K;
+        debugInfo.intermediateValues.dP = dP;
+      }
+
+      // Ensure smooth transition: if we're close to the triangulation edge,
+      // blend with the nearest point's pressure to avoid sudden jumps
+      if (nearest.P > 0 && isFinite(nearest.P)) {
+        // Calculate distance from nearest point in normalized space
+        const dLogV = Math.abs(logV - nearest.logV);
+        const dU = Math.abs(u - nearest.u) / 1e6;
+        const dist = Math.sqrt(dLogV * dLogV + dU * dU);
+
+        // Blend factor: 1 at edge (dist=0), 0 at dist=0.5
+        const blendToNearest = Math.max(0, 1 - dist * 2);
+        if (blendToNearest > 0) {
+          P = blendToNearest * nearest.P + (1 - blendToNearest) * P;
+          debugInfo.intermediateValues.blendToNearest = blendToNearest;
+        }
       }
     }
   }
@@ -2598,6 +2740,156 @@ export function latentHeat(T: number): number {
 }
 
 // ============================================================================
+// Distance to Saturation Line
+// ============================================================================
+
+/**
+ * Result of computing distance to saturation line in (u, v) space.
+ */
+export interface SaturationDistanceResult {
+  /** Signed distance to saturation liquid line: positive = compressed (v < v_f), negative = expanded (v > v_f) */
+  distance: number;
+  /** Specific volume in mL/kg (v * 1e6) - scaled to match u in kJ/kg (~1000-1700 range) */
+  v_mLkg: number;
+  /** Specific internal energy in kJ/kg */
+  u_kJkg: number;
+  /** Saturation pressure at the closest point on the saturation line */
+  P_sat_closest: number;
+  /** v_f at the closest saturation point (mL/kg) */
+  v_f_closest: number;
+}
+
+/**
+ * Compute the signed distance from a (u, v) point to the saturated liquid line.
+ *
+ * Uses Euclidean distance in scaled (u, v) space where:
+ * - v is scaled by 1e6 (m³/kg → mL/kg) to be similar magnitude to u (kJ/kg)
+ *   At operating conditions: v ≈ 0.0013-0.0017 m³/kg → 1300-1700 mL/kg
+ * - u is in kJ/kg (typically 1000-1700 kJ/kg for hot liquid)
+ *
+ * The distance is signed based on v relative to v_f at the closest saturation point:
+ * - Positive: v < v_f (compressed liquid, denser than saturated)
+ * - Negative: v > v_f (expanded, approaching or inside two-phase dome)
+ *
+ * This measures distance to the saturated liquid line (v_f, u_f) only.
+ *
+ * @param u_Jkg - Specific internal energy in J/kg
+ * @param v_m3kg - Specific volume in m³/kg
+ * @returns Distance result with closest saturation point info
+ */
+export function distanceToSaturationLine(u_Jkg: number, v_m3kg: number): SaturationDistanceResult {
+  loadData();
+
+  // Convert to scaled units for distance calculation
+  // v in mL/kg (1e6 scale) and u in kJ/kg puts both in ~1000-1700 range for hot liquid
+  const v_mLkg = v_m3kg * 1e6;  // m³/kg → mL/kg
+  const u_kJkg = u_Jkg / 1000;  // J/kg → kJ/kg
+
+  if (saturationPairs.length < 2) {
+    return {
+      distance: NaN,
+      v_mLkg,
+      u_kJkg,
+      P_sat_closest: NaN,
+      v_f_closest: NaN,
+    };
+  }
+
+  // Find minimum distance to the saturated liquid line using point-to-line-segment distance
+  // The saturation line is a series of connected segments
+  let minDist = Infinity;
+  let closestP = saturationPairs[0].P;
+  let closestVf = saturationPairs[0].v_f * 1e6;  // mL/kg
+
+  // Sort by temperature for proper line segments
+  const sorted = [...saturationPairs].sort((a, b) => a.T - b.T);
+
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const sat1 = sorted[i];
+    const sat2 = sorted[i + 1];
+
+    // Distance to saturated liquid line segment
+    const p1_v = sat1.v_f * 1e6;  // Convert to mL/kg
+    const p1_u = sat1.u_f / 1000;  // Convert to kJ/kg
+    const p2_v = sat2.v_f * 1e6;
+    const p2_u = sat2.u_f / 1000;
+
+    // Point-to-line-segment distance
+    const dist = pointToSegmentDistance(v_mLkg, u_kJkg, p1_v, p1_u, p2_v, p2_u);
+
+    if (dist < minDist) {
+      minDist = dist;
+      // Interpolate pressure and v_f at closest point
+      const t = Math.max(0, Math.min(1, projectOntoSegment(v_mLkg, u_kJkg, p1_v, p1_u, p2_v, p2_u)));
+      closestP = sat1.P + t * (sat2.P - sat1.P);
+      closestVf = p1_v + t * (p2_v - p1_v);
+    }
+  }
+
+  // Also check endpoints
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+
+  const distFirst = Math.sqrt(Math.pow(v_mLkg - first.v_f * 1e6, 2) + Math.pow(u_kJkg - first.u_f / 1000, 2));
+  const distLast = Math.sqrt(Math.pow(v_mLkg - last.v_f * 1e6, 2) + Math.pow(u_kJkg - last.u_f / 1000, 2));
+  if (distFirst < minDist) {
+    minDist = distFirst;
+    closestP = first.P;
+    closestVf = first.v_f * 1e6;
+  }
+  if (distLast < minDist) {
+    minDist = distLast;
+    closestP = last.P;
+    closestVf = last.v_f * 1e6;
+  }
+
+  // Sign the distance based on v relative to v_f at closest point:
+  // Positive = compressed (v < v_f, smaller volume, higher density)
+  // Negative = expanded (v > v_f, larger volume, lower density, approaching/in two-phase)
+  const signedDist = v_mLkg < closestVf ? minDist : -minDist;
+
+  return {
+    distance: signedDist,
+    v_mLkg,
+    u_kJkg,
+    P_sat_closest: closestP,
+    v_f_closest: closestVf,
+  };
+}
+
+/**
+ * Compute distance from point (px, py) to line segment (x1, y1)-(x2, y2)
+ */
+function pointToSegmentDistance(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+
+  if (lenSq === 0) {
+    // Segment is a point
+    return Math.sqrt((px - x1) ** 2 + (py - y1) ** 2);
+  }
+
+  // Project point onto line, clamped to segment
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  const closestX = x1 + t * dx;
+  const closestY = y1 + t * dy;
+
+  return Math.sqrt((px - closestX) ** 2 + (py - closestY) ** 2);
+}
+
+/**
+ * Compute projection parameter t for point onto line segment (0 = start, 1 = end)
+ */
+function projectOntoSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return 0;
+  return ((px - x1) * dx + (py - y1) * dy) / lenSq;
+}
+
+// ============================================================================
 // Compatibility exports
 // ============================================================================
 
@@ -2739,13 +3031,14 @@ export function bulkModulus(T_celsius: number): number {
 }
 
 /**
- * Physical constants for pressure feedback model.
- * These should be used consistently across all operators.
+ * @deprecated Use bulkModulus(T_celsius) instead for temperature-dependent bulk modulus.
+ * These constants are retained for reference but should not be used in new code.
+ * The actual bulk modulus varies from ~2200 MPa at 50°C to ~60 MPa at 350°C.
  */
 export const PRESSURE_MODEL = {
-  /** Real water bulk modulus (Pa) - water is nearly incompressible */
+  /** @deprecated Use bulkModulus(T_celsius) instead */
   K_PHYSICAL: 2.2e9,
-  /** Pressure response to mass deviation (Pa) - softer for numerical stability */
+  /** @deprecated Use bulkModulus(T_celsius) instead */
   K_FEEDBACK: 1e8,
 } as const;
 
@@ -2785,7 +3078,10 @@ export function computePressureFeedback(
   u_specific: number,
   T: number
 ): PressureFeedbackResult {
-  const { K_FEEDBACK } = PRESSURE_MODEL;
+  // Use temperature-dependent bulk modulus for realistic pressure response
+  // At high temperatures (350°C), K drops to ~60 MPa, giving softer response
+  const T_C = T - 273.15;
+  const K_feedback = bulkModulus(T_C);
 
   // Steam table lookup - this MUST succeed for valid liquid states
   const rho_table = lookupCompressedLiquidDensity(P_base, u_specific);
@@ -2795,7 +3091,6 @@ export function computePressureFeedback(
     // for this pressure to correspond to liquid. The fluid should be boiling.
     const P_bar = P_base / 1e5;
     const u_kJ = u_specific / 1000;
-    const T_C = T - 273.15;
     const P_sat = saturationPressure(T);
     const P_sat_bar = P_sat / 1e5;
     throw new Error(
@@ -2807,9 +3102,9 @@ export function computePressureFeedback(
 
   const rho_expected = rho_table;
 
-  // Compute feedback pressure deviation
+  // Compute feedback pressure deviation using temperature-dependent K
   const densityRatio = (rho - rho_expected) / rho_expected;
-  const dP_feedback = K_FEEDBACK * densityRatio;
+  const dP_feedback = K_feedback * densityRatio;
   const P_final = P_base + dP_feedback;
 
   return {
@@ -2831,12 +3126,14 @@ export function computePressureFeedback(
  * @returns Pressure (Pa)
  */
 export function computeIsolatedLiquidPressure(rho: number, T: number): number {
-  const { K_FEEDBACK } = PRESSURE_MODEL;
+  // Use temperature-dependent bulk modulus for realistic pressure response
+  const T_C = T - 273.15;
+  const K_feedback = bulkModulus(T_C);
 
   const rho_sat = saturatedLiquidDensity(T);
   const P_sat = saturationPressure(T);
   const densityRatio = (rho - rho_sat) / rho_sat;
-  const dP_compression = K_FEEDBACK * densityRatio;
+  const dP_compression = K_feedback * densityRatio;
 
   return P_sat + Math.max(0, dP_compression);
 }
