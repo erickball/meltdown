@@ -6,6 +6,7 @@ import {
   VesselComponent,
   ValveComponent,
   HeatExchangerComponent,
+  TurbineComponent,
   Fluid,
   Point,
 } from '../types';
@@ -208,6 +209,30 @@ export function createHeatExchanger(
   };
 }
 
+export function createTurbine(
+  position: Point,
+  width: number,
+  height: number,
+  options: Partial<TurbineComponent> = {}
+): TurbineComponent {
+  return {
+    id: generateId('turbine'),
+    type: 'turbine',
+    position,
+    rotation: 0,
+    width,
+    height,
+    running: true,
+    power: 0,
+    ratedPower: 333e6, // ~1/3 of 1000 MW thermal
+    ports: [
+      { id: 'inlet', position: { x: -width / 2, y: 0 }, direction: 'in' },
+      { id: 'outlet', position: { x: width / 2, y: 0 }, direction: 'out' },
+    ],
+    ...options,
+  };
+}
+
 /**
  * Create a demo plant layout that matches the simulation flow nodes exactly.
  *
@@ -302,7 +327,7 @@ export function createDemoPlant() {
   components.set(pressurizer.id, pressurizer);
 
   // =========================================================================
-  // SECONDARY SIDE (simplified)
+  // SECONDARY SIDE
   // =========================================================================
 
   // SG Secondary side (shell side where steam is generated)
@@ -320,6 +345,77 @@ export function createDemoPlant() {
   });
   components.set(sgSecondary.id, sgSecondary);
 
+  // Main turbine - receives steam from SG secondary
+  const turbine = createTurbine({ x: 15, y: -2 }, 3, 2, {
+    id: 'turbine-1',
+    label: 'Main Turbine',
+    inletFluid: { ...STEAM },
+    outletFluid: {
+      ...STEAM,
+      pressure: 500000, // 5 bar after expansion
+      phase: 'two-phase',
+      quality: 0.95,
+    },
+    simNodeId: 'turbine-inlet',
+  });
+  components.set(turbine.id, turbine);
+
+  // Turbine outlet tank (simplified - represents exhaust before condenser)
+  const turbineOutlet = createTank({ x: 19, y: -2 }, 1.5, 2.5, {
+    id: 'turbine-outlet-1',
+    label: 'Turbine Exhaust',
+    fluid: {
+      ...STEAM,
+      pressure: 500000,
+      phase: 'two-phase',
+      quality: 0.95,
+    },
+    fillLevel: 0.5,
+    simNodeId: 'turbine-outlet',
+  });
+  components.set(turbineOutlet.id, turbineOutlet);
+
+  // Condenser - shell-and-tube heat exchanger where steam condenses
+  const condenser = createTank({ x: 23, y: -2 }, 2.5, 2, {
+    id: 'condenser-1',
+    label: 'Main Condenser',
+    fluid: {
+      ...COLD_WATER,
+      pressure: 100000, // 1 bar
+      phase: 'two-phase',
+      quality: 0.1,
+    },
+    fillLevel: 0.8,
+    simNodeId: 'condenser',
+  });
+  components.set(condenser.id, condenser);
+
+  // Feedwater - subcooled liquid returning to SG
+  // Positioned below and to the left of condenser, heading back to SG
+  const feedwater = createTank({ x: 20, y: 2 }, 1.5, 1.5, {
+    id: 'feedwater-1',
+    label: 'Feedwater',
+    fluid: {
+      ...HOT_WATER,
+      temperature: 450,
+      pressure: 5500000, // 55 bar
+      phase: 'liquid',
+    },
+    fillLevel: 0.9,
+    simNodeId: 'feedwater',
+  });
+  components.set(feedwater.id, feedwater);
+
+  // Feedwater pump (positioned between condenser and feedwater tank)
+  const fwPump = createPump({ x: 23, y: 2 }, {
+    id: 'fw-pump-1',
+    label: 'FW Pump',
+    fluid: { ...HOT_WATER, temperature: 373, pressure: 100000 },
+    simNodeId: 'feedwater',
+    simPumpId: 'fw-pump',
+  });
+  components.set(fwPump.id, fwPump);
+
   // =========================================================================
   // VISUAL CONNECTIONS (showing flow paths)
   // These don't affect simulation - just for visual clarity
@@ -333,8 +429,14 @@ export function createDemoPlant() {
     { fromComponentId: 'cold-leg-pipe', fromPortId: 'outlet', toComponentId: 'vessel-1', toPortId: 'inlet' },
     // Pressurizer surge line
     { fromComponentId: 'hot-leg-pipe', fromPortId: 'outlet', toComponentId: 'pressurizer-1', toPortId: 'outlet' },
-    // Secondary side
+    // Secondary side - steam path (closed loop)
     { fromComponentId: 'sg-1', fromPortId: 'secondary-out', toComponentId: 'sg-secondary-1', toPortId: 'inlet' },
+    { fromComponentId: 'sg-secondary-1', fromPortId: 'outlet', toComponentId: 'turbine-1', toPortId: 'inlet' },
+    { fromComponentId: 'turbine-1', fromPortId: 'outlet', toComponentId: 'turbine-outlet-1', toPortId: 'inlet' },
+    { fromComponentId: 'turbine-outlet-1', fromPortId: 'outlet', toComponentId: 'condenser-1', toPortId: 'inlet' },
+    { fromComponentId: 'condenser-1', fromPortId: 'outlet', toComponentId: 'fw-pump-1', toPortId: 'suction' },
+    { fromComponentId: 'fw-pump-1', fromPortId: 'discharge', toComponentId: 'feedwater-1', toPortId: 'inlet' },
+    { fromComponentId: 'feedwater-1', fromPortId: 'outlet', toComponentId: 'sg-1', toPortId: 'secondary-in' },
   ];
 
   return {

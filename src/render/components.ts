@@ -6,6 +6,8 @@ import {
   VesselComponent,
   ValveComponent,
   HeatExchangerComponent,
+  TurbineComponent,
+  CondenserComponent,
   ViewState,
   Fluid,
   Point,
@@ -123,6 +125,12 @@ export function renderComponent(
       break;
     case 'heatExchanger':
       renderHeatExchanger(ctx, component, view);
+      break;
+    case 'turbine':
+      renderTurbine(ctx, component, view);
+      break;
+    case 'condenser':
+      renderCondenser(ctx, component, view);
       break;
   }
 
@@ -660,6 +668,192 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   ctx.strokeRect(-w / 2, -h / 2, w, h);
 }
 
+function renderTurbine(ctx: CanvasRenderingContext2D, turbine: TurbineComponent, view: ViewState): void {
+  const w = turbine.width * view.zoom;
+  const h = turbine.height * view.zoom;
+
+  // Turbine casing - trapezoidal shape (larger at inlet, smaller at outlet)
+  // Shows the expanding steam path
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, -h / 2);          // Top left (inlet side)
+  ctx.lineTo(w / 2, -h / 3);           // Top right (outlet side - smaller)
+  ctx.lineTo(w / 2, h / 3);            // Bottom right
+  ctx.lineTo(-w / 2, h / 2);           // Bottom left (inlet side)
+  ctx.closePath();
+  ctx.fill();
+
+  // Steam path visualization (if running)
+  if (turbine.running && turbine.inletFluid) {
+    ctx.fillStyle = getFluidColor(turbine.inletFluid);
+    ctx.globalAlpha = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(-w / 2 + 5, -h / 2 + 5);
+    ctx.lineTo(w / 2 - 5, -h / 3 + 5);
+    ctx.lineTo(w / 2 - 5, h / 3 - 5);
+    ctx.lineTo(-w / 2 + 5, h / 2 - 5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1.0;
+  }
+
+  // Rotor shaft (horizontal line through center)
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-w / 2 - 10, -3, w + 20, 6);
+
+  // Blades representation (vertical lines inside the casing)
+  ctx.strokeStyle = turbine.running ? '#aabbcc' : '#556677';
+  ctx.lineWidth = 2;
+  const bladeCount = 6;
+  for (let i = 0; i < bladeCount; i++) {
+    const x = -w / 2 + (w / (bladeCount + 1)) * (i + 1);
+    // Blade height decreases as we go from inlet to outlet
+    const progress = (i + 1) / (bladeCount + 1);
+    const bladeH = (h / 2) * (1 - progress * 0.3);
+    ctx.beginPath();
+    ctx.moveTo(x, -bladeH + 3);
+    ctx.lineTo(x, bladeH - 3);
+    ctx.stroke();
+  }
+
+  // Generator at the outlet end (right side)
+  const genR = h / 3;
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  ctx.arc(w / 2 + genR + 5, 0, genR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Generator outline
+  ctx.strokeStyle = turbine.running ? COLORS.safe : '#666';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(w / 2 + genR + 5, 0, genR, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Power indicator
+  if (turbine.running) {
+    ctx.font = '10px monospace';
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    const powerMW = turbine.power / 1e6;
+    ctx.fillText(`${powerMW.toFixed(0)} MW`, w / 2 + genR + 5, genR + 15);
+  }
+
+  // Turbine outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-w / 2, -h / 2);
+  ctx.lineTo(w / 2, -h / 3);
+  ctx.lineTo(w / 2, h / 3);
+  ctx.lineTo(-w / 2, h / 2);
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComponent, view: ViewState): void {
+  const w = condenser.width * view.zoom;
+  const h = condenser.height * view.zoom;
+  const wallPx = 4;
+
+  // Shell (outer rectangle)
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+
+  // Inner cavity - filled with low-pressure steam/condensate
+  const innerW = w - wallPx * 2;
+  const innerH = h - wallPx * 2;
+  const innerLeft = -w / 2 + wallPx;
+  const innerTop = -h / 2 + wallPx;
+
+  if (condenser.fluid) {
+    if (condenser.fluid.phase === 'two-phase') {
+      // Show stratified - condensate at bottom, steam at top
+      const massQuality = condenser.fluid.quality ?? 0.5;
+      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, condenser.fluid.pressure);
+      const liquidFraction = 1 - vaporVolumeFraction;
+      const liquidHeight = innerH * liquidFraction;
+      const vaporHeight = innerH - liquidHeight;
+
+      const T_sat = getSaturationTemp(condenser.fluid.pressure);
+
+      // Vapor (top)
+      if (vaporHeight > 0) {
+        const vaporFluid: Fluid = {
+          temperature: T_sat,
+          pressure: condenser.fluid.pressure,
+          phase: 'vapor',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(vaporFluid);
+        ctx.fillRect(innerLeft, innerTop, innerW, vaporHeight);
+      }
+
+      // Liquid (bottom)
+      if (liquidHeight > 0) {
+        const liquidFluid: Fluid = {
+          temperature: T_sat,
+          pressure: condenser.fluid.pressure,
+          phase: 'liquid',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(liquidFluid);
+        ctx.fillRect(innerLeft, innerTop + vaporHeight, innerW, liquidHeight);
+      }
+    } else {
+      ctx.fillStyle = getFluidColor(condenser.fluid);
+      ctx.fillRect(innerLeft, innerTop, innerW, innerH);
+    }
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(innerLeft, innerTop, innerW, innerH);
+  }
+
+  // Cooling water tubes (horizontal, showing cross-section as circles)
+  const tubeSpacing = innerH / (condenser.tubeCount + 1);
+  const tubeRadius = Math.min(tubeSpacing * 0.3, 4);
+
+  // Draw tube bank as a grid of circles
+  const tubeCols = Math.floor(innerW / (tubeRadius * 4));
+  for (let row = 0; row < condenser.tubeCount; row++) {
+    const y = innerTop + tubeSpacing * (row + 1);
+    for (let col = 0; col < tubeCols; col++) {
+      const x = innerLeft + (innerW / (tubeCols + 1)) * (col + 1);
+
+      // Tube wall
+      ctx.fillStyle = COLORS.steel;
+      ctx.beginPath();
+      ctx.arc(x, y, tubeRadius + 1, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Cooling water inside (blue for cold water)
+      ctx.fillStyle = '#4488cc';
+      ctx.beginPath();
+      ctx.arc(x, y, tubeRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // Heat rejection indicator
+  ctx.font = '10px monospace';
+  ctx.fillStyle = '#fff';
+  ctx.textAlign = 'center';
+  const heatMW = condenser.heatRejection / 1e6;
+  ctx.fillText(`${heatMW.toFixed(0)} MW`, 0, h / 2 + 15);
+  ctx.font = '8px monospace';
+  ctx.fillStyle = '#aaa';
+  ctx.fillText('rejected', 0, h / 2 + 25);
+
+  // Hotwell at bottom (condensate collection)
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-w / 2, h / 2 - 5, w, 5);
+
+  // Outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+}
+
 function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, view: ViewState): void {
   for (const port of component.ports) {
     const px = port.position.x * view.zoom;
@@ -739,6 +933,22 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         y: -component.height * view.zoom / 2 - 5,
         width: component.width * view.zoom + 10,
         height: component.height * view.zoom + 10,
+      };
+    case 'turbine':
+      // Include generator on the right side
+      const genR = component.height * view.zoom / 3;
+      return {
+        x: -component.width * view.zoom / 2 - 15,
+        y: -component.height * view.zoom / 2 - 5,
+        width: component.width * view.zoom + genR * 2 + 25,
+        height: component.height * view.zoom + 10,
+      };
+    case 'condenser':
+      return {
+        x: -component.width * view.zoom / 2 - 5,
+        y: -component.height * view.zoom / 2 - 5,
+        width: component.width * view.zoom + 10,
+        height: component.height * view.zoom + 35, // Extra for heat rejection label
       };
     default:
       return { x: -20, y: -20, width: 40, height: 40 };

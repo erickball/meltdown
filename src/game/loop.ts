@@ -16,6 +16,8 @@ import {
   FlowOperator,
   NeutronicsOperator,
   FluidStateUpdateOperator,
+  SecondaryLoopOperator,
+  createDefaultSecondaryConfig,
   checkScramConditions,
   triggerScram,
 } from '../simulation';
@@ -117,6 +119,9 @@ export class GameLoop {
     // 6. Fluid state update (ensures T, P, phase are consistent with conserved quantities)
     // This calculates pressure from thermodynamics (density, energy, volume)
     this.solver.addOperator(new FluidStateUpdateOperator());
+
+    // 7. Secondary loop (turbine, condenser, feedwater thermodynamics)
+    this.solver.addOperator(new SecondaryLoopOperator(createDefaultSecondaryConfig()));
 
     // Initialize tracking
     this.previousPower = initialState.neutronics.power;

@@ -23,3 +23,11 @@ export {
   triggerScram,
   checkScramConditions,
 } from './neutronics';
+
+export {
+  SecondaryLoopOperator,
+  createDefaultSecondaryConfig,
+  getSecondaryLoopState,
+  type SecondaryLoopConfig,
+  type SecondaryLoopState,
+} from './secondary-loop';

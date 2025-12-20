@@ -373,9 +373,11 @@ export class FlowOperator implements PhysicsOperator {
   private computeFreshPressures(state: SimulationState): Map<string, number> {
     const pressures = new Map<string, number>();
 
-    // First pass: compute water state and identify two-phase nodes
+    // First pass: compute water state and identify pressure reference nodes
+    // Both two-phase AND vapor nodes can serve as pressure references since
+    // they have well-defined pressures from thermodynamic state
     const waterStates = new Map<string, ReturnType<typeof Water.calculateState>>();
-    const twoPhaseNodes: string[] = [];
+    const pressureRefNodes: string[] = [];
 
     for (const [nodeId, flowNode] of state.flowNodes) {
       const waterState = Water.calculateState(
@@ -385,9 +387,9 @@ export class FlowOperator implements PhysicsOperator {
       );
       waterStates.set(nodeId, waterState);
 
-      if (waterState.phase === 'two-phase') {
-        twoPhaseNodes.push(nodeId);
-        // Two-phase pressure is saturation pressure
+      if (waterState.phase === 'two-phase' || waterState.phase === 'vapor') {
+        pressureRefNodes.push(nodeId);
+        // Two-phase/vapor pressure comes from thermodynamic state
         pressures.set(nodeId, waterState.pressure);
       }
     }
@@ -405,16 +407,16 @@ export class FlowOperator implements PhysicsOperator {
       connections.get(conn.toNodeId)!.add(conn.fromNodeId);
     }
 
-    // Propagate pressure from two-phase nodes to connected liquid nodes
+    // Propagate pressure from reference nodes (two-phase/vapor) to connected liquid nodes
     const liquidBasePressures = new Map<string, number>();
 
-    for (const twoPhaseId of twoPhaseNodes) {
-      const twoPhaseState = waterStates.get(twoPhaseId)!;
+    for (const refNodeId of pressureRefNodes) {
+      const refState = waterStates.get(refNodeId)!;
 
       const visited = new Set<string>();
       const queue: Array<{ nodeId: string; pressure: number }> = [{
-        nodeId: twoPhaseId,
-        pressure: twoPhaseState.pressure
+        nodeId: refNodeId,
+        pressure: refState.pressure
       }];
 
       while (queue.length > 0) {
@@ -425,8 +427,8 @@ export class FlowOperator implements PhysicsOperator {
         const nodeWaterState = waterStates.get(nodeId)!;
         const node = state.flowNodes.get(nodeId)!;
 
-        if (nodeWaterState.phase === 'liquid' || nodeId === twoPhaseId) {
-          if (!liquidBasePressures.has(nodeId) || nodeId === twoPhaseId) {
+        if (nodeWaterState.phase === 'liquid' || nodeId === refNodeId) {
+          if (!liquidBasePressures.has(nodeId) || nodeId === refNodeId) {
             liquidBasePressures.set(nodeId, pressure);
           }
 
@@ -454,50 +456,46 @@ export class FlowOperator implements PhysicsOperator {
       }
     }
 
-    // Second pass: compute final pressures for all nodes
+    // Second pass: compute final pressures for liquid nodes
+    // (two-phase and vapor already handled in first pass)
     for (const [nodeId, flowNode] of state.flowNodes) {
-      if (pressures.has(nodeId)) continue; // Already set (two-phase)
+      if (pressures.has(nodeId)) continue; // Already set (two-phase or vapor)
 
       const waterState = waterStates.get(nodeId)!;
       const rho = flowNode.fluid.mass / flowNode.volume;
       const T = waterState.temperature;
 
-      if (waterState.phase === 'vapor') {
-        // Vapor: use steam table pressure
-        pressures.set(nodeId, waterState.pressure);
-      } else {
-        // Liquid: hybrid pressure model - MUST match FluidStateUpdateOperator exactly
-        // to ensure flow calculations use consistent pressures
-        if (liquidBasePressures.has(nodeId)) {
-          // Connected to two-phase - use shared pressure feedback calculation
-          const P_base = liquidBasePressures.get(nodeId)!;
-          const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;
-          const v_specific = flowNode.volume / flowNode.fluid.mass;
-          const result = Water.computePressureFeedback(rho, P_base, u_specific, T);
+      // Liquid: hybrid pressure model - MUST match FluidStateUpdateOperator exactly
+      // to ensure flow calculations use consistent pressures
+      if (liquidBasePressures.has(nodeId)) {
+        // Connected to pressure reference node - use shared pressure feedback calculation
+        const P_base = liquidBasePressures.get(nodeId)!;
+        const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;
+        const v_specific = flowNode.volume / flowNode.fluid.mass;
+        const result = Water.computePressureFeedback(rho, P_base, u_specific, T);
 
-          // Floor: liquid pressure cannot be below saturation pressure at this temperature
-          const P_sat = Water.saturationPressure(T);
-          let P_final = Math.max(result.P_final, P_sat);
+        // Floor: liquid pressure cannot be below saturation pressure at this temperature
+        const P_sat = Water.saturationPressure(T);
+        let P_final = Math.max(result.P_final, P_sat);
 
-          // Near the liquid/supercritical boundary (u > 1750 kJ/kg), blend toward
-          // triangulation lookup to ensure smooth transition
-          const u_kJkg = u_specific / 1000;
-          const U_BLEND_START = 1750;
-          const U_BLEND_END = 1800;
+        // Near the liquid/supercritical boundary (u > 1750 kJ/kg), blend toward
+        // triangulation lookup to ensure smooth transition
+        const u_kJkg = u_specific / 1000;
+        const U_BLEND_START = 1750;
+        const U_BLEND_END = 1800;
 
-          if (u_kJkg > U_BLEND_START) {
-            const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
-            if (P_triangulation !== null) {
-              const blend = Math.min(1, (u_kJkg - U_BLEND_START) / (U_BLEND_END - U_BLEND_START));
-              P_final = (1 - blend) * P_final + blend * P_triangulation;
-            }
+        if (u_kJkg > U_BLEND_START) {
+          const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
+          if (P_triangulation !== null) {
+            const blend = Math.min(1, (u_kJkg - U_BLEND_START) / (U_BLEND_END - U_BLEND_START));
+            P_final = (1 - blend) * P_final + blend * P_triangulation;
           }
-
-          pressures.set(nodeId, P_final);
-        } else {
-          // Isolated liquid region
-          pressures.set(nodeId, Water.computeIsolatedLiquidPressure(rho, T));
         }
+
+        pressures.set(nodeId, P_final);
+      } else {
+        // Isolated liquid region
+        pressures.set(nodeId, Water.computeIsolatedLiquidPressure(rho, T));
       }
     }
 

@@ -107,13 +107,35 @@ export interface HeatExchangerComponent extends ComponentBase {
   tubeCount: number;
 }
 
+export interface TurbineComponent extends ComponentBase {
+  type: 'turbine';
+  width: number;
+  height: number;
+  running: boolean;
+  power: number;          // Current power output in Watts
+  ratedPower: number;     // Rated power output in Watts
+  inletFluid?: Fluid;     // Steam inlet conditions
+  outletFluid?: Fluid;    // Exhaust conditions
+}
+
+export interface CondenserComponent extends ComponentBase {
+  type: 'condenser';
+  width: number;
+  height: number;
+  heatRejection: number;  // Current heat rejection in Watts
+  coolingWaterTemp: number; // Cooling water inlet temp in K
+  tubeCount: number;
+}
+
 export type PlantComponent =
   | TankComponent
   | PipeComponent
   | PumpComponent
   | VesselComponent
   | ValveComponent
-  | HeatExchangerComponent;
+  | HeatExchangerComponent
+  | TurbineComponent
+  | CondenserComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;

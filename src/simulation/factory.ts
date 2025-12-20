@@ -235,7 +235,12 @@ export function createDemoReactor(): SimulationState {
   };
   state.flowNodes.set(pressurizer.id, pressurizer);
 
+  // =========================================================================
+  // SECONDARY SIDE FLOW NODES
+  // =========================================================================
   // Steam generator secondary side (boiling at ~55 bar, ~545K saturation)
+  // This is where steam is generated for the turbine
+
   const sgSecVolume = 50; // m³
   const sgSecondary: FlowNode = {
     id: 'sg-secondary',
@@ -247,6 +252,65 @@ export function createDemoReactor(): SimulationState {
     elevation: 5, // m
   };
   state.flowNodes.set(sgSecondary.id, sgSecondary);
+
+  // Turbine inlet - superheated/saturated steam from SG
+  // Steam leaves SG at ~55 bar, enters turbine
+  const turbineInletVolume = 10; // m³
+  const turbineInlet: FlowNode = {
+    id: 'turbine-inlet',
+    label: 'Turbine Inlet',
+    fluid: createFluidState(545, 5.5e6, 'vapor', 0, turbineInletVolume),
+    volume: turbineInletVolume,
+    hydraulicDiameter: 0.5, // m - large steam pipe
+    flowArea: 0.2, // m²
+    elevation: 5, // m - same level as SG top
+  };
+  state.flowNodes.set(turbineInlet.id, turbineInlet);
+
+  // Turbine outlet - wet steam exhausting to condenser
+  const turbineOutletVolume = 50; // m³ - large due to low density
+  const turbineOutlet: FlowNode = {
+    id: 'turbine-outlet',
+    label: 'Turbine Outlet',
+    // At lower pressure after expansion (~1 bar for now, not full vacuum)
+    fluid: createFluidState(373, 1e5, 'two-phase', 0.9, turbineOutletVolume),
+    volume: turbineOutletVolume,
+    hydraulicDiameter: 2, // m - very large exhaust
+    flowArea: 3, // m²
+    elevation: 0, // m - ground level
+  };
+  state.flowNodes.set(turbineOutlet.id, turbineOutlet);
+
+  // Condenser - steam condenses to saturated liquid
+  // Using ~1 bar (not full vacuum) to avoid edge of steam table data
+  const condenserVolume = 100; // m³ - large shell-and-tube HX
+  const condenser: FlowNode = {
+    id: 'condenser',
+    label: 'Main Condenser',
+    // Low pressure two-phase, mostly liquid
+    fluid: createFluidState(373, 1e5, 'two-phase', 0.1, condenserVolume),
+    volume: condenserVolume,
+    hydraulicDiameter: 0.02, // m - tubes
+    flowArea: 2, // m²
+    elevation: -2, // m - below ground level (in basement)
+  };
+  state.flowNodes.set(condenser.id, condenser);
+
+  // Feedwater - subcooled liquid pumped back to SG
+  // Feedwater is heated slightly by condensate pumps and feedwater heaters
+  // but still subcooled relative to SG pressure
+  const feedwaterVolume = 20; // m³ - piping and small heaters
+  const feedwater: FlowNode = {
+    id: 'feedwater',
+    label: 'Feedwater',
+    // Subcooled liquid at SG pressure (~55 bar), temp ~450K (below saturation ~545K)
+    fluid: createFluidState(450, 5.5e6, 'liquid', 0, feedwaterVolume),
+    volume: feedwaterVolume,
+    hydraulicDiameter: 0.3, // m - feedwater piping
+    flowArea: 0.07, // m²
+    elevation: 0, // m - ground level
+  };
+  state.flowNodes.set(feedwater.id, feedwater);
 
   // =========================================================================
   // THERMAL CONNECTIONS (Conduction between solids)
@@ -373,6 +437,82 @@ export function createDemoReactor(): SimulationState {
   });
 
   // =========================================================================
+  // SECONDARY SIDE FLOW CONNECTIONS
+  // =========================================================================
+
+  // Secondary side flow rate: ~500 kg/s steam (at full power)
+  // This is much lower than primary because we're moving steam, not liquid
+  // Energy balance: Q = m_dot * h_fg ≈ 1000 MW = m_dot * 2000 kJ/kg => m_dot ≈ 500 kg/s
+  const secondaryFlow = 500; // kg/s
+
+  // SG to turbine inlet (steam leaves SG through steam dome)
+  state.flowConnections.push({
+    id: 'flow-sg-turbine',
+    fromNodeId: 'sg-secondary',
+    toNodeId: 'turbine-inlet',
+    flowArea: 0.2,
+    hydraulicDiameter: 0.5,
+    length: 10,
+    elevation: 0, // Same level
+    resistanceCoeff: 5,
+    massFlowRate: secondaryFlow,
+  });
+
+  // Turbine inlet to outlet (through turbine)
+  state.flowConnections.push({
+    id: 'flow-turbine',
+    fromNodeId: 'turbine-inlet',
+    toNodeId: 'turbine-outlet',
+    flowArea: 0.2,
+    hydraulicDiameter: 0.5,
+    length: 5,
+    elevation: 5, // Going down to ground level
+    resistanceCoeff: 20, // High resistance through turbine stages
+    massFlowRate: secondaryFlow,
+  });
+
+  // Turbine outlet to condenser (exhaust steam to condenser)
+  state.flowConnections.push({
+    id: 'flow-exhaust-condenser',
+    fromNodeId: 'turbine-outlet',
+    toNodeId: 'condenser',
+    flowArea: 0.5,
+    hydraulicDiameter: 0.8,
+    length: 5,
+    elevation: 2, // Going down to condenser basement
+    resistanceCoeff: 5, // Moderate resistance
+    massFlowRate: secondaryFlow,
+  });
+
+  // Condenser to feedwater (condensate extraction)
+  // Condensate pump takes liquid from condenser hotwell
+  state.flowConnections.push({
+    id: 'flow-condenser-feedwater',
+    fromNodeId: 'condenser',
+    toNodeId: 'feedwater',
+    flowArea: 0.07,
+    hydraulicDiameter: 0.3,
+    length: 20,
+    elevation: -2, // Going up from basement
+    resistanceCoeff: 10,
+    massFlowRate: secondaryFlow,
+  });
+
+  // Feedwater to SG secondary (feedwater injection)
+  // Feedwater pump delivers subcooled liquid to SG
+  state.flowConnections.push({
+    id: 'flow-feedwater-sg',
+    fromNodeId: 'feedwater',
+    toNodeId: 'sg-secondary',
+    flowArea: 0.07,
+    hydraulicDiameter: 0.3,
+    length: 30,
+    elevation: -5, // Going up to SG
+    resistanceCoeff: 15,
+    massFlowRate: secondaryFlow,
+  });
+
+  // =========================================================================
   // COMPONENTS
   // =========================================================================
 
@@ -396,6 +536,27 @@ export function createDemoReactor(): SimulationState {
     position: 1.0,
     failPosition: 0, // Closes on failure
     connectedFlowPath: 'flow-hotleg-sg',
+  });
+
+  // Feedwater pump - pressurizes condensate from condenser pressure to SG pressure
+  // Head: ~55 bar - 1 bar = 54 bar = 5.4 MPa
+  // For water at ~400K: rho ~940 kg/m³
+  // H = dP / (rho * g) = 5.4e6 / (940 * 9.81) = 585 m
+  state.components.pumps.set('fw-pump', {
+    id: 'fw-pump',
+    running: true,
+    speed: 1.0,
+    ratedHead: 600, // m - sized for ~55 bar rise
+    ratedFlow: 500, // kg/s
+    connectedFlowPath: 'flow-feedwater-sg',
+  });
+
+  // Main steam isolation valve (MSIV on secondary side)
+  state.components.valves.set('msiv-secondary', {
+    id: 'msiv-secondary',
+    position: 1.0,
+    failPosition: 0, // Closes on failure
+    connectedFlowPath: 'flow-sg-turbine',
   });
 
   // =========================================================================

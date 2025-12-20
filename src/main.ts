@@ -425,6 +425,30 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       }
     }
   }
+
+  // Sync turbine state
+  const turbineInlet = simState.flowNodes.get('turbine-inlet');
+  const turbineOutlet = simState.flowNodes.get('turbine-outlet');
+  for (const [, comp] of plantState.components) {
+    if (comp.type === 'turbine') {
+      // Update inlet/outlet fluids from simulation
+      if (turbineInlet && comp.inletFluid) {
+        comp.inletFluid.temperature = turbineInlet.fluid.temperature;
+        comp.inletFluid.pressure = turbineInlet.fluid.pressure;
+        comp.inletFluid.phase = turbineInlet.fluid.phase;
+        comp.inletFluid.quality = turbineInlet.fluid.quality;
+      }
+      if (turbineOutlet && comp.outletFluid) {
+        comp.outletFluid.temperature = turbineOutlet.fluid.temperature;
+        comp.outletFluid.pressure = turbineOutlet.fluid.pressure;
+        comp.outletFluid.phase = turbineOutlet.fluid.phase;
+        comp.outletFluid.quality = turbineOutlet.fluid.quality;
+      }
+      // Turbine is running if there's flow through it
+      comp.running = true; // For now, always running
+      // Power would come from SecondaryLoopOperator - TODO: sync this
+    }
+  }
 }
 
 function showNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
