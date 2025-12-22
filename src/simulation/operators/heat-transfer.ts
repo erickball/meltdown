@@ -134,8 +134,15 @@ export class ConductionOperator implements PhysicsOperator {
 export class ConvectionOperator implements PhysicsOperator {
   name = 'Convection';
 
+  // Cache for getMaxStableDt to avoid recomputing every solver iteration
+  // Invalidated when state changes (detected by checking a hash of key values)
+  private cachedMaxDt: number = Infinity;
+  private lastStateHash: string = '';
+
   apply(state: SimulationState, dt: number): SimulationState {
     const newState = cloneSimulationState(state);
+    // Invalidate dt cache since state is changing
+    this.lastStateHash = '';
 
     // Initialize energy diagnostics if not present
     if (!newState.energyDiagnostics) {
@@ -191,9 +198,13 @@ export class ConvectionOperator implements PhysicsOperator {
       );
 
       // Update fluid state with derived quantities
+      // NOTE: We deliberately do NOT update pressure here. Pressure is handled by
+      // FluidStateUpdateOperator using the hybrid model (P_base + feedback).
+      // Setting pressure here from raw Water.calculateState() would overwrite the
+      // correct hybrid pressures, causing FlowOperator to see wrong values.
       flowNode.fluid.internalEnergy = newFluidEnergy;
       flowNode.fluid.temperature = newState_water.temperature;
-      flowNode.fluid.pressure = newState_water.pressure;
+      // flowNode.fluid.pressure - left unchanged, will be set by FluidStateUpdateOperator
       flowNode.fluid.phase = newState_water.phase;
       flowNode.fluid.quality = newState_water.quality;
     }
@@ -219,6 +230,13 @@ export class ConvectionOperator implements PhysicsOperator {
     // For solids: dt < (m * cp) / (2 * h * A)
     // For fluids: dt < (m * cv_eff) / (2 * h * A)
     // Also consider water properties stability
+
+    // Check cache - compute a simple hash of state to detect changes
+    // We only need to recompute when masses/energies change significantly
+    const stateHash = this.computeStateHash(state);
+    if (stateHash === this.lastStateHash && this.cachedMaxDt < Infinity) {
+      return this.cachedMaxDt;
+    }
 
     let minDt = Infinity;
     const warnings: string[] = [];
@@ -275,7 +293,31 @@ export class ConvectionOperator implements PhysicsOperator {
       console.warn('[Convection] Stability warnings:', warnings);
     }
 
+    // Cache the result
+    this.cachedMaxDt = minDt;
+    this.lastStateHash = stateHash;
+
     return minDt;
+  }
+
+  /**
+   * Compute a simple hash of state values that affect dt calculation.
+   * We use quantized values to avoid recomputing on tiny changes.
+   */
+  private computeStateHash(state: SimulationState): string {
+    // Hash based on quantized masses and energies of flow nodes
+    // Only changes when values change by more than ~1%
+    const parts: string[] = [];
+    for (const conn of state.convectionConnections) {
+      const flowNode = state.flowNodes.get(conn.flowNodeId);
+      if (flowNode) {
+        // Quantize to 2 significant figures for coarse change detection
+        const qMass = flowNode.fluid.mass.toPrecision(2);
+        const qEnergy = flowNode.fluid.internalEnergy.toPrecision(2);
+        parts.push(`${conn.flowNodeId}:${qMass}:${qEnergy}`);
+      }
+    }
+    return parts.join('|');
   }
 }
 
@@ -314,7 +356,13 @@ export class HeatGenerationOperator implements PhysicsOperator {
 export class FluidStateUpdateOperator implements PhysicsOperator {
   name = 'FluidStateUpdate';
 
+  // Cache for getMaxStableDt to avoid recomputing every solver iteration
+  private cachedMaxDt: number = Infinity;
+  private lastStateHash: string = '';
+
   apply(state: SimulationState, _dt: number): SimulationState {
+    // Invalidate dt cache since state is changing
+    this.lastStateHash = '';
     const newState = cloneSimulationState(state);
 
     // First pass: calculate state for all nodes using steam tables
@@ -335,7 +383,10 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
     }
 
     // Build connectivity map from flow connections
+    // Also track which connection links each pair of nodes, and the direction
     const connections = new Map<string, Set<string>>();
+    const connectionMap = new Map<string, { conn: typeof state.flowConnections[0]; forward: boolean }>();
+
     for (const conn of state.flowConnections) {
       if (!connections.has(conn.fromNodeId)) {
         connections.set(conn.fromNodeId, new Set());
@@ -345,6 +396,17 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
       }
       connections.get(conn.fromNodeId)!.add(conn.toNodeId);
       connections.get(conn.toNodeId)!.add(conn.fromNodeId);
+
+      // Store connection info for each direction
+      // Key format: "fromNode->toNode"
+      connectionMap.set(`${conn.fromNodeId}->${conn.toNodeId}`, { conn, forward: true });
+      connectionMap.set(`${conn.toNodeId}->${conn.fromNodeId}`, { conn, forward: false });
+    }
+
+    // Build pump map for quick lookup
+    const pumpsByConnection = new Map<string, typeof state.components.pumps extends Map<string, infer V> ? V : never>();
+    for (const [, pump] of state.components.pumps) {
+      pumpsByConnection.set(pump.connectedFlowPath, pump);
     }
 
     // Find all two-phase nodes - these are pressure-setting nodes
@@ -416,11 +478,69 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
             const elevationDiff = neighborNode.elevation - node.elevation;
             const rho = node.fluid.mass / node.volume;
             const hydrostaticAdj = rho * 9.81 * elevationDiff;
-            const neighborPressure = pressure - hydrostaticAdj;
+
+            // Check for pump on this connection and adjust pressure accordingly
+            // Pump adds head in the forward direction (from -> to)
+            // When propagating pressure backwards through a pump, we subtract the pump head
+            const connKey = `${nodeId}->${neighborId}`;
+            const connInfo = connectionMap.get(connKey);
+            let pumpAdj = 0;
+            if (connInfo) {
+              const pump = pumpsByConnection.get(connInfo.conn.id);
+              if (pump && pump.effectiveSpeed > 0) {
+                // Pump head should use the density of the fluid being pumped (upstream node
+                // based on actual flow direction), not the BFS traversal direction.
+                // The connection's massFlowRate tells us the actual flow direction:
+                // positive = from -> to, negative = to -> from
+                const conn = connInfo.conn;
+                const flowIsForward = conn.massFlowRate >= 0;
+                const pumpUpstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
+                const pumpUpstreamNode = newState.flowNodes.get(pumpUpstreamId);
+                const pumpRho = pumpUpstreamNode
+                  ? pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume
+                  : rho;  // fallback to current node density
+
+                // Pump head in pressure units: ΔP = ρ * g * H
+                // effectiveSpeed is maintained by FlowOperator.updatePumpSpeeds()
+                const pumpHead = pump.effectiveSpeed * pump.ratedHead * pumpRho * 9.81;
+                // If propagating in the forward direction (same as pump flow), pressure increases
+                // If propagating backwards (against pump flow), pressure decreases
+                // BFS propagates from two-phase source, so:
+                // - If pump pushes toward the source, going away from source means going against pump → subtract
+                // - If pump pushes away from source, going away from source means going with pump → add
+                // The pump is on the connection and pushes from conn.fromNodeId to conn.toNodeId
+                // We're going from nodeId to neighborId
+                // If forward (nodeId = from, neighbor = to), we're going with pump flow
+                // If backward (nodeId = to, neighbor = from), we're going against pump flow
+                if (connInfo.forward) {
+                  // Going in pump direction: pressure would increase (pump adds energy)
+                  // But we're propagating P_base, so downstream of pump has higher P_base
+                  pumpAdj = pumpHead;
+                } else {
+                  // Going against pump direction: pressure would decrease
+                  pumpAdj = -pumpHead;
+                }
+              }
+            }
+
+            const neighborPressure = pressure - hydrostaticAdj + pumpAdj;
 
             // DEBUG: Log BFS propagation
-            if (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX) {
-              console.log(`[FluidStateDebug] BFS: ${nodeId} -> ${neighborId}: elev=${elevationDiff.toFixed(1)}m, ρ=${rho.toFixed(0)}, hydro=${(hydrostaticAdj/1e5).toFixed(3)}bar, P_base=${(neighborPressure/1e5).toFixed(2)}bar`);
+            // Always log feedwater to debug flow reversal issue
+            if (neighborId === 'feedwater' || (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX)) {
+              const pumpStr = pumpAdj !== 0 ? `, pump=${(pumpAdj/1e5).toFixed(2)}bar` : '';
+              console.log(`[FluidStateDebug] BFS: ${nodeId} -> ${neighborId}: elev=${elevationDiff.toFixed(1)}m, ρ=${rho.toFixed(0)}, hydro=${(hydrostaticAdj/1e5).toFixed(3)}bar${pumpStr}, P_base=${(neighborPressure/1e5).toFixed(2)}bar`);
+              // Log pump details if this connection has a pump and goes to feedwater
+              if (connInfo && pumpAdj !== 0 && neighborId === 'feedwater') {
+                const pump = pumpsByConnection.get(connInfo.conn.id);
+                if (pump) {
+                  const flowIsForward = connInfo.conn.massFlowRate >= 0;
+                  const pumpUpstreamId = flowIsForward ? connInfo.conn.fromNodeId : connInfo.conn.toNodeId;
+                  const pumpUpstreamNode = newState.flowNodes.get(pumpUpstreamId);
+                  const pumpRho = pumpUpstreamNode ? pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume : rho;
+                  console.log(`  pump details: effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}, flowDir=${flowIsForward ? 'forward' : 'reverse'}, pumpRho=${pumpRho.toFixed(0)}`);
+                }
+              }
             }
 
             queue.push({ nodeId: neighborId, pressure: neighborPressure, path: [...path, neighborId] });
@@ -430,12 +550,18 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
     }
 
     // DEBUG: Log final P_base assignments
+    // Always log feedwater to debug flow reversal issue
     if (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX) {
       console.log(`[FluidStateDebug] P_base assignments:`);
       for (const [nodeId, P_base] of liquidPressures) {
         const source = pressureSource.get(nodeId) || 'unknown';
         console.log(`  ${nodeId}: P_base=${(P_base/1e5).toFixed(2)}bar via ${source}`);
       }
+    } else if (liquidPressures.has('feedwater')) {
+      // Even if debug is disabled, always log feedwater P_base
+      const P_base = liquidPressures.get('feedwater')!;
+      const source = pressureSource.get('feedwater') || 'unknown';
+      console.log(`[FluidStateDebug] feedwater: P_base=${(P_base/1e5).toFixed(2)}bar via ${source}`);
     }
 
     // Second pass: apply states with proper pressure handling
@@ -486,6 +612,16 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
         const T = waterState.temperature;
         const T_C = T - 273.15;
 
+        // Guard against zero/near-zero mass (node has drained)
+        // In this case, just use saturation pressure at the current temperature
+        if (flowNode.fluid.mass < 0.01 || !isFinite(rho) || rho < 0.01) {
+          flowNode.fluid.pressure = Water.saturationPressure(T);
+          if (Math.random() < 0.001) {
+            console.warn(`[FluidState] ${nodeId}: Near-zero mass (${flowNode.fluid.mass.toFixed(3)} kg), using P_sat`);
+          }
+          continue;  // Skip the rest of the liquid pressure calculation
+        }
+
         // Temperature-dependent bulk modulus
         const K = Water.bulkModulus(T_C);
 
@@ -497,6 +633,7 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           // This uses actual compressed liquid data rather than saturation approximation
           const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;  // J/kg
           const v_specific = flowNode.volume / flowNode.fluid.mass;  // m³/kg
+
           const rho_table = Water.lookupCompressedLiquidDensity(P_base, u_specific);
 
           // Fallback to saturation-based calculation if outside interpolation domain
@@ -597,6 +734,13 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
   getMaxStableDt(state: SimulationState): number {
     // This operator doesn't have its own stability constraint
     // but we check the overall fluid state stability
+
+    // Check cache - only recompute when state changes significantly
+    const stateHash = this.computeStateHash(state);
+    if (stateHash === this.lastStateHash && this.cachedMaxDt < Infinity) {
+      return this.cachedMaxDt;
+    }
+
     let minDt = Infinity;
 
     for (const [, flowNode] of state.flowNodes) {
@@ -611,7 +755,25 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
       }
     }
 
+    // Cache the result
+    this.cachedMaxDt = minDt;
+    this.lastStateHash = stateHash;
+
     return minDt;
+  }
+
+  /**
+   * Compute a simple hash of state values that affect dt calculation.
+   */
+  private computeStateHash(state: SimulationState): string {
+    const parts: string[] = [];
+    for (const [id, flowNode] of state.flowNodes) {
+      // Quantize to 2 significant figures for coarse change detection
+      const qMass = flowNode.fluid.mass.toPrecision(2);
+      const qEnergy = flowNode.fluid.internalEnergy.toPrecision(2);
+      parts.push(`${id}:${qMass}:${qEnergy}`);
+    }
+    return parts.join('|');
   }
 }
 
@@ -749,17 +911,24 @@ export function createFluidState(
   let density: number;
 
   if (phase === 'liquid') {
-    // For compressed liquid, density increases with pressure
-    // Using bulk modulus: ρ = ρ_sat * (1 + (P - P_sat) / K)
-    // Using temperature-dependent bulk modulus
-    const rho_sat = Water.saturatedLiquidDensity(temperature);
-    const P_sat = Water.saturationPressure(temperature);
-    const T_C = temperature - 273.15;
-    const K_physical = Water.bulkModulus(T_C);
+    // For compressed liquid, use steam table lookup to get the density that
+    // corresponds exactly to this (P, u) point. This ensures dP_feedback = 0
+    // at initialization, since the feedback model uses the same lookup.
+    const u_specific = Water.energyFromTemperature(temperature, 'liquid', 0);
+    const rho_table = Water.lookupCompressedLiquidDensity(pressure, u_specific);
 
-    // Density correction for pressure above saturation
-    const dP = Math.max(0, pressure - P_sat);
-    density = rho_sat * (1 + dP / K_physical);
+    if (rho_table !== null) {
+      // Use exact steam table density - this minimizes initial pressure feedback
+      density = rho_table;
+    } else {
+      // Fallback to bulk modulus approximation if outside table range
+      const rho_sat = Water.saturatedLiquidDensity(temperature);
+      const P_sat = Water.saturationPressure(temperature);
+      const T_C = temperature - 273.15;
+      const K_physical = Water.bulkModulus(T_C);
+      const dP = Math.max(0, pressure - P_sat);
+      density = rho_sat * (1 + dP / K_physical);
+    }
   } else if (phase === 'vapor') {
     // For vapor, use ideal gas with given pressure
     // ρ = P / (R * T), with R = 461.5 J/kg-K for water vapor
