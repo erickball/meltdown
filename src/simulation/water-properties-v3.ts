@@ -2004,6 +2004,17 @@ function findTwoPhaseState(v: number, u: number): {
       x_u2 = (u - sat2.u_f) / (sat2.u_g - sat2.u_f);
     }
 
+    // Debug feedwater issue - check for states very close to saturation line
+    if (Math.abs(v*1e6 - 1124.2) < 1.0 && Math.abs(u/1e3 - 752) < 5) {
+      if (inRange1) {
+        console.log(`[FeedwaterDebug] Checking sat pair ${i} (P=${(sat1.P/1e5).toFixed(1)}bar):`);
+        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat1.v_f*1e6).toFixed(2)} v_g=${(sat1.v_g*1e6).toFixed(2)}`);
+        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat1.u_f/1e3).toFixed(0)} u_g=${(sat1.u_g/1e3).toFixed(0)}`);
+        console.log(`  x_v=${x_v1.toFixed(6)} x_u=${x_u1.toFixed(6)} diff=${Math.abs(x_v1 - x_u1).toFixed(6)}`);
+        console.log(`  Will accept if diff < 0.0001: ${Math.abs(x_v1 - x_u1) < 0.0001}`);
+      }
+    }
+
     // Check for sign change (required for valid two-phase state)
     if (inRange1 && inRange2) {
       const diff1 = x_v1 - x_u1;
@@ -2018,13 +2029,33 @@ function findTwoPhaseState(v: number, u: number): {
 
     // Also check if we're VERY close to x_v = x_u at either endpoint
     // (handles case where the crossing is exactly at a saturation pair)
-    // Use tight tolerance (0.0001 = 0.01%) to avoid false positives
-    if (inRange1 && Math.abs(x_v1 - x_u1) < 0.0001 && x_u1 >= 0 && x_u1 <= 1) {
+    // For physical consistency, x_v and x_u must be very close
+    // Use absolute tolerance but require BOTH to be small for near-zero quality
+    const diff1 = Math.abs(x_v1 - x_u1);
+    const maxQual1 = Math.max(Math.abs(x_v1), Math.abs(x_u1));
+    // Accept only if difference is small AND we're not near the boundary with large discrepancy
+    if (inRange1 && diff1 < 0.001 && (maxQual1 < 0.01 || diff1 < 0.0001) && x_u1 >= 0 && x_u1 <= 1) {
+      // Debug feedwater issue
+      if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
+        console.log(`[FeedwaterDebug] At sat1 (P=${(sat1.P/1e5).toFixed(1)}bar):`);
+        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat1.v_f*1e6).toFixed(2)} v_g=${(sat1.v_g*1e6).toFixed(2)}`);
+        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat1.u_f/1e3).toFixed(0)} u_g=${(sat1.u_g/1e3).toFixed(0)}`);
+        console.log(`  x_v=${x_v1.toFixed(6)} x_u=${x_u1.toFixed(6)} diff=${Math.abs(x_v1 - x_u1).toFixed(6)}`);
+      }
       bracketIdx = i;
       foundSignChange = true;
       break;
     }
-    if (inRange2 && Math.abs(x_v2 - x_u2) < 0.0001 && x_u2 >= 0 && x_u2 <= 1) {
+    const diff2 = Math.abs(x_v2 - x_u2);
+    const maxQual2 = Math.max(Math.abs(x_v2), Math.abs(x_u2));
+    if (inRange2 && diff2 < 0.001 && (maxQual2 < 0.01 || diff2 < 0.0001) && x_u2 >= 0 && x_u2 <= 1) {
+      // Debug feedwater issue
+      if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
+        console.log(`[FeedwaterDebug] At sat2 (P=${(sat2.P/1e5).toFixed(1)}bar):`);
+        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat2.v_f*1e6).toFixed(2)} v_g=${(sat2.v_g*1e6).toFixed(2)}`);
+        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat2.u_f/1e3).toFixed(0)} u_g=${(sat2.u_g/1e3).toFixed(0)}`);
+        console.log(`  x_v=${x_v2.toFixed(6)} x_u=${x_u2.toFixed(6)} diff=${Math.abs(x_v2 - x_u2).toFixed(6)}`);
+      }
       bracketIdx = i;
       foundSignChange = true;
       break;
@@ -2115,7 +2146,7 @@ function findTwoPhaseState(v: number, u: number): {
       const P = sat1.P + t_lo * (sat2.P - sat1.P);
       return {
         T, P,
-        quality: Math.max(0, Math.min(1, (result_lo.x_v + result_lo.x_u) / 2)),
+        quality: Math.max(0, Math.min(1, Math.min(result_lo.x_v, result_lo.x_u))),
         x_v: result_lo.x_v,
         x_u: result_lo.x_u,
       };
@@ -2126,7 +2157,7 @@ function findTwoPhaseState(v: number, u: number): {
       const P = sat1.P + t_hi * (sat2.P - sat1.P);
       return {
         T, P,
-        quality: Math.max(0, Math.min(1, (result_hi.x_v + result_hi.x_u) / 2)),
+        quality: Math.max(0, Math.min(1, Math.min(result_hi.x_v, result_hi.x_u))),
         x_v: result_hi.x_v,
         x_u: result_hi.x_u,
       };
@@ -2154,7 +2185,7 @@ function findTwoPhaseState(v: number, u: number): {
           const P = sat1.P + t_mid * (sat2.P - sat1.P);
           return {
             T, P,
-            quality: Math.max(0, Math.min(1, (result_mid.x_v + result_mid.x_u) / 2)),
+            quality: Math.max(0, Math.min(1, Math.min(result_mid.x_v, result_mid.x_u))),
             x_v: result_mid.x_v,
             x_u: result_mid.x_u,
           };
@@ -2177,7 +2208,7 @@ function findTwoPhaseState(v: number, u: number): {
         const P = sat1.P + t_final * (sat2.P - sat1.P);
         return {
           T, P,
-          quality: Math.max(0, Math.min(1, (result_final.x_v + result_final.x_u) / 2)),
+          quality: Math.max(0, Math.min(1, Math.min(result_final.x_v, result_final.x_u))),
           x_v: result_final.x_v,
           x_u: result_final.x_u,
         };
@@ -2190,7 +2221,7 @@ function findTwoPhaseState(v: number, u: number): {
       const P = sat1.P + t_best * (sat2.P - sat1.P);
       return {
         T, P,
-        quality: Math.max(0, Math.min(1, (best.x_v + best.x_u) / 2)),
+        quality: Math.max(0, Math.min(1, (best.x_v, best.x_u))),
         x_v: best.x_v,
         x_u: best.x_u,
       };
@@ -2230,7 +2261,7 @@ function findTwoPhaseStateFallback(v: number, u: number): {
     const sat = bestMatch.sat;
     const x_v = bestMatch.x_v;
     const x_u = (u - sat.u_f) / (sat.u_g - sat.u_f);
-    const quality = Math.max(0, Math.min(1, (x_v + x_u) / 2));
+    const quality = Math.max(0, Math.min(1, Math.min(x_v, x_u)));
 
     if (lastPhaseDetectionDebug) {
       lastPhaseDetectionDebug.satPairChecked = {
