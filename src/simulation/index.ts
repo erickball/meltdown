@@ -8,8 +8,13 @@
 export * from './types';
 
 // Solver
-export { Solver, cloneSimulationState } from './solver';
-export type { PhysicsOperator, SolverConfig } from './solver';
+export {
+  Solver,
+  cloneSimulationState,
+  getSolverProfile,
+  resetSolverProfile,
+} from './solver';
+export type { PhysicsOperator, SolverConfig, SolverProfile } from './solver';
 
 // Operators
 export * from './operators';
@@ -17,7 +22,7 @@ export * from './operators';
 // Factory for creating simulation state
 export { createSimulationState, createDemoReactor } from './factory';
 
-// Water properties (including debug functions)
+// Water properties (including debug and profiling functions)
 export {
   setWaterPropsDebug,
   getWaterPropsDebugLog,
@@ -28,4 +33,8 @@ export {
   getCalculationDebugLog,
   lookupCompressedLiquidDensity,
   distanceToSaturationLine,
+  getWaterPropsProfile,
+  resetWaterPropsProfile,
+  clearStateCache,
+  type WaterPropsProfile,
 } from './water-properties';

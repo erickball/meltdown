@@ -97,9 +97,13 @@ export class NeutronicsOperator implements PhysicsOperator {
   }
 
   getMaxStableDt(state: SimulationState): number {
-    // Prompt neutron dynamics: τ = Λ / |ρ - β|
-    // For subcritical (ρ < β), this is stable
-    // For supercritical prompt (ρ > β), this goes unstable fast
+    // Point kinetics has two timescales:
+    // 1. Prompt: τ_prompt = Λ / |ρ - β| (very fast, ~0.01-0.1s)
+    // 2. Delayed: τ_delayed = 1 / λ (slower, ~12s)
+    //
+    // For explicit Euler stability, we need dt < τ (approximately).
+    // The prompt term (ρ - β) / Λ * N always has fast dynamics
+    // regardless of whether ρ is positive or negative.
 
     const n = state.neutronics;
     const beta = n.delayedNeutronFraction;
@@ -108,20 +112,13 @@ export class NeutronicsOperator implements PhysicsOperator {
     // Estimate reactivity (can't compute feedback without full state)
     const rho = n.reactivity;
 
-    if (rho >= beta) {
-      // Prompt supercritical - very fast dynamics
-      // Need very small timestep
-      return Lambda / (rho - beta) * 0.1;
-    } else if (rho > 0) {
-      // Delayed supercritical - slower but still fast
-      // Period ≈ Λ / (ρ - β) + β / (λ * ρ)
-      const period = beta / (n.precursorDecayConstant * rho);
-      return period * 0.1;
-    } else {
-      // Subcritical - can use larger timestep
-      // Dynamics limited by precursor decay
-      return 1 / n.precursorDecayConstant * 0.5;
-    }
+    // Prompt dynamics timescale - this is always fast
+    // |ρ - β| is always at least β when subcritical, and larger when supercritical
+    const promptTau = Lambda / Math.abs(rho - beta);
+
+    // Use a safety factor to stay well within stability region
+    // Allow up to 50ms for stability, but cap based on prompt dynamics
+    return Math.min(0.05, promptTau * 0.5);
   }
 
   getSubcycleCount(state: SimulationState, dt: number): number {

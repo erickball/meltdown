@@ -1,9 +1,13 @@
-You can run npx or other commands directly, but remember that you can't use head or tail to look at the output. Also remember that cmd /c will not work correctly in this git bash environment (it swallows the output). As long as you don't use head, you should be able to run npx by specifying the path like this:
-PATH="$PATH:/c/Program Files/nodejs" npx tsx src/simulation/tests.ts 2>&1
+## RULES - always follow
+- DO NOT pipe npx output into head or grep. It fails every single time. Use && instead of pipes.
+- Always use backslashes (\) in file paths on Windows. File edits will fail if you use forward slashes.
 
-This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions. It is best to avoid special cases, hard-coded values, thresholds, and other simplifications that may cause unstable simulation behavior. If this kind of simplification is needed, please discuss with me before adding it.
+## PROJECT GUIDELINES
+This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
 
-Style note: Please avoid beginning any response by saying I'm right. This is a pet peeve of mine. I would prefer you challenge my ideas and tell me if I'm wrong, rather than assuming I'm right.
+## WATER PROPERTIES NOTES
+- Our saturated steam table data goes all the way from the triple point to the critical point.
+- It is critical to determine phase PURELY by comparing whether a node's (energy, volume) pair is inside the saturation dome in (u,v) space. Any thresholds, approximations, or special case rules will cause problems down the line.
 
 /*
 TODO:
@@ -11,9 +15,11 @@ X Show connections between components on the display (matching fluid flows)
 X Make fluid mass match its density based on temperature & quality
 X Figure out a decent way to approximate steam tables
 X Keep the number displays from flickering so much, especially power
-Figure out why power increases after a scram?
+Fix double-display of SG secondary side
+Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
 Add the ability for the user to create components and connect them
 And specify their initial properties
+In the sandbox/construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one.
 X Make arrows in pipes proportional to flow velocity
 Position the arrows at the flow connections (each tank & pipe should get up to 4 connection locations: ends & middle). E.g. the hot leg connection to the pressurizer should have an arrow that points up or down, and it should be near the top-center of the hot leg not at the end.
 Display the full control rods even when they're not fully inserted (the non-inserted part can extend above the core).

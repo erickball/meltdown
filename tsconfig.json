@@ -18,9 +18,17 @@
   "include": ["src"],
   "exclude": [
     "src/simulation/tests.ts",
+    "src/simulation/test-*.ts",
+    "src/simulation/diagnose-*.ts",
+    "src/simulation/check-*.ts",
+    "src/simulation/analyze-*.ts",
+    "src/simulation/export-*.ts",
+    "src/simulation/find-*.ts",
+    "src/simulation/triangle-*.ts",
     "src/simulation/water-properties-iapws.ts",
     "src/simulation/water-properties-v2.ts",
     "src/simulation/water-properties-table.ts",
-    "src/simulation/water-props-test.ts"
+    "src/simulation/water-props-test.ts",
+    "src/simulation/roundtrip-test.ts"
   ]
 }

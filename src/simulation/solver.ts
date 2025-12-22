@@ -12,6 +12,64 @@
 import { SimulationState, SolverMetrics } from './types';
 
 // ============================================================================
+// Solver Profiling
+// ============================================================================
+
+export interface SolverProfile {
+  totalFrameTime: number;       // Total wall time for advance()
+  operatorApplyTime: number;    // Time in operator.apply() calls
+  captureStateTime: number;     // Time capturing pressures/flows/masses
+  compareStateTime: number;     // Time computing changes
+  maxStableDtTime: number;      // Time computing max stable dt
+  sanitizeTime: number;         // Time in sanitizeState
+  cloneStateTime: number;       // Time in cloneSimulationState
+  otherTime: number;            // Unaccounted time
+  frameCount: number;           // Number of frames profiled
+}
+
+let solverProfile: SolverProfile = {
+  totalFrameTime: 0,
+  operatorApplyTime: 0,
+  captureStateTime: 0,
+  compareStateTime: 0,
+  maxStableDtTime: 0,
+  sanitizeTime: 0,
+  cloneStateTime: 0,
+  otherTime: 0,
+  frameCount: 0,
+};
+
+// Track clone time separately since it's called from operators
+let cloneTimeAccumulator = 0;
+
+export function getCloneTimeAccumulator(): number {
+  return cloneTimeAccumulator;
+}
+
+export function addCloneTime(ms: number): void {
+  cloneTimeAccumulator += ms;
+}
+
+export function getSolverProfile(): SolverProfile {
+  return { ...solverProfile };
+}
+
+export function resetSolverProfile(): void {
+  solverProfile = {
+    totalFrameTime: 0,
+    operatorApplyTime: 0,
+    captureStateTime: 0,
+    compareStateTime: 0,
+    maxStableDtTime: 0,
+    sanitizeTime: 0,
+    cloneStateTime: 0,
+    otherTime: 0,
+    frameCount: 0,
+  };
+  cloneTimeAccumulator = 0;
+}
+
+// ============================================================================
 // Physics Operator Interface
 // ============================================================================
 
@@ -80,8 +138,8 @@ export interface SolverConfig {
 
 const DEFAULT_CONFIG: SolverConfig = {
   minDt: 1e-6,                // 1 microsecond
-  maxDt: 0.1,                 // 100 ms
-  targetDt: 0.01,             // 10 ms
+  maxDt: 0.025,               // 25 ms - pressure-flow coupling needs smaller steps
+  targetDt: 0.0005,           // 0.5 ms - start small and grow if stable
 
   safetyFactor: 0.8,
   dtGrowthRate: 1.1,
@@ -131,6 +189,10 @@ export class Solver {
   private adaptiveDt: number;
   private consecutiveSuccesses: number = 0;
 
+  // Cache for maxStableDt - recomputed once per frame or on rejection
+  private cachedMaxStableDt: number = Infinity;
+  private maxStableDtValid: boolean = false;
+
   constructor(config: Partial<SolverConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.adaptiveDt = this.config.targetDt;
@@ -177,6 +239,16 @@ export class Solver {
   } {
     const frameStartWall = performance.now();
 
+    // Profiling accumulators for this frame
+    let captureTime = 0;
+    let compareTime = 0;
+    let maxDtTime = 0;
+    let sanitizeTime = 0;
+    let operatorTime = 0;
+
+    // Reset clone time accumulator at start of frame
+    cloneTimeAccumulator = 0;
+
     let currentState = state;
     let remainingTime = requestedDt;
     let totalSubcycles = 0;
@@ -192,6 +264,9 @@ export class Solver {
 
     let bailedOut = false;
 
+    // Invalidate maxStableDt cache at start of frame - will recompute on first use
+    this.maxStableDtValid = false;
+
     // Take steps until we've covered the requested time
     while (remainingTime > 1e-10) {
       // SAFEGUARD: Check if we've exceeded time/subcycle limits
@@ -205,8 +280,18 @@ export class Solver {
         break;
       }
 
-      // Use adaptive timestep, bounded by remaining time and config limits
-      const maxStableDt = this.computeMaxStableDt(currentState);
+      // Use cached maxStableDt - only recompute once per frame or after rejection
+      let maxStableDt: number;
+      if (this.maxStableDtValid) {
+        maxStableDt = this.cachedMaxStableDt;
+      } else {
+        const t0 = performance.now();
+        maxStableDt = this.computeMaxStableDt(currentState);
+        maxDtTime += performance.now() - t0;
+        this.cachedMaxStableDt = maxStableDt;
+        this.maxStableDtValid = true;
+      }
+
       let stepDt = Math.min(
         this.adaptiveDt,
         remainingTime,
@@ -221,9 +306,11 @@ export class Solver {
 
       while (!stepAccepted && retriesThisStep <= this.config.maxRetries) {
         // Capture pre-step state for comparison
+        const t1 = performance.now();
         const prePressures = this.capturePressures(currentState);
         const preFlows = this.captureFlows(currentState);
         const preMasses = this.captureMasses(currentState);
+        captureTime += performance.now() - t1;
 
         // Apply all operators to get trial state
         let trialState = currentState;
@@ -240,6 +327,7 @@ export class Solver {
           }
 
           const opTime = performance.now() - opStart;
+          operatorTime += opTime;
           this.metrics.operatorTimes.set(
             op.name,
             (this.metrics.operatorTimes.get(op.name) ?? 0) + opTime
@@ -247,9 +335,11 @@ export class Solver {
         }
 
         // Check pressure, flow, and mass changes
+        const t2 = performance.now();
         const pressureChange = this.computeMaxPressureChange(prePressures, trialState);
         const flowChange = this.computeMaxFlowChange(preFlows, trialState);
         const massChange = this.computeMaxMassChange(preMasses, trialState);
+        compareTime += performance.now() - t2;
 
         // Compute normalized change factors (how far over target are we?)
         const pressureOvershoot = pressureChange / this.config.pressureChangeMax;
@@ -277,6 +367,9 @@ export class Solver {
           // Also update adaptive dt for future steps
           this.adaptiveDt = stepDt;
           this.consecutiveSuccesses = 0;
+
+          // Invalidate maxStableDt cache - state has changed significantly
+          this.maxStableDtValid = false;
 
           // Don't count the subcycles from rejected step
           // (they were wasted computation)
@@ -331,7 +424,9 @@ export class Solver {
       }
 
       // Sanitize state after each accepted step
+      const t3 = performance.now();
       currentState = this.sanitizeState(currentState);
+      sanitizeTime += performance.now() - t3;
     }
 
     // If we bailed out, log what was happening (rate-limited)
@@ -341,6 +436,19 @@ export class Solver {
 
     // Update timing metrics
     const frameWallTime = performance.now() - frameStartWall;
+
+    // Update solver profile
+    solverProfile.totalFrameTime += frameWallTime;
+    solverProfile.operatorApplyTime += operatorTime;
+    solverProfile.captureStateTime += captureTime;
+    solverProfile.compareStateTime += compareTime;
+    solverProfile.maxStableDtTime += maxDtTime;
+    solverProfile.sanitizeTime += sanitizeTime;
+    solverProfile.cloneStateTime += cloneTimeAccumulator;
+    // Other time is what's not accounted for
+    const accountedTime = operatorTime + captureTime + compareTime + maxDtTime + sanitizeTime;
+    solverProfile.otherTime += (frameWallTime - accountedTime);
+    solverProfile.frameCount++;
     this.metrics.retriesThisFrame = totalRetries;
     this.metrics.maxPressureChange = maxPressureChangeThisFrame;
     this.metrics.maxFlowChange = maxFlowChangeThisFrame;
@@ -392,34 +500,51 @@ export class Solver {
 
   /**
    * Capture current flow rates from all flow connections for comparison.
+   * Captures both actual flow and target flow (if available).
    */
-  private captureFlows(state: SimulationState): Map<string, number> {
-    const flows = new Map<string, number>();
+  private captureFlows(state: SimulationState): Map<string, { actual: number; target: number }> {
+    const flows = new Map<string, { actual: number; target: number }>();
     for (const conn of state.flowConnections) {
-      flows.set(conn.id, conn.massFlowRate);
+      flows.set(conn.id, {
+        actual: conn.massFlowRate,
+        target: conn.targetFlowRate ?? conn.massFlowRate,
+      });
     }
     return flows;
   }
 
   /**
-   * Compute the maximum absolute flow rate change across all flow connections.
+   * Compute the maximum flow rate change across all flow connections.
+   * Checks both actual flow change AND target flow change.
+   * Target flow oscillation is a leading indicator of pressure-flow instability.
    * Returns 0 if there are no connections.
    */
   private computeMaxFlowChange(
-    preFlows: Map<string, number>,
+    preFlows: Map<string, { actual: number; target: number }>,
     postState: SimulationState
   ): number {
     let maxChange = 0;
 
     for (const conn of postState.flowConnections) {
-      const preFlow = preFlows.get(conn.id);
-      if (preFlow === undefined) continue;
+      const pre = preFlows.get(conn.id);
+      if (pre === undefined) continue;
 
-      const postFlow = conn.massFlowRate;
-      const absoluteChange = Math.abs(postFlow - preFlow);
+      // Check actual flow change
+      const postActual = conn.massFlowRate;
+      const actualChange = Math.abs(postActual - pre.actual);
 
-      if (absoluteChange > maxChange) {
-        maxChange = absoluteChange;
+      // Check target flow change - this catches instability before it manifests
+      // in actual flow (due to relaxation damping)
+      const postTarget = conn.targetFlowRate ?? conn.massFlowRate;
+      const targetChange = Math.abs(postTarget - pre.target);
+
+      // Use the larger of the two as the "effective" flow change
+      // Target changes are weighted at 10% since they're damped by relaxation
+      // but still indicate potential instability
+      const effectiveChange = Math.max(actualChange, targetChange * 0.1);
+
+      if (effectiveChange > maxChange) {
+        maxChange = effectiveChange;
       }
     }
 
@@ -721,39 +846,72 @@ export class Solver {
 // ============================================================================
 
 export function cloneSimulationState(state: SimulationState): SimulationState {
-  return {
+  const t0 = performance.now();
+
+  // Clone thermal nodes - use forEach instead of Array.from().map()
+  const thermalNodes = new Map<string, typeof state.thermalNodes extends Map<string, infer V> ? V : never>();
+  state.thermalNodes.forEach((v, k) => {
+    thermalNodes.set(k, { ...v });
+  });
+
+  // Clone flow nodes with nested fluid object
+  const flowNodes = new Map<string, typeof state.flowNodes extends Map<string, infer V> ? V : never>();
+  state.flowNodes.forEach((v, k) => {
+    flowNodes.set(k, { ...v, fluid: { ...v.fluid } });
+  });
+
+  // Clone arrays - preallocate for performance
+  const thermalConnections = new Array(state.thermalConnections.length);
+  for (let i = 0; i < state.thermalConnections.length; i++) {
+    thermalConnections[i] = { ...state.thermalConnections[i] };
+  }
+
+  const convectionConnections = new Array(state.convectionConnections.length);
+  for (let i = 0; i < state.convectionConnections.length; i++) {
+    convectionConnections[i] = { ...state.convectionConnections[i] };
+  }
+
+  const flowConnections = new Array(state.flowConnections.length);
+  for (let i = 0; i < state.flowConnections.length; i++) {
+    flowConnections[i] = { ...state.flowConnections[i] };
+  }
+
+  // Clone component maps
+  const pumps = new Map<string, typeof state.components.pumps extends Map<string, infer V> ? V : never>();
+  state.components.pumps.forEach((v, k) => {
+    pumps.set(k, { ...v });
+  });
+
+  const valves = new Map<string, typeof state.components.valves extends Map<string, infer V> ? V : never>();
+  state.components.valves.forEach((v, k) => {
+    valves.set(k, { ...v });
+  });
+
+  const checkValves = new Map<string, typeof state.components.checkValves extends Map<string, infer V> ? V : never>();
+  if (state.components.checkValves) {
+    state.components.checkValves.forEach((v, k) => {
+      checkValves.set(k, { ...v });
+    });
+  }
+
+  const result = {
     time: state.time,
-
-    thermalNodes: new Map(
-      Array.from(state.thermalNodes.entries()).map(([k, v]) => [k, { ...v }])
-    ),
-
-    flowNodes: new Map(
-      Array.from(state.flowNodes.entries()).map(([k, v]) => [
-        k,
-        { ...v, fluid: { ...v.fluid } },
-      ])
-    ),
-
-    thermalConnections: state.thermalConnections.map(c => ({ ...c })),
-    convectionConnections: state.convectionConnections.map(c => ({ ...c })),
-    flowConnections: state.flowConnections.map(c => ({ ...c })),
-
+    thermalNodes,
+    flowNodes,
+    thermalConnections,
+    convectionConnections,
+    flowConnections,
     neutronics: { ...state.neutronics },
-
-    components: {
-      pumps: new Map(
-        Array.from(state.components.pumps.entries()).map(([k, v]) => [k, { ...v }])
-      ),
-      valves: new Map(
-        Array.from(state.components.valves.entries()).map(([k, v]) => [k, { ...v }])
-      ),
-    },
-
+    components: { pumps, valves, checkValves },
     // Clone energy diagnostics if present
     energyDiagnostics: state.energyDiagnostics ? {
       ...state.energyDiagnostics,
       heatTransferRates: new Map(state.energyDiagnostics.heatTransferRates),
     } : undefined,
+    // Clone liquid base pressures (for debug display)
+    liquidBasePressures: state.liquidBasePressures ? new Map(state.liquidBasePressures) : undefined,
   };
+
+  addCloneTime(performance.now() - t0);
+  return result;
 }
