@@ -19,6 +19,7 @@ vite.config.test.ts
 # Debug/analysis files
 src/simulation/diagnose-*.ts
 src/simulation/test-*.ts
+!src/simulation/test-suite.ts
 src/simulation/analyze-*.ts
 src/simulation/check-*.ts
 src/simulation/export-*.ts
