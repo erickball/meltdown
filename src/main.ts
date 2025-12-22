@@ -280,6 +280,32 @@ function init() {
     });
   });
 
+  // Auto-slowdown controls
+  const slowdownThreshold = document.getElementById('slowdown-threshold') as HTMLInputElement;
+  const slowdownThresholdValue = document.getElementById('slowdown-threshold-value');
+  const autoSlowdownEnabled = document.getElementById('auto-slowdown-enabled') as HTMLInputElement;
+
+  if (slowdownThreshold) {
+    slowdownThreshold.addEventListener('input', () => {
+      const percent = parseInt(slowdownThreshold.value, 10);
+      if (slowdownThresholdValue) {
+        slowdownThresholdValue.textContent = percent.toString();
+      }
+      gameLoop.setAutoSlowdownThreshold(percent / 100);
+    });
+  }
+
+  if (autoSlowdownEnabled) {
+    autoSlowdownEnabled.addEventListener('change', () => {
+      gameLoop.setAutoSlowdownEnabled(autoSlowdownEnabled.checked);
+    });
+  }
+
+  // Listen for auto-slowdown events to update speed display
+  gameLoop.addEventListener('auto-slowdown', () => {
+    updateSpeedDisplay();
+  });
+
   // Initial display update
   updateSpeedDisplay();
   updatePauseButton();
@@ -318,6 +344,27 @@ function init() {
 
   // Initialize simulation state in canvas immediately so arrows/gauges show
   plantCanvas.setSimState(simState);
+
+  // Trigger initial debug panel update so we can see the starting state
+  // before any physics runs. Use empty metrics since we haven't stepped yet.
+  const initialMetrics: SolverMetrics = {
+    lastStepWallTime: 0,
+    avgStepWallTime: 0,
+    currentDt: 0,
+    minDtUsed: 0,
+    subcycleCount: 0,
+    totalSteps: 0,
+    retriesThisFrame: 0,
+    maxPressureChange: 0,
+    maxFlowChange: 0,
+    maxMassChange: 0,
+    consecutiveSuccesses: 0,
+    realTimeRatio: 0,
+    isFallingBehind: false,
+    fallingBehindSince: 0,
+    operatorTimes: new Map(),
+  };
+  updateDebugPanel(simState, initialMetrics);
 
   // Expose debug utilities to browser console
   window.meltdown = {
@@ -446,7 +493,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       }
       // Turbine is running if there's flow through it
       comp.running = true; // For now, always running
-      // Power would come from SecondaryLoopOperator - TODO: sync this
+      // Power would come from TurbineCondenserOperator - TODO: sync this
     }
   }
 }

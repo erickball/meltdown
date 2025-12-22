@@ -16,8 +16,8 @@ import {
   FlowOperator,
   NeutronicsOperator,
   FluidStateUpdateOperator,
-  SecondaryLoopOperator,
-  createDefaultSecondaryConfig,
+  TurbineCondenserOperator,
+  createDefaultTurbineCondenserConfig,
   checkScramConditions,
   triggerScram,
 } from '../simulation';
@@ -52,7 +52,8 @@ export type GameEventType =
   | 'high-temperature'
   | 'low-flow'
   | 'phase-change'
-  | 'falling-behind';
+  | 'falling-behind'
+  | 'auto-slowdown';
 
 export interface GameEvent {
   type: GameEventType;
@@ -75,6 +76,10 @@ export class GameLoop {
   // State tracking for auto-slowdown
   private previousPower: number = 0;
   private previousMaxTemp: number = 0;
+  private cumulativePowerChange: number = 0;  // Accumulated change over measurement window
+  private cumulativeTempChange: number = 0;
+  private changeWindowTime: number = 0;       // Time accumulated in current window
+  private readonly CHANGE_WINDOW: number = 1.0; // Measure changes over 1 second
 
   // Event system
   private eventListeners: Map<GameEventType, ((event: GameEvent) => void)[]> = new Map();
@@ -97,41 +102,51 @@ export class GameLoop {
     this.solver = new Solver({
       minDt: 1e-5,
       maxDt: 0.05,
-      targetDt: 0.01,
+      targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
     });
 
     // Add operators in physics order:
-    // 1. Neutronics (power generation) - may need subcycling
-    this.solver.addOperator(new NeutronicsOperator());
-
-    // 2. Heat generation (distribute power to fuel)
-    this.solver.addOperator(new HeatGenerationOperator());
-
-    // 3. Conduction (heat spreads through solids)
-    this.solver.addOperator(new ConductionOperator());
-
-    // 4. Convection (heat transfer to coolant)
-    this.solver.addOperator(new ConvectionOperator());
-
-    // 5. Fluid flow (coolant circulation, energy transport)
+    //
+    // Key insight: FlowOperator needs pressures computed by FluidStateUpdateOperator.
+    // By putting FlowOperator FIRST, it uses the pressures computed at the END of the
+    // previous timestep, which are fresh and consistent. Then heat transfer operators
+    // modify energy, and FluidStateUpdateOperator recomputes pressures for next step.
+    //
+    // 1. Fluid flow (uses pressures from end of last step, transfers mass/energy)
     this.solver.addOperator(new FlowOperator());
 
-    // 6. Fluid state update (ensures T, P, phase are consistent with conserved quantities)
-    // This calculates pressure from thermodynamics (density, energy, volume)
+    // 2. Neutronics (power generation) - may need subcycling
+    this.solver.addOperator(new NeutronicsOperator());
+
+    // 3. Heat generation (distribute power to fuel)
+    this.solver.addOperator(new HeatGenerationOperator());
+
+    // 4. Conduction (heat spreads through solids)
+    this.solver.addOperator(new ConductionOperator());
+
+    // 5. Convection (heat transfer solid→fluid, modifies fluid energy)
+    this.solver.addOperator(new ConvectionOperator());
+
+    // 6. Fluid state update (computes T, P, phase from conserved quantities)
+    // This sets pressures that FlowOperator will use in the NEXT timestep
     this.solver.addOperator(new FluidStateUpdateOperator());
 
-    // 7. Secondary loop (turbine, condenser, feedwater thermodynamics)
-    this.solver.addOperator(new SecondaryLoopOperator(createDefaultSecondaryConfig()));
+    // 7. Turbine and condenser (work extraction, heat rejection to external sink)
+    this.solver.addOperator(new TurbineCondenserOperator(createDefaultTurbineCondenserConfig()));
 
     // Initialize tracking
     this.previousPower = initialState.neutronics.power;
     this.previousMaxTemp = this.getMaxFuelTemperature();
   }
 
+  // Flag to skip physics on the very first tick (no real frame time yet)
+  private firstTick: boolean = true;
+
   /**
    * Start the game loop
    */
   start(): void {
+    this.firstTick = true;
     this.lastFrameTime = performance.now();
     this.tick();
   }
@@ -143,6 +158,14 @@ export class GameLoop {
     const now = performance.now();
     const frameDt = (now - this.lastFrameTime) / 1000; // Convert to seconds
     this.lastFrameTime = now;
+
+    // Skip physics on the very first tick - there's no real frame time yet,
+    // just the tiny delay between setting lastFrameTime and calling tick()
+    if (this.firstTick) {
+      this.firstTick = false;
+      requestAnimationFrame(this.tick);
+      return;
+    }
 
     if (!this.isPaused && frameDt > 0) {
       // Calculate simulation time to advance
@@ -207,30 +230,86 @@ export class GameLoop {
   }
 
   /**
-   * Check if we should auto-slowdown due to rapid changes
+   * Check if we should auto-slowdown due to rapid changes.
+   *
+   * Uses cumulative change over a 1-second window rather than instantaneous
+   * rate, which prevents false triggers from frame-to-frame noise.
    */
   private checkAutoSlowdown(frameDt: number): void {
+    // Skip auto-slowdown during first 2 seconds to let simulation stabilize
+    if (this.state.time < 2.0) {
+      this.previousPower = this.state.neutronics.power;
+      this.previousMaxTemp = this.getMaxFuelTemperature();
+      return;
+    }
+
     const currentPower = this.state.neutronics.power;
     const currentMaxTemp = this.getMaxFuelTemperature();
 
-    // Calculate rates of change
-    const powerChangeRate = Math.abs(currentPower - this.previousPower) /
-                           (this.previousPower || 1) / frameDt;
-    const tempChangeRate = Math.abs(currentMaxTemp - this.previousMaxTemp) /
-                          (this.previousMaxTemp || 1) / frameDt;
+    // Accumulate changes over the measurement window
+    const powerChange = currentPower - this.previousPower;
+    const tempChange = currentMaxTemp - this.previousMaxTemp;
+    this.cumulativePowerChange += powerChange;
+    this.cumulativeTempChange += tempChange;
+    this.changeWindowTime += frameDt;
 
-    const maxChangeRate = Math.max(powerChangeRate, tempChangeRate);
+    // Check if we've accumulated a full window
+    if (this.changeWindowTime >= this.CHANGE_WINDOW) {
+      // Calculate change as fraction of initial value over the window
+      const basePower = currentPower - this.cumulativePowerChange;
+      const baseTemp = currentMaxTemp - this.cumulativeTempChange;
 
-    if (maxChangeRate > this.config.autoSlowdownThreshold) {
-      // Something interesting is happening - slow down
-      if (this.simSpeed > 1.0) {
-        this.targetSimSpeed = this.simSpeed;
-        this.simSpeed = 1.0;
-        console.log(`[GameLoop] Auto-slowing to real time (change rate: ${(maxChangeRate * 100).toFixed(1)}%/s)`);
+      const powerChangeFraction = Math.abs(this.cumulativePowerChange) / (basePower || 1);
+      const tempChangeFraction = Math.abs(this.cumulativeTempChange) / (baseTemp || 1);
+
+      const maxChangeFraction = Math.max(powerChangeFraction, tempChangeFraction);
+
+      if (maxChangeFraction > this.config.autoSlowdownThreshold) {
+        // Something interesting is happening - slow down
+        if (this.simSpeed > 1.0) {
+          const previousSpeed = this.simSpeed;
+          this.targetSimSpeed = this.simSpeed;
+          this.simSpeed = 1.0;
+
+          // Determine which quantity caused the slowdown and format message
+          let cause: string;
+          let changeValue: string;
+          if (powerChangeFraction >= tempChangeFraction) {
+            const direction = this.cumulativePowerChange > 0 ? '↑' : '↓';
+            const powerMW = Math.abs(this.cumulativePowerChange) / 1e6;
+            cause = 'Power';
+            changeValue = `${direction}${powerMW.toFixed(1)} MW (${(powerChangeFraction * 100).toFixed(0)}% in ${this.changeWindowTime.toFixed(1)}s)`;
+          } else {
+            const direction = this.cumulativeTempChange > 0 ? '↑' : '↓';
+            cause = 'Fuel temp';
+            changeValue = `${direction}${Math.abs(this.cumulativeTempChange).toFixed(1)} K (${(tempChangeFraction * 100).toFixed(0)}% in ${this.changeWindowTime.toFixed(1)}s)`;
+          }
+
+          console.log(`[GameLoop] Auto-slowing: ${previousSpeed.toFixed(1)}x → 1x | ${cause}: ${changeValue}`);
+
+          // Emit event so UI can update
+          this.emitEvent({
+            type: 'auto-slowdown',
+            time: this.state.time,
+            message: `Auto-slowed to 1x: ${cause} ${changeValue}`,
+            data: {
+              previousSpeed,
+              newSpeed: 1.0,
+              cause,
+              powerChangeFraction,
+              tempChangeFraction,
+            },
+          });
+        }
+      } else if (this.simSpeed < this.targetSimSpeed && maxChangeFraction < this.config.autoSlowdownThreshold * 0.3) {
+        // Things have calmed down - speed back up more aggressively
+        this.simSpeed = Math.min(this.simSpeed * 1.5, this.targetSimSpeed);
       }
-    } else if (this.simSpeed < this.targetSimSpeed && maxChangeRate < this.config.autoSlowdownThreshold * 0.5) {
-      // Things have calmed down - gradually speed back up
-      this.simSpeed = Math.min(this.simSpeed * 1.1, this.targetSimSpeed);
+
+      // Reset accumulators for next window
+      this.cumulativePowerChange = 0;
+      this.cumulativeTempChange = 0;
+      this.changeWindowTime = 0;
     }
 
     this.previousPower = currentPower;
@@ -295,6 +374,36 @@ export class GameLoop {
       Math.min(this.config.maxSimSpeed, speed)
     );
     this.targetSimSpeed = this.simSpeed;
+  }
+
+  /**
+   * Get auto-slowdown threshold (rate of change that triggers slowdown)
+   * Returns value as fraction per second (e.g., 0.1 = 10%/s)
+   */
+  getAutoSlowdownThreshold(): number {
+    return this.config.autoSlowdownThreshold;
+  }
+
+  /**
+   * Set auto-slowdown threshold
+   * @param threshold - Cumulative change as fraction over 1 second (e.g., 0.1 = 10%)
+   */
+  setAutoSlowdownThreshold(threshold: number): void {
+    this.config.autoSlowdownThreshold = Math.max(0.05, Math.min(4.0, threshold));
+  }
+
+  /**
+   * Get whether auto-slowdown is enabled
+   */
+  getAutoSlowdownEnabled(): boolean {
+    return this.config.autoSlowdownEnabled;
+  }
+
+  /**
+   * Set whether auto-slowdown is enabled
+   */
+  setAutoSlowdownEnabled(enabled: boolean): void {
+    this.config.autoSlowdownEnabled = enabled;
   }
 
   /**

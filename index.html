@@ -27,6 +27,13 @@
             <button class="speed-preset" data-speed="10">10x</button>
             <button class="speed-preset" data-speed="100">100x</button>
           </div>
+          <div class="slowdown-control">
+            <label for="slowdown-threshold">
+              <input type="checkbox" id="auto-slowdown-enabled" checked />
+              Auto-slow at <span id="slowdown-threshold-value">10</span>%
+            </label>
+            <input type="range" id="slowdown-threshold" min="5" max="400" value="10" step="5" />
+          </div>
         </div>
         <hr />
         <h3>Components</h3>
