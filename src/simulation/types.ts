@@ -225,15 +225,20 @@ export interface SimulationState {
 export interface ComponentStates {
   pumps: Map<string, PumpState>;
   valves: Map<string, ValveState>;
+  checkValves: Map<string, CheckValveState>;
 }
 
 export interface PumpState {
   id: string;
   running: boolean;
-  speed: number;                    // 0-1 fraction of rated speed
+  speed: number;                    // 0-1 target speed (setpoint)
+  effectiveSpeed: number;           // 0-1 actual current speed (after ramp/coast)
   ratedHead: number;                // m - head at rated conditions
   ratedFlow: number;                // kg/s - flow at rated conditions
+  efficiency: number;               // 0-1 - pump efficiency for work calculation
   connectedFlowPath: string;        // Flow connection ID this pump drives
+  rampUpTime: number;               // seconds - time to reach full speed from stopped
+  coastDownTime: number;            // seconds - time to coast to stop when tripped
 }
 
 export interface ValveState {
@@ -241,6 +246,14 @@ export interface ValveState {
   position: number;                 // 0 = closed, 1 = fully open
   failPosition: number;             // Position on loss of power/signal
   connectedFlowPath: string;        // Flow connection ID
+}
+
+export interface CheckValveState {
+  id: string;
+  connectedFlowPath: string;        // Flow connection ID
+  crackingPressure: number;         // Pa - minimum forward ΔP to open (typically 5-50 kPa)
+  // Check valves are passive - they open when forward pressure exceeds crackingPressure,
+  // and close when flow reverses. No position tracking needed.
 }
 
 // ============================================================================

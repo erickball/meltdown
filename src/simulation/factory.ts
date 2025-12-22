@@ -12,6 +12,7 @@ import {
   NeutronicsState,
 } from './types';
 import { createFluidState } from './operators';
+import { saturationTemperature } from './water-properties';
 
 /**
  * Create an empty simulation state
@@ -28,6 +29,7 @@ export function createSimulationState(): SimulationState {
     components: {
       pumps: new Map(),
       valves: new Map(),
+      checkValves: new Map(),
     },
   };
 }
@@ -156,96 +158,126 @@ export function createDemoReactor(): SimulationState {
   // from temperature, pressure, phase, quality, and volume.
   // This ensures thermodynamic consistency from the start.
   //
-  // PRESSURE GRADIENT for steady-state circulation:
-  // Pump provides ~3 bar head, which must be distributed around the loop
-  // to overcome friction losses. The pressure drops as flow moves through
-  // each leg, with the pump adding head in the cold leg to core section.
+  // HYDROSTATIC EQUILIBRIUM:
+  // For zero initial ΔPfb, the pressure at each liquid node must equal
+  // P_base, which is derived from the pressurizer via hydrostatic adjustment.
+  // The pressurizer sets the system pressure (two-phase at saturation).
   //
-  // Approximate steady-state pressure distribution:
-  // - Cold leg (just before pump): lowest pressure in loop
-  // - Core (just after pump): highest pressure in loop
-  // - Hot leg: intermediate (pressure drop from core)
-  // - SG: intermediate (pressure drop from hot leg)
+  // P_base(node) = P_prz - ρ * g * (elevation_node - elevation_prz)
   //
-  // We use a small gradient (~1-2 bar around the loop) to match the
-  // resistance coefficients and expected flow rate of ~5000 kg/s.
+  // Note: Since pressurizer is higher than most nodes, and ρ*g*Δh is positive
+  // when Δh is negative (going down), nodes below the pressurizer have
+  // HIGHER P_base than the pressurizer.
+  //
+  // Temperatures are chosen to give a typical temperature profile:
+  // - Core outlet (hot leg): ~325°C (highest)
+  // - Core inlet (cold leg): ~290°C
+  // - SG outlet (cold leg side): similar to cold leg
 
-  // Core coolant channel - highest pressure (just got pump head)
+  // Pressurizer sets the system pressure reference
+  const P_prz = 15.0e6; // Pa (150 bar) - saturation at ~342°C
+  const elev_prz = 10; // m
+  const g = 9.81;
+  // Use approximate liquid density for hydrostatic calculation (~700 kg/m³ at these temps)
+  const rho_hydro = 700;
+
+  // Calculate P_base for each node based on hydrostatic equilibrium
+  const elevations = {
+    'core-coolant': 0,
+    'hot-leg': 2,
+    'sg-primary': 5,
+    'cold-leg': 2,
+  };
+
+  function P_base_at(elevation: number): number {
+    // P = P_prz + ρ*g*(elev_prz - elevation)
+    // Going down (lower elevation) increases pressure
+    return P_prz + rho_hydro * g * (elev_prz - elevation);
+  }
+
+  // Core coolant - at elevation 0, so P_base ≈ 150 + 0.69 ≈ 150.7 bar
   const coreVolume = 25; // m³
+  const P_core = P_base_at(elevations['core-coolant']);
   const coreCoolant: FlowNode = {
     id: 'core-coolant',
     label: 'Core Coolant Channel',
-    fluid: createFluidState(590, 15.6e6, 'liquid', 0, coreVolume), // 156 bar
+    fluid: createFluidState(590, P_core, 'liquid', 0, coreVolume),
     volume: coreVolume,
     hydraulicDiameter: 0.012, // m
     flowArea: 4, // m²
-    elevation: 0, // Reference
+    elevation: elevations['core-coolant'],
   };
   state.flowNodes.set(coreCoolant.id, coreCoolant);
 
-  // Hot leg - hottest primary coolant (slightly lower pressure, friction loss)
+  // Hot leg - at elevation 2m, P_base ≈ 150 + 0.55 ≈ 150.5 bar
   const hotLegVolume = 4; // m³
+  const P_hotleg = P_base_at(elevations['hot-leg']);
   const hotLeg: FlowNode = {
     id: 'hot-leg',
     label: 'Hot Leg',
-    fluid: createFluidState(598, 15.55e6, 'liquid', 0, hotLegVolume), // 155.5 bar
+    fluid: createFluidState(598, P_hotleg, 'liquid', 0, hotLegVolume),
     volume: hotLegVolume,
     hydraulicDiameter: 0.7, // m - large pipe
     flowArea: 0.4, // m²
-    elevation: 2, // m above core
+    elevation: elevations['hot-leg'],
   };
   state.flowNodes.set(hotLeg.id, hotLeg);
 
-  // Steam generator primary side (further pressure drop)
+  // Steam generator primary side - at elevation 5m, P_base ≈ 150 + 0.34 ≈ 150.3 bar
   const sgPrimaryVolume = 15; // m³
+  const P_sg = P_base_at(elevations['sg-primary']);
   const sgPrimary: FlowNode = {
     id: 'sg-primary',
     label: 'SG Primary Side',
-    fluid: createFluidState(575, 15.45e6, 'liquid', 0, sgPrimaryVolume), // 154.5 bar
+    fluid: createFluidState(575, P_sg, 'liquid', 0, sgPrimaryVolume),
     volume: sgPrimaryVolume,
     hydraulicDiameter: 0.02, // m - tube ID
     flowArea: 2, // m²
-    elevation: 5, // m - SG is elevated
+    elevation: elevations['sg-primary'],
   };
   state.flowNodes.set(sgPrimary.id, sgPrimary);
 
-  // Cold leg - coolest primary coolant (lowest pressure, before pump)
+  // Cold leg - at elevation 2m, same P_base as hot leg
   const coldLegVolume = 4; // m³
+  const P_coldleg = P_base_at(elevations['cold-leg']);
   const coldLeg: FlowNode = {
     id: 'cold-leg',
     label: 'Cold Leg',
-    fluid: createFluidState(565, 15.35e6, 'liquid', 0, coldLegVolume), // 153.5 bar
+    fluid: createFluidState(565, P_coldleg, 'liquid', 0, coldLegVolume),
     volume: coldLegVolume,
     hydraulicDiameter: 0.7, // m
     flowArea: 0.4, // m²
-    elevation: 2, // m
+    elevation: elevations['cold-leg'],
   };
   state.flowNodes.set(coldLeg.id, coldLeg);
 
-  // Pressurizer - two-phase at saturation (~618K at 155 bar)
+  // Pressurizer - two-phase at saturation
+  // Use exact saturation temperature from steam tables for consistency
+  const T_prz = saturationTemperature(P_prz);
   const przVolume = 30; // m³
   const pressurizer: FlowNode = {
     id: 'pressurizer',
     label: 'Pressurizer',
-    fluid: createFluidState(618, 15.5e6, 'two-phase', 0.5, przVolume),
+    fluid: createFluidState(T_prz, P_prz, 'two-phase', 0.5, przVolume),
     volume: przVolume,
     hydraulicDiameter: 2, // m
     flowArea: 3, // m²
-    elevation: 10, // m - high up
+    elevation: elev_prz,
   };
   state.flowNodes.set(pressurizer.id, pressurizer);
 
   // =========================================================================
   // SECONDARY SIDE FLOW NODES
   // =========================================================================
-  // Steam generator secondary side (boiling at ~55 bar, ~545K saturation)
+  // Steam generator secondary side (boiling at ~55 bar)
   // This is where steam is generated for the turbine
-
+  const P_sg_sec = 5.5e6; // Pa - 55 bar
+  const T_sg_sec = saturationTemperature(P_sg_sec);
   const sgSecVolume = 50; // m³
   const sgSecondary: FlowNode = {
     id: 'sg-secondary',
     label: 'SG Secondary Side',
-    fluid: createFluidState(545, 5.5e6, 'two-phase', 0.3, sgSecVolume),
+    fluid: createFluidState(T_sg_sec, P_sg_sec, 'two-phase', 0.03, sgSecVolume),
     volume: sgSecVolume,
     hydraulicDiameter: 0.1, // m
     flowArea: 5, // m²
@@ -254,12 +286,12 @@ export function createDemoReactor(): SimulationState {
   state.flowNodes.set(sgSecondary.id, sgSecondary);
 
   // Turbine inlet - superheated/saturated steam from SG
-  // Steam leaves SG at ~55 bar, enters turbine
+  // Steam leaves SG at ~55 bar, enters turbine (use same T as SG secondary)
   const turbineInletVolume = 10; // m³
   const turbineInlet: FlowNode = {
     id: 'turbine-inlet',
     label: 'Turbine Inlet',
-    fluid: createFluidState(545, 5.5e6, 'vapor', 0, turbineInletVolume),
+    fluid: createFluidState(T_sg_sec, P_sg_sec, 'vapor', 0, turbineInletVolume),
     volume: turbineInletVolume,
     hydraulicDiameter: 0.5, // m - large steam pipe
     flowArea: 0.2, // m²
@@ -268,12 +300,14 @@ export function createDemoReactor(): SimulationState {
   state.flowNodes.set(turbineInlet.id, turbineInlet);
 
   // Turbine outlet - wet steam exhausting to condenser
+  // At lower pressure after expansion (~1 bar for now, not full vacuum)
+  const P_condenser = 1e5; // Pa - 1 bar
+  const T_condenser = saturationTemperature(P_condenser);
   const turbineOutletVolume = 50; // m³ - large due to low density
   const turbineOutlet: FlowNode = {
     id: 'turbine-outlet',
     label: 'Turbine Outlet',
-    // At lower pressure after expansion (~1 bar for now, not full vacuum)
-    fluid: createFluidState(373, 1e5, 'two-phase', 0.9, turbineOutletVolume),
+    fluid: createFluidState(T_condenser, P_condenser, 'two-phase', 0.9, turbineOutletVolume),
     volume: turbineOutletVolume,
     hydraulicDiameter: 2, // m - very large exhaust
     flowArea: 3, // m²
@@ -287,8 +321,8 @@ export function createDemoReactor(): SimulationState {
   const condenser: FlowNode = {
     id: 'condenser',
     label: 'Main Condenser',
-    // Low pressure two-phase, mostly liquid
-    fluid: createFluidState(373, 1e5, 'two-phase', 0.1, condenserVolume),
+    // Low pressure two-phase, mostly liquid (use same T/P as turbine outlet)
+    fluid: createFluidState(T_condenser, P_condenser, 'two-phase', 0.1, condenserVolume),
     volume: condenserVolume,
     hydraulicDiameter: 0.02, // m - tubes
     flowArea: 2, // m²
@@ -367,9 +401,8 @@ export function createDemoReactor(): SimulationState {
   // FLOW CONNECTIONS (Fluid paths)
   // =========================================================================
 
-  // Initialize with steady-state flow rates (~5000 kg/s typical PWR loop flow)
-  // This represents a reactor that's already running, not starting from cold
-  const steadyStateFlow = 5000; // kg/s
+  // Initialize with zero flow - pump will ramp up over first 5 seconds
+  // This allows initial conditions to stabilize before flow starts
 
   // Core to hot leg
   state.flowConnections.push({
@@ -381,7 +414,7 @@ export function createDemoReactor(): SimulationState {
     length: 2,
     elevation: -2, // Negative = going UP = gravity opposes forward flow
     resistanceCoeff: 2,
-    massFlowRate: steadyStateFlow, // Start with established circulation
+    massFlowRate: 0, // Start at zero, pump ramps up
   });
 
   // Hot leg to SG
@@ -394,7 +427,7 @@ export function createDemoReactor(): SimulationState {
     length: 5,
     elevation: -3, // Negative = going UP = gravity opposes forward flow
     resistanceCoeff: 3,
-    massFlowRate: steadyStateFlow, // Start with established circulation
+    massFlowRate: 0, // Start at zero, pump ramps up
   });
 
   // SG to cold leg (SG at 5m, CL at 2m - going DOWN 3m, favors flow)
@@ -407,7 +440,7 @@ export function createDemoReactor(): SimulationState {
     length: 5,
     elevation: 3, // Positive = going down = gravity favors forward flow
     resistanceCoeff: 3,
-    massFlowRate: steadyStateFlow, // Start with established circulation
+    massFlowRate: 0, // Start at zero, pump ramps up
   });
 
   // Cold leg to core (through pump) (CL at 2m, Core at 0m - going DOWN 2m, favors flow)
@@ -420,7 +453,7 @@ export function createDemoReactor(): SimulationState {
     length: 3,
     elevation: 2, // Positive = going down = gravity favors forward flow
     resistanceCoeff: 5, // Includes core resistance
-    massFlowRate: steadyStateFlow, // Start with established circulation
+    massFlowRate: 0, // Start at zero, pump ramps up
   });
 
   // Pressurizer surge line (small connection to hot leg)
@@ -525,9 +558,13 @@ export function createDemoReactor(): SimulationState {
     id: 'rcp-1',
     running: true,
     speed: 1.0,
+    effectiveSpeed: 0, // Starts at 0, ramps up over rampUpTime
     ratedHead: 150, // m - sized to overcome loop resistance at design flow
     ratedFlow: 5000, // kg/s
+    efficiency: 0.85, // Typical large centrifugal pump efficiency
     connectedFlowPath: 'flow-coldleg-core',
+    rampUpTime: 5.0, // seconds
+    coastDownTime: 30.0, // seconds - large pump has significant inertia
   });
 
   // Main isolation valve (normally open)
@@ -538,6 +575,31 @@ export function createDemoReactor(): SimulationState {
     connectedFlowPath: 'flow-hotleg-sg',
   });
 
+  // Condensate pump - lifts water from condenser hotwell to feedwater system
+  // Head needed: overcome 2m elevation + friction + raise pressure slightly
+  // Condenser at ~1 bar, feedwater system inlet at maybe 5-10 bar
+  // H = dP / (rho * g) = 1e6 / (1000 * 9.81) = ~100 m for 10 bar rise
+  // Plus 2m elevation = ~100m total
+  state.components.pumps.set('condensate-pump', {
+    id: 'condensate-pump',
+    running: true,
+    speed: 1.0,
+    effectiveSpeed: 0, // Starts at 0, ramps up over rampUpTime
+    ratedHead: 100, // m - sized to lift condensate from hotwell
+    ratedFlow: 500, // kg/s
+    efficiency: 0.85, // Typical condensate pump efficiency
+    connectedFlowPath: 'flow-condenser-feedwater',
+    rampUpTime: 5.0, // seconds
+    coastDownTime: 15.0, // seconds
+  });
+
+  // Check valve on condensate line - prevents backflow from feedwater to condenser
+  state.components.checkValves.set('condensate-check', {
+    id: 'condensate-check',
+    connectedFlowPath: 'flow-condenser-feedwater',
+    crackingPressure: 10000, // 0.1 bar - typical check valve cracking pressure
+  });
+
   // Feedwater pump - pressurizes condensate from condenser pressure to SG pressure
   // Head: ~55 bar - 1 bar = 54 bar = 5.4 MPa
   // For water at ~400K: rho ~940 kg/m³
@@ -546,9 +608,13 @@ export function createDemoReactor(): SimulationState {
     id: 'fw-pump',
     running: true,
     speed: 1.0,
+    effectiveSpeed: 0, // Starts at 0, ramps up over rampUpTime
     ratedHead: 600, // m - sized for ~55 bar rise
     ratedFlow: 500, // kg/s
+    efficiency: 0.85, // Typical feedwater pump efficiency
     connectedFlowPath: 'flow-feedwater-sg',
+    rampUpTime: 5.0, // seconds
+    coastDownTime: 20.0, // seconds
   });
 
   // Main steam isolation valve (MSIV on secondary side)

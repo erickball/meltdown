@@ -14,40 +14,56 @@
  * instantaneously to prevent oscillations.
  */
 
-import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState } from '../types';
+import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState, CheckValveState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
-import * as Water from '../water-properties';
 
 // ============================================================================
 // Flow Operator
 // ============================================================================
 
+// Profiling data structure
+export interface FlowOperatorProfile {
+  computeTargetFlows: number;
+  transferMass: number;
+  totalCalls: number;
+}
+
+// Module-level profiling accumulator
+let operatorProfile: FlowOperatorProfile = {
+  computeTargetFlows: 0,
+  transferMass: 0,
+  totalCalls: 0,
+};
+
+export function getFlowOperatorProfile(): FlowOperatorProfile {
+  return { ...operatorProfile };
+}
+
+export function resetFlowOperatorProfile(): void {
+  operatorProfile = {
+    computeTargetFlows: 0,
+    transferMass: 0,
+    totalCalls: 0,
+  };
+}
+
 export class FlowOperator implements PhysicsOperator {
   name = 'FluidFlow';
-
-  // Relaxation factor - how quickly flow adjusts (0-1)
-  // Higher = faster response, but can cause oscillation
-  // Lower value needed because:
-  // 1. Explicit coupling between flow and pressure can oscillate
-  // 2. Small volumes (like hot leg) are very sensitive to flow imbalance
-  private relaxationFactor = 0.02; // Very low to prevent oscillation
 
   // Maximum flow rate to prevent runaway (kg/s)
   private maxFlowRate = 50000;
 
-  // Cache for freshly computed pressures (computed once per apply() call)
-  private freshPressures: Map<string, number> = new Map();
-
   apply(state: SimulationState, dt: number): SimulationState {
     const newState = cloneSimulationState(state);
+    operatorProfile.totalCalls++;
 
-    // CRITICAL FIX: Compute fresh pressures BEFORE calculating flows
-    // The stored fluid.pressure values are stale (from end of last timestep).
-    // We need to recompute pressures based on current mass/energy/volume
-    // to get consistent flow calculations.
-    this.freshPressures = this.computeFreshPressures(newState);
+    // Update pump effective speeds based on ramp-up/coast-down dynamics
+    this.updatePumpSpeeds(newState, dt);
 
     // Update flow rates in each connection based on pressure balance
+    // We use the stored fluid.pressure values set by FluidStateUpdateOperator
+    // at the end of the previous timestep. These use the hybrid pressure model.
+    const t1 = performance.now();
     for (const conn of newState.flowConnections) {
       const fromNode = newState.flowNodes.get(conn.fromNodeId);
       const toNode = newState.flowNodes.get(conn.toNodeId);
@@ -78,17 +94,19 @@ export class FlowOperator implements PhysicsOperator {
       // Store target flow for debugging display
       conn.targetFlowRate = targetFlow;
 
-      // Relax toward target (prevents oscillation)
-      const flowChange = (targetFlow - conn.massFlowRate) * this.relaxationFactor;
-      conn.massFlowRate += flowChange;
+      // Set flow directly to target (no relaxation)
+      conn.massFlowRate = targetFlow;
 
       // SAFEGUARD: Final clamp
       conn.massFlowRate = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, conn.massFlowRate));
     }
+    operatorProfile.computeTargetFlows += performance.now() - t1;
 
     // MASS AND ENERGY CONSERVATION: Transfer mass and energy together
     // to ensure consistent specific energy during advection.
+    const t2 = performance.now();
     this.transferMassConservatively(newState, dt);
+    operatorProfile.transferMass += performance.now() - t2;
 
     return newState;
   }
@@ -225,13 +243,13 @@ export class FlowOperator implements PhysicsOperator {
     toNode: FlowNode,
     state: SimulationState
   ): number {
-    // CRITICAL FIX: Use freshly computed pressures, not stale stored values
-    // The stored fluid.pressure values were computed at the END of the last
-    // timestep based on the mass distribution at that time. But mass has
-    // potentially changed since then (from other operators or previous
-    // iterations), so we need fresh pressure values.
-    const P_from = this.freshPressures.get(conn.fromNodeId) ?? fromNode.fluid.pressure;
-    const P_to = this.freshPressures.get(conn.toNodeId) ?? toNode.fluid.pressure;
+    // Use stored pressures from FluidStateUpdateOperator (which ran at end of last step).
+    // These use the hybrid pressure model (P_base + feedback) which is physically correct.
+    // Previously we computed "fresh" pressures here, but that caused mismatches because
+    // operators before FlowOperator (like ConvectionOperator) modify energy, which changes
+    // what the fresh pressure calculation would produce.
+    const P_from = fromNode.fluid.pressure;
+    const P_to = toNode.fluid.pressure;
 
     // Base pressure difference (positive = from has higher pressure)
     // For liquid loops, this should be small (just friction losses)
@@ -246,13 +264,11 @@ export class FlowOperator implements PhysicsOperator {
     // Check for pump in this connection
     const pump = this.getPumpForConnection(conn.id, state);
     let dP_pump = 0;
-    if (pump && pump.running) {
-      // Pump adds head in flow direction
-      // Simplified pump curve: head decreases with flow
-      const Q = Math.abs(conn.massFlowRate) / rho; // Volumetric flow m³/s
-      const Q_rated = pump.ratedFlow / rho;
-      const headRatio = 1 - 0.5 * Math.pow(Q / Q_rated, 2); // Quadratic pump curve
-      dP_pump = pump.speed * pump.ratedHead * headRatio * rho * g;
+    if (pump && pump.effectiveSpeed > 0) {
+      // Pump provides forward head (from -> to) based on its current effective speed.
+      // The effectiveSpeed is updated by updatePumpSpeeds() each timestep, accounting
+      // for ramp-up and coast-down dynamics.
+      dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
     }
 
     // Check for valve in this connection
@@ -270,6 +286,28 @@ export class FlowOperator implements PhysicsOperator {
 
     // Total driving pressure
     const dP_driving = dP_pressure + dP_gravity + dP_pump;
+
+    // Check for check valve in this connection
+    // Check valves prevent reverse flow and require minimum forward pressure to open
+    const checkValve = this.getCheckValveForConnection(conn.id, state);
+    if (checkValve) {
+      if (dP_driving < checkValve.crackingPressure) {
+        // Either reverse flow (negative) or forward pressure below cracking pressure
+        // Check valve is closed - no flow
+        return 0;
+      }
+    }
+
+    // Debug: log components for key connections (sample at 0.1%)
+    if (conn.id === "flow-feedwater-sg" || ((conn.id === "flow-sg-coldleg" || conn.id === 'flow-coldleg-core' || conn.id === 'flow-core-hotleg') && Math.random() < 0.001)) {
+      console.log(`[FlowOp] ${conn.id}:`);
+      console.log(`  P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, dP=${((P_from-P_to)/1e5).toFixed(2)}bar`);
+      console.log(`  dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar, dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar, dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
+      console.log(`  dP_driving=${(dP_driving/1e5).toFixed(3)}bar, elev=${conn.elevation}m, rho=${rho.toFixed(0)} kg/m³`);
+      if (pump) {
+        console.log(`  pump: effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}, ratedHead=${pump.ratedHead}m`);
+      }
+    }
 
     // Compute flow from pressure drop
     // ΔP = K * (1/2) * ρ * v²  =>  v = sqrt(2 * ΔP / (ρ * K))
@@ -289,6 +327,11 @@ export class FlowOperator implements PhysicsOperator {
 
     // Mass flow rate
     const massFlow = sign * rho * A * v;
+
+    // Debug: log calculated flow for feedwater-sg
+    if (conn.id === "flow-feedwater-sg") {
+      console.log(`  calculated flow=${massFlow.toFixed(1)} kg/s (v=${(sign*v).toFixed(2)} m/s, K=${K.toFixed(3)})`);
+    }
 
     return massFlow;
   }
@@ -358,151 +401,43 @@ export class FlowOperator implements PhysicsOperator {
   }
 
   /**
-   * Compute fresh pressures for all flow nodes based on current mass/energy/volume.
-   *
-   * This is CRITICAL for correct flow calculation. The stored fluid.pressure values
-   * are stale - they were computed at the end of the previous timestep. Since mass
-   * has been transferred by other operators, the actual pressure based on the current
-   * density can be very different.
-   *
-   * This method uses the same hybrid pressure model as FluidStateUpdateOperator:
-   * - Two-phase nodes: pressure = saturation pressure at current temperature
-   * - Liquid nodes connected to two-phase: base pressure from two-phase + deviation
-   * - Isolated liquid nodes: saturation pressure + compression term
+   * Find check valve affecting this connection
    */
-  private computeFreshPressures(state: SimulationState): Map<string, number> {
-    const pressures = new Map<string, number>();
-
-    // First pass: compute water state and identify pressure reference nodes
-    // Both two-phase AND vapor nodes can serve as pressure references since
-    // they have well-defined pressures from thermodynamic state
-    const waterStates = new Map<string, ReturnType<typeof Water.calculateState>>();
-    const pressureRefNodes: string[] = [];
-
-    for (const [nodeId, flowNode] of state.flowNodes) {
-      const waterState = Water.calculateState(
-        flowNode.fluid.mass,
-        flowNode.fluid.internalEnergy,
-        flowNode.volume
-      );
-      waterStates.set(nodeId, waterState);
-
-      if (waterState.phase === 'two-phase' || waterState.phase === 'vapor') {
-        pressureRefNodes.push(nodeId);
-        // Two-phase/vapor pressure comes from thermodynamic state
-        pressures.set(nodeId, waterState.pressure);
+  private getCheckValveForConnection(connId: string, state: SimulationState): CheckValveState | undefined {
+    if (!state.components.checkValves) return undefined;
+    for (const [, cv] of state.components.checkValves) {
+      if (cv.connectedFlowPath === connId) {
+        return cv;
       }
     }
+    return undefined;
+  }
 
-    // Build connectivity map
-    const connections = new Map<string, Set<string>>();
-    for (const conn of state.flowConnections) {
-      if (!connections.has(conn.fromNodeId)) {
-        connections.set(conn.fromNodeId, new Set());
-      }
-      if (!connections.has(conn.toNodeId)) {
-        connections.set(conn.toNodeId, new Set());
-      }
-      connections.get(conn.fromNodeId)!.add(conn.toNodeId);
-      connections.get(conn.toNodeId)!.add(conn.fromNodeId);
-    }
-
-    // Propagate pressure from reference nodes (two-phase/vapor) to connected liquid nodes
-    const liquidBasePressures = new Map<string, number>();
-
-    for (const refNodeId of pressureRefNodes) {
-      const refState = waterStates.get(refNodeId)!;
-
-      const visited = new Set<string>();
-      const queue: Array<{ nodeId: string; pressure: number }> = [{
-        nodeId: refNodeId,
-        pressure: refState.pressure
-      }];
-
-      while (queue.length > 0) {
-        const { nodeId, pressure } = queue.shift()!;
-        if (visited.has(nodeId)) continue;
-        visited.add(nodeId);
-
-        const nodeWaterState = waterStates.get(nodeId)!;
-        const node = state.flowNodes.get(nodeId)!;
-
-        if (nodeWaterState.phase === 'liquid' || nodeId === refNodeId) {
-          if (!liquidBasePressures.has(nodeId) || nodeId === refNodeId) {
-            liquidBasePressures.set(nodeId, pressure);
-          }
-
-          // Propagate to connected nodes
-          const neighbors = connections.get(nodeId) || new Set();
-          for (const neighborId of neighbors) {
-            if (visited.has(neighborId)) continue;
-
-            const neighborNode = state.flowNodes.get(neighborId);
-            const neighborState = waterStates.get(neighborId);
-            if (!neighborNode || !neighborState) continue;
-
-            // Only propagate to liquid nodes
-            if (neighborState.phase !== 'liquid') continue;
-
-            // Calculate pressure with hydrostatic adjustment
-            const elevationDiff = neighborNode.elevation - node.elevation;
-            const rho = node.fluid.mass / node.volume;
-            const hydrostaticAdj = rho * 9.81 * elevationDiff;
-            const neighborPressure = pressure - hydrostaticAdj;
-
-            queue.push({ nodeId: neighborId, pressure: neighborPressure });
-          }
+  /**
+   * Update pump effective speeds based on running state and ramp dynamics.
+   * This must be called each timestep before computing flows.
+   */
+  private updatePumpSpeeds(state: SimulationState, dt: number): void {
+    for (const [, pump] of state.components.pumps) {
+      if (pump.running) {
+        // Ramp up toward target speed
+        const targetSpeed = pump.speed;
+        if (pump.effectiveSpeed < targetSpeed) {
+          const rampRate = targetSpeed / pump.rampUpTime;  // speed per second
+          pump.effectiveSpeed = Math.min(targetSpeed, pump.effectiveSpeed + rampRate * dt);
+        } else if (pump.effectiveSpeed > targetSpeed) {
+          // Speed setpoint was reduced - coast down to new target
+          const coastRate = 1.0 / pump.coastDownTime;  // speed per second
+          pump.effectiveSpeed = Math.max(targetSpeed, pump.effectiveSpeed - coastRate * dt);
         }
-      }
-    }
-
-    // Second pass: compute final pressures for liquid nodes
-    // (two-phase and vapor already handled in first pass)
-    for (const [nodeId, flowNode] of state.flowNodes) {
-      if (pressures.has(nodeId)) continue; // Already set (two-phase or vapor)
-
-      const waterState = waterStates.get(nodeId)!;
-      const rho = flowNode.fluid.mass / flowNode.volume;
-      const T = waterState.temperature;
-
-      // Liquid: hybrid pressure model - MUST match FluidStateUpdateOperator exactly
-      // to ensure flow calculations use consistent pressures
-      if (liquidBasePressures.has(nodeId)) {
-        // Connected to pressure reference node - use shared pressure feedback calculation
-        const P_base = liquidBasePressures.get(nodeId)!;
-        const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;
-        const v_specific = flowNode.volume / flowNode.fluid.mass;
-        const result = Water.computePressureFeedback(rho, P_base, u_specific, T);
-
-        // Floor: liquid pressure cannot be below saturation pressure at this temperature
-        const P_sat = Water.saturationPressure(T);
-        let P_final = Math.max(result.P_final, P_sat);
-
-        // Near the liquid/supercritical boundary (u > 1750 kJ/kg), blend toward
-        // triangulation lookup to ensure smooth transition
-        const u_kJkg = u_specific / 1000;
-        const U_BLEND_START = 1750;
-        const U_BLEND_END = 1800;
-
-        if (u_kJkg > U_BLEND_START) {
-          const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
-          if (P_triangulation !== null) {
-            const blend = Math.min(1, (u_kJkg - U_BLEND_START) / (U_BLEND_END - U_BLEND_START));
-            P_final = (1 - blend) * P_final + blend * P_triangulation;
-          }
-        }
-
-        pressures.set(nodeId, P_final);
       } else {
-        // Isolated liquid region
-        pressures.set(nodeId, Water.computeIsolatedLiquidPressure(rho, T));
+        // Pump is not running - coast down to zero
+        if (pump.effectiveSpeed > 0) {
+          const coastRate = 1.0 / pump.coastDownTime;
+          pump.effectiveSpeed = Math.max(0, pump.effectiveSpeed - coastRate * dt);
+        }
       }
     }
-
-    // Store base pressures in state for debugging
-    state.liquidBasePressures = liquidBasePressures;
-
-    return pressures;
   }
 }
 
