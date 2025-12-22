@@ -95,7 +95,7 @@ body {
 #legend {
   position: absolute;
   bottom: 50px;
-  right: 10px;
+  left: 10px;
   background: rgba(30, 30, 50, 0.95);
   padding: 12px;
   border-radius: 8px;
@@ -153,7 +153,7 @@ body {
   border: 1px solid #444;
   font-size: 11px;
   font-family: 'Consolas', monospace;
-  width: 380px;
+  width: 440px;
   max-height: calc(100vh - 100px);
   overflow-y: auto;
   overflow-x: hidden;
@@ -418,4 +418,56 @@ body {
 .speed-preset.active {
   background: #3a5a3a !important;
   border-color: #7f7 !important;
+}
+
+/* Auto-slowdown control */
+.slowdown-control {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #333;
+}
+
+.slowdown-control label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #aaa;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+
+.slowdown-control input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.slowdown-control input[type="range"] {
+  width: 100%;
+  height: 4px;
+  background: #2a2a4a;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+
+.slowdown-control input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #667788;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 1px solid #99aacc;
+}
+
+.slowdown-control input[type="range"]::-webkit-slider-thumb:hover {
+  background: #8899aa;
+}
+
+#slowdown-threshold-value {
+  color: #7af;
+  font-family: 'Consolas', monospace;
 }

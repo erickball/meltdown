@@ -2,7 +2,21 @@
  * Debug utilities for monitoring simulation state
  */
 
-import { SimulationState, SolverMetrics, calculateWaterState, lookupCompressedLiquidDensity, distanceToSaturationLine, saturationPressure } from './simulation';
+import {
+  SimulationState,
+  SolverMetrics,
+  calculateWaterState,
+  lookupCompressedLiquidDensity,
+  distanceToSaturationLine,
+  saturationPressure,
+  getWaterPropsProfile,
+  resetWaterPropsProfile,
+  getFlowOperatorProfile,
+  resetFlowOperatorProfile,
+  getSolverProfile,
+  resetSolverProfile,
+  getTurbineCondenserState,
+} from './simulation';
 
 /**
  * Format a number with appropriate precision and color coding
@@ -198,6 +212,36 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `</span><br>`;
     }
 
+
+
+    // Also show flow rates with target flows
+    html += '<br><b>Flow connections:</b><br>';
+    for (const conn of state.flowConnections) {
+      const flowClass = !isFinite(conn.massFlowRate) ? 'debug-danger' :
+                       Math.abs(conn.massFlowRate) < 1 ? 'debug-warning' : 'debug-value';
+      const targetFlow = conn.targetFlowRate ?? 0;
+      const targetClass = !isFinite(targetFlow) ? 'debug-danger' :
+                         Math.sign(targetFlow) !== Math.sign(conn.massFlowRate) && Math.abs(conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
+      html += `${conn.fromNodeId} -> ${conn.toNodeId}: <span class="${flowClass}">${conn.massFlowRate.toFixed(0)}</span>`;
+      html += ` <span style="color: #888;">→</span> <span class="${targetClass}">${targetFlow.toFixed(0)}</span> kg/s`;
+
+      // Show pump head if there's a pump on this connection
+      for (const [pumpId, pump] of state.components.pumps) {
+        if (pump.connectedFlowPath === conn.id && pump.effectiveSpeed > 0) {
+          // Calculate pump head: dP_pump = effectiveSpeed * ratedHead * rho * g
+          // effectiveSpeed is maintained by FlowOperator.updatePumpSpeeds()
+          const flowIsForward = conn.massFlowRate >= 0;
+          const upstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
+          const upstreamNode = state.flowNodes.get(upstreamId);
+          const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750; // Default to ~750 kg/m³
+          const g = 9.81;
+          const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
+          html += ` <span style="color: #8af;">[${pumpId}: +${(dP_pump/1e5).toFixed(1)}bar]</span>`;
+        }
+      }
+      html += '<br>';
+    }
+
     // Show total mass for conservation check
     let totalMass = 0;
     let totalEnergy = 0;
@@ -216,25 +260,29 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `<span class="debug-label">Fuel→Core:</span> ${formatValue(diag.fuelToCoreCoolant / 1e6, ' MW')}<br>`;
       html += `<span class="debug-label">Core→SG:</span> ${formatValue(diag.coreCoolantToSG / 1e6, ' MW')}<br>`;
 
+      // Get turbine and condenser state
+      const turbineStats = getTurbineCondenserState();
+      html += '<br><b>Power Conversion:</b><br>';
+      html += `<span class="debug-label">Turbine:</span> ${formatValue(turbineStats.turbinePower / 1e6, ' MW')} (electric)<br>`;
+      html += `<span class="debug-label">Condenser:</span> ${formatValue(-turbineStats.condenserHeatRejection / 1e6, ' MW')} (removed)<br>`;
+      html += `<span class="debug-label">Pump work:</span> ${formatValue(turbineStats.feedwaterPumpWork / 1e6, ' MW')} (added)<br>`;
+      html += `<span class="debug-label">Net power:</span> ${formatValue(turbineStats.netPower / 1e6, ' MW')}<br>`;
+
+      // Energy balance check
+      const energyIn = diag.heatGenerationTotal + turbineStats.feedwaterPumpWork;
+      const energyOut = turbineStats.turbinePower + turbineStats.condenserHeatRejection;
+      const imbalance = energyIn - energyOut;
+      const imbalanceClass = Math.abs(imbalance) > 10e6 ? 'debug-danger' :
+                            Math.abs(imbalance) > 1e6 ? 'debug-warning' : 'debug-value';
+      html += `<span class="debug-label">Imbalance:</span> <span class="${imbalanceClass}">${formatValue(imbalance / 1e6, ' MW')}</span><br>`;
+
       // Show all heat transfer connections
       html += '<br><b>Heat transfers:</b><br>';
       for (const [connId, rate] of diag.heatTransferRates) {
         const rateClass = Math.abs(rate) > 1e9 ? 'debug-danger' :
-                         Math.abs(rate) > 1e8 ? 'debug-warning' : 'debug-value';
+          Math.abs(rate) > 1e8 ? 'debug-warning' : 'debug-value';
         html += `<span style="font-size: 10px;">${connId}: <span class="${rateClass}">${(rate / 1e6).toFixed(2)} MW</span></span><br>`;
       }
-    }
-
-    // Also show flow rates with target flows
-    html += '<br><b>Flow connections:</b><br>';
-    for (const conn of state.flowConnections) {
-      const flowClass = !isFinite(conn.massFlowRate) ? 'debug-danger' :
-                       Math.abs(conn.massFlowRate) < 1 ? 'debug-warning' : 'debug-value';
-      const targetFlow = conn.targetFlowRate ?? 0;
-      const targetClass = !isFinite(targetFlow) ? 'debug-danger' :
-                         Math.sign(targetFlow) !== Math.sign(conn.massFlowRate) && Math.abs(conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
-      html += `${conn.fromNodeId} -> ${conn.toNodeId}: <span class="${flowClass}">${conn.massFlowRate.toFixed(0)}</span>`;
-      html += ` <span style="color: #888;">→</span> <span class="${targetClass}">${targetFlow.toFixed(0)}</span> kg/s<br>`;
     }
 
     flowDiv.innerHTML = html;
@@ -250,8 +298,54 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       const timeClass = time > 10 ? 'debug-danger' : time > 5 ? 'debug-warning' : 'debug-value';
       html += `<span class="debug-label">${name}:</span> <span class="${timeClass}">${time.toFixed(2)}ms</span><br>`;
     }
-    html += `<span class="debug-label">Total:</span> ${formatValue(total, 'ms', 10, 20)}`;
+    html += `<span class="debug-label">Total:</span> ${formatValue(total, 'ms', 10, 20)}<br>`;
+
+    // Detailed profiling breakdown
+    const flowProfile = getFlowOperatorProfile();
+    const waterProfile = getWaterPropsProfile();
+
+    if (flowProfile.totalCalls > 0) {
+      html += '<br><b>FluidFlow breakdown:</b><br>';
+      html += `<span style="font-size: 10px; margin-left: 8px;">targetFlows: ${flowProfile.computeTargetFlows.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">massTransfer: ${flowProfile.transferMass.toFixed(2)}ms</span><br>`;
+    }
+
+    if (waterProfile.calculateStateCalls > 0) {
+      html += '<br><b>Water props breakdown:</b><br>';
+      const actualComputations = waterProfile.calculateStateCalls - waterProfile.calculateStateCacheHits;
+      const hitRate = waterProfile.calculateStateCacheHits / waterProfile.calculateStateCalls * 100;
+      const avgStateTime = actualComputations > 0 ? waterProfile.calculateStateTime / actualComputations : 0;
+      html += `<span style="font-size: 10px; margin-left: 8px;">calcState: ${waterProfile.calculateStateTime.toFixed(2)}ms (${waterProfile.calculateStateCalls} calls, ${hitRate.toFixed(0)}% cache hit)</span><br>`;
+      if (actualComputations > 0) {
+        html += `<span style="font-size: 10px; margin-left: 8px;">  computed: ${actualComputations} (${(avgStateTime * 1000).toFixed(1)}µs avg)</span><br>`;
+      }
+      if (waterProfile.pressureFeedbackCalls > 0) {
+        const avgFbTime = waterProfile.pressureFeedbackTime / waterProfile.pressureFeedbackCalls;
+        html += `<span style="font-size: 10px; margin-left: 8px;">pressureFb: ${waterProfile.pressureFeedbackTime.toFixed(2)}ms (${waterProfile.pressureFeedbackCalls} calls, ${(avgFbTime * 1000).toFixed(1)}µs avg)</span><br>`;
+      }
+    }
+
+    // Solver-level profiling (shows where ALL time goes)
+    const solverProfile = getSolverProfile();
+    if (solverProfile.frameCount > 0) {
+      html += '<br><b>Solver breakdown:</b><br>';
+      html += `<span style="font-size: 10px; margin-left: 8px;">total: ${solverProfile.totalFrameTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">operators: ${solverProfile.operatorApplyTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">cloneState: ${solverProfile.cloneStateTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">maxStableDt: ${solverProfile.maxStableDtTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">capture: ${solverProfile.captureStateTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">compare: ${solverProfile.compareStateTime.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">sanitize: ${solverProfile.sanitizeTime.toFixed(2)}ms</span><br>`;
+      const otherClass = solverProfile.otherTime > 5 ? 'debug-warning' : 'debug-value';
+      html += `<span style="font-size: 10px; margin-left: 8px;">other: <span class="${otherClass}">${solverProfile.otherTime.toFixed(2)}ms</span></span><br>`;
+    }
+
     operatorsDiv.innerHTML = html;
+
+    // Reset profiling accumulators after each display update
+    resetFlowOperatorProfile();
+    resetWaterPropsProfile();
+    resetSolverProfile();
   }
 
   // Update perf info in status bar
@@ -492,8 +586,9 @@ export function updateComponentDetail(
   const simPumpId = component.simPumpId as string | undefined;
   const simValveId = component.simValveId as string | undefined;
 
-  // Show linked simulation flow node (skip for HX since we show primary/secondary above)
-  if (simNodeId && component.type !== 'heatExchanger') {
+  // Show linked simulation flow node (skip for HX since we show primary/secondary above,
+  // and skip for pumps since they show flow path info separately)
+  if (simNodeId && component.type !== 'heatExchanger' && !simPumpId) {
     const flowNode = simState.flowNodes.get(simNodeId);
     if (flowNode) {
       html += '<div class="detail-section">';
@@ -548,8 +643,20 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Rated Flow:</span><span class="detail-value">${pump.ratedFlow} kg/s</span></div>`;
       html += '</div>';
 
-      // Show the flow path this pump drives
+      // Calculate current pump head (using effectiveSpeed from FlowOperator)
       const flowPath = simState.flowConnections.find(c => c.id === pump.connectedFlowPath);
+      if (flowPath && pump.effectiveSpeed > 0) {
+        // Use density of upstream node based on actual flow direction
+        const flowIsForward = flowPath.massFlowRate >= 0;
+        const upstreamId = flowIsForward ? flowPath.fromNodeId : flowPath.toNodeId;
+        const upstreamNode = simState.flowNodes.get(upstreamId);
+        const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750;
+        const g = 9.81;
+        const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
+        html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value" style="color: #8af;">+${(dP_pump/1e5).toFixed(2)} bar</span></div>`;
+      }
+
+      // Show the flow path this pump drives
       if (flowPath) {
         const fromNode = simState.flowNodes.get(flowPath.fromNodeId);
         const toNode = simState.flowNodes.get(flowPath.toNodeId);
