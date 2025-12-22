@@ -134,6 +134,7 @@ let minVf = 0.001;
 
 interface DomeBoundaryPoint {
   v: number;
+  logV: number;  // log(v) for accurate interpolation near critical point
   u: number;
   sat: SaturationPair;
   side: 'liquid' | 'vapor';
@@ -223,6 +224,7 @@ function buildPhaseDetectionCaches(): void {
   // Build dome boundary as continuous piecewise curve
   const liquidLine: DomeBoundaryPoint[] = saturationPairs.map(s => ({
     v: s.v_f,
+    logV: Math.log(s.v_f),
     u: s.u_f,
     sat: s,
     side: 'liquid' as const,
@@ -230,6 +232,7 @@ function buildPhaseDetectionCaches(): void {
 
   const vaporLine: DomeBoundaryPoint[] = saturationPairs.map(s => ({
     v: s.v_g,
+    logV: Math.log(s.v_g),
     u: s.u_g,
     sat: s,
     side: 'vapor' as const,
@@ -260,6 +263,7 @@ function buildPhaseDetectionCaches(): void {
 /**
  * Find the saturation line u value at a given v.
  * Uses binary search on the pre-built dome boundary.
+ * Uses log-linear interpolation for accuracy near critical point.
  * Returns null if v is outside the dome range.
  */
 function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' } | null {
@@ -272,7 +276,9 @@ function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' }
     return null;
   }
 
-  // Binary search for the segment containing v
+  const logV = Math.log(v);
+
+  // Binary search for the segment containing v (still search by v for correct ordering)
   let lo = 0;
   let hi = domeBoundary.length - 2;
   while (lo < hi) {
@@ -294,7 +300,8 @@ function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' }
       if (v >= domeBoundary[i].v && v <= domeBoundary[i + 1].v) {
         const pt1 = domeBoundary[i];
         const pt2 = domeBoundary[i + 1];
-        const t = (v - pt1.v) / (pt2.v - pt1.v);
+        // Use log-linear interpolation
+        const t = (logV - pt1.logV) / (pt2.logV - pt1.logV);
         const u_sat = pt1.u + t * (pt2.u - pt1.u);
         let side: 'liquid' | 'vapor' = pt1.side;
         if (pt1.side !== pt2.side) side = t < 0.5 ? 'liquid' : 'vapor';
@@ -304,7 +311,8 @@ function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' }
     return null;
   }
 
-  const t = (v - p1.v) / (p2.v - p1.v);
+  // Use log-linear interpolation: linear in log(v) space
+  const t = (logV - p1.logV) / (p2.logV - p1.logV);
   const u_sat = p1.u + t * (p2.u - p1.u);
 
   let side: 'liquid' | 'vapor' = p1.side;
@@ -720,8 +728,17 @@ function buildCLSpatialIndex(): void {
  * @returns Density in kg/m³, or null if outside domain
  */
 export function lookupCompressedLiquidDensity(P: number, u: number): number | null {
-  if (!clDataReady || clPoints.length === 0) {
-    return null;
+  if (!clDataReady) {
+    throw new Error('[FATAL] lookupCompressedLiquidDensity called before compressed liquid data is loaded. This should not happen.');
+  }
+  if (clPoints.length === 0) {
+    throw new Error('[FATAL] Compressed liquid data has no points. Check that compressed-liquid-table.txt loaded correctly.');
+  }
+  if (clTriangles.length === 0) {
+    throw new Error('[FATAL] Compressed liquid triangulation has no triangles. buildCLTriangulation() may have failed.');
+  }
+  if (clGrid.length === 0) {
+    throw new Error('[FATAL] Compressed liquid spatial index not built. buildCLSpatialIndex() may have failed.');
   }
 
   const logP = Math.log10(P);
@@ -732,6 +749,14 @@ export function lookupCompressedLiquidDensity(P: number, u: number): number | nu
 
   if (cellX < 0 || cellX >= clGridCellsX || cellY < 0 || cellY >= clGridCellsY) {
     return null;  // Outside grid bounds
+  }
+
+  // Verify grid cell exists (should always be true if grid was built correctly)
+  if (!clGrid[cellX] || !clGrid[cellX][cellY]) {
+    throw new Error(`[FATAL] Compressed liquid grid cell [${cellX}][${cellY}] is undefined. ` +
+      `Grid dimensions: ${clGrid.length}x${clGrid[0]?.length ?? 0}, expected ${clGridCellsX}x${clGridCellsY}. ` +
+      `Query: P=${P.toExponential(3)} Pa (logP=${logP.toFixed(3)}), u=${u.toFixed(0)} J/kg. ` +
+      `Grid bounds: logP=[${clGridMinLogP.toFixed(3)}, ${clGridMaxLogP.toFixed(3)}], u=[${clGridMinU.toFixed(0)}, ${clGridMaxU.toFixed(0)}]`);
   }
 
   // Search triangles in this cell
@@ -1679,15 +1704,6 @@ function inCircumcircle(t: Triangle, x: number, y: number): boolean {
   return d2 < r2 * 1.0001;  // Small tolerance
 }
 
-function hasEdge(t: Triangle, a: number, b: number): boolean {
-  const edges: [number, number][] = [
-    [t.i, t.j], [t.j, t.i],
-    [t.j, t.k], [t.k, t.j],
-    [t.k, t.i], [t.i, t.k],
-  ];
-  return edges.some(([x, y]) => x === a && y === b);
-}
-
 // ============================================================================
 // Interpolation
 // ============================================================================
@@ -1960,9 +1976,11 @@ function findTwoPhaseState(v: number, u: number): {
 
   if (n < 2) return null;
 
-  // Find bracket: adjacent saturation pairs where x_v - x_u changes sign
+  // Find bracket: adjacent saturation pairs where x_v - x_u changes sign.
+  // This is necessary for bisection to find the exact T where x_v = x_u.
+  // If no sign change exists, the point is NOT inside the two-phase dome.
   let bracketIdx = -1;
-  let bestBracketScore = Infinity;
+  let foundSignChange = false;
 
   for (let i = 0; i < n - 1; i++) {
     const sat1 = sortedPairs[i];
@@ -1976,42 +1994,45 @@ function findTwoPhaseState(v: number, u: number): {
 
     // Calculate quality difference at each saturation state
     let x_v1 = 0, x_u1 = 0, x_v2 = 0, x_u2 = 0;
-    let score = Infinity;
 
     if (inRange1) {
       x_v1 = (v - sat1.v_f) / (sat1.v_g - sat1.v_f);
       x_u1 = (u - sat1.u_f) / (sat1.u_g - sat1.u_f);
-      if (x_u1 >= 0 && x_u1 <= 1) {
-        score = Math.abs(x_v1 - x_u1);
-      }
     }
     if (inRange2) {
       x_v2 = (v - sat2.v_f) / (sat2.v_g - sat2.v_f);
       x_u2 = (u - sat2.u_f) / (sat2.u_g - sat2.u_f);
-      if (x_u2 >= 0 && x_u2 <= 1) {
-        const diff2 = Math.abs(x_v2 - x_u2);
-        if (diff2 < score) score = diff2;
-      }
     }
 
-    // Check for sign change (perfect bracket for bisection)
+    // Check for sign change (required for valid two-phase state)
     if (inRange1 && inRange2) {
       const diff1 = x_v1 - x_u1;
       const diff2 = x_v2 - x_u2;
       if (diff1 * diff2 < 0) {
-        // Found perfect bracket - stop searching
+        // Found sign change - this bracket contains a valid two-phase state
         bracketIdx = i;
+        foundSignChange = true;
         break;
       }
     }
 
-    if (score < bestBracketScore) {
-      bestBracketScore = score;
+    // Also check if we're VERY close to x_v = x_u at either endpoint
+    // (handles case where the crossing is exactly at a saturation pair)
+    // Use tight tolerance (0.0001 = 0.01%) to avoid false positives
+    if (inRange1 && Math.abs(x_v1 - x_u1) < 0.0001 && x_u1 >= 0 && x_u1 <= 1) {
       bracketIdx = i;
+      foundSignChange = true;
+      break;
+    }
+    if (inRange2 && Math.abs(x_v2 - x_u2) < 0.0001 && x_u2 >= 0 && x_u2 <= 1) {
+      bracketIdx = i;
+      foundSignChange = true;
+      break;
     }
   }
 
-  if (bracketIdx < 0) return null;
+  // If no sign change found, the point is not inside the two-phase dome
+  if (bracketIdx < 0 || !foundSignChange) return null;
 
   const sat1 = sortedPairs[bracketIdx];
   const sat2 = sortedPairs[bracketIdx + 1];
@@ -2903,6 +2924,29 @@ export function vaporCv(T: number): number {
 
 export function setWaterPropsDebug(_enabled: boolean): void {}
 export function getWaterPropsDebugLog(): string[] { return []; }
+
+// Profiling stubs (not implemented in v3)
+export interface WaterPropsProfile {
+  calculateStateCalls: number;
+  calculateStateCacheHits: number;
+  calculateStateTime: number;
+  pressureFeedbackCalls: number;
+  pressureFeedbackTime: number;
+}
+
+export function getWaterPropsProfile(): WaterPropsProfile {
+  return {
+    calculateStateCalls: 0,
+    calculateStateCacheHits: 0,
+    calculateStateTime: 0,
+    pressureFeedbackCalls: 0,
+    pressureFeedbackTime: 0,
+  };
+}
+
+export function resetWaterPropsProfile(): void {}
+
+export function clearStateCache(): void {}
 
 export function addEnergy(mass: number, energy: number, volume: number, added: number): WaterState {
   return calculateState(mass, energy + added, volume);
