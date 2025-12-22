@@ -16,6 +16,9 @@ export {
 
 export {
   FlowOperator,
+  getFlowOperatorProfile,
+  resetFlowOperatorProfile,
+  type FlowOperatorProfile,
 } from './fluid-flow';
 
 export {
@@ -25,9 +28,9 @@ export {
 } from './neutronics';
 
 export {
-  SecondaryLoopOperator,
-  createDefaultSecondaryConfig,
-  getSecondaryLoopState,
-  type SecondaryLoopConfig,
-  type SecondaryLoopState,
-} from './secondary-loop';
+  TurbineCondenserOperator,
+  createDefaultTurbineCondenserConfig,
+  getTurbineCondenserState,
+  type TurbineCondenserConfig,
+  type TurbineCondenserState,
+} from './turbine-condenser';

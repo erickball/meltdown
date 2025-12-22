@@ -1,22 +1,22 @@
 /**
- * Secondary Loop Operator
+ * Turbine Condenser Operator
  *
- * Handles the thermodynamics of the secondary (steam/power) side:
- * - Turbine: Adiabatic expansion from SG pressure to condenser pressure
+ * Handles the thermodynamics of turbines and condensers:
+ * - Turbine: Adiabatic expansion from inlet pressure to outlet pressure
  * - Condenser: Heat rejection to ultimate heat sink (cooling water)
- * - Feedwater pump: Pressurizes condensate back to SG pressure
  *
  * Physics:
  * - Turbine expansion is approximately isentropic (with efficiency factor)
  * - Condenser removes latent heat at constant (low) pressure
- * - Pump adds enthalpy equal to work done on the fluid
  *
- * Unlike the primary loop which uses detailed steam tables for everything,
- * the secondary loop uses simplified thermodynamic models since the exact
- * states are less critical for reactor safety simulation.
+ * Pump work is calculated for ALL pumps in state.components.pumps, not just
+ * specific "feedwater" pumps. This provides a unified pump model where RCPs,
+ * feedwater pumps, and any other pumps use the same interface.
+ *
+ * This operator applies to both PWRs (secondary side) and BWRs (main steam).
  */
 
-import { SimulationState } from '../types';
+import { SimulationState, PumpState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 
 // ============================================================================
@@ -39,24 +39,16 @@ interface CondenserConfig {
   targetPressure: number;    // Pa - target condenser vacuum (~10 kPa = 0.1 bar)
 }
 
-interface FeedwaterPumpConfig {
-  id: string;
-  connectedFlowPath: string; // Flow connection ID this pump drives
-  targetPressure: number;    // Pa - discharge pressure (SG pressure + margin)
-  efficiency: number;        // Pump efficiency (typically 0.8-0.9)
-}
-
-export interface SecondaryLoopConfig {
+export interface TurbineCondenserConfig {
   turbines: TurbineConfig[];
   condensers: CondenserConfig[];
-  feedwaterPumps: FeedwaterPumpConfig[];
 }
 
 // ============================================================================
-// Secondary Loop State (for external access/display)
+// Turbine/Condenser State (for external access/display)
 // ============================================================================
 
-export interface SecondaryLoopState {
+export interface TurbineCondenserState {
   turbinePower: number;           // W - total electrical power generated
   condenserHeatRejection: number; // W - heat rejected to cooling water
   feedwaterPumpWork: number;      // W - work done by feedwater pumps
@@ -64,26 +56,26 @@ export interface SecondaryLoopState {
 }
 
 // Module-level state for UI access
-let lastSecondaryLoopState: SecondaryLoopState = {
+let lastTurbineCondenserState: TurbineCondenserState = {
   turbinePower: 0,
   condenserHeatRejection: 0,
   feedwaterPumpWork: 0,
   netPower: 0,
 };
 
-export function getSecondaryLoopState(): SecondaryLoopState {
-  return { ...lastSecondaryLoopState };
+export function getTurbineCondenserState(): TurbineCondenserState {
+  return { ...lastTurbineCondenserState };
 }
 
 // ============================================================================
-// Secondary Loop Operator
+// Turbine Condenser Operator
 // ============================================================================
 
-export class SecondaryLoopOperator implements PhysicsOperator {
-  name = 'SecondaryLoop';
-  private config: SecondaryLoopConfig;
+export class TurbineCondenserOperator implements PhysicsOperator {
+  name = 'TurbineCondenser';
+  private config: TurbineCondenserConfig;
 
-  constructor(config: SecondaryLoopConfig) {
+  constructor(config: TurbineCondenserConfig) {
     this.config = config;
   }
 
@@ -106,15 +98,18 @@ export class SecondaryLoopOperator implements PhysicsOperator {
       totalCondenserHeat += heat;
     }
 
-    // Note: Feedwater pumps affect flow, which is handled by FlowOperator
-    // Here we just track the work done for energy balance
-    for (const pump of this.config.feedwaterPumps) {
-      const work = this.calculatePumpWork(newState, pump);
-      totalPumpWork += work;
+    // Calculate pump work for ALL pumps in the system
+    // This includes RCPs, feedwater pumps, and any other pumps
+    // The flow driving is handled by FlowOperator; here we just track work for energy balance
+    for (const [, pump] of newState.components.pumps) {
+      if (pump.running) {
+        const work = this.calculatePumpWork(newState, pump);
+        totalPumpWork += work;
+      }
     }
 
     // Update module state for UI
-    lastSecondaryLoopState = {
+    lastTurbineCondenserState = {
       turbinePower: totalTurbinePower,
       condenserHeatRejection: totalCondenserHeat,
       feedwaterPumpWork: totalPumpWork,
@@ -280,54 +275,46 @@ export class SecondaryLoopOperator implements PhysicsOperator {
   }
 
   /**
-   * Calculate feedwater pump work
+   * Calculate pump work for any pump
    *
-   * W_pump = m_dot * v * ΔP / η
+   * W_pump = m_dot * g * H / η
    *
-   * For liquid, specific volume is approximately constant.
+   * where H is the pump head in meters, which relates to pressure rise by:
+   * ΔP = ρ * g * H
+   *
+   * This unified calculation works for RCPs, feedwater pumps, or any other pump.
    */
   private calculatePumpWork(
     state: SimulationState,
-    pump: FeedwaterPumpConfig
+    pump: PumpState
   ): number {
     // Find the flow connection for this pump
-    let massFlowRate = 0;
-    let suctionPressure = 0;
+    const conn = state.flowConnections.find(c => c.id === pump.connectedFlowPath);
+    if (!conn) return 0;
 
-    for (const conn of state.flowConnections) {
-      if (conn.id === pump.connectedFlowPath) {
-        massFlowRate = Math.abs(conn.massFlowRate);
+    const massFlowRate = Math.abs(conn.massFlowRate);
+    if (massFlowRate < 1) return 0; // No significant flow
 
-        // Get suction node pressure
-        const suctionNode = state.flowNodes.get(conn.fromNodeId);
-        if (suctionNode) {
-          suctionPressure = suctionNode.fluid.pressure;
-        }
-        break;
-      }
-    }
+    const g = 9.81;
 
-    if (massFlowRate < 1 || suctionPressure <= 0) return 0;
+    // Apply same ramp factor as FlowOperator for consistency
+    const PUMP_RAMP_TIME = 5.0;
+    const rampFactor = Math.min(1.0, state.time / PUMP_RAMP_TIME);
+    const effectiveHead = pump.speed * rampFactor * pump.ratedHead;
 
-    // Pressure rise across pump
-    const deltaP = pump.targetPressure - suctionPressure;
-    if (deltaP <= 0) return 0;
-
-    // Specific volume of liquid (approximately 0.001 m³/kg at low temps)
-    const v = 0.001;
-
-    // Pump work = m_dot * v * ΔP / η
-    const work = massFlowRate * v * deltaP / pump.efficiency;
+    // Pump work = m_dot * g * H / η
+    // This is the hydraulic power delivered to the fluid divided by efficiency
+    const work = massFlowRate * g * effectiveHead / pump.efficiency;
 
     return work;
   }
 }
 
 // ============================================================================
-// Helper: Create default secondary loop configuration
+// Helper: Create default turbine/condenser configuration
 // ============================================================================
 
-export function createDefaultSecondaryConfig(): SecondaryLoopConfig {
+export function createDefaultTurbineCondenserConfig(): TurbineCondenserConfig {
   return {
     turbines: [{
       id: 'hp-turbine',
@@ -343,11 +330,7 @@ export function createDefaultSecondaryConfig(): SecondaryLoopConfig {
       heatTransferCoeff: 10e6, // W/K - sized for ~700 MW at 70K dT
       targetPressure: 1e5, // Pa - 1 bar (not full vacuum, for stability)
     }],
-    feedwaterPumps: [{
-      id: 'fw-pump',
-      connectedFlowPath: 'flow-feedwater-sg',
-      targetPressure: 5.5e6, // Pa - SG pressure (~55 bar)
-      efficiency: 0.85,
-    }],
+    // Note: Pump work is calculated for all pumps in state.components.pumps
+    // No separate configuration needed here
   };
 }
