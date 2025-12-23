@@ -393,15 +393,6 @@ function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' }
   const t = (logV - p1.logV) / (p2.logV - p1.logV);
   const u_sat = p1.u + t * (p2.u - p1.u);
 
-  // Debug output for high v values
-  if (v > 0.01) {  // v > 10000 mL/kg
-    console.log(`[findSaturationU DEBUG] High v state:`);
-    console.log(`  v=${(v*1e6).toFixed(1)} mL/kg`);
-    console.log(`  p1: v=${(p1.v*1e6).toFixed(1)} mL/kg, u=${(p1.u/1e3).toFixed(1)} kJ/kg, side=${p1.side}`);
-    console.log(`  p2: v=${(p2.v*1e6).toFixed(1)} mL/kg, u=${(p2.u/1e3).toFixed(1)} kJ/kg, side=${p2.side}`);
-    console.log(`  t=${t.toFixed(4)}, u_sat=${(u_sat/1e3).toFixed(1)} kJ/kg`);
-  }
-
   let side: 'liquid' | 'vapor' = p1.side;
   if (p1.side !== p2.side) {
     side = t < 0.5 ? 'liquid' : 'vapor';
@@ -2092,13 +2083,6 @@ function findTwoPhaseState(v: number, u: number): {
   let loQual = calcQualities(sortedPairs[lo]);
   let hiQual = calcQualities(sortedPairs[hi]);
 
-  // Debug output for high-v state
-  if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
-    console.log(`[Binary Search] Starting binary search for v=${(v*1e6).toFixed(1)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
-    console.log(`  Low (P=${(sortedPairs[lo].P/1e5).toFixed(2)}bar): x_v=${loQual.x_v.toFixed(4)}, x_u=${loQual.x_u.toFixed(4)}, diff=${loQual.diff.toFixed(4)}`);
-    console.log(`  High (P=${(sortedPairs[hi].P/1e5).toFixed(2)}bar): x_v=${hiQual.x_v.toFixed(4)}, x_u=${hiQual.x_u.toFixed(4)}, diff=${hiQual.diff.toFixed(4)}`);
-  }
-
   // Check if there's a sign change
   if (loQual.diff * hiQual.diff > 0) {
     // No sign change - x_v and x_u don't cross
@@ -2114,10 +2098,6 @@ function findTwoPhaseState(v: number, u: number): {
     iterations++;
     const mid = Math.floor((lo + hi) / 2);
     const midQual = calcQualities(sortedPairs[mid]);
-
-    if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
-      console.log(`  Iter ${iterations}: mid=${mid} (P=${(sortedPairs[mid].P/1e5).toFixed(2)}bar): x_v=${midQual.x_v.toFixed(4)}, x_u=${midQual.x_u.toFixed(4)}, diff=${midQual.diff.toFixed(4)}`);
-    }
 
     // Check if we're close enough
     if (Math.abs(midQual.diff) < 0.0001) {
@@ -2175,15 +2155,6 @@ function findTwoPhaseState(v: number, u: number): {
 
   // Clamp quality to [0, 1]
   const qualityClamped = Math.max(0, Math.min(1, quality));
-
-  // Debug output for high-v state
-  if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
-    console.log(`[Binary Search] Final result:`);
-    console.log(`  Interpolation t=${t.toFixed(4)} between indices ${lo} and ${hi}`);
-    console.log(`  P=${(P_t/1e5).toFixed(2)}bar, T=${(T_t-273.15).toFixed(1)}°C`);
-    console.log(`  x_v=${x_v_final.toFixed(6)}, x_u=${x_u_final.toFixed(6)}`);
-    console.log(`  Final quality=${qualityClamped.toFixed(6)}`);
-  }
 
   // Check for convergence issues
   if (Math.abs(x_v_final - x_u_final) > 0.001) {
