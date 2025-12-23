@@ -53,9 +53,28 @@ export class FlowOperator implements PhysicsOperator {
   // Maximum flow rate to prevent runaway (kg/s)
   private maxFlowRate = 50000;
 
+  // Performance monitoring
+  private perfStats = {
+    callCount: 0,
+    totalPhaseTime: 0,
+    totalDensityTime: 0,
+    totalPumpTime: 0,
+    totalFlowTime: 0,
+    lastReportTime: Date.now(),
+    minDt: Infinity,
+    maxDt: 0,
+    sumDt: 0,
+  };
+
   apply(state: SimulationState, dt: number): SimulationState {
     const newState = cloneSimulationState(state);
     operatorProfile.totalCalls++;
+
+    // Track timestep stats
+    this.perfStats.callCount++;
+    this.perfStats.minDt = Math.min(this.perfStats.minDt, dt);
+    this.perfStats.maxDt = Math.max(this.perfStats.maxDt, dt);
+    this.perfStats.sumDt += dt;
 
     // Update pump effective speeds based on ramp-up/coast-down dynamics
     this.updatePumpSpeeds(newState, dt);
@@ -64,6 +83,12 @@ export class FlowOperator implements PhysicsOperator {
     // We use the stored fluid.pressure values set by FluidStateUpdateOperator
     // at the end of the previous timestep. These use the hybrid pressure model.
     const t1 = performance.now();
+    let phaseDetectionTime = 0;
+    let densityCalcTime = 0;
+    let pumpCheckTime = 0;
+    let flowCalcTime = 0;
+    let debugLogTime = 0;
+
     for (const conn of newState.flowConnections) {
       const fromNode = newState.flowNodes.get(conn.fromNodeId);
       const toNode = newState.flowNodes.get(conn.toNodeId);
@@ -71,7 +96,9 @@ export class FlowOperator implements PhysicsOperator {
       if (!fromNode || !toNode) continue;
 
       // Compute target flow rate from momentum balance
+      const tFlowStart = performance.now();
       let targetFlow = this.computeTargetFlow(conn, fromNode, toNode, newState, dt);
+      flowCalcTime += performance.now() - tFlowStart;
 
       // SAFEGUARD: Clamp target flow to reasonable range
       const unclamped = targetFlow;
@@ -107,6 +134,23 @@ export class FlowOperator implements PhysicsOperator {
     const t2 = performance.now();
     this.transferMassConservatively(newState, dt);
     operatorProfile.transferMass += performance.now() - t2;
+
+    // Periodic performance reporting (every 5 seconds)
+    const now = Date.now();
+    if (now - this.perfStats.lastReportTime > 5000) {
+      const avgDt = this.perfStats.sumDt / this.perfStats.callCount;
+      console.log(`[FlowOp Performance] ${this.perfStats.callCount} calls in 5s:`);
+      console.log(`  dt: min=${(this.perfStats.minDt*1000).toFixed(3)}ms, avg=${(avgDt*1000).toFixed(3)}ms, max=${(this.perfStats.maxDt*1000).toFixed(3)}ms`);
+      console.log(`  Simulation rate: ${(this.perfStats.sumDt).toFixed(3)}s simulated in 5s wall time`);
+      console.log(`  Speed factor: ${(this.perfStats.sumDt / 5).toFixed(5)}x real time`);
+
+      // Reset stats
+      this.perfStats.callCount = 0;
+      this.perfStats.minDt = Infinity;
+      this.perfStats.maxDt = 0;
+      this.perfStats.sumDt = 0;
+      this.perfStats.lastReportTime = now;
+    }
 
     return newState;
   }
@@ -258,9 +302,12 @@ export class FlowOperator implements PhysicsOperator {
     const dP_pressure = P_from - P_to;
 
     // Determine what phase is flowing based on connection elevation
+    const tPhase = performance.now();
     const flowPhase = this.getFlowPhase(fromNode, conn.fromElevation);
+    const phaseTime = performance.now() - tPhase;
 
     // Get appropriate density based on what's actually flowing
+    const tDensity = performance.now();
     let rho: number;
     if (flowPhase === 'liquid') {
       rho = this.getNodeDensity(fromNode, 'liquid');
@@ -269,6 +316,7 @@ export class FlowOperator implements PhysicsOperator {
     } else {
       rho = this.getNodeDensity(fromNode, 'actual'); // mixture
     }
+    const densityTime = performance.now() - tDensity;
 
     // Gravity head (positive = downward flow is favored)
     const g = 9.81; // m/s²
@@ -337,53 +385,11 @@ export class FlowOperator implements PhysicsOperator {
     }
 
     // Debug: log components for key connections
-    // Always log condenser->feedwater to understand the flow paradox
-    // Sample others at 0.1%
-    if (conn.id === "flow-condenser-feedwater" ||
-        conn.id === "flow-feedwater-sg" ||
-        ((conn.id === "flow-sg-coldleg" || conn.id === 'flow-coldleg-core' || conn.id === 'flow-core-hotleg') && Math.random() < 0.001)) {
-      console.log(`[FlowOp] ${conn.id}:`);
-      console.log(`  From: ${fromNode.id} (P=${(P_from/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase})`);
-      console.log(`  To: ${toNode.id} (P=${(P_to/1e5).toFixed(2)}bar)`);
-
-      // Show liquid level info for two-phase nodes
-      if (fromNode.fluid.phase === 'two-phase') {
-        const liquidLevel = this.getLiquidLevel(fromNode);
-        const height = Math.sqrt(fromNode.volume / (Math.PI * 0.25));
-        const connElev = conn.fromElevation || height/2;
-        console.log(`  Liquid level: ${liquidLevel.toFixed(2)}m of ${height.toFixed(2)}m total`);
-        console.log(`  Connection at: ${connElev.toFixed(2)}m => drawing ${flowPhase}`);
-      }
-
-      console.log(`  Pressure components:`);
-      console.log(`    dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar (P_from - P_to)`);
-      console.log(`    dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar (ρ*g*h, elev=${conn.elevation}m)`);
-      console.log(`    dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
-      console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)}bar (total)`);
-      if (pump) {
-        console.log(`  Pump details:`);
-        console.log(`    effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}`);
-        console.log(`    ratedHead=${pump.ratedHead}m`);
-        console.log(`    actual node density=${rho.toFixed(0)}kg/m³`);
-        console.log(`    density used for pump=${pumpRho.toFixed(0)}kg/m³`);
-        if (fromNode.fluid.phase === 'two-phase' && fromNode.fluid.quality !== undefined) {
-          const liquidFraction = 1 - fromNode.fluid.quality;
-          const liquidMass = fromNode.fluid.mass * liquidFraction;
-          console.log(`    liquid available=${liquidMass.toFixed(0)}kg (${(liquidFraction*100).toFixed(1)}% of ${fromNode.fluid.mass.toFixed(0)}kg)`);
-        }
-        console.log(`    => dP_pump = ${pump.effectiveSpeed.toFixed(3)} * ${pump.ratedHead} * ${pumpRho.toFixed(0)} * 9.81 = ${(dP_pump/1e5).toFixed(3)}bar`);
-      }
-      if (checkValve) {
-        console.log(`  Check valve: cracking pressure=${(checkValve.crackingPressure/1e5).toFixed(3)}bar`);
-      }
-
-      // Flow paradox warning
-      if (conn.id === "flow-condenser-feedwater" && dP_pressure < 0 && dP_driving > 0) {
-        console.log(`  ⚠️ FLOW PARADOX: Flow is positive (condenser→feedwater) despite adverse pressure!`);
-        console.log(`    Adverse pressure: ${(Math.abs(dP_pressure)/1e5).toFixed(2)}bar`);
-        console.log(`    Pump overcomes: ${(dP_pump/1e5).toFixed(2)}bar`);
-        console.log(`    Net driving: ${(dP_driving/1e5).toFixed(2)}bar`);
-      }
+    // Disable for now - even at 0.01% sampling it's too expensive
+    const shouldLog = false; // Math.random() < 0.0001; // 0.01% sampling
+    if (shouldLog && (conn.id === "flow-condenser-feedwater" ||
+        conn.id === "flow-feedwater-sg")) {
+      console.log(`[FlowOp] ${conn.id}: P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase}`);
     }
 
     // Compute flow from pressure drop
