@@ -298,14 +298,37 @@ export class FlowOperator implements PhysicsOperator {
       }
     }
 
-    // Debug: log components for key connections (sample at 0.1%)
-    if (conn.id === "flow-feedwater-sg" || ((conn.id === "flow-sg-coldleg" || conn.id === 'flow-coldleg-core' || conn.id === 'flow-core-hotleg') && Math.random() < 0.001)) {
+    // Debug: log components for key connections
+    // Always log condenser->feedwater to understand the flow paradox
+    // Sample others at 0.1%
+    if (conn.id === "flow-condenser-feedwater" ||
+        conn.id === "flow-feedwater-sg" ||
+        ((conn.id === "flow-sg-coldleg" || conn.id === 'flow-coldleg-core' || conn.id === 'flow-core-hotleg') && Math.random() < 0.001)) {
       console.log(`[FlowOp] ${conn.id}:`);
-      console.log(`  P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, dP=${((P_from-P_to)/1e5).toFixed(2)}bar`);
-      console.log(`  dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar, dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar, dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
-      console.log(`  dP_driving=${(dP_driving/1e5).toFixed(3)}bar, elev=${conn.elevation}m, rho=${rho.toFixed(0)} kg/m³`);
+      console.log(`  From: ${fromNode.id} (P=${(P_from/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³)`);
+      console.log(`  To: ${toNode.id} (P=${(P_to/1e5).toFixed(2)}bar)`);
+      console.log(`  Pressure components:`);
+      console.log(`    dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar (P_from - P_to)`);
+      console.log(`    dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar (ρ*g*h, elev=${conn.elevation}m)`);
+      console.log(`    dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
+      console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)}bar (total)`);
       if (pump) {
-        console.log(`  pump: effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}, ratedHead=${pump.ratedHead}m`);
+        console.log(`  Pump details:`);
+        console.log(`    effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}`);
+        console.log(`    ratedHead=${pump.ratedHead}m`);
+        console.log(`    density used=${rho.toFixed(0)}kg/m³`);
+        console.log(`    => dP_pump = ${pump.effectiveSpeed.toFixed(3)} * ${pump.ratedHead} * ${rho.toFixed(0)} * 9.81 = ${(dP_pump/1e5).toFixed(3)}bar`);
+      }
+      if (checkValve) {
+        console.log(`  Check valve: cracking pressure=${(checkValve.crackingPressure/1e5).toFixed(3)}bar`);
+      }
+
+      // Flow paradox warning
+      if (conn.id === "flow-condenser-feedwater" && dP_pressure < 0 && dP_driving > 0) {
+        console.log(`  ⚠️ FLOW PARADOX: Flow is positive (condenser→feedwater) despite adverse pressure!`);
+        console.log(`    Adverse pressure: ${(Math.abs(dP_pressure)/1e5).toFixed(2)}bar`);
+        console.log(`    Pump overcomes: ${(dP_pump/1e5).toFixed(2)}bar`);
+        console.log(`    Net driving: ${(dP_driving/1e5).toFixed(2)}bar`);
       }
     }
 
