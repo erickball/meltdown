@@ -457,6 +457,8 @@ export function createDemoReactor(): SimulationState {
   });
 
   // Pressurizer surge line (small connection to hot leg)
+  // Connected at top of hot leg to draw vapor during insurge
+  // and bottom of pressurizer to draw liquid during outsurge
   state.flowConnections.push({
     id: 'flow-przr-surge',
     fromNodeId: 'hot-leg',
@@ -465,6 +467,8 @@ export function createDemoReactor(): SimulationState {
     hydraulicDiameter: 0.25,
     length: 8,
     elevation: -8, // Negative = going UP = gravity opposes flow
+    fromElevation: 0.7, // Near top of hot leg (assumes ~0.8m diameter)
+    toElevation: 0.1,   // Near bottom of pressurizer
     resistanceCoeff: 10,
     massFlowRate: 0, // Normally no flow
   });
@@ -518,7 +522,7 @@ export function createDemoReactor(): SimulationState {
   });
 
   // Condenser to feedwater (condensate extraction)
-  // Condensate pump takes liquid from condenser hotwell
+  // Condensate pump takes liquid from condenser hotwell (bottom)
   state.flowConnections.push({
     id: 'flow-condenser-feedwater',
     fromNodeId: 'condenser',
@@ -527,6 +531,8 @@ export function createDemoReactor(): SimulationState {
     hydraulicDiameter: 0.3,
     length: 20,
     elevation: -2, // Going up from basement
+    fromElevation: 0.1, // Draw from hotwell at bottom of condenser
+    toElevation: 0.5,   // Discharge to middle of feedwater tank
     resistanceCoeff: 10,
     massFlowRate: secondaryFlow,
   });

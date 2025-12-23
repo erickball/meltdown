@@ -256,8 +256,20 @@ export class FlowOperator implements PhysicsOperator {
     // The pressurizer sets the system pressure
     const dP_pressure = P_from - P_to;
 
+    // Determine what phase is flowing based on connection elevation
+    const flowPhase = this.getFlowPhase(fromNode, conn.fromElevation);
+
+    // Get appropriate density based on what's actually flowing
+    let rho: number;
+    if (flowPhase === 'liquid') {
+      rho = this.getNodeDensity(fromNode, 'liquid');
+    } else if (flowPhase === 'vapor') {
+      rho = this.getNodeDensity(fromNode, 'vapor');
+    } else {
+      rho = this.getNodeDensity(fromNode, 'actual'); // mixture
+    }
+
     // Gravity head (positive = downward flow is favored)
-    const rho = this.getNodeDensity(fromNode);
     const g = 9.81; // m/s²
     const dP_gravity = rho * g * conn.elevation;
 
@@ -330,8 +342,18 @@ export class FlowOperator implements PhysicsOperator {
         conn.id === "flow-feedwater-sg" ||
         ((conn.id === "flow-sg-coldleg" || conn.id === 'flow-coldleg-core' || conn.id === 'flow-core-hotleg') && Math.random() < 0.001)) {
       console.log(`[FlowOp] ${conn.id}:`);
-      console.log(`  From: ${fromNode.id} (P=${(P_from/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³)`);
+      console.log(`  From: ${fromNode.id} (P=${(P_from/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase})`);
       console.log(`  To: ${toNode.id} (P=${(P_to/1e5).toFixed(2)}bar)`);
+
+      // Show liquid level info for two-phase nodes
+      if (fromNode.fluid.phase === 'two-phase') {
+        const liquidLevel = this.getLiquidLevel(fromNode);
+        const height = Math.sqrt(fromNode.volume / (Math.PI * 0.25));
+        const connElev = conn.fromElevation || height/2;
+        console.log(`  Liquid level: ${liquidLevel.toFixed(2)}m of ${height.toFixed(2)}m total`);
+        console.log(`  Connection at: ${connElev.toFixed(2)}m => drawing ${flowPhase}`);
+      }
+
       console.log(`  Pressure components:`);
       console.log(`    dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar (P_from - P_to)`);
       console.log(`    dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar (ρ*g*h, elev=${conn.elevation}m)`);
@@ -408,6 +430,82 @@ export class FlowOperator implements PhysicsOperator {
     }
 
     return netFlow;
+  }
+
+  /**
+   * Calculate liquid level height in a two-phase node.
+   * Assumes node is a vertical cylinder or rectangular tank.
+   *
+   * @param node The flow node
+   * @returns Liquid level height from bottom (m), or node height if single phase
+   */
+  private getLiquidLevel(node: FlowNode): number {
+    // For single phase, return appropriate level
+    if (node.fluid.phase === 'liquid') {
+      // Assume cylindrical tank with height = diameter for rough estimate
+      const height = Math.sqrt(node.volume / (Math.PI * 0.25));
+      return height; // Full of liquid
+    }
+    if (node.fluid.phase === 'vapor') {
+      return 0; // No liquid
+    }
+
+    // Two-phase: calculate based on void fraction
+    // Void fraction α = volume of vapor / total volume
+    // For homogeneous flow: α ≈ x / (x + (1-x) * ρ_g/ρ_f)
+    // But we can also estimate from quality and densities
+    const quality = node.fluid.quality || 0;
+
+    // Approximate densities
+    const rho_f = this.getNodeDensity(node, 'liquid');
+    const rho_g = this.getNodeDensity(node, 'vapor');
+
+    // Void fraction (Homogeneous model)
+    const voidFraction = (quality * rho_f) / (quality * rho_f + (1 - quality) * rho_g);
+
+    // Liquid fraction by volume
+    const liquidVolumeFraction = 1 - voidFraction;
+
+    // Assume cylindrical tank with height = diameter
+    const height = Math.sqrt(node.volume / (Math.PI * 0.25));
+
+    return height * liquidVolumeFraction;
+  }
+
+  /**
+   * Determine what phase should flow based on connection elevation and liquid level.
+   *
+   * @param node Source flow node
+   * @param connectionElevation Height of connection point relative to node bottom (m)
+   * @returns 'liquid', 'vapor', or 'mixture' depending on connection position
+   */
+  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
+    // Single phase nodes always flow their phase
+    if (node.fluid.phase !== 'two-phase') {
+      return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
+    }
+
+    // If no elevation specified, assume mid-height connection (mixture)
+    if (connectionElevation === undefined) {
+      // Estimate tank height
+      const height = Math.sqrt(node.volume / (Math.PI * 0.25));
+      connectionElevation = height / 2;
+    }
+
+    const liquidLevel = this.getLiquidLevel(node);
+
+    // Connection below liquid level: draw liquid
+    if (connectionElevation < liquidLevel - 0.1) {  // 10cm tolerance
+      return 'liquid';
+    }
+
+    // Connection above liquid level: draw vapor
+    if (connectionElevation > liquidLevel + 0.1) {  // 10cm tolerance
+      return 'vapor';
+    }
+
+    // Connection at interface: draw mixture
+    return 'mixture';
   }
 
   /**

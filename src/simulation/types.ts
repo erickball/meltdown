@@ -103,6 +103,11 @@ export interface FlowConnection {
   length: number;                   // m - for pressure drop
   elevation: number;               // m - elevation change (+ = upward)
 
+  // Connection point elevations (relative to node bottom)
+  // If not specified, assumes mid-height of node
+  fromElevation?: number;           // m - height of connection at from node
+  toElevation?: number;             // m - height of connection at to node
+
   // Flow resistance (K-factor for pressure drop)
   resistanceCoeff: number;          // ΔP = K * 0.5 * ρ * v²
 
