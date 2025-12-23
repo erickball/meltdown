@@ -415,6 +415,7 @@ export function createDemoReactor(): SimulationState {
     elevation: -2, // Negative = going UP = gravity opposes forward flow
     resistanceCoeff: 2,
     massFlowRate: 0, // Start at zero, pump ramps up
+    inertance: 2 / 0.4, // length / flowArea = 5 m⁻¹
   });
 
   // Hot leg to SG
@@ -428,6 +429,7 @@ export function createDemoReactor(): SimulationState {
     elevation: -3, // Negative = going UP = gravity opposes forward flow
     resistanceCoeff: 3,
     massFlowRate: 0, // Start at zero, pump ramps up
+    inertance: 5 / 0.4, // length / flowArea = 12.5 m⁻¹
   });
 
   // SG to cold leg (SG at 5m, CL at 2m - going DOWN 3m, favors flow)
@@ -441,6 +443,7 @@ export function createDemoReactor(): SimulationState {
     elevation: 3, // Positive = going down = gravity favors forward flow
     resistanceCoeff: 3,
     massFlowRate: 0, // Start at zero, pump ramps up
+    inertance: 5 / 0.4, // length / flowArea = 12.5 m⁻¹
   });
 
   // Cold leg to core (through pump) (CL at 2m, Core at 0m - going DOWN 2m, favors flow)
@@ -454,6 +457,7 @@ export function createDemoReactor(): SimulationState {
     elevation: 2, // Positive = going down = gravity favors forward flow
     resistanceCoeff: 5, // Includes core resistance
     massFlowRate: 0, // Start at zero, pump ramps up
+    inertance: 3 / 0.4, // length / flowArea = 7.5 m⁻¹
   });
 
   // Pressurizer surge line (small connection to hot leg)
@@ -471,6 +475,7 @@ export function createDemoReactor(): SimulationState {
     toElevation: 0.1,   // Near bottom of pressurizer
     resistanceCoeff: 10,
     massFlowRate: 0, // Normally no flow
+    inertance: 8 / 0.05, // length / flowArea = 160 m⁻¹ (high inertance, small pipe)
   });
 
   // =========================================================================
@@ -493,6 +498,7 @@ export function createDemoReactor(): SimulationState {
     elevation: 0, // Same level
     resistanceCoeff: 5,
     massFlowRate: secondaryFlow,
+    inertance: 10 / 0.2, // length / flowArea = 50 m⁻¹
   });
 
   // Turbine inlet to outlet (through turbine)
@@ -506,6 +512,7 @@ export function createDemoReactor(): SimulationState {
     elevation: 5, // Going down to ground level
     resistanceCoeff: 20, // High resistance through turbine stages
     massFlowRate: secondaryFlow,
+    inertance: 5 / 0.2, // length / flowArea = 25 m⁻¹
   });
 
   // Turbine outlet to condenser (exhaust steam to condenser)
@@ -519,6 +526,7 @@ export function createDemoReactor(): SimulationState {
     elevation: 2, // Going down to condenser basement
     resistanceCoeff: 5, // Moderate resistance
     massFlowRate: secondaryFlow,
+    inertance: 5 / 0.5, // length / flowArea = 10 m⁻¹
   });
 
   // Condenser to feedwater (condensate extraction)
@@ -535,6 +543,7 @@ export function createDemoReactor(): SimulationState {
     toElevation: 0.5,   // Discharge to middle of feedwater tank
     resistanceCoeff: 10,
     massFlowRate: secondaryFlow,
+    inertance: 20 / 0.07, // length / flowArea = 286 m⁻¹
   });
 
   // Feedwater to SG secondary (feedwater injection)
@@ -549,6 +558,7 @@ export function createDemoReactor(): SimulationState {
     elevation: -5, // Going up to SG
     resistanceCoeff: 15,
     massFlowRate: secondaryFlow,
+    inertance: 30 / 0.07, // length / flowArea = 429 m⁻¹
   });
 
   // =========================================================================

@@ -116,6 +116,14 @@ export interface FlowConnection {
 
   // Target flow rate (computed from pressure balance, for debugging)
   targetFlowRate?: number;          // kg/s - what flow would be at equilibrium
+
+  // Steady-state flow (what flow would be without momentum effects)
+  steadyStateFlow?: number;         // kg/s - instantaneous flow from pressure balance
+
+  // Flow momentum (for inertial effects)
+  inertance?: number;               // m⁻¹ - L/A ratio (length/area)
+  // Note: inertance = length / flowArea
+  // The momentum equation: ρ * inertance * d(flow)/dt = ΔP
 }
 
 // ============================================================================

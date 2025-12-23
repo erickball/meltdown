@@ -237,11 +237,19 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
     for (const conn of state.flowConnections) {
       const flowClass = !isFinite(conn.massFlowRate) ? 'debug-danger' :
                        Math.abs(conn.massFlowRate) < 1 ? 'debug-warning' : 'debug-value';
-      const targetFlow = conn.targetFlowRate ?? 0;
-      const targetClass = !isFinite(targetFlow) ? 'debug-danger' :
-                         Math.sign(targetFlow) !== Math.sign(conn.massFlowRate) && Math.abs(conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
-      html += `${conn.fromNodeId} -> ${conn.toNodeId}: <span class="${flowClass}">${conn.massFlowRate.toFixed(0)}</span>`;
-      html += ` <span style="color: #888;">→</span> <span class="${targetClass}">${targetFlow.toFixed(0)}</span> kg/s`;
+
+      html += `${conn.fromNodeId} → ${conn.toNodeId}: `;
+
+      // Show actual flow
+      html += `<span class="${flowClass}">${conn.massFlowRate.toFixed(0)}</span>`;
+
+      // If connection has inertance, show steady-state flow vs actual
+      if (conn.inertance && conn.inertance > 0 && conn.steadyStateFlow !== undefined) {
+        const steadyClass = Math.abs(conn.steadyStateFlow - conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
+        html += ` → <span class="${steadyClass}">${conn.steadyStateFlow.toFixed(0)}</span>`;
+      }
+
+      html += ` kg/s`;
 
       // Show pump head if there's a pump on this connection
       for (const [pumpId, pump] of state.components.pumps) {

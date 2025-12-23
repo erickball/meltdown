@@ -301,6 +301,20 @@ function init() {
     });
   }
 
+  // Max timestep control
+  const maxTimestepSlider = document.getElementById('max-timestep') as HTMLInputElement;
+  const maxTimestepValue = document.getElementById('max-timestep-value');
+
+  if (maxTimestepSlider) {
+    maxTimestepSlider.addEventListener('input', () => {
+      const ms = parseInt(maxTimestepSlider.value, 10);
+      if (maxTimestepValue) {
+        maxTimestepValue.textContent = ms.toString();
+      }
+      gameLoop.setMaxTimestep(ms / 1000); // Convert ms to seconds
+    });
+  }
+
   // Listen for auto-slowdown events to update speed display
   gameLoop.addEventListener('auto-slowdown', () => {
     updateSpeedDisplay();

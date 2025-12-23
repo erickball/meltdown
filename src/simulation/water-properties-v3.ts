@@ -2129,22 +2129,111 @@ function findTwoPhaseState(v: number, u: number): {
   const sat1 = sortedPairs[lo];
   const sat2 = sortedPairs[hi];
 
-  // Use secant method for final interpolation
-  const loQualFinal = calcQualities(sat1);
-  const hiQualFinal = calcQualities(sat2);
+  // We need to find t ∈ [0,1] such that x_v(t) = x_u(t)
+  // where saturation properties are linearly interpolated:
+  // prop(t) = prop1 + t * (prop2 - prop1)
 
-  // Linear interpolation to find where diff = 0
-  // diff1 + t * (diff2 - diff1) = 0
-  // t = -diff1 / (diff2 - diff1)
-  const t = -loQualFinal.diff / (hiQualFinal.diff - loQualFinal.diff);
+  // The condition x_v(t) = x_u(t) means:
+  // (v - v_f(t)) / (v_g(t) - v_f(t)) = (u - u_f(t)) / (u_g(t) - u_f(t))
+  //
+  // Cross multiplying:
+  // (v - v_f(t)) * (u_g(t) - u_f(t)) = (u - u_f(t)) * (v_g(t) - v_f(t))
+  //
+  // With linear interpolation, this becomes a quadratic equation in t:
+  // At² + Bt + C = 0
 
-  // Interpolate saturation properties at t
+  // Define the differences for cleaner notation
+  const dv_f = sat2.v_f - sat1.v_f;
+  const dv_g = sat2.v_g - sat1.v_g;
+  const du_f = sat2.u_f - sat1.u_f;
+  const du_g = sat2.u_g - sat1.u_g;
+
+  // Terms for left side: (v - v_f(t)) * (u_g(t) - u_f(t))
+  // v - v_f(t) = v - sat1.v_f - t*dv_f = (v - sat1.v_f) - t*dv_f
+  // u_g(t) - u_f(t) = (sat1.u_g - sat1.u_f) + t*(du_g - du_f)
+  const L1 = v - sat1.v_f;  // constant term of (v - v_f(t))
+  const L2 = -dv_f;         // linear term of (v - v_f(t))
+  const L3 = sat1.u_g - sat1.u_f;  // constant term of (u_g(t) - u_f(t))
+  const L4 = du_g - du_f;          // linear term of (u_g(t) - u_f(t))
+
+  // Terms for right side: (u - u_f(t)) * (v_g(t) - v_f(t))
+  // u - u_f(t) = u - sat1.u_f - t*du_f = (u - sat1.u_f) - t*du_f
+  // v_g(t) - v_f(t) = (sat1.v_g - sat1.v_f) + t*(dv_g - dv_f)
+  const R1 = u - sat1.u_f;  // constant term of (u - u_f(t))
+  const R2 = -du_f;         // linear term of (u - u_f(t))
+  const R3 = sat1.v_g - sat1.v_f;  // constant term of (v_g(t) - v_f(t))
+  const R4 = dv_g - dv_f;          // linear term of (v_g(t) - v_f(t))
+
+  // Expand: (L1 + L2*t) * (L3 + L4*t) = (R1 + R2*t) * (R3 + R4*t)
+  // Left: L1*L3 + (L1*L4 + L2*L3)*t + L2*L4*t²
+  // Right: R1*R3 + (R1*R4 + R2*R3)*t + R2*R4*t²
+  //
+  // Moving everything to left side:
+  // (L2*L4 - R2*R4)*t² + (L1*L4 + L2*L3 - R1*R4 - R2*R3)*t + (L1*L3 - R1*R3) = 0
+
+  const A = L2 * L4 - R2 * R4;
+  const B = L1 * L4 + L2 * L3 - R1 * R4 - R2 * R3;
+  const C = L1 * L3 - R1 * R3;
+
+  // Solve quadratic At² + Bt + C = 0
+  let t: number;
+
+  if (Math.abs(A) < 1e-12) {
+    // Linear equation: Bt + C = 0
+    if (Math.abs(B) < 1e-12) {
+      // Degenerate case - use midpoint
+      t = 0.5;
+    } else {
+      t = -C / B;
+    }
+  } else {
+    // Quadratic equation - use quadratic formula
+    const discriminant = B * B - 4 * A * C;
+
+    if (discriminant < 0) {
+      // No real solution - shouldn't happen for valid two-phase states
+      // Use midpoint as fallback
+      t = 0.5;
+    } else {
+      const sqrt_disc = Math.sqrt(discriminant);
+      const t1 = (-B + sqrt_disc) / (2 * A);
+      const t2 = (-B - sqrt_disc) / (2 * A);
+
+      // Choose the root that's in [0, 1]
+      // There should only be ONE valid root physically
+      if (t1 >= 0 && t1 <= 1 && t2 >= 0 && t2 <= 1) {
+        // Both roots in [0,1] - this shouldn't happen physically!
+        console.error(`[WaterProperties] ERROR: Two valid roots found in findTwoPhaseState!`);
+        console.error(`  v=${(v*1e6).toFixed(2)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
+        console.error(`  t1=${t1.toFixed(6)}, t2=${t2.toFixed(6)}`);
+        console.error(`  P range: ${(sat1.P/1e5).toFixed(2)} to ${(sat2.P/1e5).toFixed(2)} bar`);
+        console.error(`  Quadratic coefficients: A=${A}, B=${B}, C=${C}`);
+        throw new Error('Physical inconsistency: Two valid interpolation parameters for x_v = x_u');
+      } else if (t1 >= 0 && t1 <= 1) {
+        t = t1;
+      } else if (t2 >= 0 && t2 <= 1) {
+        t = t2;
+      } else {
+        // Neither root is in [0, 1] - clamp the closer one
+        if (Math.abs(t1 - 0.5) < Math.abs(t2 - 0.5)) {
+          t = Math.max(0, Math.min(1, t1));
+        } else {
+          t = Math.max(0, Math.min(1, t2));
+        }
+      }
+    }
+  }
+
+  // Ensure t is in valid range
+  t = Math.max(0, Math.min(1, t));
+
+  // Calculate final properties at t
   const P_t = sat1.P + t * (sat2.P - sat1.P);
   const T_t = sat1.T + t * (sat2.T - sat1.T);
-  const v_f_t = sat1.v_f + t * (sat2.v_f - sat1.v_f);
-  const v_g_t = sat1.v_g + t * (sat2.v_g - sat1.v_g);
-  const u_f_t = sat1.u_f + t * (sat2.u_f - sat1.u_f);
-  const u_g_t = sat1.u_g + t * (sat2.u_g - sat1.u_g);
+  const v_f_t = sat1.v_f + t * dv_f;
+  const v_g_t = sat1.v_g + t * dv_g;
+  const u_f_t = sat1.u_f + t * du_f;
+  const u_g_t = sat1.u_g + t * du_g;
 
   // Calculate final qualities
   const x_v_final = (v - v_f_t) / (v_g_t - v_f_t);
@@ -2157,7 +2246,7 @@ function findTwoPhaseState(v: number, u: number): {
   const qualityClamped = Math.max(0, Math.min(1, quality));
 
   // Check for convergence issues
-  if (Math.abs(x_v_final - x_u_final) > 0.001) {
+  if (Math.abs(x_v_final - x_u_final) > 0.0001) {
     console.error(`[WaterProperties] Poor convergence in findTwoPhaseState:`);
     console.error(`  v=${(v*1e6).toFixed(2)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
     console.error(`  P=${(P_t/1e5).toFixed(2)} bar, T=${(T_t-273.15).toFixed(1)}°C`);

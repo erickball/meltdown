@@ -83,11 +83,12 @@ export class FlowOperator implements PhysicsOperator {
     // We use the stored fluid.pressure values set by FluidStateUpdateOperator
     // at the end of the previous timestep. These use the hybrid pressure model.
     const t1 = performance.now();
-    let phaseDetectionTime = 0;
-    let densityCalcTime = 0;
-    let pumpCheckTime = 0;
-    let flowCalcTime = 0;
-    let debugLogTime = 0;
+    // Timing variables (commented out for performance)
+    // let phaseDetectionTime = 0;
+    // let densityCalcTime = 0;
+    // let pumpCheckTime = 0;
+    // let flowCalcTime = 0;
+    // let debugLogTime = 0;
 
     for (const conn of newState.flowConnections) {
       const fromNode = newState.flowNodes.get(conn.fromNodeId);
@@ -96,12 +97,12 @@ export class FlowOperator implements PhysicsOperator {
       if (!fromNode || !toNode) continue;
 
       // Compute target flow rate from momentum balance
-      const tFlowStart = performance.now();
+      // const tFlowStart = performance.now();
       let targetFlow = this.computeTargetFlow(conn, fromNode, toNode, newState, dt);
-      flowCalcTime += performance.now() - tFlowStart;
+      // flowCalcTime += performance.now() - tFlowStart;
 
       // SAFEGUARD: Clamp target flow to reasonable range
-      const unclamped = targetFlow;
+      // const unclamped = targetFlow;
       targetFlow = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, targetFlow));
 
       // Debug: log when clamping happens (indicates pressure imbalance)
@@ -251,13 +252,13 @@ export class FlowOperator implements PhysicsOperator {
   }
 
   getMaxStableDt(state: SimulationState): number {
-    // CFL-like condition for advection:
-    // dt < volume / max_flow_rate
-    //
-    // This ensures fluid doesn't flow through a volume in less than one timestep
+    // Two stability constraints:
+    // 1. CFL-like condition for advection: dt < volume / max_flow_rate
+    // 2. Inertial stability: dt < 2 * inertance / K (for connections with inertance)
 
     let minDt = Infinity;
 
+    // 1. Check residence time constraint (original CFL condition)
     for (const [, node] of state.flowNodes) {
       const totalInflow = Math.abs(this.computeNetMassFlow(node.id, state.flowConnections));
       if (totalInflow < 1) continue; // Skip near-zero flow
@@ -273,6 +274,24 @@ export class FlowOperator implements PhysicsOperator {
       }
     }
 
+    // 2. Check inertial stability for connections with momentum
+    for (const conn of state.flowConnections) {
+      // Only check connections with inertance
+      if (!conn.inertance || conn.inertance <= 0) continue;
+      if (conn.resistanceCoeff <= 0) continue;
+
+      // For stability checking, use base resistance (valves would slow flow more, making it more stable)
+      const K_eff = conn.resistanceCoeff;
+
+      // Inertial timestep limit: dt < 2 * inertance / K
+      // This ensures the momentum equation remains stable
+      const dtInertial = 2.0 * conn.inertance / K_eff;
+
+      if (dtInertial < minDt) {
+        minDt = dtInertial;
+      }
+    }
+
     // SAFEGUARD: Floor at 1ms to prevent runaway timestep reduction
     return Math.max(minDt, 0.001);
   }
@@ -280,6 +299,9 @@ export class FlowOperator implements PhysicsOperator {
   /**
    * Compute the target (equilibrium) mass flow rate for a connection
    * based on the pressure drop and driving forces.
+   *
+   * With inertance: implements momentum equation ρ * L/A * dv/dt = ΔP - friction
+   * Without inertance: uses steady-state flow equation (backward compatibility)
    */
   private computeTargetFlow(
     conn: FlowConnection,
@@ -301,22 +323,28 @@ export class FlowOperator implements PhysicsOperator {
     // The pressurizer sets the system pressure
     const dP_pressure = P_from - P_to;
 
-    // Determine what phase is flowing based on connection elevation
-    const tPhase = performance.now();
-    const flowPhase = this.getFlowPhase(fromNode, conn.fromElevation);
-    const phaseTime = performance.now() - tPhase;
+    // For density calculation, determine which node is upstream based on current flow direction
+    // This ensures we use the density of the fluid actually flowing through the connection
+    const currentFlow = conn.massFlowRate;
+    const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
+    const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
 
-    // Get appropriate density based on what's actually flowing
-    const tDensity = performance.now();
+    // Determine what phase is flowing based on connection elevation at upstream node
+    // const tPhase = performance.now();
+    const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+    // const phaseTime = performance.now() - tPhase;
+
+    // Get appropriate density based on what's actually flowing from upstream
+    // const tDensity = performance.now();
     let rho: number;
     if (flowPhase === 'liquid') {
-      rho = this.getNodeDensity(fromNode, 'liquid');
+      rho = this.getNodeDensity(upstreamNode, 'liquid');
     } else if (flowPhase === 'vapor') {
-      rho = this.getNodeDensity(fromNode, 'vapor');
+      rho = this.getNodeDensity(upstreamNode, 'vapor');
     } else {
-      rho = this.getNodeDensity(fromNode, 'actual'); // mixture
+      rho = this.getNodeDensity(upstreamNode, 'actual'); // mixture
     }
-    const densityTime = performance.now() - tDensity;
+    // const densityTime = performance.now() - tDensity;
 
     // Gravity head (positive = downward flow is favored)
     const g = 9.81; // m/s²
@@ -332,8 +360,8 @@ export class FlowOperator implements PhysicsOperator {
       // The effectiveSpeed is updated by updatePumpSpeeds() each timestep, accounting
       // for ramp-up and coast-down dynamics.
 
-      // Use upstream node density (fromNode is upstream in computeTargetFlow)
-      const pumpSuctionNode = fromNode;
+      // Use upstream node for pump suction (same as for density calculation)
+      const pumpSuctionNode = upstreamNode;
 
       // For two-phase nodes, pumps draw from the bottom (liquid) if available
       if (pumpSuctionNode.fluid.phase === 'two-phase' && pumpSuctionNode.fluid.quality !== undefined) {
@@ -381,17 +409,17 @@ export class FlowOperator implements PhysicsOperator {
     // Total driving pressure
     const dP_driving = dP_pressure + dP_gravity + dP_pump;
 
-    // Debug FW->SG connection
-    if (conn.id === "flow-feedwater-sg") {
-      console.log(`[FlowOp] ${conn.id} pressure analysis:`);
-      console.log(`  P_from (FW): ${(P_from/1e5).toFixed(2)} bar`);
-      console.log(`  P_to (SG): ${(P_to/1e5).toFixed(2)} bar`);
-      console.log(`  dP_pressure: ${(dP_pressure/1e5).toFixed(2)} bar`);
-      console.log(`  dP_gravity: ${(dP_gravity/1e5).toFixed(2)} bar`);
-      console.log(`  dP_pump: ${(dP_pump/1e5).toFixed(2)} bar`);
-      console.log(`  dP_driving total: ${(dP_driving/1e5).toFixed(2)} bar`);
-      console.log(`  Density used: ${rho.toFixed(0)} kg/m³`);
-    }
+    // Debug FW->SG connection (disabled)
+    // if (conn.id === "flow-feedwater-sg") {
+    //   console.log(`[FlowOp] ${conn.id} pressure analysis:`);
+    //   console.log(`  P_from (FW): ${(P_from/1e5).toFixed(2)} bar`);
+    //   console.log(`  P_to (SG): ${(P_to/1e5).toFixed(2)} bar`);
+    //   console.log(`  dP_pressure: ${(dP_pressure/1e5).toFixed(2)} bar`);
+    //   console.log(`  dP_gravity: ${(dP_gravity/1e5).toFixed(2)} bar`);
+    //   console.log(`  dP_pump: ${(dP_pump/1e5).toFixed(2)} bar`);
+    //   console.log(`  dP_driving total: ${(dP_driving/1e5).toFixed(2)} bar`);
+    //   console.log(`  Density used: ${rho.toFixed(0)} kg/m³`);
+    // }
 
     // Check for check valve in this connection
     // Check valves prevent reverse flow and require minimum forward pressure to open
@@ -406,37 +434,75 @@ export class FlowOperator implements PhysicsOperator {
 
     // Debug: log components for key connections
     // Disable for now - even at 0.01% sampling it's too expensive
-    const shouldLog = false; // Math.random() < 0.0001; // 0.01% sampling
+    // const shouldLog = false; // Math.random() < 0.0001; // 0.01% sampling
     // if (shouldLog && (conn.id === "flow-condenser-feedwater" ||
     //     conn.id === "flow-feedwater-sg")) {
     //   console.log(`[FlowOp] ${conn.id}: P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase}`);
     // }
 
     // Compute flow from pressure drop
-    // ΔP = K * (1/2) * ρ * v²  =>  v = sqrt(2 * ΔP / (ρ * K))
-    // m_dot = ρ * A * v
-
     const K = conn.resistanceCoeff * resistanceMult;
     if (K <= 0) return 0;
 
     const A = conn.flowArea;
 
-    // Handle flow direction
+    // First, always calculate the steady-state flow (what flow would be without momentum)
+    // This is useful for debugging and understanding the pressure balance
     const sign = dP_driving >= 0 ? 1 : -1;
     const dP_abs = Math.abs(dP_driving);
+    const v_steady = Math.sqrt(2 * dP_abs / (rho * K));
+    const steadyStateFlow = sign * rho * A * v_steady;
 
-    // Velocity from pressure drop
-    const v = Math.sqrt(2 * dP_abs / (rho * K));
+    // Store for debug display
+    conn.steadyStateFlow = steadyStateFlow;
 
-    // Mass flow rate
-    const massFlow = sign * rho * A * v;
+    // Check if this connection has inertance defined (flow momentum)
+    if (conn.inertance && conn.inertance > 0) {
+      // WITH INERTANCE: Implement momentum equation
+      // ρ * inertance * dv/dt = ΔP - friction_loss
+      // where friction_loss = K * (1/2) * ρ * v²
 
-    // Debug: log calculated flow for feedwater-sg
-    // if (conn.id === "flow-feedwater-sg") {
-    //   console.log(`  calculated flow=${massFlow.toFixed(1)} kg/s (v=${(sign*v).toFixed(2)} m/s, K=${K.toFixed(3)})`);
-    // }
+      // Current velocity from current mass flow
+      const currentFlow = conn.massFlowRate;
+      const currentVelocity = currentFlow / (rho * A);
 
-    return massFlow;
+      // Friction pressure drop (always opposes flow)
+      const frictionSign = currentVelocity >= 0 ? 1 : -1;
+      const dP_friction = frictionSign * K * 0.5 * rho * currentVelocity * Math.abs(currentVelocity);
+
+      // Net driving pressure (pressure difference minus friction)
+      const dP_net = dP_driving - dP_friction;
+
+      // Acceleration from momentum equation: dv/dt = dP_net / (ρ * inertance)
+      const acceleration = dP_net / (rho * conn.inertance);
+
+      // New velocity using forward Euler integration
+      const newVelocity = currentVelocity + acceleration * dt;
+
+      // New mass flow rate
+      const massFlow = rho * A * newVelocity;
+
+      // Debug: log calculated flow for feedwater-sg
+      // if (conn.id === "flow-feedwater-sg") {
+      //   console.log(`  [Inertial] flow=${massFlow.toFixed(1)} kg/s, v: ${currentVelocity.toFixed(2)}→${newVelocity.toFixed(2)} m/s`);
+      //   console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)} bar, dP_friction=${(dP_friction/1e5).toFixed(3)} bar`);
+      //   console.log(`    acceleration=${acceleration.toFixed(3)} m/s², inertance=${conn.inertance.toFixed(1)} m⁻¹`);
+      //   console.log(`    Steady-state flow would be: ${steadyStateFlow.toFixed(1)} kg/s`);
+      // }
+
+      return massFlow;
+
+    } else {
+      // WITHOUT INERTANCE: Use steady-state equation (backward compatibility)
+      // The steady-state flow we calculated above is the actual flow
+
+      // Debug: log calculated flow for feedwater-sg
+      // if (conn.id === "flow-feedwater-sg") {
+      //   console.log(`  [Steady] flow=${steadyStateFlow.toFixed(1)} kg/s (v=${(sign*v_steady).toFixed(2)} m/s, K=${K.toFixed(3)})`);
+      // }
+
+      return steadyStateFlow;
+    }
   }
 
   /**

@@ -34,6 +34,7 @@ export interface GameLoopConfig {
 
   // Performance
   targetFrameRate: number;
+  maxTimestep: number; // Maximum timestep in seconds
 }
 
 const DEFAULT_CONFIG: GameLoopConfig = {
@@ -45,6 +46,7 @@ const DEFAULT_CONFIG: GameLoopConfig = {
   autoSlowdownThreshold: 0.1, // 10% change per second triggers slowdown
 
   targetFrameRate: 60,
+  maxTimestep: 0.5, // 500ms default as requested
 };
 
 export type GameEventType =
@@ -101,7 +103,7 @@ export class GameLoop {
     // Initialize solver with operators in correct order
     this.solver = new Solver({
       minDt: 1e-5,
-      maxDt: 0.05,
+      maxDt: this.config.maxTimestep,
       targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
     });
 
@@ -374,6 +376,18 @@ export class GameLoop {
       Math.min(this.config.maxSimSpeed, speed)
     );
     this.targetSimSpeed = this.simSpeed;
+  }
+
+  setMaxTimestep(maxDt: number): void {
+    // Update config
+    this.config.maxTimestep = Math.max(0.001, Math.min(1.0, maxDt)); // Clamp between 1ms and 1s
+
+    // Update solver config dynamically
+    (this.solver as any).config.maxDt = this.config.maxTimestep;
+  }
+
+  getMaxTimestep(): number {
+    return this.config.maxTimestep;
   }
 
   /**
