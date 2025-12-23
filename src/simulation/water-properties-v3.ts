@@ -158,6 +158,10 @@ let domeBoundaryCache: DomeBoundaryCache | null = null;
 let sortedSatPairsCache: SaturationPair[] = [];  // Pre-sorted by pressure
 let boundsCache: BoundsCache | null = null;
 
+// Detailed saturated steam table data for accurate dome boundary
+let detailedSaturationData: SaturationPair[] = [];
+let detailedSaturationLoaded = false;
+
 // Convergence tracking for debugging
 let bisectionFailureCount = 0;
 let bisectionTotalCount = 0;
@@ -215,14 +219,83 @@ let lvuGridCellHeight = 0;
 let lvuDataReady = false;
 
 /**
+ * Load detailed saturated steam table for accurate dome boundary.
+ * This table has ~277 points from triple point to critical point.
+ */
+function loadDetailedSaturationTable(): void {
+  if (detailedSaturationLoaded) return;
+
+  try {
+    const isBrowser = typeof window !== 'undefined';
+    let content: string = '';
+
+    if (isBrowser) {
+      // Browser: use synchronous XHR
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', '/saturated-steam-table.txt', false); // false = synchronous
+      xhr.send();
+      if (xhr.status === 200) {
+        content = xhr.responseText;
+      } else {
+        throw new Error(`Failed to fetch saturated steam table: HTTP ${xhr.status}`);
+      }
+    } else {
+      // Node.js: use fs
+      if (!nodeFs || !nodePath || !nodeUrl) {
+        throw new Error('Node.js modules not loaded');
+      }
+      const __filename = nodeUrl.fileURLToPath(import.meta.url);
+      const __dirname = nodePath.dirname(__filename);
+      const satTablePath = nodePath.resolve(__dirname, '../../public/saturated-steam-table.txt');
+      content = nodeFs.readFileSync(satTablePath, 'utf-8');
+    }
+
+    const lines = content.split('\n');
+    detailedSaturationData = [];
+
+    // Skip header line
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+
+      const parts = line.split('\t');
+      if (parts.length < 6) continue;
+
+      const P = parseFloat(parts[0]) * 1e6;  // MPa to Pa
+      const T = parseFloat(parts[1]) + 273.15;  // °C to K
+      const v_f = parseFloat(parts[2]);  // m³/kg
+      const v_g = parseFloat(parts[3]);  // m³/kg
+      const u_f = parseFloat(parts[4]) * 1000;  // kJ/kg to J/kg
+      const u_g = parseFloat(parts[5]) * 1000;  // kJ/kg to J/kg
+
+      if (!isNaN(P) && !isNaN(T) && !isNaN(v_f) && !isNaN(v_g) && !isNaN(u_f) && !isNaN(u_g)) {
+        detailedSaturationData.push({ P, T, v_f, v_g, u_f, u_g });
+      }
+    }
+
+    detailedSaturationLoaded = true;
+    console.log(`[WaterProps v3] Loaded ${detailedSaturationData.length} detailed saturation points`);
+  } catch (error) {
+    console.warn('[WaterProps v3] Could not load detailed saturation table, falling back to general data:', error);
+    detailedSaturationData = [...saturationPairs];
+    detailedSaturationLoaded = true;
+  }
+}
+
+/**
  * Build caches for fast phase detection.
  * Called once after saturation pairs are loaded.
  */
 function buildPhaseDetectionCaches(): void {
   if (saturationPairs.length === 0) return;
 
+  // Use detailed saturation data if available, otherwise fall back to general saturation pairs
+  const satData = detailedSaturationLoaded && detailedSaturationData.length > 0
+    ? detailedSaturationData
+    : saturationPairs;
+
   // Build dome boundary as continuous piecewise curve
-  const liquidLine: DomeBoundaryPoint[] = saturationPairs.map(s => ({
+  const liquidLine: DomeBoundaryPoint[] = satData.map(s => ({
     v: s.v_f,
     logV: Math.log(s.v_f),
     u: s.u_f,
@@ -230,7 +303,7 @@ function buildPhaseDetectionCaches(): void {
     side: 'liquid' as const,
   })).sort((a, b) => a.v - b.v);
 
-  const vaporLine: DomeBoundaryPoint[] = saturationPairs.map(s => ({
+  const vaporLine: DomeBoundaryPoint[] = satData.map(s => ({
     v: s.v_g,
     logV: Math.log(s.v_g),
     u: s.u_g,
@@ -246,18 +319,18 @@ function buildPhaseDetectionCaches(): void {
     v_max: domeBoundary[domeBoundary.length - 1].v,
   };
 
-  // Pre-sort saturation pairs by pressure
+  // Pre-sort saturation pairs by pressure (still use original for bisection)
   sortedSatPairsCache = [...saturationPairs].sort((a, b) => a.P - b.P);
 
   // Pre-compute bounds
   boundsCache = {
-    v_f_min: Math.min(...saturationPairs.map(s => s.v_f)),
-    v_g_max: Math.max(...saturationPairs.map(s => s.v_g)),
-    u_f_min: Math.min(...saturationPairs.map(s => s.u_f)),
-    u_g_max: Math.max(...saturationPairs.map(s => s.u_g)),
+    v_f_min: Math.min(...satData.map(s => s.v_f)),
+    v_g_max: Math.max(...satData.map(s => s.v_g)),
+    u_f_min: Math.min(...satData.map(s => s.u_f)),
+    u_g_max: Math.max(...satData.map(s => s.u_g)),
   };
 
-  console.log(`[WaterProps v3] Phase detection caches built: dome has ${domeBoundary.length} points`);
+  console.log(`[WaterProps v3] Phase detection caches built: dome has ${domeBoundary.length} points (from ${satData.length} saturation points)`);
 }
 
 /**
@@ -265,6 +338,11 @@ function buildPhaseDetectionCaches(): void {
  * Uses binary search on the pre-built dome boundary.
  * Uses log-linear interpolation for accuracy near critical point.
  * Returns null if v is outside the dome range.
+ *
+ * NOTE: This function returns the u value on the dome boundary at the given v,
+ * but this is NOT sufficient to determine if a point is inside the two-phase region.
+ * The dome boundary is constructed as [...liquidLine, ...vaporLine] which creates
+ * a continuous curve, but the two-phase region is the area BETWEEN the liquid and vapor lines.
  */
 function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' } | null {
   if (!domeBoundaryCache) return null;
@@ -1242,6 +1320,9 @@ function loadData(): void {
     console.timeEnd("[WaterProps] buildSpatialIndex");
 
     // Build phase detection caches
+    // Load detailed saturated steam table for more accurate dome boundary
+    loadDetailedSaturationTable();
+
     console.time("[WaterProps] buildPhaseDetectionCaches");
 
     buildPhaseDetectionCaches();
@@ -1854,6 +1935,7 @@ function findNearestPoint(logV: number, u: number): DataPoint {
  *
  * This replaces the old approach of checking quality consistency with a 10% threshold.
  * The new geometric approach is more accurate and provides interpolated T/P values.
+ * Do not modify the method of detecting whether a point is two-phase.
  */
 function determinePhaseFromUV(v: number, u: number): {
   phase: 'liquid' | 'two-phase' | 'vapor';
@@ -1879,6 +1961,7 @@ function determinePhaseFromUV(v: number, u: number): {
     // v is outside the dome range - use cached bounds
     if (!boundsCache) {
       // Fallback if caches not built
+      // No fallbacks! This should be an error. -Erick
       lastPhaseDetectionDebug.decisionReason = 'caches not built, fallback';
       return { phase: u < 1.8e6 ? 'liquid' : 'vapor' };
     }
@@ -1926,6 +2009,7 @@ function determinePhaseFromUV(v: number, u: number): {
       // Fallback: couldn't find exact state, use nearest saturation pair
       bisectionFailureCount++;
       lastPhaseDetectionDebug.decisionReason = 'below dome but bisection failed, using fallback';
+      // No FALLBACKS! ERROR MESSAGE! -Erick
       return findTwoPhaseStateFallback(v, u);
     }
   } else {
@@ -2030,11 +2114,9 @@ function findTwoPhaseState(v: number, u: number): {
     // Also check if we're VERY close to x_v = x_u at either endpoint
     // (handles case where the crossing is exactly at a saturation pair)
     // For physical consistency, x_v and x_u must be very close
-    // Use absolute tolerance but require BOTH to be small for near-zero quality
     const diff1 = Math.abs(x_v1 - x_u1);
-    const maxQual1 = Math.max(Math.abs(x_v1), Math.abs(x_u1));
-    // Accept only if difference is small AND we're not near the boundary with large discrepancy
-    if (inRange1 && diff1 < 0.001 && (maxQual1 < 0.01 || diff1 < 0.0001) && x_u1 >= 0 && x_u1 <= 1) {
+    // Tightened tolerance: require diff < 0.0001 for better consistency
+    if (inRange1 && diff1 < 0.0001 && x_u1 >= 0 && x_u1 <= 1) {
       // Debug feedwater issue
       if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
         console.log(`[FeedwaterDebug] At sat1 (P=${(sat1.P/1e5).toFixed(1)}bar):`);
@@ -2047,8 +2129,8 @@ function findTwoPhaseState(v: number, u: number): {
       break;
     }
     const diff2 = Math.abs(x_v2 - x_u2);
-    const maxQual2 = Math.max(Math.abs(x_v2), Math.abs(x_u2));
-    if (inRange2 && diff2 < 0.001 && (maxQual2 < 0.01 || diff2 < 0.0001) && x_u2 >= 0 && x_u2 <= 1) {
+    // Tightened tolerance: require diff < 0.0001 for better consistency
+    if (inRange2 && diff2 < 0.0001 && x_u2 >= 0 && x_u2 <= 1) {
       // Debug feedwater issue
       if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
         console.log(`[FeedwaterDebug] At sat2 (P=${(sat2.P/1e5).toFixed(1)}bar):`);
@@ -2179,8 +2261,8 @@ function findTwoPhaseState(v: number, u: number): {
           continue;
         }
 
-        if (Math.abs(result_mid.diff) < 0.0001) {
-          // Converged!
+        if (Math.abs(result_mid.diff) < 0.00001) {
+          // Converged with tighter tolerance!
           const T = sat1.T + t_mid * (sat2.T - sat1.T);
           const P = sat1.P + t_mid * (sat2.P - sat1.P);
           return {
@@ -2221,7 +2303,7 @@ function findTwoPhaseState(v: number, u: number): {
       const P = sat1.P + t_best * (sat2.P - sat1.P);
       return {
         T, P,
-        quality: Math.max(0, Math.min(1, (best.x_v, best.x_u))),
+        quality: Math.max(0, Math.min(1, Math.min(best.x_v, best.x_u))),
         x_v: best.x_v,
         x_u: best.x_u,
       };
@@ -2234,6 +2316,7 @@ function findTwoPhaseState(v: number, u: number): {
 /**
  * Fallback for two-phase when bisection fails.
  * Uses nearest saturation pair.
+ * Don't Do This.
  */
 function findTwoPhaseStateFallback(v: number, u: number): {
   phase: 'liquid' | 'two-phase' | 'vapor';
