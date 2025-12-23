@@ -319,8 +319,8 @@ function buildPhaseDetectionCaches(): void {
     v_max: domeBoundary[domeBoundary.length - 1].v,
   };
 
-  // Pre-sort saturation pairs by pressure (still use original for bisection)
-  sortedSatPairsCache = [...saturationPairs].sort((a, b) => a.P - b.P);
+  // Pre-sort saturation pairs by pressure - use detailed data for bisection
+  sortedSatPairsCache = [...satData].sort((a, b) => a.P - b.P);
 
   // Pre-compute bounds
   boundsCache = {
@@ -392,6 +392,15 @@ function findSaturationU(v: number): { u_sat: number; side: 'liquid' | 'vapor' }
   // Use log-linear interpolation: linear in log(v) space
   const t = (logV - p1.logV) / (p2.logV - p1.logV);
   const u_sat = p1.u + t * (p2.u - p1.u);
+
+  // Debug output for high v values
+  if (v > 0.01) {  // v > 10000 mL/kg
+    console.log(`[findSaturationU DEBUG] High v state:`);
+    console.log(`  v=${(v*1e6).toFixed(1)} mL/kg`);
+    console.log(`  p1: v=${(p1.v*1e6).toFixed(1)} mL/kg, u=${(p1.u/1e3).toFixed(1)} kJ/kg, side=${p1.side}`);
+    console.log(`  p2: v=${(p2.v*1e6).toFixed(1)} mL/kg, u=${(p2.u/1e3).toFixed(1)} kJ/kg, side=${p2.side}`);
+    console.log(`  t=${t.toFixed(4)}, u_sat=${(u_sat/1e3).toFixed(1)} kJ/kg`);
+  }
 
   let side: 'liquid' | 'vapor' = p1.side;
   if (p1.side !== p2.side) {
@@ -2006,11 +2015,18 @@ function determinePhaseFromUV(v: number, u: number): {
         quality: result.quality,
       };
     } else {
-      // Fallback: couldn't find exact state, use nearest saturation pair
+      // Bisection failed - this is a fatal error
       bisectionFailureCount++;
-      lastPhaseDetectionDebug.decisionReason = 'below dome but bisection failed, using fallback';
-      // No FALLBACKS! ERROR MESSAGE! -Erick
-      return findTwoPhaseStateFallback(v, u);
+      console.error(`[WaterProps v3] FATAL ERROR: Phase detection failure`);
+      console.error(`  State: v=${(v*1e6).toFixed(1)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
+      console.error(`  findSaturationU indicates two-phase (u < u_sat)`);
+      console.error(`  But cannot find saturation T/P where x_v and x_u agree`);
+      console.error(`  This is physically impossible - stopping simulation`);
+
+      throw new Error(
+        `Phase detection failure: v=${(v*1e6).toFixed(1)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg. ` +
+        `State appears two-phase but x_v and x_u cannot be reconciled.`
+      );
     }
   } else {
     // ABOVE the saturation line = SINGLE PHASE
@@ -2045,8 +2061,8 @@ function determinePhaseFromUV(v: number, u: number): {
 }
 
 /**
- * Find the exact two-phase state using bisection.
- * Interpolates between saturation pairs to find T where x_v = x_u.
+ * Find the exact two-phase state using binary search.
+ * Searches for the saturation pressure where x_v = x_u.
  */
 function findTwoPhaseState(v: number, u: number): {
   T: number;
@@ -2060,311 +2076,133 @@ function findTwoPhaseState(v: number, u: number): {
 
   if (n < 2) return null;
 
-  // Find bracket: adjacent saturation pairs where x_v - x_u changes sign.
-  // This is necessary for bisection to find the exact T where x_v = x_u.
-  // If no sign change exists, the point is NOT inside the two-phase dome.
-  let bracketIdx = -1;
-  let foundSignChange = false;
-
-  for (let i = 0; i < n - 1; i++) {
-    const sat1 = sortedPairs[i];
-    const sat2 = sortedPairs[i + 1];
-
-    // Quick check: is v in range for either state?
-    const inRange1 = v >= sat1.v_f && v <= sat1.v_g;
-    const inRange2 = v >= sat2.v_f && v <= sat2.v_g;
-
-    if (!inRange1 && !inRange2) continue;
-
-    // Calculate quality difference at each saturation state
-    let x_v1 = 0, x_u1 = 0, x_v2 = 0, x_u2 = 0;
-
-    if (inRange1) {
-      x_v1 = (v - sat1.v_f) / (sat1.v_g - sat1.v_f);
-      x_u1 = (u - sat1.u_f) / (sat1.u_g - sat1.u_f);
-    }
-    if (inRange2) {
-      x_v2 = (v - sat2.v_f) / (sat2.v_g - sat2.v_f);
-      x_u2 = (u - sat2.u_f) / (sat2.u_g - sat2.u_f);
-    }
-
-    // Debug feedwater issue - check for states very close to saturation line
-    if (Math.abs(v*1e6 - 1124.2) < 1.0 && Math.abs(u/1e3 - 752) < 5) {
-      if (inRange1) {
-        console.log(`[FeedwaterDebug] Checking sat pair ${i} (P=${(sat1.P/1e5).toFixed(1)}bar):`);
-        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat1.v_f*1e6).toFixed(2)} v_g=${(sat1.v_g*1e6).toFixed(2)}`);
-        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat1.u_f/1e3).toFixed(0)} u_g=${(sat1.u_g/1e3).toFixed(0)}`);
-        console.log(`  x_v=${x_v1.toFixed(6)} x_u=${x_u1.toFixed(6)} diff=${Math.abs(x_v1 - x_u1).toFixed(6)}`);
-        console.log(`  Will accept if diff < 0.0001: ${Math.abs(x_v1 - x_u1) < 0.0001}`);
-      }
-    }
-
-    // Check for sign change (required for valid two-phase state)
-    if (inRange1 && inRange2) {
-      const diff1 = x_v1 - x_u1;
-      const diff2 = x_v2 - x_u2;
-      if (diff1 * diff2 < 0) {
-        // Found sign change - this bracket contains a valid two-phase state
-        bracketIdx = i;
-        foundSignChange = true;
-        break;
-      }
-    }
-
-    // Also check if we're VERY close to x_v = x_u at either endpoint
-    // (handles case where the crossing is exactly at a saturation pair)
-    // For physical consistency, x_v and x_u must be very close
-    const diff1 = Math.abs(x_v1 - x_u1);
-    // Tightened tolerance: require diff < 0.0001 for better consistency
-    if (inRange1 && diff1 < 0.0001 && x_u1 >= 0 && x_u1 <= 1) {
-      // Debug feedwater issue
-      if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
-        console.log(`[FeedwaterDebug] At sat1 (P=${(sat1.P/1e5).toFixed(1)}bar):`);
-        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat1.v_f*1e6).toFixed(2)} v_g=${(sat1.v_g*1e6).toFixed(2)}`);
-        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat1.u_f/1e3).toFixed(0)} u_g=${(sat1.u_g/1e3).toFixed(0)}`);
-        console.log(`  x_v=${x_v1.toFixed(6)} x_u=${x_u1.toFixed(6)} diff=${Math.abs(x_v1 - x_u1).toFixed(6)}`);
-      }
-      bracketIdx = i;
-      foundSignChange = true;
-      break;
-    }
-    const diff2 = Math.abs(x_v2 - x_u2);
-    // Tightened tolerance: require diff < 0.0001 for better consistency
-    if (inRange2 && diff2 < 0.0001 && x_u2 >= 0 && x_u2 <= 1) {
-      // Debug feedwater issue
-      if (v < 1.13e-3 && v > 1.12e-3 && u > 750e3 && u < 760e3) {
-        console.log(`[FeedwaterDebug] At sat2 (P=${(sat2.P/1e5).toFixed(1)}bar):`);
-        console.log(`  v=${(v*1e6).toFixed(2)} v_f=${(sat2.v_f*1e6).toFixed(2)} v_g=${(sat2.v_g*1e6).toFixed(2)}`);
-        console.log(`  u=${(u/1e3).toFixed(0)} u_f=${(sat2.u_f/1e3).toFixed(0)} u_g=${(sat2.u_g/1e3).toFixed(0)}`);
-        console.log(`  x_v=${x_v2.toFixed(6)} x_u=${x_u2.toFixed(6)} diff=${Math.abs(x_v2 - x_u2).toFixed(6)}`);
-      }
-      bracketIdx = i;
-      foundSignChange = true;
-      break;
-    }
-  }
-
-  // If no sign change found, the point is not inside the two-phase dome
-  if (bracketIdx < 0 || !foundSignChange) return null;
-
-  const sat1 = sortedPairs[bracketIdx];
-  const sat2 = sortedPairs[bracketIdx + 1];
-
-  // Helper function to compute x_v - x_u at interpolation parameter t
-  // t=0 means sat1, t=1 means sat2
-  function qualityDiff(t: number): {
-    valid: boolean;
-    diff: number;
-    x_v: number;
-    x_u: number;
-    v_f_t: number;
-    v_g_t: number;
-    u_f_t: number;
-    u_g_t: number;
-  } {
-    // Interpolate v in log space for consistency with triangulation
-    const logV_f_t = Math.log10(sat1.v_f) + t * (Math.log10(sat2.v_f) - Math.log10(sat1.v_f));
-    const logV_g_t = Math.log10(sat1.v_g) + t * (Math.log10(sat2.v_g) - Math.log10(sat1.v_g));
-    const v_f_t = Math.pow(10, logV_f_t);
-    const v_g_t = Math.pow(10, logV_g_t);
-    const u_f_t = sat1.u_f + t * (sat2.u_f - sat1.u_f);
-    const u_g_t = sat1.u_g + t * (sat2.u_g - sat1.u_g);
-
-    // Check if v is in range
-    if (v < v_f_t || v > v_g_t) {
-      return { valid: false, diff: 0, x_v: 0, x_u: 0, v_f_t, v_g_t, u_f_t, u_g_t };
-    }
-
-    const x_v = (v - v_f_t) / (v_g_t - v_f_t);
-    const x_u = (u - u_f_t) / (u_g_t - u_f_t);
-
-    return { valid: true, diff: x_v - x_u, x_v, x_u, v_f_t, v_g_t, u_f_t, u_g_t };
-  }
-
-  // Bisection to find t where x_v = x_u
-  let t_lo = 0, t_hi = 1;
-  let result_lo = qualityDiff(t_lo);
-  let result_hi = qualityDiff(t_hi);
-
-  // Handle case where endpoints aren't both valid
-  if (!result_lo.valid && !result_hi.valid) {
-    // Try middle
-    const result_mid = qualityDiff(0.5);
-    if (result_mid.valid) {
-      t_lo = 0.5;
-      t_hi = 0.5;
-      result_lo = result_mid;
-      result_hi = result_mid;
-    }
-  }
-
-  // Find valid starting points if needed
-  if (!result_lo.valid && result_hi.valid) {
-    for (let t = 0.1; t < 1; t += 0.1) {
-      const r = qualityDiff(t);
-      if (r.valid) {
-        t_lo = t;
-        result_lo = r;
-        break;
-      }
-    }
-  }
-  if (result_lo.valid && !result_hi.valid) {
-    for (let t = 0.9; t > 0; t -= 0.1) {
-      const r = qualityDiff(t);
-      if (r.valid) {
-        t_hi = t;
-        result_hi = r;
-        break;
-      }
-    }
-  }
-
-  // Now do bisection if we have valid endpoints
-  if (result_lo.valid && result_hi.valid) {
-    // Check for sign change or if already close enough
-    if (Math.abs(result_lo.diff) < 0.0001) {
-      const T = sat1.T + t_lo * (sat2.T - sat1.T);
-      const P = sat1.P + t_lo * (sat2.P - sat1.P);
-      return {
-        T, P,
-        quality: Math.max(0, Math.min(1, Math.min(result_lo.x_v, result_lo.x_u))),
-        x_v: result_lo.x_v,
-        x_u: result_lo.x_u,
-      };
-    }
-
-    if (Math.abs(result_hi.diff) < 0.0001) {
-      const T = sat1.T + t_hi * (sat2.T - sat1.T);
-      const P = sat1.P + t_hi * (sat2.P - sat1.P);
-      return {
-        T, P,
-        quality: Math.max(0, Math.min(1, Math.min(result_hi.x_v, result_hi.x_u))),
-        x_v: result_hi.x_v,
-        x_u: result_hi.x_u,
-      };
-    }
-
-    if (result_lo.diff * result_hi.diff < 0) {
-      // Sign change - bisect to find root
-      for (let iter = 0; iter < 30; iter++) {
-        const t_mid = (t_lo + t_hi) / 2;
-        const result_mid = qualityDiff(t_mid);
-
-        if (!result_mid.valid) {
-          // Shrink from the invalid side
-          if (!qualityDiff(t_lo + 0.01).valid) {
-            t_lo = t_mid;
-          } else {
-            t_hi = t_mid;
-          }
-          continue;
-        }
-
-        if (Math.abs(result_mid.diff) < 0.00001) {
-          // Converged with tighter tolerance!
-          const T = sat1.T + t_mid * (sat2.T - sat1.T);
-          const P = sat1.P + t_mid * (sat2.P - sat1.P);
-          return {
-            T, P,
-            quality: Math.max(0, Math.min(1, Math.min(result_mid.x_v, result_mid.x_u))),
-            x_v: result_mid.x_v,
-            x_u: result_mid.x_u,
-          };
-        }
-
-        if (result_mid.diff * result_lo.diff < 0) {
-          t_hi = t_mid;
-          result_hi = result_mid;
-        } else {
-          t_lo = t_mid;
-          result_lo = result_mid;
-        }
-      }
-
-      // Didn't converge tightly, use best available
-      const t_final = (t_lo + t_hi) / 2;
-      const result_final = qualityDiff(t_final);
-      if (result_final.valid) {
-        const T = sat1.T + t_final * (sat2.T - sat1.T);
-        const P = sat1.P + t_final * (sat2.P - sat1.P);
-        return {
-          T, P,
-          quality: Math.max(0, Math.min(1, Math.min(result_final.x_v, result_final.x_u))),
-          x_v: result_final.x_v,
-          x_u: result_final.x_u,
-        };
-      }
-    } else {
-      // No sign change - use the one with smaller |diff|
-      const best = Math.abs(result_lo.diff) < Math.abs(result_hi.diff) ? result_lo : result_hi;
-      const t_best = Math.abs(result_lo.diff) < Math.abs(result_hi.diff) ? t_lo : t_hi;
-      const T = sat1.T + t_best * (sat2.T - sat1.T);
-      const P = sat1.P + t_best * (sat2.P - sat1.P);
-      return {
-        T, P,
-        quality: Math.max(0, Math.min(1, Math.min(best.x_v, best.x_u))),
-        x_v: best.x_v,
-        x_u: best.x_u,
-      };
-    }
-  }
-
-  return null;
-}
-
-/**
- * Fallback for two-phase when bisection fails.
- * Uses nearest saturation pair.
- * Don't Do This.
- */
-function findTwoPhaseStateFallback(v: number, u: number): {
-  phase: 'liquid' | 'two-phase' | 'vapor';
-  P?: number;
-  T?: number;
-  quality?: number;
-} {
-  let bestMatch: { sat: SaturationPair; x_v: number } | null = null;
-  let bestScore = Infinity;
-
-  for (const sat of saturationPairs) {
-    if (v >= sat.v_f && v <= sat.v_g) {
-      const x_v = (v - sat.v_f) / (sat.v_g - sat.v_f);
-      const u_at_x = sat.u_f + x_v * (sat.u_g - sat.u_f);
-      const score = Math.abs(u - u_at_x);
-
-      if (score < bestScore) {
-        bestScore = score;
-        bestMatch = { sat, x_v };
-      }
-    }
-  }
-
-  if (bestMatch) {
-    const sat = bestMatch.sat;
-    const x_v = bestMatch.x_v;
+  // Helper function to calculate x_v and x_u at a given saturation state
+  // These can be negative or > 1 if we're outside the saturation bounds
+  function calcQualities(sat: SaturationPair): { x_v: number; x_u: number; diff: number } {
+    const x_v = (v - sat.v_f) / (sat.v_g - sat.v_f);
     const x_u = (u - sat.u_f) / (sat.u_g - sat.u_f);
-    const quality = Math.max(0, Math.min(1, Math.min(x_v, x_u)));
-
-    if (lastPhaseDetectionDebug) {
-      lastPhaseDetectionDebug.satPairChecked = {
-        P: sat.P, T: sat.T, v_f: sat.v_f, v_g: sat.v_g, u_f: sat.u_f, u_g: sat.u_g
-      };
-      lastPhaseDetectionDebug.x_v = x_v;
-      lastPhaseDetectionDebug.x_u = x_u;
-    }
-
-    return {
-      phase: 'two-phase',
-      P: sat.P,
-      T: sat.T,
-      quality,
-    };
+    return { x_v, x_u, diff: x_v - x_u };
   }
 
-  // Last resort: return as low-quality two-phase
-  return { phase: 'two-phase', quality: 0 };
+  // Binary search for the pressure where x_v = x_u
+  let lo = 0;
+  let hi = n - 1;
+
+  // Check endpoints
+  let loQual = calcQualities(sortedPairs[lo]);
+  let hiQual = calcQualities(sortedPairs[hi]);
+
+  // Debug output for high-v state
+  if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
+    console.log(`[Binary Search] Starting binary search for v=${(v*1e6).toFixed(1)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
+    console.log(`  Low (P=${(sortedPairs[lo].P/1e5).toFixed(2)}bar): x_v=${loQual.x_v.toFixed(4)}, x_u=${loQual.x_u.toFixed(4)}, diff=${loQual.diff.toFixed(4)}`);
+    console.log(`  High (P=${(sortedPairs[hi].P/1e5).toFixed(2)}bar): x_v=${hiQual.x_v.toFixed(4)}, x_u=${hiQual.x_u.toFixed(4)}, diff=${hiQual.diff.toFixed(4)}`);
+  }
+
+  // Check if there's a sign change
+  if (loQual.diff * hiQual.diff > 0) {
+    // No sign change - x_v and x_u don't cross
+    // This means the state is not truly two-phase
+    return null;
+  }
+
+  // Binary search
+  let iterations = 0;
+  const maxIterations = 50;
+
+  while (hi - lo > 1 && iterations < maxIterations) {
+    iterations++;
+    const mid = Math.floor((lo + hi) / 2);
+    const midQual = calcQualities(sortedPairs[mid]);
+
+    if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
+      console.log(`  Iter ${iterations}: mid=${mid} (P=${(sortedPairs[mid].P/1e5).toFixed(2)}bar): x_v=${midQual.x_v.toFixed(4)}, x_u=${midQual.x_u.toFixed(4)}, diff=${midQual.diff.toFixed(4)}`);
+    }
+
+    // Check if we're close enough
+    if (Math.abs(midQual.diff) < 0.0001) {
+      // Found it! x_v and x_u are essentially equal
+      const quality = Math.max(0, Math.min(1, midQual.x_v));
+      return {
+        T: sortedPairs[mid].T,
+        P: sortedPairs[mid].P,
+        quality,
+        x_v: midQual.x_v,
+        x_u: midQual.x_u
+      };
+    }
+
+    // Decide which half to search
+    if (loQual.diff * midQual.diff < 0) {
+      // Sign change is in lower half
+      hi = mid;
+      hiQual = midQual;
+    } else {
+      // Sign change is in upper half
+      lo = mid;
+      loQual = midQual;
+    }
+  }
+
+  // We've narrowed it down to two adjacent points
+  // Now interpolate between them to find exact crossing
+  const sat1 = sortedPairs[lo];
+  const sat2 = sortedPairs[hi];
+
+  // Use secant method for final interpolation
+  const loQualFinal = calcQualities(sat1);
+  const hiQualFinal = calcQualities(sat2);
+
+  // Linear interpolation to find where diff = 0
+  // diff1 + t * (diff2 - diff1) = 0
+  // t = -diff1 / (diff2 - diff1)
+  const t = -loQualFinal.diff / (hiQualFinal.diff - loQualFinal.diff);
+
+  // Interpolate saturation properties at t
+  const P_t = sat1.P + t * (sat2.P - sat1.P);
+  const T_t = sat1.T + t * (sat2.T - sat1.T);
+  const v_f_t = sat1.v_f + t * (sat2.v_f - sat1.v_f);
+  const v_g_t = sat1.v_g + t * (sat2.v_g - sat1.v_g);
+  const u_f_t = sat1.u_f + t * (sat2.u_f - sat1.u_f);
+  const u_g_t = sat1.u_g + t * (sat2.u_g - sat1.u_g);
+
+  // Calculate final qualities
+  const x_v_final = (v - v_f_t) / (v_g_t - v_f_t);
+  const x_u_final = (u - u_f_t) / (u_g_t - u_f_t);
+
+  // Use minimum of x_v and x_u as the quality
+  const quality = Math.min(x_v_final, x_u_final);
+
+  // Clamp quality to [0, 1]
+  const qualityClamped = Math.max(0, Math.min(1, quality));
+
+  // Debug output for high-v state
+  if (v > 0.04 && Math.abs(u/1e3 - 2600) < 10) {
+    console.log(`[Binary Search] Final result:`);
+    console.log(`  Interpolation t=${t.toFixed(4)} between indices ${lo} and ${hi}`);
+    console.log(`  P=${(P_t/1e5).toFixed(2)}bar, T=${(T_t-273.15).toFixed(1)}°C`);
+    console.log(`  x_v=${x_v_final.toFixed(6)}, x_u=${x_u_final.toFixed(6)}`);
+    console.log(`  Final quality=${qualityClamped.toFixed(6)}`);
+  }
+
+  // Check for convergence issues
+  if (Math.abs(x_v_final - x_u_final) > 0.001) {
+    console.error(`[WaterProperties] Poor convergence in findTwoPhaseState:`);
+    console.error(`  v=${(v*1e6).toFixed(2)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg`);
+    console.error(`  P=${(P_t/1e5).toFixed(2)} bar, T=${(T_t-273.15).toFixed(1)}°C`);
+    console.error(`  x_v=${x_v_final.toFixed(6)}, x_u=${x_u_final.toFixed(6)}`);
+    console.error(`  Difference: ${Math.abs(x_v_final - x_u_final).toFixed(6)}`);
+  }
+
+  return {
+    T: T_t,
+    P: P_t,
+    quality: qualityClamped,
+    x_v: x_v_final,
+    x_u: x_u_final
+  };
 }
+
 
 /**
  * Get bisection convergence statistics for debugging.
