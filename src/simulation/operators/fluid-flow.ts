@@ -257,7 +257,7 @@ export class FlowOperator implements PhysicsOperator {
     const dP_pressure = P_from - P_to;
 
     // Gravity head (positive = downward flow is favored)
-    const rho = this.getFluidDensity(fromNode.fluid);
+    const rho = this.getNodeDensity(fromNode);
     const g = 9.81; // m/s²
     const dP_gravity = rho * g * conn.elevation;
 
@@ -268,7 +268,9 @@ export class FlowOperator implements PhysicsOperator {
       // Pump provides forward head (from -> to) based on its current effective speed.
       // The effectiveSpeed is updated by updatePumpSpeeds() each timestep, accounting
       // for ramp-up and coast-down dynamics.
-      dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
+      // For pumps, we should use the liquid density if available (pumps draw from bottom)
+      const pumpRho = this.getNodeDensity(fromNode, 'liquid');
+      dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
     }
 
     // Check for valve in this connection
@@ -313,11 +315,13 @@ export class FlowOperator implements PhysicsOperator {
       console.log(`    dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
       console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)}bar (total)`);
       if (pump) {
+        const pumpRho = this.getNodeDensity(fromNode, 'liquid');
         console.log(`  Pump details:`);
         console.log(`    effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}`);
         console.log(`    ratedHead=${pump.ratedHead}m`);
-        console.log(`    density used=${rho.toFixed(0)}kg/m³`);
-        console.log(`    => dP_pump = ${pump.effectiveSpeed.toFixed(3)} * ${pump.ratedHead} * ${rho.toFixed(0)} * 9.81 = ${(dP_pump/1e5).toFixed(3)}bar`);
+        console.log(`    actual node density=${rho.toFixed(0)}kg/m³`);
+        console.log(`    liquid density used for pump=${pumpRho.toFixed(0)}kg/m³`);
+        console.log(`    => dP_pump = ${pump.effectiveSpeed.toFixed(3)} * ${pump.ratedHead} * ${pumpRho.toFixed(0)} * 9.81 = ${(dP_pump/1e5).toFixed(3)}bar`);
       }
       if (checkValve) {
         console.log(`  Check valve: cracking pressure=${(checkValve.crackingPressure/1e5).toFixed(3)}bar`);
@@ -380,23 +384,47 @@ export class FlowOperator implements PhysicsOperator {
   }
 
   /**
-   * Get fluid density (simplified)
+   * Get node density - uses actual mass/volume ratio.
+   *
+   * @param node The flow node
+   * @param phasePreference For two-phase nodes:
+   *   - 'actual' (default): returns the actual mixture density (mass/volume)
+   *   - 'liquid': returns approximate saturated liquid density
+   *   - 'vapor': returns approximate saturated vapor density
    */
-  private getFluidDensity(fluid: { phase: string; pressure: number; temperature: number }): number {
-    if (fluid.phase === 'liquid') {
-      // Water density decreases with temperature
-      // ρ ≈ 1000 - 0.5 * (T - 293) for rough approximation
-      return Math.max(700, 1000 - 0.5 * (fluid.temperature - 293));
-    } else if (fluid.phase === 'vapor') {
-      // Ideal gas approximation: ρ = P * M / (R * T)
-      // For steam: M ≈ 18 g/mol
-      const R = 8.314; // J/mol-K
-      const M = 0.018; // kg/mol
-      return fluid.pressure * M / (R * fluid.temperature);
-    } else {
-      // Two-phase - use liquid density (conservative)
-      return Math.max(700, 1000 - 0.5 * (fluid.temperature - 293));
+  private getNodeDensity(node: FlowNode, phasePreference: 'actual' | 'liquid' | 'vapor' = 'actual'): number {
+    // Always have the actual density from mass/volume
+    const actualDensity = node.fluid.mass / node.volume;
+
+    // For single-phase or when actual density is requested, return it directly
+    if (node.fluid.phase !== 'two-phase' || phasePreference === 'actual') {
+      return actualDensity;
     }
+
+    // For two-phase with specific phase preference
+    const T = node.fluid.temperature;
+
+    if (phasePreference === 'liquid') {
+      // Approximate saturated liquid density
+      // At saturation, liquid density decreases with temperature
+      // From ~1000 kg/m³ at 20°C to ~600 kg/m³ near critical point (374°C)
+      const T_C = T - 273.15; // Convert to Celsius
+      if (T_C < 100) {
+        return 1000 - 0.08 * T_C; // Slight decrease at low temps
+      } else if (T_C < 300) {
+        return 958 - 1.3 * (T_C - 100); // Faster decrease at medium temps
+      } else {
+        return 700 - 2.5 * (T_C - 300); // Rapid decrease approaching critical
+      }
+    } else if (phasePreference === 'vapor') {
+      // Use ideal gas approximation for saturated vapor
+      const P = node.fluid.pressure;
+      const R = 8.314; // J/mol-K
+      const M = 0.018; // kg/mol for water
+      return P * M / (R * T);
+    }
+
+    return actualDensity; // Fallback
   }
 
   /**
