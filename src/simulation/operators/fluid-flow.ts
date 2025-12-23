@@ -71,7 +71,7 @@ export class FlowOperator implements PhysicsOperator {
       if (!fromNode || !toNode) continue;
 
       // Compute target flow rate from momentum balance
-      let targetFlow = this.computeTargetFlow(conn, fromNode, toNode, newState);
+      let targetFlow = this.computeTargetFlow(conn, fromNode, toNode, newState, dt);
 
       // SAFEGUARD: Clamp target flow to reasonable range
       const unclamped = targetFlow;
@@ -241,7 +241,8 @@ export class FlowOperator implements PhysicsOperator {
     conn: FlowConnection,
     fromNode: FlowNode,
     toNode: FlowNode,
-    state: SimulationState
+    state: SimulationState,
+    dt: number
   ): number {
     // Use stored pressures from FluidStateUpdateOperator (which ran at end of last step).
     // These use the hybrid pressure model (P_base + feedback) which is physically correct.
