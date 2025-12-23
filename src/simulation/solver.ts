@@ -193,6 +193,9 @@ export class Solver {
   private cachedMaxStableDt: number = Infinity;
   private maxStableDtValid: boolean = false;
 
+  // Rate limiting for diagnostic messages
+  private lastDiagnosticTime: number = 0;
+
   constructor(config: Partial<SolverConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
     this.adaptiveDt = this.config.targetDt;
@@ -368,6 +371,31 @@ export class Solver {
           this.adaptiveDt = stepDt;
           this.consecutiveSuccesses = 0;
 
+          // Log when we shrink to very small timesteps
+          if (stepDt < 0.00002) { // < 0.02ms
+            console.warn(`[Solver] Step REJECTED - shrinking timestep to ${(stepDt * 1000).toFixed(3)}ms`);
+            console.warn(`  Pressure change: ${(pressureChange * 100).toFixed(1)}% (limit: ${(this.config.pressureChangeMax * 100).toFixed(0)}%)`);
+
+            // Show which node had the pressure problem
+            const pressureInfo = (this as any).lastWorstPressureNode;
+            if (pressureInfo && pressureInfo.nodeId) {
+              const preBar = pressureInfo.prePressure / 1e5;
+              const postBar = pressureInfo.postPressure / 1e5;
+              console.warn(`    Node: ${pressureInfo.nodeId} - ${preBar.toFixed(1)}bar → ${postBar.toFixed(1)}bar`);
+            }
+
+            console.warn(`  Flow change: ${flowChange.toFixed(0)} kg/s (limit: ${this.config.flowChangeMax})`);
+
+            // Show which connection had the flow problem
+            const flowInfo = (this as any).lastWorstFlowConn;
+            if (flowInfo && flowInfo.connId) {
+              console.warn(`    Connection: ${flowInfo.connId} - ${flowInfo.preFlow.toFixed(0)} → ${flowInfo.postFlow.toFixed(0)} kg/s`);
+            }
+
+            console.warn(`  Mass change: ${(massChange * 100).toFixed(1)}% (limit: ${(this.config.massChangeMax * 100).toFixed(0)}%)`);
+            console.warn(`  Worst overshoot: ${worstOvershoot.toFixed(2)}x limit`);
+          }
+
           // Invalidate maxStableDt cache - state has changed significantly
           this.maxStableDtValid = false;
 
@@ -482,6 +510,9 @@ export class Solver {
     postState: SimulationState
   ): number {
     let maxChange = 0;
+    let worstNodeId = '';
+    let worstPrePressure = 0;
+    let worstPostPressure = 0;
 
     for (const [id, node] of postState.flowNodes) {
       const prePressure = prePressures.get(id);
@@ -492,8 +523,19 @@ export class Solver {
 
       if (relativeChange > maxChange) {
         maxChange = relativeChange;
+        worstNodeId = id;
+        worstPrePressure = prePressure;
+        worstPostPressure = postPressure;
       }
     }
+
+    // Store for diagnostic use
+    (this as any).lastWorstPressureNode = {
+      nodeId: worstNodeId,
+      prePressure: worstPrePressure,
+      postPressure: worstPostPressure,
+      change: maxChange
+    };
 
     return maxChange;
   }
@@ -524,6 +566,9 @@ export class Solver {
     postState: SimulationState
   ): number {
     let maxChange = 0;
+    let worstConnId = '';
+    let worstPreFlow = 0;
+    let worstPostFlow = 0;
 
     for (const conn of postState.flowConnections) {
       const pre = preFlows.get(conn.id);
@@ -545,8 +590,19 @@ export class Solver {
 
       if (effectiveChange > maxChange) {
         maxChange = effectiveChange;
+        worstConnId = conn.id;
+        worstPreFlow = pre.actual;
+        worstPostFlow = postActual;
       }
     }
+
+    // Store for diagnostic use
+    (this as any).lastWorstFlowConn = {
+      connId: worstConnId,
+      preFlow: worstPreFlow,
+      postFlow: worstPostFlow,
+      change: maxChange
+    };
 
     return maxChange;
   }
@@ -651,15 +707,163 @@ export class Solver {
    */
   private computeMaxStableDt(state: SimulationState): number {
     let minDt = Infinity;
+    let limitingOperator = '';
 
     for (const op of this.operators) {
       const opMaxDt = op.getMaxStableDt(state);
       if (opMaxDt < minDt) {
         minDt = opMaxDt;
+        limitingOperator = op.name;
       }
     }
 
+    // Diagnostics for very small timesteps (rate-limited to once per second)
+    if (minDt < 0.00002) { // < 0.02 ms
+      const now = Date.now();
+      if (now - this.lastDiagnosticTime > 1000) { // Only show once per second
+        this.lastDiagnosticTime = now;
+
+        console.warn(`\n${'='.repeat(50)}`);
+        console.warn(`SMALL TIMESTEP DETECTED!`);
+        console.warn(`${'='.repeat(50)}`);
+        console.warn(`Timestep: ${(minDt * 1000).toFixed(3)}ms`);
+        console.warn(`Limited by: ${limitingOperator}`);
+        console.warn(`${'='.repeat(50)}`);
+
+        // Get details from the limiting operator
+        for (const op of this.operators) {
+          if (op.name === limitingOperator) {
+            // Add operator-specific diagnostics
+            if (op.name === 'FluidFlow') {
+              this.diagnoseFlowTimestep(state, minDt);
+            } else if (op.name === 'Neutronics') {
+              this.diagnoseNeutronicsTimestep(state, minDt);
+            } else if (op.name === 'Conduction') {
+              this.diagnoseConductionTimestep(state, minDt);
+            }
+            break;
+          }
+        }
+      } // Close rate-limiting if
+    }
+
     return minDt === Infinity ? this.config.maxDt : minDt;
+  }
+
+  /**
+   * Diagnose what's causing small timesteps in flow operator
+   */
+  private diagnoseFlowTimestep(state: SimulationState, minDt: number): void {
+    // Find the node with highest flow rate relative to mass
+    let worstNode = '';
+    let worstRatio = 0;
+    let worstFlow = 0;
+
+    for (const [nodeId, node] of state.flowNodes) {
+      let totalInflow = 0;
+      let totalOutflow = 0;
+
+      for (const conn of state.flowConnections) {
+        if (conn.fromNodeId === nodeId) {
+          totalOutflow += Math.max(0, conn.massFlowRate);
+        }
+        if (conn.toNodeId === nodeId) {
+          totalInflow += Math.max(0, conn.massFlowRate);
+        }
+        // Handle reverse flows
+        if (conn.fromNodeId === nodeId && conn.massFlowRate < 0) {
+          totalInflow += Math.abs(conn.massFlowRate);
+        }
+        if (conn.toNodeId === nodeId && conn.massFlowRate < 0) {
+          totalOutflow += Math.abs(conn.massFlowRate);
+        }
+      }
+
+      const totalFlow = Math.max(totalInflow, totalOutflow);
+      const ratio = totalFlow / node.fluid.mass;
+
+      if (ratio > worstRatio) {
+        worstRatio = ratio;
+        worstNode = nodeId;
+        worstFlow = totalFlow;
+      }
+    }
+
+    const worstNodeData = state.flowNodes.get(worstNode);
+    if (worstNodeData) {
+      console.log(`  FluidFlow limited by: ${worstNode}`);
+      console.log(`    Mass: ${worstNodeData.fluid.mass.toFixed(1)}kg`);
+      console.log(`    Flow: ${worstFlow.toFixed(1)}kg/s`);
+      console.log(`    Residence time: ${(worstNodeData.fluid.mass / worstFlow).toFixed(4)}s`);
+      console.log(`    Required dt: ${minDt.toFixed(6)}s`);
+    }
+  }
+
+  /**
+   * Diagnose what's causing small timesteps in neutronics
+   */
+  private diagnoseNeutronicsTimestep(state: SimulationState, minDt: number): void {
+    const n = state.neutronics;
+    const rho = n.reactivity;
+    const beta = n.delayedNeutronFraction;
+    const Lambda = n.promptNeutronLifetime;
+
+    console.log(`  Neutronics limited by reactivity:`);
+    console.log(`    Reactivity: ${(rho * 100000).toFixed(2)} pcm`);
+    console.log(`    Beta: ${beta.toFixed(5)}`);
+    console.log(`    Lambda: ${Lambda.toFixed(6)}s`);
+    console.log(`    |ρ - β|: ${Math.abs(rho - beta).toFixed(6)}`);
+
+    if (Math.abs(rho - beta) > 0.0001) {
+      const promptPeriod = Lambda / Math.abs(rho - beta);
+      console.log(`    Prompt period: ${promptPeriod.toFixed(6)}s`);
+    }
+    console.log(`    Required dt: ${minDt.toFixed(6)}s`);
+  }
+
+  /**
+   * Diagnose what's causing small timesteps in heat conduction
+   */
+  private diagnoseConductionTimestep(state: SimulationState, minDt: number): void {
+    // Find node with highest conductance to thermal capacitance ratio
+    const conductanceMap = new Map<string, number>();
+
+    for (const conn of state.thermalConnections) {
+      conductanceMap.set(
+        conn.fromNodeId,
+        (conductanceMap.get(conn.fromNodeId) ?? 0) + conn.conductance
+      );
+      conductanceMap.set(
+        conn.toNodeId,
+        (conductanceMap.get(conn.toNodeId) ?? 0) + conn.conductance
+      );
+    }
+
+    let worstNode = '';
+    let worstRatio = 0;
+
+    for (const [nodeId, totalCond] of conductanceMap) {
+      const node = state.thermalNodes.get(nodeId);
+      if (node && totalCond > 0) {
+        const thermalCapacity = node.mass * node.specificHeat;
+        const ratio = totalCond / thermalCapacity;
+
+        if (ratio > worstRatio) {
+          worstRatio = ratio;
+          worstNode = nodeId;
+        }
+      }
+    }
+
+    const node = state.thermalNodes.get(worstNode);
+    if (node) {
+      console.log(`  Conduction limited by: ${worstNode}`);
+      console.log(`    Temperature: ${(node.temperature - 273.15).toFixed(1)}°C`);
+      console.log(`    Total conductance: ${conductanceMap.get(worstNode)?.toFixed(0)} W/K`);
+      console.log(`    Thermal capacity: ${(node.mass * node.specificHeat).toFixed(0)} J/K`);
+      console.log(`    Time constant: ${(1 / worstRatio).toFixed(6)}s`);
+      console.log(`    Required dt: ${minDt.toFixed(6)}s`);
+    }
   }
 
   /**

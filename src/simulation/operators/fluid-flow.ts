@@ -105,12 +105,12 @@ export class FlowOperator implements PhysicsOperator {
       targetFlow = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, targetFlow));
 
       // Debug: log when clamping happens (indicates pressure imbalance)
-      if (Math.abs(unclamped) > this.maxFlowRate) {
-        const P_from = fromNode.fluid.pressure / 1e5;
-        const P_to = toNode.fluid.pressure / 1e5;
-        console.warn(`[FlowOp] ${conn.id}: CLAMPED targetFlow from ${unclamped.toFixed(0)} to ${targetFlow.toFixed(0)} kg/s`);
-        console.warn(`  Pressures: ${conn.fromNodeId}=${P_from.toFixed(2)}bar, ${conn.toNodeId}=${P_to.toFixed(2)}bar, dP=${(P_from-P_to).toFixed(2)}bar`);
-      }
+      // if (Math.abs(unclamped) > this.maxFlowRate) {
+      //   const P_from = fromNode.fluid.pressure / 1e5;
+      //   const P_to = toNode.fluid.pressure / 1e5;
+      //   console.warn(`[FlowOp] ${conn.id}: CLAMPED targetFlow from ${unclamped.toFixed(0)} to ${targetFlow.toFixed(0)} kg/s`);
+      //   console.warn(`  Pressures: ${conn.fromNodeId}=${P_from.toFixed(2)}bar, ${conn.toNodeId}=${P_to.toFixed(2)}bar, dP=${(P_from-P_to).toFixed(2)}bar`);
+      // }
 
       // SAFEGUARD: Check for NaN
       if (!isFinite(targetFlow)) {
@@ -332,12 +332,15 @@ export class FlowOperator implements PhysicsOperator {
       // The effectiveSpeed is updated by updatePumpSpeeds() each timestep, accounting
       // for ramp-up and coast-down dynamics.
 
+      // Use upstream node density (fromNode is upstream in computeTargetFlow)
+      const pumpSuctionNode = fromNode;
+
       // For two-phase nodes, pumps draw from the bottom (liquid) if available
-      if (fromNode.fluid.phase === 'two-phase' && fromNode.fluid.quality !== undefined) {
+      if (pumpSuctionNode.fluid.phase === 'two-phase' && pumpSuctionNode.fluid.quality !== undefined) {
         // Check if there's enough liquid to draw from
         // Liquid fraction = 1 - quality
-        const liquidFraction = 1 - fromNode.fluid.quality;
-        const liquidMass = fromNode.fluid.mass * liquidFraction;
+        const liquidFraction = 1 - pumpSuctionNode.fluid.quality;
+        const liquidMass = pumpSuctionNode.fluid.mass * liquidFraction;
 
         // Estimate the mass flow this pump would draw this timestep
         // Use rated flow as an estimate (actual flow will be calculated later)
@@ -346,14 +349,19 @@ export class FlowOperator implements PhysicsOperator {
 
         // Only use liquid density if there's enough liquid
         if (liquidMass > massNeeded * 2) {  // Safety factor of 2
-          pumpRho = this.getNodeDensity(fromNode, 'liquid');
+          pumpRho = this.getNodeDensity(pumpSuctionNode, 'liquid');
         } else {
           // Not enough liquid - pump is drawing mixture or vapor
-          console.log(`[FlowOp] Warning: Pump ${pump.id} has insufficient liquid (${liquidMass.toFixed(0)}kg available, ${massNeeded.toFixed(0)}kg needed)`);
-          pumpRho = rho; // Use actual mixture density
+          // console.log(`[FlowOp] Warning: Pump ${pump.id} has insufficient liquid (${liquidMass.toFixed(0)}kg available, ${massNeeded.toFixed(0)}kg needed)`);
+          pumpRho = this.getNodeDensity(pumpSuctionNode, 'actual'); // Use actual mixture density
         }
+      } else {
+        // Use actual density from suction node
+        pumpRho = this.getNodeDensity(pumpSuctionNode, 'actual');
       }
 
+      // Pump head is always positive in the forward direction (from -> to)
+      // If flow reverses, the pump still tries to push forward, opposing the reverse flow
       dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
     }
 
@@ -373,6 +381,18 @@ export class FlowOperator implements PhysicsOperator {
     // Total driving pressure
     const dP_driving = dP_pressure + dP_gravity + dP_pump;
 
+    // Debug FW->SG connection
+    if (conn.id === "flow-feedwater-sg") {
+      console.log(`[FlowOp] ${conn.id} pressure analysis:`);
+      console.log(`  P_from (FW): ${(P_from/1e5).toFixed(2)} bar`);
+      console.log(`  P_to (SG): ${(P_to/1e5).toFixed(2)} bar`);
+      console.log(`  dP_pressure: ${(dP_pressure/1e5).toFixed(2)} bar`);
+      console.log(`  dP_gravity: ${(dP_gravity/1e5).toFixed(2)} bar`);
+      console.log(`  dP_pump: ${(dP_pump/1e5).toFixed(2)} bar`);
+      console.log(`  dP_driving total: ${(dP_driving/1e5).toFixed(2)} bar`);
+      console.log(`  Density used: ${rho.toFixed(0)} kg/m³`);
+    }
+
     // Check for check valve in this connection
     // Check valves prevent reverse flow and require minimum forward pressure to open
     const checkValve = this.getCheckValveForConnection(conn.id, state);
@@ -387,10 +407,10 @@ export class FlowOperator implements PhysicsOperator {
     // Debug: log components for key connections
     // Disable for now - even at 0.01% sampling it's too expensive
     const shouldLog = false; // Math.random() < 0.0001; // 0.01% sampling
-    if (shouldLog && (conn.id === "flow-condenser-feedwater" ||
-        conn.id === "flow-feedwater-sg")) {
-      console.log(`[FlowOp] ${conn.id}: P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase}`);
-    }
+    // if (shouldLog && (conn.id === "flow-condenser-feedwater" ||
+    //     conn.id === "flow-feedwater-sg")) {
+    //   console.log(`[FlowOp] ${conn.id}: P_from=${(P_from/1e5).toFixed(2)}bar, P_to=${(P_to/1e5).toFixed(2)}bar, ρ=${rho.toFixed(0)}kg/m³, phase=${flowPhase}`);
+    // }
 
     // Compute flow from pressure drop
     // ΔP = K * (1/2) * ρ * v²  =>  v = sqrt(2 * ΔP / (ρ * K))
@@ -412,9 +432,9 @@ export class FlowOperator implements PhysicsOperator {
     const massFlow = sign * rho * A * v;
 
     // Debug: log calculated flow for feedwater-sg
-    if (conn.id === "flow-feedwater-sg") {
-      console.log(`  calculated flow=${massFlow.toFixed(1)} kg/s (v=${(sign*v).toFixed(2)} m/s, K=${K.toFixed(3)})`);
-    }
+    // if (conn.id === "flow-feedwater-sg") {
+    //   console.log(`  calculated flow=${massFlow.toFixed(1)} kg/s (v=${(sign*v).toFixed(2)} m/s, K=${K.toFixed(3)})`);
+    // }
 
     return massFlow;
   }

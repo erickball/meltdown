@@ -34,9 +34,9 @@ declare global {
 // Initialize global debug state if not already present
 if (!globalThis.__fluidStateDebugState) {
   globalThis.__fluidStateDebugState = {
-    enabled: false,
+    enabled: false,  // Disabled by default
     count: 0,
-    MAX: 500
+    MAX: 5  // Reduce max to avoid spam if accidentally enabled
   };
 }
 
@@ -422,10 +422,10 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
       // Always log this basic info when debug is enabled (ignore counter for this)
       if (FluidStateDebugState.count < FluidStateDebugState.MAX) {
         console.log(`[FluidStateDebug #${FluidStateDebugState.count}] Two-phase nodes: ${twoPhaseNodes.join(', ') || 'NONE'}`);
-        for (const id of twoPhaseNodes) {
-          const { waterState } = nodeStates.get(id)!;
-          console.log(`  ${id}: P_sat=${(waterState.pressure/1e5).toFixed(2)}bar, T=${(waterState.temperature-273.15).toFixed(1)}°C, x=${(waterState.quality*100).toFixed(1)}%`);
-        }
+        // for (const id of twoPhaseNodes) {
+        //   const { waterState } = nodeStates.get(id)!;
+        //   console.log(`  ${id}: P_sat=${(waterState.pressure/1e5).toFixed(2)}bar, T=${(waterState.temperature-273.15).toFixed(1)}°C, x=${(waterState.quality*100).toFixed(1)}%`);
+        // }
       } else if (FluidStateDebugState.count === FluidStateDebugState.MAX) {
         console.log(`[FluidStateDebug] Reached max debug count (${FluidStateDebugState.MAX}), suppressing further output`);
       }
@@ -526,22 +526,22 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
             const neighborPressure = pressure - hydrostaticAdj + pumpAdj;
 
             // DEBUG: Log BFS propagation
-            // Always log feedwater to debug flow reversal issue
-            if (neighborId === 'feedwater' || (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX)) {
-              const pumpStr = pumpAdj !== 0 ? `, pump=${(pumpAdj/1e5).toFixed(2)}bar` : '';
-              console.log(`[FluidStateDebug] BFS: ${nodeId} -> ${neighborId}: elev=${elevationDiff.toFixed(1)}m, ρ=${rho.toFixed(0)}, hydro=${(hydrostaticAdj/1e5).toFixed(3)}bar${pumpStr}, P_base=${(neighborPressure/1e5).toFixed(2)}bar`);
-              // Log pump details if this connection has a pump and goes to feedwater
-              if (connInfo && pumpAdj !== 0 && neighborId === 'feedwater') {
-                const pump = pumpsByConnection.get(connInfo.conn.id);
-                if (pump) {
-                  const flowIsForward = connInfo.conn.massFlowRate >= 0;
-                  const pumpUpstreamId = flowIsForward ? connInfo.conn.fromNodeId : connInfo.conn.toNodeId;
-                  const pumpUpstreamNode = newState.flowNodes.get(pumpUpstreamId);
-                  const pumpRho = pumpUpstreamNode ? pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume : rho;
-                  console.log(`  pump details: effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}, flowDir=${flowIsForward ? 'forward' : 'reverse'}, pumpRho=${pumpRho.toFixed(0)}`);
-                }
-              }
-            }
+            // Disabled to reduce console spam - uncomment only when debugging feedwater issues
+            // if (neighborId === 'feedwater' || (FluidStateDebugState.enabled && FluidStateDebugState.count < FluidStateDebugState.MAX)) {
+            //   const pumpStr = pumpAdj !== 0 ? `, pump=${(pumpAdj/1e5).toFixed(2)}bar` : '';
+            //   console.log(`[FluidStateDebug] BFS: ${nodeId} -> ${neighborId}: elev=${elevationDiff.toFixed(1)}m, ρ=${rho.toFixed(0)}, hydro=${(hydrostaticAdj/1e5).toFixed(3)}bar${pumpStr}, P_base=${(neighborPressure/1e5).toFixed(2)}bar`);
+            //   // Log pump details if this connection has a pump and goes to feedwater
+            //   if (connInfo && pumpAdj !== 0 && neighborId === 'feedwater') {
+            //     const pump = pumpsByConnection.get(connInfo.conn.id);
+            //     if (pump) {
+            //       const flowIsForward = connInfo.conn.massFlowRate >= 0;
+            //       const pumpUpstreamId = flowIsForward ? connInfo.conn.fromNodeId : connInfo.conn.toNodeId;
+            //       const pumpUpstreamNode = newState.flowNodes.get(pumpUpstreamId);
+            //       const pumpRho = pumpUpstreamNode ? pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume : rho;
+            //       console.log(`  pump details: effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}, flowDir=${flowIsForward ? 'forward' : 'reverse'}, pumpRho=${pumpRho.toFixed(0)}`);
+            //     }
+            //   }
+            // }
 
             queue.push({ nodeId: neighborId, pressure: neighborPressure, path: [...path, neighborId] });
           }
@@ -557,11 +557,11 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
         const source = pressureSource.get(nodeId) || 'unknown';
         console.log(`  ${nodeId}: P_base=${(P_base/1e5).toFixed(2)}bar via ${source}`);
       }
-    } else if (liquidPressures.has('feedwater')) {
-      // Even if debug is disabled, always log feedwater P_base
-      const P_base = liquidPressures.get('feedwater')!;
-      const source = pressureSource.get('feedwater') || 'unknown';
-      console.log(`[FluidStateDebug] feedwater: P_base=${(P_base/1e5).toFixed(2)}bar via ${source}`);
+    // } else if (liquidPressures.has('feedwater')) {
+    //   // Even if debug is disabled, always log feedwater P_base
+    //   const P_base = liquidPressures.get('feedwater')!;
+    //   const source = pressureSource.get('feedwater') || 'unknown';
+    //   console.log(`[FluidStateDebug] feedwater: P_base=${(P_base/1e5).toFixed(2)}bar via ${source}`);
     }
 
     // Second pass: apply states with proper pressure handling

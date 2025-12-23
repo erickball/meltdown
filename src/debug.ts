@@ -18,6 +18,9 @@ import {
   getTurbineCondenserState,
 } from './simulation';
 
+// Store previous pressures to show transitions
+let previousPressures: Map<string, number> = new Map();
+
 /**
  * Format a number with appropriate precision and color coding
  */
@@ -125,9 +128,24 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       const massClass = !isFinite(massKg) || massKg < 1 ? 'debug-danger' :
                        massKg < 100 ? 'debug-warning' : 'debug-value';
 
+      // Get previous pressure for this node
+      const prevPressure = previousPressures.get(id);
+      const showTransition = prevPressure !== undefined && Math.abs(prevPressure - node.fluid.pressure) > 1000; // Show if change > 0.01 bar
+
       html += `<b>${id}</b>: `;
       html += `<span class="${tempClass}">${tempC.toFixed(0)}C</span>, `;
-      html += `${pBar.toFixed(2)}bar, `;
+
+      // Show pressure transition if significant change
+      if (showTransition) {
+        const prevPBar = prevPressure / 1e5;
+        const changeBar = (node.fluid.pressure - prevPressure) / 1e5;
+        const changeClass = Math.abs(changeBar) > 5 ? 'debug-danger' :
+                           Math.abs(changeBar) > 2 ? 'debug-warning' : 'debug-value';
+        html += `${prevPBar.toFixed(2)}→<span class="${changeClass}">${pBar.toFixed(2)}bar</span>, `;
+      } else {
+        html += `${pBar.toFixed(2)}bar, `;
+      }
+
       html += `<span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
       html += `${node.fluid.phase}`;
       if (node.fluid.phase === 'two-phase') {
@@ -286,6 +304,12 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
     }
 
     flowDiv.innerHTML = html;
+
+    // Store current pressures for next update to show transitions
+    previousPressures.clear();
+    for (const [id, node] of state.flowNodes) {
+      previousPressures.set(id, node.fluid.pressure);
+    }
   }
 
   // Operator timing
