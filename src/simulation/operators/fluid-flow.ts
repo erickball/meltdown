@@ -264,12 +264,35 @@ export class FlowOperator implements PhysicsOperator {
     // Check for pump in this connection
     const pump = this.getPumpForConnection(conn.id, state);
     let dP_pump = 0;
+    let pumpRho = rho; // Default to actual density
+
     if (pump && pump.effectiveSpeed > 0) {
       // Pump provides forward head (from -> to) based on its current effective speed.
       // The effectiveSpeed is updated by updatePumpSpeeds() each timestep, accounting
       // for ramp-up and coast-down dynamics.
-      // For pumps, we should use the liquid density if available (pumps draw from bottom)
-      const pumpRho = this.getNodeDensity(fromNode, 'liquid');
+
+      // For two-phase nodes, pumps draw from the bottom (liquid) if available
+      if (fromNode.fluid.phase === 'two-phase' && fromNode.fluid.quality !== undefined) {
+        // Check if there's enough liquid to draw from
+        // Liquid fraction = 1 - quality
+        const liquidFraction = 1 - fromNode.fluid.quality;
+        const liquidMass = fromNode.fluid.mass * liquidFraction;
+
+        // Estimate the mass flow this pump would draw this timestep
+        // Use rated flow as an estimate (actual flow will be calculated later)
+        const expectedFlow = pump.ratedFlow * pump.effectiveSpeed;
+        const massNeeded = expectedFlow * dt;
+
+        // Only use liquid density if there's enough liquid
+        if (liquidMass > massNeeded * 2) {  // Safety factor of 2
+          pumpRho = this.getNodeDensity(fromNode, 'liquid');
+        } else {
+          // Not enough liquid - pump is drawing mixture or vapor
+          console.log(`[FlowOp] Warning: Pump ${pump.id} has insufficient liquid (${liquidMass.toFixed(0)}kg available, ${massNeeded.toFixed(0)}kg needed)`);
+          pumpRho = rho; // Use actual mixture density
+        }
+      }
+
       dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
     }
 
@@ -315,12 +338,16 @@ export class FlowOperator implements PhysicsOperator {
       console.log(`    dP_pump=${(dP_pump/1e5).toFixed(3)}bar`);
       console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)}bar (total)`);
       if (pump) {
-        const pumpRho = this.getNodeDensity(fromNode, 'liquid');
         console.log(`  Pump details:`);
         console.log(`    effectiveSpeed=${pump.effectiveSpeed.toFixed(3)}`);
         console.log(`    ratedHead=${pump.ratedHead}m`);
         console.log(`    actual node density=${rho.toFixed(0)}kg/m³`);
-        console.log(`    liquid density used for pump=${pumpRho.toFixed(0)}kg/m³`);
+        console.log(`    density used for pump=${pumpRho.toFixed(0)}kg/m³`);
+        if (fromNode.fluid.phase === 'two-phase' && fromNode.fluid.quality !== undefined) {
+          const liquidFraction = 1 - fromNode.fluid.quality;
+          const liquidMass = fromNode.fluid.mass * liquidFraction;
+          console.log(`    liquid available=${liquidMass.toFixed(0)}kg (${(liquidFraction*100).toFixed(1)}% of ${fromNode.fluid.mass.toFixed(0)}kg)`);
+        }
         console.log(`    => dP_pump = ${pump.effectiveSpeed.toFixed(3)} * ${pump.ratedHead} * ${pumpRho.toFixed(0)} * 9.81 = ${(dP_pump/1e5).toFixed(3)}bar`);
       }
       if (checkValve) {
