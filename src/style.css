@@ -368,6 +368,66 @@ body {
   padding: 8px 12px !important;
 }
 
+.mode-controls {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+.mode-btn {
+  flex: 1;
+  padding: 8px !important;
+  background: #2a2a2a !important;
+  border: 2px solid #444 !important;
+  color: #888 !important;
+  transition: all 0.2s;
+}
+
+.mode-btn.active {
+  background: #3a4a3a !important;
+  border-color: #4a7 !important;
+  color: #4a7 !important;
+  font-weight: bold;
+}
+
+.component-categories {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.component-categories details {
+  margin-bottom: 8px;
+}
+
+.component-categories summary {
+  cursor: pointer;
+  padding: 4px;
+  background: #2a2a2a;
+  border-radius: 3px;
+  font-size: 12px;
+  color: #aaa;
+  user-select: none;
+}
+
+.component-categories summary:hover {
+  background: #333;
+}
+
+.component-btn {
+  display: block !important;
+  width: 100% !important;
+  padding: 6px !important;
+  margin: 2px 0 !important;
+  text-align: left !important;
+  font-size: 11px !important;
+}
+
+.component-btn.selected {
+  background: #3a4a5a !important;
+  border-color: #5af !important;
+  color: #adf !important;
+}
+
 .sim-btn.small {
   width: 32px !important;
   padding: 6px !important;

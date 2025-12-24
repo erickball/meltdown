@@ -410,6 +410,108 @@ function init() {
   // Initial scram display update
   updateScramDisplay();
 
+  // Construction/Simulation mode controls
+  const modeConstructionBtn = document.getElementById('mode-construction') as HTMLButtonElement;
+  const modeSimulationBtn = document.getElementById('mode-simulation') as HTMLButtonElement;
+  const simControls = document.querySelector('.sim-controls') as HTMLDivElement;
+  const constructionControls = document.querySelector('.construction-controls') as HTMLDivElement;
+  const constructionButtons = document.querySelectorAll('.component-btn');
+  const selectedComponentDiv = document.getElementById('selected-component') as HTMLDivElement;
+  const placementHintDiv = document.getElementById('placement-hint') as HTMLDivElement;
+
+  let currentMode: 'construction' | 'simulation' = 'construction';
+  let selectedComponentType: string | null = null;
+
+  function setMode(mode: 'construction' | 'simulation'): void {
+    currentMode = mode;
+
+    if (mode === 'construction') {
+      // Construction mode
+      modeConstructionBtn?.classList.add('active');
+      modeSimulationBtn?.classList.remove('active');
+
+      // Hide simulation controls, show construction controls
+      if (simControls) simControls.style.display = 'none';
+      if (constructionControls) constructionControls.style.display = 'block';
+
+      // Pause simulation
+      gameLoop.pause();
+
+      console.log('[Mode] Switched to Construction mode');
+    } else {
+      // Simulation mode
+      modeConstructionBtn?.classList.remove('active');
+      modeSimulationBtn?.classList.add('active');
+
+      // Show simulation controls, hide construction controls
+      if (simControls) simControls.style.display = 'flex';
+      if (constructionControls) constructionControls.style.display = 'none';
+
+      // Clear component selection
+      selectedComponentType = null;
+      constructionButtons.forEach(btn => btn.classList.remove('selected'));
+      if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
+      if (placementHintDiv) placementHintDiv.style.display = 'none';
+
+      console.log('[Mode] Switched to Simulation mode');
+    }
+  }
+
+  if (modeConstructionBtn) {
+    modeConstructionBtn.addEventListener('click', () => setMode('construction'));
+  }
+
+  if (modeSimulationBtn) {
+    modeSimulationBtn.addEventListener('click', () => setMode('simulation'));
+  }
+
+  // Component selection handlers
+  constructionButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const button = e.target as HTMLButtonElement;
+      const componentType = button.dataset.component;
+
+      if (!componentType) return;
+
+      // Clear previous selection
+      constructionButtons.forEach(b => b.classList.remove('selected'));
+
+      // Select this component
+      button.classList.add('selected');
+      selectedComponentType = componentType;
+
+      // Update UI
+      if (selectedComponentDiv) {
+        selectedComponentDiv.textContent = `Selected: ${button.textContent}`;
+      }
+      if (placementHintDiv) {
+        placementHintDiv.style.display = 'block';
+      }
+
+      console.log(`[Construction] Selected component: ${componentType}`);
+    });
+  });
+
+  // Canvas click handler for placing components
+  canvas.addEventListener('click', (e) => {
+    if (currentMode !== 'construction' || !selectedComponentType) return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    // For now, just use screen coordinates
+    // TODO: Convert to world coordinates when we have access to view state
+    console.log(`[Construction] Placing ${selectedComponentType} at screen (${x}, ${y})`);
+
+    // TODO: Actually create and place the component
+    // For now, just log the action
+    alert(`Would place ${selectedComponentType} at (${x.toFixed(0)}, ${y.toFixed(0)})\nThis feature is not yet fully implemented.`);
+  });
+
+  // Start in construction mode
+  setMode('construction');
+
   // Start the game loop (paused for debugging)
   gameLoop.start();
   gameLoop.pause(); // Start paused so user can step through

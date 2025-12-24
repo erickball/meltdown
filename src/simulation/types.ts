@@ -111,6 +111,13 @@ export interface FlowConnection {
   // Flow resistance (K-factor for pressure drop)
   resistanceCoeff: number;          // ΔP = K * 0.5 * ρ * v²
 
+  // Check valve - allows flow only in forward direction (from -> to)
+  hasCheckValve?: boolean;          // If true, prevents reverse flow
+
+  // LOCA (Loss of Coolant Accident) - pipe break
+  breakFraction?: number;           // 0-1, fraction of flow area that is broken (0 = no break)
+  breakDischargeCoeff?: number;     // Discharge coefficient for break flow (default 0.6)
+
   // Current flow state (computed by solver)
   massFlowRate: number;             // kg/s (positive = from -> to)
 

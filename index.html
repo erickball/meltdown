@@ -10,6 +10,12 @@
     <div id="app">
       <canvas id="plant-canvas"></canvas>
       <div id="toolbar">
+        <h3>Mode</h3>
+        <div class="mode-controls">
+          <button id="mode-construction" class="mode-btn active">🔧 Construction</button>
+          <button id="mode-simulation" class="mode-btn">▶️ Simulation</button>
+        </div>
+        <hr />
         <h3>Simulation</h3>
         <div class="sim-controls">
           <button id="pause-btn" class="sim-btn">▶ Resume</button>
@@ -49,13 +55,32 @@
           </div>
         </div>
         <hr />
-        <h3>Components</h3>
-        <button data-component="tank">Tank</button>
-        <button data-component="pipe">Pipe</button>
-        <button data-component="pump">Pump</button>
-        <button data-component="vessel">Reactor Vessel</button>
-        <button data-component="valve">Valve</button>
-        <button data-component="heatExchanger">Heat Exchanger</button>
+        <div class="construction-controls">
+          <h3>Components</h3>
+          <div class="component-categories">
+            <details open>
+              <summary>Vessels</summary>
+              <button data-component="tank" class="component-btn">Tank</button>
+              <button data-component="vessel" class="component-btn">Reactor</button>
+              <button data-component="pressurizer" class="component-btn">Pressurizer</button>
+            </details>
+            <details open>
+              <summary>Flow</summary>
+              <button data-component="pipe" class="component-btn">Pipe</button>
+              <button data-component="pump" class="component-btn">Pump</button>
+              <button data-component="valve" class="component-btn">Valve</button>
+            </details>
+            <details>
+              <summary>Heat Transfer</summary>
+              <button data-component="heatExchanger" class="component-btn">Steam Gen</button>
+              <button data-component="condenser" class="component-btn">Condenser</button>
+            </details>
+          </div>
+          <div class="construction-info" style="margin-top: 10px; font-size: 11px; color: #888;">
+            <div id="selected-component">No component selected</div>
+            <div id="placement-hint" style="display: none;">Click to place</div>
+          </div>
+        </div>
         <hr />
         <h3>Control Rods</h3>
         <div class="slider-control">
