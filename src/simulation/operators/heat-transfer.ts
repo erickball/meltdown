@@ -605,10 +605,16 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           if (P_triangulation !== null) {
             flowNode.fluid.pressure = P_triangulation;
           } else {
-            // Fallback to saturation pressure if lookup fails
+            // Triangulation lookup failed - this means we're outside the data range
             const T = waterState.temperature;
-            flowNode.fluid.pressure = Water.saturationPressure(T);
-            console.warn(`[FluidState] ${nodeId}: Triangulation lookup failed for u=${(u_specific/1000).toFixed(1)}kJ/kg, v=${v_specific.toFixed(6)}m³/kg, using P_sat`);
+            const T_C = T - 273.15;
+            const P_sat = Water.saturationPressure(T);
+            throw new Error(
+              `[FluidState] Triangulation lookup failed for '${nodeId}'. ` +
+              `State point (u=${(u_specific/1000).toFixed(1)} kJ/kg, v=${v_specific.toFixed(6)} m³/kg) is outside steam table data. ` +
+              `T=${T_C.toFixed(1)}°C, P_sat=${(P_sat/1e5).toFixed(1)} bar. ` +
+              `This likely means pressure exceeds 300 bar (data limit). Physics has failed.`
+            );
           }
         } else {
           // Hybrid pressure model (default)
@@ -628,14 +634,13 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
           const T = waterState.temperature;
           const T_C = T - 273.15;
 
-          // Guard against zero/near-zero mass (node has drained)
-          // In this case, just use saturation pressure at the current temperature
+          // Check for near-zero mass (node has drained)
           if (flowNode.fluid.mass < 0.01 || !isFinite(rho) || rho < 0.01) {
-            flowNode.fluid.pressure = Water.saturationPressure(T);
-            if (Math.random() < 0.001) {
-              console.warn(`[FluidState] ${nodeId}: Near-zero mass (${flowNode.fluid.mass.toFixed(3)} kg), using P_sat`);
-            }
-            continue;  // Skip the rest of the liquid pressure calculation
+            throw new Error(
+              `[FluidState] Node '${nodeId}' has near-zero mass or density. ` +
+              `Mass=${flowNode.fluid.mass.toFixed(3)} kg, ρ=${rho.toFixed(3)} kg/m³. ` +
+              `Node has likely drained. Physics has failed.`
+            );
           }
 
         // Temperature-dependent bulk modulus

@@ -12,7 +12,6 @@ This project is intended as a sandbox environment with game-like aspects, to all
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions.
 
 ## TODO List
--Debug flow calculations (exceeding max)
     why do we have computeTargetFlow? is it different than
     const steadyStateFlow = sign * rho * A * v_steady;
     and do we use it anywhere?
@@ -63,6 +62,7 @@ Add money system based on generation (in game mode). When you are building we wi
 We could even account for interest rates? Maybe
 There should also be a sandbox mode where you have infinite money
 
+X Debug flow calculations (exceeding max)
 X Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.
 X Add flow momentum for numerical stability
 X Show connections between components on the display (matching fluid flows)
