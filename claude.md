@@ -3,7 +3,7 @@
 - Always use backslashes (\) in file paths on Windows. File edits will fail if you use forward slashes.
 
 ## PROJECT GUIDELINES
-This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
+This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, clamping, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
 
 ## WATER PROPERTIES NOTES
 - Our saturated steam table data goes all the way from the triple point to the critical point.
@@ -12,7 +12,12 @@ This project is intended as a sandbox environment with game-like aspects, to all
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions.
 
 ## TODO List
--Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.
+-Debug flow calculations (exceeding max)
+    why do we have computeTargetFlow? is it different than
+    const steadyStateFlow = sign * rho * A * v_steady;
+    and do we use it anywhere?
+
+-Fix hybrid pressure model to reduce discontinuities
 -Add the ability for the user to create components and connect them
 -And specify their initial properties
 -In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one.
@@ -58,6 +63,7 @@ Add money system based on generation (in game mode). When you are building we wi
 We could even account for interest rates? Maybe
 There should also be a sandbox mode where you have infinite money
 
+X Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.
 X Add flow momentum for numerical stability
 X Show connections between components on the display (matching fluid flows)
 X Make fluid mass match its density based on temperature & quality

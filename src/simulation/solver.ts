@@ -647,55 +647,59 @@ export class Solver {
    * Sanitize state to prevent NaN/Infinity from propagating
    */
   private sanitizeState(state: SimulationState): SimulationState {
-    // Check and fix thermal nodes
+    // Check thermal nodes
     for (const [id, node] of state.thermalNodes) {
       if (!isFinite(node.temperature) || node.temperature < 0) {
-        console.warn(`[Solver] Fixing invalid temperature in '${id}': ${node.temperature}`);
-        node.temperature = 300;
+        throw new Error(`[Solver] Invalid thermal temperature in '${id}': ${node.temperature}. Physics has failed.`);
       }
-      node.temperature = Math.max(200, Math.min(node.temperature, 5000));
+      if (node.temperature < 200 || node.temperature > 5000) {
+        throw new Error(`[Solver] Thermal temperature out of bounds in '${id}': ${node.temperature}K. Expected 200-5000K. Physics has failed.`);
+      }
     }
 
-    // Check and fix flow nodes
+    // Check flow nodes
     for (const [id, node] of state.flowNodes) {
       if (!isFinite(node.fluid.temperature) || node.fluid.temperature < 0) {
-        console.warn(`[Solver] Fixing invalid temperature in '${id}': ${node.fluid.temperature}`);
-        node.fluid.temperature = 300;
+        throw new Error(`[Solver] Invalid fluid temperature in '${id}': ${node.fluid.temperature}. Physics has failed.`);
       }
       if (!isFinite(node.fluid.mass) || node.fluid.mass <= 0) {
-        console.warn(`[Solver] Fixing invalid mass in '${id}': ${node.fluid.mass}`);
-        node.fluid.mass = 1000;
+        throw new Error(`[Solver] Invalid fluid mass in '${id}': ${node.fluid.mass}. Physics has failed.`);
       }
       if (!isFinite(node.fluid.pressure) || node.fluid.pressure <= 0) {
-        console.warn(`[Solver] Fixing invalid pressure in '${id}': ${node.fluid.pressure}`);
-        node.fluid.pressure = 101325;
+        throw new Error(`[Solver] Invalid fluid pressure in '${id}': ${node.fluid.pressure}. Physics has failed.`);
       }
 
       if (node.fluid.phase === 'two-phase') {
-        node.fluid.quality = Math.max(0, Math.min(1, node.fluid.quality));
+        if (node.fluid.quality < 0 || node.fluid.quality > 1) {
+          throw new Error(`[Solver] Quality out of bounds in '${id}': ${node.fluid.quality}. Physics has failed.`);
+        }
       }
 
-      node.fluid.temperature = Math.max(250, Math.min(node.fluid.temperature, 2000));
-      node.fluid.pressure = Math.max(1000, Math.min(node.fluid.pressure, 50e6));
-      node.fluid.mass = Math.max(1, Math.min(node.fluid.mass, 1e8));
+      if (node.fluid.temperature < 250 || node.fluid.temperature > 2000) {
+        throw new Error(`[Solver] Temperature out of bounds in '${id}': ${node.fluid.temperature}K. Expected 250-2000K. Physics has failed.`);
+      }
+
+      if (node.fluid.mass < 1 || node.fluid.mass > 1e8) {
+        throw new Error(`[Solver] Mass out of bounds in '${id}': ${node.fluid.mass}kg. Expected 1-1e8 kg. Physics has failed.`);
+      }
     }
 
     // Check and fix flow connections
     for (const conn of state.flowConnections) {
       if (!isFinite(conn.massFlowRate)) {
-        console.warn(`[Solver] Fixing invalid flow rate in '${conn.id}': ${conn.massFlowRate}`);
-        conn.massFlowRate = 0;
+        throw new Error(`[Solver] Invalid flow rate in '${conn.id}': ${conn.massFlowRate}. Physics has failed.`);
       }
-      conn.massFlowRate = Math.max(-1e5, Math.min(conn.massFlowRate, 1e5));
+      if (Math.abs(conn.massFlowRate) > 1e5) {
+        throw new Error(`[Solver] Mass flow rate out of bounds in '${conn.id}': ${conn.massFlowRate} kg/s. Exceeds ±100,000 kg/s. Physics has failed.`);
+      }
     }
 
     // Check neutronics
     if (!isFinite(state.neutronics.power) || state.neutronics.power < 0) {
-      console.warn(`[Solver] Fixing invalid power: ${state.neutronics.power}`);
-      state.neutronics.power = 0;
+      throw new Error(`[Solver] Invalid reactor power: ${state.neutronics.power}. Physics has failed.`);
     }
     if (!isFinite(state.neutronics.precursorConcentration) || state.neutronics.precursorConcentration < 0) {
-      state.neutronics.precursorConcentration = 0.01;
+      throw new Error(`[Solver] Invalid precursor concentration: ${state.neutronics.precursorConcentration}. Physics has failed.`);
     }
 
     return state;

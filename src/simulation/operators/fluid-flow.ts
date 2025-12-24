@@ -103,7 +103,13 @@ export class FlowOperator implements PhysicsOperator {
 
       // SAFEGUARD: Clamp target flow to reasonable range
       // const unclamped = targetFlow;
-      targetFlow = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, targetFlow));
+      // We need to change this to just stop the simulation with an error message and debug info.
+      // targetFlow = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, targetFlow));
+      if (targetFlow > this.maxFlowRate || targetFlow < -this.maxFlowRate) {
+        console.warn('Target flow exceeded maximum bounds.');
+        console.warn(conn, 'from:', fromNode, 'to:', toNode, 'state:', newState, 'dt:', dt);
+
+      }
 
       // Debug: log when clamping happens (indicates pressure imbalance)
       // if (Math.abs(unclamped) > this.maxFlowRate) {
@@ -113,10 +119,9 @@ export class FlowOperator implements PhysicsOperator {
       //   console.warn(`  Pressures: ${conn.fromNodeId}=${P_from.toFixed(2)}bar, ${conn.toNodeId}=${P_to.toFixed(2)}bar, dP=${(P_from-P_to).toFixed(2)}bar`);
       // }
 
-      // SAFEGUARD: Check for NaN
+      // Check for NaN
       if (!isFinite(targetFlow)) {
-        console.warn('FlowOperator: Invalid target flow, keeping current');
-        continue;
+        throw new Error(`[FlowOperator] Invalid target flow in '${conn.id}': ${targetFlow}. Physics has failed.`);
       }
 
       // Store target flow for debugging display
@@ -126,7 +131,7 @@ export class FlowOperator implements PhysicsOperator {
       conn.massFlowRate = targetFlow;
 
       // SAFEGUARD: Final clamp
-      conn.massFlowRate = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, conn.massFlowRate));
+      //conn.massFlowRate = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, conn.massFlowRate));
     }
     operatorProfile.computeTargetFlows += performance.now() - t1;
 
@@ -226,18 +231,17 @@ export class FlowOperator implements PhysicsOperator {
       upstream.fluid.internalEnergy -= transfer.energy;
       downstream.fluid.internalEnergy += transfer.energy;
 
-      // SAFEGUARD: Ensure non-negative values
+      // Check for negative energy
       if (upstream.fluid.internalEnergy < 0) {
-        // This shouldn't happen if we're transferring proportionally,
-        // but clamp just in case
-        downstream.fluid.internalEnergy += upstream.fluid.internalEnergy;
-        upstream.fluid.internalEnergy = 0;
+        throw new Error(`[FlowOperator] Negative internal energy in '${upstream.id}': ${upstream.fluid.internalEnergy} J. Physics has failed.`);
       }
     }
 
-    // Third pass: enforce minimum mass
+    // Third pass: check minimum mass
     for (const [, node] of state.flowNodes) {
-      node.fluid.mass = Math.max(node.fluid.mass, 1);
+      if (node.fluid.mass < 1) {
+        throw new Error(`[FlowOperator] Mass too low in '${node.id}': ${node.fluid.mass} kg. Node has drained. Physics has failed.`);
+      }
     }
 
     // Debug: verify conservation
@@ -292,8 +296,8 @@ export class FlowOperator implements PhysicsOperator {
       }
     }
 
-    // SAFEGUARD: Floor at 1ms to prevent runaway timestep reduction
-    return Math.max(minDt, 0.001);
+    // Return the minimum timestep without artificial floor
+    return minDt;
   }
 
   /**
@@ -467,11 +471,10 @@ export class FlowOperator implements PhysicsOperator {
       const currentVelocity = currentFlow / (rho * A);
 
       // Friction pressure drop (always opposes flow)
-      const frictionSign = currentVelocity >= 0 ? 1 : -1;
-      const dP_friction = frictionSign * K * 0.5 * rho * currentVelocity * Math.abs(currentVelocity);
+      const dP_friction = -K * 0.5 * rho * currentVelocity * Math.abs(currentVelocity);
 
       // Net driving pressure (pressure difference minus friction)
-      const dP_net = dP_driving - dP_friction;
+      const dP_net = dP_driving + dP_friction;
 
       // Acceleration from momentum equation: dv/dt = dP_net / (ρ * inertance)
       const acceleration = dP_net / (rho * conn.inertance);

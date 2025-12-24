@@ -270,6 +270,20 @@ export interface CheckValveState {
 }
 
 // ============================================================================
+// Simulation Configuration
+// ============================================================================
+
+export interface SimulationConfig {
+  // Pressure model for liquid phase
+  pressureModel: 'hybrid' | 'pure-triangulation';
+}
+
+// Global simulation configuration (can be modified at runtime)
+export const simulationConfig: SimulationConfig = {
+  pressureModel: 'hybrid'  // Default to hybrid model for stability
+};
+
+// ============================================================================
 // Solver Performance Metrics
 // ============================================================================
 

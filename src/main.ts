@@ -11,6 +11,7 @@ import {
   calculateWaterState,
   enableCalculationDebug,
   getCalculationDebugLog,
+  simulationConfig,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail } from './debug';
 
@@ -312,6 +313,19 @@ function init() {
         maxTimestepValue.textContent = ms.toString();
       }
       gameLoop.setMaxTimestep(ms / 1000); // Convert ms to seconds
+    });
+  }
+
+  // Pressure model control
+  const pressureModelSelect = document.getElementById('pressure-model') as HTMLSelectElement;
+  if (pressureModelSelect) {
+    // Set initial value to match configuration
+    pressureModelSelect.value = simulationConfig.pressureModel;
+
+    // Handle changes
+    pressureModelSelect.addEventListener('change', () => {
+      simulationConfig.pressureModel = pressureModelSelect.value as 'hybrid' | 'pure-triangulation';
+      console.log(`Pressure model changed to: ${simulationConfig.pressureModel}`);
     });
   }
 

@@ -16,7 +16,7 @@
  * based on flow conditions.
  */
 
-import { SimulationState, FlowNode, FluidState } from '../types';
+import { SimulationState, FlowNode, FluidState, simulationConfig } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 
@@ -595,32 +595,48 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
         // Vapor: use steam table pressure (ideal gas-like behavior)
         flowNode.fluid.pressure = waterState.pressure;
       } else {
-        // LIQUID: Hybrid pressure model
-        // P = P_base + K * (ρ - ρ_expected) / ρ_expected
-        //
-        // Where ρ_expected is the density of compressed liquid at the current
-        // temperature T and the base pressure P_base. This accounts for thermal
-        // expansion: as fluid heats up and expands, ρ_expected decreases, so
-        // there's no spurious pressure rise from expansion alone.
-        //
-        // We use temperature-dependent bulk modulus via Water.bulkModulus(T_C).
-        // This varies from ~2200 MPa at 50°C to ~60 MPa at 350°C, which is
-        // physically accurate - water becomes much more compressible near the
-        // critical point.
+        // LIQUID: Choose pressure model based on configuration
+        const u_specific = flowNode.fluid.internalEnergy / flowNode.fluid.mass;  // J/kg
+        const v_specific = flowNode.volume / flowNode.fluid.mass;  // m³/kg
 
-        const rho = flowNode.fluid.mass / flowNode.volume;
-        const T = waterState.temperature;
-        const T_C = T - 273.15;
-
-        // Guard against zero/near-zero mass (node has drained)
-        // In this case, just use saturation pressure at the current temperature
-        if (flowNode.fluid.mass < 0.01 || !isFinite(rho) || rho < 0.01) {
-          flowNode.fluid.pressure = Water.saturationPressure(T);
-          if (Math.random() < 0.001) {
-            console.warn(`[FluidState] ${nodeId}: Near-zero mass (${flowNode.fluid.mass.toFixed(3)} kg), using P_sat`);
+        if (simulationConfig.pressureModel === 'pure-triangulation') {
+          // Pure triangulation: directly look up pressure from (u,v)
+          const P_triangulation = Water.lookupPressureFromUV(u_specific, v_specific);
+          if (P_triangulation !== null) {
+            flowNode.fluid.pressure = P_triangulation;
+          } else {
+            // Fallback to saturation pressure if lookup fails
+            const T = waterState.temperature;
+            flowNode.fluid.pressure = Water.saturationPressure(T);
+            console.warn(`[FluidState] ${nodeId}: Triangulation lookup failed for u=${(u_specific/1000).toFixed(1)}kJ/kg, v=${v_specific.toFixed(6)}m³/kg, using P_sat`);
           }
-          continue;  // Skip the rest of the liquid pressure calculation
-        }
+        } else {
+          // Hybrid pressure model (default)
+          // P = P_base + K * (ρ - ρ_expected) / ρ_expected
+          //
+          // Where ρ_expected is the density of compressed liquid at the current
+          // temperature T and the base pressure P_base. This accounts for thermal
+          // expansion: as fluid heats up and expands, ρ_expected decreases, so
+          // there's no spurious pressure rise from expansion alone.
+          //
+          // We use temperature-dependent bulk modulus via Water.bulkModulus(T_C).
+          // This varies from ~2200 MPa at 50°C to ~60 MPa at 350°C, which is
+          // physically accurate - water becomes much more compressible near the
+          // critical point.
+
+          const rho = flowNode.fluid.mass / flowNode.volume;
+          const T = waterState.temperature;
+          const T_C = T - 273.15;
+
+          // Guard against zero/near-zero mass (node has drained)
+          // In this case, just use saturation pressure at the current temperature
+          if (flowNode.fluid.mass < 0.01 || !isFinite(rho) || rho < 0.01) {
+            flowNode.fluid.pressure = Water.saturationPressure(T);
+            if (Math.random() < 0.001) {
+              console.warn(`[FluidState] ${nodeId}: Near-zero mass (${flowNode.fluid.mass.toFixed(3)} kg), using P_sat`);
+            }
+            continue;  // Skip the rest of the liquid pressure calculation
+          }
 
         // Temperature-dependent bulk modulus
         const K = Water.bulkModulus(T_C);
@@ -713,10 +729,11 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
             console.log(`  P_final=${(flowNode.fluid.pressure/1e5).toFixed(2)}bar`);
           }
         }
+        }  // End of hybrid model
       }
 
-      // Sanity clamp on pressure
-      flowNode.fluid.pressure = Math.max(1000, Math.min(flowNode.fluid.pressure, 100e6));
+      // Pressure cap removed per user request - let physics determine pressure
+      // flowNode.fluid.pressure = Math.max(1000, Math.min(flowNode.fluid.pressure, 100e6));
     }
 
     // Increment debug counter
