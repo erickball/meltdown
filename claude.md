@@ -16,51 +16,53 @@ This project is intended as a sandbox environment with game-like aspects, to all
     const steadyStateFlow = sign * rho * A * v_steady;
     and do we use it anywhere?
 
--Fix hybrid pressure model to reduce discontinuities
--Add the ability for the user to create components and connect them
+-Add the ability for the user to create components and connect them (construction mode)
 -And specify their initial properties
--In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one.
--Improve performance (why are timesteps getting so small?)
+-In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one. (as far as I know)
+-When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
+-There should also be a sandbox mode where you have infinite money
 -Clean up the debug display
 -Fix double-display of SG secondary side (HX shell side)
 -Display the full control rods even when they're not fully inserted (the non-inserted part can extend above the core).
 -Fix the pressure gauges so they come off the top of each component
-Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
-Maybe find a good way to display relative pressure at connections
-Position the arrows at the flow connections (each tank & pipe should get up to 4 connection locations: ends & middle). E.g. the hot leg connection to the pressurizer should have an arrow that points up or down, and it should be near the top-center of the hot leg not at the end.
-Pixelated display should apply to the tube side of a HX
-Add manual reset of scram
-Add visual scram indicator
-Add LOCA capability (atmosphere as boundary condition)
-Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
-Ability to put things inside other things, e.g. containment building
-Add containment building as an option
-Add FW heaters?
-Calculate efficiency (turbine work output) in a reasonable way
-Heat transfer in a HX should depend on liquid level. In the core too.
-Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate?
-Maybe something about a control room, but I don't want the user to have to worry about this a lot
-Let the user implement automated logic for controlling stuff
-Add ability to wait for random initiating event (once steady state is achieved)
-Add cool visuals for different initiating events
-Model tank and pipe overpressure
-Model vessel creep rupture and SG tube creep rupture
-Model core-concrete interaction
-Add cladding oxidation and hydrogen explosions
-Show the "ground" in the display? And maybe the UHS?
-Steam separators? Maybe not
-Add U-tube heat exchangers as an option. Also horizontal and vertical once-through HXs.
-User editable Scram logic and system actuation
-"Operator actions" initiated by the user (with delay and progress bar)
-Diesel generators (and electric power in general)
-Add fuel melting and radionuclide release ("meltdown!")
-Show power in MWt along with %
-Add advanced reactor options (pebble bed fuel, helium or metal coolant)
-Allow multiple cores
-We can do operating cost estimates based on fuel use, number of employees (how many do you need for maintenance of this many components, etc). But we're glossing over outages.
-Add money system based on generation (in game mode). When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
-We could even account for interest rates? Maybe
-There should also be a sandbox mode where you have infinite money
+-Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
+-Maybe find a good way to display relative pressure at connections
+-Position the arrows at the flow connections (each tank & pipe should get up to 4 connection locations: ends & middle). E.g. the hot leg connection to the pressurizer should have an arrow that points up or down, and it should be near the top-center of the hot leg not at the end.
+-Pixelated display should apply to the tube side of a HX
+-Fix hybrid pressure model to reduce discontinuities
+-Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
+-Add manual reset of scram
+-Add visual scram indicator
+-Add LOCA capability (atmosphere as boundary condition)
+-Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
+-Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
+-Add containment building as an option
+-Add FW heaters?
+-Calculate efficiency (turbine work output) in a more realistic way
+-Heat transfer in a HX should depend on liquid level. In the core too.
+-Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom.
+-Improve performance (why are timesteps getting so small?)
+-Maybe something about a control room, but I don't want the user to have to worry about this a lot
+-Let the user implement automated logic for controlling stuff
+-Add ability to wait for random initiating event (once steady state is achieved)
+-Add money earning system based on generation (in game mode). 
+-Add cool visuals for different initiating events
+-Model tank and pipe overpressure
+-Model vessel creep rupture and SG tube creep rupture
+-Model core-concrete interaction
+-Add cladding oxidation and hydrogen explosions
+-Show the "ground" in the display? And maybe the UHS?
+-Steam separators? Maybe not
+-Add U-tube heat exchangers as an option. Also horizontal and vertical once-through HXs.
+-User editable Scram logic and system actuation
+-"Operator actions" initiated by the user (with delay and progress bar) by clicking on a pump or w/e
+-Diesel generators (and electric power in general)
+-Add fuel melting and radionuclide release ("meltdown!")
+-Show power in MWt along with %
+-Add advanced reactor options (pebble bed fuel, helium or metal coolant)
+-Allow multiple cores
+-We can do operating cost estimates based on fuel use, number of employees (how many do you need for maintenance of this many components, etc). But we're glossing over outages.
+-We could even account for interest rates? Maybe
 
 X Debug flow calculations (exceeding max)
 X Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.

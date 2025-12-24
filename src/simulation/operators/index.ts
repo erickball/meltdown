@@ -24,6 +24,7 @@ export {
 export {
   NeutronicsOperator,
   triggerScram,
+  resetScram,
   checkScramConditions,
 } from './neutronics';
 

@@ -291,6 +291,25 @@ export function triggerScram(state: SimulationState, reason: string): Simulation
 }
 
 /**
+ * Reset SCRAM - allows reactor to be restarted after a scram
+ * Control rods remain at their current position (typically fully inserted)
+ * Operator must manually withdraw rods to restart reactor
+ */
+export function resetScram(state: SimulationState): SimulationState {
+  const newState = cloneSimulationState(state);
+
+  if (newState.neutronics.scrammed) {
+    console.log(`[SCRAM] Scram reset at t=${state.time.toFixed(2)}s - Control rods remain at ${(newState.neutronics.controlRodPosition * 100).toFixed(1)}% insertion`);
+    newState.neutronics.scrammed = false;
+    newState.neutronics.scramTime = 0; // Reset to 0 instead of undefined
+    // Note: Control rods stay at current position (usually 0 = fully inserted)
+    // Operator must manually withdraw them to restart
+  }
+
+  return newState;
+}
+
+/**
  * Check automatic SCRAM conditions
  */
 export function checkScramConditions(state: SimulationState): { shouldScram: boolean; reason: string } {

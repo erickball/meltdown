@@ -20,6 +20,7 @@ import {
   createDefaultTurbineCondenserConfig,
   checkScramConditions,
   triggerScram,
+  resetScram,
 } from '../simulation';
 
 export interface GameLoopConfig {
@@ -51,6 +52,7 @@ const DEFAULT_CONFIG: GameLoopConfig = {
 
 export type GameEventType =
   | 'scram'
+  | 'scram-reset'
   | 'high-temperature'
   | 'low-flow'
   | 'phase-change'
@@ -515,6 +517,28 @@ export class GameLoop {
       time: this.state.time,
       message: `SCRAM: ${reason}`,
     });
+  }
+
+  /**
+   * Reset SCRAM - allows reactor restart
+   */
+  resetScram(): void {
+    const wasScrammed = this.state.neutronics.scrammed;
+    this.state = resetScram(this.state);
+    if (wasScrammed && !this.state.neutronics.scrammed) {
+      this.emitEvent({
+        type: 'scram-reset',
+        time: this.state.time,
+        message: 'SCRAM reset - manual rod control enabled',
+      });
+    }
+  }
+
+  /**
+   * Check if reactor is currently scrammed
+   */
+  isScramActive(): boolean {
+    return this.state.neutronics.scrammed;
   }
 
   /**

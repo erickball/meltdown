@@ -366,6 +366,50 @@ function init() {
     }
   });
 
+  // SCRAM button controls
+  const scramBtn = document.getElementById('scram-btn') as HTMLButtonElement;
+  const resetScramBtn = document.getElementById('reset-scram-btn') as HTMLButtonElement;
+  const scramIndicator = document.getElementById('scram-indicator') as HTMLDivElement;
+
+  function updateScramDisplay(): void {
+    const isScramActive = gameLoop.isScramActive();
+    if (scramBtn) scramBtn.style.display = isScramActive ? 'none' : 'block';
+    if (resetScramBtn) resetScramBtn.style.display = isScramActive ? 'block' : 'none';
+    if (scramIndicator) scramIndicator.style.display = isScramActive ? 'block' : 'none';
+
+    // Also disable rod control when scrammed
+    const rodSlider = document.getElementById('rod-position') as HTMLInputElement;
+    if (rodSlider) {
+      rodSlider.disabled = isScramActive;
+    }
+  }
+
+  if (scramBtn) {
+    scramBtn.addEventListener('click', () => {
+      gameLoop.triggerScram('Manual operator action');
+      updateScramDisplay();
+    });
+  }
+
+  if (resetScramBtn) {
+    resetScramBtn.addEventListener('click', () => {
+      gameLoop.resetScram();
+      updateScramDisplay();
+    });
+  }
+
+  // Listen for scram events
+  gameLoop.addEventListener('scram', () => {
+    updateScramDisplay();
+  });
+
+  gameLoop.addEventListener('scram-reset', () => {
+    updateScramDisplay();
+  });
+
+  // Initial scram display update
+  updateScramDisplay();
+
   // Start the game loop (paused for debugging)
   gameLoop.start();
   gameLoop.pause(); // Start paused so user can step through

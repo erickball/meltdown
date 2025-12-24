@@ -63,6 +63,13 @@
           <input type="range" id="rod-position" min="0" max="100" value="15" />
           <div class="slider-labels"><span>Out</span><span>In</span></div>
         </div>
+        <div class="scram-controls" style="margin-top: 10px;">
+          <button id="scram-btn" class="sim-btn" style="background: #d00; color: white; font-weight: bold;">SCRAM</button>
+          <button id="reset-scram-btn" class="sim-btn" style="display: none;">Reset SCRAM</button>
+          <div id="scram-indicator" style="display: none; color: #d00; font-weight: bold; margin-top: 5px;">
+            ⚠️ REACTOR SCRAMMED
+          </div>
+        </div>
         <hr />
         <h3>Edit</h3>
         <button id="move-mode">Move</button>
