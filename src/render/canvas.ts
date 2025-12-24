@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, renderFlowConnectionArrows, renderPressureGauge } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge } from './components';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -8,6 +8,8 @@ export class PlantCanvas {
   private view: ViewState;
   private plantState: PlantState;
   private simState: SimulationState | null = null;
+  private showPorts: boolean = false;
+  private highlightedPort: { componentId: string; portId: string } | null = null;
 
   // Interaction state
   private isDragging: boolean = false;
@@ -230,7 +232,7 @@ export class PlantCanvas {
     }
   }
 
-  private getComponentAtScreen(screenPos: Point): PlantComponent | null {
+  public getComponentAtScreen(screenPos: Point): PlantComponent | null {
     const worldPos = screenToWorld(screenPos, this.view);
 
     // Check components in reverse order (top-most first)
@@ -241,6 +243,33 @@ export class PlantCanvas {
         return component;
       }
     }
+    return null;
+  }
+
+  public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
+    const worldPos = screenToWorld(screenPos, this.view);
+
+    // Check all components for nearby ports
+    const components = Array.from(this.plantState.components.values());
+    const portRadius = 0.3; // Detection radius in meters
+
+    for (const component of components) {
+      if (!component.ports) continue;
+
+      for (const port of component.ports) {
+        // Get port world position
+        const portWorldPos = this.getPortWorldPosition(component, port);
+        const distance = Math.hypot(
+          worldPos.x - portWorldPos.x,
+          worldPos.y - portWorldPos.y
+        );
+
+        if (distance <= portRadius) {
+          return { component, port, worldPos: portWorldPos };
+        }
+      }
+    }
+
     return null;
   }
 
@@ -321,6 +350,11 @@ export class PlantCanvas {
       renderComponent(ctx, component, this.view, isSelected);
     }
 
+    // Draw port indicators if enabled
+    if (this.showPorts) {
+      this.renderPortIndicators(ctx);
+    }
+
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
       renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view);
@@ -344,9 +378,67 @@ export class PlantCanvas {
     };
   }
 
+  private renderPortIndicators(ctx: CanvasRenderingContext2D): void {
+    for (const component of this.plantState.components.values()) {
+      if (!component.ports) continue;
+
+      for (const port of component.ports) {
+        const worldPos = this.getPortWorldPosition(component, port);
+        const screenPos = worldToScreen(worldPos, this.view);
+
+        // Check if this port is highlighted
+        const isHighlighted = this.highlightedPort &&
+          this.highlightedPort.componentId === component.id &&
+          this.highlightedPort.portId === port.id;
+
+        // Draw port circle
+        ctx.beginPath();
+        ctx.arc(screenPos.x, screenPos.y, isHighlighted ? 12 : 8, 0, Math.PI * 2);
+
+        // Color based on port direction
+        if (port.direction === 'in') {
+          ctx.fillStyle = isHighlighted ? 'rgba(100, 255, 100, 0.9)' : 'rgba(100, 200, 100, 0.7)';  // Green for inlet
+        } else if (port.direction === 'out') {
+          ctx.fillStyle = isHighlighted ? 'rgba(255, 100, 100, 0.9)' : 'rgba(200, 100, 100, 0.7)';  // Red for outlet
+        } else {
+          ctx.fillStyle = isHighlighted ? 'rgba(100, 200, 255, 0.9)' : 'rgba(100, 150, 200, 0.7)';  // Blue for bidirectional
+        }
+
+        ctx.fill();
+        ctx.strokeStyle = isHighlighted ? 'rgba(255, 255, 255, 1)' : 'rgba(255, 255, 255, 0.8)';
+        ctx.lineWidth = isHighlighted ? 3 : 2;
+        ctx.stroke();
+
+        // Add pulsing effect for highlighted port
+        if (isHighlighted) {
+          ctx.beginPath();
+          ctx.arc(screenPos.x, screenPos.y, 16 + Math.sin(Date.now() * 0.003) * 3, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255, 255, 100, 0.5)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
   // Public API
   public setPlantState(state: PlantState): void {
     this.plantState = state;
+  }
+
+  public setShowPorts(show: boolean): void {
+    this.showPorts = show;
+    if (!show) {
+      this.highlightedPort = null;  // Clear highlight when hiding ports
+    }
+  }
+
+  public setHighlightedPort(componentId: string | null, portId: string | null): void {
+    if (componentId && portId) {
+      this.highlightedPort = { componentId, portId };
+    } else {
+      this.highlightedPort = null;
+    }
   }
 
   public setSimState(state: SimulationState): void {

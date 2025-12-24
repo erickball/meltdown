@@ -18,12 +18,19 @@ This project is intended as a sandbox environment with game-like aspects, to all
 
 -Add the ability for the user to create components and connect them (construction mode)
 -And specify their initial properties
--In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one. (as far as I know)
+-User-constructed plant should run in the simulation; debug panel modified accordingly.
+-User should be able to save a configuration (can we save it in a cookie or something?)
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
 -There should also be a sandbox mode where you have infinite money
+-Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Clean up the debug display
 -Fix double-display of SG secondary side (HX shell side)
 -Display the full control rods even when they're not fully inserted (the non-inserted part can extend above the core).
+-Core should allow the user to specify number and diameter of fuel rods, cladding thickness, materials, etc. And total core diameter, which will determine the rod spacing. Also number of control rods, and whether they enter from the top or bottom. Not number of assemblies, and not burnup (since we're ignoring outages and refueling). "Control rods" can be assumed to mean either blades or spider assemblies because they're functionally equivalent.
+-Core display should not include the surrounding water, just the core and the fluid between rods.
+-We should make a pebble bed core option, too
+-Not sure how to handle needing big graphite reflectors though?
+-A core should only have two ports, i.e. assume it comes with a core barrel.
 -Fix the pressure gauges so they come off the top of each component
 -Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
 -Maybe find a good way to display relative pressure at connections
@@ -31,20 +38,23 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -Pixelated display should apply to the tube side of a HX
 -Fix hybrid pressure model to reduce discontinuities
 -Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
--Add manual reset of scram
--Add visual scram indicator
+X Add manual reset of scram
+-Add visual scram indicator (should say time and reason for scram)
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
+-When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
+-Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
 -Add FW heaters?
 -Calculate efficiency (turbine work output) in a more realistic way
--Heat transfer in a HX should depend on liquid level. In the core too.
+-Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom.
 -Improve performance (why are timesteps getting so small?)
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
 -Let the user implement automated logic for controlling stuff
 -Add ability to wait for random initiating event (once steady state is achieved)
+-Add random failures for active components
 -Add money earning system based on generation (in game mode). 
 -Add cool visuals for different initiating events
 -Model tank and pipe overpressure
@@ -64,6 +74,7 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -We can do operating cost estimates based on fuel use, number of employees (how many do you need for maintenance of this many components, etc). But we're glossing over outages.
 -We could even account for interest rates? Maybe
 
+X In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one. (as far as I know)
 X Debug flow calculations (exceeding max)
 X Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.
 X Add flow momentum for numerical stability

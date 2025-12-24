@@ -1,6 +1,6 @@
 import { PlantCanvas } from './render/canvas';
 import { createDemoPlant } from './plant/factory';
-import { PlantState } from './types';
+import { PlantState, PlantComponent } from './types';
 import { GameLoop } from './game';
 import {
   createDemoReactor,
@@ -14,6 +14,9 @@ import {
   simulationConfig,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail } from './debug';
+import { ComponentDialog, ComponentConfig } from './construction/component-config';
+import { ConstructionManager } from './construction/construction-manager';
+import { ConnectionDialog, ConnectionConfig } from './construction/connection-dialog';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -161,16 +164,6 @@ function init() {
     });
   });
 
-  // Move mode toggle
-  const moveModeBtn = document.getElementById('move-mode');
-  if (moveModeBtn) {
-    moveModeBtn.addEventListener('click', () => {
-      const isActive = plantCanvas.isMoveMode();
-      plantCanvas.setMoveMode(!isActive);
-      moveModeBtn.classList.toggle('selected', !isActive);
-      moveModeBtn.textContent = !isActive ? 'Move (ON)' : 'Move';
-    });
-  }
 
   // Close detail panel button - clear selection so it doesn't reopen
   const closeDetailBtn = document.getElementById('close-detail');
@@ -413,14 +406,27 @@ function init() {
   // Construction/Simulation mode controls
   const modeConstructionBtn = document.getElementById('mode-construction') as HTMLButtonElement;
   const modeSimulationBtn = document.getElementById('mode-simulation') as HTMLButtonElement;
-  const simControls = document.querySelector('.sim-controls') as HTMLDivElement;
-  const constructionControls = document.querySelector('.construction-controls') as HTMLDivElement;
+  const simControls = document.getElementById('sim-controls') as HTMLDivElement;
+  const constructionControls = document.getElementById('construction-controls') as HTMLDivElement;
   const constructionButtons = document.querySelectorAll('.component-btn');
   const selectedComponentDiv = document.getElementById('selected-component') as HTMLDivElement;
   const placementHintDiv = document.getElementById('placement-hint') as HTMLDivElement;
 
   let currentMode: 'construction' | 'simulation' = 'construction';
+  let constructionSubMode: 'place' | 'connect' | 'move' = 'place';
   let selectedComponentType: string | null = null;
+  const componentDialog = new ComponentDialog();
+  const connectionDialog = new ConnectionDialog();
+  const constructionManager = new ConstructionManager(plantState);
+
+  // Connection mode state
+  let connectingFrom: { component: any, port: any } | null = null;
+  const connectModeBtn = document.getElementById('connect-mode-btn') as HTMLButtonElement;
+  const connectionInfo = document.getElementById('connection-info') as HTMLDivElement;
+  const connectionStatus = document.getElementById('connection-status') as HTMLDivElement;
+
+  // Move mode button
+  const moveModeBtn = document.getElementById('move-mode') as HTMLButtonElement;
 
   function setMode(mode: 'construction' | 'simulation'): void {
     currentMode = mode;
@@ -444,7 +450,7 @@ function init() {
       modeSimulationBtn?.classList.add('active');
 
       // Show simulation controls, hide construction controls
-      if (simControls) simControls.style.display = 'flex';
+      if (simControls) simControls.style.display = 'block';
       if (constructionControls) constructionControls.style.display = 'none';
 
       // Clear component selection
@@ -492,22 +498,272 @@ function init() {
     });
   });
 
-  // Canvas click handler for placing components
-  canvas.addEventListener('click', (e) => {
-    if (currentMode !== 'construction' || !selectedComponentType) return;
+  // Canvas mouse move handler for visual feedback
+  canvas.addEventListener('mousemove', (e) => {
+    if (currentMode !== 'construction') return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    // For now, just use screen coordinates
-    // TODO: Convert to world coordinates when we have access to view state
-    console.log(`[Construction] Placing ${selectedComponentType} at screen (${x}, ${y})`);
-
-    // TODO: Actually create and place the component
-    // For now, just log the action
-    alert(`Would place ${selectedComponentType} at (${x.toFixed(0)}, ${y.toFixed(0)})\nThis feature is not yet fully implemented.`);
+    if (constructionSubMode === 'connect') {
+      const hoveredPort = plantCanvas.getPortAtScreen({ x, y });
+      if (hoveredPort) {
+        canvas.style.cursor = 'pointer';
+      } else {
+        canvas.style.cursor = 'default';
+      }
+    } else if (constructionSubMode === 'move') {
+      const hoveredComponent = plantCanvas.getComponentAtScreen({ x, y });
+      if (!movingComponent && hoveredComponent) {
+        canvas.style.cursor = 'pointer';
+      } else if (movingComponent) {
+        canvas.style.cursor = 'move';
+      } else {
+        canvas.style.cursor = 'default';
+      }
+    }
   });
+
+  // Move mode state
+  let movingComponent: PlantComponent | null = null;
+  let moveStartOffset = { x: 0, y: 0 };
+
+  // Canvas click handler for placing components or making connections
+  canvas.addEventListener('click', (e) => {
+    if (currentMode !== 'construction') return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (constructionSubMode === 'move') {
+      // Move mode - select or place component
+      const component = plantCanvas.getComponentAtScreen({ x, y });
+
+      if (!movingComponent) {
+        // First click - select component to move
+        if (component) {
+          movingComponent = component;
+          // Calculate offset from component position to click point
+          const view = plantCanvas.getView();
+          const worldClickX = (x - view.offsetX) / view.zoom;
+          const worldClickY = (y - view.offsetY) / view.zoom;
+          moveStartOffset.x = worldClickX - component.position.x;
+          moveStartOffset.y = worldClickY - component.position.y;
+
+          showNotification(`Selected ${component.label || component.id} to move`, 'info');
+          canvas.style.cursor = 'move';
+        }
+      } else {
+        // Second click - place component at new location
+        const view = plantCanvas.getView();
+        const newX = (x - view.offsetX) / view.zoom - moveStartOffset.x;
+        const newY = (y - view.offsetY) / view.zoom - moveStartOffset.y;
+
+        movingComponent.position.x = newX;
+        movingComponent.position.y = newY;
+
+        showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
+
+        // Reset move state
+        movingComponent = null;
+        moveStartOffset = { x: 0, y: 0 };
+        canvas.style.cursor = 'default';
+      }
+    } else if (constructionSubMode === 'place' && selectedComponentType) {
+      // Component placement mode - convert screen to world coordinates
+      const view = plantCanvas.getView();
+      const worldPos = {
+        x: (x - view.offsetX) / view.zoom,
+        y: (y - view.offsetY) / view.zoom
+      };
+      console.log(`[Construction] Opening config dialog for ${selectedComponentType} at world (${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)})`);
+
+      // Show configuration dialog with world coordinates
+      componentDialog.show(selectedComponentType, worldPos, (config: ComponentConfig | null) => {
+        if (config) {
+          console.log(`[Construction] Component configured:`, config);
+
+          // Actually create and place the component in the plant state
+          const componentId = constructionManager.createComponent(config);
+
+          if (componentId) {
+            console.log(`[Construction] Successfully created component '${componentId}'`);
+
+            // The canvas will automatically re-render in its render loop
+            // Just show success notification
+            showNotification(`Created ${config.name} (${config.type})`, 'info');
+          } else {
+            console.error(`[Construction] Failed to create component`);
+            showNotification(`Failed to create ${config.type}`, 'error');
+          }
+
+          // Clear component selection after placing
+          selectedComponentType = null;
+          constructionButtons.forEach(b => b.classList.remove('selected'));
+          if (selectedComponentDiv) {
+            selectedComponentDiv.textContent = 'Select a component to place';
+          }
+          if (placementHintDiv) {
+            placementHintDiv.style.display = 'none';
+          }
+        } else {
+          console.log(`[Construction] Component placement cancelled`);
+        }
+      });
+    } else if (constructionSubMode === 'connect') {
+      // Connection mode - detect clicked port
+      console.log(`[Connection] Click at (${x}, ${y})`);
+      const portInfo = plantCanvas.getPortAtScreen({ x, y });
+      console.log(`[Connection] Found port:`, portInfo);
+
+      if (portInfo) {
+        if (!connectingFrom) {
+          // First click - select source port
+          connectingFrom = {
+            component: portInfo.component,
+            port: portInfo.port
+          };
+          // Highlight the selected port
+          plantCanvas.setHighlightedPort(portInfo.component.id, portInfo.port.id);
+          if (connectionStatus) {
+            const componentName = portInfo.component.label || portInfo.component.id;
+            const portName = portInfo.port.id.split('-').pop(); // Get last part of port ID
+            connectionStatus.textContent = `Connecting from ${componentName} (${portName}). Select target port...`;
+          }
+        } else {
+          // Second click - select target port and create connection
+          if (portInfo.component.id === connectingFrom.component.id) {
+            // Can't connect to self
+            showNotification('Cannot connect component to itself', 'warning');
+            return;
+          }
+
+          // Show connection configuration dialog with port-specific elevations
+          connectionDialog.show(
+            connectingFrom.component,
+            portInfo.component,
+            connectingFrom.port,
+            portInfo.port,
+            (config: ConnectionConfig | null) => {
+              if (config) {
+                // Create the connection
+                console.log(`[Connection Config] createPipe: ${config.createPipe}, flowArea: ${config.flowArea}, length: ${config.length}`);
+                let success: boolean;
+                if (config.createPipe) {
+                  console.log(`[Main] Calling createConnectionWithPipe`);
+                  success = constructionManager.createConnectionWithPipe(
+                    config.fromPort.id,
+                    config.toPort.id,
+                    config.flowArea,
+                    config.length,
+                    config.fromElevation,
+                    config.toElevation
+                  );
+                } else {
+                  console.log(`[Main] Calling createConnection (direct)`);
+                  success = constructionManager.createConnection(
+                    config.fromPort.id,
+                    config.toPort.id
+                  );
+                }
+
+                if (success) {
+                  showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
+                } else {
+                  showNotification('Failed to create connection', 'error');
+                }
+              }
+
+              // Reset connection state
+              connectingFrom = null;
+              plantCanvas.setHighlightedPort(null, null); // Clear highlight
+              if (connectionStatus) {
+                connectionStatus.textContent = 'Select first component...';
+              }
+            }
+          );
+        }
+      }
+    }
+  });
+
+
+  // Helper to set construction sub-mode
+  function setConstructionSubMode(mode: 'place' | 'connect' | 'move') {
+    constructionSubMode = mode;
+
+    // Update button states
+    connectModeBtn?.classList.toggle('active', mode === 'connect');
+    moveModeBtn?.classList.toggle('active', mode === 'move');
+
+    // Show ports when in connect mode
+    plantCanvas.setShowPorts(mode === 'connect');
+
+    // Update UI visibility
+    if (connectionInfo) {
+      connectionInfo.style.display = mode === 'connect' ? 'block' : 'none';
+    }
+
+    // Reset states when switching modes
+    if (mode !== 'connect') {
+      connectingFrom = null;
+      plantCanvas.setHighlightedPort(null, null); // Clear highlight when leaving connect mode
+      if (connectionStatus) {
+        connectionStatus.textContent = 'Select first component...';
+      }
+    }
+
+    if (mode !== 'move') {
+      movingComponent = null;
+      moveStartOffset = { x: 0, y: 0 };
+      canvas.style.cursor = 'default';
+    }
+
+    if (mode !== 'place') {
+      // Clear component selection when not in place mode
+      selectedComponentType = null;
+      constructionButtons.forEach(b => b.classList.remove('selected'));
+      if (selectedComponentDiv) {
+        selectedComponentDiv.textContent = 'No component selected';
+      }
+      if (placementHintDiv) {
+        placementHintDiv.style.display = 'none';
+      }
+    }
+
+    console.log(`[Construction] Switched to ${mode} mode`);
+  }
+
+  // Connect mode button handler
+  if (connectModeBtn) {
+    connectModeBtn.addEventListener('click', () => {
+      if (constructionSubMode === 'connect') {
+        // Exit connect mode, return to place mode
+        setConstructionSubMode('place');
+      } else {
+        // Enter connect mode
+        setConstructionSubMode('connect');
+        if (connectionStatus) {
+          connectionStatus.textContent = 'Select first component...';
+        }
+      }
+    });
+  }
+
+  // Move mode button handler
+  if (moveModeBtn) {
+    moveModeBtn.addEventListener('click', () => {
+      if (constructionSubMode === 'move') {
+        // Exit move mode, return to place mode
+        setConstructionSubMode('place');
+      } else {
+        // Enter move mode
+        setConstructionSubMode('move');
+      }
+    });
+  }
 
   // Start in construction mode
   setMode('construction');

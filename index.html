@@ -15,9 +15,11 @@
           <button id="mode-construction" class="mode-btn active">🔧 Construction</button>
           <button id="mode-simulation" class="mode-btn">▶️ Simulation</button>
         </div>
-        <hr />
-        <h3>Simulation</h3>
-        <div class="sim-controls">
+
+        <!-- Simulation Controls Section -->
+        <div class="sim-controls" id="sim-controls" style="display: none;">
+          <hr />
+          <h3>Simulation</h3>
           <button id="pause-btn" class="sim-btn">▶ Resume</button>
           <button id="step-btn" class="sim-btn">⏭ Step</button>
           <button id="single-step-btn" class="sim-btn">⏵ 1 Step</button>
@@ -53,48 +55,63 @@
               <option value="pure-triangulation">Pure Triangulation</option>
             </select>
           </div>
+          <hr />
+          <h3>Control Rods</h3>
+          <div class="slider-control">
+            <label for="rod-position">Insertion: <span id="rod-position-value">15%</span></label>
+            <input type="range" id="rod-position" min="0" max="100" value="15" />
+            <div class="slider-labels"><span>Out</span><span>In</span></div>
+          </div>
+          <div class="scram-controls" style="margin-top: 10px;">
+            <button id="scram-btn" class="sim-btn" style="background: #d00; color: white; font-weight: bold;">SCRAM</button>
+            <button id="reset-scram-btn" class="sim-btn" style="display: none;">Reset SCRAM</button>
+            <div id="scram-indicator" style="display: none; color: #d00; font-weight: bold; margin-top: 5px;">
+              ⚠️ REACTOR SCRAMMED
+            </div>
+          </div>
         </div>
-        <hr />
-        <div class="construction-controls">
+
+        <!-- Construction Controls Section -->
+        <div class="construction-controls" id="construction-controls">
+          <hr />
           <h3>Components</h3>
-          <div class="component-categories">
-            <details open>
-              <summary>Vessels</summary>
-              <button data-component="tank" class="component-btn">Tank</button>
-              <button data-component="vessel" class="component-btn">Reactor</button>
-              <button data-component="pressurizer" class="component-btn">Pressurizer</button>
-            </details>
-            <details open>
-              <summary>Flow</summary>
-              <button data-component="pipe" class="component-btn">Pipe</button>
-              <button data-component="pump" class="component-btn">Pump</button>
-              <button data-component="valve" class="component-btn">Valve</button>
-            </details>
-            <details>
-              <summary>Heat Transfer</summary>
-              <button data-component="heatExchanger" class="component-btn">Steam Gen</button>
-              <button data-component="condenser" class="component-btn">Condenser</button>
-            </details>
-          </div>
-          <div class="construction-info" style="margin-top: 10px; font-size: 11px; color: #888;">
-            <div id="selected-component">No component selected</div>
-            <div id="placement-hint" style="display: none;">Click to place</div>
-          </div>
+        <div class="component-categories">
+          <details open>
+            <summary>Vessels</summary>
+            <button data-component="tank" class="component-btn">Tank</button>
+            <button data-component="pressurizer" class="component-btn">Pressurizer</button>
+          </details>
+          <details open>
+            <summary>Flow</summary>
+            <button data-component="pipe" class="component-btn">Pipe</button>
+            <button data-component="valve" class="component-btn">Valve</button>
+            <button data-component="pump" class="component-btn">Pump</button>
+          </details>
+          <details open>
+            <summary>Heat Transfer</summary>
+            <button data-component="heat-exchanger" class="component-btn">Heat Exchanger</button>
+            <button data-component="turbine" class="component-btn">Turbine</button>
+            <button data-component="generator" class="component-btn">Generator</button>
+            <button data-component="condenser" class="component-btn">Condenser</button>
+          </details>
+          <details open>
+            <summary>Nuclear</summary>
+            <button data-component="core" class="component-btn">Reactor Core</button>
+          </details>
+        </div>
+        <div class="construction-info" style="margin-top: 10px; font-size: 11px; color: #888;">
+          <div id="selected-component">No component selected</div>
+          <div id="placement-hint" style="display: none;">Click to place</div>
         </div>
         <hr />
-        <h3>Control Rods</h3>
-        <div class="slider-control">
-          <label for="rod-position">Insertion: <span id="rod-position-value">15%</span></label>
-          <input type="range" id="rod-position" min="0" max="100" value="15" />
-          <div class="slider-labels"><span>Out</span><span>In</span></div>
+        <h3>Connections</h3>
+        <button id="connect-mode-btn" class="mode-btn">🔗 Connect Components</button>
+        <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
+          <div id="connection-status">Select first component...</div>
         </div>
-        <div class="scram-controls" style="margin-top: 10px;">
-          <button id="scram-btn" class="sim-btn" style="background: #d00; color: white; font-weight: bold;">SCRAM</button>
-          <button id="reset-scram-btn" class="sim-btn" style="display: none;">Reset SCRAM</button>
-          <div id="scram-indicator" style="display: none; color: #d00; font-weight: bold; margin-top: 5px;">
-            ⚠️ REACTOR SCRAMMED
-          </div>
         </div>
+
+        <!-- Common controls for both modes -->
         <hr />
         <h3>Edit</h3>
         <button id="move-mode">Move</button>
@@ -154,6 +171,40 @@
         </div>
       </div>
     </div>
+    <!-- Component Configuration Dialog -->
+    <div id="component-dialog" class="component-dialog" style="display: none;">
+      <div class="dialog-content">
+        <div class="dialog-header">
+          <h3 id="dialog-title">Configure Component</h3>
+          <button class="dialog-close">&times;</button>
+        </div>
+        <div id="dialog-body" class="dialog-body">
+          <!-- Dynamic content will be inserted here -->
+        </div>
+        <div class="dialog-footer">
+          <button id="dialog-cancel" class="btn-secondary">Cancel</button>
+          <button id="dialog-confirm" class="btn-primary">Place Component</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection Configuration Dialog -->
+    <div id="connection-dialog" class="component-dialog" style="display: none;">
+      <div class="dialog-content">
+        <div class="dialog-header">
+          <h3 id="connection-dialog-title">Configure Connection</h3>
+          <button class="connection-dialog-close">&times;</button>
+        </div>
+        <div id="connection-dialog-body" class="dialog-body">
+          <!-- Dynamic content will be inserted here -->
+        </div>
+        <div class="dialog-footer">
+          <button id="connection-dialog-cancel" class="btn-secondary">Cancel</button>
+          <button id="connection-dialog-confirm" class="btn-primary">Create Connection</button>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
