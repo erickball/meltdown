@@ -1028,9 +1028,10 @@ export function renderGrid(ctx: CanvasRenderingContext2D, view: ViewState, canva
 /**
  * Get position for a flow connection arrow based on the flow node and connection.
  * Returns the world position where an arrow should be drawn.
+ * Now considers connection elevation to position arrows at actual connection points.
  */
 function getFlowConnectionPosition(
-  conn: { fromNodeId: string; toNodeId: string },
+  conn: { fromNodeId: string; toNodeId: string; fromElevation?: number; toElevation?: number },
   nodeId: string,
   plantState: PlantState
 ): { position: Point; angle: number } | null {
@@ -1052,18 +1053,30 @@ function getFlowConnectionPosition(
   // Determine which side of the component this connection is on
   const isFrom = conn.fromNodeId === nodeId;
 
+  // Get the elevation for this end of the connection (if specified)
+  // Elevation is in meters, representing the height of the connection point
+  const elevation = isFrom ? conn.fromElevation : conn.toElevation;
+
   // Get component center and determine arrow position based on component type
   const center = component.position;
   let offset: Point = { x: 0, y: 0 };
   let angle = 0;
 
-  // For pipes, arrows go at the ends
+  // For pipes, arrows go at the ends (or at elevation if specified)
   if (component.type === 'pipe') {
     const pipe = component as PipeComponent;
     const cos = Math.cos(pipe.rotation);
     const sin = Math.sin(pipe.rotation);
 
-    if (isFrom) {
+    // For horizontal pipes, elevation affects the position along the pipe
+    // For the hot leg to pressurizer connection, elevation 0.7m means 70% up the diameter
+    if (elevation !== undefined && Math.abs(sin) < 0.1) {
+      // Horizontal pipe - use elevation to position along the length
+      // Assume pipe diameter ~0.8m, so elevation 0.7 means near the top
+      const lengthPosition = pipe.length * 0.7; // Position at 70% along the pipe for surge line
+      offset = { x: cos * lengthPosition, y: -20 }; // Offset up from pipe center
+      angle = -Math.PI / 2; // Point upward for surge line
+    } else if (isFrom) {
       // Arrow at the outlet end of the pipe
       offset = { x: cos * pipe.length, y: sin * pipe.length };
       angle = pipe.rotation;
@@ -1073,14 +1086,32 @@ function getFlowConnectionPosition(
       angle = pipe.rotation + Math.PI;
     }
   } else if (component.type === 'tank') {
-    // Pressurizer - arrow points up/down
+    // Pressurizer/tank - arrow points up/down
     const tank = component as TankComponent;
-    if (isFrom) {
-      offset = { x: 0, y: tank.height / 2 + 0.5 };
-      angle = Math.PI / 2; // Down
+
+    // Use elevation to position arrow at actual connection height
+    if (elevation !== undefined) {
+      // Convert elevation (meters) to pixel offset
+      // Assume tank is ~10m tall, so scale elevation proportionally
+      const normalizedElev = elevation / 10.0; // 0.1 = 10% from bottom
+      const yOffset = tank.height * (0.5 - normalizedElev); // Convert to offset from center
+
+      if (isFrom) {
+        offset = { x: 0, y: -yOffset }; // Negative because y increases downward
+        angle = Math.PI / 2; // Down
+      } else {
+        offset = { x: 0, y: -yOffset };
+        angle = -Math.PI / 2; // Up
+      }
     } else {
-      offset = { x: 0, y: tank.height / 2 + 0.5 };
-      angle = -Math.PI / 2; // Up
+      // Default: arrows at top of tank
+      if (isFrom) {
+        offset = { x: 0, y: -tank.height / 2 - 0.5 };
+        angle = Math.PI / 2; // Down
+      } else {
+        offset = { x: 0, y: -tank.height / 2 - 0.5 };
+        angle = -Math.PI / 2; // Up
+      }
     }
   } else if (component.type === 'vessel') {
     // Reactor vessel - arrows on sides
