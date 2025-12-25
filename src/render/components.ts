@@ -99,12 +99,8 @@ export function renderComponent(
   view: ViewState,
   isSelected: boolean = false
 ): void {
-  ctx.save();
-
-  // Transform to component position
-  const screenPos = worldToScreen(component.position, view);
-  ctx.translate(screenPos.x, screenPos.y);
-  ctx.rotate(component.rotation);
+  // Note: Context is already transformed to component position by caller
+  // We no longer transform here to support isometric projection
 
   // Dispatch to specific renderer
   switch (component.type) {
@@ -144,8 +140,6 @@ export function renderComponent(
 
   // Draw ports
   renderPorts(ctx, component, view);
-
-  ctx.restore();
 }
 
 function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState): void {

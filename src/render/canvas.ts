@@ -1,6 +1,15 @@
 import { ViewState, Point, PlantState, PlantComponent } from '../types';
 import { SimulationState } from '../simulation';
 import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge } from './components';
+import {
+  IsometricConfig,
+  DEFAULT_ISOMETRIC,
+  projectIsometric,
+  renderIsometricGround,
+  renderComponentShadow,
+  renderElevationLabel,
+  getComponentElevation
+} from './isometric';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -10,6 +19,7 @@ export class PlantCanvas {
   private simState: SimulationState | null = null;
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
+  private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
 
   // Interaction state
   private isDragging: boolean = false;
@@ -323,10 +333,41 @@ export class PlantCanvas {
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Draw grid
-    renderGrid(ctx, this.view, rect.width, rect.height);
+    // Draw background - either grid or isometric ground
+    if (this.isometric.enabled) {
+      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric);
+    } else {
+      renderGrid(ctx, this.view, rect.width, rect.height);
+    }
 
-    // Draw connections first (behind components)
+    // Sort components by elevation for proper layering in isometric view
+    const sortedComponents = Array.from(this.plantState.components.values()).sort((a, b) => {
+      if (!this.isometric.enabled) return 0;
+      const elevA = getComponentElevation(a);
+      const elevB = getComponentElevation(b);
+      // Also consider Y position for depth sorting
+      return (a.position.y - b.position.y) + (elevA - elevB) * 0.1;
+    });
+
+    // Draw shadows first (if isometric)
+    if (this.isometric.enabled) {
+      for (const component of sortedComponents) {
+        ctx.save();
+        const pos3D = {
+          x: component.position.x,
+          y: component.position.y,
+          z: getComponentElevation(component)
+        };
+        const projectedPos = projectIsometric(pos3D, this.isometric);
+        const screenPos = worldToScreen(projectedPos, this.view);
+        ctx.translate(screenPos.x, screenPos.y);
+        ctx.rotate(component.rotation);
+        renderComponentShadow(ctx, component, this.view, this.isometric);
+        ctx.restore();
+      }
+    }
+
+    // Draw connections (behind components)
     for (const connection of this.plantState.connections) {
       const fromComponent = this.plantState.components.get(connection.fromComponentId);
       const toComponent = this.plantState.components.get(connection.toComponentId);
@@ -344,10 +385,37 @@ export class PlantCanvas {
       }
     }
 
-    // Draw components
-    for (const component of this.plantState.components.values()) {
+    // Draw components with isometric projection
+    for (const component of sortedComponents) {
+      ctx.save();
+
+      // Apply isometric projection if enabled
+      if (this.isometric.enabled) {
+        const pos3D = {
+          x: component.position.x,
+          y: component.position.y,
+          z: getComponentElevation(component)
+        };
+        const projectedPos = projectIsometric(pos3D, this.isometric);
+        const screenPos = worldToScreen(projectedPos, this.view);
+        ctx.translate(screenPos.x, screenPos.y);
+      } else {
+        const screenPos = worldToScreen(component.position, this.view);
+        ctx.translate(screenPos.x, screenPos.y);
+      }
+
+      ctx.rotate(component.rotation);
+
+      // Render the component
       const isSelected = component.id === this.selectedComponentId;
       renderComponent(ctx, component, this.view, isSelected);
+
+      // Render elevation label if in isometric mode
+      if (this.isometric.enabled) {
+        renderElevationLabel(ctx, component, this.view, this.isometric);
+      }
+
+      ctx.restore();
     }
 
     // Draw port indicators if enabled
@@ -447,6 +515,18 @@ export class PlantCanvas {
 
   public getView(): ViewState {
     return { ...this.view };
+  }
+
+  public setIsometric(enabled: boolean): void {
+    this.isometric.enabled = enabled;
+  }
+
+  public toggleIsometric(): void {
+    this.isometric.enabled = !this.isometric.enabled;
+  }
+
+  public getIsometric(): boolean {
+    return this.isometric.enabled;
   }
 
   public setView(view: Partial<ViewState>): void {

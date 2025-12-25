@@ -428,6 +428,16 @@ function init() {
   // Move mode button
   const moveModeBtn = document.getElementById('move-mode') as HTMLButtonElement;
 
+  // Isometric view toggle
+  const isometricBtn = document.getElementById('toggle-isometric') as HTMLButtonElement;
+  if (isometricBtn) {
+    isometricBtn.addEventListener('click', () => {
+      plantCanvas.toggleIsometric();
+      isometricBtn.classList.toggle('active', plantCanvas.getIsometric());
+      console.log(`[View] Isometric mode: ${plantCanvas.getIsometric() ? 'enabled' : 'disabled'}`);
+    });
+  }
+
   function setMode(mode: 'construction' | 'simulation'): void {
     currentMode = mode;
 

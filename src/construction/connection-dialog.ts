@@ -100,10 +100,10 @@ export class ConnectionDialog {
     const toElevation = this.getPortElevation(this.toComponent!, this.toPort!, toHeight);
 
     // Calculate minimum length based on actual port positions
-    const fromPortX = this.fromComponent.position.x + this.fromPort.position.x;
-    const fromPortY = this.fromComponent.position.y + this.fromPort.position.y;
-    const toPortX = this.toComponent.position.x + this.toPort.position.x;
-    const toPortY = this.toComponent.position.y + this.toPort.position.y;
+    const fromPortX = this.fromComponent!.position.x + this.fromPort!.position.x;
+    const fromPortY = this.fromComponent!.position.y + this.fromPort!.position.y;
+    const toPortX = this.toComponent!.position.x + this.toPort!.position.x;
+    const toPortY = this.toComponent!.position.y + this.toPort!.position.y;
 
     const dx = toPortX - fromPortX;
     const dy = toPortY - fromPortY;

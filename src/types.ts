@@ -42,6 +42,7 @@ export interface ComponentBase {
   label?: string;       // Human-readable name for display
   position: Point;      // World position (meters, but we'll scale for display)
   rotation: number;     // Radians
+  elevation?: number;   // Height above ground in meters
   ports: Port[];
   fluid?: Fluid;        // Current fluid state inside
   // Simulation linkage

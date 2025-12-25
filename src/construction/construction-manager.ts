@@ -101,6 +101,7 @@ export class ConstructionManager {
           label: props.name || 'Tank',
           position: { x: worldX, y: worldY },
           rotation: 0,
+          elevation: props.elevation || 0,
           width,
           height: props.height,
           wallThickness: 0.05,  // 5cm default
@@ -143,6 +144,7 @@ export class ConstructionManager {
           label: props.name || 'Pressurizer',
           position: { x: worldX, y: worldY },
           rotation: 0,
+          elevation: props.elevation || 5, // Pressurizers are typically elevated
           width,
           height: props.height,
           wallThickness: 0.05,

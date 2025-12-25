@@ -16,8 +16,6 @@ This project is intended as a sandbox environment with game-like aspects, to all
     const steadyStateFlow = sign * rho * A * v_steady;
     and do we use it anywhere?
 
--Add the ability for the user to create components and connect them (construction mode)
--And specify their initial properties
 -User-constructed plant should run in the simulation; debug panel modified accordingly.
 -User should be able to save a configuration (can we save it in a cookie or something?)
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
@@ -74,6 +72,8 @@ X Add manual reset of scram
 -We can do operating cost estimates based on fuel use, number of employees (how many do you need for maintenance of this many components, etc). But we're glossing over outages.
 -We could even account for interest rates? Maybe
 
+X Add the ability for the user to create components and connect them (construction mode)
+X And specify their initial properties
 X In the construction mode where the user can select components, the condenser component should just always include a condensate pump. There's no reason you'd ever want a condenser without one. (as far as I know)
 X Debug flow calculations (exceeding max)
 X Finish debugging quality calculation - there are still cases where x_u and x_v don't match perfectly.
