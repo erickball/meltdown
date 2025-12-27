@@ -451,6 +451,105 @@ export function renderElevationLabel(
   ctx.restore();
 }
 
+/**
+ * Render debug grid on the ground plane with world coordinate labels
+ */
+export function renderDebugGrid(
+  ctx: CanvasRenderingContext2D,
+  view: ViewState,
+  width: number,
+  height: number,
+  cameraDepth: number,
+  worldToScreenFn: (pos: { x: number, y: number }, elevation: number) => { pos: { x: number, y: number }, scale: number }
+): void {
+  const horizonY = height * 0.25;
+  const centerX = width / 2;
+
+  // Camera world position
+  const cameraWorldX = -(view.offsetX - centerX) / 10;
+  const cameraWorldY = -cameraDepth / 10;
+
+  // Grid spacing in world units (meters)
+  const gridSpacing = 10;
+
+  // Visible range
+  const visibleRangeX = 100;
+  const visibleRangeY = 200;
+
+  const startX = Math.floor((cameraWorldX - visibleRangeX) / gridSpacing) * gridSpacing;
+  const endX = Math.ceil((cameraWorldX + visibleRangeX) / gridSpacing) * gridSpacing;
+  const startY = Math.floor(cameraWorldY / gridSpacing) * gridSpacing;
+  const endY = Math.ceil((cameraWorldY + visibleRangeY) / gridSpacing) * gridSpacing;
+
+  ctx.save();
+
+  // Draw grid lines along Y (going toward horizon)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.lineWidth = 1;
+
+  for (let x = startX; x <= endX; x += gridSpacing) {
+    ctx.beginPath();
+    let started = false;
+    for (let y = startY; y <= endY; y += gridSpacing / 4) {
+      const screen = worldToScreenFn({ x, y }, 0);
+      if (screen.scale <= 0 || screen.pos.y < horizonY) continue;
+      if (!started) {
+        ctx.moveTo(screen.pos.x, screen.pos.y);
+        started = true;
+      } else {
+        ctx.lineTo(screen.pos.x, screen.pos.y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // Draw grid lines along X (perpendicular to camera view)
+  for (let y = startY; y <= endY; y += gridSpacing) {
+    ctx.beginPath();
+    let started = false;
+    for (let x = startX; x <= endX; x += gridSpacing / 4) {
+      const screen = worldToScreenFn({ x, y }, 0);
+      if (screen.scale <= 0 || screen.pos.y < horizonY) continue;
+      if (!started) {
+        ctx.moveTo(screen.pos.x, screen.pos.y);
+        started = true;
+      } else {
+        ctx.lineTo(screen.pos.x, screen.pos.y);
+      }
+    }
+    ctx.stroke();
+  }
+
+  // Draw coordinate labels at intersections
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  for (let x = startX; x <= endX; x += gridSpacing) {
+    for (let y = startY; y <= endY; y += gridSpacing) {
+      const screen = worldToScreenFn({ x, y }, 0);
+      if (screen.scale <= 0 || screen.pos.y < horizonY || screen.pos.y > height) continue;
+      if (screen.pos.x < 0 || screen.pos.x > width) continue;
+
+      // Draw small dot at intersection
+      ctx.fillStyle = 'rgba(255, 0, 0, 0.5)';
+      ctx.beginPath();
+      ctx.arc(screen.pos.x, screen.pos.y, 3, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Draw coordinate label
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+      ctx.lineWidth = 2;
+      const label = `${x},${y}`;
+      ctx.strokeText(label, screen.pos.x, screen.pos.y - 10);
+      ctx.fillText(label, screen.pos.x, screen.pos.y - 10);
+    }
+  }
+
+  ctx.restore();
+}
+
 // Helper to get component bounds for shadow/label positioning
 function getComponentBounds(component: PlantComponent): { width: number, height: number } {
   switch (component.type) {

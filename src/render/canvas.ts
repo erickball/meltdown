@@ -6,7 +6,8 @@ import {
   DEFAULT_ISOMETRIC,
   renderIsometricGround,
   renderElevationLabel,
-  getComponentElevation
+  getComponentElevation,
+  renderDebugGrid
 } from './isometric';
 
 export class PlantCanvas {
@@ -522,6 +523,9 @@ export class PlantCanvas {
     // Draw background - either grid or isometric ground
     if (this.isometric.enabled) {
       renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth);
+      // Debug grid - temporarily enabled
+      renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
+        (pos, elev) => this.worldToScreenPerspective(pos, elev));
     } else {
       renderGrid(ctx, this.view, rect.width, rect.height);
     }
@@ -536,30 +540,20 @@ export class PlantCanvas {
     });
 
     // Draw shadows first (if isometric)
-    // Shadow corners are calculated in world space and projected to screen
-    // This ensures shadows follow the ground plane correctly with perspective
+    // Shadows are computed in world space using 3D ray-plane intersection
     if (this.isometric.enabled) {
-      // Debug: find a reference shrub position for comparison
-      const rect = this.canvas.getBoundingClientRect();
-      const horizonY = rect.height * 0.25;
-      const groundHeight = rect.height - horizonY;
-      const centerX = rect.width / 2;
-      const cameraWorldX = -(this.view.offsetX - centerX) / 10;
-      const cameraWorldY = -this.cameraDepth / 10;
+      // Sun direction vector (direction light travels, from sun toward ground)
+      // Sun is mostly overhead, slightly behind objects (toward +Y/horizon), slightly to the left
+      const sunDirX = 0.1;   // Light goes slightly right (sun is to the left)
+      const sunDirY = -0.4;  // Light goes toward camera (sun is behind, toward horizon)
+      const sunDirZ = -1.0;  // Light goes down (sun is above)
 
-      // Reference shrub at a fixed world position for debugging
-      const refShrubWorld = { x: 0, y: 100 }; // Fixed world position
-      const refShrubRelX = refShrubWorld.x - cameraWorldX;
-      const refShrubRelY = refShrubWorld.y - cameraWorldY;
-      let refShrubScreen = { x: 0, y: 0 };
-      if (refShrubRelY > 1) {
-        const shrubPerspectiveScale = this.CAMERA_HEIGHT / refShrubRelY;
-        const shrubCappedScale = Math.min(shrubPerspectiveScale, 3);
-        refShrubScreen = {
-          x: centerX + refShrubRelX * shrubCappedScale * this.PERSPECTIVE_X_SCALE,
-          y: horizonY + groundHeight * this.CAMERA_HEIGHT / refShrubRelY
-        };
-      }
+      // Shadow offset per unit of elevation: where ray hits ground
+      // For point at (x, y, z), ray is (x, y, z) + t*(sunDirX, sunDirY, sunDirZ)
+      // Hits ground when z + t*sunDirZ = 0, so t = -z/sunDirZ
+      // Ground intersection: x - z*sunDirX/sunDirZ, y - z*sunDirY/sunDirZ
+      const shadowOffsetXPerZ = -sunDirX / sunDirZ;  // 0.1 (shadow goes right)
+      const shadowOffsetYPerZ = -sunDirY / sunDirZ;  // -0.4 (shadow goes toward camera)
 
       for (const component of sortedComponents) {
         try {
@@ -567,90 +561,69 @@ export class PlantCanvas {
           const worldWidth = size.width || 1;
           const worldHeight = size.height || 1;
 
-          // Calculate component center in world coordinates
-          // Most components are centered on their position, but pipes start at position
-          let centerWorldX = component.position.x;
-          let centerWorldY = component.position.y;
+          // Get component's elevation (z coordinate)
+          const elevation = getComponentElevation(component);
+
+          // Component center in world space
+          let centerX = component.position.x;
+          let centerY = component.position.y;
           if (component.type === 'pipe') {
             const halfLength = (component as any).length / 2;
-            centerWorldX += halfLength * Math.cos(component.rotation);
-            centerWorldY += halfLength * Math.sin(component.rotation);
+            centerX += halfLength * Math.cos(component.rotation);
+            centerY += halfLength * Math.sin(component.rotation);
           }
 
-          // Shadow extent in world units (45-degree sun angle, sun behind-left)
-          // Shadow extends toward camera (-Y) and to the right (+X)
-          const shadowExtent = worldHeight;
+          // Component corners in local 3D space (x, y relative to center, z = elevation)
+          // These are the TOP corners of the component (at full elevation)
+          const halfW = worldWidth / 2;
+          const halfH = worldHeight / 2;
+          const cos = Math.cos(component.rotation);
+          const sin = Math.sin(component.rotation);
 
-          // Calculate shadow corners in world coordinates
-          const halfWidth = worldWidth / 2;
+          // Shadow falls IN FRONT of the component (toward camera)
+          // Back edge of shadow at component's front edge (y = -halfH)
+          // Front edge extends forward by shadowLength (toward camera, more negative Y)
+          const shadowLength = worldHeight; // Shadow length = component height
+          const shadowCorners3D = [
+            { x: -halfW, y: -halfH - shadowLength, z: elevation },  // front-left (toward camera)
+            { x: halfW, y: -halfH - shadowLength, z: elevation },   // front-right
+            { x: halfW, y: -halfH, z: elevation },                   // back-right (at component front)
+            { x: -halfW, y: -halfH, z: elevation },                  // back-left
+          ];
 
-          // Shadow starts at component's front edge (toward camera, lower Y)
-          // and extends further toward camera
-          const frontEdgeY = centerWorldY - halfWidth;
+          // Project each shadow corner onto the ground plane
+          const shadowCorners: Point[] = [];
+          for (const local of shadowCorners3D) {
+            // Rotate to world space
+            const worldX = centerX + local.x * cos - local.y * sin;
+            const worldY = centerY + local.x * sin + local.y * cos;
+            const worldZ = local.z;
 
-          // Top edge (at component's front edge)
-          const topLeftWorld = { x: centerWorldX - halfWidth, y: frontEdgeY };
-          const topRightWorld = { x: centerWorldX + halfWidth, y: frontEdgeY };
+            // Ray from this point in sun direction hits ground at:
+            const groundX = worldX + worldZ * shadowOffsetXPerZ;
+            const groundY = worldY + worldZ * shadowOffsetYPerZ;
 
-          // Bottom edge (shadow extends forward toward camera and right)
-          const bottomLeftWorld = { x: centerWorldX - halfWidth + shadowExtent, y: frontEdgeY - shadowExtent };
-          const bottomRightWorld = { x: centerWorldX + halfWidth + shadowExtent, y: frontEdgeY - shadowExtent };
+            shadowCorners.push({ x: groundX, y: groundY });
+          }
 
-          // Project all four corners to screen space (on ground, elevation 0)
-          const topLeft = this.worldToScreenPerspective(topLeftWorld, 0);
-          const topRight = this.worldToScreenPerspective(topRightWorld, 0);
-          const bottomLeft = this.worldToScreenPerspective(bottomLeftWorld, 0);
-          const bottomRight = this.worldToScreenPerspective(bottomRightWorld, 0);
+          // Project shadow corners from world space to screen space
+          const screenCorners = shadowCorners.map(corner =>
+            this.worldToScreenPerspective(corner, 0)
+          );
 
           // Skip if any corner is behind camera
-          if (topLeft.scale <= 0 || topRight.scale <= 0 ||
-              bottomLeft.scale <= 0 || bottomRight.scale <= 0) continue;
-
-          // Debug logging: on component creation or camera move (throttled)
-          const now = Date.now();
-          const isNewComponent = !this.loggedComponentIds.has(component.id);
-          const cameraMoved = Math.abs(cameraWorldX - this.lastCameraX) > 0.1 ||
-                              Math.abs(cameraWorldY - this.lastCameraY) > 0.1 ||
-                              Math.abs(this.cameraDepth - this.lastCameraDepth) > 0.1;
-          const canLog = now - this.lastDebugLog > 1000;
-
-          if (isNewComponent || (cameraMoved && canLog)) {
-            if (isNewComponent) {
-              this.loggedComponentIds.add(component.id);
-              console.log('=== NEW COMPONENT CREATED ===');
-            } else {
-              console.log('=== CAMERA MOVED ===');
-            }
-            this.lastDebugLog = now;
-            this.lastCameraX = cameraWorldX;
-            this.lastCameraY = cameraWorldY;
-            this.lastCameraDepth = this.cameraDepth;
-
-            const elevation = getComponentElevation(component);
-            const compScreen = this.worldToScreenPerspective(component.position, elevation);
-            console.log(`Component ${component.type} (${component.id}): world(${component.position.x.toFixed(1)}, ${component.position.y.toFixed(1)}, z=${elevation})`);
-            console.log(`  Component screen: (${compScreen.pos.x.toFixed(1)}, ${compScreen.pos.y.toFixed(1)}), scale=${compScreen.scale.toFixed(3)}`);
-            console.log(`Shadow corners (world):`);
-            console.log(`  topLeft: (${topLeftWorld.x.toFixed(1)}, ${topLeftWorld.y.toFixed(1)})`);
-            console.log(`  topRight: (${topRightWorld.x.toFixed(1)}, ${topRightWorld.y.toFixed(1)})`);
-            console.log(`Shadow corners (screen):`);
-            console.log(`  topLeft: (${topLeft.pos.x.toFixed(1)}, ${topLeft.pos.y.toFixed(1)})`);
-            console.log(`  topRight: (${topRight.pos.x.toFixed(1)}, ${topRight.pos.y.toFixed(1)})`);
-            console.log(`Reference shrub at world(${refShrubWorld.x}, ${refShrubWorld.y}):`);
-            console.log(`  screen: (${refShrubScreen.x.toFixed(1)}, ${refShrubScreen.y.toFixed(1)})`);
-            console.log(`Camera: worldX=${cameraWorldX.toFixed(1)}, worldY=${cameraWorldY.toFixed(1)}, depth=${this.cameraDepth}`);
-          }
+          if (screenCorners.some(c => c.scale <= 0)) continue;
 
           ctx.save();
 
-          // Draw shadow as parallelogram
+          // Draw shadow as polygon
           ctx.globalAlpha = 0.4;
           ctx.fillStyle = 'rgba(20, 15, 10, 1)';
           ctx.beginPath();
-          ctx.moveTo(topLeft.pos.x, topLeft.pos.y);
-          ctx.lineTo(topRight.pos.x, topRight.pos.y);
-          ctx.lineTo(bottomRight.pos.x, bottomRight.pos.y);
-          ctx.lineTo(bottomLeft.pos.x, bottomLeft.pos.y);
+          ctx.moveTo(screenCorners[0].pos.x, screenCorners[0].pos.y);
+          for (let i = 1; i < screenCorners.length; i++) {
+            ctx.lineTo(screenCorners[i].pos.x, screenCorners[i].pos.y);
+          }
           ctx.closePath();
           ctx.fill();
 
@@ -680,36 +653,86 @@ export class PlantCanvas {
     }
 
     // Draw components with perspective projection
-    // Use same perspective scale for both position and size to ensure components
-    // are fixed to the ground plane like shrubs
+    // Project all 4 corners individually for proper ground-plane alignment
     for (const component of sortedComponents) {
       ctx.save();
 
       // Apply perspective projection if in isometric mode
       if (this.isometric.enabled) {
         const elevation = getComponentElevation(component);
-        const { pos: screenPos, scale } = this.worldToScreenPerspective(component.position, elevation);
+        const size = this.getComponentSize(component);
+        const halfW = size.width / 2;
+        const halfH = size.height / 2;
 
-        // Skip if behind camera or too small
-        if (scale <= 0 || scale < 0.05) {
+        // Calculate component center (pipes start at position, others are centered)
+        let centerX = component.position.x;
+        let centerY = component.position.y;
+        if (component.type === 'pipe') {
+          const halfLength = (component as any).length / 2;
+          centerX += halfLength * Math.cos(component.rotation);
+          centerY += halfLength * Math.sin(component.rotation);
+        }
+
+        // Component corners in local space (before rotation)
+        const cos = Math.cos(component.rotation);
+        const sin = Math.sin(component.rotation);
+
+        // Define 4 corners: front-left, front-right, back-right, back-left
+        // Front = toward camera (-Y in world), Back = toward horizon (+Y)
+        const localCorners = [
+          { x: -halfW, y: -halfH },  // front-left
+          { x: halfW, y: -halfH },   // front-right
+          { x: halfW, y: halfH },    // back-right
+          { x: -halfW, y: halfH },   // back-left
+        ];
+
+        // Transform corners to world space and project to screen
+        const screenCorners = localCorners.map(local => {
+          const worldX = centerX + local.x * cos - local.y * sin;
+          const worldY = centerY + local.x * sin + local.y * cos;
+          return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+        });
+
+        // Skip if any corner is behind camera
+        if (screenCorners.some(c => c.scale <= 0 || c.scale < 0.05)) {
           ctx.restore();
           continue;
         }
 
-        // Cap scale to prevent huge components when camera is very close
-        const cappedScale = Math.min(scale, 3);
+        // Get the projected corner positions
+        const frontLeft = screenCorners[0].pos;
+        const frontRight = screenCorners[1].pos;
+        const backRight = screenCorners[2].pos;
+        const backLeft = screenCorners[3].pos;
 
-        // Use PERSPECTIVE_X_SCALE for both position and size for consistent ground plane
-        // Pass the scale through view.zoom so line widths stay proportional
-        const componentZoom = cappedScale * this.PERSPECTIVE_X_SCALE;
+        // Front edge center - this is where the component's BASE should be
+        const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+        const frontCenterY = (frontLeft.y + frontRight.y) / 2;
 
-        ctx.translate(screenPos.x, screenPos.y);
+        // Use front edge width for zoom
+        const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+        const projectedZoom = frontWidth / size.width;
+
+        // The component sprite is centered at (0,0), so its bottom edge is at +halfH
+        // We need to offset so the sprite's bottom aligns with the front edge
+        const visualHalfH = halfH * projectedZoom;
+
+        // Debug: draw the projected quad outline
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(frontLeft.x, frontLeft.y);
+        ctx.lineTo(frontRight.x, frontRight.y);
+        ctx.lineTo(backRight.x, backRight.y);
+        ctx.lineTo(backLeft.x, backLeft.y);
+        ctx.closePath();
+        ctx.stroke();
+
+        // Position: X at front edge center, Y offset up by halfH so bottom edge aligns with front
+        ctx.translate(frontCenterX, frontCenterY - visualHalfH);
         ctx.rotate(component.rotation);
 
-        // Render with calculated zoom - this scales component dimensions while keeping
-        // line widths in reasonable pixel sizes (since we're not using ctx.scale)
-        // Skip ports here - they're rendered separately with proper perspective scaling
-        const isometricView: ViewState = { ...this.view, zoom: componentZoom };
+        const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
         renderComponent(ctx, component, isometricView, isSelected, true);
 
