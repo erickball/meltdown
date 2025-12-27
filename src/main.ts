@@ -583,11 +583,8 @@ function init() {
       }
     } else if (constructionSubMode === 'place' && selectedComponentType) {
       // Component placement mode - convert screen to world coordinates
-      const view = plantCanvas.getView();
-      const worldPos = {
-        x: (x - view.offsetX) / view.zoom,
-        y: (y - view.offsetY) / view.zoom
-      };
+      // Uses perspective projection when in isometric mode
+      const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
       console.log(`[Construction] Opening config dialog for ${selectedComponentType} at world (${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)})`);
 
       // Show configuration dialog with world coordinates
