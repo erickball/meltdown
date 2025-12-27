@@ -97,7 +97,8 @@ export function renderComponent(
   ctx: CanvasRenderingContext2D,
   component: PlantComponent,
   view: ViewState,
-  isSelected: boolean = false
+  isSelected: boolean = false,
+  skipPorts: boolean = false
 ): void {
   // Note: Context is already transformed to component position by caller
   // We no longer transform here to support isometric projection
@@ -138,8 +139,10 @@ export function renderComponent(
     ctx.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height);
   }
 
-  // Draw ports
-  renderPorts(ctx, component, view);
+  // Draw ports (skip in isometric mode where they're rendered separately)
+  if (!skipPorts) {
+    renderPorts(ctx, component, view);
+  }
 }
 
 function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState): void {

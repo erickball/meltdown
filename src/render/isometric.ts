@@ -39,21 +39,25 @@ export function projectIsometric(point3D: Point & { z?: number }, config: Isomet
 
 /**
  * Calculate shadow offset based on elevation
+ * The shadow is cast from a sun position (upper-left), so shadows go down-right
  * @param elevation - Height in meters
  * @param config - Isometric configuration
+ * @returns offset in world units (meters)
  */
 export function getShadowOffset(elevation: number, config: IsometricConfig): Point {
   if (!config.enabled || elevation <= 0) {
     return { x: 0, y: 0 };
   }
 
-  // Shadow cast down and to the right
-  const shadowAngle = 45 * Math.PI / 180;
-  const shadowLength = elevation * config.elevationScale * 0.3; // Shadow length proportional to height
+  // Sun angle from upper-left: shadows extend to lower-right
+  // Shadow length is proportional to elevation (taller = longer shadow)
+  const shadowLengthFactor = 0.8; // How long shadows are relative to height
+  const shadowLength = elevation * shadowLengthFactor;
 
+  // Shadow goes to the right (+X) and "into the screen" (+Y in our coordinate system)
   return {
-    x: Math.cos(shadowAngle) * shadowLength,
-    y: Math.sin(shadowAngle) * shadowLength + elevation * config.elevationScale * Math.sin(config.angleX)
+    x: shadowLength * 0.7,  // Right
+    y: shadowLength * 0.5   // Forward (into screen/ground plane)
   };
 }
 
@@ -89,7 +93,8 @@ export function renderIsometricGround(
   view: ViewState,
   width: number,
   height: number,
-  config: IsometricConfig
+  config: IsometricConfig,
+  cameraDepth: number = 0
 ): void {
   if (!config.enabled) {
     return;
@@ -115,8 +120,8 @@ export function renderIsometricGround(
   ctx.fillStyle = duneGradient;
   ctx.fillRect(0, 0, width, height);
 
-  // Draw scattered shrubs/cacti
-  const shrubPositions = generateShrubPositions(view, width, height);
+  // Draw scattered shrubs/cacti with isometric projection
+  const shrubPositions = generateShrubPositions(view, width, height, config, cameraDepth);
 
   for (const shrub of shrubPositions) {
     drawDesertShrub(ctx, shrub.x, shrub.y, shrub.size, shrub.type);
@@ -158,26 +163,94 @@ export function renderIsometricGround(
   ctx.fillRect(0, 0, width, horizonY);
 }
 
-// Generate consistent shrub positions based on view
-function generateShrubPositions(view: ViewState, width: number, height: number): any[] {
-  const shrubs = [];
-  const seed = Math.floor(view.offsetX / 100) * 1000 + Math.floor(view.offsetY / 100);
-  const random = (n: number) => {
-    const x = Math.sin(seed + n * 137.5) * 10000;
-    return x - Math.floor(x);
-  };
+// Deterministic random from seed
+function seededRandom(seed: number): number {
+  const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  return x - Math.floor(x);
+}
 
-  // Generate 10-20 shrubs
-  const numShrubs = 10 + Math.floor(random(0) * 10);
+// Generate shrubs on a perspective ground plane with infinite tiling
+// Shrubs are placed at fixed world positions and move with parallax when camera moves
+function generateShrubPositions(view: ViewState, width: number, height: number, _config: IsometricConfig, cameraDepth: number): any[] {
+  const shrubs: { x: number; y: number; size: number; type: string }[] = [];
 
-  for (let i = 0; i < numShrubs; i++) {
-    const x = random(i * 2) * width;
-    const y = height * 0.4 + random(i * 2 + 1) * height * 0.6;
-    const size = 10 + random(i * 3) * 20;
-    const type = random(i * 4) > 0.5 ? 'cactus' : 'shrub';
+  // Screen geometry
+  const horizonY = height * 0.25;
+  const groundHeight = height - horizonY;
+  const centerX = width / 2;
 
-    shrubs.push({ x, y, size, type });
+  // World-space cell size for shrub placement
+  const cellSize = 80;
+
+  // Camera world position derived from view offsets
+  const cameraWorldX = -(view.offsetX - centerX) / 10;
+  const cameraWorldY = -cameraDepth / 10;
+
+  // Camera height above ground (affects how close objects pass "under" us)
+  // Higher value = objects pass under camera sooner
+  const cameraHeight = 50;
+
+  // Visible range - use different ranges for X and Y for performance
+  const visibleRangeX = 400;
+  const visibleRangeY = 1500; // Further in Y direction to fill to horizon
+
+  const startCellX = Math.floor((cameraWorldX - visibleRangeX) / cellSize);
+  const endCellX = Math.ceil((cameraWorldX + visibleRangeX) / cellSize);
+  const startCellY = Math.floor(cameraWorldY / cellSize); // Only ahead of camera
+  const endCellY = Math.ceil((cameraWorldY + visibleRangeY) / cellSize);
+
+  for (let cellX = startCellX; cellX <= endCellX; cellX++) {
+    for (let cellY = startCellY; cellY <= endCellY; cellY++) {
+      // Deterministic seed from cell position
+      const cellSeed = Math.abs(cellX * 73856093 + cellY * 19349663);
+
+      // Only ~30% of cells have a shrub
+      if (seededRandom(cellSeed) > 0.30) continue;
+
+      // World position of this shrub (fixed)
+      const worldX = cellX * cellSize + seededRandom(cellSeed + 1) * cellSize * 0.8;
+      const worldY = cellY * cellSize + seededRandom(cellSeed + 2) * cellSize * 0.8;
+
+      // Position relative to camera
+      const relX = worldX - cameraWorldX;
+      const relY = worldY - cameraWorldY;
+
+      // Skip if behind camera or too far
+      if (relY < 1 || relY > visibleRangeY) continue;
+
+      // Perspective projection with camera height
+      // PERSPECTIVE_X_SCALE = 50 (must match canvas.ts)
+      const perspectiveScale = cameraHeight / relY;
+      // Cap scale to match component rendering (prevents sliding when camera is very close)
+      const cappedScale = Math.min(perspectiveScale, 3);
+      const screenX = centerX + relX * cappedScale * 50;
+
+      // Screen Y: objects at distance = cameraHeight are at bottom of screen
+      // Objects closer than cameraHeight pass off the bottom (under camera)
+      // Objects further away approach the horizon
+      const screenY = horizonY + groundHeight * cameraHeight / relY;
+
+      // Skip if off-screen
+      if (screenX < -50 || screenX > width + 50) continue;
+      if (screenY < horizonY - 10 || screenY > height + 100) continue;
+
+      // Size based on distance (perspective)
+      // Use same capped scale as X position for consistent ground plane
+      // baseSize in world units (meters): 0.3 to 0.8 meters for desert shrubs
+      const baseSize = 0.3 + seededRandom(cellSeed + 3) * 0.5;
+      const size = baseSize * cappedScale * 50;
+
+      // Skip shrubs that are too tiny to see
+      if (size < 1.5) continue;
+
+      const type = seededRandom(cellSeed + 4) > 0.5 ? 'cactus' : 'shrub';
+
+      shrubs.push({ x: screenX, y: screenY, size, type });
+    }
   }
+
+  // Sort by Y position so distant shrubs are drawn first
+  shrubs.sort((a, b) => a.y - b.y);
 
   return shrubs;
 }
@@ -221,7 +294,8 @@ function drawDesertShrub(ctx: CanvasRenderingContext2D, x: number, y: number, si
 }
 
 /**
- * Render component shadow
+ * Render component shadow on the ground plane
+ * This should be called with the canvas in its default state (not translated to component position)
  */
 export function renderComponentShadow(
   ctx: CanvasRenderingContext2D,
@@ -236,14 +310,32 @@ export function renderComponentShadow(
 
   const shadowOffset = getShadowOffset(elevation, config);
 
+  // Calculate shadow position on the ground (z=0)
+  // The shadow falls at the component's X,Y plus the shadow offset
+  const shadowWorldPos = {
+    x: component.position.x + shadowOffset.x,
+    y: component.position.y + shadowOffset.y
+  };
+
+  // Project the ground-level shadow position to screen
+  const groundPos = projectIsometric({ ...shadowWorldPos, z: 0 }, config);
+  const screenPos = {
+    x: groundPos.x * view.zoom + view.offsetX,
+    y: groundPos.y * view.zoom + view.offsetY
+  };
+
   ctx.save();
+  ctx.translate(screenPos.x, screenPos.y);
+  ctx.rotate(component.rotation);
 
-  // Move to shadow position
-  ctx.translate(shadowOffset.x * view.zoom, shadowOffset.y * view.zoom);
+  // Squash the shadow vertically to appear flat on the ground
+  // The squash factor comes from the isometric angle
+  const squashFactor = Math.cos(config.angleX);
+  ctx.scale(1, squashFactor);
 
-  // Make shadow semi-transparent and dark
-  ctx.globalAlpha = 0.3 * Math.min(1, elevation / 10); // Fade with distance
-  ctx.fillStyle = '#000000';
+  // Make shadow semi-transparent - higher elevations cast more defined shadows
+  ctx.globalAlpha = 0.25 + 0.1 * Math.min(1, elevation / 5);
+  ctx.fillStyle = 'rgba(50, 40, 30, 1)'; // Brownish shadow for desert
 
   // Draw shadow shape based on component type
   switch (component.type) {
@@ -251,21 +343,27 @@ export function renderComponentShadow(
       const tank = component as any;
       const w = tank.width * view.zoom;
       const h = tank.height * view.zoom;
-      ctx.fillRect(-w/2, -h/2, w, h);
+      // Draw as ellipse for more natural ground shadow
+      ctx.beginPath();
+      ctx.ellipse(0, 0, w/2, h/2, 0, 0, Math.PI * 2);
+      ctx.fill();
       break;
     }
     case 'pipe': {
       const pipe = component as any;
       const length = pipe.length * view.zoom;
       const diameter = pipe.diameter * view.zoom;
-      ctx.fillRect(0, -diameter/2, length, diameter);
+      // Rounded rect shadow
+      ctx.beginPath();
+      ctx.ellipse(length/2, 0, length/2 + diameter/2, diameter, 0, 0, Math.PI * 2);
+      ctx.fill();
       break;
     }
     case 'pump': {
       const pump = component as any;
       const r = pump.diameter * view.zoom / 2;
       ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.arc(0, 0, r * 1.1, 0, Math.PI * 2); // Slightly larger
       ctx.fill();
       break;
     }
@@ -273,10 +371,43 @@ export function renderComponentShadow(
       const vessel = component as any;
       const r = (vessel.innerDiameter / 2 + vessel.wallThickness) * view.zoom;
       const h = vessel.height * view.zoom;
-      ctx.fillRect(-r, -h/2, r*2, h);
+      // Ellipse for vessel shadow
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 1.1, h/2, 0, 0, Math.PI * 2);
+      ctx.fill();
       break;
     }
-    // Add more component types as needed
+    case 'heatExchanger': {
+      const hx = component as any;
+      const w = hx.width * view.zoom;
+      const h = hx.height * view.zoom;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, w/2, h/2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case 'turbine': {
+      // Turbine is typically large
+      const size = 3 * view.zoom; // Approximate size
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size, size * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case 'condenser': {
+      const size = 4 * view.zoom;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size, size * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    default: {
+      // Generic small shadow
+      const size = 1 * view.zoom;
+      ctx.beginPath();
+      ctx.arc(0, 0, size, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   ctx.restore();
