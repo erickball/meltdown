@@ -111,6 +111,16 @@ export class PlantCanvas {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
+    // If ports are shown (connect mode), check if clicking on a port first
+    // If so, don't select the component - let the port click handler deal with it
+    if (this.showPorts) {
+      const portInfo = this.getPortAtScreen({ x, y });
+      if (portInfo) {
+        // Clicked on a port - don't select component or start panning
+        return;
+      }
+    }
+
     // Check if clicking on a component
     const clickedComponent = this.getComponentAtScreen({ x, y });
 
@@ -153,10 +163,21 @@ export class PlantCanvas {
       // Move the selected component
       const component = this.plantState.components.get(this.selectedComponentId);
       if (component) {
-        const dx = (x - this.dragStart.x) / this.view.zoom;
-        const dy = (y - this.dragStart.y) / this.view.zoom;
-        component.position.x += dx;
-        component.position.y += dy;
+        if (this.isometric.enabled) {
+          // In perspective mode, convert screen positions to world positions
+          const currentWorld = this.screenToWorldPerspective({ x, y });
+          const prevWorld = this.screenToWorldPerspective(this.dragStart);
+          const dx = currentWorld.x - prevWorld.x;
+          const dy = currentWorld.y - prevWorld.y;
+          component.position.x += dx;
+          component.position.y += dy;
+        } else {
+          // In 2D mode, use simple screen-to-world conversion
+          const dx = (x - this.dragStart.x) / this.view.zoom;
+          const dy = (y - this.dragStart.y) / this.view.zoom;
+          component.position.x += dx;
+          component.position.y += dy;
+        }
         this.dragStart = { x, y };
         this.onComponentMove?.(this.selectedComponentId, component.position);
       }
@@ -308,45 +329,250 @@ export class PlantCanvas {
   }
 
   public getComponentAtScreen(screenPos: Point): PlantComponent | null {
-    // Use perspective-aware conversion in isometric mode
-    const worldPos = this.getWorldPositionFromScreen(screenPos);
+    // Check components in reverse order (top-most first, closest to camera)
+    const components = Array.from(this.plantState.components.values());
 
-    // Check components in reverse order (top-most first)
-    const components = Array.from(this.plantState.components.values()).reverse();
+    // Sort by depth: closer to camera (smaller Y) checked first
+    if (this.isometric.enabled) {
+      components.sort((a, b) => a.position.y - b.position.y);
+    } else {
+      components.reverse();
+    }
 
     for (const component of components) {
-      if (this.isPointInComponent(worldPos, component)) {
-        return component;
+      if (this.isometric.enabled) {
+        // In isometric mode, check against projected screen bounds
+        if (this.isPointInProjectedComponent(screenPos, component)) {
+          return component;
+        }
+      } else {
+        // In 2D mode, use world coordinate check
+        const worldPos = this.getWorldPositionFromScreen(screenPos);
+        if (this.isPointInComponent(worldPos, component)) {
+          return component;
+        }
       }
     }
     return null;
   }
 
-  public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
-    const worldPos = screenToWorld(screenPos, this.view);
+  // Check if a screen point is inside a component's actual visual bounds on screen
+  private isPointInProjectedComponent(screenPos: Point, component: PlantComponent): boolean {
+    const elevation = getComponentElevation(component);
+    const size = this.getComponentSize(component);
+    const halfW = size.width / 2;
+    const halfH = size.height / 2;
 
+    const centerX = component.position.x;
+    const centerY = component.position.y;
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+
+    // For pipes, local coords go from (0, -halfH) to (length, halfH)
+    // For others, centered: (-halfW, -halfH) to (halfW, halfH)
+    let localLeft = -halfW;
+    let localRight = halfW;
+    if (component.type === 'pipe') {
+      localLeft = 0;
+      localRight = size.width;
+    }
+
+    // Define 4 corners in local space (ground footprint)
+    const localCorners = [
+      { x: localLeft, y: -halfH },   // front-left
+      { x: localRight, y: -halfH },  // front-right
+      { x: localRight, y: halfH },   // back-right
+      { x: localLeft, y: halfH },    // back-left
+    ];
+
+    // Transform to world and project to screen
+    const screenCorners = localCorners.map(local => {
+      const worldX = centerX + local.x * cos - local.y * sin;
+      const worldY = centerY + local.x * sin + local.y * cos;
+      return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+    });
+
+    // Skip if any corner is behind camera
+    if (screenCorners.some(c => c.scale <= 0)) {
+      return false;
+    }
+
+    const frontLeft = screenCorners[0].pos;
+    const frontRight = screenCorners[1].pos;
+    const backRight = screenCorners[2].pos;
+    const backLeft = screenCorners[3].pos;
+
+    // Calculate the visual bounds - must match the rendering translation logic
+    const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+    const projectedZoom = frontWidth / size.width;
+    const visualHalfH = halfH * projectedZoom;
+
+    let visualQuad: Point[];
+
+    if (component.type === 'pipe') {
+      // Pipe rendering: translateX = backLeft.x, translateY = backLeft.y - visualHalfH
+      // Pipe draws from local y=-halfH (top) to y=+halfH (bottom)
+      // Visual top: backLeft.y - 2*visualHalfH, Visual bottom: backLeft.y
+      // Visual left: backLeft.x, Visual right: backRight.x
+      const visualTop = backLeft.y - 2 * visualHalfH;
+      const visualBottom = backLeft.y;
+      visualQuad = [
+        { x: backLeft.x, y: visualTop },      // top-left
+        { x: backRight.x, y: visualTop },     // top-right
+        { x: backRight.x, y: visualBottom },  // bottom-right
+        { x: backLeft.x, y: visualBottom },   // bottom-left
+      ];
+    } else {
+      // Other components: translateX = frontCenterX, translateY = frontCenterY - visualHalfH
+      // Visual center is at (frontCenterX, frontCenterY - visualHalfH)
+      // Visual spans from center ± visualHalfW/H
+      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
+      const visualHalfW = halfW * projectedZoom;
+      const visualCenterY = frontCenterY - visualHalfH;
+      visualQuad = [
+        { x: frontCenterX - visualHalfW, y: visualCenterY - visualHalfH },  // top-left
+        { x: frontCenterX + visualHalfW, y: visualCenterY - visualHalfH },  // top-right
+        { x: frontCenterX + visualHalfW, y: visualCenterY + visualHalfH },  // bottom-right
+        { x: frontCenterX - visualHalfW, y: visualCenterY + visualHalfH },  // bottom-left
+      ];
+    }
+
+    return this.isPointInQuad(screenPos, visualQuad);
+  }
+
+  // Check if a point is inside a quadrilateral using cross product method
+  private isPointInQuad(point: Point, quad: Point[]): boolean {
+    // For each edge, check which side of the line the point is on
+    // If all same side (all positive or all negative cross products), point is inside
+    let sign = 0;
+    for (let i = 0; i < 4; i++) {
+      const a = quad[i];
+      const b = quad[(i + 1) % 4];
+      // Cross product of edge vector and point vector
+      const cross = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
+      if (cross !== 0) {
+        if (sign === 0) {
+          sign = cross > 0 ? 1 : -1;
+        } else if ((cross > 0 ? 1 : -1) !== sign) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
     // Check all components for nearby ports
     const components = Array.from(this.plantState.components.values());
-    const portRadius = 0.3; // Detection radius in meters
 
     for (const component of components) {
       if (!component.ports) continue;
 
       for (const port of component.ports) {
-        // Get port world position
         const portWorldPos = this.getPortWorldPosition(component, port);
-        const distance = Math.hypot(
-          worldPos.x - portWorldPos.x,
-          worldPos.y - portWorldPos.y
-        );
 
-        if (distance <= portRadius) {
-          return { component, port, worldPos: portWorldPos };
+        if (this.isometric.enabled) {
+          // In isometric mode, check against screen position
+          const portScreenPos = this.getPortScreenPosition(component, port);
+          if (!portScreenPos) continue;
+
+          const distance = Math.hypot(
+            screenPos.x - portScreenPos.x,
+            screenPos.y - portScreenPos.y
+          );
+
+          // Use a screen-space radius for detection
+          const detectionRadius = Math.max(15, portScreenPos.radius * 1.5);
+          if (distance <= detectionRadius) {
+            return { component, port, worldPos: portWorldPos };
+          }
+        } else {
+          // In 2D mode, use world coordinate check
+          const worldPos = screenToWorld(screenPos, this.view);
+          const portRadius = 0.3; // Detection radius in meters
+          const distance = Math.hypot(
+            worldPos.x - portWorldPos.x,
+            worldPos.y - portWorldPos.y
+          );
+
+          if (distance <= portRadius) {
+            return { component, port, worldPos: portWorldPos };
+          }
         }
       }
     }
 
     return null;
+  }
+
+  // Get port screen position in isometric mode, matching component visual rendering
+  private getPortScreenPosition(component: PlantComponent, port: { position: Point }): { x: number, y: number, radius: number } | null {
+    const elevation = getComponentElevation(component);
+    const size = this.getComponentSize(component);
+    const halfW = size.width / 2;
+    const halfH = size.height / 2;
+
+    const centerX = component.position.x;
+    const centerY = component.position.y;
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+
+    // For pipes, local coords go from (0, -halfH) to (length, halfH)
+    let localLeft = -halfW;
+    if (component.type === 'pipe') {
+      localLeft = 0;
+    }
+
+    // Project corners to get the visual bounds (same as component rendering)
+    const localCorners = [
+      { x: localLeft, y: -halfH },   // front-left
+      { x: localLeft + size.width, y: -halfH },  // front-right
+      { x: localLeft + size.width, y: halfH },   // back-right
+      { x: localLeft, y: halfH },    // back-left
+    ];
+
+    const screenCorners = localCorners.map(local => {
+      const worldX = centerX + local.x * cos - local.y * sin;
+      const worldY = centerY + local.x * sin + local.y * cos;
+      return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+    });
+
+    if (screenCorners.some(c => c.scale <= 0)) return null;
+
+    const frontLeft = screenCorners[0].pos;
+    const frontRight = screenCorners[1].pos;
+    const backLeft = screenCorners[3].pos;
+
+    const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+    const projectedZoom = frontWidth / size.width;
+    const visualHalfH = halfH * projectedZoom;
+
+    // Calculate the translation point (same as component rendering)
+    let translateX: number;
+    let translateY: number;
+
+    if (component.type === 'pipe') {
+      translateX = backLeft.x;
+      translateY = backLeft.y - visualHalfH;
+    } else {
+      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
+      translateX = frontCenterX;
+      translateY = frontCenterY - visualHalfH;
+    }
+
+    // Transform port's local position to screen space
+    const localX = port.position.x * projectedZoom;
+    const localY = port.position.y * projectedZoom;
+    const rotatedX = localX * cos - localY * sin;
+    const rotatedY = localX * sin + localY * cos;
+
+    return {
+      x: translateX + rotatedX,
+      y: translateY + rotatedY,
+      radius: Math.max(4, 0.4 * projectedZoom)
+    };
   }
 
   private isPointInComponent(worldPos: Point, component: PlantComponent): boolean {
@@ -543,10 +769,12 @@ export class PlantCanvas {
     // Shadows are computed in world space using 3D ray-plane intersection
     if (this.isometric.enabled) {
       // Sun direction vector (direction light travels, from sun toward ground)
-      // Sun is mostly overhead, slightly behind objects (toward +Y/horizon), slightly to the left
-      const sunDirX = 0.1;   // Light goes slightly right (sun is to the left)
-      const sunDirY = -0.4;  // Light goes toward camera (sun is behind, toward horizon)
-      const sunDirZ = -1.0;  // Light goes down (sun is above)
+      // Sun at ~25 degrees elevation, behind objects and slightly to the left
+      const sunElevation = 25 * Math.PI / 180; // 25 degrees above horizon
+      const sunAzimuth = 10 * Math.PI / 180;   // 10 degrees to the left
+      const sunDirX = Math.sin(sunAzimuth) * Math.cos(sunElevation);   // ~0.16 (light goes right)
+      const sunDirY = -Math.cos(sunAzimuth) * Math.cos(sunElevation);  // ~-0.92 (light goes toward camera)
+      const sunDirZ = -Math.sin(sunElevation);                          // ~-0.34 (light goes down)
 
       // Shadow offset per unit of elevation: where ray hits ground
       // For point at (x, y, z), ray is (x, y, z) + t*(sunDirX, sunDirY, sunDirZ)
@@ -565,35 +793,50 @@ export class PlantCanvas {
           const elevation = getComponentElevation(component);
 
           // Component center in world space
+          // For most components, position IS the center
+          // For pipes, position is at one end, so we need to offset to find the center
           let centerX = component.position.x;
           let centerY = component.position.y;
-          if (component.type === 'pipe') {
-            const halfLength = (component as any).length / 2;
-            centerX += halfLength * Math.cos(component.rotation);
-            centerY += halfLength * Math.sin(component.rotation);
-          }
+          // Note: pipe offset handled below by adjusting local corners
 
-          // Component corners in local 3D space (x, y relative to center, z = elevation)
-          // These are the TOP corners of the component (at full elevation)
+          // Component corners in local 3D space
           const halfW = worldWidth / 2;
           const halfH = worldHeight / 2;
           const cos = Math.cos(component.rotation);
           const sin = Math.sin(component.rotation);
 
-          // Shadow falls IN FRONT of the component (toward camera)
-          // Back edge of shadow at component's front edge (y = -halfH)
-          // Front edge extends forward by shadowLength (toward camera, more negative Y)
-          const shadowLength = worldHeight; // Shadow length = component height
-          const shadowCorners3D = [
-            { x: -halfW, y: -halfH - shadowLength, z: elevation },  // front-left (toward camera)
-            { x: halfW, y: -halfH - shadowLength, z: elevation },   // front-right
-            { x: halfW, y: -halfH, z: elevation },                   // back-right (at component front)
-            { x: -halfW, y: -halfH, z: elevation },                  // back-left
-          ];
+          // For pipes, position is at one end, not center
+          // Local coordinates: pipes go from (0, -halfH) to (length, halfH), not centered
+          let localLeft = -halfW;
+          let localRight = halfW;
+          if (component.type === 'pipe') {
+            // Pipe starts at position (local x=0) and extends to length
+            localLeft = 0;
+            localRight = worldWidth; // = length
+          }
 
-          // Project each shadow corner onto the ground plane
+          // Shadow is cast by the TOP of the component projecting onto the ground
+          const componentHeight = worldHeight; // Physical height (for non-pipes, this is height; for pipes, diameter)
+          const baseElevation = elevation;
+          const topElevation = baseElevation + componentHeight;
+
+          // For pipes, shadow height is the diameter, not the length
+          const shadowHeight = component.type === 'pipe' ? (component as any).diameter : worldHeight;
+          const topZ = baseElevation + shadowHeight;
+
+          // Base front corners
+          const baseFrontLeft = { x: localLeft, y: -halfH, z: baseElevation };
+          const baseFrontRight = { x: localRight, y: -halfH, z: baseElevation };
+
+          // Top front corners
+          const topFrontLeft = { x: localLeft, y: -halfH, z: topZ };
+          const topFrontRight = { x: localRight, y: -halfH, z: topZ };
+
+          // Project all 4 corners to ground plane
           const shadowCorners: Point[] = [];
-          for (const local of shadowCorners3D) {
+          const corners3D = [topFrontLeft, topFrontRight, baseFrontRight, baseFrontLeft];
+
+          for (const local of corners3D) {
             // Rotate to world space
             const worldX = centerX + local.x * cos - local.y * sin;
             const worldY = centerY + local.x * sin + local.y * cos;
@@ -664,26 +907,30 @@ export class PlantCanvas {
         const halfW = size.width / 2;
         const halfH = size.height / 2;
 
-        // Calculate component center (pipes start at position, others are centered)
-        let centerX = component.position.x;
-        let centerY = component.position.y;
-        if (component.type === 'pipe') {
-          const halfLength = (component as any).length / 2;
-          centerX += halfLength * Math.cos(component.rotation);
-          centerY += halfLength * Math.sin(component.rotation);
-        }
+        // Component position (for pipes, this is at one end; for others, it's the center)
+        const centerX = component.position.x;
+        const centerY = component.position.y;
 
         // Component corners in local space (before rotation)
         const cos = Math.cos(component.rotation);
         const sin = Math.sin(component.rotation);
 
+        // For pipes, local coords go from (0, -halfH) to (length, halfH)
+        // For others, centered: (-halfW, -halfH) to (halfW, halfH)
+        let localLeft = -halfW;
+        let localRight = halfW;
+        if (component.type === 'pipe') {
+          localLeft = 0;
+          localRight = size.width; // = length
+        }
+
         // Define 4 corners: front-left, front-right, back-right, back-left
         // Front = toward camera (-Y in world), Back = toward horizon (+Y)
         const localCorners = [
-          { x: -halfW, y: -halfH },  // front-left
-          { x: halfW, y: -halfH },   // front-right
-          { x: halfW, y: halfH },    // back-right
-          { x: -halfW, y: halfH },   // back-left
+          { x: localLeft, y: -halfH },   // front-left
+          { x: localRight, y: -halfH },  // front-right
+          { x: localRight, y: halfH },   // back-right
+          { x: localLeft, y: halfH },    // back-left
         ];
 
         // Transform corners to world space and project to screen
@@ -705,17 +952,9 @@ export class PlantCanvas {
         const backRight = screenCorners[2].pos;
         const backLeft = screenCorners[3].pos;
 
-        // Front edge center - this is where the component's BASE should be
-        const frontCenterX = (frontLeft.x + frontRight.x) / 2;
-        const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-
         // Use front edge width for zoom
         const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
         const projectedZoom = frontWidth / size.width;
-
-        // The component sprite is centered at (0,0), so its bottom edge is at +halfH
-        // We need to offset so the sprite's bottom aligns with the front edge
-        const visualHalfH = halfH * projectedZoom;
 
         // Debug: draw the projected quad outline
         ctx.strokeStyle = 'red';
@@ -728,8 +967,31 @@ export class PlantCanvas {
         ctx.closePath();
         ctx.stroke();
 
-        // Position: X at front edge center, Y offset up by halfH so bottom edge aligns with front
-        ctx.translate(frontCenterX, frontCenterY - visualHalfH);
+        // Position the component based on how renderComponent draws it:
+        // - For pipes: draws from (0,0) to (length,0), so translate to front-left
+        // - For others: draws centered at (0,0), so translate to front-center, offset up by halfH
+        let translateX: number;
+        let translateY: number;
+
+        if (component.type === 'pipe') {
+          // Pipe draws centered on y=0 in local coords
+          // In drawing coords, +halfH is below center (larger screen Y) = "bottom" of drawing
+          // The quad's top (backLeft, smaller screen Y) is furthest from camera
+          // We want the pipe's bottom drawing edge to align with the quad's top
+          // So: translateY + visualHalfH = backLeft.y → translateY = backLeft.y - visualHalfH
+          const visualHalfH = halfH * projectedZoom;
+          translateX = backLeft.x;  // Left edge of quad
+          translateY = backLeft.y - visualHalfH;  // Position so bottom edge aligns with quad top
+        } else {
+          // Other components draw centered, so position at front-center, offset up
+          const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+          const frontCenterY = (frontLeft.y + frontRight.y) / 2;
+          const visualHalfH = halfH * projectedZoom;
+          translateX = frontCenterX;
+          translateY = frontCenterY - visualHalfH;
+        }
+
+        ctx.translate(translateX, translateY);
         ctx.rotate(component.rotation);
 
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
@@ -816,31 +1078,13 @@ export class PlantCanvas {
         let lineWidth: number;
 
         if (this.isometric.enabled) {
-          // Calculate port position using same method as component rendering
-          const elevation = getComponentElevation(component);
-          const { pos: compScreenPos, scale } = this.worldToScreenPerspective(component.position, elevation);
-          if (scale <= 0) continue;
+          // Use the same positioning as click detection
+          const portScreenPos = this.getPortScreenPosition(component, port);
+          if (!portScreenPos) continue;
 
-          const cappedScale = Math.min(scale, 3);
-          const componentZoom = cappedScale * this.PERSPECTIVE_X_SCALE;
-
-          // Transform port's local position to screen space
-          // (same as component rendering: translate to compScreenPos, rotate, scale by zoom)
-          const cos = Math.cos(component.rotation);
-          const sin = Math.sin(component.rotation);
-          const localX = port.position.x * componentZoom;
-          const localY = port.position.y * componentZoom;
-          const rotatedX = localX * cos - localY * sin;
-          const rotatedY = localX * sin + localY * cos;
-
-          screenPos = {
-            x: compScreenPos.x + rotatedX,
-            y: compScreenPos.y + rotatedY
-          };
-
-          // Port radius ~0.4 meters (40cm) in world units
-          portRadius = Math.max(4, 0.4 * componentZoom);
-          lineWidth = Math.max(1, 0.1 * componentZoom);
+          screenPos = { x: portScreenPos.x, y: portScreenPos.y };
+          portRadius = portScreenPos.radius;
+          lineWidth = Math.max(1, portRadius * 0.25);
         } else {
           const worldPos = this.getPortWorldPosition(component, port);
           screenPos = worldToScreen(worldPos, this.view);

@@ -508,7 +508,12 @@ function init() {
     });
   });
 
-  // Canvas mouse move handler for visual feedback
+  // Move mode state
+  let movingComponent: PlantComponent | null = null;
+  let moveStartOffset = { x: 0, y: 0 };
+  let isDraggingComponent = false;
+
+  // Canvas mouse move handler for visual feedback and dragging
   canvas.addEventListener('mousemove', (e) => {
     if (currentMode !== 'construction') return;
 
@@ -524,20 +529,65 @@ function init() {
         canvas.style.cursor = 'default';
       }
     } else if (constructionSubMode === 'move') {
-      const hoveredComponent = plantCanvas.getComponentAtScreen({ x, y });
-      if (!movingComponent && hoveredComponent) {
-        canvas.style.cursor = 'pointer';
-      } else if (movingComponent) {
-        canvas.style.cursor = 'move';
+      if (isDraggingComponent && movingComponent) {
+        // Dragging - move the component
+        const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
+        movingComponent.position.x = worldClick.x - moveStartOffset.x;
+        movingComponent.position.y = worldClick.y - moveStartOffset.y;
+        canvas.style.cursor = 'grabbing';
       } else {
-        canvas.style.cursor = 'default';
+        // Not dragging - show move cursor on hover
+        const hoveredComponent = plantCanvas.getComponentAtScreen({ x, y });
+        if (hoveredComponent) {
+          canvas.style.cursor = 'grab';
+        } else {
+          canvas.style.cursor = 'default';
+        }
       }
     }
   });
 
-  // Move mode state
-  let movingComponent: PlantComponent | null = null;
-  let moveStartOffset = { x: 0, y: 0 };
+  // Mouse down handler for starting drag in move mode
+  canvas.addEventListener('mousedown', (e) => {
+    if (currentMode !== 'construction') return;
+    if (constructionSubMode !== 'move') return;
+
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    const component = plantCanvas.getComponentAtScreen({ x, y });
+    if (component) {
+      // Start dragging this component
+      movingComponent = component;
+      isDraggingComponent = true;
+
+      // Calculate offset from component position to click point
+      const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
+      moveStartOffset.x = worldClick.x - component.position.x;
+      moveStartOffset.y = worldClick.y - component.position.y;
+
+      canvas.style.cursor = 'grabbing';
+      e.preventDefault(); // Prevent text selection while dragging
+    }
+  });
+
+  // Mouse up handler for ending drag in move mode
+  canvas.addEventListener('mouseup', (e) => {
+    if (isDraggingComponent && movingComponent) {
+      showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
+      movingComponent = null;
+      isDraggingComponent = false;
+      moveStartOffset = { x: 0, y: 0 };
+
+      // Check what's under cursor now
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const hoveredComponent = plantCanvas.getComponentAtScreen({ x, y });
+      canvas.style.cursor = hoveredComponent ? 'grab' : 'default';
+    }
+  });
 
   // Canvas click handler for placing components or making connections
   canvas.addEventListener('click', (e) => {
@@ -547,41 +597,12 @@ function init() {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
+    // Move mode is handled by mousedown/mousemove/mouseup for drag behavior
     if (constructionSubMode === 'move') {
-      // Move mode - select or place component
-      const component = plantCanvas.getComponentAtScreen({ x, y });
+      return; // Don't process clicks in move mode
+    }
 
-      if (!movingComponent) {
-        // First click - select component to move
-        if (component) {
-          movingComponent = component;
-          // Calculate offset from component position to click point
-          const view = plantCanvas.getView();
-          const worldClickX = (x - view.offsetX) / view.zoom;
-          const worldClickY = (y - view.offsetY) / view.zoom;
-          moveStartOffset.x = worldClickX - component.position.x;
-          moveStartOffset.y = worldClickY - component.position.y;
-
-          showNotification(`Selected ${component.label || component.id} to move`, 'info');
-          canvas.style.cursor = 'move';
-        }
-      } else {
-        // Second click - place component at new location
-        const view = plantCanvas.getView();
-        const newX = (x - view.offsetX) / view.zoom - moveStartOffset.x;
-        const newY = (y - view.offsetY) / view.zoom - moveStartOffset.y;
-
-        movingComponent.position.x = newX;
-        movingComponent.position.y = newY;
-
-        showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
-
-        // Reset move state
-        movingComponent = null;
-        moveStartOffset = { x: 0, y: 0 };
-        canvas.style.cursor = 'default';
-      }
-    } else if (constructionSubMode === 'place' && selectedComponentType) {
+    if (constructionSubMode === 'place' && selectedComponentType) {
       // Component placement mode - convert screen to world coordinates
       // Uses perspective projection when in isometric mode
       const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
@@ -725,6 +746,7 @@ function init() {
     if (mode !== 'move') {
       movingComponent = null;
       moveStartOffset = { x: 0, y: 0 };
+      isDraggingComponent = false;
       canvas.style.cursor = 'default';
     }
 
