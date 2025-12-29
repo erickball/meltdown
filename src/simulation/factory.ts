@@ -41,31 +41,35 @@ export function createSimulationState(): SimulationState {
 }
 
 /**
- * Create default neutronics state for a typical LWR
+ * Create default neutronics state - disabled (no core)
  */
 function createDefaultNeutronics(): NeutronicsState {
   return {
+    // No core linked - neutronics disabled
+    coreId: null,
+    fuelNodeId: null,
+    coolantNodeId: null,
+
     power: 0,
-    nominalPower: 1000e6, // 1000 MW thermal
+    nominalPower: 0, // No nominal power without a core
 
     reactivity: 0,
     promptNeutronLifetime: 1e-4, // 100 microseconds
     delayedNeutronFraction: 0.0065, // β for U-235
 
-    precursorConcentration: 800.0,
+    precursorConcentration: 0,
     precursorDecayConstant: 0.08, // Effective λ
 
     // Reactivity feedback coefficients (typical LWR values)
-    // Note: these are in Δρ per unit change
-    fuelTempCoeff: -2.5e-5,      // -2.5 pcm/K (Doppler) - negative is good!
-    coolantTempCoeff: -1e-5,      // -1 pcm/K - can be positive in some designs
-    coolantDensityCoeff: 0.001,  // Large negative void coefficient
+    fuelTempCoeff: -2.5e-5,      // -2.5 pcm/K (Doppler)
+    coolantTempCoeff: -1e-5,      // -1 pcm/K
+    coolantDensityCoeff: 0.001,  // Void coefficient
 
-    refFuelTemp: 887,     // K - reference temperature
+    refFuelTemp: 600,     // K - reference temperature
     refCoolantTemp: 520,  // K
-    refCoolantDensity: 750, // kg/m³ at operating conditions
+    refCoolantDensity: 750, // kg/m³
 
-    controlRodPosition: 0.8, // Mostly withdrawn
+    controlRodPosition: 0, // Fully inserted (safe default)
     controlRodWorth: 0.05,   // 5000 pcm total worth
 
     decayHeatFraction: 0,
@@ -78,9 +82,9 @@ function createDefaultNeutronics(): NeutronicsState {
       coolantDensity: 0,
     },
     diagnostics: {
-      fuelTemp: 887,
+      fuelTemp: 600,
       coolantTemp: 520,
-      coolantDensity: 850,
+      coolantDensity: 750,
     },
   };
 }
@@ -653,8 +657,14 @@ export function createDemoReactor(): SimulationState {
 
   state.neutronics = {
     ...createDefaultNeutronics(),
+    // Link to the demo reactor's core nodes
+    coreId: 'core',
+    fuelNodeId: 'fuel',
+    coolantNodeId: 'core-coolant',
     power: 1000e6, // Start at full power
     nominalPower: 1000e6,
+    precursorConcentration: 800.0,
+    decayHeatFraction: 0.07, // Steady-state decay heat
     controlRodPosition: 0.97, // Partially withdrawn for criticality
   };
 
@@ -1059,6 +1069,11 @@ function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
   const rodPosition = vessel.controlRodPosition ?? 0.8;
 
   return {
+    // Link to this specific core
+    coreId: component.id,
+    fuelNodeId: `${component.id}-fuel`,
+    coolantNodeId: component.id, // The vessel's flow node
+
     power: 1000e6, // Start at full power
     nominalPower: 1000e6,
     reactivity: 0,
@@ -1074,7 +1089,7 @@ function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
     refCoolantDensity: 750,
     controlRodPosition: rodPosition,
     controlRodWorth: 0.05,
-    decayHeatFraction: 0,
+    decayHeatFraction: 0.07, // Start with steady-state decay heat
     scrammed: false,
     scramTime: -1,
     reactivityBreakdown: {

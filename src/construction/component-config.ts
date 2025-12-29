@@ -10,7 +10,7 @@ export interface ComponentConfig {
 
 export interface ComponentOption {
   name: string;
-  type: 'number' | 'text' | 'select' | 'checkbox';
+  type: 'number' | 'text' | 'select' | 'checkbox' | 'calculated';
   label: string;
   default: any;
   min?: number;
@@ -19,6 +19,8 @@ export interface ComponentOption {
   options?: Array<{ value: any; label: string }>;
   unit?: string;
   help?: string;
+  // For calculated fields: function that computes value from other properties
+  calculate?: (props: Record<string, any>) => string;
 }
 
 export const componentDefinitions: Record<string, {
@@ -105,7 +107,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Heat Exchanger',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Heat Exchanger' },
-      { name: 'type', type: 'select', label: 'Type', default: 'utube', options: [
+      { name: 'hxType', type: 'select', label: 'Type', default: 'utube', options: [
         { value: 'utube', label: 'U-Tube' },
         { value: 'straight', label: 'Straight Tube' },
         { value: 'helical', label: 'Helical Coil' }
@@ -114,13 +116,45 @@ export const componentDefinitions: Record<string, {
         { value: 'vertical', label: 'Vertical' },
         { value: 'horizontal', label: 'Horizontal' }
       ]},
-      { name: 'primaryVolume', type: 'number', label: 'Primary Volume', default: 20, min: 1, max: 200, step: 1, unit: 'm³' },
-      { name: 'secondaryVolume', type: 'number', label: 'Secondary Volume', default: 30, min: 1, max: 300, step: 1, unit: 'm³' },
-      { name: 'tubeArea', type: 'number', label: 'Heat Transfer Area', default: 5000, min: 100, max: 20000, step: 100, unit: 'm²' },
-      { name: 'tubeDiameter', type: 'number', label: 'Tube Diameter', default: 0.02, min: 0.01, max: 0.1, step: 0.005, unit: 'm' },
-      { name: 'tubeCount', type: 'number', label: 'Number of Tubes', default: 5000, min: 100, max: 20000, step: 100 },
-      { name: 'primaryPressure', type: 'number', label: 'Primary Pressure', default: 150, min: 1, max: 300, step: 10, unit: 'bar' },
-      { name: 'secondaryPressure', type: 'number', label: 'Secondary Pressure', default: 60, min: 1, max: 100, step: 5, unit: 'bar' }
+      { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 2, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level' },
+      { name: 'shellDiameter', type: 'number', label: 'Shell Diameter', default: 2.5, min: 0.5, max: 10, step: 0.1, unit: 'm' },
+      { name: 'shellLength', type: 'number', label: 'Shell Length', default: 8, min: 1, max: 25, step: 0.5, unit: 'm' },
+      { name: 'tubeCount', type: 'number', label: 'Number of Tubes', default: 3000, min: 10, max: 20000, step: 100 },
+      { name: 'tubeOD', type: 'number', label: 'Tube Outer Diameter', default: 19, min: 6, max: 50, step: 1, unit: 'mm' },
+      { name: 'tubeThickness', type: 'number', label: 'Tube Wall Thickness', default: 1.2, min: 0.5, max: 5, step: 0.1, unit: 'mm' },
+      { name: 'tubePressure', type: 'number', label: 'Tube-Side Pressure', default: 150, min: 1, max: 300, step: 10, unit: 'bar' },
+      { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure', default: 60, min: 1, max: 100, step: 5, unit: 'bar' },
+      // Calculated fields - displayed but not editable
+      { name: 'heatTransferArea', type: 'calculated', label: 'Heat Transfer Area', default: 0, unit: 'm²',
+        calculate: (p) => {
+          const tubeOD_m = (p.tubeOD || 19) / 1000; // mm to m
+          const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8); // U-tubes are ~1.8x shell length
+          const area = Math.PI * tubeOD_m * tubeLength * (p.tubeCount || 3000);
+          return area.toFixed(0);
+        }
+      },
+      { name: 'tubeSideVolume', type: 'calculated', label: 'Tube-Side Volume', default: 0, unit: 'm³',
+        calculate: (p) => {
+          const tubeOD_m = (p.tubeOD || 19) / 1000;
+          const tubeThickness_m = (p.tubeThickness || 1.2) / 1000;
+          const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
+          const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8);
+          const volume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
+          return volume.toFixed(1);
+        }
+      },
+      { name: 'shellSideVolume', type: 'calculated', label: 'Shell-Side Volume', default: 0, unit: 'm³',
+        calculate: (p) => {
+          const shellDiam = p.shellDiameter || 2.5;
+          const shellLen = p.shellLength || 8;
+          const tubeOD_m = (p.tubeOD || 19) / 1000;
+          const tubeLength = p.hxType === 'utube' ? shellLen * 1.8 : shellLen;
+          const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
+          const tubeDisplacement = Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
+          const volume = shellVolume - tubeDisplacement;
+          return Math.max(0, volume).toFixed(1);
+        }
+      }
     ]
   },
   'condenser': {
@@ -245,6 +279,10 @@ export class ComponentDialog {
   private buildForm(options: ComponentOption[]) {
     this.bodyElement.innerHTML = '';
 
+    // Separate calculated options from input options
+    const inputOptions = options.filter(o => o.type !== 'calculated');
+    const calculatedOptions = options.filter(o => o.type === 'calculated');
+
     // Add price estimate at the top
     const priceGroup = document.createElement('div');
     priceGroup.className = 'form-group';
@@ -273,7 +311,32 @@ export class ComponentDialog {
     separator.style.cssText = 'border: none; border-top: 1px solid #445566; margin: 15px 0;';
     this.bodyElement.appendChild(separator);
 
-    options.forEach(option => {
+    // Create two-column layout if there are calculated fields
+    let inputContainer: HTMLElement = this.bodyElement;
+    let calculatedContainer: HTMLElement | null = null;
+
+    if (calculatedOptions.length > 0) {
+      const columnsWrapper = document.createElement('div');
+      columnsWrapper.style.cssText = 'display: flex; gap: 20px;';
+
+      inputContainer = document.createElement('div');
+      inputContainer.style.cssText = 'flex: 1; min-width: 0;';
+
+      calculatedContainer = document.createElement('div');
+      calculatedContainer.style.cssText = 'width: 180px; flex-shrink: 0; background: #1a1e28; padding: 12px; border-radius: 6px; border: 1px solid #334;';
+
+      const calcTitle = document.createElement('div');
+      calcTitle.style.cssText = 'color: #8af; font-size: 11px; font-weight: bold; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px;';
+      calcTitle.textContent = 'Calculated';
+      calculatedContainer.appendChild(calcTitle);
+
+      columnsWrapper.appendChild(inputContainer);
+      columnsWrapper.appendChild(calculatedContainer);
+      this.bodyElement.appendChild(columnsWrapper);
+    }
+
+    // Build input fields
+    inputOptions.forEach(option => {
       const formGroup = document.createElement('div');
       formGroup.className = 'form-group';
 
@@ -340,8 +403,90 @@ export class ComponentDialog {
         formGroup.appendChild(helpText);
       }
 
-      this.bodyElement.appendChild(formGroup);
+      inputContainer.appendChild(formGroup);
     });
+
+    // Build calculated fields in right column
+    if (calculatedContainer && calculatedOptions.length > 0) {
+      calculatedOptions.forEach(option => {
+        const calcGroup = document.createElement('div');
+        calcGroup.style.cssText = 'margin-bottom: 12px;';
+
+        const calcLabel = document.createElement('div');
+        calcLabel.style.cssText = 'color: #889; font-size: 10px; margin-bottom: 2px;';
+        calcLabel.textContent = option.label;
+        calcGroup.appendChild(calcLabel);
+
+        const calcValue = document.createElement('div');
+        calcValue.id = `option-${option.name}`;
+        calcValue.style.cssText = 'color: #8cf; font-size: 16px; font-weight: bold;';
+        calcValue.textContent = '—';
+        calcGroup.appendChild(calcValue);
+
+        if (option.unit) {
+          const calcUnit = document.createElement('span');
+          calcUnit.style.cssText = 'color: #667; font-size: 11px; font-weight: normal; margin-left: 4px;';
+          calcUnit.textContent = option.unit;
+          calcValue.appendChild(calcUnit);
+        }
+
+        calculatedContainer.appendChild(calcGroup);
+      });
+    }
+
+    // Function to update calculated fields
+    const updateCalculatedFields = () => {
+      const props = this.getCurrentProperties(options);
+      calculatedOptions.forEach(calcOption => {
+        if (calcOption.calculate) {
+          const display = document.getElementById(`option-${calcOption.name}`);
+          if (display) {
+            const value = calcOption.calculate(props);
+            // Preserve the unit span if it exists
+            const unitSpan = display.querySelector('span');
+            display.textContent = value;
+            if (unitSpan) {
+              display.appendChild(unitSpan);
+            } else if (calcOption.unit) {
+              const newUnit = document.createElement('span');
+              newUnit.style.cssText = 'color: #667; font-size: 11px; font-weight: normal; margin-left: 4px;';
+              newUnit.textContent = calcOption.unit;
+              display.appendChild(newUnit);
+            }
+          }
+        }
+      });
+    };
+
+    // Add event listeners to all inputs to update calculated fields
+    if (calculatedOptions.length > 0) {
+      const inputs = inputContainer.querySelectorAll('input, select');
+      inputs.forEach(input => {
+        input.addEventListener('input', updateCalculatedFields);
+        input.addEventListener('change', updateCalculatedFields);
+      });
+
+      // Initial calculation
+      updateCalculatedFields();
+    }
+  }
+
+  private getCurrentProperties(options: ComponentOption[]): Record<string, any> {
+    const props: Record<string, any> = {};
+    options.forEach(option => {
+      if (option.type === 'calculated') return;
+      const element = document.getElementById(`option-${option.name}`) as HTMLInputElement | HTMLSelectElement;
+      if (!element) return;
+
+      if (element.type === 'checkbox') {
+        props[option.name] = (element as HTMLInputElement).checked;
+      } else if (element.type === 'number') {
+        props[option.name] = parseFloat(element.value) || option.default;
+      } else {
+        props[option.name] = element.value;
+      }
+    });
+    return props;
   }
 
   private handleConfirm() {

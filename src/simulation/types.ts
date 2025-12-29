@@ -138,6 +138,12 @@ export interface FlowConnection {
 // ============================================================================
 
 export interface NeutronicsState {
+  // Link to the core this neutronics state belongs to
+  // If null/undefined, neutronics is disabled (no core present)
+  coreId: string | null;            // ID of the vessel/core component
+  fuelNodeId: string | null;        // ID of the thermal node for fuel
+  coolantNodeId: string | null;     // ID of the flow node for coolant
+
   // Reactor power
   power: number;                    // W - current fission power
   nominalPower: number;             // W - 100% rated power

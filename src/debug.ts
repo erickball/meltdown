@@ -70,57 +70,71 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
     `;
   }
 
-  // Neutronics
+  // Neutronics - only show if a core is linked
   const neutronicsDiv = document.getElementById('debug-neutronics');
   if (neutronicsDiv) {
     const n = state.neutronics;
-    const powerPct = (n.power / n.nominalPower) * 100;
-    const rhoDisplay = (n.reactivity * 1e5).toFixed(1); // Display in pcm
-    const rb = n.reactivityBreakdown;
 
-    // Format reactivity components in pcm
-    const rodsPcm = (rb.controlRods * 1e5).toFixed(1);
-    const dopplerPcm = (rb.doppler * 1e5).toFixed(1);
-    const coolantTempPcm = (rb.coolantTemp * 1e5).toFixed(1);
-    const coolantDensityPcm = (rb.coolantDensity * 1e5).toFixed(1);
+    // Check if neutronics is active (has a linked core)
+    if (!n.coreId) {
+      neutronicsDiv.innerHTML = '<span style="color: #666; font-style: italic;">No reactor core in configuration</span>';
+    } else {
+      const powerPct = (n.power / n.nominalPower) * 100;
+      const rhoDisplay = (n.reactivity * 1e5).toFixed(1); // Display in pcm
+      const rb = n.reactivityBreakdown;
 
-    // Diagnostic values
-    const diag = n.diagnostics;
-    const fuelTempC = (diag.fuelTemp - 273).toFixed(0);
-    const coolantTempC = (diag.coolantTemp - 273).toFixed(0);
-    const coolantRho = diag.coolantDensity.toFixed(1);
-    const refCoolantRho = n.refCoolantDensity.toFixed(1);
+      // Format reactivity components in pcm
+      const rodsPcm = (rb.controlRods * 1e5).toFixed(1);
+      const dopplerPcm = (rb.doppler * 1e5).toFixed(1);
+      const coolantTempPcm = (rb.coolantTemp * 1e5).toFixed(1);
+      const coolantDensityPcm = (rb.coolantDensity * 1e5).toFixed(1);
 
-    neutronicsDiv.innerHTML = `
-      <span class="debug-label">Power:</span> ${formatValue(powerPct, '%', 100, 120)}<br>
-      <span class="debug-label">Reactivity:</span> ${formatValue(parseFloat(rhoDisplay), ' pcm')}<br>
-      <span class="debug-label" style="margin-left: 10px; color: #888;">Rods:</span> <span class="debug-value">${rodsPcm} pcm</span><br>
-      <span class="debug-label" style="margin-left: 10px; color: #888;">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C)<br>
-      <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C)<br>
-      <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant ρ:</span> <span class="debug-value">${coolantDensityPcm} pcm</span> (ρ=${coolantRho}, ref=${refCoolantRho})<br>
-      <span class="debug-label">Precursors:</span> ${formatValue(n.precursorConcentration, '')}<br>
-      <span class="debug-label">Rod insertion:</span> ${formatValue((1 - n.controlRodPosition) * 100, '%')}<br>
-      <span class="debug-label">Decay heat:</span> ${formatValue(n.decayHeatFraction * 100, '%')}<br>
-      <span class="debug-label">SCRAM:</span> ${n.scrammed ? '<span class="debug-danger">YES</span>' : 'No'}
-    `;
+      // Diagnostic values
+      const diag = n.diagnostics;
+      const fuelTempC = (diag.fuelTemp - 273).toFixed(0);
+      const coolantTempC = (diag.coolantTemp - 273).toFixed(0);
+      const coolantRho = diag.coolantDensity.toFixed(1);
+      const refCoolantRho = n.refCoolantDensity.toFixed(1);
+
+      neutronicsDiv.innerHTML = `
+        <span class="debug-label">Core:</span> <span class="debug-value">${n.coreId}</span><br>
+        <span class="debug-label">Power:</span> ${formatValue(powerPct, '%', 100, 120)}<br>
+        <span class="debug-label">Reactivity:</span> ${formatValue(parseFloat(rhoDisplay), ' pcm')}<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;">Rods:</span> <span class="debug-value">${rodsPcm} pcm</span><br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C)<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C)<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant ρ:</span> <span class="debug-value">${coolantDensityPcm} pcm</span> (ρ=${coolantRho}, ref=${refCoolantRho})<br>
+        <span class="debug-label">Precursors:</span> ${formatValue(n.precursorConcentration, '')}<br>
+        <span class="debug-label">Rod insertion:</span> ${formatValue((1 - n.controlRodPosition) * 100, '%')}<br>
+        <span class="debug-label">Decay heat:</span> ${formatValue(n.decayHeatFraction * 100, '%')}<br>
+        <span class="debug-label">SCRAM:</span> ${n.scrammed ? '<span class="debug-danger">YES</span>' : 'No'}
+      `;
+    }
   }
 
   // Thermal nodes
   const thermalDiv = document.getElementById('debug-thermal');
   if (thermalDiv) {
-    let html = '';
-    for (const [id, node] of state.thermalNodes) {
-      const tempC = node.temperature - 273;
-      const pctOfMax = (node.temperature / node.maxTemperature) * 100;
-      const tempClass = pctOfMax > 95 ? 'debug-danger' : pctOfMax > 80 ? 'debug-warning' : 'debug-value';
-      html += `<span class="debug-label">${id}:</span> <span class="${tempClass}">${tempC.toFixed(0)}C</span> (${pctOfMax.toFixed(0)}% max)<br>`;
+    if (state.thermalNodes.size === 0) {
+      thermalDiv.innerHTML = '<span style="color: #666; font-style: italic;">No thermal nodes</span>';
+    } else {
+      let html = '';
+      for (const [id, node] of state.thermalNodes) {
+        const tempC = node.temperature - 273;
+        const pctOfMax = (node.temperature / node.maxTemperature) * 100;
+        const tempClass = pctOfMax > 95 ? 'debug-danger' : pctOfMax > 80 ? 'debug-warning' : 'debug-value';
+        html += `<span class="debug-label">${id}:</span> <span class="${tempClass}">${tempC.toFixed(0)}C</span> (${pctOfMax.toFixed(0)}% max)<br>`;
+      }
+      thermalDiv.innerHTML = html;
     }
-    thermalDiv.innerHTML = html;
   }
 
   // Flow nodes
   const flowDiv = document.getElementById('debug-flow');
   if (flowDiv) {
+    if (state.flowNodes.size === 0) {
+      flowDiv.innerHTML = '<span style="color: #666; font-style: italic;">No flow nodes</span>';
+    } else {
     let html = '';
     for (const [id, node] of state.flowNodes) {
       const tempC = node.fluid.temperature - 273;
@@ -323,6 +337,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
     for (const [id, node] of state.flowNodes) {
       previousPressures.set(id, node.fluid.pressure);
     }
+    } // end else (flowNodes.size > 0)
   }
 
   // Operator timing

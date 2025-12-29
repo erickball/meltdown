@@ -40,16 +40,23 @@ export class NeutronicsOperator implements PhysicsOperator {
   private inStandby: boolean = false;
 
   apply(state: SimulationState, dt: number): SimulationState {
+    const n = state.neutronics;
+
+    // If no core is linked, neutronics is disabled - return unchanged
+    if (!n.coreId) {
+      return state;
+    }
+
     const newState = cloneSimulationState(state);
-    const n = newState.neutronics;
+    const nNew = newState.neutronics;
 
     // Always compute reactivity (needed for standby mode too)
-    const rho = this.computeTotalReactivity(n, newState);
-    n.reactivity = rho;
+    const rho = this.computeTotalReactivity(nNew, newState);
+    nNew.reactivity = rho;
 
     // Check for standby mode: scrammed AND power < 1% nominal AND subcritical
-    const powerFraction = n.power / n.nominalPower;
-    const shouldBeStandby = n.scrammed && powerFraction < 0.01 && rho < 0;
+    const powerFraction = nNew.power / nNew.nominalPower;
+    const shouldBeStandby = nNew.scrammed && powerFraction < 0.01 && rho < 0;
 
     if (shouldBeStandby && !this.inStandby) {
       this.inStandby = true;
@@ -60,7 +67,7 @@ export class NeutronicsOperator implements PhysicsOperator {
       if (rho >= 0) {
         console.log('[Neutronics] Exiting standby - reactivity went positive (recriticality risk)');
         // Set precursors to a minimum "source" level for restart calculations
-        n.precursorConcentration = Math.max(n.precursorConcentration, 1e-6);
+        nNew.precursorConcentration = Math.max(nNew.precursorConcentration, 1e-6);
       } else {
         // console.log('[Neutronics] Exiting standby - power increasing');
       }
@@ -68,27 +75,27 @@ export class NeutronicsOperator implements PhysicsOperator {
 
     // In standby mode, just update decay heat and skip kinetics
     if (this.inStandby) {
-      this.updateDecayHeat(n, state.time, dt);
+      this.updateDecayHeat(nNew, state.time, dt);
 
       // Power is just decay heat in standby
-      n.power = n.nominalPower * n.decayHeatFraction;
+      nNew.power = nNew.nominalPower * nNew.decayHeatFraction;
 
       // Precursors decay away
-      const lambda = n.precursorDecayConstant;
-      n.precursorConcentration *= Math.exp(-lambda * dt);
-      n.precursorConcentration = Math.max(n.precursorConcentration, 1e-10);
+      const lambda = nNew.precursorDecayConstant;
+      nNew.precursorConcentration *= Math.exp(-lambda * dt);
+      nNew.precursorConcentration = Math.max(nNew.precursorConcentration, 1e-10);
 
       return newState;
     }
 
     // Full point kinetics calculation
-    const beta = n.delayedNeutronFraction;
-    const Lambda = n.promptNeutronLifetime;
-    const lambda = n.precursorDecayConstant;
+    const beta = nNew.delayedNeutronFraction;
+    const Lambda = nNew.promptNeutronLifetime;
+    const lambda = nNew.precursorDecayConstant;
 
     // Normalized power (N = P / P_nominal)
-    let N = n.power / n.nominalPower;
-    let C = n.precursorConcentration;
+    let N = nNew.power / nNew.nominalPower;
+    let C = nNew.precursorConcentration;
 
     // Rate equations
     const dN_dt = (rho - beta) / Lambda * N + lambda * C;
@@ -105,42 +112,47 @@ export class NeutronicsOperator implements PhysicsOperator {
     // Limit power rate of change for ease of use
     const maxPowerChangeRate = 4; // 400% per second (still very fast)
     const maxChange = maxPowerChangeRate * dt;
-    const oldN = n.power / n.nominalPower;
+    const oldN = nNew.power / nNew.nominalPower;
     if (N > oldN + maxChange) N = oldN + maxChange;
     if (N < oldN - maxChange && N < oldN) N = Math.max(oldN - maxChange, 1e-10);
 
     // Update decay heat fraction based on operating history
-    this.updateDecayHeat(n, state.time, dt);
+    this.updateDecayHeat(nNew, state.time, dt);
 
     // Fission power from kinetics. Includes decay heat.
-    const fissionPower = N * n.nominalPower;
+    const fissionPower = N * nNew.nominalPower;
 
     // Decay heat provides a power floor
-    const decayHeatPower = n.nominalPower * n.decayHeatFraction;
-    n.power = (1.0 - n.decayHeatFraction) * fissionPower + decayHeatPower;
-    n.precursorConcentration = C;
+    const decayHeatPower = nNew.nominalPower * nNew.decayHeatFraction;
+    nNew.power = (1.0 - nNew.decayHeatFraction) * fissionPower + decayHeatPower;
+    nNew.precursorConcentration = C;
 
     // Track power rate of change for adaptive timestep
     if (this.lastPowerTime > 0 && state.time > this.lastPowerTime) {
-      const dP = n.power - this.lastPower;
+      const dP = nNew.power - this.lastPower;
       const elapsed = state.time - this.lastPowerTime;
       // Relative rate: (dP/dt) / P
-      this.powerRateOfChange = Math.abs(dP / elapsed) / Math.max(n.power, n.nominalPower * 0.01);
+      this.powerRateOfChange = Math.abs(dP / elapsed) / Math.max(nNew.power, nNew.nominalPower * 0.01);
     }
-    this.lastPower = n.power;
+    this.lastPower = nNew.power;
     this.lastPowerTime = state.time;
 
     // Clear SCRAM flag if operator withdraws rods and goes critical
-    if (n.scrammed && n.controlRodPosition > 0.2 && rho > 0) {
+    if (nNew.scrammed && nNew.controlRodPosition > 0.2 && rho > 0) {
       console.log('[Neutronics] Reactor reset from SCRAM - rods withdrawn, now supercritical');
-      n.scrammed = false;
-      n.scramTime = -1;
+      nNew.scrammed = false;
+      nNew.scramTime = -1;
     }
 
     return newState;
   }
 
-  getMaxStableDt(_state: SimulationState): number {
+  getMaxStableDt(state: SimulationState): number {
+    // If no core, neutronics imposes no constraint
+    if (!state.neutronics.coreId) {
+      return Infinity;
+    }
+
     // The GLOBAL timestep doesn't need to resolve prompt neutron dynamics -
     // that's handled internally by subcycling. The global timestep needs to
     // capture the feedback coupling: temperatures → reactivity → power → heat.
@@ -190,6 +202,11 @@ export class NeutronicsOperator implements PhysicsOperator {
   }
 
   getSubcycleCount(state: SimulationState, dt: number): number {
+    // If no core, no subcycling needed
+    if (!state.neutronics.coreId) {
+      return 1;
+    }
+
     // In standby mode, no subcycling needed
     if (this.inStandby) {
       return 1;
@@ -250,59 +267,77 @@ export class NeutronicsOperator implements PhysicsOperator {
   }
 
   /**
-   * Get average fuel temperature from thermal nodes
-   * Looks for nodes with "fuel" in their label
+   * Get fuel temperature from the linked fuel thermal node
    */
   private getAverageFuelTemperature(state: SimulationState): number {
-    let sum = 0;
-    let count = 0;
+    const n = state.neutronics;
 
+    // Use linked fuel node if available
+    if (n.fuelNodeId) {
+      const fuelNode = state.thermalNodes.get(n.fuelNodeId);
+      if (fuelNode) {
+        return fuelNode.temperature;
+      }
+    }
+
+    // Fallback: search by label (for backwards compatibility)
     for (const [, node] of state.thermalNodes) {
       if (node.label.toLowerCase().includes('fuel')) {
-        sum += node.temperature;
-        count++;
+        return node.temperature;
       }
     }
 
-    return count > 0 ? sum / count : state.neutronics.refFuelTemp;
+    return n.refFuelTemp;
   }
 
   /**
-   * Get average coolant temperature from flow nodes
-   * Looks for nodes with "coolant" or "core" in their label
+   * Get coolant temperature from the linked coolant flow node
    */
   private getAverageCoolantTemperature(state: SimulationState): number {
-    let sum = 0;
-    let count = 0;
+    const n = state.neutronics;
 
-    for (const [, node] of state.flowNodes) {
-      if (node.label.toLowerCase().includes('coolant') ||
-          node.label.toLowerCase().includes('core')) {
-        sum += node.fluid.temperature;
-        count++;
+    // Use linked coolant node if available
+    if (n.coolantNodeId) {
+      const coolantNode = state.flowNodes.get(n.coolantNodeId);
+      if (coolantNode) {
+        return coolantNode.fluid.temperature;
       }
     }
 
-    return count > 0 ? sum / count : state.neutronics.refCoolantTemp;
+    // Fallback: search by label (for backwards compatibility)
+    for (const [, node] of state.flowNodes) {
+      if (node.label.toLowerCase().includes('coolant') ||
+          node.label.toLowerCase().includes('core')) {
+        return node.fluid.temperature;
+      }
+    }
+
+    return n.refCoolantTemp;
   }
 
   /**
-   * Get average coolant density
+   * Get coolant density from the linked coolant flow node
    */
   private getAverageCoolantDensity(state: SimulationState): number {
-    let sum = 0;
-    let count = 0;
+    const n = state.neutronics;
 
-    for (const [, node] of state.flowNodes) {
-      if (node.label.toLowerCase().includes('coolant') ||
-          node.label.toLowerCase().includes('core')) {
-        const rho = node.fluid.mass / node.volume;
-        sum += rho;
-        count++;
+    // Use linked coolant node if available
+    if (n.coolantNodeId) {
+      const coolantNode = state.flowNodes.get(n.coolantNodeId);
+      if (coolantNode) {
+        return coolantNode.fluid.mass / coolantNode.volume;
       }
     }
 
-    return count > 0 ? sum / count : state.neutronics.refCoolantDensity;
+    // Fallback: search by label (for backwards compatibility)
+    for (const [, node] of state.flowNodes) {
+      if (node.label.toLowerCase().includes('coolant') ||
+          node.label.toLowerCase().includes('core')) {
+        return node.fluid.mass / node.volume;
+      }
+    }
+
+    return n.refCoolantDensity;
   }
 
   /**

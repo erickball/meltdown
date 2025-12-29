@@ -253,6 +253,17 @@ function init() {
     });
   }
 
+  // Reset simulation button
+  const resetSimBtn = document.getElementById('reset-sim-btn');
+  if (resetSimBtn) {
+    resetSimBtn.addEventListener('click', () => {
+      // Recreate simulation from current plant state
+      const newSimState = createSimulationFromPlant(plantState);
+      gameLoop.resetState(newSimState);
+      console.log('[Main] Simulation reset to initial conditions');
+    });
+  }
+
   if (speedUpBtn) {
     speedUpBtn.addEventListener('click', () => {
       gameLoop.setSimSpeed(gameLoop.getSimSpeed() * 2);
@@ -308,6 +319,13 @@ function init() {
       }
       gameLoop.setMaxTimestep(ms / 1000); // Convert ms to seconds
     });
+
+    // Initialize slider position and apply initial value
+    const initialMs = parseInt(maxTimestepSlider.value, 10);
+    if (maxTimestepValue) {
+      maxTimestepValue.textContent = initialMs.toString();
+    }
+    gameLoop.setMaxTimestep(initialMs / 1000);
   }
 
   // Pressure model control
@@ -450,6 +468,13 @@ function init() {
         viewElevationValue.textContent = String(value);
       }
     });
+
+    // Initialize slider position and apply initial value
+    const initialValue = parseInt(viewElevationSlider.value, 10);
+    plantCanvas.setViewElevation(initialValue);
+    if (viewElevationValue) {
+      viewElevationValue.textContent = String(initialValue);
+    }
   }
 
   // ============================================================================
@@ -715,14 +740,32 @@ function init() {
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
       if (placementHintDiv) placementHintDiv.style.display = 'none';
 
-      // Create simulation state from user's plant
+      // Always create simulation state from current plant configuration
+      // (even if empty - this replaces the demo plant with an empty simulation)
+      const newSimState = createSimulationFromPlant(plantState);
+      gameLoop.setSimulationState(newSimState);
+      plantCanvas.setSimState(newSimState);
+
+      // Immediately update debug panel to show new configuration
+      const currentState = gameLoop.getState();
+      const emptyMetrics: SolverMetrics = {
+        currentDt: 0,
+        actualDt: 0,
+        maxStableDt: Infinity,
+        dtLimitedBy: 'none',
+        stabilityLimitedBy: 'none',
+        totalSteps: 0,
+        lastStepWallTime: 0,
+        realTimeRatio: 0,
+        isFallingBehind: false,
+        operatorTimes: new Map(),
+      };
+      updateDebugPanel(currentState, emptyMetrics);
+
       if (plantState.components.size > 0) {
-        const newSimState = createSimulationFromPlant(plantState);
-        gameLoop.setSimulationState(newSimState);
-        plantCanvas.setSimState(newSimState);
-        console.log('[Mode] Created simulation from user plant');
+        console.log(`[Mode] Created simulation from user plant (${plantState.components.size} components)`);
       } else {
-        console.log('[Mode] No components in plant, using existing simulation');
+        console.log('[Mode] Created empty simulation (no components in plant)');
       }
 
       console.log('[Mode] Switched to Simulation mode');
@@ -1150,59 +1193,72 @@ function init() {
 }
 
 function syncSimulationToVisuals(simState: SimulationState, plantState: PlantState): void {
-  // Sync all components that have a simNodeId to their simulation node
+  // Sync all components to their simulation nodes
+  // Uses simNodeId if set, otherwise falls back to component.id
   for (const [, component] of plantState.components) {
-    const simNodeId = (component as { simNodeId?: string }).simNodeId;
-    if (simNodeId && component.fluid) {
+    const simNodeId = (component as { simNodeId?: string }).simNodeId || component.id;
+
+    // Handle heat exchangers specially - they have primary and secondary sides
+    if (component.type === 'heatExchanger') {
+      // Primary side: try simNodeId, then {id}-primary
+      const primaryNodeId = (component as { simNodeId?: string }).simNodeId || `${component.id}-primary`;
+      const primaryNode = simState.flowNodes.get(primaryNodeId);
+      if (primaryNode && component.primaryFluid) {
+        component.primaryFluid.temperature = primaryNode.fluid.temperature;
+        component.primaryFluid.pressure = primaryNode.fluid.pressure;
+        component.primaryFluid.phase = primaryNode.fluid.phase;
+        component.primaryFluid.quality = primaryNode.fluid.quality;
+      }
+
+      // Secondary side: try {id}-secondary
+      const secondaryNode = simState.flowNodes.get(`${component.id}-secondary`);
+      if (secondaryNode && component.secondaryFluid) {
+        component.secondaryFluid.temperature = secondaryNode.fluid.temperature;
+        component.secondaryFluid.pressure = secondaryNode.fluid.pressure;
+        component.secondaryFluid.phase = secondaryNode.fluid.phase;
+        component.secondaryFluid.quality = secondaryNode.fluid.quality;
+      }
+      continue;
+    }
+
+    // For vessels with fuel, sync fuel temperature
+    if (component.type === 'vessel' && component.fuelRodCount) {
+      const fuelNodeId = `${component.id}-fuel`;
+      const fuelNode = simState.thermalNodes.get(fuelNodeId);
+      if (fuelNode) {
+        component.fuelTemperature = fuelNode.temperature;
+      }
+    }
+
+    // Sync fluid state for components with fluid
+    if (component.fluid) {
       const simNode = simState.flowNodes.get(simNodeId);
       if (simNode) {
         component.fluid.temperature = simNode.fluid.temperature;
         component.fluid.pressure = simNode.fluid.pressure;
         component.fluid.phase = simNode.fluid.phase;
         component.fluid.quality = simNode.fluid.quality;
-        // Note: flowRate comes from FlowConnections, not FluidState
       }
     }
-  }
 
-  // Sync heat exchanger primary/secondary fluids
-  // Find heat exchangers by type since IDs are auto-generated
-  const sgPrimary = simState.flowNodes.get('sg-primary');
-  const sgSecondary = simState.flowNodes.get('sg-secondary');
-  for (const [, comp] of plantState.components) {
-    if (comp.type === 'heatExchanger') {
-      const sgComponent = comp;
-      if (sgPrimary && sgComponent.primaryFluid) {
-        sgComponent.primaryFluid.temperature = sgPrimary.fluid.temperature;
-        sgComponent.primaryFluid.pressure = sgPrimary.fluid.pressure;
-        sgComponent.primaryFluid.phase = sgPrimary.fluid.phase;
-        sgComponent.primaryFluid.quality = sgPrimary.fluid.quality;
-      }
-      if (sgSecondary && sgComponent.secondaryFluid) {
-        sgComponent.secondaryFluid.temperature = sgSecondary.fluid.temperature;
-        sgComponent.secondaryFluid.pressure = sgSecondary.fluid.pressure;
-        sgComponent.secondaryFluid.phase = sgSecondary.fluid.phase;
-        sgComponent.secondaryFluid.quality = sgSecondary.fluid.quality;
+    // Sync pump state
+    if (component.type === 'pump') {
+      const pumpId = (component as { simPumpId?: string }).simPumpId || component.id;
+      const pumpState = simState.components.pumps.get(pumpId);
+      if (pumpState) {
+        component.running = pumpState.running;
+        component.speed = pumpState.speed;
       }
     }
-  }
 
-  // Sync fuel temperature to reactor vessel
-  const fuelNode = simState.thermalNodes.get('fuel');
-  if (fuelNode) {
-    for (const [, comp] of plantState.components) {
-      if (comp.type === 'vessel' && comp.fuelRodCount) {
-        comp.fuelTemperature = fuelNode.temperature;
+    // Sync valve state
+    if (component.type === 'valve') {
+      const valveId = (component as { simValveId?: string }).simValveId || component.id;
+      const valveState = simState.components.valves.get(valveId);
+      if (valveState) {
+        component.opening = valveState.position;
       }
     }
-  }
-
-  // Sync pump state
-  const pump = plantState.components.get('pump-1');
-  const pumpState = simState.components.pumps.get('rcp-1');
-  if (pump && pump.type === 'pump' && pumpState) {
-    pump.running = pumpState.running;
-    pump.speed = pumpState.speed;
   }
 
   // Sync control rod position to vessel visual

@@ -217,52 +217,113 @@ export class ConstructionManager {
       }
 
       case 'heat-exchanger': {
-        // Heat exchanger has 4 ports
-        const hxPorts: Port[] = [
-          {
-            id: `${id}-primary-inlet`,
-            position: { x: -0.5, y: -0.25 },
-            direction: 'in'
-          },
-          {
-            id: `${id}-primary-outlet`,
-            position: { x: 0.5, y: -0.25 },
-            direction: 'out'
-          },
-          {
-            id: `${id}-secondary-inlet`,
-            position: { x: -0.5, y: 0.25 },
-            direction: 'in'
-          },
-          {
-            id: `${id}-secondary-outlet`,
-            position: { x: 0.5, y: 0.25 },
-            direction: 'out'
+        // Use user-specified dimensions first (needed for port positioning)
+        // For vertical: width is diameter, height is length (tubes run vertically)
+        // For horizontal: swap width/height so tubes run horizontally
+        const isVertical = props.orientation === 'vertical';
+        const shellDiam = props.shellDiameter || 2.5;
+        const shellLen = props.shellLength || 8;
+
+        // Calculate derived values
+        const tubeOD_m = (props.tubeOD || 19) / 1000; // mm to m
+        const tubeThickness_m = (props.tubeThickness || 1.2) / 1000;
+        const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
+        const tubeCount = props.tubeCount || 3000;
+        const hxType = props.hxType || 'utube';
+        const tubeLength = hxType === 'utube' ? shellLen * 1.8 : shellLen;
+
+        // Store calculated values for simulation use
+        const heatTransferArea = Math.PI * tubeOD_m * tubeLength * tubeCount;
+        const tubeSideVolume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * tubeCount;
+        const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
+        const shellSideVolume = Math.max(0, shellVolume - Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * tubeCount);
+
+        // Calculate port positions based on HX type and orientation
+        // Physical considerations:
+        // - U-tube vertical: tube sheet at bottom, so tube inlet/outlet at bottom; shell inlet/outlet on sides
+        // - Straight vertical: tube sheets at both ends, so tube in at bottom, out at top; shell on sides
+        // - Helical vertical: similar to straight tube
+        // - Horizontal: rotate the logic 90 degrees
+        const displayWidth = isVertical ? shellDiam : shellLen;
+        const displayHeight = isVertical ? shellLen : shellDiam;
+        const halfW = displayWidth / 2;
+        const halfH = displayHeight / 2;
+
+        let hxPorts: Port[];
+
+        if (isVertical) {
+          if (hxType === 'utube') {
+            // U-tube vertical: both tube connections at bottom (tube sheet), shell on sides
+            hxPorts = [
+              { id: `${id}-tube-inlet`, position: { x: -halfW * 0.3, y: halfH }, direction: 'in' },
+              { id: `${id}-tube-outlet`, position: { x: halfW * 0.3, y: halfH }, direction: 'out' },
+              { id: `${id}-shell-inlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'in' },
+              { id: `${id}-shell-outlet`, position: { x: halfW, y: -halfH * 0.5 }, direction: 'out' }
+            ];
+          } else {
+            // Straight or helical vertical: tube in at bottom, out at top; shell on sides
+            hxPorts = [
+              { id: `${id}-tube-inlet`, position: { x: 0, y: halfH }, direction: 'in' },
+              { id: `${id}-tube-outlet`, position: { x: 0, y: -halfH }, direction: 'out' },
+              { id: `${id}-shell-inlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'in' },
+              { id: `${id}-shell-outlet`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'out' }
+            ];
           }
-        ];
+        } else {
+          // Horizontal orientation
+          if (hxType === 'utube') {
+            // U-tube horizontal: both tube connections at left (tube sheet), shell on top/bottom
+            hxPorts = [
+              { id: `${id}-tube-inlet`, position: { x: -halfW, y: -halfH * 0.3 }, direction: 'in' },
+              { id: `${id}-tube-outlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'out' },
+              { id: `${id}-shell-inlet`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'in' },
+              { id: `${id}-shell-outlet`, position: { x: halfW * 0.5, y: halfH }, direction: 'out' }
+            ];
+          } else {
+            // Straight or helical horizontal: tube in at left, out at right; shell on top/bottom
+            hxPorts = [
+              { id: `${id}-tube-inlet`, position: { x: -halfW, y: 0 }, direction: 'in' },
+              { id: `${id}-tube-outlet`, position: { x: halfW, y: 0 }, direction: 'out' },
+              { id: `${id}-shell-inlet`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'in' },
+              { id: `${id}-shell-outlet`, position: { x: halfW * 0.3, y: halfH }, direction: 'out' }
+            ];
+          }
+        }
 
         const hx: HeatExchangerComponent = {
           id,
           type: 'heatExchanger',
           label: props.name || 'Heat Exchanger',
           position: { x: worldX, y: worldY },
-          rotation: props.orientation === 'vertical' ? Math.PI / 2 : 0,
-          width: props.orientation === 'vertical' ? 1 : 2,
-          height: props.orientation === 'vertical' ? 2 : 1,
+          rotation: 0, // No rotation - we swap width/height for orientation
+          elevation: props.elevation !== undefined ? props.elevation : 2, // Elevation for shadow rendering
+          width: isVertical ? shellDiam : shellLen,
+          height: isVertical ? shellLen : shellDiam,
+          hxType: hxType,
           primaryFluid: {
             ...defaultFluid,
-            pressure: props.primaryPressure * 100000
+            pressure: (props.tubePressure || 150) * 100000
           },
           secondaryFluid: {
             temperature: 280 + 273.15,
-            pressure: props.secondaryPressure * 100000,
+            pressure: (props.shellPressure || 60) * 100000,
             phase: 'two-phase',
             quality: 0.5,
             flowRate: 0
           },
-          tubeCount: props.tubeCount,
+          tubeCount: 5, // Visual tube count for rendering (not the real engineering value)
           ports: hxPorts
         };
+
+        // Store additional properties for simulation (can be accessed via component)
+        (hx as any).heatTransferArea = heatTransferArea;
+        (hx as any).tubeSideVolume = tubeSideVolume;
+        (hx as any).shellSideVolume = shellSideVolume;
+        (hx as any).realTubeCount = tubeCount;
+        (hx as any).tubeOD = tubeOD_m;
+        (hx as any).tubeID = tubeID_m;
+
+        console.log(`[HX] Created ${hxType} heat exchanger: ${heatTransferArea.toFixed(0)} m² area, tube-side ${tubeSideVolume.toFixed(1)} m³, shell-side ${shellSideVolume.toFixed(1)} m³`);
 
         this.plantState.components.set(id, hx);
         break;
@@ -482,19 +543,30 @@ export class ConstructionManager {
     const pipeId = this.generateComponentId('pipe');
     const diameter = Math.sqrt(flowArea * 4 / Math.PI);
 
-    // Get component positions to place pipe between them
-    const fromComponentId = fromPortId.substring(0, fromPortId.lastIndexOf('-'));
-    const toComponentId = toPortId.substring(0, toPortId.lastIndexOf('-'));
-    const fromComponent = this.plantState.components.get(fromComponentId);
-    const toComponent = this.plantState.components.get(toComponentId);
+    // Find components by searching for which component owns each port
+    let fromComponent: ReturnType<typeof this.plantState.components.get> = undefined;
+    let toComponent: ReturnType<typeof this.plantState.components.get> = undefined;
+    let fromPort: import('../types').Port | undefined = undefined;
+    let toPort: import('../types').Port | undefined = undefined;
 
-    if (!fromComponent || !toComponent) return false;
+    for (const [, component] of this.plantState.components) {
+      for (const port of component.ports) {
+        if (port.id === fromPortId) {
+          fromComponent = component;
+          fromPort = port;
+        }
+        if (port.id === toPortId) {
+          toComponent = component;
+          toPort = port;
+        }
+      }
+      if (fromComponent && toComponent) break;
+    }
 
-    // Find the actual ports to get their positions
-    const fromPort = fromComponent.ports?.find(p => p.id === fromPortId);
-    const toPort = toComponent.ports?.find(p => p.id === toPortId);
-
-    if (!fromPort || !toPort) return false;
+    if (!fromComponent || !toComponent || !fromPort || !toPort) {
+      console.error(`[Construction] Cannot create pipe connection: component or port not found`);
+      return false;
+    }
 
     // Calculate actual port positions in world space
     const fromPortWorldX = fromComponent.position.x + fromPort.position.x;
@@ -542,7 +614,7 @@ export class ConstructionManager {
     const pipe: PipeComponent = {
       id: pipeId,
       type: 'pipe',
-      label: `Pipe ${fromComponentId} to ${toComponentId}`,
+      label: `Pipe ${fromComponent.id} to ${toComponent.id}`,
       position: { x: pipeX, y: pipeY },
       rotation,
       diameter,
@@ -569,21 +641,31 @@ export class ConstructionManager {
   }
 
   createConnection(fromPortId: string, toPortId: string): boolean {
-    // Extract component IDs from port IDs
-    const fromComponentId = fromPortId.substring(0, fromPortId.lastIndexOf('-'));
-    const toComponentId = toPortId.substring(0, toPortId.lastIndexOf('-'));
+    // Find components by searching for which component owns each port
+    // This is more robust than parsing port IDs, which can have varying formats
+    let fromComponent: ReturnType<typeof this.plantState.components.get> = undefined;
+    let toComponent: ReturnType<typeof this.plantState.components.get> = undefined;
+    let fromPort: ReturnType<typeof Array.prototype.find<import('../types').Port>> = undefined;
+    let toPort: ReturnType<typeof Array.prototype.find<import('../types').Port>> = undefined;
 
-    const fromComponent = this.plantState.components.get(fromComponentId);
-    const toComponent = this.plantState.components.get(toComponentId);
-
-    if (!fromComponent || !toComponent) {
-      console.error(`[Construction] Cannot create connection: component not found`);
-      return false;
+    for (const [, component] of this.plantState.components) {
+      for (const port of component.ports) {
+        if (port.id === fromPortId) {
+          fromComponent = component;
+          fromPort = port;
+        }
+        if (port.id === toPortId) {
+          toComponent = component;
+          toPort = port;
+        }
+      }
+      if (fromComponent && toComponent) break;
     }
 
-    // Find the ports
-    const fromPort = fromComponent.ports.find(p => p.id === fromPortId);
-    const toPort = toComponent.ports.find(p => p.id === toPortId);
+    if (!fromComponent || !toComponent) {
+      console.error(`[Construction] Cannot create connection: component not found for ports ${fromPortId} / ${toPortId}`);
+      return false;
+    }
 
     if (!fromPort || !toPort) {
       console.error(`[Construction] Cannot create connection: port not found`);
@@ -596,9 +678,9 @@ export class ConstructionManager {
 
     // Create connection object
     const connection: Connection = {
-      fromComponentId,
+      fromComponentId: fromComponent.id,
       fromPortId,
-      toComponentId,
+      toComponentId: toComponent.id,
       toPortId
     };
 

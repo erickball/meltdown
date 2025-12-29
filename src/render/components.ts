@@ -545,17 +545,21 @@ function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view:
 }
 
 function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerComponent, view: ViewState): void {
-  const w = hx.width * view.zoom;
-  const h = hx.height * view.zoom;
+  // Defensive: ensure valid dimensions
+  const w = Math.max((hx.width || 2) * view.zoom, 20);
+  const h = Math.max((hx.height || 4) * view.zoom, 20);
   const wallPx = 4;
+
+  // Detect orientation: horizontal when width > height, vertical when height > width
+  const isHorizontal = w > h;
 
   // Shell
   ctx.fillStyle = COLORS.steel;
   ctx.fillRect(-w / 2, -h / 2, w, h);
 
   // Shell-side fluid (secondary) - stratified if two-phase
-  const innerW = w - wallPx * 2;
-  const innerH = h - wallPx * 2;
+  const innerW = Math.max(w - wallPx * 2, 10);
+  const innerH = Math.max(h - wallPx * 2, 10);
   const innerLeft = -w / 2 + wallPx;
   const innerTop = -h / 2 + wallPx;
 
@@ -604,60 +608,194 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     ctx.fillRect(innerLeft, innerTop, innerW, innerH);
   }
 
-  // Tubes (primary side) - vertical U-tubes going down and back up
-  const tubeSpacing = innerW / (hx.tubeCount + 1);
-  const tubeRadius = Math.min(tubeSpacing * 0.25, 6);
+  // Tubes (primary side) - rendering depends on hxType and orientation
+  // Use a small visual tube count (cap at 10 for rendering)
+  const visualTubeCount = Math.min(Math.max(hx.tubeCount || 5, 1), 10);
+  const hxType = hx.hxType || 'utube';
   const tubeWall = 1;
+  const tubeSheetThickness = 5;
 
-  for (let i = 0; i < hx.tubeCount; i++) {
-    const x = innerLeft + tubeSpacing * (i + 1);
+  // Primary fluid color
+  const primaryColor = hx.primaryFluid ? getFluidColor(hx.primaryFluid) : '#111';
 
-    // Draw tube outer wall (steel)
-    ctx.fillStyle = COLORS.steel;
-    ctx.fillRect(x - tubeRadius - tubeWall, innerTop + 5, (tubeRadius + tubeWall) * 2, innerH - 15);
+  if (isHorizontal) {
+    // HORIZONTAL ORIENTATION: tubes run left-to-right
+    const tubeSpacing = innerH / (visualTubeCount + 1);
+    const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
 
-    // Draw tube inner (primary fluid)
-    if (hx.primaryFluid) {
-      ctx.fillStyle = getFluidColor(hx.primaryFluid);
-    } else {
-      ctx.fillStyle = '#111';
+    for (let i = 0; i < visualTubeCount; i++) {
+      const y = innerTop + tubeSpacing * (i + 1);
+
+      if (hxType === 'straight') {
+        // Straight tubes - go all the way through horizontally
+        ctx.fillStyle = COLORS.steel;
+        ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
+
+        ctx.fillStyle = primaryColor;
+        ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
+      } else if (hxType === 'helical') {
+        // Helical coil - draw as a wavy/zigzag pattern horizontally
+        ctx.strokeStyle = COLORS.steel;
+        ctx.lineWidth = (tubeRadius + tubeWall) * 2;
+        ctx.beginPath();
+        const waveAmplitude = tubeSpacing * 0.3;
+        const waveFreq = 8;
+        for (let j = 0; j <= waveFreq; j++) {
+          const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
+          const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+          if (j === 0) {
+            ctx.moveTo(xPos, y + yOffset);
+          } else {
+            ctx.lineTo(xPos, y + yOffset);
+          }
+        }
+        ctx.stroke();
+
+        // Inner helical (primary fluid)
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = tubeRadius * 2;
+        ctx.beginPath();
+        for (let j = 0; j <= waveFreq; j++) {
+          const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
+          const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+          if (j === 0) {
+            ctx.moveTo(xPos, y + yOffset);
+          } else {
+            ctx.lineTo(xPos, y + yOffset);
+          }
+        }
+        ctx.stroke();
+      } else {
+        // U-tube - tubes with U-bends at the right end
+        ctx.fillStyle = COLORS.steel;
+        ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness - 10, (tubeRadius + tubeWall) * 2);
+
+        ctx.fillStyle = primaryColor;
+        ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness - 10 - tubeWall * 2, tubeRadius * 2);
+
+        // Tube header at left (inlet/outlet plenum)
+        ctx.fillStyle = COLORS.steel;
+        ctx.beginPath();
+        ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
+        ctx.fill();
+
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
+        ctx.fill();
+
+        // U-bend at right
+        ctx.fillStyle = COLORS.steel;
+        ctx.beginPath();
+        ctx.arc(innerLeft + innerW - 10, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
+        ctx.fill();
+
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.arc(innerLeft + innerW - 10, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
+        ctx.fill();
+      }
     }
-    ctx.fillRect(x - tubeRadius, innerTop + 5 + tubeWall, tubeRadius * 2, innerH - 15 - tubeWall * 2);
 
-    // Tube header at top (inlet/outlet plenum)
-    ctx.fillStyle = COLORS.steel;
-    ctx.beginPath();
-    ctx.arc(x, innerTop + 5, tubeRadius + tubeWall, Math.PI, 0);
-    ctx.fill();
-
-    if (hx.primaryFluid) {
-      ctx.fillStyle = getFluidColor(hx.primaryFluid);
-    } else {
-      ctx.fillStyle = '#111';
+    // Draw tube sheet(s) - vertical for horizontal orientation
+    ctx.fillStyle = COLORS.steelDark;
+    ctx.fillRect(innerLeft, innerTop, tubeSheetThickness, innerH);
+    if (hxType === 'straight') {
+      ctx.fillRect(innerLeft + innerW - tubeSheetThickness, innerTop, tubeSheetThickness, innerH);
     }
-    ctx.beginPath();
-    ctx.arc(x, innerTop + 5, tubeRadius, Math.PI, 0);
-    ctx.fill();
+  } else {
+    // VERTICAL ORIENTATION: tubes run bottom-to-top
+    const tubeSpacing = innerW / (visualTubeCount + 1);
+    const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
 
-    // U-bend at bottom
-    ctx.fillStyle = COLORS.steel;
-    ctx.beginPath();
-    ctx.arc(x, innerTop + innerH - 10, tubeRadius + tubeWall, 0, Math.PI);
-    ctx.fill();
+    for (let i = 0; i < visualTubeCount; i++) {
+      const x = innerLeft + tubeSpacing * (i + 1);
 
-    if (hx.primaryFluid) {
-      ctx.fillStyle = getFluidColor(hx.primaryFluid);
-    } else {
-      ctx.fillStyle = '#111';
+      if (hxType === 'straight') {
+        // Straight tubes - go all the way through vertically with tube sheets at both ends
+        ctx.fillStyle = COLORS.steel;
+        ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
+
+        ctx.fillStyle = primaryColor;
+        ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
+      } else if (hxType === 'helical') {
+        // Helical coil - draw as a wavy/zigzag pattern to suggest coiled tubes
+        ctx.strokeStyle = COLORS.steel;
+        ctx.lineWidth = (tubeRadius + tubeWall) * 2;
+        ctx.beginPath();
+        const waveAmplitude = tubeSpacing * 0.3;
+        const waveFreq = 8; // Number of waves along the height
+        for (let j = 0; j <= waveFreq; j++) {
+          const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
+          const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+          if (j === 0) {
+            ctx.moveTo(x + xOffset, yPos);
+          } else {
+            ctx.lineTo(x + xOffset, yPos);
+          }
+        }
+        ctx.stroke();
+
+        // Inner helical (primary fluid)
+        ctx.strokeStyle = primaryColor;
+        ctx.lineWidth = tubeRadius * 2;
+        ctx.beginPath();
+        for (let j = 0; j <= waveFreq; j++) {
+          const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
+          const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+          if (j === 0) {
+            ctx.moveTo(x + xOffset, yPos);
+          } else {
+            ctx.lineTo(x + xOffset, yPos);
+          }
+        }
+        ctx.stroke();
+      } else {
+        // U-tube - tubes with tube sheet at BOTTOM and U-bends at TOP (standard SG configuration)
+        ctx.fillStyle = COLORS.steel;
+        ctx.fillRect(x - tubeRadius - tubeWall, innerTop + 10, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness - 10);
+
+        ctx.fillStyle = primaryColor;
+        ctx.fillRect(x - tubeRadius, innerTop + 10 + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness - 10 - tubeWall * 2);
+
+        // U-bend at TOP
+        ctx.fillStyle = COLORS.steel;
+        ctx.beginPath();
+        ctx.arc(x, innerTop + 10, tubeRadius + tubeWall, Math.PI, 0);
+        ctx.fill();
+
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.arc(x, innerTop + 10, tubeRadius, Math.PI, 0);
+        ctx.fill();
+
+        // Tube header at bottom (inlet/outlet plenum)
+        ctx.fillStyle = COLORS.steel;
+        ctx.beginPath();
+        ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius + tubeWall, 0, Math.PI);
+        ctx.fill();
+
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius, 0, Math.PI);
+        ctx.fill();
+      }
     }
-    ctx.beginPath();
-    ctx.arc(x, innerTop + innerH - 10, tubeRadius, 0, Math.PI);
-    ctx.fill();
+
+    // Draw tube sheet(s) - horizontal for vertical orientation
+    ctx.fillStyle = COLORS.steelDark;
+    if (hxType === 'straight') {
+      // Straight tubes have tube sheets at both ends
+      ctx.fillRect(innerLeft, innerTop, innerW, tubeSheetThickness);
+      ctx.fillRect(innerLeft, innerTop + innerH - tubeSheetThickness, innerW, tubeSheetThickness);
+    } else if (hxType === 'utube') {
+      // U-tube has tube sheet at bottom only
+      ctx.fillRect(innerLeft, innerTop + innerH - tubeSheetThickness, innerW, tubeSheetThickness);
+    } else {
+      // Helical has tube sheet at bottom
+      ctx.fillRect(innerLeft, innerTop + innerH - tubeSheetThickness, innerW, tubeSheetThickness);
+    }
   }
-
-  // Draw tube sheet at top (separating primary and secondary)
-  ctx.fillStyle = COLORS.steelDark;
-  ctx.fillRect(innerLeft, innerTop, innerW, 5);
 
   // Outline
   ctx.strokeStyle = COLORS.steelHighlight;

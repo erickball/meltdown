@@ -143,6 +143,20 @@ export class GameLoop {
     this.previousMaxTemp = this.getMaxFuelTemperature();
   }
 
+  /**
+   * Reset simulation to a new state
+   */
+  resetState(newState: SimulationState): void {
+    this.state = newState;
+    this.previousPower = newState.neutronics.power;
+    this.previousMaxTemp = this.getMaxFuelTemperature();
+    this.cumulativePowerChange = 0;
+    this.cumulativeTempChange = 0;
+    this.changeWindowTime = 0;
+    this.recentEvents = [];
+    console.log('[GameLoop] Simulation state reset');
+  }
+
   // Flag to skip physics on the very first tick (no real frame time yet)
   private firstTick: boolean = true;
 

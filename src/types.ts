@@ -111,6 +111,7 @@ export interface HeatExchangerComponent extends ComponentBase {
   type: 'heatExchanger';
   width: number;
   height: number;
+  hxType?: 'utube' | 'straight' | 'helical';  // Heat exchanger tube configuration
   primaryFluid?: Fluid;
   secondaryFluid?: Fluid;
   tubeCount: number;
