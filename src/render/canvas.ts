@@ -7,7 +7,7 @@ import {
   renderIsometricGround,
   renderElevationLabel,
   getComponentElevation,
-  renderDebugGrid
+  renderDebugGrid,
 } from './isometric';
 
 export class PlantCanvas {
@@ -38,6 +38,9 @@ export class PlantCanvas {
   private hoveredComponentId: string | null = null;
   private moveMode: boolean = false;
   private isMovingComponent: boolean = false;
+
+  // Construction mode - shows grid and component outlines at ground level
+  private constructionMode: boolean = true;
 
   // Callbacks
   public onMouseMove?: (worldPos: Point) => void;
@@ -333,11 +336,18 @@ export class PlantCanvas {
     const components = Array.from(this.plantState.components.values());
 
     // Sort by depth: closer to camera (smaller Y) checked first
-    if (this.isometric.enabled) {
-      components.sort((a, b) => a.position.y - b.position.y);
-    } else {
-      components.reverse();
-    }
+    // Also: contained components are on top, so check them first
+    components.sort((a, b) => {
+      // First priority: contained components are on top
+      if (a.containedBy && !b.containedBy) return -1;
+      if (!a.containedBy && b.containedBy) return 1;
+
+      // Second priority: depth sorting
+      if (this.isometric.enabled) {
+        return a.position.y - b.position.y;
+      }
+      return 0;
+    });
 
     for (const component of components) {
       if (this.isometric.enabled) {
@@ -464,7 +474,13 @@ export class PlantCanvas {
 
   public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
     // Check all components for nearby ports
-    const components = Array.from(this.plantState.components.values());
+    // Sort so contained components are checked first (they're rendered on top)
+    const components = Array.from(this.plantState.components.values()).sort((a, b) => {
+      // Contained components should be checked first
+      if (a.containedBy && !b.containedBy) return -1;
+      if (!a.containedBy && b.containedBy) return 1;
+      return 0;
+    });
 
     for (const component of components) {
       if (!component.ports) continue;
@@ -618,12 +634,42 @@ export class PlantCanvas {
     this.ctx.scale(dpr, dpr);
   }
 
-  // Perspective projection constants - must match shrub generation in isometric.ts
+  // Perspective projection constants
   private readonly CAMERA_HEIGHT = 50;
-  private readonly PERSPECTIVE_X_SCALE = 50; // Controls both X position and size scaling
-  private readonly ELEVATION_SCALE = 50; // Must match PERSPECTIVE_X_SCALE for consistent visual scale
+  private readonly PERSPECTIVE_X_SCALE = 50;
+  private readonly ELEVATION_SCALE = 50;
 
-  // Calculate screen position using same perspective projection as shrubs
+  // View angle in degrees from horizontal (20 = looking forward, 70 = looking down)
+  // Controls both zoom (higher = further away) and vertical compression (higher = more top-down)
+  private viewAngle: number = 30;
+
+  // Get view transform parameters from view angle
+  // Returns parameters that create a proper "elevated camera" effect:
+  // - verticalScale: compress component heights when looking from above
+  // - perspectiveOffset: added to distance to flatten perspective (near/far more similar)
+  // - overallScale: everything smaller when camera is higher
+  private getViewTransform(): { verticalScale: number, perspectiveOffset: number, overallScale: number } {
+    // viewAngle: 20-70 degrees from horizontal
+    const angleRad = this.viewAngle * Math.PI / 180;
+
+    // Vertical compression for component heights: cos(angle)
+    // At 20°: cos = 0.94, At 70°: cos = 0.34
+    const verticalScale = Math.cos(angleRad);
+
+    // Perspective offset - adding to distance flattens perspective
+    // Higher offset = less difference between near and far objects
+    // At 20°: offset = 0 (normal perspective)
+    // At 70°: offset = 100 (very flat perspective)
+    const perspectiveOffset = (this.viewAngle - 20) * 2;
+
+    // Overall scale - everything smaller when camera is higher
+    // At 20°: scale = 1.0, At 70°: scale = 0.5
+    const overallScale = 1 / (1 + perspectiveOffset * 0.01);
+
+    return { verticalScale, perspectiveOffset, overallScale };
+  }
+
+  // Calculate screen position using perspective projection
   // worldPos: component's world position
   // elevation: component's height above ground (0 for ground-level objects)
   private worldToScreenPerspective(worldPos: Point, elevation: number = 0): { pos: Point, scale: number } {
@@ -632,7 +678,9 @@ export class PlantCanvas {
     const groundHeight = rect.height - horizonY;
     const centerX = rect.width / 2;
 
-    // Camera world position derived from view offsets (same as shrubs)
+    const { verticalScale, perspectiveOffset, overallScale } = this.getViewTransform();
+
+    // Camera world position (stays fixed, doesn't move with view angle)
     const cameraWorldX = -(this.view.offsetX - centerX) / 10;
     const cameraWorldY = -this.cameraDepth / 10;
 
@@ -640,26 +688,40 @@ export class PlantCanvas {
     const relX = worldPos.x - cameraWorldX;
     const relY = worldPos.y - cameraWorldY;
 
-    // If behind camera or too close, return off-screen position
     if (relY < 1) {
       return { pos: { x: -1000, y: -1000 }, scale: 0 };
     }
 
-    // Perspective projection (same formula as shrubs)
-    const perspectiveScale = this.CAMERA_HEIGHT / relY;
-    // Cap scale to match component rendering (prevents sliding when camera is very close)
+    // Effective distance - adding offset flattens perspective for SCALE only
+    // Higher offset = near and far objects appear more similar in size
+    const effectiveRelY = relY + perspectiveOffset;
+
+    // Perspective scale using effective distance (flatter at high angles)
+    const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
     const cappedScale = Math.min(perspectiveScale, 3);
-    const screenX = centerX + relX * cappedScale * this.PERSPECTIVE_X_SCALE;
 
-    // Screen Y for ground level
-    const groundScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT / relY;
+    // Apply overall scale (everything smaller when camera is higher)
+    const finalScale = cappedScale * overallScale;
 
-    // Elevation moves objects up on screen (subtract because Y increases downward)
-    // Scale the elevation effect by perspective
-    const elevationOffset = elevation * perspectiveScale * this.ELEVATION_SCALE;
-    const screenY = groundScreenY - elevationOffset;
+    // Screen X position
+    const screenX = centerX + relX * finalScale * this.PERSPECTIVE_X_SCALE;
 
-    return { pos: { x: screenX, y: screenY }, scale: perspectiveScale };
+    // Screen Y position - use ACTUAL distance for position, so objects stay in place
+    // Then stretch result toward screen center to fill the view
+    const rawScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT / relY;
+
+    // Stretch factor: at high angles, the flatter perspective would compress everything
+    // toward horizon. We stretch it back toward the screen center to fill the view.
+    // At 20°: stretch = 1.0, At 70°: stretch ≈ 1.5-2.0
+    const stretchFactor = 1 + perspectiveOffset * 0.01;
+    const screenCenterY = horizonY + groundHeight * 0.4; // Reference point to stretch from
+    const baseScreenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor;
+
+    // Apply elevation offset (compressed by view angle for looking from above)
+    const elevationOffset = elevation * cappedScale * this.ELEVATION_SCALE * verticalScale * overallScale;
+    const screenY = baseScreenY - elevationOffset;
+
+    return { pos: { x: screenX, y: screenY }, scale: finalScale };
   }
 
   // Inverse perspective projection: convert screen coordinates to world coordinates
@@ -670,26 +732,37 @@ export class PlantCanvas {
     const groundHeight = rect.height - horizonY;
     const centerX = rect.width / 2;
 
-    // Camera world position
+    const { perspectiveOffset, overallScale } = this.getViewTransform();
+
+    // Camera world position (stays fixed)
     const cameraWorldX = -(this.view.offsetX - centerX) / 10;
     const cameraWorldY = -this.cameraDepth / 10;
 
-    // Inverse of: screenY = horizonY + groundHeight * cameraHeight / relY
-    // Solve for relY: relY = groundHeight * cameraHeight / (screenY - horizonY)
-    const screenYFromHorizon = screenPos.y - horizonY;
+    // Reverse the stretch transformation first
+    const stretchFactor = 1 + perspectiveOffset * 0.01;
+    const screenCenterY = horizonY + groundHeight * 0.4;
+    const rawScreenY = screenCenterY + (screenPos.y - screenCenterY) / stretchFactor;
+
+    // Now reverse the perspective projection
+    const screenYFromHorizon = rawScreenY - horizonY;
     if (screenYFromHorizon <= 0) {
-      // Click is at or above horizon - place far away
       return { x: cameraWorldX, y: cameraWorldY + 1000 };
     }
 
     const relY = groundHeight * this.CAMERA_HEIGHT / screenYFromHorizon;
 
-    // Now we know relY, we can find perspectiveScale and solve for relX
-    const perspectiveScale = this.CAMERA_HEIGHT / relY;
-    // Inverse of: screenX = centerX + relX * perspectiveScale * PERSPECTIVE_X_SCALE
-    const relX = (screenPos.x - centerX) / (perspectiveScale * this.PERSPECTIVE_X_SCALE);
+    if (relY < 1) {
+      return { x: cameraWorldX, y: cameraWorldY + 1 };
+    }
 
-    // Convert from camera-relative to world coordinates
+    // Reverse X projection using effective distance for scale
+    const effectiveRelY = relY + perspectiveOffset;
+    const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
+    const cappedScale = Math.min(perspectiveScale, 3);
+    const finalScale = cappedScale * overallScale;
+
+    const relX = (screenPos.x - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
+
     return {
       x: relX + cameraWorldX,
       y: relY + cameraWorldY
@@ -748,10 +821,13 @@ export class PlantCanvas {
 
     // Draw background - either grid or isometric ground
     if (this.isometric.enabled) {
-      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth);
-      // Debug grid - temporarily enabled
-      renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
-        (pos, elev) => this.worldToScreenPerspective(pos, elev));
+      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle);
+
+      // Draw construction grid on ground plane in construction mode
+      if (this.constructionMode) {
+        renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
+          (pos, elev) => this.worldToScreenPerspective(pos, elev));
+      }
     } else {
       renderGrid(ctx, this.view, rect.width, rect.height);
     }
@@ -759,9 +835,14 @@ export class PlantCanvas {
     // Sort components by depth for proper layering in isometric view
     // Larger Y = further from camera = draw first (behind)
     // Smaller Y = closer to camera = draw last (in front)
+    // Also: contained components must be drawn after their containers
     const sortedComponents = Array.from(this.plantState.components.values()).sort((a, b) => {
+      // First priority: contained components are drawn after their containers
+      if (a.containedBy === b.id) return 1;  // a is inside b, draw a last
+      if (b.containedBy === a.id) return -1; // b is inside a, draw b last
+
+      // Second priority: depth sorting in isometric mode
       if (!this.isometric.enabled) return 0;
-      // Sort by Y descending (further objects first), then by elevation
       return (b.position.y - a.position.y);
     });
 
@@ -769,8 +850,8 @@ export class PlantCanvas {
     // Shadows are computed in world space using 3D ray-plane intersection
     if (this.isometric.enabled) {
       // Sun direction vector (direction light travels, from sun toward ground)
-      // Sun at ~25 degrees elevation, behind objects and slightly to the left
-      const sunElevation = 25 * Math.PI / 180; // 25 degrees above horizon
+      // Sun at 45 degrees elevation, behind objects and slightly to the left
+      const sunElevation = 45 * Math.PI / 180; // 45 degrees above horizon
       const sunAzimuth = 10 * Math.PI / 180;   // 10 degrees to the left
       const sunDirX = Math.sin(sunAzimuth) * Math.cos(sunElevation);   // ~0.16 (light goes right)
       const sunDirY = -Math.cos(sunAzimuth) * Math.cos(sunElevation);  // ~-0.92 (light goes toward camera)
@@ -785,6 +866,9 @@ export class PlantCanvas {
 
       for (const component of sortedComponents) {
         try {
+          // Skip shadows for contained components (they're inside something)
+          if (component.containedBy) continue;
+
           const size = this.getComponentSize(component);
           const worldWidth = size.width || 1;
           const worldHeight = size.height || 1;
@@ -875,6 +959,13 @@ export class PlantCanvas {
           console.error('Shadow rendering error:', e);
         }
       }
+
+      // Draw ground-level outlines in construction mode
+      if (this.constructionMode) {
+        for (const component of sortedComponents) {
+          this.renderGroundOutline(ctx, component);
+        }
+      }
     }
 
     // Draw connections (behind components)
@@ -887,10 +978,15 @@ export class PlantCanvas {
         const toPort = toComponent.ports.find(p => p.id === connection.toPortId);
 
         if (fromPort && toPort) {
-          // Calculate world positions of ports
-          const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
-          const toWorld = this.getPortWorldPosition(toComponent, toPort);
-          renderConnection(ctx, fromWorld, toWorld, fromComponent.fluid, this.view);
+          if (this.isometric.enabled) {
+            // Use perspective-aware connection rendering
+            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort);
+          } else {
+            // Calculate world positions of ports
+            const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
+            const toWorld = this.getPortWorldPosition(toComponent, toPort);
+            renderConnection(ctx, fromWorld, toWorld, fromComponent.fluid, this.view);
+          }
         }
       }
     }
@@ -956,37 +1052,29 @@ export class PlantCanvas {
         const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
         const projectedZoom = frontWidth / size.width;
 
-        // Debug: draw the projected quad outline
-        ctx.strokeStyle = 'red';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(frontLeft.x, frontLeft.y);
-        ctx.lineTo(frontRight.x, frontRight.y);
-        ctx.lineTo(backRight.x, backRight.y);
-        ctx.lineTo(backLeft.x, backLeft.y);
-        ctx.closePath();
-        ctx.stroke();
+        // Get vertical scale first - needed for translation calculation
+        const { verticalScale } = this.getViewTransform();
 
         // Position the component based on how renderComponent draws it:
         // - For pipes: draws from (0,0) to (length,0), so translate to front-left
         // - For others: draws centered at (0,0), so translate to front-center, offset up by halfH
+        // IMPORTANT: Account for verticalScale so the base of the component stays on the ground
+        // after the vertical compression is applied
         let translateX: number;
         let translateY: number;
 
         if (component.type === 'pipe') {
           // Pipe draws centered on y=0 in local coords
-          // In drawing coords, +halfH is below center (larger screen Y) = "bottom" of drawing
-          // The quad's top (backLeft, smaller screen Y) is furthest from camera
-          // We want the pipe's bottom drawing edge to align with the quad's top
-          // So: translateY + visualHalfH = backLeft.y → translateY = backLeft.y - visualHalfH
-          const visualHalfH = halfH * projectedZoom;
-          translateX = backLeft.x;  // Left edge of quad
-          translateY = backLeft.y - visualHalfH;  // Position so bottom edge aligns with quad top
+          const visualHalfH = halfH * projectedZoom * verticalScale; // Account for compression
+          translateX = backLeft.x;
+          translateY = backLeft.y - visualHalfH;
         } else {
           // Other components draw centered, so position at front-center, offset up
+          // After vertical scaling, the bottom of the component (at local +halfH) will be at
+          // translateY + visualHalfH * verticalScale. We want this to equal frontCenterY.
           const frontCenterX = (frontLeft.x + frontRight.x) / 2;
           const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-          const visualHalfH = halfH * projectedZoom;
+          const visualHalfH = halfH * projectedZoom * verticalScale; // Account for compression
           translateX = frontCenterX;
           translateY = frontCenterY - visualHalfH;
         }
@@ -994,11 +1082,15 @@ export class PlantCanvas {
         ctx.translate(translateX, translateY);
         ctx.rotate(component.rotation);
 
+        // Apply vertical compression based on view angle (looking from above = compressed)
+        ctx.scale(1, verticalScale);
+
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
         renderComponent(ctx, component, isometricView, isSelected, true);
 
-        // Render elevation label
+        // Render elevation label (reset scale first so text isn't squished)
+        ctx.scale(1, 1 / verticalScale);
         renderElevationLabel(ctx, component, isometricView, this.isometric);
       } else {
         const screenPos = worldToScreen(component.position, this.view);
@@ -1130,6 +1222,111 @@ export class PlantCanvas {
     }
   }
 
+  // Render a connection between two ports with perspective projection
+  private renderConnectionPerspective(
+    ctx: CanvasRenderingContext2D,
+    fromComponent: PlantComponent,
+    fromPort: { position: Point },
+    toComponent: PlantComponent,
+    toPort: { position: Point }
+  ): void {
+    // Get screen positions for both ports
+    const fromScreenPos = this.getPortScreenPosition(fromComponent, fromPort);
+    const toScreenPos = this.getPortScreenPosition(toComponent, toPort);
+
+    if (!fromScreenPos || !toScreenPos) return;
+
+    // Get fluid color from the source component
+    const fluid = (fromComponent as any).fluid;
+    ctx.strokeStyle = fluid ? this.getFluidColorForConnection(fluid) : '#667788';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+
+    ctx.beginPath();
+    ctx.moveTo(fromScreenPos.x, fromScreenPos.y);
+
+    // Simple curved connection in screen space
+    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
+    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
+    ctx.quadraticCurveTo(midX, fromScreenPos.y, midX, midY);
+    ctx.quadraticCurveTo(midX, toScreenPos.y, toScreenPos.x, toScreenPos.y);
+
+    ctx.stroke();
+  }
+
+  // Get fluid color for connection rendering
+  private getFluidColorForConnection(fluid: any): string {
+    if (!fluid) return '#667788';
+
+    // Map temperature/phase to color
+    if (fluid.phase === 'vapor') {
+      return 'rgba(200, 200, 255, 0.8)';
+    } else if (fluid.phase === 'two-phase') {
+      return 'rgba(150, 180, 220, 0.8)';
+    } else {
+      // Liquid - color based on temperature
+      const temp = fluid.temperature || 300;
+      if (temp > 500) return 'rgba(255, 100, 100, 0.8)';
+      if (temp > 400) return 'rgba(255, 150, 100, 0.8)';
+      if (temp > 350) return 'rgba(200, 150, 100, 0.8)';
+      return 'rgba(100, 150, 200, 0.8)';
+    }
+  }
+
+  // Render ground-level outline for a component in construction mode
+  private renderGroundOutline(ctx: CanvasRenderingContext2D, component: PlantComponent): void {
+    const size = this.getComponentSize(component);
+    const halfW = size.width / 2;
+    const halfH = size.height / 2;
+
+    // Get component corners at ground level (elevation = 0)
+    let corners: Point[];
+
+    if (component.type === 'pipe') {
+      // For pipes, use length along rotation
+      const pipe = component as any;
+      const len = pipe.length || 10;
+      const cos = Math.cos(component.rotation);
+      const sin = Math.sin(component.rotation);
+
+      corners = [
+        { x: component.position.x - halfH * sin, y: component.position.y + halfH * cos },
+        { x: component.position.x + halfH * sin, y: component.position.y - halfH * cos },
+        { x: component.position.x + len * cos + halfH * sin, y: component.position.y + len * sin - halfH * cos },
+        { x: component.position.x + len * cos - halfH * sin, y: component.position.y + len * sin + halfH * cos },
+      ];
+    } else {
+      // Standard rectangular footprint
+      corners = [
+        { x: component.position.x - halfW, y: component.position.y - halfH },
+        { x: component.position.x + halfW, y: component.position.y - halfH },
+        { x: component.position.x + halfW, y: component.position.y + halfH },
+        { x: component.position.x - halfW, y: component.position.y + halfH },
+      ];
+    }
+
+    // Project corners to screen at ground level
+    const screenCorners = corners.map(c => this.worldToScreenPerspective(c, 0));
+
+    // Skip if any corner is behind camera
+    if (screenCorners.some(c => c.scale <= 0)) return;
+
+    // Draw outline
+    ctx.strokeStyle = 'rgba(255, 80, 80, 0.6)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([5, 5]);
+
+    ctx.beginPath();
+    ctx.moveTo(screenCorners[0].pos.x, screenCorners[0].pos.y);
+    for (let i = 1; i < screenCorners.length; i++) {
+      ctx.lineTo(screenCorners[i].pos.x, screenCorners[i].pos.y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+  }
+
   // Public API
   public setPlantState(state: PlantState): void {
     this.plantState = state;
@@ -1200,6 +1397,21 @@ export class PlantCanvas {
 
   public getIsometric(): boolean {
     return this.isometric.enabled;
+  }
+
+  public setViewElevation(sliderValue: number): void {
+    // sliderValue: 10-60, maps directly to view angle in degrees
+    // 10 = looking more forward (less compression)
+    // 60 = looking more from above (more compression)
+    this.viewAngle = Math.max(10, Math.min(70, sliderValue));
+  }
+
+  public getViewElevation(): number {
+    return this.viewAngle;
+  }
+
+  public setConstructionMode(enabled: boolean): void {
+    this.constructionMode = enabled;
   }
 
   public setView(view: Partial<ViewState>): void {

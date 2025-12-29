@@ -10,7 +10,7 @@ export interface IsometricConfig {
 
 // Default isometric view settings
 export const DEFAULT_ISOMETRIC: IsometricConfig = {
-  enabled: false,  // Start with normal view
+  enabled: true,  // Start with 2.5D view by default
   angleX: 30 * Math.PI / 180, // 30 degrees tilt
   angleZ: 0, // No rotation for now, keeping X as horizontal
   elevationScale: 1.0
@@ -94,14 +94,18 @@ export function renderIsometricGround(
   width: number,
   height: number,
   config: IsometricConfig,
-  cameraDepth: number = 0
+  cameraDepth: number = 0,
+  viewAngle: number = 30
 ): void {
   if (!config.enabled) {
     return;
   }
 
+  // Fixed horizon at 25% from top (matches canvas projection)
+  const horizonY = height * 0.25;
+
   // Desert sand gradient - warm sandy colors
-  const gradient = ctx.createLinearGradient(0, height * 0.2, 0, height);
+  const gradient = ctx.createLinearGradient(0, horizonY, 0, height);
   gradient.addColorStop(0, '#e8d4a0');  // Light sand far away
   gradient.addColorStop(0.3, '#d9c590');  // Mid sand
   gradient.addColorStop(0.6, '#c9b580');  // Darker sand
@@ -121,14 +125,13 @@ export function renderIsometricGround(
   ctx.fillRect(0, 0, width, height);
 
   // Draw scattered shrubs/cacti with isometric projection
-  const shrubPositions = generateShrubPositions(view, width, height, config, cameraDepth);
+  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle);
 
   for (const shrub of shrubPositions) {
     drawDesertShrub(ctx, shrub.x, shrub.y, shrub.size, shrub.type);
   }
 
   // Add distant mountains on horizon
-  const horizonY = height * 0.25;
   ctx.fillStyle = 'rgba(150, 140, 120, 0.3)';
   ctx.beginPath();
   ctx.moveTo(0, horizonY);
@@ -171,10 +174,10 @@ function seededRandom(seed: number): number {
 
 // Generate shrubs on a perspective ground plane with infinite tiling
 // Shrubs are placed at fixed world positions and move with parallax when camera moves
-function generateShrubPositions(view: ViewState, width: number, height: number, _config: IsometricConfig, cameraDepth: number): any[] {
+function generateShrubPositions(view: ViewState, width: number, height: number, cameraDepth: number, viewAngle: number = 30): any[] {
   const shrubs: { x: number; y: number; size: number; type: string }[] = [];
 
-  // Screen geometry
+  // Screen geometry - must match canvas projection
   const horizonY = height * 0.25;
   const groundHeight = height - horizonY;
   const centerX = width / 2;
@@ -182,17 +185,31 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
   // World-space cell size for shrub placement
   const cellSize = 80;
 
-  // Camera world position derived from view offsets
+  // Constants - must match canvas.ts
+  const CAMERA_HEIGHT = 50;
+  const PERSPECTIVE_X_SCALE = 50;
+
+  // View transform parameters - must match canvas.ts getViewTransform()
+  // Perspective offset - adding to distance flattens perspective
+  // At 20°: offset = 0 (normal perspective)
+  // At 70°: offset = 100 (very flat perspective)
+  const perspectiveOffset = (viewAngle - 20) * 2;
+
+  // Overall scale - everything smaller when camera is higher
+  // At 20°: scale = 1.0, At 70°: scale = 0.5
+  const overallScale = 1 / (1 + perspectiveOffset * 0.01);
+
+  // Camera world position (stays fixed, doesn't move with view angle)
   const cameraWorldX = -(view.offsetX - centerX) / 10;
   const cameraWorldY = -cameraDepth / 10;
 
-  // Camera height above ground (affects how close objects pass "under" us)
-  // Higher value = objects pass under camera sooner
-  const cameraHeight = 50;
+  // Stretch factor for screen Y (matches canvas.ts)
+  const stretchFactor = 1 + perspectiveOffset * 0.01;
+  const screenCenterY = horizonY + groundHeight * 0.4;
 
   // Visible range - use different ranges for X and Y for performance
   const visibleRangeX = 400;
-  const visibleRangeY = 1500; // Further in Y direction to fill to horizon
+  const visibleRangeY = 500;
 
   const startCellX = Math.floor((cameraWorldX - visibleRangeX) / cellSize);
   const endCellX = Math.ceil((cameraWorldX + visibleRangeX) / cellSize);
@@ -218,27 +235,29 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
       // Skip if behind camera or too far
       if (relY < 1 || relY > visibleRangeY) continue;
 
-      // Perspective projection with camera height
-      // PERSPECTIVE_X_SCALE = 50 (must match canvas.ts)
-      const perspectiveScale = cameraHeight / relY;
-      // Cap scale to match component rendering (prevents sliding when camera is very close)
-      const cappedScale = Math.min(perspectiveScale, 3);
-      const screenX = centerX + relX * cappedScale * 50;
+      // Effective distance - adding offset flattens perspective for SCALE only
+      const effectiveRelY = relY + perspectiveOffset;
 
-      // Screen Y: objects at distance = cameraHeight are at bottom of screen
-      // Objects closer than cameraHeight pass off the bottom (under camera)
-      // Objects further away approach the horizon
-      const screenY = horizonY + groundHeight * cameraHeight / relY;
+      // Perspective projection - must match canvas.ts worldToScreenPerspective()
+      const perspectiveScale = CAMERA_HEIGHT / effectiveRelY;
+      const cappedScale = Math.min(perspectiveScale, 3);
+      const finalScale = cappedScale * overallScale;
+
+      // Screen X position
+      const screenX = centerX + relX * finalScale * PERSPECTIVE_X_SCALE;
+
+      // Screen Y position - use ACTUAL distance for position, then stretch
+      const rawScreenY = horizonY + groundHeight * CAMERA_HEIGHT / relY;
+      const screenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor;
 
       // Skip if off-screen
       if (screenX < -50 || screenX > width + 50) continue;
       if (screenY < horizonY - 10 || screenY > height + 100) continue;
 
-      // Size based on distance (perspective)
-      // Use same capped scale as X position for consistent ground plane
+      // Size based on distance (perspective) and overall scale
       // baseSize in world units (meters): 0.3 to 0.8 meters for desert shrubs
       const baseSize = 0.3 + seededRandom(cellSeed + 3) * 0.5;
-      const size = baseSize * cappedScale * 50;
+      const size = baseSize * finalScale * PERSPECTIVE_X_SCALE;
 
       // Skip shrubs that are too tiny to see
       if (size < 1.5) continue;
@@ -462,6 +481,7 @@ export function renderDebugGrid(
   cameraDepth: number,
   worldToScreenFn: (pos: { x: number, y: number }, elevation: number) => { pos: { x: number, y: number }, scale: number }
 ): void {
+  // Fixed horizon at 25% from top (matches canvas projection)
   const horizonY = height * 0.25;
   const centerX = width / 2;
 

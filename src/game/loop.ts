@@ -175,8 +175,8 @@ export class GameLoop {
       // Calculate simulation time to advance
       const simDt = frameDt * this.simSpeed;
 
-      // Advance physics
-      const result = this.solver.advance(this.state, simDt);
+      // Advance physics - pass actual frame time for accurate RT ratio calculation
+      const result = this.solver.advance(this.state, simDt, frameDt * 1000);
       this.state = result.state;
 
       // Update fuel heat generation from neutronics
@@ -360,6 +360,18 @@ export class GameLoop {
    */
   getState(): SimulationState {
     return this.state;
+  }
+
+  /**
+   * Set/replace the simulation state
+   * Used when switching from construction mode with a new plant configuration
+   */
+  setSimulationState(newState: SimulationState): void {
+    this.state = newState;
+    // Reset tracking variables
+    this.previousPower = newState.neutronics?.power ?? 0;
+    this.previousMaxTemp = this.getMaxFuelTemperature();
+    console.log(`[GameLoop] Simulation state updated with ${newState.flowNodes.size} flow nodes`);
   }
 
   /**

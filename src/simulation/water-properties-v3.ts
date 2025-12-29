@@ -2990,13 +2990,20 @@ export interface StabilityInfo {
 }
 
 export function analyzeStability(state: WaterState, volume: number): StabilityInfo {
+  // Use thermal diffusion timescale, not acoustic timescale
+  // Acoustic waves (L / 1500 m/s) are too fast to matter for thermal-hydraulics
+  // Thermal equilibration happens on timescales of seconds, not microseconds
   const L = Math.cbrt(volume);
-  const ct = state.phase === 'liquid' ? L / 1500 : L / 500;
+  // Characteristic time based on convective transport (typical flow velocity ~1-10 m/s)
+  // and thermal diffusion (much slower than acoustic)
+  const ct = state.phase === 'liquid' ? L / 10 : L / 50;  // ~0.1s for 1m³ liquid, ~0.02s for vapor
   return { regime: state.phase, isStiff: state.phase === 'liquid', characteristicTime: ct, warnings: [] };
 }
 
 export function suggestMaxTimestep(state: WaterState, volume: number): number {
-  return Math.max(1e-6, Math.min(analyzeStability(state, volume).characteristicTime * 0.1, 0.1));
+  // Allow larger timesteps - thermal-hydraulic simulations don't need to resolve acoustics
+  // Floor at 10ms (was 1μs), cap at 500ms (was 100ms)
+  return Math.max(0.01, Math.min(analyzeStability(state, volume).characteristicTime * 0.5, 0.5));
 }
 
 // ============================================================================

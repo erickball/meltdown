@@ -5,6 +5,7 @@ export interface ComponentConfig {
   name: string;
   position: { x: number; y: number };
   properties: Record<string, any>;
+  containedBy?: string;  // ID of container component (tank, vessel, containment building)
 }
 
 export interface ComponentOption {
@@ -35,8 +36,7 @@ export const componentDefinitions: Record<string, {
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 10, unit: 'bar' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 1, max: 300, step: 1, unit: 'bar' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 350, step: 5, unit: '°C' },
-      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%' },
-      { name: 'hasCore', type: 'checkbox', label: 'Contains Reactor Core', default: false }
+      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%' }
     ]
   },
   'pressurizer': {

@@ -67,7 +67,9 @@ export class ConstructionManager {
 
     switch (config.type) {
       case 'tank': {
-        const width = props.volume / props.height;  // Approximate width from volume
+        // Calculate diameter from cylindrical volume: V = π * r² * h
+        // r = sqrt(V / (π * h)), diameter = 2 * r
+        const width = 2 * Math.sqrt(props.volume / (Math.PI * props.height));
         const halfWidth = width / 2;
         const halfHeight = props.height / 2;
 
@@ -115,7 +117,8 @@ export class ConstructionManager {
       }
 
       case 'pressurizer': {
-        const width = props.volume / props.height;
+        // Calculate diameter from cylindrical volume: V = π * r² * h
+        const width = 2 * Math.sqrt(props.volume / (Math.PI * props.height));
         const halfWidth = width / 2;
         const halfHeight = props.height / 2;
 
@@ -404,26 +407,17 @@ export class ConstructionManager {
         const coreHeight = 3.6;  // Standard PWR core height ~3.6m
         const coreDiameter = 3.4;  // Standard PWR core diameter ~3.4m
 
-        // Core has 4 connection points for coolant flow
+        // Core has 2 connection points: inlet at bottom-center, outlet at top-center
+        // This represents the core barrel - flow enters from bottom, exits from top
         const corePorts: Port[] = [
           {
-            id: `${id}-inlet-1`,
-            position: { x: -coreDiameter/2, y: coreHeight/2 },  // Bottom left
+            id: `${id}-inlet`,
+            position: { x: 0, y: coreHeight/2 },   // Bottom center
             direction: 'in'
           },
           {
-            id: `${id}-inlet-2`,
-            position: { x: coreDiameter/2, y: coreHeight/2 },   // Bottom right
-            direction: 'in'
-          },
-          {
-            id: `${id}-outlet-1`,
-            position: { x: -coreDiameter/2, y: -coreHeight/2 }, // Top left
-            direction: 'out'
-          },
-          {
-            id: `${id}-outlet-2`,
-            position: { x: coreDiameter/2, y: -coreHeight/2 },  // Top right
+            id: `${id}-outlet`,
+            position: { x: 0, y: -coreHeight/2 },  // Top center
             direction: 'out'
           }
         ];
@@ -461,6 +455,15 @@ export class ConstructionManager {
       default:
         console.error(`[Construction] Unknown component type: ${config.type}`);
         return null;
+    }
+
+    // Set containedBy if specified (component placed inside a container)
+    if (config.containedBy) {
+      const component = this.plantState.components.get(id);
+      if (component) {
+        component.containedBy = config.containedBy;
+        console.log(`[Construction] Component '${id}' is contained by '${config.containedBy}'`);
+      }
     }
 
     console.log(`[Construction] Created component '${id}' of type '${config.type}'`);

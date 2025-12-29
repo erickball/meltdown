@@ -107,11 +107,30 @@ export class ConnectionDialog {
 
     const dx = toPortX - fromPortX;
     const dy = toPortY - fromPortY;
-    const minLength = Math.sqrt(dx * dx + dy * dy);
+    const portDistance = Math.sqrt(dx * dx + dy * dy);
+
+    // Check if one component is contained by the other
+    // If so, the connection is just an opening - use max 1m length
+    const isContainedConnection =
+      this.fromComponent!.containedBy === this.toComponent!.id ||
+      this.toComponent!.containedBy === this.fromComponent!.id;
+
+    const minLength = isContainedConnection ? Math.min(portDistance, 0.1) : portDistance;
+    const maxLength = isContainedConnection ? 1.0 : 1000;
 
     // Component info section
     const infoSection = document.createElement('div');
     infoSection.style.cssText = 'background: #2a2e38; padding: 10px; border-radius: 4px; margin-bottom: 15px;';
+
+    // Show different info for contained connections
+    const containedNote = isContainedConnection
+      ? `<div style="margin-top: 8px; padding: 6px; background: #1a3a2a; border-radius: 4px; font-size: 11px; color: #6c8;">
+           <strong>Contained Connection:</strong> This is a direct opening between a component and its container (max 1m length).
+         </div>`
+      : `<div style="margin-top: 8px; font-size: 11px; color: #667788;">
+           Port-to-port distance: ${portDistance.toFixed(1)} m
+         </div>`;
+
     infoSection.innerHTML = `
       <div style="font-size: 12px; color: #7af; margin-bottom: 8px;">Component Information</div>
       <div style="display: flex; justify-content: space-between; font-size: 11px;">
@@ -126,9 +145,7 @@ export class ConnectionDialog {
           <div style="color: #667788;">Port: ${this.toPort!.id}</div>
         </div>
       </div>
-      <div style="margin-top: 8px; font-size: 11px; color: #667788;">
-        Port-to-port distance: ${minLength.toFixed(1)} m
-      </div>
+      ${containedNote}
     `;
     this.bodyElement.appendChild(infoSection);
 
@@ -169,14 +186,16 @@ export class ConnectionDialog {
       },
       {
         id: 'length',
-        label: 'Connection Length',
+        label: isContainedConnection ? 'Opening Thickness' : 'Connection Length',
         type: 'number',
-        default: Math.max(minLength, 2),
+        default: isContainedConnection ? 0.5 : Math.max(minLength, 2),
         min: minLength,
-        max: 1000,
+        max: maxLength,
         step: 0.1,
         unit: 'm',
-        help: `Must be at least ${minLength.toFixed(1)} m`
+        help: isContainedConnection
+          ? 'Wall thickness of opening (max 1m for contained connections)'
+          : `Must be at least ${minLength.toFixed(1)} m`
       }
     ];
 

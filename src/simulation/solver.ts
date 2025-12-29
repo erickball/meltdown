@@ -204,6 +204,10 @@ export class Solver {
       lastStepWallTime: 0,
       avgStepWallTime: 0,
       currentDt: this.config.targetDt,
+      actualDt: this.config.targetDt,
+      dtLimitedBy: 'none',
+      maxStableDt: Infinity,
+      stabilityLimitedBy: 'none',
       minDtUsed: this.config.targetDt,
       subcycleCount: 0,
       totalSteps: 0,
@@ -234,9 +238,10 @@ export class Solver {
    *
    * @param state Current simulation state
    * @param requestedDt Time to advance (s) - typically frame time * sim speed
+   * @param actualFrameTimeMs Optional actual wall time between frames (for accurate RT ratio)
    * @returns New simulation state and metrics
    */
-  advance(state: SimulationState, requestedDt: number): {
+  advance(state: SimulationState, requestedDt: number, actualFrameTimeMs?: number): {
     state: SimulationState;
     metrics: SolverMetrics;
   } {
@@ -266,6 +271,7 @@ export class Solver {
     }
 
     let bailedOut = false;
+    let completedSteps = 0;  // Track completed steps to ensure at least one per frame
 
     // Invalidate maxStableDt cache at start of frame - will recompute on first use
     this.maxStableDtValid = false;
@@ -273,12 +279,13 @@ export class Solver {
     // Take steps until we've covered the requested time
     while (remainingTime > 1e-10) {
       // SAFEGUARD: Check if we've exceeded time/subcycle limits
+      // But always complete at least one step per frame to ensure progress
       const elapsedWall = performance.now() - frameStartWall;
-      if (elapsedWall > this.config.maxWallTimePerFrame) {
+      if (completedSteps > 0 && elapsedWall > this.config.maxWallTimePerFrame) {
         bailedOut = true;
         break;
       }
-      if (totalSubcycles > this.config.maxSubcyclesPerFrame) {
+      if (completedSteps > 0 && totalSubcycles > this.config.maxSubcyclesPerFrame) {
         bailedOut = true;
         break;
       }
@@ -295,13 +302,31 @@ export class Solver {
         this.maxStableDtValid = true;
       }
 
-      let stepDt = Math.min(
-        this.adaptiveDt,
-        remainingTime,
-        this.config.maxDt,
-        maxStableDt * this.config.safetyFactor
-      );
+      // Determine stepDt and track what's limiting it
+      const stabilityLimit = maxStableDt * this.config.safetyFactor;
+      let stepDt: number;
+      let dtLimiter: string;
+
+      if (this.adaptiveDt <= remainingTime && this.adaptiveDt <= this.config.maxDt && this.adaptiveDt <= stabilityLimit) {
+        stepDt = this.adaptiveDt;
+        dtLimiter = 'adaptive';
+      } else if (remainingTime <= this.config.maxDt && remainingTime <= stabilityLimit) {
+        stepDt = remainingTime;
+        dtLimiter = 'remaining';
+      } else if (this.config.maxDt <= stabilityLimit) {
+        stepDt = this.config.maxDt;
+        dtLimiter = 'config.maxDt';
+      } else {
+        stepDt = stabilityLimit;
+        dtLimiter = this.lastLimitingOperator;
+      }
       stepDt = Math.max(stepDt, this.config.minDt);
+
+      // Track for metrics (last accepted step will be reported)
+      this.metrics.actualDt = stepDt;
+      this.metrics.dtLimitedBy = dtLimiter;
+      this.metrics.maxStableDt = maxStableDt;
+      this.metrics.stabilityLimitedBy = this.lastLimitingOperator;
 
       // Try-reject-retry loop for this step
       let stepAccepted = false;
@@ -404,6 +429,7 @@ export class Solver {
         } else {
           // Accept step
           stepAccepted = true;
+          completedSteps++;
           currentState = trialState;
           currentState.time += stepDt;
           remainingTime -= stepDt;
@@ -482,7 +508,9 @@ export class Solver {
     this.metrics.maxFlowChange = maxFlowChangeThisFrame;
     this.metrics.maxMassChange = maxMassChangeThisFrame;
     this.metrics.consecutiveSuccesses = this.consecutiveSuccesses;
-    this.updateMetrics(frameWallTime, requestedDt - remainingTime, this.adaptiveDt, totalSubcycles, currentState.time);
+    // Use actual frame time for RT ratio if provided, otherwise use solver work time
+    const wallTimeForRatio = actualFrameTimeMs ?? frameWallTime;
+    this.updateMetrics(wallTimeForRatio, requestedDt - remainingTime, this.adaptiveDt, totalSubcycles, currentState.time);
 
     return {
       state: currentState,
@@ -705,13 +733,16 @@ export class Solver {
     return state;
   }
 
+  // Track which operator is limiting the timestep (set by computeMaxStableDt)
+  private lastLimitingOperator: string = 'none';
+
   /**
    * Query all operators for their stability constraints and return
    * the most restrictive one.
    */
   private computeMaxStableDt(state: SimulationState): number {
     let minDt = Infinity;
-    let limitingOperator = '';
+    let limitingOperator = 'none';
 
     for (const op of this.operators) {
       const opMaxDt = op.getMaxStableDt(state);
@@ -720,6 +751,9 @@ export class Solver {
         limitingOperator = op.name;
       }
     }
+
+    // Store for metrics
+    this.lastLimitingOperator = limitingOperator;
 
     // Diagnostics for very small timesteps (rate-limited to once per second)
     if (minDt < 0.00002) { // < 0.02 ms

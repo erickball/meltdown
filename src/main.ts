@@ -4,6 +4,7 @@ import { PlantState, PlantComponent } from './types';
 import { GameLoop } from './game';
 import {
   createDemoReactor,
+  createSimulationFromPlant,
   SimulationState,
   SolverMetrics,
   setWaterPropsDebug,
@@ -438,6 +439,245 @@ function init() {
     });
   }
 
+  // View elevation slider (controls both camera height and view angle)
+  const viewElevationSlider = document.getElementById('view-elevation') as HTMLInputElement;
+  const viewElevationValue = document.getElementById('view-elevation-value');
+  if (viewElevationSlider) {
+    viewElevationSlider.addEventListener('input', () => {
+      const value = parseInt(viewElevationSlider.value, 10);
+      plantCanvas.setViewElevation(value);
+      if (viewElevationValue) {
+        viewElevationValue.textContent = String(value);
+      }
+    });
+  }
+
+  // ============================================================================
+  // Save/Load Configuration
+  // ============================================================================
+  const STORAGE_PREFIX = 'meltdown_config_';
+  const openSaveLoadBtn = document.getElementById('open-save-load-btn') as HTMLButtonElement;
+
+  // Serialize PlantState to JSON-compatible object
+  function serializePlantState(state: PlantState): object {
+    return {
+      components: Array.from(state.components.entries()),
+      connections: state.connections,
+    };
+  }
+
+  // Deserialize JSON object back to PlantState
+  function deserializePlantState(data: any): void {
+    plantState.components.clear();
+    plantState.connections = [];
+
+    if (data.components) {
+      for (const [id, component] of data.components) {
+        plantState.components.set(id, component);
+      }
+    }
+
+    if (data.connections) {
+      plantState.connections = data.connections;
+    }
+  }
+
+  // Get list of saved configuration names
+  function getSavedConfigNames(): string[] {
+    const names: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(STORAGE_PREFIX)) {
+        names.push(key.substring(STORAGE_PREFIX.length));
+      }
+    }
+    return names.sort();
+  }
+
+  // Save current configuration
+  function saveConfiguration(name: string): boolean {
+    try {
+      const data = serializePlantState(plantState);
+      const json = JSON.stringify(data);
+      localStorage.setItem(STORAGE_PREFIX + name, json);
+      console.log(`[Save] Configuration '${name}' saved (${json.length} bytes)`);
+      return true;
+    } catch (e) {
+      console.error('[Save] Failed to save configuration:', e);
+      return false;
+    }
+  }
+
+  // Load configuration by name
+  function loadConfiguration(name: string): boolean {
+    try {
+      const json = localStorage.getItem(STORAGE_PREFIX + name);
+      if (!json) {
+        console.error(`[Load] Configuration '${name}' not found`);
+        return false;
+      }
+
+      const data = JSON.parse(json);
+      deserializePlantState(data);
+      console.log(`[Load] Configuration '${name}' loaded (${plantState.components.size} components)`);
+      return true;
+    } catch (e) {
+      console.error('[Load] Failed to load configuration:', e);
+      return false;
+    }
+  }
+
+  // Delete configuration by name
+  function deleteConfiguration(name: string): boolean {
+    try {
+      localStorage.removeItem(STORAGE_PREFIX + name);
+      console.log(`[Delete] Configuration '${name}' deleted`);
+      return true;
+    } catch (e) {
+      console.error('[Delete] Failed to delete configuration:', e);
+      return false;
+    }
+  }
+
+  // Show Save/Load dialog
+  function showSaveLoadDialog(): void {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000;
+    `;
+
+    const dialog = document.createElement('div');
+    dialog.style.cssText = `
+      background: #1a1e24; border: 1px solid #445566; border-radius: 8px;
+      padding: 20px; min-width: 320px; max-width: 400px; color: #d0d8e0;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    `;
+
+    const configs = getSavedConfigNames();
+    const configOptions = configs.length > 0
+      ? configs.map(name => `<option value="${name}">${name}</option>`).join('')
+      : '';
+
+    dialog.innerHTML = `
+      <h3 style="margin: 0 0 15px 0; color: #7af;">Save / Load Configuration</h3>
+
+      <div style="margin-bottom: 15px;">
+        <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Save Current Design</label>
+        <div style="display: flex; gap: 5px;">
+          <input type="text" id="save-name-input" placeholder="Enter name..."
+            style="flex: 1; padding: 8px; background: #2a2e38; border: 1px solid #445566;
+            border-radius: 4px; color: #d0d8e0;" />
+          <button id="dialog-save-btn" style="padding: 8px 16px; background: #2a5a8a;
+            border: 1px solid #4a8aba; border-radius: 4px; color: #fff; cursor: pointer;">
+            Save
+          </button>
+        </div>
+      </div>
+
+      <hr style="border: none; border-top: 1px solid #445566; margin: 15px 0;" />
+
+      <div style="margin-bottom: 15px;">
+        <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Load Saved Design</label>
+        <select id="dialog-config-select" style="width: 100%; padding: 8px; margin-bottom: 8px;
+          background: #2a2e38; color: #d0d8e0; border: 1px solid #445566; border-radius: 4px;">
+          <option value="">-- Select Configuration --</option>
+          ${configOptions}
+        </select>
+        <div style="display: flex; gap: 5px;">
+          <button id="dialog-load-btn" style="flex: 1; padding: 8px; background: #334455;
+            border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            Load
+          </button>
+          <button id="dialog-delete-btn" style="padding: 8px 12px; background: #433;
+            border: 1px solid #644; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            Delete
+          </button>
+        </div>
+      </div>
+
+      <div style="text-align: right; margin-top: 15px;">
+        <button id="dialog-close-btn" style="padding: 8px 20px; background: #334455;
+          border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+          Close
+        </button>
+      </div>
+    `;
+
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+
+    const saveNameInput = dialog.querySelector('#save-name-input') as HTMLInputElement;
+    const configSelect = dialog.querySelector('#dialog-config-select') as HTMLSelectElement;
+    const saveBtn = dialog.querySelector('#dialog-save-btn') as HTMLButtonElement;
+    const loadBtn = dialog.querySelector('#dialog-load-btn') as HTMLButtonElement;
+    const deleteBtn = dialog.querySelector('#dialog-delete-btn') as HTMLButtonElement;
+    const closeBtn = dialog.querySelector('#dialog-close-btn') as HTMLButtonElement;
+
+    const cleanup = () => document.body.removeChild(overlay);
+
+    const refreshConfigs = () => {
+      const names = getSavedConfigNames();
+      configSelect.innerHTML = '<option value="">-- Select Configuration --</option>' +
+        names.map(name => `<option value="${name}">${name}</option>`).join('');
+    };
+
+    saveBtn.addEventListener('click', () => {
+      const name = saveNameInput.value.trim();
+      if (!name) {
+        showNotification('Enter a name for the configuration', 'warning');
+        return;
+      }
+      if (saveConfiguration(name)) {
+        showNotification(`Saved '${name}'`, 'info');
+        refreshConfigs();
+        configSelect.value = name;
+        saveNameInput.value = '';
+      }
+    });
+
+    loadBtn.addEventListener('click', () => {
+      const name = configSelect.value;
+      if (!name) {
+        showNotification('Select a configuration to load', 'warning');
+        return;
+      }
+      if (loadConfiguration(name)) {
+        showNotification(`Loaded '${name}'`, 'info');
+        cleanup();
+      }
+    });
+
+    deleteBtn.addEventListener('click', () => {
+      const name = configSelect.value;
+      if (!name) {
+        showNotification('Select a configuration to delete', 'warning');
+        return;
+      }
+      if (confirm(`Delete '${name}'?`)) {
+        if (deleteConfiguration(name)) {
+          showNotification(`Deleted '${name}'`, 'info');
+          refreshConfigs();
+        }
+      }
+    });
+
+    closeBtn.addEventListener('click', cleanup);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
+    document.addEventListener('keydown', function escHandler(e) {
+      if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', escHandler); }
+    });
+
+    saveNameInput.focus();
+  }
+
+  // Open Save/Load dialog button
+  if (openSaveLoadBtn) {
+    openSaveLoadBtn.addEventListener('click', showSaveLoadDialog);
+  }
+
   function setMode(mode: 'construction' | 'simulation'): void {
     currentMode = mode;
 
@@ -449,6 +689,9 @@ function init() {
       // Hide simulation controls, show construction controls
       if (simControls) simControls.style.display = 'none';
       if (constructionControls) constructionControls.style.display = 'block';
+
+      // Enable construction mode visuals (grid, outlines)
+      plantCanvas.setConstructionMode(true);
 
       // Pause simulation
       gameLoop.pause();
@@ -463,11 +706,24 @@ function init() {
       if (simControls) simControls.style.display = 'block';
       if (constructionControls) constructionControls.style.display = 'none';
 
+      // Disable construction mode visuals
+      plantCanvas.setConstructionMode(false);
+
       // Clear component selection
       selectedComponentType = null;
       constructionButtons.forEach(btn => btn.classList.remove('selected'));
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
       if (placementHintDiv) placementHintDiv.style.display = 'none';
+
+      // Create simulation state from user's plant
+      if (plantState.components.size > 0) {
+        const newSimState = createSimulationFromPlant(plantState);
+        gameLoop.setSimulationState(newSimState);
+        plantCanvas.setSimState(newSimState);
+        console.log('[Mode] Created simulation from user plant');
+      } else {
+        console.log('[Mode] No components in plant, using existing simulation');
+      }
 
       console.log('[Mode] Switched to Simulation mode');
     }
@@ -608,38 +864,74 @@ function init() {
       const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
       console.log(`[Construction] Opening config dialog for ${selectedComponentType} at world (${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)})`);
 
-      // Show configuration dialog with world coordinates
-      componentDialog.show(selectedComponentType, worldPos, (config: ComponentConfig | null) => {
-        if (config) {
-          console.log(`[Construction] Component configured:`, config);
+      // Check if clicking on an existing container component (tank, vessel)
+      const clickedComponent = plantCanvas.getComponentAtScreen({ x, y });
+      const isContainer = clickedComponent && (clickedComponent.type === 'tank' || clickedComponent.type === 'vessel');
 
-          // Actually create and place the component in the plant state
-          const componentId = constructionManager.createComponent(config);
-
-          if (componentId) {
-            console.log(`[Construction] Successfully created component '${componentId}'`);
-
-            // The canvas will automatically re-render in its render loop
-            // Just show success notification
-            showNotification(`Created ${config.name} (${config.type})`, 'info');
-          } else {
-            console.error(`[Construction] Failed to create component`);
-            showNotification(`Failed to create ${config.type}`, 'error');
-          }
-
-          // Clear component selection after placing
-          selectedComponentType = null;
-          constructionButtons.forEach(b => b.classList.remove('selected'));
-          if (selectedComponentDiv) {
-            selectedComponentDiv.textContent = 'Select a component to place';
-          }
-          if (placementHintDiv) {
-            placementHintDiv.style.display = 'none';
-          }
-        } else {
-          console.log(`[Construction] Component placement cancelled`);
+      // Function to proceed with component placement
+      const proceedWithPlacement = (containedBy?: string) => {
+        // If placing inside a container, use the container's position
+        let placementPos = worldPos;
+        if (containedBy && clickedComponent) {
+          placementPos = { ...clickedComponent.position };
         }
-      });
+
+        componentDialog.show(selectedComponentType!, placementPos, (config: ComponentConfig | null) => {
+          if (config) {
+            console.log(`[Construction] Component configured:`, config);
+
+            // Set containment if specified
+            if (containedBy) {
+              config.containedBy = containedBy;
+              // Ensure position matches container
+              if (clickedComponent) {
+                config.position = { ...clickedComponent.position };
+              }
+            }
+
+            // Actually create and place the component in the plant state
+            const componentId = constructionManager.createComponent(config);
+
+            if (componentId) {
+              console.log(`[Construction] Successfully created component '${componentId}'`);
+
+              // The canvas will automatically re-render in its render loop
+              // Just show success notification
+              const containerNote = containedBy ? ` inside ${clickedComponent?.label || clickedComponent?.id}` : '';
+              showNotification(`Created ${config.name} (${config.type})${containerNote}`, 'info');
+            } else {
+              console.error(`[Construction] Failed to create component`);
+              showNotification(`Failed to create ${config.type}`, 'error');
+            }
+
+            // Clear component selection after placing
+            selectedComponentType = null;
+            constructionButtons.forEach(b => b.classList.remove('selected'));
+            if (selectedComponentDiv) {
+              selectedComponentDiv.textContent = 'Select a component to place';
+            }
+            if (placementHintDiv) {
+              placementHintDiv.style.display = 'none';
+            }
+          } else {
+            console.log(`[Construction] Component placement cancelled`);
+          }
+        });
+      };
+
+      // If clicking on a container, ask if user wants to place inside
+      if (isContainer && clickedComponent) {
+        const containerName = clickedComponent.label || clickedComponent.id;
+        showContainmentDialog(containerName, selectedComponentType, (placeInside: boolean) => {
+          if (placeInside) {
+            proceedWithPlacement(clickedComponent.id);
+          } else {
+            proceedWithPlacement();
+          }
+        });
+      } else {
+        proceedWithPlacement();
+      }
     } else if (constructionSubMode === 'connect') {
       // Connection mode - detect clicked port
       console.log(`[Connection] Click at (${x}, ${y})`);
@@ -810,6 +1102,10 @@ function init() {
     lastStepWallTime: 0,
     avgStepWallTime: 0,
     currentDt: 0,
+    actualDt: 0,
+    dtLimitedBy: 'none',
+    maxStableDt: 0,
+    stabilityLimitedBy: 'none',
     minDtUsed: 0,
     subcycleCount: 0,
     totalSteps: 0,
@@ -960,6 +1256,112 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
 function showNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
   const prefix = type === 'warning' ? '!' : type === 'error' ? 'X' : 'i';
   console.log('[' + prefix + '] ' + message);
+}
+
+// Show a dialog asking if user wants to place component inside a container
+function showContainmentDialog(
+  containerName: string,
+  componentType: string,
+  callback: (placeInside: boolean) => void
+): void {
+  // Create modal overlay
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  `;
+
+  // Create dialog box
+  const dialog = document.createElement('div');
+  dialog.style.cssText = `
+    background: #1a1e24;
+    border: 1px solid #445566;
+    border-radius: 8px;
+    padding: 20px;
+    max-width: 400px;
+    color: #d0d8e0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  `;
+
+  // Dialog content
+  dialog.innerHTML = `
+    <h3 style="margin: 0 0 15px 0; color: #7af;">Place Inside Container?</h3>
+    <p style="margin: 0 0 20px 0; line-height: 1.5;">
+      You clicked on <strong>${containerName}</strong>. Would you like to place the
+      <strong>${componentType}</strong> inside this container?
+    </p>
+    <p style="margin: 0 0 20px 0; font-size: 12px; color: #889;">
+      Placing inside will:
+      <br>• Reduce the container's free volume
+      <br>• Connect heat transfer to the container's fluid
+      <br>• Direct any ruptures into the container
+    </p>
+    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+      <button id="containment-no" style="
+        padding: 8px 16px;
+        background: #334455;
+        border: 1px solid #556677;
+        border-radius: 4px;
+        color: #d0d8e0;
+        cursor: pointer;
+      ">Place Normally</button>
+      <button id="containment-yes" style="
+        padding: 8px 16px;
+        background: #2a5a8a;
+        border: 1px solid #4a8aba;
+        border-radius: 4px;
+        color: #fff;
+        cursor: pointer;
+      ">Place Inside</button>
+    </div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  // Handle button clicks
+  const yesBtn = dialog.querySelector('#containment-yes') as HTMLButtonElement;
+  const noBtn = dialog.querySelector('#containment-no') as HTMLButtonElement;
+
+  const cleanup = () => {
+    document.body.removeChild(overlay);
+  };
+
+  yesBtn.addEventListener('click', () => {
+    cleanup();
+    callback(true);
+  });
+
+  noBtn.addEventListener('click', () => {
+    cleanup();
+    callback(false);
+  });
+
+  // Close on escape key
+  const handleEscape = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      cleanup();
+      callback(false);
+      document.removeEventListener('keydown', handleEscape);
+    }
+  };
+  document.addEventListener('keydown', handleEscape);
+
+  // Close on overlay click
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      cleanup();
+      callback(false);
+    }
+  });
 }
 
 if (document.readyState === 'loading') {

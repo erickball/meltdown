@@ -20,7 +20,7 @@ export type { PhysicsOperator, SolverConfig, SolverProfile } from './solver';
 export * from './operators';
 
 // Factory for creating simulation state
-export { createSimulationState, createDemoReactor } from './factory';
+export { createSimulationState, createDemoReactor, createSimulationFromPlant } from './factory';
 
 // Water properties (including debug and profiling functions)
 export {

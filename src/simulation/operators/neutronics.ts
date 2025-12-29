@@ -31,15 +31,57 @@ import { PhysicsOperator, cloneSimulationState } from '../solver';
 export class NeutronicsOperator implements PhysicsOperator {
   name = 'Neutronics';
 
+  // Track previous power for rate-of-change detection
+  private lastPower: number = 0;
+  private lastPowerTime: number = 0;
+  private powerRateOfChange: number = 0;  // dP/dt / P (relative rate)
+
+  // Standby mode for post-SCRAM with negligible power
+  private inStandby: boolean = false;
+
   apply(state: SimulationState, dt: number): SimulationState {
     const newState = cloneSimulationState(state);
     const n = newState.neutronics;
 
-    // Always compute reactivity
+    // Always compute reactivity (needed for standby mode too)
     const rho = this.computeTotalReactivity(n, newState);
     n.reactivity = rho;
 
-    // Point kinetics with one delayed group
+    // Check for standby mode: scrammed AND power < 1% nominal AND subcritical
+    const powerFraction = n.power / n.nominalPower;
+    const shouldBeStandby = n.scrammed && powerFraction < 0.01 && rho < 0;
+
+    if (shouldBeStandby && !this.inStandby) {
+      this.inStandby = true;
+      // console.log('[Neutronics] Entering standby mode - power negligible, reactor subcritical');
+    } else if (!shouldBeStandby && this.inStandby) {
+      this.inStandby = false;
+      // Recriticality or power increase - wake up
+      if (rho >= 0) {
+        console.log('[Neutronics] Exiting standby - reactivity went positive (recriticality risk)');
+        // Set precursors to a minimum "source" level for restart calculations
+        n.precursorConcentration = Math.max(n.precursorConcentration, 1e-6);
+      } else {
+        // console.log('[Neutronics] Exiting standby - power increasing');
+      }
+    }
+
+    // In standby mode, just update decay heat and skip kinetics
+    if (this.inStandby) {
+      this.updateDecayHeat(n, state.time, dt);
+
+      // Power is just decay heat in standby
+      n.power = n.nominalPower * n.decayHeatFraction;
+
+      // Precursors decay away
+      const lambda = n.precursorDecayConstant;
+      n.precursorConcentration *= Math.exp(-lambda * dt);
+      n.precursorConcentration = Math.max(n.precursorConcentration, 1e-10);
+
+      return newState;
+    }
+
+    // Full point kinetics calculation
     const beta = n.delayedNeutronFraction;
     const Lambda = n.promptNeutronLifetime;
     const lambda = n.precursorDecayConstant;
@@ -73,18 +115,20 @@ export class NeutronicsOperator implements PhysicsOperator {
     // Fission power from kinetics. Includes decay heat.
     const fissionPower = N * n.nominalPower;
 
-    // Decay heat provides a power floor only after SCRAM
-    // During normal operation, fission dominates and decay heat is negligible
-    // After shutdown, decay heat prevents power from going to zero
-    const decayHeatPower = n.nominalPower * n.decayHeatFraction
-    n.power = (1.0-n.decayHeatFraction)*fissionPower + decayHeatPower
-    // if (n.scrammed) {
-    //   const decayHeatPower = n.nominalPower * n.decayHeatFraction;
-    //   n.power = Math.max(fissionPower, decayHeatPower);
-    // } else {
-    //   n.power = fissionPower;
-    // }
+    // Decay heat provides a power floor
+    const decayHeatPower = n.nominalPower * n.decayHeatFraction;
+    n.power = (1.0 - n.decayHeatFraction) * fissionPower + decayHeatPower;
     n.precursorConcentration = C;
+
+    // Track power rate of change for adaptive timestep
+    if (this.lastPowerTime > 0 && state.time > this.lastPowerTime) {
+      const dP = n.power - this.lastPower;
+      const elapsed = state.time - this.lastPowerTime;
+      // Relative rate: (dP/dt) / P
+      this.powerRateOfChange = Math.abs(dP / elapsed) / Math.max(n.power, n.nominalPower * 0.01);
+    }
+    this.lastPower = n.power;
+    this.lastPowerTime = state.time;
 
     // Clear SCRAM flag if operator withdraws rods and goes critical
     if (n.scrammed && n.controlRodPosition > 0.2 && rho > 0) {
@@ -96,40 +140,69 @@ export class NeutronicsOperator implements PhysicsOperator {
     return newState;
   }
 
-  getMaxStableDt(state: SimulationState): number {
-    // Point kinetics has two timescales:
-    // 1. Prompt: τ_prompt = Λ / |ρ - β| (very fast, ~0.01-0.1s)
-    // 2. Delayed: τ_delayed = 1 / λ (slower, ~12s)
+  getMaxStableDt(_state: SimulationState): number {
+    // The GLOBAL timestep doesn't need to resolve prompt neutron dynamics -
+    // that's handled internally by subcycling. The global timestep needs to
+    // capture the feedback coupling: temperatures → reactivity → power → heat.
     //
-    // For explicit Euler stability, we need dt < τ (approximately).
-    // The prompt term (ρ - β) / Λ * N always has fast dynamics
-    // regardless of whether ρ is positive or negative.
+    // This coupling happens on thermal timescales (seconds), not prompt
+    // neutron timescales (milliseconds).
 
+    // In standby mode, neutronics imposes no constraint
+    if (this.inStandby) {
+      return Infinity;
+    }
+
+    // If power is very stable (low rate of change), allow larger steps
+    // powerRateOfChange is |dP/dt| / P in units of 1/s
+    // A rate of 0.01/s means 1% change per second - very stable
+    // A rate of 1.0/s means 100% change per second - rapid transient
+    if (this.powerRateOfChange < 0.1) {
+      // Stable operation - feedback coupling is slow
+      // Allow up to 100ms steps
+      return 0.1;
+    } else if (this.powerRateOfChange < 1.0) {
+      // Moderate transient - be more careful
+      // Allow up to 20ms steps
+      return 0.02;
+    } else {
+      // Rapid transient - need to track feedback closely
+      // Allow up to 5ms steps
+      return 0.005;
+    }
+  }
+
+  /**
+   * Get the internal stability timestep for point kinetics.
+   * This is used for subcycling within the operator.
+   */
+  private getInternalMaxDt(state: SimulationState): number {
     const n = state.neutronics;
     const beta = n.delayedNeutronFraction;
     const Lambda = n.promptNeutronLifetime;
-
-    // Estimate reactivity (can't compute feedback without full state)
     const rho = n.reactivity;
 
-    // Prompt dynamics timescale - this is always fast
-    // |ρ - β| is always at least β when subcritical, and larger when supercritical
+    // Prompt dynamics timescale
     const promptTau = Lambda / Math.abs(rho - beta);
 
-    // Use a safety factor to stay well within stability region
-    // Allow up to 50ms for stability, but cap based on prompt dynamics
+    // Use safety factor for explicit Euler stability
     return Math.min(0.05, promptTau * 0.5);
   }
 
   getSubcycleCount(state: SimulationState, dt: number): number {
-    const maxDt = this.getMaxStableDt(state);
+    // In standby mode, no subcycling needed
+    if (this.inStandby) {
+      return 1;
+    }
+
+    // Use internal stability requirement for subcycling
+    const maxDt = this.getInternalMaxDt(state);
     if (maxDt >= dt) return 1;
 
-    // Need to subcycle
+    // Need to subcycle to maintain internal stability
     const count = Math.ceil(dt / maxDt);
 
     // Cap subcycles to prevent runaway computation
-    // If we need more than 1000 subcycles, something is wrong
     return Math.min(count, 1000);
   }
 

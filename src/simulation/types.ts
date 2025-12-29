@@ -287,7 +287,7 @@ export interface SimulationConfig {
 
 // Global simulation configuration (can be modified at runtime)
 export const simulationConfig: SimulationConfig = {
-  pressureModel: 'hybrid'  // Default to hybrid model for stability
+  pressureModel: 'pure-triangulation'  // Default to pure triangulation
 };
 
 // ============================================================================
@@ -300,7 +300,11 @@ export interface SolverMetrics {
   avgStepWallTime: number;          // ms - rolling average
 
   // Timestep info
-  currentDt: number;                // s - current physics timestep
+  currentDt: number;                // s - adaptive target timestep
+  actualDt: number;                 // s - actual timestep used in last step
+  dtLimitedBy: string;              // What's limiting dt: operator name, "adaptive", "remaining", or "config.maxDt"
+  maxStableDt: number;              // s - stability limit from operators
+  stabilityLimitedBy: string;       // Which operator is setting the stability limit
   minDtUsed: number;                // s - smallest dt used recently
   subcycleCount: number;            // Number of substeps in last frame
   totalSteps: number;               // Total simulation steps taken (cumulative)

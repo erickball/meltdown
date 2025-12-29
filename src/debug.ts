@@ -56,12 +56,17 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
   if (solverDiv) {
     const rtRatioClass = metrics.realTimeRatio < 0.5 ? 'debug-danger' :
                         metrics.realTimeRatio < 0.95 ? 'debug-warning' : 'debug-value';
+
+    // Format dt limiter - shorten operator names
+    let limiterDisplay = metrics.dtLimitedBy;
+    if (limiterDisplay === 'config.maxDt') limiterDisplay = 'maxDt';
+
     solverDiv.innerHTML = `
-      <span class="debug-label">Physics dt:</span> ${formatValue(metrics.currentDt * 1000, 'ms')}<br>
+      <span class="debug-label">Target dt:</span> ${formatValue(metrics.currentDt * 1000, 'ms')}<br>
+      <span class="debug-label">Actual dt:</span> ${formatValue(metrics.actualDt * 1000, 'ms')} <span style="color: #888;">(${limiterDisplay})</span><br>
+      <span class="debug-label">Stability limit:</span> ${formatValue(metrics.maxStableDt * 1000, 'ms')} <span style="color: #888;">(${metrics.stabilityLimitedBy}, ×0.8→${formatValue(metrics.maxStableDt * 0.8 * 1000, 'ms')})</span><br>
       <span class="debug-label">Wall time:</span> ${formatValue(metrics.lastStepWallTime, 'ms', 16, 33)}<br>
-      <span class="debug-label">Subcycles:</span> ${formatValue(metrics.subcycleCount, '', 10, 100)}<br>
-      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}</span><br>
-      <span class="debug-label">Min dt used:</span> ${formatValue(metrics.minDtUsed * 1000, 'ms')}
+      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}x</span>
     `;
   }
 
@@ -383,7 +388,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
   // Update perf info in status bar
   const perfInfo = document.getElementById('perf-info');
   if (perfInfo) {
-    perfInfo.textContent = `dt: ${(metrics.currentDt * 1000).toFixed(2)}ms | wall: ${metrics.lastStepWallTime.toFixed(1)}ms | RT: ${metrics.realTimeRatio.toFixed(2)}x`;
+    perfInfo.textContent = `dt: ${(metrics.actualDt * 1000).toFixed(2)}ms (${metrics.dtLimitedBy}) | wall: ${metrics.lastStepWallTime.toFixed(1)}ms | RT: ${metrics.realTimeRatio.toFixed(2)}x`;
     perfInfo.style.color = metrics.realTimeRatio < 0.5 ? '#f55' :
                           metrics.realTimeRatio < 0.95 ? '#fa0' : '#aaa';
   }
@@ -501,7 +506,24 @@ export function updateComponentDetail(
 
   let html = '';
 
-  // Basic info - show label prominently if available
+  // Get simulation linkage from component properties
+  const simNodeId = component.simNodeId as string | undefined;
+  const simPumpId = component.simPumpId as string | undefined;
+  const simValveId = component.simValveId as string | undefined;
+
+  // Get linked flow node if available
+  // First check explicit simNodeId, then fall back to looking up by component ID
+  // (user-created components use component ID as node ID)
+  let flowNode = simNodeId ? simState.flowNodes.get(simNodeId) : undefined;
+  if (!flowNode) {
+    flowNode = simState.flowNodes.get(componentId);
+  }
+  // For heat exchangers, check for primary node
+  if (!flowNode && component.type === 'heatExchanger') {
+    flowNode = simState.flowNodes.get(`${componentId}-primary`);
+  }
+
+  // ========== BASIC INFO ==========
   const label = component.label as string | undefined;
   if (label) {
     html += `<div class="detail-row"><span class="detail-label">Name:</span><span class="detail-value" style="color: #7f7; font-weight: bold;">${label}</span></div>`;
@@ -509,176 +531,147 @@ export function updateComponentDetail(
   html += `<div class="detail-row"><span class="detail-label">ID:</span><span class="detail-value">${componentId}</span></div>`;
   html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">${component.type}</span></div>`;
 
-  // Position
+  // Position and elevation
   const pos = component.position as { x: number; y: number } | undefined;
   if (pos) {
     html += `<div class="detail-row"><span class="detail-label">Position:</span><span class="detail-value">(${pos.x.toFixed(1)}, ${pos.y.toFixed(1)}) m</span></div>`;
   }
+  const elevation = component.elevation as number | undefined;
+  html += `<div class="detail-row"><span class="detail-label">Elevation:</span><span class="detail-value">${elevation !== undefined ? elevation.toFixed(1) : '0'} m</span></div>`;
 
-  // Type-specific info
+  // ========== GEOMETRY ==========
+  let volume: number | undefined;
   switch (component.type) {
     case 'vessel': {
-      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${(component.innerDiameter as number)?.toFixed(2)} m</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Height:</span><span class="detail-value">${(component.height as number)?.toFixed(2)} m</span></div>`;
+      const innerDiam = component.innerDiameter as number;
+      const height = component.height as number;
+      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${innerDiam?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Height:</span><span class="detail-value">${height?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Wall:</span><span class="detail-value">${((component.wallThickness as number) * 1000)?.toFixed(0)} mm</span></div>`;
-      // Fuel info if present
-      const fuelTemp = component.fuelTemperature as number | undefined;
-      const fuelMelt = component.fuelMeltingPoint as number | undefined ?? 2800;
-      if (fuelTemp !== undefined) {
-        const fuelTempC = fuelTemp - 273;
-        const fuelRatio = fuelTemp / fuelMelt;
-        let fuelColor = '#7f7';  // green
-        if (fuelRatio > 0.9) fuelColor = '#f55';  // red
-        else if (fuelRatio > 0.7) fuelColor = '#fa0';  // orange
-        else if (fuelRatio > 0.5) fuelColor = '#ff0';  // yellow
-        html += `<div class="detail-row"><span class="detail-label">Fuel Temp:</span><span class="detail-value" style="color: ${fuelColor};">${fuelTempC.toFixed(0)} C</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Fuel Margin:</span><span class="detail-value">${((1 - fuelRatio) * 100).toFixed(0)}% to melt</span></div>`;
-      }
+      volume = Math.PI * (innerDiam / 2) ** 2 * height;
       break;
     }
     case 'pipe': {
-      html += `<div class="detail-row"><span class="detail-label">Length:</span><span class="detail-value">${(component.length as number)?.toFixed(2)} m</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${((component.diameter as number) * 1000)?.toFixed(0)} mm</span></div>`;
+      const diam = component.diameter as number;
+      const length = component.length as number;
+      html += `<div class="detail-row"><span class="detail-label">Length:</span><span class="detail-value">${length?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${(diam * 1000)?.toFixed(0)} mm</span></div>`;
+      volume = Math.PI * (diam / 2) ** 2 * length;
       break;
     }
-    case 'pump': {
-      const pumpRunning = component.running as boolean;
-      const pumpSpeed = component.speed as number;
-      html += `<div class="detail-row"><span class="detail-label">Running:</span><span class="detail-value" style="color: ${pumpRunning ? '#7f7' : '#f55'};">${pumpRunning ? 'Yes' : 'No'}</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Speed:</span><span class="detail-value">${(pumpSpeed * 100)?.toFixed(0)}%</span></div>`;
-      break;
-    }
-    case 'valve': {
-      const opening = component.opening as number;
-      html += `<div class="detail-row"><span class="detail-label">Opening:</span><span class="detail-value">${(opening * 100)?.toFixed(0)}% open</span></div>`;
+    case 'tank': {
+      const width = component.width as number;
+      const height = component.height as number;
+      html += `<div class="detail-row"><span class="detail-label">Size:</span><span class="detail-value">${width?.toFixed(1)} x ${height?.toFixed(1)} m</span></div>`;
+      // Assume cylindrical tank
+      volume = Math.PI * (width / 2) ** 2 * height;
       break;
     }
     case 'heatExchanger': {
       html += `<div class="detail-row"><span class="detail-label">Size:</span><span class="detail-value">${(component.width as number)?.toFixed(1)} x ${(component.height as number)?.toFixed(1)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Tubes:</span><span class="detail-value">${component.tubeCount as number}</span></div>`;
-
-      // Primary fluid (tube side)
-      const primaryFluid = component.primaryFluid as { temperature: number; pressure: number; phase: string; quality?: number } | undefined;
-      if (primaryFluid) {
-        html += '<div class="detail-section">';
-        html += '<div class="detail-section-title">Primary (Tube Side)</div>';
-        html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(primaryFluid.temperature - 273).toFixed(0)} C</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(primaryFluid.pressure / 1e5).toFixed(1)} bar</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${primaryFluid.phase}</span></div>`;
-        // Always show quality line to prevent layout shift
-        if (primaryFluid.phase === 'two-phase' && primaryFluid.quality !== undefined) {
-          html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(primaryFluid.quality * 100).toFixed(0)}%</span></div>`;
-        } else {
-          html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">-</span></div>`;
-        }
-        html += '</div>';
-      }
-
-      // Secondary fluid (shell side)
-      const secondaryFluid = component.secondaryFluid as { temperature: number; pressure: number; phase: string; quality?: number } | undefined;
-      if (secondaryFluid) {
-        html += '<div class="detail-section">';
-        html += '<div class="detail-section-title">Secondary (Shell Side)</div>';
-        html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(secondaryFluid.temperature - 273).toFixed(0)} C</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(secondaryFluid.pressure / 1e5).toFixed(1)} bar</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${secondaryFluid.phase}</span></div>`;
-        // Always show quality line to prevent layout shift
-        if (secondaryFluid.phase === 'two-phase' && secondaryFluid.quality !== undefined) {
-          html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(secondaryFluid.quality * 100).toFixed(0)}%</span></div>`;
-        } else {
-          html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">-</span></div>`;
-        }
-        html += '</div>';
-      }
       break;
     }
-    case 'tank': {
+    case 'pump': {
+      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${((component.diameter as number) * 1000)?.toFixed(0)} mm</span></div>`;
+      break;
+    }
+    case 'valve': {
+      html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${((component.diameter as number) * 1000)?.toFixed(0)} mm</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">${component.valveType as string}</span></div>`;
+      break;
+    }
+    case 'turbine':
+    case 'condenser': {
       html += `<div class="detail-row"><span class="detail-label">Size:</span><span class="detail-value">${(component.width as number)?.toFixed(1)} x ${(component.height as number)?.toFixed(1)} m</span></div>`;
-      const fillLevel = component.fillLevel as number | undefined;
-      if (fillLevel !== undefined) {
-        html += `<div class="detail-row"><span class="detail-label">Fill Level:</span><span class="detail-value">${(fillLevel * 100).toFixed(0)}%</span></div>`;
-      }
       break;
     }
   }
 
-  // Get simulation linkage from component properties
-  const simNodeId = component.simNodeId as string | undefined;
-
-  // Fluid info - only show if no simulation linkage (otherwise simulation section shows it)
-  const fluid = component.fluid as { temperature: number; pressure: number; phase: string } | undefined;
-  if (fluid && !simNodeId && component.type !== 'heatExchanger') {
-    html += '<div class="detail-section">';
-    html += '<div class="detail-section-title">Fluid</div>';
-    html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(fluid.temperature - 273).toFixed(0)} C</span></div>`;
-    html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(fluid.pressure / 1e5).toFixed(1)} bar</span></div>`;
-    html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${fluid.phase}</span></div>`;
-    html += '</div>';
+  // Volume - prefer simulation node volume, fall back to calculated
+  const nodeVolume = flowNode?.volume;
+  const displayVolume = nodeVolume ?? volume;
+  if (displayVolume !== undefined) {
+    html += `<div class="detail-row"><span class="detail-label">Volume:</span><span class="detail-value">${displayVolume.toFixed(2)} m³</span></div>`;
   }
-  const simPumpId = component.simPumpId as string | undefined;
-  const simValveId = component.simValveId as string | undefined;
 
-  // Show linked simulation flow node (skip for HX since we show primary/secondary above,
-  // and skip for pumps since they show flow path info separately)
-  if (simNodeId && component.type !== 'heatExchanger' && !simPumpId) {
-    const flowNode = simState.flowNodes.get(simNodeId);
-    if (flowNode) {
+  // ========== CURRENT FLUID CONDITIONS (from simulation) ==========
+  // Helper to determine if a component has distinct liquid/vapor spaces
+  const hasSeparatePhases = (type: string): boolean => {
+    return type === 'tank' || type === 'vessel' || type === 'heatExchanger';
+  };
+
+  // Heat exchanger shows two fluid sections (primary & secondary)
+  if (component.type === 'heatExchanger') {
+    // Find both simulation nodes (tube side and shell side)
+    // Convention: simNodeId is tube side (primary), look for shell side
+    const tubeNode = flowNode;
+    // Find shell side node - it would be named with shell/secondary suffix
+    let shellNode: typeof flowNode | undefined;
+    for (const [nodeId, node] of simState.flowNodes) {
+      if (nodeId.includes(componentId) && nodeId !== simNodeId &&
+          (nodeId.includes('shell') || nodeId.includes('secondary'))) {
+        shellNode = node;
+        break;
+      }
+    }
+
+    if (tubeNode) {
       html += '<div class="detail-section">';
-      html += `<div class="detail-section-title">Simulation: ${flowNode.label || simNodeId}</div>`;
-      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(flowNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(flowNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${flowNode.fluid.mass.toFixed(0)} kg</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Energy:</span><span class="detail-value">${(flowNode.fluid.internalEnergy / 1.0e3 / flowNode.fluid.mass).toFixed(0)
-} kJ/kg</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${flowNode.fluid.phase}</span></div>`;
-      // Always show quality line to prevent layout shift
-      if (flowNode.fluid.phase === 'two-phase') {
-        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(flowNode.fluid.quality * 100).toFixed(0)}%</span></div>`;
-      } else {
-        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">-</span></div>`;
+      html += '<div class="detail-section-title">Primary (Tube Side)</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(tubeNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(tubeNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${tubeNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${tubeNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      html += '</div>';
+    }
+
+    if (shellNode) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Secondary (Shell Side)</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(shellNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(shellNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${shellNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${shellNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      // Show fill level only for two-phase shell side
+      if (shellNode.fluid.phase === 'two-phase') {
+        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(shellNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
       }
       html += '</div>';
-
-      // Show flow connections for this node
-      const connectedPaths: string[] = [];
-      for (const conn of simState.flowConnections) {
-        if (conn.fromNodeId === simNodeId || conn.toNodeId === simNodeId) {
-          const direction = conn.fromNodeId === simNodeId ? '→' : '←';
-          const otherNodeId = conn.fromNodeId === simNodeId ? conn.toNodeId : conn.fromNodeId;
-          const otherNode = simState.flowNodes.get(otherNodeId);
-          const otherName = otherNode?.label || otherNodeId;
-          const flowDir = conn.massFlowRate >= 0 ? '' : ' (reverse)';
-          connectedPaths.push(`${direction} ${otherName}: ${Math.abs(conn.massFlowRate).toFixed(1)} kg/s${flowDir}`);
-        }
-      }
-
-      if (connectedPaths.length > 0) {
-        html += '<div class="detail-section">';
-        html += '<div class="detail-section-title">Flow Connections</div>';
-        for (const path of connectedPaths) {
-          html += `<div style="font-size: 10px; color: #aaa;">${path}</div>`;
-        }
-        html += '</div>';
-      }
     }
+  } else if (flowNode) {
+    // Standard single-fluid component
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-title">Current Fluid State</div>';
+    html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(flowNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+    html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(flowNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+    html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${flowNode.fluid.phase}</span></div>`;
+    html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${flowNode.fluid.mass.toFixed(0)} kg</span></div>`;
+    const specificEnergy = flowNode.fluid.internalEnergy / flowNode.fluid.mass / 1000;
+    html += `<div class="detail-row"><span class="detail-label">Spec. Energy:</span><span class="detail-value">${specificEnergy.toFixed(0)} kJ/kg</span></div>`;
+
+    // Show fill level / quality only for two-phase in containers that can have separate phases
+    if (flowNode.fluid.phase === 'two-phase' && hasSeparatePhases(component.type as string)) {
+      html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(flowNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+    }
+    html += '</div>';
   }
 
-  // Show linked pump state
+  // ========== PUMP STATE ==========
   if (simPumpId) {
     const pump = simState.components.pumps.get(simPumpId);
     if (pump) {
       html += '<div class="detail-section">';
-      html += `<div class="detail-section-title">Pump: ${simPumpId}</div>`;
+      html += '<div class="detail-section-title">Pump Control</div>';
       html += `<div class="detail-row"><span class="detail-label">Running:</span><span class="detail-value" style="color: ${pump.running ? '#7f7' : '#f55'};">${pump.running ? 'Yes' : 'No'}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Speed:</span><span class="detail-value">${(pump.speed * 100).toFixed(0)}%</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Effective:</span><span class="detail-value">${(pump.effectiveSpeed * 100).toFixed(0)}%</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Rated Head:</span><span class="detail-value">${pump.ratedHead} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Rated Flow:</span><span class="detail-value">${pump.ratedFlow} kg/s</span></div>`;
-      html += '</div>';
 
-      // Calculate current pump head (using effectiveSpeed from FlowOperator)
+      // Calculate current pump head
       const flowPath = simState.flowConnections.find(c => c.id === pump.connectedFlowPath);
       if (flowPath && pump.effectiveSpeed > 0) {
-        // Use density of upstream node based on actual flow direction
         const flowIsForward = flowPath.massFlowRate >= 0;
         const upstreamId = flowIsForward ? flowPath.fromNodeId : flowPath.toNodeId;
         const upstreamNode = simState.flowNodes.get(upstreamId);
@@ -687,47 +680,165 @@ export function updateComponentDetail(
         const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
         html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value" style="color: #8af;">+${(dP_pump/1e5).toFixed(2)} bar</span></div>`;
       }
-
-      // Show the flow path this pump drives
-      if (flowPath) {
-        const fromNode = simState.flowNodes.get(flowPath.fromNodeId);
-        const toNode = simState.flowNodes.get(flowPath.toNodeId);
-        html += '<div class="detail-section">';
-        html += '<div class="detail-section-title">Flow Path</div>';
-        html += `<div style="font-size: 10px; color: #aaa;">${fromNode?.label || flowPath.fromNodeId} → ${toNode?.label || flowPath.toNodeId}</div>`;
-        html += `<div class="detail-row"><span class="detail-label">Flow Rate:</span><span class="detail-value">${flowPath.massFlowRate.toFixed(1)} kg/s</span></div>`;
-        html += '</div>';
-      }
+      html += '</div>';
     }
   }
 
-  // Show linked valve state
+  // ========== VALVE STATE ==========
   if (simValveId) {
     const valve = simState.components.valves.get(simValveId);
     if (valve) {
       html += '<div class="detail-section">';
-      html += `<div class="detail-section-title">Valve: ${simValveId}</div>`;
+      html += '<div class="detail-section-title">Valve Control</div>';
       const posColor = valve.position > 0.9 ? '#7f7' : valve.position < 0.1 ? '#f55' : '#fa0';
       html += `<div class="detail-row"><span class="detail-label">Position:</span><span class="detail-value" style="color: ${posColor};">${(valve.position * 100).toFixed(0)}% open</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Fail Position:</span><span class="detail-value">${(valve.failPosition * 100).toFixed(0)}%</span></div>`;
       html += '</div>';
+    }
+  }
 
-      // Show the flow path this valve controls
-      const flowPath = simState.flowConnections.find(c => c.id === valve.connectedFlowPath);
-      if (flowPath) {
-        const fromNode = simState.flowNodes.get(flowPath.fromNodeId);
-        const toNode = simState.flowNodes.get(flowPath.toNodeId);
-        html += '<div class="detail-section">';
-        html += '<div class="detail-section-title">Flow Path</div>';
-        html += `<div style="font-size: 10px; color: #aaa;">${fromNode?.label || flowPath.fromNodeId} → ${toNode?.label || flowPath.toNodeId}</div>`;
-        html += `<div class="detail-row"><span class="detail-label">Flow Rate:</span><span class="detail-value">${flowPath.massFlowRate.toFixed(1)} kg/s</span></div>`;
-        html += '</div>';
+  // ========== FUEL STATE (for reactor vessels) ==========
+  const fuelTemp = component.fuelTemperature as number | undefined;
+  if (fuelTemp !== undefined) {
+    const fuelMelt = (component.fuelMeltingPoint as number | undefined) ?? 2800;
+    const fuelTempC = fuelTemp - 273;
+    const fuelRatio = fuelTemp / fuelMelt;
+    let fuelColor = '#7f7';  // green
+    if (fuelRatio > 0.9) fuelColor = '#f55';  // red
+    else if (fuelRatio > 0.7) fuelColor = '#fa0';  // orange
+    else if (fuelRatio > 0.5) fuelColor = '#ff0';  // yellow
+
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-title">Fuel</div>';
+    html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value" style="color: ${fuelColor};">${fuelTempC.toFixed(0)} C</span></div>`;
+    html += `<div class="detail-row"><span class="detail-label">Margin:</span><span class="detail-value">${((1 - fuelRatio) * 100).toFixed(0)}% to melt</span></div>`;
+    html += '</div>';
+  }
+
+  // ========== FLOW CONNECTIONS ==========
+  // Find all flow connections involving this component's simulation node(s)
+  const nodeIds = new Set<string>();
+  if (simNodeId) nodeIds.add(simNodeId);
+  // Also add component ID directly (user-created components use this)
+  nodeIds.add(componentId);
+  // For HX, also check for primary/secondary/shell side nodes
+  for (const [nodeId] of simState.flowNodes) {
+    if (nodeId.includes(componentId)) {
+      nodeIds.add(nodeId);
+    }
+  }
+
+  const flowConnections: Array<{
+    conn: typeof simState.flowConnections[0];
+    isFrom: boolean;
+  }> = [];
+
+  for (const conn of simState.flowConnections) {
+    for (const nodeId of nodeIds) {
+      if (conn.fromNodeId === nodeId) {
+        flowConnections.push({ conn, isFrom: true });
+      } else if (conn.toNodeId === nodeId) {
+        flowConnections.push({ conn, isFrom: false });
       }
     }
   }
 
-  // If no simulation linkage, show a note
-  if (!simNodeId && !simPumpId && !simValveId) {
+  if (flowConnections.length > 0) {
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-title">Flow Connections</div>';
+
+    for (const { conn, isFrom } of flowConnections) {
+      const otherNodeId = isFrom ? conn.toNodeId : conn.fromNodeId;
+      const otherNode = simState.flowNodes.get(otherNodeId);
+      const otherName = otherNode?.label || otherNodeId;
+
+      // Determine actual flow direction
+      const actualFlow = conn.massFlowRate;
+      const flowingOut = (isFrom && actualFlow >= 0) || (!isFrom && actualFlow < 0);
+      const arrowDir = flowingOut ? '→' : '←';
+      const flowColor = flowingOut ? '#7af' : '#fa7';
+
+      // Connection elevation
+      const connElev = isFrom ? conn.fromElevation : conn.toElevation;
+      const elevStr = connElev !== undefined ? `@ ${connElev.toFixed(1)}m` : '';
+
+      // Phase of flowing fluid (determined by upstream node)
+      const upstreamId = actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId;
+      const upstreamNode = simState.flowNodes.get(upstreamId);
+      const flowPhase = upstreamNode?.fluid.phase || 'unknown';
+
+      html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
+      html += `<span style="color: ${flowColor};">${arrowDir}</span> ${otherName}<br>`;
+      html += `<span style="color: #888; margin-left: 12px;">`;
+      html += `${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
+      if (elevStr) html += ` ${elevStr}`;
+      html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²`;
+      html += `</span></div>`;
+    }
+    html += '</div>';
+  }
+
+  // ========== HEAT TRANSFER CONNECTIONS ==========
+  // Find convection connections involving this component's nodes
+  const heatConnections: Array<{
+    thermalNodeId: string;
+    flowNodeId: string;
+    heatRate?: number;
+  }> = [];
+
+  for (const conv of simState.convectionConnections) {
+    if (nodeIds.has(conv.flowNodeId)) {
+      const heatRate = simState.energyDiagnostics?.heatTransferRates.get(conv.id);
+      heatConnections.push({
+        thermalNodeId: conv.thermalNodeId,
+        flowNodeId: conv.flowNodeId,
+        heatRate
+      });
+    }
+  }
+
+  // Also check if this is a thermal node
+  const thermalNode = simState.thermalNodes.get(componentId);
+  if (thermalNode) {
+    for (const conv of simState.convectionConnections) {
+      if (conv.thermalNodeId === componentId) {
+        const heatRate = simState.energyDiagnostics?.heatTransferRates.get(conv.id);
+        heatConnections.push({
+          thermalNodeId: conv.thermalNodeId,
+          flowNodeId: conv.flowNodeId,
+          heatRate
+        });
+      }
+    }
+  }
+
+  if (heatConnections.length > 0) {
+    html += '<div class="detail-section">';
+    html += '<div class="detail-section-title">Heat Transfer</div>';
+
+    for (const heat of heatConnections) {
+      const thermal = simState.thermalNodes.get(heat.thermalNodeId);
+      const flow = simState.flowNodes.get(heat.flowNodeId);
+      const thermalName = thermal?.label || heat.thermalNodeId;
+      const flowName = flow?.label || heat.flowNodeId;
+
+      // Heat rate and direction
+      const rate = heat.heatRate ?? 0;
+      const rateStr = Math.abs(rate) >= 1e6
+        ? `${(rate / 1e6).toFixed(2)} MW`
+        : `${(rate / 1e3).toFixed(1)} kW`;
+      const heatDir = rate >= 0 ? '→' : '←';
+      const heatColor = rate >= 0 ? '#f80' : '#08f';
+
+      html += `<div style="font-size: 10px; margin: 2px 0;">`;
+      html += `<span style="color: ${heatColor};">${thermalName} ${heatDir} ${flowName}</span>: ${rateStr}`;
+      html += `</div>`;
+    }
+    html += '</div>';
+  }
+
+  // ========== NO SIMULATION LINKAGE ==========
+  if (!simNodeId && !simPumpId && !simValveId && heatConnections.length === 0) {
     html += '<div class="detail-section">';
     html += '<div style="font-size: 10px; color: #888; font-style: italic;">No simulation linkage</div>';
     html += '</div>';

@@ -52,7 +52,7 @@
             <label for="pressure-model">Pressure Model:</label>
             <select id="pressure-model" style="margin-left: 5px;">
               <option value="hybrid">Hybrid (Bulk Modulus)</option>
-              <option value="pure-triangulation">Pure Triangulation</option>
+              <option value="pure-triangulation" selected>Pure Triangulation</option>
             </select>
           </div>
           <hr />
@@ -109,6 +109,10 @@
         <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
           <div id="connection-status">Select first component...</div>
         </div>
+
+        <!-- Save/Load Section -->
+        <hr />
+        <button id="open-save-load-btn" class="mode-btn">💾 Save / Load</button>
         </div>
 
         <!-- Common controls for both modes -->
@@ -117,7 +121,11 @@
         <button id="move-mode" class="mode-btn">Move</button>
         <hr />
         <h3>View</h3>
-        <button id="toggle-isometric" class="view-btn">🎛️ 2.5D View</button>
+        <button id="toggle-isometric" class="view-btn active">🎛️ 2.5D View</button>
+        <div class="slider-control" style="margin: 8px 0;">
+          <label for="view-elevation" style="font-size: 11px;">View Angle: <span id="view-elevation-value">30</span>°</label>
+          <input type="range" id="view-elevation" min="20" max="70" value="30" style="width: 100%;" />
+        </div>
         <button id="zoom-in">Zoom +</button>
         <button id="zoom-out">Zoom -</button>
         <button id="reset-view">Reset View</button>

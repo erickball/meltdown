@@ -956,6 +956,31 @@ export function createFluidState(
     // ρ = P / (R * T), with R = 461.5 J/kg-K for water vapor
     const R_WATER = 461.5;
     density = pressure / (R_WATER * temperature);
+
+    // Check if this is superheated steam (P < P_sat at this T)
+    const P_sat = Water.saturationPressure(temperature);
+    if (pressure < P_sat * 0.99) {
+      // Superheated steam - need to calculate energy differently
+      // u = u_g(T_sat(P)) + Cv * (T - T_sat(P))
+      // where T_sat is saturation temperature at this pressure
+      const T_sat = Water.saturationTemperature(pressure);
+      const u_sat_g = Water.saturatedVaporEnergy(T_sat);
+      const Cv_steam = 1500; // J/kg·K, approximate for steam
+      const superheat = temperature - T_sat;
+      const specificEnergy = u_sat_g + Cv_steam * superheat;
+
+      const mass = density * volume;
+      const internalEnergy = mass * specificEnergy;
+
+      return {
+        mass,
+        internalEnergy,
+        temperature,
+        pressure,
+        phase,
+        quality,
+      };
+    }
   } else {
     // Two-phase mixture - pressure is locked to saturation
     const rho_f = Water.saturatedLiquidDensity(temperature);

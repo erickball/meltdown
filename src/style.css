@@ -33,6 +33,27 @@ body {
   border-radius: 8px;
   border: 1px solid #444;
   min-width: 150px;
+  max-height: calc(100vh - 60px);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+#toolbar::-webkit-scrollbar {
+  width: 6px;
+}
+
+#toolbar::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+#toolbar::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 3px;
+}
+
+#toolbar::-webkit-scrollbar-thumb:hover {
+  background: #777;
 }
 
 #toolbar h3 {

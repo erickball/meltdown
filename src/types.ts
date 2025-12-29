@@ -45,6 +45,14 @@ export interface ComponentBase {
   elevation?: number;   // Height above ground in meters
   ports: Port[];
   fluid?: Fluid;        // Current fluid state inside
+  // Containment - ID of component that contains this one (e.g., tank, containment building)
+  // Used for: heat transfer (outer surface connects to container fluid),
+  // burst location (rupture connects to container instead of atmosphere),
+  // volume reduction (component displaces container fluid)
+  // NOTE: When implementing burst pressure, use GAUGE pressure relative to container!
+  // A component inside another only bursts when (inner pressure - container pressure) > burst rating.
+  // This means a pipe inside a pressurized containment can withstand higher absolute pressure.
+  containedBy?: string;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
