@@ -730,28 +730,28 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       });
     }
 
-    // Create thermal nodes and secondary flow node for heat exchangers
+    // Create thermal nodes and shell-side flow node for heat exchangers
     if (component.type === 'heatExchanger') {
       const hxThermalNode = createHeatExchangerThermalNode(component);
       state.thermalNodes.set(hxThermalNode.id, hxThermalNode);
 
-      // Create secondary flow node for heat exchanger
-      const secondaryNode = createHeatExchangerSecondaryNode(component);
-      state.flowNodes.set(secondaryNode.id, secondaryNode);
+      // Create shell-side flow node for heat exchanger
+      const shellNode = createHeatExchangerShellNode(component);
+      state.flowNodes.set(shellNode.id, shellNode);
 
-      // Create convection connections for primary and secondary sides
-      // The HX creates two flow nodes: id-primary and id-secondary
+      // Create convection connections for tube and shell sides
+      // The HX creates two flow nodes: id-tube and id-shell
       state.convectionConnections.push({
-        id: `convection-${id}-primary`,
+        id: `convection-${id}-tube`,
         thermalNodeId: `${id}-tubes`,
-        flowNodeId: `${id}-primary`,
-        surfaceArea: (component as any).tubeCount * 0.5, // Approximate
+        flowNodeId: `${id}-tube`,
+        surfaceArea: (component as any).tubeCount * 0.5, // Tube inner surface
       });
       state.convectionConnections.push({
-        id: `convection-${id}-secondary`,
+        id: `convection-${id}-shell`,
         thermalNodeId: `${id}-tubes`,
-        flowNodeId: `${id}-secondary`,
-        surfaceArea: (component as any).tubeCount * 0.6, // Outer surface slightly larger
+        flowNodeId: `${id}-shell`,
+        surfaceArea: (component as any).tubeCount * 0.6, // Tube outer surface slightly larger
       });
     }
   }
@@ -929,20 +929,20 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'heatExchanger': {
       const hx = component as any;
-      // Heat exchangers create TWO flow nodes - primary and secondary sides
-      const primaryVolume = 10; // Approximate
-      const secondaryVolume = 30;
-      const primaryTemp = hx.primaryFluid?.temperature || 570;
-      const primaryPressure = hx.primaryFluid?.pressure || 15e6;
-      const secondaryTemp = hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
-      const secondaryPressure = hx.secondaryFluid?.pressure || 5.5e6;
+      // Heat exchangers create TWO flow nodes - tube side and shell side
+      const tubeVolume = 10; // Approximate
+      const shellVolume = 30;
+      const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
+      const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
+      const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
+      const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
 
-      // Return primary node, secondary is created separately
+      // Return tube-side node, shell-side is created separately
       return {
-        id: `${component.id}-primary`,
-        label: `${component.label || 'HX'} Primary`,
-        fluid: createFluidState(primaryTemp, primaryPressure, 'liquid', 0, primaryVolume),
-        volume: primaryVolume,
+        id: `${component.id}-tube`,
+        label: `${component.label || 'HX'} Tube`,
+        fluid: createFluidState(tubeTemp, tubePressure, 'liquid', 0, tubeVolume),
+        volume: tubeVolume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
         elevation,
@@ -1127,22 +1127,22 @@ function createHeatExchangerThermalNode(component: PlantComponent): ThermalNode 
 }
 
 /**
- * Create secondary flow node for heat exchanger
+ * Create shell-side flow node for heat exchanger
  */
-function createHeatExchangerSecondaryNode(component: PlantComponent): FlowNode {
+function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const hx = component as any;
   const elevation = hx.elevation || 0;
-  const secondaryVolume = 30;
-  const secondaryTemp = hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
-  const secondaryPressure = hx.secondaryFluid?.pressure || 5.5e6;
-  const phase = hx.secondaryFluid?.phase || 'two-phase';
-  const quality = hx.secondaryFluid?.quality || 0.5;
+  const shellVolume = 30;
+  const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
+  const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
+  const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
+  const quality = hx.shellFluid?.quality || hx.secondaryFluid?.quality || 0.5;
 
   return {
-    id: `${component.id}-secondary`,
-    label: `${component.label || 'HX'} Secondary`,
-    fluid: createFluidState(secondaryTemp, secondaryPressure, phase, quality, secondaryVolume),
-    volume: secondaryVolume,
+    id: `${component.id}-shell`,
+    label: `${component.label || 'HX'} Shell`,
+    fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume),
+    volume: shellVolume,
     hydraulicDiameter: 0.1,
     flowArea: 5,
     elevation,
@@ -1164,23 +1164,23 @@ function createFlowConnectionFromPlantConnection(
     return null;
   }
 
-  // Determine flow node IDs (heat exchangers have -primary/-secondary suffixes)
+  // Determine flow node IDs (heat exchangers have -tube/-shell suffixes)
   let fromNodeId = connection.fromComponentId;
   let toNodeId = connection.toComponentId;
 
   // Handle heat exchanger port mappings
   if (fromComponent.type === 'heatExchanger') {
-    if (connection.fromPortId.includes('primary')) {
-      fromNodeId = `${connection.fromComponentId}-primary`;
-    } else if (connection.fromPortId.includes('secondary')) {
-      fromNodeId = `${connection.fromComponentId}-secondary`;
+    if (connection.fromPortId.includes('tube')) {
+      fromNodeId = `${connection.fromComponentId}-tube`;
+    } else if (connection.fromPortId.includes('shell')) {
+      fromNodeId = `${connection.fromComponentId}-shell`;
     }
   }
   if (toComponent.type === 'heatExchanger') {
-    if (connection.toPortId.includes('primary')) {
-      toNodeId = `${connection.toComponentId}-primary`;
-    } else if (connection.toPortId.includes('secondary')) {
-      toNodeId = `${connection.toComponentId}-secondary`;
+    if (connection.toPortId.includes('tube')) {
+      toNodeId = `${connection.toComponentId}-tube`;
+    } else if (connection.toPortId.includes('shell')) {
+      toNodeId = `${connection.toComponentId}-shell`;
     }
   }
 

@@ -266,9 +266,20 @@ export class ConvectionOperator implements PhysicsOperator {
       const fluidThermalMass = flowNode.fluid.mass * cv_eff;
       const dtFluid = fluidThermalMass / (2 * hA);
 
-      // Also check water properties stability
+      // Check water properties stability, but scale by flow rate
+      // With no flow, the constraint is much more relaxed (thermal diffusion only)
+      let totalMassFlow = 0;
+      for (const fc of state.flowConnections) {
+        if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
+          totalMassFlow += Math.abs(fc.massFlowRate);
+        }
+      }
       const stability = Water.analyzeStability(waterState, flowNode.volume);
-      const dtWater = stability.characteristicTime * 0.5;
+      // Scale characteristic time inversely with flow rate:
+      // At high flow (>100 kg/s): use standard timescale
+      // At low/no flow: extend timescale by up to 10x
+      const flowFactor = Math.max(1, 10 / Math.max(1, totalMassFlow / 10));
+      const dtWater = stability.characteristicTime * 0.5 * flowFactor;
 
       // Collect warnings
       if (stability.warnings.length > 0) {

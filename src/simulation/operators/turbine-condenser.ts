@@ -119,7 +119,30 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     return newState;
   }
 
-  getMaxStableDt(_state: SimulationState): number {
+  getMaxStableDt(state: SimulationState): number {
+    // Check if any configured turbines/condensers actually exist in the state
+    let hasActiveTurbine = false;
+    let hasActiveCondenser = false;
+
+    for (const turbine of this.config.turbines) {
+      if (state.flowNodes.has(turbine.inletNodeId) && state.flowNodes.has(turbine.outletNodeId)) {
+        hasActiveTurbine = true;
+        break;
+      }
+    }
+
+    for (const condenser of this.config.condensers) {
+      if (state.flowNodes.has(condenser.flowNodeId)) {
+        hasActiveCondenser = true;
+        break;
+      }
+    }
+
+    // If no turbines or condensers are actually present, no stability limit
+    if (!hasActiveTurbine && !hasActiveCondenser) {
+      return Infinity;
+    }
+
     // Secondary loop dynamics are slower than primary
     // The condenser is the limiting factor due to heat removal rate
     return 0.1; // 100 ms is fine
