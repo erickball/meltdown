@@ -14,6 +14,7 @@ import {
   enableCalculationDebug,
   getCalculationDebugLog,
   simulationConfig,
+  preloadWaterProperties,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
@@ -870,11 +871,16 @@ function init() {
         showNotification('Enter a name for the configuration', 'warning');
         return;
       }
+      // Check if configuration already exists
+      const existingConfigs = getSavedConfigNames();
+      if (existingConfigs.includes(name)) {
+        if (!confirm(`Configuration '${name}' already exists. Overwrite?`)) {
+          return;
+        }
+      }
       if (saveConfiguration(name)) {
         showNotification(`Saved '${name}'`, 'info');
-        refreshConfigs();
-        configSelect.value = name;
-        saveNameInput.value = '';
+        cleanup();
       }
     });
 
@@ -1456,6 +1462,14 @@ function init() {
   console.log('  S: Manual SCRAM');
   console.log('  Mouse drag: Pan view');
   console.log('  Mouse wheel: Zoom');
+
+  // Preload water properties in the background after UI is ready
+  // This prevents blocking the main thread when switching to simulation mode
+  setTimeout(() => {
+    preloadWaterProperties().catch(err => {
+      console.warn('[Main] Water properties preload failed:', err);
+    });
+  }, 100);
 }
 
 function syncSimulationToVisuals(simState: SimulationState, plantState: PlantState): void {
