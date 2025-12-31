@@ -19,6 +19,13 @@ import {
 } from '../types';
 import { ComponentConfig } from './component-config';
 import { saturationTemperature } from '../simulation/water-properties';
+import {
+  calculateState,
+  saturatedLiquidDensity,
+  saturatedVaporDensity,
+  saturatedLiquidEnergy,
+  saturatedVaporEnergy
+} from '../simulation/water-properties-v3';
 
 export class ConstructionManager {
   private plantState: PlantState;
@@ -47,11 +54,17 @@ export class ConstructionManager {
     const worldY = y;
 
     // Create default fluid state
+    // If initial level < 100%, the component is two-phase (liquid + vapor space)
+    const fillLevel = props.initialLevel !== undefined ? props.initialLevel / 100 : 1;
+    const isTwoPhase = fillLevel > 0 && fillLevel < 1;
+    // For two-phase, quality represents fraction of vapor by mass
+    // Low fill level with small vapor space = low quality (mostly liquid by mass)
+    const defaultQuality = isTwoPhase ? Math.max(0.01, (1 - fillLevel) * 0.1) : 0;
     const defaultFluid: Fluid = {
       temperature: props.initialTemperature ? props.initialTemperature + 273.15 : 300,
       pressure: props.initialPressure ? props.initialPressure * 100000 : 15000000, // Convert bar to Pa
-      phase: 'liquid',
-      quality: 0,
+      phase: isTwoPhase ? 'two-phase' : 'liquid',
+      quality: defaultQuality,
       flowRate: 0
     };
 
@@ -180,6 +193,18 @@ export class ConstructionManager {
       }
 
       case 'pipe': {
+        // Build pipe-specific fluid state from user properties
+        const pipePhase = props.initialPhase || 'liquid';
+        const pipeQuality = pipePhase === 'two-phase' ? (props.initialQuality ?? 0.5) :
+                           (pipePhase === 'vapor' ? 1 : 0);
+        const pipeFluid: Fluid = {
+          temperature: props.initialTemperature ? props.initialTemperature + 273.15 : 563.15, // default 290C in K
+          pressure: props.initialPressure ? props.initialPressure * 100000 : 15000000, // bar to Pa
+          phase: pipePhase,
+          quality: pipeQuality,
+          flowRate: 0
+        };
+
         const pipe: PipeComponent = {
           id,
           type: 'pipe',
@@ -190,7 +215,7 @@ export class ConstructionManager {
           thickness: 0.01,  // 1cm default wall thickness
           length: props.length,
           ports: bidirectionalPorts,  // Pipes are bidirectional - flow determined by physics
-          fluid: defaultFluid
+          fluid: pipeFluid
         };
 
         this.plantState.components.set(id, pipe);
@@ -288,15 +313,10 @@ export class ConstructionManager {
         const flow = props.ratedFlow || 1000;
         const calculatedDiameter = 0.2 + Math.sqrt(flow / 1000) * 0.4;
 
-        // Calculate rotation based on orientation
-        let pumpRotation = 0;
+        // Pump orientation is handled in rendering via transforms, not rotation
+        // Rotation stays 0 for all pumps
+        const pumpRotation = 0;
         const orientation = props.orientation || 'left-right';
-        switch (orientation) {
-          case 'left-right': pumpRotation = 0; break;
-          case 'right-left': pumpRotation = Math.PI; break;
-          case 'bottom-top': pumpRotation = -Math.PI / 2; break;
-          case 'top-bottom': pumpRotation = Math.PI / 2; break;
-        }
 
         // Port positions for upright RCP-style pump
         // Layout: motor on top, coupling, casing, suction nozzle, inlet pipe at bottom
@@ -316,15 +336,50 @@ export class ConstructionManager {
         const casingBottom = couplingBottom + pumpCasingHeight;
         const nozzleBottom = casingBottom + suctionNozzleHeight;
 
-        // Inlet at bottom of inlet pipe, outlet on side
-        const inletY = nozzleBottom + inletPipeLength;
-        const outletY = couplingBottom + pumpCasingHeight * 0.35;
-        const outletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
+        // Base positions (for left-right orientation):
+        // Inlet at bottom of inlet pipe, outlet on right side
+        const baseInletY = nozzleBottom + inletPipeLength;
+        const baseOutletY = couplingBottom + pumpCasingHeight * 0.35;
+        const baseOutletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
 
-        const pumpPorts: Port[] = [
-          { id: 'inlet', position: { x: 0, y: inletY }, direction: 'in' },
-          { id: 'outlet', position: { x: outletX, y: outletY }, direction: 'out' }
-        ];
+        // Calculate port positions based on orientation
+        // The rendering applies transforms, so port positions must match:
+        // - left-right: inlet bottom, outlet right (default)
+        // - right-left: inlet bottom, outlet left (mirrored X)
+        // - bottom-top: inlet left, outlet up (rotated -90°)
+        // - top-bottom: inlet right, outlet down (rotated +90°)
+        // Port IDs must include component ID to be unique across multiple pumps
+        let pumpPorts: Port[];
+        switch (orientation) {
+          case 'right-left':
+            // Mirror X: inlet stays at bottom, outlet on left
+            pumpPorts = [
+              { id: `${id}-inlet`, position: { x: 0, y: baseInletY }, direction: 'in' },
+              { id: `${id}-outlet`, position: { x: -baseOutletX, y: baseOutletY }, direction: 'out' }
+            ];
+            break;
+          case 'bottom-top':
+            // Rotate -90°: (x,y) -> (y, -x)
+            // Inlet goes to left side, outlet goes to top
+            pumpPorts = [
+              { id: `${id}-inlet`, position: { x: -baseInletY, y: 0 }, direction: 'in' },
+              { id: `${id}-outlet`, position: { x: -baseOutletY, y: -baseOutletX }, direction: 'out' }
+            ];
+            break;
+          case 'top-bottom':
+            // Rotate +90°: (x,y) -> (-y, x)
+            // Inlet goes to right side, outlet goes to bottom
+            pumpPorts = [
+              { id: `${id}-inlet`, position: { x: baseInletY, y: 0 }, direction: 'in' },
+              { id: `${id}-outlet`, position: { x: baseOutletY, y: baseOutletX }, direction: 'out' }
+            ];
+            break;
+          default: // left-right
+            pumpPorts = [
+              { id: `${id}-inlet`, position: { x: 0, y: baseInletY }, direction: 'in' },
+              { id: `${id}-outlet`, position: { x: baseOutletX, y: baseOutletY }, direction: 'out' }
+            ];
+        }
 
         const pump: PumpComponent = {
           id,
@@ -505,6 +560,12 @@ export class ConstructionManager {
           }
         ];
 
+        // Pressure rating is 1.5x inlet pressure (provides margin for transients)
+        const turbinePressureRating = (props.inletPressure || 60) * 1.5;
+
+        // Inlet temperature should be saturation temperature at inlet pressure
+        const inletTempK = saturationTemperature(P_in);
+
         const turbineGen: TurbineGeneratorComponent = {
           id,
           type: 'turbine-generator',
@@ -523,7 +584,7 @@ export class ConstructionManager {
           generatorEfficiency: eta_g,
           governorValve: (props.governorValve || 100) / 100,  // Convert % to 0-1
           inletFluid: {
-            temperature: 280 + 273.15,
+            temperature: inletTempK,
             pressure: P_in,
             phase: 'vapor',
             quality: 1.0,
@@ -538,6 +599,8 @@ export class ConstructionManager {
           },
           ports: turbineGenPorts
         };
+        // Add pressure rating for pipe creation
+        (turbineGen as any).pressureRating = turbinePressureRating;
 
         this.plantState.components.set(id, turbineGen);
         break;
@@ -942,8 +1005,10 @@ export class ConstructionManager {
 
         this.plantState.components.set(outsideBarrelId, outsideBarrel);
 
-        // Add the ports to the main vessel for connection purposes
-        reactorVessel.ports = [...outsideBarrelPorts];
+        // Note: Ports are owned by sub-components (inside/outside barrel)
+        // The main vessel has no ports - connections go to sub-components directly
+        // This ensures getFluidAtElevation uses the correct sub-component's fluid state
+        reactorVessel.ports = [];
 
         // Create automatic connections between inside and outside regions
         // at top/bottom of barrel where there are gaps
@@ -1090,8 +1155,13 @@ export class ConstructionManager {
 
     // Compute average fluid properties from connected components
     const pipeFluid = this.computeAverageFluid(
-      fromComponent, toComponent, fromElevation, toElevation
+      fromComponent, toComponent, fromElevation, toElevation, fromPort, toPort
     );
+
+    // Get pressure rating from connected components - use the higher of the two
+    const fromPressureRating = (fromComponent as any).pressureRating ?? 0;
+    const toPressureRating = (toComponent as any).pressureRating ?? 0;
+    const pipePressureRating = Math.max(fromPressureRating, toPressureRating) || 155; // Default 155 bar if neither has rating
 
     const pipe: PipeComponent = {
       id: pipeId,
@@ -1102,6 +1172,7 @@ export class ConstructionManager {
       diameter,
       thickness: 0.01,
       length: pipeLength,
+      pressureRating: pipePressureRating,
       ports: pipePorts,
       fluid: pipeFluid,
       // 3D endpoint data for isometric rendering
@@ -1193,6 +1264,54 @@ export class ConstructionManager {
   }
 
   /**
+   * Update pump port positions based on current diameter and orientation.
+   * Called when ratedFlow or orientation changes.
+   */
+  private updatePumpPorts(component: PlantComponent): void {
+    if (component.type !== 'pump' || !component.ports || component.ports.length < 2) {
+      return;
+    }
+
+    const orientation = (component as any).orientation || 'left-right';
+    const scale = component.diameter * 1.3;
+    const pumpCasingWidth = scale * 0.75;
+    const pumpCasingHeight = scale * 0.5;
+    const suctionNozzleHeight = scale * 0.35;
+    const inletPipeLength = scale * 0.3;
+    const voluteBulge = scale * 0.18;
+    const outletPipeLength = scale * 0.45;
+    const totalHeight = scale * 1.9;
+    const motorTop = -totalHeight / 2;
+    const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
+    const casingBottom = couplingBottom + pumpCasingHeight;
+    const nozzleBottom = casingBottom + suctionNozzleHeight;
+
+    // Base positions (for left-right orientation)
+    const baseInletY = nozzleBottom + inletPipeLength;
+    const baseOutletY = couplingBottom + pumpCasingHeight * 0.35;
+    const baseOutletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
+
+    // Calculate port positions based on orientation
+    switch (orientation) {
+      case 'right-left':
+        component.ports[0].position = { x: 0, y: baseInletY };
+        component.ports[1].position = { x: -baseOutletX, y: baseOutletY };
+        break;
+      case 'bottom-top':
+        component.ports[0].position = { x: -baseInletY, y: 0 };
+        component.ports[1].position = { x: -baseOutletY, y: -baseOutletX };
+        break;
+      case 'top-bottom':
+        component.ports[0].position = { x: baseInletY, y: 0 };
+        component.ports[1].position = { x: baseOutletY, y: baseOutletX };
+        break;
+      default: // left-right
+        component.ports[0].position = { x: 0, y: baseInletY };
+        component.ports[1].position = { x: baseOutletX, y: baseOutletY };
+    }
+  }
+
+  /**
    * Calculate the elevation of a port relative to the component's bottom.
    * Port position.y is relative to component center, with negative Y = top.
    * Returns: height above component bottom in meters
@@ -1223,60 +1342,18 @@ export class ConstructionManager {
    * Compute average fluid properties for a pipe connecting two components.
    * Takes into account connection elevation to determine if we're in vapor/liquid space
    * for two-phase components.
+   * If only one side has a valid fluid state, uses that side's fluid.
+   * If neither has a valid fluid state, uses a default.
    */
   private computeAverageFluid(
     fromComponent: PlantComponent,
     toComponent: PlantComponent,
     fromElevation: number,
-    toElevation: number
+    toElevation: number,
+    fromPort?: Port,
+    toPort?: Port
   ): Fluid {
-    // Get fluid properties at each end, considering elevation
-    const fromFluid = this.getFluidAtElevation(fromComponent, fromElevation);
-    const toFluid = this.getFluidAtElevation(toComponent, toElevation);
-
-    // Average the properties
-    const avgTemp = (fromFluid.temperature + toFluid.temperature) / 2;
-    const avgPressure = (fromFluid.pressure + toFluid.pressure) / 2;
-
-    // Determine phase based on average conditions
-    let phase: 'liquid' | 'vapor' | 'two-phase' = 'liquid';
-    let quality = 0;
-
-    // Check if either side is vapor/two-phase
-    if (fromFluid.phase === 'vapor' && toFluid.phase === 'vapor') {
-      phase = 'vapor';
-      quality = 1;
-    } else if (fromFluid.phase === 'two-phase' || toFluid.phase === 'two-phase') {
-      // If connecting to two-phase region, use the quality based on temperature
-      phase = 'two-phase';
-      const fromQ = fromFluid.quality ?? 0;
-      const toQ = toFluid.quality ?? 0;
-      quality = (fromQ + toQ) / 2;
-    } else if (fromFluid.phase === 'vapor' || toFluid.phase === 'vapor') {
-      // One side vapor, one side liquid - likely two-phase in between
-      phase = 'two-phase';
-      quality = 0.5;
-    }
-
-    console.log(`[Pipe Fluid] From: ${fromFluid.temperature.toFixed(0)}K ${fromFluid.phase}, ` +
-                `To: ${toFluid.temperature.toFixed(0)}K ${toFluid.phase}, ` +
-                `Avg: ${avgTemp.toFixed(0)}K ${phase}`);
-
-    return {
-      temperature: avgTemp,
-      pressure: avgPressure,
-      phase,
-      quality,
-      flowRate: 0
-    };
-  }
-
-  /**
-   * Get the fluid properties at a specific elevation within a component.
-   * For two-phase components, high elevation = vapor space, low elevation = liquid space.
-   */
-  private getFluidAtElevation(component: PlantComponent, elevation: number): Fluid {
-    // Default fluid if component has none defined
+    // Default fluid if neither component has a valid state
     const defaultFluid: Fluid = {
       temperature: 300,
       pressure: 101325,  // 1 atm
@@ -1285,29 +1362,136 @@ export class ConstructionManager {
       flowRate: 0
     };
 
-    if (!component.fluid) {
+    // Get fluid properties at each end, considering elevation and port
+    // These return null if no valid fluid state exists
+    const fromFluid = this.getFluidAtElevation(fromComponent, fromElevation, fromPort);
+    const toFluid = this.getFluidAtElevation(toComponent, toElevation, toPort);
+
+    // If only one side has valid fluid, use that side entirely
+    if (!fromFluid && !toFluid) {
+      console.log(`[Pipe Fluid] Neither component has valid fluid, using default`);
       return defaultFluid;
+    }
+    if (!fromFluid) {
+      console.log(`[Pipe Fluid] Only 'to' component has fluid, using: ${toFluid!.temperature.toFixed(0)}K ${toFluid!.phase}`);
+      return { ...toFluid!, flowRate: 0 };
+    }
+    if (!toFluid) {
+      console.log(`[Pipe Fluid] Only 'from' component has fluid, using: ${fromFluid.temperature.toFixed(0)}K ${fromFluid.phase}`);
+      return { ...fromFluid, flowRate: 0 };
+    }
+
+    // Both sides have valid fluid - average specific internal energy (u) and specific volume (v)
+    // This is thermodynamically correct, as opposed to averaging T and P directly
+
+    // Helper to compute u and v from fluid state
+    const getUV = (fluid: Fluid): { u: number; v: number } => {
+      const T = fluid.temperature;
+      const q = fluid.quality ?? 0;
+
+      if (fluid.phase === 'two-phase') {
+        // Two-phase: interpolate between saturated liquid and vapor
+        const u_f = saturatedLiquidEnergy(T);
+        const u_g = saturatedVaporEnergy(T);
+        const u = u_f + q * (u_g - u_f);
+
+        const rho_f = saturatedLiquidDensity(T);
+        const rho_g = saturatedVaporDensity(T);
+        const v_f = 1 / rho_f;
+        const v_g = 1 / rho_g;
+        const v = v_f + q * (v_g - v_f);
+
+        return { u, v };
+      } else if (fluid.phase === 'vapor') {
+        // Superheated vapor: approximate u from saturated vapor energy
+        // For superheated steam, u increases roughly linearly with T above saturation
+        const u = saturatedVaporEnergy(T);
+        const rho = saturatedVaporDensity(T);
+        const v = 1 / rho;
+        return { u, v };
+      } else {
+        // Subcooled liquid: approximate u from saturated liquid energy
+        const u = saturatedLiquidEnergy(T);
+        const rho = saturatedLiquidDensity(T);
+        const v = 1 / rho;
+        return { u, v };
+      }
+    };
+
+    const fromUV = getUV(fromFluid);
+    const toUV = getUV(toFluid);
+
+    // Average u and v
+    const avgU = (fromUV.u + toUV.u) / 2;
+    const avgV = (fromUV.v + toUV.v) / 2;
+
+    // Use calculateState to derive T, P, phase, quality from averaged u and v
+    // calculateState takes (mass, U_total, V_total), so we use unit mass (1 kg)
+    const state = calculateState(1, avgU, avgV);
+
+    console.log(`[Pipe Fluid] From: ${fromFluid.temperature.toFixed(0)}K ${fromFluid.phase} (u=${fromUV.u.toFixed(0)}, v=${fromUV.v.toFixed(4)}), ` +
+                `To: ${toFluid.temperature.toFixed(0)}K ${toFluid.phase} (u=${toUV.u.toFixed(0)}, v=${toUV.v.toFixed(4)}), ` +
+                `Avg: ${state.temperature.toFixed(0)}K ${state.phase} (u=${avgU.toFixed(0)}, v=${avgV.toFixed(4)})`);
+
+    return {
+      temperature: state.temperature,
+      pressure: state.pressure,
+      phase: state.phase,
+      quality: state.quality ?? 0,
+      flowRate: 0
+    };
+  }
+
+  /**
+   * Get the fluid properties at a specific elevation within a component.
+   * For two-phase components, high elevation = vapor space, low elevation = liquid space.
+   * For components with inlet/outlet fluids (turbines, pumps), uses the appropriate fluid
+   * based on which port is being connected.
+   * Returns null if the component has no valid fluid state.
+   */
+  private getFluidAtElevation(component: PlantComponent, elevation: number, port?: Port): Fluid | null {
+    // Check for inlet/outlet fluids (turbines, pumps, etc.)
+    // These components have separate inlet and outlet conditions
+    const compAny = component as any;
+    if (compAny.inletFluid || compAny.outletFluid) {
+      // Determine which fluid to use based on port direction or ID
+      const isOutletPort = port?.direction === 'out' || port?.id?.includes('outlet');
+
+      if (isOutletPort && compAny.outletFluid) {
+        console.log(`[getFluidAtElevation] ${component.id}: using outletFluid (port: ${port?.id})`);
+        return compAny.outletFluid;
+      } else if (compAny.inletFluid) {
+        console.log(`[getFluidAtElevation] ${component.id}: using inletFluid (port: ${port?.id})`);
+        return compAny.inletFluid;
+      }
+    }
+
+    if (!component.fluid) {
+      console.log(`[getFluidAtElevation] ${component.id}: no fluid defined, returning null`);
+      return null;
     }
 
     const fluid = component.fluid;
+    const componentHeight = this.getComponentHeight(component);
+    const fillLevel = this.getComponentFillLevel(component);
+    const liquidLevelHeight = fillLevel * componentHeight;
+
+    console.log(`[getFluidAtElevation] ${component.id}: phase=${fluid.phase}, fillLevel=${fillLevel.toFixed(2)}, ` +
+                `height=${componentHeight.toFixed(1)}m, liquidLevel=${liquidLevelHeight.toFixed(1)}m, ` +
+                `connectionElev=${elevation.toFixed(1)}m`);
 
     // For non-two-phase, just return the fluid as-is
     if (fluid.phase !== 'two-phase') {
+      console.log(`[getFluidAtElevation] ${component.id}: not two-phase, returning as-is: ${fluid.phase}`);
       return fluid;
     }
 
     // For two-phase: determine if we're in vapor or liquid space based on elevation
-    // Get component height
-    const componentHeight = this.getComponentHeight(component);
-    const fillLevel = this.getComponentFillLevel(component);
-
-    // Liquid level height = fillLevel * componentHeight
-    const liquidLevelHeight = fillLevel * componentHeight;
-
     // If elevation is above liquid level, we're in vapor space
     if (elevation > liquidLevelHeight) {
       // Return saturated vapor properties
       const T_sat = saturationTemperature(fluid.pressure);
+      console.log(`[getFluidAtElevation] ${component.id}: elev ${elevation.toFixed(1)} > liquidLevel ${liquidLevelHeight.toFixed(1)} -> VAPOR`);
       return {
         temperature: T_sat,
         pressure: fluid.pressure,
@@ -1318,6 +1502,7 @@ export class ConstructionManager {
     } else {
       // Return saturated liquid properties
       const T_sat = saturationTemperature(fluid.pressure);
+      console.log(`[getFluidAtElevation] ${component.id}: elev ${elevation.toFixed(1)} <= liquidLevel ${liquidLevelHeight.toFixed(1)} -> LIQUID`);
       return {
         temperature: T_sat,
         pressure: fluid.pressure,
@@ -1495,26 +1680,8 @@ export class ConstructionManager {
       if (component.type === 'pump') {
         const flow = properties.ratedFlow;
         component.diameter = 0.2 + Math.sqrt(flow / 1000) * 0.4;
-        // Update port positions for upright RCP-style pump
-        const scale = component.diameter * 1.3;
-        const pumpCasingWidth = scale * 0.75;
-        const pumpCasingHeight = scale * 0.5;
-        const suctionNozzleHeight = scale * 0.35;
-        const inletPipeLength = scale * 0.3;
-        const voluteBulge = scale * 0.18;
-        const outletPipeLength = scale * 0.45;
-        const totalHeight = scale * 1.9;
-        const motorTop = -totalHeight / 2;
-        const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
-        const casingBottom = couplingBottom + pumpCasingHeight;
-        const nozzleBottom = casingBottom + suctionNozzleHeight;
-        const inletY = nozzleBottom + inletPipeLength;
-        const outletY = couplingBottom + pumpCasingHeight * 0.35;
-        const outletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
-        if (component.ports && component.ports.length >= 2) {
-          component.ports[0].position = { x: 0, y: inletY };
-          component.ports[1].position = { x: outletX, y: outletY };
-        }
+        // Recalculate port positions
+        this.updatePumpPorts(component as PlantComponent);
       }
     }
     if (properties.ratedHead !== undefined) {
@@ -1524,16 +1691,12 @@ export class ConstructionManager {
       component.running = properties.initialState === 'on';
     }
     if (properties.orientation !== undefined && component.type === 'pump') {
-      // Update pump rotation based on orientation
-      const orientation = properties.orientation;
-      switch (orientation) {
-        case 'left-right': component.rotation = 0; break;
-        case 'right-left': component.rotation = Math.PI; break;
-        case 'bottom-top': component.rotation = -Math.PI / 2; break;
-        case 'top-bottom': component.rotation = Math.PI / 2; break;
-      }
-      // Store orientation for next edit dialog
-      (component as any).orientation = orientation;
+      // Store orientation - rendering handles transforms internally
+      (component as any).orientation = properties.orientation;
+      // Rotation stays 0 for pumps
+      component.rotation = 0;
+      // Recalculate port positions based on new orientation
+      this.updatePumpPorts(component as PlantComponent);
     }
 
     // Fluid properties - update initial conditions

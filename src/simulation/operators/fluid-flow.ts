@@ -192,6 +192,7 @@ export class FlowOperator implements PhysicsOperator {
 
       const upstreamId = conn.massFlowRate > 0 ? conn.fromNodeId : conn.toNodeId;
       const downstreamId = conn.massFlowRate > 0 ? conn.toNodeId : conn.fromNodeId;
+      const upstreamElevation = conn.massFlowRate > 0 ? conn.fromElevation : conn.toElevation;
 
       const upstream = state.flowNodes.get(upstreamId);
       const downstream = state.flowNodes.get(downstreamId);
@@ -206,12 +207,51 @@ export class FlowOperator implements PhysicsOperator {
 
       if (massToMove < 1e-6) continue; // Skip only truly negligible transfers
 
-      // Calculate specific energy BEFORE any mass is removed
-      // This is the key fix - we use the current (unchanged) upstream state
-      const upstreamSpecificEnergy = upstream.fluid.internalEnergy / upstream.fluid.mass;
+      // Determine what phase is actually flowing based on connection elevation
+      // For two-phase nodes, use phase-specific energy to correctly model
+      // liquid vs vapor flow from different parts of the node
+      let specificEnergyToUse: number;
+      const flowPhase = this.getFlowPhase(upstream, upstreamElevation);
+
+      if (upstream.fluid.phase === 'two-phase' && flowPhase !== 'mixture') {
+        // Use phase-specific specific energy for the flowing phase
+        if (flowPhase === 'vapor') {
+          // Vapor space: use saturated vapor internal energy
+          // Approximate saturated vapor specific internal energy
+          // u_g ≈ u_f + h_fg - Pv_g, but for simplicity use average vapor energy
+          // Steam at 150 bar: u_g ≈ 2600 kJ/kg, at 10 bar: u_g ≈ 2580 kJ/kg
+          // The upstream node's quality gives us the vapor fraction
+          const quality = upstream.fluid.quality ?? 0.5;
+          if (quality > 0.01) {
+            // Vapor energy = (total energy - liquid mass * liquid energy) / vapor mass
+            // Estimate liquid specific energy from saturation properties
+            const T = upstream.fluid.temperature;
+            const u_f = 4186 * (T - 273.15); // Approximate saturated liquid u (kJ/kg)
+            const liquidMass = upstream.fluid.mass * (1 - quality);
+            const vaporMass = upstream.fluid.mass * quality;
+            const vaporEnergy = upstream.fluid.internalEnergy - liquidMass * u_f;
+            specificEnergyToUse = vaporEnergy / vaporMass;
+          } else {
+            // Very low quality - use bulk average
+            specificEnergyToUse = upstream.fluid.internalEnergy / upstream.fluid.mass;
+          }
+        } else {
+          // Liquid space: use saturated liquid internal energy
+          const T = upstream.fluid.temperature;
+          // Approximate saturated liquid specific internal energy
+          // u_f ≈ c_p * (T - T_ref) where c_p ≈ 4186 J/kg/K for water
+          specificEnergyToUse = 4186 * (T - 273.15);
+        }
+        // Bound to reasonable values
+        const bulkSpecificEnergy = upstream.fluid.internalEnergy / upstream.fluid.mass;
+        specificEnergyToUse = Math.max(0.5 * bulkSpecificEnergy, Math.min(2 * bulkSpecificEnergy, specificEnergyToUse));
+      } else {
+        // Single-phase or mixture: use bulk average specific energy
+        specificEnergyToUse = upstream.fluid.internalEnergy / upstream.fluid.mass;
+      }
 
       // Energy carried by this mass
-      const energyToMove = massToMove * upstreamSpecificEnergy;
+      const energyToMove = massToMove * specificEnergyToUse;
 
       // Validate
       if (!isFinite(energyToMove) || !isFinite(massToMove)) continue;
@@ -323,17 +363,17 @@ export class FlowOperator implements PhysicsOperator {
     state: SimulationState,
     dt: number
   ): number {
-    // Use stored pressures from FluidStateUpdateOperator (which ran at end of last step).
-    // These use the hybrid pressure model (P_base + feedback) which is physically correct.
-    // Previously we computed "fresh" pressures here, but that caused mismatches because
-    // operators before FlowOperator (like ConvectionOperator) modify energy, which changes
-    // what the fresh pressure calculation would produce.
-    const P_from = fromNode.fluid.pressure;
-    const P_to = toNode.fluid.pressure;
+    // Calculate pressures at the actual connection points, accounting for hydrostatic
+    // head within each node. For two-phase nodes, connections below the liquid level
+    // experience higher pressure due to the liquid column above.
+    //
+    // This replaces the previous approach of using node.fluid.pressure directly,
+    // which didn't account for where on the node the connection was located.
+    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
+    const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
 
     // Base pressure difference (positive = from has higher pressure)
-    // For liquid loops, this should be small (just friction losses)
-    // The pressurizer sets the system pressure
+    // Now includes hydrostatic effects within each node
     const dP_pressure = P_from - P_to;
 
     // For density calculation, determine which node is upstream based on current flow direction
@@ -655,6 +695,61 @@ export class FlowOperator implements PhysicsOperator {
     }
 
     return actualDensity; // Fallback
+  }
+
+  /**
+   * Calculate the pressure at a specific connection elevation within a node.
+   *
+   * For two-phase nodes, the node's stored pressure is the saturation pressure
+   * at the liquid surface. Connections below the liquid level experience additional
+   * hydrostatic pressure from the liquid column above them.
+   *
+   * P_connection = P_node + ρ_liquid * g * (liquidLevel - connectionElevation)
+   *
+   * For single-phase liquid nodes, the stored pressure is typically at some
+   * reference point. We adjust based on connection elevation.
+   *
+   * @param node The flow node
+   * @param connectionElevation Height of connection point relative to node bottom (m)
+   * @returns Pressure at the connection point (Pa)
+   */
+  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
+    const g = 9.81;
+    const baseP = node.fluid.pressure;
+
+    // Get node height estimate
+    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+
+    // Default connection elevation to mid-height if not specified
+    if (connectionElevation === undefined) {
+      connectionElevation = nodeHeight / 2;
+    }
+
+    if (node.fluid.phase === 'two-phase') {
+      // For two-phase, base pressure is saturation pressure at the liquid surface
+      // Connections below liquid level have higher pressure due to liquid head
+      const liquidLevel = this.getLiquidLevel(node);
+      const rho_liquid = this.getNodeDensity(node, 'liquid');
+
+      if (connectionElevation < liquidLevel) {
+        // Below liquid level: add hydrostatic head from liquid above
+        const liquidHead = liquidLevel - connectionElevation;
+        return baseP + rho_liquid * g * liquidHead;
+      } else {
+        // Above liquid level (in steam space): just saturation pressure
+        // (vapor is compressible, hydrostatic effect is negligible)
+        return baseP;
+      }
+    } else if (node.fluid.phase === 'liquid') {
+      // For liquid nodes, treat like 100% filled two-phase: base pressure is at top,
+      // connections below get hydrostatic head from the liquid column above
+      const rho = this.getNodeDensity(node, 'actual');
+      const liquidHead = nodeHeight - connectionElevation;  // distance from connection to top
+      return baseP + rho * g * liquidHead;
+    } else {
+      // Vapor - negligible hydrostatic effect
+      return baseP;
+    }
   }
 
   /**

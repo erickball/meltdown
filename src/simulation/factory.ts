@@ -704,6 +704,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const pumpState = createPumpStateFromComponent(component);
       if (pumpState) {
         state.components.pumps.set(pumpState.id, pumpState);
+        // Link plant component to pump state for debug panel
+        (component as any).simPumpId = pumpState.id;
       }
     }
 
@@ -717,18 +719,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
           connectedFlowPath: '', // Set later when connections are processed
           crackingPressure: valve.crackingPressure || 10000, // Default 0.1 bar
         });
+        // Link plant component to check valve state for debug panel
+        (component as any).simValveId = component.id;
       } else if (valve.valveType === 'relief' || valve.valveType === 'porv') {
         // Relief valves and PORVs - for now, treat as regular valves
         // TODO: Add proper relief valve logic with setpoint
         const valveState = createValveStateFromComponent(component);
         if (valveState) {
           state.components.valves.set(valveState.id, valveState);
+          (component as any).simValveId = valveState.id;
         }
       } else {
         // Standard valves (gate, globe, ball, butterfly)
         const valveState = createValveStateFromComponent(component);
         if (valveState) {
           state.components.valves.set(valveState.id, valveState);
+          (component as any).simValveId = valveState.id;
         }
       }
     }
@@ -793,7 +799,10 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     if (flowConnection) {
       state.flowConnections.push(flowConnection);
 
-      // Link pump to its flow connection if the pump is on this path
+      // Link pump to its OUTLET flow connection (where pump is the FROM component)
+      // Pump head is added to flow going FROM the pump TO the downstream component
+      // We only set connectedFlowPath when pump is the FROM component to ensure
+      // pump head is applied in the correct direction
       const fromComponent = plantState.components.get(connection.fromComponentId);
       const toComponent = plantState.components.get(connection.toComponentId);
 
@@ -803,12 +812,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
           pumpState.connectedFlowPath = flowConnection.id;
         }
       }
-      if (toComponent?.type === 'pump') {
-        const pumpState = state.components.pumps.get(toComponent.id);
-        if (pumpState) {
-          pumpState.connectedFlowPath = flowConnection.id;
-        }
-      }
+      // NOTE: We intentionally do NOT set connectedFlowPath when pump is the TO component
+      // because pump head should only be applied on the outlet side
 
       // Link valve to its flow connection
       if (fromComponent?.type === 'valve') {
@@ -861,30 +866,30 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const volume = tank.volume !== undefined
         ? tank.volume
         : Math.PI * Math.pow(tank.width / 2, 2) * tank.height;
-      const temp = tank.fluid?.temperature || 350; // Default 350K
 
       // Use fillLevel to determine the liquid/vapor split
       // fillLevel is 0-1, default to 1.0 (full) if not specified
       const fillLevel = tank.fillLevel !== undefined ? tank.fillLevel : 1.0;
 
-      console.log(`[Factory] Tank ${component.id}: volume=${volume.toFixed(2)} m³, fillLevel=${fillLevel}, temp=${temp.toFixed(0)}K`);
-
       let fluid: FluidState;
 
       if (fillLevel >= 0.999) {
-        // Fully liquid - use specified pressure
+        // Fully liquid - use specified pressure and temperature
         const pressure = tank.fluid?.pressure || 1e6;
-        console.log(`[Factory] Tank ${component.id}: creating LIQUID state at ${pressure/1e5} bar`);
+        const temp = tank.fluid?.temperature || 350;
+        console.log(`[Factory] Tank ${component.id}: creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
         fluid = createFluidState(temp, pressure, 'liquid', 0, volume);
       } else if (fillLevel <= 0.001) {
-        // Fully vapor - can use specified pressure (no liquid to constrain it)
-        const pressure = tank.fluid?.pressure || Water.saturationPressure(temp);
-        console.log(`[Factory] Tank ${component.id}: creating VAPOR state at ${pressure/1e5} bar`);
+        // Fully vapor - use specified pressure and temperature
+        const pressure = tank.fluid?.pressure || 1e5;
+        const temp = tank.fluid?.temperature || 400;
+        console.log(`[Factory] Tank ${component.id}: creating VAPOR state at ${pressure/1e5} bar, ${temp}K`);
         fluid = createFluidState(temp, pressure, 'vapor', 1, volume);
       } else {
         // Partially filled - two-phase mixture
-        // Pressure is saturation pressure (ignoring user-specified pressure)
-        const pressure = Water.saturationPressure(temp);
+        // Use the user-specified pressure, derive saturation temperature from it
+        const pressure = tank.fluid?.pressure || 1e6;
+        const temp = Water.saturationTemperature(pressure);
 
         // Calculate quality from fill level (volume fraction to mass fraction)
         // V_liquid = fillLevel * V, V_vapor = (1 - fillLevel) * V
@@ -897,7 +902,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         const totalMass = m_liquid + m_vapor;
         const quality = m_vapor / totalMass;
 
-        console.log(`[Factory] Tank ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P_sat=${(pressure/1e5).toFixed(1)} bar, rho_f=${rho_f.toFixed(0)}, rho_g=${rho_g.toFixed(1)}, quality=${quality.toFixed(4)}`);
+        console.log(`[Factory] Tank ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P=${(pressure/1e5).toFixed(1)} bar, T_sat=${temp.toFixed(0)}K, quality=${quality.toFixed(4)}`);
 
         // Create fluid state with calculated quality
         fluid = createFluidState(temp, pressure, 'two-phase', quality, volume);
@@ -918,13 +923,22 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const pipe = component as any;
       const radius = pipe.diameter / 2;
       const volume = Math.PI * radius * radius * pipe.length;
-      const temp = pipe.fluid?.temperature || 350;
       const pressure = pipe.fluid?.pressure || 1e6;
+      const phase = pipe.fluid?.phase || 'liquid';
+      const quality = pipe.fluid?.quality ?? 0;
+
+      // For two-phase, use saturation temperature from pressure
+      // For single-phase, use specified temperature
+      const temp = phase === 'two-phase'
+        ? Water.saturationTemperature(pressure)
+        : (pipe.fluid?.temperature || 350);
+
+      console.log(`[Factory] Pipe ${component.id}: creating ${phase} state at ${(pressure/1e5).toFixed(1)} bar, ${temp.toFixed(0)}K, quality=${quality.toFixed(2)}`);
 
       return {
         id: component.id,
         label: component.label || 'Pipe',
-        fluid: createFluidState(temp, pressure, 'liquid', 0, volume),
+        fluid: createFluidState(temp, pressure, phase, quality, volume),
         volume,
         hydraulicDiameter: pipe.diameter,
         flowArea: Math.PI * radius * radius,
@@ -1100,12 +1114,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
  */
 function createPumpStateFromComponent(component: PlantComponent): PumpState | null {
   const pump = component as any;
+  const isRunning = pump.running ?? true;
 
   return {
     id: component.id,
-    running: pump.running ?? true,
-    speed: pump.running ? 1.0 : 0,
-    effectiveSpeed: 0, // Start at 0, ramp up
+    running: isRunning,
+    speed: isRunning ? 1.0 : 0,  // Target speed (1.0 = 100%)
+    effectiveSpeed: 0, // Start at 0, ramp up over rampUpTime
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
     efficiency: 0.85,

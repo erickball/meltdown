@@ -75,6 +75,7 @@ export interface PipeComponent extends ComponentBase {
   diameter: number;     // meters (inner)
   thickness: number;    // wall thickness
   length: number;       // meters
+  pressureRating?: number;  // Design pressure (bar) - for rupture calculations
   // Endpoint positions for 3D rendering
   // Start point uses position (x, y) and elevation from ComponentBase
   // End point has its own position and elevation
@@ -89,6 +90,7 @@ export interface PumpComponent extends ComponentBase {
   speed: number;        // 0-1 (fraction of rated)
   ratedFlow: number;    // kg/s at full speed
   ratedHead: number;    // meters of head
+  orientation?: 'left-right' | 'right-left';  // Outlet direction (default: left-right)
 }
 
 export interface VesselComponent extends ComponentBase {

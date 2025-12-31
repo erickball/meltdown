@@ -88,6 +88,79 @@ function renderTwoPhaseFluid(
   }
 }
 
+/**
+ * Calculate liquid volume fraction for stratified two-phase display.
+ * In construction mode, uses stored fillLevel directly.
+ * In simulation mode, derives from mass quality using density ratio.
+ *
+ * @param component - Component with optional fillLevel property
+ * @param fluid - Fluid state with quality and pressure
+ * @param isSimulating - Whether simulation is running
+ * @returns Liquid volume fraction (0-1), where 1 = fully liquid
+ */
+function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean): number {
+  // In construction mode, use stored fillLevel if available
+  if (!isSimulating && component.fillLevel !== undefined) {
+    return component.fillLevel;
+  }
+  // In simulation mode or if no fillLevel, derive from mass quality
+  const massQuality = fluid.quality ?? 0.5;
+  const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
+  return 1 - vaporVolumeFraction;
+}
+
+/**
+ * Render stratified two-phase fluid with vapor on top, liquid on bottom.
+ * Used for tanks, pressurizers, vessels, HX shell sides, condensers.
+ *
+ * @param ctx - Canvas context
+ * @param fluid - Fluid state (must be two-phase)
+ * @param x - Left edge of render area
+ * @param y - Top edge of render area (vapor starts here)
+ * @param width - Width of render area
+ * @param height - Total height of render area
+ * @param liquidFraction - Volume fraction of liquid (0-1)
+ */
+function renderStratifiedTwoPhase(
+  ctx: CanvasRenderingContext2D,
+  fluid: Fluid,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  liquidFraction: number
+): void {
+  const liquidHeight = height * liquidFraction;
+  const vaporHeight = height - liquidHeight;
+
+  // Saturation temperature for coloring
+  const T_sat = getSaturationTemp(fluid.pressure);
+
+  // Draw vapor space (top)
+  if (vaporHeight > 0) {
+    const vaporFluid: Fluid = {
+      temperature: T_sat,
+      pressure: fluid.pressure,
+      phase: 'vapor',
+      flowRate: 0,
+    };
+    ctx.fillStyle = getFluidColor(vaporFluid);
+    ctx.fillRect(x, y, width, vaporHeight);
+  }
+
+  // Draw liquid (bottom)
+  if (liquidHeight > 0) {
+    const liquidFluid: Fluid = {
+      temperature: T_sat,
+      pressure: fluid.pressure,
+      phase: 'liquid',
+      flowRate: 0,
+    };
+    ctx.fillStyle = getFluidColor(liquidFluid);
+    ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
+  }
+}
+
 export function screenToWorld(point: Point, view: ViewState): Point {
   return {
     x: (point.x - view.offsetX) / view.zoom,
@@ -102,7 +175,8 @@ export function renderComponent(
   view: ViewState,
   isSelected: boolean = false,
   skipPorts: boolean = false,
-  connections?: Connection[]
+  connections?: Connection[],
+  isSimulating: boolean = false
 ): void {
   // Note: Context is already transformed to component position by caller
   // We no longer transform here to support isometric projection
@@ -110,7 +184,7 @@ export function renderComponent(
   // Dispatch to specific renderer
   switch (component.type) {
     case 'tank':
-      renderTank(ctx, component, view);
+      renderTank(ctx, component, view, isSimulating);
       break;
     case 'pipe':
       renderPipe(ctx, component, view);
@@ -119,7 +193,7 @@ export function renderComponent(
       renderPump(ctx, component, view);
       break;
     case 'vessel':
-      renderVessel(ctx, component, view);
+      renderVessel(ctx, component, view, isSimulating);
       break;
     case 'valve':
       renderValve(ctx, component, view);
@@ -137,7 +211,7 @@ export function renderComponent(
       renderCondenser(ctx, component, view);
       break;
     case 'reactorVessel':
-      renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections);
+      renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections, isSimulating);
       break;
   }
 
@@ -155,7 +229,7 @@ export function renderComponent(
   }
 }
 
-function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState): void {
+function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState, isSimulating: boolean = false): void {
   const w = tank.width * view.zoom;
   const h = tank.height * view.zoom;
   const wallPx = Math.max(2, tank.wallThickness * view.zoom);
@@ -169,48 +243,12 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   const innerH = h - wallPx * 2;
 
   if (tank.fluid) {
-    // For two-phase in tanks, show stratified: liquid at bottom, vapor at top
-    // Use volume fraction (not mass quality) for visual height split
     if (tank.fluid.phase === 'two-phase') {
-      const massQuality = tank.fluid.quality ?? 0.5;
-      // Convert mass quality to volume fraction for proper visual representation
-      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, tank.fluid.pressure);
-      // Liquid fills the bottom, vapor fills the top
-      const liquidFraction = 1 - vaporVolumeFraction;
-      const liquidHeight = innerH * liquidFraction;
-      const vaporHeight = innerH - liquidHeight;
-
-      // Saturation temperature for coloring (use consistent formula from colors.ts)
-      const T_sat = getSaturationTemp(tank.fluid.pressure);
-
-      // Draw vapor space (top) - use saturation temperature for proper coloring
-      if (vaporHeight > 0) {
-        const vaporFluid: Fluid = {
-          temperature: T_sat,
-          pressure: tank.fluid.pressure,
-          phase: 'vapor',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(-innerW / 2, -innerH / 2, innerW, vaporHeight);
-      }
-
-      // Draw liquid (bottom) - use saturation temperature for proper coloring
-      if (liquidHeight > 0) {
-        const liquidFluid: Fluid = {
-          temperature: T_sat,
-          pressure: tank.fluid.pressure,
-          phase: 'liquid',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(liquidFluid);
-        ctx.fillRect(-innerW / 2, -innerH / 2 + vaporHeight, innerW, liquidHeight);
-      }
+      // Stratified display: vapor on top, liquid on bottom
+      const liquidFraction = getLiquidFraction(tank, tank.fluid, isSimulating);
+      renderStratifiedTwoPhase(ctx, tank.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction);
     } else {
-      // Single phase fluid - fills the entire tank
-      // When phase is 'liquid', the tank is completely filled with compressed liquid
-      // (no vapor space - the "pressurizer has gone solid")
-      // When phase is 'vapor', the tank is completely filled with superheated vapor
+      // Single phase fluid fills the entire tank
       ctx.fillStyle = getFluidColor(tank.fluid);
       ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH);
     }
@@ -303,6 +341,25 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
   // Suction nozzle on bottom, discharge on side, motor on top
   const d = pump.diameter * view.zoom;
   const scale = d * 1.3; // 30% bigger overall
+
+  // Handle orientation:
+  // - left-right: vertical pump, inlet bottom, outlet right (default)
+  // - right-left: vertical pump, inlet bottom, outlet left (mirror horizontally)
+  // - bottom-top: horizontal pump, inlet left, outlet right (rotate -90°)
+  // - top-bottom: horizontal pump, inlet right, outlet left (rotate +90°)
+  const orientation = (pump as any).orientation || 'left-right';
+
+  ctx.save();
+
+  // Apply transform based on orientation
+  if (orientation === 'right-left') {
+    ctx.scale(-1, 1);  // Mirror horizontally
+  } else if (orientation === 'bottom-top') {
+    ctx.rotate(-Math.PI / 2);  // Rotate -90° (motor on right)
+  } else if (orientation === 'top-bottom') {
+    ctx.rotate(Math.PI / 2);  // Rotate +90° (motor on left)
+  }
+  // left-right: no transform needed
 
   // Component dimensions (all relative to scale)
   const motorWidth = scale * 0.5;
@@ -525,9 +582,11 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
   ctx.fill();
   ctx.lineWidth = 1.5;
   ctx.stroke();
+
+  ctx.restore();  // Restore from horizontal mirror transform
 }
 
-function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, view: ViewState): void {
+function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, view: ViewState, isSimulating: boolean = false): void {
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
   const outerR = innerR + vessel.wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
@@ -595,10 +654,11 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   }
   ctx.clip();
 
-  // Fill with fluid color
+  // Fill with fluid color - stratified for two-phase (like pressurizers)
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
-      renderTwoPhaseFluid(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, 5);
+      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -705,7 +765,7 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   ctx.stroke();
 }
 
-function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[]): void {
+function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[], isSimulating: boolean = false): void {
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
   const outerR = innerR + vessel.wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
@@ -788,38 +848,8 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   // Fill with fluid color (downcomer region) - stratified if two-phase
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
-      // Draw stratified: vapor on top, liquid on bottom
-      const massQuality = vessel.fluid.quality ?? 0.5;
-      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, vessel.fluid.pressure);
-      const liquidFraction = 1 - vaporVolumeFraction;
-      const liquidHeight = h * liquidFraction;
-      const vaporHeight = h - liquidHeight;
-
-      const T_sat = getSaturationTemp(vessel.fluid.pressure);
-
-      // Vapor (top)
-      if (vaporHeight > 0) {
-        const vaporFluid: Fluid = {
-          temperature: T_sat,
-          pressure: vessel.fluid.pressure,
-          phase: 'vapor',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(-innerR, -h / 2, innerR * 2, vaporHeight);
-      }
-
-      // Liquid (bottom)
-      if (liquidHeight > 0) {
-        const liquidFluid: Fluid = {
-          temperature: T_sat,
-          pressure: vessel.fluid.pressure,
-          phase: 'liquid',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(liquidFluid);
-        ctx.fillRect(-innerR, -h / 2 + vaporHeight, innerR * 2, liquidHeight);
-      }
+      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -848,38 +878,8 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
-      // Draw stratified: vapor on top, liquid on bottom
-      const massQuality = vessel.fluid.quality ?? 0.5;
-      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, vessel.fluid.pressure);
-      const liquidFraction = 1 - vaporVolumeFraction;
-      const liquidHeightBarrel = barrelHeight * liquidFraction;
-      const vaporHeightBarrel = barrelHeight - liquidHeightBarrel;
-
-      const T_sat = getSaturationTemp(vessel.fluid.pressure);
-
-      // Vapor (top)
-      if (vaporHeightBarrel > 0) {
-        const vaporFluid: Fluid = {
-          temperature: T_sat,
-          pressure: vessel.fluid.pressure,
-          phase: 'vapor',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, vaporHeightBarrel);
-      }
-
-      // Liquid (bottom)
-      if (liquidHeightBarrel > 0) {
-        const liquidFluid: Fluid = {
-          temperature: T_sat,
-          pressure: vessel.fluid.pressure,
-          phase: 'liquid',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(liquidFluid);
-        ctx.fillRect(-barrelInnerR, barrelTopY + vaporHeightBarrel, barrelInnerR * 2, liquidHeightBarrel);
-      }
+      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
@@ -1342,39 +1342,9 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   if (hx.secondaryFluid) {
     if (hx.secondaryFluid.phase === 'two-phase') {
       // Stratified: vapor on top, liquid on bottom
-      // Use volume fraction (not mass quality) for visual height split
-      const massQuality = hx.secondaryFluid.quality ?? 0.5;
-      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, hx.secondaryFluid.pressure);
-      const liquidFraction = 1 - vaporVolumeFraction;
-      const liquidHeight = innerH * liquidFraction;
-      const vaporHeight = innerH - liquidHeight;
-
-      // Use consistent saturation temperature formula
-      const T_sat = getSaturationTemp(hx.secondaryFluid.pressure);
-
-      // Vapor (top) - with pressure-dependent color
-      if (vaporHeight > 0) {
-        const vaporFluid: Fluid = {
-          temperature: T_sat,
-          pressure: hx.secondaryFluid.pressure,
-          phase: 'vapor',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(innerLeft, innerTop, innerW, vaporHeight);
-      }
-
-      // Liquid (bottom) - with pressure-dependent color
-      if (liquidHeight > 0) {
-        const liquidFluid: Fluid = {
-          temperature: T_sat,
-          pressure: hx.secondaryFluid.pressure,
-          phase: 'liquid',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(liquidFluid);
-        ctx.fillRect(innerLeft, innerTop + vaporHeight, innerW, liquidHeight);
-      }
+      // HX shell side always uses quality-based calculation (no stored fillLevel)
+      const liquidFraction = getLiquidFraction(hx, hx.secondaryFluid, true);
+      renderStratifiedTwoPhase(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction);
     } else {
       ctx.fillStyle = getFluidColor(hx.secondaryFluid);
       ctx.fillRect(innerLeft, innerTop, innerW, innerH);
@@ -1932,38 +1902,10 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
 
   if (condenser.fluid) {
     if (condenser.fluid.phase === 'two-phase') {
-      // Show stratified - condensate at bottom, steam at top
-      const massQuality = condenser.fluid.quality ?? 0.5;
-      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, condenser.fluid.pressure);
-      const liquidFraction = 1 - vaporVolumeFraction;
-      const liquidHeight = innerH * liquidFraction;
-      const vaporHeight = innerH - liquidHeight;
-
-      const T_sat = getSaturationTemp(condenser.fluid.pressure);
-
-      // Vapor (top)
-      if (vaporHeight > 0) {
-        const vaporFluid: Fluid = {
-          temperature: T_sat,
-          pressure: condenser.fluid.pressure,
-          phase: 'vapor',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(innerLeft, innerTop, innerW, vaporHeight);
-      }
-
-      // Liquid (bottom)
-      if (liquidHeight > 0) {
-        const liquidFluid: Fluid = {
-          temperature: T_sat,
-          pressure: condenser.fluid.pressure,
-          phase: 'liquid',
-          flowRate: 0,
-        };
-        ctx.fillStyle = getFluidColor(liquidFluid);
-        ctx.fillRect(innerLeft, innerTop + vaporHeight, innerW, liquidHeight);
-      }
+      // Stratified: condensate at bottom, steam at top
+      // Condenser always uses quality-based calculation (no stored fillLevel)
+      const liquidFraction = getLiquidFraction(condenser, condenser.fluid, true);
+      renderStratifiedTwoPhase(ctx, condenser.fluid, innerLeft, innerTop, innerW, innerH, liquidFraction);
     } else {
       ctx.fillStyle = getFluidColor(condenser.fluid);
       ctx.fillRect(innerLeft, innerTop, innerW, innerH);
@@ -2093,12 +2035,32 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
       const pumpBodyWidth = pumpScale * 0.75; // casing width
       const pumpVoluteBulge = pumpScale * 0.18;
       const pumpOutletPipe = pumpScale * 0.45;
-      return {
-        x: -pumpBodyWidth / 2 - 5,
-        y: -pumpBodyHeight / 2 - 5,
-        width: pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe + 10,
-        height: pumpTotalHeight + 10,
-      };
+      // Account for orientation
+      const pumpOrientation = (component as any).orientation || 'left-right';
+      const isHorizontal = pumpOrientation === 'bottom-top' || pumpOrientation === 'top-bottom';
+
+      if (isHorizontal) {
+        // For horizontal orientations, swap width and height
+        const hWidth = pumpTotalHeight;  // vertical height becomes horizontal width
+        const hHeight = pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe;  // horizontal extent becomes height
+        return {
+          x: -hWidth / 2 - 5,
+          y: -hHeight / 2 - 5,
+          width: hWidth + 10,
+          height: hHeight + 10,
+        };
+      } else {
+        // Vertical orientations (left-right, right-left)
+        const pumpOutletOnLeft = pumpOrientation === 'right-left';
+        return {
+          x: pumpOutletOnLeft
+            ? -(pumpBodyWidth / 2 + pumpVoluteBulge + pumpOutletPipe) - 5
+            : -pumpBodyWidth / 2 - 5,
+          y: -pumpBodyHeight / 2 - 5,
+          width: pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe + 10,
+          height: pumpTotalHeight + 10,
+        };
+      }
     case 'vessel':
       const r = (component.innerDiameter / 2 + component.wallThickness) * view.zoom;
       return {
@@ -2230,21 +2192,78 @@ export function renderGrid(ctx: CanvasRenderingContext2D, view: ViewState, canva
 // ============================================================================
 
 /**
- * Get position for a flow connection arrow based on the flow node and connection.
+ * Get position for a flow connection arrow based on the flow connection and plant connections.
  * Returns the world position where an arrow should be drawn.
- * Now considers connection elevation to position arrows at actual connection points.
+ * Uses actual port positions from plant connections for accurate positioning.
  */
 function getFlowConnectionPosition(
-  conn: { fromNodeId: string; toNodeId: string; fromElevation?: number; toElevation?: number },
+  conn: { id?: string; fromNodeId: string; toNodeId: string; fromElevation?: number; toElevation?: number },
   nodeId: string,
   plantState: PlantState
 ): { position: Point; angle: number } | null {
-  // Map flow node IDs to plant component positions
-  // Flow connections are between flow nodes (core-coolant, hot-leg, sg-primary, cold-leg, pressurizer)
+  // Try to find the corresponding plant connection from the flow connection ID
+  // Flow connection IDs are in the format "flow-{fromComponentId}-{toComponentId}"
+  let plantConnection: Connection | undefined;
+  let fromComponent: PlantComponent | undefined;
+  let toComponent: PlantComponent | undefined;
 
-  // Find the component that corresponds to this flow node
-  // Priority: 1) exact simNodeId match, 2) simNodeId prefix match (for HX tube/shell),
-  //           3) direct component ID match (user-constructed plants)
+  if (conn.id && conn.id.startsWith('flow-')) {
+    // Try to find a matching plant connection
+    // Handle component IDs that may contain dashes by checking all connections
+    for (const pc of plantState.connections) {
+      if (conn.id === `flow-${pc.fromComponentId}-${pc.toComponentId}`) {
+        plantConnection = pc;
+        fromComponent = plantState.components.get(pc.fromComponentId);
+        toComponent = plantState.components.get(pc.toComponentId);
+        break;
+      }
+    }
+  }
+
+  // Determine if we're looking for the "from" or "to" end of the connection
+  const isFrom = conn.fromNodeId === nodeId;
+
+  // If we found the plant connection, use the actual port positions
+  if (plantConnection && fromComponent && toComponent) {
+    const component = isFrom ? fromComponent : toComponent;
+    const portId = isFrom ? plantConnection.fromPortId : plantConnection.toPortId;
+
+    // Find the port on the component
+    if (component.ports) {
+      const port = component.ports.find(p => p.id === portId);
+      if (port) {
+        // Calculate world position of the port
+        const cos = Math.cos(component.rotation);
+        const sin = Math.sin(component.rotation);
+        const portWorldPos = {
+          x: component.position.x + port.position.x * cos - port.position.y * sin,
+          y: component.position.y + port.position.x * sin + port.position.y * cos,
+        };
+
+        // Determine arrow angle based on port direction or connection direction
+        // Arrow should point in the direction of flow (from -> to)
+        let angle = 0;
+        if (port.direction === 'out') {
+          // Outlet port - arrow points outward from component
+          angle = Math.atan2(port.position.y, port.position.x) + component.rotation;
+        } else if (port.direction === 'in') {
+          // Inlet port - arrow points into component
+          angle = Math.atan2(port.position.y, port.position.x) + component.rotation + Math.PI;
+        } else {
+          // Bidirectional - determine angle based on connection direction
+          const otherComponent = isFrom ? toComponent : fromComponent;
+          const dx = otherComponent.position.x - component.position.x;
+          const dy = otherComponent.position.y - component.position.y;
+          angle = Math.atan2(dy, dx);
+          if (!isFrom) angle += Math.PI; // Reverse for "to" end
+        }
+
+        return { position: portWorldPos, angle };
+      }
+    }
+  }
+
+  // Fallback: find the component that corresponds to this flow node
   let component: PlantComponent | undefined;
   for (const [compId, comp] of plantState.components) {
     const simNodeId = (comp as { simNodeId?: string }).simNodeId;
@@ -2267,11 +2286,7 @@ function getFlowConnectionPosition(
 
   if (!component) return null;
 
-  // Determine which side of the component this connection is on
-  const isFrom = conn.fromNodeId === nodeId;
-
   // Get the elevation for this end of the connection (if specified)
-  // Elevation is in meters, representing the height of the connection point
   const elevation = isFrom ? conn.fromElevation : conn.toElevation;
 
   // Get component center and determine arrow position based on component type
@@ -2279,123 +2294,85 @@ function getFlowConnectionPosition(
   let offset: Point = { x: 0, y: 0 };
   let angle = 0;
 
-  // For pipes, arrows go at the ends (or at elevation if specified)
+  // Component-type-specific fallback positioning
   if (component.type === 'pipe') {
     const pipe = component as PipeComponent;
     const cos = Math.cos(pipe.rotation);
     const sin = Math.sin(pipe.rotation);
 
-    // For horizontal pipes, elevation affects the position along the pipe
-    // For the hot leg to pressurizer connection, elevation 0.7m means 70% up the diameter
     if (elevation !== undefined && Math.abs(sin) < 0.1) {
-      // Horizontal pipe - use elevation to position along the length
-      // Assume pipe diameter ~0.8m, so elevation 0.7 means near the top
-      const lengthPosition = pipe.length * 0.7; // Position at 70% along the pipe for surge line
-      offset = { x: cos * lengthPosition, y: -20 }; // Offset up from pipe center
-      angle = -Math.PI / 2; // Point upward for surge line
+      const lengthPosition = pipe.length * 0.7;
+      offset = { x: cos * lengthPosition, y: -20 };
+      angle = -Math.PI / 2;
     } else if (isFrom) {
-      // Arrow at the outlet end of the pipe
       offset = { x: cos * pipe.length, y: sin * pipe.length };
       angle = pipe.rotation;
     } else {
-      // Arrow at the inlet end of the pipe
       offset = { x: 0, y: 0 };
       angle = pipe.rotation + Math.PI;
     }
   } else if (component.type === 'tank') {
-    // Pressurizer/tank - arrow points up/down
     const tank = component as TankComponent;
-
-    // Use elevation to position arrow at actual connection height
     if (elevation !== undefined) {
-      // Convert elevation (meters) to pixel offset
-      // Assume tank is ~10m tall, so scale elevation proportionally
-      const normalizedElev = elevation / 10.0; // 0.1 = 10% from bottom
-      const yOffset = tank.height * (0.5 - normalizedElev); // Convert to offset from center
-
-      if (isFrom) {
-        offset = { x: 0, y: -yOffset }; // Negative because y increases downward
-        angle = Math.PI / 2; // Down
-      } else {
-        offset = { x: 0, y: -yOffset };
-        angle = -Math.PI / 2; // Up
-      }
+      const normalizedElev = elevation / 10.0;
+      const yOffset = tank.height * (0.5 - normalizedElev);
+      offset = { x: 0, y: -yOffset };
+      angle = isFrom ? Math.PI / 2 : -Math.PI / 2;
     } else {
-      // Default: arrows at top of tank
-      if (isFrom) {
-        offset = { x: 0, y: -tank.height / 2 - 0.5 };
-        angle = Math.PI / 2; // Down
-      } else {
-        offset = { x: 0, y: -tank.height / 2 - 0.5 };
-        angle = -Math.PI / 2; // Up
-      }
+      offset = { x: 0, y: -tank.height / 2 - 0.5 };
+      angle = isFrom ? Math.PI / 2 : -Math.PI / 2;
     }
   } else if (component.type === 'vessel') {
-    // Reactor vessel - arrows on sides
     const vessel = component as VesselComponent;
     const r = vessel.innerDiameter / 2 + vessel.wallThickness + 0.5;
-    if (isFrom) {
-      offset = { x: r, y: -vessel.height / 4 };
-      angle = 0; // Right
-    } else {
-      offset = { x: -r, y: -vessel.height / 4 };
-      angle = Math.PI; // Left
-    }
+    offset = isFrom ? { x: r, y: -vessel.height / 4 } : { x: -r, y: -vessel.height / 4 };
+    angle = isFrom ? 0 : Math.PI;
   } else if (component.type === 'heatExchanger') {
-    // Steam generator - arrows on sides
     const hx = component as HeatExchangerComponent;
-    if (isFrom) {
-      offset = { x: -hx.width / 2 - 0.5, y: hx.height / 3 };
-      angle = Math.PI; // Left (primary out)
-    } else {
-      offset = { x: -hx.width / 2 - 0.5, y: -hx.height / 3 };
-      angle = Math.PI; // Left (primary in)
-    }
+    offset = isFrom ? { x: -hx.width / 2 - 0.5, y: hx.height / 3 } : { x: -hx.width / 2 - 0.5, y: -hx.height / 3 };
+    angle = Math.PI;
   } else if (component.type === 'pump') {
-    // Pump - arrows on sides
     const pump = component as any;
     const r = (pump.diameter || 1) / 2 + 0.3;
-    if (isFrom) {
-      offset = { x: r, y: 0 };
-      angle = 0; // Right (outlet)
+    const orientation = pump.orientation || 'left-right';
+    // Account for pump orientation:
+    // left-right: inlet bottom, outlet right
+    // right-left: inlet bottom, outlet left (mirrored)
+    // bottom-top: inlet left, outlet right (rotated -90°)
+    // top-bottom: inlet right, outlet left (rotated +90°)
+    if (orientation === 'right-left') {
+      // Vertical pump, outlet on left
+      offset = isFrom ? { x: -r, y: 0 } : { x: 0, y: r };  // from=outlet(left), to=inlet(bottom)
+      angle = isFrom ? Math.PI : Math.PI / 2;
+    } else if (orientation === 'bottom-top') {
+      // Horizontal pump, inlet on left, outlet on right
+      offset = isFrom ? { x: 0, y: -r } : { x: 0, y: r };  // from=outlet(top), to=inlet(bottom)
+      angle = isFrom ? -Math.PI / 2 : Math.PI / 2;
+    } else if (orientation === 'top-bottom') {
+      // Horizontal pump, inlet on right, outlet on left
+      offset = isFrom ? { x: 0, y: r } : { x: 0, y: -r };  // from=outlet(bottom), to=inlet(top)
+      angle = isFrom ? Math.PI / 2 : -Math.PI / 2;
     } else {
-      offset = { x: -r, y: 0 };
-      angle = Math.PI; // Left (inlet)
+      // left-right: vertical pump, outlet on right
+      offset = isFrom ? { x: r, y: 0 } : { x: 0, y: r };  // from=outlet(right), to=inlet(bottom)
+      angle = isFrom ? 0 : Math.PI / 2;
     }
   } else if (component.type === 'valve') {
-    // Valve - arrows on sides
     const valve = component as any;
     const r = (valve.diameter || 0.5) / 2 + 0.3;
-    if (isFrom) {
-      offset = { x: r, y: 0 };
-      angle = 0; // Right (outlet)
-    } else {
-      offset = { x: -r, y: 0 };
-      angle = Math.PI; // Left (inlet)
-    }
+    offset = isFrom ? { x: r, y: 0 } : { x: -r, y: 0 };
+    angle = isFrom ? 0 : Math.PI;
   } else if (component.type === 'condenser') {
-    // Condenser - arrows on sides (steam in top, condensate out bottom)
     const cond = component as any;
     const w = (cond.width || 5) / 2 + 0.5;
     const h = (cond.height || 3) / 2;
-    if (isFrom) {
-      offset = { x: w, y: h * 0.5 }; // Condensate out (lower right)
-      angle = 0; // Right
-    } else {
-      offset = { x: -w, y: -h * 0.5 }; // Steam in (upper left)
-      angle = Math.PI; // Left
-    }
+    offset = isFrom ? { x: w, y: h * 0.5 } : { x: -w, y: -h * 0.5 };
+    angle = isFrom ? 0 : Math.PI;
   } else if (component.type === 'turbine-generator' || component.type === 'turbine-driven-pump') {
-    // Turbine components - horizontal flow through
     const turb = component as any;
     const length = turb.length || 10;
-    if (isFrom) {
-      offset = { x: length / 2 + 0.5, y: 0 }; // Exhaust end
-      angle = 0; // Right
-    } else {
-      offset = { x: -length / 2 - 0.5, y: 0 }; // Inlet end
-      angle = Math.PI; // Left
-    }
+    offset = isFrom ? { x: length / 2 + 0.5, y: 0 } : { x: -length / 2 - 0.5, y: 0 };
+    angle = isFrom ? 0 : Math.PI;
   }
 
   return {
