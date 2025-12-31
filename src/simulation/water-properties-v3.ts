@@ -3058,6 +3058,46 @@ export function resetWaterPropsProfile(): void {}
 
 export function clearStateCache(): void {}
 
+/**
+ * Preload water properties data asynchronously.
+ * Call this early after page load to avoid blocking the main thread later.
+ * Uses async fetch instead of synchronous XMLHttpRequest.
+ */
+export async function preloadWaterProperties(): Promise<void> {
+  if (dataLoaded) return;
+
+  console.log('[WaterProps v3] Preloading water properties asynchronously...');
+
+  try {
+    // Only do async loading in browser
+    const isBrowser = typeof window !== 'undefined';
+
+    if (isBrowser && !steamTableContent) {
+      // Use async fetch instead of sync XHR
+      const response = await fetch('/steam-table.txt');
+      if (!response.ok) {
+        throw new Error(`Failed to fetch steam table: HTTP ${response.status}`);
+      }
+      steamTableContent = await response.text();
+    }
+
+    // Now call the regular loadData which will use the pre-fetched content
+    loadData();
+
+    console.log('[WaterProps v3] Preload complete');
+  } catch (e) {
+    console.error('[WaterProps v3] Preload failed:', e);
+    // Fall back to sync loading when actually needed
+  }
+}
+
+/**
+ * Check if water properties data has been loaded.
+ */
+export function isWaterPropertiesLoaded(): boolean {
+  return dataLoaded;
+}
+
 export function addEnergy(mass: number, energy: number, volume: number, added: number): WaterState {
   return calculateState(mass, energy + added, volume);
 }
