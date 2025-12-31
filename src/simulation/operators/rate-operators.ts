@@ -299,24 +299,28 @@ export class FlowRateOperator implements RateOperator {
       let upstreamNode: FlowNode;
       let upstreamId: string;
       let downstreamId: string;
+      let upstreamElevation: number | undefined;
 
       if (massFlow >= 0) {
         upstreamNode = fromNode;
         upstreamId = conn.fromNodeId;
         downstreamId = conn.toNodeId;
+        upstreamElevation = conn.fromElevation;
       } else {
         upstreamNode = toNode;
         upstreamId = conn.toNodeId;
         downstreamId = conn.fromNodeId;
+        upstreamElevation = conn.toElevation;
       }
 
       const absMassFlow = Math.abs(massFlow);
 
-      // Specific enthalpy of upstream fluid: h = u + P*v
-      const u_up = upstreamNode.fluid.internalEnergy / upstreamNode.fluid.mass;
-      const v_up = upstreamNode.volume / upstreamNode.fluid.mass;
-      const P_up = upstreamNode.fluid.pressure;
-      const h_up = u_up + P_up * v_up;
+      // Determine what phase is actually flowing based on connection elevation
+      // For two-phase nodes, we need to use phase-specific enthalpy
+      const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+
+      // Get specific enthalpy based on what's actually flowing
+      const h_up = this.getSpecificEnthalpy(upstreamNode, flowPhase);
 
       // Energy flow rate = mass flow * specific enthalpy
       const energyFlow = absMassFlow * h_up;
@@ -333,6 +337,109 @@ export class FlowRateOperator implements RateOperator {
     }
 
     return rates;
+  }
+
+  /**
+   * Determine what phase of fluid is flowing based on connection elevation
+   * relative to liquid level in a two-phase node.
+   */
+  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
+    // Single phase nodes always flow their phase
+    if (node.fluid.phase !== 'two-phase') {
+      return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
+    }
+
+    // Estimate node height (assume cylindrical with height ≈ diameter)
+    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+
+    // If no elevation specified, assume mid-height connection (mixture)
+    if (connectionElevation === undefined) {
+      connectionElevation = nodeHeight / 2;
+    }
+
+    // Calculate liquid level from quality
+    const quality = node.fluid.quality ?? 0.5;
+    const T_C = node.fluid.temperature - 273.15;
+
+    // Approximate saturated liquid/vapor densities
+    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                       700 - 2.5 * (T_C - 300);
+    const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
+
+    // Void fraction = vapor volume / total volume
+    // α = x * ρ_l / (x * ρ_l + (1-x) * ρ_v)  where x is quality
+    const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
+
+    // Liquid level (assuming liquid settles at bottom)
+    const liquidLevel = nodeHeight * (1 - voidFraction);
+
+    // Connection below liquid level: draw liquid
+    if (connectionElevation < liquidLevel - 0.1) {  // 10cm tolerance
+      return 'liquid';
+    }
+
+    // Connection above liquid level: draw vapor
+    if (connectionElevation > liquidLevel + 0.1) {  // 10cm tolerance
+      return 'vapor';
+    }
+
+    // Connection at interface: draw mixture
+    return 'mixture';
+  }
+
+  /**
+   * Get specific enthalpy of the flowing phase.
+   * h = u + Pv for the phase actually being drawn from the node.
+   */
+  private getSpecificEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
+    const P = node.fluid.pressure;
+    const T = node.fluid.temperature;
+    const T_C = T - 273.15;
+
+    // For single-phase or mixture, use bulk average
+    if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') {
+      const u = node.fluid.internalEnergy / node.fluid.mass;
+      const v = node.volume / node.fluid.mass;
+      return u + P * v;
+    }
+
+    // For two-phase node drawing from specific phase, use phase-specific properties
+    if (flowPhase === 'liquid') {
+      // Saturated liquid specific internal energy
+      // u_f ≈ c_p * (T - T_ref) where c_p ≈ 4186 J/kg/K for water
+      const u_f = 4186 * T_C; // J/kg relative to 0°C
+
+      // Saturated liquid specific volume (approximate)
+      const rho_f = T_C < 100 ? 1000 - 0.08 * T_C :
+                    T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                    700 - 2.5 * (T_C - 300);
+      const v_f = 1 / rho_f;
+
+      // Specific enthalpy h_f = u_f + P*v_f
+      return u_f + P * v_f;
+    } else {
+      // Saturated vapor specific internal energy
+      // u_g = u_f + u_fg where u_fg ≈ h_fg - P*(v_g - v_f) ≈ h_fg - P*v_g
+      // h_fg varies from ~2257 kJ/kg at 100°C to ~1000 kJ/kg near critical
+      const u_f = 4186 * T_C;
+
+      // Approximate h_fg (latent heat)
+      const P_bar = P / 1e5;
+      const h_fg = P_bar < 10 ? 2200e3 :
+                   P_bar < 100 ? 2200e3 - (P_bar - 10) * 10e3 :
+                   1300e3 - (P_bar - 100) * 10e3;
+
+      // Saturated vapor specific volume
+      const rho_g = P * 0.018 / (8.314 * T);
+      const v_g = 1 / rho_g;
+
+      // u_g ≈ u_f + h_fg - P*v_g (from h = u + Pv and h_g = h_f + h_fg)
+      const u_g = u_f + h_fg - P * v_g;
+
+      // Specific enthalpy h_g = u_g + P*v_g = u_f + h_fg
+      return u_g + P * v_g;
+    }
   }
 }
 
@@ -807,11 +914,31 @@ export class FlowMomentumRateOperator implements RateOperator {
       const dz = conn.elevation || 0; // positive = upward
       const dP_gravity = -rho_avg * g * dz; // negative if going up
 
-      // Pump head - uses upstream density since that's the fluid the pump is actually moving
+      // Pump head - need to determine correct density for pump suction
       let dP_pump = 0;
       for (const [, pump] of state.components.pumps) {
         if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0) {
-          dP_pump = pump.effectiveSpeed * pump.ratedHead * rho_upstream * g;
+          // For two-phase suction, pumps draw from the bottom (liquid) if available
+          const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
+          let pumpRho = rho_upstream; // Default to upstream density
+
+          if (upstreamNode.fluid.phase === 'two-phase' && upstreamNode.fluid.quality !== undefined) {
+            // Check if there's enough liquid to draw from
+            const liquidFraction = 1 - upstreamNode.fluid.quality;
+            const liquidMass = upstreamNode.fluid.mass * liquidFraction;
+
+            // If there's significant liquid (more than 10kg), use liquid density
+            if (liquidMass > 10) {
+              // Approximate saturated liquid density
+              const T_C = upstreamNode.fluid.temperature - 273.15;
+              pumpRho = T_C < 100 ? 1000 - 0.08 * T_C :
+                        T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                        700 - 2.5 * (T_C - 300);
+            }
+            // Otherwise use mixture density (pump is cavitating)
+          }
+
+          dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
         }
       }
 
@@ -837,12 +964,15 @@ export class FlowMomentumRateOperator implements RateOperator {
       // === Total driving pressure (computed early for pump/valve checks) ===
       const dP_driving = dP_pressure + dP_gravity + dP_pump;
 
-      // Check valve - prevents reverse flow
+      // Check valve - prevents reverse flow and requires cracking pressure to open
       const checkValve = state.components.checkValves?.get(conn.id);
       if (checkValve) {
-        // If driving pressure is reverse and flow is trying to go reverse
-        if (dP_driving < 0 && currentFlow <= 0) {
-          // Prevent reverse flow - decay to zero
+        const crackingPressure = checkValve.crackingPressure ?? 0;
+        // Check valve remains closed if:
+        // 1. Driving pressure is below cracking pressure (not enough to open)
+        // 2. OR driving pressure is negative (trying to reverse)
+        if (dP_driving < crackingPressure) {
+          // Check valve is closed - decay flow to zero
           const tau = 0.1;
           rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
           continue;
