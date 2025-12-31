@@ -9,6 +9,7 @@ import {
   getComponentElevation,
   renderDebugGrid,
 } from './isometric';
+import { getFluidColor } from './colors';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -1195,7 +1196,7 @@ export class PlantCanvas {
               (pipe as any).length = screenLength / pipeZoom;
 
               const isSelected = component.id === this.selectedComponentId;
-              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections);
+              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections, !!this.simState);
 
               // Restore original length
               (pipe as any).length = originalLength;
@@ -1221,7 +1222,10 @@ export class PlantCanvas {
         }
 
         ctx.translate(translateX, translateY);
-        ctx.rotate(component.rotation);
+        // Skip rotation for pumps - they handle orientation internally via mirroring
+        if (component.type !== 'pump') {
+          ctx.rotate(component.rotation);
+        }
 
         // Apply vertical compression based on view angle (looking from above = compressed)
         // Skip for pipes since they're thin horizontal elements and compression looks wrong
@@ -1231,7 +1235,7 @@ export class PlantCanvas {
 
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections);
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState);
 
         // Render elevation label (reset scale first so text isn't squished)
         if (component.type !== 'pipe') {
@@ -1241,11 +1245,14 @@ export class PlantCanvas {
       } else {
         const screenPos = worldToScreen(component.position, this.view);
         ctx.translate(screenPos.x, screenPos.y);
-        ctx.rotate(component.rotation);
+        // Skip rotation for pumps - they handle orientation internally via mirroring
+        if (component.type !== 'pump') {
+          ctx.rotate(component.rotation);
+        }
 
         // Render the component
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections);
+        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !!this.simState);
       }
 
       ctx.restore();
@@ -1419,23 +1426,13 @@ export class PlantCanvas {
     ctx.stroke();
   }
 
-  // Get fluid color for connection rendering
+  // Get fluid color for connection rendering - uses same coloring as fluid nodes
   private getFluidColorForConnection(fluid: any): string {
     if (!fluid) return '#667788';
 
-    // Map temperature/phase to color
-    if (fluid.phase === 'vapor') {
-      return 'rgba(200, 200, 255, 0.8)';
-    } else if (fluid.phase === 'two-phase') {
-      return 'rgba(150, 180, 220, 0.8)';
-    } else {
-      // Liquid - color based on temperature
-      const temp = fluid.temperature || 300;
-      if (temp > 500) return 'rgba(255, 100, 100, 0.8)';
-      if (temp > 400) return 'rgba(255, 150, 100, 0.8)';
-      if (temp > 350) return 'rgba(200, 150, 100, 0.8)';
-      return 'rgba(100, 150, 200, 0.8)';
-    }
+    // Use the standard fluid color function for consistency with node rendering
+    // This ensures connections match the color of their source fluid
+    return getFluidColor(fluid);
   }
 
   // Render ground-level outline for a component in construction mode
