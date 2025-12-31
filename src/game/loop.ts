@@ -4,6 +4,10 @@
  * Integrates the physics simulation with the rendering and UI.
  * Handles the main update cycle, simulation speed control, and
  * automatic slowdown during rapid transients.
+ *
+ * Supports two integration methods:
+ * - 'euler': Traditional forward Euler with operator splitting 
+ * - 'rk45': Dormand-Prince RK45 with embedded error estimation
  */
 
 import {
@@ -21,7 +25,20 @@ import {
   checkScramConditions,
   triggerScram,
   resetScram,
+  // RK45 imports
+  RK45Solver,
+  ConductionRateOperator,
+  ConvectionRateOperator,
+  HeatGenerationRateOperator,
+  NeutronicsRateOperator,
+  FlowRateOperator,
+  FlowMomentumRateOperator,
+  TurbineCondenserRateOperator,
+  FluidStateConstraintOperator,
+  FlowDynamicsConstraintOperator,
 } from '../simulation';
+
+export type IntegrationMethod = 'euler' | 'rk45';
 
 export interface GameLoopConfig {
   // Simulation speed (1.0 = real time)
@@ -36,6 +53,9 @@ export interface GameLoopConfig {
   // Performance
   targetFrameRate: number;
   maxTimestep: number; // Maximum timestep in seconds
+
+  // Integration method
+  integrationMethod: IntegrationMethod;
 }
 
 const DEFAULT_CONFIG: GameLoopConfig = {
@@ -48,6 +68,8 @@ const DEFAULT_CONFIG: GameLoopConfig = {
 
   targetFrameRate: 60,
   maxTimestep: 0.5, // 500ms default as requested
+
+  integrationMethod: 'rk45', // Default to 'rk45' to test
 };
 
 export type GameEventType =
@@ -67,7 +89,8 @@ export interface GameEvent {
 }
 
 export class GameLoop {
-  private solver: Solver;
+  private solver: Solver | null = null;
+  private rk45Solver: RK45Solver | null = null;
   private state: SimulationState;
   private config: GameLoopConfig;
 
@@ -102,41 +125,67 @@ export class GameLoop {
     this.simSpeed = this.config.initialSimSpeed;
     this.targetSimSpeed = this.simSpeed;
 
-    // Initialize solver with operators in correct order
-    this.solver = new Solver({
-      minDt: 1e-5,
-      maxDt: this.config.maxTimestep,
-      targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
-    });
+    if (this.config.integrationMethod === 'rk45') {
+      // Initialize RK45 solver with rate-based operators
+      console.log('[GameLoop] Using RK45 integration method');
+      this.rk45Solver = new RK45Solver({
+        minDt: 1e-6,
+        maxDt: this.config.maxTimestep,
+        initialDt: 0.001,
+        relTol: 1e-3,
+        absTol: 1e-6,
+      });
 
-    // Add operators in physics order:
-    //
-    // Key insight: FlowOperator needs pressures computed by FluidStateUpdateOperator.
-    // By putting FlowOperator FIRST, it uses the pressures computed at the END of the
-    // previous timestep, which are fresh and consistent. Then heat transfer operators
-    // modify energy, and FluidStateUpdateOperator recomputes pressures for next step.
-    //
-    // 1. Fluid flow (uses pressures from end of last step, transfers mass/energy)
-    this.solver.addOperator(new FlowOperator());
+      // Add rate operators (compute derivatives)
+      this.rk45Solver.addRateOperator(new FlowMomentumRateOperator()); // Flow momentum (dṁ/dt)
+      this.rk45Solver.addRateOperator(new FlowRateOperator());          // Mass/energy transport
+      this.rk45Solver.addRateOperator(new NeutronicsRateOperator());
+      this.rk45Solver.addRateOperator(new HeatGenerationRateOperator());
+      this.rk45Solver.addRateOperator(new ConductionRateOperator());
+      this.rk45Solver.addRateOperator(new ConvectionRateOperator());
+      this.rk45Solver.addRateOperator(new TurbineCondenserRateOperator());
 
-    // 2. Neutronics (power generation) - may need subcycling
-    this.solver.addOperator(new NeutronicsOperator());
+      // Add constraint operators (enforce thermodynamic consistency)
+      this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
+      this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
+    } else {
+      // Initialize Euler solver with traditional operators
+      console.log('[GameLoop] Using Euler integration method');
+      this.solver = new Solver({
+        minDt: 1e-5,
+        maxDt: this.config.maxTimestep,
+        targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
+      });
 
-    // 3. Heat generation (distribute power to fuel)
-    this.solver.addOperator(new HeatGenerationOperator());
+      // Add operators in physics order:
+      //
+      // Key insight: FlowOperator needs pressures computed by FluidStateUpdateOperator.
+      // By putting FlowOperator FIRST, it uses the pressures computed at the END of the
+      // previous timestep, which are fresh and consistent. Then heat transfer operators
+      // modify energy, and FluidStateUpdateOperator recomputes pressures for next step.
+      //
+      // 1. Fluid flow (uses pressures from end of last step, transfers mass/energy)
+      this.solver.addOperator(new FlowOperator());
 
-    // 4. Conduction (heat spreads through solids)
-    this.solver.addOperator(new ConductionOperator());
+      // 2. Neutronics (power generation) - may need subcycling
+      this.solver.addOperator(new NeutronicsOperator());
 
-    // 5. Convection (heat transfer solid→fluid, modifies fluid energy)
-    this.solver.addOperator(new ConvectionOperator());
+      // 3. Heat generation (distribute power to fuel)
+      this.solver.addOperator(new HeatGenerationOperator());
 
-    // 6. Fluid state update (computes T, P, phase from conserved quantities)
-    // This sets pressures that FlowOperator will use in the NEXT timestep
-    this.solver.addOperator(new FluidStateUpdateOperator());
+      // 4. Conduction (heat spreads through solids)
+      this.solver.addOperator(new ConductionOperator());
 
-    // 7. Turbine and condenser (work extraction, heat rejection to external sink)
-    this.solver.addOperator(new TurbineCondenserOperator(createDefaultTurbineCondenserConfig()));
+      // 5. Convection (heat transfer solid→fluid, modifies fluid energy)
+      this.solver.addOperator(new ConvectionOperator());
+
+      // 6. Fluid state update (computes T, P, phase from conserved quantities)
+      // This sets pressures that FlowOperator will use in the NEXT timestep
+      this.solver.addOperator(new FluidStateUpdateOperator());
+
+      // 7. Turbine and condenser (work extraction, heat rejection to external sink)
+      this.solver.addOperator(new TurbineCondenserOperator(createDefaultTurbineCondenserConfig()));
+    }
 
     // Initialize tracking
     this.previousPower = initialState.neutronics.power;
@@ -148,12 +197,21 @@ export class GameLoop {
    */
   resetState(newState: SimulationState): void {
     this.state = newState;
-    this.previousPower = newState.neutronics.power;
+    this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
     this.cumulativePowerChange = 0;
     this.cumulativeTempChange = 0;
     this.changeWindowTime = 0;
     this.recentEvents = [];
+
+    // Reset solver state (timestep, counters, etc.)
+    if (this.rk45Solver) {
+      this.rk45Solver.reset();
+    }
+    if (this.solver) {
+      // Euler solver doesn't have explicit reset, but we could add one
+    }
+
     console.log('[GameLoop] Simulation state reset');
   }
 
@@ -189,8 +247,15 @@ export class GameLoop {
       // Calculate simulation time to advance
       const simDt = frameDt * this.simSpeed;
 
-      // Advance physics - pass actual frame time for accurate RT ratio calculation
-      const result = this.solver.advance(this.state, simDt, frameDt * 1000);
+      // Advance physics using the configured solver
+      let result: { state: SimulationState; metrics: SolverMetrics };
+      if (this.rk45Solver) {
+        result = this.rk45Solver.advance(this.state, simDt);
+      } else if (this.solver) {
+        result = this.solver.advance(this.state, simDt, frameDt * 1000);
+      } else {
+        throw new Error('[GameLoop] No solver configured');
+      }
       this.state = result.state;
 
       // Update fuel heat generation from neutronics
@@ -411,7 +476,12 @@ export class GameLoop {
     this.config.maxTimestep = Math.max(0.001, Math.min(1.0, maxDt)); // Clamp between 1ms and 1s
 
     // Update solver config dynamically
-    (this.solver as any).config.maxDt = this.config.maxTimestep;
+    if (this.solver) {
+      (this.solver as any).config.maxDt = this.config.maxTimestep;
+    }
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).config.maxDt = this.config.maxTimestep;
+    }
   }
 
   getMaxTimestep(): number {
@@ -488,7 +558,14 @@ export class GameLoop {
    */
   step(dt: number = 0.001): void {
     // Advance physics by the specified amount
-    const result = this.solver.advance(this.state, dt);
+    let result: { state: SimulationState; metrics: SolverMetrics };
+    if (this.rk45Solver) {
+      result = this.rk45Solver.advance(this.state, dt);
+    } else if (this.solver) {
+      result = this.solver.advance(this.state, dt);
+    } else {
+      throw new Error('[GameLoop] No solver configured');
+    }
     this.state = result.state;
 
     // Update fuel heat generation from neutronics
@@ -508,7 +585,15 @@ export class GameLoop {
    */
   singleStep(): number {
     // Execute exactly one solver substep
-    const result = this.solver.singleStep(this.state);
+    let result: { state: SimulationState; dt: number; metrics: SolverMetrics };
+    if (this.rk45Solver) {
+      const rk45Result = this.rk45Solver.singleStep(this.state);
+      result = { state: rk45Result.state, dt: rk45Result.dt, metrics: rk45Result.metrics };
+    } else if (this.solver) {
+      result = this.solver.singleStep(this.state);
+    } else {
+      throw new Error('[GameLoop] No solver configured');
+    }
     this.state = result.state;
 
     // Update fuel heat generation from neutronics
@@ -571,7 +656,31 @@ export class GameLoop {
    * Get solver metrics
    */
   getSolverMetrics(): SolverMetrics {
-    return this.solver.getMetrics();
+    if (this.solver) {
+      return this.solver.getMetrics();
+    }
+    // Return empty metrics for RK45 (metrics are returned per-advance call)
+    return {
+      currentDt: 0,
+      actualDt: 0,
+      maxStableDt: Infinity,
+      dtLimitedBy: 'RK45',
+      stabilityLimitedBy: 'none',
+      minDtUsed: 0,
+      subcycleCount: 0,
+      totalSteps: 0,
+      lastStepWallTime: 0,
+      avgStepWallTime: 0,
+      retriesThisFrame: 0,
+      maxPressureChange: 0,
+      maxFlowChange: 0,
+      maxMassChange: 0,
+      consecutiveSuccesses: 0,
+      realTimeRatio: 1,
+      isFallingBehind: false,
+      fallingBehindSince: 0,
+      operatorTimes: new Map(),
+    };
   }
 
   /**

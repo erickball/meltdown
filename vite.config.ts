@@ -5,6 +5,7 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     assetsDir: 'assets',
+    target: 'esnext', // Support top-level await
     // Generate a single JS file for simpler deployment
     rollupOptions: {
       output: {
