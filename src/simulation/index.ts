@@ -7,7 +7,7 @@
 // Core types
 export * from './types';
 
-// Solver
+// Solver (Euler)
 export {
   Solver,
   cloneSimulationState,
@@ -15,6 +15,38 @@ export {
   resetSolverProfile,
 } from './solver';
 export type { PhysicsOperator, SolverConfig, SolverProfile } from './solver';
+
+// RK45 Solver
+export {
+  RK45Solver,
+  createZeroRates,
+  addRates,
+  scaleRates,
+  applyRatesToState,
+} from './rk45-solver';
+export type {
+  RateOperator,
+  ConstraintOperator,
+  StateRates,
+  FlowNodeRates,
+  FlowConnectionRates,
+  ThermalNodeRates,
+  NeutronicsRates,
+  RK45Config,
+} from './rk45-solver';
+
+// Rate-based operators for RK45
+export {
+  ConductionRateOperator,
+  ConvectionRateOperator,
+  HeatGenerationRateOperator,
+  NeutronicsRateOperator,
+  FlowRateOperator,
+  FlowMomentumRateOperator,
+  TurbineCondenserRateOperator,
+  FluidStateConstraintOperator,
+  FlowDynamicsConstraintOperator,
+} from './operators/rate-operators';
 
 // Operators
 export * from './operators';

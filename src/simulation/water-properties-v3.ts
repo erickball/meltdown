@@ -84,6 +84,8 @@ interface SaturationPair {
   v_g: number;    // m³/kg
   u_f: number;    // J/kg
   u_g: number;    // J/kg
+  h_f?: number;   // J/kg - saturated liquid enthalpy (optional, loaded from detailed table)
+  h_g?: number;   // J/kg - saturated vapor enthalpy (optional, loaded from detailed table)
 }
 
 // ============================================================================
@@ -254,6 +256,7 @@ function loadDetailedSaturationTable(): void {
     detailedSaturationData = [];
 
     // Skip header line
+    // Columns: P(MPa) T(°C) VL VV UL UV DUvap HL HV DHvap SL SV DSvap
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -268,8 +271,15 @@ function loadDetailedSaturationTable(): void {
       const u_f = parseFloat(parts[4]) * 1000;  // kJ/kg to J/kg
       const u_g = parseFloat(parts[5]) * 1000;  // kJ/kg to J/kg
 
+      // Parse enthalpy columns if available (columns 7 and 8, 0-indexed)
+      const h_f = parts.length > 7 ? parseFloat(parts[7]) * 1000 : undefined;  // kJ/kg to J/kg
+      const h_g = parts.length > 8 ? parseFloat(parts[8]) * 1000 : undefined;  // kJ/kg to J/kg
+
       if (!isNaN(P) && !isNaN(T) && !isNaN(v_f) && !isNaN(v_g) && !isNaN(u_f) && !isNaN(u_g)) {
-        detailedSaturationData.push({ P, T, v_f, v_g, u_f, u_g });
+        const entry: SaturationPair = { P, T, v_f, v_g, u_f, u_g };
+        if (h_f !== undefined && !isNaN(h_f)) entry.h_f = h_f;
+        if (h_g !== undefined && !isNaN(h_g)) entry.h_g = h_g;
+        detailedSaturationData.push(entry);
       }
     }
 
@@ -2770,6 +2780,94 @@ export function latentHeat(T: number): number {
 
   const tau = 1 - T / T_CRIT;
   return 2.5e6 * Math.pow(Math.max(0, tau), 0.38);
+}
+
+/**
+ * Get saturated liquid enthalpy at a given pressure.
+ * Uses detailed saturation data if available, otherwise calculates from h = u + Pv.
+ * @param P Pressure in Pa
+ * @returns h_f in J/kg
+ */
+export function saturatedLiquidEnthalpy(P: number): number {
+  loadData();
+
+  // Use detailed data if available (has h_f)
+  const satData = detailedSaturationLoaded && detailedSaturationData.length > 0
+    ? detailedSaturationData
+    : saturationPairs;
+
+  // Binary search for closest pressure
+  let lo = 0, hi = satData.length - 1;
+  while (lo < hi - 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (satData[mid].P < P) lo = mid;
+    else hi = mid;
+  }
+
+  // Interpolate between lo and hi
+  const s0 = satData[lo];
+  const s1 = satData[hi];
+
+  if (P <= s0.P) {
+    return s0.h_f ?? (s0.u_f + s0.P * s0.v_f);
+  }
+  if (P >= s1.P) {
+    return s1.h_f ?? (s1.u_f + s1.P * s1.v_f);
+  }
+
+  const t = (P - s0.P) / (s1.P - s0.P);
+  const h_f_0 = s0.h_f ?? (s0.u_f + s0.P * s0.v_f);
+  const h_f_1 = s1.h_f ?? (s1.u_f + s1.P * s1.v_f);
+
+  return h_f_0 + t * (h_f_1 - h_f_0);
+}
+
+/**
+ * Get saturated vapor enthalpy at a given pressure.
+ * Uses detailed saturation data if available, otherwise calculates from h = u + Pv.
+ * @param P Pressure in Pa
+ * @returns h_g in J/kg
+ */
+export function saturatedVaporEnthalpy(P: number): number {
+  loadData();
+
+  const satData = detailedSaturationLoaded && detailedSaturationData.length > 0
+    ? detailedSaturationData
+    : saturationPairs;
+
+  // Binary search for closest pressure
+  let lo = 0, hi = satData.length - 1;
+  while (lo < hi - 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (satData[mid].P < P) lo = mid;
+    else hi = mid;
+  }
+
+  const s0 = satData[lo];
+  const s1 = satData[hi];
+
+  if (P <= s0.P) {
+    return s0.h_g ?? (s0.u_g + s0.P * s0.v_g);
+  }
+  if (P >= s1.P) {
+    return s1.h_g ?? (s1.u_g + s1.P * s1.v_g);
+  }
+
+  const t = (P - s0.P) / (s1.P - s0.P);
+  const h_g_0 = s0.h_g ?? (s0.u_g + s0.P * s0.v_g);
+  const h_g_1 = s1.h_g ?? (s1.u_g + s1.P * s1.v_g);
+
+  return h_g_0 + t * (h_g_1 - h_g_0);
+}
+
+/**
+ * Get latent heat of vaporization (enthalpy) at a given pressure.
+ * h_fg = h_g - h_f
+ * @param P Pressure in Pa
+ * @returns h_fg in J/kg
+ */
+export function latentHeatEnthalpy(P: number): number {
+  return saturatedVaporEnthalpy(P) - saturatedLiquidEnthalpy(P);
 }
 
 // ============================================================================

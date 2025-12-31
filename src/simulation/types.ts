@@ -179,6 +179,7 @@ export interface NeutronicsState {
   // SCRAM state
   scrammed: boolean;
   scramTime: number;                // Simulation time when SCRAM occurred
+  scramReason: string;              // Reason for the SCRAM
 
   // Reactivity breakdown (for debugging)
   reactivityBreakdown: {

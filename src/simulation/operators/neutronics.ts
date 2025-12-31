@@ -392,6 +392,7 @@ export function triggerScram(state: SimulationState, reason: string): Simulation
     console.log(`[SCRAM] Reactor scrammed at t=${state.time.toFixed(2)}s - Reason: ${reason}`);
     newState.neutronics.scrammed = true;
     newState.neutronics.scramTime = state.time;
+    newState.neutronics.scramReason = reason;
     newState.neutronics.controlRodPosition = 0; // Rods fully inserted
   }
 
@@ -410,6 +411,7 @@ export function resetScram(state: SimulationState): SimulationState {
     console.log(`[SCRAM] Scram reset at t=${state.time.toFixed(2)}s - Control rods remain at ${(newState.neutronics.controlRodPosition * 100).toFixed(1)}% insertion`);
     newState.neutronics.scrammed = false;
     newState.neutronics.scramTime = 0; // Reset to 0 instead of undefined
+    newState.neutronics.scramReason = '';
     // Note: Control rods stay at current position (usually 0 = fully inserted)
     // Operator must manually withdraw them to restart
   }
