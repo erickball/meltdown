@@ -259,10 +259,10 @@ function getTemperatureColor(T: number, T_sat: number, phase: 'liquid' | 'vapor'
       return lerpRGB(WATER_WARM, waterSat, (t - 0.55) / 0.45);
     }
   } else if (phase === 'two-phase') {
-    // Two-phase: handled in getFluidColor, but if we get here, blend based on quality
-    // This shouldn't normally be called for two-phase, but provide a reasonable fallback
-    // Blend from light blue (liquid) to white (vapor) using pressure-dependent colors
-    return lerpRGB(waterSat, steamSat, 0.5); // Default to 50% blend
+    // Two-phase should be handled in getFluidColor with quality parameter
+    // If we get here, that's a bug in the calling code
+    throw new Error(`[Colors] getTemperatureColor called for two-phase without quality. ` +
+      `Use getFluidColor instead. T=${T.toFixed(1)}K, T_sat=${T_sat.toFixed(1)}K`);
   } else {
     // Vapor/steam: white (saturated) -> yellow (100°C SH) -> orange (500°C SH)
     const superheat = T - T_sat;

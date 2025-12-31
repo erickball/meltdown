@@ -2461,11 +2461,13 @@ function getFlowConnectionPosition(
       component = comp;
       break;
     }
-    // Direct component ID match (fallback for user-constructed plants)
+    // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
     if (compId === nodeId) {
       component = comp;
       break;
     }
+    // Note: If none of the above match, component remains null and we return null below
+    // This is intentional - if we can't find the component, we shouldn't guess
   }
 
   if (!component) return null;

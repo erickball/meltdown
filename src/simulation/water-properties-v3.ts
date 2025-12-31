@@ -1970,10 +1970,8 @@ function determinePhaseFromUV(v: number, u: number): {
   if (satResult === null) {
     // v is outside the dome range - use cached bounds
     if (!boundsCache) {
-      // Fallback if caches not built
-      // No fallbacks! This should be an error. -Erick
-      lastPhaseDetectionDebug.decisionReason = 'caches not built, fallback';
-      return { phase: u < 1.8e6 ? 'liquid' : 'vapor' };
+      // Caches should always be built before simulation starts
+      throw new Error(`[WaterProperties] Phase detection called but boundsCache not built. Call preloadWaterProperties() first.`);
     }
 
     const { v_f_min } = boundsCache;
@@ -2201,9 +2199,10 @@ function findTwoPhaseState(v: number, u: number): {
     const discriminant = B * B - 4 * A * C;
 
     if (discriminant < 0) {
-      // No real solution - shouldn't happen for valid two-phase states
-      // Use midpoint as fallback
-      t = 0.5;
+      // No real solution - this indicates an invalid two-phase state
+      throw new Error(`[WaterProperties] findTwoPhaseState: Negative discriminant (${discriminant.toExponential(3)}) - ` +
+        `no valid pressure for v=${(v*1e6).toFixed(2)} mL/kg, u=${(u/1e3).toFixed(1)} kJ/kg. ` +
+        `This may indicate the state is outside the valid two-phase region.`);
     } else {
       const sqrt_disc = Math.sqrt(discriminant);
       const t1 = (-B + sqrt_disc) / (2 * A);
@@ -2434,11 +2433,11 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     debugInfo.intermediateValues.T_fromEnergy = T;
     debugInfo.calculationPath = 'LIQUID_ENERGY_BASED';
 
-    // Fallback if estimation fails
+    // No fallback - if estimation fails, that's an error
     if (!isFinite(T) || T < T_TRIPLE || T > T_CRIT) {
-      T = 373.15 + (u - 417500) / 4200;
-      debugInfo.calculationPath = 'LIQUID_FALLBACK';
-      debugInfo.intermediateValues.T_fallback = T;
+      throw new Error(`[WaterProperties] estimateTemperatureFromLiquidEnergy failed: ` +
+        `T=${T?.toFixed(1) ?? 'NaN'}K from u=${(u/1e3).toFixed(1)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg. ` +
+        `Valid range: ${T_TRIPLE.toFixed(1)}K to ${T_CRIT.toFixed(1)}K`);
     }
 
     // PRESSURE: Use liquid-only triangulation for accurate compressed liquid pressure

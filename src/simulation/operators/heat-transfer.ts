@@ -507,9 +507,10 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
                 const flowIsForward = conn.massFlowRate >= 0;
                 const pumpUpstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
                 const pumpUpstreamNode = newState.flowNodes.get(pumpUpstreamId);
-                const pumpRho = pumpUpstreamNode
-                  ? pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume
-                  : rho;  // fallback to current node density
+                if (!pumpUpstreamNode) {
+                  throw new Error(`[HeatTransfer] Pump '${pump.id}' upstream node '${pumpUpstreamId}' not found in flowNodes`);
+                }
+                const pumpRho = pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume;
 
                 // Pump head in pressure units: ΔP = ρ * g * H
                 // effectiveSpeed is maintained by FlowOperator.updatePumpSpeeds()

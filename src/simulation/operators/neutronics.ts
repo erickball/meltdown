@@ -280,13 +280,12 @@ export class NeutronicsOperator implements PhysicsOperator {
       }
     }
 
-    // Fallback: search by label (for backwards compatibility)
-    for (const [, node] of state.thermalNodes) {
-      if (node.label.toLowerCase().includes('fuel')) {
-        return node.temperature;
-      }
+    // No fallback - if fuelNodeId is set but node doesn't exist, that's a configuration error
+    if (n.fuelNodeId) {
+      throw new Error(`[Neutronics] Fuel node '${n.fuelNodeId}' not found in thermalNodes`);
     }
 
+    // If no fuelNodeId is configured, use reference temperature (no reactor core present)
     return n.refFuelTemp;
   }
 
@@ -304,14 +303,12 @@ export class NeutronicsOperator implements PhysicsOperator {
       }
     }
 
-    // Fallback: search by label (for backwards compatibility)
-    for (const [, node] of state.flowNodes) {
-      if (node.label.toLowerCase().includes('coolant') ||
-          node.label.toLowerCase().includes('core')) {
-        return node.fluid.temperature;
-      }
+    // No fallback - if coolantNodeId is set but node doesn't exist, that's a configuration error
+    if (n.coolantNodeId) {
+      throw new Error(`[Neutronics] Coolant node '${n.coolantNodeId}' not found in flowNodes`);
     }
 
+    // If no coolantNodeId is configured, use reference temperature (no reactor core present)
     return n.refCoolantTemp;
   }
 
@@ -329,14 +326,12 @@ export class NeutronicsOperator implements PhysicsOperator {
       }
     }
 
-    // Fallback: search by label (for backwards compatibility)
-    for (const [, node] of state.flowNodes) {
-      if (node.label.toLowerCase().includes('coolant') ||
-          node.label.toLowerCase().includes('core')) {
-        return node.fluid.mass / node.volume;
-      }
+    // No fallback - if coolantNodeId is set but node doesn't exist, that's a configuration error
+    if (n.coolantNodeId) {
+      throw new Error(`[Neutronics] Coolant node '${n.coolantNodeId}' not found in flowNodes`);
     }
 
+    // If no coolantNodeId is configured, use reference density (no reactor core present)
     return n.refCoolantDensity;
   }
 
