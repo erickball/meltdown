@@ -23,14 +23,14 @@ import { PhysicsOperator, cloneSimulationState } from '../solver';
 
 // Profiling data structure
 export interface FlowOperatorProfile {
-  computeTargetFlows: number;
+  computeFlowRates: number;
   transferMass: number;
   totalCalls: number;
 }
 
 // Module-level profiling accumulator
 let operatorProfile: FlowOperatorProfile = {
-  computeTargetFlows: 0,
+  computeFlowRates: 0,
   transferMass: 0,
   totalCalls: 0,
 };
@@ -41,7 +41,7 @@ export function getFlowOperatorProfile(): FlowOperatorProfile {
 
 export function resetFlowOperatorProfile(): void {
   operatorProfile = {
-    computeTargetFlows: 0,
+    computeFlowRates: 0,
     transferMass: 0,
     totalCalls: 0,
   };
@@ -98,8 +98,16 @@ export class FlowOperator implements PhysicsOperator {
 
       // Compute target flow rate from momentum balance
       // const tFlowStart = performance.now();
-      let targetFlow = this.computeTargetFlow(conn, fromNode, toNode, newState, dt);
+      let targetFlow = this.computeFlowRate(conn, fromNode, toNode, newState, dt);
       // flowCalcTime += performance.now() - tFlowStart;
+
+      // RESTRICTION: No reverse flow through a running pump
+      // Running pumps act as a check valve - they prevent backflow even if pressure
+      // would drive flow in reverse. This prevents numerical instabilities.
+      const pump = this.getPumpForConnection(conn.id, newState);
+      if (pump && pump.running && pump.effectiveSpeed > 0.01 && targetFlow < 0) {
+        targetFlow = 0;
+      }
 
       // SAFEGUARD: Clamp target flow to reasonable range
       // const unclamped = targetFlow;
@@ -133,7 +141,7 @@ export class FlowOperator implements PhysicsOperator {
       // SAFEGUARD: Final clamp
       //conn.massFlowRate = Math.max(-this.maxFlowRate, Math.min(this.maxFlowRate, conn.massFlowRate));
     }
-    operatorProfile.computeTargetFlows += performance.now() - t1;
+    operatorProfile.computeFlowRates += performance.now() - t1;
 
     // MASS AND ENERGY CONSERVATION: Transfer mass and energy together
     // to ensure consistent specific energy during advection.
@@ -301,13 +309,14 @@ export class FlowOperator implements PhysicsOperator {
   }
 
   /**
-   * Compute the target (equilibrium) mass flow rate for a connection
-   * based on the pressure drop and driving forces.
+   * Compute the actual mass flow rate for a connection this timestep.
    *
-   * With inertance: implements momentum equation ρ * L/A * dv/dt = ΔP - friction
-   * Without inertance: uses steady-state flow equation (backward compatibility)
+   * Calculates the driving pressure (pressure difference + gravity + pump head),
+   * handles valve resistance and check valves, then either:
+   * - Returns steady-state flow directly (if no inertance)
+   * - Applies momentum equation to smoothly transition toward steady state (if inertance defined)
    */
-  private computeTargetFlow(
+  private computeFlowRate(
     conn: FlowConnection,
     fromNode: FlowNode,
     toNode: FlowNode,

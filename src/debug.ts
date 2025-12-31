@@ -358,7 +358,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
 
     if (flowProfile.totalCalls > 0) {
       html += '<br><b>FluidFlow breakdown:</b><br>';
-      html += `<span style="font-size: 10px; margin-left: 8px;">targetFlows: ${flowProfile.computeTargetFlows.toFixed(2)}ms</span><br>`;
+      html += `<span style="font-size: 10px; margin-left: 8px;">flowRates: ${flowProfile.computeFlowRates.toFixed(2)}ms</span><br>`;
       html += `<span style="font-size: 10px; margin-left: 8px;">massTransfer: ${flowProfile.transferMass.toFixed(2)}ms</span><br>`;
     }
 
@@ -493,12 +493,15 @@ export function initDebugPanel(): void {
   }
 }
 
+// Import Connection type for plant connections
+import { Connection } from './types';
+
 /**
  * Update the component detail panel with selected component info
  */
 export function updateComponentDetail(
   componentId: string | null,
-  plantState: { components: Map<string, unknown> },
+  plantState: { components: Map<string, unknown>; connections: Connection[] },
   simState: SimulationState
 ): void {
   const panel = document.getElementById('component-detail');
@@ -560,24 +563,36 @@ export function updateComponentDetail(
     case 'vessel': {
       const innerDiam = component.innerDiameter as number;
       const height = component.height as number;
+      const pressureRating = component.pressureRating as number | undefined;
       html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${innerDiam?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Height:</span><span class="detail-value">${height?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Wall:</span><span class="detail-value">${((component.wallThickness as number) * 1000)?.toFixed(0)} mm</span></div>`;
+      if (pressureRating !== undefined) {
+        html += `<div class="detail-row"><span class="detail-label">Pressure Rating:</span><span class="detail-value">${pressureRating} bar</span></div>`;
+      }
       volume = Math.PI * (innerDiam / 2) ** 2 * height;
       break;
     }
     case 'pipe': {
       const diam = component.diameter as number;
       const length = component.length as number;
+      const pressureRating = component.pressureRating as number | undefined;
       html += `<div class="detail-row"><span class="detail-label">Length:</span><span class="detail-value">${length?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${(diam * 1000)?.toFixed(0)} mm</span></div>`;
+      if (pressureRating !== undefined) {
+        html += `<div class="detail-row"><span class="detail-label">Pressure Rating:</span><span class="detail-value">${pressureRating} bar</span></div>`;
+      }
       volume = Math.PI * (diam / 2) ** 2 * length;
       break;
     }
     case 'tank': {
       const width = component.width as number;
       const height = component.height as number;
+      const pressureRating = component.pressureRating as number | undefined;
       html += `<div class="detail-row"><span class="detail-label">Size:</span><span class="detail-value">${width?.toFixed(1)} x ${height?.toFixed(1)} m</span></div>`;
+      if (pressureRating !== undefined) {
+        html += `<div class="detail-row"><span class="detail-label">Pressure Rating:</span><span class="detail-value">${pressureRating} bar</span></div>`;
+      }
       // Assume cylindrical tank
       volume = Math.PI * (width / 2) ** 2 * height;
       break;
@@ -601,13 +616,53 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Size:</span><span class="detail-value">${(component.width as number)?.toFixed(1)} x ${(component.height as number)?.toFixed(1)} m</span></div>`;
       break;
     }
+    case 'reactorVessel': {
+      const innerDiam = component.innerDiameter as number;
+      const height = component.height as number;
+      const wallThickness = component.wallThickness as number;
+      const pressureRating = component.pressureRating as number | undefined;
+      // barrelDiameter is center-line diameter (to middle of barrel wall)
+      const barrelCenterDiam = component.barrelDiameter as number;
+      const barrelThickness = component.barrelThickness as number;
+      const barrelOuterDiam = barrelCenterDiam + barrelThickness;
+      const barrelInnerDiam = barrelCenterDiam - barrelThickness;
+      const barrelTopGap = component.barrelTopGap as number;
+      const barrelBottomGap = component.barrelBottomGap as number;
+
+      // Get volumes from the sub-components
+      const insideBarrelId = component.insideBarrelId as string;
+      const outsideBarrelId = component.outsideBarrelId as string;
+      const insideBarrelComp = plantState.components.get(insideBarrelId) as Record<string, unknown> | undefined;
+      const outsideBarrelComp = plantState.components.get(outsideBarrelId) as Record<string, unknown> | undefined;
+      const insideVolume = (insideBarrelComp?.volume as number) ?? 0;
+      const outsideVolume = (outsideBarrelComp?.volume as number) ?? 0;
+      const totalVolume = insideVolume + outsideVolume;
+
+      html += `<div class="detail-row"><span class="detail-label">Vessel Inner Dia:</span><span class="detail-value">${innerDiam?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Vessel Height:</span><span class="detail-value">${height?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Wall Thickness:</span><span class="detail-value">${(wallThickness * 1000)?.toFixed(0)} mm</span></div>`;
+      if (pressureRating !== undefined) {
+        html += `<div class="detail-row"><span class="detail-label">Pressure Rating:</span><span class="detail-value">${pressureRating} bar</span></div>`;
+      }
+      html += `<div class="detail-row"><span class="detail-label">Barrel Outer Dia:</span><span class="detail-value">${barrelOuterDiam?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Barrel Inner Dia:</span><span class="detail-value">${barrelInnerDiam?.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Barrel Thickness:</span><span class="detail-value">${(barrelThickness * 1000)?.toFixed(0)} mm</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Barrel Gaps:</span><span class="detail-value">top: ${barrelTopGap?.toFixed(2)}m, btm: ${barrelBottomGap?.toFixed(2)}m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Core Volume:</span><span class="detail-value">${insideVolume.toFixed(2)} m³</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Annulus Volume:</span><span class="detail-value">${outsideVolume.toFixed(2)} m³</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Total Volume:</span><span class="detail-value">${totalVolume.toFixed(2)} m³</span></div>`;
+      break;
+    }
   }
 
   // Volume - prefer simulation node volume, fall back to calculated
-  const nodeVolume = flowNode?.volume;
-  const displayVolume = nodeVolume ?? volume;
-  if (displayVolume !== undefined) {
-    html += `<div class="detail-row"><span class="detail-label">Volume:</span><span class="detail-value">${displayVolume.toFixed(2)} m³</span></div>`;
+  // (Skip for reactor vessels since volumes are shown in geometry section)
+  if (component.type !== 'reactorVessel') {
+    const nodeVolume = flowNode?.volume;
+    const displayVolume = nodeVolume ?? volume;
+    if (displayVolume !== undefined) {
+      html += `<div class="detail-row"><span class="detail-label">Volume:</span><span class="detail-value">${displayVolume.toFixed(2)} m³</span></div>`;
+    }
   }
 
   // ========== CURRENT FLUID CONDITIONS (from simulation) ==========
@@ -616,8 +671,47 @@ export function updateComponentDetail(
     return type === 'tank' || type === 'vessel' || type === 'heatExchanger';
   };
 
+  // Reactor vessel shows two fluid sections (inside barrel / core region, and outside barrel / annulus)
+  if (component.type === 'reactorVessel') {
+    const insideBarrelId = component.insideBarrelId as string;
+    const outsideBarrelId = component.outsideBarrelId as string;
+    const insideNode = simState.flowNodes.get(insideBarrelId);
+    const outsideNode = simState.flowNodes.get(outsideBarrelId);
+
+    if (insideNode) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Core Region (Inside Barrel)</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(insideNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(insideNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${insideNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${insideNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      if (insideNode.fluid.phase === 'two-phase') {
+        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(insideNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+      }
+      html += '</div>';
+    }
+
+    if (outsideNode) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Annulus (Outside Barrel)</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(outsideNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(outsideNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${outsideNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${outsideNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      if (outsideNode.fluid.phase === 'two-phase') {
+        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(outsideNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+      }
+      html += '</div>';
+    }
+
+    // If no simulation nodes found, show a note
+    if (!insideNode && !outsideNode) {
+      html += '<div class="detail-section">';
+      html += '<div style="font-size: 10px; color: #888; font-style: italic;">Run simulation to see fluid state</div>';
+      html += '</div>';
+    }
+  } else if (component.type === 'heatExchanger') {
   // Heat exchanger shows two fluid sections (primary & secondary)
-  if (component.type === 'heatExchanger') {
     // Find both simulation nodes (tube side and shell side)
     // Convention: simNodeId is tube side (primary), look for shell side
     const tubeNode = flowNode;
@@ -736,62 +830,236 @@ export function updateComponentDetail(
   if (simNodeId) nodeIds.add(simNodeId);
   // Also add component ID directly (user-created components use this)
   nodeIds.add(componentId);
-  // For HX, also check for primary/secondary/shell side nodes
-  for (const [nodeId] of simState.flowNodes) {
-    if (nodeId.includes(componentId)) {
-      nodeIds.add(nodeId);
-    }
+  // For reactor vessels, include both inside and outside barrel regions
+  if (component.type === 'reactorVessel') {
+    const insideBarrelId = component.insideBarrelId as string;
+    const outsideBarrelId = component.outsideBarrelId as string;
+    if (insideBarrelId) nodeIds.add(insideBarrelId);
+    if (outsideBarrelId) nodeIds.add(outsideBarrelId);
   }
-
-  const flowConnections: Array<{
-    conn: typeof simState.flowConnections[0];
-    isFrom: boolean;
-  }> = [];
-
-  for (const conn of simState.flowConnections) {
-    for (const nodeId of nodeIds) {
-      if (conn.fromNodeId === nodeId) {
-        flowConnections.push({ conn, isFrom: true });
-      } else if (conn.toNodeId === nodeId) {
-        flowConnections.push({ conn, isFrom: false });
+  // For HX, also check for primary/secondary/shell side nodes (only if simulation is running)
+  if (simState.flowNodes) {
+    for (const [nodeId] of simState.flowNodes) {
+      if (nodeId.includes(componentId)) {
+        nodeIds.add(nodeId);
       }
     }
   }
+  // Show simulation connections if running AND they match this component, otherwise show plant connections
+  const componentElev = elevation ?? 0;
 
-  if (flowConnections.length > 0) {
-    html += '<div class="detail-section">';
-    html += '<div class="detail-section-title">Flow Connections</div>';
+  // Check if any simulation connections involve this component's nodes
+  const matchingSimConnections = simState.flowConnections?.filter(conn =>
+    nodeIds.has(conn.fromNodeId) || nodeIds.has(conn.toNodeId)
+  ) ?? [];
 
-    for (const { conn, isFrom } of flowConnections) {
-      const otherNodeId = isFrom ? conn.toNodeId : conn.fromNodeId;
-      const otherNode = simState.flowNodes.get(otherNodeId);
-      const otherName = otherNode?.label || otherNodeId;
+  const hasMatchingSimConnections = matchingSimConnections.length > 0;
 
-      // Determine actual flow direction
-      const actualFlow = conn.massFlowRate;
-      const flowingOut = (isFrom && actualFlow >= 0) || (!isFrom && actualFlow < 0);
-      const arrowDir = flowingOut ? '→' : '←';
-      const flowColor = flowingOut ? '#7af' : '#fa7';
+  // Helper to get component label
+  const getComponentLabel = (compId: string): string => {
+    const comp = plantState.components.get(compId) as Record<string, unknown> | undefined;
+    return (comp?.label as string) || compId;
+  };
 
-      // Connection elevation
-      const connElev = isFrom ? conn.fromElevation : conn.toElevation;
-      const elevStr = connElev !== undefined ? `@ ${connElev.toFixed(1)}m` : '';
+  if (hasMatchingSimConnections) {
+    // Collect simulation flow connections, deduplicating internal connections
+    const seenConnIds = new Set<string>();
+    const flowConnections: Array<{
+      conn: typeof simState.flowConnections[0];
+      isInternal: boolean;
+      isFrom: boolean;
+    }> = [];
 
-      // Phase of flowing fluid (determined by upstream node)
-      const upstreamId = actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId;
-      const upstreamNode = simState.flowNodes.get(upstreamId);
-      const flowPhase = upstreamNode?.fluid.phase || 'unknown';
+    for (const conn of matchingSimConnections) {
+      const fromInSet = nodeIds.has(conn.fromNodeId);
+      const toInSet = nodeIds.has(conn.toNodeId);
 
-      html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
-      html += `<span style="color: ${flowColor};">${arrowDir}</span> ${otherName}<br>`;
-      html += `<span style="color: #888; margin-left: 12px;">`;
-      html += `${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
-      if (elevStr) html += ` ${elevStr}`;
-      html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²`;
-      html += `</span></div>`;
+      if (fromInSet && toInSet) {
+        if (!seenConnIds.has(conn.id)) {
+          seenConnIds.add(conn.id);
+          flowConnections.push({ conn, isInternal: true, isFrom: true });
+        }
+      } else if (fromInSet) {
+        if (!seenConnIds.has(conn.id)) {
+          seenConnIds.add(conn.id);
+          flowConnections.push({ conn, isInternal: false, isFrom: true });
+        }
+      } else if (toInSet) {
+        if (!seenConnIds.has(conn.id)) {
+          seenConnIds.add(conn.id);
+          flowConnections.push({ conn, isInternal: false, isFrom: false });
+        }
+      }
     }
-    html += '</div>';
+
+    if (flowConnections.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Flow Connections</div>';
+
+      for (const { conn, isInternal, isFrom } of flowConnections) {
+        const fromNode = simState.flowNodes.get(conn.fromNodeId);
+        const toNode = simState.flowNodes.get(conn.toNodeId);
+        const fromName = fromNode?.label || conn.fromNodeId;
+        const toName = toNode?.label || conn.toNodeId;
+        const actualFlow = conn.massFlowRate;
+
+        if (isInternal) {
+          const arrowDir = actualFlow >= 0 ? '→' : '←';
+          const connElev = conn.fromElevation ?? conn.toElevation;
+          let elevStr = '';
+          if (connElev !== undefined) {
+            elevStr = `@ ${connElev.toFixed(1)}m rel (${(componentElev + connElev).toFixed(1)}m abs)`;
+          }
+          const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
+          const flowPhase = upstreamNode?.fluid.phase || 'unknown';
+
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(150,150,255,0.1); border-radius: 3px;">`;
+          html += `<span style="color: #888;">Internal:</span> <span style="color: #9af;">${fromName} ${arrowDir} ${toName}</span>`;
+          html += `<button class="delete-connection-btn" data-from="${conn.fromNodeId}" data-to="${conn.toNodeId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
+          html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
+          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+        } else {
+          const otherName = isFrom ? toName : fromName;
+          const flowingOut = (isFrom && actualFlow >= 0) || (!isFrom && actualFlow < 0);
+          const arrowDir = flowingOut ? '→' : '←';
+          const flowColor = flowingOut ? '#7af' : '#fa7';
+          const relElev = isFrom ? conn.fromElevation : conn.toElevation;
+          let elevStr = '';
+          if (relElev !== undefined) {
+            elevStr = `@ ${relElev.toFixed(1)}m rel (${(componentElev + relElev).toFixed(1)}m abs)`;
+          }
+          const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
+          const flowPhase = upstreamNode?.fluid.phase || 'unknown';
+
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
+          html += `<span style="color: ${flowColor};">${arrowDir}</span> ${otherName}`;
+          html += `<button class="delete-connection-btn" data-from="${conn.fromNodeId}" data-to="${conn.toNodeId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
+          html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
+          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+        }
+      }
+      html += '</div>';
+    }
+  } else {
+    // Show plant connections (no matching simulation connections)
+    const plantConnections = plantState.connections.filter(pc =>
+      pc.fromComponentId === componentId || pc.toComponentId === componentId ||
+      nodeIds.has(pc.fromComponentId) || nodeIds.has(pc.toComponentId)
+    );
+
+    // Deduplicate connections - use full port IDs to allow multiple connections between same components
+    const seenConnections = new Set<string>();
+    const uniqueConnections: Array<{ conn: Connection; isInternal: boolean; isFrom: boolean }> = [];
+
+    for (const conn of plantConnections) {
+      // Use port IDs (not just component IDs) to uniquely identify each connection
+      const connKey = [conn.fromPortId, conn.toPortId].sort().join('|');
+      const fromInSet = nodeIds.has(conn.fromComponentId) || conn.fromComponentId === componentId;
+      const toInSet = nodeIds.has(conn.toComponentId) || conn.toComponentId === componentId;
+
+      if (fromInSet && toInSet) {
+        if (!seenConnections.has(connKey)) {
+          seenConnections.add(connKey);
+          uniqueConnections.push({ conn, isInternal: true, isFrom: true });
+        }
+      } else if (fromInSet) {
+        if (!seenConnections.has(connKey)) {
+          seenConnections.add(connKey);
+          uniqueConnections.push({ conn, isInternal: false, isFrom: true });
+        }
+      } else if (toInSet) {
+        if (!seenConnections.has(connKey)) {
+          seenConnections.add(connKey);
+          uniqueConnections.push({ conn, isInternal: false, isFrom: false });
+        }
+      }
+    }
+
+    if (uniqueConnections.length > 0) {
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Flow Connections</div>';
+
+      for (const { conn, isInternal, isFrom } of uniqueConnections) {
+        const fromName = getComponentLabel(conn.fromComponentId);
+        const toName = getComponentLabel(conn.toComponentId);
+        const flowArea = conn.flowArea ?? 0.1;
+
+        if (isInternal) {
+          const connElev = conn.fromElevation ?? conn.toElevation;
+          let elevStr = '';
+          if (connElev !== undefined) {
+            elevStr = `@ ${connElev.toFixed(1)}m rel (${(componentElev + connElev).toFixed(1)}m abs)`;
+          }
+
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(150,150,255,0.1); border-radius: 3px;">`;
+          html += `<span style="color: #888;">Internal:</span> <span style="color: #9af;">${fromName} ↔ ${toName}</span>`;
+          html += `<button class="delete-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
+          html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          html += `<br>Area: ${(flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+        } else {
+          const otherName = isFrom ? toName : fromName;
+          const relElev = isFrom ? conn.fromElevation : conn.toElevation;
+          let elevStr = '';
+          if (relElev !== undefined) {
+            elevStr = `@ ${relElev.toFixed(1)}m rel (${(componentElev + relElev).toFixed(1)}m abs)`;
+          }
+
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
+          html += `<span style="color: #7af;">↔</span> ${otherName}`;
+          html += `<button class="delete-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
+          html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          html += `<br>Area: ${(flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+        }
+      }
+      html += '</div>';
+    }
   }
+
+  // Add click handlers for connection buttons after setting innerHTML
+  const setupConnectionButtonHandlers = () => {
+    // Edit buttons for simulation connections
+    document.querySelectorAll('.edit-connection-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const connId = (btn as HTMLElement).dataset.connId;
+        if (connId && connectionEditCallback) {
+          connectionEditCallback(connId);
+        }
+      });
+    });
+
+    // Edit buttons for plant connections (before simulation)
+    document.querySelectorAll('.edit-plant-connection-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const fromId = (btn as HTMLElement).dataset.from;
+        const toId = (btn as HTMLElement).dataset.to;
+        if (fromId && toId && plantConnectionEditCallback) {
+          plantConnectionEditCallback(fromId, toId);
+        }
+      });
+    });
+
+    // Delete buttons
+    document.querySelectorAll('.delete-connection-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const fromId = (btn as HTMLElement).dataset.from;
+        const toId = (btn as HTMLElement).dataset.to;
+        if (fromId && toId && connectionDeleteCallback) {
+          connectionDeleteCallback(fromId, toId);
+        }
+      });
+    });
+  };
 
   // ========== HEAT TRANSFER CONNECTIONS ==========
   // Find convection connections involving this component's nodes
@@ -859,5 +1127,76 @@ export function updateComponentDetail(
     html += '</div>';
   }
 
+  // ========== EDIT/DELETE BUTTONS ==========
+  html += '<div class="detail-section" style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #445;">';
+  html += `<button id="edit-component-btn" style="background: #357; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">Edit</button>`;
+  html += `<button id="delete-component-btn" style="background: #744; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>`;
+  html += '</div>';
+
   content.innerHTML = html;
+
+  // Set up button handlers
+  const editBtn = document.getElementById('edit-component-btn');
+  const deleteBtn = document.getElementById('delete-component-btn');
+
+  if (editBtn) {
+    editBtn.addEventListener('click', () => {
+      if (componentEditCallback) {
+        componentEditCallback(componentId);
+      }
+    });
+  }
+
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', () => {
+      if (componentDeleteCallback) {
+        componentDeleteCallback(componentId);
+      }
+    });
+  }
+
+  // Set up connection button handlers
+  setupConnectionButtonHandlers();
+}
+
+// Callbacks for edit/delete actions
+let componentEditCallback: ((componentId: string) => void) | null = null;
+let componentDeleteCallback: ((componentId: string) => void) | null = null;
+let connectionEditCallback: ((connectionId: string) => void) | null = null;
+let plantConnectionEditCallback: ((fromId: string, toId: string) => void) | null = null;
+let connectionDeleteCallback: ((fromId: string, toId: string) => void) | null = null;
+
+/**
+ * Set callback for when the Edit button is clicked
+ */
+export function setComponentEditCallback(callback: (componentId: string) => void): void {
+  componentEditCallback = callback;
+}
+
+/**
+ * Set callback for when the Delete button is clicked
+ */
+export function setComponentDeleteCallback(callback: (componentId: string) => void): void {
+  componentDeleteCallback = callback;
+}
+
+/**
+ * Set callback for when a connection Edit button is clicked (simulation running)
+ */
+export function setConnectionEditCallback(callback: (connectionId: string) => void): void {
+  connectionEditCallback = callback;
+}
+
+/**
+ * Set callback for when a plant connection Edit button is clicked (before simulation)
+ */
+export function setPlantConnectionEditCallback(callback: (fromId: string, toId: string) => void): void {
+  plantConnectionEditCallback = callback;
+}
+
+/**
+ * Set callback for when a connection Delete button is clicked
+ */
+export function setConnectionDeleteCallback(callback: (fromId: string, toId: string) => void): void {
+  connectionDeleteCallback = callback;
 }
