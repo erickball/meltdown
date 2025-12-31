@@ -99,23 +99,40 @@ export class ConnectionDialog {
     const fromElevation = this.getPortElevation(this.fromComponent!, this.fromPort!, fromHeight);
     const toElevation = this.getPortElevation(this.toComponent!, this.toPort!, toHeight);
 
-    // Calculate minimum length based on actual port positions
+    // Calculate minimum length based on actual 3D port positions (including elevation)
     const fromPortX = this.fromComponent!.position.x + this.fromPort!.position.x;
     const fromPortY = this.fromComponent!.position.y + this.fromPort!.position.y;
     const toPortX = this.toComponent!.position.x + this.toPort!.position.x;
     const toPortY = this.toComponent!.position.y + this.toPort!.position.y;
 
+    // Get component base elevations
+    const fromComponentElev = (this.fromComponent! as any).elevation ?? 0;
+    const toComponentElev = (this.toComponent! as any).elevation ?? 0;
+
+    // Calculate absolute elevations of each port
+    const fromAbsoluteElev = fromComponentElev + fromElevation;
+    const toAbsoluteElev = toComponentElev + toElevation;
+
+    // Calculate 3D distance including elevation difference
     const dx = toPortX - fromPortX;
     const dy = toPortY - fromPortY;
-    const portDistance = Math.sqrt(dx * dx + dy * dy);
+    const dz = toAbsoluteElev - fromAbsoluteElev;
+    const portDistance = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-    // Check if one component is contained by the other
-    // If so, the connection is just an opening - use max 1m length
+    // Check if components are in a contained relationship:
+    // 1. One is directly contained by the other (parent-child)
+    // 2. Both are contained by the same parent (siblings inside same vessel)
+    // In either case, the connection is just an opening - visual port positions don't reflect physical distance
+    const fromContainedBy = this.fromComponent!.containedBy;
+    const toContainedBy = this.toComponent!.containedBy;
     const isContainedConnection =
-      this.fromComponent!.containedBy === this.toComponent!.id ||
-      this.toComponent!.containedBy === this.fromComponent!.id;
+      fromContainedBy === this.toComponent!.id ||
+      toContainedBy === this.fromComponent!.id ||
+      (fromContainedBy !== undefined && fromContainedBy === toContainedBy);
 
-    const minLength = isContainedConnection ? Math.min(portDistance, 0.1) : portDistance;
+    // For contained connections, min is 0.1m (wall opening), max is 1m
+    // For regular connections, min is the actual 3D distance between ports
+    const minLength = isContainedConnection ? 0.1 : portDistance;
     const maxLength = isContainedConnection ? 1.0 : 1000;
 
     // Component info section
@@ -123,12 +140,16 @@ export class ConnectionDialog {
     infoSection.style.cssText = 'background: #2a2e38; padding: 10px; border-radius: 4px; margin-bottom: 15px;';
 
     // Show different info for contained connections
+    const elevDiff = Math.abs(toAbsoluteElev - fromAbsoluteElev);
+    const isSiblingConnection = fromContainedBy !== undefined && fromContainedBy === toContainedBy;
     const containedNote = isContainedConnection
       ? `<div style="margin-top: 8px; padding: 6px; background: #1a3a2a; border-radius: 4px; font-size: 11px; color: #6c8;">
-           <strong>Contained Connection:</strong> This is a direct opening between a component and its container (max 1m length).
+           <strong>Internal Connection:</strong> ${isSiblingConnection
+             ? 'Components share the same container (e.g., core/annulus regions).'
+             : 'Direct opening between component and container.'} Max 1m length.
          </div>`
       : `<div style="margin-top: 8px; font-size: 11px; color: #667788;">
-           Port-to-port distance: ${portDistance.toFixed(1)} m
+           Port-to-port 3D distance: ${portDistance.toFixed(1)} m (elevation diff: ${elevDiff.toFixed(1)} m)
          </div>`;
 
     infoSection.innerHTML = `
@@ -149,83 +170,139 @@ export class ConnectionDialog {
     `;
     this.bodyElement.appendChild(infoSection);
 
-    // Create form fields
-    const fields = [
-      {
-        id: 'from-elevation',
-        label: 'From Elevation',
-        type: 'number',
-        default: fromElevation,
-        min: 0,
-        max: fromHeight,
-        step: 0.1,
-        unit: 'm',
-        help: `Height above component bottom (0 to ${fromHeight.toFixed(1)} m)`
-      },
-      {
-        id: 'to-elevation',
-        label: 'To Elevation',
-        type: 'number',
-        default: toElevation,
-        min: 0,
-        max: toHeight,
-        step: 0.1,
-        unit: 'm',
-        help: `Height above component bottom (0 to ${toHeight.toFixed(1)} m)`
-      },
-      {
-        id: 'flow-area',
-        label: 'Flow Area',
-        type: 'number',
-        default: 0.05,
-        min: 0.001,
-        max: 10,
-        step: 0.001,
-        unit: 'm²',
-        help: 'Cross-sectional area of connection'
-      },
-      {
-        id: 'length',
-        label: isContainedConnection ? 'Opening Thickness' : 'Connection Length',
-        type: 'number',
-        default: isContainedConnection ? 0.5 : Math.max(minLength, 2),
-        min: minLength,
-        max: maxLength,
-        step: 0.1,
-        unit: 'm',
-        help: isContainedConnection
-          ? 'Wall thickness of opening (max 1m for contained connections)'
-          : `Must be at least ${minLength.toFixed(1)} m`
+    // Helper to calculate 3D distance based on current elevation values
+    const calculate3DDistance = (fromRelElev: number, toRelElev: number): number => {
+      const fromAbsElev = fromComponentElev + fromRelElev;
+      const toAbsElev = toComponentElev + toRelElev;
+      const dz = toAbsElev - fromAbsElev;
+      return Math.sqrt(dx * dx + dy * dy + dz * dz);
+    };
+
+    // Create from-elevation field with absolute elevation display
+    const fromElevGroup = document.createElement('div');
+    fromElevGroup.className = 'form-group';
+    const fromElevLabel = document.createElement('label');
+    fromElevLabel.textContent = 'From Elevation (m)';
+    fromElevLabel.setAttribute('for', 'from-elevation');
+    fromElevGroup.appendChild(fromElevLabel);
+
+    const fromElevInput = document.createElement('input');
+    fromElevInput.type = 'number';
+    fromElevInput.id = 'from-elevation';
+    fromElevInput.value = String(fromElevation);
+    fromElevInput.min = '0';
+    fromElevInput.max = String(fromHeight);
+    fromElevInput.step = '0.1';
+    fromElevGroup.appendChild(fromElevInput);
+
+    const fromElevHelp = document.createElement('div');
+    fromElevHelp.className = 'help-text';
+    fromElevHelp.id = 'from-elevation-help';
+    fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`;
+    fromElevGroup.appendChild(fromElevHelp);
+    this.bodyElement.appendChild(fromElevGroup);
+
+    // Create to-elevation field with absolute elevation display
+    const toElevGroup = document.createElement('div');
+    toElevGroup.className = 'form-group';
+    const toElevLabel = document.createElement('label');
+    toElevLabel.textContent = 'To Elevation (m)';
+    toElevLabel.setAttribute('for', 'to-elevation');
+    toElevGroup.appendChild(toElevLabel);
+
+    const toElevInput = document.createElement('input');
+    toElevInput.type = 'number';
+    toElevInput.id = 'to-elevation';
+    toElevInput.value = String(toElevation);
+    toElevInput.min = '0';
+    toElevInput.max = String(toHeight);
+    toElevInput.step = '0.1';
+    toElevGroup.appendChild(toElevInput);
+
+    const toElevHelp = document.createElement('div');
+    toElevHelp.className = 'help-text';
+    toElevHelp.id = 'to-elevation-help';
+    toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`;
+    toElevGroup.appendChild(toElevHelp);
+    this.bodyElement.appendChild(toElevGroup);
+
+    // Create flow area field
+    const flowAreaGroup = document.createElement('div');
+    flowAreaGroup.className = 'form-group';
+    const flowAreaLabel = document.createElement('label');
+    flowAreaLabel.textContent = 'Flow Area (m²)';
+    flowAreaLabel.setAttribute('for', 'flow-area');
+    flowAreaGroup.appendChild(flowAreaLabel);
+
+    const flowAreaInput = document.createElement('input');
+    flowAreaInput.type = 'number';
+    flowAreaInput.id = 'flow-area';
+    flowAreaInput.value = '0.05';
+    flowAreaInput.min = '0.001';
+    flowAreaInput.max = '10';
+    flowAreaInput.step = '0.001';
+    flowAreaGroup.appendChild(flowAreaInput);
+
+    const flowAreaHelp = document.createElement('div');
+    flowAreaHelp.className = 'help-text';
+    flowAreaHelp.textContent = 'Cross-sectional area of connection';
+    flowAreaGroup.appendChild(flowAreaHelp);
+    this.bodyElement.appendChild(flowAreaGroup);
+
+    // Create length field
+    const lengthGroup = document.createElement('div');
+    lengthGroup.className = 'form-group';
+    const lengthLabel = document.createElement('label');
+    lengthLabel.textContent = (isContainedConnection ? 'Opening Thickness' : 'Connection Length') + ' (m)';
+    lengthLabel.setAttribute('for', 'length');
+    lengthGroup.appendChild(lengthLabel);
+
+    const lengthInput = document.createElement('input');
+    lengthInput.type = 'number';
+    lengthInput.id = 'length';
+    lengthInput.value = String(isContainedConnection ? 0.5 : Math.max(minLength, 2));
+    lengthInput.min = String(minLength);
+    lengthInput.max = String(maxLength);
+    lengthInput.step = '0.1';
+    lengthGroup.appendChild(lengthInput);
+
+    const lengthHelp = document.createElement('div');
+    lengthHelp.className = 'help-text';
+    lengthHelp.id = 'length-help';
+    lengthHelp.textContent = isContainedConnection
+      ? 'Wall thickness of opening (max 1m for contained connections)'
+      : `Min: ${minLength.toFixed(1)} m (3D port distance)`;
+    lengthGroup.appendChild(lengthHelp);
+    this.bodyElement.appendChild(lengthGroup);
+
+    // Update function for when elevations change
+    const updateLengthConstraints = () => {
+      const fromRelElev = parseFloat(fromElevInput.value) || 0;
+      const toRelElev = parseFloat(toElevInput.value) || 0;
+
+      // Update absolute elevation displays
+      const fromAbsElev = fromComponentElev + fromRelElev;
+      const toAbsElev = toComponentElev + toRelElev;
+      fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${fromAbsElev.toFixed(1)} m`;
+      toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${toAbsElev.toFixed(1)} m`;
+
+      if (!isContainedConnection) {
+        // Recalculate minimum length based on new 3D distance
+        const newMinLength = calculate3DDistance(fromRelElev, toRelElev);
+        lengthInput.min = String(newMinLength);
+        lengthHelp.textContent = `Min: ${newMinLength.toFixed(1)} m (3D port distance)`;
+
+        // If current length is below new minimum, update it
+        const currentLength = parseFloat(lengthInput.value) || 0;
+        if (currentLength < newMinLength) {
+          lengthInput.value = String(Math.max(newMinLength, 2));
+        }
       }
-    ];
+    };
 
-    fields.forEach(field => {
-      const formGroup = document.createElement('div');
-      formGroup.className = 'form-group';
-
-      const label = document.createElement('label');
-      label.textContent = field.label + (field.unit ? ` (${field.unit})` : '');
-      label.setAttribute('for', field.id);
-      formGroup.appendChild(label);
-
-      const input = document.createElement('input');
-      input.type = field.type;
-      input.id = field.id;
-      input.value = String(field.default);
-      if (field.min !== undefined) input.min = String(field.min);
-      if (field.max !== undefined) input.max = String(field.max);
-      if (field.step !== undefined) input.step = String(field.step);
-      formGroup.appendChild(input);
-
-      if (field.help) {
-        const helpText = document.createElement('div');
-        helpText.className = 'help-text';
-        helpText.textContent = field.help;
-        formGroup.appendChild(helpText);
-      }
-
-      this.bodyElement.appendChild(formGroup);
-    });
+    // Add event listeners for elevation changes
+    fromElevInput.addEventListener('input', updateLengthConstraints);
+    toElevInput.addEventListener('input', updateLengthConstraints);
 
     // Add auto-pipe creation note
     const pipeNote = document.createElement('div');
@@ -239,8 +316,6 @@ export class ConnectionDialog {
     this.bodyElement.appendChild(pipeNote);
 
     // Update pipe status when inputs change
-    const flowAreaInput = document.getElementById('flow-area') as HTMLInputElement;
-    const lengthInput = document.getElementById('length') as HTMLInputElement;
     const pipeStatus = document.getElementById('pipe-status')!;
 
     const updatePipeStatus = () => {
