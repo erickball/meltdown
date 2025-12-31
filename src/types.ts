@@ -112,7 +112,16 @@ export interface ValveComponent extends ComponentBase {
   type: 'valve';
   diameter: number;
   opening: number;      // 0 = closed, 1 = fully open
-  valveType: 'gate' | 'globe' | 'check' | 'relief';
+  valveType: 'gate' | 'globe' | 'ball' | 'butterfly' | 'check' | 'relief' | 'porv';
+  // Check valve properties
+  crackingPressure?: number;  // Pa - minimum ΔP to open (check valves)
+  // Relief valve / PORV properties
+  setpoint?: number;          // Pa - pressure at which valve opens
+  blowdown?: number;          // fraction - pressure drop before reseating (e.g., 0.05 = 5%)
+  capacity?: number;          // kg/s - maximum flow at rated pressure
+  // PORV-specific properties
+  controlMode?: 'auto' | 'open' | 'closed';  // Manual override mode
+  hasBlockValve?: boolean;    // Has upstream isolation valve
 }
 
 // Reactor vessel with core barrel - creates two concentric hydraulic regions

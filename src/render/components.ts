@@ -1078,8 +1078,24 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
 function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
   const d = valve.diameter * view.zoom;
-  const bodySize = d * 1.5;
 
+  // Different rendering based on valve type with different size multipliers
+  if (valve.valveType === 'check') {
+    // Check valves: 30% larger
+    const bodySize = d * 1.5 * 1.3;
+    renderCheckValve(ctx, valve, view, d * 1.3, bodySize);
+  } else if (valve.valveType === 'relief' || valve.valveType === 'porv') {
+    // Relief valves and PORVs: 30% larger
+    const bodySize = d * 1.5 * 1.3;
+    renderReliefValve(ctx, valve, view, d * 1.3, bodySize);
+  } else {
+    // Standard valve (gate, globe, ball, butterfly): 15% larger
+    const bodySize = d * 1.5 * 1.15;
+    renderStandardValve(ctx, valve, view, d * 1.15, bodySize);
+  }
+}
+
+function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
   // Valve body - bowtie shape for gate valve
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
@@ -1119,6 +1135,189 @@ function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view:
   ctx.font = '10px monospace';
   ctx.textAlign = 'center';
   ctx.fillText(`${Math.round(valve.opening * 100)}%`, 0, -d / 2 - 35);
+}
+
+function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
+  // Check valve body - bowtie shape like standard valve
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  ctx.moveTo(-bodySize / 2, -d / 2);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(-bodySize / 2, d / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(bodySize / 2, -d / 2);
+  ctx.lineTo(0, 0);
+  ctx.lineTo(bodySize / 2, d / 2);
+  ctx.closePath();
+  ctx.fill();
+
+  // Flow path visualization based on opening
+  if (valve.opening > 0 && valve.fluid) {
+    const openingWidth = d * valve.opening * 0.8;
+    ctx.fillStyle = getFluidColor(valve.fluid);
+    ctx.fillRect(-bodySize / 2, -openingWidth / 2, bodySize, openingWidth);
+  }
+
+  // Check valve flapper/disc with hinge animation
+  // When closed: diagonal at ~45 degrees (blocking flow)
+  // When open: swings to nearly horizontal (~10 degrees from horizontal)
+  const arrowLen = bodySize * 1.2;  // 25% longer arrow
+  const hingeX = -arrowLen / 3;     // Move hinge more toward center
+  const hingeY = arrowLen / 4;      // Move hinge upward (smaller Y = higher)
+
+  // Angle: closed = 45 degrees (blocking), open = ~80 degrees (nearly horizontal)
+  // The flapper rotates around the hinge point
+  const closedAngle = -Math.PI / 4;  // 45 degrees up-right
+  const openAngle = -Math.PI / 10;   // Nearly horizontal (still slightly angled)
+  const currentAngle = closedAngle + (openAngle - closedAngle) * valve.opening;
+
+  // Calculate end point of flapper based on angle
+  const flapperLen = arrowLen * 1.0;  // Full length flapper
+  const flapperEndX = hingeX + Math.cos(currentAngle) * flapperLen;
+  const flapperEndY = hingeY + Math.sin(currentAngle) * flapperLen;
+
+  // Draw hinge circle at base
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.beginPath();
+  ctx.arc(hingeX, hingeY, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#666';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // Draw flapper line
+  ctx.strokeStyle = valve.opening > 0 ? COLORS.safe : '#222';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(hingeX, hingeY);
+  ctx.lineTo(flapperEndX, flapperEndY);
+  ctx.stroke();
+
+  // Arrow head at end of flapper
+  const headSize = arrowLen * 0.25;
+  const headAngle = currentAngle;
+  // Arrow head perpendicular to flapper direction
+  ctx.beginPath();
+  ctx.moveTo(flapperEndX, flapperEndY);
+  ctx.lineTo(
+    flapperEndX - headSize * Math.cos(headAngle) - headSize * 0.5 * Math.sin(headAngle),
+    flapperEndY - headSize * Math.sin(headAngle) + headSize * 0.5 * Math.cos(headAngle)
+  );
+  ctx.moveTo(flapperEndX, flapperEndY);
+  ctx.lineTo(
+    flapperEndX - headSize * Math.cos(headAngle) + headSize * 0.5 * Math.sin(headAngle),
+    flapperEndY - headSize * Math.sin(headAngle) - headSize * 0.5 * Math.cos(headAngle)
+  );
+  ctx.stroke();
+
+  // Label
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('CHK', 0, d / 2 + 12);
+}
+
+function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
+  // Relief valve / PORV: inlet from bottom, outlet to side, spring on top
+  const bodyWidth = bodySize * 0.8;
+  const bodyHeight = bodySize * 1.2;
+
+  // Main valve body (vertical rectangular shape)
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(-bodyWidth / 2, -bodyHeight / 2, bodyWidth, bodyHeight);
+
+  // Inlet pipe from bottom
+  const pipeWidth = d * 0.6;
+  const pipeLength = d * 0.5;
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(-pipeWidth / 2, bodyHeight / 2, pipeWidth, pipeLength);
+
+  // Flow path in inlet (if open)
+  if (valve.fluid) {
+    const fluidColor = getFluidColor(valve.fluid);
+    if (valve.opening > 0) {
+      // Show fluid flowing up through inlet
+      ctx.fillStyle = fluidColor;
+      ctx.fillRect(-pipeWidth / 2 + 2, bodyHeight / 2, pipeWidth - 4, pipeLength);
+    }
+  }
+
+  // Outlet pipe to the right side
+  const outletY = -bodyHeight / 4;
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(bodyWidth / 2, outletY - pipeWidth / 2, pipeLength, pipeWidth);
+
+  // Flow path in outlet (if open)
+  if (valve.opening > 0 && valve.fluid) {
+    ctx.fillStyle = getFluidColor(valve.fluid);
+    ctx.fillRect(bodyWidth / 2, outletY - pipeWidth / 2 + 2, pipeLength, pipeWidth - 4);
+  }
+
+  // Internal chamber (darker)
+  const chamberInset = 3;
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-bodyWidth / 2 + chamberInset, -bodyHeight / 2 + chamberInset,
+               bodyWidth - chamberInset * 2, bodyHeight - chamberInset * 2);
+
+  // Stopper/disc (moves based on opening)
+  const stopperHeight = bodyHeight * 0.15;
+  const stopperY = -bodyHeight / 2 + chamberInset + (bodyHeight * 0.3) * (1 - valve.opening);
+  ctx.fillStyle = valve.opening > 0 ? COLORS.warning : COLORS.steel;
+  ctx.fillRect(-bodyWidth / 2 + chamberInset + 2, stopperY,
+               bodyWidth - chamberInset * 2 - 4, stopperHeight);
+
+  // Spring coil above stopper (pushing down)
+  const springTop = -bodyHeight / 2 + chamberInset + 2;
+  const springBottom = stopperY;
+  const springCoils = 5;
+  const springWidth = bodyWidth * 0.4;
+
+  ctx.strokeStyle = '#aaa';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  for (let i = 0; i <= springCoils; i++) {
+    const y = springTop + (springBottom - springTop) * (i / springCoils);
+    const x = (i % 2 === 0) ? -springWidth / 2 : springWidth / 2;
+    if (i === 0) {
+      ctx.moveTo(0, y);
+      ctx.lineTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.lineTo(0, springBottom);
+  ctx.stroke();
+
+  // Spring cap on top
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(-bodyWidth / 3, -bodyHeight / 2 - 5, bodyWidth * 2 / 3, 8);
+
+  // Adjustment bolt on top (for setpoint)
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-4, -bodyHeight / 2 - 12, 8, 10);
+
+  // Hex head
+  ctx.beginPath();
+  ctx.arc(0, -bodyHeight / 2 - 15, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Label with setpoint or state
+  ctx.fillStyle = '#fff';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'center';
+
+  if (valve.valveType === 'porv') {
+    const state = valve.opening > 0 ? 'OPEN' : 'SHUT';
+    ctx.fillText(`PORV ${state}`, 0, bodyHeight / 2 + pipeLength + 12);
+  } else {
+    const setpointBar = valve.setpoint ? (valve.setpoint / 1e5).toFixed(0) : '???';
+    ctx.fillText(`RV ${setpointBar}bar`, 0, bodyHeight / 2 + pipeLength + 12);
+  }
 }
 
 function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerComponent, view: ViewState): void {

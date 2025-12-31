@@ -164,13 +164,114 @@ export const componentDefinitions: Record<string, {
         { value: 'gate', label: 'Gate Valve' },
         { value: 'globe', label: 'Globe Valve' },
         { value: 'ball', label: 'Ball Valve' },
-        { value: 'check', label: 'Check Valve' },
-        { value: 'relief', label: 'Relief Valve' }
+        { value: 'butterfly', label: 'Butterfly Valve' }
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
-      { name: 'cv', type: 'number', label: 'Flow Coefficient (Cv)', default: 500, min: 10, max: 10000, step: 10 },
       { name: 'initialPosition', type: 'number', label: 'Initial Position', default: 100, min: 0, max: 100, step: 5, unit: '%', help: '0% = closed, 100% = open' },
-      { name: 'reliefSetpoint', type: 'number', label: 'Relief Setpoint', default: 170, min: 10, max: 600, step: 10, unit: 'bar', help: 'Only for relief valves' }
+      // Cv calculated from diameter and valve type
+      // Cv ≈ 29.84 * d² for gate/ball (full bore), less for globe/butterfly
+      { name: 'cv', type: 'calculated', label: 'Flow Coefficient (Cv)', default: 0,
+        calculate: (p) => {
+          const d = p.diameter || 0.3;  // m
+          const d_in = d * 39.37;  // Convert to inches for Cv formula
+          // Cv = 29.84 * d² for full-bore valves (gate, ball)
+          // Reduced for globe (~60%) and butterfly (~80%)
+          const typeFactors: Record<string, number> = {
+            'gate': 1.0,
+            'ball': 1.0,
+            'globe': 0.6,
+            'butterfly': 0.8
+          };
+          const factor = typeFactors[p.type as string] || 1.0;
+          const cv = 29.84 * d_in * d_in * factor;
+          return cv.toFixed(0);
+        }
+      }
+    ]
+  },
+  'check-valve': {
+    displayName: 'Check Valve',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Check Valve' },
+      { name: 'type', type: 'select', label: 'Check Valve Type', default: 'swing', options: [
+        { value: 'swing', label: 'Swing Check' },
+        { value: 'lift', label: 'Lift Check' },
+        { value: 'tilting-disc', label: 'Tilting Disc' }
+      ]},
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
+      { name: 'crackingPressure', type: 'number', label: 'Cracking Pressure', default: 0.1, min: 0.01, max: 5, step: 0.01, unit: 'bar', help: 'Minimum ΔP to open valve' },
+      // Cv calculated from diameter and check valve type
+      { name: 'cv', type: 'calculated', label: 'Flow Coefficient (Cv)', default: 0,
+        calculate: (p) => {
+          const d = p.diameter || 0.3;  // m
+          const d_in = d * 39.37;  // Convert to inches
+          // Check valves have more restriction than gate valves
+          // Swing check ~85%, lift check ~50%, tilting disc ~75%
+          const typeFactors: Record<string, number> = {
+            'swing': 0.85,
+            'lift': 0.50,
+            'tilting-disc': 0.75
+          };
+          const factor = typeFactors[p.type as string] || 0.75;
+          const cv = 29.84 * d_in * d_in * factor;
+          return cv.toFixed(0);
+        }
+      }
+    ]
+  },
+  'relief-valve': {
+    displayName: 'Relief Valve',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Relief Valve' },
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 0.15, min: 0.025, max: 0.5, step: 0.025, unit: 'm' },
+      { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
+      { name: 'blowdown', type: 'number', label: 'Blowdown', default: 5, min: 1, max: 20, step: 1, unit: '%', help: 'Pressure drop before reseating (% of setpoint)' },
+      // Capacity calculated using critical (choked) flow for steam
+      // For critical flow: m_dot = Cd * A * P * sqrt(k * M / (R * T)) * (2/(k+1))^((k+1)/(2*(k-1)))
+      // Simplified: m_dot ≈ Cd * A * P * 0.67 / sqrt(T) for steam (k≈1.3)
+      // Or use empirical: ~50 kg/s per 0.1m diameter at 170 bar (scales with d² and sqrt(P))
+      { name: 'capacity', type: 'calculated', label: 'Relieving Capacity', default: 0, unit: 'kg/s',
+        calculate: (p) => {
+          const d = p.diameter || 0.15;  // m
+          const setpoint = p.setpoint || 170;  // bar
+          const A = Math.PI * (d / 2) * (d / 2);  // m²
+          const Cd = 0.85;  // ASME certified nozzle coefficient
+          // Critical flow constant for steam: C ≈ 2.11 kg/(s·m²·bar) at typical conditions
+          // This accounts for choked flow thermodynamics
+          const C = 2.11;
+          // Capacity = Cd * A * C * P (with Kd knockdown factor ~0.975)
+          const capacity = Cd * 0.975 * A * C * setpoint;
+          return capacity.toFixed(1);
+        }
+      }
+    ]
+  },
+  'porv': {
+    displayName: 'PORV',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'PORV' },
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 0.1, min: 0.025, max: 0.3, step: 0.025, unit: 'm' },
+      { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
+      { name: 'blowdown', type: 'number', label: 'Blowdown', default: 3, min: 1, max: 10, step: 1, unit: '%', help: 'Pressure drop before auto-reseating (% of setpoint)' },
+      { name: 'initialPosition', type: 'select', label: 'Initial State', default: 'auto', options: [
+        { value: 'auto', label: 'Auto (pressure-controlled)' },
+        { value: 'open', label: 'Forced Open' },
+        { value: 'closed', label: 'Forced Closed' }
+      ]},
+      { name: 'hasBlockValve', type: 'checkbox', label: 'Has Block Valve', default: true, help: 'Upstream isolation valve for maintenance' },
+      // Capacity calculated using critical (choked) flow for steam
+      { name: 'capacity', type: 'calculated', label: 'Relieving Capacity', default: 0, unit: 'kg/s',
+        calculate: (p) => {
+          const d = p.diameter || 0.1;  // m
+          const setpoint = p.setpoint || 165;  // bar
+          const A = Math.PI * (d / 2) * (d / 2);  // m²
+          const Cd = 0.90;  // PORVs typically have better flow characteristics
+          // Critical flow constant for steam
+          const C = 2.11;  // kg/(s·m²·bar)
+          const capacity = Cd * 0.975 * A * C * setpoint;
+          return capacity.toFixed(1);
+        }
+      }
     ]
   },
   'pump': {
@@ -828,12 +929,30 @@ export class ComponentDialog {
       return 'pressurizer';
     }
 
+    // Special case: valve can be check-valve, relief-valve, or porv based on valveType
+    if (type === 'valve' && component) {
+      if (component.valveType === 'check') {
+        return 'check-valve';
+      }
+      if (component.valveType === 'relief') {
+        return 'relief-valve';
+      }
+      if (component.valveType === 'porv') {
+        return 'porv';
+      }
+      // Otherwise it's a standard valve (gate, globe, ball, butterfly)
+      return 'valve';
+    }
+
     const mapping: Record<string, string> = {
       'tank': 'tank',
       'vessel': 'pressurizer',
       'reactorVessel': 'reactor-vessel',
       'pipe': 'pipe',
       'valve': 'valve',
+      'check-valve': 'check-valve',
+      'relief-valve': 'relief-valve',
+      'porv': 'porv',
       'pump': 'pump',
       'heatExchanger': 'heat-exchanger',
       'condenser': 'condenser',
@@ -1023,9 +1142,14 @@ export class ComponentDialog {
    * Get existing value from component, handling property name mapping
    */
   private getExistingValue(optionName: string, component: Record<string, any>, defaultValue: any): any {
-    // Direct property match
+    // Direct property match with unit conversions for pressure values stored in Pa
     if (component[optionName] !== undefined) {
-      return component[optionName];
+      const value = component[optionName];
+      // Convert Pa to bar for pressure fields
+      if (optionName === 'crackingPressure' || optionName === 'setpoint') {
+        return value / 1e5;  // Pa to bar
+      }
+      return value;
     }
 
     // Map option names to component properties

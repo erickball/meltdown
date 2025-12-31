@@ -1,6 +1,7 @@
 
 ## PROJECT GUIDELINES
 This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, clamping, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. It can also do BWRs, advanced reactors, or new and weird ideas for reactor designs. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
+Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
 -What does it mean when a connection turns orange?
@@ -19,6 +20,7 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
 -When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
+-Minimum pressure rating for a tank is what's needed for the hydrostatic pressure at its height
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
@@ -50,6 +52,8 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -We should make a pebble bed core option, too
 -Not sure how to handle needing big graphite reflectors though?
 -Show connection starting from their listed elevation.
+
+Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
 
 
 X Pumps should have a better drawing and also a big arrow showing which way they point. And ability to turn them around in construction mode.

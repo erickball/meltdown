@@ -55,8 +55,23 @@ export class ConstructionManager {
       flowRate: 0
     };
 
-    // Create standard ports for most components
-    const standardPorts: Port[] = [
+    // Create standard bidirectional ports for passive components (pipes, condensers)
+    // Flow direction is determined by physics, not by the component
+    const bidirectionalPorts: Port[] = [
+      {
+        id: `${id}-left`,
+        position: { x: -0.5, y: 0 },
+        direction: 'both'
+      },
+      {
+        id: `${id}-right`,
+        position: { x: 0.5, y: 0 },
+        direction: 'both'
+      }
+    ];
+
+    // Directional ports for active components (pumps, turbines) where flow has a defined direction
+    const directionalPorts: Port[] = [
       {
         id: `${id}-inlet`,
         position: { x: -0.5, y: 0 },
@@ -174,7 +189,7 @@ export class ConstructionManager {
           diameter: props.diameter,
           thickness: 0.01,  // 1cm default wall thickness
           length: props.length,
-          ports: standardPorts,
+          ports: bidirectionalPorts,  // Pipes are bidirectional - flow determined by physics
           fluid: defaultFluid
         };
 
@@ -183,6 +198,7 @@ export class ConstructionManager {
       }
 
       case 'valve': {
+        // Regular valves (gate, globe, ball, butterfly) are bidirectional
         const valve: ValveComponent = {
           id,
           type: 'valve',
@@ -192,11 +208,77 @@ export class ConstructionManager {
           diameter: props.diameter,
           opening: props.initialPosition / 100,
           valveType: props.type || 'gate',
-          ports: standardPorts,
+          ports: bidirectionalPorts,
           fluid: defaultFluid
         };
 
         this.plantState.components.set(id, valve);
+        break;
+      }
+
+      case 'check-valve': {
+        // Check valves are directional - flow only in forward direction
+        const checkValve: ValveComponent = {
+          id,
+          type: 'valve',
+          label: props.name || 'Check Valve',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          diameter: props.diameter,
+          opening: 0,  // Starts closed, opens based on ΔP
+          valveType: 'check',
+          crackingPressure: (props.crackingPressure || 0.1) * 1e5,  // bar to Pa
+          ports: directionalPorts,
+          fluid: defaultFluid
+        };
+
+        this.plantState.components.set(id, checkValve);
+        break;
+      }
+
+      case 'relief-valve': {
+        // Relief valves are directional - inlet from system, outlet to atmosphere/tank
+        const reliefValve: ValveComponent = {
+          id,
+          type: 'valve',
+          label: props.name || 'Relief Valve',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          diameter: props.diameter,
+          opening: 0,  // Starts closed, opens at setpoint
+          valveType: 'relief',
+          setpoint: (props.setpoint || 170) * 1e5,  // bar to Pa
+          blowdown: (props.blowdown || 5) / 100,    // % to fraction
+          capacity: props.capacity || 100,          // kg/s
+          ports: directionalPorts,
+          fluid: defaultFluid
+        };
+
+        this.plantState.components.set(id, reliefValve);
+        break;
+      }
+
+      case 'porv': {
+        // PORVs are directional like relief valves, but can be manually controlled
+        const porv: ValveComponent = {
+          id,
+          type: 'valve',
+          label: props.name || 'PORV',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          diameter: props.diameter,
+          opening: props.initialPosition === 'open' ? 1 : 0,
+          valveType: 'porv',
+          setpoint: (props.setpoint || 165) * 1e5,  // bar to Pa
+          blowdown: (props.blowdown || 3) / 100,    // % to fraction
+          capacity: props.capacity || 50,           // kg/s
+          controlMode: props.initialPosition || 'auto',  // 'auto', 'open', 'closed'
+          hasBlockValve: props.hasBlockValve !== false,
+          ports: directionalPorts,
+          fluid: defaultFluid
+        };
+
+        this.plantState.components.set(id, porv);
         break;
       }
 
@@ -563,7 +645,7 @@ export class ConstructionManager {
           heatRejection: 0,
           coolingWaterTemp: props.coolingWaterTemp + 273.15,
           tubeCount: 10000,  // Default tube count
-          ports: standardPorts,
+          ports: bidirectionalPorts,  // Condensers are bidirectional - steam in, condensate out determined by physics
           fluid: {
             temperature: props.coolingWaterTemp + 273.15 + 10,
             pressure: props.operatingPressure * 100000,
@@ -614,7 +696,7 @@ export class ConstructionManager {
           this.plantState.components.set(pumpId, condensatePump);
 
           // Automatically connect condenser to pump
-          this.createConnection(`${id}-outlet`, `${pumpId}-inlet`);
+          this.createConnection(`${id}-right`, `${pumpId}-inlet`);
         }
         break;
       }

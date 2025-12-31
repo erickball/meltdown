@@ -709,9 +709,27 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
     // Create valve state if this is a valve
     if (component.type === 'valve') {
-      const valveState = createValveStateFromComponent(component);
-      if (valveState) {
-        state.components.valves.set(valveState.id, valveState);
+      const valve = component as any;
+      if (valve.valveType === 'check') {
+        // Check valves go in the checkValves map
+        state.components.checkValves.set(component.id, {
+          id: component.id,
+          connectedFlowPath: '', // Set later when connections are processed
+          crackingPressure: valve.crackingPressure || 10000, // Default 0.1 bar
+        });
+      } else if (valve.valveType === 'relief' || valve.valveType === 'porv') {
+        // Relief valves and PORVs - for now, treat as regular valves
+        // TODO: Add proper relief valve logic with setpoint
+        const valveState = createValveStateFromComponent(component);
+        if (valveState) {
+          state.components.valves.set(valveState.id, valveState);
+        }
+      } else {
+        // Standard valves (gate, globe, ball, butterfly)
+        const valveState = createValveStateFromComponent(component);
+        if (valveState) {
+          state.components.valves.set(valveState.id, valveState);
+        }
       }
     }
 
@@ -794,15 +812,31 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
       // Link valve to its flow connection
       if (fromComponent?.type === 'valve') {
-        const valveState = state.components.valves.get(fromComponent.id);
-        if (valveState) {
-          valveState.connectedFlowPath = flowConnection.id;
+        const fromValve = fromComponent as any;
+        if (fromValve.valveType === 'check') {
+          const checkValveState = state.components.checkValves.get(fromComponent.id);
+          if (checkValveState) {
+            checkValveState.connectedFlowPath = flowConnection.id;
+          }
+        } else {
+          const valveState = state.components.valves.get(fromComponent.id);
+          if (valveState) {
+            valveState.connectedFlowPath = flowConnection.id;
+          }
         }
       }
       if (toComponent?.type === 'valve') {
-        const valveState = state.components.valves.get(toComponent.id);
-        if (valveState) {
-          valveState.connectedFlowPath = flowConnection.id;
+        const toValve = toComponent as any;
+        if (toValve.valveType === 'check') {
+          const checkValveState = state.components.checkValves.get(toComponent.id);
+          if (checkValveState) {
+            checkValveState.connectedFlowPath = flowConnection.id;
+          }
+        } else {
+          const valveState = state.components.valves.get(toComponent.id);
+          if (valveState) {
+            valveState.connectedFlowPath = flowConnection.id;
+          }
         }
       }
     }
