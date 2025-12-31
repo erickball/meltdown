@@ -230,21 +230,47 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
 }
 
 /**
- * Compute the L2 norm of rates for error estimation
+ * Compute the L2 norm of rates for error estimation.
+ * Also considers flow magnitude relative to node mass (throughput ratio)
+ * to handle stiffness from high flow through small volumes.
  */
 export function computeRatesNorm(rates: StateRates, state: SimulationState): number {
   let sumSq = 0;
   let count = 0;
 
+  // Build a map of total absolute flow into/out of each node
+  // This captures throughput even when net flow is near zero
+  const nodeThroughput = new Map<string, number>();
+  for (const conn of state.flowConnections) {
+    const absFlow = Math.abs(conn.massFlowRate);
+    // Add flow to both connected nodes
+    nodeThroughput.set(conn.fromNodeId, (nodeThroughput.get(conn.fromNodeId) || 0) + absFlow);
+    nodeThroughput.set(conn.toNodeId, (nodeThroughput.get(conn.toNodeId) || 0) + absFlow);
+  }
+
   // Flow nodes - normalize by current values to get relative error
   for (const [id, r] of rates.flowNodes) {
     const node = state.flowNodes.get(id);
     if (node) {
-      // Relative mass rate
+      // Relative mass rate (from net flow)
       if (node.fluid.mass > 0) {
         const relMassRate = r.dMass / node.fluid.mass;
         sumSq += relMassRate * relMassRate;
         count++;
+
+        // Also consider throughput ratio: total flow magnitude / node mass
+        // Even balanced flows can cause numerical issues if throughput >> mass
+        // A throughput of 10% of mass per second is significant
+        const throughput = nodeThroughput.get(id) || 0;
+        if (throughput > 0) {
+          // Throughput ratio: kg/s flowing through / kg in node
+          // Scale factor of 0.5 since we're counting flow at both ends
+          const throughputRatio = (throughput * 0.5) / node.fluid.mass;
+          // Weight this less than net mass change since balanced flow is more stable
+          // but still contributes to stiffness
+          sumSq += (throughputRatio * 0.3) * (throughputRatio * 0.3);
+          count++;
+        }
       }
       // Relative energy rate
       if (Math.abs(node.fluid.internalEnergy) > 0) {
@@ -294,11 +320,51 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
 }
 
 /**
+ * Quick pre-constraint check for catastrophically bad states.
+ * This runs BEFORE constraint operators to avoid crashing water properties.
+ * Returns true if the state is safe enough to pass to constraint operators.
+ */
+export function checkPreConstraintSanity(state: SimulationState): { safe: boolean; reason?: string } {
+  for (const [id, node] of state.flowNodes) {
+    // Check for very low mass - would cause divide-by-zero or extreme specific volume
+    if (node.fluid.mass < 0.1) {
+      return { safe: false, reason: `${id}: Mass too low (${node.fluid.mass.toFixed(4)} kg)` };
+    }
+
+    // Check for non-finite values that would crash calculations
+    if (!isFinite(node.fluid.mass) || !isFinite(node.fluid.internalEnergy)) {
+      return { safe: false, reason: `${id}: Non-finite mass or energy` };
+    }
+
+    // Check for negative internal energy (impossible)
+    if (node.fluid.internalEnergy < 0) {
+      return { safe: false, reason: `${id}: Negative internal energy` };
+    }
+
+    // Check specific volume isn't astronomically high (indicates near-vacuum)
+    // At 0.1 kg in 100 m³, v = 1,000,000 mL/kg which is far beyond any valid state
+    const v_mLkg = (node.volume / node.fluid.mass) * 1e6; // m³/kg to mL/kg
+    if (v_mLkg > 1e7) { // 10 million mL/kg is way beyond any physical state
+      return { safe: false, reason: `${id}: Specific volume too high (${v_mLkg.toExponential(2)} mL/kg) - near vacuum` };
+    }
+  }
+  return { safe: true };
+}
+
+/**
  * Check if a state has obviously bad physics that should cause step rejection.
  * Returns a score > 1 if the state is bad (larger = worse).
  */
-export function checkStateSanity(oldState: SimulationState, newState: SimulationState): number {
+export function checkStateSanity(oldState: SimulationState, newState: SimulationState, dt: number): number {
   let maxBadness = 0;
+
+  // Build throughput map for new state
+  const nodeThroughput = new Map<string, number>();
+  for (const conn of newState.flowConnections) {
+    const absFlow = Math.abs(conn.massFlowRate);
+    nodeThroughput.set(conn.fromNodeId, (nodeThroughput.get(conn.fromNodeId) || 0) + absFlow);
+    nodeThroughput.set(conn.toNodeId, (nodeThroughput.get(conn.toNodeId) || 0) + absFlow);
+  }
 
   // Check each flow node for bad physics
   for (const [id, newNode] of newState.flowNodes) {
@@ -323,6 +389,19 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
     if (newNode.fluid.mass < 0.1) {
       console.warn(`[RK45 Sanity] ${id}: Mass too low ${newNode.fluid.mass}`);
       return 1000;
+    }
+
+    // Check for large mass change relative to node mass
+    // If flow * dt > 20% of node mass, the timestep is probably too large
+    const throughput = nodeThroughput.get(id) || 0;
+    if (throughput > 0 && newNode.fluid.mass > 0) {
+      const massMovedThisStep = throughput * 0.5 * dt; // 0.5 because we counted both ends
+      const massFraction = massMovedThisStep / newNode.fluid.mass;
+      if (massFraction > 0.2) {
+        // More than 20% of mass moved in one step - too aggressive
+        const badness = massFraction / 0.2; // 20% = 1, 40% = 2, etc.
+        maxBadness = Math.max(maxBadness, badness);
+      }
     }
 
     // Check for invalid temperature (250K to 2500K covers most scenarios)
@@ -465,8 +544,17 @@ export class RK45Solver {
    * IMPORTANT: We must apply constraints BEFORE computing rates to ensure
    * algebraic variables (flow rates, pressures) are consistent with the
    * current state. Otherwise intermediate RK stages use stale values.
+   *
+   * Returns null if the state is too bad to process (pre-constraint sanity failure).
    */
-  private computeTotalRates(state: SimulationState): StateRates {
+  private computeTotalRates(state: SimulationState): StateRates | null {
+    // Quick sanity check before constraints to avoid crashing water properties
+    const preCheck = checkPreConstraintSanity(state);
+    if (!preCheck.safe) {
+      console.warn(`[RK45 computeRates] Pre-constraint sanity failed: ${preCheck.reason}`);
+      return null;
+    }
+
     // First, ensure algebraic constraints are satisfied for this state
     // This updates flow rates based on current pressures, which is critical
     // for the DAE nature of this system
@@ -514,7 +602,16 @@ export class RK45Solver {
     const k: StateRates[] = [];
 
     // k1 = f(t, y)
-    k[0] = this.computeTotalRates(state);
+    const k0 = this.computeTotalRates(state);
+    if (k0 === null) {
+      // Initial state is catastrophically bad - return failure
+      return {
+        newState: state,
+        error: 1e10,
+        k: [],
+      };
+    }
+    k[0] = k0;
 
     // k2 through k7
     for (let i = 1; i <= 6; i++) {
@@ -525,10 +622,31 @@ export class RK45Solver {
       }
       const stageState = applyRatesToState(state, stageRates, dt);
 
+      // Quick sanity check before constraints to avoid crashing water properties
+      const preCheck = checkPreConstraintSanity(stageState);
+      if (!preCheck.safe) {
+        // Intermediate stage is catastrophically bad - return failure
+        return {
+          newState: state,
+          error: 1e10,
+          k,
+        };
+      }
+
       // Apply constraints at intermediate stages for stability
       const constrainedStage = this.applyAllConstraints(stageState);
 
-      k[i] = this.computeTotalRates(constrainedStage);
+      // computeTotalRates also does sanity check but constrained state should be fine
+      const ki = this.computeTotalRates(constrainedStage);
+      if (ki === null) {
+        // Constraint operators made state worse somehow - return failure
+        return {
+          newState: state,
+          error: 1e10,
+          k,
+        };
+      }
+      k[i] = ki;
     }
 
     // Compute 5th order solution: y5 = y + dt * sum(B5[i] * k[i])
@@ -609,11 +727,22 @@ export class RK45Solver {
       // Take a step
       const { newState, error } = this.step(currentState, stepDt);
 
+      // Quick sanity check BEFORE constraints to avoid crashing water properties
+      const preCheck = checkPreConstraintSanity(newState);
+      if (!preCheck.safe) {
+        // Catastrophically bad state - reject immediately and shrink dt aggressively
+        console.warn(`[RK45] Pre-constraint sanity failed: ${preCheck.reason}`);
+        rejectsThisFrame++;
+        this.rejectedSteps++;
+        this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
+        continue;
+      }
+
       // Apply constraints to get final state
       const constrainedState = this.applyAllConstraints(newState);
 
       // Check for obviously bad physics (in addition to RK45 error estimate)
-      const sanityScore = checkStateSanity(currentState, constrainedState);
+      const sanityScore = checkStateSanity(currentState, constrainedState, stepDt);
 
       // Combine RK45 error with sanity check
       // Sanity score > 1 means something suspicious happened
@@ -689,10 +818,45 @@ export class RK45Solver {
     metrics: SolverMetrics;
   } {
     const { newState, error } = this.step(state, this.currentDt);
+
+    // Quick sanity check BEFORE constraints to avoid crashing water properties
+    const preCheck = checkPreConstraintSanity(newState);
+    if (!preCheck.safe) {
+      console.warn(`[RK45 singleStep] Pre-constraint sanity failed: ${preCheck.reason}`);
+      // Return original state with error indicator
+      this.rejectedSteps++;
+      return {
+        state,
+        dt: this.currentDt,
+        error: 1000, // Indicate failure
+        metrics: {
+          currentDt: this.currentDt,
+          actualDt: 0,
+          maxStableDt: this.config.maxDt,
+          dtLimitedBy: 'pre-sanity-fail',
+          stabilityLimitedBy: 'none',
+          minDtUsed: this.currentDt,
+          subcycleCount: 0,
+          totalSteps: this.totalSteps,
+          lastStepWallTime: 0,
+          avgStepWallTime: 0,
+          retriesThisFrame: 1,
+          maxPressureChange: 0,
+          maxFlowChange: 0,
+          maxMassChange: 0,
+          consecutiveSuccesses: 0,
+          realTimeRatio: 0,
+          isFallingBehind: true,
+          fallingBehindSince: 0,
+          operatorTimes: new Map(),
+        },
+      };
+    }
+
     const constrainedState = this.applyAllConstraints(newState);
 
     // Check sanity and log warning if needed
-    const sanityScore = checkStateSanity(state, constrainedState);
+    const sanityScore = checkStateSanity(state, constrainedState, this.currentDt);
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }

@@ -4,11 +4,8 @@ This project is intended as a sandbox environment with game-like aspects, to all
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
--Limit flow into or out of a node based on the fraction of its mass. Goes in the RK45 derivative calc?
 -Flow arrows are not located at the connections and not pointing the way flow is going. And the numbers with them should be black not white.
 -Vapor space connections are getting two-phase flow; level is not correctly used for flow phase.
--Warning before saving over something
--Successful save should close the dialog
 -If I'm placing a component and I click on an existing component, the options should be "place inside" or "cancel" not "place normally"
 -Core exceeds available space 3.30 m, when barrel ID is 3.35 m.
 -In construction mode, delete button should bring up the delete confirmation for the selected component (if any)
@@ -67,6 +64,10 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
 
 
+X Resolve some issues with high outward flow rate persisting despite almost no mass left in pump.
+X Limit flow into or out of a node based on the fraction of its mass. Goes in the RK45 derivative calc?
+X Warning before saving over something
+X Successful save should close the dialog
 X Selecting a pump does not show you its current head or rated head or flow, or current or rated speed, or even its quality. (confirm if quality shows up now when the pump is two phase)
 X Add visual scram indicator (should say time and reason for scram)
 X Preload water triangulation asynchronously

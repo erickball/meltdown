@@ -616,7 +616,22 @@ export function updateComponentDetail(
         html += '<div class="detail-section-title">Operating Status</div>';
         html += `<div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value" style="color: ${pumpState.running ? '#7f7' : '#f77'};">${pumpState.running ? 'RUNNING' : 'STOPPED'}</span></div>`;
         html += `<div class="detail-row"><span class="detail-label">Speed:</span><span class="detail-value">${(pumpState.effectiveSpeed * 100).toFixed(1)}%</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value">${(pumpState.ratedHead * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Head:</span><span class="detail-value">${(pumpState.ratedHead * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
+
+        // Calculate and show pressure rise using actual fluid density
+        if (pumpState.connectedFlowPath && pumpState.effectiveSpeed > 0) {
+          const conn = simState.flowConnections.find(c => c.id === pumpState.connectedFlowPath);
+          if (conn) {
+            const flowIsForward = conn.massFlowRate >= 0;
+            const upstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
+            const upstreamNode = simState.flowNodes.get(upstreamId);
+            const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750;
+            const g = 9.81;
+            const dP_pump = pumpState.effectiveSpeed * pumpState.ratedHead * rho * g;
+            html += `<div class="detail-row"><span class="detail-label">Pressure Rise:</span><span class="detail-value" style="color: #8af;">+${(dP_pump/1e5).toFixed(2)} bar</span> <span style="color: #888; font-size: 9px;">(ρ=${rho.toFixed(0)} kg/m³)</span></div>`;
+          }
+        }
+
         html += `<div class="detail-row"><span class="detail-label">Efficiency:</span><span class="detail-value">${(pumpState.efficiency * 100).toFixed(1)}%</span></div>`;
 
         // Get current flow and fluid state from connected flow path
@@ -816,7 +831,7 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Rated Head:</span><span class="detail-value">${pump.ratedHead} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Rated Flow:</span><span class="detail-value">${pump.ratedFlow} kg/s</span></div>`;
 
-      // Calculate current pump head
+      // Calculate current pump pressure rise
       const flowPath = simState.flowConnections.find(c => c.id === pump.connectedFlowPath);
       if (flowPath && pump.effectiveSpeed > 0) {
         const flowIsForward = flowPath.massFlowRate >= 0;
@@ -825,7 +840,9 @@ export function updateComponentDetail(
         const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750;
         const g = 9.81;
         const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
-        html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value" style="color: #8af;">+${(dP_pump/1e5).toFixed(2)} bar</span></div>`;
+        const currentHead = pump.effectiveSpeed * pump.ratedHead;
+        html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value">${currentHead.toFixed(1)} m</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Pressure Rise:</span><span class="detail-value" style="color: #8af;">+${(dP_pump/1e5).toFixed(2)} bar</span> <span style="color: #888; font-size: 9px;">(ρ=${rho.toFixed(0)} kg/m³)</span></div>`;
       }
       html += '</div>';
     }

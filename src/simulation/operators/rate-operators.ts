@@ -765,25 +765,34 @@ export class FlowMomentumRateOperator implements RateOperator {
 
       if (!fromNode || !toNode) continue;
 
-      // Get inertance (L/A ratio)
-      // If not specified, estimate from length and flow area
-      let inertance = conn.inertance;
-      if (!inertance || inertance <= 0) {
-        // Estimate: inertance = length / flowArea
-        inertance = (conn.length || 10) / (conn.flowArea || 0.1);
+      // Get pipe length L for momentum equation
+      // Standard inertance I = ρL/A, and ΔP = I * dQ/dt where Q = v*A
+      // This gives: ΔP = ρL/A * A * dv/dt = ρL * dv/dt
+      // So: dv/dt = ΔP / (ρ * L)
+      // We store just L here; density is applied separately
+      let L = conn.length;
+      if (!L || L <= 0) {
+        L = 10; // Default 10m pipe length
       }
 
       // Current flow state
       const currentFlow = conn.massFlowRate;
       const A = conn.flowArea || 0.1;
 
-      // Average density for momentum calculations
+      // Densities for momentum calculations
       const rho_from = fromNode.fluid.mass / fromNode.volume;
       const rho_to = toNode.fluid.mass / toNode.volume;
+
+      // For momentum/inertia, use upstream density - that's the fluid actually moving
+      // For positive flow (from->to), upstream is fromNode
+      // For negative flow (to->from), upstream is toNode
+      const rho_upstream = currentFlow >= 0 ? rho_from : rho_to;
+
+      // Average density for things that depend on both ends (like hydrostatic head in the connection)
       const rho_avg = (rho_from + rho_to) / 2;
 
-      // Current velocity
-      const v = currentFlow / (rho_avg * A);
+      // Current velocity - use upstream density since that's what's flowing
+      const v = currentFlow / (rho_upstream * A);
 
       // === Driving pressures ===
 
@@ -798,11 +807,11 @@ export class FlowMomentumRateOperator implements RateOperator {
       const dz = conn.elevation || 0; // positive = upward
       const dP_gravity = -rho_avg * g * dz; // negative if going up
 
-      // Pump head
+      // Pump head - uses upstream density since that's the fluid the pump is actually moving
       let dP_pump = 0;
       for (const [, pump] of state.components.pumps) {
         if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0) {
-          dP_pump = pump.effectiveSpeed * pump.ratedHead * rho_avg * g;
+          dP_pump = pump.effectiveSpeed * pump.ratedHead * rho_upstream * g;
         }
       }
 
@@ -875,19 +884,34 @@ export class FlowMomentumRateOperator implements RateOperator {
 
       // Friction pressure drop (always opposes flow direction)
       // dP_friction = -K * 0.5 * ρ * v * |v|  (negative when flow is positive)
-      const dP_friction = -K_eff * 0.5 * rho_avg * v * Math.abs(v);
+      // Uses upstream density since that's the fluid experiencing the friction
+      const dP_friction = -K_eff * 0.5 * rho_upstream * v * Math.abs(v);
 
       // Net accelerating pressure
       const dP_net = dP_driving + dP_friction;
 
-      // Momentum equation: ρ * inertance * dv/dt = dP_net
-      // dv/dt = dP_net / (ρ * inertance)
-      const dv_dt = dP_net / (rho_avg * inertance);
+      // Momentum equation: ΔP = ρ * L * dv/dt  (from inertance I = ρL/A, ΔP = I * dQ/dt where Q = v*A)
+      // dv/dt = ΔP / (ρ * L)
+      // Uses upstream density - that's the fluid being accelerated
+      const dv_dt = dP_net / (rho_upstream * L);
 
       // Convert velocity rate to mass flow rate:
       // ṁ = ρ * A * v
       // dṁ/dt = ρ * A * dv/dt  (assuming ρ changes slowly)
-      const dMassFlowRate = rho_avg * A * dv_dt;
+      // Uses upstream density since that's what's flowing
+      const dMassFlowRate = rho_upstream * A * dv_dt;
+
+      // DEBUG: Log momentum equation details for pum-5
+      if (conn.id.includes('pum-5') || conn.fromNodeId.includes('pum-5') || conn.toNodeId.includes('pum-5')) {
+        console.log(`[FlowMomentum DEBUG] ${conn.id}:`);
+        console.log(`  Pressures: P_from=${(P_from/1e5).toFixed(2)} bar, P_to=${(P_to/1e5).toFixed(2)} bar, dP_pressure=${(dP_pressure/1e5).toFixed(2)} bar`);
+        console.log(`  Driving: dP_gravity=${(dP_gravity/1e5).toFixed(3)} bar, dP_pump=${(dP_pump/1e5).toFixed(2)} bar, dP_driving=${(dP_driving/1e5).toFixed(2)} bar`);
+        console.log(`  Densities: rho_from=${rho_from.toFixed(1)}, rho_to=${rho_to.toFixed(1)}, rho_upstream=${rho_upstream.toFixed(1)} kg/m³`);
+        console.log(`  Flow: currentFlow=${currentFlow.toFixed(1)} kg/s, v=${v.toFixed(2)} m/s, A=${A.toFixed(4)} m²`);
+        console.log(`  Friction: K_eff=${K_eff.toFixed(1)}, dP_friction=${(dP_friction/1e5).toFixed(3)} bar`);
+        console.log(`  Momentum: L=${L.toFixed(1)} m, dP_net=${(dP_net/1e5).toFixed(2)} bar`);
+        console.log(`  Result: dv_dt=${dv_dt.toFixed(2)} m/s², dMassFlowRate=${dMassFlowRate.toFixed(2)} kg/s²`);
+      }
 
       rates.flowConnections.set(conn.id, { dMassFlowRate });
     }

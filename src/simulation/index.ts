@@ -23,6 +23,7 @@ export {
   addRates,
   scaleRates,
   applyRatesToState,
+  checkPreConstraintSanity,
 } from './rk45-solver';
 export type {
   RateOperator,
