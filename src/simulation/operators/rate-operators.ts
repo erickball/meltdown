@@ -454,7 +454,7 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
   private turbineEfficiency = 0.87;
   private condenserUA = 10e6; // W/K
-  private heatSinkTemp = 300; // K
+  private loggedOnce = false;
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -462,6 +462,12 @@ export class TurbineCondenserRateOperator implements RateOperator {
     // Initialize
     for (const [id] of state.flowNodes) {
       rates.flowNodes.set(id, { dMass: 0, dEnergy: 0 });
+    }
+
+    // Debug: Log all flow node IDs once
+    if (!this.loggedOnce) {
+      console.log('[TurbineCondenser] All flow node IDs:', Array.from(state.flowNodes.keys()));
+      this.loggedOnce = true;
     }
 
     let totalTurbinePower = 0;
@@ -533,16 +539,21 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       if (!isCondenser) continue;
 
-      const T_sat = condenserNode.fluid.temperature;
-      const T_sink = this.heatSinkTemp;
+      const T_fluid = condenserNode.fluid.temperature;
 
-      let heatRate = this.condenserUA * Math.max(0, T_sat - T_sink);
-
-      // Limit based on quality
-      const quality = condenserNode.fluid.quality ?? 0;
-      if (quality < 0.1) {
-        heatRate *= quality / 0.1;
+      // Heat sink temp must be specified on the flow node
+      if (condenserNode.heatSinkTemp === undefined) {
+        throw new Error(`[TurbineCondenser] Condenser node '${condenserNodeId}' missing heatSinkTemp property`);
       }
+      const T_sink = condenserNode.heatSinkTemp;
+
+      // Heat removal based on temperature difference only
+      // The condenser removes heat as long as fluid is warmer than heat sink
+      let heatRate = this.condenserUA * Math.max(0, T_fluid - T_sink);
+
+      // Debug logging
+      const quality = condenserNode.fluid.quality ?? 0;
+      console.log(`[Condenser] ${condenserNodeId}: T=${T_fluid.toFixed(1)}K, T_sink=${T_sink.toFixed(0)}K, quality=${quality.toFixed(3)}, heatRate=${(heatRate/1e6).toFixed(1)}MW`);
 
       // Cap heat rate
       heatRate = Math.min(heatRate, 800e6);

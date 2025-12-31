@@ -252,8 +252,12 @@ export function createTurbineGenerator(
  *
  * Flow Path: core-coolant → hot-leg → sg-primary → cold-leg → core-coolant
  *            hot-leg ↔ pressurizer (surge line)
+ *
+ * OBSOLETE: This demo plant uses hardcoded simNodeIds that match the
+ * obsolete createDemoReactor() function. Use user-constructed plants instead.
  */
 export function createDemoPlant() {
+  throw new Error('createDemoPlant is OBSOLETE. Use user-constructed plants instead.');
   const components = new Map();
 
   // =========================================================================

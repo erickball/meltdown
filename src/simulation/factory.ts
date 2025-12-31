@@ -91,10 +91,12 @@ function createDefaultNeutronics(): NeutronicsState {
 }
 
 /**
- * Create a demonstration reactor with realistic-ish parameters
- * This is a simplified PWR model
+ * OBSOLETE: Demo reactor with hardcoded node IDs.
+ * Use createSimulationFromPlant() with user-constructed plants instead.
  */
 export function createDemoReactor(): SimulationState {
+  throw new Error('createDemoReactor is OBSOLETE. Use createSimulationFromPlant() instead.');
+  /* Unreachable code - preserved for reference
   const state = createSimulationState();
 
   // =========================================================================
@@ -676,6 +678,7 @@ export function createDemoReactor(): SimulationState {
   }
 
   return state;
+  */
 }
 
 /**
@@ -1084,6 +1087,8 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const volume = 50;
       const pressure = condenser.fluid?.pressure || 1e5; // 1 bar
       const temp = saturationTemperature(pressure);
+      // Get cooling water temp from component, default to 293K (20°C)
+      const heatSinkTemp = condenser.coolingWaterTemp || 293;
 
       return {
         id: component.id,
@@ -1093,6 +1098,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         hydraulicDiameter: 0.02,
         flowArea: 2,
         elevation,
+        heatSinkTemp,
       };
     }
 

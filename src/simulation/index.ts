@@ -57,6 +57,7 @@ export * from './operators';
 
 // Factory for creating simulation state
 export { createSimulationState, createDemoReactor, createSimulationFromPlant } from './factory';
+// Note: createDemoReactor is OBSOLETE - throws error if used
 
 // Water properties (including debug and profiling functions)
 export {

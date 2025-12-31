@@ -1664,23 +1664,19 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     }
   }
 
-  // Sync turbine-generator state
-  const turbineInlet = simState.flowNodes.get('turbine-inlet');
-  const turbineOutlet = simState.flowNodes.get('turbine-outlet');
+  // Sync turbine-generator state using component's simNodeId
   for (const [, comp] of plantState.components) {
     if (comp.type === 'turbine-generator') {
+      // Get the turbine's simulation node using its simNodeId
+      const turbineNodeId = (comp as { simNodeId?: string }).simNodeId;
+      const turbineNode = turbineNodeId ? simState.flowNodes.get(turbineNodeId) : undefined;
+
       // Update inlet/outlet fluids from simulation
-      if (turbineInlet && comp.inletFluid) {
-        comp.inletFluid.temperature = turbineInlet.fluid.temperature;
-        comp.inletFluid.pressure = turbineInlet.fluid.pressure;
-        comp.inletFluid.phase = turbineInlet.fluid.phase;
-        comp.inletFluid.quality = turbineInlet.fluid.quality;
-      }
-      if (turbineOutlet && comp.outletFluid) {
-        comp.outletFluid.temperature = turbineOutlet.fluid.temperature;
-        comp.outletFluid.pressure = turbineOutlet.fluid.pressure;
-        comp.outletFluid.phase = turbineOutlet.fluid.phase;
-        comp.outletFluid.quality = turbineOutlet.fluid.quality;
+      if (turbineNode && comp.inletFluid) {
+        comp.inletFluid.temperature = turbineNode.fluid.temperature;
+        comp.inletFluid.pressure = turbineNode.fluid.pressure;
+        comp.inletFluid.phase = turbineNode.fluid.phase;
+        comp.inletFluid.quality = turbineNode.fluid.quality;
       }
       // Turbine is running if there's flow through it
       comp.running = true; // For now, always running

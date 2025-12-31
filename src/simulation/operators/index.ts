@@ -31,9 +31,9 @@ export {
 } from './neutronics';
 
 export {
-  TurbineCondenserOperator,
-  createDefaultTurbineCondenserConfig,
-  createTurbineCondenserConfigFromPlant,
+  TurbineCondenserOperator,  // OBSOLETE: throws error if used
+  createDefaultTurbineCondenserConfig,  // OBSOLETE: throws error if used
+  createTurbineCondenserConfigFromPlant,  // OBSOLETE: throws error if used
   getTurbineCondenserState,
   updateTurbineCondenserState,
   type TurbineCondenserConfig,

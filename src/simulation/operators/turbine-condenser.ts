@@ -17,7 +17,9 @@
  */
 
 import { SimulationState, PumpState } from '../types';
-import { PhysicsOperator, cloneSimulationState } from '../solver';
+import { PhysicsOperator } from '../solver';
+// Preserved for reference in commented-out OBSOLETE code
+// @ts-ignore
 import { saturatedLiquidEnthalpy, saturatedVaporEnthalpy } from '../water-properties';
 
 // ============================================================================
@@ -86,18 +88,23 @@ export function updateTurbineCondenserState(
 }
 
 // ============================================================================
-// Turbine Condenser Operator
+// OBSOLETE: Euler-based Turbine Condenser Operator
+// Use TurbineCondenserRateOperator in rate-operators.ts instead.
 // ============================================================================
 
+// @ts-ignore - OBSOLETE class with unused private members
 export class TurbineCondenserOperator implements PhysicsOperator {
   name = 'TurbineCondenser';
+  // @ts-ignore - unused but preserved for reference
   private config: TurbineCondenserConfig;
 
-  constructor(config: TurbineCondenserConfig) {
-    this.config = config;
+  constructor(_config: TurbineCondenserConfig) {
+    throw new Error('TurbineCondenserOperator is OBSOLETE. Use TurbineCondenserRateOperator instead.');
   }
 
-  apply(state: SimulationState, dt: number): SimulationState {
+  apply(_state: SimulationState, _dt: number): SimulationState {
+    throw new Error('TurbineCondenserOperator is OBSOLETE. Use TurbineCondenserRateOperator instead.');
+    /* Unreachable code preserved for reference
     const newState = cloneSimulationState(state);
 
     let totalTurbinePower = 0;
@@ -106,13 +113,13 @@ export class TurbineCondenserOperator implements PhysicsOperator {
 
     // Process turbines
     for (const turbine of this.config.turbines) {
-      const power = this.processTurbine(newState, turbine, dt);
+      const power = this.processTurbine(newState, turbine, _dt);
       totalTurbinePower += power;
     }
 
     // Process condensers
     for (const condenser of this.config.condensers) {
-      const heat = this.processCondenser(newState, condenser, dt);
+      const heat = this.processCondenser(newState, condenser, _dt);
       totalCondenserHeat += heat;
     }
 
@@ -135,9 +142,12 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     };
 
     return newState;
+    */
   }
 
-  getMaxStableDt(state: SimulationState): number {
+  getMaxStableDt(_state: SimulationState): number {
+    throw new Error('TurbineCondenserOperator is OBSOLETE. Use TurbineCondenserRateOperator instead.');
+    /*
     // Check if any configured turbines/condensers actually exist in the state
     let hasActiveTurbine = false;
     let hasActiveCondenser = false;
@@ -164,27 +174,17 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     // Secondary loop dynamics are slower than primary
     // The condenser is the limiting factor due to heat removal rate
     return 0.1; // 100 ms is fine
+    */
   }
 
-  /**
-   * Process turbine expansion
-   *
-   * The turbine extracts enthalpy from steam as it expands from inlet pressure
-   * to outlet pressure. The expansion is approximately isentropic:
-   *
-   * h_out_ideal = h(s_in, P_out)  <- isentropic expansion
-   * h_out_actual = h_in - η * (h_in - h_out_ideal)
-   * Power = m_dot * (h_in - h_out_actual)
-   *
-   * For isentropic expansion of saturated steam to wet steam at lower pressure,
-   * the outlet quality is typically 0.85-0.90. We use this to calculate the
-   * ideal outlet enthalpy from saturation properties.
-   */
+  // @ts-ignore - unused private method (OBSOLETE)
   private processTurbine(
-    state: SimulationState,
-    turbine: TurbineConfig,
-    dt: number
+    _state: SimulationState,
+    _turbine: TurbineConfig,
+    _dt: number
   ): number {
+    throw new Error('OBSOLETE');
+    /* Unreachable code
     const turbineNode = state.flowNodes.get(turbine.turbineNodeId);
     const outletNode = state.flowNodes.get(turbine.outletNodeId);
 
@@ -286,25 +286,17 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     }
 
     return power;
+    */
   }
 
-  /**
-   * Process condenser heat rejection
-   *
-   * The condenser removes latent heat from wet steam to produce saturated liquid.
-   * Heat is rejected to the ultimate heat sink (cooling water).
-   *
-   * Q = UA * (T_sat - T_cooling)
-   * Q = m_dot * h_fg (if condensing)
-   *
-   * The condenser pressure is determined by equilibrium between heat rejection
-   * rate and steam flow rate.
-   */
+  // @ts-ignore - unused private method (OBSOLETE)
   private processCondenser(
-    state: SimulationState,
-    condenser: CondenserConfig,
-    dt: number
+    _state: SimulationState,
+    _condenser: CondenserConfig,
+    _dt: number
   ): number {
+    throw new Error('OBSOLETE');
+    /* Unreachable code
     const node = state.flowNodes.get(condenser.flowNodeId);
     if (!node) return 0;
 
@@ -342,22 +334,16 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     // which will shift quality toward liquid.
 
     return heatRate;
+    */
   }
 
-  /**
-   * Calculate pump work for any pump
-   *
-   * W_pump = m_dot * g * H / η
-   *
-   * where H is the pump head in meters, which relates to pressure rise by:
-   * ΔP = ρ * g * H
-   *
-   * This unified calculation works for RCPs, feedwater pumps, or any other pump.
-   */
+  // @ts-ignore - unused private method (OBSOLETE)
   private calculatePumpWork(
-    state: SimulationState,
-    pump: PumpState
+    _state: SimulationState,
+    _pump: PumpState
   ): number {
+    throw new Error('OBSOLETE');
+    /*
     // Find the flow connection for this pump
     const conn = state.flowConnections.find(c => c.id === pump.connectedFlowPath);
     if (!conn) return 0;
@@ -377,14 +363,16 @@ export class TurbineCondenserOperator implements PhysicsOperator {
     const work = massFlowRate * g * effectiveHead / pump.efficiency;
 
     return work;
+    */
   }
 }
 
 // ============================================================================
-// Helper: Create default turbine/condenser configuration
+// OBSOLETE: Default config with hardcoded node IDs
 // ============================================================================
 
 export function createDefaultTurbineCondenserConfig(): TurbineCondenserConfig {
+  throw new Error('createDefaultTurbineCondenserConfig is OBSOLETE. RK45 operator dynamically finds components.');
   return {
     turbines: [{
       id: 'hp-turbine',
@@ -406,13 +394,14 @@ export function createDefaultTurbineCondenserConfig(): TurbineCondenserConfig {
 }
 
 /**
- * Create turbine/condenser configuration from plant components.
- * Scans the plant state for turbine-generator and condenser components
- * and builds the appropriate configuration.
+ * OBSOLETE: Create turbine/condenser configuration from plant components.
+ * The RK45 TurbineCondenserRateOperator now dynamically finds components.
  */
 export function createTurbineCondenserConfigFromPlant(
-  plantComponents: Map<string, { type: string; id: string }>
+  _plantComponents: Map<string, { type: string; id: string }>
 ): TurbineCondenserConfig {
+  throw new Error('createTurbineCondenserConfigFromPlant is OBSOLETE. RK45 operator dynamically finds components.');
+  /* Unreachable code
   const turbines: TurbineConfig[] = [];
   const condensers: CondenserConfig[] = [];
 
@@ -421,7 +410,7 @@ export function createTurbineCondenserConfigFromPlant(
   const turbineComponents: Array<{ id: string; efficiency?: number; ratedPower?: number; ratedSteamFlow?: number }> = [];
   const condenserComponents: Array<{ id: string; coolingWaterTemp?: number }> = [];
 
-  for (const [, component] of plantComponents) {
+  for (const [, component] of _plantComponents) {
     const comp = component as Record<string, unknown>;
     if (component.type === 'turbine-generator') {
       turbineComponents.push({
@@ -476,4 +465,5 @@ export function createTurbineCondenserConfigFromPlant(
   }
 
   return { turbines, condensers };
+  */
 }

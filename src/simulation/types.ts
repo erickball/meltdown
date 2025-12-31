@@ -67,6 +67,9 @@ export interface FlowNode {
 
   // Elevation for natural circulation
   elevation: number;                // m - height relative to reference
+
+  // Optional: Heat sink temperature for condensers (K)
+  heatSinkTemp?: number;
 }
 
 // ============================================================================
