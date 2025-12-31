@@ -76,8 +76,10 @@ export function getComponentElevation(component: PlantComponent): number {
       return 0; // Pumps typically at ground level
     case 'condenser':
       return -2; // Condensers often below grade
-    case 'turbine':
+    case 'turbine-generator':
       return 2; // Turbines on elevated deck
+    case 'turbine-driven-pump':
+      return 1; // Auxiliary turbines slightly elevated
     case 'vessel':
       return 0; // Reactor vessel at grade
     default:
@@ -405,11 +407,19 @@ export function renderComponentShadow(
       ctx.fill();
       break;
     }
-    case 'turbine': {
-      // Turbine is typically large
+    case 'turbine-generator': {
+      // Turbine-generator is typically large
       const size = 3 * view.zoom; // Approximate size
       ctx.beginPath();
       ctx.ellipse(0, 0, size, size * 0.6, 0, 0, Math.PI * 2);
+      ctx.fill();
+      break;
+    }
+    case 'turbine-driven-pump': {
+      // Smaller auxiliary turbine-pump
+      const size = 1.5 * view.zoom;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, size, size * 0.5, 0, 0, Math.PI * 2);
       ctx.fill();
       break;
     }

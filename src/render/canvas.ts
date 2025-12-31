@@ -24,12 +24,6 @@ export class PlantCanvas {
   // Separate from view.offsetY which controls elevation
   private cameraDepth: number = 0;
 
-  // Debug logging throttle and camera tracking
-  private lastDebugLog: number = 0;
-  private lastCameraX: number = 0;
-  private lastCameraY: number = 0;
-  private lastCameraDepth: number = 0;
-  private loggedComponentIds: Set<string> = new Set();
 
   // Interaction state
   private isDragging: boolean = false;
@@ -223,11 +217,21 @@ export class PlantCanvas {
     e.preventDefault();
 
     if (this.isometric.enabled) {
-      // In isometric mode, scroll wheel moves camera forward/backward
-      // Scroll up = move forward (decrease cameraDepth), scroll down = move backward
-      const depthStep = 30;
-      this.cameraDepth += e.deltaY > 0 ? depthStep : -depthStep;
-      this.clampView();
+      // In isometric mode, scroll wheel changes view angle
+      // Scroll up = look more from above (increase angle), scroll down = look more forward (decrease angle)
+      const angleStep = 5;
+      this.viewAngle += e.deltaY > 0 ? angleStep : -angleStep;
+      this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
+
+      // Update the view angle slider and display to match
+      const slider = document.getElementById('view-elevation') as HTMLInputElement;
+      const display = document.getElementById('view-elevation-value');
+      if (slider) {
+        slider.value = String(this.viewAngle);
+      }
+      if (display) {
+        display.textContent = String(this.viewAngle);
+      }
     } else {
       // In 2D mode, scroll wheel zooms
       const rect = this.canvas.getBoundingClientRect();
@@ -333,7 +337,9 @@ export class PlantCanvas {
 
   public getComponentAtScreen(screenPos: Point): PlantComponent | null {
     // Check components in reverse order (top-most first, closest to camera)
-    const components = Array.from(this.plantState.components.values());
+    // Filter out hydraulic-only components (they're not rendered, so shouldn't be clickable)
+    const components = Array.from(this.plantState.components.values())
+      .filter(c => !(c as any).isHydraulicOnly);
 
     // Sort by depth: closer to camera (smaller Y) checked first
     // Also: contained components are on top, so check them first
@@ -420,10 +426,43 @@ export class PlantCanvas {
     let visualQuad: Point[];
 
     if (component.type === 'pipe') {
-      // Pipe rendering: translateX = backLeft.x, translateY = backLeft.y - visualHalfH
-      // Pipe draws from local y=-halfH (top) to y=+halfH (bottom)
-      // Visual top: backLeft.y - 2*visualHalfH, Visual bottom: backLeft.y
-      // Visual left: backLeft.x, Visual right: backRight.x
+      // For pipes with endpoint data, use projected endpoints for hit testing
+      const pipe = component as import('../types').PipeComponent;
+      if (pipe.endPosition && pipe.endElevation !== undefined) {
+        // Project both endpoints
+        const startScreen = this.worldToScreenPerspective(
+          { x: pipe.position.x, y: pipe.position.y },
+          pipe.elevation ?? 0
+        );
+        const endScreen = this.worldToScreenPerspective(
+          pipe.endPosition,
+          pipe.endElevation
+        );
+
+        if (startScreen.scale > 0 && endScreen.scale > 0) {
+          // Calculate pipe visual thickness
+          const avgScale = (startScreen.scale + endScreen.scale) / 2;
+          const visualThickness = halfH * avgScale * 50; // Match rendering zoom
+
+          // Calculate perpendicular offset for pipe width
+          const dx = endScreen.pos.x - startScreen.pos.x;
+          const dy = endScreen.pos.y - startScreen.pos.y;
+          const len = Math.hypot(dx, dy);
+          const perpX = -dy / len * visualThickness;
+          const perpY = dx / len * visualThickness;
+
+          // Quad corners: start-left, start-right, end-right, end-left
+          visualQuad = [
+            { x: startScreen.pos.x + perpX, y: startScreen.pos.y + perpY },
+            { x: startScreen.pos.x - perpX, y: startScreen.pos.y - perpY },
+            { x: endScreen.pos.x - perpX, y: endScreen.pos.y - perpY },
+            { x: endScreen.pos.x + perpX, y: endScreen.pos.y + perpY },
+          ];
+          return this.isPointInQuad(screenPos, visualQuad);
+        }
+      }
+
+      // Fallback for pipes without endpoint data
       const visualTop = backLeft.y - 2 * visualHalfH;
       const visualBottom = backLeft.y;
       visualQuad = [
@@ -524,6 +563,43 @@ export class PlantCanvas {
 
   // Get port screen position in isometric mode, matching component visual rendering
   private getPortScreenPosition(component: PlantComponent, port: { position: Point }): { x: number, y: number, radius: number } | null {
+    // For pipes with endpoint data, use the projected endpoints directly
+    if (component.type === 'pipe') {
+      const pipe = component as import('../types').PipeComponent;
+      if (pipe.endPosition && pipe.endElevation !== undefined) {
+        // Determine which endpoint this port is at based on port.position.x
+        // Inlet (x=0) is at start, outlet (x=length) is at end
+        const isAtEnd = port.position.x > pipe.length / 2;
+
+        if (isAtEnd) {
+          // Project end point
+          const endScreen = this.worldToScreenPerspective(
+            pipe.endPosition,
+            pipe.endElevation
+          );
+          if (endScreen.scale <= 0) return null;
+          return {
+            x: endScreen.pos.x,
+            y: endScreen.pos.y,
+            radius: Math.max(6, endScreen.scale * 25)
+          };
+        } else {
+          // Project start point
+          const startScreen = this.worldToScreenPerspective(
+            { x: pipe.position.x, y: pipe.position.y },
+            pipe.elevation ?? 0
+          );
+          if (startScreen.scale <= 0) return null;
+          return {
+            x: startScreen.pos.x,
+            y: startScreen.pos.y,
+            radius: Math.max(6, startScreen.scale * 25)
+          };
+        }
+      }
+    }
+
+    // Standard approach for non-pipe components
     const elevation = getComponentElevation(component);
     const size = this.getComponentSize(component);
     const halfW = size.width / 2;
@@ -534,7 +610,7 @@ export class PlantCanvas {
     const cos = Math.cos(component.rotation);
     const sin = Math.sin(component.rotation);
 
-    // For pipes, local coords go from (0, -halfH) to (length, halfH)
+    // For pipes without endpoint data, use old method
     let localLeft = -halfW;
     if (component.type === 'pipe') {
       localLeft = 0;
@@ -613,6 +689,10 @@ export class PlantCanvas {
       case 'vessel':
         const r = component.innerDiameter / 2 + component.wallThickness;
         return Math.abs(localX) <= r && Math.abs(localY) <= component.height / 2;
+      case 'reactorVessel':
+        const rv = component as import('../types').ReactorVesselComponent;
+        const rvR = rv.innerDiameter / 2 + rv.wallThickness;
+        return Math.abs(localX) <= rvR && Math.abs(localY) <= rv.height / 2;
       case 'valve':
         const vr = component.diameter;
         return Math.abs(localX) <= vr && Math.abs(localY) <= vr;
@@ -649,12 +729,9 @@ export class PlantCanvas {
   // - perspectiveOffset: added to distance to flatten perspective (near/far more similar)
   // - overallScale: everything smaller when camera is higher
   private getViewTransform(): { verticalScale: number, perspectiveOffset: number, overallScale: number } {
-    // viewAngle: 20-70 degrees from horizontal
-    const angleRad = this.viewAngle * Math.PI / 180;
-
-    // Vertical compression for component heights: cos(angle)
-    // At 20°: cos = 0.94, At 70°: cos = 0.34
-    const verticalScale = Math.cos(angleRad);
+    // Vertical compression disabled - it was distorting positions
+    // Previously: const verticalScale = Math.cos(viewAngle in radians);
+    const verticalScale = 1.0;
 
     // Perspective offset - adding to distance flattens perspective
     // Higher offset = less difference between near and far objects
@@ -836,10 +913,29 @@ export class PlantCanvas {
     // Larger Y = further from camera = draw first (behind)
     // Smaller Y = closer to camera = draw last (in front)
     // Also: contained components must be drawn after their containers
-    const sortedComponents = Array.from(this.plantState.components.values()).sort((a, b) => {
+
+    // Helper to check if 'a' is contained by 'b' (directly or indirectly)
+    const isContainedBy = (a: PlantComponent, bId: string): boolean => {
+      const visited = new Set<string>();
+      let current = a;
+      while (current.containedBy) {
+        if (current.containedBy === bId) return true;
+        if (visited.has(current.id)) break; // Prevent infinite loop on circular refs
+        visited.add(current.id);
+        const parent = this.plantState.components.get(current.containedBy);
+        if (!parent) break;
+        current = parent;
+      }
+      return false;
+    };
+
+    const sortedComponents = Array.from(this.plantState.components.values())
+      .filter(c => !(c as any).isHydraulicOnly) // Skip hydraulic-only components (no visual)
+      .sort((a, b) => {
       // First priority: contained components are drawn after their containers
-      if (a.containedBy === b.id) return 1;  // a is inside b, draw a last
-      if (b.containedBy === a.id) return -1; // b is inside a, draw b last
+      // Check containment chain (a inside intermediate inside b)
+      if (isContainedBy(a, b.id)) return 1;  // a is inside b (directly or indirectly), draw a last
+      if (isContainedBy(b, a.id)) return -1; // b is inside a (directly or indirectly), draw b last
 
       // Second priority: depth sorting in isometric mode
       if (!this.isometric.enabled) return 0;
@@ -900,9 +996,7 @@ export class PlantCanvas {
           }
 
           // Shadow is cast by the TOP of the component projecting onto the ground
-          const componentHeight = worldHeight; // Physical height (for non-pipes, this is height; for pipes, diameter)
           const baseElevation = elevation;
-          const topElevation = baseElevation + componentHeight;
 
           // For pipes, shadow height is the diameter, not the length
           const shadowHeight = component.type === 'pipe' ? (component as any).diameter : worldHeight;
@@ -1045,7 +1139,6 @@ export class PlantCanvas {
         // Get the projected corner positions
         const frontLeft = screenCorners[0].pos;
         const frontRight = screenCorners[1].pos;
-        const backRight = screenCorners[2].pos;
         const backLeft = screenCorners[3].pos;
 
         // Use front edge width for zoom
@@ -1064,8 +1157,55 @@ export class PlantCanvas {
         let translateY: number;
 
         if (component.type === 'pipe') {
-          // Pipe draws centered on y=0 in local coords
-          const visualHalfH = halfH * projectedZoom * verticalScale; // Account for compression
+          // For pipes with endpoint data, project both endpoints and draw between them
+          const pipe = component as import('../types').PipeComponent;
+          if (pipe.endPosition && pipe.endElevation !== undefined) {
+            // Project start point (position, elevation)
+            const startScreen = this.worldToScreenPerspective(
+              { x: pipe.position.x, y: pipe.position.y },
+              pipe.elevation ?? 0
+            );
+            // Project end point
+            const endScreen = this.worldToScreenPerspective(
+              pipe.endPosition,
+              pipe.endElevation
+            );
+
+            if (startScreen.scale > 0 && endScreen.scale > 0) {
+              // Calculate screen-space length and rotation
+              const screenDx = endScreen.pos.x - startScreen.pos.x;
+              const screenDy = endScreen.pos.y - startScreen.pos.y;
+              const screenLength = Math.hypot(screenDx, screenDy);
+              const screenRotation = Math.atan2(screenDy, screenDx);
+
+              // Use average scale for pipe thickness
+              const avgScale = (startScreen.scale + endScreen.scale) / 2;
+              const pipeZoom = avgScale * 50; // Base zoom factor
+
+              // Position at start point, rotate toward end point
+              ctx.translate(startScreen.pos.x, startScreen.pos.y);
+              ctx.rotate(screenRotation);
+
+              // Create a modified view for rendering with screen-space dimensions
+              const pipeView: ViewState = { ...this.view, zoom: pipeZoom };
+
+              // Temporarily modify pipe length to match screen length
+              const originalLength = pipe.length;
+              (pipe as any).length = screenLength / pipeZoom;
+
+              const isSelected = component.id === this.selectedComponentId;
+              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections);
+
+              // Restore original length
+              (pipe as any).length = originalLength;
+
+              ctx.restore();
+              continue; // Skip the normal rendering path
+            }
+          }
+
+          // Fallback for pipes without endpoint data
+          const visualHalfH = halfH * projectedZoom;
           translateX = backLeft.x;
           translateY = backLeft.y - visualHalfH;
         } else {
@@ -1083,14 +1223,19 @@ export class PlantCanvas {
         ctx.rotate(component.rotation);
 
         // Apply vertical compression based on view angle (looking from above = compressed)
-        ctx.scale(1, verticalScale);
+        // Skip for pipes since they're thin horizontal elements and compression looks wrong
+        if (component.type !== 'pipe') {
+          ctx.scale(1, verticalScale);
+        }
 
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, isometricView, isSelected, true);
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections);
 
         // Render elevation label (reset scale first so text isn't squished)
-        ctx.scale(1, 1 / verticalScale);
+        if (component.type !== 'pipe') {
+          ctx.scale(1, 1 / verticalScale);
+        }
         renderElevationLabel(ctx, component, isometricView, this.isometric);
       } else {
         const screenPos = worldToScreen(component.position, this.view);
@@ -1099,7 +1244,7 @@ export class PlantCanvas {
 
         // Render the component
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, this.view, isSelected);
+        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections);
       }
 
       ctx.restore();
@@ -1146,13 +1291,18 @@ export class PlantCanvas {
       case 'vessel':
         const vesselR = (component as any).innerDiameter / 2 + (component as any).wallThickness;
         return { width: vesselR * 2, height: (component as any).height };
+      case 'reactorVessel':
+        const rvR2 = (component as any).innerDiameter / 2 + (component as any).wallThickness;
+        return { width: rvR2 * 2, height: (component as any).height };
       case 'valve':
         const valveD = (component as any).diameter || 0.2;
         return { width: valveD * 2, height: valveD * 2 };
       case 'heatExchanger':
         return { width: (component as any).width, height: (component as any).height };
-      case 'turbine':
+      case 'turbine-generator':
         return { width: (component as any).width || 1.5, height: (component as any).height || 1.2 };
+      case 'turbine-driven-pump':
+        return { width: (component as any).width || 1, height: (component as any).height || 0.6 };
       case 'condenser':
         return { width: (component as any).width || 2, height: (component as any).height || 1 };
       default:
@@ -1400,10 +1550,10 @@ export class PlantCanvas {
   }
 
   public setViewElevation(sliderValue: number): void {
-    // sliderValue: 10-60, maps directly to view angle in degrees
+    // sliderValue: 10-50, maps directly to view angle in degrees
     // 10 = looking more forward (less compression)
-    // 60 = looking more from above (more compression)
-    this.viewAngle = Math.max(10, Math.min(70, sliderValue));
+    // 50 = looking more from above (more compression)
+    this.viewAngle = Math.max(10, Math.min(50, sliderValue));
   }
 
   public getViewElevation(): number {

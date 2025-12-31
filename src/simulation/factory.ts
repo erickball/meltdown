@@ -75,6 +75,7 @@ function createDefaultNeutronics(): NeutronicsState {
     decayHeatFraction: 0,
     scrammed: false,
     scramTime: -1,
+    scramReason: '',
     reactivityBreakdown: {
       controlRods: 0,
       doppler: 0,
@@ -712,7 +713,11 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
 
     // Create thermal nodes for heat-generating components (vessels with fuel)
-    if (component.type === 'vessel' && (component as any).fuelRodCount > 0) {
+    const hasFuel = (component as any).fuelRodCount > 0;
+    const isReactorVessel = component.type === 'reactorVessel';
+    const isVesselWithFuel = component.type === 'vessel' && hasFuel;
+
+    if (isVesselWithFuel || (isReactorVessel && hasFuel)) {
       const thermalNodes = createThermalNodesFromCore(component);
       for (const node of thermalNodes) {
         state.thermalNodes.set(node.id, node);
@@ -722,10 +727,15 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       state.neutronics = createNeutronicsFromCore(component);
 
       // Create convection connection from fuel to coolant
+      // For reactor vessels, the coolant is in the inside barrel region
+      const coolantFlowNodeId = isReactorVessel
+        ? (component as any).insideBarrelId
+        : id;
+
       state.convectionConnections.push({
         id: `convection-${id}`,
         thermalNodeId: `${id}-fuel`,
-        flowNodeId: id,
+        flowNodeId: coolantFlowNodeId,
         surfaceArea: 5000, // Approximate fuel surface area
       });
     }
@@ -809,22 +819,30 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
   switch (component.type) {
     case 'tank': {
       const tank = component as any;
-      const volume = tank.width * tank.height * (tank.width || 1); // Approximate volume
+      // Use stored volume if available (e.g., for reactor vessel regions),
+      // otherwise calculate from dimensions (cylindrical approximation)
+      const volume = tank.volume !== undefined
+        ? tank.volume
+        : Math.PI * Math.pow(tank.width / 2, 2) * tank.height;
       const temp = tank.fluid?.temperature || 350; // Default 350K
 
       // Use fillLevel to determine the liquid/vapor split
       // fillLevel is 0-1, default to 1.0 (full) if not specified
       const fillLevel = tank.fillLevel !== undefined ? tank.fillLevel : 1.0;
 
+      console.log(`[Factory] Tank ${component.id}: volume=${volume.toFixed(2)} m³, fillLevel=${fillLevel}, temp=${temp.toFixed(0)}K`);
+
       let fluid: FluidState;
 
       if (fillLevel >= 0.999) {
         // Fully liquid - use specified pressure
         const pressure = tank.fluid?.pressure || 1e6;
+        console.log(`[Factory] Tank ${component.id}: creating LIQUID state at ${pressure/1e5} bar`);
         fluid = createFluidState(temp, pressure, 'liquid', 0, volume);
       } else if (fillLevel <= 0.001) {
         // Fully vapor - can use specified pressure (no liquid to constrain it)
         const pressure = tank.fluid?.pressure || Water.saturationPressure(temp);
+        console.log(`[Factory] Tank ${component.id}: creating VAPOR state at ${pressure/1e5} bar`);
         fluid = createFluidState(temp, pressure, 'vapor', 1, volume);
       } else {
         // Partially filled - two-phase mixture
@@ -841,6 +859,8 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         const m_vapor = rho_g * (1 - fillLevel) * volume;
         const totalMass = m_liquid + m_vapor;
         const quality = m_vapor / totalMass;
+
+        console.log(`[Factory] Tank ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P_sat=${(pressure/1e5).toFixed(1)} bar, rho_f=${rho_f.toFixed(0)}, rho_g=${rho_g.toFixed(1)}, quality=${quality.toFixed(4)}`);
 
         // Create fluid state with calculated quality
         fluid = createFluidState(temp, pressure, 'two-phase', quality, volume);
@@ -916,10 +936,38 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const temp = vessel.fluid?.temperature || 580; // Higher default for reactor vessel
       const pressure = vessel.fluid?.pressure || 15e6; // 150 bar typical PWR
 
+      // Use fillLevel to determine the liquid/vapor split
+      // fillLevel is 0-1, default to 1.0 (full) if not specified
+      const fillLevel = vessel.fillLevel !== undefined ? vessel.fillLevel : 1.0;
+
+      let fluid: FluidState;
+
+      if (fillLevel >= 0.999) {
+        // Fully liquid - use specified pressure
+        fluid = createFluidState(temp, pressure, 'liquid', 0, volume);
+      } else if (fillLevel <= 0.001) {
+        // Fully vapor
+        const satPressure = Water.saturationPressure(temp);
+        fluid = createFluidState(temp, satPressure, 'vapor', 1, volume);
+      } else {
+        // Partially filled - two-phase mixture at saturation
+        const satPressure = Water.saturationPressure(temp);
+
+        // Calculate quality from fill level (volume fraction to mass fraction)
+        const rho_f = Water.saturatedLiquidDensity(temp);
+        const rho_g = Water.saturatedVaporDensity(temp);
+        const m_liquid = rho_f * fillLevel * volume;
+        const m_vapor = rho_g * (1 - fillLevel) * volume;
+        const totalMass = m_liquid + m_vapor;
+        const quality = m_vapor / totalMass;
+
+        fluid = createFluidState(temp, satPressure, 'two-phase', quality, volume);
+      }
+
       return {
         id: component.id,
         label: component.label || 'Vessel',
-        fluid: createFluidState(temp, pressure, 'liquid', 0, volume),
+        fluid,
         volume,
         hydraulicDiameter: 0.012, // Typical fuel channel
         flowArea: Math.PI * radius * radius * 0.5, // Account for internals
@@ -931,11 +979,8 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const hx = component as any;
       // Heat exchangers create TWO flow nodes - tube side and shell side
       const tubeVolume = 10; // Approximate
-      const shellVolume = 30;
       const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
       const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
-      const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
-      const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
 
       // Return tube-side node, shell-side is created separately
       return {
@@ -949,19 +994,36 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
-    case 'turbine': {
-      const turbine = component as any;
+    case 'turbine-generator': {
+      const turbineGen = component as any;
       const volume = 10;
-      const temp = turbine.inletFluid?.temperature || saturationTemperature(5.5e6);
-      const pressure = turbine.inletFluid?.pressure || 5.5e6;
+      const temp = turbineGen.inletFluid?.temperature || saturationTemperature(5.5e6);
+      const pressure = turbineGen.inletFluid?.pressure || 5.5e6;
 
       return {
         id: component.id,
-        label: component.label || 'Turbine',
+        label: component.label || 'Turbine-Generator',
         fluid: createFluidState(temp, pressure, 'vapor', 0, volume),
         volume,
         hydraulicDiameter: 0.5,
         flowArea: 0.2,
+        elevation,
+      };
+    }
+
+    case 'turbine-driven-pump': {
+      const tdPump = component as any;
+      const volume = 2;
+      const temp = tdPump.inletFluid?.temperature || saturationTemperature(5.5e6);
+      const pressure = tdPump.inletFluid?.pressure || 5.5e6;
+
+      return {
+        id: component.id,
+        label: component.label || 'TD Pump',
+        fluid: createFluidState(temp, pressure, 'vapor', 0, volume),
+        volume,
+        hydraulicDiameter: 0.2,
+        flowArea: 0.05,
         elevation,
       };
     }
@@ -981,6 +1043,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         flowArea: 2,
         elevation,
       };
+    }
+
+    case 'reactorVessel': {
+      // Reactor vessels have sub-components (inside barrel, outside barrel) that handle the flow
+      // The parent reactor vessel doesn't need its own flow node
+      // Flow nodes are created for the tank-type sub-components
+      return null;
     }
 
     default:
@@ -1092,6 +1161,7 @@ function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
     decayHeatFraction: 0.07, // Start with steady-state decay heat
     scrammed: false,
     scramTime: -1,
+    scramReason: '',
     reactivityBreakdown: {
       controlRods: 0,
       doppler: 0,
@@ -1184,20 +1254,16 @@ function createFlowConnectionFromPlantConnection(
     }
   }
 
-  // Get port positions for elevation calculation
-  const fromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
-  const toPort = toComponent.ports?.find(p => p.id === connection.toPortId);
-
   const fromElevation = (fromComponent as any).elevation || 0;
   const toElevation = (toComponent as any).elevation || 0;
   const elevationChange = toElevation - fromElevation;
 
-  // Estimate flow area from component diameters
-  let flowArea = 0.1; // Default
+  // Use flow area from plant connection if provided, otherwise estimate from components
+  let flowArea = connection.flowArea ?? 0.1; // Use plant connection's flowArea if set
   let hydraulicDiameter = 0.3;
-  let length = 1;
+  let length = connection.length ?? 1;
 
-  // Use pipe dimensions if connecting through pipes
+  // Use pipe dimensions if connecting through pipes (overrides connection flowArea)
   if (fromComponent.type === 'pipe') {
     const pipe = fromComponent as any;
     flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
@@ -1210,6 +1276,11 @@ function createFlowConnectionFromPlantConnection(
     length = pipe.length;
   }
 
+  // Get connection point elevations from plant connection (relative to component bottom)
+  // These are physical elevations in meters
+  const connFromElevation = connection.fromElevation;
+  const connToElevation = connection.toElevation;
+
   return {
     id: `flow-${connection.fromComponentId}-${connection.toComponentId}`,
     fromNodeId,
@@ -1218,6 +1289,8 @@ function createFlowConnectionFromPlantConnection(
     hydraulicDiameter,
     length,
     elevation: elevationChange,
+    fromElevation: connFromElevation,
+    toElevation: connToElevation,
     resistanceCoeff: 5, // Default resistance
     massFlowRate: 0, // Start at zero
     inertance: length / flowArea,

@@ -6,7 +6,7 @@ import {
   VesselComponent,
   ValveComponent,
   HeatExchangerComponent,
-  TurbineComponent,
+  TurbineGeneratorComponent,
   Fluid,
   Point,
 } from '../types';
@@ -209,22 +209,28 @@ export function createHeatExchanger(
   };
 }
 
-export function createTurbine(
+export function createTurbineGenerator(
   position: Point,
   width: number,
   height: number,
-  options: Partial<TurbineComponent> = {}
-): TurbineComponent {
+  options: Partial<TurbineGeneratorComponent> = {}
+): TurbineGeneratorComponent {
   return {
-    id: generateId('turbine'),
-    type: 'turbine',
+    id: generateId('turbine-gen'),
+    type: 'turbine-generator',
     position,
     rotation: 0,
     width,
     height,
+    orientation: 'left-right',
+    stages: 3,
     running: true,
     power: 0,
     ratedPower: 333e6, // ~1/3 of 1000 MW thermal
+    ratedSteamFlow: 500, // kg/s - typical for this power level
+    efficiency: 0.87,
+    generatorEfficiency: 0.98,
+    governorValve: 1.0,
     ports: [
       { id: 'inlet', position: { x: -width / 2, y: 0 }, direction: 'in' },
       { id: 'outlet', position: { x: width / 2, y: 0 }, direction: 'out' },
@@ -345,10 +351,10 @@ export function createDemoPlant() {
   });
   components.set(sgSecondary.id, sgSecondary);
 
-  // Main turbine - receives steam from SG secondary
-  const turbine = createTurbine({ x: 15, y: -2 }, 3, 2, {
-    id: 'turbine-1',
-    label: 'Main Turbine',
+  // Main turbine-generator - receives steam from SG secondary
+  const turbineGen = createTurbineGenerator({ x: 15, y: -2 }, 3, 2, {
+    id: 'turbine-gen-1',
+    label: 'Main Turbine-Generator',
     inletFluid: { ...STEAM },
     outletFluid: {
       ...STEAM,
@@ -358,7 +364,7 @@ export function createDemoPlant() {
     },
     simNodeId: 'turbine-inlet',
   });
-  components.set(turbine.id, turbine);
+  components.set(turbineGen.id, turbineGen);
 
   // Turbine outlet tank (simplified - represents exhaust before condenser)
   const turbineOutlet = createTank({ x: 19, y: -2 }, 1.5, 2.5, {
