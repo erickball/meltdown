@@ -1,5 +1,7 @@
 // Component configuration definitions and dialog system
 
+import { saturationTemperature } from '../simulation/water-properties';
+
 export interface ComponentConfig {
   type: string;
   name: string;
@@ -36,9 +38,9 @@ export const componentDefinitions: Record<string, {
       { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 1000, step: 0.1, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 10, unit: 'bar' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 1, max: 300, step: 1, unit: 'bar' },
-      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 350, step: 5, unit: '°C' },
-      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%' },
+      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 1, max: 221, step: 1, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -65,7 +67,9 @@ export const componentDefinitions: Record<string, {
       { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm' },
       { name: 'heaterPower', type: 'number', label: 'Heater Power', default: 2, min: 0, max: 10, step: 0.5, unit: 'MW' },
       { name: 'sprayFlow', type: 'number', label: 'Max Spray Flow', default: 50, min: 0, max: 200, step: 10, unit: 'kg/s' },
-      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%' }
+      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%', help: 'Pressurizers are always two-phase at saturation' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 1, max: 221, step: 1, unit: 'bar', help: 'Determines saturation temperature' },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 345, min: 20, max: 374, step: 5, unit: '°C', help: 'Calculated from saturation pressure' }
     ]
   },
   'reactor-vessel': {
@@ -80,9 +84,9 @@ export const componentDefinitions: Record<string, {
       { name: 'barrelThickness', type: 'number', label: 'Barrel Wall Thickness', default: 0.05, min: 0.02, max: 0.15, step: 0.01, unit: 'm' },
       { name: 'barrelBottomGap', type: 'number', label: 'Barrel Bottom Gap', default: 1.0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from lower head to barrel bottom' },
       { name: 'barrelTopGap', type: 'number', label: 'Barrel Top Gap', default: 0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from upper head to barrel top' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 50, max: 200, step: 5, unit: 'bar' },
-      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 350, step: 5, unit: '°C' },
-      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 100, min: 0, max: 100, step: 5, unit: '%', help: 'Percentage of vessel filled with liquid' },
+      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 100, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 50, max: 221, step: 5, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -140,6 +144,14 @@ export const componentDefinitions: Record<string, {
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
       { name: 'elevation', type: 'number', label: 'Elevation Change', default: 0, min: -50, max: 50, step: 0.5, unit: 'm', help: 'Height difference from inlet to outlet' },
       { name: 'roughness', type: 'number', label: 'Roughness', default: 0.0001, min: 0.00001, max: 0.01, step: 0.00001, unit: 'm' },
+      { name: 'initialPhase', type: 'select', label: 'Initial Phase', default: 'liquid', options: [
+        { value: 'liquid', label: 'Subcooled Liquid' },
+        { value: 'two-phase', label: 'Two-Phase (Saturated)' },
+        { value: 'vapor', label: 'Superheated Vapor' }
+      ], help: 'Fluid phase at start of simulation' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'For two-phase, determines saturation temperature' },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
+      { name: 'initialQuality', type: 'number', label: 'Initial Quality', default: 0.5, min: 0, max: 1, step: 0.01, help: 'Mass fraction of vapor (0=sat. liquid, 1=sat. vapor). Only for two-phase.' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -813,6 +825,116 @@ export class ComponentDialog {
       // Initial calculation
       updateCalculatedFields();
     }
+
+    // Set up two-phase P/T coupling if this component has phase selection
+    this.setupTwoPhaseCouplng();
+  }
+
+  /**
+   * Set up dynamic coupling between pressure and temperature for two-phase conditions.
+   * When phase is "two-phase", temperature is calculated from saturation pressure
+   * and the quality field is shown. For other phases, both P and T are independent
+   * and quality is hidden.
+   */
+  private setupTwoPhaseCouplng(): void {
+    const phaseSelect = document.getElementById('option-initialPhase') as HTMLSelectElement;
+    const pressureInput = document.getElementById('option-initialPressure') as HTMLInputElement;
+    const temperatureInput = document.getElementById('option-initialTemperature') as HTMLInputElement;
+    const qualityInput = document.getElementById('option-initialQuality') as HTMLInputElement;
+    const levelInput = document.getElementById('option-initialLevel') as HTMLInputElement;
+
+    // Exit if this form doesn't have the relevant fields
+    if (!pressureInput || !temperatureInput) return;
+
+    // Get the form groups for showing/hiding and styling
+    const tempFormGroup = temperatureInput.closest('.form-group') as HTMLElement;
+    const qualityFormGroup = qualityInput?.closest('.form-group') as HTMLElement;
+
+    // Helper to check if component is two-phase
+    const isTwoPhase = (): boolean => {
+      // If there's a phase selector, use it
+      if (phaseSelect) {
+        return phaseSelect.value === 'two-phase';
+      }
+      // If there's a level input (tanks, vessels), check if level is between 0-100%
+      if (levelInput) {
+        const level = parseFloat(levelInput.value);
+        return level > 0 && level < 100;
+      }
+      return false;
+    };
+
+    // Helper to update saturation temperature from pressure
+    const updateSaturationTemp = () => {
+      if (isTwoPhase()) {
+        const pressureBar = parseFloat(pressureInput.value) || 150;
+        const pressurePa = pressureBar * 1e5;
+        try {
+          const satTempK = saturationTemperature(pressurePa);
+          const satTempC = satTempK - 273.15;
+          temperatureInput.value = satTempC.toFixed(1);
+        } catch {
+          // If saturation calculation fails (e.g., beyond critical point), leave as-is
+        }
+      }
+    };
+
+    // Helper to update form field visibility and state
+    const updateFormState = () => {
+      const twoPhase = isTwoPhase();
+
+      if (tempFormGroup) {
+        if (twoPhase) {
+          // Make temperature read-only and show it's calculated
+          temperatureInput.readOnly = true;
+          temperatureInput.style.backgroundColor = '#1a1e28';
+          temperatureInput.style.color = '#8cf';
+          temperatureInput.style.cursor = 'not-allowed';
+
+          // Update label to indicate it's calculated
+          const tempLabel = tempFormGroup.querySelector('label');
+          if (tempLabel && !tempLabel.textContent?.includes('(from sat.)')) {
+            tempLabel.textContent = tempLabel.textContent?.replace(' (°C)', '') + ' (from sat.) (°C)';
+          }
+
+          // Update temperature from saturation
+          updateSaturationTemp();
+        } else {
+          // Make temperature editable again
+          temperatureInput.readOnly = false;
+          temperatureInput.style.backgroundColor = '';
+          temperatureInput.style.color = '';
+          temperatureInput.style.cursor = '';
+
+          // Restore label
+          const tempLabel = tempFormGroup.querySelector('label');
+          if (tempLabel) {
+            tempLabel.textContent = tempLabel.textContent?.replace(' (from sat.)', '') || 'Initial Temperature (°C)';
+          }
+        }
+      }
+
+      // Show/hide quality field based on phase
+      if (qualityFormGroup) {
+        qualityFormGroup.style.display = twoPhase ? 'block' : 'none';
+      }
+    };
+
+    // Set up event listeners
+    if (phaseSelect) {
+      phaseSelect.addEventListener('change', updateFormState);
+    }
+    if (levelInput) {
+      levelInput.addEventListener('input', updateFormState);
+    }
+    pressureInput.addEventListener('input', () => {
+      if (isTwoPhase()) {
+        updateSaturationTemp();
+      }
+    });
+
+    // Initial state update
+    updateFormState();
   }
 
   private getCurrentProperties(options: ComponentOption[]): Record<string, any> {
@@ -1136,6 +1258,9 @@ export class ComponentDialog {
       // Initial calculation
       updateCalculatedFields();
     }
+
+    // Set up two-phase P/T coupling if this component has phase selection
+    this.setupTwoPhaseCouplng();
   }
 
   /**
@@ -1160,6 +1285,8 @@ export class ComponentDialog {
       'initialState': ['running'],
       'initialPressure': ['fluid.pressure'],
       'initialTemperature': ['fluid.temperature'],
+      'initialPhase': ['fluid.phase'],
+      'initialQuality': ['fluid.quality'],
       'initialLevel': ['fillLevel'],
       'ratedFlow': ['ratedFlow'],
       'ratedHead': ['ratedHead'],
