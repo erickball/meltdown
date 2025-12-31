@@ -4,9 +4,22 @@ This project is intended as a sandbox environment with game-like aspects, to all
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
--What does it mean when a connection turns orange?
--Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine.
--If you zoom in on the red and green ports you should be able to see an arrow in them pointing towards or away from the component.
+-Limit flow into or out of a node based on the fraction of its mass. Goes in the RK45 derivative calc?
+-Flow arrows are not located at the connections and not pointing the way flow is going. And the numbers with them should be black not white.
+-Vapor space connections are getting two-phase flow; level is not correctly used for flow phase.
+-Warning before saving over something
+-Successful save should close the dialog
+-If I'm placing a component and I click on an existing component, the options should be "place inside" or "cancel" not "place normally"
+-Core exceeds available space 3.30 m, when barrel ID is 3.35 m.
+-In construction mode, delete button should bring up the delete confirmation for the selected component (if any)
+-Turbine power calculations have a unit conversion problem for the edit menu
+-Visual rendering of the core doesn't seem to match its diameter. Height is ok.
+-Condenser should have a pressure rating, but a low one.
+-Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine. Fix pipe, condenser, reactor vessel. Pressurizer is ok as is.
+-If you zoom in on the red and green ports you should be able to see a white arrow in them pointing towards or away from the component center.
+-Initial pressure can't be higher than pressure rating. Maybe 95% of pressure rating.
+-Show connection starting from their listed elevation.
+-When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
 -There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
@@ -16,7 +29,6 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -Position the arrows at the flow connections (each tank & pipe should get up to 4 connection locations: ends & middle). E.g. the hot leg connection to the pressurizer should have an arrow that points up or down, and it should be near the top-center of the hot leg not at the end.
 -Pixelated display should apply to the tube side of a HX
 -Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
--Add visual scram indicator (should say time and reason for scram)
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
 -When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
@@ -51,11 +63,17 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -We could even account for interest rates? Maybe
 -We should make a pebble bed core option, too
 -Not sure how to handle needing big graphite reflectors though?
--Show connection starting from their listed elevation.
 
-Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
+-Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
 
 
+X Selecting a pump does not show you its current head or rated head or flow, or current or rated speed, or even its quality. (confirm if quality shows up now when the pump is two phase)
+X Add visual scram indicator (should say time and reason for scram)
+X Preload water triangulation asynchronously
+X Pumps are "running" but speed and pump head stay at 0.
+X The debug panel used to show pump head next to any flow connections with pumps on them, what happened to that?
+X What does it mean when a connection turns orange?
+X Pumps are drawn upside down when you switch them to right->left; they should be mirrored instead.
 X Pumps should have a better drawing and also a big arrow showing which way they point. And ability to turn them around in construction mode.
 X Fix the pressure gauges so they come off the top of each component
 X Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
