@@ -5,7 +5,7 @@ This project is intended as a sandbox environment with game-like aspects, to all
 ## TODO List
 -What does it mean when a connection turns orange?
 -Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine.
-
+-Pumps should have a better drawing and also a big arrow showing which way they point. And ability to turn them in construction mode.
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
 -There should also be a sandbox mode where you have infinite money
 -Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)

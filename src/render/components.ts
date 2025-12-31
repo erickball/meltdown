@@ -1862,9 +1862,6 @@ function getFlowConnectionPosition(
   };
 }
 
-// Debug: track last log time to avoid spam but still log periodically
-let lastFlowArrowLogTime = 0;
-
 /**
  * Render flow connection arrows showing actual mass flow rates from simulation
  */
@@ -1875,26 +1872,6 @@ export function renderFlowConnectionArrows(
   view: ViewState,
   perspectiveProjector?: (pos: Point, elevation: number) => { pos: Point; scale: number }
 ): void {
-  // Debug logging (every 5 seconds)
-  const now = Date.now();
-  if (now - lastFlowArrowLogTime > 5000) {
-    console.log(`[FlowArrows] ${simState.flowConnections.length} connections, ${plantState.components.size} components, perspective=${!!perspectiveProjector}`);
-    for (const conn of simState.flowConnections) {
-      const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
-      let screenPos: Point | null = null;
-      if (arrowInfo) {
-        if (perspectiveProjector) {
-          const projected = perspectiveProjector(arrowInfo.position, 0);
-          screenPos = projected.pos;
-        } else {
-          screenPos = worldToScreen(arrowInfo.position, view);
-        }
-      }
-      console.log(`[FlowArrows]   ${conn.id}: flow=${conn.massFlowRate.toFixed(1)} kg/s, world=${arrowInfo ? `(${arrowInfo.position.x.toFixed(0)},${arrowInfo.position.y.toFixed(0)})` : 'N/A'}, screen=${screenPos ? `(${screenPos.x.toFixed(0)},${screenPos.y.toFixed(0)})` : 'N/A'}`);
-    }
-    lastFlowArrowLogTime = now;
-  }
-
   for (const conn of simState.flowConnections) {
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
     const toNode = simState.flowNodes.get(conn.toNodeId);
@@ -1922,12 +1899,12 @@ export function renderFlowConnectionArrows(
     const density = fromNode.fluid.mass / fromNode.volume;
     const velocity = Math.abs(conn.massFlowRate) / (density * conn.flowArea);
 
-    // Scale arrow size: 0 m/s -> 5px, 10 m/s -> 30px
-    // Apply perspective scale for isometric mode (arrowScale is typically 0.02-0.15)
-    const baseArrowSize = Math.min(30, Math.max(5, 5 + velocity * 2.5));
+    // Scale arrow size: 0 m/s -> 8px, 10 m/s -> 45px (50% larger than before)
+    // Apply perspective scale for isometric mode
+    const baseArrowSize = Math.min(45, Math.max(8, 8 + velocity * 3.7));
     // In perspective mode, scale proportionally to distance (closer = bigger)
-    // arrowScale * 50 gives reasonable sizing (0.05 * 50 = 2.5x base for mid-distance)
-    const perspectiveMultiplier = perspectiveProjector ? Math.max(0.3, Math.min(3, arrowScale * 50)) : 1;
+    // arrowScale ranges from ~0.3 (far) to ~2.5 (near) - use it directly
+    const perspectiveMultiplier = perspectiveProjector ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
 
     // Determine arrow direction
@@ -2067,10 +2044,11 @@ export function renderPressureGauge(
       const gaugeElevation = componentElevation + gaugeElevationOffset;
       const projected = perspectiveProjector(worldPos, gaugeElevation);
       screenPos = projected.pos;
-      // Scale gauge with perspective (arrowScale is typically 0.02-0.15)
-      gaugeScale = Math.max(0.3, Math.min(2, projected.scale * 50));
       // Skip if behind camera
       if (projected.scale <= 0) continue;
+      // Scale gauge with perspective - projected.scale ranges from ~0.3 (far) to ~2.5 (near)
+      // Use the scale directly, clamped to reasonable range
+      gaugeScale = Math.max(0.3, Math.min(2.5, projected.scale));
     } else {
       // In 2D mode, offset upward from component center
       const basePos = worldToScreen(worldPos, view);
@@ -2081,8 +2059,8 @@ export function renderPressureGauge(
       };
     }
 
-    // Gauge parameters - scale with perspective
-    const baseGaugeRadius = 18;
+    // Gauge parameters - scale with perspective (10% larger base size)
+    const baseGaugeRadius = 20;
     const gaugeRadius = baseGaugeRadius * gaugeScale;
     const maxPressure = 220e5; // 220 bar in Pa
     const pressureBar = node.fluid.pressure / 1e5; // Convert to bar
@@ -2138,18 +2116,23 @@ export function renderPressureGauge(
     }
 
     // Draw pressure value in center - with 1 decimal place
-    const valueFontSize = Math.max(7, Math.round(10 * gaugeScale));
+    // Use larger font with text outline for better readability at small sizes
+    const valueFontSize = Math.max(9, Math.round(12 * gaugeScale));
     ctx.font = `bold ${valueFontSize}px monospace`;
-    ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
+    // Draw text outline for crispness
+    ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
+    ctx.lineWidth = 2;
+    ctx.strokeText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
+    ctx.fillStyle = '#fff';
     ctx.fillText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
 
     // Draw "bar" unit below the value
-    const unitFontSize = Math.max(5, Math.round(6 * gaugeScale));
+    const unitFontSize = Math.max(6, Math.round(7 * gaugeScale));
     ctx.font = `${unitFontSize}px monospace`;
-    ctx.fillStyle = '#888';
-    ctx.fillText('bar', 0, 6 * gaugeScale);
+    ctx.fillStyle = '#999';
+    ctx.fillText('bar', 0, 7 * gaugeScale);
 
     ctx.restore();
   }
