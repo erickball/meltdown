@@ -3,8 +3,6 @@
 This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, clamping, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. It can also do BWRs, advanced reactors, or new and weird ideas for reactor designs. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
 
 ## TODO List
--Show connection starting from their listed elevation.
--Bring back flow arrows and pressure gauges like they were in the demo plant
 -What does it mean when a connection turns orange?
 -Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine.
 
@@ -12,9 +10,6 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -There should also be a sandbox mode where you have infinite money
 -Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Clean up the debug display
-
--Fix the pressure gauges so they come off the top of each component
--Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
 -Maybe find a good way to display relative pressure at connections
 -Position the arrows at the flow connections (each tank & pipe should get up to 4 connection locations: ends & middle). E.g. the hot leg connection to the pressurizer should have an arrow that points up or down, and it should be near the top-center of the hot leg not at the end.
 -Pixelated display should apply to the tube side of a HX
@@ -51,8 +46,12 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -We could even account for interest rates? Maybe
 -We should make a pebble bed core option, too
 -Not sure how to handle needing big graphite reflectors though?
+-Show connection starting from their listed elevation.
 
 
+X Fix the pressure gauges so they come off the top of each component
+X Change the pressure gauges to display the number in the center and add a sig fig (down to .1 bar) and then instead of the white dial arm have the colored ring around the edge just go up to where the dial would be.
+X Bring back flow arrows and pressure gauges like they were in the demo plant
 X Simulation started running while I was in construction mode. Keyboard shortcuts shouldn't work in construction mode.
 X Minimum connection length doesn't seem to be correct (it's sometimes less than the elevation difference) and also doesn't seem to be enforced. Also if one component is inside the other, the minimum connection length should never be more than 1 m regardless of the distance between ports.
 X Show the "ground" in the display

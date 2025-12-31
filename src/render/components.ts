@@ -1701,10 +1701,23 @@ function getFlowConnectionPosition(
   // Flow connections are between flow nodes (core-coolant, hot-leg, sg-primary, cold-leg, pressurizer)
 
   // Find the component that corresponds to this flow node
+  // Priority: 1) exact simNodeId match, 2) simNodeId prefix match (for HX tube/shell),
+  //           3) direct component ID match (user-constructed plants)
   let component: PlantComponent | undefined;
-  for (const [, comp] of plantState.components) {
+  for (const [compId, comp] of plantState.components) {
     const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+    // Exact simNodeId match
     if (simNodeId === nodeId) {
+      component = comp;
+      break;
+    }
+    // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
+    if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+      component = comp;
+      break;
+    }
+    // Direct component ID match (fallback for user-constructed plants)
+    if (compId === nodeId) {
       component = comp;
       break;
     }
@@ -1796,6 +1809,51 @@ function getFlowConnectionPosition(
       offset = { x: -hx.width / 2 - 0.5, y: -hx.height / 3 };
       angle = Math.PI; // Left (primary in)
     }
+  } else if (component.type === 'pump') {
+    // Pump - arrows on sides
+    const pump = component as any;
+    const r = (pump.diameter || 1) / 2 + 0.3;
+    if (isFrom) {
+      offset = { x: r, y: 0 };
+      angle = 0; // Right (outlet)
+    } else {
+      offset = { x: -r, y: 0 };
+      angle = Math.PI; // Left (inlet)
+    }
+  } else if (component.type === 'valve') {
+    // Valve - arrows on sides
+    const valve = component as any;
+    const r = (valve.diameter || 0.5) / 2 + 0.3;
+    if (isFrom) {
+      offset = { x: r, y: 0 };
+      angle = 0; // Right (outlet)
+    } else {
+      offset = { x: -r, y: 0 };
+      angle = Math.PI; // Left (inlet)
+    }
+  } else if (component.type === 'condenser') {
+    // Condenser - arrows on sides (steam in top, condensate out bottom)
+    const cond = component as any;
+    const w = (cond.width || 5) / 2 + 0.5;
+    const h = (cond.height || 3) / 2;
+    if (isFrom) {
+      offset = { x: w, y: h * 0.5 }; // Condensate out (lower right)
+      angle = 0; // Right
+    } else {
+      offset = { x: -w, y: -h * 0.5 }; // Steam in (upper left)
+      angle = Math.PI; // Left
+    }
+  } else if (component.type === 'turbine-generator' || component.type === 'turbine-driven-pump') {
+    // Turbine components - horizontal flow through
+    const turb = component as any;
+    const length = turb.length || 10;
+    if (isFrom) {
+      offset = { x: length / 2 + 0.5, y: 0 }; // Exhaust end
+      angle = 0; // Right
+    } else {
+      offset = { x: -length / 2 - 0.5, y: 0 }; // Inlet end
+      angle = Math.PI; // Left
+    }
   }
 
   return {
@@ -1804,6 +1862,9 @@ function getFlowConnectionPosition(
   };
 }
 
+// Debug: track last log time to avoid spam but still log periodically
+let lastFlowArrowLogTime = 0;
+
 /**
  * Render flow connection arrows showing actual mass flow rates from simulation
  */
@@ -1811,8 +1872,29 @@ export function renderFlowConnectionArrows(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
-  view: ViewState
+  view: ViewState,
+  perspectiveProjector?: (pos: Point, elevation: number) => { pos: Point; scale: number }
 ): void {
+  // Debug logging (every 5 seconds)
+  const now = Date.now();
+  if (now - lastFlowArrowLogTime > 5000) {
+    console.log(`[FlowArrows] ${simState.flowConnections.length} connections, ${plantState.components.size} components, perspective=${!!perspectiveProjector}`);
+    for (const conn of simState.flowConnections) {
+      const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
+      let screenPos: Point | null = null;
+      if (arrowInfo) {
+        if (perspectiveProjector) {
+          const projected = perspectiveProjector(arrowInfo.position, 0);
+          screenPos = projected.pos;
+        } else {
+          screenPos = worldToScreen(arrowInfo.position, view);
+        }
+      }
+      console.log(`[FlowArrows]   ${conn.id}: flow=${conn.massFlowRate.toFixed(1)} kg/s, world=${arrowInfo ? `(${arrowInfo.position.x.toFixed(0)},${arrowInfo.position.y.toFixed(0)})` : 'N/A'}, screen=${screenPos ? `(${screenPos.x.toFixed(0)},${screenPos.y.toFixed(0)})` : 'N/A'}`);
+    }
+    lastFlowArrowLogTime = now;
+  }
+
   for (const conn of simState.flowConnections) {
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
     const toNode = simState.flowNodes.get(conn.toNodeId);
@@ -1822,7 +1904,18 @@ export function renderFlowConnectionArrows(
     const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
     if (!arrowInfo) continue;
 
-    const screenPos = worldToScreen(arrowInfo.position, view);
+    // Use perspective projection if available (isometric mode), otherwise standard 2D
+    let screenPos: Point;
+    let arrowScale = 1;
+    if (perspectiveProjector) {
+      const projected = perspectiveProjector(arrowInfo.position, 0);
+      screenPos = projected.pos;
+      arrowScale = projected.scale;
+      // Skip if behind camera or off-screen
+      if (arrowScale <= 0) continue;
+    } else {
+      screenPos = worldToScreen(arrowInfo.position, view);
+    }
 
     // Calculate arrow size based on flow velocity
     // velocity = massFlowRate / (density * area)
@@ -1830,7 +1923,12 @@ export function renderFlowConnectionArrows(
     const velocity = Math.abs(conn.massFlowRate) / (density * conn.flowArea);
 
     // Scale arrow size: 0 m/s -> 5px, 10 m/s -> 30px
-    const arrowSize = Math.min(30, Math.max(5, 5 + velocity * 2.5));
+    // Apply perspective scale for isometric mode (arrowScale is typically 0.02-0.15)
+    const baseArrowSize = Math.min(30, Math.max(5, 5 + velocity * 2.5));
+    // In perspective mode, scale proportionally to distance (closer = bigger)
+    // arrowScale * 50 gives reasonable sizing (0.05 * 50 = 2.5x base for mid-distance)
+    const perspectiveMultiplier = perspectiveProjector ? Math.max(0.3, Math.min(3, arrowScale * 50)) : 1;
+    const arrowSize = baseArrowSize * perspectiveMultiplier;
 
     // Determine arrow direction
     let angle = arrowInfo.angle;
@@ -1846,14 +1944,11 @@ export function renderFlowConnectionArrows(
     ctx.translate(screenPos.x, screenPos.y);
     ctx.rotate(angle);
 
-    // Arrow color based on flow magnitude
-    const flowMagnitude = Math.abs(conn.massFlowRate);
-    if (flowMagnitude > 10000) {
-      ctx.fillStyle = 'rgba(255, 100, 100, 0.9)'; // Red for very high flow
-    } else if (flowMagnitude > 5000) {
-      ctx.fillStyle = 'rgba(255, 200, 100, 0.9)'; // Orange for high flow
+    // Arrow color: green for positive flow, red for negative flow
+    if (conn.massFlowRate >= 0) {
+      ctx.fillStyle = 'rgba(100, 255, 100, 0.9)'; // Green for positive flow
     } else {
-      ctx.fillStyle = 'rgba(100, 255, 100, 0.9)'; // Green for normal flow
+      ctx.fillStyle = 'rgba(255, 100, 100, 0.9)'; // Red for negative/reverse flow
     }
 
     // Draw arrow shape
@@ -1874,13 +1969,15 @@ export function renderFlowConnectionArrows(
 
     // Draw flow rate label
     ctx.save();
-    ctx.font = '10px monospace';
+    const fontSize = Math.max(8, Math.min(14, 10 * perspectiveMultiplier)); // Scale font with perspective
+    ctx.font = `${fontSize}px monospace`;
     ctx.fillStyle = '#fff';
     ctx.strokeStyle = '#000';
     ctx.lineWidth = 2;
     const label = `${conn.massFlowRate.toFixed(0)} kg/s`;
-    const labelX = screenPos.x + Math.cos(angle) * (arrowSize + 5);
-    const labelY = screenPos.y + Math.sin(angle) * (arrowSize + 5) + 4;
+    const labelOffset = arrowSize + 5 * perspectiveMultiplier;
+    const labelX = screenPos.x + Math.cos(angle) * labelOffset;
+    const labelY = screenPos.y + Math.sin(angle) * labelOffset + 4;
     ctx.strokeText(label, labelX, labelY);
     ctx.fillText(label, labelX, labelY);
     ctx.restore();
@@ -1898,7 +1995,8 @@ export function renderPressureGauge(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
-  view: ViewState
+  view: ViewState,
+  perspectiveProjector?: (pos: Point, elevation: number) => { pos: Point; scale: number }
 ): void {
   // Draw a pressure gauge for each flow node that has a corresponding visual component
   for (const [nodeId, node] of simState.flowNodes) {
@@ -1914,8 +2012,13 @@ export function renderPressureGauge(
 
     if (!component) continue;
 
-    // Determine gauge position (offset from component)
+    // Get component elevation for perspective projection
+    const componentElevation = (component as { elevation?: number }).elevation ?? 0;
+
+    // Determine gauge position - always at top of component
     let gaugeOffset: Point = { x: 0, y: 0 };
+    let gaugeElevationOffset = 0; // Elevation at top of component
+    let componentHeight = 0;
 
     if (component.type === 'pipe') {
       const pipe = component as PipeComponent;
@@ -1924,18 +2027,30 @@ export function renderPressureGauge(
       const cos = Math.cos(pipe.rotation);
       const sin = Math.sin(pipe.rotation);
       gaugeOffset = {
-        x: midX * cos - (pipe.diameter / 2 + 1) * sin,
-        y: midX * sin + (pipe.diameter / 2 + 1) * cos,
+        x: midX * cos,
+        y: midX * sin,
       };
+      // Pipe elevation is at center, gauge goes above
+      gaugeElevationOffset = pipe.diameter / 2 + 0.5;
+      componentHeight = pipe.diameter;
     } else if (component.type === 'tank') {
       const tank = component as TankComponent;
-      gaugeOffset = { x: tank.width / 2 + 1, y: -tank.height / 4 };
+      // Place gauge at top center of tank
+      gaugeOffset = { x: 0, y: 0 };
+      gaugeElevationOffset = tank.height + 0.5; // Just above top
+      componentHeight = tank.height;
     } else if (component.type === 'vessel') {
       const vessel = component as VesselComponent;
-      gaugeOffset = { x: vessel.innerDiameter / 2 + vessel.wallThickness + 1.5, y: 0 };
+      // Place gauge at top of vessel
+      gaugeOffset = { x: 0, y: 0 };
+      gaugeElevationOffset = vessel.height + 0.5; // Just above top
+      componentHeight = vessel.height;
     } else if (component.type === 'heatExchanger') {
       const hx = component as HeatExchangerComponent;
-      gaugeOffset = { x: hx.width / 2 + 1, y: 0 };
+      // Place gauge at top of heat exchanger
+      gaugeOffset = { x: 0, y: 0 };
+      gaugeElevationOffset = hx.height + 0.5; // Just above top
+      componentHeight = hx.height;
     } else {
       continue; // Skip other component types
     }
@@ -1944,13 +2059,39 @@ export function renderPressureGauge(
       x: component.position.x + gaugeOffset.x,
       y: component.position.y + gaugeOffset.y,
     };
-    const screenPos = worldToScreen(worldPos, view);
 
-    // Gauge parameters
-    const gaugeRadius = 20;
+    // Use perspective projection if available (isometric mode), otherwise standard 2D
+    let screenPos: Point;
+    let gaugeScale = 1;
+    if (perspectiveProjector) {
+      const gaugeElevation = componentElevation + gaugeElevationOffset;
+      const projected = perspectiveProjector(worldPos, gaugeElevation);
+      screenPos = projected.pos;
+      // Scale gauge with perspective (arrowScale is typically 0.02-0.15)
+      gaugeScale = Math.max(0.3, Math.min(2, projected.scale * 50));
+      // Skip if behind camera
+      if (projected.scale <= 0) continue;
+    } else {
+      // In 2D mode, offset upward from component center
+      const basePos = worldToScreen(worldPos, view);
+      // Move up by component height (in screen pixels)
+      screenPos = {
+        x: basePos.x,
+        y: basePos.y - (componentHeight / 2 + 1.5) * view.zoom,
+      };
+    }
+
+    // Gauge parameters - scale with perspective
+    const baseGaugeRadius = 18;
+    const gaugeRadius = baseGaugeRadius * gaugeScale;
     const maxPressure = 220e5; // 220 bar in Pa
     const pressureBar = node.fluid.pressure / 1e5; // Convert to bar
-    const needleAngle = (node.fluid.pressure / maxPressure) * Math.PI * 1.5 - Math.PI * 0.75;
+
+    // Calculate the angle for the current pressure (arc goes from -135° to +135°, i.e., 270° total)
+    const startAngle = -Math.PI * 0.75; // -135°
+    const totalArcAngle = Math.PI * 1.5; // 270°
+    const pressureFraction = Math.min(1, Math.max(0, node.fluid.pressure / maxPressure));
+    const currentAngle = startAngle + pressureFraction * totalArcAngle;
 
     ctx.save();
     ctx.translate(screenPos.x, screenPos.y);
@@ -1958,63 +2099,57 @@ export function renderPressureGauge(
     // Draw gauge background
     ctx.beginPath();
     ctx.arc(0, 0, gaugeRadius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(30, 30, 40, 0.9)';
+    ctx.fillStyle = 'rgba(20, 22, 28, 0.95)';
     ctx.fill();
-    ctx.strokeStyle = '#666';
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = Math.max(1, 1.5 * gaugeScale);
     ctx.stroke();
 
-    // Draw scale arc
+    // Draw background arc (dark gray track)
+    const arcWidth = Math.max(2, 4 * gaugeScale);
     ctx.beginPath();
-    ctx.arc(0, 0, gaugeRadius - 4, -Math.PI * 0.75, Math.PI * 0.75);
-    ctx.strokeStyle = '#444';
-    ctx.lineWidth = 3;
+    ctx.arc(0, 0, gaugeRadius - arcWidth / 2 - 1, startAngle, startAngle + totalArcAngle);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = arcWidth;
+    ctx.lineCap = 'round';
     ctx.stroke();
 
-    // Draw colored zones on the arc
-    // Green zone: 0-180 bar (normal operation)
-    ctx.beginPath();
-    ctx.arc(0, 0, gaugeRadius - 4, -Math.PI * 0.75, -Math.PI * 0.75 + (180 / 220) * Math.PI * 1.5);
-    ctx.strokeStyle = '#4a4';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+    // Draw colored arc up to current pressure
+    // Color transitions: green (0-150 bar) -> yellow (150-180 bar) -> orange (180-200 bar) -> red (200+ bar)
+    if (pressureFraction > 0) {
+      // Determine color based on pressure
+      let arcColor: string;
+      if (pressureBar < 150) {
+        arcColor = '#4c4'; // Green
+      } else if (pressureBar < 180) {
+        arcColor = '#cc4'; // Yellow
+      } else if (pressureBar < 200) {
+        arcColor = '#c84'; // Orange
+      } else {
+        arcColor = '#c44'; // Red
+      }
 
-    // Yellow zone: 180-200 bar
-    ctx.beginPath();
-    ctx.arc(0, 0, gaugeRadius - 4, -Math.PI * 0.75 + (180 / 220) * Math.PI * 1.5, -Math.PI * 0.75 + (200 / 220) * Math.PI * 1.5);
-    ctx.strokeStyle = '#aa4';
-    ctx.lineWidth = 3;
-    ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(0, 0, gaugeRadius - arcWidth / 2 - 1, startAngle, currentAngle);
+      ctx.strokeStyle = arcColor;
+      ctx.lineWidth = arcWidth;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
 
-    // Red zone: 200-220 bar
-    ctx.beginPath();
-    ctx.arc(0, 0, gaugeRadius - 4, -Math.PI * 0.75 + (200 / 220) * Math.PI * 1.5, Math.PI * 0.75);
-    ctx.strokeStyle = '#a44';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    // Draw needle
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(needleAngle) * (gaugeRadius - 6), Math.sin(needleAngle) * (gaugeRadius - 6));
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.stroke();
-
-    // Draw center dot
-    ctx.beginPath();
-    ctx.arc(0, 0, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#888';
-    ctx.fill();
-
-    // Draw pressure value
-    ctx.font = '9px monospace';
+    // Draw pressure value in center - with 1 decimal place
+    const valueFontSize = Math.max(7, Math.round(10 * gaugeScale));
+    ctx.font = `bold ${valueFontSize}px monospace`;
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
-    ctx.fillText(`${pressureBar.toFixed(0)}`, 0, gaugeRadius - 10);
-    ctx.font = '7px monospace';
-    ctx.fillStyle = '#aaa';
-    ctx.fillText('bar', 0, gaugeRadius - 3);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
+
+    // Draw "bar" unit below the value
+    const unitFontSize = Math.max(5, Math.round(6 * gaugeScale));
+    ctx.font = `${unitFontSize}px monospace`;
+    ctx.fillStyle = '#888';
+    ctx.fillText('bar', 0, 6 * gaugeScale);
 
     ctx.restore();
   }

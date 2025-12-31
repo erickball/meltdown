@@ -694,6 +694,9 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     if (flowNode) {
       state.flowNodes.set(flowNode.id, flowNode);
       processedComponents.add(id);
+
+      // Set simNodeId on the plant component so arrow rendering can find it
+      (component as any).simNodeId = flowNode.id;
     }
 
     // Create pump state if this is a pump

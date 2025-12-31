@@ -16,6 +16,7 @@ export class PlantCanvas {
   private view: ViewState;
   private plantState: PlantState;
   private simState: SimulationState | null = null;
+  private _simStateWarningLogged: boolean = false;
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
@@ -1257,12 +1258,26 @@ export class PlantCanvas {
 
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
-      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view);
+      // Pass perspective projection function when in isometric mode
+      const perspectiveProjector = this.isometric.enabled
+        ? (pos: Point, elev: number) => this.worldToScreenPerspective(pos, elev)
+        : undefined;
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, perspectiveProjector);
+    } else {
+      // Debug: log once if simState is not set
+      if (!this._simStateWarningLogged) {
+        console.log('[Canvas] simState is null, skipping flow arrows');
+        this._simStateWarningLogged = true;
+      }
     }
 
     // Draw pressure gauges on flow nodes
     if (this.simState) {
-      renderPressureGauge(ctx, this.simState, this.plantState, this.view);
+      // Pass perspective projection function when in isometric mode
+      const gaugePerspectiveProjector = this.isometric.enabled
+        ? (pos: Point, elev: number) => this.worldToScreenPerspective(pos, elev)
+        : undefined;
+      renderPressureGauge(ctx, this.simState, this.plantState, this.view, gaugePerspectiveProjector);
     }
 
     // Schedule next frame
@@ -1499,6 +1514,8 @@ export class PlantCanvas {
 
   public setSimState(state: SimulationState): void {
     this.simState = state;
+    this._simStateWarningLogged = false; // Reset warning flag when state is set
+    console.log(`[Canvas] setSimState called: ${state.flowConnections.length} flow connections, ${state.flowNodes.size} flow nodes`);
   }
 
   public getView(): ViewState {
