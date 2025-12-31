@@ -1,9 +1,10 @@
 import { PlantCanvas } from './render/canvas';
-import { createDemoPlant } from './plant/factory';
-import { PlantState, PlantComponent } from './types';
+// Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
+// import { createDemoPlant } from './plant/factory';
+import { PlantState, PlantComponent, ReactorVesselComponent } from './types';
 import { GameLoop } from './game';
 import {
-  createDemoReactor,
+  // createDemoReactor,
   createSimulationFromPlant,
   SimulationState,
   SolverMetrics,
@@ -14,7 +15,7 @@ import {
   getCalculationDebugLog,
   simulationConfig,
 } from './simulation';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig } from './construction/connection-dialog';
@@ -49,11 +50,59 @@ function init() {
     return;
   }
 
-  // Create demo plant (visual representation)
-  const plantState: PlantState = createDemoPlant();
+  // Start with empty plant (user can create components)
+  // To load the demo plant instead, uncomment the lines below:
+  // const plantState: PlantState = createDemoPlant();
+  // const simState: SimulationState = createDemoReactor();
 
-  // Create demo reactor (physics simulation)
-  const simState: SimulationState = createDemoReactor();
+  const plantState: PlantState = {
+    components: new Map(),
+    connections: [],
+    simTime: 0,
+    simSpeed: 1,
+    isPaused: true,
+  };
+
+  // Empty simulation state - will be created when user starts simulation
+  const simState: SimulationState = {
+    time: 0,
+    flowNodes: new Map(),
+    flowConnections: [],
+    thermalNodes: new Map(),
+    thermalConnections: [],
+    convectionConnections: [],
+    neutronics: {
+      coreId: null,
+      fuelNodeId: null,
+      coolantNodeId: null,
+      power: 0,
+      nominalPower: 0,
+      reactivity: 0,
+      promptNeutronLifetime: 2e-5,
+      delayedNeutronFraction: 0.0065,
+      precursorConcentration: 0,
+      precursorDecayConstant: 0.08,
+      fuelTempCoeff: -2.5e-5,
+      coolantTempCoeff: -1e-4,
+      coolantDensityCoeff: -2e-4,
+      refFuelTemp: 900,
+      refCoolantTemp: 580,
+      refCoolantDensity: 700,
+      controlRodPosition: 1,
+      controlRodWorth: 0.08,
+      decayHeatFraction: 0,
+      scrammed: false,
+      scramTime: 0,
+      scramReason: '',
+      reactivityBreakdown: { controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
+      diagnostics: { fuelTemp: 0, coolantTemp: 0, coolantDensity: 0 },
+    },
+    components: {
+      pumps: new Map(),
+      valves: new Map(),
+      checkValves: new Map(),
+    },
+  };
 
   // Initialize canvas renderer
   const plantCanvas = new PlantCanvas(canvas, plantState);
@@ -195,7 +244,7 @@ function init() {
       });
       // Update visual vessel (visual also uses withdrawal position internally)
       for (const [, comp] of plantState.components) {
-        if (comp.type === 'vessel' && comp.controlRodCount) {
+        if ((comp.type === 'vessel' || comp.type === 'reactorVessel') && comp.controlRodCount) {
           comp.controlRodPosition = withdrawalPosition;
         }
       }
@@ -350,33 +399,7 @@ function init() {
   updateSpeedDisplay();
   updatePauseButton();
 
-  // Keyboard controls
-  document.addEventListener('keydown', (e) => {
-    switch (e.key) {
-      case ' ':
-        e.preventDefault();
-        gameLoop.togglePause();
-        updatePauseButton();
-        console.log(gameLoop.getIsPaused() ? 'Paused' : 'Resumed');
-        break;
-      case '+':
-      case '=':
-        gameLoop.setSimSpeed(gameLoop.getSimSpeed() * 2);
-        updateSpeedDisplay();
-        break;
-      case '-':
-        gameLoop.setSimSpeed(gameLoop.getSimSpeed() / 2);
-        updateSpeedDisplay();
-        break;
-      case 's':
-        if (e.ctrlKey) {
-          e.preventDefault();
-        } else {
-          gameLoop.triggerScram('Manual operator action');
-        }
-        break;
-    }
-  });
+  // Keyboard controls are set up later, after currentMode is defined
 
   // SCRAM button controls
   const scramBtn = document.getElementById('scram-btn') as HTMLButtonElement;
@@ -387,7 +410,16 @@ function init() {
     const isScramActive = gameLoop.isScramActive();
     if (scramBtn) scramBtn.style.display = isScramActive ? 'none' : 'block';
     if (resetScramBtn) resetScramBtn.style.display = isScramActive ? 'block' : 'none';
-    if (scramIndicator) scramIndicator.style.display = isScramActive ? 'block' : 'none';
+    if (scramIndicator) {
+      scramIndicator.style.display = isScramActive ? 'block' : 'none';
+      // Update indicator with time and reason
+      if (isScramActive) {
+        const simState = gameLoop.getState();
+        const scramTime = simState.neutronics.scramTime;
+        const scramReason = simState.neutronics.scramReason || 'Unknown';
+        scramIndicator.innerHTML = `<strong>SCRAM ACTIVE</strong><br>Time: ${scramTime.toFixed(1)}s<br>Reason: ${scramReason}`;
+      }
+    }
 
     // Also disable rod control when scrammed
     const rodSlider = document.getElementById('rod-position') as HTMLInputElement;
@@ -405,8 +437,12 @@ function init() {
 
   if (resetScramBtn) {
     resetScramBtn.addEventListener('click', () => {
-      gameLoop.resetScram();
+      // Reset T&H conditions to initial state (recreate simulation)
+      const newSimState = createSimulationFromPlant(plantState);
+      gameLoop.resetState(newSimState);
+      // SCRAM is automatically cleared since we have a fresh simulation state
       updateScramDisplay();
+      console.log('[Main] SCRAM reset with initial T&H conditions');
     });
   }
 
@@ -437,6 +473,185 @@ function init() {
   const componentDialog = new ComponentDialog();
   const connectionDialog = new ConnectionDialog();
   const constructionManager = new ConstructionManager(plantState);
+
+  // Keyboard controls - only active in simulation mode
+  document.addEventListener('keydown', (e) => {
+    // Skip simulation keyboard shortcuts in construction mode
+    if (currentMode === 'construction') {
+      return;
+    }
+
+    switch (e.key) {
+      case ' ':
+        e.preventDefault();
+        gameLoop.togglePause();
+        updatePauseButton();
+        console.log(gameLoop.getIsPaused() ? 'Paused' : 'Resumed');
+        break;
+      case '+':
+      case '=':
+        gameLoop.setSimSpeed(gameLoop.getSimSpeed() * 2);
+        updateSpeedDisplay();
+        break;
+      case '-':
+        gameLoop.setSimSpeed(gameLoop.getSimSpeed() / 2);
+        updateSpeedDisplay();
+        break;
+      case 's':
+        if (e.ctrlKey) {
+          e.preventDefault();
+        } else {
+          gameLoop.triggerScram('Manual operator action');
+        }
+        break;
+    }
+  });
+
+  // Set up edit/delete callbacks for component detail panel
+  setComponentEditCallback((componentId: string) => {
+    const component = constructionManager.getComponent(componentId);
+    if (!component) {
+      console.error(`[Edit] Component ${componentId} not found`);
+      return;
+    }
+
+    componentDialog.showEdit(component as Record<string, any>, (properties) => {
+      if (properties) {
+        constructionManager.updateComponent(componentId, properties);
+        // Refresh the component detail panel
+        if (gameLoop) {
+          updateComponentDetail(componentId, plantState, gameLoop.getState());
+        }
+      }
+    });
+  });
+
+  setComponentDeleteCallback((componentId: string) => {
+    if (confirm(`Delete component "${componentId}"? This will also remove all its connections.`)) {
+      constructionManager.deleteComponent(componentId);
+      // Clear selection
+      plantCanvas.clearSelection();
+      // Hide component detail panel
+      updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+    }
+  });
+
+  // Connection edit callback - find plant connection from simulation connection ID
+  setConnectionEditCallback((simConnId: string) => {
+    // Simulation connection IDs are typically formatted as "fromNodeId->toNodeId"
+    // We need to find the matching plant connection
+    const simState = gameLoop?.getState();
+    if (!simState) return;
+
+    // Find the simulation connection to get the node IDs
+    const simConn = simState.flowConnections.find(c => c.id === simConnId);
+    if (!simConn) {
+      console.error(`[Edit] Simulation connection ${simConnId} not found`);
+      return;
+    }
+
+    // Find the plant connection that matches these nodes
+    // Node IDs might be component IDs or internal region IDs
+    const plantConn = plantState.connections.find(pc => {
+      // Check if the plant connection matches (in either direction)
+      const fromMatches = pc.fromComponentId === simConn.fromNodeId ||
+        pc.fromComponentId.includes(simConn.fromNodeId) ||
+        simConn.fromNodeId.includes(pc.fromComponentId);
+      const toMatches = pc.toComponentId === simConn.toNodeId ||
+        pc.toComponentId.includes(simConn.toNodeId) ||
+        simConn.toNodeId.includes(pc.toComponentId);
+      return fromMatches && toMatches;
+    });
+
+    if (!plantConn) {
+      console.error(`[Edit] No plant connection found for sim connection ${simConnId}`);
+      alert('Cannot edit this connection - it may be an automatically generated internal connection.');
+      return;
+    }
+
+    // Show edit dialog
+    const currentArea = plantConn.flowArea ?? 0.1;
+    const currentLength = plantConn.length ?? 1;
+    const currentFromElev = plantConn.fromElevation ?? 0;
+    const currentToElev = plantConn.toElevation ?? 0;
+
+    const newAreaStr = prompt(
+      `Edit Connection: ${plantConn.fromComponentId} → ${plantConn.toComponentId}\n\n` +
+      `Current flow area: ${(currentArea * 1e4).toFixed(1)} cm²\n` +
+      `Current length: ${currentLength.toFixed(2)} m\n` +
+      `From elevation: ${currentFromElev.toFixed(2)} m\n` +
+      `To elevation: ${currentToElev.toFixed(2)} m\n\n` +
+      `Enter new flow area in cm² (or cancel to keep current):`,
+      (currentArea * 1e4).toFixed(1)
+    );
+
+    if (newAreaStr !== null) {
+      const newAreaCm2 = parseFloat(newAreaStr);
+      if (!isNaN(newAreaCm2) && newAreaCm2 > 0) {
+        plantConn.flowArea = newAreaCm2 / 1e4; // Convert cm² to m²
+        console.log(`[Edit] Updated connection flow area to ${plantConn.flowArea.toFixed(4)} m²`);
+
+        // Also update the simulation connection directly for immediate effect
+        simConn.flowArea = plantConn.flowArea;
+
+        // Refresh the component detail panel
+        const selectedId = plantCanvas.getSelectedComponentId?.();
+        if (selectedId) {
+          updateComponentDetail(selectedId, plantState, simState);
+        }
+      }
+    }
+  });
+
+  // Plant connection edit callback (before simulation starts)
+  setPlantConnectionEditCallback((fromId: string, toId: string) => {
+    // Find the plant connection
+    const plantConn = plantState.connections.find(pc =>
+      (pc.fromComponentId === fromId && pc.toComponentId === toId) ||
+      (pc.fromComponentId === toId && pc.toComponentId === fromId)
+    );
+
+    if (!plantConn) {
+      console.error(`[Edit] Plant connection ${fromId} → ${toId} not found`);
+      return;
+    }
+
+    const currentArea = plantConn.flowArea ?? 0.1;
+    const newAreaStr = prompt(
+      `Edit Connection: ${plantConn.fromComponentId} → ${plantConn.toComponentId}\n\n` +
+      `Current flow area: ${(currentArea * 1e4).toFixed(1)} cm²\n\n` +
+      `Enter new flow area in cm²:`,
+      (currentArea * 1e4).toFixed(1)
+    );
+
+    if (newAreaStr !== null) {
+      const newAreaCm2 = parseFloat(newAreaStr);
+      if (!isNaN(newAreaCm2) && newAreaCm2 > 0) {
+        plantConn.flowArea = newAreaCm2 / 1e4;
+        console.log(`[Edit] Updated plant connection flow area to ${plantConn.flowArea.toFixed(4)} m²`);
+
+        // Refresh the component detail panel
+        const selectedId = plantCanvas.getSelectedComponentId?.();
+        if (selectedId) {
+          updateComponentDetail(selectedId, plantState, gameLoop?.getState() || {} as SimulationState);
+        }
+      }
+    }
+  });
+
+  // Connection delete callback
+  setConnectionDeleteCallback((fromId: string, toId: string) => {
+    if (confirm(`Delete connection between ${fromId} and ${toId}?`)) {
+      const deleted = constructionManager.deleteConnection(fromId, toId);
+      if (deleted) {
+        // Refresh the component detail panel
+        const selectedId = plantCanvas.getSelectedComponentId?.();
+        if (selectedId) {
+          updateComponentDetail(selectedId, plantState, gameLoop?.getState() || {} as SimulationState);
+        }
+      }
+    }
+  });
 
   // Connection mode state
   let connectingFrom: { component: any, port: any } | null = null;
@@ -797,6 +1012,25 @@ function init() {
 
       if (!componentType) return;
 
+      // If clicking the same component again, deselect it
+      if (selectedComponentType === componentType) {
+        constructionButtons.forEach(b => b.classList.remove('selected'));
+        selectedComponentType = null;
+        if (selectedComponentDiv) {
+          selectedComponentDiv.textContent = 'Select a component to place';
+        }
+        if (placementHintDiv) {
+          placementHintDiv.style.display = 'none';
+        }
+        console.log(`[Construction] Deselected component: ${componentType}`);
+        return;
+      }
+
+      // If in connect or move mode, switch to place mode
+      if (constructionSubMode !== 'place') {
+        setConstructionSubMode('place');
+      }
+
       // Clear previous selection
       constructionButtons.forEach(b => b.classList.remove('selected'));
 
@@ -916,9 +1150,9 @@ function init() {
       const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
       console.log(`[Construction] Opening config dialog for ${selectedComponentType} at world (${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)})`);
 
-      // Check if clicking on an existing container component (tank, vessel)
+      // Check if clicking on an existing container component (tank, vessel, reactor vessel)
       const clickedComponent = plantCanvas.getComponentAtScreen({ x, y });
-      const isContainer = clickedComponent && (clickedComponent.type === 'tank' || clickedComponent.type === 'vessel');
+      const isContainer = clickedComponent && (clickedComponent.type === 'tank' || clickedComponent.type === 'vessel' || clickedComponent.type === 'reactorVessel');
 
       // Function to proceed with component placement
       const proceedWithPlacement = (containedBy?: string) => {
@@ -932,28 +1166,47 @@ function init() {
           if (config) {
             console.log(`[Construction] Component configured:`, config);
 
-            // Set containment if specified
-            if (containedBy) {
-              config.containedBy = containedBy;
-              // Ensure position matches container
-              if (clickedComponent) {
-                config.position = { ...clickedComponent.position };
+            // Special case: placing a core inside a container
+            if (config.type === 'core' && containedBy && clickedComponent) {
+              // Add fuel rod properties to the container (reactor vessel or tank)
+              // The container handles rendering the fuel rods at the correct position
+              const result = constructionManager.addCoreToContainer(containedBy, config.properties);
+              if (result.success) {
+                console.log(`[Construction] Added core to ${clickedComponent.label || containedBy}`);
+                showNotification(`Added reactor core to ${clickedComponent.label || containedBy}`, 'info');
+              } else {
+                console.error(`[Construction] Failed to add core to container: ${result.error}`);
+                showNotification(result.error || 'Failed to add core to container', 'error');
               }
-            }
-
-            // Actually create and place the component in the plant state
-            const componentId = constructionManager.createComponent(config);
-
-            if (componentId) {
-              console.log(`[Construction] Successfully created component '${componentId}'`);
-
-              // The canvas will automatically re-render in its render loop
-              // Just show success notification
-              const containerNote = containedBy ? ` inside ${clickedComponent?.label || clickedComponent?.id}` : '';
-              showNotification(`Created ${config.name} (${config.type})${containerNote}`, 'info');
             } else {
-              console.error(`[Construction] Failed to create component`);
-              showNotification(`Failed to create ${config.type}`, 'error');
+              // Normal component creation
+              // Set containment if specified
+              if (containedBy) {
+                config.containedBy = containedBy;
+                // Ensure position and elevation match container
+                if (clickedComponent) {
+                  config.position = { ...clickedComponent.position };
+                  if (clickedComponent.elevation !== undefined) {
+                    config.properties = config.properties || {};
+                    config.properties.elevation = clickedComponent.elevation;
+                  }
+                }
+              }
+
+              // Actually create and place the component in the plant state
+              const componentId = constructionManager.createComponent(config);
+
+              if (componentId) {
+                console.log(`[Construction] Successfully created component '${componentId}'`);
+
+                // The canvas will automatically re-render in its render loop
+                // Just show success notification
+                const containerNote = containedBy ? ` inside ${clickedComponent?.label || clickedComponent?.id}` : '';
+                showNotification(`Created ${config.name} (${config.type})${containerNote}`, 'info');
+              } else {
+                console.error(`[Construction] Failed to create component`);
+                showNotification(`Failed to create ${config.type}`, 'error');
+              }
             }
 
             // Clear component selection after placing
@@ -1037,7 +1290,11 @@ function init() {
                   console.log(`[Main] Calling createConnection (direct)`);
                   success = constructionManager.createConnection(
                     config.fromPort.id,
-                    config.toPort.id
+                    config.toPort.id,
+                    config.fromElevation,
+                    config.toElevation,
+                    config.flowArea,
+                    config.length
                   );
                 }
 
@@ -1239,6 +1496,28 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       }
     }
 
+    // Handle reactor vessels specially - sync from inside barrel region
+    if (component.type === 'reactorVessel') {
+      const rv = component as ReactorVesselComponent;
+      // Sync fluid from inside barrel region (core region)
+      if (rv.insideBarrelId) {
+        const insideNode = simState.flowNodes.get(rv.insideBarrelId);
+        if (insideNode && component.fluid) {
+          component.fluid.temperature = insideNode.fluid.temperature;
+          component.fluid.pressure = insideNode.fluid.pressure;
+          component.fluid.phase = insideNode.fluid.phase;
+          component.fluid.quality = insideNode.fluid.quality;
+        }
+      }
+      // Sync fuel temperature if present
+      const fuelNodeId = `${component.id}-fuel`;
+      const fuelNode = simState.thermalNodes.get(fuelNodeId);
+      if (fuelNode) {
+        (component as any).fuelTemperature = fuelNode.temperature;
+      }
+      continue;
+    }
+
     // Sync fluid state for components with fluid
     if (component.fluid) {
       const simNode = simState.flowNodes.get(simNodeId);
@@ -1273,7 +1552,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
   // Sync control rod position to vessel visual
   const rodPosition = simState.neutronics.controlRodPosition;
   for (const [, comp] of plantState.components) {
-    if (comp.type === 'vessel' && comp.controlRodCount) {
+    if ((comp.type === 'vessel' || comp.type === 'reactorVessel') && comp.controlRodCount) {
       comp.controlRodPosition = rodPosition;
     }
   }
@@ -1293,11 +1572,11 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     }
   }
 
-  // Sync turbine state
+  // Sync turbine-generator state
   const turbineInlet = simState.flowNodes.get('turbine-inlet');
   const turbineOutlet = simState.flowNodes.get('turbine-outlet');
   for (const [, comp] of plantState.components) {
-    if (comp.type === 'turbine') {
+    if (comp.type === 'turbine-generator') {
       // Update inlet/outlet fluids from simulation
       if (turbineInlet && comp.inletFluid) {
         comp.inletFluid.temperature = turbineInlet.fluid.temperature;
@@ -1321,6 +1600,57 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
 function showNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
   const prefix = type === 'warning' ? '!' : type === 'error' ? 'X' : 'i';
   console.log('[' + prefix + '] ' + message);
+
+  // Create visible notification element
+  const notification = document.createElement('div');
+  notification.style.cssText = `
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 12px 24px;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 14px;
+    z-index: 2000;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    animation: slideDown 0.3s ease-out;
+    max-width: 80%;
+    text-align: center;
+  `;
+
+  // Color based on type
+  switch (type) {
+    case 'error':
+      notification.style.background = '#8b2020';
+      notification.style.border = '1px solid #cc4444';
+      notification.style.color = '#ffcccc';
+      break;
+    case 'warning':
+      notification.style.background = '#8b6b20';
+      notification.style.border = '1px solid #ccaa44';
+      notification.style.color = '#ffeebb';
+      break;
+    default:
+      notification.style.background = '#1a3a5a';
+      notification.style.border = '1px solid #4488aa';
+      notification.style.color = '#d0e8ff';
+  }
+
+  notification.textContent = message;
+  document.body.appendChild(notification);
+
+  // Auto-remove after delay (longer for errors)
+  const duration = type === 'error' ? 5000 : type === 'warning' ? 4000 : 3000;
+  setTimeout(() => {
+    notification.style.opacity = '0';
+    notification.style.transition = 'opacity 0.3s ease-out';
+    setTimeout(() => {
+      if (notification.parentNode) {
+        document.body.removeChild(notification);
+      }
+    }, 300);
+  }, duration);
 }
 
 // Show a dialog asking if user wants to place component inside a container
