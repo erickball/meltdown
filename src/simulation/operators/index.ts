@@ -26,12 +26,16 @@ export {
   triggerScram,
   resetScram,
   checkScramConditions,
+  DEFAULT_SCRAM_SETPOINTS,
+  type ScramSetpoints,
 } from './neutronics';
 
 export {
   TurbineCondenserOperator,
   createDefaultTurbineCondenserConfig,
+  createTurbineCondenserConfigFromPlant,
   getTurbineCondenserState,
+  updateTurbineCondenserState,
   type TurbineCondenserConfig,
   type TurbineCondenserState,
 } from './turbine-condenser';

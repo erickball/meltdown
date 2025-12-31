@@ -396,6 +396,7 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (typically at ground level)' },
       { name: 'volume', type: 'number', label: 'Volume', default: 100, min: 10, max: 1000, step: 10, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 3, min: 1, max: 10, step: 0.5, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 1.1, min: 0.5, max: 10, step: 0.1, unit: 'bar', help: 'Design pressure (condensers operate under vacuum but must withstand external atmospheric pressure)' },
       { name: 'coolingCapacity', type: 'number', label: 'Cooling Capacity', default: 2000, min: 100, max: 5000, step: 100, unit: 'MW' },
       { name: 'operatingPressure', type: 'number', label: 'Operating Pressure', default: 0.05, min: 0.01, max: 1, step: 0.01, unit: 'bar' },
       { name: 'coolingWaterTemp', type: 'number', label: 'Cooling Water Temp', default: 20, min: 5, max: 40, step: 5, unit: '°C' },
@@ -409,6 +410,25 @@ export const componentDefinitions: Record<string, {
           const height = p.height || 3;
           const width = Math.sqrt(volume / height);
           return width.toFixed(1);
+        }
+      },
+      { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
+        calculate: (p) => {
+          // For vacuum vessels, design is based on external pressure (atmospheric)
+          // Shell buckling formula: t = D * sqrt(P_ext / (2.6 * E))
+          // But for simplicity, use ASME pressure vessel formula with design pressure
+          // t = P*R / (S*E - 0.6*P)
+          // S = 137 MPa (carbon steel), E = 0.85
+          const P = (p.pressureRating || 1.1) * 1e5; // bar to Pa
+          const vol = p.volume || 100;
+          const h = p.height || 3;
+          const R = Math.sqrt(vol / h) / 2; // Half-width as radius
+          const S = 137e6; // Pa
+          const E = 0.85;
+          const t = P * R / (S * E - 0.6 * P);
+          // Minimum practical thickness for large vacuum vessels
+          const minThickness = 6; // mm
+          return Math.max(t * 1000, minThickness).toFixed(1);
         }
       }
     ]
@@ -562,6 +582,20 @@ export const componentDefinitions: Record<string, {
         }
       }
     ]
+  },
+
+  // Controllers
+  'scram-controller': {
+    displayName: 'Scram Controller',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Scram Controller' },
+      // Note: connectedCore will be populated dynamically in the dialog based on available cores
+      { name: 'connectedCore', type: 'select', label: 'Connected Core', default: '', options: [], help: 'Select the reactor core this controller monitors' },
+      { name: 'highPower', type: 'number', label: 'High Power Trip', default: 125, min: 100, max: 200, step: 5, unit: '%', help: 'Scram when power exceeds this % of nominal' },
+      { name: 'lowPower', type: 'number', label: 'Low Power Trip', default: 12, min: 0, max: 50, step: 1, unit: '%', help: 'Scram when power drops below this % of nominal' },
+      { name: 'highFuelTemp', type: 'number', label: 'High Fuel Temp Trip', default: 95, min: 80, max: 100, step: 1, unit: '%', help: 'Scram when fuel temp exceeds this % of melting point' },
+      { name: 'lowCoolantFlow', type: 'number', label: 'Low Coolant Flow Trip', default: 10, min: 0, max: 100, step: 1, unit: 'kg/s', help: 'Scram when coolant flow drops below this value' }
+    ]
   }
 };
 
@@ -575,6 +609,7 @@ export class ComponentDialog {
   private currentCallback: ((config: ComponentConfig | null) => void) | null = null;
   private currentType: string = '';
   private currentPosition: { x: number; y: number } = { x: 0, y: 0 };
+  private availableCores: Array<{ id: string; label: string }> = [];
 
   constructor() {
     this.dialog = document.getElementById('component-dialog')!;
@@ -604,7 +639,12 @@ export class ComponentDialog {
     });
   }
 
-  show(componentType: string, position: { x: number; y: number }, callback: (config: ComponentConfig | null) => void) {
+  show(
+    componentType: string,
+    position: { x: number; y: number },
+    callback: (config: ComponentConfig | null) => void,
+    availableCores?: Array<{ id: string; label: string }>
+  ) {
     const definition = componentDefinitions[componentType];
     if (!definition) {
       console.error(`Unknown component type: ${componentType}`);
@@ -619,8 +659,8 @@ export class ComponentDialog {
     // Set title
     this.titleElement.textContent = `Configure ${definition.displayName}`;
 
-    // Build form
-    this.buildForm(definition.options);
+    // Build form (pass available cores for controller dropdowns)
+    this.buildForm(definition.options, availableCores);
 
     // Show dialog
     this.dialog.style.display = 'flex';
@@ -632,7 +672,7 @@ export class ComponentDialog {
     }
   }
 
-  private buildForm(options: ComponentOption[]) {
+  private buildForm(options: ComponentOption[], availableCores?: Array<{ id: string; label: string }>) {
     this.bodyElement.innerHTML = '';
 
     // Separate calculated options from input options
@@ -709,7 +749,27 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
 
-          if (option.options) {
+          // Special case: dynamically populate core dropdown for controllers
+          if (option.name === 'connectedCore' && availableCores) {
+            // Add "None" option
+            const noneOption = document.createElement('option');
+            noneOption.value = '';
+            noneOption.textContent = '-- Select a core --';
+            input.appendChild(noneOption);
+
+            // Add available cores
+            availableCores.forEach(core => {
+              const optionElement = document.createElement('option');
+              optionElement.value = core.id;
+              optionElement.textContent = core.label || core.id;
+              input.appendChild(optionElement);
+            });
+
+            // Select first core by default if available
+            if (availableCores.length > 0) {
+              (input as HTMLSelectElement).value = availableCores[0].id;
+            }
+          } else if (option.options) {
             option.options.forEach(opt => {
               const optionElement = document.createElement('option');
               optionElement.value = String(opt.value);
@@ -1001,7 +1061,8 @@ export class ComponentDialog {
    */
   showEdit(
     component: Record<string, any>,
-    callback: (properties: Record<string, any> | null) => void
+    callback: (properties: Record<string, any> | null) => void,
+    availableCores?: Array<{ id: string; label: string }>
   ) {
     const componentType = this.mapComponentTypeToDefinition(component.type, component);
     const definition = componentDefinitions[componentType];
@@ -1013,6 +1074,7 @@ export class ComponentDialog {
 
     this.currentType = componentType;
     this.currentPosition = component.position || { x: 0, y: 0 };
+    this.availableCores = availableCores || [];
     this.currentCallback = (config) => {
       if (config) {
         callback(config.properties);
@@ -1080,7 +1142,8 @@ export class ComponentDialog {
       'condenser': 'condenser',
       'turbine-generator': 'turbine-generator',
       'turbine-driven-pump': 'turbine-driven-pump',
-      'fuelAssembly': 'core'
+      'fuelAssembly': 'core',
+      'controller': 'scram-controller'
     };
     return mapping[type] || type;
   }
@@ -1145,7 +1208,28 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
 
-          if (option.options) {
+          // Special case: dynamically populate core dropdown for controllers
+          if (option.name === 'connectedCore' && this.availableCores.length > 0) {
+            // Add "None" option
+            const noneOption = document.createElement('option');
+            noneOption.value = '';
+            noneOption.textContent = '-- Select a core --';
+            if (!existingValue) {
+              noneOption.selected = true;
+            }
+            input.appendChild(noneOption);
+
+            // Add available cores
+            this.availableCores.forEach(core => {
+              const optionElement = document.createElement('option');
+              optionElement.value = core.id;
+              optionElement.textContent = core.label || core.id;
+              if (core.id === existingValue) {
+                optionElement.selected = true;
+              }
+              input.appendChild(optionElement);
+            });
+          } else if (option.options) {
             option.options.forEach(opt => {
               const optionElement = document.createElement('option');
               optionElement.value = String(opt.value);
@@ -1274,6 +1358,10 @@ export class ComponentDialog {
       if (optionName === 'crackingPressure' || optionName === 'setpoint') {
         return value / 1e5;  // Pa to bar
       }
+      // Convert W to MW for power fields (turbine ratedPower, core thermalPower stored in W)
+      if (optionName === 'ratedPower' || optionName === 'thermalPower') {
+        return value / 1e6;  // W to MW
+      }
       return value;
     }
 
@@ -1297,6 +1385,12 @@ export class ComponentDialog {
       'diameter': ['innerDiameter'],
       'controlRodBanks': ['controlRodCount'],
       'initialRodPosition': ['controlRodPosition'],
+      // Controller setpoint mappings
+      'connectedCore': ['connectedCoreId'],
+      'highPower': ['setpoints.highPower'],
+      'lowPower': ['setpoints.lowPower'],
+      'highFuelTemp': ['setpoints.highFuelTemp'],
+      'lowCoolantFlow': ['setpoints.lowCoolantFlow'],
     };
 
     const mappings = propertyMappings[optionName];
@@ -1313,6 +1407,7 @@ export class ComponentDialog {
             // Convert units if needed
             if (prop === 'fluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
             if (prop === 'fluid.temperature') return (value as unknown as number) - 273; // K to C
+            if (prop === 'setpoints.highFuelTemp') return (value as unknown as number) * 100; // 0-1 to %
             return value;
           }
         } else if (component[prop] !== undefined) {

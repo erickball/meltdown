@@ -10,13 +10,14 @@ import {
   TurbineGeneratorComponent,
   TurbineDrivenPumpComponent,
   CondenserComponent,
+  ControllerComponent,
   ViewState,
   Fluid,
   Point,
   PlantState,
   Connection,
 } from '../types';
-import { SimulationState } from '../simulation';
+import { SimulationState, getTurbineCondenserState } from '../simulation';
 import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction, getSaturationTemp } from './colors';
 
 // Convert world coordinates (meters) to screen coordinates (pixels)
@@ -212,6 +213,9 @@ export function renderComponent(
       break;
     case 'reactorVessel':
       renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections, isSimulating);
+      break;
+    case 'controller':
+      renderController(ctx, component as ControllerComponent, view);
       break;
   }
 
@@ -771,7 +775,7 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   const h = vessel.height * view.zoom;
 
   // Barrel dimensions
-  const barrelOuterR = (vessel.barrelDiameter / 2 + vessel.barrelThickness) * view.zoom;
+  const barrelOuterR = (vessel.barrelDiameter / 2 + vessel.barrelThickness / 2) * view.zoom;
   const barrelInnerR = (vessel.barrelDiameter / 2) * view.zoom;
 
   // Calculate dome intrusion at barrel radius
@@ -779,7 +783,7 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   // At the barrel's outer radius, the dome surface is at:
   // z = R - sqrt(R² - r²) from the end of the cylinder
   const vesselR = vessel.innerDiameter / 2;  // world units
-  const barrelOuterRWorld = vessel.barrelDiameter / 2 + vessel.barrelThickness;
+  const barrelOuterRWorld = vessel.barrelDiameter / 2 + vessel.barrelThickness / 2;
   const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterRWorld * barrelOuterRWorld);
 
   // Barrel position relative to inner dome surface
@@ -898,8 +902,9 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
     const fuelColor = getFuelColor(fuelTemp, meltPoint);
 
     // Core dimensions - use stored coreDiameter or default to barrel inner diameter
-    const coreDiameter = (vessel as any).coreDiameter ?? (vessel.barrelDiameter - vessel.barrelThickness * 2);
-    const coreWidth = (coreDiameter / 2) * view.zoom * 1.6; // 80% of core diameter for rod placement
+    // barrelDiameter is center-line, so inner = barrelDiameter - barrelThickness/2
+    const coreDiameterWorld = (vessel as any).coreDiameter ?? (vessel.barrelDiameter - vessel.barrelThickness / 2);
+    const coreRadiusPx = (coreDiameterWorld / 2) * view.zoom;
 
     // Core height - use stored coreHeight or default to barrel height
     const coreHeightWorld = (vessel as any).coreHeight ?? barrelHeight / view.zoom;
@@ -910,21 +915,69 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
     const bottomGap = barrelHeight * 0.1;
     const coreTop = barrelBottomY - bottomGap - coreHeightPx;
 
-    const rodCount = (vessel as any).fuelRodCount;
-    const rodSpacing = coreWidth / (rodCount + 1);
-    const rodWidth = Math.max(2, Math.min(rodSpacing * 0.6, 6));
+    // Calculate grid dimensions based on rod pitch
+    const rodPitchMm = (vessel as any).rodPitch ?? 12.6;
+    const rodPitchWorld = rodPitchMm / 1000; // Convert mm to m
+    const rodPitchPx = rodPitchWorld * view.zoom;
+
+    // Rod diameter (typically ~9.5mm for PWR fuel rods)
+    const rodDiameterMm = (vessel as any).rodDiameter ?? 9.5;
+    const rodDiameterWorld = rodDiameterMm / 1000;
+
+    // Calculate the ratio of rod diameter to pitch (typically ~0.75)
+    const rodToPitchRatio = rodDiameterWorld / rodPitchWorld;
+
+    // For visibility: rods need to be at least 4px wide with at least 2px gap between them
+    const minRodWidthPx = 4;
+    const minGapPx = 2;
+    const minPitchPx = minRodWidthPx + minGapPx;
+
+    // Calculate skip factor to ensure minimum pitch
+    let skipFactor = 1;
+    if (rodPitchPx < minPitchPx) {
+      skipFactor = Math.ceil(minPitchPx / rodPitchPx);
+    }
+
+    // Effective display pitch (in pixels)
+    const displayPitchPx = rodPitchPx * skipFactor;
+
+    // Rod width maintains the ratio to pitch, but ensure minimum gap
+    // Gap = pitch - rod width, so rod width = pitch * ratio
+    // But we also need gap >= minGapPx, so rod width <= pitch - minGapPx
+    const proportionalRodWidth = displayPitchPx * rodToPitchRatio;
+    const maxRodWidthForGap = displayPitchPx - minGapPx;
+    const rodWidthPx = Math.min(proportionalRodWidth, maxRodWidthForGap);
+
+    // How many rods we'll actually display across the diameter
+    const displayPitchWorld = rodPitchWorld * skipFactor;
+    const displayRodsAcross = Math.floor(coreDiameterWorld / displayPitchWorld);
+
+    // Generate symmetrical rod positions within circular boundary
+    const rodPositions: number[] = [];
+    const halfGrid = displayRodsAcross / 2;
+
+    for (let col = 0; col < displayRodsAcross; col++) {
+      // X position in pixels (centered)
+      const xOffset = (col - halfGrid + 0.5) * displayPitchPx;
+
+      // Check if this position is within the circular core boundary
+      const xWorld = (col - halfGrid + 0.5) * displayPitchWorld;
+      const distFromCenter = Math.abs(xWorld);
+
+      if (distFromCenter < coreDiameterWorld / 2 - displayPitchWorld * 0.3) {
+        rodPositions.push(xOffset);
+      }
+    }
 
     // Draw each fuel rod as a vertical bar
-    for (let i = 0; i < rodCount; i++) {
-      const rodX = -coreWidth / 2 + rodSpacing * (i + 1);
-
+    for (const rodX of rodPositions) {
       // Fuel rod cladding
       ctx.fillStyle = COLORS.steelDark;
-      ctx.fillRect(rodX - rodWidth / 2 - 1, coreTop, rodWidth + 2, coreHeightPx);
+      ctx.fillRect(rodX - rodWidthPx / 2 - 1, coreTop, rodWidthPx + 2, coreHeightPx);
 
       // Fuel pellet
       ctx.fillStyle = fuelColor;
-      ctx.fillRect(rodX - rodWidth / 2, coreTop + 1, rodWidth, coreHeightPx - 2);
+      ctx.fillRect(rodX - rodWidthPx / 2, coreTop + 1, rodWidthPx, coreHeightPx - 2);
     }
 
     // Draw control rods (always full length, extend above core when withdrawn)
@@ -937,25 +990,19 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
       // The top of the rod moves up as it's withdrawn
       const rodTopOffset = coreHeightPx * controlRodPosition;
       const rodTop = coreTop - rodTopOffset;
-      const controlRodWidth = rodWidth * 0.8;
+      const controlRodWidth = rodWidthPx * 1.2; // Control rods slightly wider than fuel rods
 
-      // Get fuel rod positions
-      const fuelRodPositions: number[] = [];
-      for (let i = 0; i < rodCount; i++) {
-        fuelRodPositions.push(-coreWidth / 2 + rodSpacing * (i + 1));
-      }
+      // Place control rods evenly across the core width
+      // Use symmetrical positions
+      const controlRodSpacing = (coreRadiusPx * 2 * 0.8) / (controlRodCount + 1);
 
-      // Place control rods between fuel rods
-      for (let i = 0; i < controlRodCount && i < rodCount - 1; i++) {
-        const fuelIndex = Math.floor((i + 1) * (rodCount - 1) / (controlRodCount + 1));
-        if (fuelIndex + 1 < fuelRodPositions.length) {
-          const crX = (fuelRodPositions[fuelIndex] + fuelRodPositions[fuelIndex + 1]) / 2;
+      for (let i = 0; i < controlRodCount; i++) {
+        const crX = -coreRadiusPx * 0.8 + controlRodSpacing * (i + 1);
 
-          ctx.fillStyle = '#333';
-          ctx.fillRect(crX - controlRodWidth / 2 - 1, rodTop, controlRodWidth + 2, controlRodLength);
-          ctx.fillStyle = '#111';
-          ctx.fillRect(crX - controlRodWidth / 2, rodTop + 1, controlRodWidth, controlRodLength - 2);
-        }
+        ctx.fillStyle = '#333';
+        ctx.fillRect(crX - controlRodWidth / 2 - 1, rodTop, controlRodWidth + 2, controlRodLength);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(crX - controlRodWidth / 2, rodTop + 1, controlRodWidth, controlRodLength - 2);
       }
     }
   }
@@ -1638,12 +1685,14 @@ function renderTurbineGenerator(ctx: CanvasRenderingContext2D, turbine: TurbineG
   ctx.arc(genX, 0, genR, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Power indicator
-  if (turbine.running) {
-    ctx.font = '10px monospace';
-    ctx.fillStyle = '#fff';
+  // Power indicator - get actual power from simulation state
+  const turbineStats = getTurbineCondenserState();
+  const powerMW = turbineStats.turbinePower / 1e6;
+  if (powerMW > 0 || turbine.running) {
+    const fontSize = Math.max(8, 10 * view.zoom / 60); // Scale with zoom, min 8px
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.fillStyle = '#1a1a1a'; // Dark text for readability
     ctx.textAlign = 'center';
-    const powerMW = turbine.power / 1e6;
     ctx.fillText(`${powerMW.toFixed(0)} MW`, genX, genR + 15);
   }
 
@@ -1942,14 +1991,17 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
     }
   }
 
-  // Heat rejection indicator
-  ctx.font = '10px monospace';
-  ctx.fillStyle = '#fff';
+  // Heat rejection indicator - get actual heat rejection from simulation state
+  const condenserStats = getTurbineCondenserState();
+  const heatMW = condenserStats.condenserHeatRejection / 1e6;
+  const fontSize = Math.max(8, 10 * view.zoom / 60); // Scale with zoom, min 8px
+  const smallFontSize = Math.max(6, 8 * view.zoom / 60);
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.fillStyle = '#1a1a1a'; // Dark text for readability
   ctx.textAlign = 'center';
-  const heatMW = condenser.heatRejection / 1e6;
   ctx.fillText(`${heatMW.toFixed(0)} MW`, 0, h / 2 + 15);
-  ctx.font = '8px monospace';
-  ctx.fillStyle = '#aaa';
+  ctx.font = `${smallFontSize}px monospace`;
+  ctx.fillStyle = '#333';
   ctx.fillText('rejected', 0, h / 2 + 25);
 
   // Hotwell at bottom (condensate collection)
@@ -1960,6 +2012,127 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 2;
   ctx.strokeRect(-w / 2, -h / 2, w, h);
+}
+
+function renderController(ctx: CanvasRenderingContext2D, controller: ControllerComponent, view: ViewState): void {
+  const w = controller.width * view.zoom;
+  const h = controller.height * view.zoom;
+
+  // Cabinet body - dark gray metal
+  ctx.fillStyle = '#3a3a4a';
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+
+  // Darker border/frame
+  ctx.strokeStyle = '#2a2a3a';
+  ctx.lineWidth = Math.max(1, w * 0.02);
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+
+  // Warning stripes at very top (yellow/black diagonal stripes)
+  const stripeHeight = h * 0.05;
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-w / 2 + 2, -h / 2 + 2, w - 4, stripeHeight);
+  ctx.clip();
+
+  const stripeWidth = stripeHeight;
+  ctx.fillStyle = '#ffaa00';
+  ctx.fillRect(-w / 2, -h / 2, w, stripeHeight + 2);
+  ctx.fillStyle = '#222';
+  for (let i = -5; i < 15; i++) {
+    ctx.beginPath();
+    ctx.moveTo(-w / 2 + i * stripeWidth, -h / 2);
+    ctx.lineTo(-w / 2 + i * stripeWidth + stripeWidth / 2, -h / 2);
+    ctx.lineTo(-w / 2 + i * stripeWidth + stripeWidth / 2 + stripeHeight, -h / 2 + stripeHeight);
+    ctx.lineTo(-w / 2 + i * stripeWidth + stripeHeight, -h / 2 + stripeHeight);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // SCRAM label - positioned below stripes with more space
+  ctx.font = `bold ${h * 0.16}px monospace`;
+  ctx.fillStyle = '#ff4444';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('SCRAM', 0, -h / 2 + stripeHeight + h * 0.14);
+
+  // Status panel area (darker inset) - positioned below SCRAM label
+  const panelTop = -h / 2 + stripeHeight + h * 0.24;
+  const panelHeight = h * 0.22;
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(-w / 2 + w * 0.08, panelTop, w * 0.84, panelHeight);
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-w / 2 + w * 0.08, panelTop, w * 0.84, panelHeight);
+
+  // Status text - simplified: just "STATUS: CONNECTED" or "STATUS: NO CORE"
+  const isConnected = controller.connectedCoreId !== undefined && controller.connectedCoreId !== '';
+  ctx.font = `${h * 0.09}px monospace`;
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#6f6';
+  ctx.fillText('STATUS:', -w / 2 + w * 0.12, panelTop + panelHeight * 0.4);
+  ctx.fillStyle = isConnected ? '#6f6' : '#f66';
+  ctx.fillText(isConnected ? 'CONNECTED' : 'NO CORE', -w / 2 + w * 0.12, panelTop + panelHeight * 0.7);
+
+  // Indicator lights row
+  const lightsY = panelTop + panelHeight + h * 0.07;
+  const lightRadius = w * 0.05;
+  const lightSpacing = w * 0.22;
+
+  // Light 1 - Power (green if connected)
+  ctx.beginPath();
+  ctx.arc(-lightSpacing, lightsY, lightRadius, 0, Math.PI * 2);
+  ctx.fillStyle = isConnected ? '#0f0' : '#030';
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = Math.max(1, w * 0.015);
+  ctx.stroke();
+
+  // Light 2 - Status (amber)
+  ctx.beginPath();
+  ctx.arc(0, lightsY, lightRadius, 0, Math.PI * 2);
+  ctx.fillStyle = isConnected ? '#fa0' : '#330';
+  ctx.fill();
+  ctx.stroke();
+
+  // Light 3 - Alarm (red, normally off)
+  ctx.beginPath();
+  ctx.arc(lightSpacing, lightsY, lightRadius, 0, Math.PI * 2);
+  ctx.fillStyle = '#300';
+  ctx.fill();
+  ctx.stroke();
+
+  // Bottom section - buttons/switches
+  const buttonY = lightsY + h * 0.12;
+  const buttonSize = w * 0.08;
+
+  // Manual SCRAM button (red)
+  ctx.beginPath();
+  ctx.arc(0, buttonY, buttonSize, 0, Math.PI * 2);
+  ctx.fillStyle = '#c00';
+  ctx.fill();
+  ctx.strokeStyle = '#600';
+  ctx.lineWidth = Math.max(1, w * 0.015);
+  ctx.stroke();
+
+  // Button highlight
+  ctx.beginPath();
+  ctx.arc(-buttonSize * 0.2, buttonY - buttonSize * 0.2, buttonSize * 0.3, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,100,100,0.4)';
+  ctx.fill();
+
+  // Setpoint display at bottom
+  ctx.font = `${h * 0.07}px monospace`;
+  ctx.fillStyle = '#888';
+  ctx.textAlign = 'center';
+  const setpointY = buttonY + buttonSize + h * 0.08;
+  ctx.fillText(`Hi:${controller.setpoints.highPower}%  Lo:${controller.setpoints.lowPower}%`, 0, setpointY);
+  ctx.fillText(`Temp:${Math.round(controller.setpoints.highFuelTemp * 100)}%  Flow:${controller.setpoints.lowCoolantFlow}`, 0, setpointY + h * 0.09);
+
+  // Outer highlight
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-w / 2 + 1, -h / 2 + 1, w - 2, h - 2);
 }
 
 function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, view: ViewState): void {
@@ -2008,7 +2181,7 @@ function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, v
   }
 }
 
-function getComponentBounds(component: PlantComponent, view: ViewState): { x: number; y: number; width: number; height: number } {
+export function getComponentBounds(component: PlantComponent, view: ViewState): { x: number; y: number; width: number; height: number } {
   // Return bounding box in local coordinates (pre-rotation)
   switch (component.type) {
     case 'tank':
@@ -2029,9 +2202,9 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
       // Upright RCP-style pump bounds
       // Layout: motor + coupling + casing + suction nozzle + inlet pipe
       const pumpScale = component.diameter * view.zoom * 1.3; // 30% bigger
-      const pumpBodyHeight = pumpScale * (0.9 + 0.15 + 0.5 + 0.35); // motor + coupling + casing + nozzle
+      const pumpBodyHeight = pumpScale * (0.9 + 0.15 + 0.5 + 0.35); // motor + coupling + casing + nozzle = 1.9
       const pumpInletPipe = pumpScale * 0.3; // inlet pipe below nozzle
-      const pumpTotalHeight = pumpBodyHeight + pumpInletPipe;
+      const pumpTotalHeight = pumpBodyHeight + pumpInletPipe; // = 2.2 * scale
       const pumpBodyWidth = pumpScale * 0.75; // casing width
       const pumpVoluteBulge = pumpScale * 0.18;
       const pumpOutletPipe = pumpScale * 0.45;
@@ -2051,14 +2224,18 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         };
       } else {
         // Vertical orientations (left-right, right-left)
+        // The pump is drawn centered on pumpBodyHeight, with inlet pipe extending below
+        // So top is at -pumpBodyHeight/2, bottom is at pumpBodyHeight/2 + pumpInletPipe
         const pumpOutletOnLeft = pumpOrientation === 'right-left';
+        const topY = -pumpBodyHeight / 2;
+        const bottomY = pumpBodyHeight / 2 + pumpInletPipe;
         return {
           x: pumpOutletOnLeft
             ? -(pumpBodyWidth / 2 + pumpVoluteBulge + pumpOutletPipe) - 5
             : -pumpBodyWidth / 2 - 5,
-          y: -pumpBodyHeight / 2 - 5,
+          y: topY - 5,
           width: pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe + 10,
-          height: pumpTotalHeight + 10,
+          height: (bottomY - topY) + 10,
         };
       }
     case 'vessel':
@@ -2115,6 +2292,13 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         y: -component.height * view.zoom / 2 - 5,
         width: component.width * view.zoom + 10,
         height: component.height * view.zoom + 35, // Extra for heat rejection label
+      };
+    case 'controller':
+      return {
+        x: -component.width * view.zoom / 2 - 5,
+        y: -component.height * view.zoom / 2 - 5,
+        width: component.width * view.zoom + 10,
+        height: component.height * view.zoom + 10,
       };
     default:
       return { x: -20, y: -20, width: 40, height: 40 };
@@ -2486,13 +2670,14 @@ export function renderFlowConnectionArrows(
 
 /**
  * Render pressure dial gauges on flow nodes
+ * Each gauge is attached to the top-center of its component with a thin black stem
  */
 export function renderPressureGauge(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  perspectiveProjector?: (pos: Point, elevation: number) => { pos: Point; scale: number }
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number } | null
 ): void {
   // Draw a pressure gauge for each flow node that has a corresponding visual component
   for (const [nodeId, node] of simState.flowNodes) {
@@ -2508,77 +2693,56 @@ export function renderPressureGauge(
 
     if (!component) continue;
 
-    // Get component elevation for perspective projection
-    const componentElevation = (component as { elevation?: number }).elevation ?? 0;
-
-    // Determine gauge position - always at top of component
-    let gaugeOffset: Point = { x: 0, y: 0 };
-    let gaugeElevationOffset = 0; // Elevation at top of component
-    let componentHeight = 0;
-
-    if (component.type === 'pipe') {
-      const pipe = component as PipeComponent;
-      // Place gauge above the middle of the pipe
-      const midX = pipe.length / 2;
-      const cos = Math.cos(pipe.rotation);
-      const sin = Math.sin(pipe.rotation);
-      gaugeOffset = {
-        x: midX * cos,
-        y: midX * sin,
-      };
-      // Pipe elevation is at center, gauge goes above
-      gaugeElevationOffset = pipe.diameter / 2 + 0.5;
-      componentHeight = pipe.diameter;
-    } else if (component.type === 'tank') {
-      const tank = component as TankComponent;
-      // Place gauge at top center of tank
-      gaugeOffset = { x: 0, y: 0 };
-      gaugeElevationOffset = tank.height + 0.5; // Just above top
-      componentHeight = tank.height;
-    } else if (component.type === 'vessel') {
-      const vessel = component as VesselComponent;
-      // Place gauge at top of vessel
-      gaugeOffset = { x: 0, y: 0 };
-      gaugeElevationOffset = vessel.height + 0.5; // Just above top
-      componentHeight = vessel.height;
-    } else if (component.type === 'heatExchanger') {
-      const hx = component as HeatExchangerComponent;
-      // Place gauge at top of heat exchanger
-      gaugeOffset = { x: 0, y: 0 };
-      gaugeElevationOffset = hx.height + 0.5; // Just above top
-      componentHeight = hx.height;
-    } else {
-      continue; // Skip other component types
+    // Check if this component is contained by a reactor vessel - if so, use the parent vessel's geometry
+    const containedBy = (component as { containedBy?: string }).containedBy;
+    let parentVessel: PlantComponent | undefined;
+    if (containedBy) {
+      parentVessel = plantState.components.get(containedBy);
     }
 
-    const worldPos = {
-      x: component.position.x + gaugeOffset.x,
-      y: component.position.y + gaugeOffset.y,
-    };
+    // Determine which component to get bounds from
+    const boundsComponent = (parentVessel && parentVessel.type === 'reactorVessel') ? parentVessel : component;
 
-    // Use perspective projection if available (isometric mode), otherwise standard 2D
-    let screenPos: Point;
+    // Get screen position from the canvas's screen bounds calculator
+    let stemBottomPos: Point;
+    let gaugePos: Point;
     let gaugeScale = 1;
-    if (perspectiveProjector) {
-      const gaugeElevation = componentElevation + gaugeElevationOffset;
-      const projected = perspectiveProjector(worldPos, gaugeElevation);
-      screenPos = projected.pos;
-      // Skip if behind camera
-      if (projected.scale <= 0) continue;
-      // Scale gauge with perspective - projected.scale ranges from ~0.3 (far) to ~2.5 (near)
-      // Use the scale directly, clamped to reasonable range
-      gaugeScale = Math.max(0.3, Math.min(2.5, projected.scale));
+    const stemLengthPx = 25; // Fixed stem length in pixels
+
+    if (getScreenBounds) {
+      // Use the screen bounds from canvas (works correctly in both 2D and perspective modes)
+      const screenBounds = getScreenBounds(boundsComponent);
+      if (!screenBounds) continue;
+
+      gaugeScale = Math.max(0.3, Math.min(2.5, screenBounds.scale));
+      let gaugeX = screenBounds.topCenter.x;
+      let topY = screenBounds.topCenter.y;
+
+      // For reactor vessel sub-components, offset the X position to separate the two gauges
+      if (parentVessel && parentVessel.type === 'reactorVessel') {
+        const rv = parentVessel as ReactorVesselComponent;
+        const isInsideBarrel = component.id.includes('-inside');
+        const gaugeOffsetX = rv.innerDiameter * view.zoom * gaugeScale * (isInsideBarrel ? -0.15 : 0.15);
+        gaugeX = screenBounds.topCenter.x + gaugeOffsetX;
+        // Also offset the core gauge down slightly
+        if (isInsideBarrel) {
+          topY = screenBounds.topCenter.y + 10 * gaugeScale;
+        }
+      }
+
+      stemBottomPos = { x: gaugeX, y: topY };
+      gaugePos = { x: gaugeX, y: topY - stemLengthPx * gaugeScale };
     } else {
-      // In 2D mode, offset upward from component center
-      const basePos = worldToScreen(worldPos, view);
-      // Move up by component height (in screen pixels)
-      screenPos = {
-        x: basePos.x,
-        y: basePos.y - (componentHeight / 2 + 1.5) * view.zoom,
-      };
+      // Fallback: use simple world-to-screen conversion (2D mode without callback)
+      const bounds = getComponentBounds(boundsComponent, view);
+      const screenCenter = worldToScreen(boundsComponent.position, view);
+      const topY = screenCenter.y + bounds.y;
+      const gaugeX = screenCenter.x;
+      stemBottomPos = { x: gaugeX, y: topY };
+      gaugePos = { x: gaugeX, y: topY - stemLengthPx };
     }
 
-    // Gauge parameters - scale with perspective (10% larger base size)
+    // Gauge parameters - scale with perspective
     const baseGaugeRadius = 20;
     const gaugeRadius = baseGaugeRadius * gaugeScale;
     const maxPressure = 220e5; // 220 bar in Pa
@@ -2590,8 +2754,19 @@ export function renderPressureGauge(
     const pressureFraction = Math.min(1, Math.max(0, node.fluid.pressure / maxPressure));
     const currentAngle = startAngle + pressureFraction * totalArcAngle;
 
+    // Draw stem from top of component to gauge
     ctx.save();
-    ctx.translate(screenPos.x, screenPos.y);
+    ctx.beginPath();
+    ctx.moveTo(stemBottomPos.x, stemBottomPos.y);
+    ctx.lineTo(gaugePos.x, gaugePos.y + gaugeRadius); // Connect to bottom of gauge
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = Math.max(2, 3 * gaugeScale);
+    ctx.stroke();
+    ctx.restore();
+
+    // Draw the gauge
+    ctx.save();
+    ctx.translate(gaugePos.x, gaugePos.y);
 
     // Draw gauge background
     ctx.beginPath();
@@ -2612,18 +2787,25 @@ export function renderPressureGauge(
     ctx.stroke();
 
     // Draw colored arc up to current pressure
-    // Color transitions: green (0-150 bar) -> yellow (150-180 bar) -> orange (180-200 bar) -> red (200+ bar)
+    // Color transitions based on typical reactor pressure ranges:
+    // Red (<1 bar) - vacuum/loss of pressure
+    // Green (1-40 bar) - normal low pressure range
+    // Yellow (40-80 bar) - BWR/secondary pressures
+    // White (80-160 bar) - normal PWR primary range
+    // Orange (160+ bar) - high pressure
     if (pressureFraction > 0) {
       // Determine color based on pressure
       let arcColor: string;
-      if (pressureBar < 150) {
-        arcColor = '#4c4'; // Green
-      } else if (pressureBar < 180) {
-        arcColor = '#cc4'; // Yellow
-      } else if (pressureBar < 200) {
-        arcColor = '#c84'; // Orange
+      if (pressureBar < 1) {
+        arcColor = '#c44'; // Red - vacuum/low
+      } else if (pressureBar < 40) {
+        arcColor = '#4c4'; // Green - normal low
+      } else if (pressureBar < 80) {
+        arcColor = '#cc4'; // Yellow - BWR/secondary
+      } else if (pressureBar < 160) {
+        arcColor = '#ddd'; // White - normal PWR primary
       } else {
-        arcColor = '#c44'; // Red
+        arcColor = '#c84'; // Orange - high
       }
 
       ctx.beginPath();

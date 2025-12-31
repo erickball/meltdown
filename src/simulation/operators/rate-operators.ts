@@ -447,12 +447,11 @@ export class FlowRateOperator implements RateOperator {
 // Turbine/Condenser Rate Operator
 // ============================================================================
 
+import { updateTurbineCondenserState } from './turbine-condenser';
+
 export class TurbineCondenserRateOperator implements RateOperator {
   name = 'TurbineCondenser';
 
-  private turbineInletNodeId = 'turbine-inlet';
-  private turbineOutletNodeId = 'turbine-outlet';
-  private condenserNodeId = 'condenser';
   private turbineEfficiency = 0.87;
   private condenserUA = 10e6; // W/K
   private heatSinkTemp = 300; // K
@@ -465,50 +464,75 @@ export class TurbineCondenserRateOperator implements RateOperator {
       rates.flowNodes.set(id, { dMass: 0, dEnergy: 0 });
     }
 
-    // Turbine: extract work from steam expansion
-    const inletNode = state.flowNodes.get(this.turbineInletNodeId);
-    const outletNode = state.flowNodes.get(this.turbineOutletNodeId);
+    let totalTurbinePower = 0;
+    let totalCondenserHeat = 0;
 
-    if (inletNode && outletNode) {
-      // Find flow through turbine
+    // Find turbines dynamically by looking for nodes that have "turbine" in the label
+    // and are connected to condensers
+    for (const [turbineNodeId, turbineNode] of state.flowNodes) {
+      // Check if this is a turbine node (by label or id pattern)
+      const isTurbine = turbineNode.label?.toLowerCase().includes('turbine') ||
+                        turbineNodeId.includes('turbine-generator');
+
+      if (!isTurbine) continue;
+
+      // Find flow INTO the turbine
       let massFlowRate = 0;
+      let outletNodeId: string | null = null;
+
       for (const conn of state.flowConnections) {
-        if (conn.fromNodeId === this.turbineInletNodeId && conn.toNodeId === this.turbineOutletNodeId) {
-          massFlowRate = Math.abs(conn.massFlowRate);
-          break;
+        // Flow into turbine
+        if (conn.toNodeId === turbineNodeId && conn.massFlowRate > 0) {
+          massFlowRate += conn.massFlowRate;
+        }
+        // Flow out of turbine - find the outlet (likely condenser)
+        if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
+          outletNodeId = conn.toNodeId;
         }
       }
 
-      if (massFlowRate > 1 && inletNode.fluid.phase !== 'liquid') {
-        const P_in = inletNode.fluid.pressure;
-        const P_out = outletNode.fluid.pressure;
+      if (massFlowRate < 1 || !outletNodeId) continue;
 
-        if (P_in > P_out) {
-          // Compute enthalpy at inlet
-          const u_in = inletNode.fluid.internalEnergy / inletNode.fluid.mass;
-          const v_in = inletNode.volume / inletNode.fluid.mass;
-          const h_in = u_in + P_in * v_in;
+      const outletNode = state.flowNodes.get(outletNodeId);
+      if (!outletNode) continue;
 
-          // Approximate isentropic expansion
-          const pressureRatio = P_out / P_in;
-          const h_out_ideal = h_in * Math.pow(pressureRatio, 0.3);
-          const deltaH = this.turbineEfficiency * (h_in - h_out_ideal);
+      // Skip if inlet is liquid
+      if (turbineNode.fluid.phase === 'liquid') continue;
 
-          // Power extracted
-          const power = massFlowRate * deltaH;
+      const P_in = turbineNode.fluid.pressure;
+      const P_out = outletNode.fluid.pressure;
 
-          // Remove energy from outlet node
-          const outRates = rates.flowNodes.get(this.turbineOutletNodeId);
-          if (outRates) {
-            outRates.dEnergy -= power;
-          }
-        }
+      if (P_in <= P_out) continue;
+
+      // Compute enthalpy at turbine
+      const u_in = turbineNode.fluid.internalEnergy / turbineNode.fluid.mass;
+      const v_in = turbineNode.volume / turbineNode.fluid.mass;
+      const h_in = u_in + P_in * v_in;
+
+      // Approximate isentropic expansion
+      const pressureRatio = P_out / P_in;
+      const h_out_ideal = h_in * Math.pow(pressureRatio, 0.3);
+      const deltaH = this.turbineEfficiency * (h_in - h_out_ideal);
+
+      // Power extracted
+      const power = massFlowRate * deltaH;
+      totalTurbinePower += power;
+
+      // Remove energy from outlet node
+      const outRates = rates.flowNodes.get(outletNodeId);
+      if (outRates) {
+        outRates.dEnergy -= power;
       }
     }
 
-    // Condenser: remove heat to ultimate heat sink
-    const condenserNode = state.flowNodes.get(this.condenserNodeId);
-    if (condenserNode) {
+    // Find condensers dynamically
+    for (const [condenserNodeId, condenserNode] of state.flowNodes) {
+      // Check if this is a condenser node
+      const isCondenser = condenserNode.label?.toLowerCase().includes('condenser') ||
+                          condenserNodeId.includes('condenser');
+
+      if (!isCondenser) continue;
+
       const T_sat = condenserNode.fluid.temperature;
       const T_sink = this.heatSinkTemp;
 
@@ -522,12 +546,16 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       // Cap heat rate
       heatRate = Math.min(heatRate, 800e6);
+      totalCondenserHeat += heatRate;
 
-      const condRates = rates.flowNodes.get(this.condenserNodeId);
+      const condRates = rates.flowNodes.get(condenserNodeId);
       if (condRates) {
         condRates.dEnergy -= heatRate;
       }
     }
+
+    // Update shared state for display (accessed via getTurbineCondenserState)
+    updateTurbineCondenserState(totalTurbinePower, totalCondenserHeat);
 
     return rates;
   }
@@ -1030,18 +1058,6 @@ export class FlowMomentumRateOperator implements RateOperator {
       // dṁ/dt = ρ * A * dv/dt  (assuming ρ changes slowly)
       // Uses upstream density since that's what's flowing
       const dMassFlowRate = rho_upstream * A * dv_dt;
-
-      // DEBUG: Log momentum equation details for pum-5
-      if (conn.id.includes('pum-5') || conn.fromNodeId.includes('pum-5') || conn.toNodeId.includes('pum-5')) {
-        console.log(`[FlowMomentum DEBUG] ${conn.id}:`);
-        console.log(`  Pressures: P_from=${(P_from/1e5).toFixed(2)} bar, P_to=${(P_to/1e5).toFixed(2)} bar, dP_pressure=${(dP_pressure/1e5).toFixed(2)} bar`);
-        console.log(`  Driving: dP_gravity=${(dP_gravity/1e5).toFixed(3)} bar, dP_pump=${(dP_pump/1e5).toFixed(2)} bar, dP_driving=${(dP_driving/1e5).toFixed(2)} bar`);
-        console.log(`  Densities: rho_from=${rho_from.toFixed(1)}, rho_to=${rho_to.toFixed(1)}, rho_upstream=${rho_upstream.toFixed(1)} kg/m³`);
-        console.log(`  Flow: currentFlow=${currentFlow.toFixed(1)} kg/s, v=${v.toFixed(2)} m/s, A=${A.toFixed(4)} m²`);
-        console.log(`  Friction: K_eff=${K_eff.toFixed(1)}, dP_friction=${(dP_friction/1e5).toFixed(3)} bar`);
-        console.log(`  Momentum: L=${L.toFixed(1)} m, dP_net=${(dP_net/1e5).toFixed(2)} bar`);
-        console.log(`  Result: dv_dt=${dv_dt.toFixed(2)} m/s², dMassFlowRate=${dMassFlowRate.toFixed(2)} kg/s²`);
-      }
 
       rates.flowConnections.set(conn.id, { dMassFlowRate });
     }

@@ -1,8 +1,8 @@
 import { PlantCanvas } from './render/canvas';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
-import { PlantState, PlantComponent, ReactorVesselComponent } from './types';
-import { GameLoop } from './game';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent } from './types';
+import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
   createSimulationFromPlant,
@@ -41,6 +41,22 @@ declare global {
       singleStep: () => number;
     };
   }
+}
+
+/**
+ * Find scram controller in plant state and return its setpoints
+ * Returns undefined if no controller is found or controller has no connected core
+ */
+function getScramSetpointsFromPlant(plantState: PlantState): ScramSetpoints | undefined {
+  for (const [, comp] of plantState.components) {
+    if (comp.type === 'controller') {
+      const controller = comp as ControllerComponent;
+      if (controller.controllerType === 'scram' && controller.connectedCoreId) {
+        return controller.setpoints;
+      }
+    }
+  }
+  return undefined;
 }
 
 // Initialize the application
@@ -310,6 +326,8 @@ function init() {
       // Recreate simulation from current plant state
       const newSimState = createSimulationFromPlant(plantState);
       gameLoop.resetState(newSimState);
+      // Update scram setpoints from any scram controller in the plant
+      gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
       console.log('[Main] Simulation reset to initial conditions');
     });
   }
@@ -475,10 +493,26 @@ function init() {
   const connectionDialog = new ConnectionDialog();
   const constructionManager = new ConstructionManager(plantState);
 
-  // Keyboard controls - only active in simulation mode
+  // Keyboard controls
   document.addEventListener('keydown', (e) => {
-    // Skip simulation keyboard shortcuts in construction mode
+    // Construction mode keyboard shortcuts
     if (currentMode === 'construction') {
+      // Delete key deletes the selected component
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedComponentId) {
+        e.preventDefault();
+        const component = constructionManager.getComponent(selectedComponentId);
+        const label = component?.label || selectedComponentId;
+        if (confirm(`Delete component "${label}"? This will also remove all its connections.`)) {
+          const wasController = component?.type === 'controller';
+          constructionManager.deleteComponent(selectedComponentId);
+          if (wasController) {
+            gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+          }
+          plantCanvas.clearSelection();
+          selectedComponentId = null;
+          updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+        }
+      }
       return;
     }
 
@@ -516,20 +550,45 @@ function init() {
       return;
     }
 
+    // Get available cores for controller dropdowns
+    const availableCores: Array<{ id: string; label: string }> = [];
+    if (component.type === 'controller') {
+      for (const [id, comp] of plantState.components) {
+        if (comp.type === 'reactorVessel' || (comp.type === 'vessel' && (comp as any).fuelRodCount)) {
+          availableCores.push({ id, label: comp.label || id });
+        }
+      }
+    }
+
     componentDialog.showEdit(component as Record<string, any>, (properties) => {
       if (properties) {
         constructionManager.updateComponent(componentId, properties);
+        // If editing a controller, update the game loop scram setpoints
+        if (component.type === 'controller') {
+          gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+          console.log('[Main] Controller edited, scram setpoints updated');
+        }
         // Refresh the component detail panel
         if (gameLoop) {
           updateComponentDetail(componentId, plantState, gameLoop.getState());
         }
       }
-    });
+    }, availableCores);
   });
 
   setComponentDeleteCallback((componentId: string) => {
     if (confirm(`Delete component "${componentId}"? This will also remove all its connections.`)) {
+      // Check if this is a controller before deleting
+      const wasController = plantState.components.get(componentId)?.type === 'controller';
+
       constructionManager.deleteComponent(componentId);
+
+      // If we deleted a controller, update the scram setpoints
+      if (wasController) {
+        gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+        console.log('[Main] Scram controller deleted, checking for remaining controllers');
+      }
+
       // Clear selection
       plantCanvas.clearSelection();
       // Hide component detail panel
@@ -1063,11 +1122,14 @@ function init() {
 
   // Canvas mouse move handler for visual feedback and dragging
   canvas.addEventListener('mousemove', (e) => {
-    if (currentMode !== 'construction') return;
-
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+
+    // DEBUG: Track cursor position for gauge debug logging
+    (window as any).__debugCursor = { x: Math.round(x), y: Math.round(y) };
+
+    if (currentMode !== 'construction') return;
 
     if (constructionSubMode === 'connect') {
       const hoveredPort = plantCanvas.getPortAtScreen({ x, y });
@@ -1168,6 +1230,17 @@ function init() {
           placementPos = { ...clickedComponent.position };
         }
 
+        // Get available cores for controller dropdowns
+        const availableCores: Array<{ id: string; label: string }> = [];
+        if (selectedComponentType === 'scram-controller') {
+          for (const [id, comp] of plantState.components) {
+            // Include reactor vessels with cores (fuelRodCount defined) and standalone cores
+            if (comp.type === 'reactorVessel' || (comp.type === 'vessel' && (comp as any).fuelRodCount)) {
+              availableCores.push({ id, label: comp.label || id });
+            }
+          }
+        }
+
         componentDialog.show(selectedComponentType!, placementPos, (config: ComponentConfig | null) => {
           if (config) {
             console.log(`[Construction] Component configured:`, config);
@@ -1205,6 +1278,12 @@ function init() {
               if (componentId) {
                 console.log(`[Construction] Successfully created component '${componentId}'`);
 
+                // If a scram controller was placed, update the game loop setpoints
+                if (config.type === 'scram-controller') {
+                  gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+                  console.log('[Main] Scram controller placed, automatic scram enabled');
+                }
+
                 // The canvas will automatically re-render in its render loop
                 // Just show success notification
                 const containerNote = containedBy ? ` inside ${clickedComponent?.label || clickedComponent?.id}` : '';
@@ -1227,18 +1306,17 @@ function init() {
           } else {
             console.log(`[Construction] Component placement cancelled`);
           }
-        });
+        }, availableCores);
       };
 
       // If clicking on a container, ask if user wants to place inside
       if (isContainer && clickedComponent) {
         const containerName = clickedComponent.label || clickedComponent.id;
-        showContainmentDialog(containerName, selectedComponentType, (placeInside: boolean) => {
-          if (placeInside) {
+        showContainmentDialog(containerName, selectedComponentType, (placeInside: boolean | null) => {
+          if (placeInside === true) {
             proceedWithPlacement(clickedComponent.id);
-          } else {
-            proceedWithPlacement();
           }
+          // If placeInside is false/null, user cancelled - do nothing
         });
       } else {
         proceedWithPlacement();
@@ -1671,7 +1749,7 @@ function showNotification(message: string, type: 'info' | 'warning' | 'error' = 
 function showContainmentDialog(
   containerName: string,
   componentType: string,
-  callback: (placeInside: boolean) => void
+  callback: (placeInside: boolean | null) => void
 ): void {
   // Create modal overlay
   const overlay = document.createElement('div');
@@ -1721,7 +1799,7 @@ function showContainmentDialog(
         border-radius: 4px;
         color: #d0d8e0;
         cursor: pointer;
-      ">Place Normally</button>
+      ">Cancel</button>
       <button id="containment-yes" style="
         padding: 8px 16px;
         background: #2a5a8a;
@@ -1751,14 +1829,14 @@ function showContainmentDialog(
 
   noBtn.addEventListener('click', () => {
     cleanup();
-    callback(false);
+    callback(null);
   });
 
   // Close on escape key
   const handleEscape = (e: KeyboardEvent) => {
     if (e.key === 'Escape') {
       cleanup();
-      callback(false);
+      callback(null);
       document.removeEventListener('keydown', handleEscape);
     }
   };
@@ -1768,7 +1846,7 @@ function showContainmentDialog(
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) {
       cleanup();
-      callback(false);
+      callback(null);
     }
   });
 }

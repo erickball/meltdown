@@ -4,14 +4,8 @@ This project is intended as a sandbox environment with game-like aspects, to all
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
+-Debug condenser not removing heat.
 -Flow arrows are not located at the connections and not pointing the way flow is going. And the numbers with them should be black not white.
--Vapor space connections are getting two-phase flow; level is not correctly used for flow phase.
--If I'm placing a component and I click on an existing component, the options should be "place inside" or "cancel" not "place normally"
--Core exceeds available space 3.30 m, when barrel ID is 3.35 m.
--In construction mode, delete button should bring up the delete confirmation for the selected component (if any)
--Turbine power calculations have a unit conversion problem for the edit menu
--Visual rendering of the core doesn't seem to match its diameter. Height is ok.
--Condenser should have a pressure rating, but a low one.
 -Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine. Fix pipe, condenser, reactor vessel. Pressurizer is ok as is.
 -If you zoom in on the red and green ports you should be able to see a white arrow in them pointing towards or away from the component center.
 -Initial pressure can't be higher than pressure rating. Maybe 95% of pressure rating.
@@ -36,9 +30,9 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -Add FW heaters?
 -Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom.
+-Add other types of system controllers (turbine pressure controller, FW level control, etc)
 -Improve performance (why are timesteps getting so small?)
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
--Let the user implement automated logic for controlling stuff
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
@@ -50,7 +44,6 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -Maybe show the UHS as a river or ocean?
 -Maybe you can build seismic supports under things to give them earthquake resistance, to replace the air
 -Steam separators? Maybe not
--User editable Scram logic and system actuation
 -"Operator actions" initiated by the user (with delay and progress bar) by clicking on a pump or w/e
 -Diesel generators (and electric power in general)
 -Add fuel melting and radionuclide release ("meltdown!")
@@ -64,6 +57,17 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
 
 
+
+X Got rid of old Euler method code that was causing problems.
+X Labels under the generator and condenser say 0 MW even when they're not.
+X Pressure gauges should come from the tops of the components
+X Condenser should have a pressure rating, but a low one.
+X Visual rendering of the core doesn't seem to match its diameter. Height is ok.
+X Turbine power calculations have a unit conversion problem for the edit menu
+X In construction mode, delete button should bring up the delete confirmation for the selected component (if any)
+X Core exceeds available space 3.30 m, when barrel ID is 3.35 m.
+X If I'm placing a component and I click on an existing component, the options should be "place inside" or "cancel" not "place normally"
+X User-editable scram logic (Scram controller component)
 X Resolve some issues with high outward flow rate persisting despite almost no mass left in pump.
 X Limit flow into or out of a node based on the fraction of its mass. Goes in the RK45 derivative calc?
 X Warning before saving over something

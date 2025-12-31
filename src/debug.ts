@@ -677,8 +677,8 @@ export function updateComponentDetail(
       // barrelDiameter is center-line diameter (to middle of barrel wall)
       const barrelCenterDiam = component.barrelDiameter as number;
       const barrelThickness = component.barrelThickness as number;
-      const barrelOuterDiam = barrelCenterDiam + barrelThickness;
-      const barrelInnerDiam = barrelCenterDiam - barrelThickness;
+      const barrelOuterDiam = barrelCenterDiam + barrelThickness / 2;
+      const barrelInnerDiam = barrelCenterDiam - barrelThickness / 2;
       const barrelTopGap = component.barrelTopGap as number;
       const barrelBottomGap = component.barrelBottomGap as number;
 
@@ -704,6 +704,20 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Core Volume:</span><span class="detail-value">${insideVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Annulus Volume:</span><span class="detail-value">${outsideVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Total Volume:</span><span class="detail-value">${totalVolume.toFixed(2)} m³</span></div>`;
+      break;
+    }
+    case 'controller': {
+      const connectedCoreId = component.connectedCoreId as string | undefined;
+      const setpoints = component.setpoints as { highPower: number; lowPower: number; highFuelTemp: number; lowCoolantFlow: number };
+      html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">SCRAM Controller</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Connected To:</span><span class="detail-value" style="color: ${connectedCoreId ? '#7f7' : '#f77'};">${connectedCoreId || 'None'}</span></div>`;
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Scram Setpoints</div>';
+      html += `<div class="detail-row"><span class="detail-label">High Power:</span><span class="detail-value">${setpoints?.highPower ?? 125}%</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Low Power:</span><span class="detail-value">${setpoints?.lowPower ?? 12}%</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">High Fuel Temp:</span><span class="detail-value">${Math.round((setpoints?.highFuelTemp ?? 0.95) * 100)}%</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Low Coolant Flow:</span><span class="detail-value">${setpoints?.lowCoolantFlow ?? 10} kg/s</span></div>`;
+      html += '</div>';
       break;
     }
   }

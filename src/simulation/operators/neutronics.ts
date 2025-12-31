@@ -420,25 +420,57 @@ export function resetScram(state: SimulationState): SimulationState {
 }
 
 /**
- * Check automatic SCRAM conditions
+ * Scram setpoint configuration
  */
-export function checkScramConditions(state: SimulationState): { shouldScram: boolean; reason: string } {
-  const n = state.neutronics;
+export interface ScramSetpoints {
+  highPower: number;      // % of nominal power (default 125)
+  lowPower: number;       // % of nominal power (default 12)
+  highFuelTemp: number;   // Fraction of melting point (default 0.95)
+  lowCoolantFlow: number; // kg/s (default 10)
+}
 
-  // High power SCRAM (e.g., >125% nominal)
-  if (n.power > n.nominalPower * 1.25) {
-    return { shouldScram: true, reason: 'High power (>125%)' };
+/**
+ * Default scram setpoints (used when no controller is present)
+ */
+export const DEFAULT_SCRAM_SETPOINTS: ScramSetpoints = {
+  highPower: 125,
+  lowPower: 12,
+  highFuelTemp: 0.95,
+  lowCoolantFlow: 10
+};
+
+/**
+ * Check automatic SCRAM conditions
+ * @param state - Current simulation state
+ * @param setpoints - Optional scram setpoints (if undefined, returns shouldScram: false for manual-only mode)
+ */
+export function checkScramConditions(
+  state: SimulationState,
+  setpoints?: ScramSetpoints
+): { shouldScram: boolean; reason: string } {
+  // If no setpoints provided, automatic scram is disabled (manual only mode)
+  if (!setpoints) {
+    return { shouldScram: false, reason: '' };
   }
 
-  // Low power SCRAM (e.g., <12% nominal)
-  if (n.power < n.nominalPower * 0.12) {
-    return { shouldScram: true, reason: 'Low power (<12%)' };
+  const n = state.neutronics;
+
+  // High power SCRAM
+  const highPowerFraction = setpoints.highPower / 100;
+  if (n.power > n.nominalPower * highPowerFraction) {
+    return { shouldScram: true, reason: `High power (>${setpoints.highPower}%)` };
+  }
+
+  // Low power SCRAM
+  const lowPowerFraction = setpoints.lowPower / 100;
+  if (n.power < n.nominalPower * lowPowerFraction) {
+    return { shouldScram: true, reason: `Low power (<${setpoints.lowPower}%)` };
   }
 
   // High fuel temperature
   for (const [, node] of state.thermalNodes) {
     if (node.label.toLowerCase().includes('fuel')) {
-      if (node.temperature > node.maxTemperature * 0.95) {
+      if (node.temperature > node.maxTemperature * setpoints.highFuelTemp) {
         return { shouldScram: true, reason: `High fuel temperature (${node.temperature.toFixed(0)}K)` };
       }
     }
@@ -451,9 +483,9 @@ export function checkScramConditions(state: SimulationState): { shouldScram: boo
       totalCoolantFlow += Math.abs(conn.massFlowRate);
     }
   }
-  // This threshold should be configurable
-  if (totalCoolantFlow < 10 && n.power > n.nominalPower * 0.1) {
-    return { shouldScram: true, reason: 'Low coolant flow' };
+  // Only scram on low flow if power is significant
+  if (totalCoolantFlow < setpoints.lowCoolantFlow && n.power > n.nominalPower * 0.1) {
+    return { shouldScram: true, reason: `Low coolant flow (<${setpoints.lowCoolantFlow} kg/s)` };
   }
 
   return { shouldScram: false, reason: '' };

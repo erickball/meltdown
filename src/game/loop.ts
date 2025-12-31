@@ -11,21 +11,12 @@
  */
 
 import {
-  Solver,
   SimulationState,
   SolverMetrics,
-  ConductionOperator,
-  ConvectionOperator,
-  HeatGenerationOperator,
-  FlowOperator,
-  NeutronicsOperator,
-  FluidStateUpdateOperator,
-  TurbineCondenserOperator,
-  createDefaultTurbineCondenserConfig,
   checkScramConditions,
   triggerScram,
   resetScram,
-  // RK45 imports
+  // RK45 solver and operators
   RK45Solver,
   ConductionRateOperator,
   ConvectionRateOperator,
@@ -38,6 +29,8 @@ import {
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
 } from '../simulation';
+import type { ScramSetpoints } from '../simulation/operators/neutronics';
+export type { ScramSetpoints } from '../simulation/operators/neutronics';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -90,7 +83,6 @@ export interface GameEvent {
 }
 
 export class GameLoop {
-  private solver: Solver | null = null;
   private rk45Solver: RK45Solver | null = null;
   private state: SimulationState;
   private config: GameLoopConfig;
@@ -112,6 +104,9 @@ export class GameLoop {
   // Event system
   private eventListeners: Map<GameEventType, ((event: GameEvent) => void)[]> = new Map();
   private recentEvents: GameEvent[] = [];
+
+  // Scram controller setpoints (undefined = manual scram only)
+  private scramSetpoints: ScramSetpoints | undefined = undefined;
 
   // Callbacks
   public onStateUpdate?: (state: SimulationState, metrics: SolverMetrics) => void;
@@ -152,44 +147,51 @@ export class GameLoop {
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
-    } else {
-      // Initialize Euler solver with traditional operators
-      console.log('[GameLoop] Using Euler integration method');
-      this.solver = new Solver({
-        minDt: 1e-5,
-        maxDt: this.config.maxTimestep,
-        targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
-      });
-
-      // Add operators in physics order:
-      //
-      // Key insight: FlowOperator needs pressures computed by FluidStateUpdateOperator.
-      // By putting FlowOperator FIRST, it uses the pressures computed at the END of the
-      // previous timestep, which are fresh and consistent. Then heat transfer operators
-      // modify energy, and FluidStateUpdateOperator recomputes pressures for next step.
-      //
-      // 1. Fluid flow (uses pressures from end of last step, transfers mass/energy)
-      this.solver.addOperator(new FlowOperator());
-
-      // 2. Neutronics (power generation) - may need subcycling
-      this.solver.addOperator(new NeutronicsOperator());
-
-      // 3. Heat generation (distribute power to fuel)
-      this.solver.addOperator(new HeatGenerationOperator());
-
-      // 4. Conduction (heat spreads through solids)
-      this.solver.addOperator(new ConductionOperator());
-
-      // 5. Convection (heat transfer solid→fluid, modifies fluid energy)
-      this.solver.addOperator(new ConvectionOperator());
-
-      // 6. Fluid state update (computes T, P, phase from conserved quantities)
-      // This sets pressures that FlowOperator will use in the NEXT timestep
-      this.solver.addOperator(new FluidStateUpdateOperator());
-
-      // 7. Turbine and condenser (work extraction, heat rejection to external sink)
-      this.solver.addOperator(new TurbineCondenserOperator(createDefaultTurbineCondenserConfig()));
     }
+
+    // OBSOLETE: Euler solver code - no longer used, RK45 is the only integration method
+    // } else {
+    //   // Initialize Euler solver with traditional operators
+    //   console.log('[GameLoop] Using Euler integration method');
+    //   this.solver = new Solver({
+    //     minDt: 1e-5,
+    //     maxDt: this.config.maxTimestep,
+    //     targetDt: 0.0005,  // Start at 0.5ms for stability, will grow if stable
+    //   });
+    //
+    //   // Add operators in physics order:
+    //   //
+    //   // Key insight: FlowOperator needs pressures computed by FluidStateUpdateOperator.
+    //   // By putting FlowOperator FIRST, it uses the pressures computed at the END of the
+    //   // previous timestep, which are fresh and consistent. Then heat transfer operators
+    //   // modify energy, and FluidStateUpdateOperator recomputes pressures for next step.
+    //   //
+    //   // 1. Fluid flow (uses pressures from end of last step, transfers mass/energy)
+    //   this.solver.addOperator(new FlowOperator());
+    //
+    //   // 2. Neutronics (power generation) - may need subcycling
+    //   this.solver.addOperator(new NeutronicsOperator());
+    //
+    //   // 3. Heat generation (distribute power to fuel)
+    //   this.solver.addOperator(new HeatGenerationOperator());
+    //
+    //   // 4. Conduction (heat spreads through solids)
+    //   this.solver.addOperator(new ConductionOperator());
+    //
+    //   // 5. Convection (heat transfer solid→fluid, modifies fluid energy)
+    //   this.solver.addOperator(new ConvectionOperator());
+    //
+    //   // 6. Fluid state update (computes T, P, phase from conserved quantities)
+    //   // This sets pressures that FlowOperator will use in the NEXT timestep
+    //   this.solver.addOperator(new FluidStateUpdateOperator());
+    //
+    //   // 7. Turbine and condenser (work extraction, heat rejection to external sink)
+    //   // Use dynamic config from plant components if available, otherwise fall back to default
+    //   const turbineCondenserConfig = this.plantState
+    //     ? createTurbineCondenserConfigFromPlant(this.plantState.components)
+    //     : createDefaultTurbineCondenserConfig();
+    //   this.solver.addOperator(new TurbineCondenserOperator(turbineCondenserConfig));
+    // }
 
     // Initialize tracking
     this.previousPower = initialState.neutronics.power;
@@ -211,9 +213,6 @@ export class GameLoop {
     // Reset solver state (timestep, counters, etc.)
     if (this.rk45Solver) {
       this.rk45Solver.reset();
-    }
-    if (this.solver) {
-      // Euler solver doesn't have explicit reset, but we could add one
     }
 
     console.log('[GameLoop] Simulation state reset');
@@ -252,14 +251,10 @@ export class GameLoop {
       const simDt = frameDt * this.simSpeed;
 
       // Advance physics using the configured solver
-      let result: { state: SimulationState; metrics: SolverMetrics };
-      if (this.rk45Solver) {
-        result = this.rk45Solver.advance(this.state, simDt);
-      } else if (this.solver) {
-        result = this.solver.advance(this.state, simDt, frameDt * 1000);
-      } else {
+      if (!this.rk45Solver) {
         throw new Error('[GameLoop] No solver configured');
       }
+      const result = this.rk45Solver.advance(this.state, simDt);
       this.state = result.state;
 
       // Update fuel heat generation from neutronics
@@ -303,9 +298,10 @@ export class GameLoop {
 
   /**
    * Check automatic SCRAM conditions
+   * Only triggers automatic scram if a scram controller is connected (scramSetpoints is set)
    */
   private checkScramConditions(): void {
-    const result = checkScramConditions(this.state);
+    const result = checkScramConditions(this.state, this.scramSetpoints);
     if (result.shouldScram) {
       this.state = triggerScram(this.state, result.reason);
       this.emitEvent({
@@ -314,6 +310,21 @@ export class GameLoop {
         message: `SCRAM: ${result.reason}`,
       });
     }
+  }
+
+  /**
+   * Set scram controller setpoints
+   * Pass undefined to disable automatic scram (manual only mode)
+   */
+  public setScramSetpoints(setpoints: ScramSetpoints | undefined): void {
+    this.scramSetpoints = setpoints;
+  }
+
+  /**
+   * Get current scram setpoints (undefined = manual only mode)
+   */
+  public getScramSetpoints(): ScramSetpoints | undefined {
+    return this.scramSetpoints;
   }
 
   /**
@@ -480,9 +491,6 @@ export class GameLoop {
     this.config.maxTimestep = Math.max(0.001, Math.min(1.0, maxDt)); // Clamp between 1ms and 1s
 
     // Update solver config dynamically
-    if (this.solver) {
-      (this.solver as any).config.maxDt = this.config.maxTimestep;
-    }
     if (this.rk45Solver) {
       (this.rk45Solver as any).config.maxDt = this.config.maxTimestep;
     }
@@ -562,14 +570,10 @@ export class GameLoop {
    */
   step(dt: number = 0.001): void {
     // Advance physics by the specified amount
-    let result: { state: SimulationState; metrics: SolverMetrics };
-    if (this.rk45Solver) {
-      result = this.rk45Solver.advance(this.state, dt);
-    } else if (this.solver) {
-      result = this.solver.advance(this.state, dt);
-    } else {
+    if (!this.rk45Solver) {
       throw new Error('[GameLoop] No solver configured');
     }
+    const result = this.rk45Solver.advance(this.state, dt);
     this.state = result.state;
 
     // Update fuel heat generation from neutronics
@@ -589,15 +593,11 @@ export class GameLoop {
    */
   singleStep(): number {
     // Execute exactly one solver substep
-    let result: { state: SimulationState; dt: number; metrics: SolverMetrics };
-    if (this.rk45Solver) {
-      const rk45Result = this.rk45Solver.singleStep(this.state);
-      result = { state: rk45Result.state, dt: rk45Result.dt, metrics: rk45Result.metrics };
-    } else if (this.solver) {
-      result = this.solver.singleStep(this.state);
-    } else {
+    if (!this.rk45Solver) {
       throw new Error('[GameLoop] No solver configured');
     }
+    const rk45Result = this.rk45Solver.singleStep(this.state);
+    const result = { state: rk45Result.state, dt: rk45Result.dt, metrics: rk45Result.metrics };
     this.state = result.state;
 
     // Update fuel heat generation from neutronics
@@ -660,10 +660,7 @@ export class GameLoop {
    * Get solver metrics
    */
   getSolverMetrics(): SolverMetrics {
-    if (this.solver) {
-      return this.solver.getMetrics();
-    }
-    // Return empty metrics for RK45 (metrics are returned per-advance call)
+    // Return default metrics (actual metrics are returned per-advance call)
     return {
       currentDt: 0,
       actualDt: 0,

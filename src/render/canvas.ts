@@ -1,6 +1,6 @@
-import { ViewState, Point, PlantState, PlantComponent } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -490,6 +490,117 @@ export class PlantCanvas {
     }
 
     return this.isPointInQuad(screenPos, visualQuad);
+  }
+
+  /**
+   * Get the screen bounding box for a component.
+   * Returns the top-center position and scale, suitable for attaching gauges.
+   * This uses the same calculation as isPointInProjectedComponent for consistency.
+   */
+  public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number } | null {
+    if (!this.isometric.enabled) {
+      // In 2D mode, use simple world-to-screen conversion
+      const bounds = getComponentBounds(component, this.view);
+      const screenCenter = worldToScreen(component.position, this.view);
+      const topY = screenCenter.y + bounds.y;
+      return {
+        topCenter: { x: screenCenter.x, y: topY },
+        scale: 1
+      };
+    }
+
+    // Isometric/perspective mode - replicate the visual bounds calculation
+    const elevation = getComponentElevation(component);
+    const size = this.getComponentSize(component);
+    const halfW = size.width / 2;
+    const halfH = size.height / 2;
+
+    const centerX = component.position.x;
+    const centerY = component.position.y;
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+
+    // For pipes, local coords go from (0, -halfH) to (length, halfH)
+    // For others, centered: (-halfW, -halfH) to (halfW, halfH)
+    let localLeft = -halfW;
+    let localRight = halfW;
+    if (component.type === 'pipe') {
+      localLeft = 0;
+      localRight = size.width;
+    }
+
+    // Define front corners in local space
+    const localCorners = [
+      { x: localLeft, y: -halfH },   // front-left
+      { x: localRight, y: -halfH },  // front-right
+    ];
+
+    // Transform to world and project to screen
+    const screenCorners = localCorners.map(local => {
+      const worldX = centerX + local.x * cos - local.y * sin;
+      const worldY = centerY + local.x * sin + local.y * cos;
+      return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+    });
+
+    // Skip if any corner is behind camera
+    if (screenCorners.some(c => c.scale <= 0)) {
+      return null;
+    }
+
+    const frontLeft = screenCorners[0].pos;
+    const frontRight = screenCorners[1].pos;
+    // Use the actual perspective scale from the projection (average of both corners)
+    const perspectiveScale = (screenCorners[0].scale + screenCorners[1].scale) / 2;
+
+    // Calculate the visual bounds
+    const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+    const projectedZoom = frontWidth / size.width;
+    const visualHalfH = halfH * projectedZoom;
+
+    if (component.type === 'pipe') {
+      // For pipes, use the midpoint of the pipe at its visual top
+      const pipe = component as import('../types').PipeComponent;
+      if (pipe.endPosition && pipe.endElevation !== undefined) {
+        const startScreen = this.worldToScreenPerspective(
+          { x: pipe.position.x, y: pipe.position.y },
+          pipe.elevation ?? 0
+        );
+        const endScreen = this.worldToScreenPerspective(
+          pipe.endPosition,
+          pipe.endElevation
+        );
+
+        if (startScreen.scale > 0 && endScreen.scale > 0) {
+          const avgScale = (startScreen.scale + endScreen.scale) / 2;
+          const visualThickness = halfH * avgScale * 50;
+          const midX = (startScreen.pos.x + endScreen.pos.x) / 2;
+          const midY = (startScreen.pos.y + endScreen.pos.y) / 2;
+          // Top of pipe is at midY - visualThickness
+          return {
+            topCenter: { x: midX, y: midY - visualThickness },
+            scale: avgScale
+          };
+        }
+      }
+      // Fallback
+      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
+      return {
+        topCenter: { x: frontCenterX, y: frontCenterY - 2 * visualHalfH },
+        scale: perspectiveScale
+      };
+    } else {
+      // Other components
+      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
+      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
+      const visualCenterY = frontCenterY - visualHalfH;
+      // Top of bounding box is at visualCenterY - visualHalfH
+      const topY = visualCenterY - visualHalfH;
+      return {
+        topCenter: { x: frontCenterX, y: topY },
+        scale: perspectiveScale
+      };
+    }
   }
 
   // Check if a point is inside a quadrilateral using cross product method
@@ -1087,6 +1198,56 @@ export class PlantCanvas {
       }
     }
 
+    // Draw controller wires (control signal connections to cores)
+    for (const component of sortedComponents) {
+      if (component.type === 'controller') {
+        const controller = component as ControllerComponent;
+        if (controller.connectedCoreId) {
+          const core = this.plantState.components.get(controller.connectedCoreId);
+          if (core) {
+            // Get screen positions based on view mode
+            let controllerScreen: Point;
+            let coreScreen: Point;
+
+            if (this.isometric.enabled) {
+              const controllerElev = controller.elevation ?? 0;
+              const coreElev = (core as any).elevation ?? 0;
+              const controllerProj = this.worldToScreenPerspective(controller.position, controllerElev);
+              const coreProj = this.worldToScreenPerspective(core.position, coreElev);
+              controllerScreen = controllerProj.pos;
+              coreScreen = coreProj.pos;
+            } else {
+              controllerScreen = worldToScreen(controller.position, this.view);
+              coreScreen = worldToScreen(core.position, this.view);
+            }
+
+            // Draw thin black wire from controller to core
+            ctx.save();
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([6, 4]); // Dashed line for control signal
+
+            ctx.beginPath();
+            ctx.moveTo(controllerScreen.x, controllerScreen.y);
+            // Draw with a slight curve
+            const midX = (controllerScreen.x + coreScreen.x) / 2;
+            const midY = Math.min(controllerScreen.y, coreScreen.y) - 20;
+            ctx.quadraticCurveTo(midX, midY, coreScreen.x, coreScreen.y);
+            ctx.stroke();
+
+            // Draw small circle at core end
+            ctx.setLineDash([]);
+            ctx.fillStyle = '#222';
+            ctx.beginPath();
+            ctx.arc(coreScreen.x, coreScreen.y, 4, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+          }
+        }
+      }
+    }
+
     // Draw components with perspective projection
     // Project all 4 corners individually for proper ground-plane alignment
     for (const component of sortedComponents) {
@@ -1280,11 +1441,9 @@ export class PlantCanvas {
 
     // Draw pressure gauges on flow nodes
     if (this.simState) {
-      // Pass perspective projection function when in isometric mode
-      const gaugePerspectiveProjector = this.isometric.enabled
-        ? (pos: Point, elev: number) => this.worldToScreenPerspective(pos, elev)
-        : undefined;
-      renderPressureGauge(ctx, this.simState, this.plantState, this.view, gaugePerspectiveProjector);
+      // Pass screen bounds getter function for proper gauge positioning
+      const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
+      renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
     }
 
     // Schedule next frame
@@ -1308,8 +1467,14 @@ export class PlantCanvas {
       case 'pipe':
         return { width: (component as any).length, height: (component as any).diameter };
       case 'pump':
+        // Pump is drawn much larger than its diameter
+        // Scale factor is diameter * 1.3, total height is scale * 2.2 (motor + coupling + casing + nozzle + inlet)
+        // Width includes volute bulge and outlet pipe
         const pumpD = (component as any).diameter || 0.3;
-        return { width: pumpD, height: pumpD };
+        const pumpScale = pumpD * 1.3;
+        const pumpHeight = pumpScale * 2.2;  // Full height including inlet pipe
+        const pumpWidth = pumpScale * 1.5;   // Casing + volute + outlet
+        return { width: pumpWidth, height: pumpHeight };
       case 'vessel':
         const vesselR = (component as any).innerDiameter / 2 + (component as any).wallThickness;
         return { width: vesselR * 2, height: (component as any).height };

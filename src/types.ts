@@ -30,7 +30,8 @@ export type ComponentType =
   | 'turbine-generator'
   | 'turbine-driven-pump'
   | 'condenser'
-  | 'fuelAssembly';
+  | 'fuelAssembly'
+  | 'controller';
 
 export interface Port {
   id: string;
@@ -204,9 +205,27 @@ export interface CondenserComponent extends ComponentBase {
   type: 'condenser';
   width: number;
   height: number;
+  pressureRating?: number; // Design pressure in bar (condensers typically ~1.1 bar to withstand atmospheric)
   heatRejection: number;  // Current heat rejection in Watts
   coolingWaterTemp: number; // Cooling water inlet temp in K
   tubeCount: number;
+}
+
+// Scram setpoint configuration
+export interface ScramSetpoints {
+  highPower: number;      // % of nominal power (default 125)
+  lowPower: number;       // % of nominal power (default 12)
+  highFuelTemp: number;   // Fraction of melting point (default 0.95)
+  lowCoolantFlow: number; // kg/s (default 10)
+}
+
+export interface ControllerComponent extends ComponentBase {
+  type: 'controller';
+  controllerType: 'scram';  // For future controller types
+  width: number;
+  height: number;
+  connectedCoreId?: string;  // ID of the core/reactor vessel this controller monitors
+  setpoints: ScramSetpoints;
 }
 
 export type PlantComponent =
@@ -219,7 +238,8 @@ export type PlantComponent =
   | HeatExchangerComponent
   | TurbineGeneratorComponent
   | TurbineDrivenPumpComponent
-  | CondenserComponent;
+  | CondenserComponent
+  | ControllerComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;

@@ -13,6 +13,7 @@ import {
   TurbineGeneratorComponent,
   TurbineDrivenPumpComponent,
   CondenserComponent,
+  ControllerComponent,
   Connection,
   Port,
   Fluid
@@ -705,6 +706,7 @@ export class ConstructionManager {
           elevation: props.elevation ?? 0,  // Default to ground level
           width: condenserWidth,
           height: condenserHeight,
+          pressureRating: props.pressureRating ?? 1.1,  // bar (stored in bar for consistency with other components)
           heatRejection: 0,
           coolingWaterTemp: props.coolingWaterTemp + 273.15,
           tubeCount: 10000,  // Default tube count
@@ -899,8 +901,8 @@ export class ConstructionManager {
         // This is the "dome intrusion" - how far the dome curves into the cylindrical region
         // Note: barrelDiameter is the CENTER-LINE diameter (to middle of barrel wall)
         const barrelCenterR = barrelDiameter / 2;
-        const barrelOuterR = barrelCenterR + barrelThickness;
-        const barrelInnerR = barrelCenterR - barrelThickness;
+        const barrelOuterR = barrelCenterR + barrelThickness / 2;
+        const barrelInnerR = barrelCenterR - barrelThickness / 2;
         const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterR * barrelOuterR);
 
         // Barrel positions are measured from inner geometry (no wall thickness dependence)
@@ -1048,6 +1050,37 @@ export class ConstructionManager {
         }
 
         console.log(`[Construction] Created reactor vessel: wall ${(wallThickness * 1000).toFixed(0)}mm, inside ${insideVolume.toFixed(1)} m³, outside ${outsideVolume.toFixed(1)} m³`);
+        break;
+      }
+
+      case 'scram-controller': {
+        // Scram controller - electrical cabinet that monitors reactor and triggers scram
+        // Size: typical industrial cabinet dimensions
+        const controllerWidth = 1.2;  // 1.2m wide (wider to fit text)
+        const controllerHeight = 2.0; // 2m tall
+
+        const controller: ControllerComponent = {
+          id,
+          type: 'controller',
+          controllerType: 'scram',
+          label: props.name || 'Scram Controller',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          width: controllerWidth,
+          height: controllerHeight,
+          connectedCoreId: props.connectedCore || undefined,
+          setpoints: {
+            highPower: props.highPower ?? 125,         // % of nominal
+            lowPower: props.lowPower ?? 12,            // % of nominal
+            highFuelTemp: (props.highFuelTemp ?? 95) / 100,  // Convert % to fraction
+            lowCoolantFlow: props.lowCoolantFlow ?? 10 // kg/s
+          },
+          ports: [] // Controllers have no hydraulic ports
+        };
+
+        this.plantState.components.set(id, controller);
+        console.log(`[Construction] Created scram controller connected to ${props.connectedCore || 'no core'}`);
         break;
       }
 
@@ -1769,6 +1802,28 @@ export class ConstructionManager {
       component.thermalPower = properties.thermalPower * 1e6; // MW to W
     }
 
+    // Controller-specific properties
+    if (component.type === 'controller') {
+      if (properties.connectedCore !== undefined) {
+        component.connectedCoreId = properties.connectedCore || undefined;
+      }
+      if (!component.setpoints) {
+        component.setpoints = { highPower: 125, lowPower: 12, highFuelTemp: 0.95, lowCoolantFlow: 10 };
+      }
+      if (properties.highPower !== undefined) {
+        component.setpoints.highPower = properties.highPower;
+      }
+      if (properties.lowPower !== undefined) {
+        component.setpoints.lowPower = properties.lowPower;
+      }
+      if (properties.highFuelTemp !== undefined) {
+        component.setpoints.highFuelTemp = properties.highFuelTemp / 100; // % to 0-1
+      }
+      if (properties.lowCoolantFlow !== undefined) {
+        component.setpoints.lowCoolantFlow = properties.lowCoolantFlow;
+      }
+    }
+
     console.log(`[Construction] Updated component ${componentId}`);
     return true;
   }
@@ -1797,7 +1852,8 @@ export class ConstructionManager {
     let availableDiameter: number;
     if (container.type === 'reactorVessel') {
       // For reactor vessels, core must fit inside the barrel
-      availableDiameter = container.barrelDiameter - container.barrelThickness * 2;
+      // barrelDiameter is center-line diameter, so inner diameter = barrelDiameter - barrelThickness/2
+      availableDiameter = container.barrelDiameter - container.barrelThickness / 2;
     } else {
       availableDiameter = container.innerDiameter || container.width || 3.37;
     }
