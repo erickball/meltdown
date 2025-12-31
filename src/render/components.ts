@@ -1498,84 +1498,221 @@ function renderTurbineGenerator(ctx: CanvasRenderingContext2D, turbine: TurbineG
 }
 
 function renderTurbineDrivenPump(ctx: CanvasRenderingContext2D, tdPump: TurbineDrivenPumpComponent, view: ViewState): void {
+  // Turbine-driven pump with trapezoidal turbine and centrifugal pump volute
   const w = tdPump.width * view.zoom;
   const h = tdPump.height * view.zoom;
 
   const isLeftRight = tdPump.orientation !== 'right-left';
 
-  // Turbine side (smaller, cylindrical)
-  const turbineW = w * 0.5;
-  const turbineH = h * 0.8;
-  const turbineX = isLeftRight ? -w / 4 : w / 4;
+  // Layout: turbine on one side, shaft, pump on other side
+  const turbineW = w * 0.38;
+  const pumpW = w * 0.5;
 
-  // Pump side (circular volute)
-  const pumpH = h;
-  const pumpX = isLeftRight ? w / 4 : -w / 4;
+  // Turbine dimensions - FLIPPED: large end (inlet) away from pump, small end (exhaust) toward pump
+  const turbineInletH = h * 0.7;   // Large end (away from pump)
+  const turbineExhaustH = h * 0.4; // Small end (toward pump)
+  const turbineX = isLeftRight ? -w / 2 + turbineW / 2 : w / 2 - turbineW / 2;
 
-  // Turbine casing
+  // Pump dimensions
+  const pumpR = Math.min(pumpW, h) * 0.4;
+  const pumpX = isLeftRight ? w / 2 - pumpW / 2 : -w / 2 + pumpW / 2;
+
+  // ===== TURBINE (trapezoidal, large end away from pump) =====
   ctx.fillStyle = COLORS.steel;
-  ctx.fillRect(turbineX - turbineW / 2, -turbineH / 2, turbineW, turbineH);
+  ctx.beginPath();
+  if (isLeftRight) {
+    // Large end on left (inlet), small end on right (exhaust toward pump)
+    ctx.moveTo(turbineX - turbineW / 2, -turbineInletH / 2);   // Top left (large)
+    ctx.lineTo(turbineX + turbineW / 2, -turbineExhaustH / 2); // Top right (small)
+    ctx.lineTo(turbineX + turbineW / 2, turbineExhaustH / 2);  // Bottom right (small)
+    ctx.lineTo(turbineX - turbineW / 2, turbineInletH / 2);    // Bottom left (large)
+  } else {
+    // Large end on right (inlet), small end on left (exhaust toward pump)
+    ctx.moveTo(turbineX - turbineW / 2, -turbineExhaustH / 2); // Top left (small)
+    ctx.lineTo(turbineX + turbineW / 2, -turbineInletH / 2);   // Top right (large)
+    ctx.lineTo(turbineX + turbineW / 2, turbineInletH / 2);    // Bottom right (large)
+    ctx.lineTo(turbineX - turbineW / 2, turbineExhaustH / 2);  // Bottom left (small)
+  }
+  ctx.closePath();
+  ctx.fill();
 
-  // Steam flow visualization
+  // Steam flow visualization inside turbine
   if (tdPump.running && tdPump.inletFluid) {
     ctx.fillStyle = getFluidColor(tdPump.inletFluid);
     ctx.globalAlpha = 0.5;
-    ctx.fillRect(turbineX - turbineW / 2 + 3, -turbineH / 2 + 3, turbineW - 6, turbineH - 6);
+    ctx.beginPath();
+    if (isLeftRight) {
+      ctx.moveTo(turbineX - turbineW / 2 + 3, -turbineInletH / 2 + 3);
+      ctx.lineTo(turbineX + turbineW / 2 - 3, -turbineExhaustH / 2 + 3);
+      ctx.lineTo(turbineX + turbineW / 2 - 3, turbineExhaustH / 2 - 3);
+      ctx.lineTo(turbineX - turbineW / 2 + 3, turbineInletH / 2 - 3);
+    } else {
+      ctx.moveTo(turbineX - turbineW / 2 + 3, -turbineExhaustH / 2 + 3);
+      ctx.lineTo(turbineX + turbineW / 2 - 3, -turbineInletH / 2 + 3);
+      ctx.lineTo(turbineX + turbineW / 2 - 3, turbineInletH / 2 - 3);
+      ctx.lineTo(turbineX - turbineW / 2 + 3, turbineExhaustH / 2 - 3);
+    }
+    ctx.closePath();
+    ctx.fill();
     ctx.globalAlpha = 1.0;
   }
 
-  // Rotor shaft connecting turbine to pump
-  ctx.fillStyle = COLORS.steelDark;
-  ctx.fillRect(-w / 2 + 5, -3, w - 10, 6);
-
-  // Turbine blades
-  ctx.strokeStyle = tdPump.running ? '#aabbcc' : '#556677';
-  ctx.lineWidth = 2;
-  const bladeCount = Math.max(3, (tdPump.stages || 1) * 2);
+  // Turbine blade rows - darker and thicker for visibility
+  ctx.strokeStyle = tdPump.running ? '#556677' : '#3a4455';
+  ctx.lineWidth = 3;
+  const bladeCount = Math.max(4, (tdPump.stages || 2) * 2);
   for (let i = 0; i < bladeCount; i++) {
     const x = turbineX - turbineW / 2 + (turbineW / (bladeCount + 1)) * (i + 1);
+    const progress = (i + 1) / (bladeCount + 1);
+    // Blades shrink from inlet (large) to exhaust (small)
+    const bladeProgress = isLeftRight ? progress : (1 - progress);
+    const bladeH = turbineInletH / 2 - (turbineInletH - turbineExhaustH) / 2 * bladeProgress;
     ctx.beginPath();
-    ctx.moveTo(x, -turbineH / 2 + 5);
-    ctx.lineTo(x, turbineH / 2 - 5);
+    ctx.moveTo(x, -bladeH + 4);
+    ctx.lineTo(x, bladeH - 4);
     ctx.stroke();
   }
-
-  // Pump casing (circular/volute shape)
-  ctx.fillStyle = COLORS.steel;
-  ctx.beginPath();
-  ctx.arc(pumpX, 0, pumpH / 2, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Pump impeller (simplified as spokes)
-  ctx.strokeStyle = tdPump.running ? '#99aacc' : '#556677';
-  ctx.lineWidth = 2;
-  const spokeCount = 6;
-  for (let i = 0; i < spokeCount; i++) {
-    const angle = (i / spokeCount) * Math.PI * 2;
-    ctx.beginPath();
-    ctx.moveTo(pumpX, 0);
-    ctx.lineTo(pumpX + Math.cos(angle) * (pumpH / 2 - 5), Math.sin(angle) * (pumpH / 2 - 5));
-    ctx.stroke();
-  }
-
-  // Pump outline
-  ctx.strokeStyle = COLORS.steelHighlight;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.arc(pumpX, 0, pumpH / 2, 0, Math.PI * 2);
-  ctx.stroke();
 
   // Turbine outline
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 2;
-  ctx.strokeRect(turbineX - turbineW / 2, -turbineH / 2, turbineW, turbineH);
+  ctx.beginPath();
+  if (isLeftRight) {
+    ctx.moveTo(turbineX - turbineW / 2, -turbineInletH / 2);
+    ctx.lineTo(turbineX + turbineW / 2, -turbineExhaustH / 2);
+    ctx.lineTo(turbineX + turbineW / 2, turbineExhaustH / 2);
+    ctx.lineTo(turbineX - turbineW / 2, turbineInletH / 2);
+  } else {
+    ctx.moveTo(turbineX - turbineW / 2, -turbineExhaustH / 2);
+    ctx.lineTo(turbineX + turbineW / 2, -turbineInletH / 2);
+    ctx.lineTo(turbineX + turbineW / 2, turbineInletH / 2);
+    ctx.lineTo(turbineX - turbineW / 2, turbineExhaustH / 2);
+  }
+  ctx.closePath();
+  ctx.stroke();
+
+  // ===== SHAFT connecting turbine exhaust to pump center =====
+  const shaftY = 0;
+  const shaftH = 8;
+  ctx.fillStyle = COLORS.steelDark;
+  const shaftStart = isLeftRight ? turbineX + turbineW / 2 : pumpX;
+  const shaftEnd = isLeftRight ? pumpX : turbineX - turbineW / 2;
+  ctx.fillRect(Math.min(shaftStart, shaftEnd), shaftY - shaftH / 2, Math.abs(shaftEnd - shaftStart), shaftH);
+
+  // Coupling flange
+  const couplingX = (turbineX + pumpX) / 2;
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.beginPath();
+  ctx.arc(couplingX, shaftY, 8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // ===== PUMP (centrifugal volute - ~300 deg spiral with outlet up, inlet below) =====
+  // The volute is a circle that bulges out on one side into a tangential discharge nozzle
+
+  // Main pump casing (base circle)
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  ctx.arc(pumpX, 0, pumpR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Volute bulge - extends from the base circle toward the discharge
+  // The bulge is on the side opposite to where the shaft enters
+  const bulgeDir = isLeftRight ? 1 : -1; // Bulge away from turbine
+  const bulgeAngleStart = -Math.PI * 0.6;
+  const bulgeAngleEnd = -Math.PI * 0.15;
+
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  const bulgeSteps = 20;
+  for (let i = 0; i <= bulgeSteps; i++) {
+    const t = i / bulgeSteps;
+    const angle = bulgeAngleStart + t * (bulgeAngleEnd - bulgeAngleStart);
+    const bulgeFactor = Math.sin(t * Math.PI) * 0.35;
+    const r = pumpR * (1 + bulgeFactor);
+    const x = pumpX + Math.cos(angle) * r * bulgeDir;
+    const y = Math.sin(angle) * r;
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.fill();
+
+  // Discharge nozzle pointing UP (tangent to the spiral)
+  const nozzleWidth = pumpR * 0.35;
+  const nozzleLength = pumpR * 0.6;
+  const nozzleX = pumpX + bulgeDir * pumpR * 0.5;
+  const nozzleTop = -pumpR - nozzleLength;
+
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(nozzleX - nozzleWidth / 2, nozzleTop, nozzleWidth, nozzleLength + pumpR * 0.3);
+
+  // Nozzle flange at top
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(nozzleX - nozzleWidth * 0.7, nozzleTop - 4, nozzleWidth * 1.4, 6);
+
+  // Inlet nozzle from BELOW (suction - center of pump)
+  const inletWidth = pumpR * 0.4;
+  const inletLength = pumpR * 0.5;
+
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(pumpX - inletWidth / 2, pumpR - 2, inletWidth, inletLength);
+
+  // Inlet flange at bottom
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(pumpX - inletWidth * 0.65, pumpR + inletLength - 2, inletWidth * 1.3, 5);
+
+  // Pump casing outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(pumpX, 0, pumpR, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Draw volute bulge outline
+  ctx.beginPath();
+  for (let i = 0; i <= bulgeSteps; i++) {
+    const t = i / bulgeSteps;
+    const angle = bulgeAngleStart + t * (bulgeAngleEnd - bulgeAngleStart);
+    const bulgeFactor = Math.sin(t * Math.PI) * 0.35;
+    const r = pumpR * (1 + bulgeFactor);
+    const x = pumpX + Math.cos(angle) * r * bulgeDir;
+    const y = Math.sin(angle) * r;
+    if (i === 0) {
+      ctx.moveTo(x, y);
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.stroke();
+
+  // Discharge nozzle outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(nozzleX - nozzleWidth / 2, nozzleTop, nozzleWidth, nozzleLength + pumpR * 0.3);
+
+  // Inlet nozzle outline
+  ctx.strokeRect(pumpX - inletWidth / 2, pumpR - 2, inletWidth, inletLength + 2);
+
+  // Shaft end visible at pump center
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.beginPath();
+  ctx.arc(pumpX, 0, pumpR * 0.15, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 1;
+  ctx.stroke();
 
   // Flow indicator if running
   if (tdPump.running && tdPump.pumpFlow > 0) {
     ctx.font = '9px monospace';
     ctx.fillStyle = '#8cf';
     ctx.textAlign = 'center';
-    ctx.fillText(`${tdPump.pumpFlow.toFixed(0)} kg/s`, pumpX, pumpH / 2 + 12);
+    ctx.fillText(`${tdPump.pumpFlow.toFixed(0)} kg/s`, pumpX, pumpR + inletLength + 18);
   }
 }
 
