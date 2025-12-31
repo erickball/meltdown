@@ -300,6 +300,10 @@ export const COLORS = {
   selectionHighlight: 'rgba(100, 150, 255, 0.5)',
   portAvailable: '#44ff88',
   portConnected: '#888888',
+  // Port direction colors
+  portInlet: '#44ff88',      // Green for inlet
+  portOutlet: '#ff5544',     // Red for outlet
+  portBidirectional: '#4488ff', // Blue for bidirectional
 };
 
 // Get color for component based on temperature stress

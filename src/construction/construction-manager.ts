@@ -201,20 +201,65 @@ export class ConstructionManager {
       }
 
       case 'pump': {
+        // Calculate diameter based on flow capacity
+        // Small pumps (~100 kg/s): ~0.3m, Large RCPs (~5000 kg/s): ~1.5m
+        const flow = props.ratedFlow || 1000;
+        const calculatedDiameter = 0.2 + Math.sqrt(flow / 1000) * 0.4;
+
+        // Calculate rotation based on orientation
+        let pumpRotation = 0;
+        const orientation = props.orientation || 'left-right';
+        switch (orientation) {
+          case 'left-right': pumpRotation = 0; break;
+          case 'right-left': pumpRotation = Math.PI; break;
+          case 'bottom-top': pumpRotation = -Math.PI / 2; break;
+          case 'top-bottom': pumpRotation = Math.PI / 2; break;
+        }
+
+        // Port positions for upright RCP-style pump
+        // Layout: motor on top, coupling, casing, suction nozzle, inlet pipe at bottom
+        // Outlet is on the side (volute discharge)
+        const scale = calculatedDiameter * 1.3; // 30% bigger to match render
+        const pumpCasingWidth = scale * 0.75;
+        const pumpCasingHeight = scale * 0.5;
+        const suctionNozzleHeight = scale * 0.35;
+        const inletPipeLength = scale * 0.3;
+        const voluteBulge = scale * 0.18;
+        const outletPipeLength = scale * 0.45;
+
+        // Total height: motor (0.9) + coupling (0.15) + casing (0.5) + nozzle (0.35)
+        const totalHeight = scale * 1.9;
+        const motorTop = -totalHeight / 2;
+        const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
+        const casingBottom = couplingBottom + pumpCasingHeight;
+        const nozzleBottom = casingBottom + suctionNozzleHeight;
+
+        // Inlet at bottom of inlet pipe, outlet on side
+        const inletY = nozzleBottom + inletPipeLength;
+        const outletY = couplingBottom + pumpCasingHeight * 0.35;
+        const outletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
+
+        const pumpPorts: Port[] = [
+          { id: 'inlet', position: { x: 0, y: inletY }, direction: 'in' },
+          { id: 'outlet', position: { x: outletX, y: outletY }, direction: 'out' }
+        ];
+
         const pump: PumpComponent = {
           id,
           type: 'pump',
           label: props.name || 'Pump',
           position: { x: worldX, y: worldY },
-          rotation: 0,
-          diameter: 0.3,  // Default 30cm diameter
+          rotation: pumpRotation,
+          diameter: calculatedDiameter,
           running: props.initialState === 'on',
           speed: props.speed / 3600,  // Convert RPM to fraction
           ratedFlow: props.ratedFlow,
           ratedHead: props.ratedHead,
-          ports: standardPorts,
+          ports: pumpPorts,
           fluid: defaultFluid
         };
+        // Store orientation for edit dialog
+        (pump as any).orientation = orientation;
 
         this.plantState.components.set(id, pump);
         break;
@@ -1364,12 +1409,49 @@ export class ConstructionManager {
     // Pump-specific properties
     if (properties.ratedFlow !== undefined) {
       component.ratedFlow = properties.ratedFlow;
+      // Recalculate diameter based on new flow
+      if (component.type === 'pump') {
+        const flow = properties.ratedFlow;
+        component.diameter = 0.2 + Math.sqrt(flow / 1000) * 0.4;
+        // Update port positions for upright RCP-style pump
+        const scale = component.diameter * 1.3;
+        const pumpCasingWidth = scale * 0.75;
+        const pumpCasingHeight = scale * 0.5;
+        const suctionNozzleHeight = scale * 0.35;
+        const inletPipeLength = scale * 0.3;
+        const voluteBulge = scale * 0.18;
+        const outletPipeLength = scale * 0.45;
+        const totalHeight = scale * 1.9;
+        const motorTop = -totalHeight / 2;
+        const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
+        const casingBottom = couplingBottom + pumpCasingHeight;
+        const nozzleBottom = casingBottom + suctionNozzleHeight;
+        const inletY = nozzleBottom + inletPipeLength;
+        const outletY = couplingBottom + pumpCasingHeight * 0.35;
+        const outletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
+        if (component.ports && component.ports.length >= 2) {
+          component.ports[0].position = { x: 0, y: inletY };
+          component.ports[1].position = { x: outletX, y: outletY };
+        }
+      }
     }
     if (properties.ratedHead !== undefined) {
       component.ratedHead = properties.ratedHead;
     }
     if (properties.initialState !== undefined && component.type === 'pump') {
       component.running = properties.initialState === 'on';
+    }
+    if (properties.orientation !== undefined && component.type === 'pump') {
+      // Update pump rotation based on orientation
+      const orientation = properties.orientation;
+      switch (orientation) {
+        case 'left-right': component.rotation = 0; break;
+        case 'right-left': component.rotation = Math.PI; break;
+        case 'bottom-top': component.rotation = -Math.PI / 2; break;
+        case 'top-bottom': component.rotation = Math.PI / 2; break;
+      }
+      // Store orientation for next edit dialog
+      (component as any).orientation = orientation;
     }
 
     // Fluid properties - update initial conditions

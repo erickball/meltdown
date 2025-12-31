@@ -181,6 +181,12 @@ export const componentDefinitions: Record<string, {
         { value: 'centrifugal', label: 'Centrifugal' },
         { value: 'positive', label: 'Positive Displacement' }
       ]},
+      { name: 'orientation', type: 'select', label: 'Flow Direction', default: 'left-right', options: [
+        { value: 'left-right', label: 'Inlet Left → Outlet Right' },
+        { value: 'right-left', label: 'Inlet Right → Outlet Left' },
+        { value: 'bottom-top', label: 'Inlet Bottom → Outlet Top' },
+        { value: 'top-bottom', label: 'Inlet Top → Outlet Bottom' }
+      ]},
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 1000, step: 10, unit: 'm' },
       { name: 'speed', type: 'number', label: 'Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM' },
@@ -189,7 +195,29 @@ export const componentDefinitions: Record<string, {
       { name: 'initialState', type: 'select', label: 'Initial State', default: 'on', options: [
         { value: 'on', label: 'Running' },
         { value: 'off', label: 'Stopped' }
-      ]}
+      ]},
+      // Calculated fields
+      { name: 'diameter', type: 'calculated', label: 'Pump Diameter', default: 0, unit: 'm',
+        calculate: (p) => {
+          // Pump diameter scales with flow capacity
+          // Small pumps (~100 kg/s): ~0.3m, Large RCPs (~5000 kg/s): ~1.5m
+          const flow = p.ratedFlow || 1000;
+          const diameter = 0.2 + Math.sqrt(flow / 1000) * 0.4;
+          return diameter.toFixed(2);
+        }
+      },
+      { name: 'shaftPower', type: 'calculated', label: 'Shaft Power', default: 0, unit: 'kW',
+        calculate: (p) => {
+          // P = rho * g * Q * H / eta
+          const rho = 1000;  // kg/m³ (water)
+          const g = 9.81;
+          const Q = (p.ratedFlow || 1000) / rho;  // m³/s
+          const H = p.ratedHead || 100;
+          const eta = (p.efficiency || 85) / 100;
+          const power = rho * g * Q * H / eta;
+          return (power / 1000).toFixed(0);  // kW
+        }
+      }
     ]
   },
 

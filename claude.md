@@ -5,9 +5,10 @@ This project is intended as a sandbox environment with game-like aspects, to all
 ## TODO List
 -What does it mean when a connection turns orange?
 -Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine.
--Pumps should have a better drawing and also a big arrow showing which way they point. And ability to turn them in construction mode.
+-Pumps should have a better drawing and also a big arrow showing which way they point. And ability to turn them around in construction mode.
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
--There should also be a sandbox mode where you have infinite money
+-There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
+-In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Clean up the debug display
 -Maybe find a good way to display relative pressure at connections
@@ -30,6 +31,7 @@ This project is intended as a sandbox environment with game-like aspects, to all
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
+-After an accident you get told how many people you may have given cancer to ("but we'll never know for certain"). Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit.
 -Add cool visuals for different initiating events
 -Model vessel creep rupture and SG tube creep rupture
 -Model core-concrete interaction

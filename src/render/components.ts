@@ -299,47 +299,231 @@ function renderFlowArrows(ctx: CanvasRenderingContext2D, pipe: PipeComponent, vi
 }
 
 function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: ViewState): void {
+  // Upright motor-driven pump in profile view (like an RCP)
+  // Suction nozzle on bottom, discharge on side, motor on top
   const d = pump.diameter * view.zoom;
-  const r = d / 2;
+  const scale = d * 1.3; // 30% bigger overall
 
-  // Pump body (circle)
-  ctx.fillStyle = pump.running ? COLORS.steel : COLORS.steelDark;
+  // Component dimensions (all relative to scale)
+  const motorWidth = scale * 0.5;
+  const motorHeight = scale * 0.9;
+  const couplingHeight = scale * 0.15;
+  const pumpCasingWidth = scale * 0.75;
+  const pumpCasingHeight = scale * 0.5;
+  const suctionNozzleHeight = scale * 0.35; // Tapered section below casing
+  const pipeSize = scale * 0.22;
+  const inletPipeSize = scale * 0.28; // Slightly larger suction pipe
+
+  // Calculate total height and vertical positions
+  // Layout from top to bottom: motor, coupling, pump casing, suction nozzle, inlet pipe
+  const totalHeight = motorHeight + couplingHeight + pumpCasingHeight + suctionNozzleHeight;
+  const motorTop = -totalHeight / 2;
+  const motorBottom = motorTop + motorHeight;
+  const couplingBottom = motorBottom + couplingHeight;
+  const casingBottom = couplingBottom + pumpCasingHeight;
+  const nozzleBottom = casingBottom + suctionNozzleHeight;
+
+  const steelColor = pump.running ? COLORS.steel : COLORS.steelDark;
+  const highlightColor = pump.running ? COLORS.steelHighlight : COLORS.steel;
+
+  // === INLET PIPE (vertical, from bottom of suction nozzle) ===
+  const inletLength = scale * 0.3;
+  ctx.fillStyle = steelColor;
+  ctx.fillRect(-inletPipeSize / 2, nozzleBottom, inletPipeSize, inletLength);
+  // Flange at inlet end
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-inletPipeSize * 0.7, nozzleBottom + inletLength - scale * 0.05, inletPipeSize * 1.4, scale * 0.05);
+
+  // === SUCTION NOZZLE (tapered from casing to inlet pipe) ===
+  ctx.fillStyle = steelColor;
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  // Start at bottom of casing (wider)
+  ctx.moveTo(-pumpCasingWidth / 2, casingBottom);
+  // Taper down to inlet pipe width
+  ctx.lineTo(-inletPipeSize / 2, nozzleBottom);
+  ctx.lineTo(inletPipeSize / 2, nozzleBottom);
+  ctx.lineTo(pumpCasingWidth / 2, casingBottom);
+  ctx.closePath();
   ctx.fill();
-
-  // Pump internals - impeller representation
-  ctx.strokeStyle = pump.running ? '#aabbcc' : '#556677';
+  ctx.strokeStyle = highlightColor;
   ctx.lineWidth = 2;
-  const bladeCount = 4;
-  for (let i = 0; i < bladeCount; i++) {
-    const angle = (i / bladeCount) * Math.PI * 2;
+  ctx.stroke();
+
+  // Nozzle detail lines (taper rings)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+  ctx.lineWidth = 1;
+  for (let i = 1; i <= 3; i++) {
+    const t = i / 4;
+    const y = casingBottom + suctionNozzleHeight * t;
+    const w = pumpCasingWidth / 2 * (1 - t) + inletPipeSize / 2 * t;
     ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.lineTo(Math.cos(angle) * r * 0.7, Math.sin(angle) * r * 0.7);
+    ctx.moveTo(-w, y);
+    ctx.lineTo(w, y);
     ctx.stroke();
   }
 
-  // Center hub
+  // === OUTLET PIPE (horizontal, from right side of casing) ===
+  const outletY = couplingBottom + pumpCasingHeight * 0.35;
+  const outletLength = scale * 0.45;
+  // Volute bulge width for outlet position
+  const voluteBulge = scale * 0.18;
+  ctx.fillStyle = steelColor;
+  ctx.fillRect(pumpCasingWidth / 2 + voluteBulge - pipeSize / 4, outletY - pipeSize / 2, outletLength, pipeSize);
+  // Flange at outlet end
   ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(pumpCasingWidth / 2 + voluteBulge + outletLength - scale * 0.05, outletY - pipeSize * 0.7, scale * 0.05, pipeSize * 1.4);
+
+  // === PUMP CASING (volute shape with pronounced bulge) ===
+  ctx.fillStyle = steelColor;
   ctx.beginPath();
-  ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2);
+  const casingR = pumpCasingHeight * 0.15;
+
+  // Start at top-left, go clockwise
+  ctx.moveTo(-pumpCasingWidth / 2 + casingR, couplingBottom);
+  ctx.lineTo(pumpCasingWidth / 2 - casingR, couplingBottom);
+  ctx.arc(pumpCasingWidth / 2 - casingR, couplingBottom + casingR, casingR, -Math.PI / 2, 0);
+
+  // Right side with pronounced volute bulge (spiral collector)
+  ctx.lineTo(pumpCasingWidth / 2, couplingBottom + pumpCasingHeight * 0.15);
+  // Bulge out for volute - more pronounced curve
+  ctx.bezierCurveTo(
+    pumpCasingWidth / 2 + voluteBulge * 0.5, couplingBottom + pumpCasingHeight * 0.2,
+    pumpCasingWidth / 2 + voluteBulge, couplingBottom + pumpCasingHeight * 0.35,
+    pumpCasingWidth / 2 + voluteBulge, outletY
+  );
+  // Continue bulge down and back
+  ctx.bezierCurveTo(
+    pumpCasingWidth / 2 + voluteBulge, couplingBottom + pumpCasingHeight * 0.6,
+    pumpCasingWidth / 2 + voluteBulge * 0.3, couplingBottom + pumpCasingHeight * 0.85,
+    pumpCasingWidth / 2, casingBottom - casingR
+  );
+
+  ctx.arc(pumpCasingWidth / 2 - casingR, casingBottom - casingR, casingR, 0, Math.PI / 2);
+  ctx.lineTo(-pumpCasingWidth / 2 + casingR, casingBottom);
+  ctx.arc(-pumpCasingWidth / 2 + casingR, casingBottom - casingR, casingR, Math.PI / 2, Math.PI);
+  ctx.lineTo(-pumpCasingWidth / 2, couplingBottom + casingR);
+  ctx.arc(-pumpCasingWidth / 2 + casingR, couplingBottom + casingR, casingR, Math.PI, Math.PI * 1.5);
+  ctx.closePath();
   ctx.fill();
 
-  // Running indicator
+  // Casing outline
+  ctx.strokeStyle = highlightColor;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Casing detail - impeller eye suggestion (circle in center)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(0, couplingBottom + pumpCasingHeight * 0.5, pumpCasingHeight * 0.25, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // === COUPLING HOUSING ===
+  ctx.fillStyle = COLORS.steelDark;
+  const couplingWidth = motorWidth * 0.7;
+  ctx.fillRect(-couplingWidth / 2, motorBottom, couplingWidth, couplingHeight);
+  ctx.strokeStyle = highlightColor;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-couplingWidth / 2, motorBottom, couplingWidth, couplingHeight);
+
+  // === MOTOR ===
+  // Motor body (cylindrical, shown as rectangle in profile)
+  ctx.fillStyle = steelColor;
+  ctx.fillRect(-motorWidth / 2, motorTop, motorWidth, motorHeight);
+
+  // Motor outline
+  ctx.strokeStyle = highlightColor;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(-motorWidth / 2, motorTop, motorWidth, motorHeight);
+
+  // Motor cooling fins (horizontal lines on the sides)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.lineWidth = 1;
+  const finSpacing = motorHeight / 12;
+  for (let i = 1; i < 12; i++) {
+    const finY = motorTop + i * finSpacing;
+    // Left side fins
+    ctx.beginPath();
+    ctx.moveTo(-motorWidth / 2, finY);
+    ctx.lineTo(-motorWidth / 2 - scale * 0.04, finY);
+    ctx.stroke();
+    // Right side fins
+    ctx.beginPath();
+    ctx.moveTo(motorWidth / 2, finY);
+    ctx.lineTo(motorWidth / 2 + scale * 0.04, finY);
+    ctx.stroke();
+  }
+
+  // Motor end cap (top)
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-motorWidth / 2, motorTop, motorWidth, scale * 0.06);
+  ctx.strokeStyle = highlightColor;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-motorWidth / 2, motorTop, motorWidth, scale * 0.06);
+
+  // Motor nameplate/label area
+  ctx.fillStyle = 'rgba(40, 50, 60, 0.8)';
+  const labelWidth = motorWidth * 0.6;
+  const labelHeight = motorHeight * 0.15;
+  const labelY = motorTop + motorHeight * 0.35;
+  ctx.fillRect(-labelWidth / 2, labelY, labelWidth, labelHeight);
+
+  // === RUNNING INDICATOR ===
   if (pump.running) {
+    // Green glow around the motor
     ctx.strokeStyle = COLORS.safe;
     ctx.lineWidth = 3;
+    ctx.strokeRect(-motorWidth / 2 - 3, motorTop - 3, motorWidth + 6, motorHeight + couplingHeight + 6);
+
+    // Animated-looking motion lines near coupling
+    ctx.strokeStyle = 'rgba(100, 220, 100, 0.4)';
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    ctx.arc(0, 0, r + 3, 0, Math.PI * 2);
+    ctx.arc(0, motorBottom + couplingHeight / 2, couplingWidth / 2 + 5, 0, Math.PI, true);
     ctx.stroke();
   }
 
-  // Outer rim
-  ctx.strokeStyle = COLORS.steelHighlight;
-  ctx.lineWidth = 2;
+  // === FLOW DIRECTION ARROW ===
+  // Arrow shows flow from bottom inlet, up through pump, out the side
+  const arrowStartY = nozzleBottom + inletLength * 0.7;
+  const arrowEndX = pumpCasingWidth / 2 + voluteBulge + outletLength * 0.8;
+  const arrowWidth = scale * 0.1;
+  const arrowHeadLen = scale * 0.12;
+
+  // Arrow color
+  if (pump.running) {
+    ctx.fillStyle = 'rgba(100, 220, 100, 0.9)';
+    ctx.strokeStyle = 'rgba(50, 150, 50, 1)';
+  } else {
+    ctx.fillStyle = 'rgba(150, 150, 150, 0.5)';
+    ctx.strokeStyle = 'rgba(100, 100, 100, 0.6)';
+  }
+
+  // Draw curved arrow following flow path (up and out)
+  ctx.lineWidth = arrowWidth;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // Arrow shaft (curved path: up from inlet, curve to outlet)
   ctx.beginPath();
-  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.moveTo(0, arrowStartY);
+  ctx.lineTo(0, couplingBottom + pumpCasingHeight * 0.5);
+  // Curve toward outlet
+  ctx.quadraticCurveTo(
+    pumpCasingWidth * 0.3, couplingBottom + pumpCasingHeight * 0.4,
+    arrowEndX - arrowHeadLen, outletY
+  );
+  ctx.stroke();
+
+  // Arrow head
+  ctx.beginPath();
+  ctx.moveTo(arrowEndX, outletY);
+  ctx.lineTo(arrowEndX - arrowHeadLen, outletY - arrowWidth * 1.2);
+  ctx.lineTo(arrowEndX - arrowHeadLen * 0.6, outletY);
+  ctx.lineTo(arrowEndX - arrowHeadLen, outletY + arrowWidth * 1.2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 1.5;
   ctx.stroke();
 }
 
@@ -1505,12 +1689,25 @@ function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, v
     const px = port.position.x * view.zoom;
     const py = port.position.y * view.zoom;
 
-    ctx.fillStyle = port.connectedTo ? COLORS.portConnected : COLORS.portAvailable;
+    // Use direction-based colors: green for inlet, red for outlet, blue for bidirectional
+    // Connected ports become gray
+    let portColor: string;
+    if (port.connectedTo) {
+      portColor = COLORS.portConnected;
+    } else if (port.direction === 'in') {
+      portColor = COLORS.portInlet;
+    } else if (port.direction === 'out') {
+      portColor = COLORS.portOutlet;
+    } else {
+      portColor = COLORS.portBidirectional;
+    }
+
+    ctx.fillStyle = portColor;
     ctx.beginPath();
     ctx.arc(px, py, 5, 0, Math.PI * 2);
     ctx.fill();
 
-    // Direction indicator
+    // Direction indicator (white arrow inside the port)
     ctx.strokeStyle = '#fff';
     ctx.lineWidth = 1;
     if (port.direction === 'in') {
@@ -1551,11 +1748,20 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         height: component.diameter * view.zoom + 10,
       };
     case 'pump':
+      // Upright RCP-style pump bounds
+      // Layout: motor + coupling + casing + suction nozzle + inlet pipe
+      const pumpScale = component.diameter * view.zoom * 1.3; // 30% bigger
+      const pumpBodyHeight = pumpScale * (0.9 + 0.15 + 0.5 + 0.35); // motor + coupling + casing + nozzle
+      const pumpInletPipe = pumpScale * 0.3; // inlet pipe below nozzle
+      const pumpTotalHeight = pumpBodyHeight + pumpInletPipe;
+      const pumpBodyWidth = pumpScale * 0.75; // casing width
+      const pumpVoluteBulge = pumpScale * 0.18;
+      const pumpOutletPipe = pumpScale * 0.45;
       return {
-        x: -component.diameter * view.zoom / 2 - 5,
-        y: -component.diameter * view.zoom / 2 - 5,
-        width: component.diameter * view.zoom + 10,
-        height: component.diameter * view.zoom + 10,
+        x: -pumpBodyWidth / 2 - 5,
+        y: -pumpBodyHeight / 2 - 5,
+        width: pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe + 10,
+        height: pumpTotalHeight + 10,
       };
     case 'vessel':
       const r = (component.innerDiameter / 2 + component.wallThickness) * view.zoom;
