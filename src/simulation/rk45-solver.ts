@@ -40,11 +40,16 @@ export interface NeutronicsRates {
   dPrecursorConcentration: number;   // 1/s - rate of precursor change
 }
 
+export interface PumpRates {
+  dEffectiveSpeed: number;  // 1/s - rate of change of effective speed
+}
+
 export interface StateRates {
   flowNodes: Map<string, FlowNodeRates>;
-  flowConnections: Map<string, FlowConnectionRates>;  // NEW: flow momentum
+  flowConnections: Map<string, FlowConnectionRates>;  // flow momentum
   thermalNodes: Map<string, ThermalNodeRates>;
   neutronics: NeutronicsRates;
+  pumps: Map<string, PumpRates>;  // pump speed dynamics
 }
 
 // ============================================================================
@@ -83,6 +88,7 @@ export function createZeroRates(): StateRates {
     flowConnections: new Map(),
     thermalNodes: new Map(),
     neutronics: { dPower: 0, dPrecursorConcentration: 0 },
+    pumps: new Map(),
   };
 }
 
@@ -126,6 +132,16 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     dPrecursorConcentration: a.neutronics.dPrecursorConcentration + b.neutronics.dPrecursorConcentration,
   };
 
+  // Combine pump rates
+  const allPumpIds = new Set([...a.pumps.keys(), ...b.pumps.keys()]);
+  for (const id of allPumpIds) {
+    const aRates = a.pumps.get(id) || { dEffectiveSpeed: 0 };
+    const bRates = b.pumps.get(id) || { dEffectiveSpeed: 0 };
+    result.pumps.set(id, {
+      dEffectiveSpeed: aRates.dEffectiveSpeed + bRates.dEffectiveSpeed,
+    });
+  }
+
   return result;
 }
 
@@ -155,6 +171,12 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     dPower: rates.neutronics.dPower * factor,
     dPrecursorConcentration: rates.neutronics.dPrecursorConcentration * factor,
   };
+
+  for (const [id, r] of rates.pumps) {
+    result.pumps.set(id, {
+      dEffectiveSpeed: r.dEffectiveSpeed * factor,
+    });
+  }
 
   return result;
 }
@@ -193,6 +215,16 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
   // Apply neutronics rates
   newState.neutronics.power += rates.neutronics.dPower * dt;
   newState.neutronics.precursorConcentration += rates.neutronics.dPrecursorConcentration * dt;
+
+  // Apply pump rates
+  for (const [id, pumpRates] of rates.pumps) {
+    const pump = newState.components.pumps.get(id);
+    if (pump) {
+      pump.effectiveSpeed += pumpRates.dEffectiveSpeed * dt;
+      // Clamp to [0, targetSpeed] to prevent overshoot
+      pump.effectiveSpeed = Math.max(0, Math.min(pump.speed, pump.effectiveSpeed));
+    }
+  }
 
   return newState;
 }

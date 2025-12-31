@@ -496,11 +496,45 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
 export class FlowDynamicsConstraintOperator implements ConstraintOperator {
   name = 'FlowDynamics';
 
+  /**
+   * Calculate pressure at a specific connection elevation within a node,
+   * accounting for hydrostatic head within the node.
+   */
+  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
+    const g = 9.81;
+    const baseP = node.fluid.pressure;
+    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+
+    if (connectionElevation === undefined) {
+      connectionElevation = nodeHeight / 2;
+    }
+
+    if (node.fluid.phase === 'two-phase') {
+      const quality = node.fluid.quality || 0;
+      const T_C = node.fluid.temperature - 273.15;
+      const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                         T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                         700 - 2.5 * (T_C - 300);
+      const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
+      const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
+      const liquidLevel = nodeHeight * (1 - voidFraction);
+
+      if (connectionElevation < liquidLevel) {
+        return baseP + rho_liquid * g * (liquidLevel - connectionElevation);
+      }
+      return baseP;
+    } else if (node.fluid.phase === 'liquid') {
+      // Liquid nodes: base pressure is at top, add hydrostatic head below
+      const rho = node.fluid.mass / node.volume;
+      const liquidHead = nodeHeight - connectionElevation;
+      return baseP + rho * g * liquidHead;
+    }
+    return baseP;
+  }
+
   applyConstraints(state: SimulationState): SimulationState {
     const newState = cloneSimulationState(state);
 
-    // Compute steady-state target flow rates for display purposes only
-    // DO NOT modify massFlowRate - it is now integrated via momentum equation
     for (const conn of newState.flowConnections) {
       const fromNode = newState.flowNodes.get(conn.fromNodeId);
       const toNode = newState.flowNodes.get(conn.toNodeId);
@@ -511,7 +545,27 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
       const targetFlow = this.computeSteadyStateFlow(conn, fromNode, toNode, newState);
       conn.targetFlowRate = targetFlow;
       conn.steadyStateFlow = targetFlow;
-      // NOTE: massFlowRate is NOT set here - it evolves via momentum equation
+
+      // === PHYSICAL CONSTRAINTS ON FLOW ===
+
+      // Running pumps act as check valves - clamp reverse flow to zero
+      // This is a hard physical constraint that must be enforced after integration
+      for (const [, pump] of newState.components.pumps) {
+        if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0.01) {
+          if (conn.massFlowRate < 0) {
+            // Reverse flow through a running pump is physically impossible
+            // The impeller blocks backflow
+            conn.massFlowRate = 0;
+          }
+          break;
+        }
+      }
+
+      // Check valves prevent reverse flow
+      const checkValve = newState.components.checkValves?.get(conn.id);
+      if (checkValve && conn.massFlowRate < 0) {
+        conn.massFlowRate = 0;
+      }
     }
 
     return newState;
@@ -523,9 +577,9 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
     toNode: FlowNode,
     state: SimulationState
   ): number {
-    // Pressure difference
-    const P_from = fromNode.fluid.pressure;
-    const P_to = toNode.fluid.pressure;
+    // Pressure difference with hydrostatic adjustment at connection points
+    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
+    const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
     const dP_pressure = P_from - P_to;
 
     // Gravity head
@@ -569,6 +623,74 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
 }
 
 // ============================================================================
+// Pump Speed Rate Operator
+// ============================================================================
+
+/**
+ * Computes the rate of change of pump effectiveSpeed based on ramp-up/coast-down
+ * dynamics. This integrates properly with the RK45 solver.
+ *
+ * When pump is running: dEffectiveSpeed/dt = targetSpeed / rampUpTime
+ * When pump is stopped: dEffectiveSpeed/dt = -effectiveSpeed / coastDownTime
+ */
+export class PumpSpeedRateOperator implements RateOperator {
+  name = 'PumpSpeed';
+
+  computeRates(state: SimulationState): StateRates {
+    const rates = createZeroRates();
+
+    for (const [id, pump] of state.components.pumps) {
+      let dEffectiveSpeed = 0;
+
+      if (pump.running) {
+        const targetSpeed = pump.speed;
+        if (pump.effectiveSpeed < targetSpeed) {
+          // Ramp up: constant rate to reach target in rampUpTime
+          dEffectiveSpeed = targetSpeed / pump.rampUpTime;
+        } else if (pump.effectiveSpeed > targetSpeed) {
+          // Speed reduced: coast down to new target
+          dEffectiveSpeed = -1.0 / pump.coastDownTime;
+        }
+        // else: at target, no change needed
+      } else {
+        // Pump stopped: coast down to zero
+        if (pump.effectiveSpeed > 0) {
+          dEffectiveSpeed = -1.0 / pump.coastDownTime;
+        }
+      }
+
+      if (dEffectiveSpeed !== 0) {
+        rates.pumps.set(id, { dEffectiveSpeed });
+      }
+    }
+
+    return rates;
+  }
+}
+
+// ============================================================================
+// Pump Speed Constraint Operator (DEPRECATED - kept for backwards compatibility)
+// ============================================================================
+
+/**
+ * @deprecated Use PumpSpeedRateOperator instead. This constraint-based approach
+ * doesn't work well with RK45 because constraint operators don't receive dt.
+ */
+export class PumpSpeedConstraintOperator implements ConstraintOperator {
+  name = 'PumpSpeed';
+
+  applyConstraints(state: SimulationState): SimulationState {
+    // This operator is deprecated - pump speeds are now handled by PumpSpeedRateOperator
+    // Just return the state unchanged
+    return state;
+  }
+
+  reset(): void {
+    // No-op
+  }
+}
+
+// ============================================================================
 // Flow Momentum Rate Operator
 // ============================================================================
 
@@ -588,6 +710,51 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
  */
 export class FlowMomentumRateOperator implements RateOperator {
   name = 'FlowMomentum';
+
+  /**
+   * Calculate pressure at a specific connection elevation within a node,
+   * accounting for hydrostatic head within the node.
+   */
+  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
+    const g = 9.81;
+    const baseP = node.fluid.pressure;
+
+    // Estimate node height (assume cylindrical with height ≈ diameter)
+    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+
+    if (connectionElevation === undefined) {
+      connectionElevation = nodeHeight / 2;
+    }
+
+    if (node.fluid.phase === 'two-phase') {
+      // Calculate liquid level from quality
+      const quality = node.fluid.quality || 0;
+      // Approximate liquid/vapor densities
+      const T_C = node.fluid.temperature - 273.15;
+      const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                         T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                         700 - 2.5 * (T_C - 300);
+      const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
+
+      // Void fraction and liquid level
+      const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
+      const liquidVolumeFraction = 1 - voidFraction;
+      const liquidLevel = nodeHeight * liquidVolumeFraction;
+
+      if (connectionElevation < liquidLevel) {
+        // Below liquid: add hydrostatic head
+        return baseP + rho_liquid * g * (liquidLevel - connectionElevation);
+      }
+      return baseP;  // In steam space
+    } else if (node.fluid.phase === 'liquid') {
+      // Liquid nodes: base pressure is at top, add hydrostatic head below
+      const rho = node.fluid.mass / node.volume;
+      const liquidHead = nodeHeight - connectionElevation;
+      return baseP + rho * g * liquidHead;
+    }
+
+    return baseP;  // Vapor - no adjustment
+  }
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -620,9 +787,10 @@ export class FlowMomentumRateOperator implements RateOperator {
 
       // === Driving pressures ===
 
-      // Pressure difference (positive = from has higher pressure)
-      const P_from = fromNode.fluid.pressure;
-      const P_to = toNode.fluid.pressure;
+      // Pressure difference at connection points, with hydrostatic adjustment
+      // This accounts for liquid head within each node based on connection elevation
+      const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
+      const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
       const dP_pressure = P_from - P_to;
 
       // Gravity head (positive = downward flow is favored)
@@ -657,15 +825,43 @@ export class FlowMomentumRateOperator implements RateOperator {
         continue;
       }
 
+      // === Total driving pressure (computed early for pump/valve checks) ===
+      const dP_driving = dP_pressure + dP_gravity + dP_pump;
+
       // Check valve - prevents reverse flow
       const checkValve = state.components.checkValves?.get(conn.id);
       if (checkValve) {
-        const netDrivingPressure = dP_pressure + dP_gravity + dP_pump;
         // If driving pressure is reverse and flow is trying to go reverse
-        if (netDrivingPressure < 0 && currentFlow <= 0) {
+        if (dP_driving < 0 && currentFlow <= 0) {
           // Prevent reverse flow - decay to zero
           const tau = 0.1;
           rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
+          continue;
+        }
+      }
+
+      // Running pumps act as check valves - prevent reverse flow
+      // The constraint operator will clamp flow to >= 0 after each step,
+      // but we also need to prevent the rate equation from driving flow negative
+      let pumpOnThisConnection: { running: boolean; effectiveSpeed: number } | undefined;
+      for (const [, pump] of state.components.pumps) {
+        if (pump.connectedFlowPath === conn.id) {
+          pumpOnThisConnection = pump;
+          break;
+        }
+      }
+      if (pumpOnThisConnection && pumpOnThisConnection.running && pumpOnThisConnection.effectiveSpeed > 0.01) {
+        // If flow is at or near zero and pressure would drive it backward, prevent acceleration
+        // The pump impeller physically blocks reverse flow
+        if (currentFlow <= 0 && dP_driving < 0) {
+          // No acceleration - pump holds flow at zero
+          rates.flowConnections.set(conn.id, { dMassFlowRate: 0 });
+          continue;
+        }
+        // If flow is small positive but about to go negative, also prevent
+        if (currentFlow > 0 && currentFlow < 1 && dP_driving < 0) {
+          // Clamp acceleration to prevent going negative
+          rates.flowConnections.set(conn.id, { dMassFlowRate: 0 });
           continue;
         }
       }
@@ -676,9 +872,6 @@ export class FlowMomentumRateOperator implements RateOperator {
       const K_eff = K_base / Math.pow(valveOpenFraction, 2);
 
       // === Momentum equation ===
-
-      // Total driving pressure
-      const dP_driving = dP_pressure + dP_gravity + dP_pump;
 
       // Friction pressure drop (always opposes flow direction)
       // dP_friction = -K * 0.5 * ρ * v * |v|  (negative when flow is positive)

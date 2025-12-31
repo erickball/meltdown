@@ -36,6 +36,7 @@ import {
   TurbineCondenserRateOperator,
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
+  PumpSpeedRateOperator,
 } from '../simulation';
 
 export type IntegrationMethod = 'euler' | 'rk45';
@@ -144,6 +145,9 @@ export class GameLoop {
       this.rk45Solver.addRateOperator(new ConductionRateOperator());
       this.rk45Solver.addRateOperator(new ConvectionRateOperator());
       this.rk45Solver.addRateOperator(new TurbineCondenserRateOperator());
+
+      // Add pump speed rate operator (integrates pump ramp-up/coast-down)
+      this.rk45Solver.addRateOperator(new PumpSpeedRateOperator());
 
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());

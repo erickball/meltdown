@@ -32,6 +32,7 @@ export type {
   FlowConnectionRates,
   ThermalNodeRates,
   NeutronicsRates,
+  PumpRates,
   RK45Config,
 } from './rk45-solver';
 
@@ -46,6 +47,8 @@ export {
   TurbineCondenserRateOperator,
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
+  PumpSpeedRateOperator,
+  PumpSpeedConstraintOperator,  // deprecated, kept for compatibility
 } from './operators/rate-operators';
 
 // Operators
@@ -68,5 +71,7 @@ export {
   getWaterPropsProfile,
   resetWaterPropsProfile,
   clearStateCache,
+  preloadWaterProperties,
+  isWaterPropertiesLoaded,
   type WaterPropsProfile,
 } from './water-properties';
