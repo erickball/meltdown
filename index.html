@@ -91,12 +91,16 @@
           <details open>
             <summary>Heat Transfer</summary>
             <button data-component="heat-exchanger" class="component-btn">Heat Exchanger</button>
-            <button data-component="turbine" class="component-btn">Turbine</button>
-            <button data-component="generator" class="component-btn">Generator</button>
             <button data-component="condenser" class="component-btn">Condenser</button>
           </details>
           <details open>
+            <summary>Power</summary>
+            <button data-component="turbine-generator" class="component-btn">Turbine-Generator</button>
+            <button data-component="turbine-driven-pump" class="component-btn">Turbine-Driven Pump</button>
+          </details>
+          <details open>
             <summary>Nuclear</summary>
+            <button data-component="reactor-vessel" class="component-btn">Reactor Vessel</button>
             <button data-component="core" class="component-btn">Reactor Core</button>
           </details>
         </div>
@@ -125,7 +129,7 @@
         <button id="toggle-isometric" class="view-btn active">🎛️ 2.5D View</button>
         <div class="slider-control" style="margin: 8px 0;">
           <label for="view-elevation" style="font-size: 11px;">View Angle: <span id="view-elevation-value">30</span>°</label>
-          <input type="range" id="view-elevation" min="10" max="70" value="30" style="width: 100%;" />
+          <input type="range" id="view-elevation" min="10" max="50" value="30" style="width: 100%;" />
         </div>
         <button id="zoom-in">Zoom +</button>
         <button id="zoom-out">Zoom -</button>

@@ -23,9 +23,12 @@ export type ComponentType =
   | 'pipe'
   | 'pump'
   | 'vessel'
+  | 'reactorVessel'
   | 'valve'
   | 'heatExchanger'
   | 'turbine'
+  | 'turbine-generator'
+  | 'turbine-driven-pump'
   | 'condenser'
   | 'fuelAssembly';
 
@@ -72,7 +75,11 @@ export interface PipeComponent extends ComponentBase {
   diameter: number;     // meters (inner)
   thickness: number;    // wall thickness
   length: number;       // meters
-  // Pipes are drawn from position along rotation direction
+  // Endpoint positions for 3D rendering
+  // Start point uses position (x, y) and elevation from ComponentBase
+  // End point has its own position and elevation
+  endPosition?: Point;      // World position of pipe outlet end
+  endElevation?: number;    // Elevation of pipe outlet end (meters)
 }
 
 export interface PumpComponent extends ComponentBase {
@@ -92,9 +99,10 @@ export interface VesselComponent extends ComponentBase {
   hasDome: boolean;     // Hemispherical top
   hasBottom: boolean;   // Hemispherical bottom
   // Fuel properties (for reactor vessels)
-  fuelRodCount?: number;      // Number of fuel rods to display
-  fuelTemperature?: number;   // Current fuel temperature in Kelvin
-  fuelMeltingPoint?: number;  // Fuel melting point in Kelvin (default 2800)
+  fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
+  actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
+  fuelTemperature?: number;     // Current fuel temperature in Kelvin
+  fuelMeltingPoint?: number;    // Fuel melting point in Kelvin (default 2800)
   // Control rod properties
   controlRodCount?: number;   // Number of control rod banks to display
   controlRodPosition?: number; // 0 = fully inserted, 1 = fully withdrawn
@@ -107,6 +115,33 @@ export interface ValveComponent extends ComponentBase {
   valveType: 'gate' | 'globe' | 'check' | 'relief';
 }
 
+// Reactor vessel with core barrel - creates two concentric hydraulic regions
+export interface ReactorVesselComponent extends ComponentBase {
+  type: 'reactorVessel';
+  innerDiameter: number;    // Vessel inner diameter (m)
+  wallThickness: number;    // Vessel wall thickness (m) - calculated from pressure
+  height: number;           // Vessel height (m)
+  pressureRating: number;   // Design pressure (bar)
+  // Core barrel properties
+  barrelDiameter: number;   // Core barrel inner diameter (m)
+  barrelThickness: number;  // Core barrel wall thickness (m)
+  barrelBottomGap: number;  // Gap from lower head to barrel bottom (m)
+  barrelTopGap: number;     // Gap from upper head to barrel top (m)
+  // Internal region IDs (created automatically)
+  insideBarrelId?: string;  // ID of inside-barrel region (for flow connections)
+  outsideBarrelId?: string; // ID of outside-barrel region (for flow connections)
+  // Core component ID if one is placed inside
+  coreId?: string;
+  // Fuel properties (added when core is placed inside)
+  fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
+  actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
+  fuelTemperature?: number;     // Current fuel temperature in Kelvin
+  fuelMeltingPoint?: number;    // Fuel melting point in Kelvin
+  // Control rod properties (added when core is placed inside)
+  controlRodCount?: number;     // Number of control rod banks to display
+  controlRodPosition?: number;  // 0 = fully inserted, 1 = fully withdrawn
+}
+
 export interface HeatExchangerComponent extends ComponentBase {
   type: 'heatExchanger';
   width: number;
@@ -117,15 +152,41 @@ export interface HeatExchangerComponent extends ComponentBase {
   tubeCount: number;
 }
 
-export interface TurbineComponent extends ComponentBase {
-  type: 'turbine';
-  width: number;
-  height: number;
+export interface TurbineGeneratorComponent extends ComponentBase {
+  type: 'turbine-generator';
+  width: number;          // Length of turbine (inlet to exhaust) in meters
+  height: number;         // Diameter at exhaust end in meters
+  orientation: 'left-right' | 'right-left';  // Steam flow direction
+  stages: number;         // Number of turbine stages
   running: boolean;
   power: number;          // Current power output in Watts
   ratedPower: number;     // Rated power output in Watts
+  ratedSteamFlow: number; // Rated steam mass flow in kg/s
+  efficiency: number;     // Isentropic efficiency (0-1)
+  governorValve: number;  // Governor valve position (0-1)
+  generatorEfficiency: number; // Generator efficiency (0-1), typically 0.98
   inletFluid?: Fluid;     // Steam inlet conditions
   outletFluid?: Fluid;    // Exhaust conditions
+}
+
+export interface TurbineDrivenPumpComponent extends ComponentBase {
+  type: 'turbine-driven-pump';
+  width: number;          // Length of turbine + pump assembly in meters
+  height: number;         // Diameter at exhaust end in meters
+  orientation: 'left-right' | 'right-left';  // Steam flow direction (pump on opposite side)
+  stages: number;         // Number of turbine stages
+  running: boolean;
+  // Turbine properties
+  ratedSteamFlow: number; // Rated steam mass flow in kg/s
+  turbineEfficiency: number; // Isentropic efficiency (0-1)
+  governorValve: number;  // Governor valve position (0-1)
+  inletFluid?: Fluid;     // Steam inlet conditions
+  outletFluid?: Fluid;    // Exhaust conditions
+  // Pump properties
+  pumpFlow: number;       // Current pump flow in kg/s
+  ratedPumpFlow: number;  // Rated pump flow in kg/s
+  ratedHead: number;      // Pump head in meters
+  pumpEfficiency: number; // Pump efficiency (0-1)
 }
 
 export interface CondenserComponent extends ComponentBase {
@@ -142,9 +203,11 @@ export type PlantComponent =
   | PipeComponent
   | PumpComponent
   | VesselComponent
+  | ReactorVesselComponent
   | ValveComponent
   | HeatExchangerComponent
-  | TurbineComponent
+  | TurbineGeneratorComponent
+  | TurbineDrivenPumpComponent
   | CondenserComponent;
 
 export interface PlantState {
@@ -160,6 +223,12 @@ export interface Connection {
   fromPortId: string;
   toComponentId: string;
   toPortId: string;
+  // Connection elevations (relative to component bottom)
+  fromElevation?: number;  // m - height of connection at from component
+  toElevation?: number;    // m - height of connection at to component
+  // Flow parameters (optional, used when creating simulation)
+  flowArea?: number;       // m² - cross-sectional area
+  length?: number;         // m - connection length
 }
 
 // View/camera state

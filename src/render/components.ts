@@ -4,14 +4,17 @@ import {
   PipeComponent,
   PumpComponent,
   VesselComponent,
+  ReactorVesselComponent,
   ValveComponent,
   HeatExchangerComponent,
-  TurbineComponent,
+  TurbineGeneratorComponent,
+  TurbineDrivenPumpComponent,
   CondenserComponent,
   ViewState,
   Fluid,
   Point,
   PlantState,
+  Connection,
 } from '../types';
 import { SimulationState } from '../simulation';
 import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction, getSaturationTemp } from './colors';
@@ -98,7 +101,8 @@ export function renderComponent(
   component: PlantComponent,
   view: ViewState,
   isSelected: boolean = false,
-  skipPorts: boolean = false
+  skipPorts: boolean = false,
+  connections?: Connection[]
 ): void {
   // Note: Context is already transformed to component position by caller
   // We no longer transform here to support isometric projection
@@ -123,11 +127,17 @@ export function renderComponent(
     case 'heatExchanger':
       renderHeatExchanger(ctx, component, view);
       break;
-    case 'turbine':
-      renderTurbine(ctx, component, view);
+    case 'turbine-generator':
+      renderTurbineGenerator(ctx, component, view);
+      break;
+    case 'turbine-driven-pump':
+      renderTurbineDrivenPump(ctx, component, view);
       break;
     case 'condenser':
       renderCondenser(ctx, component, view);
+      break;
+    case 'reactorVessel':
+      renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections);
       break;
   }
 
@@ -337,88 +347,96 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
   const outerR = innerR + vessel.wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
-  const cylinderH = h - (vessel.hasDome ? outerR : 0) - (vessel.hasBottom ? outerR : 0);
 
+  // Draw the vessel shell as a single continuous path (no dome transition lines)
   ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
 
-  // Main cylinder
-  const cylinderTop = vessel.hasDome ? -h / 2 + outerR : -h / 2;
-  ctx.fillRect(-outerR, cylinderTop, outerR * 2, cylinderH);
-
-  // Top dome
-  if (vessel.hasDome) {
-    ctx.beginPath();
-    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0);
-    ctx.fill();
+  if (vessel.hasDome && vessel.hasBottom) {
+    // Full vessel with both domes - draw as single continuous path
+    ctx.moveTo(-outerR, h / 2 - outerR);
+    ctx.lineTo(-outerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0, false);
+    ctx.lineTo(outerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI, false);
+    ctx.closePath();
+  } else if (vessel.hasDome) {
+    // Dome on top only
+    ctx.moveTo(-outerR, h / 2);
+    ctx.lineTo(-outerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0, false);
+    ctx.lineTo(outerR, h / 2);
+    ctx.closePath();
+  } else if (vessel.hasBottom) {
+    // Dome on bottom only
+    ctx.moveTo(-outerR, -h / 2);
+    ctx.lineTo(-outerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI, false);
+    ctx.lineTo(outerR, -h / 2);
+    ctx.closePath();
+  } else {
+    // No domes - just a cylinder
+    ctx.rect(-outerR, -h / 2, outerR * 2, h);
   }
+  ctx.fill();
 
-  // Bottom dome
-  if (vessel.hasBottom) {
-    ctx.beginPath();
-    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI);
-    ctx.fill();
+  // Inner cavity with fluid - also as single path
+  ctx.save();
+  ctx.beginPath();
+
+  if (vessel.hasDome && vessel.hasBottom) {
+    ctx.moveTo(-innerR, h / 2 - outerR);
+    ctx.lineTo(-innerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, innerR, Math.PI, 0, false);
+    ctx.lineTo(innerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, innerR, 0, Math.PI, false);
+    ctx.closePath();
+  } else if (vessel.hasDome) {
+    const wallT = vessel.wallThickness * view.zoom;
+    ctx.moveTo(-innerR, h / 2 - wallT);
+    ctx.lineTo(-innerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, innerR, Math.PI, 0, false);
+    ctx.lineTo(innerR, h / 2 - wallT);
+    ctx.closePath();
+  } else if (vessel.hasBottom) {
+    const wallT = vessel.wallThickness * view.zoom;
+    ctx.moveTo(-innerR, -h / 2 + wallT);
+    ctx.lineTo(-innerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, innerR, 0, Math.PI, false);
+    ctx.lineTo(innerR, -h / 2 + wallT);
+    ctx.closePath();
+  } else {
+    const wallT = vessel.wallThickness * view.zoom;
+    ctx.rect(-innerR, -h / 2 + wallT, innerR * 2, h - wallT * 2);
   }
+  ctx.clip();
 
-  // Inner cavity with fluid
-  const innerCylinderH = cylinderH - vessel.wallThickness * view.zoom * 2;
-  const innerTop = cylinderTop + vessel.wallThickness * view.zoom;
-
+  // Fill with fluid color
   if (vessel.fluid) {
-    // Use pixelated rendering for two-phase
     if (vessel.fluid.phase === 'two-phase') {
-      renderTwoPhaseFluid(ctx, vessel.fluid, -innerR, innerTop, innerR * 2, innerCylinderH, 5);
+      renderTwoPhaseFluid(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, 5);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
-      ctx.fillRect(-innerR, innerTop, innerR * 2, innerCylinderH);
+      ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
     }
   } else {
     ctx.fillStyle = '#111';
-    ctx.fillRect(-innerR, innerTop, innerR * 2, innerCylinderH);
+    ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
   }
 
-  // Inner domes - also use two-phase if applicable
-  if (vessel.hasDome) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, -h / 2 + outerR, innerR, Math.PI, 0);
-    ctx.clip();
-    if (vessel.fluid) {
-      if (vessel.fluid.phase === 'two-phase') {
-        renderTwoPhaseFluid(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, outerR, 5);
-      } else {
-        ctx.fillStyle = getFluidColor(vessel.fluid);
-        ctx.fill();
-      }
-    } else {
-      ctx.fillStyle = '#111';
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-  if (vessel.hasBottom) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, h / 2 - outerR, innerR, 0, Math.PI);
-    ctx.clip();
-    if (vessel.fluid) {
-      if (vessel.fluid.phase === 'two-phase') {
-        renderTwoPhaseFluid(ctx, vessel.fluid, -innerR, h / 2 - outerR, innerR * 2, outerR, 5);
-      } else {
-        ctx.fillStyle = getFluidColor(vessel.fluid);
-        ctx.fill();
-      }
-    } else {
-      ctx.fillStyle = '#111';
-      ctx.fill();
-    }
-    ctx.restore();
-  }
+  ctx.restore();
 
   // Fuel rods and control rods (if this is a reactor vessel with fuel)
   if (vessel.fuelRodCount && vessel.fuelRodCount > 0) {
     const fuelTemp = vessel.fuelTemperature ?? 600; // Default to warm if not set
     const meltPoint = vessel.fuelMeltingPoint ?? 2800;
     const fuelColor = getFuelColor(fuelTemp, meltPoint);
+
+    // Calculate inner cavity dimensions
+    const domeOffset = vessel.hasDome ? outerR : 0;
+    const bottomOffset = vessel.hasBottom ? outerR : 0;
+    const innerCylinderH = h - domeOffset - bottomOffset - vessel.wallThickness * view.zoom * 2;
+    const innerTop = -h / 2 + domeOffset + vessel.wallThickness * view.zoom;
 
     // Fuel rods are in the lower portion of the vessel (core region)
     const coreHeight = innerCylinderH * 0.6; // Core is 60% of inner height
@@ -443,16 +461,18 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
     }
 
     // Draw control rods (black bars between fuel rods)
+    // Control rods are always full length, and extend above the core when withdrawn
     const controlRodCount = vessel.controlRodCount ?? 0;
     if (controlRodCount > 0) {
       const controlRodPosition = vessel.controlRodPosition ?? 0.5;
-      // 0 = fully inserted (full length visible), 1 = fully withdrawn (not visible in core)
-      const insertionDepth = 1 - controlRodPosition; // How far into the core
-      const controlRodLength = coreHeight * insertionDepth;
+      // 0 = fully inserted (rod inside core), 1 = fully withdrawn (rod above core)
+      // Control rod length is always the same as core height
+      const controlRodLength = coreHeight;
+      // The top of the rod moves up as it's withdrawn
+      const rodTopOffset = coreHeight * controlRodPosition;
+      const rodTop = coreTop - rodTopOffset;
 
       // Control rods are positioned between fuel rods
-      // With 8 fuel rods and 3 control rod banks, place them at positions 2, 4, 6
-      // (i.e., between fuel rods 1-2, 3-4, 5-6)
       const controlRodWidth = rodWidth * 0.8;
       const fuelRodPositions: number[] = [];
       for (let i = 0; i < rodCount; i++) {
@@ -461,41 +481,414 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
 
       // Place control rods evenly distributed between fuel rods
       for (let i = 0; i < controlRodCount; i++) {
-        // Calculate position between fuel rods
         const fuelIndex = Math.floor((i + 1) * (rodCount - 1) / (controlRodCount + 1));
         const crX = (fuelRodPositions[fuelIndex] + fuelRodPositions[fuelIndex + 1]) / 2;
 
-        // Draw control rod from top of core down
-        if (controlRodLength > 0) {
-          // Control rod guide tube (thin gray outline)
-          ctx.fillStyle = '#333';
-          ctx.fillRect(crX - controlRodWidth / 2 - 1, coreTop, controlRodWidth + 2, controlRodLength);
+        ctx.fillStyle = '#333';
+        ctx.fillRect(crX - controlRodWidth / 2 - 1, rodTop, controlRodWidth + 2, controlRodLength);
+        ctx.fillStyle = '#111';
+        ctx.fillRect(crX - controlRodWidth / 2, rodTop + 1, controlRodWidth, controlRodLength - 2);
+      }
+    }
+  }
 
-          // Control rod absorber (black)
+  // Vessel outline - single continuous path (no dome transition lines)
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  if (vessel.hasDome && vessel.hasBottom) {
+    ctx.moveTo(-outerR, h / 2 - outerR);
+    ctx.lineTo(-outerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0, false);
+    ctx.lineTo(outerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI, false);
+  } else if (vessel.hasDome) {
+    ctx.moveTo(-outerR, h / 2);
+    ctx.lineTo(-outerR, -h / 2 + outerR);
+    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0, false);
+    ctx.lineTo(outerR, h / 2);
+  } else if (vessel.hasBottom) {
+    ctx.moveTo(-outerR, -h / 2);
+    ctx.lineTo(-outerR, h / 2 - outerR);
+    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI, false);
+    ctx.lineTo(outerR, -h / 2);
+  } else {
+    ctx.rect(-outerR, -h / 2, outerR * 2, h);
+  }
+
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[]): void {
+  const innerR = (vessel.innerDiameter / 2) * view.zoom;
+  const outerR = innerR + vessel.wallThickness * view.zoom;
+  const h = vessel.height * view.zoom;
+
+  // Barrel dimensions
+  const barrelOuterR = (vessel.barrelDiameter / 2 + vessel.barrelThickness) * view.zoom;
+  const barrelInnerR = (vessel.barrelDiameter / 2) * view.zoom;
+
+  // Calculate dome intrusion at barrel radius
+  // The dome is hemispherical with radius = innerDiameter/2
+  // At the barrel's outer radius, the dome surface is at:
+  // z = R - sqrt(R² - r²) from the end of the cylinder
+  const vesselR = vessel.innerDiameter / 2;  // world units
+  const barrelOuterRWorld = vessel.barrelDiameter / 2 + vessel.barrelThickness;
+  const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterRWorld * barrelOuterRWorld);
+
+  // Barrel position relative to inner dome surface
+  // The inner dome center is at Y = -H/2 + outerR (top) or H/2 - outerR (bottom)
+  // Inner dome radius = vesselR, so at barrel outer radius, dome surface is at:
+  // Y = domeCenterY -/+ sqrt(vesselR² - barrelR²)
+  // The gap is measured from this dome surface to the barrel end
+  const effectiveBottomY = vessel.height / 2 - vessel.wallThickness - domeIntrusion - vessel.barrelBottomGap;
+  const effectiveTopY = -vessel.height / 2 + vessel.wallThickness + domeIntrusion + vessel.barrelTopGap;
+  const barrelBottomY = effectiveBottomY * view.zoom;
+  const barrelTopY = effectiveTopY * view.zoom;
+  const barrelHeight = barrelBottomY - barrelTopY;
+
+  // Draw the vessel shell as a single continuous path (no dome transition lines)
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+
+  // Start at bottom-left of cylinder, draw outer path clockwise
+  const domeR = outerR; // Dome radius equals outer radius (hemispherical)
+
+  // Left side going up
+  ctx.moveTo(-outerR, h / 2 - domeR);
+  ctx.lineTo(-outerR, -h / 2 + domeR);
+
+  // Top dome (arc from left to right)
+  ctx.arc(0, -h / 2 + domeR, domeR, Math.PI, 0, false);
+
+  // Right side going down
+  ctx.lineTo(outerR, h / 2 - domeR);
+
+  // Bottom dome (arc from right to left)
+  ctx.arc(0, h / 2 - domeR, domeR, 0, Math.PI, false);
+
+  ctx.closePath();
+  ctx.fill();
+
+  // Now draw the inner cavity (hollow it out)
+  // Inner cavity with fluid - drawn as a single path
+  const innerDomeR = innerR;
+  const cavityTop = -h / 2 + domeR + vessel.wallThickness * view.zoom;
+  const cavityBottom = h / 2 - domeR - vessel.wallThickness * view.zoom;
+
+  // Draw fluid in cavity (outside the barrel - downcomer region)
+  ctx.save();
+
+  // Create clipping path for the inner cavity (excludes barrel region)
+  ctx.beginPath();
+
+  // Outer boundary of cavity (inside vessel wall)
+  ctx.moveTo(-innerR, cavityBottom);
+  ctx.lineTo(-innerR, cavityTop);
+  ctx.arc(0, -h / 2 + domeR, innerDomeR, Math.PI, 0, false);
+  ctx.lineTo(innerR, cavityBottom);
+  ctx.arc(0, h / 2 - domeR, innerDomeR, 0, Math.PI, false);
+  ctx.closePath();
+
+  // Cut out the barrel region (counterclockwise to subtract)
+  ctx.moveTo(barrelOuterR, barrelTopY);
+  ctx.lineTo(-barrelOuterR, barrelTopY);
+  ctx.lineTo(-barrelOuterR, barrelBottomY);
+  ctx.lineTo(barrelOuterR, barrelBottomY);
+  ctx.closePath();
+
+  ctx.clip('evenodd');
+
+  // Fill with fluid color (downcomer region) - stratified if two-phase
+  if (vessel.fluid) {
+    if (vessel.fluid.phase === 'two-phase') {
+      // Draw stratified: vapor on top, liquid on bottom
+      const massQuality = vessel.fluid.quality ?? 0.5;
+      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, vessel.fluid.pressure);
+      const liquidFraction = 1 - vaporVolumeFraction;
+      const liquidHeight = h * liquidFraction;
+      const vaporHeight = h - liquidHeight;
+
+      const T_sat = getSaturationTemp(vessel.fluid.pressure);
+
+      // Vapor (top)
+      if (vaporHeight > 0) {
+        const vaporFluid: Fluid = {
+          temperature: T_sat,
+          pressure: vessel.fluid.pressure,
+          phase: 'vapor',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(vaporFluid);
+        ctx.fillRect(-innerR, -h / 2, innerR * 2, vaporHeight);
+      }
+
+      // Liquid (bottom)
+      if (liquidHeight > 0) {
+        const liquidFluid: Fluid = {
+          temperature: T_sat,
+          pressure: vessel.fluid.pressure,
+          phase: 'liquid',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(liquidFluid);
+        ctx.fillRect(-innerR, -h / 2 + vaporHeight, innerR * 2, liquidHeight);
+      }
+    } else {
+      ctx.fillStyle = getFluidColor(vessel.fluid);
+      ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
+    }
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
+  }
+
+  ctx.restore();
+
+  // Draw the core barrel
+  ctx.fillStyle = COLORS.steelDark;
+
+  // Left barrel wall
+  ctx.fillRect(-barrelOuterR, barrelTopY, vessel.barrelThickness * view.zoom, barrelHeight);
+
+  // Right barrel wall
+  ctx.fillRect(barrelInnerR, barrelTopY, vessel.barrelThickness * view.zoom, barrelHeight);
+
+  // Draw fluid inside barrel - stratified if two-phase
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
+  ctx.clip();
+
+  if (vessel.fluid) {
+    if (vessel.fluid.phase === 'two-phase') {
+      // Draw stratified: vapor on top, liquid on bottom
+      const massQuality = vessel.fluid.quality ?? 0.5;
+      const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, vessel.fluid.pressure);
+      const liquidFraction = 1 - vaporVolumeFraction;
+      const liquidHeightBarrel = barrelHeight * liquidFraction;
+      const vaporHeightBarrel = barrelHeight - liquidHeightBarrel;
+
+      const T_sat = getSaturationTemp(vessel.fluid.pressure);
+
+      // Vapor (top)
+      if (vaporHeightBarrel > 0) {
+        const vaporFluid: Fluid = {
+          temperature: T_sat,
+          pressure: vessel.fluid.pressure,
+          phase: 'vapor',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(vaporFluid);
+        ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, vaporHeightBarrel);
+      }
+
+      // Liquid (bottom)
+      if (liquidHeightBarrel > 0) {
+        const liquidFluid: Fluid = {
+          temperature: T_sat,
+          pressure: vessel.fluid.pressure,
+          phase: 'liquid',
+          flowRate: 0,
+        };
+        ctx.fillStyle = getFluidColor(liquidFluid);
+        ctx.fillRect(-barrelInnerR, barrelTopY + vaporHeightBarrel, barrelInnerR * 2, liquidHeightBarrel);
+      }
+    } else {
+      ctx.fillStyle = getFluidColor(vessel.fluid);
+      ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
+    }
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
+  }
+
+  ctx.restore();
+
+  // Draw fuel rods inside the barrel (if this reactor vessel has a core)
+  if ((vessel as any).fuelRodCount && (vessel as any).fuelRodCount > 0) {
+    const fuelTemp = (vessel as any).fuelTemperature ?? 600;
+    const meltPoint = (vessel as any).fuelMeltingPoint ?? 2800;
+    const fuelColor = getFuelColor(fuelTemp, meltPoint);
+
+    // Core dimensions - use stored coreDiameter or default to barrel inner diameter
+    const coreDiameter = (vessel as any).coreDiameter ?? (vessel.barrelDiameter - vessel.barrelThickness * 2);
+    const coreWidth = (coreDiameter / 2) * view.zoom * 1.6; // 80% of core diameter for rod placement
+
+    // Core height - use stored coreHeight or default to barrel height
+    const coreHeightWorld = (vessel as any).coreHeight ?? barrelHeight / view.zoom;
+    const coreHeightPx = coreHeightWorld * view.zoom;
+
+    // Position core closer to the bottom of the barrel (more realistic)
+    // Leave a small gap (10% of barrel height) at the bottom for lower plenum
+    const bottomGap = barrelHeight * 0.1;
+    const coreTop = barrelBottomY - bottomGap - coreHeightPx;
+
+    const rodCount = (vessel as any).fuelRodCount;
+    const rodSpacing = coreWidth / (rodCount + 1);
+    const rodWidth = Math.max(2, Math.min(rodSpacing * 0.6, 6));
+
+    // Draw each fuel rod as a vertical bar
+    for (let i = 0; i < rodCount; i++) {
+      const rodX = -coreWidth / 2 + rodSpacing * (i + 1);
+
+      // Fuel rod cladding
+      ctx.fillStyle = COLORS.steelDark;
+      ctx.fillRect(rodX - rodWidth / 2 - 1, coreTop, rodWidth + 2, coreHeightPx);
+
+      // Fuel pellet
+      ctx.fillStyle = fuelColor;
+      ctx.fillRect(rodX - rodWidth / 2, coreTop + 1, rodWidth, coreHeightPx - 2);
+    }
+
+    // Draw control rods (always full length, extend above core when withdrawn)
+    const controlRodCount = (vessel as any).controlRodCount ?? 0;
+    if (controlRodCount > 0) {
+      const controlRodPosition = (vessel as any).controlRodPosition ?? 0.5;
+      // 0 = fully inserted (rod inside core), 1 = fully withdrawn (rod above core)
+      // Control rod length is always the same as core height
+      const controlRodLength = coreHeightPx;
+      // The top of the rod moves up as it's withdrawn
+      const rodTopOffset = coreHeightPx * controlRodPosition;
+      const rodTop = coreTop - rodTopOffset;
+      const controlRodWidth = rodWidth * 0.8;
+
+      // Get fuel rod positions
+      const fuelRodPositions: number[] = [];
+      for (let i = 0; i < rodCount; i++) {
+        fuelRodPositions.push(-coreWidth / 2 + rodSpacing * (i + 1));
+      }
+
+      // Place control rods between fuel rods
+      for (let i = 0; i < controlRodCount && i < rodCount - 1; i++) {
+        const fuelIndex = Math.floor((i + 1) * (rodCount - 1) / (controlRodCount + 1));
+        if (fuelIndex + 1 < fuelRodPositions.length) {
+          const crX = (fuelRodPositions[fuelIndex] + fuelRodPositions[fuelIndex + 1]) / 2;
+
+          ctx.fillStyle = '#333';
+          ctx.fillRect(crX - controlRodWidth / 2 - 1, rodTop, controlRodWidth + 2, controlRodLength);
           ctx.fillStyle = '#111';
-          ctx.fillRect(crX - controlRodWidth / 2, coreTop + 1, controlRodWidth, controlRodLength - 2);
+          ctx.fillRect(crX - controlRodWidth / 2, rodTop + 1, controlRodWidth, controlRodLength - 2);
         }
       }
     }
   }
 
-  // Vessel outline
+  // Draw barrel top and bottom plates with holes for connections
+  ctx.fillStyle = COLORS.steelDark;
+  const plateThickness = 3;
+
+  // Find connections between inside and outside barrel regions
+  let bottomConnectionFlowArea = 0;
+  let topConnectionFlowArea = 0;
+
+  if (connections && vessel.insideBarrelId && vessel.outsideBarrelId) {
+    for (const conn of connections) {
+      const connectsInside = conn.fromComponentId === vessel.insideBarrelId || conn.toComponentId === vessel.insideBarrelId;
+      const connectsOutside = conn.fromComponentId === vessel.outsideBarrelId || conn.toComponentId === vessel.outsideBarrelId;
+
+      if (connectsInside && connectsOutside && conn.flowArea) {
+        // Determine if this is a top or bottom connection based on port names
+        const portId = conn.fromComponentId === vessel.insideBarrelId ? conn.fromPortId : conn.toPortId;
+        if (portId.includes('bottom')) {
+          bottomConnectionFlowArea += conn.flowArea;
+        } else if (portId.includes('top')) {
+          topConnectionFlowArea += conn.flowArea;
+        }
+      }
+    }
+  }
+
+  // Bottom plate - draw if there's a gap (space between barrel and vessel bottom)
+  if (vessel.barrelBottomGap > 0.1) {
+    if (bottomConnectionFlowArea > 0) {
+      // Calculate hole size from flow area (A = π*r²)
+      const holeRadius = Math.sqrt(bottomConnectionFlowArea / Math.PI) * view.zoom;
+      // Cap at barrel outer radius (hole can't be bigger than barrel)
+      const holeRadiusClamped = Math.min(holeRadius, barrelOuterR);
+
+      if (holeRadiusClamped >= barrelOuterR - 1) {
+        // Hole is full width - don't draw plate at all (open gap)
+      } else if (holeRadiusClamped > 2) {
+        // Draw plate with hole
+        ctx.fillRect(-barrelOuterR, barrelBottomY - plateThickness, barrelOuterR - holeRadiusClamped, plateThickness);
+        ctx.fillRect(holeRadiusClamped, barrelBottomY - plateThickness, barrelOuterR - holeRadiusClamped, plateThickness);
+      } else {
+        // Hole too small to see, draw solid plate
+        ctx.fillRect(-barrelOuterR, barrelBottomY - plateThickness, barrelOuterR * 2, plateThickness);
+      }
+    } else {
+      // No connection - draw solid plate
+      ctx.fillRect(-barrelOuterR, barrelBottomY - plateThickness, barrelOuterR * 2, plateThickness);
+    }
+  }
+
+  // Top plate - draw if there's a gap
+  if (vessel.barrelTopGap > 0.1) {
+    if (topConnectionFlowArea > 0) {
+      const holeRadius = Math.sqrt(topConnectionFlowArea / Math.PI) * view.zoom;
+      const holeRadiusClamped = Math.min(holeRadius, barrelOuterR);
+
+      if (holeRadiusClamped >= barrelOuterR - 1) {
+        // Hole is full width - don't draw plate
+      } else if (holeRadiusClamped > 2) {
+        ctx.fillRect(-barrelOuterR, barrelTopY, barrelOuterR - holeRadiusClamped, plateThickness);
+        ctx.fillRect(holeRadiusClamped, barrelTopY, barrelOuterR - holeRadiusClamped, plateThickness);
+      } else {
+        ctx.fillRect(-barrelOuterR, barrelTopY, barrelOuterR * 2, plateThickness);
+      }
+    } else {
+      ctx.fillRect(-barrelOuterR, barrelTopY, barrelOuterR * 2, plateThickness);
+    }
+  }
+
+  // Vessel outline - single continuous path (no dome transition lines!)
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  if (vessel.hasDome) {
-    ctx.arc(0, -h / 2 + outerR, outerR, Math.PI, 0);
-  } else {
-    ctx.moveTo(-outerR, -h / 2);
-    ctx.lineTo(outerR, -h / 2);
-  }
-  ctx.lineTo(outerR, h / 2 - (vessel.hasBottom ? outerR : 0));
-  if (vessel.hasBottom) {
-    ctx.arc(0, h / 2 - outerR, outerR, 0, Math.PI);
-  } else {
-    ctx.lineTo(-outerR, h / 2);
-  }
+
+  // Left side going up
+  ctx.moveTo(-outerR, h / 2 - domeR);
+  ctx.lineTo(-outerR, -h / 2 + domeR);
+
+  // Top dome
+  ctx.arc(0, -h / 2 + domeR, outerR, Math.PI, 0, false);
+
+  // Right side going down
+  ctx.lineTo(outerR, h / 2 - domeR);
+
+  // Bottom dome
+  ctx.arc(0, h / 2 - domeR, outerR, 0, Math.PI, false);
+
   ctx.closePath();
+  ctx.stroke();
+
+  // Core barrel outline - only draw edges where barrel doesn't meet dome
+  ctx.strokeStyle = COLORS.steel;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+
+  // Left vertical edge
+  ctx.moveTo(-barrelOuterR, barrelTopY);
+  ctx.lineTo(-barrelOuterR, barrelBottomY);
+
+  // Bottom edge (only if there's a gap)
+  if (vessel.barrelBottomGap > 0.05) {
+    ctx.lineTo(barrelOuterR, barrelBottomY);
+  } else {
+    ctx.moveTo(barrelOuterR, barrelBottomY);
+  }
+
+  // Right vertical edge
+  ctx.lineTo(barrelOuterR, barrelTopY);
+
+  // Top edge (only if there's a gap)
+  if (vessel.barrelTopGap > 0.05) {
+    ctx.lineTo(-barrelOuterR, barrelTopY);
+  }
+
   ctx.stroke();
 }
 
@@ -803,18 +1196,35 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   ctx.strokeRect(-w / 2, -h / 2, w, h);
 }
 
-function renderTurbine(ctx: CanvasRenderingContext2D, turbine: TurbineComponent, view: ViewState): void {
+function renderTurbineGenerator(ctx: CanvasRenderingContext2D, turbine: TurbineGeneratorComponent, view: ViewState): void {
   const w = turbine.width * view.zoom;
   const h = turbine.height * view.zoom;
 
-  // Turbine casing - trapezoidal shape (larger at inlet, smaller at outlet)
-  // Shows the expanding steam path
+  // Determine inlet/exhaust sides based on orientation
+  // orientation 'left-right' means inlet on left (small), exhaust on right (large)
+  // orientation 'right-left' means inlet on right (small), exhaust on left (large)
+  const isLeftRight = turbine.orientation !== 'right-left';
+
+  // Inlet (HP) side is smaller, exhaust (LP) side is larger
+  const inletH = h * 0.4;   // HP end is ~40% of exhaust diameter
+  const exhaustH = h;        // LP end is full diameter
+
+  // Turbine casing - trapezoidal shape (small at inlet, large at exhaust)
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
-  ctx.moveTo(-w / 2, -h / 2);          // Top left (inlet side)
-  ctx.lineTo(w / 2, -h / 3);           // Top right (outlet side - smaller)
-  ctx.lineTo(w / 2, h / 3);            // Bottom right
-  ctx.lineTo(-w / 2, h / 2);           // Bottom left (inlet side)
+  if (isLeftRight) {
+    // Inlet left, exhaust right
+    ctx.moveTo(-w / 2, -inletH / 2);      // Top left (inlet - small)
+    ctx.lineTo(w / 2, -exhaustH / 2);     // Top right (exhaust - large)
+    ctx.lineTo(w / 2, exhaustH / 2);      // Bottom right
+    ctx.lineTo(-w / 2, inletH / 2);       // Bottom left (inlet - small)
+  } else {
+    // Inlet right, exhaust left
+    ctx.moveTo(-w / 2, -exhaustH / 2);    // Top left (exhaust - large)
+    ctx.lineTo(w / 2, -inletH / 2);       // Top right (inlet - small)
+    ctx.lineTo(w / 2, inletH / 2);        // Bottom right
+    ctx.lineTo(-w / 2, exhaustH / 2);     // Bottom left (exhaust - large)
+  }
   ctx.closePath();
   ctx.fill();
 
@@ -823,10 +1233,17 @@ function renderTurbine(ctx: CanvasRenderingContext2D, turbine: TurbineComponent,
     ctx.fillStyle = getFluidColor(turbine.inletFluid);
     ctx.globalAlpha = 0.6;
     ctx.beginPath();
-    ctx.moveTo(-w / 2 + 5, -h / 2 + 5);
-    ctx.lineTo(w / 2 - 5, -h / 3 + 5);
-    ctx.lineTo(w / 2 - 5, h / 3 - 5);
-    ctx.lineTo(-w / 2 + 5, h / 2 - 5);
+    if (isLeftRight) {
+      ctx.moveTo(-w / 2 + 5, -inletH / 2 + 5);
+      ctx.lineTo(w / 2 - 5, -exhaustH / 2 + 5);
+      ctx.lineTo(w / 2 - 5, exhaustH / 2 - 5);
+      ctx.lineTo(-w / 2 + 5, inletH / 2 - 5);
+    } else {
+      ctx.moveTo(-w / 2 + 5, -exhaustH / 2 + 5);
+      ctx.lineTo(w / 2 - 5, -inletH / 2 + 5);
+      ctx.lineTo(w / 2 - 5, inletH / 2 - 5);
+      ctx.lineTo(-w / 2 + 5, exhaustH / 2 - 5);
+    }
     ctx.closePath();
     ctx.fill();
     ctx.globalAlpha = 1.0;
@@ -837,32 +1254,35 @@ function renderTurbine(ctx: CanvasRenderingContext2D, turbine: TurbineComponent,
   ctx.fillRect(-w / 2 - 10, -3, w + 20, 6);
 
   // Blades representation (vertical lines inside the casing)
+  // Number of blade rows scales with turbine stages
   ctx.strokeStyle = turbine.running ? '#aabbcc' : '#556677';
   ctx.lineWidth = 2;
-  const bladeCount = 6;
+  const bladeCount = Math.max(4, (turbine.stages || 3) * 2);
   for (let i = 0; i < bladeCount; i++) {
     const x = -w / 2 + (w / (bladeCount + 1)) * (i + 1);
-    // Blade height decreases as we go from inlet to outlet
+    // Blade height increases from inlet to exhaust
     const progress = (i + 1) / (bladeCount + 1);
-    const bladeH = (h / 2) * (1 - progress * 0.3);
+    const bladeProgress = isLeftRight ? progress : (1 - progress);
+    const bladeH = inletH / 2 + (exhaustH - inletH) / 2 * bladeProgress;
     ctx.beginPath();
     ctx.moveTo(x, -bladeH + 3);
     ctx.lineTo(x, bladeH - 3);
     ctx.stroke();
   }
 
-  // Generator at the outlet end (right side)
-  const genR = h / 3;
+  // Generator at the exhaust end
+  const genR = exhaustH / 3;
+  const genX = isLeftRight ? (w / 2 + genR + 5) : (-w / 2 - genR - 5);
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
-  ctx.arc(w / 2 + genR + 5, 0, genR, 0, Math.PI * 2);
+  ctx.arc(genX, 0, genR, 0, Math.PI * 2);
   ctx.fill();
 
   // Generator outline
   ctx.strokeStyle = turbine.running ? COLORS.safe : '#666';
   ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.arc(w / 2 + genR + 5, 0, genR, 0, Math.PI * 2);
+  ctx.arc(genX, 0, genR, 0, Math.PI * 2);
   ctx.stroke();
 
   // Power indicator
@@ -871,19 +1291,108 @@ function renderTurbine(ctx: CanvasRenderingContext2D, turbine: TurbineComponent,
     ctx.fillStyle = '#fff';
     ctx.textAlign = 'center';
     const powerMW = turbine.power / 1e6;
-    ctx.fillText(`${powerMW.toFixed(0)} MW`, w / 2 + genR + 5, genR + 15);
+    ctx.fillText(`${powerMW.toFixed(0)} MW`, genX, genR + 15);
   }
 
   // Turbine outline
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  ctx.moveTo(-w / 2, -h / 2);
-  ctx.lineTo(w / 2, -h / 3);
-  ctx.lineTo(w / 2, h / 3);
-  ctx.lineTo(-w / 2, h / 2);
+  if (isLeftRight) {
+    ctx.moveTo(-w / 2, -inletH / 2);
+    ctx.lineTo(w / 2, -exhaustH / 2);
+    ctx.lineTo(w / 2, exhaustH / 2);
+    ctx.lineTo(-w / 2, inletH / 2);
+  } else {
+    ctx.moveTo(-w / 2, -exhaustH / 2);
+    ctx.lineTo(w / 2, -inletH / 2);
+    ctx.lineTo(w / 2, inletH / 2);
+    ctx.lineTo(-w / 2, exhaustH / 2);
+  }
   ctx.closePath();
   ctx.stroke();
+}
+
+function renderTurbineDrivenPump(ctx: CanvasRenderingContext2D, tdPump: TurbineDrivenPumpComponent, view: ViewState): void {
+  const w = tdPump.width * view.zoom;
+  const h = tdPump.height * view.zoom;
+
+  const isLeftRight = tdPump.orientation !== 'right-left';
+
+  // Turbine side (smaller, cylindrical)
+  const turbineW = w * 0.5;
+  const turbineH = h * 0.8;
+  const turbineX = isLeftRight ? -w / 4 : w / 4;
+
+  // Pump side (circular volute)
+  const pumpH = h;
+  const pumpX = isLeftRight ? w / 4 : -w / 4;
+
+  // Turbine casing
+  ctx.fillStyle = COLORS.steel;
+  ctx.fillRect(turbineX - turbineW / 2, -turbineH / 2, turbineW, turbineH);
+
+  // Steam flow visualization
+  if (tdPump.running && tdPump.inletFluid) {
+    ctx.fillStyle = getFluidColor(tdPump.inletFluid);
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(turbineX - turbineW / 2 + 3, -turbineH / 2 + 3, turbineW - 6, turbineH - 6);
+    ctx.globalAlpha = 1.0;
+  }
+
+  // Rotor shaft connecting turbine to pump
+  ctx.fillStyle = COLORS.steelDark;
+  ctx.fillRect(-w / 2 + 5, -3, w - 10, 6);
+
+  // Turbine blades
+  ctx.strokeStyle = tdPump.running ? '#aabbcc' : '#556677';
+  ctx.lineWidth = 2;
+  const bladeCount = Math.max(3, (tdPump.stages || 1) * 2);
+  for (let i = 0; i < bladeCount; i++) {
+    const x = turbineX - turbineW / 2 + (turbineW / (bladeCount + 1)) * (i + 1);
+    ctx.beginPath();
+    ctx.moveTo(x, -turbineH / 2 + 5);
+    ctx.lineTo(x, turbineH / 2 - 5);
+    ctx.stroke();
+  }
+
+  // Pump casing (circular/volute shape)
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  ctx.arc(pumpX, 0, pumpH / 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Pump impeller (simplified as spokes)
+  ctx.strokeStyle = tdPump.running ? '#99aacc' : '#556677';
+  ctx.lineWidth = 2;
+  const spokeCount = 6;
+  for (let i = 0; i < spokeCount; i++) {
+    const angle = (i / spokeCount) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(pumpX, 0);
+    ctx.lineTo(pumpX + Math.cos(angle) * (pumpH / 2 - 5), Math.sin(angle) * (pumpH / 2 - 5));
+    ctx.stroke();
+  }
+
+  // Pump outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(pumpX, 0, pumpH / 2, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Turbine outline
+  ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(turbineX - turbineW / 2, -turbineH / 2, turbineW, turbineH);
+
+  // Flow indicator if running
+  if (tdPump.running && tdPump.pumpFlow > 0) {
+    ctx.font = '9px monospace';
+    ctx.fillStyle = '#8cf';
+    ctx.textAlign = 'center';
+    ctx.fillText(`${tdPump.pumpFlow.toFixed(0)} kg/s`, pumpX, pumpH / 2 + 12);
+  }
 }
 
 function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComponent, view: ViewState): void {
@@ -945,12 +1454,14 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
   }
 
   // Cooling water tubes (horizontal, showing cross-section as circles)
-  const tubeSpacing = innerH / (condenser.tubeCount + 1);
+  // Limit visual tube count for rendering performance (actual tubeCount used for heat transfer)
+  const visualTubeRows = Math.min(condenser.tubeCount, 8);
+  const tubeSpacing = innerH / (visualTubeRows + 1);
   const tubeRadius = Math.min(tubeSpacing * 0.3, 4);
 
   // Draw tube bank as a grid of circles
-  const tubeCols = Math.floor(innerW / (tubeRadius * 4));
-  for (let row = 0; row < condenser.tubeCount; row++) {
+  const tubeCols = Math.min(Math.floor(innerW / (tubeRadius * 4)), 12);
+  for (let row = 0; row < visualTubeRows; row++) {
     const y = innerTop + tubeSpacing * (row + 1);
     for (let col = 0; col < tubeCols; col++) {
       const x = innerLeft + (innerW / (tubeCols + 1)) * (col + 1);
@@ -1054,6 +1565,15 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         width: r * 2 + 10,
         height: component.height * view.zoom + 10,
       };
+    case 'reactorVessel':
+      const rvComp = component as ReactorVesselComponent;
+      const rvR = (rvComp.innerDiameter / 2 + rvComp.wallThickness) * view.zoom;
+      return {
+        x: -rvR - 5,
+        y: -rvComp.height * view.zoom / 2 - 5,
+        width: rvR * 2 + 10,
+        height: rvComp.height * view.zoom + 10,
+      };
     case 'valve':
       const vd = component.diameter * view.zoom * 1.5;
       return {
@@ -1069,7 +1589,7 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         width: component.width * view.zoom + 10,
         height: component.height * view.zoom + 10,
       };
-    case 'turbine':
+    case 'turbine-generator':
       // Include generator on the right side
       const genR = component.height * view.zoom / 3;
       return {
@@ -1077,6 +1597,13 @@ function getComponentBounds(component: PlantComponent, view: ViewState): { x: nu
         y: -component.height * view.zoom / 2 - 5,
         width: component.width * view.zoom + genR * 2 + 25,
         height: component.height * view.zoom + 10,
+      };
+    case 'turbine-driven-pump':
+      return {
+        x: -component.width * view.zoom / 2 - 5,
+        y: -component.height * view.zoom / 2 - 5,
+        width: component.width * view.zoom + 10,
+        height: component.height * view.zoom + 20, // Extra for flow label
       };
     case 'condenser':
       return {
