@@ -270,11 +270,11 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
 
       html += ` kg/s`;
 
-      // Show pump head if there's a pump on this connection
+      // Show pump head if there's a pump providing head on this connection
+      // Only pumps with connectedFlowPath === conn.id actually contribute head
       for (const [pumpId, pump] of state.components.pumps) {
         if (pump.connectedFlowPath === conn.id && pump.effectiveSpeed > 0) {
           // Calculate pump head: dP_pump = effectiveSpeed * ratedHead * rho * g
-          // effectiveSpeed is maintained by FlowOperator.updatePumpSpeeds()
           const flowIsForward = conn.massFlowRate >= 0;
           const upstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
           const upstreamNode = state.flowNodes.get(upstreamId);
@@ -604,6 +604,44 @@ export function updateComponentDetail(
     }
     case 'pump': {
       html += `<div class="detail-row"><span class="detail-label">Diameter:</span><span class="detail-value">${((component.diameter as number) * 1000)?.toFixed(0)} mm</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Rated Head:</span><span class="detail-value">${(component.ratedHead as number)?.toFixed(1)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Rated Flow:</span><span class="detail-value">${(component.ratedFlow as number)?.toFixed(0)} kg/s</span></div>`;
+      const orientation = (component.orientation as string) || 'left-right';
+      html += `<div class="detail-row"><span class="detail-label">Orientation:</span><span class="detail-value">${orientation}</span></div>`;
+
+      // Get pump simulation state
+      const pumpState = simState.components.pumps.get(componentId);
+      if (pumpState) {
+        html += '<div class="detail-section">';
+        html += '<div class="detail-section-title">Operating Status</div>';
+        html += `<div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value" style="color: ${pumpState.running ? '#7f7' : '#f77'};">${pumpState.running ? 'RUNNING' : 'STOPPED'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Speed:</span><span class="detail-value">${(pumpState.effectiveSpeed * 100).toFixed(1)}%</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Current Head:</span><span class="detail-value">${(pumpState.ratedHead * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Efficiency:</span><span class="detail-value">${(pumpState.efficiency * 100).toFixed(1)}%</span></div>`;
+
+        // Get current flow and fluid state from connected flow path
+        if (pumpState.connectedFlowPath) {
+          const conn = simState.flowConnections.find(c => c.id === pumpState.connectedFlowPath);
+          if (conn) {
+            html += `<div class="detail-row"><span class="detail-label">Current Flow:</span><span class="detail-value">${Math.abs(conn.massFlowRate).toFixed(1)} kg/s</span></div>`;
+
+            // Get fluid state from upstream node (suction side)
+            const upstreamNode = simState.flowNodes.get(conn.fromNodeId);
+            if (upstreamNode) {
+              html += '</div>';
+              html += '<div class="detail-section">';
+              html += '<div class="detail-section-title">Fluid (Suction)</div>';
+              html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(upstreamNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+              html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(upstreamNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+              const phaseDisplay = upstreamNode.fluid.phase === 'two-phase'
+                ? `two-phase (${(upstreamNode.fluid.quality * 100).toFixed(1)}% quality)`
+                : upstreamNode.fluid.phase;
+              html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${phaseDisplay}</span></div>`;
+            }
+          }
+        }
+        html += '</div>';
+      }
       break;
     }
     case 'valve': {
