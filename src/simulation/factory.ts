@@ -850,6 +850,40 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
   }
 
+  // Third pass: Update pumps/valves with matchUpstream=true to use upstream fluid conditions
+  for (const [id, component] of plantState.components) {
+    const matchUpstream = (component as any).matchUpstream;
+    if (!matchUpstream) continue;
+    if (component.type !== 'pump' && component.type !== 'valve') continue;
+
+    // Find upstream component via connections
+    // Look for connections where this component is the "to" side (downstream)
+    const inletConnection = plantState.connections.find(
+      conn => conn.toComponentId === id
+    );
+
+    if (inletConnection) {
+      const upstreamComponent = plantState.components.get(inletConnection.fromComponentId);
+      if (upstreamComponent && upstreamComponent.fluid) {
+        const flowNode = state.flowNodes.get(id);
+        if (flowNode) {
+          const upstreamFluid = upstreamComponent.fluid;
+          console.log(`[Factory] ${component.type} ${id}: matching upstream conditions from ${upstreamComponent.label || inletConnection.fromComponentId} ` +
+            `(${(upstreamFluid.pressure / 1e5).toFixed(1)} bar, ${(upstreamFluid.temperature - 273.15).toFixed(0)}°C)`);
+
+          // Recreate the fluid state with upstream conditions
+          flowNode.fluid = createFluidState(
+            upstreamFluid.temperature,
+            upstreamFluid.pressure,
+            upstreamFluid.phase || 'liquid',
+            upstreamFluid.quality || 0,
+            flowNode.volume
+          );
+        }
+      }
+    }
+  }
+
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 
   return state;
@@ -951,7 +985,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'pump': {
       const pump = component as any;
-      const volume = 0.1; // Small volume for pump
+      // Pump internal volume scales with flow capacity
+      // A typical RCP (~5000 kg/s) has ~1-2 m³ internal volume
+      // Small pumps (~100 kg/s) have ~0.1 m³
+      // Scale: volume ≈ 0.0002 * ratedFlow (so 100 kg/s → 0.02 m³, 5000 kg/s → 1 m³)
+      // Minimum 0.05 m³ to avoid numerical issues
+      const ratedFlow = pump.ratedFlow || 100;
+      const volume = Math.max(0.05, 0.0002 * ratedFlow);
       const temp = pump.fluid?.temperature || 350;
       const pressure = pump.fluid?.pressure || 1e6;
 
@@ -968,7 +1008,12 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'valve': {
       const valve = component as any;
-      const volume = 0.05; // Small volume for valve
+      // Valve volume scales with diameter
+      // Approximate as a cylinder: V ≈ π * (D/2)² * 2D (body length ≈ 2x diameter)
+      // For 0.2m valve: V ≈ 0.013 m³
+      // Minimum 0.01 m³ to avoid numerical issues
+      const diameter = valve.diameter || 0.2;
+      const volume = Math.max(0.01, Math.PI * Math.pow(diameter / 2, 2) * diameter * 2);
       const temp = valve.fluid?.temperature || 350;
       const pressure = valve.fluid?.pressure || 1e6;
 

@@ -239,6 +239,17 @@ export class ConstructionManager {
       }
 
       case 'valve': {
+        // Create valve-specific fluid state from user properties
+        // If matchUpstream is true, use placeholder values - factory will override
+        const matchUpstream = props.matchUpstream !== false; // Default true
+        const valveFluid: Fluid = {
+          temperature: props.initialTemperature !== undefined ? props.initialTemperature + 273.15 : 323.15, // Default 50°C
+          pressure: props.initialPressure !== undefined ? props.initialPressure * 1e5 : 1e6, // Default 10 bar
+          phase: 'liquid',
+          quality: 0,
+          flowRate: 0
+        };
+
         // Regular valves (gate, globe, ball, butterfly) are bidirectional
         const valve: ValveComponent = {
           id,
@@ -250,8 +261,10 @@ export class ConstructionManager {
           opening: props.initialPosition / 100,
           valveType: props.type || 'gate',
           ports: bidirectionalPorts,
-          fluid: defaultFluid
+          fluid: valveFluid
         };
+        // Store matchUpstream for factory to use
+        (valve as any).matchUpstream = matchUpstream;
 
         this.plantState.components.set(id, valve);
         break;
@@ -397,6 +410,17 @@ export class ConstructionManager {
             ];
         }
 
+        // Create pump-specific fluid state from user properties
+        // If matchUpstream is true, use placeholder values - factory will override
+        const matchUpstream = props.matchUpstream !== false; // Default true
+        const pumpFluid: Fluid = {
+          temperature: props.initialTemperature !== undefined ? props.initialTemperature + 273.15 : 323.15, // Default 50°C
+          pressure: props.initialPressure !== undefined ? props.initialPressure * 1e5 : 1e6, // Default 10 bar
+          phase: 'liquid',
+          quality: 0,
+          flowRate: 0
+        };
+
         const pump: PumpComponent = {
           id,
           type: 'pump',
@@ -409,10 +433,11 @@ export class ConstructionManager {
           ratedFlow: props.ratedFlow,
           ratedHead: props.ratedHead,
           ports: pumpPorts,
-          fluid: defaultFluid
+          fluid: pumpFluid
         };
-        // Store orientation for edit dialog
+        // Store orientation and matchUpstream for factory to use
         (pump as any).orientation = orientation;
+        (pump as any).matchUpstream = matchUpstream;
 
         this.plantState.components.set(id, pump);
         break;

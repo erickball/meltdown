@@ -4,13 +4,14 @@ This project is intended as a sandbox environment with game-like aspects, to all
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
--Flow arrows are not located at the connections and not pointing the way flow is going. And the numbers with them should be black not white.
+-The numbers with flow arrows should be black not white.
+-Flow arrows are not located at the connections and not pointing the way flow is going. 
 -Show connection starting from their listed elevation.
 -When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
 -When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
--Minimum pressure rating for a tank is what's needed for the hydrostatic pressure at its height
+-Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
 

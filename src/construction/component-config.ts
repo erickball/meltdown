@@ -23,6 +23,8 @@ export interface ComponentOption {
   help?: string;
   // For calculated fields: function that computes value from other properties
   calculate?: (props: Record<string, any>) => string;
+  // For conditional visibility: show/hide based on another field's value
+  dependsOn?: { field: string; value: any };
 }
 
 export const componentDefinitions: Record<string, {
@@ -180,6 +182,9 @@ export const componentDefinitions: Record<string, {
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
       { name: 'initialPosition', type: 'number', label: 'Initial Position', default: 100, min: 0, max: 100, step: 5, unit: '%', help: '0% = closed, 100% = open' },
+      { name: 'matchUpstream', type: 'checkbox', label: 'Match upstream conditions', default: true, help: 'Automatically set initial P/T from connected upstream component' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 10, min: 0.01, max: 250, step: 0.1, unit: 'bar', dependsOn: { field: 'matchUpstream', value: false } },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 50, min: 0, max: 400, step: 1, unit: '°C', dependsOn: { field: 'matchUpstream', value: false } },
       // Cv calculated from diameter and valve type
       // Cv ≈ 29.84 * d² for gate/ball (full bore), less for globe/butterfly
       { name: 'cv', type: 'calculated', label: 'Flow Coefficient (Cv)', default: 0,
@@ -309,6 +314,9 @@ export const componentDefinitions: Record<string, {
         { value: 'on', label: 'Running' },
         { value: 'off', label: 'Stopped' }
       ]},
+      { name: 'matchUpstream', type: 'checkbox', label: 'Match upstream conditions', default: true, help: 'Automatically set initial P/T from connected upstream component' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 10, min: 0.01, max: 250, step: 0.1, unit: 'bar', dependsOn: { field: 'matchUpstream', value: false } },
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 50, min: 0, max: 400, step: 1, unit: '°C', dependsOn: { field: 'matchUpstream', value: false } },
       // Calculated fields
       { name: 'diameter', type: 'calculated', label: 'Pump Diameter', default: 0, unit: 'm',
         calculate: (p) => {
@@ -731,10 +739,15 @@ export class ComponentDialog {
       this.bodyElement.appendChild(columnsWrapper);
     }
 
+    // Track form groups by option name for dependsOn visibility
+    const formGroups: Map<string, HTMLElement> = new Map();
+
     // Build input fields
     inputOptions.forEach(option => {
       const formGroup = document.createElement('div');
       formGroup.className = 'form-group';
+      formGroup.dataset.optionName = option.name;
+      formGroups.set(option.name, formGroup);
 
       const label = document.createElement('label');
       label.textContent = option.label + (option.unit ? ` (${option.unit})` : '');
@@ -821,6 +834,38 @@ export class ComponentDialog {
 
       inputContainer.appendChild(formGroup);
     });
+
+    // Set up dependsOn visibility logic
+    const updateDependentVisibility = () => {
+      inputOptions.forEach(option => {
+        if (option.dependsOn) {
+          const formGroup = formGroups.get(option.name);
+          const controllingInput = document.getElementById(`option-${option.dependsOn.field}`) as HTMLInputElement;
+          if (formGroup && controllingInput) {
+            let currentValue: any;
+            if (controllingInput.type === 'checkbox') {
+              currentValue = controllingInput.checked;
+            } else {
+              currentValue = controllingInput.value;
+            }
+            const shouldShow = currentValue === option.dependsOn.value;
+            formGroup.style.display = shouldShow ? '' : 'none';
+          }
+        }
+      });
+    };
+
+    // Add change listeners for fields that control visibility
+    const controllingFields = new Set(inputOptions.filter(o => o.dependsOn).map(o => o.dependsOn!.field));
+    controllingFields.forEach(fieldName => {
+      const input = document.getElementById(`option-${fieldName}`);
+      if (input) {
+        input.addEventListener('change', updateDependentVisibility);
+      }
+    });
+
+    // Initial visibility update
+    updateDependentVisibility();
 
     // Build calculated fields in right column
     if (calculatedContainer && calculatedOptions.length > 0) {
@@ -1300,10 +1345,15 @@ export class ComponentDialog {
       this.bodyElement.appendChild(columnsWrapper);
     }
 
+    // Track form groups by option name for dependsOn visibility
+    const formGroups: Map<string, HTMLElement> = new Map();
+
     // Build input fields with existing values
     inputOptions.forEach(option => {
       const formGroup = document.createElement('div');
       formGroup.className = 'form-group';
+      formGroup.dataset.optionName = option.name;
+      formGroups.set(option.name, formGroup);
 
       const label = document.createElement('label');
       label.textContent = option.label + (option.unit ? ` (${option.unit})` : '');
@@ -1394,6 +1444,38 @@ export class ComponentDialog {
 
       inputContainer.appendChild(formGroup);
     });
+
+    // Set up dependsOn visibility logic
+    const updateDependentVisibility = () => {
+      inputOptions.forEach(option => {
+        if (option.dependsOn) {
+          const formGroup = formGroups.get(option.name);
+          const controllingInput = document.getElementById(`option-${option.dependsOn.field}`) as HTMLInputElement;
+          if (formGroup && controllingInput) {
+            let currentValue: any;
+            if (controllingInput.type === 'checkbox') {
+              currentValue = controllingInput.checked;
+            } else {
+              currentValue = controllingInput.value;
+            }
+            const shouldShow = currentValue === option.dependsOn.value;
+            formGroup.style.display = shouldShow ? '' : 'none';
+          }
+        }
+      });
+    };
+
+    // Add change listeners for fields that control visibility
+    const controllingFields = new Set(inputOptions.filter(o => o.dependsOn).map(o => o.dependsOn!.field));
+    controllingFields.forEach(fieldName => {
+      const input = document.getElementById(`option-${fieldName}`);
+      if (input) {
+        input.addEventListener('change', updateDependentVisibility);
+      }
+    });
+
+    // Initial visibility update
+    updateDependentVisibility();
 
     // Build calculated fields (same as buildForm)
     if (calculatedContainer && calculatedOptions.length > 0) {

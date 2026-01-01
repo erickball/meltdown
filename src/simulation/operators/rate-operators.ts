@@ -639,14 +639,13 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         }
       }
 
-      // Sanity checks
+      // Sanity checks - log warnings but do NOT clamp values
+      // Clamping hides problems; we need to see what's causing invalid states
       if (!isFinite(flowNode.fluid.temperature) || flowNode.fluid.temperature < 200 || flowNode.fluid.temperature > 2000) {
-        console.warn(`[FluidState] Invalid temperature in ${nodeId}: ${flowNode.fluid.temperature}K`);
-        flowNode.fluid.temperature = Math.max(280, Math.min(700, flowNode.fluid.temperature || 300));
+        console.warn(`[FluidState] Invalid temperature in ${nodeId}: ${flowNode.fluid.temperature}K, mass=${flowNode.fluid.mass.toFixed(1)}kg, U=${(flowNode.fluid.internalEnergy/1e6).toFixed(2)}MJ`);
       }
       if (!isFinite(flowNode.fluid.pressure) || flowNode.fluid.pressure < 1000 || flowNode.fluid.pressure > 50e6) {
-        console.warn(`[FluidState] Invalid pressure in ${nodeId}: ${flowNode.fluid.pressure}Pa`);
-        flowNode.fluid.pressure = Math.max(1e5, Math.min(20e6, flowNode.fluid.pressure || 1e6));
+        console.warn(`[FluidState] Invalid pressure in ${nodeId}: ${flowNode.fluid.pressure}Pa, mass=${flowNode.fluid.mass.toFixed(1)}kg, vol=${flowNode.volume.toFixed(3)}m³, ρ=${(flowNode.fluid.mass/flowNode.volume).toFixed(1)}kg/m³`);
       }
     }
 
@@ -718,18 +717,8 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
 
       // === PHYSICAL CONSTRAINTS ON FLOW ===
 
-      // Running pumps act as check valves - clamp reverse flow to zero
-      // This is a hard physical constraint that must be enforced after integration
-      for (const [, pump] of newState.components.pumps) {
-        if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0.01) {
-          if (conn.massFlowRate < 0) {
-            // Reverse flow through a running pump is physically impossible
-            // The impeller blocks backflow
-            conn.massFlowRate = 0;
-          }
-          break;
-        }
-      }
+      // Note: Running pumps resist reverse flow via high friction in the rate equation,
+      // not hard clamping here. This provides smoother dynamics.
 
       // Check valves prevent reverse flow
       const checkValve = newState.components.checkValves?.get(conn.id);
@@ -1042,36 +1031,47 @@ export class FlowMomentumRateOperator implements RateOperator {
         }
       }
 
-      // Running pumps act as check valves - prevent reverse flow
-      // The constraint operator will clamp flow to >= 0 after each step,
-      // but we also need to prevent the rate equation from driving flow negative
-      let pumpOnThisConnection: { running: boolean; effectiveSpeed: number } | undefined;
-      for (const [, pump] of state.components.pumps) {
+      // Check if there's a running pump on this connection
+      // A pump affects flow on BOTH its inlet and outlet connections:
+      // - Outlet connection: pump.connectedFlowPath matches conn.id
+      // - Inlet connection: pump is the toNode of this connection
+      let pumpOnOutlet: { running: boolean; effectiveSpeed: number } | undefined;
+      let pumpOnInlet: { running: boolean; effectiveSpeed: number } | undefined;
+
+      for (const [pumpId, pump] of state.components.pumps) {
         if (pump.connectedFlowPath === conn.id) {
-          pumpOnThisConnection = pump;
-          break;
+          // This is the pump's outlet connection (pump is fromNode)
+          pumpOnOutlet = pump;
         }
-      }
-      if (pumpOnThisConnection && pumpOnThisConnection.running && pumpOnThisConnection.effectiveSpeed > 0.01) {
-        // If flow is at or near zero and pressure would drive it backward, prevent acceleration
-        // The pump impeller physically blocks reverse flow
-        if (currentFlow <= 0 && dP_driving < 0) {
-          // No acceleration - pump holds flow at zero
-          rates.flowConnections.set(conn.id, { dMassFlowRate: 0 });
-          continue;
-        }
-        // If flow is small positive but about to go negative, also prevent
-        if (currentFlow > 0 && currentFlow < 1 && dP_driving < 0) {
-          // Clamp acceleration to prevent going negative
-          rates.flowConnections.set(conn.id, { dMassFlowRate: 0 });
-          continue;
+        if (conn.toNodeId === pumpId) {
+          // This is the pump's inlet connection (pump is toNode)
+          pumpOnInlet = pump;
         }
       }
 
       // Resistance coefficient (K-factor)
       const K_base = conn.resistanceCoeff || 10;
       // Valve increases resistance as it closes: K_eff = K_base / position²
-      const K_eff = K_base / Math.pow(valveOpenFraction, 2);
+      let K_eff = K_base / Math.pow(valveOpenFraction, 2);
+
+      // Running pumps have very high resistance to reverse flow through the pump
+      // The pump impeller physically blocks backflow - model this as extremely high friction
+      //
+      // For outlet connection (pump is fromNode):
+      //   - Positive flow = normal (pump pushes out)
+      //   - Negative flow = reverse (downstream pushes back through pump) → block
+      //
+      // For inlet connection (pump is toNode):
+      //   - Positive flow = normal (upstream flows into pump)
+      //   - Negative flow = reverse (pump pushes back through its inlet) → block
+      //
+      // Note: Both cases involve currentFlow < 0, which means flow going from toNode to fromNode
+      if (pumpOnOutlet && pumpOnOutlet.running && currentFlow < 0) {
+        K_eff += 10000 * K_base;
+      }
+      if (pumpOnInlet && pumpOnInlet.running && currentFlow < 0) {
+        K_eff += 10000 * K_base;
+      }
 
       // === Momentum equation ===
 

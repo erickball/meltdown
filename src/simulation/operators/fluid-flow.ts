@@ -101,13 +101,8 @@ export class FlowOperator implements PhysicsOperator {
       let targetFlow = this.computeFlowRate(conn, fromNode, toNode, newState, dt);
       // flowCalcTime += performance.now() - tFlowStart;
 
-      // RESTRICTION: No reverse flow through a running pump
-      // Running pumps act as a check valve - they prevent backflow even if pressure
-      // would drive flow in reverse. This prevents numerical instabilities.
-      const pump = this.getPumpForConnection(conn.id, newState);
-      if (pump && pump.running && pump.effectiveSpeed > 0.01 && targetFlow < 0) {
-        targetFlow = 0;
-      }
+      // Note: Reverse flow through running pumps is handled via high friction
+      // in computeFlowRate, not by hard clamping here.
 
       // SAFEGUARD: Clamp target flow to reasonable range
       // const unclamped = targetFlow;
@@ -494,8 +489,15 @@ export class FlowOperator implements PhysicsOperator {
     // }
 
     // Compute flow from pressure drop
-    const K = conn.resistanceCoeff * resistanceMult;
+    let K = conn.resistanceCoeff * resistanceMult;
     if (K <= 0) return 0;
+
+    // Running pumps have very high resistance to reverse flow
+    // The pump impeller physically blocks backflow - model this as extremely high friction
+    if (pump && pump.running && conn.massFlowRate < 0) {
+      // Add massive friction coefficient for reverse flow (10000x base resistance)
+      K += 10000 * conn.resistanceCoeff;
+    }
 
     const A = conn.flowArea;
 
