@@ -1417,6 +1417,12 @@ export class ComponentDialog {
       if (optionName === 'operatingPressure') {
         return value / 1e5;  // Pa to bar
       }
+      // Convert 0-1 to % for efficiency, valve, and blowdown fields
+      if (optionName === 'turbineEfficiency' || optionName === 'generatorEfficiency' ||
+          optionName === 'pumpEfficiency' || optionName === 'governorValve' || optionName === 'efficiency' ||
+          optionName === 'blowdown') {
+        return value * 100;  // 0-1 to %
+      }
       return value;
     }
 
@@ -1446,6 +1452,9 @@ export class ComponentDialog {
       'lowPower': ['setpoints.lowPower'],
       'highFuelTemp': ['setpoints.highFuelTemp'],
       'lowCoolantFlow': ['setpoints.lowCoolantFlow'],
+      // Turbine-specific mappings
+      'inletPressure': ['inletFluid.pressure'],
+      'exhaustPressure': ['outletFluid.pressure'],
     };
 
     const mappings = propertyMappings[optionName];
@@ -1463,6 +1472,8 @@ export class ComponentDialog {
             if (prop === 'fluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
             if (prop === 'fluid.temperature') return (value as unknown as number) - 273; // K to C
             if (prop === 'setpoints.highFuelTemp') return (value as unknown as number) * 100; // 0-1 to %
+            if (prop === 'inletFluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
+            if (prop === 'outletFluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
             return value;
           }
         } else if (component[prop] !== undefined) {

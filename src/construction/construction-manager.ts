@@ -1844,6 +1844,19 @@ export class ConstructionManager {
       component.opening = properties.initialPosition / 100; // % to 0-1
     }
 
+    // Relief valve / PORV specific
+    if (properties.setpoint !== undefined) {
+      component.setpoint = properties.setpoint * 1e5; // bar to Pa
+    }
+    if (properties.blowdown !== undefined) {
+      component.blowdown = properties.blowdown / 100; // % to 0-1
+    }
+
+    // Check valve specific
+    if (properties.crackingPressure !== undefined) {
+      component.crackingPressure = properties.crackingPressure * 1e5; // bar to Pa
+    }
+
     // Pump-specific properties
     if (properties.ratedFlow !== undefined) {
       component.ratedFlow = properties.ratedFlow;
@@ -1924,6 +1937,36 @@ export class ConstructionManager {
     }
     if (properties.operatingPressure !== undefined) {
       component.operatingPressure = properties.operatingPressure * 1e5; // bar to Pa
+    }
+
+    // Turbine/turbine-driven-pump specific
+    if (properties.ratedPower !== undefined) {
+      component.ratedPower = properties.ratedPower * 1e6; // MW to W
+    }
+    if (properties.inletPressure !== undefined && component.inletFluid) {
+      component.inletFluid.pressure = properties.inletPressure * 1e5; // bar to Pa
+    }
+    if (properties.exhaustPressure !== undefined && component.outletFluid) {
+      component.outletFluid.pressure = properties.exhaustPressure * 1e5; // bar to Pa
+    }
+    if (properties.turbineEfficiency !== undefined) {
+      component.turbineEfficiency = properties.turbineEfficiency / 100; // % to 0-1
+      // Also update 'efficiency' for turbine-generator which uses that name
+      if (component.efficiency !== undefined) {
+        component.efficiency = properties.turbineEfficiency / 100;
+      }
+    }
+    if (properties.generatorEfficiency !== undefined) {
+      component.generatorEfficiency = properties.generatorEfficiency / 100; // % to 0-1
+    }
+    if (properties.pumpEfficiency !== undefined) {
+      component.pumpEfficiency = properties.pumpEfficiency / 100; // % to 0-1
+    }
+    if (properties.governorValve !== undefined) {
+      component.governorValve = properties.governorValve / 100; // % to 0-1
+    }
+    if (properties.stages !== undefined) {
+      component.stages = properties.stages;
     }
 
     // Core-specific properties
