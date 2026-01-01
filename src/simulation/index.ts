@@ -75,5 +75,7 @@ export {
   clearStateCache,
   preloadWaterProperties,
   isWaterPropertiesLoaded,
+  setDebugNodeId,
+  clearPressureHistory,
   type WaterPropsProfile,
 } from './water-properties';

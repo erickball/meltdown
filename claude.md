@@ -3,7 +3,14 @@
 This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, clamping, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. Although we are using a PWR-like setup for testing, this is not a "PWR simulator" and none of the hydraulic components have special roles. It can also do BWRs, advanced reactors, or new and weird ideas for reactor designs. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
+## WATER PROPERTIES NOTES
+- Our saturated steam table data goes all the way from the triple point to the critical point.
+- It is critical to determine phase PURELY by comparing whether a node's (energy, volume) pair is inside the saturation dome in (u,v) space. Any thresholds, approximations, or special case rules will cause problems down the line.
+- Representing the dome boundary as a single curve that concatenates the saturated liquid and saturated vapor lines DOES correctly represent the two-phase region. Testing whether u < u_sat(v) is the ONLY valid way to determine if a node is two-phase.
+- If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions.
+
 ## TODO List
+-I guess maybe some kind of semi-implicit fluid flow/pressure calculation
 -The numbers with flow arrows should be black not white.
 -Flow arrows are not located at the connections and not pointing the way flow is going. 
 -Show connection starting from their listed elevation.
@@ -51,9 +58,9 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 -We should make a pebble bed core option, too
 -Not sure how to handle needing big graphite reflectors though?
 
--Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. 
+-Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
-
+## Done List
 X Initial pressure can't be higher than pressure rating. Maybe 95% of pressure rating (nah)
 X the condenser ports are in the right position now, but the pipe ports are offset by L/2. Remember that pipe position is at one end, not in the middle.
 X If you zoom in on the red and green ports you should be able to see a white arrow in them pointing towards or away from the component center.
@@ -122,9 +129,4 @@ X Add check valves
 X Add better secondary side modeling (turbine, condenser)
 X Flow connections should have a specified elevation and check if it's above or below the liquid level in a tank, and transfer saturated liquid/saturated steam/mixture as appropriate.
 
-## WATER PROPERTIES NOTES
-- Our saturated steam table data goes all the way from the triple point to the critical point.
-- It is critical to determine phase PURELY by comparing whether a node's (energy, volume) pair is inside the saturation dome in (u,v) space. Any thresholds, approximations, or special case rules will cause problems down the line.
-- Representing the dome boundary as a single curve that concatenates the saturated liquid and saturated vapor lines DOES correctly represent the two-phase region. Testing whether u < u_sat(v) is the ONLY valid way to determine if a node is two-phase.
-- If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions.
 

@@ -687,11 +687,18 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
       }
 
       // Calculate water state normally
+      // DEBUG: Track pressure jumps for pum-5 specifically
+      if (nodeId === 'pum-5') {
+        Water.setDebugNodeId('pum-5');
+      }
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
         flowNode.fluid.internalEnergy,
         flowNode.volume
       );
+      if (nodeId === 'pum-5') {
+        Water.setDebugNodeId(null);
+      }
 
       // Check if temperature would go below freezing
       if (waterState.temperature < FluidStateConstraintOperator.T_FREEZE) {
@@ -753,7 +760,8 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
       if (!isFinite(flowNode.fluid.temperature) || flowNode.fluid.temperature < 200 || flowNode.fluid.temperature > 2000) {
         console.warn(`[FluidState] Invalid temperature in ${nodeId}: ${flowNode.fluid.temperature}K, mass=${flowNode.fluid.mass.toFixed(1)}kg, U=${(flowNode.fluid.internalEnergy/1e6).toFixed(2)}MJ`);
       }
-      if (!isFinite(flowNode.fluid.pressure) || flowNode.fluid.pressure < 1000 || flowNode.fluid.pressure > 50e6) {
+      // Triple point pressure is 611.657 Pa - warn if we get close to or below it
+      if (!isFinite(flowNode.fluid.pressure) || flowNode.fluid.pressure < 650 || flowNode.fluid.pressure > 50e6) {
         console.warn(`[FluidState] Invalid pressure in ${nodeId}: ${flowNode.fluid.pressure}Pa, mass=${flowNode.fluid.mass.toFixed(1)}kg, vol=${flowNode.volume.toFixed(3)}m³, ρ=${(flowNode.fluid.mass/flowNode.volume).toFixed(1)}kg/m³`);
       }
     }

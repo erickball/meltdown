@@ -48,6 +48,61 @@ function formatValue(value: number, unit: string = '', warnThreshold?: number, d
 }
 
 /**
+ * Smart format for temperature (°C) - more digits for small/cold values
+ */
+function formatTemp(tempC: number): string {
+  if (Math.abs(tempC) < 10) {
+    return tempC.toFixed(2);  // e.g., "0.31" or "-5.25"
+  } else if (Math.abs(tempC) < 100) {
+    return tempC.toFixed(1);  // e.g., "70.5"
+  } else {
+    return tempC.toFixed(0);  // e.g., "260"
+  }
+}
+
+/**
+ * Smart format for pressure (bar) - more digits for low pressures
+ */
+function formatPressure(pBar: number): string {
+  if (pBar < 0.1) {
+    return pBar.toFixed(4);   // e.g., "0.0312"
+  } else if (pBar < 1) {
+    return pBar.toFixed(3);   // e.g., "0.312"
+  } else if (pBar < 10) {
+    return pBar.toFixed(2);   // e.g., "5.67"
+  } else {
+    return pBar.toFixed(1);   // e.g., "155.3"
+  }
+}
+
+/**
+ * Smart format for flow rate (kg/s) - more digits for low flows
+ */
+function formatFlow(flow: number): string {
+  const absFlow = Math.abs(flow);
+  if (absFlow < 1) {
+    return flow.toFixed(2);   // e.g., "0.25" or "-0.03"
+  } else if (absFlow < 10) {
+    return flow.toFixed(1);   // e.g., "5.3"
+  } else {
+    return flow.toFixed(0);   // e.g., "1557"
+  }
+}
+
+/**
+ * Format density with one extra digit (always show .1 precision)
+ */
+function formatDensity(rho: number): string {
+  if (rho < 10) {
+    return rho.toFixed(2);    // e.g., "0.35"
+  } else if (rho < 100) {
+    return rho.toFixed(1);    // e.g., "72.5"
+  } else {
+    return rho.toFixed(1);    // e.g., "975.3" (extra digit vs previous)
+  }
+}
+
+/**
  * Update the debug panel with current simulation state
  */
 export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics): void {
@@ -152,7 +207,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       const showTransition = prevPressure !== undefined && Math.abs(prevPressure - node.fluid.pressure) > 1000; // Show if change > 0.01 bar
 
       html += `<b>${id}</b>: `;
-      html += `<span class="${tempClass}">${tempC.toFixed(0)}C</span>, `;
+      html += `<span class="${tempClass}">${formatTemp(tempC)}C</span>, `;
 
       // Show pressure transition if significant change
       if (showTransition) {
@@ -160,9 +215,9 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
         const changeBar = (node.fluid.pressure - prevPressure) / 1e5;
         const changeClass = Math.abs(changeBar) > 5 ? 'debug-danger' :
                            Math.abs(changeBar) > 2 ? 'debug-warning' : 'debug-value';
-        html += `${prevPBar.toFixed(2)}→<span class="${changeClass}">${pBar.toFixed(2)}bar</span>, `;
+        html += `${formatPressure(prevPBar)}→<span class="${changeClass}">${formatPressure(pBar)}bar</span>, `;
       } else {
-        html += `${pBar.toFixed(2)}bar, `;
+        html += `${formatPressure(pBar)}bar, `;
       }
 
       html += `<span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
@@ -172,7 +227,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       }
       // Show density for debugging pressure deviation
       const rho = massKg / node.volume;
-      html += ` ρ=${rho.toFixed(0)}`;
+      html += ` ρ=${formatDensity(rho)}`;
       html += '<br>';
 
       // Second line: phase-specific debug info
@@ -186,7 +241,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       if (node.fluid.phase === 'two-phase') {
         // Two-phase: pressure is P_sat, no feedback model applies
         // Just show the raw water properties pressure for comparison
-        html += ` (P<sub>sat</sub>=${rawP_bar.toFixed(1)}bar)`;
+        html += ` (P<sub>sat</sub>=${formatPressure(rawP_bar)}bar)`;
       } else if (node.fluid.phase === 'liquid') {
         // Liquid nodes: get P_base directly from simulation state (set by FluidStateOperator)
         const u_J = node.fluid.internalEnergy / massKg; // J/kg for lookup
@@ -216,13 +271,14 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
         const deviationClass = Math.abs(dP_feedback_bar) > 50 ? 'debug-danger' :
                               Math.abs(dP_feedback_bar) > 10 ? 'debug-warning' : 'debug-value';
 
-        html += `, ρ<sub>exp</sub>=${rho_expected.toFixed(0)}`;
-        html += `, P<sub>base</sub>=${isNaN(P_base_bar) ? "err" : P_base_bar.toFixed(1) + "bar"}`;
-        html += `, <span class="${deviationClass}">ΔP<sub>fb</sub>=${dP_feedback_bar >= 0 ? '+' : ''}${dP_feedback_bar.toFixed(1)}bar</span>`;
-        html += ` (P<sub>wp</sub>=${rawP_bar.toFixed(1)}bar)`;
+        html += `, ρ<sub>exp</sub>=${formatDensity(rho_expected)}`;
+        html += `, P<sub>base</sub>=${isNaN(P_base_bar) ? "err" : formatPressure(P_base_bar) + "bar"}`;
+        const dP_sign = dP_feedback_bar >= 0 ? '+' : '-';
+        html += `, <span class="${deviationClass}">ΔP<sub>fb</sub>=${dP_sign}${formatPressure(Math.abs(dP_feedback_bar))}bar</span>`;
+        html += ` (P<sub>wp</sub>=${formatPressure(rawP_bar)}bar)`;
       } else {
         // Vapor: just show raw water properties pressure
-        html += ` (P<sub>wp</sub>=${rawP_bar.toFixed(1)}bar)`;
+        html += ` (P<sub>wp</sub>=${formatPressure(rawP_bar)}bar)`;
       }
 
       html += `</span><br>`;
@@ -244,7 +300,7 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
       html += `v=${satDist.v_mLkg.toFixed(1)}`;
       html += `, v<sub>f</sub>=${satDist.v_f_closest.toFixed(1)}`;
-      html += `, P<sub>sat</sub>(T)=${(P_sat_T/1e5).toFixed(1)}bar`;
+      html += `, P<sub>sat</sub>(T)=${formatPressure(P_sat_T/1e5)}bar`;
       html += `, <span class="${distClass}">Δsat=${satDist.distance >= 0 ? '+' : ''}${satDist.distance.toFixed(1)}</span>`;
       html += `</span><br>`;
     }
@@ -260,12 +316,12 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `${conn.fromNodeId} → ${conn.toNodeId}: `;
 
       // Show actual flow
-      html += `<span class="${flowClass}">${conn.massFlowRate.toFixed(0)}</span>`;
+      html += `<span class="${flowClass}">${formatFlow(conn.massFlowRate)}</span>`;
 
       // If connection has inertance, show steady-state flow vs actual
       if (conn.inertance && conn.inertance > 0 && conn.steadyStateFlow !== undefined) {
         const steadyClass = Math.abs(conn.steadyStateFlow - conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
-        html += ` → <span class="${steadyClass}">${conn.steadyStateFlow.toFixed(0)}</span>`;
+        html += ` → <span class="${steadyClass}">${formatFlow(conn.steadyStateFlow)}</span>`;
       }
 
       html += ` kg/s`;

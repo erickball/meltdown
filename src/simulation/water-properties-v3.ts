@@ -131,6 +131,22 @@ let cacheAge = 0;
 let minVf = 0.001;
 
 // ============================================================================
+// Debug: Track large pressure jumps
+// ============================================================================
+// Tracks previous pressure by node ID (set via setDebugNodeId before calling calculateState)
+const pressureHistory: Map<string, { P: number; phase: string; path: string }> = new Map();
+let debugNodeId: string | null = null;
+let debugPressureJumpThreshold = 0.6; // Log if pressure changes by more than 60%
+
+export function setDebugNodeId(nodeId: string | null): void {
+  debugNodeId = nodeId;
+}
+
+export function clearPressureHistory(): void {
+  pressureHistory.clear();
+}
+
+// ============================================================================
 // Phase Detection Caches (built once after loading saturation pairs)
 // ============================================================================
 
@@ -943,7 +959,35 @@ function buildLiquidVUInterpolation(): void {
   buildLVUSpatialIndex();
 
   lvuDataReady = true;
+
+  // Diagnostic: count points in various pressure ranges
+  const lowP = lvuPoints.filter(p => p.P < 1e5).length;
+  const midP = lvuPoints.filter(p => p.P >= 1e5 && p.P < 10e5).length;
+  const highP = lvuPoints.filter(p => p.P >= 10e5).length;
   console.log(`[WaterProps v3 OPTIMIZED] Liquid (V,u)->P: ${lvuPoints.length} points, ${lvuTriangles.length} triangles`);
+  console.log(`[WaterProps v3] Liquid point distribution: <1 bar: ${lowP}, 1-10 bar: ${midP}, >10 bar: ${highP}`);
+
+  // Diagnostic: find triangles with huge pressure ratios
+  let badTriangles = 0;
+  for (const t of lvuTriangles) {
+    const p0 = lvuPoints[t.i];
+    const p1 = lvuPoints[t.j];
+    const p2 = lvuPoints[t.k];
+    const minP = Math.min(p0.P, p1.P, p2.P);
+    const maxP = Math.max(p0.P, p1.P, p2.P);
+    if (maxP / minP > 100) {
+      badTriangles++;
+      if (badTriangles <= 3) {
+        console.log(`[WaterProps v3] BAD TRIANGLE: P range ${(minP/1e5).toFixed(2)}-${(maxP/1e5).toFixed(2)} bar (${(maxP/minP).toFixed(0)}x)`);
+        console.log(`  [0] u=${(p0.u/1e3).toFixed(1)} kJ/kg, v=${Math.pow(10, p0.logV)*1e6} mL/kg, P=${(p0.P/1e5).toFixed(1)} bar`);
+        console.log(`  [1] u=${(p1.u/1e3).toFixed(1)} kJ/kg, v=${Math.pow(10, p1.logV)*1e6} mL/kg, P=${(p1.P/1e5).toFixed(1)} bar`);
+        console.log(`  [2] u=${(p2.u/1e3).toFixed(1)} kJ/kg, v=${Math.pow(10, p2.logV)*1e6} mL/kg, P=${(p2.P/1e5).toFixed(1)} bar`);
+      }
+    }
+  }
+  if (badTriangles > 0) {
+    console.warn(`[WaterProps v3] Found ${badTriangles} triangles with pressure ratio >100x!`);
+  }
 }
 
 /**
@@ -1151,7 +1195,20 @@ function buildLVUSpatialIndex(): void {
  * @param v - Specific volume (m³/kg)
  * @returns Pressure in Pa, or null if outside liquid domain
  */
+export interface LiquidTriangleLookupResult {
+  P: number;
+  triangle: {
+    vertices: Array<{ logV: number; u: number; P: number; v_mLkg: number }>;
+    weights: [number, number, number];
+  };
+}
+
 export function lookupPressureFromUV_LiquidOnly(u: number, v: number): number | null {
+  const result = lookupPressureFromUV_LiquidOnlyWithDebug(u, v);
+  return result ? result.P : null;
+}
+
+export function lookupPressureFromUV_LiquidOnlyWithDebug(u: number, v: number): LiquidTriangleLookupResult | null {
   if (!lvuDataReady || lvuPoints.length === 0) {
     return null;
   }
@@ -1202,14 +1259,35 @@ export function lookupPressureFromUV_LiquidOnly(u: number, v: number): number | 
 
   const denom = (p1.u - p2.u) * (p0.logV - p2.logV) + (p2.logV - p1.logV) * (p0.u - p2.u);
   if (Math.abs(denom) < 1e-20) {
-    return (p0.P + p1.P + p2.P) / 3;
+    const avgP = (p0.P + p1.P + p2.P) / 3;
+    return {
+      P: avgP,
+      triangle: {
+        vertices: [
+          { logV: p0.logV, u: p0.u, P: p0.P, v_mLkg: Math.pow(10, p0.logV) * 1e6 },
+          { logV: p1.logV, u: p1.u, P: p1.P, v_mLkg: Math.pow(10, p1.logV) * 1e6 },
+          { logV: p2.logV, u: p2.u, P: p2.P, v_mLkg: Math.pow(10, p2.logV) * 1e6 },
+        ],
+        weights: [1/3, 1/3, 1/3],
+      },
+    };
   }
 
   const w0 = ((p1.u - p2.u) * (logV - p2.logV) + (p2.logV - p1.logV) * (u - p2.u)) / denom;
   const w1 = ((p2.u - p0.u) * (logV - p2.logV) + (p0.logV - p2.logV) * (u - p2.u)) / denom;
   const w2 = 1 - w0 - w1;
 
-  return w0 * p0.P + w1 * p1.P + w2 * p2.P;
+  return {
+    P: w0 * p0.P + w1 * p1.P + w2 * p2.P,
+    triangle: {
+      vertices: [
+        { logV: p0.logV, u: p0.u, P: p0.P, v_mLkg: Math.pow(10, p0.logV) * 1e6 },
+        { logV: p1.logV, u: p1.u, P: p1.P, v_mLkg: Math.pow(10, p1.logV) * 1e6 },
+        { logV: p2.logV, u: p2.u, P: p2.P, v_mLkg: Math.pow(10, p2.logV) * 1e6 },
+      ],
+      weights: [w0, w1, w2],
+    },
+  };
 }
 
 function pointInLVUTriangle(logV: number, u: number, t: Triangle): boolean {
@@ -1314,6 +1392,11 @@ function loadData(): void {
 
     // Add interpolated compressed liquid points along isobars to fill gaps
     addInterpolatedCompressedLiquidPoints();
+
+    // Add synthetic near-saturation liquid points to fill triangulation gaps at low pressures
+    // This is critical: steam tables typically lack compressed liquid data at low P,
+    // causing triangulation to span huge pressure ranges near the saturation line
+    addNearSaturationLiquidPoints();
 
     // Build Delaunay triangulation
     console.time("[WaterProps] buildTriangulation");
@@ -1632,6 +1715,156 @@ function addInterpolatedCompressedLiquidPoints(): void {
   if (newPoints.length > 0) {
     dataPoints.push(...newPoints);
     console.log(`[WaterProps v3] Added ${newPoints.length} interpolated compressed liquid points`);
+  }
+}
+
+/**
+ * Add synthetic compressed liquid points near the saturation line for low pressures.
+ *
+ * The steam table typically only has compressed liquid data at higher pressures
+ * (above ~10 bar). At low pressures (e.g., 0.3 bar at 70°C), there's only the
+ * saturation point, causing the triangulation to use distant high-pressure points.
+ *
+ * This function generates synthetic liquid points by:
+ * 1. Taking saturation liquid (v_f, u_f) at each T
+ * 2. Creating points at slightly higher pressures using incompressibility:
+ *    - v stays ~constant (liquid is incompressible)
+ *    - u increases slightly with compression
+ *
+ * Physics basis:
+ * - Liquid water is nearly incompressible: v ≈ v_f for P > P_sat
+ * - Internal energy increases slightly with pressure: du/dP ≈ v (at constant T)
+ * - For small compression: u(P) ≈ u_f + v_f * (P - P_sat)
+ */
+function addNearSaturationLiquidPoints(): void {
+  if (saturationPairs.length < 2) return;
+
+  const newPoints: DataPoint[] = [];
+
+  // The steam table has 5°C temperature spacing, which leaves gaps in (v,u) space
+  // where triangulation creates bad triangles spanning huge pressure ranges.
+  // Focus on the problematic region: 50-120°C where low-pressure liquid exists.
+  // We only need a few hundred points, not thousands.
+
+  // Sort saturation pairs by temperature
+  const sortedSat = [...saturationPairs].sort((a, b) => a.T - b.T);
+
+  // Only fill gaps in the low-temperature region (50-120°C = 323-393 K)
+  // where the steam table has 5°C gaps that cause bad triangles
+  for (let i = 0; i < sortedSat.length - 1; i++) {
+    const sat1 = sortedSat[i];
+    const sat2 = sortedSat[i + 1];
+
+    // Only process pairs in the problematic temperature range
+    if (sat1.T < 323 || sat2.T > 393) continue;
+
+    const dT = sat2.T - sat1.T;
+    if (dT < 1 || dT > 10) continue;
+
+    // Generate intermediate temperatures at 1 K intervals
+    const T_start = Math.ceil(sat1.T);
+    const T_end = Math.floor(sat2.T);
+    for (let T = T_start; T <= T_end; T += 1) {
+      if (T - sat1.T < 0.5 || sat2.T - T < 0.5) continue;
+
+      const t = (T - sat1.T) / dT;
+      const P_sat = sat1.P + t * (sat2.P - sat1.P);
+      const v_f = sat1.v_f + t * (sat2.v_f - sat1.v_f);
+      const u_f = sat1.u_f + t * (sat2.u_f - sat1.u_f);
+
+      const T_C = T - 273.15;
+      const K = (2.2 - 0.004 * T_C) * 1e9;
+
+      // Pressure levels - dense coverage to break up triangles spanning huge P ranges
+      // At T=70°C, P_sat=0.31 bar. We need points at 0.5, 1, 2, 5, 10, 20 bar etc.
+      const pressures = [
+        P_sat + 0.2e5,  // 0.2 bar above saturation
+        P_sat + 0.5e5,  // 0.5 bar above saturation
+        P_sat + 1e5,    // 1 bar above saturation
+        P_sat + 2e5,    // 2 bar above saturation
+        P_sat + 5e5,    // 5 bar above saturation
+        P_sat + 10e5,   // 10 bar above saturation
+        P_sat + 25e5,   // 25 bar above saturation
+      ];
+
+      for (const P of pressures) {
+        if (P > 35e6) continue;
+
+        const dP = P - P_sat;
+        const dV_over_V = -dP / K;
+        const v = v_f * (1 + dV_over_V);
+        const du_dP = -0.2e3 / 1e6;
+        const u = u_f + du_dP * dP;
+
+        newPoints.push({
+          P,
+          T,
+          v,
+          u,
+          logV: Math.log10(v),
+          logP: Math.log10(P),
+          phase: 'liquid',
+        });
+      }
+    }
+  }
+
+  // Also add a few points at existing saturation temperatures in the problem range
+  for (const sat of saturationPairs) {
+    // Only in the problematic temperature range (50-120°C)
+    if (sat.T < 323 || sat.T > 393) continue;
+
+    const T_C = sat.T - 273.15;
+    const K = (2.2 - 0.004 * T_C) * 1e9;
+
+    // Include low pressure levels to break up triangles near saturation
+    const pressures = [
+      sat.P + 0.1e5,  // 0.1 bar above saturation
+      sat.P + 0.5e5,  // 0.5 bar above saturation
+      sat.P + 2e5,    // 2 bar above saturation
+      sat.P + 10e5,   // 10 bar above saturation
+    ];
+
+    for (const P of pressures) {
+      if (P > 35e6) continue;
+
+      const dP = P - sat.P;
+      const dV_over_V = -dP / K;
+      const v = sat.v_f * (1 + dV_over_V);
+      const du_dP = -0.2e3 / 1e6;
+      const u = sat.u_f + du_dP * dP;
+
+      newPoints.push({
+        P,
+        T: sat.T,
+        v,
+        u,
+        logV: Math.log10(v),
+        logP: Math.log10(P),
+        phase: 'liquid',
+      });
+    }
+  }
+
+  if (newPoints.length > 0) {
+    dataPoints.push(...newPoints);
+    console.log(`[WaterProps v3] Added ${newPoints.length} near-saturation liquid points (with intermediate temperatures)`);
+
+    // Debug: show points near the problematic region (u ~ 290-320 kJ/kg, T ~ 70-77°C)
+    const nearProblem = newPoints.filter(p => p.u > 290e3 && p.u < 320e3 && p.T > 340 && p.T < 355);
+    if (nearProblem.length > 0) {
+      console.log(`[WaterProps v3] Near-problem region points (u=290-320 kJ/kg, T=67-82°C): ${nearProblem.length}`);
+      // Show a sample from different temperatures
+      const byTemp = new Map<number, DataPoint[]>();
+      for (const p of nearProblem) {
+        const T_rounded = Math.round(p.T);
+        if (!byTemp.has(T_rounded)) byTemp.set(T_rounded, []);
+        byTemp.get(T_rounded)!.push(p);
+      }
+      for (const [T, pts] of Array.from(byTemp.entries()).slice(0, 5)) {
+        console.log(`  T=${T-273}°C: ${pts.length} points, P range ${(pts[0].P/1e5).toFixed(1)}-${(pts[pts.length-1].P/1e5).toFixed(1)} bar`);
+      }
+    }
   }
 }
 
@@ -2651,6 +2884,108 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   debugInfo.result = { T, P, phase };
   if (calculationDebugEnabled && calculationDebugLog.length < CALCULATION_DEBUG_MAX) {
     calculationDebugLog.push(debugInfo);
+  }
+
+  // DEBUG: Track large pressure jumps for specific node
+  if (debugNodeId) {
+    const prev = pressureHistory.get(debugNodeId);
+    const calculationPath = debugInfo.calculationPath || 'unknown';
+
+    if (prev) {
+      const pressureRatio = P / prev.P;
+      const phaseChanged = prev.phase !== phase;
+      // Log if pressure changes by more than threshold (60%) OR if phase changed
+      if (phaseChanged || pressureRatio > (1 + debugPressureJumpThreshold) || pressureRatio < 1 / (1 + debugPressureJumpThreshold)) {
+        const jumpType = phaseChanged ? `PHASE TRANSITION (${prev.phase}→${phase})` : 'PRESSURE JUMP';
+        console.warn('='.repeat(70));
+        console.warn(`[${jumpType}] Node ${debugNodeId}: ${(prev.P/1e5).toFixed(2)} bar → ${(P/1e5).toFixed(2)} bar (${((pressureRatio-1)*100).toFixed(0)}% change)`);
+        console.warn('='.repeat(70));
+        console.warn(`  PREVIOUS: P=${(prev.P/1e5).toFixed(2)} bar, phase=${prev.phase}, path=${prev.path}`);
+        console.warn(`  CURRENT:  P=${(P/1e5).toFixed(2)} bar, phase=${phase}, path=${calculationPath}`);
+        console.warn('');
+        console.warn(`  Inputs: mass=${mass.toFixed(2)}kg, U=${(internalEnergy/1e3).toFixed(1)}kJ, V=${(volume*1e3).toFixed(3)}L`);
+        console.warn(`  Derived: ρ=${rho.toFixed(2)}kg/m³, v=${(v*1e6).toFixed(2)}mL/kg, u=${(u/1e3).toFixed(2)}kJ/kg, T=${(T-273.15).toFixed(1)}°C`);
+
+        // Phase detection details
+        console.warn('');
+        console.warn(`  Phase detection:`);
+        if (debugInfo.phaseDetectionDebug) {
+          console.warn(`    Decision: ${debugInfo.phaseDetectionDebug.decisionReason || 'unknown'}`);
+          if (debugInfo.phaseDetectionDebug.x_v !== undefined) {
+            console.warn(`    x_v=${debugInfo.phaseDetectionDebug.x_v.toFixed(4)}, x_u=${debugInfo.phaseDetectionDebug.x_u?.toFixed(4)}`);
+          }
+        }
+
+        // Saturation info
+        const P_sat = saturationPressure(T);
+        const v_f = 1 / saturatedLiquidDensity(T);
+        console.warn('');
+        console.warn(`  Saturation at T=${(T-273.15).toFixed(1)}°C:`);
+        console.warn(`    P_sat=${(P_sat/1e5).toFixed(3)} bar`);
+        console.warn(`    v_f=${(v_f*1e6).toFixed(2)} mL/kg (our v=${(v*1e6).toFixed(2)} mL/kg, diff=${((v-v_f)*1e6).toFixed(3)} mL/kg)`);
+
+        // Triangulation details
+        console.warn('');
+        console.warn(`  Pressure calculation:`);
+        const P_tri = debugInfo.intermediateValues.P_triangulation;
+        if (P_tri !== undefined && typeof P_tri === 'number') {
+          console.warn(`    P_triangulation=${(P_tri/1e5).toFixed(2)} bar`);
+        }
+        const P_sat_fb = debugInfo.intermediateValues.P_sat;
+        if (P_sat_fb !== undefined && typeof P_sat_fb === 'number') {
+          console.warn(`    P_sat_fallback=${(P_sat_fb/1e5).toFixed(3)} bar`);
+          const rho_sat_val = debugInfo.intermediateValues.rho_sat;
+          const comprRatio = debugInfo.intermediateValues.compressionRatio;
+          const K_val = debugInfo.intermediateValues.K_bulkModulus;
+          if (typeof rho_sat_val === 'number') console.warn(`    rho_sat=${rho_sat_val.toFixed(2)} kg/m³`);
+          if (typeof comprRatio === 'number') console.warn(`    compressionRatio=${comprRatio.toFixed(6)}`);
+          if (typeof K_val === 'number') console.warn(`    K_bulkModulus=${(K_val/1e9).toFixed(2)} GPa`);
+        }
+
+        // Look up what findSaturationU returns for this v
+        const satResult = findSaturationU(v);
+        if (satResult) {
+          console.warn('');
+          console.warn(`  findSaturationU(v=${(v*1e6).toFixed(2)} mL/kg):`);
+          console.warn(`    u_sat=${(satResult.u_sat/1e3).toFixed(2)} kJ/kg (our u=${(u/1e3).toFixed(2)} kJ/kg)`);
+          console.warn(`    side=${satResult.side}`);
+          console.warn(`    u ${u < satResult.u_sat ? '<' : '>='} u_sat => ${u < satResult.u_sat ? 'TWO-PHASE' : 'SINGLE-PHASE'}`);
+        } else {
+          console.warn(`  findSaturationU returned null (v outside dome range)`);
+        }
+
+        // Check if liquid triangulation found a triangle - show detailed triangle info
+        if (phase === 'liquid' || prev.phase === 'liquid') {
+          console.warn('');
+          console.warn(`  Liquid triangulation lookup:`);
+          const lookupResult = lookupPressureFromUV_LiquidOnlyWithDebug(u, v);
+          if (lookupResult) {
+            console.warn(`    Result: P=${(lookupResult.P/1e5).toFixed(2)} bar`);
+            console.warn(`    Triangle vertices (logV, u [kJ/kg], v [mL/kg], P [bar]):`);
+            for (let i = 0; i < 3; i++) {
+              const vtx = lookupResult.triangle.vertices[i];
+              const w = lookupResult.triangle.weights[i];
+              console.warn(`      [${i}] logV=${vtx.logV.toFixed(5)}, u=${(vtx.u/1e3).toFixed(2)}, v=${vtx.v_mLkg.toFixed(2)}, P=${(vtx.P/1e5).toFixed(2)} bar (weight=${w.toFixed(3)})`);
+            }
+            // Check if any weights are negative (extrapolation!)
+            const [w0, w1, w2] = lookupResult.triangle.weights;
+            if (w0 < 0 || w1 < 0 || w2 < 0) {
+              console.warn(`    WARNING: Negative weights detected - EXTRAPOLATING outside triangle!`);
+            }
+            // Show pressure range of the triangle
+            const pVals = lookupResult.triangle.vertices.map(v => v.P);
+            console.warn(`    Triangle pressure range: ${(Math.min(...pVals)/1e5).toFixed(2)} - ${(Math.max(...pVals)/1e5).toFixed(2)} bar`);
+          } else {
+            console.warn(`    No triangle found for (u=${(u/1e3).toFixed(2)}, v=${(v*1e6).toFixed(2)})`);
+          }
+        }
+
+        console.warn('='.repeat(70));
+      }
+    }
+
+    // Store current state for next comparison
+    pressureHistory.set(debugNodeId, { P, phase, path: calculationPath });
   }
 
   return {
