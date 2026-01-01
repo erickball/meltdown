@@ -603,39 +603,148 @@ export class TurbineCondenserRateOperator implements RateOperator {
 export class FluidStateConstraintOperator implements ConstraintOperator {
   name = 'FluidState';
 
+  // Latent heat of fusion for water: 334 kJ/kg
+  private static readonly LATENT_HEAT_FUSION = 334000; // J/kg
+  // Freezing point
+  private static readonly T_FREEZE = 273.15; // K
+  // Specific heat of liquid water near freezing
+  private static readonly CP_WATER = 4186; // J/kg-K
+  // Maximum allowed ice fraction before throwing error
+  private static readonly MAX_ICE_FRACTION = 0.5;
+
   applyConstraints(state: SimulationState): SimulationState {
     const newState = cloneSimulationState(state);
 
     // Update fluid properties (T, P, phase) from (m, U, V)
     for (const [nodeId, flowNode] of newState.flowNodes) {
+      // Initialize ice fraction if not present
+      if (flowNode.iceFraction === undefined) {
+        flowNode.iceFraction = 0;
+      }
+
+      // First, calculate what the water state would be with current internal energy
+      let effectiveEnergy = flowNode.fluid.internalEnergy;
+
+      // If we have ice, we need to account for the latent heat locked in the ice
+      // The internal energy stored in the FluidState doesn't include the latent heat buffer
+      // So we add it back when calculating the effective temperature
+      if (flowNode.iceFraction > 0) {
+        // Ice is present - we're at the freezing point
+        // Any energy added/removed goes into melting/freezing, not temperature change
+        const iceEnergy = flowNode.iceFraction * flowNode.fluid.mass * FluidStateConstraintOperator.LATENT_HEAT_FUSION;
+
+        // Calculate what temperature would be if all the ice melted
+        const energyIfMelted = effectiveEnergy + iceEnergy;
+        const waterStateIfMelted = Water.calculateState(
+          flowNode.fluid.mass,
+          energyIfMelted,
+          flowNode.volume
+        );
+
+        if (waterStateIfMelted.temperature >= FluidStateConstraintOperator.T_FREEZE) {
+          // Enough energy to melt all ice - calculate how much ice actually melts
+          // Energy available for melting = U - U_at_0C
+          const U_at_0C = flowNode.fluid.mass * FluidStateConstraintOperator.CP_WATER * (FluidStateConstraintOperator.T_FREEZE - 273.15);
+          // This is approximate - we use the current stored energy to figure out how much to melt
+          const energyAboveFreezing = flowNode.fluid.internalEnergy - U_at_0C;
+
+          if (energyAboveFreezing > 0) {
+            // Melt some ice
+            const energyToMelt = Math.min(iceEnergy, energyAboveFreezing);
+            const iceMelted = energyToMelt / FluidStateConstraintOperator.LATENT_HEAT_FUSION / flowNode.fluid.mass;
+            flowNode.iceFraction = Math.max(0, flowNode.iceFraction - iceMelted);
+
+            // If all ice melted, proceed with normal calculation
+            if (flowNode.iceFraction <= 0) {
+              flowNode.iceFraction = 0;
+              // Continue with normal water state calculation below
+            } else {
+              // Still have ice - stay at freezing point
+              flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
+              flowNode.fluid.phase = 'liquid';
+              flowNode.fluid.quality = 0;
+              flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
+              continue; // Skip to next node
+            }
+          } else {
+            // Not enough energy to melt ice - stay at 0°C with current ice fraction
+            flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
+            flowNode.fluid.phase = 'liquid';
+            flowNode.fluid.quality = 0;
+            flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
+            continue;
+          }
+        } else {
+          // Even melting all ice wouldn't get above 0°C - freeze more
+          // This shouldn't happen if we're maintaining proper energy balance
+          console.warn(`[FluidState] ${nodeId}: Temperature would be ${waterStateIfMelted.temperature.toFixed(1)}K even after melting all ice`);
+          flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
+          flowNode.fluid.phase = 'liquid';
+          flowNode.fluid.quality = 0;
+          flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
+          continue;
+        }
+      }
+
+      // Calculate water state normally
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
         flowNode.fluid.internalEnergy,
         flowNode.volume
       );
 
-      // Update temperature and phase
-      flowNode.fluid.temperature = waterState.temperature;
-      flowNode.fluid.phase = waterState.phase;
-      flowNode.fluid.quality = waterState.quality;
+      // Check if temperature would go below freezing
+      if (waterState.temperature < FluidStateConstraintOperator.T_FREEZE) {
+        // Calculate energy deficit below freezing
+        // Energy at 0°C (approximately) = mass * cp * (0°C - some reference)
+        // We want to know how much energy below 0°C we are
+        const dT_below_freezing = FluidStateConstraintOperator.T_FREEZE - waterState.temperature;
+        const energyDeficit = flowNode.fluid.mass * FluidStateConstraintOperator.CP_WATER * dT_below_freezing;
 
-      // Determine pressure based on phase
-      if (waterState.phase === 'two-phase' || waterState.phase === 'vapor') {
-        flowNode.fluid.pressure = waterState.pressure;
+        // Convert energy deficit to ice fraction
+        const additionalIceFraction = energyDeficit / (flowNode.fluid.mass * FluidStateConstraintOperator.LATENT_HEAT_FUSION);
+        flowNode.iceFraction = Math.min(1, flowNode.iceFraction + additionalIceFraction);
+
+        // Check if we've frozen too much
+        if (flowNode.iceFraction > FluidStateConstraintOperator.MAX_ICE_FRACTION) {
+          console.error(`[FluidState] FREEZING ERROR in ${nodeId}: Ice fraction ${(flowNode.iceFraction * 100).toFixed(1)}% exceeds ${FluidStateConstraintOperator.MAX_ICE_FRACTION * 100}% limit! ` +
+            `T_calc=${waterState.temperature.toFixed(1)}K, mass=${flowNode.fluid.mass.toFixed(1)}kg`);
+          // Still set values so we can see what's happening
+        }
+
+        // Clamp temperature at freezing point
+        flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
+        flowNode.fluid.phase = 'liquid';
+        flowNode.fluid.quality = 0;
+        flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
+
+        // Adjust internal energy to match 0°C (the deficit is now in the ice fraction)
+        // This keeps the energy balance consistent
+        flowNode.fluid.internalEnergy += energyDeficit;
       } else {
-        // Liquid: use pressure model
-        const v_specific = flowNode.volume / flowNode.fluid.mass;
+        // Normal operation - update temperature and phase
+        flowNode.fluid.temperature = waterState.temperature;
+        flowNode.fluid.phase = waterState.phase;
+        flowNode.fluid.quality = waterState.quality;
 
-        if (simulationConfig.pressureModel === 'pure-triangulation') {
+        // Determine pressure based on phase
+        if (waterState.phase === 'two-phase' || waterState.phase === 'vapor') {
           flowNode.fluid.pressure = waterState.pressure;
         } else {
-          // Hybrid model with bulk modulus
-          const P_base = newState.liquidBasePressures?.get(nodeId) ?? waterState.pressure;
-          const rho_current = flowNode.fluid.mass / flowNode.volume;
-          const rho_base = 1 / v_specific;
-          const K = Water.bulkModulus(waterState.temperature - 273.15);
-          const dP = K * (rho_current - rho_base) / rho_base;
-          flowNode.fluid.pressure = P_base + dP;
+          // Liquid: use pressure model
+          const v_specific = flowNode.volume / flowNode.fluid.mass;
+
+          if (simulationConfig.pressureModel === 'pure-triangulation') {
+            flowNode.fluid.pressure = waterState.pressure;
+          } else {
+            // Hybrid model with bulk modulus
+            const P_base = newState.liquidBasePressures?.get(nodeId) ?? waterState.pressure;
+            const rho_current = flowNode.fluid.mass / flowNode.volume;
+            const rho_base = 1 / v_specific;
+            const K = Water.bulkModulus(waterState.temperature - 273.15);
+            const dP = K * (rho_current - rho_base) / rho_base;
+            flowNode.fluid.pressure = P_base + dP;
+          }
         }
       }
 

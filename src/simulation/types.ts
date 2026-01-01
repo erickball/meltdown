@@ -72,6 +72,12 @@ export interface FlowNode {
   heatSinkTemp?: number;            // K - cooling water inlet temperature
   coolingWaterFlow?: number;        // kg/s - cooling water mass flow rate
   condenserUA?: number;             // W/K - overall heat transfer coefficient × area
+
+  // Ice/freezing latent heat buffer
+  // When temperature would drop below 273.15K, energy goes into latent heat instead
+  // iceFraction = 0 means no ice, iceFraction = 1 means fully frozen
+  // Latent heat of fusion for water: 334 kJ/kg
+  iceFraction?: number;             // 0-1, fraction of mass that is frozen
 }
 
 // ============================================================================
