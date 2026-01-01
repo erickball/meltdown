@@ -511,6 +511,9 @@ export class RK45Solver {
   private rejectedSteps = 0;
   private operatorTimes = new Map<string, number>();
 
+  // Rate limiting for log messages (wall time in ms)
+  private lastWallTimeLimitLog = 0;
+
   constructor(config: Partial<RK45Config> = {}) {
     this.config = { ...DEFAULT_RK45_CONFIG, ...config };
     this.currentDt = this.config.initialDt;
@@ -716,8 +719,13 @@ export class RK45Solver {
         console.warn(`[RK45] Hit max steps per frame (${this.config.maxStepsPerFrame})`);
         break;
       }
-      if (performance.now() - frameStart > this.config.maxWallTimeMs) {
-        console.warn(`[RK45] Hit wall time limit (${this.config.maxWallTimeMs}ms)`);
+      const now = performance.now();
+      if (now - frameStart > this.config.maxWallTimeMs) {
+        // Rate limit this warning to once per second
+        if (now - this.lastWallTimeLimitLog > 1000) {
+          console.warn(`[RK45] Hit wall time limit (${this.config.maxWallTimeMs}ms)`);
+          this.lastWallTimeLimitLog = now;
+        }
         break;
       }
 

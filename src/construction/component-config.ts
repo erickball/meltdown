@@ -1032,6 +1032,13 @@ export class ComponentDialog {
       }
     });
 
+    // Validate: initial pressure must not exceed pressure rating
+    const validationError = this.validatePressure(properties);
+    if (validationError) {
+      this.showValidationError(validationError);
+      return;
+    }
+
     const config: ComponentConfig = {
       type: this.currentType,
       name: properties.name || componentDefinitions[this.currentType].displayName,
@@ -1045,6 +1052,46 @@ export class ComponentDialog {
       this.currentCallback(config);
       this.currentCallback = null;
     }
+  }
+
+  /**
+   * Validate that initial pressure does not exceed pressure rating
+   */
+  private validatePressure(properties: Record<string, any>): string | null {
+    const initialPressure = properties.initialPressure;
+    const pressureRating = properties.pressureRating;
+
+    // Only validate if both fields exist
+    if (initialPressure !== undefined && pressureRating !== undefined) {
+      if (initialPressure > pressureRating) {
+        return `Initial pressure (${initialPressure} bar) cannot exceed pressure rating (${pressureRating} bar)`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Show a validation error message in the dialog
+   */
+  private showValidationError(message: string): void {
+    // Remove any existing error message
+    const existingError = this.bodyElement.querySelector('.validation-error');
+    if (existingError) {
+      existingError.remove();
+    }
+
+    // Create error message element
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'validation-error';
+    errorDiv.style.cssText = 'background: #422; color: #f88; padding: 10px; border-radius: 4px; margin-bottom: 10px; border: 1px solid #633;';
+    errorDiv.textContent = message;
+
+    // Insert at the top of the form
+    this.bodyElement.insertBefore(errorDiv, this.bodyElement.firstChild);
+
+    // Scroll to show error
+    this.bodyElement.scrollTop = 0;
   }
 
   private handleCancel() {
@@ -1358,9 +1405,17 @@ export class ComponentDialog {
       if (optionName === 'crackingPressure' || optionName === 'setpoint') {
         return value / 1e5;  // Pa to bar
       }
-      // Convert W to MW for power fields (turbine ratedPower, core thermalPower stored in W)
-      if (optionName === 'ratedPower' || optionName === 'thermalPower') {
+      // Convert W to MW for power fields (turbine ratedPower, core thermalPower, condenser coolingCapacity stored in W)
+      if (optionName === 'ratedPower' || optionName === 'thermalPower' || optionName === 'coolingCapacity') {
         return value / 1e6;  // W to MW
+      }
+      // Convert K to C for temperature fields stored in K
+      if (optionName === 'coolingWaterTemp') {
+        return value - 273.15;  // K to C
+      }
+      // Convert Pa to bar for pressure fields
+      if (optionName === 'operatingPressure') {
+        return value / 1e5;  // Pa to bar
       }
       return value;
     }

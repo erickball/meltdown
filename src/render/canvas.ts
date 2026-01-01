@@ -18,6 +18,7 @@ export class PlantCanvas {
   private plantState: PlantState;
   private simState: SimulationState | null = null;
   private _simStateWarningLogged: boolean = false;
+  private _lastSetSimStateLog: number = 0;
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
@@ -1546,6 +1547,55 @@ export class PlantCanvas {
         ctx.lineWidth = isHighlighted ? lineWidth * 1.5 : lineWidth;
         ctx.stroke();
 
+        // Draw direction arrow inside inlet/outlet ports
+        if (port.direction === 'in' || port.direction === 'out') {
+          // Calculate direction from port to component center
+          const dx = -port.position.x;  // Direction toward center
+          const dy = -port.position.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+
+          if (len > 0.01) {
+            // Normalize direction vector
+            let dirX = dx / len;
+            let dirY = dy / len;
+
+            // Flip direction for outlet ports (point away from center)
+            if (port.direction === 'out') {
+              dirX = -dirX;
+              dirY = -dirY;
+            }
+
+            // Arrow parameters scale with port radius
+            const arrowLen = displayRadius * 0.55;
+            const headLen = displayRadius * 0.35;
+            const headAngle = Math.PI / 5;
+
+            // Arrow start and end points
+            const startX = screenPos.x - dirX * arrowLen;
+            const startY = screenPos.y - dirY * arrowLen;
+            const endX = screenPos.x + dirX * arrowLen;
+            const endY = screenPos.y + dirY * arrowLen;
+
+            // Arrow head points
+            const angle = Math.atan2(dirY, dirX);
+            const head1X = endX + headLen * Math.cos(angle + Math.PI - headAngle);
+            const head1Y = endY + headLen * Math.sin(angle + Math.PI - headAngle);
+            const head2X = endX + headLen * Math.cos(angle + Math.PI + headAngle);
+            const head2Y = endY + headLen * Math.sin(angle + Math.PI + headAngle);
+
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = Math.max(1, displayRadius * 0.2);
+            ctx.lineCap = 'round';
+            ctx.beginPath();
+            ctx.moveTo(startX, startY);
+            ctx.lineTo(endX, endY);
+            ctx.moveTo(head1X, head1Y);
+            ctx.lineTo(endX, endY);
+            ctx.lineTo(head2X, head2Y);
+            ctx.stroke();
+          }
+        }
+
         // Add pulsing effect for highlighted port
         if (isHighlighted) {
           ctx.beginPath();
@@ -1677,7 +1727,12 @@ export class PlantCanvas {
   public setSimState(state: SimulationState): void {
     this.simState = state;
     this._simStateWarningLogged = false; // Reset warning flag when state is set
-    console.log(`[Canvas] setSimState called: ${state.flowConnections.length} flow connections, ${state.flowNodes.size} flow nodes`);
+    // Rate limit this log to once per second
+    const now = performance.now();
+    if (now - this._lastSetSimStateLog > 1000) {
+      console.log(`[Canvas] setSimState called: ${state.flowConnections.length} flow connections, ${state.flowNodes.size} flow nodes`);
+      this._lastSetSimStateLog = now;
+    }
   }
 
   public getView(): ViewState {

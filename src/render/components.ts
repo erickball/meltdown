@@ -2136,6 +2136,7 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
 }
 
 function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, view: ViewState): void {
+  // Small port indicators on components (larger interactive ports are in renderPortIndicators)
   for (const port of component.ports) {
     const px = port.position.x * view.zoom;
     const py = port.position.y * view.zoom;
@@ -2153,31 +2154,13 @@ function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, v
       portColor = COLORS.portBidirectional;
     }
 
+    // Small port circles (arrows are drawn in renderPortIndicators for connect mode)
+    const portRadius = 4;
+
     ctx.fillStyle = portColor;
     ctx.beginPath();
-    ctx.arc(px, py, 5, 0, Math.PI * 2);
+    ctx.arc(px, py, portRadius, 0, Math.PI * 2);
     ctx.fill();
-
-    // Direction indicator (white arrow inside the port)
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 1;
-    if (port.direction === 'in') {
-      ctx.beginPath();
-      ctx.moveTo(px - 3, py);
-      ctx.lineTo(px + 3, py);
-      ctx.moveTo(px + 1, py - 2);
-      ctx.lineTo(px + 3, py);
-      ctx.lineTo(px + 1, py + 2);
-      ctx.stroke();
-    } else if (port.direction === 'out') {
-      ctx.beginPath();
-      ctx.moveTo(px + 3, py);
-      ctx.lineTo(px - 3, py);
-      ctx.moveTo(px - 1, py - 2);
-      ctx.lineTo(px - 3, py);
-      ctx.lineTo(px - 1, py + 2);
-      ctx.stroke();
-    }
   }
 }
 

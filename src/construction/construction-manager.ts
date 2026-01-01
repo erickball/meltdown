@@ -206,6 +206,21 @@ export class ConstructionManager {
           flowRate: 0
         };
 
+        const pipeLength = props.length || 5;
+        // Pipe ports at each end - pipe is drawn from x=0 to x=length (left edge at origin)
+        const pipePorts: Port[] = [
+          {
+            id: `${id}-left`,
+            position: { x: 0, y: 0 },
+            direction: 'both'
+          },
+          {
+            id: `${id}-right`,
+            position: { x: pipeLength, y: 0 },
+            direction: 'both'
+          }
+        ];
+
         const pipe: PipeComponent = {
           id,
           type: 'pipe',
@@ -214,8 +229,8 @@ export class ConstructionManager {
           rotation: 0,
           diameter: props.diameter,
           thickness: 0.01,  // 1cm default wall thickness
-          length: props.length,
-          ports: bidirectionalPorts,  // Pipes are bidirectional - flow determined by physics
+          length: pipeLength,
+          ports: pipePorts,  // Pipes are bidirectional - flow determined by physics
           fluid: pipeFluid
         };
 
@@ -438,22 +453,24 @@ export class ConstructionManager {
 
         let hxPorts: Port[];
 
+        // Heat exchangers are passive - flow direction is determined by physics
+        // Port names indicate typical flow direction but all are bidirectional
         if (isVertical) {
           if (hxType === 'utube') {
             // U-tube vertical: both tube connections at bottom (tube sheet), shell on sides
             hxPorts = [
-              { id: `${id}-tube-inlet`, position: { x: -halfW * 0.3, y: halfH }, direction: 'in' },
-              { id: `${id}-tube-outlet`, position: { x: halfW * 0.3, y: halfH }, direction: 'out' },
-              { id: `${id}-shell-inlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'in' },
-              { id: `${id}-shell-outlet`, position: { x: halfW, y: -halfH * 0.5 }, direction: 'out' }
+              { id: `${id}-tube-1`, position: { x: -halfW * 0.3, y: halfH }, direction: 'both' },
+              { id: `${id}-tube-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' },
+              { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.5 }, direction: 'both' }
             ];
           } else {
-            // Straight or helical vertical: tube in at bottom, out at top; shell on sides
+            // Straight or helical vertical: tube at top/bottom; shell on sides
             hxPorts = [
-              { id: `${id}-tube-inlet`, position: { x: 0, y: halfH }, direction: 'in' },
-              { id: `${id}-tube-outlet`, position: { x: 0, y: -halfH }, direction: 'out' },
-              { id: `${id}-shell-inlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'in' },
-              { id: `${id}-shell-outlet`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'out' }
+              { id: `${id}-tube-bottom`, position: { x: 0, y: halfH }, direction: 'both' },
+              { id: `${id}-tube-top`, position: { x: 0, y: -halfH }, direction: 'both' },
+              { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'both' }
             ];
           }
         } else {
@@ -461,18 +478,18 @@ export class ConstructionManager {
           if (hxType === 'utube') {
             // U-tube horizontal: both tube connections at left (tube sheet), shell on top/bottom
             hxPorts = [
-              { id: `${id}-tube-inlet`, position: { x: -halfW, y: -halfH * 0.3 }, direction: 'in' },
-              { id: `${id}-tube-outlet`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'out' },
-              { id: `${id}-shell-inlet`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'in' },
-              { id: `${id}-shell-outlet`, position: { x: halfW * 0.5, y: halfH }, direction: 'out' }
+              { id: `${id}-tube-1`, position: { x: -halfW, y: -halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-tube-2`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
+              { id: `${id}-shell-2`, position: { x: halfW * 0.5, y: halfH }, direction: 'both' }
             ];
           } else {
-            // Straight or helical horizontal: tube in at left, out at right; shell on top/bottom
+            // Straight or helical horizontal: tube at left/right; shell on top/bottom
             hxPorts = [
-              { id: `${id}-tube-inlet`, position: { x: -halfW, y: 0 }, direction: 'in' },
-              { id: `${id}-tube-outlet`, position: { x: halfW, y: 0 }, direction: 'out' },
-              { id: `${id}-shell-inlet`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'in' },
-              { id: `${id}-shell-outlet`, position: { x: halfW * 0.3, y: halfH }, direction: 'out' }
+              { id: `${id}-tube-left`, position: { x: -halfW, y: 0 }, direction: 'both' },
+              { id: `${id}-tube-right`, position: { x: halfW, y: 0 }, direction: 'both' },
+              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
+              { id: `${id}-shell-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' }
             ];
           }
         }
@@ -621,14 +638,14 @@ export class ConstructionManager {
 
         const exhaustPipePorts: Port[] = [
           {
-            id: `${exhaustPipeId}-inlet`,
+            id: `${exhaustPipeId}-top`,
             position: { x: 0, y: -exhaustPipeLength / 2 },  // Top of vertical pipe
-            direction: 'in'
+            direction: 'both'
           },
           {
-            id: `${exhaustPipeId}-outlet`,
+            id: `${exhaustPipeId}-bottom`,
             position: { x: 0, y: exhaustPipeLength / 2 },   // Bottom of vertical pipe
-            direction: 'out'
+            direction: 'both'
           }
         ];
 
@@ -655,7 +672,7 @@ export class ConstructionManager {
         this.plantState.components.set(exhaustPipeId, exhaustPipe);
 
         // Automatically connect turbine outlet to exhaust pipe inlet
-        this.createConnection(`${id}-outlet`, `${exhaustPipeId}-inlet`);
+        this.createConnection(`${id}-outlet`, `${exhaustPipeId}-top`);
 
         console.log(`[Turbine] Created exhaust pipe: ${exhaustPipeLength.toFixed(1)}m long, ${exhaustPipeDiameter.toFixed(2)}m diameter`);
         break;
@@ -741,6 +758,57 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, tdPump);
+
+        // Create exhaust pipe for steam exhaust (similar to main turbine)
+        // TD pump exhaust is lower pressure/flow than main turbine
+        const tdExhaustPipeId = `${id}-exhaust`;
+        const tdExhaustPipeLength = 1.5;  // Smaller than main turbine
+        const tdExhaustPipeDiameter = 0.3 + (ratedSteamFlow / 50) * 0.2;  // 0.3m base + 0.2m per 50 kg/s
+
+        // Position the exhaust pipe below the steam exhaust port
+        const tdExhaustPipeX = orientation === 'left-right'
+          ? worldX - assemblyLength / 2 - tdExhaustPipeLength / 2 - 0.3
+          : worldX + assemblyLength / 2 + tdExhaustPipeLength / 2 + 0.3;
+        const tdExhaustPipeY = worldY + diameter / 3 + tdExhaustPipeLength / 2;
+
+        const tdExhaustPipePorts: Port[] = [
+          {
+            id: `${tdExhaustPipeId}-top`,
+            position: { x: 0, y: -tdExhaustPipeLength / 2 },
+            direction: 'both'
+          },
+          {
+            id: `${tdExhaustPipeId}-bottom`,
+            position: { x: 0, y: tdExhaustPipeLength / 2 },
+            direction: 'both'
+          }
+        ];
+
+        const tdExhaustPipe: PipeComponent = {
+          id: tdExhaustPipeId,
+          type: 'pipe',
+          label: 'TD Pump Exhaust',
+          position: { x: tdExhaustPipeX, y: tdExhaustPipeY },
+          rotation: 0,
+          diameter: tdExhaustPipeDiameter,
+          thickness: 0.008,  // 8mm wall thickness
+          length: tdExhaustPipeLength,
+          ports: tdExhaustPipePorts,
+          fluid: {
+            temperature: 100 + 273.15,  // ~100°C exhaust steam
+            pressure: P_out,
+            phase: 'two-phase',
+            quality: 0.9,
+            flowRate: 0
+          }
+        };
+
+        this.plantState.components.set(tdExhaustPipeId, tdExhaustPipe);
+
+        // Automatically connect TD pump steam exhaust to exhaust pipe
+        this.createConnection(`${id}-steam-exhaust`, `${tdExhaustPipeId}-top`);
+
+        console.log(`[TD Pump] Created exhaust pipe: ${tdExhaustPipeLength.toFixed(1)}m long, ${tdExhaustPipeDiameter.toFixed(2)}m diameter`);
         break;
       }
 
@@ -750,6 +818,20 @@ export class ConstructionManager {
         const condenserHeight = props.height || 3;    // m
         // Assuming square footprint: V = W * W * H
         const condenserWidth = Math.sqrt(condenserVolume / condenserHeight);
+
+        // Condenser ports on opposite sides (left and right)
+        const condenserPorts: Port[] = [
+          {
+            id: `${id}-left`,
+            position: { x: -condenserWidth / 2, y: 0 },
+            direction: 'both'
+          },
+          {
+            id: `${id}-right`,
+            position: { x: condenserWidth / 2, y: 0 },
+            direction: 'both'
+          }
+        ];
 
         const condenser: CondenserComponent = {
           id,
@@ -766,7 +848,7 @@ export class ConstructionManager {
           coolingWaterFlow: props.coolingWaterFlow || 50000,  // kg/s
           coolingCapacity: (props.coolingCapacity || 2000) * 1e6,  // MW to W
           tubeCount: 10000,  // Default tube count
-          ports: bidirectionalPorts,  // Condensers are bidirectional - steam in, condensate out determined by physics
+          ports: condenserPorts,  // Condensers are bidirectional - steam in, condensate out determined by physics
           fluid: {
             temperature: props.coolingWaterTemp + 273.15 + 10,
             pressure: props.operatingPressure * 100000,
@@ -1039,8 +1121,8 @@ export class ConstructionManager {
         // Create outside-barrel region (annulus) as hydraulic-only
         // Ports on the VESSEL, not the annulus region
         const outsideBarrelPorts: Port[] = [
-          { id: `${outsideBarrelId}-inlet`, position: { x: -vesselR, y: -innerHeight / 4 }, direction: 'in' },
-          { id: `${outsideBarrelId}-outlet`, position: { x: vesselR, y: -innerHeight / 4 }, direction: 'out' }
+          { id: `${outsideBarrelId}-left`, position: { x: -vesselR, y: -innerHeight / 4 }, direction: 'both' },
+          { id: `${outsideBarrelId}-right`, position: { x: vesselR, y: -innerHeight / 4 }, direction: 'both' }
         ];
 
         const outsideBarrel: TankComponent = {
@@ -1079,7 +1161,7 @@ export class ConstructionManager {
         if (barrelBottomGap > 0.1) {
           this.plantState.connections.push({
             fromComponentId: outsideBarrelId,
-            fromPortId: `${outsideBarrelId}-inlet`, // Use existing port
+            fromPortId: `${outsideBarrelId}-left`, // Use existing port (left side = cold leg inlet)
             toComponentId: insideBarrelId,
             toPortId: `${insideBarrelId}-bottom`,
             fromElevation: barrelBottomGap / 2,
@@ -1096,7 +1178,7 @@ export class ConstructionManager {
             fromComponentId: insideBarrelId,
             fromPortId: `${insideBarrelId}-top`,
             toComponentId: outsideBarrelId,
-            toPortId: `${outsideBarrelId}-outlet`, // Use existing port
+            toPortId: `${outsideBarrelId}-right`, // Use existing port (right side = hot leg outlet)
             fromElevation: barrelHeight,
             toElevation: innerHeight - barrelTopGap / 2,
             flowArea: barrelOpeningArea,
@@ -1228,17 +1310,17 @@ export class ConstructionManager {
     console.log(`  End: (${endX.toFixed(2)}, ${endY.toFixed(2)}, elev=${endElevation.toFixed(2)})`);
     console.log(`  3D Distance: ${actualDistance.toFixed(2)}m, Pipe length: ${pipeLength.toFixed(2)}m`);
 
-    // Pipe ports are at the ends: inlet at x=0, outlet at x=length
+    // Pipe ports are at the ends - bidirectional since flow is determined by physics
     const pipePorts: Port[] = [
       {
-        id: `${pipeId}-inlet`,
+        id: `${pipeId}-left`,
         position: { x: 0, y: 0 },  // Left end of pipe
-        direction: 'in'
+        direction: 'both'
       },
       {
-        id: `${pipeId}-outlet`,
+        id: `${pipeId}-right`,
         position: { x: pipeLength, y: 0 },  // Right end of pipe
-        direction: 'out'
+        direction: 'both'
       }
     ];
 
@@ -1278,9 +1360,9 @@ export class ConstructionManager {
     // Create connections from component to pipe and pipe to component
     // Pass elevations relative to each component's bottom
     // From component → pipe: fromElevation is relative to fromComponent, pipeRelElev is relative to pipe
-    this.createConnection(fromPortId, `${pipeId}-inlet`, fromElevation, pipeRelElev);
+    this.createConnection(fromPortId, `${pipeId}-left`, fromElevation, pipeRelElev);
     // Pipe → to component: pipeRelElev is relative to pipe, toElevation is relative to toComponent
-    this.createConnection(`${pipeId}-outlet`, toPortId, pipeRelElev, toElevation);
+    this.createConnection(`${pipeId}-right`, toPortId, pipeRelElev, toElevation);
 
     console.log(`[Construction] Created pipe '${pipeId}' with diameter ${diameter.toFixed(3)}m between components`);
     return true;
@@ -1828,6 +1910,20 @@ export class ConstructionManager {
     }
     if (properties.hxType !== undefined) {
       component.hxType = properties.hxType;
+    }
+
+    // Condenser specific
+    if (properties.coolingCapacity !== undefined) {
+      component.coolingCapacity = properties.coolingCapacity * 1e6; // MW to W
+    }
+    if (properties.coolingWaterTemp !== undefined) {
+      component.coolingWaterTemp = properties.coolingWaterTemp + 273.15; // C to K
+    }
+    if (properties.coolingWaterFlow !== undefined) {
+      component.coolingWaterFlow = properties.coolingWaterFlow;
+    }
+    if (properties.operatingPressure !== undefined) {
+      component.operatingPressure = properties.operatingPressure * 1e5; // bar to Pa
     }
 
     // Core-specific properties
