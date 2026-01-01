@@ -495,10 +495,18 @@ function init() {
 
   // Keyboard controls
   document.addEventListener('keydown', (e) => {
+    // Don't handle keyboard shortcuts if a dialog is open
+    const componentDialogEl = document.getElementById('component-dialog');
+    const connectionDialogEl = document.getElementById('connection-dialog');
+    if ((componentDialogEl && componentDialogEl.style.display !== 'none') ||
+        (connectionDialogEl && connectionDialogEl.style.display !== 'none')) {
+      return;
+    }
+
     // Construction mode keyboard shortcuts
     if (currentMode === 'construction') {
-      // Delete key deletes the selected component
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedComponentId) {
+      // Delete key deletes the selected component (but not Backspace - that's for text editing)
+      if (e.key === 'Delete' && selectedComponentId) {
         e.preventDefault();
         const component = constructionManager.getComponent(selectedComponentId);
         const label = component?.label || selectedComponentId;

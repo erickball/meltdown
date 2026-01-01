@@ -649,7 +649,11 @@ export class ConstructionManager {
           }
         ];
 
-        // Exhaust steam conditions: low pressure, wet steam (after expansion through turbine)
+        // Exhaust steam conditions: start with saturated liquid at exhaust pressure.
+        // At very low pressures (e.g., 0.05 bar), high-quality steam has extremely low density,
+        // causing sanity check failures. Starting with liquid is more realistic for startup
+        // conditions anyway - the simulation will evolve to steady-state two-phase conditions.
+        const T_sat_exhaust = 273.15 + 33;  // ~33°C saturation temp at low condenser pressures
         const exhaustPipe: PipeComponent = {
           id: exhaustPipeId,
           type: 'pipe',
@@ -661,10 +665,10 @@ export class ConstructionManager {
           length: exhaustPipeLength,
           ports: exhaustPipePorts,
           fluid: {
-            temperature: 40 + 273.15,  // ~40°C exhaust steam
-            pressure: P_out,            // Exhaust pressure (e.g., 0.05 bar = 5 kPa)
-            phase: 'two-phase',
-            quality: 0.9,               // Wet steam at ~90% quality
+            temperature: T_sat_exhaust,  // Saturation temp at exhaust pressure
+            pressure: P_out,             // Exhaust pressure (e.g., 0.05 bar = 5 kPa)
+            phase: 'liquid',             // Start with liquid - will flash if needed during simulation
+            quality: 0,                  // Saturated liquid
             flowRate: 0
           }
         };
@@ -1889,6 +1893,12 @@ export class ConstructionManager {
     }
     if (properties.initialTemperature !== undefined && component.fluid) {
       component.fluid.temperature = properties.initialTemperature + 273.15; // C to K
+    }
+    if (properties.initialPhase !== undefined && component.fluid) {
+      component.fluid.phase = properties.initialPhase;
+    }
+    if (properties.initialQuality !== undefined && component.fluid) {
+      component.fluid.quality = properties.initialQuality; // Already 0-1
     }
     if (properties.initialLevel !== undefined) {
       component.fillLevel = properties.initialLevel / 100; // % to 0-1

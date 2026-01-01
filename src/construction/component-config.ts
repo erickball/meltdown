@@ -1033,9 +1033,16 @@ export class ComponentDialog {
     });
 
     // Validate: initial pressure must not exceed pressure rating
-    const validationError = this.validatePressure(properties);
-    if (validationError) {
-      this.showValidationError(validationError);
+    const pressureError = this.validatePressure(properties);
+    if (pressureError) {
+      this.showValidationError(pressureError);
+      return;
+    }
+
+    // Validate: two-phase fluid must not have extremely low density
+    const densityError = this.validateFluidDensity(properties);
+    if (densityError) {
+      this.showValidationError(densityError);
       return;
     }
 
@@ -1066,6 +1073,65 @@ export class ComponentDialog {
       if (initialPressure > pressureRating) {
         return `Initial pressure (${initialPressure} bar) cannot exceed pressure rating (${pressureRating} bar)`;
       }
+    }
+
+    return null;
+  }
+
+  /**
+   * Validate that two-phase fluid conditions won't result in extremely low density.
+   * At very low pressures with high quality, steam density becomes extremely low,
+   * causing simulation sanity check failures.
+   */
+  private validateFluidDensity(properties: Record<string, any>): string | null {
+    const phase = properties.initialPhase;
+    const quality = properties.initialQuality;
+    const pressure = properties.initialPressure; // bar
+
+    // Only check two-phase conditions
+    if (phase !== 'two-phase' || quality === undefined || pressure === undefined) {
+      return null;
+    }
+
+    // At low pressures, high-quality steam has very low density
+    // The sanity check fails at specific volume > 10 million mL/kg (density < 0.0001 kg/m³)
+    //
+    // Approximate saturated vapor density using ideal gas:
+    // ρ_v ≈ P / (R * T) where R = 461.5 J/kg-K for water vapor
+    // At 0.05 bar (5 kPa) and ~306K (saturation temp): ρ_v ≈ 5000 / (461.5 * 306) ≈ 0.035 kg/m³
+    //
+    // Two-phase mixture density: 1/ρ = x/ρ_v + (1-x)/ρ_l
+    // At high quality (x → 1), ρ → ρ_v
+    //
+    // For a pipe with volume V and density ρ, mass = ρ * V
+    // Specific volume v = V / m = 1/ρ
+    // Sanity limit: v < 10 m³/kg → ρ > 0.1 kg/m³
+
+    const P_Pa = pressure * 1e5;
+
+    // Approximate saturation temperature from pressure (Clausius-Clapeyron approximation)
+    // T_sat ≈ 373 + 42 * ln(P/101325) for rough estimate
+    const T_sat = 373 + 42 * Math.log(P_Pa / 101325);
+
+    // Saturated vapor density (ideal gas approximation)
+    const R_WATER = 461.5;
+    const rho_vapor = P_Pa / (R_WATER * T_sat);
+
+    // Saturated liquid density (approximate)
+    const T_C = T_sat - 273.15;
+    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                       700 - 2.5 * (T_C - 300);
+
+    // Two-phase mixture density
+    const rho_mixture = 1 / (quality / rho_vapor + (1 - quality) / rho_liquid);
+
+    // Specific volume in mL/kg
+    const v_mLkg = (1 / rho_mixture) * 1e6;
+
+    // Sanity check uses 10 million mL/kg limit, but warn earlier at 1 million
+    if (v_mLkg > 1e6) {
+      return `Two-phase conditions (${pressure.toFixed(2)} bar, ${(quality * 100).toFixed(0)}% quality) would result in extremely low density (${rho_mixture.toFixed(4)} kg/m³). Try lowering quality or increasing pressure.`;
     }
 
     return null;
