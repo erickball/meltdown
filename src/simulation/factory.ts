@@ -1084,11 +1084,43 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'condenser': {
       const condenser = component as any;
-      const volume = 50;
-      const pressure = condenser.fluid?.pressure || 1e5; // 1 bar
+      const volume = condenser.width * condenser.width * condenser.height || 50;
+      const pressure = condenser.fluid?.pressure || 5000; // 0.05 bar = 5 kPa default
       const temp = saturationTemperature(pressure);
-      // Get cooling water temp from component, default to 293K (20°C)
-      const heatSinkTemp = condenser.coolingWaterTemp || 293;
+
+      // Get cooling water properties from component
+      const heatSinkTemp = condenser.coolingWaterTemp || 293; // K
+      const coolingWaterFlow = condenser.coolingWaterFlow || 50000; // kg/s
+      const coolingCapacity = condenser.coolingCapacity || 2000e6; // W (default 2000 MW)
+
+      // Calculate UA from design conditions using LMTD
+      // At design: Q = UA × LMTD
+      // Steam condenses at T_sat (design), cooling water rises from T_cw_in to T_cw_out
+      const T_sat_design = temp; // Use current saturation temp as design point
+      const c_p_water = 4186; // J/kg-K for cooling water
+      const T_cw_in = heatSinkTemp;
+      const T_cw_out = T_cw_in + coolingCapacity / (coolingWaterFlow * c_p_water);
+
+      // LMTD for counter-flow condenser (steam at T_sat, water from T_in to T_out)
+      const dT1 = T_sat_design - T_cw_in;  // Hot end: steam vs cold water in
+      const dT2 = T_sat_design - T_cw_out; // Cold end: steam vs warm water out
+
+      let LMTD_design: number;
+      if (Math.abs(dT1 - dT2) < 0.1) {
+        // Avoid division by zero when dT1 ≈ dT2
+        LMTD_design = dT1;
+      } else if (dT1 <= 0 || dT2 <= 0) {
+        // Invalid design conditions - use simple approximation
+        console.warn(`[Factory] Condenser ${component.id}: Invalid design temps, using fallback UA`);
+        LMTD_design = Math.max(dT1, 1); // At least 1K difference
+      } else {
+        LMTD_design = (dT1 - dT2) / Math.log(dT1 / dT2);
+      }
+
+      const condenserUA = coolingCapacity / LMTD_design;
+      console.log(`[Factory] Condenser ${component.id}: UA=${(condenserUA/1e6).toFixed(1)} MW/K, ` +
+        `LMTD_design=${LMTD_design.toFixed(1)}K, T_sat=${(T_sat_design-273.15).toFixed(1)}°C, ` +
+        `T_cw_in=${(T_cw_in-273.15).toFixed(1)}°C, T_cw_out=${(T_cw_out-273.15).toFixed(1)}°C`);
 
       return {
         id: component.id,
@@ -1099,6 +1131,8 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         flowArea: 2,
         elevation,
         heatSinkTemp,
+        coolingWaterFlow,
+        condenserUA,
       };
     }
 

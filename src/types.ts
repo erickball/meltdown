@@ -208,6 +208,8 @@ export interface CondenserComponent extends ComponentBase {
   pressureRating?: number; // Design pressure in bar (condensers typically ~1.1 bar to withstand atmospheric)
   heatRejection: number;  // Current heat rejection in Watts
   coolingWaterTemp: number; // Cooling water inlet temp in K
+  coolingWaterFlow: number; // Cooling water mass flow rate in kg/s
+  coolingCapacity: number;  // Design heat rejection capacity in W
   tubeCount: number;
 }
 

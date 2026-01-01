@@ -68,8 +68,10 @@ export interface FlowNode {
   // Elevation for natural circulation
   elevation: number;                // m - height relative to reference
 
-  // Optional: Heat sink temperature for condensers (K)
-  heatSinkTemp?: number;
+  // Optional: Condenser properties (only for condenser nodes)
+  heatSinkTemp?: number;            // K - cooling water inlet temperature
+  coolingWaterFlow?: number;        // kg/s - cooling water mass flow rate
+  condenserUA?: number;             // W/K - overall heat transfer coefficient × area
 }
 
 // ============================================================================

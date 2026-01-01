@@ -604,6 +604,60 @@ export class ConstructionManager {
         (turbineGen as any).pressureRating = turbinePressureRating;
 
         this.plantState.components.set(id, turbineGen);
+
+        // Create exhaust pipe (like condensers come with pumps, turbines come with exhaust pipes)
+        // This provides a buffer volume for the work extraction process
+        const exhaustPipeId = `${id}-exhaust`;
+        const exhaustPipeLength = 2 + (ratedPowerMW / 500) * 1;  // 2m base + 1m per 500 MW
+        // Exhaust pipe diameter: realistic sizing for LP exhaust crossover/duct
+        // Even large plants use ~1-2m diameter pipes, not turbine casing size
+        const exhaustPipeDiameter = 0.6 + (ratedPowerMW / 1000) * 0.6;  // 0.6m base + 0.6m per GW (so 1.2m for 1000 MW)
+
+        // Position the exhaust pipe below the turbine outlet
+        const exhaustPipeX = orientation === 'left-right'
+          ? worldX + turbineLength / 2 + exhaustPipeLength / 2 + 0.5
+          : worldX - turbineLength / 2 - exhaustPipeLength / 2 - 0.5;
+        const exhaustPipeY = worldY + exhaustDiameter * 0.4 + exhaustPipeLength / 2;  // Below and extending down
+
+        const exhaustPipePorts: Port[] = [
+          {
+            id: `${exhaustPipeId}-inlet`,
+            position: { x: 0, y: -exhaustPipeLength / 2 },  // Top of vertical pipe
+            direction: 'in'
+          },
+          {
+            id: `${exhaustPipeId}-outlet`,
+            position: { x: 0, y: exhaustPipeLength / 2 },   // Bottom of vertical pipe
+            direction: 'out'
+          }
+        ];
+
+        // Exhaust steam conditions: low pressure, wet steam (after expansion through turbine)
+        const exhaustPipe: PipeComponent = {
+          id: exhaustPipeId,
+          type: 'pipe',
+          label: 'Exhaust Pipe',
+          position: { x: exhaustPipeX, y: exhaustPipeY },
+          rotation: 0,
+          diameter: exhaustPipeDiameter,
+          thickness: 0.01,  // 1cm wall thickness
+          length: exhaustPipeLength,
+          ports: exhaustPipePorts,
+          fluid: {
+            temperature: 40 + 273.15,  // ~40°C exhaust steam
+            pressure: P_out,            // Exhaust pressure (e.g., 0.05 bar = 5 kPa)
+            phase: 'two-phase',
+            quality: 0.9,               // Wet steam at ~90% quality
+            flowRate: 0
+          }
+        };
+
+        this.plantState.components.set(exhaustPipeId, exhaustPipe);
+
+        // Automatically connect turbine outlet to exhaust pipe inlet
+        this.createConnection(`${id}-outlet`, `${exhaustPipeId}-inlet`);
+
+        console.log(`[Turbine] Created exhaust pipe: ${exhaustPipeLength.toFixed(1)}m long, ${exhaustPipeDiameter.toFixed(2)}m diameter`);
         break;
       }
 
@@ -709,6 +763,8 @@ export class ConstructionManager {
           pressureRating: props.pressureRating ?? 1.1,  // bar (stored in bar for consistency with other components)
           heatRejection: 0,
           coolingWaterTemp: props.coolingWaterTemp + 273.15,
+          coolingWaterFlow: props.coolingWaterFlow || 50000,  // kg/s
+          coolingCapacity: (props.coolingCapacity || 2000) * 1e6,  // MW to W
           tubeCount: 10000,  // Default tube count
           ports: bidirectionalPorts,  // Condensers are bidirectional - steam in, condensate out determined by physics
           fluid: {

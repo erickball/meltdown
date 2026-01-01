@@ -4,7 +4,6 @@ This project is intended as a sandbox environment with game-like aspects, to all
 Whenever there's something potential confusing in an interface, add a tooltip to explain.
 
 ## TODO List
--Debug condenser not removing heat.
 -Flow arrows are not located at the connections and not pointing the way flow is going. And the numbers with them should be black not white.
 -Most components don't need their connection ports to be red/green; only if they have directionality like a pump or turbine. Fix pipe, condenser, reactor vessel. Pressurizer is ok as is.
 -If you zoom in on the red and green ports you should be able to see a white arrow in them pointing towards or away from the component center.
@@ -58,6 +57,7 @@ Whenever there's something potential confusing in an interface, add a tooltip to
 
 
 
+X Debug condenser not removing heat.
 X Got rid of old Euler method code that was causing problems.
 X Labels under the generator and condenser say 0 MW even when they're not.
 X Pressure gauges should come from the tops of the components

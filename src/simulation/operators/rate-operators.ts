@@ -453,8 +453,8 @@ export class TurbineCondenserRateOperator implements RateOperator {
   name = 'TurbineCondenser';
 
   private turbineEfficiency = 0.87;
-  private condenserUA = 10e6; // W/K
   private loggedOnce = false;
+  private c_p_water = 4186; // J/kg-K for cooling water
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -524,10 +524,11 @@ export class TurbineCondenserRateOperator implements RateOperator {
       const power = massFlowRate * deltaH;
       totalTurbinePower += power;
 
-      // Remove energy from outlet node
-      const outRates = rates.flowNodes.get(outletNodeId);
-      if (outRates) {
-        outRates.dEnergy -= power;
+      // Remove energy from the TURBINE node (where work is extracted)
+      // The flow operator will then advect the reduced-enthalpy steam to the condenser
+      const turbineRates = rates.flowNodes.get(turbineNodeId);
+      if (turbineRates) {
+        turbineRates.dEnergy -= power;
       }
     }
 
@@ -539,24 +540,47 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       if (!isCondenser) continue;
 
-      const T_fluid = condenserNode.fluid.temperature;
+      // Steam temperature (saturation temp for condensing steam)
+      const T_steam = condenserNode.fluid.temperature;
 
-      // Heat sink temp must be specified on the flow node
+      // Get condenser properties from flow node
       if (condenserNode.heatSinkTemp === undefined) {
         throw new Error(`[TurbineCondenser] Condenser node '${condenserNodeId}' missing heatSinkTemp property`);
       }
-      const T_sink = condenserNode.heatSinkTemp;
+      const T_cw_in = condenserNode.heatSinkTemp;
+      const m_cw = condenserNode.coolingWaterFlow ?? 50000; // kg/s default
+      const UA = condenserNode.condenserUA ?? 100e6; // W/K default
 
-      // Heat removal based on temperature difference only
-      // The condenser removes heat as long as fluid is warmer than heat sink
-      let heatRate = this.condenserUA * Math.max(0, T_fluid - T_sink);
+      // Calculate heat removal using LMTD method
+      // For a condenser: steam at T_steam, cooling water from T_cw_in to T_cw_out
+      // Q = UA × LMTD = m_cw × c_p × (T_cw_out - T_cw_in)
 
-      // Debug logging
-      const quality = condenserNode.fluid.quality ?? 0;
-      console.log(`[Condenser] ${condenserNodeId}: T=${T_fluid.toFixed(1)}K, T_sink=${T_sink.toFixed(0)}K, quality=${quality.toFixed(3)}, heatRate=${(heatRate/1e6).toFixed(1)}MW`);
+      // Maximum possible heat removal (limited by cooling water heat capacity)
+      // If all steam energy went to cooling water: T_cw_out would approach T_steam
+      // But LMTD goes to zero as T_cw_out -> T_steam, so there's a balance point
 
-      // Cap heat rate
-      heatRate = Math.min(heatRate, 800e6);
+      // Iterative solution: find Q such that Q = UA × LMTD(Q)
+      // For efficiency, use a simplified approach:
+      // Assume T_cw_out based on current heat rate, then compute LMTD
+
+      // Start with a guess based on simple ΔT
+      const dT_simple = T_steam - T_cw_in;
+      if (dT_simple <= 0) {
+        // Steam is colder than cooling water - no heat removal
+        continue;
+      }
+
+      // Use effectiveness-NTU method for more accurate calculation
+      // NTU = UA / (m_cw × c_p)
+      // For condenser (C_min/C_max = 0): effectiveness ε = 1 - exp(-NTU)
+      // Q = ε × (m_cw × c_p) × (T_steam - T_cw_in)
+      const C_cw = m_cw * this.c_p_water; // W/K - cooling water heat capacity rate
+      const NTU = UA / C_cw;
+      const effectiveness = 1 - Math.exp(-NTU);
+
+      // Heat removal rate
+      const heatRate = effectiveness * C_cw * dT_simple;
+
       totalCondenserHeat += heatRate;
 
       const condRates = rates.flowNodes.get(condenserNodeId);
