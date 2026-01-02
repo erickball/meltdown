@@ -1017,6 +1017,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
 
   let T: number;
   let P: number;
+  let calculationPath: string = 'unknown';
 
   if (phase === 'liquid') {
     // Use saturation-anchored interpolation for liquid - no fallbacks
@@ -1027,6 +1028,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     }
     T = result.T;
     P = result.P;
+    calculationPath = 'liquid_saturation_anchor';
   } else {
     // Vapor: use grid interpolation first
     const gridResult = interpolateFromGrid(u, v, 'vapor');
@@ -1034,6 +1036,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     if (gridResult) {
       T = gridResult.T;
       P = gridResult.P;
+      calculationPath = 'vapor_grid';
     } else {
       // Grid interpolation failed - check if this is high-temperature vapor where ideal gas is valid
       // Ideal gas is only valid for low density (rho << RHO_CRIT) and high energy (u > u_g at triple point)
@@ -1043,6 +1046,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
         const idealResult = idealGasApproximation(u, v);
         T = idealResult.T;
         P = idealResult.P;
+        calculationPath = 'vapor_ideal_gas';
       } else {
         throw new Error(`[WaterProps v4] Vapor grid interpolation failed and ideal gas not applicable: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
       }
@@ -1055,6 +1059,11 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   }
   if (T < T_TRIPLE || T > 3000) {
     throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);
+  }
+
+  // Debug tracking for pressure jumps
+  if (debugNodeId) {
+    trackDebugState(debugNodeId, u, v, T, P, phase, calculationPath);
   }
 
   return {
@@ -1215,8 +1224,49 @@ export function setWaterPropsDebug(_enabled: boolean): void {}
 export function getWaterPropsDebugLog(): string[] { return []; }
 
 // Debug utilities
-export function setDebugNodeId(_nodeId: string | null): void {}
-export function clearPressureHistory(): void {}
+let debugNodeId: string | null = null;
+let debugPressureJumpThreshold = 0.5; // Log if pressure changes by more than 50%
+const pressureHistory = new Map<string, { P: number; phase: string; u: number; v: number }>();
+
+export function setDebugNodeId(nodeId: string | null): void {
+  debugNodeId = nodeId;
+}
+
+export function clearPressureHistory(): void {
+  pressureHistory.clear();
+}
+
+/**
+ * Track state changes for a specific node and log pressure jumps
+ */
+function trackDebugState(
+  nodeId: string,
+  u: number,
+  v: number,
+  T: number,
+  P: number,
+  phase: string,
+  calculationPath: string
+): void {
+  const prev = pressureHistory.get(nodeId);
+
+  if (prev) {
+    const pressureRatio = P / prev.P;
+    const phaseChanged = phase !== prev.phase;
+
+    if (phaseChanged || pressureRatio > (1 + debugPressureJumpThreshold) || pressureRatio < 1 / (1 + debugPressureJumpThreshold)) {
+      const jumpType = phaseChanged ? `PHASE TRANSITION (${prev.phase}→${phase})` : 'PRESSURE JUMP';
+
+      console.warn(`[${jumpType}] Node ${nodeId}: ${(prev.P/1e5).toFixed(2)} bar → ${(P/1e5).toFixed(2)} bar (${((pressureRatio-1)*100).toFixed(0)}% change)`);
+      console.warn(`  Path: ${calculationPath}`);
+      console.warn(`  Previous: u=${(prev.u/1e3).toFixed(2)} kJ/kg, v=${(prev.v*1e6).toFixed(2)} mL/kg`);
+      console.warn(`  Current:  u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg`);
+      console.warn(`  T=${(T-273.15).toFixed(1)}°C, ρ=${(1/v).toFixed(1)} kg/m³`);
+    }
+  }
+
+  pressureHistory.set(nodeId, { P, phase, u, v });
+}
 
 // Debug/calculation logging stubs (compatibility with v3)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

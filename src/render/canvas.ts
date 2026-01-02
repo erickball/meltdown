@@ -1727,12 +1727,6 @@ export class PlantCanvas {
   public setSimState(state: SimulationState): void {
     this.simState = state;
     this._simStateWarningLogged = false; // Reset warning flag when state is set
-    // Rate limit this log to once per second
-    const now = performance.now();
-    if (now - this._lastSetSimStateLog > 1000) {
-      console.log(`[Canvas] setSimState called: ${state.flowConnections.length} flow connections, ${state.flowNodes.size} flow nodes`);
-      this._lastSetSimStateLog = now;
-    }
   }
 
   public getView(): ViewState {

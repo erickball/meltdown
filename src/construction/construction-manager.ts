@@ -848,17 +848,20 @@ export class ConstructionManager {
         // Assuming square footprint: V = W * W * H
         const condenserWidth = Math.sqrt(condenserVolume / condenserHeight);
 
-        // Condenser ports on opposite sides (left and right)
+        // Condenser ports: steam inlet at top, condensate outlet at bottom
+        // This ensures proper phase separation - steam enters high, liquid drains low
         const condenserPorts: Port[] = [
           {
-            id: `${id}-left`,
-            position: { x: -condenserWidth / 2, y: 0 },
-            direction: 'both'
+            id: `${id}-inlet`,
+            // Top of condenser (negative y = up in screen coords, but we use y position to indicate vertical)
+            position: { x: -condenserWidth / 2, y: -condenserHeight / 2 + 0.3 },
+            direction: 'in'  // Steam inlet
           },
           {
-            id: `${id}-right`,
-            position: { x: condenserWidth / 2, y: 0 },
-            direction: 'both'
+            id: `${id}-outlet`,
+            // Bottom of condenser - hotwell drain
+            position: { x: condenserWidth / 2, y: condenserHeight / 2 - 0.3 },
+            direction: 'out'  // Condensate outlet
           }
         ];
 
@@ -927,8 +930,8 @@ export class ConstructionManager {
           };
           this.plantState.components.set(pumpId, condensatePump);
 
-          // Automatically connect condenser to pump
-          this.createConnection(`${id}-right`, `${pumpId}-inlet`);
+          // Automatically connect condenser outlet (bottom) to pump inlet
+          this.createConnection(`${id}-outlet`, `${pumpId}-inlet`);
         }
         break;
       }
@@ -1403,7 +1406,9 @@ export class ConstructionManager {
     fromElevation?: number,
     toElevation?: number,
     flowArea?: number,
-    length?: number
+    length?: number,
+    fromPhaseTolerance?: number,
+    toPhaseTolerance?: number
   ): boolean {
     // Find components by searching for which component owns each port
     // This is more robust than parsing port IDs, which can have varying formats
@@ -1445,6 +1450,16 @@ export class ConstructionManager {
     fromPort.connectedTo = toPortId;
     toPort.connectedTo = fromPortId;
 
+    // Auto-detect phase tolerance for condenser outlets (bottom connections)
+    // Condenser outlets at the bottom should always draw liquid (tolerance = 0)
+    let effectiveFromPhaseTolerance = fromPhaseTolerance;
+    if (effectiveFromPhaseTolerance === undefined && fromComponent.type === 'condenser') {
+      // Check if this is a bottom port (outlet) - position.y < 0 means bottom of component
+      if (fromPort.position.y < 0) {
+        effectiveFromPhaseTolerance = 0; // Always draw liquid from bottom of condenser
+      }
+    }
+
     // Create connection object with elevations and flow properties
     const connection: Connection = {
       fromComponentId: fromComponent.id,
@@ -1453,6 +1468,8 @@ export class ConstructionManager {
       toPortId,
       fromElevation: calcFromElev,
       toElevation: calcToElev,
+      fromPhaseTolerance: effectiveFromPhaseTolerance,
+      toPhaseTolerance: toPhaseTolerance,
       flowArea: flowArea,
       length: length
     };
@@ -1528,7 +1545,25 @@ export class ConstructionManager {
 
   private generateComponentId(type: string): string {
     const prefix = type.substring(0, 3);
-    return `${prefix}-${this.nextComponentId++}`;
+
+    // Find the highest existing ID number for any component type to avoid collisions
+    // This handles cases where components are deleted and new ones created
+    let maxExistingId = 0;
+    for (const componentId of this.plantState.components.keys()) {
+      const match = componentId.match(/^[a-z]+-(\d+)/);
+      if (match) {
+        const idNum = parseInt(match[1], 10);
+        if (idNum > maxExistingId) {
+          maxExistingId = idNum;
+        }
+      }
+    }
+
+    // Use the higher of nextComponentId or maxExistingId + 1
+    const nextId = Math.max(this.nextComponentId, maxExistingId + 1);
+    this.nextComponentId = nextId + 1;
+
+    return `${prefix}-${nextId}`;
   }
 
   exportToSimulation(): any {
@@ -2030,6 +2065,28 @@ export class ConstructionManager {
     }
     if (properties.thermalPower !== undefined) {
       component.thermalPower = properties.thermalPower * 1e6; // MW to W
+    }
+
+    // Reactor vessel-specific properties
+    if (component.type === 'reactorVessel') {
+      if (properties.innerDiameter !== undefined) {
+        component.innerDiameter = properties.innerDiameter;
+      }
+      if (properties.barrelDiameter !== undefined) {
+        component.barrelDiameter = properties.barrelDiameter;
+      }
+      if (properties.barrelThickness !== undefined) {
+        component.barrelThickness = properties.barrelThickness;
+      }
+      if (properties.barrelBottomGap !== undefined) {
+        component.barrelBottomGap = properties.barrelBottomGap;
+      }
+      if (properties.barrelTopGap !== undefined) {
+        component.barrelTopGap = properties.barrelTopGap;
+      }
+      if (properties.pressureRating !== undefined) {
+        component.pressureRating = properties.pressureRating;
+      }
     }
 
     // Controller-specific properties

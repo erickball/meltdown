@@ -85,6 +85,15 @@ export interface FlowNode {
   // 1 = fully separated (pure liquid at bottom, pure vapor at top)
   // Used by renderer to show appropriate pixelation in each zone
   separation?: number;              // 0-1, degree of phase separation
+
+  // Internal obstructions that reduce available cross-sectional area at certain elevations
+  // Used for accurate liquid level calculation when components are inside this node
+  // (e.g., a core barrel inside a reactor vessel annulus)
+  internalObstructions?: Array<{
+    bottomElevation: number;        // m - elevation of bottom of obstruction (relative to node bottom)
+    topElevation: number;           // m - elevation of top of obstruction
+    crossSectionalArea: number;     // m² - area occupied by the obstruction
+  }>;
 }
 
 // ============================================================================
@@ -125,6 +134,15 @@ export interface FlowConnection {
   // If not specified, assumes mid-height of node
   fromElevation?: number;           // m - height of connection at from node
   toElevation?: number;             // m - height of connection at to node
+
+  // Phase drawing tolerance for two-phase nodes (meters)
+  // Controls the tolerance zone around the liquid-vapor interface.
+  // A connection within this distance of the interface draws mixture.
+  // Set to 0 for connections at the very bottom or top of a vessel that should
+  // always draw pure liquid or vapor regardless of calculated interface position.
+  // If not specified, uses default tolerance based on separation factor.
+  fromPhaseTolerance?: number;      // m - tolerance at fromNode connection
+  toPhaseTolerance?: number;        // m - tolerance at toNode connection
 
   // Flow resistance (K-factor for pressure drop)
   resistanceCoeff: number;          // ΔP = K * 0.5 * ρ * v²

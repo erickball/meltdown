@@ -50,6 +50,7 @@ export {
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
   PumpSpeedConstraintOperator,  // deprecated, kept for compatibility
+  setSeparationDebug,  // Debug toggle for phase separation calculation
 } from './operators/rate-operators';
 
 // Operators

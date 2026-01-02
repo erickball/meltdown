@@ -47,21 +47,46 @@ const CRITICAL_POINT: RGB = { r: 200, g: 220, b: 240 }; // pale blue-white
 const T_CRITICAL = 647.3;
 
 /**
- * Get saturated liquid color at a given pressure/temperature.
- * As pressure approaches critical, the color becomes paler (converging with vapor).
+ * Get saturated liquid color at a given saturation temperature.
+ * Uses the same temperature gradient as subcooled liquid to ensure
+ * smooth color transition at the phase boundary.
+ *
+ * At low T_sat (e.g., condenser at 40°C), returns a color close to WATER_COLD
+ * At high T_sat (e.g., PWR at 344°C), returns light blue
+ * Near critical (374°C), converges with vapor to pale blue-white
  */
 function getSaturatedLiquidColor(T_sat: number): RGB {
-  // Blend from light blue to critical color as T_sat approaches T_critical
-  // Start blending around 300°C (573K) for gradual transition
-  const T_BLEND_START = 573; // 300°C
-  if (T_sat <= T_BLEND_START) {
-    return WATER_SAT_LOW_P;
-  } else if (T_sat >= T_CRITICAL) {
+  // Use the same temperature scale as getTemperatureColor for liquid
+  // This ensures no color discontinuity when crossing the saturation line
+  const T_COLD = 293;      // 20°C
+  const T_PWR_SAT = 617;   // 344°C - PWR saturation temperature at 155 bar
+
+  // Near critical point, blend toward critical color
+  if (T_sat >= T_CRITICAL) {
     return CRITICAL_POINT;
-  } else {
-    const t = (T_sat - T_BLEND_START) / (T_CRITICAL - T_BLEND_START);
-    return lerpRGB(WATER_SAT_LOW_P, CRITICAL_POINT, t);
   }
+
+  // Calculate position on the temperature gradient
+  const T_clamped = Math.max(T_COLD, T_sat);
+  const t = (T_clamped - T_COLD) / (T_PWR_SAT - T_COLD);
+
+  let baseColor: RGB;
+  if (t <= 0.25) {
+    // Low T_sat (e.g., 40°C condenser): dark blue range
+    baseColor = lerpRGB(WATER_COLD, WATER_COOL, t / 0.25);
+  } else if (t <= 0.55) {
+    // Medium T_sat (~100-200°C): medium blue range
+    baseColor = lerpRGB(WATER_COOL, WATER_WARM, (t - 0.25) / 0.3);
+  } else if (t <= 1.0) {
+    // High T_sat (~200-344°C): toward light blue
+    baseColor = lerpRGB(WATER_WARM, WATER_SAT_LOW_P, (t - 0.55) / 0.45);
+  } else {
+    // Above PWR sat temp, blend toward critical
+    const tCrit = (T_sat - T_PWR_SAT) / (T_CRITICAL - T_PWR_SAT);
+    baseColor = lerpRGB(WATER_SAT_LOW_P, CRITICAL_POINT, tCrit);
+  }
+
+  return baseColor;
 }
 
 /**

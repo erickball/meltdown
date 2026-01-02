@@ -6,7 +6,6 @@ import {
   SimulationState,
   SolverMetrics,
   calculateWaterState,
-  lookupCompressedLiquidDensity,
   distanceToSaturationLine,
   saturationPressure,
   getWaterPropsProfile,
@@ -225,56 +224,32 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       if (node.fluid.phase === 'two-phase') {
         html += ` x=${(node.fluid.quality * 100).toFixed(1)}%`;
       }
-      // Show density for debugging pressure deviation
-      const rho = massKg / node.volume;
-      html += ` ρ=${formatDensity(rho)}`;
       html += '<br>';
 
-      // Second line: phase-specific debug info
+      // Second line: density, separation, and phase-specific debug info
+      const rho = massKg / node.volume;
       const rawState = calculateWaterState(massKg, node.fluid.internalEnergy, node.volume);
       const rawP_bar = rawState.pressure / 1e5;
       const u_kJ = node.fluid.internalEnergy / massKg / 1000; // specific energy kJ/kg
 
       html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
-      html += `u=${u_kJ.toFixed(0)}kJ/kg`;
+      html += `ρ=${formatDensity(rho)}`;
+      html += `, u=${u_kJ.toFixed(0)}kJ/kg`;
 
       if (node.fluid.phase === 'two-phase') {
-        // Two-phase: pressure is P_sat, no feedback model applies
-        // Just show the raw water properties pressure for comparison
+        // Two-phase: show P_sat and separation factor
         html += ` (P<sub>sat</sub>=${formatPressure(rawP_bar)}bar)`;
-      } else if (node.fluid.phase === 'liquid') {
-        // Liquid nodes: get P_base directly from simulation state (set by FluidStateOperator)
-        const u_J = node.fluid.internalEnergy / massKg; // J/kg for lookup
-        const P_displayed = node.fluid.pressure;
-
-        // Get P_base from the actual simulation state
-        const P_base = state.liquidBasePressures?.get(id);
-
-        let P_base_bar: number;
-        let dP_feedback_bar: number;
-        let rho_expected = rho; // default if lookup fails
-
-        if (P_base !== undefined) {
-          P_base_bar = P_base / 1e5;
-          // Look up expected density at this P_base
-          const rho_at_Pbase = lookupCompressedLiquidDensity(P_base, u_J);
-          if (rho_at_Pbase !== null) {
-            rho_expected = rho_at_Pbase;
-          }
-          dP_feedback_bar = (P_displayed - P_base) / 1e5;
+        const sep = node.separation;
+        if (sep !== undefined && sep !== null) {
+          const sepPct = (sep * 100).toFixed(0);
+          const sepClass = sep > 0.8 ? 'debug-value' :
+                          sep > 0.3 ? 'debug-warning' : 'debug-danger';
+          html += `, <span class="${sepClass}">sep=${sepPct}%</span>`;
         } else {
-          // Fallback: P_base not available (shouldn't happen in normal operation)
-          P_base_bar = NaN; // Will display as 'err'
-          dP_feedback_bar = NaN;
+          html += `, sep=?`;
         }
-
-        const deviationClass = Math.abs(dP_feedback_bar) > 50 ? 'debug-danger' :
-                              Math.abs(dP_feedback_bar) > 10 ? 'debug-warning' : 'debug-value';
-
-        html += `, ρ<sub>exp</sub>=${formatDensity(rho_expected)}`;
-        html += `, P<sub>base</sub>=${isNaN(P_base_bar) ? "err" : formatPressure(P_base_bar) + "bar"}`;
-        const dP_sign = dP_feedback_bar >= 0 ? '+' : '-';
-        html += `, <span class="${deviationClass}">ΔP<sub>fb</sub>=${dP_sign}${formatPressure(Math.abs(dP_feedback_bar))}bar</span>`;
+      } else if (node.fluid.phase === 'liquid') {
+        // Liquid: just show raw water properties pressure
         html += ` (P<sub>wp</sub>=${formatPressure(rawP_bar)}bar)`;
       } else {
         // Vapor: just show raw water properties pressure

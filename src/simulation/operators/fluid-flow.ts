@@ -16,6 +16,7 @@
 
 import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState, CheckValveState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
+import { calculateLiquidLevelWithObstructions } from './rate-operators';
 
 // ============================================================================
 // Flow Operator
@@ -188,6 +189,7 @@ export class FlowOperator implements PhysicsOperator {
       const upstreamId = conn.massFlowRate > 0 ? conn.fromNodeId : conn.toNodeId;
       const downstreamId = conn.massFlowRate > 0 ? conn.toNodeId : conn.fromNodeId;
       const upstreamElevation = conn.massFlowRate > 0 ? conn.fromElevation : conn.toElevation;
+      const upstreamPhaseTolerance = conn.massFlowRate > 0 ? conn.fromPhaseTolerance : conn.toPhaseTolerance;
 
       const upstream = state.flowNodes.get(upstreamId);
       const downstream = state.flowNodes.get(downstreamId);
@@ -206,7 +208,7 @@ export class FlowOperator implements PhysicsOperator {
       // For two-phase nodes, use phase-specific energy to correctly model
       // liquid vs vapor flow from different parts of the node
       let specificEnergyToUse: number;
-      const flowPhase = this.getFlowPhase(upstream, upstreamElevation);
+      const flowPhase = this.getFlowPhase(upstream, upstreamElevation, upstreamPhaseTolerance);
 
       if (upstream.fluid.phase === 'two-phase' && flowPhase !== 'mixture') {
         // Use phase-specific specific energy for the flowing phase
@@ -376,10 +378,11 @@ export class FlowOperator implements PhysicsOperator {
     const currentFlow = conn.massFlowRate;
     const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
     const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
+    const upstreamPhaseTolerance = currentFlow >= 0 ? conn.fromPhaseTolerance : conn.toPhaseTolerance;
 
     // Determine what phase is flowing based on connection elevation at upstream node
     // const tPhase = performance.now();
-    const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+    const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation, upstreamPhaseTolerance);
     // const phaseTime = performance.now() - tPhase;
 
     // Get appropriate density based on what's actually flowing from upstream
@@ -395,8 +398,29 @@ export class FlowOperator implements PhysicsOperator {
     // const densityTime = performance.now() - tDensity;
 
     // Gravity head (positive = downward flow is favored)
+    // conn.elevation = toElevation - fromElevation
+    // If going uphill (to higher than from), conn.elevation > 0, gravity opposes flow
+    // If going downhill (to lower than from), conn.elevation < 0, gravity favors flow
+    // dP_gravity = -ρ * g * dz, so downhill gives positive dP (favors forward flow)
+    //
+    // IMPORTANT: Use the density of the fluid filling the pipe between nodes.
+    // If we're drawing liquid from the upstream node (e.g., from bottom of condenser),
+    // the pipe between nodes is filled with liquid, so use liquid density for gravity.
+    // This is critical for condensate pump suction where the 20m elevation difference
+    // should provide ~2 bar of liquid head, not a fraction of that with mixture density.
     const g = 9.81; // m/s²
-    const dP_gravity = rho * g * conn.elevation;
+    let rho_gravity: number;
+    if (flowPhase === 'liquid') {
+      // Liquid flowing - pipe is filled with liquid
+      rho_gravity = this.getNodeDensity(upstreamNode, 'liquid');
+    } else if (flowPhase === 'vapor') {
+      // Vapor flowing - use vapor density (small effect anyway)
+      rho_gravity = this.getNodeDensity(upstreamNode, 'vapor');
+    } else {
+      // Mixture - use actual mixture density
+      rho_gravity = rho;
+    }
+    const dP_gravity = -rho_gravity * g * conn.elevation;
 
     // Check for pump in this connection
     const pump = this.getPumpForConnection(conn.id, state);
@@ -456,18 +480,6 @@ export class FlowOperator implements PhysicsOperator {
 
     // Total driving pressure
     const dP_driving = dP_pressure + dP_gravity + dP_pump;
-
-    // Debug FW->SG connection (disabled)
-    // if (conn.id === "flow-feedwater-sg") {
-    //   console.log(`[FlowOp] ${conn.id} pressure analysis:`);
-    //   console.log(`  P_from (FW): ${(P_from/1e5).toFixed(2)} bar`);
-    //   console.log(`  P_to (SG): ${(P_to/1e5).toFixed(2)} bar`);
-    //   console.log(`  dP_pressure: ${(dP_pressure/1e5).toFixed(2)} bar`);
-    //   console.log(`  dP_gravity: ${(dP_gravity/1e5).toFixed(2)} bar`);
-    //   console.log(`  dP_pump: ${(dP_pump/1e5).toFixed(2)} bar`);
-    //   console.log(`  dP_driving total: ${(dP_driving/1e5).toFixed(2)} bar`);
-    //   console.log(`  Density used: ${rho.toFixed(0)} kg/m³`);
-    // }
 
     // Check for check valve in this connection
     // Check valves prevent reverse flow and require minimum forward pressure to open
@@ -581,42 +593,35 @@ export class FlowOperator implements PhysicsOperator {
 
   /**
    * Calculate liquid level height in a two-phase node.
-   * Assumes node is a vertical cylinder or rectangular tank.
+   * Accounts for internal obstructions that reduce available cross-sectional area.
    *
    * @param node The flow node
    * @returns Liquid level height from bottom (m), or node height if single phase
    */
   private getLiquidLevel(node: FlowNode): number {
+    // Use stored height if available, otherwise estimate from volume
+    const height = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
+
     // For single phase, return appropriate level
     if (node.fluid.phase === 'liquid') {
-      // Assume cylindrical tank with height = diameter for rough estimate
-      const height = Math.sqrt(node.volume / (Math.PI * 0.25));
       return height; // Full of liquid
     }
     if (node.fluid.phase === 'vapor') {
       return 0; // No liquid
     }
 
-    // Two-phase: calculate based on void fraction
-    // Void fraction α = volume of vapor / total volume
-    // For homogeneous flow: α ≈ x / (x + (1-x) * ρ_g/ρ_f)
-    // But we can also estimate from quality and densities
+    // Two-phase: calculate based on liquid mass and density
     const quality = node.fluid.quality || 0;
 
-    // Approximate densities
+    // Get liquid density
     const rho_f = this.getNodeDensity(node, 'liquid');
-    const rho_g = this.getNodeDensity(node, 'vapor');
 
-    // Void fraction (Homogeneous model)
-    const voidFraction = (quality * rho_f) / (quality * rho_f + (1 - quality) * rho_g);
+    // Calculate liquid mass and volume
+    const liquidMass = node.fluid.mass * (1 - quality);
+    const liquidVolume = liquidMass / rho_f;
 
-    // Liquid fraction by volume
-    const liquidVolumeFraction = 1 - voidFraction;
-
-    // Assume cylindrical tank with height = diameter
-    const height = Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    return height * liquidVolumeFraction;
+    // Calculate liquid level accounting for internal obstructions
+    return calculateLiquidLevelWithObstructions(node, liquidVolume);
   }
 
   /**
@@ -624,9 +629,10 @@ export class FlowOperator implements PhysicsOperator {
    *
    * @param node Source flow node
    * @param connectionElevation Height of connection point relative to node bottom (m)
+   * @param phaseTolerance Tolerance zone around interface (m). 0 = no tolerance, undefined = use default (0.1m).
    * @returns 'liquid', 'vapor', or 'mixture' depending on connection position
    */
-  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
+  private getFlowPhase(node: FlowNode, connectionElevation?: number, phaseTolerance?: number): 'liquid' | 'vapor' | 'mixture' {
     // Single phase nodes always flow their phase
     if (node.fluid.phase !== 'two-phase') {
       return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
@@ -634,20 +640,25 @@ export class FlowOperator implements PhysicsOperator {
 
     // If no elevation specified, assume mid-height connection (mixture)
     if (connectionElevation === undefined) {
-      // Estimate tank height
-      const height = Math.sqrt(node.volume / (Math.PI * 0.25));
+      // Use stored height if available, otherwise estimate from volume
+      const height = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
       connectionElevation = height / 2;
     }
 
     const liquidLevel = this.getLiquidLevel(node);
 
+    // Tolerance zone around the interface
+    // If phaseTolerance is specified (including 0), use it directly
+    // Otherwise use default of 0.1m (10cm)
+    const tolerance = phaseTolerance !== undefined ? phaseTolerance : 0.1;
+
     // Connection below liquid level: draw liquid
-    if (connectionElevation < liquidLevel - 0.1) {  // 10cm tolerance
+    if (connectionElevation < liquidLevel - tolerance) {
       return 'liquid';
     }
 
     // Connection above liquid level: draw vapor
-    if (connectionElevation > liquidLevel + 0.1) {  // 10cm tolerance
+    if (connectionElevation > liquidLevel + tolerance) {
       return 'vapor';
     }
 

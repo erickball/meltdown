@@ -295,6 +295,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Pump',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pump' },
+      { name: 'elevation', type: 'number', label: 'Elevation', default: 0, min: -20, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (negative for basement placement, e.g. condensate pumps)' },
       { name: 'type', type: 'select', label: 'Pump Type', default: 'centrifugal', options: [
         { value: 'centrifugal', label: 'Centrifugal' },
         { value: 'positive', label: 'Positive Displacement' }

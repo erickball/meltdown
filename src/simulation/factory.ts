@@ -553,6 +553,7 @@ export function createDemoReactor(): SimulationState {
     length: 20,
     elevation: -2, // Going up from basement
     fromElevation: 0.1, // Draw from hotwell at bottom of condenser
+    fromPhaseTolerance: 0, // Always draw liquid from bottom of hotwell
     toElevation: 0.5,   // Discharge to middle of feedwater tank
     resistanceCoeff: 10,
     massFlowRate: secondaryFlow,
@@ -1178,6 +1179,10 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         `LMTD_design=${LMTD_design.toFixed(1)}K, T_sat=${(T_sat_design-273.15).toFixed(1)}°C, ` +
         `T_cw_in=${(T_cw_in-273.15).toFixed(1)}°C, T_cw_out=${(T_cw_out-273.15).toFixed(1)}°C`);
 
+      // Condenser height - use actual component height so separation can occur
+      // (liquid collects in hotwell at bottom, vapor in upper shell)
+      const condenserHeight = condenser.height || 3;  // m
+
       return {
         id: component.id,
         label: component.label || 'Condenser',
@@ -1185,7 +1190,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
-        height: 0,  // Condensers are well-mixed
+        height: condenserHeight,  // Allow phase separation
         elevation,
         heatSinkTemp,
         coolingWaterFlow,
@@ -1217,7 +1222,7 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     id: component.id,
     running: isRunning,
     speed: isRunning ? 1.0 : 0,  // Target speed (1.0 = 100%)
-    effectiveSpeed: 0, // Start at 0, ramp up over rampUpTime
+    effectiveSpeed: isRunning ? 1.0 : 0, // If running at start, assume already at speed
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
     efficiency: 0.85,
@@ -1431,6 +1436,27 @@ function createFlowConnectionFromPlantConnection(
   const connFromElevation = connection.fromElevation;
   const connToElevation = connection.toElevation;
 
+  // Auto-detect phase tolerance for condenser bottom connections
+  // If fromPhaseTolerance isn't set, and this is a condenser with a low elevation connection,
+  // set tolerance to 0 so it always draws liquid from the hotwell
+  let fromPhaseTolerance = connection.fromPhaseTolerance;
+  if (fromPhaseTolerance === undefined && fromComponent.type === 'condenser') {
+    // Check if connection is at the bottom (fromElevation near 0 or undefined)
+    const connElev = connFromElevation ?? 0;
+    if (connElev < 0.2) {
+      fromPhaseTolerance = 0; // Always draw liquid from bottom of condenser
+    }
+  }
+
+  // Same for toNode (in case flow reverses)
+  let toPhaseTolerance = connection.toPhaseTolerance;
+  if (toPhaseTolerance === undefined && toComponent.type === 'condenser') {
+    const connElev = connToElevation ?? 0;
+    if (connElev < 0.2) {
+      toPhaseTolerance = 0;
+    }
+  }
+
   return {
     id: `flow-${connection.fromComponentId}-${connection.toComponentId}`,
     fromNodeId,
@@ -1441,6 +1467,8 @@ function createFlowConnectionFromPlantConnection(
     elevation: elevationChange,
     fromElevation: connFromElevation,
     toElevation: connToElevation,
+    fromPhaseTolerance,
+    toPhaseTolerance,
     resistanceCoeff: 5, // Default resistance
     massFlowRate: 0, // Start at zero
     inertance: length / flowArea,

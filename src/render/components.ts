@@ -140,8 +140,10 @@ function renderStratifiedTwoPhase(
   const liquidHeight = height * liquidFraction;
   const vaporHeight = height - liquidHeight;
 
-  // Get actual mass quality
-  const actualQuality = fluid.quality ?? 0.5;
+  // Get actual mass quality and convert to volume fraction for visual rendering
+  // Volume fraction represents what fraction of SPACE is occupied by vapor
+  const massQuality = fluid.quality ?? 0.5;
+  const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
 
   // Saturation temperature for coloring
   const T_sat = getSaturationTemp(fluid.pressure);
@@ -152,7 +154,8 @@ function renderStratifiedTwoPhase(
   // Draw vapor space (top)
   if (vaporHeight > 0) {
     // Vapor zone effective quality: pure vapor at separation=1, mixture at separation=0
-    const vaporZoneQuality = separation + (1 - separation) * actualQuality;
+    // Use volume fraction so visual pixel distribution matches spatial distribution
+    const vaporZoneQuality = separation + (1 - separation) * volumeFraction;
 
     if (separation >= 0.95) {
       // Nearly fully separated: draw as pure vapor
@@ -173,7 +176,8 @@ function renderStratifiedTwoPhase(
   // Draw liquid zone (bottom)
   if (liquidHeight > 0) {
     // Liquid zone effective quality: pure liquid at separation=1, mixture at separation=0
-    const liquidZoneQuality = (1 - separation) * actualQuality;
+    // Use volume fraction so visual pixel distribution matches spatial distribution
+    const liquidZoneQuality = (1 - separation) * volumeFraction;
 
     if (separation >= 0.95) {
       // Nearly fully separated: draw as pure liquid
@@ -925,14 +929,15 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
   ctx.clip('evenodd');
 
-  // Fill with fluid color (downcomer region) - stratified if two-phase
-  if (vessel.fluid) {
-    if (vessel.fluid.phase === 'two-phase') {
-      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      const separation = vessel.fluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
+  // Fill with fluid color (downcomer region) - use outsideBarrelFluid if available
+  const downcomerFluid = vessel.outsideBarrelFluid ?? vessel.fluid;
+  if (downcomerFluid) {
+    if (downcomerFluid.phase === 'two-phase') {
+      const liquidFraction = getLiquidFraction(vessel, downcomerFluid, isSimulating);
+      const separation = downcomerFluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, downcomerFluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
     } else {
-      ctx.fillStyle = getFluidColor(vessel.fluid);
+      ctx.fillStyle = getFluidColor(downcomerFluid);
       ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
     }
   } else {

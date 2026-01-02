@@ -15,6 +15,7 @@ import {
   getCalculationDebugLog,
   simulationConfig,
   preloadWaterProperties,
+  setSeparationDebug,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
@@ -34,6 +35,7 @@ declare global {
       calculateWaterState: typeof calculateWaterState;
       enableCalculationDebug: typeof enableCalculationDebug;
       getCalculationDebugLog: typeof getCalculationDebugLog;
+      setSeparationDebug: typeof setSeparationDebug;
       getState: () => SimulationState | null;
       pause: () => void;
       resume: () => void;
@@ -1529,6 +1531,7 @@ function init() {
     calculateWaterState,
     enableCalculationDebug,
     getCalculationDebugLog,
+    setSeparationDebug,
     getState: () => gameLoop.getState(),
     pause: () => gameLoop.pause(),
     resume: () => gameLoop.resume(),
@@ -1539,6 +1542,7 @@ function init() {
   console.log('Meltdown initialized!');
   console.log('Debug utilities available via window.meltdown:');
   console.log('  meltdown.setWaterPropsDebug(true) - Enable water property logging');
+  console.log('  meltdown.setSeparationDebug(true) - Enable phase separation logging');
   console.log('  meltdown.getWaterPropsDebugLog() - Get recent log entries');
   console.log('  meltdown.getState() - Get current simulation state');
   console.log('  meltdown.pause() / meltdown.resume() - Control simulation');
@@ -1598,10 +1602,10 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       }
     }
 
-    // Handle reactor vessels specially - sync from inside barrel region
+    // Handle reactor vessels specially - sync both inside and outside barrel regions
     if (component.type === 'reactorVessel') {
       const rv = component as ReactorVesselComponent;
-      // Sync fluid from inside barrel region (core region)
+      // Sync fluid from inside barrel region (core region) to component.fluid
       if (rv.insideBarrelId) {
         const insideNode = simState.flowNodes.get(rv.insideBarrelId);
         if (insideNode && component.fluid) {
@@ -1610,6 +1614,26 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.phase = insideNode.fluid.phase;
           component.fluid.quality = insideNode.fluid.quality;
           component.fluid.separation = insideNode.separation;
+        }
+      }
+      // Sync fluid from outside barrel region (downcomer) to outsideBarrelFluid
+      if (rv.outsideBarrelId) {
+        const outsideNode = simState.flowNodes.get(rv.outsideBarrelId);
+        if (outsideNode) {
+          // Initialize outsideBarrelFluid if it doesn't exist
+          if (!rv.outsideBarrelFluid) {
+            rv.outsideBarrelFluid = {
+              temperature: outsideNode.fluid.temperature,
+              pressure: outsideNode.fluid.pressure,
+              phase: outsideNode.fluid.phase,
+              flowRate: 0,
+            };
+          }
+          rv.outsideBarrelFluid.temperature = outsideNode.fluid.temperature;
+          rv.outsideBarrelFluid.pressure = outsideNode.fluid.pressure;
+          rv.outsideBarrelFluid.phase = outsideNode.fluid.phase;
+          rv.outsideBarrelFluid.quality = outsideNode.fluid.quality;
+          rv.outsideBarrelFluid.separation = outsideNode.separation;
         }
       }
       // Sync fuel temperature if present

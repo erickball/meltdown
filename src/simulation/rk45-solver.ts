@@ -347,6 +347,14 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
     if (v_mLkg > 1e7) { // 10 million mL/kg is way beyond any physical state
       return { safe: false, reason: `${id}: Specific volume too high (${v_mLkg.toExponential(2)} mL/kg) - near vacuum` };
     }
+
+    // Check specific volume isn't impossibly low (indicates mass accumulation bug)
+    // Water at room temp: ~1000 mL/kg, compressed liquid minimum ~900 mL/kg
+    // Anything below 800 mL/kg is physically impossible
+    if (v_mLkg < 800) {
+      const density = node.fluid.mass / node.volume;
+      return { safe: false, reason: `${id}: Specific volume too low (${v_mLkg.toFixed(1)} mL/kg, ρ=${density.toFixed(0)} kg/m³) - mass accumulation` };
+    }
   }
   return { safe: true };
 }
@@ -391,6 +399,15 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
       return 1000;
     }
 
+    // Check for physically impossible density (mass accumulation bug)
+    // Water density is ~1000 kg/m³, max ~1100 at high pressure
+    // Anything above 1200 kg/m³ indicates runaway mass accumulation
+    const density = newNode.fluid.mass / newNode.volume;
+    if (density > 1200) {
+      console.warn(`[RK45 Sanity] ${id}: Density ${density.toFixed(0)} kg/m³ exceeds physical limit`);
+      return 1000; // Definitely reject
+    }
+
     // Check for large mass change relative to node mass
     // If flow * dt > 20% of node mass, the timestep is probably too large
     const throughput = nodeThroughput.get(id) || 0;
@@ -402,6 +419,16 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
         const badness = massFraction / 0.2; // 20% = 1, 40% = 2, etc.
         maxBadness = Math.max(maxBadness, badness);
       }
+    }
+
+    // Check for large net mass change (accumulation or depletion)
+    // This catches cases where inflow >> outflow or vice versa
+    const massChange = newNode.fluid.mass - oldNode.fluid.mass;
+    const relMassChange = Math.abs(massChange) / Math.max(1, oldNode.fluid.mass);
+    if (relMassChange > 0.5) {
+      // More than 50% mass change in one step - suspicious
+      const badness = relMassChange / 0.5;
+      maxBadness = Math.max(maxBadness, badness);
     }
 
     // Check for invalid temperature (250K to 2500K covers most scenarios)
@@ -658,6 +685,25 @@ export class RK45Solver {
       solution5Rates = addRates(solution5Rates, scaleRates(k[i], B5[i]));
     }
     const newState = applyRatesToState(state, solution5Rates, dt);
+
+    // Sanity check final state before returning
+    const finalCheck = checkPreConstraintSanity(newState);
+    if (!finalCheck.safe) {
+      // Final state is catastrophically bad
+      console.warn(`[RK45] Final state sanity failed: ${finalCheck.reason}`);
+      console.warn(`  dt=${(dt*1000).toFixed(4)}ms, state.time=${state.time.toFixed(4)}s`);
+      // Log the rates that caused this
+      for (const [id, r] of solution5Rates.flowNodes) {
+        if (Math.abs(r.dMass) > 100) {
+          console.warn(`  ${id}: dMass=${r.dMass.toFixed(1)} kg/s`);
+        }
+      }
+      return {
+        newState: state,
+        error: 1e10,
+        k,
+      };
+    }
 
     // Compute error estimate: err = dt * sum(E[i] * k[i])
     let errorRates = createZeroRates();

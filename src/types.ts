@@ -143,6 +143,9 @@ export interface ReactorVesselComponent extends ComponentBase {
   // Internal region IDs (created automatically)
   insideBarrelId?: string;  // ID of inside-barrel region (for flow connections)
   outsideBarrelId?: string; // ID of outside-barrel region (for flow connections)
+  // Fluid state for outside barrel region (downcomer/annulus)
+  // The inherited 'fluid' property is used for inside barrel (core region)
+  outsideBarrelFluid?: Fluid;
   // Core component ID if one is placed inside
   coreId?: string;
   // Fuel properties (added when core is placed inside)
@@ -260,6 +263,11 @@ export interface Connection {
   // Connection elevations (relative to component bottom)
   fromElevation?: number;  // m - height of connection at from component
   toElevation?: number;    // m - height of connection at to component
+  // Phase drawing tolerance (meters) - controls tolerance zone around liquid-vapor interface
+  // Set to 0 for connections at the very bottom or top of a vessel that should
+  // always draw pure liquid or vapor. If not specified, uses default based on separation.
+  fromPhaseTolerance?: number;  // m - tolerance at from component connection
+  toPhaseTolerance?: number;    // m - tolerance at to component connection
   // Flow parameters (optional, used when creating simulation)
   flowArea?: number;       // m² - cross-sectional area
   length?: number;         // m - connection length
