@@ -25,6 +25,7 @@ export type ComponentType =
   | 'pump'
   | 'vessel'
   | 'reactorVessel'
+  | 'coreBarrel'
   | 'valve'
   | 'heatExchanger'
   | 'turbine'
@@ -70,6 +71,7 @@ export interface TankComponent extends ComponentBase {
   height: number;       // meters
   wallThickness: number;
   fillLevel: number;    // 0-1
+  pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
 }
 
 export interface PipeComponent extends ComponentBase {
@@ -102,6 +104,7 @@ export interface VesselComponent extends ComponentBase {
   height: number;
   hasDome: boolean;     // Hemispherical top
   hasBottom: boolean;   // Hemispherical bottom
+  pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
   // Fuel properties (for reactor vessels)
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
@@ -128,32 +131,44 @@ export interface ValveComponent extends ComponentBase {
   hasBlockValve?: boolean;    // Has upstream isolation valve
 }
 
-// Reactor vessel with core barrel - creates two concentric hydraulic regions
+// Reactor vessel - the outer pressure boundary containing the downcomer/annulus region
+// The vessel's fluid property represents the downcomer (cold leg inlet, hot leg outlet)
+// A CoreBarrel component placed inside contains the core region
 export interface ReactorVesselComponent extends ComponentBase {
   type: 'reactorVessel';
   innerDiameter: number;    // Vessel inner diameter (m)
   wallThickness: number;    // Vessel wall thickness (m) - calculated from pressure
   height: number;           // Vessel height (m)
   pressureRating: number;   // Design pressure (bar)
-  // Core barrel properties
+  fillLevel?: number;       // 0-1, fraction of vessel filled with liquid
+  // Core barrel geometry (for rendering - actual barrel is a separate component)
   barrelDiameter: number;   // Core barrel inner diameter (m)
   barrelThickness: number;  // Core barrel wall thickness (m)
   barrelBottomGap: number;  // Gap from lower head to barrel bottom (m)
   barrelTopGap: number;     // Gap from upper head to barrel top (m)
-  // Internal region IDs (created automatically)
-  insideBarrelId?: string;  // ID of inside-barrel region (for flow connections)
-  outsideBarrelId?: string; // ID of outside-barrel region (for flow connections)
-  // Fluid state for outside barrel region (downcomer/annulus)
-  // The inherited 'fluid' property is used for inside barrel (core region)
-  outsideBarrelFluid?: Fluid;
-  // Core component ID if one is placed inside
-  coreId?: string;
-  // Fuel properties (added when core is placed inside)
+  // Reference to contained core barrel component
+  coreBarrelId?: string;    // ID of CoreBarrel component inside this vessel
+  // Legacy fields for save file migration (will be removed after migration)
+  insideBarrelId?: string;  // DEPRECATED - use coreBarrelId
+  outsideBarrelId?: string; // DEPRECATED - vessel itself is the downcomer now
+  outsideBarrelFluid?: Fluid; // DEPRECATED - vessel.fluid is the downcomer
+}
+
+// Core barrel - placed inside a reactor vessel, contains the core region
+// Flow enters from bottom (from downcomer), exits from top (to downcomer)
+export interface CoreBarrelComponent extends ComponentBase {
+  type: 'coreBarrel';
+  innerDiameter: number;    // Barrel inner diameter (m)
+  thickness: number;        // Barrel wall thickness (m)
+  height: number;           // Barrel height (m)
+  bottomGap: number;        // Gap from vessel bottom to barrel bottom (m)
+  topGap: number;           // Gap from vessel top to barrel top (m)
+  // Fuel properties
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
   fuelTemperature?: number;     // Current fuel temperature in Kelvin
-  fuelMeltingPoint?: number;    // Fuel melting point in Kelvin
-  // Control rod properties (added when core is placed inside)
+  fuelMeltingPoint?: number;    // Fuel melting point in Kelvin (default 2800)
+  // Control rod properties
   controlRodCount?: number;     // Number of control rod banks to display
   controlRodPosition?: number;  // 0 = fully inserted, 1 = fully withdrawn
 }
@@ -166,6 +181,7 @@ export interface HeatExchangerComponent extends ComponentBase {
   primaryFluid?: Fluid;
   secondaryFluid?: Fluid;
   tubeCount: number;
+  pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
 }
 
 export interface TurbineGeneratorComponent extends ComponentBase {
@@ -240,6 +256,7 @@ export type PlantComponent =
   | PumpComponent
   | VesselComponent
   | ReactorVesselComponent
+  | CoreBarrelComponent
   | ValveComponent
   | HeatExchangerComponent
   | TurbineGeneratorComponent

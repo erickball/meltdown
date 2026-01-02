@@ -115,12 +115,33 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
     let limiterDisplay = metrics.dtLimitedBy;
     if (limiterDisplay === 'config.maxDt') limiterDisplay = 'maxDt';
 
+    // Build error contributors display if RK45 is limiting dt
+    let errorContributorsHtml = '';
+    if (metrics.dtLimitedBy === 'RK45-error' && metrics.topErrorContributors && metrics.topErrorContributors.length > 0) {
+      const contributorLines = metrics.topErrorContributors.map(c => {
+        const pct = (c.contribution * 100).toFixed(0);
+        // Format type as a short label
+        const typeLabels: Record<string, string> = {
+          'mass': 'mass',
+          'energy': 'energy',
+          'throughput': 'flow-thru',
+          'momentum': 'momentum',
+          'temperature': 'temp',
+          'power': 'power',
+          'precursor': 'precursor'
+        };
+        const typeLabel = typeLabels[c.type] || c.type;
+        return `<span style="color: #aaa; font-size: 10px; margin-left: 12px;">• ${c.nodeId} <span style="color: #7af;">${typeLabel}</span> (${pct}%): ${c.description}</span>`;
+      }).join('<br>');
+      errorContributorsHtml = `<br><span class="debug-label" style="font-size: 10px;">Error sources:</span><br>${contributorLines}`;
+    }
+
     solverDiv.innerHTML = `
       <span class="debug-label">Target dt:</span> ${formatValue(metrics.currentDt * 1000, 'ms')}<br>
       <span class="debug-label">Actual dt:</span> ${formatValue(metrics.actualDt * 1000, 'ms')} <span style="color: #888;">(${limiterDisplay})</span><br>
       <span class="debug-label">Stability limit:</span> ${formatValue(metrics.maxStableDt * 1000, 'ms')} <span style="color: #888;">(${metrics.stabilityLimitedBy}, ×0.8→${formatValue(metrics.maxStableDt * 0.8 * 1000, 'ms')})</span><br>
       <span class="debug-label">Wall time:</span> ${formatValue(metrics.lastStepWallTime, 'ms', 16, 33)}<br>
-      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}x</span>
+      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}x</span>${errorContributorsHtml}
     `;
   }
 
@@ -751,14 +772,28 @@ export function updateComponentDetail(
       const barrelTopGap = component.barrelTopGap as number;
       const barrelBottomGap = component.barrelBottomGap as number;
 
-      // Get volumes from the sub-components
-      const insideBarrelId = component.insideBarrelId as string;
-      const outsideBarrelId = component.outsideBarrelId as string;
-      const insideBarrelComp = plantState.components.get(insideBarrelId) as Record<string, unknown> | undefined;
-      const outsideBarrelComp = plantState.components.get(outsideBarrelId) as Record<string, unknown> | undefined;
-      const insideVolume = (insideBarrelComp?.volume as number) ?? 0;
-      const outsideVolume = (outsideBarrelComp?.volume as number) ?? 0;
-      const totalVolume = insideVolume + outsideVolume;
+      // Get volumes - new architecture uses coreBarrelId, legacy uses insideBarrelId/outsideBarrelId
+      const coreBarrelId = component.coreBarrelId as string | undefined;
+      const legacyInsideId = component.insideBarrelId as string | undefined;
+      const legacyOutsideId = component.outsideBarrelId as string | undefined;
+
+      let coreVolume = 0;
+      let downcomerVolume = 0;
+
+      if (coreBarrelId) {
+        // New architecture: core barrel is separate component, vessel is downcomer
+        const coreBarrelNode = simState?.flowNodes.get(coreBarrelId);
+        const vesselNode = simState?.flowNodes.get(componentId);
+        coreVolume = coreBarrelNode?.volume ?? 0;
+        downcomerVolume = vesselNode?.volume ?? 0;
+      } else if (legacyInsideId && legacyOutsideId) {
+        // Legacy architecture: insideBarrel is core, outsideBarrel is downcomer
+        const insideBarrelComp = plantState.components.get(legacyInsideId) as Record<string, unknown> | undefined;
+        const outsideBarrelComp = plantState.components.get(legacyOutsideId) as Record<string, unknown> | undefined;
+        coreVolume = (insideBarrelComp?.volume as number) ?? 0;
+        downcomerVolume = (outsideBarrelComp?.volume as number) ?? 0;
+      }
+      const totalVolume = coreVolume + downcomerVolume;
 
       html += `<div class="detail-row"><span class="detail-label">Vessel Inner Dia:</span><span class="detail-value">${innerDiam?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Vessel Height:</span><span class="detail-value">${height?.toFixed(2)} m</span></div>`;
@@ -770,8 +805,8 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Barrel Inner Dia:</span><span class="detail-value">${barrelInnerDiam?.toFixed(2)} m</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Barrel Thickness:</span><span class="detail-value">${(barrelThickness * 1000)?.toFixed(0)} mm</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Barrel Gaps:</span><span class="detail-value">top: ${barrelTopGap?.toFixed(2)}m, btm: ${barrelBottomGap?.toFixed(2)}m</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Core Volume:</span><span class="detail-value">${insideVolume.toFixed(2)} m³</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Annulus Volume:</span><span class="detail-value">${outsideVolume.toFixed(2)} m³</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Core Volume:</span><span class="detail-value">${coreVolume.toFixed(2)} m³</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Downcomer Volume:</span><span class="detail-value">${downcomerVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Total Volume:</span><span class="detail-value">${totalVolume.toFixed(2)} m³</span></div>`;
       break;
     }
@@ -807,41 +842,55 @@ export function updateComponentDetail(
     return type === 'tank' || type === 'vessel' || type === 'heatExchanger';
   };
 
-  // Reactor vessel shows two fluid sections (inside barrel / core region, and outside barrel / annulus)
+  // Reactor vessel shows two fluid sections (core region and downcomer)
   if (component.type === 'reactorVessel') {
-    const insideBarrelId = component.insideBarrelId as string;
-    const outsideBarrelId = component.outsideBarrelId as string;
-    const insideNode = simState.flowNodes.get(insideBarrelId);
-    const outsideNode = simState.flowNodes.get(outsideBarrelId);
+    // New architecture: coreBarrelId points to core, vessel itself is downcomer
+    // Legacy: insideBarrelId is core, outsideBarrelId is downcomer
+    const coreBarrelId = component.coreBarrelId as string | undefined;
+    const legacyInsideId = component.insideBarrelId as string | undefined;
+    const legacyOutsideId = component.outsideBarrelId as string | undefined;
 
-    if (insideNode) {
+    let coreNode: typeof flowNode | undefined;
+    let downcomerNode: typeof flowNode | undefined;
+
+    if (coreBarrelId) {
+      // New architecture
+      coreNode = simState.flowNodes.get(coreBarrelId);
+      downcomerNode = simState.flowNodes.get(componentId);
+    } else if (legacyInsideId && legacyOutsideId) {
+      // Legacy architecture
+      coreNode = simState.flowNodes.get(legacyInsideId);
+      downcomerNode = simState.flowNodes.get(legacyOutsideId);
+    }
+
+    if (coreNode) {
       html += '<div class="detail-section">';
-      html += '<div class="detail-section-title">Core Region (Inside Barrel)</div>';
-      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(insideNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(insideNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${insideNode.fluid.phase}</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${insideNode.fluid.mass.toFixed(0)} kg</span></div>`;
-      if (insideNode.fluid.phase === 'two-phase') {
-        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(insideNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+      html += '<div class="detail-section-title">Core Region</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(coreNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(coreNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${coreNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${coreNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      if (coreNode.fluid.phase === 'two-phase') {
+        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(coreNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
       }
       html += '</div>';
     }
 
-    if (outsideNode) {
+    if (downcomerNode) {
       html += '<div class="detail-section">';
-      html += '<div class="detail-section-title">Annulus (Outside Barrel)</div>';
-      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(outsideNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(outsideNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${outsideNode.fluid.phase}</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${outsideNode.fluid.mass.toFixed(0)} kg</span></div>`;
-      if (outsideNode.fluid.phase === 'two-phase') {
-        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(outsideNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+      html += '<div class="detail-section-title">Downcomer</div>';
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(downcomerNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(downcomerNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${downcomerNode.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${downcomerNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      if (downcomerNode.fluid.phase === 'two-phase') {
+        html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(downcomerNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
       }
       html += '</div>';
     }
 
     // If no simulation nodes found, show a note
-    if (!insideNode && !outsideNode) {
+    if (!coreNode && !downcomerNode) {
       html += '<div class="detail-section">';
       html += '<div style="font-size: 10px; color: #888; font-style: italic;">Run simulation to see fluid state</div>';
       html += '</div>';
@@ -968,12 +1017,14 @@ export function updateComponentDetail(
   if (simNodeId) nodeIds.add(simNodeId);
   // Also add component ID directly (user-created components use this)
   nodeIds.add(componentId);
-  // For reactor vessels, include both inside and outside barrel regions
+  // For reactor vessels, include core barrel and vessel (new arch) or inside/outside barrel (legacy)
   if (component.type === 'reactorVessel') {
-    const insideBarrelId = component.insideBarrelId as string;
-    const outsideBarrelId = component.outsideBarrelId as string;
-    if (insideBarrelId) nodeIds.add(insideBarrelId);
-    if (outsideBarrelId) nodeIds.add(outsideBarrelId);
+    const coreBarrelId = component.coreBarrelId as string | undefined;
+    const legacyInsideId = component.insideBarrelId as string | undefined;
+    const legacyOutsideId = component.outsideBarrelId as string | undefined;
+    if (coreBarrelId) nodeIds.add(coreBarrelId);
+    if (legacyInsideId) nodeIds.add(legacyInsideId);
+    if (legacyOutsideId) nodeIds.add(legacyOutsideId);
   }
   // For HX, also check for primary/secondary/shell side nodes (only if simulation is running)
   if (simState.flowNodes) {

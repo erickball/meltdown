@@ -1204,15 +1204,17 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
           flowNode.fluid.pressure = waterState.pressure;
         } else {
           // Liquid: use pressure model
-          const v_specific = flowNode.volume / flowNode.fluid.mass;
-
+          // NOTE: The 'hybrid' pressure model is OBSOLETE and should not be used.
+          // It was never properly implemented here - the original code had rho_base = rho_current
+          // which made dP always zero. Use pure-triangulation for accurate physics.
           if (simulationConfig.pressureModel === 'pure-triangulation') {
             flowNode.fluid.pressure = waterState.pressure;
           } else {
-            // Hybrid model with bulk modulus
+            // OBSOLETE hybrid model - kept for backwards compatibility but does nothing useful
             const P_base = newState.liquidBasePressures?.get(nodeId) ?? waterState.pressure;
             const rho_current = flowNode.fluid.mass / flowNode.volume;
-            const rho_base = 1 / v_specific;
+            const v_specific = flowNode.volume / flowNode.fluid.mass;
+            const rho_base = 1 / v_specific;  // Note: This equals rho_current, so dP = 0
             const K = Water.bulkModulus(waterState.temperature - 273.15);
             const dP = K * (rho_current - rho_base) / rho_base;
             flowNode.fluid.pressure = P_base + dP;

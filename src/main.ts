@@ -261,10 +261,15 @@ function init() {
         state.neutronics.controlRodPosition = withdrawalPosition;
         return state;
       });
-      // Update visual vessel (visual also uses withdrawal position internally)
+      // Update visual components with control rods (visual also uses withdrawal position internally)
       for (const [, comp] of plantState.components) {
-        if ((comp.type === 'vessel' || comp.type === 'reactorVessel') && comp.controlRodCount) {
-          comp.controlRodPosition = withdrawalPosition;
+        // Vessels have controlRodCount directly
+        if (comp.type === 'vessel' && (comp as any).controlRodCount) {
+          (comp as any).controlRodPosition = withdrawalPosition;
+        }
+        // Core barrels have control rod properties
+        if (comp.type === 'coreBarrel' && (comp as any).controlRodCount) {
+          (comp as any).controlRodPosition = withdrawalPosition;
         }
       }
     });
@@ -798,6 +803,124 @@ function init() {
     if (data.connections) {
       plantState.connections = data.connections;
     }
+
+    // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
+    migrateReactorVessels(plantState);
+  }
+
+  // Migrate reactor vessels from old architecture (insideBarrelId, outsideBarrelId)
+  // to new architecture (coreBarrelId, vessel IS downcomer)
+  function migrateReactorVessels(state: PlantState): void {
+    for (const [id, component] of state.components) {
+      if (component.type !== 'reactorVessel') continue;
+      const rv = component as any;
+
+      // Skip if already migrated or new architecture
+      if (rv.coreBarrelId) continue;
+      if (!rv.insideBarrelId || !rv.outsideBarrelId) continue;
+
+      console.log(`[Migration] Converting reactor vessel ${id} from sibling to parent-child architecture`);
+
+      const insideBarrel = state.components.get(rv.insideBarrelId) as any;
+      const outsideBarrel = state.components.get(rv.outsideBarrelId) as any;
+
+      if (!insideBarrel || !outsideBarrel) {
+        console.warn(`[Migration] Could not find sub-components for reactor vessel ${id}`);
+        continue;
+      }
+
+      // Create new CoreBarrel component from inside barrel
+      const coreBarrelId = `${id}-core`;
+      const coreBarrel: any = {
+        id: coreBarrelId,
+        type: 'coreBarrel',
+        label: `${rv.label || 'Reactor'} Core`,
+        position: rv.position,
+        rotation: rv.rotation,
+        elevation: rv.elevation,
+        ports: [],
+        fluid: insideBarrel.fluid,
+        containedBy: id,
+        innerDiameter: rv.barrelDiameter - rv.barrelThickness,
+        thickness: rv.barrelThickness,
+        height: rv.height - rv.barrelBottomGap - rv.barrelTopGap,
+        bottomGap: rv.barrelBottomGap,
+        topGap: rv.barrelTopGap,
+        // Transfer fuel properties from vessel
+        fuelRodCount: rv.fuelRodCount,
+        actualFuelRodCount: rv.actualFuelRodCount,
+        fuelTemperature: rv.fuelTemperature,
+        fuelMeltingPoint: rv.fuelMeltingPoint,
+        controlRodCount: rv.controlRodCount,
+        controlRodPosition: rv.controlRodPosition,
+      };
+
+      // Create ports for core barrel
+      coreBarrel.ports = [
+        { id: `${coreBarrelId}-bottom`, position: { x: 0, y: coreBarrel.height / 2 }, direction: 'both' as const },
+        { id: `${coreBarrelId}-top`, position: { x: 0, y: -coreBarrel.height / 2 }, direction: 'both' as const },
+      ];
+
+      // Transfer ports from outside barrel to vessel (for external connections)
+      // Copy ports that aren't internal connections
+      rv.ports = [];
+      for (const port of outsideBarrel.ports || []) {
+        if (!port.id.includes('internal')) {
+          rv.ports.push({
+            ...port,
+            id: port.id.replace(rv.outsideBarrelId, id),
+          });
+        }
+      }
+
+      // Transfer fluid from outside barrel to vessel (vessel is now the downcomer)
+      rv.fluid = outsideBarrel.fluid || rv.outsideBarrelFluid;
+
+      // Set new reference
+      rv.coreBarrelId = coreBarrelId;
+
+      // Clear fuel properties from vessel (they're on core barrel now)
+      delete rv.fuelRodCount;
+      delete rv.actualFuelRodCount;
+      delete rv.fuelTemperature;
+      delete rv.fuelMeltingPoint;
+      delete rv.controlRodCount;
+      delete rv.controlRodPosition;
+
+      // Add the new core barrel
+      state.components.set(coreBarrelId, coreBarrel);
+
+      // Update connections to point to new component IDs
+      for (const conn of state.connections) {
+        // Connections to inside barrel now go to core barrel
+        if (conn.fromComponentId === rv.insideBarrelId) {
+          conn.fromComponentId = coreBarrelId;
+          conn.fromPortId = conn.fromPortId.replace(rv.insideBarrelId, coreBarrelId);
+        }
+        if (conn.toComponentId === rv.insideBarrelId) {
+          conn.toComponentId = coreBarrelId;
+          conn.toPortId = conn.toPortId.replace(rv.insideBarrelId, coreBarrelId);
+        }
+        // Connections to outside barrel now go to vessel
+        if (conn.fromComponentId === rv.outsideBarrelId) {
+          conn.fromComponentId = id;
+          conn.fromPortId = conn.fromPortId.replace(rv.outsideBarrelId, id);
+        }
+        if (conn.toComponentId === rv.outsideBarrelId) {
+          conn.toComponentId = id;
+          conn.toPortId = conn.toPortId.replace(rv.outsideBarrelId, id);
+        }
+      }
+
+      // Remove old sub-components
+      state.components.delete(rv.insideBarrelId);
+      state.components.delete(rv.outsideBarrelId);
+
+      // Keep legacy fields for reference (they're marked as deprecated in types)
+      // Don't delete them so we can track what was migrated
+
+      console.log(`[Migration] Reactor vessel ${id} migrated successfully`);
+    }
   }
 
   // Get list of saved configuration names
@@ -1062,6 +1185,7 @@ function init() {
         maxFlowChange: 0,
         maxMassChange: 0,
         consecutiveSuccesses: 0,
+        topErrorContributors: [],
         realTimeRatio: 0,
         isFallingBehind: false,
         fallingBehindSince: 0,
@@ -1525,6 +1649,7 @@ function init() {
     maxFlowChange: 0,
     maxMassChange: 0,
     consecutiveSuccesses: 0,
+    topErrorContributors: [],
     realTimeRatio: 0,
     isFallingBehind: false,
     fallingBehindSince: 0,
@@ -1610,9 +1735,36 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       }
     }
 
-    // Handle reactor vessels specially - sync both inside and outside barrel regions
+    // Handle reactor vessels specially - sync both core and downcomer regions
     if (component.type === 'reactorVessel') {
       const rv = component as ReactorVesselComponent;
+
+      // New architecture: vessel IS the downcomer, coreBarrel is separate
+      if (rv.coreBarrelId) {
+        // Sync vessel.fluid from the vessel's own flow node (downcomer)
+        const vesselNode = simState.flowNodes.get(component.id);
+        if (vesselNode && component.fluid) {
+          component.fluid.temperature = vesselNode.fluid.temperature;
+          component.fluid.pressure = vesselNode.fluid.pressure;
+          component.fluid.phase = vesselNode.fluid.phase;
+          component.fluid.quality = vesselNode.fluid.quality;
+          component.fluid.separation = vesselNode.separation;
+        }
+        // Core barrel syncs automatically via normal component loop (it has its own fluid)
+        // Sync fuel temperature from core barrel's thermal node
+        const fuelNodeId = `${component.id}-fuel`;
+        const fuelNode = simState.thermalNodes.get(fuelNodeId);
+        if (fuelNode) {
+          // Update fuel temp on the core barrel
+          const coreBarrel = plantState.components.get(rv.coreBarrelId);
+          if (coreBarrel) {
+            (coreBarrel as any).fuelTemperature = fuelNode.temperature;
+          }
+        }
+        continue;
+      }
+
+      // Legacy architecture: insideBarrelId/outsideBarrelId
       // Sync fluid from inside barrel region (core region) to component.fluid
       if (rv.insideBarrelId) {
         const insideNode = simState.flowNodes.get(rv.insideBarrelId);
@@ -1685,11 +1837,16 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     }
   }
 
-  // Sync control rod position to vessel visual
+  // Sync control rod position to vessel/coreBarrel visual
   const rodPosition = simState.neutronics.controlRodPosition;
   for (const [, comp] of plantState.components) {
-    if ((comp.type === 'vessel' || comp.type === 'reactorVessel') && comp.controlRodCount) {
-      comp.controlRodPosition = rodPosition;
+    // Vessels have controlRodCount directly
+    if (comp.type === 'vessel' && (comp as any).controlRodCount) {
+      (comp as any).controlRodPosition = rodPosition;
+    }
+    // Core barrels have control rod properties
+    if (comp.type === 'coreBarrel' && (comp as any).controlRodCount) {
+      (comp as any).controlRodPosition = rodPosition;
     }
   }
 

@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -1334,7 +1334,7 @@ export class PlantCanvas {
               (pipe as any).length = screenLength / pipeZoom;
 
               const isSelected = component.id === this.selectedComponentId;
-              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections, !!this.simState);
+              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState);
 
               // Restore original length
               (pipe as any).length = originalLength;
@@ -1373,7 +1373,7 @@ export class PlantCanvas {
 
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState);
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState);
 
         // Render elevation label (reset scale first so text isn't squished)
         if (component.type !== 'pipe') {
@@ -1390,7 +1390,7 @@ export class PlantCanvas {
 
         // Render the component
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !!this.simState);
+        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !!this.simState, this.plantState);
       }
 
       ctx.restore();
@@ -1430,7 +1430,11 @@ export class PlantCanvas {
       const getPortScreenPos = this.isometric.enabled
         ? (comp: PlantComponent, port: { position: Point }) => this.getPortScreenPosition(comp, port)
         : undefined;
-      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos);
+      // Pass connection endpoint getter that accounts for elevation offsets
+      const getConnScreenPos = this.isometric.enabled
+        ? (fromComp: PlantComponent, toComp: PlantComponent, conn: Connection) => this.getConnectionScreenEndpoints(fromComp, toComp, conn)
+        : undefined;
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos);
     } else {
       // Debug: log once if simState is not set
       if (!this._simStateWarningLogged) {
@@ -1748,6 +1752,101 @@ export class PlantCanvas {
     // Use the standard fluid color function for consistency with node rendering
     // This ensures connections match the color of their source fluid
     return getFluidColor(fluid);
+  }
+
+  // Calculate connection screen endpoints accounting for elevation offsets
+  // This matches the logic in renderConnectionPerspective for consistency
+  private getConnectionScreenEndpoints(
+    fromComponent: PlantComponent,
+    toComponent: PlantComponent,
+    connection: Connection
+  ): ConnectionScreenEndpoints | null {
+    // Find ports
+    const fromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
+    const toPort = toComponent.ports?.find(p => p.id === connection.toPortId);
+    if (!fromPort || !toPort) return null;
+
+    // Get port screen positions
+    const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
+    const toPortScreen = this.getPortScreenPosition(toComponent, toPort);
+    if (!fromPortScreen || !toPortScreen) return null;
+
+    // Get component base elevations
+    const fromCompElevation = getComponentElevation(fromComponent);
+    const toCompElevation = getComponentElevation(toComponent);
+
+    // Connection elevation is relative to component bottom
+    const fromConnElevation = connection.fromElevation ?? 0;
+    const toConnElevation = connection.toElevation ?? 0;
+
+    // Calculate the port's visual elevation relative to component bottom
+    const fromSize = this.getComponentSize(fromComponent);
+    const toSize = this.getComponentSize(toComponent);
+    const fromPortVisualElev = fromSize.height / 2 - fromPort.position.y;
+    const toPortVisualElev = toSize.height / 2 - toPort.position.y;
+
+    // Calculate the DIFFERENCE between where the connection should be and where the port appears
+    const fromElevDiff = fromConnElevation - fromPortVisualElev;
+    const toElevDiff = toConnElevation - toPortVisualElev;
+
+    // Use worldToScreenPerspective to get the scale factor at each location
+    const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
+    const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
+
+    const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
+    const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
+
+    if (fromProj.scale <= 0 || toProj.scale <= 0) return null;
+
+    // Get the vertical transform for elevation changes
+    const { verticalScale } = this.getViewTransform();
+
+    // Calculate elevation offset in screen pixels
+    const fromElevationOffset = fromElevDiff * fromProj.scale * this.ELEVATION_SCALE * verticalScale;
+    const toElevationOffset = toElevDiff * toProj.scale * this.ELEVATION_SCALE * verticalScale;
+
+    // Apply elevation offset to port screen positions (negative because Y increases downward)
+    let fromScreen = { x: fromPortScreen.x, y: fromPortScreen.y - fromElevationOffset };
+    let toScreen = { x: toPortScreen.x, y: toPortScreen.y - toElevationOffset };
+
+    // Handle internal connections (one component contained by the other, or siblings)
+    const fromContainedBy = (fromComponent as any).containedBy;
+    const toContainedBy = (toComponent as any).containedBy;
+
+    if (fromContainedBy === toComponent.id) {
+      const t = 0.1;
+      toScreen = {
+        x: fromScreen.x + t * (toScreen.x - fromScreen.x),
+        y: fromScreen.y + t * (toScreen.y - fromScreen.y)
+      };
+    } else if (toContainedBy === fromComponent.id) {
+      const t = 0.1;
+      fromScreen = {
+        x: toScreen.x + t * (fromScreen.x - toScreen.x),
+        y: toScreen.y + t * (fromScreen.y - toScreen.y)
+      };
+    } else if (fromContainedBy && fromContainedBy === toContainedBy) {
+      const t = 0.4;
+      const midX = (fromScreen.x + toScreen.x) / 2;
+      const midY = (fromScreen.y + toScreen.y) / 2;
+      fromScreen = {
+        x: fromScreen.x + t * (midX - fromScreen.x),
+        y: fromScreen.y + t * (midY - fromScreen.y)
+      };
+      toScreen = {
+        x: toScreen.x + t * (midX - toScreen.x),
+        y: toScreen.y + t * (midY - toScreen.y)
+      };
+    }
+
+    // Average scale for arrow sizing
+    const avgScale = (fromProj.scale + toProj.scale) / 2;
+
+    return {
+      fromPos: fromScreen,
+      toPos: toScreen,
+      scale: avgScale
+    };
   }
 
   // Render ground-level outline for a component in construction mode

@@ -677,6 +677,7 @@ export class GameLoop {
       maxFlowChange: 0,
       maxMassChange: 0,
       consecutiveSuccesses: 0,
+      topErrorContributors: [],
       realTimeRatio: 1,
       isFallingBehind: false,
       fallingBehindSince: 0,

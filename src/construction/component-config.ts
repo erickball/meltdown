@@ -67,11 +67,27 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 10, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Typically elevated above hot leg' },
       { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 175, min: 100, max: 250, step: 5, unit: 'bar' },
       { name: 'heaterPower', type: 'number', label: 'Heater Power', default: 2, min: 0, max: 10, step: 0.5, unit: 'MW' },
       { name: 'sprayFlow', type: 'number', label: 'Max Spray Flow', default: 50, min: 0, max: 200, step: 10, unit: 'kg/s' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%', help: 'Pressurizers are always two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 1, max: 221, step: 1, unit: 'bar', help: 'Determines saturation temperature' },
-      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 345, min: 20, max: 374, step: 5, unit: '°C', help: 'Calculated from saturation pressure' }
+      { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 345, min: 20, max: 374, step: 5, unit: '°C', help: 'Calculated from saturation pressure' },
+      // Calculated fields
+      { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
+        calculate: (p) => {
+          // ASME formula: t = P*R / (S*E - 0.6*P)
+          // S = 172 MPa (SA-533 Grade B Class 1), E = 1.0 (full radiograph)
+          const P = (p.pressureRating || 175) * 1e5; // bar to Pa
+          const vol = p.volume || 40;
+          const h = p.height || 12;
+          const R = Math.sqrt(vol / (Math.PI * h)); // Derive radius from volume and height
+          const S = 172e6; // Pa
+          const E = 1.0;
+          const t = P * R / (S * E - 0.6 * P);
+          return (t * 1000).toFixed(1); // Convert to mm
+        }
+      }
     ]
   },
   'reactor-vessel': {
@@ -394,6 +410,17 @@ export const componentDefinitions: Record<string, {
           const tubeDisplacement = Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
           const volume = shellVolume - tubeDisplacement;
           return Math.max(0, volume).toFixed(1);
+        }
+      },
+      { name: 'shellWallThickness', type: 'calculated', label: 'Shell Wall Thickness', default: 0, unit: 'mm',
+        calculate: (p) => {
+          // ASME formula for cylindrical vessels: t = P*R / (S*E - 0.6*P)
+          const P = (p.shellPressure || 60) * 1e5; // bar to Pa
+          const R = (p.shellDiameter || 2.5) / 2;   // inner radius in m
+          const S = 172e6; // SA-533 Grade B Class 1 allowable stress (Pa)
+          const E = 1.0;   // Joint efficiency
+          const thickness = P * R / (S * E - 0.6 * P);
+          return (Math.max(0.002, thickness) * 1000).toFixed(0); // m to mm
         }
       }
     ]

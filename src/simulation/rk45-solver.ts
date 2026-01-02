@@ -15,7 +15,7 @@
  * - Solver combines rates using RK45 and adjusts timestep based on error
  */
 
-import { SimulationState, SolverMetrics } from './types';
+import { SimulationState, SolverMetrics, ErrorContributor } from './types';
 import { cloneSimulationState } from './solver';
 
 // ============================================================================
@@ -238,39 +238,17 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
   let sumSq = 0;
   let count = 0;
 
-  // Build a map of total absolute flow into/out of each node
-  // This captures throughput even when net flow is near zero
-  const nodeThroughput = new Map<string, number>();
-  for (const conn of state.flowConnections) {
-    const absFlow = Math.abs(conn.massFlowRate);
-    // Add flow to both connected nodes
-    nodeThroughput.set(conn.fromNodeId, (nodeThroughput.get(conn.fromNodeId) || 0) + absFlow);
-    nodeThroughput.set(conn.toNodeId, (nodeThroughput.get(conn.toNodeId) || 0) + absFlow);
-  }
-
   // Flow nodes - normalize by current values to get relative error
   for (const [id, r] of rates.flowNodes) {
     const node = state.flowNodes.get(id);
     if (node) {
       // Relative mass rate (from net flow)
+      // This is what matters for accuracy - if flows are unbalanced, mass changes.
+      // Balanced high-throughput is fine because the net dMass will be small.
       if (node.fluid.mass > 0) {
         const relMassRate = r.dMass / node.fluid.mass;
         sumSq += relMassRate * relMassRate;
         count++;
-
-        // Also consider throughput ratio: total flow magnitude / node mass
-        // Even balanced flows can cause numerical issues if throughput >> mass
-        // A throughput of 10% of mass per second is significant
-        const throughput = nodeThroughput.get(id) || 0;
-        if (throughput > 0) {
-          // Throughput ratio: kg/s flowing through / kg in node
-          // Scale factor of 0.5 since we're counting flow at both ends
-          const throughputRatio = (throughput * 0.5) / node.fluid.mass;
-          // Weight this less than net mass change since balanced flow is more stable
-          // but still contributes to stiffness
-          sumSq += (throughputRatio * 0.3) * (throughputRatio * 0.3);
-          count++;
-        }
       }
       // Relative energy rate
       if (Math.abs(node.fluid.internalEnergy) > 0) {
@@ -317,6 +295,138 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
   }
 
   return count > 0 ? Math.sqrt(sumSq / count) : 0;
+}
+
+/**
+ * Compute per-component error contributions for debugging.
+ * Returns the top N contributors to the total RK45 error.
+ */
+export function computeErrorContributors(rates: StateRates, state: SimulationState, topN: number = 3): ErrorContributor[] {
+  const contributions: ErrorContributor[] = [];
+
+  // Flow nodes - mass rate, energy rate, and density warnings
+  // Note: Throughput (total flow through a node) is NOT included because balanced
+  // high-throughput doesn't cause accuracy problems - only net mass imbalance does.
+  for (const [id, r] of rates.flowNodes) {
+    const node = state.flowNodes.get(id);
+    if (node) {
+      // Mass rate contribution (net flow imbalance)
+      if (node.fluid.mass > 0) {
+        const relMassRate = Math.abs(r.dMass / node.fluid.mass);
+        // Use very low threshold - we want to show what's contributing even if small
+        if (relMassRate > 1e-8) {
+          const direction = r.dMass > 0 ? 'gaining' : 'losing';
+          contributions.push({
+            nodeId: id,
+            type: 'mass',
+            contribution: relMassRate,
+            description: `${direction} ${Math.abs(r.dMass).toFixed(1)} kg/s`
+          });
+        }
+
+        // Also check for dangerous density accumulation
+        // This isn't an RK45 error term, but it's a critical warning
+        // Water density should never exceed ~1100 kg/m³ (high pressure compressed liquid)
+        const density = node.fluid.mass / node.volume;
+        if (density > 950) {
+          // Calculate how far above normal we are (950 kg/m³ is already compressed)
+          // At 1100 it's dangerous, at 1500 we'll crash
+          const dangerFactor = (density - 950) / (1500 - 950);
+          if (dangerFactor > 0.1) {
+            contributions.push({
+              nodeId: id,
+              type: 'mass',
+              contribution: dangerFactor, // Will be normalized with others
+              description: `⚠️ ρ=${density.toFixed(0)} kg/m³`
+            });
+          }
+        }
+      }
+
+      // Energy rate contribution
+      if (Math.abs(node.fluid.internalEnergy) > 0) {
+        const relEnergyRate = Math.abs(r.dEnergy / node.fluid.internalEnergy);
+        if (relEnergyRate > 1e-8) {
+          const powerMW = r.dEnergy / 1e6;
+          contributions.push({
+            nodeId: id,
+            type: 'energy',
+            contribution: relEnergyRate,
+            description: `${powerMW > 0 ? '+' : ''}${powerMW.toFixed(2)} MW`
+          });
+        }
+      }
+    }
+  }
+
+  // Flow connections - momentum (flow rate changes)
+  for (const [id, r] of rates.flowConnections) {
+    const conn = state.flowConnections.find(c => c.id === id);
+    if (conn) {
+      const refFlowRate = Math.max(100, Math.abs(conn.massFlowRate));
+      const relFlowRateChange = Math.abs(r.dMassFlowRate / refFlowRate);
+      if (relFlowRateChange > 1e-8) {
+        // Extract node IDs from connection ID (format: "flow-fromId-toId")
+        const fromNode = conn.fromNodeId;
+        const toNode = conn.toNodeId;
+        contributions.push({
+          nodeId: `${fromNode}→${toNode}`,
+          type: 'momentum',
+          contribution: relFlowRateChange,
+          description: `dṁ/dt=${r.dMassFlowRate.toFixed(1)} kg/s²`
+        });
+      }
+    }
+  }
+
+  // Thermal nodes
+  for (const [id, r] of rates.thermalNodes) {
+    const relTempRate = Math.abs(r.dTemperature / 1000);
+    if (relTempRate > 1e-8) {
+      contributions.push({
+        nodeId: id,
+        type: 'temperature',
+        contribution: relTempRate,
+        description: `dT/dt=${r.dTemperature.toFixed(1)} K/s`
+      });
+    }
+  }
+
+  // Neutronics
+  if (state.neutronics.power > 0) {
+    const relPowerRate = Math.abs(rates.neutronics.dPower / state.neutronics.power);
+    if (relPowerRate > 1e-8) {
+      contributions.push({
+        nodeId: 'neutronics',
+        type: 'power',
+        contribution: relPowerRate,
+        description: `dP/dt=${(rates.neutronics.dPower / 1e6).toFixed(2)} MW/s`
+      });
+    }
+  }
+  if (state.neutronics.precursorConcentration > 0) {
+    const relPrecRate = Math.abs(rates.neutronics.dPrecursorConcentration / state.neutronics.precursorConcentration);
+    if (relPrecRate > 1e-8) {
+      contributions.push({
+        nodeId: 'neutronics',
+        type: 'precursor',
+        contribution: relPrecRate,
+        description: `precursor decay`
+      });
+    }
+  }
+
+  // Sort by contribution (highest first) and return top N
+  contributions.sort((a, b) => b.contribution - a.contribution);
+
+  // Normalize contributions to show relative importance
+  const totalContribution = contributions.reduce((sum, c) => sum + c.contribution * c.contribution, 0);
+  const totalNorm = Math.sqrt(totalContribution);
+
+  return contributions.slice(0, topN).map(c => ({
+    ...c,
+    contribution: totalNorm > 0 ? (c.contribution * c.contribution) / totalContribution : 0
+  }));
 }
 
 /**
@@ -627,6 +737,7 @@ export class RK45Solver {
     newState: SimulationState;
     error: number;
     k: StateRates[];
+    errorRates: StateRates;
   } {
     // Compute the 7 stages of DOPRI5
     const k: StateRates[] = [];
@@ -639,6 +750,7 @@ export class RK45Solver {
         newState: state,
         error: 1e10,
         k: [],
+        errorRates: createZeroRates(),
       };
     }
     k[0] = k0;
@@ -660,6 +772,7 @@ export class RK45Solver {
           newState: state,
           error: 1e10,
           k,
+          errorRates: createZeroRates(),
         };
       }
 
@@ -674,6 +787,7 @@ export class RK45Solver {
           newState: state,
           error: 1e10,
           k,
+          errorRates: createZeroRates(),
         };
       }
       k[i] = ki;
@@ -702,6 +816,7 @@ export class RK45Solver {
         newState: state,
         error: 1e10,
         k,
+        errorRates: solution5Rates,
       };
     }
 
@@ -714,7 +829,7 @@ export class RK45Solver {
     // Compute error norm
     const error = computeRatesNorm(errorRates, state) * dt;
 
-    return { newState, error, k };
+    return { newState, error, k, errorRates };
   }
 
   /**
@@ -760,6 +875,8 @@ export class RK45Solver {
     let minDtUsed = this.currentDt;
     let consecutiveRejectsAtMinDt = 0;
     const MAX_REJECTS_AT_MIN_DT = 50;
+    let lastErrorRates: StateRates = createZeroRates();
+    let lastAcceptedState: SimulationState = state;
 
     while (remainingTime > 1e-10) {
       // Check limits
@@ -781,7 +898,7 @@ export class RK45Solver {
       const stepDt = Math.min(this.currentDt, remainingTime);
 
       // Take a step
-      const { newState, error } = this.step(currentState, stepDt);
+      const { newState, error, errorRates } = this.step(currentState, stepDt);
 
       // Quick sanity check BEFORE constraints to avoid crashing water properties
       const preCheck = checkPreConstraintSanity(newState);
@@ -853,6 +970,10 @@ export class RK45Solver {
         this.totalSteps++;
         minDtUsed = Math.min(minDtUsed, stepDt);
 
+        // Track error rates for contributor analysis (use the one that limited dt the most)
+        lastErrorRates = errorRates;
+        lastAcceptedState = constrainedState;
+
         // Reset consecutive reject counter on successful step
         consecutiveRejectsAtMinDt = 0;
 
@@ -878,6 +999,9 @@ export class RK45Solver {
 
     const frameTime = performance.now() - frameStart;
 
+    // Compute top error contributors from the last accepted step
+    const topErrorContributors = computeErrorContributors(lastErrorRates, lastAcceptedState, 3);
+
     // Build metrics
     const metrics: SolverMetrics = {
       currentDt: this.currentDt,
@@ -895,6 +1019,7 @@ export class RK45Solver {
       maxFlowChange: 0,
       maxMassChange: 0,
       consecutiveSuccesses: stepsThisFrame - rejectsThisFrame,
+      topErrorContributors,
       realTimeRatio: (requestedDt - remainingTime) / (frameTime / 1000),
       isFallingBehind: remainingTime > requestedDt * 0.1,
       fallingBehindSince: 0,
@@ -913,7 +1038,7 @@ export class RK45Solver {
     error: number;
     metrics: SolverMetrics;
   } {
-    const { newState, error } = this.step(state, this.currentDt);
+    const { newState, error, errorRates } = this.step(state, this.currentDt);
 
     // Quick sanity check BEFORE constraints to avoid crashing water properties
     const preCheck = checkPreConstraintSanity(newState);
@@ -941,6 +1066,7 @@ export class RK45Solver {
           maxFlowChange: 0,
           maxMassChange: 0,
           consecutiveSuccesses: 0,
+          topErrorContributors: computeErrorContributors(errorRates, state, 3),
           realTimeRatio: 0,
           isFallingBehind: true,
           fallingBehindSince: 0,
@@ -977,6 +1103,7 @@ export class RK45Solver {
       maxFlowChange: 0,
       maxMassChange: 0,
       consecutiveSuccesses: 1,
+      topErrorContributors: computeErrorContributors(errorRates, constrainedState, 3),
       realTimeRatio: 1,
       isFallingBehind: false,
       fallingBehindSince: 0,

@@ -216,6 +216,7 @@ export class Solver {
       maxFlowChange: 0,
       maxMassChange: 0,
       consecutiveSuccesses: 0,
+      topErrorContributors: [],
       realTimeRatio: 1.0,
       isFallingBehind: false,
       fallingBehindSince: -1,

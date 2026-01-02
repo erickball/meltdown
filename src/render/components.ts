@@ -5,6 +5,7 @@ import {
   PumpComponent,
   VesselComponent,
   ReactorVesselComponent,
+  CoreBarrelComponent,
   ValveComponent,
   HeatExchangerComponent,
   TurbineGeneratorComponent,
@@ -19,6 +20,48 @@ import {
 } from '../types';
 import { SimulationState, getTurbineCondenserState } from '../simulation';
 import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction, getSaturationTemp } from './colors';
+
+/**
+ * Calculate wall thickness from pressure rating using ASME pressure vessel formula.
+ * t = P*R / (S*E - 0.6*P)
+ * where:
+ *   P = design pressure (Pa)
+ *   R = inner radius (m)
+ *   S = allowable stress (Pa) - using SA-533 Grade B Class 1 at ~320°C = 172 MPa
+ *   E = joint efficiency (1.0 for full radiograph)
+ *
+ * Returns minimum 2mm wall thickness.
+ */
+export function calculateWallThicknessFromPressure(pressureBar: number, innerDiameterM: number): number {
+  const P = pressureBar * 1e5; // bar to Pa
+  const R = innerDiameterM / 2; // radius in meters
+  const S = 172e6; // Pa - SA-533 Grade B Class 1 allowable stress
+  const E = 1.0; // Joint efficiency
+
+  // ASME formula for cylindrical shells
+  const thickness = P * R / (S * E - 0.6 * P);
+
+  // Minimum 2mm wall thickness
+  return Math.max(0.002, thickness);
+}
+
+/**
+ * Calculate pipe wall thickness from pressure rating.
+ * Uses Barlow's formula: t = P*D / (2*S*E)
+ * For pipes, we use a lower allowable stress (carbon steel SA-106)
+ */
+export function calculatePipeThicknessFromPressure(pressureBar: number, outerDiameterM: number): number {
+  const P = pressureBar * 1e5; // bar to Pa
+  const D = outerDiameterM; // outer diameter in meters
+  const S = 138e6; // Pa - SA-106 Grade B allowable stress at elevated temp
+  const E = 1.0; // Joint efficiency
+
+  // Barlow's formula
+  const thickness = P * D / (2 * S * E);
+
+  // Minimum 2mm wall thickness
+  return Math.max(0.002, thickness);
+}
 
 // Convert world coordinates (meters) to screen coordinates (pixels)
 export function worldToScreen(point: Point, view: ViewState): Point {
@@ -255,7 +298,8 @@ export function renderComponent(
   isSelected: boolean = false,
   skipPorts: boolean = false,
   connections?: Connection[],
-  isSimulating: boolean = false
+  isSimulating: boolean = false,
+  plantState?: PlantState
 ): void {
   // Note: Context is already transformed to component position by caller
   // We no longer transform here to support isometric projection
@@ -290,7 +334,7 @@ export function renderComponent(
       renderCondenser(ctx, component, view);
       break;
     case 'reactorVessel':
-      renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections, isSimulating);
+      renderReactorVessel(ctx, component as ReactorVesselComponent, view, connections, isSimulating, plantState);
       break;
     case 'controller':
       renderController(ctx, component as ControllerComponent, view);
@@ -314,7 +358,13 @@ export function renderComponent(
 function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState, isSimulating: boolean = false): void {
   const w = tank.width * view.zoom;
   const h = tank.height * view.zoom;
-  const wallPx = Math.max(2, tank.wallThickness * view.zoom);
+
+  // Calculate wall thickness from pressure rating if available, otherwise use stored value
+  let wallThickness = tank.wallThickness;
+  if (tank.pressureRating !== undefined && tank.pressureRating > 0) {
+    wallThickness = calculateWallThicknessFromPressure(tank.pressureRating, tank.width);
+  }
+  const wallPx = Math.max(2, wallThickness * view.zoom);
 
   // Outer wall
   ctx.fillStyle = COLORS.steel;
@@ -349,8 +399,18 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
 
 function renderPipe(ctx: CanvasRenderingContext2D, pipe: PipeComponent, view: ViewState): void {
   const length = pipe.length * view.zoom;
-  const outerD = pipe.diameter * view.zoom;
-  const innerD = (pipe.diameter - pipe.thickness * 2) * view.zoom;
+
+  // Calculate wall thickness from pressure rating if available, otherwise use stored value
+  let wallThickness = pipe.thickness;
+  if (pipe.pressureRating !== undefined && pipe.pressureRating > 0) {
+    // For pipes, outer diameter = inner diameter + 2*thickness
+    // We calculate thickness based on what outer diameter would be
+    const estimatedOuterD = pipe.diameter + 2 * pipe.thickness;
+    wallThickness = calculatePipeThicknessFromPressure(pipe.pressureRating, estimatedOuterD);
+  }
+
+  const outerD = (pipe.diameter + wallThickness * 2) * view.zoom;
+  const innerD = pipe.diameter * view.zoom;
 
   // Outer pipe (wall)
   ctx.fillStyle = COLORS.steel;
@@ -671,7 +731,14 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
 
 function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, view: ViewState, isSimulating: boolean = false): void {
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
-  const outerR = innerR + vessel.wallThickness * view.zoom;
+
+  // Calculate wall thickness from pressure rating if available, otherwise use stored value
+  let wallThickness = vessel.wallThickness;
+  if (vessel.pressureRating !== undefined && vessel.pressureRating > 0) {
+    wallThickness = calculateWallThicknessFromPressure(vessel.pressureRating, vessel.innerDiameter);
+  }
+
+  const outerR = innerR + wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
 
   // Draw the vessel shell as a single continuous path (no dome transition lines)
@@ -718,21 +785,21 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
     ctx.arc(0, h / 2 - outerR, innerR, 0, Math.PI, false);
     ctx.closePath();
   } else if (vessel.hasDome) {
-    const wallT = vessel.wallThickness * view.zoom;
+    const wallT = wallThickness * view.zoom;
     ctx.moveTo(-innerR, h / 2 - wallT);
     ctx.lineTo(-innerR, -h / 2 + outerR);
     ctx.arc(0, -h / 2 + outerR, innerR, Math.PI, 0, false);
     ctx.lineTo(innerR, h / 2 - wallT);
     ctx.closePath();
   } else if (vessel.hasBottom) {
-    const wallT = vessel.wallThickness * view.zoom;
+    const wallT = wallThickness * view.zoom;
     ctx.moveTo(-innerR, -h / 2 + wallT);
     ctx.lineTo(-innerR, h / 2 - outerR);
     ctx.arc(0, h / 2 - outerR, innerR, 0, Math.PI, false);
     ctx.lineTo(innerR, -h / 2 + wallT);
     ctx.closePath();
   } else {
-    const wallT = vessel.wallThickness * view.zoom;
+    const wallT = wallThickness * view.zoom;
     ctx.rect(-innerR, -h / 2 + wallT, innerR * 2, h - wallT * 2);
   }
   ctx.clip();
@@ -849,7 +916,7 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   ctx.stroke();
 }
 
-function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[], isSimulating: boolean = false): void {
+function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[], isSimulating: boolean = false, plantState?: PlantState): void {
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
   const outerR = innerR + vessel.wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
@@ -929,8 +996,10 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
   ctx.clip('evenodd');
 
-  // Fill with fluid color (downcomer region) - use outsideBarrelFluid if available
-  const downcomerFluid = vessel.outsideBarrelFluid ?? vessel.fluid;
+  // Fill with fluid color (downcomer region)
+  // New architecture: vessel.fluid IS the downcomer
+  // Legacy: outsideBarrelFluid was the downcomer (fallback to vessel.fluid)
+  const downcomerFluid = (vessel as any).outsideBarrelFluid ?? vessel.fluid;
   if (downcomerFluid) {
     if (downcomerFluid.phase === 'two-phase') {
       const liquidFraction = getLiquidFraction(vessel, downcomerFluid, isSimulating);
@@ -957,18 +1026,25 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   ctx.fillRect(barrelInnerR, barrelTopY, vessel.barrelThickness * view.zoom, barrelHeight);
 
   // Draw fluid inside barrel - stratified if two-phase
+  // Look up core barrel for fluid (new architecture) or fall back to vessel.fluid (legacy)
+  let coreBarrel: CoreBarrelComponent | undefined;
+  if (vessel.coreBarrelId && plantState) {
+    coreBarrel = plantState.components.get(vessel.coreBarrelId) as CoreBarrelComponent;
+  }
+  const coreFluid = coreBarrel?.fluid ?? vessel.fluid;
+
   ctx.save();
   ctx.beginPath();
   ctx.rect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
   ctx.clip();
 
-  if (vessel.fluid) {
-    if (vessel.fluid.phase === 'two-phase') {
-      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      const separation = vessel.fluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction, separation);
+  if (coreFluid) {
+    if (coreFluid.phase === 'two-phase') {
+      const liquidFraction = getLiquidFraction(vessel, coreFluid, isSimulating);
+      const separation = coreFluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, coreFluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction, separation);
     } else {
-      ctx.fillStyle = getFluidColor(vessel.fluid);
+      ctx.fillStyle = getFluidColor(coreFluid);
       ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
     }
   } else {
@@ -979,9 +1055,11 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   ctx.restore();
 
   // Draw fuel rods inside the barrel (if this reactor vessel has a core)
-  if ((vessel as any).fuelRodCount && (vessel as any).fuelRodCount > 0) {
-    const fuelTemp = (vessel as any).fuelTemperature ?? 600;
-    const meltPoint = (vessel as any).fuelMeltingPoint ?? 2800;
+  // Fuel properties are on core barrel (new) or vessel (legacy)
+  const fuelRodCount = coreBarrel?.fuelRodCount ?? (vessel as any).fuelRodCount;
+  if (fuelRodCount && fuelRodCount > 0) {
+    const fuelTemp = coreBarrel?.fuelTemperature ?? (vessel as any).fuelTemperature ?? 600;
+    const meltPoint = coreBarrel?.fuelMeltingPoint ?? (vessel as any).fuelMeltingPoint ?? 2800;
     const fuelColor = getFuelColor(fuelTemp, meltPoint);
 
     // Core dimensions - use stored coreDiameter or default to barrel inner diameter
@@ -1064,9 +1142,10 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
     }
 
     // Draw control rods (always full length, extend above core when withdrawn)
-    const controlRodCount = (vessel as any).controlRodCount ?? 0;
+    // Control rod properties are on core barrel (new) or vessel (legacy)
+    const controlRodCount = coreBarrel?.controlRodCount ?? (vessel as any).controlRodCount ?? 0;
     if (controlRodCount > 0) {
-      const controlRodPosition = (vessel as any).controlRodPosition ?? 0.5;
+      const controlRodPosition = coreBarrel?.controlRodPosition ?? (vessel as any).controlRodPosition ?? 0.5;
       // 0 = fully inserted (rod inside core), 1 = fully withdrawn (rod above core)
       // Control rod length is always the same as core height
       const controlRodLength = coreHeightPx;
@@ -1094,22 +1173,44 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   ctx.fillStyle = COLORS.steelDark;
   const plateThickness = 3;
 
-  // Find connections between inside and outside barrel regions
+  // Find connections between vessel (downcomer) and core barrel regions
   let bottomConnectionFlowArea = 0;
   let topConnectionFlowArea = 0;
 
-  if (connections && vessel.insideBarrelId && vessel.outsideBarrelId) {
-    for (const conn of connections) {
-      const connectsInside = conn.fromComponentId === vessel.insideBarrelId || conn.toComponentId === vessel.insideBarrelId;
-      const connectsOutside = conn.fromComponentId === vessel.outsideBarrelId || conn.toComponentId === vessel.outsideBarrelId;
+  // New architecture: connections between vessel and coreBarrel
+  const coreBarrelId = vessel.coreBarrelId;
+  // Legacy architecture: connections between insideBarrel and outsideBarrel
+  const legacyInsideId = (vessel as any).insideBarrelId;
+  const legacyOutsideId = (vessel as any).outsideBarrelId;
 
-      if (connectsInside && connectsOutside && conn.flowArea) {
-        // Determine if this is a top or bottom connection based on port names
-        const portId = conn.fromComponentId === vessel.insideBarrelId ? conn.fromPortId : conn.toPortId;
-        if (portId.includes('bottom')) {
-          bottomConnectionFlowArea += conn.flowArea;
-        } else if (portId.includes('top')) {
-          topConnectionFlowArea += conn.flowArea;
+  if (connections) {
+    for (const conn of connections) {
+      // New architecture: vessel <-> coreBarrel connections
+      if (coreBarrelId) {
+        const connectsVessel = conn.fromComponentId === vessel.id || conn.toComponentId === vessel.id;
+        const connectsCoreBarrel = conn.fromComponentId === coreBarrelId || conn.toComponentId === coreBarrelId;
+
+        if (connectsVessel && connectsCoreBarrel && conn.flowArea) {
+          const portId = conn.fromComponentId === coreBarrelId ? conn.fromPortId : conn.toPortId;
+          if (portId.includes('bottom')) {
+            bottomConnectionFlowArea += conn.flowArea;
+          } else if (portId.includes('top')) {
+            topConnectionFlowArea += conn.flowArea;
+          }
+        }
+      }
+      // Legacy architecture: insideBarrel <-> outsideBarrel connections
+      else if (legacyInsideId && legacyOutsideId) {
+        const connectsInside = conn.fromComponentId === legacyInsideId || conn.toComponentId === legacyInsideId;
+        const connectsOutside = conn.fromComponentId === legacyOutsideId || conn.toComponentId === legacyOutsideId;
+
+        if (connectsInside && connectsOutside && conn.flowArea) {
+          const portId = conn.fromComponentId === legacyInsideId ? conn.fromPortId : conn.toPortId;
+          if (portId.includes('bottom')) {
+            bottomConnectionFlowArea += conn.flowArea;
+          } else if (portId.includes('top')) {
+            topConnectionFlowArea += conn.flowArea;
+          }
         }
       }
     }
@@ -1454,7 +1555,14 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   // Defensive: ensure valid dimensions
   const w = Math.max((hx.width || 2) * view.zoom, 20);
   const h = Math.max((hx.height || 4) * view.zoom, 20);
-  const wallPx = 4;
+
+  // Calculate wall thickness from pressure rating if available
+  // Use the smaller dimension as the "diameter" for cylindrical approximation
+  const shellDiameter = Math.min(hx.width || 2, hx.height || 4);
+  const wallThicknessM = hx.pressureRating
+    ? calculateWallThicknessFromPressure(hx.pressureRating, shellDiameter)
+    : 0.01; // Default 10mm wall
+  const wallPx = Math.max(wallThicknessM * view.zoom, 2);
 
   // Detect orientation: horizontal when width > height, vertical when height > width
   const isHorizontal = w > h;
@@ -2652,16 +2760,29 @@ function getPortWorldPosition(component: PlantComponent, portId: string): Point 
 }
 
 /**
+ * Connection endpoint info returned by getConnectionScreenPos callback
+ */
+export interface ConnectionScreenEndpoints {
+  fromPos: Point;
+  toPos: Point;
+  scale: number;  // Average scale factor for arrow sizing
+}
+
+/**
  * Render flow connection arrows showing actual mass flow rates from simulation.
  * Arrows are drawn at the midpoint of each connection in screen space,
  * pointing from the source port to the destination port.
+ *
+ * @param getConnectionScreenPos Optional callback to get adjusted connection endpoints
+ *        accounting for elevation offsets (used in isometric mode)
  */
 export function renderFlowConnectionArrows(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  getPortScreenPos?: (component: PlantComponent, port: { position: Point }) => { x: number; y: number; radius: number } | null
+  getPortScreenPos?: (component: PlantComponent, port: { position: Point }) => { x: number; y: number; radius: number } | null,
+  getConnectionScreenPos?: (fromComp: PlantComponent, toComp: PlantComponent, plantConn: Connection) => ConnectionScreenEndpoints | null
 ): void {
   for (const conn of simState.flowConnections) {
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
@@ -2683,28 +2804,41 @@ export function renderFlowConnectionArrows(
           const toComponent = plantState.components.get(pc.toComponentId);
 
           if (fromComponent && toComponent) {
-            const fromPort = fromComponent.ports?.find(p => p.id === pc.fromPortId);
-            const toPort = toComponent.ports?.find(p => p.id === pc.toPortId);
+            // Try to use the connection screen position callback first (accounts for elevations)
+            if (getConnectionScreenPos) {
+              const endpoints = getConnectionScreenPos(fromComponent, toComponent, pc);
+              if (endpoints) {
+                fromScreenPos = endpoints.fromPos;
+                toScreenPos = endpoints.toPos;
+                arrowScale = endpoints.scale;
+              }
+            }
 
-            if (fromPort && toPort) {
-              if (getPortScreenPos) {
-                // Use the canvas's port screen position calculation (isometric mode)
-                const fromPortScreen = getPortScreenPos(fromComponent, fromPort);
-                const toPortScreen = getPortScreenPos(toComponent, toPort);
-                if (fromPortScreen && toPortScreen) {
-                  fromScreenPos = { x: fromPortScreen.x, y: fromPortScreen.y };
-                  toScreenPos = { x: toPortScreen.x, y: toPortScreen.y };
-                  // Port radius is Math.max(6, scale * 25), so radius/25 ≈ perspective scale
-                  // Average the two port scales for the arrow
-                  arrowScale = (fromPortScreen.radius + toPortScreen.radius) / 2 / 25;
-                }
-              } else {
-                // Standard 2D mode - use world to screen conversion
-                const fromWorldPos = getPortWorldPosition(fromComponent, pc.fromPortId);
-                const toWorldPos = getPortWorldPosition(toComponent, pc.toPortId);
-                if (fromWorldPos && toWorldPos) {
-                  fromScreenPos = worldToScreen(fromWorldPos, view);
-                  toScreenPos = worldToScreen(toWorldPos, view);
+            // Fall back to port positions if callback not provided or failed
+            if (!fromScreenPos || !toScreenPos) {
+              const fromPort = fromComponent.ports?.find(p => p.id === pc.fromPortId);
+              const toPort = toComponent.ports?.find(p => p.id === pc.toPortId);
+
+              if (fromPort && toPort) {
+                if (getPortScreenPos) {
+                  // Use the canvas's port screen position calculation (isometric mode)
+                  const fromPortScreen = getPortScreenPos(fromComponent, fromPort);
+                  const toPortScreen = getPortScreenPos(toComponent, toPort);
+                  if (fromPortScreen && toPortScreen) {
+                    fromScreenPos = { x: fromPortScreen.x, y: fromPortScreen.y };
+                    toScreenPos = { x: toPortScreen.x, y: toPortScreen.y };
+                    // Port radius is Math.max(6, scale * 25), so radius/25 ≈ perspective scale
+                    // Average the two port scales for the arrow
+                    arrowScale = (fromPortScreen.radius + toPortScreen.radius) / 2 / 25;
+                  }
+                } else {
+                  // Standard 2D mode - use world to screen conversion
+                  const fromWorldPos = getPortWorldPosition(fromComponent, pc.fromPortId);
+                  const toWorldPos = getPortWorldPosition(toComponent, pc.toPortId);
+                  if (fromWorldPos && toWorldPos) {
+                    fromScreenPos = worldToScreen(fromWorldPos, view);
+                    toScreenPos = worldToScreen(toWorldPos, view);
+                  }
                 }
               }
             }

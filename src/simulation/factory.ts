@@ -18,7 +18,7 @@ import {
 import { createFluidState } from './operators';
 import { saturationTemperature } from './water-properties';
 import * as Water from './water-properties';
-import { PlantState, PlantComponent, Connection } from '../types';
+import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
 
 /**
  * Create an empty simulation state
@@ -743,12 +743,15 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       }
     }
 
-    // Create thermal nodes for heat-generating components (vessels with fuel)
+    // Create thermal nodes for heat-generating components (vessels/core barrels with fuel)
     const hasFuel = (component as any).fuelRodCount > 0;
     const isReactorVessel = component.type === 'reactorVessel';
+    const isCoreBarrel = component.type === 'coreBarrel';
     const isVesselWithFuel = component.type === 'vessel' && hasFuel;
 
-    if (isVesselWithFuel || (isReactorVessel && hasFuel)) {
+    // New architecture: fuel is on core barrel, not reactor vessel
+    // Legacy: fuel is on reactor vessel with insideBarrelId/outsideBarrelId
+    if (isVesselWithFuel || (isReactorVessel && hasFuel) || (isCoreBarrel && hasFuel)) {
       const thermalNodes = createThermalNodesFromCore(component);
       for (const node of thermalNodes) {
         state.thermalNodes.set(node.id, node);
@@ -758,10 +761,19 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       state.neutronics = createNeutronicsFromCore(component);
 
       // Create convection connection from fuel to coolant
-      // For reactor vessels, the coolant is in the inside barrel region
-      const coolantFlowNodeId = isReactorVessel
-        ? (component as any).insideBarrelId
-        : id;
+      // For core barrels, the coolant is the core barrel's own flow node
+      // For reactor vessels (legacy), the coolant is in the inside barrel
+      let coolantFlowNodeId: string;
+      if (isCoreBarrel) {
+        // New architecture: core barrel IS the core region flow node
+        coolantFlowNodeId = id;
+      } else if (isReactorVessel) {
+        const rv = component as ReactorVesselComponent;
+        // Legacy architecture: insideBarrelId is the core coolant
+        coolantFlowNodeId = (rv as any).insideBarrelId || id;
+      } else {
+        coolantFlowNodeId = id;
+      }
 
       state.convectionConnections.push({
         id: `convection-${id}`,
@@ -1199,10 +1211,93 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
     }
 
     case 'reactorVessel': {
-      // Reactor vessels have sub-components (inside barrel, outside barrel) that handle the flow
-      // The parent reactor vessel doesn't need its own flow node
-      // Flow nodes are created for the tank-type sub-components
-      return null;
+      // Reactor vessel IS the downcomer region - creates its own flow node
+      const rv = component as ReactorVesselComponent;
+
+      // Calculate downcomer volume (annular region between vessel wall and core barrel)
+      const vesselInnerRadius = rv.innerDiameter / 2;
+      const barrelOuterRadius = rv.barrelDiameter / 2 + rv.barrelThickness;
+      const effectiveHeight = rv.height - rv.barrelBottomGap - rv.barrelTopGap;
+      const downcomerVolume = Math.PI * (vesselInnerRadius * vesselInnerRadius - barrelOuterRadius * barrelOuterRadius) * effectiveHeight;
+
+      // Use fillLevel to determine the liquid/vapor split
+      const fillLevel = rv.fillLevel !== undefined ? rv.fillLevel : 1.0;
+
+      let fluid: FluidState;
+      const pressure = rv.fluid?.pressure || 155e5; // Default PWR pressure
+
+      if (fillLevel >= 0.999) {
+        const temp = rv.fluid?.temperature || 565; // ~292°C
+        console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
+        fluid = createFluidState(temp, pressure, 'liquid', 0, downcomerVolume);
+      } else if (fillLevel <= 0.001) {
+        const temp = rv.fluid?.temperature || 620;
+        console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating VAPOR state at ${pressure/1e5} bar, ${temp}K`);
+        fluid = createFluidState(temp, pressure, 'vapor', 1, downcomerVolume);
+      } else {
+        const temp = Water.saturationTemperature(pressure);
+        const rho_f = Water.saturatedLiquidDensity(temp);
+        const rho_g = Water.saturatedVaporDensity(temp);
+        const m_liquid = rho_f * fillLevel * downcomerVolume;
+        const m_vapor = rho_g * (1 - fillLevel) * downcomerVolume;
+        const totalMass = m_liquid + m_vapor;
+        const quality = m_vapor / totalMass;
+        console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating TWO-PHASE state: fillLevel=${fillLevel}, P=${(pressure/1e5).toFixed(1)} bar, quality=${quality.toFixed(4)}`);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, downcomerVolume);
+      }
+
+      return {
+        id: component.id,
+        label: component.label || 'Reactor Vessel (Downcomer)',
+        fluid,
+        volume: downcomerVolume,
+        hydraulicDiameter: rv.innerDiameter - rv.barrelDiameter - 2 * rv.barrelThickness, // Annular gap
+        flowArea: Math.PI * (vesselInnerRadius * vesselInnerRadius - barrelOuterRadius * barrelOuterRadius),
+        height: rv.height,
+        elevation,
+      };
+    }
+
+    case 'coreBarrel': {
+      // Core barrel is the core region inside a reactor vessel
+      const barrel = component as CoreBarrelComponent;
+
+      // Calculate core region volume (cylindrical)
+      const coreRadius = barrel.innerDiameter / 2;
+      const coreVolume = Math.PI * coreRadius * coreRadius * barrel.height;
+
+      // Use fluid from component or default to typical PWR conditions
+      const pressure = barrel.fluid?.pressure || 155e5;
+      const fillLevel = 1.0; // Core region is typically full
+
+      let fluid: FluidState;
+
+      if (fillLevel >= 0.999) {
+        const temp = barrel.fluid?.temperature || 580; // Slightly hotter than inlet
+        console.log(`[Factory] CoreBarrel ${component.id}: creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
+        fluid = createFluidState(temp, pressure, 'liquid', 0, coreVolume);
+      } else {
+        const temp = Water.saturationTemperature(pressure);
+        const rho_f = Water.saturatedLiquidDensity(temp);
+        const rho_g = Water.saturatedVaporDensity(temp);
+        const m_liquid = rho_f * fillLevel * coreVolume;
+        const m_vapor = rho_g * (1 - fillLevel) * coreVolume;
+        const totalMass = m_liquid + m_vapor;
+        const quality = m_vapor / totalMass;
+        console.log(`[Factory] CoreBarrel ${component.id}: creating TWO-PHASE state: P=${(pressure/1e5).toFixed(1)} bar, quality=${quality.toFixed(4)}`);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, coreVolume);
+      }
+
+      return {
+        id: component.id,
+        label: component.label || 'Core Region',
+        fluid,
+        volume: coreVolume,
+        hydraulicDiameter: barrel.innerDiameter,
+        flowArea: Math.PI * coreRadius * coreRadius,
+        height: barrel.height,
+        elevation,
+      };
     }
 
     default:

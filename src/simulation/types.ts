@@ -332,12 +332,24 @@ export interface SimulationConfig {
 
 // Global simulation configuration (can be modified at runtime)
 export const simulationConfig: SimulationConfig = {
-  pressureModel: 'pure-triangulation'  // Default to pure triangulation
+  // Pure triangulation interpolates pressure directly from steam tables in (u,v) space.
+  // The 'hybrid' model is OBSOLETE - it was an attempt to use bulk modulus for pressure
+  // feedback but the implementation in FluidStateConstraintOperator was broken and never
+  // properly matched FluidStateUpdateOperator. Use pure-triangulation for accurate physics.
+  pressureModel: 'pure-triangulation'
 };
 
 // ============================================================================
 // Solver Performance Metrics
 // ============================================================================
+
+/** Describes what's contributing most to timestep-limiting error */
+export interface ErrorContributor {
+  nodeId: string;           // Component/node ID
+  type: 'mass' | 'energy' | 'throughput' | 'momentum' | 'temperature' | 'power' | 'precursor';
+  contribution: number;     // Relative contribution to total error (0-1)
+  description: string;      // Human-readable description
+}
 
 export interface SolverMetrics {
   // Timing
@@ -360,6 +372,9 @@ export interface SolverMetrics {
   maxFlowChange: number;            // Maximum absolute flow rate change in last accepted step (kg/s)
   maxMassChange: number;            // Maximum relative mass change in last accepted step
   consecutiveSuccesses: number;     // Steps since last retry (for dt growth)
+
+  // Error contributors - top sources of RK45 error
+  topErrorContributors: ErrorContributor[];
 
   // Performance ratio
   realTimeRatio: number;            // sim_time / wall_time (< 1 means falling behind)

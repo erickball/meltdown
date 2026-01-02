@@ -8,6 +8,7 @@ import {
   PumpComponent,
   VesselComponent,
   ReactorVesselComponent,
+  CoreBarrelComponent,
   ValveComponent,
   HeatExchangerComponent,
   TurbineGeneratorComponent,
@@ -139,8 +140,9 @@ export class ConstructionManager {
           elevation: props.elevation || 0,
           width,
           height: props.height,
-          wallThickness: 0.05,  // 5cm default
+          wallThickness: 0.05,  // 5cm default (overridden by rendering if pressureRating is set)
           fillLevel: props.initialLevel / 100,
+          pressureRating: props.pressureRating,
           ports: tankPorts,
           fluid: defaultFluid
         };
@@ -183,8 +185,9 @@ export class ConstructionManager {
           elevation: props.elevation || 5, // Pressurizers are typically elevated
           width,
           height: props.height,
-          wallThickness: 0.05,
+          wallThickness: 0.05,  // Default (overridden by rendering if pressureRating is set)
           fillLevel: props.initialLevel / 100,
+          pressureRating: props.pressureRating,
           ports: pressurizerPorts,
           fluid: defaultFluid
         };
@@ -541,7 +544,8 @@ export class ConstructionManager {
             flowRate: 0
           },
           tubeCount: 5, // Visual tube count for rendering (not the real engineering value)
-          ports: hxPorts
+          ports: hxPorts,
+          pressureRating: props.shellPressure || 60
         };
 
         // Store additional properties for simulation (can be accessed via component)
@@ -1060,11 +1064,7 @@ export class ConstructionManager {
         const S = 172e6; // Pa - gives realistic wall thicknesses for PWR vessels
         const wallThickness = P * vesselR / (S * 1.0 - 0.6 * P);
 
-        // Create IDs for the internal regions
-        const insideBarrelId = `${id}-inside`;
-        const outsideBarrelId = `${id}-outside`;
-
-        // Calculate barrel positions accounting for dome curvature
+        // Calculate barrel geometry accounting for dome curvature
         // The dome is hemispherical with inner radius = vesselR.
         // At the barrel's outer radius, the dome surface is at:
         // z = R - sqrt(R² - r²) from the tangent point with the cylinder
@@ -1081,8 +1081,8 @@ export class ConstructionManager {
         const barrelTopElev = innerHeight - domeIntrusion - barrelTopGap;
         const barrelHeight = barrelTopElev - barrelBottomElev;
 
-        // Inside barrel volume (cylindrical)
-        const insideVolume = Math.PI * barrelInnerR * barrelInnerR * barrelHeight;
+        // Inside barrel volume (cylindrical) - this is the core region
+        const coreVolume = Math.PI * barrelInnerR * barrelInnerR * barrelHeight;
 
         // Outside barrel volume = total inner vessel volume - barrel region volume
         // Inner vessel: cylinder of height (innerHeight - 2*vesselR) + two hemispherical domes
@@ -1091,9 +1091,22 @@ export class ConstructionManager {
         const cylinderVolume = Math.PI * vesselR * vesselR * innerCylinderHeight;
         const totalVesselVolume = cylinderVolume + 2 * domeVolume;
         const barrelRegionVolume = Math.PI * barrelOuterR * barrelOuterR * barrelHeight;
-        const outsideVolume = totalVesselVolume - barrelRegionVolume;
+        const downcomerVolume = totalVesselVolume - barrelRegionVolume;
 
-        // Create the main reactor vessel component
+        // Use initial level from config (default 100%)
+        const initialFillLevel = (props.initialLevel !== undefined ? props.initialLevel : 100) / 100;
+        console.log(`[Construction] Reactor vessel initial level: ${props.initialLevel}% -> fillLevel=${initialFillLevel}`);
+
+        // Create the core barrel ID
+        const coreBarrelId = `${id}-core`;
+
+        // Vessel ports for external piping (to the downcomer region)
+        const vesselPorts: Port[] = [
+          { id: `${id}-inlet-left`, position: { x: -vesselR, y: -innerHeight / 4 }, direction: 'both' },
+          { id: `${id}-outlet-right`, position: { x: vesselR, y: -innerHeight / 4 }, direction: 'both' }
+        ];
+
+        // Create the main reactor vessel component - this IS the downcomer hydraulic region
         const reactorVessel: ReactorVesselComponent = {
           id,
           type: 'reactorVessel',
@@ -1109,93 +1122,54 @@ export class ConstructionManager {
           barrelThickness: barrelThickness,
           barrelBottomGap: barrelBottomGap,
           barrelTopGap: barrelTopGap,
-          insideBarrelId: insideBarrelId,
-          outsideBarrelId: outsideBarrelId,
-          ports: [], // Main vessel doesn't have ports - the regions do
-          fluid: defaultFluid
+          coreBarrelId: coreBarrelId,
+          ports: vesselPorts, // Vessel now has ports for downcomer connections
+          fluid: defaultFluid // Vessel fluid IS the downcomer fluid
         };
+        (reactorVessel as any).volume = downcomerVolume;
+        (reactorVessel as any).fillLevel = initialFillLevel;
 
         this.plantState.components.set(id, reactorVessel);
 
-        // Create inside-barrel region as a hydraulic-only tank (rendered by vessel, not separately)
-        const insideBarrelPorts: Port[] = [
-          { id: `${insideBarrelId}-bottom`, position: { x: 0, y: barrelHeight / 2 }, direction: 'both' },
-          { id: `${insideBarrelId}-top`, position: { x: 0, y: -barrelHeight / 2 }, direction: 'both' }
+        // Create core barrel component inside the vessel (the core region)
+        const coreBarrelPorts: Port[] = [
+          { id: `${coreBarrelId}-bottom`, position: { x: 0, y: barrelHeight / 2 }, direction: 'both' },
+          { id: `${coreBarrelId}-top`, position: { x: 0, y: -barrelHeight / 2 }, direction: 'both' }
         ];
 
-        // Use initial level from config (default 100%)
-        const initialFillLevel = (props.initialLevel !== undefined ? props.initialLevel : 100) / 100;
-        console.log(`[Construction] Reactor vessel initial level: ${props.initialLevel}% -> fillLevel=${initialFillLevel}`);
-
-        // Store fillLevel on main vessel for edit dialog to read
-        (reactorVessel as any).fillLevel = initialFillLevel;
-
-        const insideBarrel: TankComponent = {
-          id: insideBarrelId,
-          type: 'tank',
-          label: `${props.name || 'RV'} Core Region`,
+        const coreBarrel: CoreBarrelComponent = {
+          id: coreBarrelId,
+          type: 'coreBarrel',
+          label: `${props.name || 'RV'} Core Barrel`,
           position: { x: worldX, y: worldY },
           rotation: 0,
           elevation: vesselElevation + barrelBottomElev,
-          width: barrelInnerR * 2,
+          innerDiameter: barrelInnerR * 2,
+          thickness: barrelThickness,
           height: barrelHeight,
-          wallThickness: 0,
-          fillLevel: initialFillLevel,
-          ports: insideBarrelPorts,
+          bottomGap: barrelBottomGap,
+          topGap: barrelTopGap,
+          ports: coreBarrelPorts,
           fluid: { ...defaultFluid },
-          containedBy: id // Part of reactor vessel
+          containedBy: id // Core barrel is inside the vessel
         };
-        (insideBarrel as any).volume = insideVolume;
-        (insideBarrel as any).isHydraulicOnly = true; // Don't render separately
+        (coreBarrel as any).volume = coreVolume;
+        (coreBarrel as any).fillLevel = initialFillLevel;
+        (coreBarrel as any).isHydraulicOnly = true; // Don't render separately (vessel renders both)
 
-        this.plantState.components.set(insideBarrelId, insideBarrel);
+        this.plantState.components.set(coreBarrelId, coreBarrel);
 
-        // Create outside-barrel region (annulus) as hydraulic-only
-        // Ports on the VESSEL, not the annulus region
-        const outsideBarrelPorts: Port[] = [
-          { id: `${outsideBarrelId}-left`, position: { x: -vesselR, y: -innerHeight / 4 }, direction: 'both' },
-          { id: `${outsideBarrelId}-right`, position: { x: vesselR, y: -innerHeight / 4 }, direction: 'both' }
-        ];
-
-        const outsideBarrel: TankComponent = {
-          id: outsideBarrelId,
-          type: 'tank',
-          label: `${props.name || 'RV'} Annulus`,
-          position: { x: worldX, y: worldY },
-          rotation: 0,
-          elevation: vesselElevation,
-          width: vesselDiameter,
-          height: innerHeight,
-          wallThickness: 0,
-          fillLevel: initialFillLevel,
-          ports: outsideBarrelPorts,
-          fluid: { ...defaultFluid },
-          containedBy: id // Part of reactor vessel
-        };
-        (outsideBarrel as any).volume = outsideVolume;
-        (outsideBarrel as any).isHydraulicOnly = true; // Don't render separately
-
-        this.plantState.components.set(outsideBarrelId, outsideBarrel);
-
-        // Note: Ports are owned by sub-components (inside/outside barrel)
-        // The main vessel has no ports - connections go to sub-components directly
-        // This ensures getFluidAtElevation uses the correct sub-component's fluid state
-        reactorVessel.ports = [];
-
-        // Create automatic connections between inside and outside regions
-        // at top/bottom of barrel where there are gaps
-
+        // Create containment connections between vessel (downcomer) and core barrel
         // Flow area at barrel openings is the barrel inner cross-section
-        // (the core region only extends inside the barrel; head regions are part of annulus)
         const barrelOpeningArea = Math.PI * barrelInnerR * barrelInnerR;
 
-        // Bottom connection (if barrel doesn't touch vessel bottom)
+        // Bottom connection: downcomer -> core barrel bottom (if barrel doesn't touch vessel bottom)
         if (barrelBottomGap > 0.1) {
           this.plantState.connections.push({
-            fromComponentId: outsideBarrelId,
-            fromPortId: `${outsideBarrelId}-left`, // Use existing port (left side = cold leg inlet)
-            toComponentId: insideBarrelId,
-            toPortId: `${insideBarrelId}-bottom`,
+            fromComponentId: id,  // Vessel (downcomer)
+            fromPortId: `${id}-inlet-left`,
+            toComponentId: coreBarrelId,
+            toPortId: `${coreBarrelId}-bottom`,
             fromElevation: barrelBottomGap / 2,
             toElevation: 0,
             flowArea: barrelOpeningArea,
@@ -1204,13 +1178,13 @@ export class ConstructionManager {
           console.log(`[Construction] Bottom gap connection (flow area: ${barrelOpeningArea.toFixed(2)} m²)`);
         }
 
-        // Top connection (if barrel doesn't touch vessel top)
+        // Top connection: core barrel top -> downcomer (if barrel doesn't touch vessel top)
         if (barrelTopGap > 0.1) {
           this.plantState.connections.push({
-            fromComponentId: insideBarrelId,
-            fromPortId: `${insideBarrelId}-top`,
-            toComponentId: outsideBarrelId,
-            toPortId: `${outsideBarrelId}-right`, // Use existing port (right side = hot leg outlet)
+            fromComponentId: coreBarrelId,
+            fromPortId: `${coreBarrelId}-top`,
+            toComponentId: id,  // Vessel (downcomer)
+            toPortId: `${id}-outlet-right`,
             fromElevation: barrelHeight,
             toElevation: innerHeight - barrelTopGap / 2,
             flowArea: barrelOpeningArea,
@@ -1219,7 +1193,7 @@ export class ConstructionManager {
           console.log(`[Construction] Top gap connection (flow area: ${barrelOpeningArea.toFixed(2)} m²)`);
         }
 
-        console.log(`[Construction] Created reactor vessel: wall ${(wallThickness * 1000).toFixed(0)}mm, inside ${insideVolume.toFixed(1)} m³, outside ${outsideVolume.toFixed(1)} m³`);
+        console.log(`[Construction] Created reactor vessel: wall ${(wallThickness * 1000).toFixed(0)}mm, core ${coreVolume.toFixed(1)} m³, downcomer ${downcomerVolume.toFixed(1)} m³`);
         break;
       }
 
@@ -1789,11 +1763,13 @@ export class ConstructionManager {
     // Collect all component IDs to delete (includes sub-components for reactor vessels)
     const idsToDelete = new Set<string>([componentId]);
 
-    // For reactor vessels, also include the sub-components
+    // For reactor vessels, also include the core barrel
     if (component.type === 'reactorVessel') {
-      const rv = component as any;
-      if (rv.insideBarrelId) idsToDelete.add(rv.insideBarrelId);
-      if (rv.outsideBarrelId) idsToDelete.add(rv.outsideBarrelId);
+      const rv = component as ReactorVesselComponent;
+      if (rv.coreBarrelId) idsToDelete.add(rv.coreBarrelId);
+      // Legacy support for old save files
+      if ((rv as any).insideBarrelId) idsToDelete.add((rv as any).insideBarrelId);
+      if ((rv as any).outsideBarrelId) idsToDelete.add((rv as any).outsideBarrelId);
     }
 
     // Remove all connections involving any of these components
@@ -1964,17 +1940,24 @@ export class ConstructionManager {
     if (properties.initialLevel !== undefined) {
       component.fillLevel = properties.initialLevel / 100; // % to 0-1
 
-      // For reactor vessels, also update the sub-components
+      // For reactor vessels, also update the core barrel
       if (component.type === 'reactorVessel') {
-        const rv = component as any;
-        if (rv.insideBarrelId) {
-          const insideBarrel = this.plantState.components.get(rv.insideBarrelId) as any;
+        const rv = component as ReactorVesselComponent;
+        if (rv.coreBarrelId) {
+          const coreBarrel = this.plantState.components.get(rv.coreBarrelId) as CoreBarrelComponent;
+          if (coreBarrel && coreBarrel.fluid) {
+            // Core barrel fill level is managed via fluid state, not fillLevel property
+          }
+        }
+        // Legacy support for old save files
+        if ((rv as any).insideBarrelId) {
+          const insideBarrel = this.plantState.components.get((rv as any).insideBarrelId) as any;
           if (insideBarrel) {
             insideBarrel.fillLevel = properties.initialLevel / 100;
           }
         }
-        if (rv.outsideBarrelId) {
-          const outsideBarrel = this.plantState.components.get(rv.outsideBarrelId) as any;
+        if ((rv as any).outsideBarrelId) {
+          const outsideBarrel = this.plantState.components.get((rv as any).outsideBarrelId) as any;
           if (outsideBarrel) {
             outsideBarrel.fillLevel = properties.initialLevel / 100;
           }
@@ -2199,30 +2182,54 @@ export class ConstructionManager {
     // Store the fuel rod volume for reference
     container.fuelRodVolume = totalFuelRodVolume;
 
-    // For reactor vessels, update the inside barrel volume and flow areas
-    if (container.type === 'reactorVessel' && container.insideBarrelId) {
-      const insideBarrel = this.plantState.components.get(container.insideBarrelId) as Record<string, any>;
-      if (insideBarrel && insideBarrel.volume !== undefined) {
-        const originalVolume = insideBarrel.volume;
-        insideBarrel.volume = Math.max(0, originalVolume - totalFuelRodVolume);
-        console.log(`[Construction] Adjusted core region volume: ${originalVolume.toFixed(2)} - ${totalFuelRodVolume.toFixed(2)} = ${insideBarrel.volume.toFixed(2)} m³`);
+    // For reactor vessels with new architecture, update core barrel properties
+    if (container.type === 'reactorVessel') {
+      const rv = container as ReactorVesselComponent;
+      if (rv.coreBarrelId) {
+        const coreBarrel = this.plantState.components.get(rv.coreBarrelId) as CoreBarrelComponent;
+        if (coreBarrel) {
+          // Transfer fuel properties to the core barrel
+          coreBarrel.fuelRodCount = container.fuelRodCount;
+          coreBarrel.actualFuelRodCount = actualFuelRodCount;
+          coreBarrel.fuelTemperature = container.fuelTemperature;
+          coreBarrel.fuelMeltingPoint = container.fuelMeltingPoint;
+          coreBarrel.controlRodCount = container.controlRodCount;
+          coreBarrel.controlRodPosition = container.controlRodPosition;
+          // Clear from vessel (they belong on core barrel now)
+          delete (container as any).fuelRodCount;
+          delete (container as any).actualFuelRodCount;
+          delete (container as any).fuelTemperature;
+          delete (container as any).fuelMeltingPoint;
+          delete (container as any).controlRodCount;
+          delete (container as any).controlRodPosition;
+          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId}`);
+        }
       }
+      // Legacy support for old save files
+      if ((rv as any).insideBarrelId) {
+        const insideBarrel = this.plantState.components.get((rv as any).insideBarrelId) as Record<string, any>;
+        if (insideBarrel && insideBarrel.volume !== undefined) {
+          const originalVolume = insideBarrel.volume;
+          insideBarrel.volume = Math.max(0, originalVolume - totalFuelRodVolume);
+          console.log(`[Construction] Adjusted core region volume: ${originalVolume.toFixed(2)} - ${totalFuelRodVolume.toFixed(2)} = ${insideBarrel.volume.toFixed(2)} m³`);
+        }
 
-      // Also reduce the barrel opening flow areas to account for fuel rods blocking flow
-      const fuelRodCrossSection = Math.PI * Math.pow(rodDiameter_m / 2, 2) * actualFuelRodCount;
-      const insideBarrelId = container.insideBarrelId as string;
-      const outsideBarrelId = container.outsideBarrelId as string;
+        // Also reduce the barrel opening flow areas to account for fuel rods blocking flow
+        const fuelRodCrossSection = Math.PI * Math.pow(rodDiameter_m / 2, 2) * actualFuelRodCount;
+        const insideBarrelId = (rv as any).insideBarrelId as string;
+        const outsideBarrelId = (rv as any).outsideBarrelId as string;
 
-      // Find and update internal connections between barrel regions
-      for (const conn of this.plantState.connections) {
-        const isInternalConnection =
-          (conn.fromComponentId === insideBarrelId && conn.toComponentId === outsideBarrelId) ||
-          (conn.fromComponentId === outsideBarrelId && conn.toComponentId === insideBarrelId);
+        // Find and update internal connections between barrel regions
+        for (const conn of this.plantState.connections) {
+          const isInternalConnection =
+            (conn.fromComponentId === insideBarrelId && conn.toComponentId === outsideBarrelId) ||
+            (conn.fromComponentId === outsideBarrelId && conn.toComponentId === insideBarrelId);
 
-        if (isInternalConnection && conn.flowArea !== undefined) {
-          const originalArea = conn.flowArea;
-          conn.flowArea = Math.max(0.01, originalArea - fuelRodCrossSection);
-          console.log(`[Construction] Adjusted barrel opening flow area: ${originalArea.toFixed(2)} - ${fuelRodCrossSection.toFixed(2)} = ${conn.flowArea.toFixed(2)} m²`);
+          if (isInternalConnection && conn.flowArea !== undefined) {
+            const originalArea = conn.flowArea;
+            conn.flowArea = Math.max(0.01, originalArea - fuelRodCrossSection);
+            console.log(`[Construction] Adjusted barrel opening flow area: ${originalArea.toFixed(2)} - ${fuelRodCrossSection.toFixed(2)} = ${conn.flowArea.toFixed(2)} m²`);
+          }
         }
       }
     }

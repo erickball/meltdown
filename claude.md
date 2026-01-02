@@ -11,7 +11,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions unless you get explicit user approval.
 
 ## TODO List
--Backup a timestep feature? Or just periodic state-saving?
 -I guess maybe some kind of semi-implicit fluid flow/pressure calculation
 -When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 -Add LOCA capability (atmosphere as boundary condition)
@@ -20,6 +19,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
+-Back up a timestep feature? Or just periodic state-saving?
 
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
 -There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
@@ -61,6 +61,9 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Debug panel should show what RK45 operator-component combination(s) contribute most to limiting the timestep
+X Refactor to make reactor vessel a component that contains a core barrel instead of having core and annulus as siblings
+X Wall thickness rendering for tanks and pipes should match their pressure rating
 X Show connections starting from their listed elevation.
 x Add an abort if there's super high RK45 error instead of plowing through and pretending to advance the sim
 X Pump head accounts for NPSH
