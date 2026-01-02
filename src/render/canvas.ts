@@ -18,7 +18,6 @@ export class PlantCanvas {
   private plantState: PlantState;
   private simState: SimulationState | null = null;
   private _simStateWarningLogged: boolean = false;
-  private _lastSetSimStateLog: number = 0;
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };

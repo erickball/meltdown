@@ -11,10 +11,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions unless you get explicit user approval.
 
 ## TODO List
--Add an error if nothing changes during the timestep or no step is accepted
--Below u=30 density starts to go up as it gets colder; this affects determination of two-phase.
 -Backup a timestep feature? Or just periodic state-saving?
--Display issue: when one reactor region is liquid, they both look like liquid (all blue) visually
 -I guess maybe some kind of semi-implicit fluid flow/pressure calculation
 -The numbers with flow arrows should be black not white.
 -Flow arrows are not located at the connections and not pointing the way flow is going. 
@@ -27,6 +24,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
 
+-Add an error if nothing changes during the timestep or no step is accepted?
 -When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
 -There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
@@ -67,8 +65,10 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Below u=30 density starts to go up as it gets colder; this affects determination of two-phase.
 X Water level should account for volume of any components contained.
 X Debug condensate pump connection to always draw from the very bottom.
+X Display issue: when one reactor region is liquid, they both look like liquid (all blue) visually
 X Allow bubbles in the liquid space and droplets in the vapor space of a two-phase component.
 X Debug new steam table
 X Switched to custom steam table that should be more stable for compressed liquid.

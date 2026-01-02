@@ -376,6 +376,11 @@ function findSaturationAtV(v: number): {
  * - If v ≈ v_c: we're near the critical point
  *
  * A point is two-phase if u < u_sat for the appropriate line(s).
+ *
+ * SPECIAL CASE: Near the triple point (u < 50 kJ/kg), water has its density anomaly
+ * where v_f first decreases then increases with T (max density around 4°C).
+ * This means a single v value could correspond to two different u_f values.
+ * For this region, we also check v > v_sat(u) to confirm two-phase status.
  */
 function isInsideTwoPhaseDome(u: number, v: number): {
   inside: boolean;
@@ -400,12 +405,37 @@ function isInsideTwoPhaseDome(u: number, v: number): {
     // We're on the liquid side (or at critical point)
     // A state is two-phase if u <= u_f at this v (including the boundary)
     // Saturated liquid (u = u_f, v = v_f) is treated as two-phase with quality = 0
+
+    // SPECIAL CASE: Low-energy region near triple point (u < 50 kJ/kg)
+    // Due to water's density anomaly, v_f has a minimum around 4°C (277 K).
+    // A single v value could map to two different u_f values, so the
+    // u <= u_sat(v) check is ambiguous. Instead, use v > v_sat(u) which is unambiguous.
+    const U_LOW_ENERGY_THRESHOLD = 50000; // 50 kJ/kg in J/kg
+    if (u < U_LOW_ENERGY_THRESHOLD && u >= 0) {
+      // Get T from u (treating u as u_f on the saturation line)
+      const T_from_u = T_from_u_f(u);
+      // Get v_f at that temperature
+      const v_f_at_u = v_f_from_T(T_from_u);
+
+      // For two-phase: v must be greater than v_f(u)
+      // (i.e., the state is "to the right" of the saturation liquid line in u-v space)
+      const inside = v > v_f_at_u;
+
+      return {
+        inside,
+        u_sat: u_f_from_T(T_from_u), // u_sat at this temperature
+        T_sat: T_from_u,
+      };
+    }
+
+    // Standard check for higher energy states: u <= u_sat(v)
     if (satResult.u_sat_liquid === null) {
       // v < v_f at triple point - we're below the saturation dome
       // This is compressed liquid colder than the triple point
       // Treat as single-phase liquid (not two-phase)
       return { inside: false };
     }
+
     const inside = u <= satResult.u_sat_liquid;
     return {
       inside,
