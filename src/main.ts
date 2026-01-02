@@ -20,7 +20,7 @@ import {
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
-import { ConnectionDialog, ConnectionConfig } from './construction/connection-dialog';
+import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -639,30 +639,32 @@ function init() {
       return;
     }
 
-    // Show edit dialog
-    const currentArea = plantConn.flowArea ?? 0.1;
-    const currentLength = plantConn.length ?? 1;
-    const currentFromElev = plantConn.fromElevation ?? 0;
-    const currentToElev = plantConn.toElevation ?? 0;
+    // Get the components
+    const fromComponent = plantState.components.get(plantConn.fromComponentId);
+    const toComponent = plantState.components.get(plantConn.toComponentId);
 
-    const newAreaStr = prompt(
-      `Edit Connection: ${plantConn.fromComponentId} → ${plantConn.toComponentId}\n\n` +
-      `Current flow area: ${(currentArea * 1e4).toFixed(1)} cm²\n` +
-      `Current length: ${currentLength.toFixed(2)} m\n` +
-      `From elevation: ${currentFromElev.toFixed(2)} m\n` +
-      `To elevation: ${currentToElev.toFixed(2)} m\n\n` +
-      `Enter new flow area in cm² (or cancel to keep current):`,
-      (currentArea * 1e4).toFixed(1)
-    );
+    if (!fromComponent || !toComponent) {
+      console.error(`[Edit] Components not found for connection`);
+      return;
+    }
 
-    if (newAreaStr !== null) {
-      const newAreaCm2 = parseFloat(newAreaStr);
-      if (!isNaN(newAreaCm2) && newAreaCm2 > 0) {
-        plantConn.flowArea = newAreaCm2 / 1e4; // Convert cm² to m²
-        console.log(`[Edit] Updated connection flow area to ${plantConn.flowArea.toFixed(4)} m²`);
+    // Show the edit dialog
+    connectionDialog.edit(plantConn, fromComponent, toComponent, (result: ConnectionEditResult | null) => {
+      if (result) {
+        // Update the plant connection
+        plantConn.fromElevation = result.fromElevation;
+        plantConn.toElevation = result.toElevation;
+        plantConn.flowArea = result.flowArea;
+        plantConn.length = result.length;
 
         // Also update the simulation connection directly for immediate effect
-        simConn.flowArea = plantConn.flowArea;
+        simConn.flowArea = result.flowArea;
+        simConn.fromElevation = result.fromElevation;
+        simConn.toElevation = result.toElevation;
+        // Note: length affects inertance which is calculated at simulation start,
+        // so changing it during simulation won't have full effect until restart
+
+        console.log(`[Edit] Updated connection: fromElev=${result.fromElevation}m, toElev=${result.toElevation}m, area=${result.flowArea.toFixed(4)}m², length=${result.length}m`);
 
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
@@ -670,7 +672,7 @@ function init() {
           updateComponentDetail(selectedId, plantState, simState);
         }
       }
-    }
+    });
   });
 
   // Plant connection edit callback (before simulation starts)
@@ -686,19 +688,25 @@ function init() {
       return;
     }
 
-    const currentArea = plantConn.flowArea ?? 0.1;
-    const newAreaStr = prompt(
-      `Edit Connection: ${plantConn.fromComponentId} → ${plantConn.toComponentId}\n\n` +
-      `Current flow area: ${(currentArea * 1e4).toFixed(1)} cm²\n\n` +
-      `Enter new flow area in cm²:`,
-      (currentArea * 1e4).toFixed(1)
-    );
+    // Get the components
+    const fromComponent = plantState.components.get(plantConn.fromComponentId);
+    const toComponent = plantState.components.get(plantConn.toComponentId);
 
-    if (newAreaStr !== null) {
-      const newAreaCm2 = parseFloat(newAreaStr);
-      if (!isNaN(newAreaCm2) && newAreaCm2 > 0) {
-        plantConn.flowArea = newAreaCm2 / 1e4;
-        console.log(`[Edit] Updated plant connection flow area to ${plantConn.flowArea.toFixed(4)} m²`);
+    if (!fromComponent || !toComponent) {
+      console.error(`[Edit] Components not found for connection`);
+      return;
+    }
+
+    // Show the edit dialog
+    connectionDialog.edit(plantConn, fromComponent, toComponent, (result: ConnectionEditResult | null) => {
+      if (result) {
+        // Update the connection with new values
+        plantConn.fromElevation = result.fromElevation;
+        plantConn.toElevation = result.toElevation;
+        plantConn.flowArea = result.flowArea;
+        plantConn.length = result.length;
+
+        console.log(`[Edit] Updated plant connection: fromElev=${result.fromElevation}m, toElev=${result.toElevation}m, area=${result.flowArea.toFixed(4)}m², length=${result.length}m`);
 
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
@@ -706,7 +714,7 @@ function init() {
           updateComponentDetail(selectedId, plantState, gameLoop?.getState() || {} as SimulationState);
         }
       }
-    }
+    });
   });
 
   // Connection delete callback

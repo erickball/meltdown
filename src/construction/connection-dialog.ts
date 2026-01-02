@@ -1,6 +1,6 @@
 // Connection configuration dialog for creating connections between components
 
-import { PlantComponent, Port } from '../types';
+import { PlantComponent, Port, Connection } from '../types';
 
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
@@ -14,6 +14,14 @@ export interface ConnectionConfig {
   createPipe: boolean;    // Whether to create an intermediate pipe
 }
 
+// Result of editing an existing connection
+export interface ConnectionEditResult {
+  fromElevation: number;
+  toElevation: number;
+  flowArea: number;
+  length: number;
+}
+
 export class ConnectionDialog {
   private dialog: HTMLElement;
   private titleElement: HTMLElement;
@@ -22,6 +30,8 @@ export class ConnectionDialog {
   private cancelButton: HTMLElement;
   private closeButton: HTMLElement;
   private currentCallback: ((config: ConnectionConfig | null) => void) | null = null;
+  private currentEditCallback: ((result: ConnectionEditResult | null) => void) | null = null;
+  private isEditMode: boolean = false;
   private fromComponent: PlantComponent | null = null;
   private toComponent: PlantComponent | null = null;
   private fromPort: Port | null = null;
@@ -275,6 +285,9 @@ export class ConnectionDialog {
     lengthGroup.appendChild(lengthHelp);
     this.bodyElement.appendChild(lengthGroup);
 
+    // Track the current minimum length so we can detect when user has length set to minimum
+    let currentMinLength = minLength;
+
     // Update function for when elevations change
     const updateLengthConstraints = () => {
       const fromRelElev = parseFloat(fromElevInput.value) || 0;
@@ -289,14 +302,22 @@ export class ConnectionDialog {
       if (!isContainedConnection) {
         // Recalculate minimum length based on new 3D distance
         const newMinLength = calculate3DDistance(fromRelElev, toRelElev);
+
+        // Check if current length was at the previous minimum (within tolerance)
+        const currentLength = parseFloat(lengthInput.value) || 0;
+        const wasAtMinimum = Math.abs(currentLength - currentMinLength) < 0.05;
+
+        // Update minimum
         lengthInput.min = String(newMinLength);
         lengthHelp.textContent = `Min: ${newMinLength.toFixed(1)} m (3D port distance)`;
 
-        // If current length is below new minimum, update it
-        const currentLength = parseFloat(lengthInput.value) || 0;
-        if (currentLength < newMinLength) {
+        // If length was at previous minimum, or is now below new minimum, update to new minimum
+        if (wasAtMinimum || currentLength < newMinLength) {
           lengthInput.value = String(Math.max(newMinLength, 2));
         }
+
+        // Track the new minimum for next update
+        currentMinLength = newMinLength;
       }
     };
 
@@ -372,39 +393,243 @@ export class ConnectionDialog {
   }
 
   private handleConfirm() {
-    if (!this.fromComponent || !this.toComponent || !this.fromPort || !this.toPort) return;
-
     const fromElevation = parseFloat((document.getElementById('from-elevation') as HTMLInputElement).value);
     const toElevation = parseFloat((document.getElementById('to-elevation') as HTMLInputElement).value);
     const flowArea = parseFloat((document.getElementById('flow-area') as HTMLInputElement).value);
     const length = parseFloat((document.getElementById('length') as HTMLInputElement).value);
 
-    const config: ConnectionConfig = {
-      fromComponent: this.fromComponent,
-      toComponent: this.toComponent,
-      fromPort: this.fromPort,
-      toPort: this.toPort,
-      fromElevation,
-      toElevation,
-      flowArea,
-      length,
-      createPipe: flowArea > 0.1 && length > 1
-    };
-
     this.dialog.style.display = 'none';
 
-    if (this.currentCallback) {
-      this.currentCallback(config);
-      this.currentCallback = null;
+    if (this.isEditMode) {
+      // Edit mode - return just the edited values
+      if (this.currentEditCallback) {
+        this.currentEditCallback({
+          fromElevation,
+          toElevation,
+          flowArea,
+          length
+        });
+        this.currentEditCallback = null;
+      }
+    } else {
+      // Create mode - return full config
+      if (!this.fromComponent || !this.toComponent || !this.fromPort || !this.toPort) return;
+
+      const config: ConnectionConfig = {
+        fromComponent: this.fromComponent,
+        toComponent: this.toComponent,
+        fromPort: this.fromPort,
+        toPort: this.toPort,
+        fromElevation,
+        toElevation,
+        flowArea,
+        length,
+        createPipe: flowArea > 0.1 && length > 1
+      };
+
+      if (this.currentCallback) {
+        this.currentCallback(config);
+        this.currentCallback = null;
+      }
     }
+
+    this.isEditMode = false;
   }
 
   private handleCancel() {
     this.dialog.style.display = 'none';
 
-    if (this.currentCallback) {
-      this.currentCallback(null);
-      this.currentCallback = null;
+    if (this.isEditMode) {
+      if (this.currentEditCallback) {
+        this.currentEditCallback(null);
+        this.currentEditCallback = null;
+      }
+    } else {
+      if (this.currentCallback) {
+        this.currentCallback(null);
+        this.currentCallback = null;
+      }
     }
+
+    this.isEditMode = false;
+  }
+
+  /**
+   * Show the dialog in edit mode for an existing connection
+   */
+  edit(
+    connection: Connection,
+    fromComponent: PlantComponent,
+    toComponent: PlantComponent,
+    callback: (result: ConnectionEditResult | null) => void
+  ) {
+    this.isEditMode = true;
+    this.currentEditCallback = callback;
+    this.fromComponent = fromComponent;
+    this.toComponent = toComponent;
+
+    // Set title
+    const fromName = fromComponent.label || fromComponent.id;
+    const toName = toComponent.label || toComponent.id;
+    this.titleElement.textContent = `Edit Connection: ${fromName} → ${toName}`;
+    this.confirmButton.textContent = 'Save Changes';
+
+    // Build edit form
+    this.buildEditForm(connection, fromComponent, toComponent);
+
+    // Show dialog
+    this.dialog.style.display = 'flex';
+
+    // Focus first input
+    const firstInput = this.bodyElement.querySelector('input') as HTMLElement;
+    if (firstInput) {
+      firstInput.focus();
+    }
+  }
+
+  private buildEditForm(connection: Connection, fromComponent: PlantComponent, toComponent: PlantComponent) {
+    this.bodyElement.innerHTML = '';
+
+    // Get component heights for validation
+    const fromHeight = this.getComponentHeight(fromComponent);
+    const toHeight = this.getComponentHeight(toComponent);
+
+    // Get component base elevations
+    const fromComponentElev = (fromComponent as any).elevation ?? 0;
+    const toComponentElev = (toComponent as any).elevation ?? 0;
+
+    // Current values
+    const currentFromElev = connection.fromElevation ?? 0;
+    const currentToElev = connection.toElevation ?? 0;
+    const currentFlowArea = connection.flowArea ?? 0.05;
+    const currentLength = connection.length ?? 2;
+
+    // Component info section
+    const infoSection = document.createElement('div');
+    infoSection.style.cssText = 'background: #2a2e38; padding: 10px; border-radius: 4px; margin-bottom: 15px;';
+    infoSection.innerHTML = `
+      <div style="font-size: 12px; color: #7af; margin-bottom: 8px;">Connection Information</div>
+      <div style="display: flex; justify-content: space-between; font-size: 11px;">
+        <div>
+          <div style="color: #99aacc;">From: ${fromComponent.label || fromComponent.id}</div>
+          <div style="color: #667788;">Component height: ${fromHeight.toFixed(1)} m</div>
+          <div style="color: #667788;">Base elevation: ${fromComponentElev.toFixed(1)} m</div>
+        </div>
+        <div>
+          <div style="color: #99aacc;">To: ${toComponent.label || toComponent.id}</div>
+          <div style="color: #667788;">Component height: ${toHeight.toFixed(1)} m</div>
+          <div style="color: #667788;">Base elevation: ${toComponentElev.toFixed(1)} m</div>
+        </div>
+      </div>
+    `;
+    this.bodyElement.appendChild(infoSection);
+
+    // From elevation field
+    const fromElevGroup = document.createElement('div');
+    fromElevGroup.className = 'form-group';
+    const fromElevLabel = document.createElement('label');
+    fromElevLabel.textContent = 'From Elevation (m)';
+    fromElevLabel.setAttribute('for', 'from-elevation');
+    fromElevGroup.appendChild(fromElevLabel);
+
+    const fromElevInput = document.createElement('input');
+    fromElevInput.type = 'number';
+    fromElevInput.id = 'from-elevation';
+    fromElevInput.value = String(currentFromElev);
+    fromElevInput.min = '0';
+    fromElevInput.max = String(fromHeight);
+    fromElevInput.step = '0.1';
+    fromElevGroup.appendChild(fromElevInput);
+
+    const fromElevHelp = document.createElement('div');
+    fromElevHelp.className = 'help-text';
+    fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + currentFromElev).toFixed(1)} m`;
+    fromElevGroup.appendChild(fromElevHelp);
+    this.bodyElement.appendChild(fromElevGroup);
+
+    // To elevation field
+    const toElevGroup = document.createElement('div');
+    toElevGroup.className = 'form-group';
+    const toElevLabel = document.createElement('label');
+    toElevLabel.textContent = 'To Elevation (m)';
+    toElevLabel.setAttribute('for', 'to-elevation');
+    toElevGroup.appendChild(toElevLabel);
+
+    const toElevInput = document.createElement('input');
+    toElevInput.type = 'number';
+    toElevInput.id = 'to-elevation';
+    toElevInput.value = String(currentToElev);
+    toElevInput.min = '0';
+    toElevInput.max = String(toHeight);
+    toElevInput.step = '0.1';
+    toElevGroup.appendChild(toElevInput);
+
+    const toElevHelp = document.createElement('div');
+    toElevHelp.className = 'help-text';
+    toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + currentToElev).toFixed(1)} m`;
+    toElevGroup.appendChild(toElevHelp);
+    this.bodyElement.appendChild(toElevGroup);
+
+    // Update absolute elevation displays when inputs change
+    fromElevInput.addEventListener('input', () => {
+      const fromRelElev = parseFloat(fromElevInput.value) || 0;
+      fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromRelElev).toFixed(1)} m`;
+    });
+    toElevInput.addEventListener('input', () => {
+      const toRelElev = parseFloat(toElevInput.value) || 0;
+      toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toRelElev).toFixed(1)} m`;
+    });
+
+    // Flow area field
+    const flowAreaGroup = document.createElement('div');
+    flowAreaGroup.className = 'form-group';
+    const flowAreaLabel = document.createElement('label');
+    flowAreaLabel.textContent = 'Flow Area (m²)';
+    flowAreaLabel.setAttribute('for', 'flow-area');
+    flowAreaGroup.appendChild(flowAreaLabel);
+
+    const flowAreaInput = document.createElement('input');
+    flowAreaInput.type = 'number';
+    flowAreaInput.id = 'flow-area';
+    flowAreaInput.value = String(currentFlowArea);
+    flowAreaInput.min = '0.001';
+    flowAreaInput.max = '10';
+    flowAreaInput.step = '0.001';
+    flowAreaGroup.appendChild(flowAreaInput);
+
+    const flowAreaHelp = document.createElement('div');
+    flowAreaHelp.className = 'help-text';
+    flowAreaHelp.textContent = `Cross-sectional area (${(currentFlowArea * 1e4).toFixed(1)} cm²)`;
+    flowAreaGroup.appendChild(flowAreaHelp);
+    this.bodyElement.appendChild(flowAreaGroup);
+
+    // Update flow area help when input changes
+    flowAreaInput.addEventListener('input', () => {
+      const area = parseFloat(flowAreaInput.value) || 0;
+      flowAreaHelp.textContent = `Cross-sectional area (${(area * 1e4).toFixed(1)} cm²)`;
+    });
+
+    // Length field
+    const lengthGroup = document.createElement('div');
+    lengthGroup.className = 'form-group';
+    const lengthLabel = document.createElement('label');
+    lengthLabel.textContent = 'Connection Length (m)';
+    lengthLabel.setAttribute('for', 'length');
+    lengthGroup.appendChild(lengthLabel);
+
+    const lengthInput = document.createElement('input');
+    lengthInput.type = 'number';
+    lengthInput.id = 'length';
+    lengthInput.value = String(currentLength);
+    lengthInput.min = '0.1';
+    lengthInput.max = '1000';
+    lengthInput.step = '0.1';
+    lengthGroup.appendChild(lengthInput);
+
+    const lengthHelp = document.createElement('div');
+    lengthHelp.className = 'help-text';
+    lengthHelp.textContent = 'Physical length of the connection';
+    lengthGroup.appendChild(lengthHelp);
+    this.bodyElement.appendChild(lengthGroup);
   }
 }

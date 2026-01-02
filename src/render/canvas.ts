@@ -1,4 +1,4 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
 import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds } from './components';
 import {
@@ -1175,29 +1175,6 @@ export class PlantCanvas {
       }
     }
 
-    // Draw connections (behind components)
-    for (const connection of this.plantState.connections) {
-      const fromComponent = this.plantState.components.get(connection.fromComponentId);
-      const toComponent = this.plantState.components.get(connection.toComponentId);
-
-      if (fromComponent && toComponent) {
-        const fromPort = fromComponent.ports.find(p => p.id === connection.fromPortId);
-        const toPort = toComponent.ports.find(p => p.id === connection.toPortId);
-
-        if (fromPort && toPort) {
-          if (this.isometric.enabled) {
-            // Use perspective-aware connection rendering
-            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort);
-          } else {
-            // Calculate world positions of ports
-            const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
-            const toWorld = this.getPortWorldPosition(toComponent, toPort);
-            renderConnection(ctx, fromWorld, toWorld, fromComponent.fluid, this.view);
-          }
-        }
-      }
-    }
-
     // Draw controller wires (control signal connections to cores)
     for (const component of sortedComponents) {
       if (component.type === 'controller') {
@@ -1419,6 +1396,29 @@ export class PlantCanvas {
       ctx.restore();
     }
 
+    // Draw connections (on top of components so labels are visible)
+    for (const connection of this.plantState.connections) {
+      const fromComponent = this.plantState.components.get(connection.fromComponentId);
+      const toComponent = this.plantState.components.get(connection.toComponentId);
+
+      if (fromComponent && toComponent) {
+        const fromPort = fromComponent.ports.find(p => p.id === connection.fromPortId);
+        const toPort = toComponent.ports.find(p => p.id === connection.toPortId);
+
+        if (fromPort && toPort) {
+          if (this.isometric.enabled) {
+            // Use perspective-aware connection rendering with actual connection elevations
+            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection);
+          } else {
+            // Calculate world positions of ports
+            const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
+            const toWorld = this.getPortWorldPosition(toComponent, toPort);
+            renderConnection(ctx, fromWorld, toWorld, fromComponent.fluid, this.view);
+          }
+        }
+      }
+    }
+
     // Draw port indicators if enabled
     if (this.showPorts) {
       this.renderPortIndicators(ctx);
@@ -1609,18 +1609,119 @@ export class PlantCanvas {
   }
 
   // Render a connection between two ports with perspective projection
+  // Uses actual connection elevations (fromElevation/toElevation) instead of port visual positions
   private renderConnectionPerspective(
     ctx: CanvasRenderingContext2D,
     fromComponent: PlantComponent,
     fromPort: { position: Point },
     toComponent: PlantComponent,
-    toPort: { position: Point }
+    toPort: { position: Point },
+    connection: Connection
   ): void {
-    // Get screen positions for both ports
-    const fromScreenPos = this.getPortScreenPosition(fromComponent, fromPort);
-    const toScreenPos = this.getPortScreenPosition(toComponent, toPort);
+    // Get port screen positions (these are visually consistent with component rendering)
+    const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
+    const toPortScreen = this.getPortScreenPosition(toComponent, toPort);
 
-    if (!fromScreenPos || !toScreenPos) return;
+    if (!fromPortScreen || !toPortScreen) return;
+
+    // Get component base elevations
+    const fromCompElevation = getComponentElevation(fromComponent);
+    const toCompElevation = getComponentElevation(toComponent);
+
+    // Connection elevation is relative to component bottom
+    const fromConnElevation = connection.fromElevation ?? 0;
+    const toConnElevation = connection.toElevation ?? 0;
+
+    // Calculate the port's visual elevation relative to component bottom
+    // Port position.y is in local coordinates where Y=0 is component center
+    // Negative Y is toward the top (front in world), positive Y is toward the bottom (back in world)
+    // So port elevation from bottom = componentHeight/2 - port.position.y
+    const fromSize = this.getComponentSize(fromComponent);
+    const toSize = this.getComponentSize(toComponent);
+    const fromPortVisualElev = fromSize.height / 2 - fromPort.position.y;
+    const toPortVisualElev = toSize.height / 2 - toPort.position.y;
+
+    // Calculate the DIFFERENCE between where the connection should be and where the port appears
+    // Positive diff = connection is higher than port visual position
+    const fromElevDiff = fromConnElevation - fromPortVisualElev;
+    const toElevDiff = toConnElevation - toPortVisualElev;
+
+    // Use worldToScreenPerspective to get the scale factor at each location
+    const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
+    const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
+
+    const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
+    const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
+
+    if (fromProj.scale <= 0 || toProj.scale <= 0) return;
+
+    // Get the vertical transform for elevation changes
+    const { verticalScale } = this.getViewTransform();
+
+    // Calculate elevation offset in screen pixels based on the DIFFERENCE
+    // The formula from worldToScreenPerspective is:
+    // elevationOffset = elevation * cappedScale * ELEVATION_SCALE * verticalScale * overallScale
+    // Since fromProj.scale already equals cappedScale * overallScale, we use it directly
+    const fromElevationOffset = fromElevDiff * fromProj.scale * this.ELEVATION_SCALE * verticalScale;
+    const toElevationOffset = toElevDiff * toProj.scale * this.ELEVATION_SCALE * verticalScale;
+
+    // Apply elevation offset to port screen positions (negative because Y increases downward)
+    const fromScreen = {
+      pos: { x: fromPortScreen.x, y: fromPortScreen.y - fromElevationOffset },
+      scale: fromProj.scale
+    };
+    const toScreen = {
+      pos: { x: toPortScreen.x, y: toPortScreen.y - toElevationOffset },
+      scale: toProj.scale
+    };
+
+    if (fromScreen.scale <= 0 || toScreen.scale <= 0) return;
+
+    // Check for internal connections (one component contained by the other, or siblings in the same container)
+    // For these, we want the outer endpoint to stop partway inside, not at the edge
+    const fromContainedBy = (fromComponent as any).containedBy;
+    const toContainedBy = (toComponent as any).containedBy;
+
+    let adjustedFromScreen = fromScreen.pos;
+    let adjustedToScreen = toScreen.pos;
+
+    // If fromComponent is contained by toComponent, adjust the "to" endpoint
+    // to stop partway between the inner (from) edge and the outer (to) edge
+    if (fromContainedBy === toComponent.id) {
+      // Move the "to" endpoint only 10% of the way from "from" to "to"
+      // This places it just barely past the inner component edge
+      const t = 0.1;
+      adjustedToScreen = {
+        x: fromScreen.pos.x + t * (toScreen.pos.x - fromScreen.pos.x),
+        y: fromScreen.pos.y + t * (toScreen.pos.y - fromScreen.pos.y)
+      };
+    }
+    // If toComponent is contained by fromComponent, adjust the "from" endpoint
+    else if (toContainedBy === fromComponent.id) {
+      // Move the "from" endpoint only 10% of the way from "to" to "from"
+      const t = 0.1;
+      adjustedFromScreen = {
+        x: toScreen.pos.x + t * (fromScreen.pos.x - toScreen.pos.x),
+        y: toScreen.pos.y + t * (fromScreen.pos.y - toScreen.pos.y)
+      };
+    }
+    // If both components are contained by the same parent (siblings inside a reactor vessel, etc.)
+    // Draw a short connection between them - adjust both endpoints toward the midpoint
+    else if (fromContainedBy && fromContainedBy === toContainedBy) {
+      // Both are inside the same container - draw connection mostly in the middle
+      // Move each endpoint 40% toward the midpoint
+      const t = 0.4;
+      const midX = (fromScreen.pos.x + toScreen.pos.x) / 2;
+      const midY = (fromScreen.pos.y + toScreen.pos.y) / 2;
+      adjustedFromScreen = {
+        x: fromScreen.pos.x + t * (midX - fromScreen.pos.x),
+        y: fromScreen.pos.y + t * (midY - fromScreen.pos.y)
+      };
+      adjustedToScreen = {
+        x: toScreen.pos.x + t * (midX - toScreen.pos.x),
+        y: toScreen.pos.y + t * (midY - toScreen.pos.y)
+      };
+    }
 
     // Get fluid color from the source component
     const fluid = (fromComponent as any).fluid;
@@ -1629,13 +1730,13 @@ export class PlantCanvas {
     ctx.lineCap = 'round';
 
     ctx.beginPath();
-    ctx.moveTo(fromScreenPos.x, fromScreenPos.y);
+    ctx.moveTo(adjustedFromScreen.x, adjustedFromScreen.y);
 
     // Simple curved connection in screen space
-    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
-    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
-    ctx.quadraticCurveTo(midX, fromScreenPos.y, midX, midY);
-    ctx.quadraticCurveTo(midX, toScreenPos.y, toScreenPos.x, toScreenPos.y);
+    const midX = (adjustedFromScreen.x + adjustedToScreen.x) / 2;
+    const midY = (adjustedFromScreen.y + adjustedToScreen.y) / 2;
+    ctx.quadraticCurveTo(midX, adjustedFromScreen.y, midX, midY);
+    ctx.quadraticCurveTo(midX, adjustedToScreen.y, adjustedToScreen.x, adjustedToScreen.y);
 
     ctx.stroke();
   }

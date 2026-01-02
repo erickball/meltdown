@@ -13,7 +13,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 ## TODO List
 -Backup a timestep feature? Or just periodic state-saving?
 -I guess maybe some kind of semi-implicit fluid flow/pressure calculation
--Show connection starting from their listed elevation.
 -When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
@@ -62,6 +61,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Show connections starting from their listed elevation.
 x Add an abort if there's super high RK45 error instead of plowing through and pretending to advance the sim
 X Pump head accounts for NPSH
 X The numbers with flow arrows should be black not white.
