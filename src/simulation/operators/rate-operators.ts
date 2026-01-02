@@ -20,6 +20,62 @@ import * as Water from '../water-properties';
 import { simulationConfig } from '../types';
 
 // ============================================================================
+// Debug Tracking for Pump-5
+// ============================================================================
+
+interface DebugSnapshot {
+  time: number;
+  mass: number;
+  internalEnergy: number;
+  volume: number;
+  temperature: number;
+  pressure: number;
+  phase: string;
+  quality: number;
+  u_specific: number;  // kJ/kg
+  v_specific: number;  // mL/kg
+  flowsIn: Array<{ from: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }>;
+  flowsOut: Array<{ to: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }>;
+  dMass: number;
+  dEnergy: number;
+}
+
+const DEBUG_NODE_ID = 'pum-5';
+const debugHistory: DebugSnapshot[] = [];
+const MAX_DEBUG_HISTORY = 20;
+
+function logDebugSnapshot(snapshot: DebugSnapshot): void {
+  debugHistory.push(snapshot);
+  if (debugHistory.length > MAX_DEBUG_HISTORY) {
+    debugHistory.shift();
+  }
+}
+
+export function dumpDebugHistory(): void {
+  console.log(`\n========== DEBUG HISTORY FOR ${DEBUG_NODE_ID} ==========`);
+  for (const snap of debugHistory) {
+    console.log(`\n--- t=${snap.time.toFixed(3)}s ---`);
+    console.log(`  State: m=${snap.mass.toFixed(1)}kg, U=${(snap.internalEnergy/1000).toFixed(1)}kJ, V=${(snap.volume*1000).toFixed(1)}L`);
+    console.log(`  Specific: u=${snap.u_specific.toFixed(2)} kJ/kg, v=${snap.v_specific.toFixed(2)} mL/kg`);
+    console.log(`  T=${(snap.temperature-273.15).toFixed(2)}°C, P=${(snap.pressure/1e5).toFixed(4)}bar, phase=${snap.phase}, x=${(snap.quality*100).toFixed(1)}%`);
+    console.log(`  Rates: dM=${snap.dMass.toFixed(2)} kg/s, dU=${(snap.dEnergy/1000).toFixed(2)} kJ/s`);
+    if (snap.flowsIn.length > 0) {
+      console.log(`  Flows IN:`);
+      for (const f of snap.flowsIn) {
+        console.log(`    from ${f.from}: ${f.massFlow.toFixed(2)} kg/s, ${(f.energyFlow/1000).toFixed(2)} kJ/s (h=${(f.h_specific/1000).toFixed(2)} kJ/kg, phase=${f.flowPhase})`);
+      }
+    }
+    if (snap.flowsOut.length > 0) {
+      console.log(`  Flows OUT:`);
+      for (const f of snap.flowsOut) {
+        console.log(`    to ${f.to}: ${f.massFlow.toFixed(2)} kg/s, ${(f.energyFlow/1000).toFixed(2)} kJ/s (h=${(f.h_specific/1000).toFixed(2)} kJ/kg, phase=${f.flowPhase})`);
+      }
+    }
+  }
+  console.log(`\n========== END DEBUG HISTORY ==========\n`);
+}
+
+// ============================================================================
 // Conduction Rate Operator
 // ============================================================================
 
@@ -285,6 +341,10 @@ export class FlowRateOperator implements RateOperator {
       rates.flowNodes.set(id, { dMass: 0, dEnergy: 0 });
     }
 
+    // Debug tracking for pump-5
+    const debugFlowsIn: Array<{ from: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }> = [];
+    const debugFlowsOut: Array<{ to: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }> = [];
+
     // For each flow connection, compute mass and energy transfer rates
     for (const conn of state.flowConnections) {
       const fromNode = state.flowNodes.get(conn.fromNodeId);
@@ -317,7 +377,48 @@ export class FlowRateOperator implements RateOperator {
 
       // Determine what phase is actually flowing based on connection elevation
       // For two-phase nodes, we need to use phase-specific enthalpy
-      const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+      let flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+
+      // Check if we're trying to draw more of a phase than is available.
+      // If the flow rate would drain the phase too quickly, use mixture instead.
+      // Limit: 1% of available phase mass per millisecond = 10x per second.
+      // This prevents unrealistic phase separation when flow exceeds what the
+      // interface can supply. (Approved fallback - discussed with user)
+      //
+      // IMPORTANT: This limit assumes timesteps <= 100ms. At larger timesteps,
+      // we could drain >100% of a phase in one step without triggering this.
+      // If timesteps ever exceed 100ms, this logic needs to be revisited.
+      // See the warning check below that fires if we'd drain >50% at dt=100ms.
+      if (upstreamNode.fluid.phase === 'two-phase' && flowPhase !== 'mixture') {
+        const quality = upstreamNode.fluid.quality ?? 0;
+        const totalMass = upstreamNode.fluid.mass;
+        const maxDrainRate = 10; // 1/s - can drain the phase 10x per second max
+
+        if (flowPhase === 'vapor') {
+          const vaporMass = totalMass * quality;
+          // If trying to drain vapor faster than 10x/second, use mixture
+          if (vaporMass < 1e-6 || absMassFlow > maxDrainRate * vaporMass) {
+            flowPhase = 'mixture';
+          } else if (absMassFlow > 5 * vaporMass) {
+            // Warning: at dt=100ms, this would drain >50% of vapor
+            // This shouldn't happen often, but if it does we need to revisit
+            console.warn(`[FlowRate] High vapor drain rate in ${upstreamId}: ` +
+              `${absMassFlow.toFixed(1)} kg/s from ${vaporMass.toFixed(1)} kg vapor ` +
+              `(would drain ${(absMassFlow / vaporMass * 100).toFixed(0)}%/s)`);
+          }
+        } else if (flowPhase === 'liquid') {
+          const liquidMass = totalMass * (1 - quality);
+          // If trying to drain liquid faster than 10x/second, use mixture
+          if (liquidMass < 1e-6 || absMassFlow > maxDrainRate * liquidMass) {
+            flowPhase = 'mixture';
+          } else if (absMassFlow > 5 * liquidMass) {
+            // Warning: at dt=100ms, this would drain >50% of liquid
+            console.warn(`[FlowRate] High liquid drain rate in ${upstreamId}: ` +
+              `${absMassFlow.toFixed(1)} kg/s from ${liquidMass.toFixed(1)} kg liquid ` +
+              `(would drain ${(absMassFlow / liquidMass * 100).toFixed(0)}%/s)`);
+          }
+        }
+      }
 
       // Get specific enthalpy based on what's actually flowing
       const h_up = this.getSpecificEnthalpy(upstreamNode, flowPhase);
@@ -334,6 +435,36 @@ export class FlowRateOperator implements RateOperator {
 
       downRates.dMass += absMassFlow;
       downRates.dEnergy += energyFlow;
+
+      // Track flows for debug node
+      if (downstreamId === DEBUG_NODE_ID) {
+        debugFlowsIn.push({ from: upstreamId, massFlow: absMassFlow, energyFlow, h_specific: h_up, flowPhase });
+      }
+      if (upstreamId === DEBUG_NODE_ID) {
+        debugFlowsOut.push({ to: downstreamId, massFlow: absMassFlow, energyFlow, h_specific: h_up, flowPhase });
+      }
+    }
+
+    // Log debug snapshot for pump-5
+    const debugNode = state.flowNodes.get(DEBUG_NODE_ID);
+    const debugRates = rates.flowNodes.get(DEBUG_NODE_ID);
+    if (debugNode && debugRates) {
+      logDebugSnapshot({
+        time: state.time,
+        mass: debugNode.fluid.mass,
+        internalEnergy: debugNode.fluid.internalEnergy,
+        volume: debugNode.volume,
+        temperature: debugNode.fluid.temperature,
+        pressure: debugNode.fluid.pressure,
+        phase: debugNode.fluid.phase,
+        quality: debugNode.fluid.quality ?? 0,
+        u_specific: (debugNode.fluid.internalEnergy / debugNode.fluid.mass) / 1000,
+        v_specific: (debugNode.volume / debugNode.fluid.mass) * 1e6,
+        flowsIn: debugFlowsIn,
+        flowsOut: debugFlowsOut,
+        dMass: debugRates.dMass,
+        dEnergy: debugRates.dEnergy,
+      });
     }
 
     return rates;
@@ -342,11 +473,24 @@ export class FlowRateOperator implements RateOperator {
   /**
    * Determine what phase of fluid is flowing based on connection elevation
    * relative to liquid level in a two-phase node.
+   *
+   * Only large vessels (tanks, vessels, heat exchangers) have stratified flow
+   * where liquid and vapor separate. Pumps, pipes, and other small volumes
+   * are well-mixed and always flow mixture.
    */
   private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
     // Single phase nodes always flow their phase
     if (node.fluid.phase !== 'two-phase') {
       return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
+    }
+
+    // Determine if this node has stratified flow (liquid/vapor separation)
+    // Only large vessels have this - pumps, pipes, etc. are well-mixed
+    const isStratified = this.isStratifiedNode(node);
+
+    if (!isStratified) {
+      // Well-mixed nodes always flow mixture
+      return 'mixture';
     }
 
     // Estimate node height (assume cylindrical with height ≈ diameter)
@@ -386,6 +530,28 @@ export class FlowRateOperator implements RateOperator {
 
     // Connection at interface: draw mixture
     return 'mixture';
+  }
+
+  /**
+   * Determine if a node has stratified (separated liquid/vapor) flow.
+   * Only large vessels have stratified flow - pumps, pipes, etc. are well-mixed.
+   */
+  private isStratifiedNode(node: FlowNode): boolean {
+    // Use ID prefix to determine node type
+    // Stratified: ves-, tan-, hx- (vessels, tanks, heat exchangers)
+    // Well-mixed: pum-, pip-, con-, val- (pumps, pipes, condensers, valves)
+    const id = node.id.toLowerCase();
+
+    if (id.startsWith('ves-') || id.startsWith('tan-') || id.startsWith('hx-')) {
+      return true;
+    }
+    if (id.startsWith('pum-') || id.startsWith('pip-') || id.startsWith('con-') || id.startsWith('val-')) {
+      return false;
+    }
+
+    // For other nodes, use volume as heuristic: large volumes (>0.1 m³) are stratified
+    // Small volumes are well-mixed
+    return node.volume > 0.1;
   }
 
   /**
@@ -691,11 +857,20 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
       if (nodeId === 'pum-5') {
         Water.setDebugNodeId('pum-5');
       }
-      const waterState = Water.calculateState(
-        flowNode.fluid.mass,
-        flowNode.fluid.internalEnergy,
-        flowNode.volume
-      );
+      let waterState: Water.WaterState;
+      try {
+        waterState = Water.calculateState(
+          flowNode.fluid.mass,
+          flowNode.fluid.internalEnergy,
+          flowNode.volume
+        );
+      } catch (e) {
+        // Dump debug history before re-throwing
+        if (nodeId === DEBUG_NODE_ID) {
+          dumpDebugHistory();
+        }
+        throw e;
+      }
       if (nodeId === 'pum-5') {
         Water.setDebugNodeId(null);
       }

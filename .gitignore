@@ -28,3 +28,12 @@ src/simulation/find-*.ts
 # Generated plots and images
 *.png
 *.html
+
+# Generated data files from scripts
+scripts/*.json
+scripts/*.csv
+scripts/*.npz
+
+# Generated water property data in public folder
+public/saturation_dome_iapws.json
+public/uv_grid_data_v13_filtered.json

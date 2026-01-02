@@ -1,9 +1,9 @@
 /**
  * Water/Steam Properties Module
  *
- * Re-exports the v3 Delaunay interpolation-based implementation.
- * This module uses steam table data with Delaunay triangulation in (log(v), u) space
- * to interpolate P and T accurately across all phases.
+ * Re-exports the v4 (u,v) grid-based implementation.
+ * This module uses a custom-built (u,v) grid from IAPWS-IF97 equations
+ * with saturation-anchored interpolation for compressed liquid.
  */
 
-export * from './water-properties-v3';
+export * from './water-properties-v4';
