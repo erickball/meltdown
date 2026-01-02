@@ -1426,11 +1426,11 @@ export class PlantCanvas {
 
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
-      // Pass perspective projection function when in isometric mode
-      const perspectiveProjector = this.isometric.enabled
-        ? (pos: Point, elev: number) => this.worldToScreenPerspective(pos, elev)
+      // Pass port screen position getter for proper positioning in isometric mode
+      const getPortScreenPos = this.isometric.enabled
+        ? (comp: PlantComponent, port: { position: Point }) => this.getPortScreenPosition(comp, port)
         : undefined;
-      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, perspectiveProjector);
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos);
     } else {
       // Debug: log once if simState is not set
       if (!this._simStateWarningLogged) {

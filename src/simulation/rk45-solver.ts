@@ -758,6 +758,8 @@ export class RK45Solver {
     let stepsThisFrame = 0;
     let rejectsThisFrame = 0;
     let minDtUsed = this.currentDt;
+    let consecutiveRejectsAtMinDt = 0;
+    const MAX_REJECTS_AT_MIN_DT = 50;
 
     while (remainingTime > 1e-10) {
       // Check limits
@@ -789,6 +791,18 @@ export class RK45Solver {
         rejectsThisFrame++;
         this.rejectedSteps++;
         this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
+
+        // Track consecutive rejects at minimum dt
+        if (this.currentDt <= this.config.minDt * 1.01) {
+          consecutiveRejectsAtMinDt++;
+          if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+            throw new Error(
+              `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
+              `Pre-constraint sanity failed: ${preCheck.reason}. ` +
+              `The physics is unstable and cannot be resolved by shrinking the timestep.`
+            );
+          }
+        }
         continue;
       }
 
@@ -806,13 +820,41 @@ export class RK45Solver {
       const tol = this.config.relTol;
 
       if (effectiveError <= tol || stepDt <= this.config.minDt) {
-        // Accept step
+        // Accept step (possibly forced at minimum dt)
+        if (stepDt <= this.config.minDt && effectiveError > tol) {
+          // Forced acceptance at minimum dt with high error
+          // This means we can't make the timestep small enough to get accurate results
+
+          // Catastrophically high error means physics is completely broken
+          // Don't continue with garbage - throw an error instead
+          const CATASTROPHIC_ERROR = 1e6;
+          if (effectiveError > CATASTROPHIC_ERROR) {
+            throw new Error(
+              `[RK45] Simulation unstable: error ${effectiveError.toExponential(2)} at minimum dt ` +
+              `(${(stepDt * 1000).toFixed(3)}ms). The physics has diverged and cannot be recovered. ` +
+              `This typically indicates a configuration problem or numerical instability.`
+            );
+          }
+
+          // Log a warning but continue - the simulation may be unstable
+          if (stepsThisFrame % 100 === 0) {
+            console.warn(
+              `[RK45] Force-accepting step at minimum dt (${(stepDt * 1000).toFixed(3)}ms) ` +
+              `with high error (${effectiveError.toFixed(4)} > tol ${tol.toFixed(4)}). ` +
+              `Simulation may be inaccurate.`
+            );
+          }
+        }
+
         currentState = constrainedState;
         currentState.time += stepDt;
         remainingTime -= stepDt;
         stepsThisFrame++;
         this.totalSteps++;
         minDtUsed = Math.min(minDtUsed, stepDt);
+
+        // Reset consecutive reject counter on successful step
+        consecutiveRejectsAtMinDt = 0;
 
         // Grow timestep for next step
         this.currentDt = this.computeOptimalDt(effectiveError, stepDt);

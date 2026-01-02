@@ -237,8 +237,46 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       html += `, u=${u_kJ.toFixed(0)}kJ/kg`;
 
       if (node.fluid.phase === 'two-phase') {
-        // Two-phase: show P_sat and separation factor
+        // Two-phase: show P_sat, void fraction, and separation factor
         html += ` (P<sub>sat</sub>=${formatPressure(rawP_bar)}bar)`;
+
+        // Calculate void fraction (volume fraction of vapor) from quality (mass fraction)
+        // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
+        // At low pressure, even tiny quality gives huge void fraction
+        const quality = node.fluid.quality ?? 0;
+        if (quality > 0 && quality < 1) {
+          // Estimate phase densities from temperature (approximate)
+          const T_C = node.fluid.temperature - 273.15;
+          // Liquid density approximation
+          const rho_f = T_C < 100 ? 1000 - 0.08 * T_C :
+                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                       Math.max(400, 700 - 2.5 * (T_C - 300));
+          // Vapor density from ideal gas at saturation pressure
+          const P_sat = node.fluid.pressure; // Pa
+          const T_K = node.fluid.temperature;
+          const R = 8314; // J/(kmol·K)
+          const M = 18; // kg/kmol for water
+          const rho_g = P_sat * M / (R * T_K);
+
+          const v_vapor = quality / rho_g;
+          const v_liquid = (1 - quality) / rho_f;
+          const voidFraction = v_vapor / (v_vapor + v_liquid);
+          const voidPct = (voidFraction * 100).toFixed(1);
+          // Color code: high void = warning (pump performance issue)
+          const voidClass = voidFraction > 0.9 ? 'debug-danger' :
+                           voidFraction > 0.5 ? 'debug-warning' : 'debug-value';
+          html += `, <span class="${voidClass}">α=${voidPct}%</span>`;
+
+          // Calculate liquid level for display
+          const liquidMass = node.fluid.mass * (1 - quality);
+          const liquidVolume = liquidMass / rho_f;
+          const nodeHeight = node.height ?? Math.cbrt(node.volume);
+          const baseArea = node.volume / nodeHeight;
+          const liquidLevel = liquidVolume / baseArea;
+          const levelPct = (liquidLevel / nodeHeight * 100).toFixed(1);
+          html += `, lvl=${liquidLevel.toFixed(3)}m (${levelPct}%)`;
+        }
+
         const sep = node.separation;
         if (sep !== undefined && sep !== null) {
           const sepPct = (sep * 100).toFixed(0);

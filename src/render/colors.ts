@@ -1,4 +1,9 @@
 import { Fluid } from '../types';
+import {
+  saturationTemperature,
+  saturatedLiquidDensity,
+  saturatedVaporDensity
+} from '../simulation/water-properties';
 
 // Temperature color mapping for fluids
 // Water: dark blue (cold 0°C) -> light blue (saturation)
@@ -106,74 +111,30 @@ function getSaturatedVaporColor(T_sat: number): RGB {
   }
 }
 
-// Saturation temperature as function of pressure (simplified)
-// For water: T_sat ≈ 373K at 1 atm, ~617K at 155 bar, ~647K at 220 bar (critical)
+// Saturation temperature as function of pressure
+// Uses the actual steam table for consistency with physics calculations
 export function getSaturationTemp(pressure: number): number {
-  // Antoine-like correlation fitted to steam tables
-  // T_sat = 373 + 48.5 * ln(P/101325)
-  // This gives: 1 bar -> 373K (100°C), 10 bar -> 485K (212°C),
-  //            155 bar -> 617K (344°C), 220 bar -> 647K (374°C critical)
-  const P_atm = pressure / 101325;
-  if (P_atm <= 1) return 373;
-  return 373 + 48.5 * Math.log(P_atm);
-}
-
-// Steam table data for saturated water (IAPWS-IF97)
-// Used for accurate volume fraction calculations in two-phase display
-const SATURATION_TABLE = [
-  { P: 1e5,      v_f: 0.001043, v_g: 1.694 },
-  { P: 5e5,      v_f: 0.001093, v_g: 0.3749 },
-  { P: 10e5,     v_f: 0.001127, v_g: 0.1944 },
-  { P: 20e5,     v_f: 0.001177, v_g: 0.09963 },
-  { P: 50e5,     v_f: 0.001286, v_g: 0.03944 },
-  { P: 100e5,    v_f: 0.001453, v_g: 0.01803 },
-  { P: 150e5,    v_f: 0.001658, v_g: 0.01167 },
-  { P: 155e5,    v_f: 0.001680, v_g: 0.01070 },
-  { P: 200e5,    v_f: 0.002036, v_g: 0.00587 },
-  { P: 220.64e5, v_f: 0.003155, v_g: 0.003155 }, // Critical point
-];
-
-/**
- * Interpolate saturation property from steam table using log-linear interpolation.
- * Log-linear is more accurate for properties that vary exponentially with pressure.
- */
-function interpolateSaturationProperty(P: number, key: 'v_f' | 'v_g'): number {
-  const table = SATURATION_TABLE;
-
-  // Clamp to table range
-  if (P <= table[0].P) return table[0][key];
-  if (P >= table[table.length - 1].P) return table[table.length - 1][key];
-
-  // Find bracketing entries and interpolate in log-log space
-  for (let i = 0; i < table.length - 1; i++) {
-    if (P >= table[i].P && P <= table[i + 1].P) {
-      const logP = Math.log(P);
-      const logP0 = Math.log(table[i].P);
-      const logP1 = Math.log(table[i + 1].P);
-      const t = (logP - logP0) / (logP1 - logP0);
-
-      const logV0 = Math.log(table[i][key]);
-      const logV1 = Math.log(table[i + 1][key]);
-      return Math.exp(logV0 + t * (logV1 - logV0));
-    }
-  }
-  return table[table.length - 1][key];
+  return saturationTemperature(pressure);
 }
 
 /**
  * Get saturated liquid specific volume (m³/kg) at given pressure
- * Uses steam table lookup with log-linear interpolation
+ * Uses the actual steam table for consistency with physics calculations
  */
 function getSaturatedLiquidVolume(pressure: number): number {
-  return interpolateSaturationProperty(pressure, 'v_f');
+  const T_sat = saturationTemperature(pressure);
+  const rho_f = saturatedLiquidDensity(T_sat);
+  return 1 / rho_f;
 }
 
 /**
  * Get saturated vapor specific volume (m³/kg) at given pressure
- * Uses steam table lookup with log-linear interpolation
+ * Uses the actual steam table for consistency with physics calculations
  */
 function getSaturatedVaporVolume(pressure: number): number {
-  return interpolateSaturationProperty(pressure, 'v_g');
+  const T_sat = saturationTemperature(pressure);
+  const rho_g = saturatedVaporDensity(T_sat);
+  return 1 / rho_g;
 }
 
 /**

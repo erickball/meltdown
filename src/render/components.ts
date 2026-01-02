@@ -157,7 +157,7 @@ function renderStratifiedTwoPhase(
     // Use volume fraction so visual pixel distribution matches spatial distribution
     const vaporZoneQuality = separation + (1 - separation) * volumeFraction;
 
-    if (separation >= 0.95) {
+    if (separation >= 0.99) {
       // Nearly fully separated: draw as pure vapor
       const vaporFluid: Fluid = {
         temperature: T_sat,
@@ -179,7 +179,7 @@ function renderStratifiedTwoPhase(
     // Use volume fraction so visual pixel distribution matches spatial distribution
     const liquidZoneQuality = (1 - separation) * volumeFraction;
 
-    if (separation >= 0.95) {
+    if (separation >= 0.99) {
       // Nearly fully separated: draw as pure liquid
       const liquidFluid: Fluid = {
         temperature: T_sat,
@@ -2636,58 +2636,116 @@ function getFlowConnectionPosition(
 }
 
 /**
- * Render flow connection arrows showing actual mass flow rates from simulation
+ * Get world position of a port on a component.
+ * Returns null if port not found.
+ */
+function getPortWorldPosition(component: PlantComponent, portId: string): Point | null {
+  const port = component.ports?.find(p => p.id === portId);
+  if (!port) return null;
+
+  const cos = Math.cos(component.rotation);
+  const sin = Math.sin(component.rotation);
+  return {
+    x: component.position.x + port.position.x * cos - port.position.y * sin,
+    y: component.position.y + port.position.x * sin + port.position.y * cos,
+  };
+}
+
+/**
+ * Render flow connection arrows showing actual mass flow rates from simulation.
+ * Arrows are drawn at the midpoint of each connection in screen space,
+ * pointing from the source port to the destination port.
  */
 export function renderFlowConnectionArrows(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  perspectiveProjector?: (pos: Point, elevation: number) => { pos: Point; scale: number }
+  getPortScreenPos?: (component: PlantComponent, port: { position: Point }) => { x: number; y: number; radius: number } | null
 ): void {
   for (const conn of simState.flowConnections) {
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
     const toNode = simState.flowNodes.get(conn.toNodeId);
     if (!fromNode || !toNode) continue;
 
-    // Get arrow position - draw near the "from" node
-    const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
-    if (!arrowInfo) continue;
-
-    // Use perspective projection if available (isometric mode), otherwise standard 2D
-    let screenPos: Point;
-    let arrowScale = 1;
-    if (perspectiveProjector) {
-      const projected = perspectiveProjector(arrowInfo.position, 0);
-      screenPos = projected.pos;
-      arrowScale = projected.scale;
-      // Skip if behind camera or off-screen
-      if (arrowScale <= 0) continue;
-    } else {
-      screenPos = worldToScreen(arrowInfo.position, view);
-    }
-
-    // Calculate arrow size based on flow velocity
-    // velocity = massFlowRate / (density * area)
-    const density = fromNode.fluid.mass / fromNode.volume;
-    const velocity = Math.abs(conn.massFlowRate) / (density * conn.flowArea);
-
-    // Scale arrow size: 0 m/s -> 8px, 10 m/s -> 45px (50% larger than before)
-    // Apply perspective scale for isometric mode
-    const baseArrowSize = Math.min(45, Math.max(8, 8 + velocity * 3.7));
-    // In perspective mode, scale proportionally to distance (closer = bigger)
-    // arrowScale ranges from ~0.3 (far) to ~2.5 (near) - use it directly
-    const perspectiveMultiplier = perspectiveProjector ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
-    const arrowSize = baseArrowSize * perspectiveMultiplier;
-
-    // Determine arrow direction
-    let angle = arrowInfo.angle;
-    if (conn.massFlowRate < 0) {
-      angle += Math.PI; // Reverse direction for negative flow
-    }
-
     // Skip tiny flows
     if (Math.abs(conn.massFlowRate) < 1) continue;
+
+    // Find the plant connection to get port positions
+    let fromScreenPos: Point | null = null;
+    let toScreenPos: Point | null = null;
+    let arrowScale = 1;
+
+    if (conn.id && conn.id.startsWith('flow-')) {
+      for (const pc of plantState.connections) {
+        if (conn.id === `flow-${pc.fromComponentId}-${pc.toComponentId}`) {
+          const fromComponent = plantState.components.get(pc.fromComponentId);
+          const toComponent = plantState.components.get(pc.toComponentId);
+
+          if (fromComponent && toComponent) {
+            const fromPort = fromComponent.ports?.find(p => p.id === pc.fromPortId);
+            const toPort = toComponent.ports?.find(p => p.id === pc.toPortId);
+
+            if (fromPort && toPort) {
+              if (getPortScreenPos) {
+                // Use the canvas's port screen position calculation (isometric mode)
+                const fromPortScreen = getPortScreenPos(fromComponent, fromPort);
+                const toPortScreen = getPortScreenPos(toComponent, toPort);
+                if (fromPortScreen && toPortScreen) {
+                  fromScreenPos = { x: fromPortScreen.x, y: fromPortScreen.y };
+                  toScreenPos = { x: toPortScreen.x, y: toPortScreen.y };
+                  // Port radius is Math.max(6, scale * 25), so radius/25 ≈ perspective scale
+                  // Average the two port scales for the arrow
+                  arrowScale = (fromPortScreen.radius + toPortScreen.radius) / 2 / 25;
+                }
+              } else {
+                // Standard 2D mode - use world to screen conversion
+                const fromWorldPos = getPortWorldPosition(fromComponent, pc.fromPortId);
+                const toWorldPos = getPortWorldPosition(toComponent, pc.toPortId);
+                if (fromWorldPos && toWorldPos) {
+                  fromScreenPos = worldToScreen(fromWorldPos, view);
+                  toScreenPos = worldToScreen(toWorldPos, view);
+                }
+              }
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    // If we couldn't find port positions, fall back to old method
+    if (!fromScreenPos || !toScreenPos) {
+      const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
+      if (!arrowInfo) continue;
+
+      // In fallback mode, just use world to screen (no perspective)
+      fromScreenPos = worldToScreen(arrowInfo.position, view);
+      toScreenPos = fromScreenPos;
+    }
+
+    // Calculate midpoint in screen space
+    const screenPos: Point = {
+      x: (fromScreenPos.x + toScreenPos.x) / 2,
+      y: (fromScreenPos.y + toScreenPos.y) / 2,
+    };
+
+    // Calculate angle from "from" to "to" in screen space
+    const dx = toScreenPos.x - fromScreenPos.x;
+    const dy = toScreenPos.y - fromScreenPos.y;
+    let angle = Math.atan2(dy, dx);
+
+    // Reverse direction for negative flow
+    if (conn.massFlowRate < 0) {
+      angle += Math.PI;
+    }
+
+    // Calculate arrow size based on mass flow rate
+    // Scale: 0 kg/s -> 8px, 1000 kg/s -> 45px
+    const massFlow = Math.abs(conn.massFlowRate);
+    const baseArrowSize = Math.min(45, Math.max(8, 8 + massFlow * 0.037));
+    const perspectiveMultiplier = getPortScreenPos ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
+    const arrowSize = baseArrowSize * perspectiveMultiplier;
 
     // Draw arrow
     ctx.save();
@@ -2696,9 +2754,9 @@ export function renderFlowConnectionArrows(
 
     // Arrow color: green for positive flow, red for negative flow
     if (conn.massFlowRate >= 0) {
-      ctx.fillStyle = 'rgba(100, 255, 100, 0.9)'; // Green for positive flow
+      ctx.fillStyle = 'rgba(100, 255, 100, 0.9)';
     } else {
-      ctx.fillStyle = 'rgba(255, 100, 100, 0.9)'; // Red for negative/reverse flow
+      ctx.fillStyle = 'rgba(255, 100, 100, 0.9)';
     }
 
     // Draw arrow shape
@@ -2719,15 +2777,17 @@ export function renderFlowConnectionArrows(
 
     // Draw flow rate label
     ctx.save();
-    const fontSize = Math.max(8, Math.min(14, 10 * perspectiveMultiplier)); // Scale font with perspective
+    const fontSize = Math.max(8, Math.min(14, 10 * perspectiveMultiplier));
     ctx.font = `${fontSize}px monospace`;
-    ctx.fillStyle = '#fff';
-    ctx.strokeStyle = '#000';
+    ctx.fillStyle = '#000';
+    ctx.strokeStyle = '#fff';
     ctx.lineWidth = 2;
+    ctx.textAlign = 'center';
     const label = `${conn.massFlowRate.toFixed(0)} kg/s`;
-    const labelOffset = arrowSize + 5 * perspectiveMultiplier;
-    const labelX = screenPos.x + Math.cos(angle) * labelOffset;
-    const labelY = screenPos.y + Math.sin(angle) * labelOffset + 4;
+    // Position label above or below the arrow based on angle
+    const labelOffset = arrowSize + 8 * perspectiveMultiplier;
+    const labelX = screenPos.x;
+    const labelY = screenPos.y - labelOffset;
     ctx.strokeText(label, labelX, labelY);
     ctx.fillText(label, labelX, labelY);
     ctx.restore();

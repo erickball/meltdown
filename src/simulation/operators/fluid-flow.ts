@@ -17,6 +17,7 @@
 import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState, CheckValveState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
+import { saturationPressure } from '../water-properties';
 
 // ============================================================================
 // Flow Operator
@@ -460,9 +461,25 @@ export class FlowOperator implements PhysicsOperator {
         pumpRho = this.getNodeDensity(pumpSuctionNode, 'actual');
       }
 
+      // Calculate head degradation factor based on suction conditions
+      //
+      // Two mechanisms reduce pump head:
+      // 1. NPSH degradation (liquid suction): When P_suction is close to P_vapor,
+      //    pressure drop at impeller eye causes local flashing → cavitation → head loss
+      // 2. Two-phase degradation: Vapor already present in suction reduces volumetric
+      //    efficiency and head capability
+      //
+      // These must be continuous at the boundary (saturated liquid ↔ two-phase at x=0).
+      // We handle this by:
+      // - For liquid: use NPSH-based factor
+      // - For two-phase: use quality-based factor that equals NPSH factor at x=0
+      //
+      // At saturated liquid (quality=0, NPSH_a=0), both should give the same result.
+      const headFactor = this.calculatePumpHeadFactor(pump, pumpSuctionNode, pumpRho);
+
       // Pump head is always positive in the forward direction (from -> to)
       // If flow reverses, the pump still tries to push forward, opposing the reverse flow
-      dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
+      dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g * headFactor;
     }
 
     // Check for valve in this connection
@@ -708,6 +725,103 @@ export class FlowOperator implements PhysicsOperator {
     }
 
     return actualDensity; // Fallback
+  }
+
+  /**
+   * Calculate pump head degradation factor based on suction conditions.
+   *
+   * This handles two related phenomena that must be continuous at the boundary:
+   *
+   * 1. NPSH degradation (liquid suction):
+   *    When P_suction approaches P_vapor, pressure drop at the impeller eye
+   *    causes local flashing → cavitation → head loss.
+   *    NPSH_available = (P_suction - P_vapor) / (ρ * g)
+   *
+   * 2. Two-phase degradation (vapor already in suction):
+   *    Vapor present reduces volumetric efficiency. The density already captures
+   *    some of this (dP = ρgh), but pumps also lose efficiency with void fraction.
+   *
+   * At the boundary (saturated liquid ↔ two-phase at x=0), both models must agree.
+   * We define a "base factor" at NPSH_a=0 / quality=0 and degrade from there.
+   *
+   * @param pump The pump state
+   * @param suctionNode The flow node at pump suction
+   * @param pumpRho Density being used for pump calculations (kg/m³)
+   * @returns Factor 0-1 to multiply rated head by (1 = no degradation)
+   */
+  private calculatePumpHeadFactor(pump: PumpState, suctionNode: FlowNode, pumpRho: number): number {
+    const g = 9.81;
+    const pumpType = pump.pumpType ?? 'centrifugal';
+
+    // Base factor at the boundary (NPSH_a = 0 or quality = 0)
+    // This is the factor when saturated liquid enters (about to flash)
+    // Centrifugal: still develops significant head but cavitating
+    // Positive displacement: more tolerant
+    const baseFactor = pumpType === 'centrifugal' ? 0.85 : 0.95;
+
+    if (suctionNode.fluid.phase === 'two-phase') {
+      // Two-phase suction: degrade based on void fraction (volume fraction of vapor)
+      // Void fraction is what matters for pump performance, not quality (mass fraction)
+      // A small mass of vapor occupies a large volume because ρ_vapor << ρ_liquid
+      //
+      // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
+      //
+      // At quality = 0: α = 0, factor = baseFactor (matches NPSH_a = 0 case)
+      // At quality = 1: α = 1, factor approaches 0 (can't pump pure vapor effectively)
+      const quality = suctionNode.fluid.quality ?? 0;
+
+      // Calculate void fraction from quality and phase densities
+      const rho_f = this.getNodeDensity(suctionNode, 'liquid');
+      const rho_g = this.getNodeDensity(suctionNode, 'vapor');
+
+      // Avoid division by zero at quality extremes
+      let voidFraction: number;
+      if (quality <= 0) {
+        voidFraction = 0;
+      } else if (quality >= 1) {
+        voidFraction = 1;
+      } else {
+        // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
+        const v_vapor = quality / rho_g;
+        const v_liquid = (1 - quality) / rho_f;
+        voidFraction = v_vapor / (v_vapor + v_liquid);
+      }
+
+      if (pumpType === 'centrifugal') {
+        // Centrifugal pumps lose head rapidly with void fraction
+        // factor = baseFactor * (1 - α)^2
+        // At α=0: 0.85, at α=0.5: 0.21, at α=1: 0
+        return baseFactor * Math.pow(1 - voidFraction, 2);
+      } else {
+        // Positive displacement: more tolerant, linear degradation
+        // factor = baseFactor * (1 - 0.8 * α)
+        // At α=0: 0.95, at α=0.5: 0.57, at α=1: 0.19
+        return baseFactor * (1 - 0.8 * voidFraction);
+      }
+    }
+
+    // Liquid suction: use NPSH-based degradation
+    const P_suction = suctionNode.fluid.pressure;
+    const T_suction = suctionNode.fluid.temperature;
+    const P_vapor = saturationPressure(T_suction);
+
+    // NPSH available (in meters of fluid head)
+    const npshAvailable = (P_suction - P_vapor) / (pumpRho * g);
+
+    // Get required NPSH from pump
+    const npshRequired = pump.npshRequired ?? 5;
+
+    // If NPSH_a >= NPSH_r, no degradation
+    if (npshAvailable >= npshRequired) {
+      return 1.0;
+    }
+
+    // NPSH ratio: 1.0 = exactly at NPSHr, 0 = at vapor pressure (saturated)
+    const npshRatio = Math.max(0, npshAvailable / npshRequired);
+
+    // Interpolate from 1.0 at npshRatio=1 to baseFactor at npshRatio=0
+    // This ensures continuity with the two-phase model at quality=0
+    return baseFactor + (1.0 - baseFactor) * npshRatio;
   }
 
   /**

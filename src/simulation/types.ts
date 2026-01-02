@@ -302,6 +302,8 @@ export interface PumpState {
   connectedFlowPath: string;        // Flow connection ID this pump drives
   rampUpTime: number;               // seconds - time to reach full speed from stopped
   coastDownTime: number;            // seconds - time to coast to stop when tripped
+  npshRequired: number;             // m - NPSH required by pump (NPSHr)
+  pumpType: 'centrifugal' | 'positive';  // Type affects cavitation behavior
 }
 
 export interface ValveState {

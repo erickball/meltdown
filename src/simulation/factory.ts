@@ -1229,6 +1229,8 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     connectedFlowPath: '', // Set later when connections are processed
     rampUpTime: 5.0,
     coastDownTime: 30.0,
+    npshRequired: pump.npshRequired || 5,  // Default 5m NPSHr
+    pumpType: pump.type || 'centrifugal',
   };
 }
 
@@ -1438,13 +1440,15 @@ function createFlowConnectionFromPlantConnection(
 
   // Auto-detect phase tolerance for condenser bottom connections
   // If fromPhaseTolerance isn't set, and this is a condenser with a low elevation connection,
-  // set tolerance to 0 so it always draws liquid from the hotwell
+  // set a small tolerance so it draws liquid when there's meaningful liquid present,
+  // but switches to mixture/vapor when the hotwell is nearly empty.
+  // Using 0.01m (1cm) as minimum liquid level for "pure liquid" draw.
   let fromPhaseTolerance = connection.fromPhaseTolerance;
   if (fromPhaseTolerance === undefined && fromComponent.type === 'condenser') {
     // Check if connection is at the bottom (fromElevation near 0 or undefined)
     const connElev = connFromElevation ?? 0;
     if (connElev < 0.2) {
-      fromPhaseTolerance = 0; // Always draw liquid from bottom of condenser
+      fromPhaseTolerance = 0.01; // Draw liquid if level > 1cm, otherwise mixture
     }
   }
 
@@ -1453,7 +1457,7 @@ function createFlowConnectionFromPlantConnection(
   if (toPhaseTolerance === undefined && toComponent.type === 'condenser') {
     const connElev = connToElevation ?? 0;
     if (connElev < 0.2) {
-      toPhaseTolerance = 0;
+      toPhaseTolerance = 0.01;
     }
   }
 

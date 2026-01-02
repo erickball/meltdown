@@ -1451,12 +1451,13 @@ export class ConstructionManager {
     toPort.connectedTo = fromPortId;
 
     // Auto-detect phase tolerance for condenser outlets (bottom connections)
-    // Condenser outlets at the bottom should always draw liquid (tolerance = 0)
+    // Small tolerance so it draws liquid when there's meaningful liquid present,
+    // but switches to mixture/vapor when the hotwell is nearly empty.
     let effectiveFromPhaseTolerance = fromPhaseTolerance;
     if (effectiveFromPhaseTolerance === undefined && fromComponent.type === 'condenser') {
       // Check if this is a bottom port (outlet) - position.y < 0 means bottom of component
       if (fromPort.position.y < 0) {
-        effectiveFromPhaseTolerance = 0; // Always draw liquid from bottom of condenser
+        effectiveFromPhaseTolerance = 0.01; // Draw liquid if level > 1cm, otherwise mixture
       }
     }
 
