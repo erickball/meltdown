@@ -952,6 +952,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: Math.min(tank.width, tank.height),
         flowArea: tank.width * (tank.width || 1),
+        height: tank.height,
         elevation,
       };
     }
@@ -972,6 +973,9 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
       console.log(`[Factory] Pipe ${component.id}: creating ${phase} state at ${(pressure/1e5).toFixed(1)} bar, ${temp.toFixed(0)}K, quality=${quality.toFixed(2)}`);
 
+      // For pipes, "height" is the vertical component of the pipe length
+      // This affects phase separation - horizontal pipes separate better than vertical
+      // We'll set height = 0 for pipes since they're treated as well-mixed anyway
       return {
         id: component.id,
         label: component.label || 'Pipe',
@@ -979,6 +983,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: pipe.diameter,
         flowArea: Math.PI * radius * radius,
+        height: 0,  // Pipes are well-mixed, height doesn't affect separation
         elevation,
       };
     }
@@ -1002,6 +1007,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: pump.diameter || 0.3,
         flowArea: Math.PI * Math.pow((pump.diameter || 0.3) / 2, 2),
+        height: 0,  // Pumps are well-mixed
         elevation,
       };
     }
@@ -1024,6 +1030,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: valve.diameter || 0.2,
         flowArea: Math.PI * Math.pow((valve.diameter || 0.2) / 2, 2),
+        height: 0,  // Valves are well-mixed
         elevation,
       };
     }
@@ -1070,6 +1077,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: 0.012, // Typical fuel channel
         flowArea: Math.PI * radius * radius * 0.5, // Account for internals
+        height: vessel.height,
         elevation,
       };
     }
@@ -1089,6 +1097,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume: tubeVolume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
+        height: hx.height,
         elevation,
       };
     }
@@ -1106,6 +1115,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: 0.5,
         flowArea: 0.2,
+        height: 0,  // Turbines are well-mixed
         elevation,
       };
     }
@@ -1123,6 +1133,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: 0.2,
         flowArea: 0.05,
+        height: 0,  // TD pumps are well-mixed
         elevation,
       };
     }
@@ -1174,6 +1185,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         volume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
+        height: 0,  // Condensers are well-mixed
         elevation,
         heatSinkTemp,
         coolingWaterFlow,
@@ -1352,6 +1364,7 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
     volume: shellVolume,
     hydraulicDiameter: 0.1,
     flowArea: 5,
+    height: hx.height,
     elevation,
   };
 }

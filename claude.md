@@ -11,6 +11,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions.
 
 ## TODO List
+-Add an error if nothing changes during the timestep or no step is accepted
 -Below u=30 density starts to go up as it gets colder; this affects determination of two-phase.
 -How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right?
 -Backup a timestep feature? Or just periodic state-saving?
@@ -66,6 +67,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Allow bubbles in the liquid space and droplets in the vapor space of a two-phase component.
 X Debug new steam table
 X Switched to custom steam table that should be more stable for compressed liquid.
 X Initial pressure can't be higher than pressure rating. Maybe 95% of pressure rating (nah)

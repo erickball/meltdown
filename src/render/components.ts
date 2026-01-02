@@ -114,6 +114,10 @@ function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean):
  * Render stratified two-phase fluid with vapor on top, liquid on bottom.
  * Used for tanks, pressurizers, vessels, HX shell sides, condensers.
  *
+ * When separation < 1, each zone is shown as a mixture with pixelated rendering:
+ * - Liquid zone has effective quality = (1 - separation) × actual_quality
+ * - Vapor zone has effective quality = separation + (1 - separation) × actual_quality
+ *
  * @param ctx - Canvas context
  * @param fluid - Fluid state (must be two-phase)
  * @param x - Left edge of render area
@@ -121,6 +125,7 @@ function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean):
  * @param width - Width of render area
  * @param height - Total height of render area
  * @param liquidFraction - Volume fraction of liquid (0-1)
+ * @param separation - Phase separation factor (0 = fully mixed, 1 = fully separated)
  */
 function renderStratifiedTwoPhase(
   ctx: CanvasRenderingContext2D,
@@ -129,36 +134,105 @@ function renderStratifiedTwoPhase(
   y: number,
   width: number,
   height: number,
-  liquidFraction: number
+  liquidFraction: number,
+  separation: number = 1
 ): void {
   const liquidHeight = height * liquidFraction;
   const vaporHeight = height - liquidHeight;
 
+  // Get actual mass quality
+  const actualQuality = fluid.quality ?? 0.5;
+
   // Saturation temperature for coloring
   const T_sat = getSaturationTemp(fluid.pressure);
 
+  // Get base colors at saturation
+  const { liquid: liquidColor, vapor: vaporColor } = getTwoPhaseColors(fluid);
+
   // Draw vapor space (top)
   if (vaporHeight > 0) {
-    const vaporFluid: Fluid = {
-      temperature: T_sat,
-      pressure: fluid.pressure,
-      phase: 'vapor',
-      flowRate: 0,
-    };
-    ctx.fillStyle = getFluidColor(vaporFluid);
-    ctx.fillRect(x, y, width, vaporHeight);
+    // Vapor zone effective quality: pure vapor at separation=1, mixture at separation=0
+    const vaporZoneQuality = separation + (1 - separation) * actualQuality;
+
+    if (separation >= 0.95) {
+      // Nearly fully separated: draw as pure vapor
+      const vaporFluid: Fluid = {
+        temperature: T_sat,
+        pressure: fluid.pressure,
+        phase: 'vapor',
+        flowRate: 0,
+      };
+      ctx.fillStyle = getFluidColor(vaporFluid);
+      ctx.fillRect(x, y, width, vaporHeight);
+    } else {
+      // Partial separation: draw pixelated mixture
+      renderZoneWithQuality(ctx, x, y, width, vaporHeight, liquidColor, vaporColor, vaporZoneQuality);
+    }
   }
 
-  // Draw liquid (bottom)
+  // Draw liquid zone (bottom)
   if (liquidHeight > 0) {
-    const liquidFluid: Fluid = {
-      temperature: T_sat,
-      pressure: fluid.pressure,
-      phase: 'liquid',
-      flowRate: 0,
-    };
-    ctx.fillStyle = getFluidColor(liquidFluid);
-    ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
+    // Liquid zone effective quality: pure liquid at separation=1, mixture at separation=0
+    const liquidZoneQuality = (1 - separation) * actualQuality;
+
+    if (separation >= 0.95) {
+      // Nearly fully separated: draw as pure liquid
+      const liquidFluid: Fluid = {
+        temperature: T_sat,
+        pressure: fluid.pressure,
+        phase: 'liquid',
+        flowRate: 0,
+      };
+      ctx.fillStyle = getFluidColor(liquidFluid);
+      ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
+    } else {
+      // Partial separation: draw pixelated mixture
+      renderZoneWithQuality(ctx, x, y + vaporHeight, width, liquidHeight, liquidColor, vaporColor, liquidZoneQuality);
+    }
+  }
+}
+
+/**
+ * Render a zone with pixelated liquid/vapor based on effective quality.
+ * Similar to renderTwoPhaseFluid but for a specific zone.
+ */
+function renderZoneWithQuality(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  liquidColor: { r: number; g: number; b: number },
+  vaporColor: { r: number; g: number; b: number },
+  quality: number,
+  pixelSize: number = 4
+): void {
+  const timeSeed = getTimeSeed();
+
+  // Calculate grid dimensions
+  const cols = Math.ceil(width / pixelSize);
+  const rows = Math.ceil(height / pixelSize);
+
+  // Render each pixel
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const px = x + col * pixelSize;
+      const py = y + row * pixelSize;
+      const pw = Math.min(pixelSize, x + width - px);
+      const ph = Math.min(pixelSize, y + height - py);
+
+      // Use seeded random based on position + time for animated pattern
+      const seed = row * 1000 + col + Math.floor(quality * 100) * 10000 + timeSeed * 7919;
+      const rand = seededRandom(seed);
+
+      // Higher quality = more vapor pixels
+      const isVapor = rand < quality;
+
+      ctx.fillStyle = isVapor
+        ? rgbToString(vaporColor, 0.85)
+        : rgbToString(liquidColor, 0.9);
+      ctx.fillRect(px, py, pw, ph);
+    }
   }
 }
 
@@ -250,7 +324,8 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
     if (tank.fluid.phase === 'two-phase') {
       // Stratified display: vapor on top, liquid on bottom
       const liquidFraction = getLiquidFraction(tank, tank.fluid, isSimulating);
-      renderStratifiedTwoPhase(ctx, tank.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction);
+      const separation = tank.fluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, tank.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction, separation);
     } else {
       // Single phase fluid fills the entire tank
       ctx.fillStyle = getFluidColor(tank.fluid);
@@ -662,7 +737,8 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
       const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction);
+      const separation = vessel.fluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -853,7 +929,8 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
       const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction);
+      const separation = vessel.fluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -883,7 +960,8 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   if (vessel.fluid) {
     if (vessel.fluid.phase === 'two-phase') {
       const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction);
+      const separation = vessel.fluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, vessel.fluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction, separation);
     } else {
       ctx.fillStyle = getFluidColor(vessel.fluid);
       ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
@@ -1391,7 +1469,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
       // Stratified: vapor on top, liquid on bottom
       // HX shell side always uses quality-based calculation (no stored fillLevel)
       const liquidFraction = getLiquidFraction(hx, hx.secondaryFluid, true);
-      renderStratifiedTwoPhase(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction);
+      const separation = hx.secondaryFluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
     } else {
       ctx.fillStyle = getFluidColor(hx.secondaryFluid);
       ctx.fillRect(innerLeft, innerTop, innerW, innerH);
@@ -1954,7 +2033,8 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
       // Stratified: condensate at bottom, steam at top
       // Condenser always uses quality-based calculation (no stored fillLevel)
       const liquidFraction = getLiquidFraction(condenser, condenser.fluid, true);
-      renderStratifiedTwoPhase(ctx, condenser.fluid, innerLeft, innerTop, innerW, innerH, liquidFraction);
+      const separation = condenser.fluid.separation ?? 1;
+      renderStratifiedTwoPhase(ctx, condenser.fluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
     } else {
       ctx.fillStyle = getFluidColor(condenser.fluid);
       ctx.fillRect(innerLeft, innerTop, innerW, innerH);

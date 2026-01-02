@@ -16,6 +16,7 @@ export interface Fluid {
   phase: 'liquid' | 'vapor' | 'two-phase';
   quality?: number;     // For two-phase: 0 = all liquid, 1 = all vapor
   flowRate: number;     // kg/s (positive = forward direction)
+  separation?: number;  // Phase separation factor: 0 = fully mixed, 1 = fully separated
 }
 
 export type ComponentType =

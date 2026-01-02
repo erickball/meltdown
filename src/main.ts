@@ -1574,6 +1574,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.primaryFluid.pressure = primaryNode.fluid.pressure;
         component.primaryFluid.phase = primaryNode.fluid.phase;
         component.primaryFluid.quality = primaryNode.fluid.quality;
+        component.primaryFluid.separation = primaryNode.separation;
       }
 
       // Secondary side: try {id}-secondary
@@ -1583,6 +1584,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.secondaryFluid.pressure = secondaryNode.fluid.pressure;
         component.secondaryFluid.phase = secondaryNode.fluid.phase;
         component.secondaryFluid.quality = secondaryNode.fluid.quality;
+        component.secondaryFluid.separation = secondaryNode.separation;
       }
       continue;
     }
@@ -1607,6 +1609,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.pressure = insideNode.fluid.pressure;
           component.fluid.phase = insideNode.fluid.phase;
           component.fluid.quality = insideNode.fluid.quality;
+          component.fluid.separation = insideNode.separation;
         }
       }
       // Sync fuel temperature if present
@@ -1626,6 +1629,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.fluid.pressure = simNode.fluid.pressure;
         component.fluid.phase = simNode.fluid.phase;
         component.fluid.quality = simNode.fluid.quality;
+        component.fluid.separation = simNode.separation;
       }
     }
 

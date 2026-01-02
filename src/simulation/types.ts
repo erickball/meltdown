@@ -64,6 +64,7 @@ export interface FlowNode {
   volume: number;                   // m³
   hydraulicDiameter: number;        // m - for heat transfer correlations
   flowArea: number;                 // m² - cross-sectional flow area
+  height?: number;                  // m - vertical height (for phase separation)
 
   // Elevation for natural circulation
   elevation: number;                // m - height relative to reference
@@ -78,6 +79,12 @@ export interface FlowNode {
   // iceFraction = 0 means no ice, iceFraction = 1 means fully frozen
   // Latent heat of fusion for water: 334 kJ/kg
   iceFraction?: number;             // 0-1, fraction of mass that is frozen
+
+  // Phase separation factor (calculated by FlowRateOperator)
+  // 0 = fully mixed (uniform quality throughout)
+  // 1 = fully separated (pure liquid at bottom, pure vapor at top)
+  // Used by renderer to show appropriate pixelation in each zone
+  separation?: number;              // 0-1, degree of phase separation
 }
 
 // ============================================================================

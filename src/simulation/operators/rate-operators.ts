@@ -341,6 +341,25 @@ export class FlowRateOperator implements RateOperator {
       rates.flowNodes.set(id, { dMass: 0, dEnergy: 0 });
     }
 
+    // Calculate total mass flow through each node for separation calculation
+    const nodeMassFlows = new Map<string, number>();
+    for (const conn of state.flowConnections) {
+      const absFlow = Math.abs(conn.massFlowRate);
+      nodeMassFlows.set(conn.fromNodeId, (nodeMassFlows.get(conn.fromNodeId) ?? 0) + absFlow);
+      nodeMassFlows.set(conn.toNodeId, (nodeMassFlows.get(conn.toNodeId) ?? 0) + absFlow);
+    }
+
+    // Calculate and store separation for all two-phase nodes
+    // This is used by the renderer to show appropriate pixelation in each zone
+    for (const [nodeId, node] of state.flowNodes) {
+      if (node.fluid.phase === 'two-phase') {
+        const totalFlow = nodeMassFlows.get(nodeId) ?? 0;
+        node.separation = this.calculateSeparation(node, totalFlow);
+      } else {
+        node.separation = undefined;  // Only meaningful for two-phase
+      }
+    }
+
     // Debug tracking for pump-5
     const debugFlowsIn: Array<{ from: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }> = [];
     const debugFlowsOut: Array<{ to: string; massFlow: number; energyFlow: number; h_specific: number; flowPhase: string }> = [];
@@ -377,7 +396,8 @@ export class FlowRateOperator implements RateOperator {
 
       // Determine what phase is actually flowing based on connection elevation
       // For two-phase nodes, we need to use phase-specific enthalpy
-      let flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation);
+      // Pass mass flow rate so separation calculation can account for turbulence
+      let flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation, absMassFlow);
 
       // Check if we're trying to draw more of a phase than is available.
       // If the flow rate would drain the phase too quickly, use mixture instead.
@@ -471,87 +491,187 @@ export class FlowRateOperator implements RateOperator {
   }
 
   /**
+   * Calculate the degree of phase separation in a two-phase node.
+   * Returns a separation factor from 0 (fully mixed) to 1 (fully separated).
+   *
+   * Physics: Separation depends on the competition between:
+   * - Buoyancy forces trying to separate phases (proportional to Δρ × g × h)
+   * - Turbulent mixing from flow (proportional to v²)
+   * - Residence time for separation to occur
+   *
+   * @param node The flow node to analyze
+   * @param massFlowRate The mass flow rate through the node (kg/s)
+   * @returns Separation factor 0-1
+   */
+  private calculateSeparation(node: FlowNode, massFlowRate: number): number {
+    // Pumps, pipes, valves, turbines, condensers are always well-mixed
+    const id = node.id.toLowerCase();
+    if (id.startsWith('pum-') || id.startsWith('pip-') || id.startsWith('val-') ||
+        id.startsWith('tur-') || id.startsWith('con-') || id.startsWith('tdp-')) {
+      return 0;  // No separation
+    }
+
+    // If height is explicitly 0, the node is well-mixed
+    if (node.height === 0) {
+      return 0;
+    }
+
+    // Get node height - use stored value or estimate from volume
+    const nodeHeight = node.height ?? Math.cbrt(node.volume);  // Assume cube if no height
+    if (nodeHeight < 0.1) {
+      return 0;  // Too small for meaningful separation
+    }
+
+    // Get flow properties
+    const quality = node.fluid.quality ?? 0;
+    const T_C = node.fluid.temperature - 273.15;
+    const P = node.fluid.pressure;
+
+    // Approximate saturated liquid/vapor densities
+    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                       Math.max(400, 700 - 2.5 * (T_C - 300));
+    const rho_vapor = Math.max(0.1, P * 0.018 / (8.314 * node.fluid.temperature));
+    const rho_mixture = rho_liquid * (1 - quality) + rho_vapor * quality;
+
+    // Density difference drives separation
+    const delta_rho = rho_liquid - rho_vapor;
+
+    // Characteristic bubble/droplet size (m)
+    // Smaller at higher pressure due to surface tension effects
+    const d_bubble = 0.005 * Math.sqrt(1e5 / Math.max(P, 1e5));  // ~5mm at 1 bar, smaller at high P
+
+    // Terminal settling velocity (simplified Stokes drag)
+    // v_settle = (Δρ × g × d²) / (18 × μ)
+    // For water at typical conditions, μ ≈ 0.0003 Pa·s
+    const g = 9.81;
+    const mu = 0.0003;
+    const v_settle = (delta_rho * g * d_bubble * d_bubble) / (18 * mu);
+
+    // Flow velocity through the node
+    // Use the node's internal flow area, not the connection flow area
+    const v_flow = Math.abs(massFlowRate) / (rho_mixture * Math.max(node.flowArea, 0.01));
+
+    // Residence time
+    const tau = node.volume * rho_mixture / Math.max(Math.abs(massFlowRate), 0.01);
+
+    // Separation height achievable during residence time
+    const h_sep = v_settle * tau;
+
+    // Separation factor based on how much of the height can be settled
+    let separation = Math.min(1, h_sep / nodeHeight);
+
+    // Reduce separation if flow velocity is high relative to settling velocity
+    // High turbulence from flow re-mixes the phases
+    if (v_flow > 0.01) {
+      const turbulence_factor = Math.exp(-v_flow / v_settle);
+      separation *= turbulence_factor;
+    }
+
+    // Clamp to valid range
+    return Math.max(0, Math.min(1, separation));
+  }
+
+  /**
    * Determine what phase of fluid is flowing based on connection elevation
    * relative to liquid level in a two-phase node.
    *
-   * Only large vessels (tanks, vessels, heat exchangers) have stratified flow
-   * where liquid and vapor separate. Pumps, pipes, and other small volumes
-   * are well-mixed and always flow mixture.
+   * Uses physics-based separation model: only nodes with sufficient residence
+   * time and low turbulence will have separated phases. The separation factor
+   * determines how much of the flow is phase-specific vs mixture.
+   *
+   * @param node The upstream flow node
+   * @param connectionElevation Height of connection relative to node bottom (m)
+   * @param massFlowRate Mass flow rate through the connection (kg/s)
+   * @returns The phase of fluid flowing ('liquid', 'vapor', or 'mixture')
    */
-  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
+  private getFlowPhase(
+    node: FlowNode,
+    connectionElevation?: number,
+    massFlowRate: number = 0
+  ): 'liquid' | 'vapor' | 'mixture' {
     // Single phase nodes always flow their phase
     if (node.fluid.phase !== 'two-phase') {
       return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
     }
 
-    // Determine if this node has stratified flow (liquid/vapor separation)
-    // Only large vessels have this - pumps, pipes, etc. are well-mixed
-    const isStratified = this.isStratifiedNode(node);
+    // Calculate separation factor (0 = fully mixed, 1 = fully separated)
+    const separation = this.calculateSeparation(node, massFlowRate);
 
-    if (!isStratified) {
-      // Well-mixed nodes always flow mixture
+    // If separation is low, return mixture regardless of elevation
+    if (separation < 0.1) {
       return 'mixture';
     }
 
-    // Estimate node height (assume cylindrical with height ≈ diameter)
-    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+    // Get node height - use stored value or estimate
+    const nodeHeight = node.height ?? Math.cbrt(node.volume);
 
     // If no elevation specified, assume mid-height connection (mixture)
     if (connectionElevation === undefined) {
       connectionElevation = nodeHeight / 2;
     }
 
-    // Calculate liquid level from quality
+    // Calculate liquid level from quality, densities, and separation factor
     const quality = node.fluid.quality ?? 0.5;
     const T_C = node.fluid.temperature - 273.15;
 
-    // Approximate saturated liquid/vapor densities
     const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
                        T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                       700 - 2.5 * (T_C - 300);
-    const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
+                       Math.max(400, 700 - 2.5 * (T_C - 300));
+    const rho_vapor = Math.max(0.1, node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature));
 
-    // Void fraction = vapor volume / total volume
-    // α = x * ρ_l / (x * ρ_l + (1-x) * ρ_v)  where x is quality
-    const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
+    // Mixture density (homogeneous)
+    const rho_mixture = 1 / ((1 - quality) / rho_liquid + quality / rho_vapor);
 
-    // Liquid level (assuming liquid settles at bottom)
-    const liquidLevel = nodeHeight * (1 - voidFraction);
+    // Zone densities account for partial separation:
+    // - Liquid zone: separation × ρ_f + (1 - separation) × ρ_mix
+    // - Vapor zone: separation × ρ_g + (1 - separation) × ρ_mix
+    // At separation = 1: zones are pure liquid and pure vapor
+    // At separation = 0: both zones are just the mixture density
+    const rho_liquid_zone = separation * rho_liquid + (1 - separation) * rho_mixture;
+    const rho_vapor_zone = separation * rho_vapor + (1 - separation) * rho_mixture;
 
-    // Connection below liquid level: draw liquid
-    if (connectionElevation < liquidLevel - 0.1) {  // 10cm tolerance
+    // Total mass = ρ_liq_zone × V_liq + ρ_vap_zone × V_vap
+    // Total volume = V_liq + V_vap
+    // Average density = mass / volume = ρ_liq_zone × f + ρ_vap_zone × (1 - f)
+    // where f = V_liq / V_total = liquid volume fraction
+    //
+    // Solving for f:
+    // ρ_avg = ρ_liq_zone × f + ρ_vap_zone × (1 - f)
+    // ρ_avg = ρ_vap_zone + f × (ρ_liq_zone - ρ_vap_zone)
+    // f = (ρ_avg - ρ_vap_zone) / (ρ_liq_zone - ρ_vap_zone)
+    const rho_avg = node.fluid.mass / node.volume;
+
+    let liquidVolumeFraction: number;
+    const denom = rho_liquid_zone - rho_vapor_zone;
+    if (Math.abs(denom) < 0.1) {
+      // Nearly equal zone densities (very low separation) - use quality as approximation
+      liquidVolumeFraction = 1 - quality;
+    } else {
+      liquidVolumeFraction = (rho_avg - rho_vapor_zone) / denom;
+      // Clamp to valid range
+      liquidVolumeFraction = Math.max(0, Math.min(1, liquidVolumeFraction));
+    }
+
+    // Liquid level based on volume fraction occupied by liquid zone
+    const liquidLevel = nodeHeight * liquidVolumeFraction;
+
+    // Tolerance zone around the interface - wider when separation is low
+    // At low separation, the "interface" is smeared out over a larger region
+    const interfaceTolerance = 0.1 + (1 - separation) * nodeHeight * 0.4;
+
+    // Connection well below liquid level: draw liquid
+    if (connectionElevation < liquidLevel - interfaceTolerance) {
       return 'liquid';
     }
 
-    // Connection above liquid level: draw vapor
-    if (connectionElevation > liquidLevel + 0.1) {  // 10cm tolerance
+    // Connection well above liquid level: draw vapor
+    if (connectionElevation > liquidLevel + interfaceTolerance) {
       return 'vapor';
     }
 
-    // Connection at interface: draw mixture
+    // Connection near interface: draw mixture
     return 'mixture';
-  }
-
-  /**
-   * Determine if a node has stratified (separated liquid/vapor) flow.
-   * Only large vessels have stratified flow - pumps, pipes, etc. are well-mixed.
-   */
-  private isStratifiedNode(node: FlowNode): boolean {
-    // Use ID prefix to determine node type
-    // Stratified: ves-, tan-, hx- (vessels, tanks, heat exchangers)
-    // Well-mixed: pum-, pip-, con-, val- (pumps, pipes, condensers, valves)
-    const id = node.id.toLowerCase();
-
-    if (id.startsWith('ves-') || id.startsWith('tan-') || id.startsWith('hx-')) {
-      return true;
-    }
-    if (id.startsWith('pum-') || id.startsWith('pip-') || id.startsWith('con-') || id.startsWith('val-')) {
-      return false;
-    }
-
-    // For other nodes, use volume as heuristic: large volumes (>0.1 m³) are stratified
-    // Small volumes are well-mixed
-    return node.volume > 0.1;
   }
 
   /**
