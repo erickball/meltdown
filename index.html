@@ -20,10 +20,17 @@
         <div class="sim-controls" id="sim-controls" style="display: none;">
           <hr />
           <h3>Simulation</h3>
-          <button id="pause-btn" class="sim-btn">▶ Resume</button>
-          <button id="step-btn" class="sim-btn">⏭ Step</button>
-          <button id="single-step-btn" class="sim-btn">⏵ 1 Step</button>
-          <button id="reset-sim-btn" class="sim-btn" style="background: #654; margin-top: 5px;">↺ Reset</button>
+          <div class="history-controls" style="margin-bottom: 5px;">
+            <button id="back-step-btn" class="sim-btn" title="Back one step in history">⏮</button>
+            <button id="forward-step-btn" class="sim-btn" title="Forward one step in history">⏭</button>
+            <button id="pause-btn" class="sim-btn">▶ Resume</button>
+            <button id="run-one-step-btn" class="sim-btn" title="Run one simulation step">Run 1 Step</button>
+          </div>
+          <div class="history-controls" style="margin-bottom: 5px;">
+            <button id="goto-time-btn" class="sim-btn" title="Go to time...">Go To...</button>
+            <button id="reset-sim-btn" class="sim-btn" title="Jump to t=0" style="background: #654;">↺ t=0</button>
+            <span id="history-info" style="font-size: 10px; color: #888; margin-left: 5px;"></span>
+          </div>
           <div class="speed-controls">
             <button id="speed-down" class="sim-btn small">−</button>
             <span id="speed-display">1x</span>
@@ -43,19 +50,44 @@
             </label>
             <input type="range" id="slowdown-threshold" min="5" max="400" value="10" step="5" />
           </div>
-          <div class="timestep-control">
-            <label for="max-timestep">
-              Max timestep: <span id="max-timestep-value">500</span>ms
-            </label>
-            <input type="range" id="max-timestep" min="1" max="1000" value="500" step="10" />
-          </div>
-          <div class="pressure-model-control" style="margin-top: 10px;">
-            <label for="pressure-model">Pressure Model:</label>
-            <select id="pressure-model" style="margin-left: 5px;">
-              <option value="hybrid">Hybrid (Bulk Modulus)</option>
-              <option value="pure-triangulation" selected>Pure Triangulation</option>
-            </select>
-          </div>
+          <details style="margin-top: 10px;" open>
+            <summary style="cursor: pointer; color: #7af;">Advanced Solver Settings</summary>
+            <div class="solver-settings" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
+              <div class="timestep-control" style="margin-bottom: 8px;">
+                <label for="max-timestep" style="font-size: 11px;">
+                  Max timestep: <span id="max-timestep-value">500</span>ms
+                </label>
+                <input type="range" id="max-timestep" min="1" max="1000" value="500" step="10" style="width: 100%;" />
+              </div>
+              <div class="slider-control" style="margin-bottom: 8px;">
+                <label for="min-timestep" style="font-size: 11px;">
+                  Min timestep: <span id="min-timestep-value">1</span>µs
+                </label>
+                <input type="range" id="min-timestep" min="0" max="5" value="0" step="0.1" style="width: 100%;" />
+                <div class="slider-labels" style="font-size: 9px;"><span>1µs</span><span>100ms</span></div>
+              </div>
+              <div class="pressure-model-control" style="margin-bottom: 8px;">
+                <label for="pressure-model" style="font-size: 11px;">Pressure Model:</label>
+                <select id="pressure-model" style="margin-left: 5px;">
+                  <option value="hybrid">Hybrid (Bulk Modulus)</option>
+                  <option value="pure-triangulation" selected>Pure Triangulation</option>
+                </select>
+              </div>
+              <div class="slider-control" style="margin-bottom: 8px;">
+                <label for="k-max" style="font-size: 11px;">
+                  K_max: <span id="k-max-value">2200</span> MPa
+                </label>
+                <input type="range" id="k-max" min="25" max="2200" value="2200" step="25" style="width: 100%;" />
+                <div class="slider-labels" style="font-size: 9px;"><span>25 MPa</span><span>2200 MPa</span></div>
+              </div>
+              <div style="margin-top: 8px;">
+                <label style="font-size: 11px;">
+                  <input type="checkbox" id="pressure-solver-enabled" />
+                  Enable pressure solver
+                </label>
+              </div>
+            </div>
+          </details>
           <hr />
           <h3>Control Rods</h3>
           <div class="slider-control">
@@ -222,6 +254,28 @@
         <div class="dialog-footer">
           <button id="connection-dialog-cancel" class="btn-secondary">Cancel</button>
           <button id="connection-dialog-confirm" class="btn-primary">Create Connection</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- History Navigation Dialog -->
+    <div id="history-dialog" class="component-dialog" style="display: none;">
+      <div class="dialog-content" style="max-width: 400px; max-height: 80vh;">
+        <div class="dialog-header">
+          <h3>Navigate to State</h3>
+          <button class="history-dialog-close">&times;</button>
+        </div>
+        <div id="history-dialog-body" class="dialog-body" style="max-height: 50vh; overflow-y: auto;">
+          <!-- Snapshot list will be inserted here -->
+        </div>
+        <div class="dialog-footer" style="flex-direction: column; gap: 8px;">
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <label style="font-size: 12px;">Go to time:</label>
+            <input type="number" id="history-time-input" step="0.1" min="0" style="width: 80px; padding: 4px;">
+            <span style="font-size: 12px;">s</span>
+            <button id="history-goto-time-btn" class="btn-primary" style="padding: 4px 8px;">Go</button>
+          </div>
+          <button id="history-dialog-cancel" class="btn-secondary">Close</button>
         </div>
       </div>
     </div>

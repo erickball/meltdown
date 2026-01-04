@@ -340,6 +340,39 @@ export const simulationConfig: SimulationConfig = {
 };
 
 // ============================================================================
+// Semi-Implicit Pressure Solver Configuration
+// ============================================================================
+
+/**
+ * Configuration for the semi-implicit pressure-flow solver.
+ *
+ * The pressure solver couples pressure and momentum equations for liquid nodes,
+ * using Gauss-Seidel iteration with under-relaxation. This prevents the stiffness
+ * problems that occur when tiny density changes cause huge pressure swings in
+ * compressed liquid (where bulk modulus K ~ 2200 MPa at low temperatures).
+ */
+export interface PressureSolverConfig {
+  /** Maximum iterations for pressure solve (default: 10) */
+  maxIterations: number;
+  /** Convergence tolerance - relative pressure change (default: 1e-4) */
+  tolerance: number;
+  /** Relaxation factor 0-1 (default: 0.7). Lower = more stable, slower convergence */
+  relaxation: number;
+  /** Maximum numerical bulk modulus in Pa (undefined = use physical value).
+   *  Setting this caps how stiff the pressure response can be. At K_max = 200 MPa,
+   *  a 0.01% density error causes ~20 bar pressure change instead of ~220 bar. */
+  K_max?: number;
+}
+
+/** Default configuration for pressure solver */
+export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
+  maxIterations: 10,
+  tolerance: 1e-4,
+  relaxation: 0.7,
+  K_max: undefined,  // Start with physical K, can tune if needed
+};
+
+// ============================================================================
 // Solver Performance Metrics
 // ============================================================================
 

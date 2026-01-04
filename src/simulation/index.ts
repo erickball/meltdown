@@ -53,6 +53,10 @@ export {
   setSeparationDebug,  // Debug toggle for phase separation calculation
 } from './operators/rate-operators';
 
+// Semi-implicit pressure solver
+export { PressureSolver } from './operators/pressure-solver';
+export type { PressureSolverStatus } from './operators/pressure-solver';
+
 // Operators
 export * from './operators';
 
@@ -78,5 +82,7 @@ export {
   isWaterPropertiesLoaded,
   setDebugNodeId,
   clearPressureHistory,
+  bulkModulus,
+  numericalBulkModulus,
   type WaterPropsProfile,
 } from './water-properties';

@@ -159,11 +159,26 @@ function init() {
     // Update debug panel and component detail (throttled to reduce flickering)
     const now = performance.now();
     if (now - lastDebugUpdate >= DEBUG_UPDATE_INTERVAL_MS) {
-      updateDebugPanel(state, metrics);
+      updateDebugPanel(state, metrics, gameLoop.getPressureSolverStatus());
 
       // Update component detail panel if something is selected
       if (selectedComponentId) {
         updateComponentDetail(selectedComponentId, plantState, state);
+      }
+
+      // Update history info display
+      const historyInfo = gameLoop.getHistoryInfo();
+      const historyInfoEl = document.getElementById('history-info');
+      if (historyInfoEl) {
+        if (historyInfo.count === 0) {
+          historyInfoEl.textContent = '';
+        } else {
+          // Show current position indicator if not at end
+          const posStr = historyInfo.currentIndex >= 0
+            ? ` [${historyInfo.currentIndex + 1}/${historyInfo.count}]`
+            : '';
+          historyInfoEl.textContent = `${historyInfo.count} states${posStr}`;
+        }
       }
 
       lastDebugUpdate = now;
@@ -185,6 +200,10 @@ function init() {
       showNotification('SCRAM: ' + event.message, 'warning');
     } else if (event.type === 'falling-behind') {
       showNotification('Simulation running slower than real time', 'info');
+    } else if (event.type === 'simulation-error') {
+      showNotification('Simulation error - use history to go back', 'warning');
+      // Update pause button to show paused state
+      updatePauseButton();
     }
   };
 
@@ -277,7 +296,6 @@ function init() {
 
   // Simulation speed controls
   const pauseBtn = document.getElementById('pause-btn');
-  const stepBtn = document.getElementById('step-btn');
   const speedDisplay = document.getElementById('speed-display');
   const speedUpBtn = document.getElementById('speed-up');
   const speedDownBtn = document.getElementById('speed-down');
@@ -310,33 +328,233 @@ function init() {
     });
   }
 
-  if (stepBtn) {
-    stepBtn.addEventListener('click', () => {
-      // Execute a single timestep (1ms of simulation time - may be multiple internal steps)
-      gameLoop.step(0.001);
-    });
-  }
-
-  const singleStepBtn = document.getElementById('single-step-btn');
-  if (singleStepBtn) {
-    singleStepBtn.addEventListener('click', () => {
-      // Execute exactly one internal physics step
-      const dt = gameLoop.singleStep();
-      console.log(`[Single Step] Advanced by ${(dt * 1e6).toFixed(3)} microseconds`);
-    });
-  }
-
-  // Reset simulation button
+  // History controls (back/forward buttons and Go To dialog)
+  const backStepBtn = document.getElementById('back-step-btn');
+  const forwardStepBtn = document.getElementById('forward-step-btn');
+  const runOneStepBtn = document.getElementById('run-one-step-btn');
+  const gotoTimeBtn = document.getElementById('goto-time-btn');
   const resetSimBtn = document.getElementById('reset-sim-btn');
+  const historyInfoSpan = document.getElementById('history-info');
+  const historyDialog = document.getElementById('history-dialog');
+  const historyDialogBody = document.getElementById('history-dialog-body');
+  const historyTimeInput = document.getElementById('history-time-input') as HTMLInputElement | null;
+  const historyGotoTimeBtn = document.getElementById('history-goto-time-btn');
+  const historyDialogCancel = document.getElementById('history-dialog-cancel');
+  const historyDialogClose = document.querySelector('.history-dialog-close');
+
+  // Refresh all displays after restoring a state from history
+  function refreshDisplayAfterRestore(): void {
+    const state = gameLoop.getState();
+    const historyInfo = gameLoop.getHistoryInfo();
+
+    // Sync simulation to visual components
+    syncSimulationToVisuals(state, plantState);
+
+    // Update canvas
+    plantCanvas.setSimState(state);
+
+    // Update time display - use step number from history, not solver
+    const timeDisplay = document.getElementById('sim-time');
+    if (timeDisplay) {
+      timeDisplay.textContent = `Time: ${state.time.toFixed(3)}s (${historyInfo.currentStepNumber} steps)`;
+    }
+
+    // Update debug panel
+    updateDebugPanel(state, gameLoop.getSolverMetrics(), gameLoop.getPressureSolverStatus());
+
+    // Update component detail panel if something is selected
+    if (selectedComponentId) {
+      updateComponentDetail(selectedComponentId, plantState, state);
+    }
+
+    // Update history info
+    updateHistoryInfo();
+  }
+
+  if (backStepBtn) {
+    backStepBtn.addEventListener('click', () => {
+      const success = gameLoop.stepBack();
+      if (success) {
+        refreshDisplayAfterRestore();
+      } else {
+        showNotification('Already at beginning of history', 'warning');
+      }
+    });
+  }
+
+  if (forwardStepBtn) {
+    forwardStepBtn.addEventListener('click', () => {
+      const success = gameLoop.stepForward();
+      if (success) {
+        refreshDisplayAfterRestore();
+      } else {
+        showNotification('Already at end of history', 'warning');
+      }
+    });
+  }
+
+  // Run 1 Step button - advance simulation by one solver step
+  if (runOneStepBtn) {
+    runOneStepBtn.addEventListener('click', () => {
+      try {
+        gameLoop.singleStep();
+        refreshDisplayAfterRestore();
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        showNotification('Simulation error: ' + errorMessage.substring(0, 50), 'warning');
+      }
+    });
+  }
+
+  // Reset button - jump to t=0
   if (resetSimBtn) {
     resetSimBtn.addEventListener('click', () => {
-      // Recreate simulation from current plant state
-      const newSimState = createSimulationFromPlant(plantState);
-      gameLoop.resetState(newSimState);
-      // Update scram setpoints from any scram controller in the plant
-      gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-      console.log('[Main] Simulation reset to initial conditions');
+      const restoredTime = gameLoop.restoreToTime(0);
+      if (restoredTime !== null) {
+        refreshDisplayAfterRestore();
+      } else {
+        showNotification('No history available', 'warning');
+      }
     });
+  }
+
+  // Open history dialog
+  function openHistoryDialog(): void {
+    if (!historyDialog || !historyDialogBody) return;
+
+    const snapshots = gameLoop.getSnapshotList();
+    const historyInfo = gameLoop.getHistoryInfo();
+
+    if (snapshots.length === 0) {
+      showNotification('No history available', 'warning');
+      return;
+    }
+
+    // Build snapshot list HTML
+    // Show most recent first, highlight current position
+    const currentIdx = historyInfo.currentIndex >= 0 ? historyInfo.currentIndex : snapshots.length - 1;
+
+    let html = '<div style="font-size: 11px;">';
+    // Show in reverse order (newest first)
+    for (let i = snapshots.length - 1; i >= 0; i--) {
+      const s = snapshots[i];
+      const isCurrent = i === currentIdx;
+      const isMarker = s.isSecondMarker;
+      const bgColor = isCurrent ? 'rgba(100, 150, 255, 0.3)' : (isMarker ? 'rgba(255, 255, 255, 0.05)' : 'transparent');
+      const border = isCurrent ? '1px solid #7af' : 'none';
+      const markerIcon = isMarker ? '⏱' : '';
+
+      html += `<div class="history-item" data-index="${i}" style="
+        padding: 4px 8px;
+        margin: 2px 0;
+        cursor: pointer;
+        background: ${bgColor};
+        border: ${border};
+        border-radius: 3px;
+        display: flex;
+        justify-content: space-between;
+      " onmouseover="this.style.background='rgba(100,150,255,0.2)'" onmouseout="this.style.background='${bgColor}'">
+        <span>${markerIcon} t = ${s.simTime.toFixed(3)}s</span>
+        <span style="color: #888;">step ${s.stepNumber}</span>
+      </div>`;
+    }
+    html += '</div>';
+
+    historyDialogBody.innerHTML = html;
+
+    // Add click handlers to items
+    const items = historyDialogBody.querySelectorAll('.history-item');
+    items.forEach(item => {
+      item.addEventListener('click', () => {
+        const index = parseInt(item.getAttribute('data-index') || '0', 10);
+        const time = gameLoop.navigateToHistoryIndex(index);
+        if (time !== null) {
+          refreshDisplayAfterRestore();
+          closeHistoryDialog();
+        }
+      });
+    });
+
+    // Set input to current time
+    if (historyTimeInput) {
+      historyTimeInput.value = historyInfo.currentTime.toFixed(1);
+    }
+
+    historyDialog.style.display = 'flex';
+  }
+
+  function closeHistoryDialog(): void {
+    if (historyDialog) {
+      historyDialog.style.display = 'none';
+    }
+  }
+
+  if (gotoTimeBtn) {
+    gotoTimeBtn.addEventListener('click', openHistoryDialog);
+  }
+
+  if (historyDialogClose) {
+    historyDialogClose.addEventListener('click', closeHistoryDialog);
+  }
+
+  if (historyDialogCancel) {
+    historyDialogCancel.addEventListener('click', closeHistoryDialog);
+  }
+
+  if (historyGotoTimeBtn && historyTimeInput) {
+    historyGotoTimeBtn.addEventListener('click', () => {
+      const targetTime = parseFloat(historyTimeInput.value);
+      if (isNaN(targetTime)) {
+        showNotification('Invalid time value', 'warning');
+        return;
+      }
+
+      const restoredTime = gameLoop.restoreToTime(targetTime);
+      if (restoredTime !== null) {
+        refreshDisplayAfterRestore();
+        closeHistoryDialog();
+      } else {
+        showNotification('No snapshot found near that time', 'warning');
+      }
+    });
+  }
+
+  // Close dialog on background click
+  if (historyDialog) {
+    historyDialog.addEventListener('click', (e) => {
+      if (e.target === historyDialog) {
+        closeHistoryDialog();
+      }
+    });
+  }
+
+  // Update history info display and forward button state
+  function updateHistoryInfo(): void {
+    const info = gameLoop.getHistoryInfo();
+
+    // Update the history info text
+    if (historyInfoSpan) {
+      if (info.count === 0) {
+        historyInfoSpan.textContent = '';
+      } else {
+        // Show current position indicator if not at end
+        const posStr = info.currentIndex >= 0
+          ? ` [${info.currentIndex + 1}/${info.count}]`
+          : '';
+        historyInfoSpan.textContent = `${info.count} states${posStr}`;
+      }
+    }
+
+    // Update forward button disabled state
+    // Disable when at end of history (currentIndex === -1 means at end)
+    if (forwardStepBtn) {
+      const atEnd = info.currentIndex < 0;
+      (forwardStepBtn as HTMLButtonElement).disabled = atEnd;
+      forwardStepBtn.title = atEnd
+        ? 'Already at end of history - use "Run 1 Step" to advance simulation'
+        : 'Forward one step in history';
+      forwardStepBtn.style.opacity = atEnd ? '0.5' : '1';
+    }
   }
 
   if (speedUpBtn) {
@@ -413,6 +631,75 @@ function init() {
     pressureModelSelect.addEventListener('change', () => {
       simulationConfig.pressureModel = pressureModelSelect.value as 'hybrid' | 'pure-triangulation';
       console.log(`Pressure model changed to: ${simulationConfig.pressureModel}`);
+    });
+  }
+
+  // Advanced solver settings: Min timestep control (logarithmic scale)
+  // Slider value 0-5 maps to 1µs (1e-6) to 100ms (0.1) via exponential: 10^(sliderValue - 6)
+  const minTimestepSlider = document.getElementById('min-timestep') as HTMLInputElement;
+  const minTimestepValue = document.getElementById('min-timestep-value');
+
+  function formatMinTimestep(seconds: number): string {
+    if (seconds < 1e-3) {
+      return `${(seconds * 1e6).toFixed(0)}µs`;
+    } else {
+      return `${(seconds * 1e3).toFixed(1)}ms`;
+    }
+  }
+
+  if (minTimestepSlider) {
+    minTimestepSlider.addEventListener('input', () => {
+      // Slider value 0-5 maps logarithmically: 0=1µs, 5=100ms
+      const sliderVal = parseFloat(minTimestepSlider.value);
+      const minDt = Math.pow(10, sliderVal - 6); // 0 -> 1e-6, 5 -> 1e-1
+      if (minTimestepValue) {
+        minTimestepValue.textContent = formatMinTimestep(minDt);
+      }
+      gameLoop.setMinTimestep(minDt);
+      console.log(`Min timestep set to: ${(minDt * 1000).toFixed(3)}ms (slider=${sliderVal})`);
+    });
+
+    // Initialize display AND apply initial value
+    const initialSliderVal = parseFloat(minTimestepSlider.value);
+    const initialMinDt = Math.pow(10, initialSliderVal - 6);
+    if (minTimestepValue) {
+      minTimestepValue.textContent = formatMinTimestep(initialMinDt);
+    }
+    gameLoop.setMinTimestep(initialMinDt);
+  }
+
+  // Advanced solver settings: K_max control (numerical bulk modulus cap)
+  const kMaxSlider = document.getElementById('k-max') as HTMLInputElement;
+  const kMaxValue = document.getElementById('k-max-value');
+
+  if (kMaxSlider) {
+    kMaxSlider.addEventListener('input', () => {
+      const kMaxMPa = parseInt(kMaxSlider.value, 10);
+      if (kMaxValue) {
+        kMaxValue.textContent = kMaxMPa.toString();
+      }
+      // Convert MPa to Pa and set (undefined at max means no cap)
+      const kMaxPa = kMaxMPa >= 2200 ? undefined : kMaxMPa * 1e6;
+      gameLoop.setKMax(kMaxPa);
+      console.log(`K_max set to: ${kMaxMPa >= 2200 ? 'unlimited (physical)' : kMaxMPa + ' MPa'}`);
+    });
+
+    // Initialize display
+    const initialKMax = parseInt(kMaxSlider.value, 10);
+    if (kMaxValue) {
+      kMaxValue.textContent = initialKMax.toString();
+    }
+  }
+
+  // Advanced solver settings: Pressure solver enable/disable
+  const pressureSolverCheckbox = document.getElementById('pressure-solver-enabled') as HTMLInputElement;
+  if (pressureSolverCheckbox) {
+    // Initialize to unchecked (pressure solver disabled by default)
+    pressureSolverCheckbox.checked = false;
+
+    pressureSolverCheckbox.addEventListener('change', () => {
+      gameLoop.setPressureSolverEnabled(pressureSolverCheckbox.checked);
+      console.log(`Pressure solver: ${pressureSolverCheckbox.checked ? 'enabled' : 'disabled'}`);
     });
   }
 
@@ -1191,13 +1478,16 @@ function init() {
         fallingBehindSince: 0,
         operatorTimes: new Map(),
       };
-      updateDebugPanel(currentState, emptyMetrics);
+      updateDebugPanel(currentState, emptyMetrics, gameLoop.getPressureSolverStatus());
 
       if (plantState.components.size > 0) {
         console.log(`[Mode] Created simulation from user plant (${plantState.components.size} components)`);
       } else {
         console.log('[Mode] Created empty simulation (no components in plant)');
       }
+
+      // Update pause button to reflect actual paused state
+      updatePauseButton();
 
       console.log('[Mode] Switched to Simulation mode');
     }
@@ -1655,7 +1945,7 @@ function init() {
     fallingBehindSince: 0,
     operatorTimes: new Map(),
   };
-  updateDebugPanel(simState, initialMetrics);
+  updateDebugPanel(simState, initialMetrics, gameLoop.getPressureSolverStatus());
 
   // Expose debug utilities to browser console
   window.meltdown = {

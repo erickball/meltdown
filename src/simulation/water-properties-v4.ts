@@ -792,23 +792,107 @@ function interpolateLiquidWithSaturationAnchor(
 }
 
 /**
+ * Bulk modulus data for saturated liquid water.
+ * Source: IAPWS-IF97 at saturation pressure.
+ * Format: [temperature °C, bulk modulus MPa]
+ */
+const BULK_MODULUS_DATA: [number, number][] = [
+  [0.01, 1964.64],
+  [10, 2091.18],
+  [20, 2178.65],
+  [30, 2233.14],
+  [40, 2259.89],
+  [50, 2263.47],
+  [60, 2246.69],
+  [70, 2213.37],
+  [80, 2166.38],
+  [90, 2107.93],
+  [100, 2039.98],
+  [110, 1964.25],
+  [120, 1882.18],
+  [130, 1795.33],
+  [140, 1705.03],
+  [150, 1611.86],
+  [160, 1516.76],
+  [170, 1420.66],
+  [180, 1323.98],
+  [190, 1227.75],
+  [200, 1132.25],
+  [210, 1037.99],
+  [220, 945.18],
+  [230, 855.43],
+  [240, 767.46],
+  [250, 682.59],
+  [260, 600.96],
+  [270, 523.01],
+  [280, 448.63],
+  [290, 378.50],
+  [300, 312.70],
+  [310, 251.51],
+  [320, 195.35],
+  [330, 144.51],
+  [340, 99.21],
+  [350, 59.56],
+  [360, 26.68],
+];
+
+/**
  * Temperature-dependent bulk modulus for liquid water.
+ * Uses linear interpolation on tabulated IAPWS-IF97 data.
  */
 export function bulkModulus(T_C: number): number {
-  // Empirical fit for water bulk modulus (Pa)
-  // K decreases from ~2.2 GPa at 20°C to ~0.5 GPa near critical point
-  if (T_C < 20) {
-    return 2.2e9;
-  } else if (T_C < 200) {
-    // Roughly linear decrease
-    return 2.2e9 - (T_C - 20) * 5e6;
-  } else if (T_C < 350) {
-    // Faster decrease approaching critical point
-    return 1.3e9 - (T_C - 200) * 5e6;
-  } else {
-    // Near critical point
-    return Math.max(0.2e9, 0.55e9 - (T_C - 350) * 3e6);
+  const data = BULK_MODULUS_DATA;
+
+  // Clamp to data range
+  if (T_C <= data[0][0]) {
+    return data[0][1] * 1e6; // Convert MPa to Pa
   }
+  if (T_C >= data[data.length - 1][0]) {
+    return data[data.length - 1][1] * 1e6;
+  }
+
+  // Binary search for bracket
+  let lo = 0, hi = data.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (data[mid][0] <= T_C) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  // Linear interpolation
+  const [T1, K1] = data[lo];
+  const [T2, K2] = data[hi];
+  const t = (T_C - T1) / (T2 - T1);
+  const K_MPa = K1 + t * (K2 - K1);
+
+  return K_MPa * 1e6; // Convert MPa to Pa
+}
+
+/**
+ * Get bulk modulus with optional numerical softening.
+ * The numerical limit prevents extreme stiffness at low temperatures
+ * which can cause instability in the pressure-flow solver.
+ *
+ * @param T_celsius - Temperature in degrees Celsius
+ * @param K_max - Maximum allowed bulk modulus in Pa (undefined = no limit)
+ * @returns Bulk modulus in Pa
+ */
+export function numericalBulkModulus(T_celsius: number, K_max?: number): number {
+  const K_physical = bulkModulus(T_celsius);
+
+  if (K_max === undefined || K_physical <= K_max) {
+    return K_physical;
+  }
+
+  // Smooth transition using tanh blending (C-infinity smooth)
+  const blend_width = K_max * 0.2; // 20% transition zone
+  const x = (K_physical - K_max) / blend_width;
+  const blend = 0.5 * (1 - Math.tanh(x));
+
+  return K_max + blend * (K_physical - K_max);
 }
 
 // ============================================================================

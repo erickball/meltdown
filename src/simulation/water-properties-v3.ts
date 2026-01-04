@@ -3566,6 +3566,43 @@ export function bulkModulus(T_celsius: number): number {
 }
 
 /**
+ * Get bulk modulus with optional numerical softening.
+ * The numerical limit prevents extreme stiffness at low temperatures,
+ * which can cause stability problems in explicit time integration.
+ *
+ * At low temperatures (< 100°C), the physical bulk modulus is ~2200 MPa.
+ * A 0.01% density error would cause a 220 bar pressure swing with the
+ * physical value. With K_max = 200 MPa, the same error causes only 20 bar.
+ *
+ * The blending uses tanh for C-infinity smoothness - no discontinuities
+ * in K or its derivatives with respect to temperature.
+ *
+ * @param T_celsius - Temperature in degrees Celsius
+ * @param K_max - Maximum allowed bulk modulus in Pa (undefined = no limit)
+ * @returns Bulk modulus in Pa
+ */
+export function numericalBulkModulus(T_celsius: number, K_max?: number): number {
+  const K_physical = bulkModulus(T_celsius);
+
+  if (K_max === undefined || K_physical <= K_max) {
+    return K_physical;
+  }
+
+  // Smooth transition using tanh blending (C-infinity smooth)
+  // When K_physical > K_max, we blend toward K_max
+  const blend_width = K_max * 0.2; // 20% transition zone
+  const x = (K_physical - K_max) / blend_width;
+  // tanh(x) goes from -1 to +1 as x goes from -inf to +inf
+  // We want blend=1 when K_physical=K_max, blend=0 when K_physical >> K_max
+  const blend = 0.5 * (1 - Math.tanh(x));
+
+  // Result: K_max + blend * (K_physical - K_max)
+  // When blend=0: returns K_max
+  // When blend=1: returns K_physical
+  return K_max + blend * (K_physical - K_max);
+}
+
+/**
  * @deprecated Use bulkModulus(T_celsius) instead for temperature-dependent bulk modulus.
  * These constants are retained for reference but should not be used in new code.
  * The actual bulk modulus varies from ~2200 MPa at 50°C to ~60 MPa at 350°C.

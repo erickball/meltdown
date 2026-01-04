@@ -15,8 +15,9 @@
  * - Solver combines rates using RK45 and adjusts timestep based on error
  */
 
-import { SimulationState, SolverMetrics, ErrorContributor } from './types';
+import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG } from './types';
 import { cloneSimulationState } from './solver';
+import { PressureSolver } from './operators/pressure-solver';
 
 // ============================================================================
 // State Rates - Derivatives for all state variables
@@ -282,9 +283,13 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
     }
   }
 
-  // Neutronics - relative to current values
-  if (state.neutronics.power > 0) {
-    const relPowerRate = rates.neutronics.dPower / state.neutronics.power;
+  // Neutronics - use nominal power as reference to avoid tiny timesteps at low power.
+  // Point kinetics at low power with residual precursors can produce large error estimates
+  // because the equations are stiff (positive eigenvalue from precursor source term).
+  // Use 5% of nominal as minimum reference - errors below this level don't matter much.
+  if (state.neutronics.nominalPower > 0) {
+    const refPower = Math.max(state.neutronics.power, state.neutronics.nominalPower * 0.05);
+    const relPowerRate = rates.neutronics.dPower / refPower;
     sumSq += relPowerRate * relPowerRate;
     count++;
   }
@@ -392,15 +397,19 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
     }
   }
 
-  // Neutronics
-  if (state.neutronics.power > 0) {
-    const relPowerRate = Math.abs(rates.neutronics.dPower / state.neutronics.power);
+  // Neutronics - use same reference power as computeRatesNorm for consistency
+  if (state.neutronics.nominalPower > 0) {
+    const refPower = Math.max(state.neutronics.power, state.neutronics.nominalPower * 0.05);
+    const relPowerRate = Math.abs(rates.neutronics.dPower / refPower);
     if (relPowerRate > 1e-8) {
+      // Note: rates.neutronics.dPower is the error in power RATE (W), not power itself.
+      // It represents how much the 4th and 5th order solutions disagree on dP/dt.
+      // The actual error in power per step is approximately dPower * dt.
       contributions.push({
         nodeId: 'neutronics',
         type: 'power',
         contribution: relPowerRate,
-        description: `dP/dt=${(rates.neutronics.dPower / 1e6).toFixed(2)} MW/s`
+        description: `Δ(dP/dt)=${(rates.neutronics.dPower / 1e6).toFixed(1)} MW`
       });
     }
   }
@@ -591,6 +600,10 @@ export interface RK45Config {
   // Performance limits
   maxStepsPerFrame: number;   // Maximum integration steps per frame
   maxWallTimeMs: number;      // Maximum wall time per advance() call
+
+  // Semi-implicit pressure solver configuration
+  // Set to false to disable (use pure explicit RK45 for all physics)
+  pressureSolver?: Partial<PressureSolverConfig> | false;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -643,6 +656,12 @@ export class RK45Solver {
   private config: RK45Config;
   private currentDt: number;
 
+  // Semi-implicit pressure solver - runs BEFORE constraints to pre-condition flow rates
+  private pressureSolver: PressureSolver | null = null;
+
+  // Flag to dynamically enable/disable pressure solver at runtime
+  public pressureSolverEnabled: boolean = false;  // Disabled by default
+
   // Metrics
   private totalSteps = 0;
   private rejectedSteps = 0;
@@ -651,9 +670,22 @@ export class RK45Solver {
   // Rate limiting for log messages (wall time in ms)
   private lastWallTimeLimitLog = 0;
 
+  // Optional callback invoked after each accepted substep (for state history recording)
+  public onSubstepComplete?: (state: SimulationState, stepNumber: number) => void;
+
   constructor(config: Partial<RK45Config> = {}) {
     this.config = { ...DEFAULT_RK45_CONFIG, ...config };
     this.currentDt = this.config.initialDt;
+
+    // Semi-implicit pressure solver for liquid compressibility
+    // Runs BEFORE constraint operators to pre-condition flow rates
+    if (config.pressureSolver !== false) {
+      const pressureSolverConfig = typeof config.pressureSolver === 'object'
+        ? { ...DEFAULT_PRESSURE_SOLVER_CONFIG, ...config.pressureSolver }
+        : DEFAULT_PRESSURE_SOLVER_CONFIG;
+      this.pressureSolver = new PressureSolver(pressureSolverConfig);
+      this.operatorTimes.set('PressureSolver', 0);
+    }
   }
 
   addRateOperator(op: RateOperator): void {
@@ -676,6 +708,19 @@ export class RK45Solver {
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
+  }
+
+  /**
+   * Get the status of the pressure solver
+   */
+  getPressureSolverStatus(): { enabled: boolean; status: ReturnType<PressureSolver['getLastStatus']> | null } {
+    if (!this.pressureSolver) {
+      return { enabled: false, status: null };
+    }
+    return {
+      enabled: this.pressureSolverEnabled,
+      status: this.pressureSolverEnabled ? this.pressureSolver.getLastStatus() : null,
+    };
   }
 
   /**
@@ -721,11 +766,28 @@ export class RK45Solver {
    */
   private applyAllConstraints(state: SimulationState): SimulationState {
     let result = state;
+
+    // FIRST: Run semi-implicit pressure solver to pre-condition flow rates
+    // This adjusts massFlowRate on connections to approximately satisfy mass
+    // conservation at liquid nodes, BEFORE we compute pressures from steam tables.
+    // This removes the acoustic timescale stiffness from compressed liquid.
+    //
+    // Note: The pressure solver does NOT modify node pressures - it only adjusts
+    // flow rates. The actual pressures remain thermodynamically consistent as
+    // computed by FluidStateConstraintOperator from (m, U, V).
+    if (this.pressureSolver && this.pressureSolverEnabled) {
+      const t0 = performance.now();
+      this.pressureSolver.solve(result, this.currentDt);
+      this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
+    }
+
+    // THEN: Apply standard constraint operators (thermodynamic consistency, etc.)
     for (const op of this.constraintOperators) {
       const t0 = performance.now();
       result = op.applyConstraints(result);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
     }
+
     return result;
   }
 
@@ -970,6 +1032,9 @@ export class RK45Solver {
         this.totalSteps++;
         minDtUsed = Math.min(minDtUsed, stepDt);
 
+        // Notify listener of accepted substep (for state history recording)
+        this.onSubstepComplete?.(currentState, this.totalSteps);
+
         // Track error rates for contributor analysis (use the one that limited dt the most)
         lastErrorRates = errorRates;
         lastAcceptedState = constrainedState;
@@ -1112,6 +1177,9 @@ export class RK45Solver {
 
     // Adjust dt for next step based on combined error
     this.currentDt = this.computeOptimalDt(effectiveError, this.currentDt);
+
+    // Notify listener of accepted substep (for state history recording)
+    this.onSubstepComplete?.(constrainedState, this.totalSteps);
 
     return {
       state: constrainedState,

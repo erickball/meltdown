@@ -31,6 +31,7 @@ import {
 } from '../simulation';
 import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
+import { StateHistory } from './state-history';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -73,7 +74,8 @@ export type GameEventType =
   | 'low-flow'
   | 'phase-change'
   | 'falling-behind'
-  | 'auto-slowdown';
+  | 'auto-slowdown'
+  | 'simulation-error';
 
 export interface GameEvent {
   type: GameEventType;
@@ -107,6 +109,12 @@ export class GameLoop {
 
   // Scram controller setpoints (undefined = manual scram only)
   private scramSetpoints: ScramSetpoints | undefined = undefined;
+
+  // State history for "back up" functionality
+  private stateHistory: StateHistory = new StateHistory();
+
+  // Last solver metrics (stored for getSolverMetrics)
+  private lastMetrics: SolverMetrics | null = null;
 
   // Callbacks
   public onStateUpdate?: (state: SimulationState, metrics: SolverMetrics) => void;
@@ -147,6 +155,12 @@ export class GameLoop {
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
+
+      // Set up substep callback for state history recording
+      // This records state after each accepted substep, not just once per frame
+      this.rk45Solver.onSubstepComplete = (state, stepNumber) => {
+        this.stateHistory.recordStep(state, stepNumber);
+      };
     }
 
     // OBSOLETE: Euler solver code - no longer used, RK45 is the only integration method
@@ -210,6 +224,10 @@ export class GameLoop {
     this.changeWindowTime = 0;
     this.recentEvents = [];
 
+    // Clear state history on reset and record initial state (step 0)
+    this.stateHistory.clear();
+    this.stateHistory.recordStep(this.state, 0);
+
     // Reset solver state (timestep, counters, etc.)
     if (this.rk45Solver) {
       this.rk45Solver.reset();
@@ -250,36 +268,55 @@ export class GameLoop {
       // Calculate simulation time to advance
       const simDt = frameDt * this.simSpeed;
 
-      // Advance physics using the configured solver
-      if (!this.rk45Solver) {
-        throw new Error('[GameLoop] No solver configured');
-      }
-      const result = this.rk45Solver.advance(this.state, simDt);
-      this.state = result.state;
+      try {
+        // Advance physics using the configured solver
+        if (!this.rk45Solver) {
+          throw new Error('[GameLoop] No solver configured');
+        }
+        const result = this.rk45Solver.advance(this.state, simDt);
+        this.state = result.state;
+        this.lastMetrics = result.metrics;
+        // Note: State history recording happens via onSubstepComplete callback
 
-      // Update fuel heat generation from neutronics
-      this.syncNeutronicsToThermal();
+        // Update fuel heat generation from neutronics
+        this.syncNeutronicsToThermal();
 
-      // Check for automatic SCRAM conditions
-      this.checkScramConditions();
+        // Check for automatic SCRAM conditions
+        this.checkScramConditions();
 
-      // Check for auto-slowdown conditions
-      if (this.config.autoSlowdownEnabled) {
-        this.checkAutoSlowdown(frameDt);
-      }
+        // Check for auto-slowdown conditions
+        if (this.config.autoSlowdownEnabled) {
+          this.checkAutoSlowdown(frameDt);
+        }
 
-      // Check for performance warnings
-      if (result.metrics.isFallingBehind) {
+        // Check for performance warnings
+        if (result.metrics.isFallingBehind) {
+          this.emitEvent({
+            type: 'falling-behind',
+            time: this.state.time,
+            message: `Simulation falling behind real time (ratio: ${result.metrics.realTimeRatio.toFixed(2)})`,
+            data: { ratio: result.metrics.realTimeRatio },
+          });
+        }
+
+        // Notify listeners
+        this.onStateUpdate?.(this.state, result.metrics);
+      } catch (error) {
+        // Simulation error - pause and notify user
+        this.isPaused = true;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error('[GameLoop] Simulation error:', errorMessage);
+
         this.emitEvent({
-          type: 'falling-behind',
+          type: 'simulation-error',
           time: this.state.time,
-          message: `Simulation falling behind real time (ratio: ${result.metrics.realTimeRatio.toFixed(2)})`,
-          data: { ratio: result.metrics.realTimeRatio },
+          message: errorMessage,
+          data: { error },
         });
-      }
 
-      // Notify listeners
-      this.onStateUpdate?.(this.state, result.metrics);
+        // Still notify listeners so UI can update (show paused state, etc.)
+        this.onStateUpdate?.(this.state, this.getSolverMetrics());
+      }
     }
 
     // Schedule next frame
@@ -465,6 +502,11 @@ export class GameLoop {
     // Reset tracking variables
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
+
+    // Clear state history and record initial state (step 0)
+    this.stateHistory.clear();
+    this.stateHistory.recordStep(this.state, 0);
+
     console.log(`[GameLoop] Simulation state updated with ${newState.flowNodes.size} flow nodes`);
   }
 
@@ -498,6 +540,75 @@ export class GameLoop {
 
   getMaxTimestep(): number {
     return this.config.maxTimestep;
+  }
+
+  /**
+   * Set minimum timestep (prevents adaptive dt from going too small)
+   * @param minDt - minimum timestep in seconds (e.g., 1e-6 for 1µs)
+   */
+  setMinTimestep(minDt: number): void {
+    const clampedMinDt = Math.max(1e-6, Math.min(0.1, minDt)); // Clamp between 1µs and 100ms
+    if (this.rk45Solver) {
+      const oldMinDt = (this.rk45Solver as any).config.minDt;
+      const oldCurrentDt = (this.rk45Solver as any).currentDt;
+      (this.rk45Solver as any).config.minDt = clampedMinDt;
+      // Also clamp currentDt upward if it's now below the new minimum
+      if ((this.rk45Solver as any).currentDt < clampedMinDt) {
+        (this.rk45Solver as any).currentDt = clampedMinDt;
+        console.log(`[GameLoop] Clamped currentDt from ${(oldCurrentDt * 1000).toFixed(3)}ms to ${(clampedMinDt * 1000).toFixed(3)}ms`);
+      }
+      console.log(`[GameLoop] minDt: ${(oldMinDt * 1000).toFixed(3)}ms → ${(clampedMinDt * 1000).toFixed(3)}ms`);
+    }
+  }
+
+  getMinTimestep(): number {
+    if (this.rk45Solver) {
+      return (this.rk45Solver as any).config.minDt;
+    }
+    return 1e-6;
+  }
+
+  /**
+   * Set K_max for the pressure solver (numerical bulk modulus cap)
+   * @param kMax - maximum bulk modulus in Pa (e.g., 200e6 for 200 MPa)
+   */
+  setKMax(kMax: number | undefined): void {
+    if (this.rk45Solver && (this.rk45Solver as any).pressureSolver) {
+      (this.rk45Solver as any).pressureSolver.config.K_max = kMax;
+    }
+  }
+
+  getKMax(): number | undefined {
+    if (this.rk45Solver && (this.rk45Solver as any).pressureSolver) {
+      return (this.rk45Solver as any).pressureSolver.config.K_max;
+    }
+    return undefined;
+  }
+
+  /**
+   * Enable or disable the pressure solver
+   */
+  setPressureSolverEnabled(enabled: boolean): void {
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).pressureSolverEnabled = enabled;
+    }
+  }
+
+  getPressureSolverEnabled(): boolean {
+    if (this.rk45Solver) {
+      return (this.rk45Solver as any).pressureSolverEnabled ?? true;
+    }
+    return false;
+  }
+
+  /**
+   * Get pressure solver status (for debug panel display)
+   */
+  getPressureSolverStatus(): { enabled: boolean; status: { ran: boolean; iterations: number; converged: boolean; stagnated: boolean; maxImbalance: number; K_max: number | undefined } | null } {
+    if (this.rk45Solver) {
+      return this.rk45Solver.getPressureSolverStatus();
+    }
+    return { enabled: false, status: null };
   }
 
   /**
@@ -575,6 +686,8 @@ export class GameLoop {
     }
     const result = this.rk45Solver.advance(this.state, dt);
     this.state = result.state;
+    this.lastMetrics = result.metrics;
+    // Note: State history recording happens via onSubstepComplete callback
 
     // Update fuel heat generation from neutronics
     this.syncNeutronicsToThermal();
@@ -599,6 +712,8 @@ export class GameLoop {
     const rk45Result = this.rk45Solver.singleStep(this.state);
     const result = { state: rk45Result.state, dt: rk45Result.dt, metrics: rk45Result.metrics };
     this.state = result.state;
+    this.lastMetrics = result.metrics;
+    // Note: State history recording happens via onSubstepComplete callback
 
     // Update fuel heat generation from neutronics
     this.syncNeutronicsToThermal();
@@ -660,16 +775,22 @@ export class GameLoop {
    * Get solver metrics
    */
   getSolverMetrics(): SolverMetrics {
-    // Return default metrics (actual metrics are returned per-advance call)
+    // Return last stored metrics if available
+    if (this.lastMetrics) {
+      return this.lastMetrics;
+    }
+
+    // Otherwise return defaults with real step count from solver
+    const solverMetrics = this.rk45Solver?.getMetrics();
     return {
-      currentDt: 0,
+      currentDt: solverMetrics?.currentDt ?? 0,
       actualDt: 0,
       maxStableDt: Infinity,
       dtLimitedBy: 'RK45',
       stabilityLimitedBy: 'none',
       minDtUsed: 0,
       subcycleCount: 0,
-      totalSteps: 0,
+      totalSteps: solverMetrics?.totalSteps ?? 0,
       lastStepWallTime: 0,
       avgStepWallTime: 0,
       retriesThisFrame: 0,
@@ -697,5 +818,140 @@ export class GameLoop {
    */
   updateState(updater: (state: SimulationState) => SimulationState): void {
     this.state = updater(this.state);
+  }
+
+  // ============================================================================
+  // State History (for "back up" functionality)
+  // ============================================================================
+
+  /**
+   * Navigate back one step in history.
+   * Does NOT delete future states - they remain available.
+   * Returns true if successful, false if already at the beginning.
+   */
+  stepBack(): boolean {
+    const snapshot = this.stateHistory.navigateBack();
+    if (!snapshot) {
+      console.log('[GameLoop] No history to step back to');
+      return false;
+    }
+
+    this.state = snapshot.state;
+    console.log(`[GameLoop] Navigated back to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
+
+    // Reset solver adaptive timestep to a safe value
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).currentDt = Math.min(
+        0.001,
+        (this.rk45Solver as any).config.maxDt
+      );
+    }
+
+    return true;
+  }
+
+  /**
+   * Navigate forward one step in history.
+   * Returns true if successful, false if already at the end.
+   */
+  stepForward(): boolean {
+    const snapshot = this.stateHistory.navigateForward();
+    if (!snapshot) {
+      console.log('[GameLoop] Already at end of history');
+      return false;
+    }
+
+    this.state = snapshot.state;
+    console.log(`[GameLoop] Navigated forward to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
+
+    // Reset solver adaptive timestep to a safe value
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).currentDt = Math.min(
+        0.001,
+        (this.rk45Solver as any).config.maxDt
+      );
+    }
+
+    return true;
+  }
+
+  /**
+   * Navigate to a specific snapshot by index.
+   * Returns the actual time navigated to, or null if invalid index.
+   */
+  navigateToHistoryIndex(index: number): number | null {
+    const snapshot = this.stateHistory.navigateToIndex(index);
+    if (!snapshot) {
+      console.log('[GameLoop] Invalid history index');
+      return null;
+    }
+
+    this.state = snapshot.state;
+    console.log(`[GameLoop] Navigated to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
+
+    // Reset solver adaptive timestep to a safe value
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).currentDt = Math.min(
+        0.001,
+        (this.rk45Solver as any).config.maxDt
+      );
+    }
+
+    return snapshot.simTime;
+  }
+
+  /**
+   * Restore to the state closest to a given simulation time.
+   * Returns the actual time restored to, or null if no history.
+   */
+  restoreToTime(targetTime: number): number | null {
+    const restoredState = this.stateHistory.restoreToTime(targetTime);
+    if (!restoredState) {
+      console.log('[GameLoop] No history to restore from');
+      return null;
+    }
+
+    this.state = restoredState;
+    console.log(`[GameLoop] Navigated to t=${restoredState.time.toFixed(3)}s (requested ${targetTime.toFixed(3)}s)`);
+
+    // Reset solver adaptive timestep to a safe value
+    if (this.rk45Solver) {
+      (this.rk45Solver as any).currentDt = Math.min(
+        0.001,
+        (this.rk45Solver as any).config.maxDt
+      );
+    }
+
+    return restoredState.time;
+  }
+
+  /**
+   * Get information about available state history.
+   */
+  getHistoryInfo(): {
+    count: number;
+    oldestTime: number;
+    newestTime: number;
+    currentIndex: number;
+    currentTime: number;
+    currentStepNumber: number;
+  } {
+    return this.stateHistory.getInfo();
+  }
+
+  /**
+   * Get list of all snapshots for UI display.
+   */
+  getSnapshotList(): Array<{ index: number; simTime: number; stepNumber: number; isSecondMarker: boolean }> {
+    return this.stateHistory.getSnapshotList();
+  }
+
+  /**
+   * Find the closest available snapshot time to a target time.
+   * Returns null if no history.
+   */
+  findClosestHistoryTime(targetTime: number): number | null {
+    const snapshot = this.stateHistory.findClosestToTime(targetTime);
+    return snapshot ? snapshot.simTime : null;
   }
 }

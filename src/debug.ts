@@ -101,10 +101,27 @@ function formatDensity(rho: number): string {
   }
 }
 
+/** Pressure solver status for debug panel display */
+export interface PressureSolverDebugInfo {
+  enabled: boolean;
+  status: {
+    ran: boolean;
+    iterations: number;
+    converged: boolean;
+    stagnated: boolean;
+    maxImbalance: number;
+    K_max: number | undefined;
+  } | null;
+}
+
 /**
  * Update the debug panel with current simulation state
  */
-export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics): void {
+export function updateDebugPanel(
+  state: SimulationState,
+  metrics: SolverMetrics,
+  pressureSolverInfo?: PressureSolverDebugInfo
+): void {
   // Solver info
   const solverDiv = document.getElementById('debug-solver');
   if (solverDiv) {
@@ -136,12 +153,40 @@ export function updateDebugPanel(state: SimulationState, metrics: SolverMetrics)
       errorContributorsHtml = `<br><span class="debug-label" style="font-size: 10px;">Error sources:</span><br>${contributorLines}`;
     }
 
+    // Build pressure solver status display
+    let pressureSolverHtml = '';
+    if (pressureSolverInfo) {
+      if (!pressureSolverInfo.enabled) {
+        pressureSolverHtml = `<br><span class="debug-label">Pressure solver:</span> <span style="color: #666;">disabled</span>`;
+      } else if (pressureSolverInfo.status) {
+        const s = pressureSolverInfo.status;
+        // Format K_max
+        const kMaxStr = s.K_max !== undefined
+          ? `${(s.K_max / 1e6).toFixed(0)} MPa`
+          : 'unlimited';
+        // Format convergence status
+        let statusStr: string;
+        let statusClass: string;
+        if (s.converged) {
+          statusStr = `converged (${s.iterations} iter)`;
+          statusClass = 'debug-value';
+        } else if (s.stagnated) {
+          statusStr = `stagnated (${s.iterations} iter)`;
+          statusClass = 'debug-warning';
+        } else {
+          statusStr = `${s.iterations} iter`;
+          statusClass = 'debug-warning';
+        }
+        pressureSolverHtml = `<br><span class="debug-label">Pressure solver:</span> <span class="${statusClass}">${statusStr}</span>, K<sub>max</sub>=${kMaxStr}`;
+      }
+    }
+
     solverDiv.innerHTML = `
       <span class="debug-label">Target dt:</span> ${formatValue(metrics.currentDt * 1000, 'ms')}<br>
       <span class="debug-label">Actual dt:</span> ${formatValue(metrics.actualDt * 1000, 'ms')} <span style="color: #888;">(${limiterDisplay})</span><br>
       <span class="debug-label">Stability limit:</span> ${formatValue(metrics.maxStableDt * 1000, 'ms')} <span style="color: #888;">(${metrics.stabilityLimitedBy}, ×0.8→${formatValue(metrics.maxStableDt * 0.8 * 1000, 'ms')})</span><br>
       <span class="debug-label">Wall time:</span> ${formatValue(metrics.lastStepWallTime, 'ms', 16, 33)}<br>
-      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}x</span>${errorContributorsHtml}
+      <span class="debug-label">RT Ratio:</span> <span class="${rtRatioClass}">${metrics.realTimeRatio.toFixed(3)}x</span>${pressureSolverHtml}${errorContributorsHtml}
     `;
   }
 

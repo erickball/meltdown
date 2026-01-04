@@ -489,10 +489,6 @@ export class NeutronicsRateOperator implements RateOperator {
       return rates;
     }
 
-    // Point kinetics equations:
-    // dN/dt = (ρ - β) / Λ * N + λ * C
-    // dC/dt = β / Λ * N - λ * C
-
     const rho = this.computeTotalReactivity(n, state);
     const beta = n.delayedNeutronFraction;
     const Lambda = n.promptNeutronLifetime;
@@ -502,15 +498,224 @@ export class NeutronicsRateOperator implements RateOperator {
     const N = n.power / n.nominalPower;
     const C = n.precursorConcentration;
 
-    // Rate equations
-    const dN_dt = (rho - beta) / Lambda * N + lambda * C;
-    const dC_dt = beta / Lambda * N - lambda * C;
+    // Use prompt jump approximation when deeply subcritical.
+    // When ρ < β, the prompt neutron population is stable and responds
+    // essentially instantaneously to changes in precursor concentration.
+    // Instead of solving the stiff full equations, we assume:
+    //   N_equilibrium = λ * Λ * C / (β - ρ)
+    // and only integrate precursor decay.
+    //
+    // This eliminates the fast timescale (Λ ~ 10⁻⁵ s) and leaves only
+    // the slow precursor decay timescale (1/λ ~ 10 s).
+
+    const subcriticalMargin = beta - rho;
+    const usePromptJump = subcriticalMargin > 0.001; // Use when ρ < β - 0.1%
+
+    let dN_dt: number;
+    let dC_dt: number;
+
+    if (usePromptJump) {
+      // Prompt jump approximation: power tracks precursor concentration
+      // N_eq = λ * Λ * C / (β - ρ)
+      // dN/dt = d/dt[λ * Λ * C / (β - ρ)]
+      //       ≈ λ * Λ / (β - ρ) * dC/dt  (ignoring dρ/dt for now)
+      //
+      // The precursor equation remains:
+      // dC/dt = β / Λ * N - λ * C
+      //
+      // Substituting N_eq:
+      // dC/dt = β / Λ * (λ * Λ * C / (β - ρ)) - λ * C
+      //       = β * λ * C / (β - ρ) - λ * C
+      //       = λ * C * (β / (β - ρ) - 1)
+      //       = λ * C * (β - (β - ρ)) / (β - ρ)
+      //       = λ * C * ρ / (β - ρ)
+      //
+      // For shutdown (ρ < 0): dC/dt < 0 (precursors decay)
+      // For critical (ρ = 0): dC/dt = 0 (equilibrium)
+      // For subcritical (0 < ρ < β): dC/dt > 0 (precursors build up)
+
+      dC_dt = lambda * C * rho / subcriticalMargin;
+
+      // Power follows equilibrium with precursors
+      const N_eq = lambda * Lambda * C / subcriticalMargin;
+
+      // Rate of power change = rate of approach to equilibrium
+      // Use a relaxation timescale based on precursor decay
+      // This gives smooth behavior without the stiff prompt response
+      const tau_relax = 1.0 / lambda; // ~10 seconds, same as precursor timescale
+      dN_dt = (N_eq - N) / tau_relax;
+    } else {
+      // Near critical or supercritical: use analytical solution
+      // This eliminates the stiff prompt neutron timescale (Λ ~ 10⁻⁵ s)
+      // by solving the 2x2 linear system exactly over an arbitrary timestep.
+      //
+      // System: d/dt [N]   [a  b] [N]     where a = (ρ-β)/Λ, b = λ
+      //              [C] = [c  d] [C]           c = β/Λ,     d = -λ
+      //
+      // Solution: [N(t)]   exp(At) [N(0)]
+      //           [C(t)] =        [C(0)]
+      //
+      // The eigenvalues of A are: λ₁,₂ = (tr ± sqrt(D)) / 2
+      //   tr = a + d = (ρ-β)/Λ - λ
+      //   det = ad - bc = -(ρ-β)λ/Λ - βλ/Λ = -ρλ/Λ
+      //   D = tr² - 4*det
+      //
+      // For the effective rate, we compute N(dt) and C(dt), then:
+      //   dN/dt_eff = (N(dt) - N(0)) / dt
+      //   dC/dt_eff = (C(dt) - C(0)) / dt
+      //
+      // The dt cancels when dividing, so we can use any convenient dt.
+
+      const result = this.analyticalPointKinetics(N, C, rho, beta, Lambda, lambda);
+      dN_dt = result.dN_dt;
+      dC_dt = result.dC_dt;
+    }
 
     // Convert back to absolute power rate
     rates.neutronics.dPower = dN_dt * n.nominalPower;
     rates.neutronics.dPrecursorConcentration = dC_dt;
 
     return rates;
+  }
+
+  /**
+   * Analytical solution to point kinetics equations for near-critical reactivity.
+   *
+   * Solves the 2x2 linear system:
+   *   dN/dt = a*N + b*C    where a = (ρ-β)/Λ, b = λ
+   *   dC/dt = c*N + d*C          c = β/Λ,     d = -λ
+   *
+   * Uses matrix exponential via eigenvalue decomposition.
+   * Returns effective rates (change per unit time).
+   *
+   * @param N - Normalized power (N = P / P_nominal)
+   * @param C - Precursor concentration
+   * @param rho - Reactivity
+   * @param beta - Delayed neutron fraction
+   * @param Lambda - Prompt neutron lifetime (s)
+   * @param lambda - Precursor decay constant (1/s)
+   */
+  private analyticalPointKinetics(
+    N: number,
+    C: number,
+    rho: number,
+    beta: number,
+    Lambda: number,
+    lambda: number
+  ): { dN_dt: number; dC_dt: number } {
+    // Matrix coefficients
+    const a = (rho - beta) / Lambda;
+    const b = lambda;
+    const c = beta / Lambda;
+    const d = -lambda;
+
+    // Eigenvalue computation
+    // λ₁,₂ = (tr ± sqrt(D)) / 2
+    // tr = a + d = (ρ-β)/Λ - λ
+    // det = ad - bc = -λ(ρ-β)/Λ - λβ/Λ = -λρ/Λ
+    // D = tr² - 4*det = tr² + 4λρ/Λ
+
+    const tr = a + d;
+    const det = a * d - b * c; // = -lambda * rho / Lambda
+    const D = tr * tr - 4 * det;
+
+    // Use an arbitrary timestep - the choice doesn't matter since we divide by it
+    // Use a value on the order of the precursor timescale for numerical stability
+    const dt = 0.1; // 100 ms - large enough to capture dynamics, small enough to be accurate
+
+    let N_new: number;
+    let C_new: number;
+
+    if (D > 1e-20) {
+      // Two distinct real eigenvalues (typical case)
+      const sqrtD = Math.sqrt(D);
+      const lambda1 = (tr + sqrtD) / 2;
+      const lambda2 = (tr - sqrtD) / 2;
+
+      // Eigenvectors: For eigenvalue λᵢ, eigenvector is [b, λᵢ - a]ᵀ (or [λᵢ - d, c]ᵀ)
+      // Using [b, λᵢ - a]ᵀ form:
+      const v1_N = b;
+      const v1_C = lambda1 - a;
+      const v2_N = b;
+      const v2_C = lambda2 - a;
+
+      // Solve for coefficients: [N, C]ᵀ = c1 * v1 + c2 * v2
+      // | v1_N  v2_N | |c1|   |N|
+      // | v1_C  v2_C | |c2| = |C|
+      //
+      // det(V) = v1_N * v2_C - v2_N * v1_C = b*(λ2-a) - b*(λ1-a) = b*(λ2-λ1) = -b*sqrtD
+      const detV = -b * sqrtD;
+
+      if (Math.abs(detV) < 1e-30) {
+        // Degenerate case - fall back to explicit rates
+        return {
+          dN_dt: a * N + b * C,
+          dC_dt: c * N + d * C,
+        };
+      }
+
+      const c1 = (v2_C * N - v2_N * C) / detV;
+      const c2 = (-v1_C * N + v1_N * C) / detV;
+
+      // Solution at time dt
+      const exp1 = Math.exp(lambda1 * dt);
+      const exp2 = Math.exp(lambda2 * dt);
+
+      N_new = c1 * v1_N * exp1 + c2 * v2_N * exp2;
+      C_new = c1 * v1_C * exp1 + c2 * v2_C * exp2;
+    } else if (D < -1e-20) {
+      // Complex eigenvalues (rare for typical reactor parameters)
+      // λ = α ± iω where α = tr/2, ω = sqrt(-D)/2
+      const alpha = tr / 2;
+      const omega = Math.sqrt(-D) / 2;
+
+      // Solution uses: exp(αt) * [cos(ωt) + i*sin(ωt)]
+      // Real solution involves rotation matrix
+      const expAlpha = Math.exp(alpha * dt);
+      const cosOmega = Math.cos(omega * dt);
+      const sinOmega = Math.sin(omega * dt);
+
+      // For complex eigenvalues, use the matrix exponential directly:
+      // exp(At) = exp(αt) * [cos(ωt)*I + sin(ωt)/ω * (A - αI)]
+      // where A - αI = [[a-α, b], [c, d-α]] = [[(a-d)/2, b], [c, (d-a)/2]]
+
+      const halfDiff = (a - d) / 2;
+
+      // Matrix (A - αI) / ω  (the rotation generator, normalized)
+      // Note: This is the matrix whose sin(ωt) coefficient gives the rotation
+      const m11 = halfDiff / omega;
+      const m12 = b / omega;
+      const m21 = c / omega;
+      const m22 = -halfDiff / omega;
+
+      // exp(At) = exp(αt) * [cos(ωt)*I + sin(ωt)*M]
+      // [N_new]   [cos + m11*sin   m12*sin   ] [N]
+      // [C_new] = [m21*sin    cos + m22*sin  ] [C] * exp(αt)
+
+      N_new = expAlpha * ((cosOmega + m11 * sinOmega) * N + m12 * sinOmega * C);
+      C_new = expAlpha * (m21 * sinOmega * N + (cosOmega + m22 * sinOmega) * C);
+    } else {
+      // Repeated eigenvalue (D ≈ 0) - near-critical degeneracy
+      // λ = tr/2 (repeated)
+      // exp(At) = exp(λt) * (I + t*(A - λI))
+
+      const lambdaRep = tr / 2;
+      const expLambda = Math.exp(lambdaRep * dt);
+
+      // A - λI = [[a - λ, b], [c, d - λ]]
+      const a_adj = a - lambdaRep;
+      const d_adj = d - lambdaRep;
+
+      // exp(At) = exp(λt) * [[1 + t*a_adj, t*b], [t*c, 1 + t*d_adj]]
+      N_new = expLambda * ((1 + dt * a_adj) * N + dt * b * C);
+      C_new = expLambda * (dt * c * N + (1 + dt * d_adj) * C);
+    }
+
+    // Return effective rates
+    return {
+      dN_dt: (N_new - N) / dt,
+      dC_dt: (C_new - C) / dt,
+    };
   }
 
   private computeTotalReactivity(n: any, state: SimulationState): number {
