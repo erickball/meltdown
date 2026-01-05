@@ -224,15 +224,25 @@ export class ConstructionManager {
           }
         ];
 
+        // Calculate endpoint position based on length and elevation change
+        // Pipe starts at position (worldX, worldY) and extends in the +X direction
+        const startElevation = props.elevation ?? 0;
+        const elevationChange = props.elevationChange ?? 0; // Height change from inlet to outlet
+        const endElevation = startElevation + elevationChange;
+
         const pipe: PipeComponent = {
           id,
           type: 'pipe',
           label: props.name || 'Pipe',
           position: { x: worldX, y: worldY },
+          elevation: startElevation,
           rotation: 0,
           diameter: props.diameter,
           thickness: 0.01,  // 1cm default wall thickness
           length: pipeLength,
+          // End position: pipe extends in +X direction from start
+          endPosition: { x: worldX + pipeLength, y: worldY },
+          endElevation: endElevation,
           ports: pipePorts,  // Pipes are bidirectional - flow determined by physics
           fluid: pipeFluid
         };
@@ -1874,6 +1884,51 @@ export class ConstructionManager {
       if (component.type === 'tank' && component.height) {
         const radius = Math.sqrt(properties.volume / (Math.PI * component.height));
         component.width = radius * 2;
+      }
+    }
+
+    // Pipe-specific endpoint properties
+    if (component.type === 'pipe') {
+      const pipe = component as PipeComponent;
+
+      // Update start position
+      if (properties.startX !== undefined) {
+        pipe.position.x = properties.startX;
+      }
+      if (properties.startY !== undefined) {
+        pipe.position.y = properties.startY;
+      }
+
+      // Update end position
+      if (properties.endX !== undefined || properties.endY !== undefined) {
+        if (!pipe.endPosition) {
+          pipe.endPosition = { x: pipe.position.x + pipe.length, y: pipe.position.y };
+        }
+        if (properties.endX !== undefined) {
+          pipe.endPosition.x = properties.endX;
+        }
+        if (properties.endY !== undefined) {
+          pipe.endPosition.y = properties.endY;
+        }
+      }
+
+      // Update end elevation
+      if (properties.endElevation !== undefined) {
+        pipe.endElevation = properties.endElevation;
+      }
+
+      // Recalculate length from endpoints (3D distance)
+      if (pipe.endPosition && pipe.endElevation !== undefined && pipe.elevation !== undefined) {
+        const dx = pipe.endPosition.x - pipe.position.x;
+        const dy = pipe.endPosition.y - pipe.position.y;
+        const dz = pipe.endElevation - pipe.elevation;
+        pipe.length = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+        // Update port positions to match new length
+        const rightPort = pipe.ports.find(p => p.id.endsWith('-right'));
+        if (rightPort) {
+          rightPort.position.x = pipe.length;
+        }
       }
     }
 

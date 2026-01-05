@@ -9,7 +9,7 @@ import {
   getComponentElevation,
   renderDebugGrid,
 } from './isometric';
-import { getFluidColor } from './colors';
+import { getFluidColor, COLORS } from './colors';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -590,15 +590,28 @@ export class PlantCanvas {
         scale: perspectiveScale
       };
     } else {
-      // Other components
-      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
-      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-      const visualCenterY = frontCenterY - visualHalfH;
-      // Top of bounding box is at visualCenterY - visualHalfH
-      const topY = visualCenterY - visualHalfH;
+      // Other components: use center-based positioning (matching component rendering)
+      const centerScreen = this.worldToScreenPerspective(
+        { x: component.position.x, y: component.position.y },
+        elevation
+      );
+
+      if (centerScreen.scale <= 0) return null;
+
+      // Use center-based zoom (same as component rendering)
+      const { verticalScale } = this.getViewTransform();
+      const centerZoom = centerScreen.scale * 50;
+      const centerVisualHalfH = halfH * centerZoom * verticalScale;
+
+      // Component center is at centerScreen.pos
+      // Top of component is at centerScreen.pos.y - centerVisualHalfH * 2 (from translate + scaling)
+      // Actually: draw origin is at (centerScreen.pos.x, centerScreen.pos.y - centerVisualHalfH)
+      // Component is drawn with center at (0, centerVisualHalfH) in local coords
+      // So the top is at centerScreen.pos.y - 2 * centerVisualHalfH
+      const topY = centerScreen.pos.y - 2 * centerVisualHalfH;
       return {
-        topCenter: { x: frontCenterX, y: topY },
-        scale: perspectiveScale
+        topCenter: { x: centerScreen.pos.x, y: topY },
+        scale: centerScreen.scale
       };
     }
   }
@@ -715,68 +728,99 @@ export class PlantCanvas {
     // Standard approach for non-pipe components
     const elevation = getComponentElevation(component);
     const size = this.getComponentSize(component);
-    const halfW = size.width / 2;
     const halfH = size.height / 2;
 
-    const centerX = component.position.x;
-    const centerY = component.position.y;
     const cos = Math.cos(component.rotation);
     const sin = Math.sin(component.rotation);
 
-    // For pipes without endpoint data, use old method
-    let localLeft = -halfW;
+    // For pipes without endpoint data, use corner-based projection (legacy)
     if (component.type === 'pipe') {
-      localLeft = 0;
+      const centerX = component.position.x;
+      const centerY = component.position.y;
+
+      const localCorners = [
+        { x: 0, y: -halfH },           // front-left (start)
+        { x: size.width, y: -halfH },  // front-right (end)
+        { x: size.width, y: halfH },   // back-right
+        { x: 0, y: halfH },            // back-left
+      ];
+
+      const screenCorners = localCorners.map(local => {
+        const worldX = centerX + local.x * cos - local.y * sin;
+        const worldY = centerY + local.x * sin + local.y * cos;
+        return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+      });
+
+      if (screenCorners.some(c => c.scale <= 0)) return null;
+
+      const frontLeft = screenCorners[0].pos;
+      const frontRight = screenCorners[1].pos;
+      const backLeft = screenCorners[3].pos;
+
+      const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+      const projectedZoom = frontWidth / size.width;
+      const visualHalfH = halfH * projectedZoom;
+
+      const translateX = backLeft.x;
+      const translateY = backLeft.y - visualHalfH;
+
+      const localX = port.position.x * projectedZoom;
+      const localY = port.position.y * projectedZoom;
+      const rotatedX = localX * cos - localY * sin;
+      const rotatedY = localX * sin + localY * cos;
+
+      return {
+        x: translateX + rotatedX,
+        y: translateY + rotatedY,
+        radius: Math.max(4, 0.4 * projectedZoom)
+      };
     }
 
-    // Project corners to get the visual bounds (same as component rendering)
-    const localCorners = [
-      { x: localLeft, y: -halfH },   // front-left
-      { x: localLeft + size.width, y: -halfH },  // front-right
-      { x: localLeft + size.width, y: halfH },   // back-right
-      { x: localLeft, y: halfH },    // back-left
-    ];
+    // Non-pipe components: use center-based positioning (matching component rendering)
+    // Project the actual center point to screen space
+    const centerScreen = this.worldToScreenPerspective(
+      { x: component.position.x, y: component.position.y },
+      elevation
+    );
 
-    const screenCorners = localCorners.map(local => {
-      const worldX = centerX + local.x * cos - local.y * sin;
-      const worldY = centerY + local.x * sin + local.y * cos;
-      return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
-    });
+    if (centerScreen.scale <= 0) return null;
 
-    if (screenCorners.some(c => c.scale <= 0)) return null;
+    // Use center-based zoom (same as component rendering)
+    const { verticalScale } = this.getViewTransform();
+    const centerZoom = centerScreen.scale * 50;
 
-    const frontLeft = screenCorners[0].pos;
-    const frontRight = screenCorners[1].pos;
-    const backLeft = screenCorners[3].pos;
+    // The component rendering applies transforms as: translate, rotate, scale(1, verticalScale)
+    // Canvas transforms apply in reverse order to points, so for a local point (x, y):
+    // 1. Scale: (x, y * verticalScale)
+    // 2. Rotate: (x*cos - y*vs*sin, x*sin + y*vs*cos)
+    // 3. Translate: add (tx, ty)
+    //
+    // The translation includes an offset: ty = centerScreen.pos.y - (halfH * centerZoom * verticalScale)
+    // This offset positions the component so its visual center is at the projected point.
 
-    const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
-    const projectedZoom = frontWidth / size.width;
-    const visualHalfH = halfH * projectedZoom;
+    const localX = port.position.x * centerZoom;
+    const localY = port.position.y * centerZoom;
 
-    // Calculate the translation point (same as component rendering)
-    let translateX: number;
-    let translateY: number;
+    // Apply vertical scale FIRST (before rotation), matching canvas transform order
+    const scaledY = localY * verticalScale;
 
-    if (component.type === 'pipe') {
-      translateX = backLeft.x;
-      translateY = backLeft.y - visualHalfH;
-    } else {
-      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
-      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-      translateX = frontCenterX;
-      translateY = frontCenterY - visualHalfH;
-    }
+    // Then apply rotation
+    const rotatedX = localX * cos - scaledY * sin;
+    const rotatedY = localX * sin + scaledY * cos;
 
-    // Transform port's local position to screen space
-    const localX = port.position.x * projectedZoom;
-    const localY = port.position.y * projectedZoom;
-    const rotatedX = localX * cos - localY * sin;
-    const rotatedY = localX * sin + localY * cos;
+    // The rendering uses translateY = centerScreen.pos.y - visualHalfH
+    // where visualHalfH = halfH * centerZoom * verticalScale
+    // We need to match this offset for the port to align with the rendered component
+    // (size and halfH are already computed above at the start of the function)
+    const visualHalfH = halfH * centerZoom * verticalScale;
+    const translateY = centerScreen.pos.y - visualHalfH;
 
+    // Add to translated position (component center in local coords is at y=0,
+    // which after transforms ends up at translateY + 0 = translateY)
     return {
-      x: translateX + rotatedX,
+      x: centerScreen.pos.x + rotatedX,
       y: translateY + rotatedY,
-      radius: Math.max(4, 0.4 * projectedZoom)
+      radius: Math.max(4, 0.4 * centerZoom)
     };
   }
 
@@ -806,6 +850,10 @@ export class PlantCanvas {
         const rv = component as import('../types').ReactorVesselComponent;
         const rvR = rv.innerDiameter / 2 + rv.wallThickness;
         return Math.abs(localX) <= rvR && Math.abs(localY) <= rv.height / 2;
+      case 'coreBarrel':
+        const cb = component as import('../types').CoreBarrelComponent;
+        const cbR = cb.innerDiameter / 2 + cb.thickness;
+        return Math.abs(localX) <= cbR && Math.abs(localY) <= cb.height / 2;
       case 'valve':
         const vr = component.diameter;
         return Math.abs(localX) <= vr && Math.abs(localY) <= vr;
@@ -970,6 +1018,16 @@ export class PlantCanvas {
         x: (screenPos.x - this.view.offsetX) / this.view.zoom,
         y: (screenPos.y - this.view.offsetY) / this.view.zoom
       };
+    }
+  }
+
+  // Public method to convert world coordinates to screen coordinates
+  // Uses perspective projection when in isometric mode
+  public getScreenPositionFromWorld(worldPos: Point, elevation: number = 0): Point {
+    if (this.isometric.enabled) {
+      return this.worldToScreenPerspective(worldPos, elevation).pos;
+    } else {
+      return worldToScreen(worldPos, this.view);
     }
   }
 
@@ -1281,9 +1339,9 @@ export class PlantCanvas {
         const frontRight = screenCorners[1].pos;
         const backLeft = screenCorners[3].pos;
 
-        // Use front edge width for zoom
+        // Use front edge width for zoom (may be overridden for non-pipe components)
         const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
-        const projectedZoom = frontWidth / size.width;
+        let projectedZoom = frontWidth / size.width;
 
         // Get vertical scale first - needed for translation calculation
         const { verticalScale } = this.getViewTransform();
@@ -1318,26 +1376,79 @@ export class PlantCanvas {
               const screenLength = Math.hypot(screenDx, screenDy);
               const screenRotation = Math.atan2(screenDy, screenDx);
 
-              // Use average scale for pipe thickness
+              // Calculate perspective-scaled diameters at each end
+              // The raw perspective is subtle due to perspectiveOffset flattening,
+              // so we exaggerate the taper ratio to make it more visually apparent.
+              // taperExaggeration of 2.0 means: if far end would be 90% of near end,
+              // it becomes 80% instead (difference doubled).
+              const taperExaggeration = 2.0;
               const avgScale = (startScreen.scale + endScreen.scale) / 2;
-              const pipeZoom = avgScale * 50; // Base zoom factor
+              const rawRatio = endScreen.scale / startScreen.scale;
+              const exaggeratedRatio = 1 - (1 - rawRatio) * taperExaggeration;
+              // Clamp to reasonable range (don't let it go negative or too extreme)
+              const clampedRatio = Math.max(0.3, Math.min(1.5, exaggeratedRatio));
+
+              const startZoom = avgScale * 50;
+              const endZoom = startZoom * clampedRatio;
+
+              // Wall thickness (use pressure rating if available)
+              const wallThickness = pipe.thickness;
+              const startOuterD = (pipe.diameter + wallThickness * 2) * startZoom;
+              const startInnerD = pipe.diameter * startZoom;
+              const endOuterD = (pipe.diameter + wallThickness * 2) * endZoom;
+              const endInnerD = pipe.diameter * endZoom;
 
               // Position at start point, rotate toward end point
               ctx.translate(startScreen.pos.x, startScreen.pos.y);
               ctx.rotate(screenRotation);
 
-              // Create a modified view for rendering with screen-space dimensions
-              const pipeView: ViewState = { ...this.view, zoom: pipeZoom };
+              // Draw tapered pipe (trapezoid) - outer wall
+              ctx.fillStyle = COLORS.steel;
+              ctx.beginPath();
+              ctx.moveTo(0, -startOuterD / 2);           // top-left (start)
+              ctx.lineTo(screenLength, -endOuterD / 2);  // top-right (end)
+              ctx.lineTo(screenLength, endOuterD / 2);   // bottom-right (end)
+              ctx.lineTo(0, startOuterD / 2);            // bottom-left (start)
+              ctx.closePath();
+              ctx.fill();
 
-              // Temporarily modify pipe length to match screen length
-              const originalLength = pipe.length;
-              (pipe as any).length = screenLength / pipeZoom;
+              // Draw tapered inner pipe (fluid space)
+              if (pipe.fluid) {
+                ctx.fillStyle = getFluidColor(pipe.fluid);
+              } else {
+                ctx.fillStyle = '#111';
+              }
+              ctx.beginPath();
+              ctx.moveTo(0, -startInnerD / 2);
+              ctx.lineTo(screenLength, -endInnerD / 2);
+              ctx.lineTo(screenLength, endInnerD / 2);
+              ctx.lineTo(0, startInnerD / 2);
+              ctx.closePath();
+              ctx.fill();
 
+              // Draw pipe edges (top and bottom lines)
+              ctx.strokeStyle = COLORS.steelHighlight;
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(0, -startOuterD / 2);
+              ctx.lineTo(screenLength, -endOuterD / 2);
+              ctx.moveTo(0, startOuterD / 2);
+              ctx.lineTo(screenLength, endOuterD / 2);
+              ctx.stroke();
+
+              // Selection highlight
               const isSelected = component.id === this.selectedComponentId;
-              renderComponent(ctx, pipe, pipeView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState);
-
-              // Restore original length
-              (pipe as any).length = originalLength;
+              if (isSelected) {
+                ctx.strokeStyle = 'rgba(100, 150, 255, 0.8)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(-2, -startOuterD / 2 - 2);
+                ctx.lineTo(screenLength + 2, -endOuterD / 2 - 2);
+                ctx.lineTo(screenLength + 2, endOuterD / 2 + 2);
+                ctx.lineTo(-2, startOuterD / 2 + 2);
+                ctx.closePath();
+                ctx.stroke();
+              }
 
               ctx.restore();
               continue; // Skip the normal rendering path
@@ -1349,14 +1460,23 @@ export class PlantCanvas {
           translateX = backLeft.x;
           translateY = backLeft.y - visualHalfH;
         } else {
-          // Other components draw centered, so position at front-center, offset up
-          // After vertical scaling, the bottom of the component (at local +halfH) will be at
-          // translateY + visualHalfH * verticalScale. We want this to equal frontCenterY.
-          const frontCenterX = (frontLeft.x + frontRight.x) / 2;
-          const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-          const visualHalfH = halfH * projectedZoom * verticalScale; // Account for compression
-          translateX = frontCenterX;
-          translateY = frontCenterY - visualHalfH;
+          // Other components draw centered at their position
+          // Project the actual center point (component.position) to screen space
+          const centerScreen = this.worldToScreenPerspective(
+            { x: component.position.x, y: component.position.y },
+            elevation
+          );
+
+          // Use center-based zoom for consistent sizing
+          const centerZoom = centerScreen.scale * 50;
+          const visualHalfH = halfH * centerZoom * verticalScale;
+
+          // Position so the component's center is at the projected center point
+          translateX = centerScreen.pos.x;
+          translateY = centerScreen.pos.y - visualHalfH;
+
+          // Override projectedZoom with center-based zoom for this component
+          projectedZoom = centerZoom;
         }
 
         ctx.translate(translateX, translateY);
@@ -1485,6 +1605,10 @@ export class PlantCanvas {
       case 'reactorVessel':
         const rvR2 = (component as any).innerDiameter / 2 + (component as any).wallThickness;
         return { width: rvR2 * 2, height: (component as any).height };
+      case 'coreBarrel':
+        // Core barrel is the cylindrical region inside a reactor vessel
+        const cbR = (component as any).innerDiameter / 2 + (component as any).thickness;
+        return { width: cbR * 2, height: (component as any).height };
       case 'valve':
         const valveD = (component as any).diameter || 0.2;
         return { width: valveD * 2, height: valveD * 2 };
@@ -1650,33 +1774,56 @@ export class PlantCanvas {
     const fromElevDiff = fromConnElevation - fromPortVisualElev;
     const toElevDiff = toConnElevation - toPortVisualElev;
 
-    // Use worldToScreenPerspective to get the scale factor at each location
-    const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
-    const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
-
-    const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
-    const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
-
-    if (fromProj.scale <= 0 || toProj.scale <= 0) return;
-
     // Get the vertical transform for elevation changes
     const { verticalScale } = this.getViewTransform();
 
+    // For non-pipe components, we need to use the center-based scale that getPortScreenPosition uses
+    // For pipes, we use the port world position scale
+    let fromScale: number;
+    let toScale: number;
+
+    if (fromComponent.type === 'pipe') {
+      const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
+      const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
+      if (fromProj.scale <= 0) return;
+      fromScale = fromProj.scale;
+    } else {
+      const fromCenterProj = this.worldToScreenPerspective(
+        { x: fromComponent.position.x, y: fromComponent.position.y },
+        fromCompElevation
+      );
+      if (fromCenterProj.scale <= 0) return;
+      fromScale = fromCenterProj.scale * 50; // Match centerZoom calculation
+    }
+
+    if (toComponent.type === 'pipe') {
+      const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
+      const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
+      if (toProj.scale <= 0) return;
+      toScale = toProj.scale;
+    } else {
+      const toCenterProj = this.worldToScreenPerspective(
+        { x: toComponent.position.x, y: toComponent.position.y },
+        toCompElevation
+      );
+      if (toCenterProj.scale <= 0) return;
+      toScale = toCenterProj.scale * 50; // Match centerZoom calculation
+    }
+
     // Calculate elevation offset in screen pixels based on the DIFFERENCE
-    // The formula from worldToScreenPerspective is:
-    // elevationOffset = elevation * cappedScale * ELEVATION_SCALE * verticalScale * overallScale
-    // Since fromProj.scale already equals cappedScale * overallScale, we use it directly
-    const fromElevationOffset = fromElevDiff * fromProj.scale * this.ELEVATION_SCALE * verticalScale;
-    const toElevationOffset = toElevDiff * toProj.scale * this.ELEVATION_SCALE * verticalScale;
+    // Since getPortScreenPosition uses centerZoom = scale * 50, we need to convert
+    // elevation differences to pixels using the same scaling
+    const fromElevationOffset = fromElevDiff * fromScale * this.ELEVATION_SCALE / 50 * verticalScale;
+    const toElevationOffset = toElevDiff * toScale * this.ELEVATION_SCALE / 50 * verticalScale;
 
     // Apply elevation offset to port screen positions (negative because Y increases downward)
     const fromScreen = {
       pos: { x: fromPortScreen.x, y: fromPortScreen.y - fromElevationOffset },
-      scale: fromProj.scale
+      scale: fromScale
     };
     const toScreen = {
       pos: { x: toPortScreen.x, y: toPortScreen.y - toElevationOffset },
-      scale: toProj.scale
+      scale: toScale
     };
 
     if (fromScreen.scale <= 0 || toScreen.scale <= 0) return;
@@ -1789,21 +1936,45 @@ export class PlantCanvas {
     const fromElevDiff = fromConnElevation - fromPortVisualElev;
     const toElevDiff = toConnElevation - toPortVisualElev;
 
-    // Use worldToScreenPerspective to get the scale factor at each location
-    const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
-    const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
-
-    const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
-    const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
-
-    if (fromProj.scale <= 0 || toProj.scale <= 0) return null;
-
     // Get the vertical transform for elevation changes
     const { verticalScale } = this.getViewTransform();
 
+    // For non-pipe components, we need to use the center-based scale that getPortScreenPosition uses
+    // For pipes, we use the port world position scale
+    let fromScale: number;
+    let toScale: number;
+
+    if (fromComponent.type === 'pipe') {
+      const fromPortWorld = this.getPortWorldPosition(fromComponent, fromPort);
+      const fromProj = this.worldToScreenPerspective(fromPortWorld, fromCompElevation);
+      if (fromProj.scale <= 0) return null;
+      fromScale = fromProj.scale;
+    } else {
+      const fromCenterProj = this.worldToScreenPerspective(
+        { x: fromComponent.position.x, y: fromComponent.position.y },
+        fromCompElevation
+      );
+      if (fromCenterProj.scale <= 0) return null;
+      fromScale = fromCenterProj.scale * 50;
+    }
+
+    if (toComponent.type === 'pipe') {
+      const toPortWorld = this.getPortWorldPosition(toComponent, toPort);
+      const toProj = this.worldToScreenPerspective(toPortWorld, toCompElevation);
+      if (toProj.scale <= 0) return null;
+      toScale = toProj.scale;
+    } else {
+      const toCenterProj = this.worldToScreenPerspective(
+        { x: toComponent.position.x, y: toComponent.position.y },
+        toCompElevation
+      );
+      if (toCenterProj.scale <= 0) return null;
+      toScale = toCenterProj.scale * 50;
+    }
+
     // Calculate elevation offset in screen pixels
-    const fromElevationOffset = fromElevDiff * fromProj.scale * this.ELEVATION_SCALE * verticalScale;
-    const toElevationOffset = toElevDiff * toProj.scale * this.ELEVATION_SCALE * verticalScale;
+    const fromElevationOffset = fromElevDiff * fromScale * this.ELEVATION_SCALE / 50 * verticalScale;
+    const toElevationOffset = toElevDiff * toScale * this.ELEVATION_SCALE / 50 * verticalScale;
 
     // Apply elevation offset to port screen positions (negative because Y increases downward)
     let fromScreen = { x: fromPortScreen.x, y: fromPortScreen.y - fromElevationOffset };
@@ -1840,7 +2011,7 @@ export class PlantCanvas {
     }
 
     // Average scale for arrow sizing
-    const avgScale = (fromProj.scale + toProj.scale) / 2;
+    const avgScale = (fromScale + toScale) / 2;
 
     return {
       fromPos: fromScreen,

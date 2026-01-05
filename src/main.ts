@@ -1,7 +1,7 @@
 import { PlantCanvas } from './render/canvas';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -1093,6 +1093,39 @@ function init() {
 
     // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
     migrateReactorVessels(plantState);
+
+    // Migration: ensure pipes have endPosition for proper 3D rendering
+    migratePipeEndpoints(plantState);
+  }
+
+  // Migrate pipes to have endPosition and endElevation for 3D rendering
+  function migratePipeEndpoints(state: PlantState): void {
+    for (const [id, component] of state.components) {
+      if (component.type !== 'pipe') continue;
+      const pipe = component as PipeComponent;
+
+      // Skip if already has endPosition
+      if (pipe.endPosition) continue;
+
+      // Calculate endPosition from start position and length
+      // Pipe extends in +X direction in local coordinates
+      // Apply rotation to get world coordinates
+      const cos = Math.cos(pipe.rotation);
+      const sin = Math.sin(pipe.rotation);
+      const localEndX = pipe.length;
+      const localEndY = 0;
+
+      pipe.endPosition = {
+        x: pipe.position.x + localEndX * cos - localEndY * sin,
+        y: pipe.position.y + localEndX * sin + localEndY * cos
+      };
+
+      // endElevation: use elevation if set, otherwise default to 0
+      // For legacy pipes without elevation, assume horizontal
+      pipe.endElevation = pipe.elevation ?? 0;
+
+      console.log(`[Migration] Added endPosition to pipe ${id}: (${pipe.endPosition.x.toFixed(2)}, ${pipe.endPosition.y.toFixed(2)}) @ ${pipe.endElevation}m`);
+    }
   }
 
   // Migrate reactor vessels from old architecture (insideBarrelId, outsideBarrelId)
@@ -1551,6 +1584,10 @@ function init() {
   let movingComponent: PlantComponent | null = null;
   let moveStartOffset = { x: 0, y: 0 };
   let isDraggingComponent = false;
+  // For pipes: which end is being dragged ('start', 'end', or 'both')
+  let pipeDragMode: 'start' | 'end' | 'both' = 'both';
+  // For pipes: offset from end position when dragging 'end'
+  let moveEndOffset = { x: 0, y: 0 };
 
   // Canvas mouse move handler for visual feedback and dragging
   canvas.addEventListener('mousemove', (e) => {
@@ -1574,8 +1611,53 @@ function init() {
       if (isDraggingComponent && movingComponent) {
         // Dragging - move the component
         const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
-        movingComponent.position.x = worldClick.x - moveStartOffset.x;
-        movingComponent.position.y = worldClick.y - moveStartOffset.y;
+
+        // Handle pipes with endpoint data specially
+        if (movingComponent.type === 'pipe') {
+          const pipe = movingComponent as PipeComponent;
+          if (pipe.endPosition) {
+            if (pipeDragMode === 'start') {
+              // Move only start position
+              pipe.position.x = worldClick.x - moveStartOffset.x;
+              pipe.position.y = worldClick.y - moveStartOffset.y;
+              // Recalculate length
+              const dx = pipe.endPosition.x - pipe.position.x;
+              const dy = pipe.endPosition.y - pipe.position.y;
+              const dz = (pipe.endElevation ?? 0) - (pipe.elevation ?? 0);
+              pipe.length = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            } else if (pipeDragMode === 'end') {
+              // Move only end position
+              pipe.endPosition.x = worldClick.x - moveEndOffset.x;
+              pipe.endPosition.y = worldClick.y - moveEndOffset.y;
+              // Recalculate length
+              const dx = pipe.endPosition.x - pipe.position.x;
+              const dy = pipe.endPosition.y - pipe.position.y;
+              const dz = (pipe.endElevation ?? 0) - (pipe.elevation ?? 0);
+              pipe.length = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            } else {
+              // Move both ends together (translate the whole pipe)
+              const dx = worldClick.x - moveStartOffset.x - pipe.position.x;
+              const dy = worldClick.y - moveStartOffset.y - pipe.position.y;
+              pipe.position.x += dx;
+              pipe.position.y += dy;
+              pipe.endPosition.x += dx;
+              pipe.endPosition.y += dy;
+            }
+            // Update port position
+            const rightPort = pipe.ports.find(p => p.id.endsWith('-right'));
+            if (rightPort) {
+              rightPort.position.x = pipe.length;
+            }
+          } else {
+            // No endpoint data, move position only
+            movingComponent.position.x = worldClick.x - moveStartOffset.x;
+            movingComponent.position.y = worldClick.y - moveStartOffset.y;
+          }
+        } else {
+          // Non-pipe components: move normally
+          movingComponent.position.x = worldClick.x - moveStartOffset.x;
+          movingComponent.position.y = worldClick.y - moveStartOffset.y;
+        }
         canvas.style.cursor = 'grabbing';
       } else {
         // Not dragging - show move cursor on hover
@@ -1606,6 +1688,37 @@ function init() {
 
       // Calculate offset from component position to click point
       const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
+
+      // For pipes with endpoint data, determine which end is nearest using screen-space distance
+      if (component.type === 'pipe') {
+        const pipe = component as PipeComponent;
+        if (pipe.endPosition) {
+          // Get screen positions of pipe endpoints
+          const startScreen = plantCanvas.getScreenPositionFromWorld(pipe.position, pipe.elevation ?? 0);
+          const endScreen = plantCanvas.getScreenPositionFromWorld(pipe.endPosition, pipe.endElevation ?? 0);
+
+          // Calculate screen-space distances
+          const distToStart = Math.hypot(x - startScreen.x, y - startScreen.y);
+          const distToEnd = Math.hypot(x - endScreen.x, y - endScreen.y);
+          const pipeScreenLength = Math.hypot(endScreen.x - startScreen.x, endScreen.y - startScreen.y);
+
+          // Threshold: within 30% of pipe length from either end = move that end
+          const endThreshold = pipeScreenLength * 0.3;
+
+          if (distToStart < endThreshold && distToStart < distToEnd) {
+            pipeDragMode = 'start';
+          } else if (distToEnd < endThreshold && distToEnd < distToStart) {
+            pipeDragMode = 'end';
+            moveEndOffset.x = worldClick.x - pipe.endPosition.x;
+            moveEndOffset.y = worldClick.y - pipe.endPosition.y;
+          } else {
+            pipeDragMode = 'both';
+          }
+        } else {
+          pipeDragMode = 'both';
+        }
+      }
+
       moveStartOffset.x = worldClick.x - component.position.x;
       moveStartOffset.y = worldClick.y - component.position.y;
 
@@ -1621,6 +1734,8 @@ function init() {
       movingComponent = null;
       isDraggingComponent = false;
       moveStartOffset = { x: 0, y: 0 };
+      moveEndOffset = { x: 0, y: 0 };
+      pipeDragMode = 'both';
 
       // Check what's under cursor now
       const rect = canvas.getBoundingClientRect();

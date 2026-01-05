@@ -157,10 +157,17 @@ export const componentDefinitions: Record<string, {
     displayName: 'Pipe',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pipe' },
-      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm' },
+      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Calculated from endpoint positions when editing' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.5, min: 0.05, max: 2, step: 0.05, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
-      { name: 'elevation', type: 'number', label: 'Elevation Change', default: 0, min: -50, max: 50, step: 0.5, unit: 'm', help: 'Height difference from inlet to outlet' },
+      // Start endpoint (inlet)
+      { name: 'startX', type: 'number', label: 'Start X', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of inlet end' },
+      { name: 'startY', type: 'number', label: 'Start Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of inlet end' },
+      { name: 'elevation', type: 'number', label: 'Start Elevation', default: 0, min: -20, max: 100, step: 0.5, unit: 'm', help: 'Height of inlet end above ground' },
+      // End endpoint (outlet)
+      { name: 'endX', type: 'number', label: 'End X', default: 10, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of outlet end' },
+      { name: 'endY', type: 'number', label: 'End Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of outlet end' },
+      { name: 'endElevation', type: 'number', label: 'End Elevation', default: 0, min: -20, max: 100, step: 0.5, unit: 'm', help: 'Height of outlet end above ground' },
       { name: 'roughness', type: 'number', label: 'Roughness', default: 0.0001, min: 0.00001, max: 0.01, step: 0.00001, unit: 'm' },
       { name: 'initialPhase', type: 'select', label: 'Initial Phase', default: 'liquid', options: [
         { value: 'liquid', label: 'Subcooled Liquid' },
@@ -182,6 +189,16 @@ export const componentDefinitions: Record<string, {
           const y = 0.4;
           const t = P * D / (2 * S * E + 2 * y * P);
           return (t * 1000).toFixed(1); // Convert to mm
+        }
+      },
+      { name: 'calculatedLength', type: 'calculated', label: 'Actual Length', default: 0, unit: 'm',
+        calculate: (p) => {
+          // Calculate 3D length from endpoints
+          const dx = (p.endX ?? 10) - (p.startX ?? 0);
+          const dy = (p.endY ?? 0) - (p.startY ?? 0);
+          const dz = (p.endElevation ?? 0) - (p.elevation ?? 0);
+          const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+          return len.toFixed(2);
         }
       }
     ]
@@ -1167,18 +1184,11 @@ export class ComponentDialog {
     }
 
     // At low pressures, high-quality steam has very low density
-    // The sanity check fails at specific volume > 10 million mL/kg (density < 0.0001 kg/m³)
+    // Pure saturated steam at condenser pressures (~0.05 bar) has density ~0.03 kg/m³
+    // This is physically normal for turbine exhaust and condensers.
     //
-    // Approximate saturated vapor density using ideal gas:
-    // ρ_v ≈ P / (R * T) where R = 461.5 J/kg-K for water vapor
-    // At 0.05 bar (5 kPa) and ~306K (saturation temp): ρ_v ≈ 5000 / (461.5 * 306) ≈ 0.035 kg/m³
-    //
-    // Two-phase mixture density: 1/ρ = x/ρ_v + (1-x)/ρ_l
-    // At high quality (x → 1), ρ → ρ_v
-    //
-    // For a pipe with volume V and density ρ, mass = ρ * V
-    // Specific volume v = V / m = 1/ρ
-    // Sanity limit: v < 10 m³/kg → ρ > 0.1 kg/m³
+    // Only warn if density is extremely low (< 0.01 kg/m³), which would indicate
+    // unrealistic conditions that might cause numerical issues.
 
     const P_Pa = pressure * 1e5;
 
@@ -1199,11 +1209,9 @@ export class ComponentDialog {
     // Two-phase mixture density
     const rho_mixture = 1 / (quality / rho_vapor + (1 - quality) / rho_liquid);
 
-    // Specific volume in mL/kg
-    const v_mLkg = (1 / rho_mixture) * 1e6;
-
-    // Sanity check uses 10 million mL/kg limit, but warn earlier at 1 million
-    if (v_mLkg > 1e6) {
+    // Only warn for extremely low densities that might cause numerical issues
+    // Density < 0.01 kg/m³ corresponds to specific volume > 100 m³/kg
+    if (rho_mixture < 0.01) {
       return `Two-phase conditions (${pressure.toFixed(2)} bar, ${(quality * 100).toFixed(0)}% quality) would result in extremely low density (${rho_mixture.toFixed(4)} kg/m³). Try lowering quality or increasing pressure.`;
     }
 
@@ -1618,6 +1626,11 @@ export class ComponentDialog {
       'volume': ['volume'],
       'shellDiameter': ['width'],
       'shellLength': ['height'],
+      // Pipe endpoint mappings
+      'startX': ['position.x'],
+      'startY': ['position.y'],
+      'endX': ['endPosition.x'],
+      'endY': ['endPosition.y'],
       // Core-specific mappings
       'diameter': ['innerDiameter'],
       'controlRodBanks': ['controlRodCount'],

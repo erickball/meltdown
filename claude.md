@@ -12,7 +12,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 
 ## TODO List
 -Debug semi-implicit pressure/flow solver
--When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
 -When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
@@ -60,6 +59,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 X Back up a timestep feature, and periodic state-saving
 X Some kind of semi-implicit fluid flow/pressure calculation
 X Debug panel should show what RK45 operator-component combination(s) contribute most to limiting the timestep
