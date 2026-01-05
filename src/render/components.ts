@@ -12,6 +12,7 @@ import {
   TurbineDrivenPumpComponent,
   CondenserComponent,
   ControllerComponent,
+  SwitchyardComponent,
   ViewState,
   Fluid,
   Point,
@@ -338,6 +339,9 @@ export function renderComponent(
       break;
     case 'controller':
       renderController(ctx, component as ControllerComponent, view);
+      break;
+    case 'switchyard':
+      renderSwitchyard(ctx, component as SwitchyardComponent, view, plantState);
       break;
   }
 
@@ -2328,6 +2332,227 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   ctx.strokeRect(-w / 2 + 1, -h / 2 + 1, w - 2, h - 2);
 }
 
+/**
+ * Render a switchyard component
+ * Shows transformers, equipment, power line towers, and connection to grid
+ * No bounding box - outdoor equipment layout
+ */
+function renderSwitchyard(
+  ctx: CanvasRenderingContext2D,
+  switchyard: SwitchyardComponent,
+  view: ViewState,
+  plantState?: PlantState
+): void {
+  const w = switchyard.width * view.zoom;
+  const h = switchyard.height * view.zoom;
+
+  // Shadow offset for grounded appearance
+  const shadowOffsetX = 3;
+  const shadowOffsetY = 3;
+  const shadowColor = 'rgba(0, 0, 0, 0.3)';
+
+  // Helper: draw a shadow ellipse under equipment
+  const drawShadow = (x: number, y: number, width: number, height: number) => {
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.ellipse(x + shadowOffsetX, y + height / 2 + shadowOffsetY, width / 2 * 1.1, height * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+  };
+
+  // Helper: draw a small transformer with shadow
+  const drawTransformer = (x: number, y: number, scale: number) => {
+    const tw = w * 0.08 * scale;
+    const th = h * 0.15 * scale;
+
+    // Shadow
+    drawShadow(x, y, tw * 1.4, th);
+
+    // Tank
+    ctx.fillStyle = '#4a5a6a';
+    ctx.fillRect(x - tw / 2, y - th / 2, tw, th);
+    ctx.strokeStyle = '#3a4a5a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - tw / 2, y - th / 2, tw, th);
+    // Cooling fins
+    ctx.fillStyle = '#5a6a7a';
+    ctx.fillRect(x - tw / 2 - tw * 0.15, y - th * 0.3, tw * 0.12, th * 0.6);
+    ctx.fillRect(x + tw / 2 + tw * 0.03, y - th * 0.3, tw * 0.12, th * 0.6);
+    // Bushings on top
+    ctx.fillStyle = '#c9b896';
+    for (let i = 0; i < 3; i++) {
+      const bx = x - tw * 0.25 + i * tw * 0.25;
+      ctx.fillRect(bx - w * 0.008, y - th / 2 - h * 0.04, w * 0.016, h * 0.04);
+    }
+  };
+
+  // Helper: draw a small equipment box (breaker, disconnect, etc.) with shadow
+  const drawEquipment = (x: number, y: number, type: 'breaker' | 'disconnect' | 'box') => {
+    const size = w * 0.025;
+
+    // Shadow
+    const eqHeight = type === 'disconnect' ? size * 1.2 : size * 2;
+    drawShadow(x, y, size, eqHeight * 0.5);
+
+    if (type === 'breaker') {
+      ctx.fillStyle = '#5a6a7a';
+      ctx.fillRect(x - size / 2, y - size, size, size * 2);
+      // Status light
+      ctx.beginPath();
+      ctx.arc(x, y - size * 0.5, size * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = '#0f0';
+      ctx.fill();
+    } else if (type === 'disconnect') {
+      ctx.fillStyle = '#c9b896';
+      ctx.fillRect(x - size * 0.3, y - size * 1.2, size * 0.6, size * 1.2);
+    } else {
+      ctx.fillStyle = '#6a7a8a';
+      ctx.fillRect(x - size / 2, y - size / 2, size, size);
+    }
+  };
+
+  // Helper: draw a transmission tower with shadow
+  const drawTower = (x: number, y: number, scale: number = 1) => {
+    const tw = w * 0.04 * scale;
+    const th = h * 0.18 * scale;
+
+    // Shadow at base
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.ellipse(x + shadowOffsetX, y + th * 0.5 + shadowOffsetY, tw * 0.8, th * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#444';
+    // Tower legs (tapered)
+    ctx.beginPath();
+    ctx.moveTo(x - tw * 0.6, y + th * 0.5);
+    ctx.lineTo(x + tw * 0.6, y + th * 0.5);
+    ctx.lineTo(x + tw * 0.2, y - th * 0.5);
+    ctx.lineTo(x - tw * 0.2, y - th * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Cross arms
+    ctx.fillStyle = '#555';
+    ctx.fillRect(x - tw, y - th * 0.4, tw * 2, th * 0.06);
+    ctx.fillRect(x - tw * 0.8, y - th * 0.2, tw * 1.6, th * 0.05);
+    // Insulators
+    ctx.fillStyle = '#c9b896';
+    for (let i = -1; i <= 1; i++) {
+      ctx.fillRect(x + i * tw * 0.6 - w * 0.006, y - th * 0.4 - h * 0.02, w * 0.012, h * 0.025);
+    }
+  };
+
+  // No background box - switchyard is outdoors
+  // Equipment is drawn directly on the ground with shadows
+
+  // Row 1: Transformers (left side)
+  const txY1 = -h * 0.25;
+  const txY2 = h * 0.15;
+  drawTransformer(-w * 0.35, txY1, 1.2);  // Main transformer
+  drawTransformer(-w * 0.35, txY2, 0.9);  // Aux transformer
+  drawTransformer(-w * 0.15, txY1, 0.8);
+  drawTransformer(-w * 0.15, txY2, 0.8);
+
+  // Equipment in between
+  drawEquipment(-w * 0.25, txY1, 'breaker');
+  drawEquipment(-w * 0.25, txY2, 'breaker');
+  drawEquipment(-w * 0.05, txY1, 'disconnect');
+  drawEquipment(-w * 0.05, txY2, 'disconnect');
+  drawEquipment(-w * 0.05, 0, 'box');
+  drawEquipment(w * 0.02, txY1, 'breaker');
+  drawEquipment(w * 0.02, txY2, 'breaker');
+
+  // Bus bars (horizontal conductors)
+  ctx.strokeStyle = '#808080';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-w * 0.4, txY1 - h * 0.12);
+  ctx.lineTo(w * 0.1, txY1 - h * 0.12);
+  ctx.moveTo(-w * 0.4, txY2 + h * 0.12);
+  ctx.lineTo(w * 0.1, txY2 + h * 0.12);
+  ctx.stroke();
+
+  // Transmission towers in a row going to the right
+  const towerCount = Math.max(switchyard.offsiteLines, 2);
+  const towerSpacing = h * 0.25;
+  const towerStartY = -((towerCount - 1) * towerSpacing) / 2;
+
+  for (let i = 0; i < towerCount; i++) {
+    const ty = towerStartY + i * towerSpacing;
+    drawTower(w * 0.15, ty, 0.9);
+    drawTower(w * 0.28, ty, 1.0);
+  }
+
+  // Lines connecting to towers
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < towerCount; i++) {
+    const ty = towerStartY + i * towerSpacing;
+    ctx.beginPath();
+    ctx.moveTo(w * 0.1, i < towerCount / 2 ? txY1 - h * 0.12 : txY2 + h * 0.12);
+    ctx.lineTo(w * 0.15, ty - h * 0.07);
+    ctx.lineTo(w * 0.28, ty - h * 0.08);
+    ctx.lineTo(w * 0.42, ty);
+    ctx.stroke();
+  }
+
+  // Grid label on the right
+  ctx.font = `bold ${h * 0.09}px sans-serif`;
+  ctx.fillStyle = '#666';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`Grid`, w * 0.35, -h * 0.4);
+  ctx.font = `${h * 0.07}px sans-serif`;
+  ctx.fillStyle = '#555';
+  ctx.fillText(`(${switchyard.transmissionVoltage} kV)`, w * 0.35, -h * 0.28);
+
+  // Arrow pointing to grid
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(w * 0.42, 0);
+  ctx.lineTo(w * 0.48, 0);
+  ctx.stroke();
+  // Arrowhead
+  ctx.beginPath();
+  ctx.moveTo(w * 0.48, 0);
+  ctx.lineTo(w * 0.45, -h * 0.03);
+  ctx.lineTo(w * 0.45, h * 0.03);
+  ctx.closePath();
+  ctx.fillStyle = '#555';
+  ctx.fill();
+
+  // MW to grid display - get power from connected generator
+  let mwToGrid = 0;
+  if (plantState && switchyard.connectedGeneratorId) {
+    const generator = plantState.components.get(switchyard.connectedGeneratorId);
+    if (generator && generator.type === 'turbine-generator') {
+      const tg = generator as TurbineGeneratorComponent;
+      mwToGrid = (tg.power || 0) / 1e6;
+    }
+  }
+
+  // Display MW prominently
+  ctx.font = `bold ${h * 0.14}px sans-serif`;
+  ctx.fillStyle = mwToGrid > 0 ? '#4f4' : '#666';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${mwToGrid.toFixed(0)} MW`, -w * 0.25, h * 0.42);
+
+  // Reliability indicator (positioned to the right of MW display)
+  const reliabilityColors: Record<string, string> = {
+    'standard': '#777',
+    'enhanced': '#8a8',
+    'highly-reliable': '#4a4'
+  };
+  ctx.fillStyle = reliabilityColors[switchyard.reliabilityClass] || '#777';
+  ctx.font = `${h * 0.05}px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.fillText(switchyard.reliabilityClass.toUpperCase(), w * 0.05, h * 0.42);
+
+  // Note: The dashed electrical connection to the generator is drawn in canvas.ts
+  // using absolute screen coordinates (similar to controller wires)
+}
+
 function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, view: ViewState): void {
   // Small port indicators on components (larger interactive ports are in renderPortIndicators)
   for (const port of component.ports) {
@@ -2475,6 +2700,14 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
         y: -component.height * view.zoom / 2 - 5,
         width: component.width * view.zoom + 10,
         height: component.height * view.zoom + 10,
+      };
+    case 'switchyard':
+      const sw = component as SwitchyardComponent;
+      return {
+        x: -sw.width * view.zoom / 2 - 5,
+        y: -sw.height * view.zoom / 2 - 5,
+        width: sw.width * view.zoom + 10,
+        height: sw.height * view.zoom + 10,
       };
     default:
       return { x: -20, y: -20, width: 40, height: 40 };

@@ -869,6 +869,30 @@ export function updateComponentDetail(
       html += '</div>';
       break;
     }
+    case 'switchyard': {
+      const connectedGenId = component.connectedGeneratorId as string | undefined;
+      const transmissionVoltage = component.transmissionVoltage as number;
+      const offsiteLines = component.offsiteLines as number;
+      const transformerRating = component.transformerRating as number;
+      const reliabilityClass = component.reliabilityClass as string;
+
+      html += `<div class="detail-row"><span class="detail-label">Transmission:</span><span class="detail-value">${transmissionVoltage} kV</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Offsite Lines:</span><span class="detail-value">${offsiteLines}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Transformer:</span><span class="detail-value">${transformerRating} MW</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Reliability:</span><span class="detail-value">${reliabilityClass}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Generator:</span><span class="detail-value" style="color: ${connectedGenId ? '#7f7' : '#f77'};">${connectedGenId || 'None'}</span></div>`;
+
+      // Show MW to grid if connected to a generator
+      if (connectedGenId && plantState) {
+        const generator = plantState.components.get(connectedGenId) as Record<string, unknown> | undefined;
+        if (generator && generator.type === 'turbine-generator') {
+          const power = (generator.power as number) || 0;
+          const mwToGrid = power / 1e6;
+          html += `<div class="detail-row"><span class="detail-label">MW to Grid:</span><span class="detail-value" style="color: ${mwToGrid > 0 ? '#4f4' : '#888'};">${mwToGrid.toFixed(1)} MW</span></div>`;
+        }
+      }
+      break;
+    }
   }
 
   // Volume - prefer simulation node volume, fall back to calculated

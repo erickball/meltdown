@@ -15,6 +15,7 @@ import {
   TurbineDrivenPumpComponent,
   CondenserComponent,
   ControllerComponent,
+  SwitchyardComponent,
   Connection,
   Port,
   Fluid
@@ -148,6 +149,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, tank);
+        (tank as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -193,6 +195,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, pressurizer);
+        (pressurizer as any).nqa1 = props.nqa1 ?? true;
         break;
       }
 
@@ -248,6 +251,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, pipe);
+        (pipe as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -280,6 +284,7 @@ export class ConstructionManager {
         (valve as any).matchUpstream = matchUpstream;
 
         this.plantState.components.set(id, valve);
+        (valve as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -300,6 +305,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, checkValve);
+        (checkValve as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -322,6 +328,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, reliefValve);
+        (reliefValve as any).nqa1 = props.nqa1 ?? true;
         break;
       }
 
@@ -346,6 +353,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, porv);
+        (porv as any).nqa1 = props.nqa1 ?? true;
         break;
       }
 
@@ -453,6 +461,7 @@ export class ConstructionManager {
         (pump as any).matchUpstream = matchUpstream;
 
         this.plantState.components.set(id, pump);
+        (pump as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -569,6 +578,7 @@ export class ConstructionManager {
         console.log(`[HX] Created ${hxType} heat exchanger: ${heatTransferArea.toFixed(0)} m² area, tube-side ${tubeSideVolume.toFixed(1)} m³, shell-side ${shellSideVolume.toFixed(1)} m³`);
 
         this.plantState.components.set(id, hx);
+        (hx as any).nqa1 = props.nqa1 ?? true;
         break;
       }
 
@@ -660,6 +670,7 @@ export class ConstructionManager {
         (turbineGen as any).pressureRating = turbinePressureRating;
 
         this.plantState.components.set(id, turbineGen);
+        (turbineGen as any).nqa1 = props.nqa1 ?? false;
 
         // Create exhaust pipe (like condensers come with pumps, turbines come with exhaust pipes)
         // This provides a buffer volume for the work extraction process
@@ -801,6 +812,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, tdPump);
+        (tdPump as any).nqa1 = props.nqa1 ?? true;
 
         // Create exhaust pipe for steam exhaust (similar to main turbine)
         // TD pump exhaust is lower pressure/flow than main turbine
@@ -905,6 +917,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, condenser);
+        (condenser as any).nqa1 = props.nqa1 ?? false;
 
         // If includesPump, also create a condensate pump
         if (props.includesPump) {
@@ -980,6 +993,7 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, generator);
+        (generator as any).nqa1 = props.nqa1 ?? false;
         break;
       }
 
@@ -1050,6 +1064,7 @@ export class ConstructionManager {
         (core as any).thermalPower = (props.thermalPower || 3000) * 1e6;  // Convert MW to W
 
         this.plantState.components.set(id, core);
+        (core as any).nqa1 = props.nqa1 ?? true;
         break;
       }
 
@@ -1140,6 +1155,7 @@ export class ConstructionManager {
         (reactorVessel as any).fillLevel = initialFillLevel;
 
         this.plantState.components.set(id, reactorVessel);
+        (reactorVessel as any).nqa1 = props.nqa1 ?? true;
 
         // Create core barrel component inside the vessel (the core region)
         const coreBarrelPorts: Port[] = [
@@ -1234,7 +1250,37 @@ export class ConstructionManager {
         };
 
         this.plantState.components.set(id, controller);
+        (controller as any).nqa1 = props.nqa1 ?? true;
         console.log(`[Construction] Created scram controller connected to ${props.connectedCore || 'no core'}`);
+        break;
+      }
+
+      case 'switchyard': {
+        // Switchyard - electrical interconnection to the grid
+        // Visual representation: transformer, bus bars, transmission lines
+        const switchyardWidth = 15;   // 15m wide (large outdoor facility)
+        const switchyardHeight = 12;  // 12m tall (transformer + structures)
+
+        const switchyard: SwitchyardComponent = {
+          id,
+          type: 'switchyard',
+          label: props.name || 'Switchyard',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          width: switchyardWidth,
+          height: switchyardHeight,
+          transmissionVoltage: 345,  // Fixed at 345 kV
+          offsiteLines: props.offsiteLines ?? 2,
+          transformerRating: props.transformerRating ?? 1200,
+          reliabilityClass: props.reliabilityClass ?? 'standard',
+          connectedGeneratorId: props.connectedGenerator || undefined,
+          ports: [] // Switchyards connect electrically, not hydraulically
+        };
+
+        this.plantState.components.set(id, switchyard);
+        (switchyard as any).nqa1 = props.nqa1 ?? false;
+        console.log(`[Construction] Created switchyard: ${props.offsiteLines ?? 2} lines, ${props.transformerRating ?? 1200} MW, connected to ${props.connectedGenerator || 'no generator'}`);
         break;
       }
 
@@ -2148,6 +2194,11 @@ export class ConstructionManager {
       if (properties.lowCoolantFlow !== undefined) {
         component.setpoints.lowCoolantFlow = properties.lowCoolantFlow;
       }
+    }
+
+    // NQA-1 property (applies to all components)
+    if (properties.nqa1 !== undefined) {
+      component.nqa1 = properties.nqa1;
     }
 
     console.log(`[Construction] Updated component ${componentId}`);

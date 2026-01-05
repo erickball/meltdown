@@ -1,4 +1,4 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, Connection } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
 import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints } from './components';
 import {
@@ -860,6 +860,22 @@ export class PlantCanvas {
       case 'heatExchanger':
         return Math.abs(localX) <= component.width / 2 &&
                Math.abs(localY) <= component.height / 2;
+      case 'turbine-generator':
+        return Math.abs(localX) <= component.width / 2 &&
+               Math.abs(localY) <= component.height / 2;
+      case 'turbine-driven-pump':
+        return Math.abs(localX) <= component.width / 2 &&
+               Math.abs(localY) <= component.height / 2;
+      case 'condenser':
+        return Math.abs(localX) <= component.width / 2 &&
+               Math.abs(localY) <= component.height / 2;
+      case 'controller':
+        return Math.abs(localX) <= component.width / 2 &&
+               Math.abs(localY) <= component.height / 2;
+      case 'switchyard':
+        const sw = component as import('../types').SwitchyardComponent;
+        return Math.abs(localX) <= sw.width / 2 &&
+               Math.abs(localY) <= sw.height / 2;
       default:
         return false;
     }
@@ -1136,6 +1152,9 @@ export class PlantCanvas {
           // Skip shadows for contained components (they're inside something)
           if (component.containedBy) continue;
 
+          // Skip shadows for switchyard (it has its own individual equipment shadows)
+          if (component.type === 'switchyard') continue;
+
           const size = this.getComponentSize(component);
           const worldWidth = size.width || 1;
           const worldHeight = size.height || 1;
@@ -1152,12 +1171,11 @@ export class PlantCanvas {
 
           // Component corners in local 3D space
           const halfW = worldWidth / 2;
-          const halfH = worldHeight / 2;
           const cos = Math.cos(component.rotation);
           const sin = Math.sin(component.rotation);
 
           // For pipes, position is at one end, not center
-          // Local coordinates: pipes go from (0, -halfH) to (length, halfH), not centered
+          // Local x: pipes go from 0 to length (not centered like other components)
           let localLeft = -halfW;
           let localRight = halfW;
           if (component.type === 'pipe') {
@@ -1173,13 +1191,13 @@ export class PlantCanvas {
           const shadowHeight = component.type === 'pipe' ? (component as any).diameter : worldHeight;
           const topZ = baseElevation + shadowHeight;
 
-          // Base front corners
-          const baseFrontLeft = { x: localLeft, y: -halfH, z: baseElevation };
-          const baseFrontRight = { x: localRight, y: -halfH, z: baseElevation };
+          // Base center corners (y=0 since components are drawn at midpoint)
+          const baseFrontLeft = { x: localLeft, y: 0, z: baseElevation };
+          const baseFrontRight = { x: localRight, y: 0, z: baseElevation };
 
-          // Top front corners
-          const topFrontLeft = { x: localLeft, y: -halfH, z: topZ };
-          const topFrontRight = { x: localRight, y: -halfH, z: topZ };
+          // Top center corners
+          const topFrontLeft = { x: localLeft, y: 0, z: topZ };
+          const topFrontRight = { x: localRight, y: 0, z: topZ };
 
           // Project all 4 corners to ground plane
           const shadowCorners: Point[] = [];
@@ -1277,6 +1295,82 @@ export class PlantCanvas {
             ctx.arc(coreScreen.x, coreScreen.y, 4, 0, Math.PI * 2);
             ctx.fill();
 
+            ctx.restore();
+          }
+        }
+      }
+
+      // Draw switchyard-to-generator electrical connections
+      if (component.type === 'switchyard') {
+        const switchyard = component as SwitchyardComponent;
+        if (switchyard.connectedGeneratorId) {
+          const generator = this.plantState.components.get(switchyard.connectedGeneratorId);
+          if (generator && generator.type === 'turbine-generator') {
+            const tg = generator as TurbineGeneratorComponent;
+
+            // Get screen positions
+            let switchyardScreen: Point;
+            let generatorScreen: Point;
+
+            if (this.isometric.enabled) {
+              const switchyardElev = switchyard.elevation ?? 0;
+              const tgElev = tg.elevation ?? 0;
+
+              // Switchyard position - project to visual center
+              const switchyardProj = this.worldToScreenPerspective(switchyard.position, switchyardElev);
+              // The component is drawn with its bottom at ground level, so visual center
+              // is offset upward by half the visual height
+              const sySize = this.getComponentSize(switchyard);
+              const syVisualHalfH = (sySize.height / 2) * switchyardProj.scale * 50 * this.getViewTransform().verticalScale;
+              switchyardScreen = {
+                x: switchyardProj.pos.x,
+                y: switchyardProj.pos.y - syVisualHalfH
+              };
+
+              // Generator circle position (at exhaust end of turbine)
+              const tgW = tg.width;
+              const tgH = tg.height;
+              const genR = tgH / 3;
+              const isLeftRight = tg.orientation !== 'right-left';
+              const genLocalX = isLeftRight ? (tgW / 2 + genR) : (-tgW / 2 - genR);
+
+              // Transform to world coords
+              const cos = Math.cos(tg.rotation);
+              const sin = Math.sin(tg.rotation);
+              const genWorldX = tg.position.x + genLocalX * cos;
+              const genWorldY = tg.position.y + genLocalX * sin;
+
+              // Project the turbine center to get the correct scale for height offset
+              const tgCenterProj = this.worldToScreenPerspective(tg.position, tgElev);
+              const tgSize = this.getComponentSize(tg);
+              const tgVisualHalfH = (tgSize.height / 2) * tgCenterProj.scale * 50 * this.getViewTransform().verticalScale;
+
+              // Project the generator's world position
+              const genProj = this.worldToScreenPerspective({ x: genWorldX, y: genWorldY }, tgElev);
+              // The generator is drawn at local Y=0, which is at the visual center of the turbine
+              // The visual center is offset upward from the ground projection by visualHalfH
+              generatorScreen = {
+                x: genProj.pos.x,
+                y: genProj.pos.y - tgVisualHalfH
+              };
+            } else {
+              switchyardScreen = worldToScreen(switchyard.position, this.view);
+              // Simple 2D case - generator at turbine position
+              generatorScreen = worldToScreen(generator.position, this.view);
+            }
+
+            // Draw dashed electrical connection
+            ctx.save();
+            ctx.strokeStyle = '#222';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([8, 4]);
+
+            ctx.beginPath();
+            ctx.moveTo(switchyardScreen.x, switchyardScreen.y);
+            ctx.lineTo(generatorScreen.x, generatorScreen.y);
+            ctx.stroke();
+
+            ctx.setLineDash([]);
             ctx.restore();
           }
         }
@@ -1493,7 +1587,9 @@ export class PlantCanvas {
 
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState);
+        // Create projection function for components that need world-to-screen mapping
+        const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev).pos;
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState, worldToScreenFn);
 
         // Render elevation label (reset scale first so text isn't squished)
         if (component.type !== 'pipe') {
@@ -1620,6 +1716,10 @@ export class PlantCanvas {
         return { width: (component as any).width || 1, height: (component as any).height || 0.6 };
       case 'condenser':
         return { width: (component as any).width || 2, height: (component as any).height || 1 };
+      case 'controller':
+        return { width: (component as any).width || 1, height: (component as any).height || 1 };
+      case 'switchyard':
+        return { width: (component as any).width || 15, height: (component as any).height || 12 };
       default:
         return { width: 1, height: 1 };
     }

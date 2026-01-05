@@ -228,9 +228,8 @@ export function estimateReactorVesselCost(props: {
   // Installation (heavy lift, internals installation, inspection)
   const installationCost = (materialCost + fabricationCost) * INSTALLATION_MULTIPLIERS.reactorVessel;
 
-  // Reactor vessels are ALWAYS NQA-1 (force the multiplier)
   const subtotal = materialCost + fabricationCost + installationCost;
-  const nqa1Premium = subtotal * (NQA1_MULTIPLIER - 1);
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
 
   return {
     materialCost,
@@ -653,9 +652,7 @@ export function estimateCoreCost(props: {
   const installationCost = fuelFabCost * 0.1; // 10% for loading operations
 
   const subtotal = equipmentCost + fabricationCost + installationCost;
-
-  // Nuclear fuel is ALWAYS NQA-1 by definition
-  const nqa1Premium = subtotal * (NQA1_MULTIPLIER - 1);
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
 
   return {
     materialCost: equipmentCost,
@@ -677,7 +674,7 @@ export function estimateCoreCost(props: {
  * Reactor protection system instrumentation and controls.
  * This includes: sensors, logic cabinets, power supplies, cabling.
  */
-export function estimateControllerCost(_props: {
+export function estimateControllerCost(props: {
   controllerType: 'scram';
   nqa1: boolean;
 }): CostEstimate {
@@ -697,9 +694,7 @@ export function estimateControllerCost(_props: {
   const installationCost = equipmentCost * 0.5;
 
   const subtotal = equipmentCost + installationCost;
-
-  // RPS is ALWAYS NQA-1 (safety system)
-  const nqa1Premium = subtotal * (NQA1_MULTIPLIER - 1);
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
 
   return {
     materialCost: equipmentCost,
@@ -710,6 +705,99 @@ export function estimateControllerCost(_props: {
     total: subtotal + nqa1Premium,
     breakdown: {
       numChannels,
+    },
+  };
+}
+
+/**
+ * Estimate cost for a switchyard
+ *
+ * Major components:
+ * - Main power transformer (MPT): Steps up generator voltage to transmission voltage
+ * - Startup/auxiliary transformer (SAT): Provides power from grid during startup
+ * - Circuit breakers: High-voltage SF6 or oil-filled breakers
+ * - Bus bars: Rigid aluminum or steel conductors
+ * - Disconnect switches: Visible break isolation
+ * - Surge arresters and protective relays
+ * - Control building and SCADA systems
+ *
+ * Cost varies significantly based on:
+ * - Transformer rating (scales with generator output)
+ * - Number of transmission lines (more lines = more breakers, more land)
+ * - Reliability class (affects redundancy and equipment quality)
+ */
+export function estimateSwitchyardCost(props: {
+  transformerRating: number;  // MW
+  offsiteLines: number;       // 1-4
+  reliabilityClass: 'standard' | 'enhanced' | 'highly-reliable';
+  nqa1: boolean;
+}): CostEstimate {
+  // Main Power Transformer cost (scales with MVA rating)
+  // Typical large power transformers: $1-3M per 100 MVA
+  const mptCostPerMVA = 15000; // $/MVA
+  // Assume power factor ~0.9, so MVA = MW / 0.9
+  const mvaRating = props.transformerRating / 0.9;
+  const mptCost = mptCostPerMVA * mvaRating;
+
+  // Startup/Auxiliary Transformer (typically 10-20% of main capacity)
+  const satCost = mptCost * 0.15;
+
+  // High-voltage circuit breakers (~$500K-1M each at 345kV)
+  const breakerCostEach = 750000;
+  // Need 2 breakers per line (utility side, plant side) plus bus tie breakers
+  const numBreakers = props.offsiteLines * 2 + 2;
+  const breakerCost = breakerCostEach * numBreakers;
+
+  // Disconnect switches (~$50K each)
+  const disconnectCostEach = 50000;
+  const numDisconnects = numBreakers * 2; // 2 per breaker
+  const disconnectCost = disconnectCostEach * numDisconnects;
+
+  // Bus work and structures ($2-5M depending on configuration)
+  const busBaseCost = 2000000;
+  const busCost = busBaseCost * (1 + props.offsiteLines * 0.3);
+
+  // Protection and control systems
+  const protectionCost = 500000 * props.offsiteLines;
+
+  // Control building
+  const controlBuildingCost = 1500000;
+
+  // Reliability multipliers
+  const reliabilityMultiplier = {
+    'standard': 1.0,
+    'enhanced': 1.3,         // Better surge protection, redundant relays
+    'highly-reliable': 1.6,  // Full redundancy, premium equipment
+  }[props.reliabilityClass];
+
+  const equipmentCost = (
+    mptCost + satCost + breakerCost + disconnectCost +
+    busCost + protectionCost + controlBuildingCost
+  ) * reliabilityMultiplier;
+
+  // Site work, foundations, grounding grid
+  const civilCost = equipmentCost * 0.25;
+
+  // Installation and commissioning
+  const installationCost = equipmentCost * INSTALLATION_MULTIPLIERS.electrical;
+
+  const subtotal = equipmentCost + civilCost + installationCost;
+
+  // Switchyards are typically not NQA-1, but user can override
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+
+  return {
+    materialCost: equipmentCost + civilCost,
+    fabricationCost: 0,
+    installationCost,
+    subtotal,
+    nqa1Premium,
+    total: subtotal + nqa1Premium,
+    breakdown: {
+      mptCost: Math.round(mptCost),
+      satCost: Math.round(satCost),
+      breakerCost: Math.round(breakerCost),
+      numBreakers,
     },
   };
 }
@@ -755,7 +843,7 @@ export function estimateComponentCost(
         pressureRating: props.pressureRating || 175,
         barrelDiameter: props.barrelDiameter || 3.4,
         barrelThickness: props.barrelThickness || 0.05,
-        nqa1: true, // Always NQA-1
+        nqa1,
       });
 
     case 'pipe':
@@ -827,13 +915,21 @@ export function estimateComponentCost(
         fuelRodCount: parseInt(props.fuelRodCount?.replace(/,/g, '') || '50000'),
         height: props.height || 3.66,
         diameter: props.diameter || 3.2,
-        nqa1: true, // Always NQA-1
+        nqa1,
       });
 
     case 'scram-controller':
       return estimateControllerCost({
         controllerType: 'scram',
-        nqa1: true, // Always NQA-1
+        nqa1,
+      });
+
+    case 'switchyard':
+      return estimateSwitchyardCost({
+        transformerRating: props.transformerRating || 1200,
+        offsiteLines: props.offsiteLines || 2,
+        reliabilityClass: props.reliabilityClass || 'standard',
+        nqa1,
       });
 
     default:

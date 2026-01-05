@@ -665,6 +665,28 @@ export const componentDefinitions: Record<string, {
       { name: 'highFuelTemp', type: 'number', label: 'High Fuel Temp Trip', default: 95, min: 80, max: 100, step: 1, unit: '%', help: 'Scram when fuel temp exceeds this % of melting point' },
       { name: 'lowCoolantFlow', type: 'number', label: 'Low Coolant Flow Trip', default: 10, min: 0, max: 100, step: 1, unit: 'kg/s', help: 'Scram when coolant flow drops below this value' }
     ]
+  },
+
+  // Electrical
+  'switchyard': {
+    displayName: 'Switchyard',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Switchyard' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: 'Switchyards are typically non-safety related' },
+      // Note: connectedGenerator will be populated dynamically in the dialog based on available turbine-generators
+      { name: 'connectedGenerator', type: 'select', label: 'Connected Generator', default: '', options: [], help: 'Select the turbine-generator this switchyard connects to' },
+      { name: 'offsiteLines', type: 'number', label: 'Offsite Power Lines', default: 2, min: 1, max: 4, step: 1, help: 'Number of independent transmission lines (more = lower LOOP probability)' },
+      { name: 'transformerRating', type: 'number', label: 'Transformer Rating', default: 1200, min: 100, max: 2000, step: 50, unit: 'MW', help: 'Main power transformer capacity (should match or exceed generator output)' },
+      { name: 'reliabilityClass', type: 'select', label: 'Reliability Class', default: 'standard', options: [
+        { value: 'standard', label: 'Standard' },
+        { value: 'enhanced', label: 'Enhanced' },
+        { value: 'highly-reliable', label: 'Highly Reliable' }
+      ], help: 'Affects equipment quality, redundancy, and maintenance programs' },
+      // Calculated fields
+      { name: 'transmissionVoltage', type: 'calculated', label: 'Transmission Voltage', default: 345, unit: 'kV',
+        calculate: () => '345'  // Fixed at 345 kV (cosmetic)
+      }
+    ]
   }
 };
 
@@ -679,6 +701,7 @@ export class ComponentDialog {
   private currentType: string = '';
   private currentPosition: { x: number; y: number } = { x: 0, y: 0 };
   private availableCores: Array<{ id: string; label: string }> = [];
+  private availableGenerators: Array<{ id: string; label: string }> = [];
 
   constructor() {
     this.dialog = document.getElementById('component-dialog')!;
@@ -712,7 +735,8 @@ export class ComponentDialog {
     componentType: string,
     position: { x: number; y: number },
     callback: (config: ComponentConfig | null) => void,
-    availableCores?: Array<{ id: string; label: string }>
+    availableCores?: Array<{ id: string; label: string }>,
+    availableGenerators?: Array<{ id: string; label: string }>
   ) {
     const definition = componentDefinitions[componentType];
     if (!definition) {
@@ -724,6 +748,7 @@ export class ComponentDialog {
     this.currentType = componentType;
     this.currentPosition = position;
     this.currentCallback = callback;
+    this.availableGenerators = availableGenerators || [];
 
     // Set title
     this.titleElement.textContent = `Configure ${definition.displayName}`;
@@ -843,6 +868,26 @@ export class ComponentDialog {
             // Select first core by default if available
             if (availableCores.length > 0) {
               (input as HTMLSelectElement).value = availableCores[0].id;
+            }
+          } else if (option.name === 'connectedGenerator' && this.availableGenerators.length > 0) {
+            // Special case: dynamically populate generator dropdown for switchyards
+            // Add "None" option
+            const noneOption = document.createElement('option');
+            noneOption.value = '';
+            noneOption.textContent = '-- Select a generator --';
+            input.appendChild(noneOption);
+
+            // Add available generators
+            this.availableGenerators.forEach(gen => {
+              const optionElement = document.createElement('option');
+              optionElement.value = gen.id;
+              optionElement.textContent = gen.label || gen.id;
+              input.appendChild(optionElement);
+            });
+
+            // Select first generator by default if available
+            if (this.availableGenerators.length > 0) {
+              (input as HTMLSelectElement).value = this.availableGenerators[0].id;
             }
           } else if (option.options) {
             option.options.forEach(opt => {
@@ -1390,7 +1435,8 @@ export class ComponentDialog {
       'turbine-generator': 'turbine-generator',
       'turbine-driven-pump': 'turbine-driven-pump',
       'fuelAssembly': 'core',
-      'controller': 'scram-controller'
+      'controller': 'scram-controller',
+      'switchyard': 'switchyard'
     };
     return mapping[type] || type;
   }

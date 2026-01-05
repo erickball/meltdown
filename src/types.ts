@@ -33,7 +33,8 @@ export type ComponentType =
   | 'turbine-driven-pump'
   | 'condenser'
   | 'fuelAssembly'
-  | 'controller';
+  | 'controller'
+  | 'switchyard';
 
 export interface Port {
   id: string;
@@ -250,6 +251,63 @@ export interface ControllerComponent extends ComponentBase {
   setpoints: ScramSetpoints;
 }
 
+// Reliability class affects likelihood of LOOP events and recovery time
+export type SwitchyardReliabilityClass = 'standard' | 'enhanced' | 'highly-reliable';
+
+export interface SwitchyardComponent extends ComponentBase {
+  type: 'switchyard';
+  width: number;
+  height: number;
+  // Transmission voltage is cosmetic - fixed at 345 kV
+  transmissionVoltage: number;  // kV (display only, always 345)
+  // Number of independent offsite power lines (affects LOOP probability)
+  offsiteLines: number;  // 1-4, more lines = lower LOOP probability
+  // Main power transformer rating - should match or exceed generator output
+  transformerRating: number;  // MW
+  // Reliability class affects maintenance quality, redundancy, protection schemes
+  reliabilityClass: SwitchyardReliabilityClass;
+  // Connected generator(s) - required for MW to grid calculation
+  connectedGeneratorId?: string;  // ID of turbine-generator this feeds
+
+  // === FUTURE FAILURE MODES (not yet implemented) ===
+  // These comments document failure mechanisms for future implementation:
+  //
+  // LOOP (Loss of Offsite Power):
+  //   - Grid disturbance causes all offsite lines to trip
+  //   - Probability inversely related to offsiteLines count
+  //   - Recovery time: 30 min to several hours
+  //
+  // Partial LOOP:
+  //   - One or more (but not all) offsite lines trip
+  //   - Plant can continue if remaining capacity sufficient
+  //   - May require load reduction
+  //
+  // Transformer Fault:
+  //   - Main power transformer failure (fire, winding fault, bushing failure)
+  //   - Requires switchover to startup transformer or trip
+  //   - Recovery time: days to weeks (major repair/replacement)
+  //
+  // Breaker Failure:
+  //   - Circuit breaker fails to open on demand
+  //   - Backup protection must clear fault
+  //   - May cause wider outage
+  //
+  // Bus Fault:
+  //   - Short circuit on switchyard bus
+  //   - Requires fault isolation and repair
+  //   - Recovery depends on fault location and damage
+  //
+  // Lightning Strike:
+  //   - Direct strike to switchyard equipment
+  //   - May cause transient trip or equipment damage
+  //   - Enhanced reliability class includes better surge protection
+  //
+  // SBO (Station Blackout):
+  //   - LOOP combined with failure of emergency diesel generators
+  //   - Most severe loss of power event
+  //   - Switchyard reliability affects LOOP frequency component
+}
+
 export type PlantComponent =
   | TankComponent
   | PipeComponent
@@ -262,7 +320,8 @@ export type PlantComponent =
   | TurbineGeneratorComponent
   | TurbineDrivenPumpComponent
   | CondenserComponent
-  | ControllerComponent;
+  | ControllerComponent
+  | SwitchyardComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;

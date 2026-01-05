@@ -1904,6 +1904,16 @@ function init() {
           }
         }
 
+        // Get available generators for switchyard dropdowns
+        const availableGenerators: Array<{ id: string; label: string }> = [];
+        if (selectedComponentType === 'switchyard') {
+          for (const [id, comp] of plantState.components) {
+            if (comp.type === 'turbine-generator') {
+              availableGenerators.push({ id, label: comp.label || id });
+            }
+          }
+        }
+
         componentDialog.show(selectedComponentType!, placementPos, (config: ComponentConfig | null) => {
           if (config) {
             console.log(`[Construction] Component configured:`, config);
@@ -1972,7 +1982,7 @@ function init() {
           } else {
             console.log(`[Construction] Component placement cancelled`);
           }
-        }, availableCores);
+        }, availableCores, availableGenerators);
       };
 
       // If clicking on a container, ask if user wants to place inside
