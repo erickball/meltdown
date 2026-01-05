@@ -386,6 +386,20 @@ export class PlantCanvas {
     const cos = Math.cos(component.rotation);
     const sin = Math.sin(component.rotation);
 
+    // Switchyard uses ground-level footprint for hit testing (matches its perspective rendering)
+    if (component.type === 'switchyard') {
+      // Project the four corners at ground level (elevation 0)
+      const corners = [
+        { x: centerX - halfW, y: centerY - halfH },
+        { x: centerX + halfW, y: centerY - halfH },
+        { x: centerX + halfW, y: centerY + halfH },
+        { x: centerX - halfW, y: centerY + halfH },
+      ];
+      const screenCorners = corners.map(c => this.worldToScreenPerspective(c, 0));
+      if (screenCorners.some(c => c.scale <= 0)) return false;
+      return this.isPointInQuad(screenPos, screenCorners.map(c => c.pos));
+    }
+
     // For pipes, local coords go from (0, -halfH) to (length, halfH)
     // For others, centered: (-halfW, -halfH) to (halfW, halfH)
     let localLeft = -halfW;
@@ -1313,18 +1327,14 @@ export class PlantCanvas {
             let generatorScreen: Point;
 
             if (this.isometric.enabled) {
-              const switchyardElev = switchyard.elevation ?? 0;
               const tgElev = tg.elevation ?? 0;
 
-              // Switchyard position - project to visual center
-              const switchyardProj = this.worldToScreenPerspective(switchyard.position, switchyardElev);
-              // The component is drawn with its bottom at ground level, so visual center
-              // is offset upward by half the visual height
-              const sySize = this.getComponentSize(switchyard);
-              const syVisualHalfH = (sySize.height / 2) * switchyardProj.scale * 50 * this.getViewTransform().verticalScale;
+              // Switchyard position - project to footprint center (ground level)
+              // The switchyard is drawn centered on its footprint, so target ground projection
+              const switchyardProj = this.worldToScreenPerspective(switchyard.position, 0);
               switchyardScreen = {
                 x: switchyardProj.pos.x,
-                y: switchyardProj.pos.y - syVisualHalfH
+                y: switchyardProj.pos.y
               };
 
               // Generator circle position (at exhaust end of turbine)
@@ -1340,18 +1350,16 @@ export class PlantCanvas {
               const genWorldX = tg.position.x + genLocalX * cos;
               const genWorldY = tg.position.y + genLocalX * sin;
 
-              // Project the turbine center to get the correct scale for height offset
-              const tgCenterProj = this.worldToScreenPerspective(tg.position, tgElev);
-              const tgSize = this.getComponentSize(tg);
-              const tgVisualHalfH = (tgSize.height / 2) * tgCenterProj.scale * 50 * this.getViewTransform().verticalScale;
-
-              // Project the generator's world position
+              // Project the generator's world position to screen space
+              // The generator circle is drawn at local Y=0, which is the vertical center of the turbine
+              // In perspective rendering, components are drawn at:
+              //   translateY = centerScreen.pos.y - visualHalfH (upward from ground projection)
+              // So the center (local Y=0) is at centerScreen.pos.y - visualHalfH in screen space
               const genProj = this.worldToScreenPerspective({ x: genWorldX, y: genWorldY }, tgElev);
-              // The generator is drawn at local Y=0, which is at the visual center of the turbine
-              // The visual center is offset upward from the ground projection by visualHalfH
+              const visualHalfH = (tg.height / 2) * genProj.scale * 50 * this.getViewTransform().verticalScale;
               generatorScreen = {
                 x: genProj.pos.x,
-                y: genProj.pos.y - tgVisualHalfH
+                y: genProj.pos.y - visualHalfH  // Center of generator circle
               };
             } else {
               switchyardScreen = worldToScreen(switchyard.position, this.view);
@@ -1588,7 +1596,8 @@ export class PlantCanvas {
         const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
         const isSelected = component.id === this.selectedComponentId;
         // Create projection function for components that need world-to-screen mapping
-        const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev).pos;
+        // Returns both screen position and scale factor for proper perspective rendering
+        const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
         renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState, worldToScreenFn);
 
         // Render elevation label (reset scale first so text isn't squished)

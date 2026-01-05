@@ -1354,7 +1354,8 @@ export class ComponentDialog {
   showEdit(
     component: Record<string, any>,
     callback: (properties: Record<string, any> | null) => void,
-    availableCores?: Array<{ id: string; label: string }>
+    availableCores?: Array<{ id: string; label: string }>,
+    availableGenerators?: Array<{ id: string; label: string }>
   ) {
     const componentType = this.mapComponentTypeToDefinition(component.type, component);
     const definition = componentDefinitions[componentType];
@@ -1367,6 +1368,7 @@ export class ComponentDialog {
     this.currentType = componentType;
     this.currentPosition = component.position || { x: 0, y: 0 };
     this.availableCores = availableCores || [];
+    this.availableGenerators = availableGenerators || [];
     this.currentCallback = (config) => {
       if (config) {
         callback(config.properties);

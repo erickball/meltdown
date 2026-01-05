@@ -970,6 +970,16 @@ function init() {
       }
     }
 
+    // Get available generators for switchyard dropdowns
+    const availableGenerators: Array<{ id: string; label: string }> = [];
+    if (component.type === 'switchyard') {
+      for (const [id, comp] of plantState.components) {
+        if (comp.type === 'turbine-generator') {
+          availableGenerators.push({ id, label: comp.label || id });
+        }
+      }
+    }
+
     componentDialog.showEdit(component as Record<string, any>, (properties) => {
       if (properties) {
         constructionManager.updateComponent(componentId, properties);
@@ -983,7 +993,7 @@ function init() {
           updateComponentDetail(componentId, plantState, gameLoop.getState());
         }
       }
-    }, availableCores);
+    }, availableCores, availableGenerators);
   });
 
   setComponentDeleteCallback((componentId: string) => {

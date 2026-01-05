@@ -291,6 +291,15 @@ export function screenToWorld(point: Point, view: ViewState): Point {
   };
 }
 
+/** Result of world-to-screen projection with scale factor for perspective */
+export interface WorldToScreenResult {
+  pos: Point;
+  scale: number;
+}
+
+/** Function type for world-to-screen projection with elevation */
+export type WorldToScreenFn = (pos: Point, elevation?: number) => WorldToScreenResult;
+
 // Main component renderer - dispatches to specific renderers
 export function renderComponent(
   ctx: CanvasRenderingContext2D,
@@ -300,7 +309,8 @@ export function renderComponent(
   skipPorts: boolean = false,
   connections?: Connection[],
   isSimulating: boolean = false,
-  plantState?: PlantState
+  plantState?: PlantState,
+  worldToScreenFn?: WorldToScreenFn
 ): void {
   // Note: Context is already transformed to component position by caller
   // We no longer transform here to support isometric projection
@@ -341,7 +351,7 @@ export function renderComponent(
       renderController(ctx, component as ControllerComponent, view);
       break;
     case 'switchyard':
-      renderSwitchyard(ctx, component as SwitchyardComponent, view, plantState);
+      renderSwitchyard(ctx, component as SwitchyardComponent, view, plantState, worldToScreenFn);
       break;
   }
 
@@ -2336,13 +2346,35 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
  * Render a switchyard component
  * Shows transformers, equipment, power line towers, and connection to grid
  * No bounding box - outdoor equipment layout
+ *
+ * When worldToScreenFn is provided (isometric mode), elements are rendered at their
+ * world positions with perspective projection for proper 3D appearance.
  */
 function renderSwitchyard(
   ctx: CanvasRenderingContext2D,
   switchyard: SwitchyardComponent,
   view: ViewState,
-  plantState?: PlantState
+  plantState?: PlantState,
+  worldToScreenFn?: WorldToScreenFn
 ): void {
+  // Get MW to grid for display
+  let mwToGrid = 0;
+  if (plantState && switchyard.connectedGeneratorId) {
+    const generator = plantState.components.get(switchyard.connectedGeneratorId);
+    if (generator && generator.type === 'turbine-generator') {
+      const tg = generator as TurbineGeneratorComponent;
+      mwToGrid = (tg.power || 0) / 1e6;
+    }
+  }
+
+  // In isometric mode with perspective projection, render elements individually
+  // at their world positions for proper 3D depth effect
+  if (worldToScreenFn) {
+    renderSwitchyardPerspective(ctx, switchyard, worldToScreenFn, mwToGrid);
+    return;
+  }
+
+  // Non-isometric (2D) mode - use original local-coordinate rendering
   const w = switchyard.width * view.zoom;
   const h = switchyard.height * view.zoom;
 
@@ -2521,16 +2553,6 @@ function renderSwitchyard(
   ctx.fillStyle = '#555';
   ctx.fill();
 
-  // MW to grid display - get power from connected generator
-  let mwToGrid = 0;
-  if (plantState && switchyard.connectedGeneratorId) {
-    const generator = plantState.components.get(switchyard.connectedGeneratorId);
-    if (generator && generator.type === 'turbine-generator') {
-      const tg = generator as TurbineGeneratorComponent;
-      mwToGrid = (tg.power || 0) / 1e6;
-    }
-  }
-
   // Display MW prominently
   ctx.font = `bold ${h * 0.14}px sans-serif`;
   ctx.fillStyle = mwToGrid > 0 ? '#4f4' : '#666';
@@ -2551,6 +2573,283 @@ function renderSwitchyard(
 
   // Note: The dashed electrical connection to the generator is drawn in canvas.ts
   // using absolute screen coordinates (similar to controller wires)
+}
+
+/**
+ * Render switchyard with perspective projection for isometric mode.
+ * Elements at different world-Y positions get different scales for depth effect.
+ */
+function renderSwitchyardPerspective(
+  ctx: CanvasRenderingContext2D,
+  switchyard: SwitchyardComponent,
+  worldToScreenFn: WorldToScreenFn,
+  mwToGrid: number
+): void {
+  // Reset canvas transform to DPR-scaled identity
+  // The canvas uses devicePixelRatio scaling (see CanvasRenderer.resize()),
+  // so we need to preserve that scale while removing component transforms
+  ctx.save();
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const worldW = switchyard.width;
+  const worldH = switchyard.height;
+
+  // Project at ground level (elevation 0) to match the footprint outline
+  // The footprint is axis-aligned (no rotation) via renderGroundOutline
+  const centerProj = worldToScreenFn(switchyard.position, 0);
+  const baseZoom = centerProj.scale * 50;
+
+  // Convert local coordinates to world coordinates (axis-aligned, no rotation)
+  // This matches how renderGroundOutline calculates footprint corners
+  const project = (localX: number, localY: number): WorldToScreenResult => {
+    const worldPos = {
+      x: switchyard.position.x + localX,
+      y: switchyard.position.y + localY,
+    };
+    return worldToScreenFn(worldPos, 0);
+  };
+
+  const shadowColor = 'rgba(0, 0, 0, 0.3)';
+
+  // Debug markers removed - we'll compute corners using WORLD coordinates directly
+  // matching exactly how renderGroundOutline does it
+
+  // Helper: draw a transformer at a world position
+  const drawTransformer = (localX: number, localY: number, sizeScale: number) => {
+    const proj = project(localX, localY);
+    const zoom = proj.scale * 50;
+    const tw = worldW * 0.08 * sizeScale * zoom;
+    const th = worldH * 0.15 * sizeScale * zoom;
+
+    // Shadow
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.ellipse(proj.pos.x + 3, proj.pos.y + 3, tw * 0.7 * 1.1, th * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Tank
+    ctx.fillStyle = '#4a5a6a';
+    ctx.fillRect(proj.pos.x - tw / 2, proj.pos.y - th / 2, tw, th);
+    ctx.strokeStyle = '#3a4a5a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(proj.pos.x - tw / 2, proj.pos.y - th / 2, tw, th);
+    // Cooling fins
+    ctx.fillStyle = '#5a6a7a';
+    ctx.fillRect(proj.pos.x - tw / 2 - tw * 0.15, proj.pos.y - th * 0.3, tw * 0.12, th * 0.6);
+    ctx.fillRect(proj.pos.x + tw / 2 + tw * 0.03, proj.pos.y - th * 0.3, tw * 0.12, th * 0.6);
+    // Bushings on top
+    ctx.fillStyle = '#c9b896';
+    const bushingW = worldW * 0.008 * zoom;
+    const bushingH = worldH * 0.04 * zoom;
+    for (let i = 0; i < 3; i++) {
+      const bx = proj.pos.x - tw * 0.25 + i * tw * 0.25;
+      ctx.fillRect(bx - bushingW, proj.pos.y - th / 2 - bushingH, bushingW * 2, bushingH);
+    }
+  };
+
+  // Helper: draw equipment at a world position
+  const drawEquipment = (localX: number, localY: number, type: 'breaker' | 'disconnect' | 'box') => {
+    const proj = project(localX, localY);
+    const zoom = proj.scale * 50;
+    const size = worldW * 0.025 * zoom;
+
+    // Shadow
+    const eqHeight = type === 'disconnect' ? size * 1.2 : size * 2;
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.ellipse(proj.pos.x + 3, proj.pos.y + eqHeight * 0.25 + 3, size * 0.55, eqHeight * 0.15, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (type === 'breaker') {
+      ctx.fillStyle = '#5a6a7a';
+      ctx.fillRect(proj.pos.x - size / 2, proj.pos.y - size, size, size * 2);
+      // Status light
+      ctx.beginPath();
+      ctx.arc(proj.pos.x, proj.pos.y - size * 0.5, size * 0.2, 0, Math.PI * 2);
+      ctx.fillStyle = '#0f0';
+      ctx.fill();
+    } else if (type === 'disconnect') {
+      ctx.fillStyle = '#c9b896';
+      ctx.fillRect(proj.pos.x - size * 0.3, proj.pos.y - size * 1.2, size * 0.6, size * 1.2);
+    } else {
+      ctx.fillStyle = '#6a7a8a';
+      ctx.fillRect(proj.pos.x - size / 2, proj.pos.y - size / 2, size, size);
+    }
+  };
+
+  // Helper: draw a transmission tower at a world position
+  const drawTower = (localX: number, localY: number, sizeScale: number = 1) => {
+    const proj = project(localX, localY);
+    const zoom = proj.scale * 50;
+    const tw = worldW * 0.04 * sizeScale * zoom;
+    const th = worldH * 0.18 * sizeScale * zoom;
+
+    // Shadow at base
+    ctx.fillStyle = shadowColor;
+    ctx.beginPath();
+    ctx.ellipse(proj.pos.x + 3, proj.pos.y + th * 0.5 + 3, tw * 0.8, th * 0.08, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#444';
+    // Tower legs (tapered)
+    ctx.beginPath();
+    ctx.moveTo(proj.pos.x - tw * 0.6, proj.pos.y + th * 0.5);
+    ctx.lineTo(proj.pos.x + tw * 0.6, proj.pos.y + th * 0.5);
+    ctx.lineTo(proj.pos.x + tw * 0.2, proj.pos.y - th * 0.5);
+    ctx.lineTo(proj.pos.x - tw * 0.2, proj.pos.y - th * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    // Cross arms
+    ctx.fillStyle = '#555';
+    ctx.fillRect(proj.pos.x - tw, proj.pos.y - th * 0.4, tw * 2, th * 0.06);
+    ctx.fillRect(proj.pos.x - tw * 0.8, proj.pos.y - th * 0.2, tw * 1.6, th * 0.05);
+    // Insulators
+    ctx.fillStyle = '#c9b896';
+    const insW = worldW * 0.006 * zoom;
+    const insH = worldH * 0.025 * zoom;
+    for (let i = -1; i <= 1; i++) {
+      ctx.fillRect(proj.pos.x + i * tw * 0.6 - insW, proj.pos.y - th * 0.4 - insH, insW * 2, insH);
+    }
+  };
+
+  // Collect all elements with their depth (localY) for back-to-front sorting
+  interface DrawCommand {
+    depth: number;  // localY - higher = farther back
+    draw: () => void;
+  }
+  const drawCommands: DrawCommand[] = [];
+
+  // Row positions (in local/world coordinates, as fractions of height)
+  const rowY1 = -worldH * 0.25;  // Back row
+  const rowY2 = worldH * 0.15;   // Front row
+
+  // Transformers
+  drawCommands.push({ depth: rowY1, draw: () => drawTransformer(-worldW * 0.35, rowY1, 1.2) });
+  drawCommands.push({ depth: rowY2, draw: () => drawTransformer(-worldW * 0.35, rowY2, 0.9) });
+  drawCommands.push({ depth: rowY1, draw: () => drawTransformer(-worldW * 0.15, rowY1, 0.8) });
+  drawCommands.push({ depth: rowY2, draw: () => drawTransformer(-worldW * 0.15, rowY2, 0.8) });
+
+  // Equipment
+  drawCommands.push({ depth: rowY1, draw: () => drawEquipment(-worldW * 0.25, rowY1, 'breaker') });
+  drawCommands.push({ depth: rowY2, draw: () => drawEquipment(-worldW * 0.25, rowY2, 'breaker') });
+  drawCommands.push({ depth: rowY1, draw: () => drawEquipment(-worldW * 0.05, rowY1, 'disconnect') });
+  drawCommands.push({ depth: rowY2, draw: () => drawEquipment(-worldW * 0.05, rowY2, 'disconnect') });
+  drawCommands.push({ depth: 0, draw: () => drawEquipment(-worldW * 0.05, 0, 'box') });
+  drawCommands.push({ depth: rowY1, draw: () => drawEquipment(worldW * 0.02, rowY1, 'breaker') });
+  drawCommands.push({ depth: rowY2, draw: () => drawEquipment(worldW * 0.02, rowY2, 'breaker') });
+
+  // Transmission towers
+  const towerCount = Math.max(switchyard.offsiteLines, 2);
+  const towerSpacing = worldH * 0.25;
+  const towerStartY = -((towerCount - 1) * towerSpacing) / 2;
+
+  for (let i = 0; i < towerCount; i++) {
+    const ty = towerStartY + i * towerSpacing;
+    drawCommands.push({ depth: ty, draw: () => drawTower(worldW * 0.15, ty, 0.9) });
+    drawCommands.push({ depth: ty, draw: () => drawTower(worldW * 0.28, ty, 1.0) });
+  }
+
+  // Sort back-to-front (smaller Y = farther back = draw first)
+  drawCommands.sort((a, b) => a.depth - b.depth);
+
+  // Draw all elements
+  for (const cmd of drawCommands) {
+    cmd.draw();
+  }
+
+  // Bus bars (horizontal conductors) - draw after sorting since they span multiple depths
+  ctx.strokeStyle = '#808080';
+  ctx.lineWidth = 2;
+  // Back bus bar
+  const busBackLeft = project(-worldW * 0.4, rowY1 - worldH * 0.12);
+  const busBackRight = project(worldW * 0.1, rowY1 - worldH * 0.12);
+  ctx.beginPath();
+  ctx.moveTo(busBackLeft.pos.x, busBackLeft.pos.y);
+  ctx.lineTo(busBackRight.pos.x, busBackRight.pos.y);
+  ctx.stroke();
+  // Front bus bar
+  const busFrontLeft = project(-worldW * 0.4, rowY2 + worldH * 0.12);
+  const busFrontRight = project(worldW * 0.1, rowY2 + worldH * 0.12);
+  ctx.beginPath();
+  ctx.moveTo(busFrontLeft.pos.x, busFrontLeft.pos.y);
+  ctx.lineTo(busFrontRight.pos.x, busFrontRight.pos.y);
+  ctx.stroke();
+
+  // Lines connecting to towers
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 1.5;
+  for (let i = 0; i < towerCount; i++) {
+    const ty = towerStartY + i * towerSpacing;
+    const startY = i < towerCount / 2 ? rowY1 - worldH * 0.12 : rowY2 + worldH * 0.12;
+    const p1 = project(worldW * 0.1, startY);
+    const p2 = project(worldW * 0.15, ty - worldH * 0.07);
+    const p3 = project(worldW * 0.28, ty - worldH * 0.08);
+    const p4 = project(worldW * 0.42, ty);
+    ctx.beginPath();
+    ctx.moveTo(p1.pos.x, p1.pos.y);
+    ctx.lineTo(p2.pos.x, p2.pos.y);
+    ctx.lineTo(p3.pos.x, p3.pos.y);
+    ctx.lineTo(p4.pos.x, p4.pos.y);
+    ctx.stroke();
+  }
+
+  // Grid label on the right (use back-row y for placement)
+  const labelPos = project(worldW * 0.35, rowY1);
+  const labelZoom = labelPos.scale * 50;
+  ctx.font = `bold ${worldH * 0.09 * labelZoom}px sans-serif`;
+  ctx.fillStyle = '#666';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`Grid`, labelPos.pos.x, labelPos.pos.y);
+  const voltPos = project(worldW * 0.35, rowY1 + worldH * 0.12);
+  ctx.font = `${worldH * 0.07 * labelZoom}px sans-serif`;
+  ctx.fillStyle = '#555';
+  ctx.fillText(`(${switchyard.transmissionVoltage} kV)`, voltPos.pos.x, voltPos.pos.y);
+
+  // Arrow pointing to grid (at center depth)
+  const arrowStart = project(worldW * 0.42, 0);
+  const arrowEnd = project(worldW * 0.48, 0);
+  ctx.strokeStyle = '#555';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(arrowStart.pos.x, arrowStart.pos.y);
+  ctx.lineTo(arrowEnd.pos.x, arrowEnd.pos.y);
+  ctx.stroke();
+  // Arrowhead
+  const arrowH = worldH * 0.03 * baseZoom;
+  ctx.beginPath();
+  ctx.moveTo(arrowEnd.pos.x, arrowEnd.pos.y);
+  ctx.lineTo(arrowEnd.pos.x - arrowH, arrowEnd.pos.y - arrowH);
+  ctx.lineTo(arrowEnd.pos.x - arrowH, arrowEnd.pos.y + arrowH);
+  ctx.closePath();
+  ctx.fillStyle = '#555';
+  ctx.fill();
+
+  // Display MW prominently (at front-center)
+  const mwPos = project(-worldW * 0.25, rowY2 + worldH * 0.27);
+  const mwZoom = mwPos.scale * 50;
+  ctx.font = `bold ${worldH * 0.14 * mwZoom}px sans-serif`;
+  ctx.fillStyle = mwToGrid > 0 ? '#4f4' : '#666';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(`${mwToGrid.toFixed(0)} MW`, mwPos.pos.x, mwPos.pos.y);
+
+  // Reliability indicator (positioned to the right of MW display)
+  const reliabilityColors: Record<string, string> = {
+    'standard': '#777',
+    'enhanced': '#8a8',
+    'highly-reliable': '#4a4'
+  };
+  const relPos = project(worldW * 0.05, rowY2 + worldH * 0.27);
+  const relZoom = relPos.scale * 50;
+  ctx.fillStyle = reliabilityColors[switchyard.reliabilityClass] || '#777';
+  ctx.font = `${worldH * 0.05 * relZoom}px sans-serif`;
+  ctx.textAlign = 'left';
+  ctx.fillText(switchyard.reliabilityClass.toUpperCase(), relPos.pos.x, relPos.pos.y);
+
+  // Restore the canvas transform
+  ctx.restore();
 }
 
 function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, view: ViewState): void {
