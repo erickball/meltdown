@@ -1,6 +1,7 @@
 // Component configuration definitions and dialog system
 
 import { saturationTemperature } from '../simulation/water-properties';
+import { estimateComponentCost, formatCost } from './cost-estimation';
 
 export interface ComponentConfig {
   type: string;
@@ -36,6 +37,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Tank',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Tank' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Height of tank bottom above ground level' },
       { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 1000, step: 0.1, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
@@ -64,6 +66,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Pressurizer',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pressurizer' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 10, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Typically elevated above hot leg' },
       { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm' },
@@ -94,6 +97,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Reactor Vessel',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Reactor Vessel' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm' },
       { name: 'innerDiameter', type: 'number', label: 'Vessel Inner Diameter', default: 4.4, min: 2, max: 8, step: 0.1, unit: 'm' },
       { name: 'height', type: 'number', label: 'Vessel Inner Height', default: 12, min: 5, max: 20, step: 0.5, unit: 'm', help: 'Total internal cavity height (including domes)' },
@@ -157,6 +161,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Pipe',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pipe' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Calculated from endpoint positions when editing' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.5, min: 0.05, max: 2, step: 0.05, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
@@ -207,6 +212,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Valve',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Valve' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'type', type: 'select', label: 'Valve Type', default: 'gate', options: [
         { value: 'gate', label: 'Gate Valve' },
         { value: 'globe', label: 'Globe Valve' },
@@ -243,6 +249,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Check Valve',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Check Valve' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'type', type: 'select', label: 'Check Valve Type', default: 'swing', options: [
         { value: 'swing', label: 'Swing Check' },
         { value: 'lift', label: 'Lift Check' },
@@ -273,6 +280,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Relief Valve',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Relief Valve' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.15, min: 0.025, max: 0.5, step: 0.025, unit: 'm' },
       { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 5, min: 1, max: 20, step: 1, unit: '%', help: 'Pressure drop before reseating (% of setpoint)' },
@@ -300,6 +308,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'PORV',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'PORV' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.1, min: 0.025, max: 0.3, step: 0.025, unit: 'm' },
       { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 3, min: 1, max: 10, step: 1, unit: '%', help: 'Pressure drop before auto-reseating (% of setpoint)' },
@@ -328,6 +337,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Pump',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pump' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'elevation', type: 'number', label: 'Elevation', default: 0, min: -20, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (negative for basement placement, e.g. condensate pumps)' },
       { name: 'type', type: 'select', label: 'Pump Type', default: 'centrifugal', options: [
         { value: 'centrifugal', label: 'Centrifugal' },
@@ -381,6 +391,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Heat Exchanger',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Heat Exchanger' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'hxType', type: 'select', label: 'Type', default: 'utube', options: [
         { value: 'utube', label: 'U-Tube' },
         { value: 'straight', label: 'Straight Tube' },
@@ -446,6 +457,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Condenser',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Condenser' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (typically at ground level)' },
       { name: 'volume', type: 'number', label: 'Volume', default: 100, min: 10, max: 1000, step: 10, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 3, min: 1, max: 10, step: 0.5, unit: 'm' },
@@ -490,6 +502,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Turbine-Generator',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Turbine-Generator' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'left-right', options: [
         { value: 'left-right', label: 'Inlet Left → Exhaust Right' },
         { value: 'right-left', label: 'Inlet Right → Exhaust Left' }
@@ -543,6 +556,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Turbine-Driven Pump',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'TD Pump' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'left-right', options: [
         { value: 'left-right', label: 'Steam Left → Pump Right' },
         { value: 'right-left', label: 'Steam Right → Pump Left' }
@@ -616,6 +630,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Reactor Core',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Core' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'height', type: 'number', label: 'Active Height', default: 3.66, min: 1, max: 6, step: 0.1, unit: 'm', help: 'Height of the active fuel region' },
       { name: 'diameter', type: 'number', label: 'Core Diameter', default: 3.2, min: 1, max: 6, step: 0.1, unit: 'm' },
       { name: 'rodDiameter', type: 'number', label: 'Fuel Rod Diameter', default: 9.5, min: 5, max: 15, step: 0.5, unit: 'mm' },
@@ -642,6 +657,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Scram Controller',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Scram Controller' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       // Note: connectedCore will be populated dynamically in the dialog based on available cores
       { name: 'connectedCore', type: 'select', label: 'Connected Core', default: '', options: [], help: 'Select the reactor core this controller monitors' },
       { name: 'highPower', type: 'number', label: 'High Power Trip', default: 125, min: 100, max: 200, step: 5, unit: '%', help: 'Scram when power exceeds this % of nominal' },
@@ -739,20 +755,21 @@ export class ComponentDialog {
 
     const priceLabel = document.createElement('div');
     priceLabel.style.cssText = 'color: #7af; font-size: 12px; margin-bottom: 5px;';
-    priceLabel.textContent = 'Estimated Cost';
+    priceLabel.textContent = 'Estimated Installed Cost';
 
     const priceValue = document.createElement('div');
     priceValue.id = 'price-estimate';
     priceValue.style.cssText = 'font-size: 20px; font-weight: bold; color: #4a4;';
-    priceValue.textContent = '$0'; // Will be updated dynamically
+    priceValue.textContent = '$0';
 
-    const priceNote = document.createElement('div');
-    priceNote.style.cssText = 'font-size: 11px; color: #667788; margin-top: 5px;';
-    priceNote.textContent = 'Price calculation coming soon';
+    const priceBreakdown = document.createElement('div');
+    priceBreakdown.id = 'price-breakdown';
+    priceBreakdown.style.cssText = 'font-size: 10px; color: #889; margin-top: 5px; line-height: 1.4;';
+    priceBreakdown.textContent = '';
 
     priceGroup.appendChild(priceLabel);
     priceGroup.appendChild(priceValue);
-    priceGroup.appendChild(priceNote);
+    priceGroup.appendChild(priceBreakdown);
     this.bodyElement.appendChild(priceGroup);
 
     // Add separator
@@ -866,6 +883,7 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
           input.value = option.default;
+          input.autocomplete = 'off';
       }
 
       formGroup.appendChild(input);
@@ -964,17 +982,52 @@ export class ComponentDialog {
       });
     };
 
-    // Add event listeners to all inputs to update calculated fields
-    if (calculatedOptions.length > 0) {
-      const inputs = inputContainer.querySelectorAll('input, select');
-      inputs.forEach(input => {
-        input.addEventListener('input', updateCalculatedFields);
-        input.addEventListener('change', updateCalculatedFields);
-      });
+    // Function to update price estimate
+    const updatePriceEstimate = () => {
+      const props = this.getCurrentProperties(options);
+      const estimate = estimateComponentCost(this.currentType, props);
 
-      // Initial calculation
-      updateCalculatedFields();
-    }
+      const priceDisplay = document.getElementById('price-estimate');
+      const breakdownDisplay = document.getElementById('price-breakdown');
+
+      if (priceDisplay) {
+        priceDisplay.textContent = formatCost(estimate.total);
+      }
+
+      if (breakdownDisplay) {
+        const parts: string[] = [];
+        if (estimate.materialCost > 0) {
+          parts.push(`Material: ${formatCost(estimate.materialCost)}`);
+        }
+        if (estimate.fabricationCost > 0) {
+          parts.push(`Fabrication: ${formatCost(estimate.fabricationCost)}`);
+        }
+        if (estimate.installationCost > 0) {
+          parts.push(`Installation: ${formatCost(estimate.installationCost)}`);
+        }
+        if (estimate.nqa1Premium > 0) {
+          parts.push(`NQA-1 Premium: ${formatCost(estimate.nqa1Premium)}`);
+        }
+        breakdownDisplay.innerHTML = parts.join('<br>');
+      }
+    };
+
+    // Add event listeners to all inputs to update calculated fields and price
+    const allInputs = inputContainer.querySelectorAll('input, select');
+    allInputs.forEach(input => {
+      input.addEventListener('input', () => {
+        updateCalculatedFields();
+        updatePriceEstimate();
+      });
+      input.addEventListener('change', () => {
+        updateCalculatedFields();
+        updatePriceEstimate();
+      });
+    });
+
+    // Initial calculations
+    updateCalculatedFields();
+    updatePriceEstimate();
 
     // Set up two-phase P/T coupling if this component has phase selection
     this.setupTwoPhaseCouplng();
@@ -1352,7 +1405,31 @@ export class ComponentDialog {
     const inputOptions = options.filter(o => o.type !== 'calculated');
     const calculatedOptions = options.filter(o => o.type === 'calculated');
 
-    // Skip price estimate for editing
+    // Add price estimate at the top (also show for editing)
+    const priceGroup = document.createElement('div');
+    priceGroup.className = 'form-group';
+    priceGroup.style.cssText = 'background: #2a2e38; padding: 10px; border-radius: 4px; margin-bottom: 15px;';
+
+    const priceLabel = document.createElement('div');
+    priceLabel.style.cssText = 'color: #7af; font-size: 12px; margin-bottom: 5px;';
+    priceLabel.textContent = 'Estimated Installed Cost';
+
+    const priceValue = document.createElement('div');
+    priceValue.id = 'price-estimate';
+    priceValue.style.cssText = 'font-size: 20px; font-weight: bold; color: #4a4;';
+    priceValue.textContent = '$0';
+
+    const priceBreakdown = document.createElement('div');
+    priceBreakdown.id = 'price-breakdown';
+    priceBreakdown.style.cssText = 'font-size: 10px; color: #889; margin-top: 5px; line-height: 1.4;';
+    priceBreakdown.textContent = '';
+
+    priceGroup.appendChild(priceLabel);
+    priceGroup.appendChild(priceValue);
+    priceGroup.appendChild(priceBreakdown);
+    this.bodyElement.appendChild(priceGroup);
+
+    // Add separator
     const separator = document.createElement('hr');
     separator.style.cssText = 'border: none; border-top: 1px solid #445566; margin: 15px 0;';
     this.bodyElement.appendChild(separator);
@@ -1467,6 +1544,7 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
           input.value = String(existingValue);
+          input.autocomplete = 'off';
       }
 
       formGroup.appendChild(input);
@@ -1563,16 +1641,49 @@ export class ComponentDialog {
         });
       };
 
-      // Add event listeners
-      const inputs = inputContainer.querySelectorAll('input, select');
-      inputs.forEach(input => {
-        input.addEventListener('input', updateCalculatedFields);
-        input.addEventListener('change', updateCalculatedFields);
-      });
-
       // Initial calculation
       updateCalculatedFields();
     }
+
+    // Function to update price estimate
+    const updatePriceEstimate = () => {
+      const props = this.getCurrentProperties(options);
+      const estimate = estimateComponentCost(this.currentType, props);
+
+      const priceDisplay = document.getElementById('price-estimate');
+      const breakdownDisplay = document.getElementById('price-breakdown');
+
+      if (priceDisplay) {
+        priceDisplay.textContent = formatCost(estimate.total);
+      }
+
+      if (breakdownDisplay) {
+        const parts: string[] = [];
+        if (estimate.materialCost > 0) {
+          parts.push(`Material: ${formatCost(estimate.materialCost)}`);
+        }
+        if (estimate.fabricationCost > 0) {
+          parts.push(`Fabrication: ${formatCost(estimate.fabricationCost)}`);
+        }
+        if (estimate.installationCost > 0) {
+          parts.push(`Installation: ${formatCost(estimate.installationCost)}`);
+        }
+        if (estimate.nqa1Premium > 0) {
+          parts.push(`NQA-1 Premium: ${formatCost(estimate.nqa1Premium)}`);
+        }
+        breakdownDisplay.innerHTML = parts.join('<br>');
+      }
+    };
+
+    // Add event listeners to all inputs to update calculated fields and price
+    const allInputs = inputContainer.querySelectorAll('input, select');
+    allInputs.forEach(input => {
+      input.addEventListener('input', updatePriceEstimate);
+      input.addEventListener('change', updatePriceEstimate);
+    });
+
+    // Initial price calculation
+    updatePriceEstimate();
 
     // Set up two-phase P/T coupling if this component has phase selection
     this.setupTwoPhaseCouplng();

@@ -21,6 +21,7 @@ import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEd
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
+import { estimateComponentCost, formatCost } from './construction/cost-estimation';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -787,6 +788,112 @@ function init() {
   const connectionDialog = new ConnectionDialog();
   const constructionManager = new ConstructionManager(plantState);
 
+  // Construction cost panel elements
+  const constructionCostPanel = document.getElementById('construction-cost-panel') as HTMLDivElement;
+  const totalCostDisplay = document.getElementById('total-cost') as HTMLDivElement;
+  const costBreakdownDisplay = document.getElementById('cost-breakdown') as HTMLDivElement;
+  const costHeader = document.getElementById('cost-header') as HTMLDivElement;
+
+  // Toggle cost breakdown visibility on header click
+  if (costHeader && costBreakdownDisplay && constructionCostPanel) {
+    costHeader.addEventListener('click', () => {
+      const isExpanded = constructionCostPanel.classList.toggle('expanded');
+      costBreakdownDisplay.style.display = isExpanded ? 'block' : 'none';
+    });
+  }
+
+  /**
+   * Update the construction cost panel with current plant costs
+   */
+  function updateConstructionCostPanel(): void {
+    if (!constructionCostPanel) return;
+
+    let totalCost = 0;
+    const componentCosts: Array<{ label: string; cost: number }> = [];
+
+    // Calculate cost for each component
+    for (const [id, component] of plantState.components) {
+      // Map component type to cost estimation key
+      // Some components store a different 'type' than their definition key
+      // (e.g., pressurizer is stored as type='tank', turbine-generator as type='turbine-generator')
+      let costType: string = component.type;
+
+      if (component.type === 'tank') {
+        // Distinguish between tank and pressurizer by label
+        const label = (component.label || '').toLowerCase();
+        if (label.includes('pressurizer')) {
+          costType = 'pressurizer';
+        } else {
+          costType = 'tank';
+        }
+      } else if (component.type === 'vessel') {
+        // Check if it's a core or pressurizer
+        if ((component as any).fuelRodCount !== undefined || (component as any).controlRodCount !== undefined) {
+          costType = 'core';
+        } else {
+          costType = 'pressurizer';
+        }
+      } else if (component.type === 'reactorVessel') {
+        costType = 'reactor-vessel';
+      } else if (component.type === 'heatExchanger') {
+        costType = 'heat-exchanger';
+      } else if (component.type === 'valve') {
+        const valve = component as any;
+        if (valve.valveType === 'check') costType = 'check-valve';
+        else if (valve.valveType === 'relief') costType = 'relief-valve';
+        else if (valve.valveType === 'porv') costType = 'porv';
+      } else if (component.type === 'controller') {
+        costType = 'scram-controller';
+      } else if (component.type === 'coreBarrel') {
+        // Core barrel cost is included in reactor vessel
+        continue;
+      }
+
+      // Create a copy of component properties with units converted to what estimateComponentCost expects
+      // Stored components use SI units (Watts), but cost estimation expects MW
+      const costProps: Record<string, any> = { ...component };
+      if (costType === 'turbine-generator') {
+        costProps.ratedPower = costProps.ratedPower / 1e6;
+      }
+      if (costType === 'condenser') {
+        costProps.coolingCapacity = costProps.coolingCapacity / 1e6;
+      }
+
+      const estimate = estimateComponentCost(costType, costProps);
+      totalCost += estimate.total;
+      componentCosts.push({
+        label: component.label || id,
+        cost: estimate.total,
+      });
+    }
+
+    // Update total display
+    if (totalCostDisplay) {
+      totalCostDisplay.textContent = formatCost(totalCost);
+    }
+
+    // Update breakdown
+    if (costBreakdownDisplay) {
+      // Sort by cost descending
+      componentCosts.sort((a, b) => b.cost - a.cost);
+
+      // Build breakdown HTML
+      let html = '';
+      for (const item of componentCosts) {
+        html += `<div class="cost-item">
+          <span class="cost-label" title="${item.label}">${item.label}</span>
+          <span class="cost-value">${formatCost(item.cost)}</span>
+        </div>`;
+      }
+
+      if (componentCosts.length === 0) {
+        html = '<div style="color: #666; font-style: italic;">No components placed</div>';
+      }
+
+      costBreakdownDisplay.innerHTML = html;
+    }
+  }
+
   // Keyboard controls
   document.addEventListener('keydown', (e) => {
     // Don't handle keyboard shortcuts if a dialog is open
@@ -813,6 +920,7 @@ function init() {
           plantCanvas.clearSelection();
           selectedComponentId = null;
           updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+          updateConstructionCostPanel();
         }
       }
       return;
@@ -895,6 +1003,8 @@ function init() {
       plantCanvas.clearSelection();
       // Hide component detail panel
       updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+      // Update construction cost
+      updateConstructionCostPanel();
     }
   });
 
@@ -1412,6 +1522,7 @@ function init() {
       }
       if (loadConfiguration(name)) {
         showNotification(`Loaded '${name}'`, 'info');
+        updateConstructionCostPanel();
         cleanup();
       }
     });
@@ -1455,6 +1566,10 @@ function init() {
       // Hide simulation controls, show construction controls
       if (simControls) simControls.style.display = 'none';
       if (constructionControls) constructionControls.style.display = 'block';
+      if (constructionCostPanel) {
+        constructionCostPanel.style.display = 'block';
+        updateConstructionCostPanel();
+      }
 
       // Enable construction mode visuals (grid, outlines)
       plantCanvas.setConstructionMode(true);
@@ -1471,6 +1586,7 @@ function init() {
       // Show simulation controls, hide construction controls
       if (simControls) simControls.style.display = 'block';
       if (constructionControls) constructionControls.style.display = 'none';
+      if (constructionCostPanel) constructionCostPanel.style.display = 'none';
 
       // Disable construction mode visuals
       plantCanvas.setConstructionMode(false);
@@ -1830,6 +1946,9 @@ function init() {
                   gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
                   console.log('[Main] Scram controller placed, automatic scram enabled');
                 }
+
+                // Update construction cost panel
+                updateConstructionCostPanel();
 
                 // The canvas will automatically re-render in its render loop
                 // Just show success notification

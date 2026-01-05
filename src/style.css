@@ -163,6 +163,82 @@ body {
   font-size: 10px;
 }
 
+/* Construction Cost Panel */
+#construction-cost-panel {
+  position: absolute;
+  top: 10px;
+  left: 180px;
+  background: rgba(20, 30, 25, 0.95);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #4a5;
+  font-size: 12px;
+  font-family: 'Consolas', monospace;
+  z-index: 100;
+}
+
+#cost-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
+#cost-toggle {
+  color: #4a5;
+  font-size: 10px;
+  transition: transform 0.2s;
+}
+
+#construction-cost-panel.expanded #cost-toggle {
+  transform: rotate(90deg);
+}
+
+.cost-title {
+  color: #aaa;
+}
+
+#total-cost {
+  font-size: 14px;
+  font-weight: bold;
+  color: #4a4;
+}
+
+#cost-breakdown {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #4a5;
+  line-height: 1.5;
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 10px;
+}
+
+#cost-breakdown .cost-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  border-bottom: 1px solid #333;
+}
+
+#cost-breakdown .cost-item:last-child {
+  border-bottom: none;
+}
+
+#cost-breakdown .cost-label {
+  color: #aaa;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#cost-breakdown .cost-value {
+  color: #8cf;
+  font-weight: bold;
+}
+
 /* Debug Panel */
 #debug-panel {
   position: absolute;

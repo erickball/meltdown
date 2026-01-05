@@ -19,8 +19,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -Add containment building as an option
 
--When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
--There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Clean up the debug display
@@ -59,6 +57,8 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+-When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
+-There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
 X When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 X Back up a timestep feature, and periodic state-saving
 X Some kind of semi-implicit fluid flow/pressure calculation
