@@ -1120,6 +1120,8 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const volume = 10;
       const temp = turbineGen.inletFluid?.temperature || saturationTemperature(5.5e6);
       const pressure = turbineGen.inletFluid?.pressure || 5.5e6;
+      // Governor valve position: 0 = closed, 1 = open
+      const governorValve = turbineGen.governorValve ?? 1.0;
 
       return {
         id: component.id,
@@ -1130,6 +1132,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         flowArea: 0.2,
         height: 0,  // Turbines are well-mixed
         elevation,
+        governorValve,
       };
     }
 
@@ -1214,11 +1217,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Reactor vessel IS the downcomer region - creates its own flow node
       const rv = component as ReactorVesselComponent;
 
-      // Calculate downcomer volume (annular region between vessel wall and core barrel)
+      // Use stored volume from construction manager (includes dome geometry)
+      // Fallback to simplified calculation if not available
       const vesselInnerRadius = rv.innerDiameter / 2;
       const barrelOuterRadius = rv.barrelDiameter / 2 + rv.barrelThickness;
       const effectiveHeight = rv.height - rv.barrelBottomGap - rv.barrelTopGap;
-      const downcomerVolume = Math.PI * (vesselInnerRadius * vesselInnerRadius - barrelOuterRadius * barrelOuterRadius) * effectiveHeight;
+      const calculatedVolume = Math.PI * (vesselInnerRadius * vesselInnerRadius - barrelOuterRadius * barrelOuterRadius) * effectiveHeight;
+      const downcomerVolume = (rv as any).volume !== undefined ? (rv as any).volume : calculatedVolume;
 
       // Use fillLevel to determine the liquid/vapor split
       const fillLevel = rv.fillLevel !== undefined ? rv.fillLevel : 1.0;
@@ -1262,9 +1267,11 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Core barrel is the core region inside a reactor vessel
       const barrel = component as CoreBarrelComponent;
 
-      // Calculate core region volume (cylindrical)
+      // Use stored volume from construction manager (accounts for barrel geometry)
+      // Fallback to simplified calculation if not available
       const coreRadius = barrel.innerDiameter / 2;
-      const coreVolume = Math.PI * coreRadius * coreRadius * barrel.height;
+      const calculatedVolume = Math.PI * coreRadius * coreRadius * barrel.height;
+      const coreVolume = (barrel as any).volume !== undefined ? (barrel as any).volume : calculatedVolume;
 
       // Use fluid from component or default to typical PWR conditions
       const pressure = barrel.fluid?.pressure || 155e5;

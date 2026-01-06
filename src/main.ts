@@ -16,6 +16,7 @@ import {
   simulationConfig,
   preloadWaterProperties,
   setSeparationDebug,
+  getTurbineCondenserState,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig } from './construction/component-config';
@@ -157,6 +158,22 @@ function init() {
       }
     }
 
+    // Update MW to grid display from turbine-condenser state
+    const mwValueEl = document.getElementById('mw-value');
+    if (mwValueEl) {
+      const tcState = getTurbineCondenserState();
+      const totalMW = tcState.turbinePower / 1e6;
+      mwValueEl.textContent = totalMW.toFixed(1) + ' MW';
+      // Color based on power level
+      if (totalMW <= 0) {
+        mwValueEl.style.color = '#888';
+      } else if (totalMW < 100) {
+        mwValueEl.style.color = '#ff4';
+      } else {
+        mwValueEl.style.color = '#4f4';
+      }
+    }
+
     // Update debug panel and component detail (throttled to reduce flickering)
     const now = performance.now();
     if (now - lastDebugUpdate >= DEBUG_UPDATE_INTERVAL_MS) {
@@ -202,11 +219,64 @@ function init() {
     } else if (event.type === 'falling-behind') {
       showNotification('Simulation running slower than real time', 'info');
     } else if (event.type === 'simulation-error') {
-      showNotification('Simulation error - use history to go back', 'warning');
+      // Show error dialog for simulation errors
+      showErrorDialog('Simulation Error', event.message);
       // Update pause button to show paused state
       updatePauseButton();
     }
   };
+
+  /**
+   * Show an error dialog to the user
+   */
+  function showErrorDialog(title: string, message: string): void {
+    // Create dialog if it doesn't exist
+    let dialog = document.getElementById('error-dialog') as HTMLDivElement;
+    if (!dialog) {
+      dialog = document.createElement('div');
+      dialog.id = 'error-dialog';
+      dialog.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(40, 20, 20, 0.98);
+        border: 2px solid #a44;
+        border-radius: 8px;
+        padding: 20px;
+        z-index: 10000;
+        max-width: 500px;
+        font-family: 'Consolas', monospace;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      `;
+      document.body.appendChild(dialog);
+    }
+
+    dialog.innerHTML = `
+      <h3 style="color: #f88; margin: 0 0 10px 0;">${title}</h3>
+      <p style="color: #ddd; margin: 0 0 15px 0; font-size: 12px; white-space: pre-wrap; word-break: break-word;">${message}</p>
+      <p style="color: #888; margin: 0 0 15px 0; font-size: 11px;">Use the history controls (⏮ ⏭) to go back to a stable state, or reduce simulation speed.</p>
+      <button id="error-dialog-close" style="
+        background: #644;
+        color: #fff;
+        border: 1px solid #a66;
+        border-radius: 4px;
+        padding: 8px 20px;
+        cursor: pointer;
+        font-family: inherit;
+      ">OK</button>
+    `;
+
+    dialog.style.display = 'block';
+
+    // Close button handler
+    const closeBtn = document.getElementById('error-dialog-close');
+    if (closeBtn) {
+      closeBtn.onclick = () => {
+        dialog.style.display = 'none';
+      };
+    }
+  }
 
   // Set up UI callbacks
   plantCanvas.onMouseMove = (worldPos) => {
@@ -1581,6 +1651,10 @@ function init() {
         updateConstructionCostPanel();
       }
 
+      // Hide MW to grid panel in construction mode
+      const mwPanel = document.getElementById('mw-to-grid-panel');
+      if (mwPanel) mwPanel.style.display = 'none';
+
       // Enable construction mode visuals (grid, outlines)
       plantCanvas.setConstructionMode(true);
 
@@ -1597,6 +1671,10 @@ function init() {
       if (simControls) simControls.style.display = 'block';
       if (constructionControls) constructionControls.style.display = 'none';
       if (constructionCostPanel) constructionCostPanel.style.display = 'none';
+
+      // Show MW to grid panel in simulation mode
+      const mwPanel = document.getElementById('mw-to-grid-panel');
+      if (mwPanel) mwPanel.style.display = 'block';
 
       // Disable construction mode visuals
       plantCanvas.setConstructionMode(false);

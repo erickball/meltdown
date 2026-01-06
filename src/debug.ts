@@ -827,10 +827,18 @@ export function updateComponentDetail(
 
       if (coreBarrelId) {
         // New architecture: core barrel is separate component, vessel is downcomer
+        // Try simulation nodes first (runtime), fall back to plant component volumes (construction mode)
         const coreBarrelNode = simState?.flowNodes.get(coreBarrelId);
         const vesselNode = simState?.flowNodes.get(componentId);
-        coreVolume = coreBarrelNode?.volume ?? 0;
-        downcomerVolume = vesselNode?.volume ?? 0;
+        if (coreBarrelNode && vesselNode) {
+          coreVolume = coreBarrelNode.volume ?? 0;
+          downcomerVolume = vesselNode.volume ?? 0;
+        } else {
+          // Construction mode: read from plant component's stored volumes
+          const coreBarrelComp = plantState?.components.get(coreBarrelId) as Record<string, unknown> | undefined;
+          coreVolume = (coreBarrelComp?.volume as number) ?? 0;
+          downcomerVolume = (component.volume as number) ?? 0;
+        }
       } else if (legacyInsideId && legacyOutsideId) {
         // Legacy architecture: insideBarrel is core, outsideBarrel is downcomer
         const insideBarrelComp = plantState.components.get(legacyInsideId) as Record<string, unknown> | undefined;
@@ -883,11 +891,13 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Generator:</span><span class="detail-value" style="color: ${connectedGenId ? '#7f7' : '#f77'};">${connectedGenId || 'None'}</span></div>`;
 
       // Show MW to grid if connected to a generator
+      // Note: Currently shows total turbine power, not per-generator
       if (connectedGenId && plantState) {
         const generator = plantState.components.get(connectedGenId) as Record<string, unknown> | undefined;
         if (generator && generator.type === 'turbine-generator') {
-          const power = (generator.power as number) || 0;
-          const mwToGrid = power / 1e6;
+          // Get power from turbine-condenser state (simulation calculated value)
+          const tcState = getTurbineCondenserState();
+          const mwToGrid = tcState.turbinePower / 1e6;
           html += `<div class="detail-row"><span class="detail-label">MW to Grid:</span><span class="detail-value" style="color: ${mwToGrid > 0 ? '#4f4' : '#888'};">${mwToGrid.toFixed(1)} MW</span></div>`;
         }
       }

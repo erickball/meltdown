@@ -239,6 +239,31 @@ body {
   font-weight: bold;
 }
 
+/* MW to Grid Panel (simulation mode) */
+#mw-to-grid-panel {
+  position: absolute;
+  top: 10px;
+  left: 180px;
+  background: rgba(20, 30, 25, 0.95);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #4a5;
+  font-size: 12px;
+  font-family: 'Consolas', monospace;
+  z-index: 100;
+}
+
+#mw-to-grid-panel .mw-label {
+  color: #aaa;
+}
+
+#mw-to-grid-panel #mw-value {
+  font-size: 14px;
+  font-weight: bold;
+  color: #4f4;
+  margin-left: 5px;
+}
+
 /* Debug Panel */
 #debug-panel {
   position: absolute;

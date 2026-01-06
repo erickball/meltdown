@@ -2120,7 +2120,12 @@ export class PlantCanvas {
     }
 
     // Average scale for arrow sizing
-    const avgScale = (fromScale + toScale) / 2;
+    // The flow arrow code expects scale ~1.0 at normal viewing distance
+    // For pipes, fromScale/toScale are raw projection scales (~1.0)
+    // For non-pipes, they're projection scale * 50, so we need to normalize
+    const fromNormalized = fromComponent.type === 'pipe' ? fromScale : fromScale / 50;
+    const toNormalized = toComponent.type === 'pipe' ? toScale : toScale / 50;
+    const avgScale = (fromNormalized + toNormalized) / 2;
 
     return {
       fromPos: fromScreen,

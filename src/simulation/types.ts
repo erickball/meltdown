@@ -86,6 +86,11 @@ export interface FlowNode {
   // Used by renderer to show appropriate pixelation in each zone
   separation?: number;              // 0-1, degree of phase separation
 
+  // Governor valve for turbines (0-1)
+  // 0 = fully closed, 1 = fully open
+  // Affects flow resistance into the turbine
+  governorValve?: number;
+
   // Internal obstructions that reduce available cross-sectional area at certain elevations
   // Used for accurate liquid level calculation when components are inside this node
   // (e.g., a core barrel inside a reactor vessel annulus)

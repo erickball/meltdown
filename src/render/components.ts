@@ -3406,10 +3406,10 @@ export function renderFlowConnectionArrows(
       angle += Math.PI;
     }
 
-    // Calculate arrow size based on mass flow rate
-    // Scale: 0 kg/s -> 8px, 1000 kg/s -> 45px
-    const massFlow = Math.abs(conn.massFlowRate);
-    const baseArrowSize = Math.min(45, Math.max(8, 8 + massFlow * 0.037));
+    // Calculate arrow size based on mass flow rate (square root scaling)
+    // Scale: 0 kg/s -> 8px, 10000 kg/s -> 80px (sqrt(10000) = 100, so 8 + 100*0.72 = 80)
+    const massFlow = Math.min(10000, Math.abs(conn.massFlowRate));
+    const baseArrowSize = Math.max(8, 8 + Math.sqrt(massFlow) * 0.72);
     const perspectiveMultiplier = getPortScreenPos ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
 

@@ -125,8 +125,11 @@ export const componentDefinitions: Record<string, {
       { name: 'insideVolume', type: 'calculated', label: 'Inside Barrel Volume', default: 0, unit: 'm³',
         calculate: (p) => {
           const vesselR = (p.innerDiameter ?? 4.4) / 2;
-          const barrelOuterR = (p.barrelDiameter ?? 3.4) / 2 + (p.barrelThickness ?? 0.05);
-          const barrelInnerR = (p.barrelDiameter ?? 3.4) / 2 - (p.barrelThickness ?? 0.05);
+          // barrelDiameter is CENTER-LINE diameter (to middle of barrel wall)
+          const barrelCenterR = (p.barrelDiameter ?? 3.4) / 2;
+          const barrelThickness = p.barrelThickness ?? 0.05;
+          const barrelOuterR = barrelCenterR + barrelThickness / 2;
+          const barrelInnerR = barrelCenterR - barrelThickness / 2;
           const innerHeight = p.height ?? 12; // Inner height - volumes don't depend on wall thickness
           // Calculate dome intrusion at barrel outer radius
           const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterR * barrelOuterR);
@@ -138,7 +141,10 @@ export const componentDefinitions: Record<string, {
       { name: 'outsideVolume', type: 'calculated', label: 'Annulus Volume', default: 0, unit: 'm³',
         calculate: (p) => {
           const vesselR = (p.innerDiameter ?? 4.4) / 2;
-          const barrelOuterR = (p.barrelDiameter ?? 3.4) / 2 + (p.barrelThickness ?? 0.05);
+          // barrelDiameter is CENTER-LINE diameter (to middle of barrel wall)
+          const barrelCenterR = (p.barrelDiameter ?? 3.4) / 2;
+          const barrelThickness = p.barrelThickness ?? 0.05;
+          const barrelOuterR = barrelCenterR + barrelThickness / 2;
           const innerHeight = p.height ?? 12; // Inner height - volumes don't depend on wall thickness
           // Calculate dome intrusion at barrel outer radius
           const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterR * barrelOuterR);

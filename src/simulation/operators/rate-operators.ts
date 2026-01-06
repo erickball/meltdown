@@ -1963,6 +1963,21 @@ export class FlowMomentumRateOperator implements RateOperator {
       // Valve increases resistance as it closes: K_eff = K_base / position²
       let K_eff = K_base / Math.pow(valveOpenFraction, 2);
 
+      // Governor valve on turbines affects inlet flow resistance
+      // Check if destination node is a turbine with a governor valve
+      if (toNode.governorValve !== undefined && toNode.governorValve < 1.0) {
+        const gvPosition = Math.max(0.01, toNode.governorValve); // Prevent division by zero
+        // Governor valve acts like a control valve: K increases as it closes
+        K_eff = K_eff / Math.pow(gvPosition, 2);
+
+        // If governor valve is nearly closed, decay flow to zero
+        if (gvPosition < 0.01) {
+          const tau = 0.1; // 100ms decay time
+          rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
+          continue;
+        }
+      }
+
       // Running pumps have very high resistance to reverse flow through the pump
       // The pump impeller physically blocks backflow - model this as extremely high friction
       //

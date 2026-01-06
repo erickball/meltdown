@@ -503,6 +503,9 @@ export class GameLoop {
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
 
+    // Clear recent events (prevents stale events from blocking new ones due to time comparison)
+    this.recentEvents = [];
+
     // Clear state history and record initial state (step 0)
     this.stateHistory.clear();
     this.stateHistory.recordStep(this.state, 0);

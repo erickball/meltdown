@@ -2172,6 +2172,40 @@ export class ConstructionManager {
       if (properties.pressureRating !== undefined) {
         component.pressureRating = properties.pressureRating;
       }
+
+      // Recalculate volumes when geometry changes
+      const rv = component as ReactorVesselComponent;
+      const vesselR = rv.innerDiameter / 2;
+      // barrelDiameter is CENTER-LINE diameter (to middle of barrel wall)
+      const barrelCenterR = rv.barrelDiameter / 2;
+      const barrelOuterR = barrelCenterR + rv.barrelThickness / 2;
+      const barrelInnerR = barrelCenterR - rv.barrelThickness / 2;
+      const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterR * barrelOuterR);
+      const barrelBottomElev = domeIntrusion + rv.barrelBottomGap;
+      const barrelTopElev = rv.height - domeIntrusion - rv.barrelTopGap;
+      const barrelHeight = barrelTopElev - barrelBottomElev;
+
+      // Core volume (inside barrel)
+      const coreVolume = Math.PI * barrelInnerR * barrelInnerR * barrelHeight;
+
+      // Downcomer volume (total vessel - barrel region)
+      const innerCylinderHeight = rv.height - 2 * vesselR;
+      const domeVolume = (4/3) * Math.PI * Math.pow(vesselR, 3) / 2;
+      const cylinderVolume = Math.PI * vesselR * vesselR * innerCylinderHeight;
+      const totalVesselVolume = cylinderVolume + 2 * domeVolume;
+      const barrelRegionVolume = Math.PI * barrelOuterR * barrelOuterR * barrelHeight;
+      const downcomerVolume = totalVesselVolume - barrelRegionVolume;
+
+      // Update volumes on vessel and core barrel
+      (component as any).volume = downcomerVolume;
+      if (rv.coreBarrelId) {
+        const coreBarrel = this.plantState.components.get(rv.coreBarrelId) as any;
+        if (coreBarrel) {
+          coreBarrel.volume = coreVolume;
+          coreBarrel.innerDiameter = barrelInnerR * 2;
+          coreBarrel.height = barrelHeight;
+        }
+      }
     }
 
     // Controller-specific properties
