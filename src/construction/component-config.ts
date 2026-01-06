@@ -2,6 +2,7 @@
 
 import { saturationTemperature } from '../simulation/water-properties';
 import { estimateComponentCost, formatCost } from './cost-estimation';
+import { ALL_GAS_SPECIES, GAS_PROPERTIES, type GasSpecies } from '../simulation/gas-properties';
 
 export interface ComponentConfig {
   type: string;
@@ -11,9 +12,36 @@ export interface ComponentConfig {
   containedBy?: string;  // ID of container component (tank, vessel, containment building)
 }
 
+/**
+ * NCG (Non-Condensible Gas) initial condition.
+ * Stored as partial pressures in bar for user-friendly input.
+ */
+export interface NcgInitialCondition {
+  N2?: number;   // bar partial pressure
+  O2?: number;
+  H2?: number;
+  He?: number;
+  CO?: number;
+  CO2?: number;
+  Xe?: number;
+  Ar?: number;
+}
+
+/** Display names for gas species */
+const GAS_DISPLAY_NAMES: Record<GasSpecies, string> = {
+  N2: 'Nitrogen (N₂)',
+  O2: 'Oxygen (O₂)',
+  H2: 'Hydrogen (H₂)',
+  He: 'Helium (He)',
+  CO: 'Carbon Monoxide (CO)',
+  CO2: 'Carbon Dioxide (CO₂)',
+  Xe: 'Xenon (Xe)',
+  Ar: 'Argon (Ar)',
+};
+
 export interface ComponentOption {
   name: string;
-  type: 'number' | 'text' | 'select' | 'checkbox' | 'calculated';
+  type: 'number' | 'text' | 'select' | 'checkbox' | 'calculated' | 'ncg';
   label: string;
   default: any;
   min?: number;
@@ -45,6 +73,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 1, max: 221, step: 1, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
+      { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -76,6 +105,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%', help: 'Pressurizers are always two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 1, max: 221, step: 1, unit: 'bar', help: 'Determines saturation temperature' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 345, min: 20, max: 374, step: 5, unit: '°C', help: 'Calculated from saturation pressure' },
+      { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to the steam space' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -109,6 +139,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 100, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 50, max: 221, step: 5, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
+      { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to the vapor space' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -188,6 +219,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'For two-phase, determines saturation temperature' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialQuality', type: 'number', label: 'Initial Quality', default: 0.5, min: 0, max: 1, step: 0.01, help: 'Mass fraction of vapor (0=sat. liquid, 1=sat. vapor). Only for two-phase.' },
+      { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to vapor' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
@@ -473,6 +505,7 @@ export const componentDefinitions: Record<string, {
       { name: 'coolingWaterTemp', type: 'number', label: 'Cooling Water Temp', default: 20, min: 5, max: 40, step: 5, unit: '°C' },
       { name: 'coolingWaterFlow', type: 'number', label: 'Cooling Water Flow', default: 50000, min: 1000, max: 100000, step: 1000, unit: 'kg/s' },
       { name: 'includesPump', type: 'checkbox', label: 'Include Condensate Pump', default: true, help: 'Automatically includes a condensate pump' },
+      { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Air ingress or other NCGs in condenser (typically evacuated)' },
       // Calculated fields
       { name: 'width', type: 'calculated', label: 'Width', default: 0, unit: 'm',
         calculate: (p) => {
@@ -928,6 +961,19 @@ export class ComponentDialog {
           if (option.step !== undefined) input.step = String(option.step);
           break;
 
+        case 'ncg':
+          // NCG input is a button that opens an expandable panel
+          input = document.createElement('input');
+          input.type = 'hidden';
+          input.id = `option-${option.name}`;
+          input.name = option.name;
+          input.value = JSON.stringify(option.default || {});
+
+          // Create the NCG control panel
+          const ncgPanel = this.createNcgPanel(option.name, option.default || {});
+          formGroup.appendChild(ncgPanel);
+          break;
+
         default: // text
           input = document.createElement('input');
           input.type = 'text';
@@ -1191,6 +1237,192 @@ export class ComponentDialog {
     updateFormState();
   }
 
+  /**
+   * Create the NCG (Non-Condensible Gas) input panel.
+   * Shows a button that expands to reveal partial pressure inputs for each gas species.
+   */
+  private createNcgPanel(optionName: string, initialValue: NcgInitialCondition): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'ncg-panel';
+    container.style.cssText = 'margin-top: 4px;';
+
+    // Summary line showing current NCG content
+    const summaryLine = document.createElement('div');
+    summaryLine.id = `ncg-summary-${optionName}`;
+    summaryLine.style.cssText = 'font-size: 11px; color: #8af; margin-bottom: 6px;';
+    this.updateNcgSummary(summaryLine, initialValue);
+    container.appendChild(summaryLine);
+
+    // Toggle button
+    const toggleBtn = document.createElement('button');
+    toggleBtn.type = 'button';
+    toggleBtn.textContent = '+ Add/Edit Gases';
+    toggleBtn.style.cssText = `
+      background: #3a4a5a; color: #adf; border: 1px solid #4a6a8a;
+      padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+    `;
+    container.appendChild(toggleBtn);
+
+    // Expandable panel (hidden by default)
+    const panel = document.createElement('div');
+    panel.style.cssText = `
+      display: none; margin-top: 8px; padding: 10px;
+      background: #1a2a3a; border: 1px solid #3a5a7a; border-radius: 4px;
+    `;
+
+    // Gas species inputs
+    const gasInputs: Map<GasSpecies, HTMLInputElement> = new Map();
+
+    for (const species of ALL_GAS_SPECIES) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display: flex; align-items: center; margin-bottom: 6px;';
+
+      const label = document.createElement('label');
+      label.style.cssText = 'width: 140px; font-size: 11px; color: #aaa;';
+      label.textContent = GAS_DISPLAY_NAMES[species];
+
+      const input = document.createElement('input');
+      input.type = 'number';
+      input.min = '0';
+      input.max = '100';
+      input.step = '0.001';
+      input.value = String(initialValue[species] || 0);
+      input.style.cssText = 'width: 70px; margin-right: 5px;';
+      input.dataset.species = species;
+      gasInputs.set(species, input);
+
+      const unit = document.createElement('span');
+      unit.style.cssText = 'font-size: 10px; color: #888;';
+      unit.textContent = 'bar';
+
+      // Color indicator
+      const colorDot = document.createElement('span');
+      colorDot.style.cssText = `
+        width: 12px; height: 12px; border-radius: 50%; margin-left: 8px;
+        background: ${GAS_PROPERTIES[species].color}; border: 1px solid #555;
+      `;
+
+      row.appendChild(label);
+      row.appendChild(input);
+      row.appendChild(unit);
+      row.appendChild(colorDot);
+      panel.appendChild(row);
+
+      // Update hidden input and summary when value changes
+      input.addEventListener('input', () => {
+        this.updateNcgHiddenInput(optionName, gasInputs);
+        const hiddenInput = document.getElementById(`option-${optionName}`) as HTMLInputElement;
+        if (hiddenInput) {
+          try {
+            const val = JSON.parse(hiddenInput.value);
+            this.updateNcgSummary(summaryLine, val);
+          } catch { /* ignore */ }
+        }
+      });
+    }
+
+    // Quick-add buttons for common mixtures
+    const quickAddDiv = document.createElement('div');
+    quickAddDiv.style.cssText = 'margin-top: 10px; padding-top: 8px; border-top: 1px solid #3a5a7a;';
+
+    const quickLabel = document.createElement('div');
+    quickLabel.style.cssText = 'font-size: 10px; color: #888; margin-bottom: 6px;';
+    quickLabel.textContent = 'Quick add:';
+    quickAddDiv.appendChild(quickLabel);
+
+    // Air button
+    const airBtn = document.createElement('button');
+    airBtn.type = 'button';
+    airBtn.textContent = 'Air (1 bar)';
+    airBtn.style.cssText = `
+      background: #2a3a4a; color: #8cf; border: 1px solid #4a6a8a;
+      padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px; margin-right: 6px;
+    `;
+    airBtn.addEventListener('click', () => {
+      gasInputs.get('N2')!.value = '0.78';
+      gasInputs.get('O2')!.value = '0.21';
+      gasInputs.get('Ar')!.value = '0.009';
+      this.updateNcgHiddenInput(optionName, gasInputs);
+      const hiddenInput = document.getElementById(`option-${optionName}`) as HTMLInputElement;
+      if (hiddenInput) {
+        try {
+          this.updateNcgSummary(summaryLine, JSON.parse(hiddenInput.value));
+        } catch { /* ignore */ }
+      }
+    });
+    quickAddDiv.appendChild(airBtn);
+
+    // Clear button
+    const clearBtn = document.createElement('button');
+    clearBtn.type = 'button';
+    clearBtn.textContent = 'Clear All';
+    clearBtn.style.cssText = `
+      background: #3a2a2a; color: #faa; border: 1px solid #6a4a4a;
+      padding: 3px 8px; border-radius: 3px; cursor: pointer; font-size: 10px;
+    `;
+    clearBtn.addEventListener('click', () => {
+      for (const input of gasInputs.values()) {
+        input.value = '0';
+      }
+      this.updateNcgHiddenInput(optionName, gasInputs);
+      this.updateNcgSummary(summaryLine, {});
+    });
+    quickAddDiv.appendChild(clearBtn);
+
+    panel.appendChild(quickAddDiv);
+    container.appendChild(panel);
+
+    // Toggle expand/collapse
+    toggleBtn.addEventListener('click', () => {
+      const isHidden = panel.style.display === 'none';
+      panel.style.display = isHidden ? 'block' : 'none';
+      toggleBtn.textContent = isHidden ? '− Hide Gases' : '+ Add/Edit Gases';
+    });
+
+    return container;
+  }
+
+  /**
+   * Update the hidden input field with current NCG values.
+   */
+  private updateNcgHiddenInput(optionName: string, gasInputs: Map<GasSpecies, HTMLInputElement>): void {
+    const hiddenInput = document.getElementById(`option-${optionName}`) as HTMLInputElement;
+    if (!hiddenInput) return;
+
+    const ncg: NcgInitialCondition = {};
+    for (const [species, input] of gasInputs) {
+      const val = parseFloat(input.value) || 0;
+      if (val > 0) {
+        ncg[species] = val;
+      }
+    }
+    hiddenInput.value = JSON.stringify(ncg);
+  }
+
+  /**
+   * Update the NCG summary line showing total pressure and composition.
+   */
+  private updateNcgSummary(element: HTMLElement, ncg: NcgInitialCondition): void {
+    let total = 0;
+    const parts: string[] = [];
+
+    for (const species of ALL_GAS_SPECIES) {
+      const val = ncg[species] || 0;
+      if (val > 0) {
+        total += val;
+        parts.push(`${species}: ${val.toFixed(3)} bar`);
+      }
+    }
+
+    if (total === 0) {
+      element.textContent = 'No NCGs (pure steam/water)';
+      element.style.color = '#666';
+    } else {
+      element.textContent = `Total NCG: ${total.toFixed(3)} bar (${parts.join(', ')})`;
+      element.style.color = '#8af';
+    }
+  }
+
   private getCurrentProperties(options: ComponentOption[]): Record<string, any> {
     const props: Record<string, any> = {};
     options.forEach(option => {
@@ -1202,6 +1434,13 @@ export class ComponentDialog {
         props[option.name] = (element as HTMLInputElement).checked;
       } else if (element.type === 'number') {
         props[option.name] = parseFloat(element.value) || option.default;
+      } else if (element.type === 'hidden' && option.type === 'ncg') {
+        // Parse NCG JSON
+        try {
+          props[option.name] = JSON.parse(element.value);
+        } catch {
+          props[option.name] = {};
+        }
       } else {
         props[option.name] = element.value;
       }
@@ -1216,11 +1455,23 @@ export class ComponentDialog {
     inputs.forEach((input: Element) => {
       const element = input as HTMLInputElement | HTMLSelectElement;
       const name = element.name;
+      if (!name) return; // Skip unnamed inputs
 
       if (element.type === 'checkbox') {
         properties[name] = (element as HTMLInputElement).checked;
       } else if (element.type === 'number') {
         properties[name] = parseFloat(element.value);
+      } else if (element.type === 'hidden' && name.includes('Ncg')) {
+        // Parse NCG JSON from hidden input
+        try {
+          const parsed = JSON.parse(element.value);
+          // Only store if there are actual values
+          if (parsed && Object.keys(parsed).length > 0) {
+            properties[name] = parsed;
+          }
+        } catch {
+          // Ignore parse errors
+        }
       } else {
         properties[name] = element.value;
       }

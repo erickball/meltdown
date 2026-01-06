@@ -19,6 +19,22 @@
 import { SimulationState, FlowNode, FluidState, simulationConfig } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
+import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES } from '../gas-properties';
+
+/**
+ * NCG initial condition as partial pressures in bar.
+ * Used for specifying initial gas content in components.
+ */
+export interface NcgPartialPressures {
+  N2?: number;   // bar
+  O2?: number;
+  H2?: number;
+  He?: number;
+  CO?: number;
+  CO2?: number;
+  Xe?: number;
+  Ar?: number;
+}
 
 // ============================================================================
 // Fluid State Debug Logging
@@ -934,12 +950,24 @@ export function getFluidSpecificHeat(fluid: FluidState): number {
  * Create a FluidState from temperature, pressure, phase, and volume
  * Calculates mass and internal energy for the new energy-conserving formulation
  */
+/**
+ * Create a FluidState with proper density calculation for the given conditions.
+ *
+ * @param temperature - Temperature in Kelvin
+ * @param pressure - Steam/water pressure in Pascals (NOT including NCG partial pressure)
+ * @param phase - Phase of the fluid
+ * @param quality - Vapor mass fraction (0-1, only meaningful for two-phase)
+ * @param volume - Volume in m³
+ * @param ncgPartialPressures - Optional NCG content as partial pressures in bar
+ * @returns FluidState with calculated mass, energy, and optionally NCG moles
+ */
 export function createFluidState(
   temperature: number,
   pressure: number,
   phase: 'liquid' | 'two-phase' | 'vapor',
   quality: number,
-  volume: number
+  volume: number,
+  ncgPartialPressures?: NcgPartialPressures
 ): FluidState {
   // Calculate density based on phase
   let density: number;
@@ -984,7 +1012,8 @@ export function createFluidState(
       const mass = density * volume;
       const internalEnergy = mass * specificEnergy;
 
-      return {
+      // Create fluid state for superheated vapor
+      const fluidState: FluidState = {
         mass,
         internalEnergy,
         temperature,
@@ -992,6 +1021,29 @@ export function createFluidState(
         phase,
         quality,
       };
+
+      // Add NCG if specified
+      if (ncgPartialPressures && Object.keys(ncgPartialPressures).length > 0) {
+        const ncg = emptyGasComposition();
+        let hasNcg = false;
+
+        for (const species of ALL_GAS_SPECIES) {
+          const P_bar = ncgPartialPressures[species as GasSpecies];
+          if (P_bar && P_bar > 0) {
+            const P_Pa = P_bar * 1e5; // bar to Pa
+            // n = PV / RT
+            const moles = (P_Pa * volume) / (R_GAS * temperature);
+            ncg[species as GasSpecies] = moles;
+            hasNcg = true;
+          }
+        }
+
+        if (hasNcg) {
+          fluidState.ncg = ncg;
+        }
+      }
+
+      return fluidState;
     }
   } else {
     // Two-phase mixture - pressure is locked to saturation
@@ -1004,7 +1056,8 @@ export function createFluidState(
   const specificEnergy = Water.energyFromTemperature(temperature, phase, quality);
   const internalEnergy = mass * specificEnergy;
 
-  return {
+  // Create base fluid state
+  const fluidState: FluidState = {
     mass,
     internalEnergy,
     temperature,
@@ -1012,4 +1065,28 @@ export function createFluidState(
     phase,
     quality,
   };
+
+  // Add NCG if specified
+  if (ncgPartialPressures && Object.keys(ncgPartialPressures).length > 0) {
+    // Convert partial pressures (bar) to moles using ideal gas law: n = PV/RT
+    const ncg = emptyGasComposition();
+    let hasNcg = false;
+
+    for (const species of ALL_GAS_SPECIES) {
+      const P_bar = ncgPartialPressures[species as GasSpecies];
+      if (P_bar && P_bar > 0) {
+        const P_Pa = P_bar * 1e5; // bar to Pa
+        // n = PV / RT
+        const moles = (P_Pa * volume) / (R_GAS * temperature);
+        ncg[species as GasSpecies] = moles;
+        hasNcg = true;
+      }
+    }
+
+    if (hasNcg) {
+      fluidState.ncg = ncg;
+    }
+  }
+
+  return fluidState;
 }

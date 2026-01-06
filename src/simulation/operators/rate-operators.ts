@@ -2085,3 +2085,188 @@ export class FlowMomentumRateOperator implements RateOperator {
     return rates;
   }
 }
+
+// ============================================================================
+// Cladding Oxidation Rate Operator
+// ============================================================================
+
+/**
+ * Cladding Oxidation Rate Operator
+ *
+ * Models high-temperature zirconium oxidation by steam:
+ *   Zr + 2H₂O → ZrO₂ + 2H₂ + heat (586 kJ/mol Zr)
+ *
+ * This reaction becomes significant above ~1200K and accelerates dramatically
+ * at higher temperatures (runaway oxidation above ~1500K).
+ *
+ * The Baker-Just correlation is used for oxidation rate:
+ *   dW²/dt = A × exp(-Q/RT)
+ * where W is oxide thickness, A = 33.3 cm²/s, Q = 45,500 cal/mol
+ *
+ * Physics included:
+ * 1. Temperature-dependent Arrhenius kinetics
+ * 2. Steam availability (oxidation limited by steam partial pressure)
+ * 3. Exothermic heat addition to cladding
+ * 4. H₂ generation added to coolant NCG inventory
+ * 5. Oxidation progress tracking (0-100% of cladding consumed)
+ *
+ * References:
+ * - Baker, L., Just, L.C. (1962) - Baker-Just correlation
+ * - Cathcart-Pawel correlation (alternative, similar results)
+ */
+export class CladdingOxidationRateOperator implements RateOperator {
+  name = 'CladdingOxidation';
+
+  // Physical constants
+  private static readonly ZR_MOLAR_MASS = 0.09122; // kg/mol (91.22 g/mol)
+  private static readonly H2O_MOLAR_MASS = 0.01802; // kg/mol
+
+  // Baker-Just correlation constants (parabolic rate law)
+  // dW²/dt = A × exp(-Q/RT) where W is oxide thickness
+  // A = 33.3 cm²/s = 3.33e-3 m²/s
+  // Q = 45500 cal/mol = 190370 J/mol
+  private static readonly A_BAKER_JUST = 3.33e-3; // m²/s
+  private static readonly Q_ACTIVATION = 190370;  // J/mol
+  private static readonly R_GAS = 8.314;          // J/mol-K
+
+  // Reaction enthalpy: Zr + 2H₂O → ZrO₂ + 2H₂ releases 586 kJ/mol Zr
+  private static readonly OXIDATION_ENTHALPY = 586000; // J/mol Zr
+
+  // Temperature threshold below which oxidation is negligible
+  private static readonly T_THRESHOLD = 1100; // K (~827°C)
+
+  computeRates(state: SimulationState): StateRates {
+    const rates = createZeroRates();
+
+    // Find all cladding nodes with oxidation tracking
+    for (const [id, node] of state.thermalNodes) {
+      if (!node.oxidation) continue;
+
+      const ox = node.oxidation;
+
+      // Skip if already fully oxidized
+      if (ox.oxidizedFraction >= 0.9999) continue;
+
+      // Get cladding temperature
+      const T = node.temperature;
+
+      // Skip if below threshold temperature
+      if (T < CladdingOxidationRateOperator.T_THRESHOLD) continue;
+
+      // Get associated coolant node for steam availability and H₂ release
+      const coolantNode = state.flowNodes.get(ox.associatedCoolantNode);
+      if (!coolantNode) continue;
+
+      // Check steam availability
+      // For two-phase or vapor, steam is available
+      // For liquid, very little steam (use saturation pressure at surface, but much reduced)
+      let P_steam: number;
+      let steamFactor: number;
+      if (coolantNode.fluid.phase === 'liquid') {
+        // Limited steam from liquid surface evaporation
+        // Use saturation pressure at coolant temperature, but reduce significantly
+        // because steam must diffuse from liquid surface to hot cladding
+        const P_sat = Water.saturationPressure(coolantNode.fluid.temperature);
+        // Effective steam pressure is much lower than saturation due to diffusion limits
+        // Use a factor of 0.01 to represent this mass transfer limitation
+        P_steam = P_sat * 0.01;
+        // Steam factor based on 1 bar reference for full reaction rate
+        steamFactor = Math.min(1, P_steam / 1e5);
+      } else {
+        // Vapor or two-phase: steam pressure is total - NCG
+        const P_ncg = coolantNode.fluid.ncg && coolantNode.volume > 0
+          ? ncgPartialPressure(coolantNode.fluid.ncg, coolantNode.fluid.temperature, coolantNode.volume)
+          : 0;
+        P_steam = Math.max(0, coolantNode.fluid.pressure - P_ncg);
+        // Steam factor: full rate at 1 bar, reduced below
+        steamFactor = Math.min(1, P_steam / 1e5);
+      }
+
+      if (steamFactor < 0.01) continue; // No steam, no reaction
+
+      // Baker-Just parabolic rate law: dW²/dt = A × exp(-Q/RT)
+      // where W is oxide layer thickness
+      // For mass-based calculation: dm_oxide/dt ~ (surface area) × rate
+      const A = CladdingOxidationRateOperator.A_BAKER_JUST;
+      const Q = CladdingOxidationRateOperator.Q_ACTIVATION;
+      const R = CladdingOxidationRateOperator.R_GAS;
+
+      // Arrhenius rate constant (m²/s)
+      const k_rate = A * Math.exp(-Q / (R * T));
+
+      // Current oxide thickness fraction determines remaining Zr surface
+      // As oxidation progresses, rate slows due to diffusion through oxide layer
+      // Parabolic law already accounts for this: rate ∝ 1/W
+      const W_fraction = ox.oxidizedFraction;
+      const remaining_factor = Math.sqrt(1 - W_fraction);
+
+      // Mass oxidation rate (kg Zr/s)
+      // Surface area is proportional to node.surfaceArea
+      // Convert from parabolic thickness rate to mass rate:
+      // dm/dt = ρ_Zr × surfaceArea × dW/dt
+      // where dW/dt = k_rate / (2W) for parabolic law
+      // For simplicity, use empirical rate scaled by surface area
+      const ZR_DENSITY = 6500; // kg/m³
+      const characteristic_thickness = node.characteristicLength; // clad thickness ~0.6mm
+
+      // Rate of oxide thickness growth (m/s)
+      // From parabolic law: W × dW/dt = k_rate/2, so dW/dt = k_rate/(2W)
+      // At W→0, we cap the rate to avoid singularity
+      const W_current = Math.max(characteristic_thickness * W_fraction, 1e-6);
+      const dW_dt = k_rate / (2 * W_current);
+
+      // Cap the rate to prevent numerical issues (max ~1 mm/s at extreme T)
+      const dW_dt_capped = Math.min(dW_dt, 1e-3);
+
+      // Mass of Zr oxidized per second (kg/s)
+      // dm_Zr/dt = ρ_Zr × surfaceArea × dW/dt × steam_availability
+      const dm_Zr_dt = ZR_DENSITY * node.surfaceArea * dW_dt_capped * steamFactor * remaining_factor;
+
+      // Convert to oxidation fraction rate
+      // dFraction/dt = dm_Zr_dt / total_Zr_mass
+      const dOxidizedFraction_dt = dm_Zr_dt / ox.totalZrMass;
+
+      // Store oxidation rate for this thermal node
+      const existingRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+      existingRates.dOxidizedFraction = dOxidizedFraction_dt;
+
+      // Calculate heat release (exothermic reaction)
+      // Moles of Zr oxidized per second
+      const mol_Zr_dt = dm_Zr_dt / CladdingOxidationRateOperator.ZR_MOLAR_MASS;
+      const Q_release = mol_Zr_dt * CladdingOxidationRateOperator.OXIDATION_ENTHALPY; // W
+
+      // Add heat to cladding (increases temperature)
+      existingRates.dTemperature += Q_release / (node.mass * node.specificHeat);
+      rates.thermalNodes.set(id, existingRates);
+
+      // Calculate H₂ production rate
+      // Stoichiometry: 1 mol Zr → 2 mol H₂
+      const mol_H2_dt = 2 * mol_Zr_dt;
+
+      // Add H₂ to coolant NCG inventory
+      const coolantRates = rates.flowNodes.get(ox.associatedCoolantNode) || { dMass: 0, dEnergy: 0 };
+      if (!coolantRates.dNcg) {
+        coolantRates.dNcg = emptyGasComposition();
+      }
+      coolantRates.dNcg.H2 += mol_H2_dt;
+      rates.flowNodes.set(ox.associatedCoolantNode, coolantRates);
+
+      // Steam consumption: 2 mol H₂O per mol Zr
+      // This removes mass and energy from coolant
+      const mol_H2O_dt = 2 * mol_Zr_dt;
+      const dm_steam = mol_H2O_dt * CladdingOxidationRateOperator.H2O_MOLAR_MASS; // kg/s consumed
+
+      // For now, we don't explicitly track steam mass removal
+      // (The steam tables will naturally reduce pressure as mass drops)
+      // But we should add this for mass conservation
+      coolantRates.dMass -= dm_steam;
+
+      // Energy for steam consumption (latent heat of vaporization ~2.26 MJ/kg at 100°C)
+      // At high temperature it's less, but use conservative estimate
+      const h_fg = 2.0e6; // J/kg (approximate at high T)
+      coolantRates.dEnergy -= dm_steam * h_fg;
+    }
+
+    return rates;
+  }
+}

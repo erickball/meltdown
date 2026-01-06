@@ -36,6 +36,7 @@ export interface FlowConnectionRates {
 
 export interface ThermalNodeRates {
   dTemperature: number;  // K/s - rate of temperature change (for solids)
+  dOxidizedFraction?: number;  // 1/s - rate of cladding oxidation (for cladding nodes only)
 }
 
 export interface NeutronicsRates {
@@ -132,9 +133,14 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
   for (const id of allThermalNodeIds) {
     const aRates = a.thermalNodes.get(id) || { dTemperature: 0 };
     const bRates = b.thermalNodes.get(id) || { dTemperature: 0 };
-    result.thermalNodes.set(id, {
+    const combined: ThermalNodeRates = {
       dTemperature: aRates.dTemperature + bRates.dTemperature,
-    });
+    };
+    // Combine oxidation rates if either has them
+    if (aRates.dOxidizedFraction !== undefined || bRates.dOxidizedFraction !== undefined) {
+      combined.dOxidizedFraction = (aRates.dOxidizedFraction ?? 0) + (bRates.dOxidizedFraction ?? 0);
+    }
+    result.thermalNodes.set(id, combined);
   }
 
   // Combine neutronics rates
@@ -181,9 +187,14 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
   }
 
   for (const [id, r] of rates.thermalNodes) {
-    result.thermalNodes.set(id, {
+    const scaled: ThermalNodeRates = {
       dTemperature: r.dTemperature * factor,
-    });
+    };
+    // Scale oxidation rate if present
+    if (r.dOxidizedFraction !== undefined) {
+      scaled.dOxidizedFraction = r.dOxidizedFraction * factor;
+    }
+    result.thermalNodes.set(id, scaled);
   }
 
   result.neutronics = {
@@ -244,6 +255,12 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
     const node = newState.thermalNodes.get(id);
     if (node) {
       node.temperature += nodeRates.dTemperature * dt;
+      // Apply oxidation rate if present
+      if (nodeRates.dOxidizedFraction !== undefined && node.oxidation) {
+        node.oxidation.oxidizedFraction += nodeRates.dOxidizedFraction * dt;
+        // Clamp to [0, 1]
+        node.oxidation.oxidizedFraction = Math.max(0, Math.min(1, node.oxidation.oxidizedFraction));
+      }
     }
   }
 

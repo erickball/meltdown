@@ -12,6 +12,7 @@ export {
   getFluidSpecificHeat,
   createFluidState,
   enableFluidStateDebug,
+  type NcgPartialPressures,
 } from './heat-transfer';
 
 export {

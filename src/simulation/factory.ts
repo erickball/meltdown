@@ -15,7 +15,7 @@ import {
   PumpState,
   ValveState,
 } from './types';
-import { createFluidState } from './operators';
+import { createFluidState, NcgPartialPressures } from './operators';
 import { saturationTemperature } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -921,6 +921,9 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // fillLevel is 0-1, default to 1.0 (full) if not specified
       const fillLevel = tank.fillLevel !== undefined ? tank.fillLevel : 1.0;
 
+      // Get NCG initial conditions if specified (partial pressures in bar)
+      const ncg: NcgPartialPressures | undefined = tank.initialNcg;
+
       let fluid: FluidState;
 
       if (fillLevel >= 0.999) {
@@ -928,13 +931,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         const pressure = tank.fluid?.pressure || 1e6;
         const temp = tank.fluid?.temperature || 350;
         console.log(`[Factory] Tank ${component.id}: creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
-        fluid = createFluidState(temp, pressure, 'liquid', 0, volume);
+        fluid = createFluidState(temp, pressure, 'liquid', 0, volume, ncg);
       } else if (fillLevel <= 0.001) {
         // Fully vapor - use specified pressure and temperature
         const pressure = tank.fluid?.pressure || 1e5;
         const temp = tank.fluid?.temperature || 400;
         console.log(`[Factory] Tank ${component.id}: creating VAPOR state at ${pressure/1e5} bar, ${temp}K`);
-        fluid = createFluidState(temp, pressure, 'vapor', 1, volume);
+        fluid = createFluidState(temp, pressure, 'vapor', 1, volume, ncg);
       } else {
         // Partially filled - two-phase mixture
         // Use the user-specified pressure, derive saturation temperature from it
@@ -955,7 +958,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         console.log(`[Factory] Tank ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P=${(pressure/1e5).toFixed(1)} bar, T_sat=${temp.toFixed(0)}K, quality=${quality.toFixed(4)}`);
 
         // Create fluid state with calculated quality
-        fluid = createFluidState(temp, pressure, 'two-phase', quality, volume);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, volume, ncg);
       }
 
       return {
@@ -984,6 +987,9 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         ? Water.saturationTemperature(pressure)
         : (pipe.fluid?.temperature || 350);
 
+      // Get NCG initial conditions if specified (partial pressures in bar)
+      const ncg: NcgPartialPressures | undefined = pipe.initialNcg;
+
       console.log(`[Factory] Pipe ${component.id}: creating ${phase} state at ${(pressure/1e5).toFixed(1)} bar, ${temp.toFixed(0)}K, quality=${quality.toFixed(2)}`);
 
       // For pipes, "height" is the vertical component of the pipe length
@@ -992,7 +998,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       return {
         id: component.id,
         label: component.label || 'Pipe',
-        fluid: createFluidState(temp, pressure, phase, quality, volume),
+        fluid: createFluidState(temp, pressure, phase, quality, volume, ncg),
         volume,
         hydraulicDiameter: pipe.diameter,
         flowArea: Math.PI * radius * radius,
@@ -1198,10 +1204,14 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // (liquid collects in hotwell at bottom, vapor in upper shell)
       const condenserHeight = condenser.height || 3;  // m
 
+      // Get NCG initial conditions if specified (partial pressures in bar)
+      // Condensers often have air ingress that needs to be evacuated
+      const ncg: NcgPartialPressures | undefined = condenser.initialNcg;
+
       return {
         id: component.id,
         label: component.label || 'Condenser',
-        fluid: createFluidState(temp, pressure, 'two-phase', 0.1, volume),
+        fluid: createFluidState(temp, pressure, 'two-phase', 0.1, volume, ncg),
         volume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
@@ -1228,17 +1238,20 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Use fillLevel to determine the liquid/vapor split
       const fillLevel = rv.fillLevel !== undefined ? rv.fillLevel : 1.0;
 
+      // Get NCG initial conditions if specified (partial pressures in bar)
+      const ncg: NcgPartialPressures | undefined = (rv as any).initialNcg;
+
       let fluid: FluidState;
       const pressure = rv.fluid?.pressure || 155e5; // Default PWR pressure
 
       if (fillLevel >= 0.999) {
         const temp = rv.fluid?.temperature || 565; // ~292°C
         console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
-        fluid = createFluidState(temp, pressure, 'liquid', 0, downcomerVolume);
+        fluid = createFluidState(temp, pressure, 'liquid', 0, downcomerVolume, ncg);
       } else if (fillLevel <= 0.001) {
         const temp = rv.fluid?.temperature || 620;
         console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating VAPOR state at ${pressure/1e5} bar, ${temp}K`);
-        fluid = createFluidState(temp, pressure, 'vapor', 1, downcomerVolume);
+        fluid = createFluidState(temp, pressure, 'vapor', 1, downcomerVolume, ncg);
       } else {
         const temp = Water.saturationTemperature(pressure);
         const rho_f = Water.saturatedLiquidDensity(temp);
@@ -1248,7 +1261,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         const totalMass = m_liquid + m_vapor;
         const quality = m_vapor / totalMass;
         console.log(`[Factory] ReactorVessel ${component.id} (downcomer): creating TWO-PHASE state: fillLevel=${fillLevel}, P=${(pressure/1e5).toFixed(1)} bar, quality=${quality.toFixed(4)}`);
-        fluid = createFluidState(temp, pressure, 'two-phase', quality, downcomerVolume);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, downcomerVolume, ncg);
       }
 
       return {

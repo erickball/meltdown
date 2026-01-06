@@ -50,6 +50,7 @@ export {
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
   PumpSpeedConstraintOperator,  // deprecated, kept for compatibility
+  CladdingOxidationRateOperator,  // Zr + 2H₂O → ZrO₂ + 2H₂ (generates H₂)
   setSeparationDebug,  // Debug toggle for phase separation calculation
 } from './operators/rate-operators';
 

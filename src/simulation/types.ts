@@ -55,6 +55,15 @@ export interface ThermalNode {
 
   // Limits for damage modeling
   maxTemperature: number;           // K - failure/damage threshold
+
+  // Cladding oxidation state (only for cladding nodes)
+  // Zr + 2H₂O → ZrO₂ + 2H₂ (exothermic: 586 kJ/mol Zr)
+  // Tracks oxidation progress and H₂ generation
+  oxidation?: {
+    oxidizedFraction: number;       // 0-1 - fraction of cladding that has oxidized
+    totalZrMass: number;            // kg - total Zr mass available for oxidation
+    associatedCoolantNode: string;  // FlowNode ID where H₂ is released
+  };
 }
 
 // ============================================================================
@@ -76,6 +85,13 @@ export interface FlowNode {
 
   // Elevation for natural circulation
   elevation: number;                // m - height relative to reference
+
+  // Containment hierarchy
+  // Every flow node must be "inside" something else - either another node or atmosphere
+  // If containerId is undefined/null, this node is exposed to atmosphere
+  // When a node ruptures, fluid escapes to its container (or atmosphere)
+  // Air ingress can occur through connections to atmospheric nodes
+  containerId?: string;             // ID of containing FlowNode (undefined = atmosphere)
 
   // Optional: Condenser properties (only for condenser nodes)
   heatSinkTemp?: number;            // K - cooling water inlet temperature
