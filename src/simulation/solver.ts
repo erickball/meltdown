@@ -1097,10 +1097,15 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     thermalNodes.set(k, { ...v });
   });
 
-  // Clone flow nodes with nested fluid object
+  // Clone flow nodes with nested fluid object (including NCG if present)
   const flowNodes = new Map<string, typeof state.flowNodes extends Map<string, infer V> ? V : never>();
   state.flowNodes.forEach((v, k) => {
-    flowNodes.set(k, { ...v, fluid: { ...v.fluid } });
+    const clonedFluid = { ...v.fluid };
+    // Deep clone NCG composition if present (it's a mutable object)
+    if (v.fluid.ncg) {
+      clonedFluid.ncg = { ...v.fluid.ncg };
+    }
+    flowNodes.set(k, { ...v, fluid: clonedFluid });
   });
 
   // Clone arrays - preallocate for performance

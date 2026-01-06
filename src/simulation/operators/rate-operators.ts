@@ -18,6 +18,7 @@ import {
 import { cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 import { simulationConfig } from '../types';
+import { ncgPartialPressure, totalMoles } from '../gas-properties';
 
 // ============================================================================
 // Phase Separation Calculation (shared utility)
@@ -1425,6 +1426,19 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
             flowNode.fluid.pressure = P_base + dP;
           }
         }
+      }
+
+      // Add NCG partial pressure using Dalton's law: P_total = P_steam + P_ncg
+      // NCGs occupy the vapor space, so we use the full node volume for the calculation.
+      // For two-phase or vapor nodes, NCGs mix with steam; for liquid-filled nodes,
+      // any NCG present would form a bubble at the top (simplified: still add to pressure).
+      if (flowNode.fluid.ncg && totalMoles(flowNode.fluid.ncg) > 0) {
+        const P_ncg = ncgPartialPressure(
+          flowNode.fluid.ncg,
+          flowNode.fluid.temperature,
+          flowNode.volume
+        );
+        flowNode.fluid.pressure += P_ncg;
       }
 
       // Sanity checks - log warnings but do NOT clamp values

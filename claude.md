@@ -13,6 +13,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions unless you get explicit user approval.
 
 ## TODO List
+-Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Debug semi-implicit pressure/flow solver
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
@@ -22,7 +23,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Add containment building as an option
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
--Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 -Clean up the debug display
 -Maybe find a good way to display relative pressure at connections
 -Pixelated display should apply to the tube side of a HX
