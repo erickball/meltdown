@@ -18,6 +18,7 @@
 import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG } from './types';
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
+import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition } from './gas-properties';
 
 // ============================================================================
 // State Rates - Derivatives for all state variables
@@ -26,6 +27,7 @@ import { PressureSolver } from './operators/pressure-solver';
 export interface FlowNodeRates {
   dMass: number;      // kg/s - rate of mass change
   dEnergy: number;    // W - rate of internal energy change
+  dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
 }
 
 export interface FlowConnectionRates {
@@ -101,10 +103,18 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
   for (const id of allFlowNodeIds) {
     const aRates = a.flowNodes.get(id) || { dMass: 0, dEnergy: 0 };
     const bRates = b.flowNodes.get(id) || { dMass: 0, dEnergy: 0 };
-    result.flowNodes.set(id, {
+    const combined: FlowNodeRates = {
       dMass: aRates.dMass + bRates.dMass,
       dEnergy: aRates.dEnergy + bRates.dEnergy,
-    });
+    };
+    // Combine NCG rates if either has them
+    if (aRates.dNcg || bRates.dNcg) {
+      combined.dNcg = emptyGasComposition();
+      for (const species of ALL_GAS_SPECIES) {
+        combined.dNcg[species] = (aRates.dNcg?.[species] ?? 0) + (bRates.dNcg?.[species] ?? 0);
+      }
+    }
+    result.flowNodes.set(id, combined);
   }
 
   // Combine flow connection rates (momentum)
@@ -150,10 +160,18 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
   const result = createZeroRates();
 
   for (const [id, r] of rates.flowNodes) {
-    result.flowNodes.set(id, {
+    const scaled: FlowNodeRates = {
       dMass: r.dMass * factor,
       dEnergy: r.dEnergy * factor,
-    });
+    };
+    // Scale NCG rates if present
+    if (r.dNcg) {
+      scaled.dNcg = emptyGasComposition();
+      for (const species of ALL_GAS_SPECIES) {
+        scaled.dNcg[species] = r.dNcg[species] * factor;
+      }
+    }
+    result.flowNodes.set(id, scaled);
   }
 
   for (const [id, r] of rates.flowConnections) {
@@ -194,6 +212,22 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
     if (node) {
       node.fluid.mass += nodeRates.dMass * dt;
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
+
+      // Apply NCG transport rates if present
+      if (nodeRates.dNcg) {
+        // Initialize NCG on node if not present
+        if (!node.fluid.ncg) {
+          node.fluid.ncg = emptyGasComposition();
+        }
+        // Apply rate for each gas species
+        for (const species of ALL_GAS_SPECIES) {
+          node.fluid.ncg[species] += nodeRates.dNcg[species] * dt;
+          // Ensure non-negative (numerical precision)
+          if (node.fluid.ncg[species] < 0) {
+            node.fluid.ncg[species] = 0;
+          }
+        }
+      }
     }
   }
 

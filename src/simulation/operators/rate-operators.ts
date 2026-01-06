@@ -18,7 +18,12 @@ import {
 import { cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 import { simulationConfig } from '../types';
-import { ncgPartialPressure, totalMoles } from '../gas-properties';
+import {
+  ncgPartialPressure,
+  totalMoles,
+  emptyGasComposition,
+  ALL_GAS_SPECIES,
+} from '../gas-properties';
 
 // ============================================================================
 // Phase Separation Calculation (shared utility)
@@ -894,6 +899,48 @@ export class FlowRateOperator implements RateOperator {
 
       downRates.dMass += absMassFlow;
       downRates.dEnergy += energyFlow;
+
+      // NCG transport: NCGs flow with the bulk fluid
+      // NCGs are assumed to be well-mixed with vapor/gas phase and move proportionally
+      // with mass flow. For liquid-only flow, NCGs don't move (they stay in vapor space).
+      // For vapor or mixture flow, NCGs move proportionally to the mass fraction leaving.
+      if (upstreamNode.fluid.ncg && totalMoles(upstreamNode.fluid.ncg) > 0) {
+        // Only transport NCG with vapor or mixture flow (not pure liquid)
+        if (flowPhase === 'vapor' || flowPhase === 'mixture') {
+          // Calculate fraction of upstream mass being transported
+          const upstreamMass = upstreamNode.fluid.mass;
+          if (upstreamMass > 0) {
+            // For vapor: NCGs move with vapor mass
+            // For mixture: NCGs move with total mass (they're mixed throughout)
+            let ncgTransportFraction: number;
+            if (flowPhase === 'vapor' && upstreamNode.fluid.phase === 'two-phase') {
+              // NCGs are in the vapor space - transport based on vapor mass leaving
+              const quality = upstreamNode.fluid.quality ?? 0;
+              const vaporMass = upstreamMass * quality;
+              ncgTransportFraction = vaporMass > 0 ? absMassFlow / vaporMass : 0;
+            } else {
+              // Homogeneous mixture or pure vapor - NCGs transport with bulk flow
+              ncgTransportFraction = absMassFlow / upstreamMass;
+            }
+
+            // Create NCG rate entries if not present
+            if (!upRates.dNcg) {
+              upRates.dNcg = emptyGasComposition();
+            }
+            if (!downRates.dNcg) {
+              downRates.dNcg = emptyGasComposition();
+            }
+
+            // Transport each gas species proportionally
+            for (const species of ALL_GAS_SPECIES) {
+              const molesTransferred = upstreamNode.fluid.ncg[species] * ncgTransportFraction;
+              upRates.dNcg[species] -= molesTransferred;
+              downRates.dNcg[species] += molesTransferred;
+            }
+          }
+        }
+        // For pure liquid flow: NCGs stay in the vapor space, no transport
+      }
 
       // Track flows for debug node
       if (downstreamId === DEBUG_NODE_ID) {
