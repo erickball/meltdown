@@ -86,3 +86,54 @@ export {
   numericalBulkModulus,
   type WaterPropsProfile,
 } from './water-properties';
+
+// Gas properties (non-condensible gases)
+export {
+  // Types
+  type GasSpecies,
+  type GasComposition,
+  type GasPropertyData,
+  type FlammabilityStatus,
+
+  // Constants
+  ALL_GAS_SPECIES,
+  GAS_PROPERTIES,
+  R_GAS,
+  H2_FLAMMABILITY,
+  DRY_AIR_COMPOSITION,
+
+  // Composition creation
+  emptyGasComposition,
+  createGasComposition,
+  cloneGasComposition,
+  createAirComposition,
+
+  // Composition calculations
+  totalMoles,
+  moleFraction,
+  allMoleFractions,
+  totalMass,
+  averageMolecularWeight,
+  mixtureCp,
+  mixtureCv,
+
+  // Ideal gas law
+  ncgPartialPressure,
+  speciesPartialPressure,
+  ncgDensity,
+  molesFromPVT,
+
+  // Composition arithmetic
+  addCompositions,
+  subtractCompositions,
+  scaleComposition,
+  isCompositionEmpty,
+
+  // Flammability
+  evaluateFlammability,
+  hydrogenPercentage,
+
+  // Display
+  mixedGasColor,
+  compositionSummary,
+} from './gas-properties';

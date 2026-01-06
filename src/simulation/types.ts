@@ -6,6 +6,8 @@
  * These are connected via heat transfer and flow connections.
  */
 
+import type { GasComposition } from './gas-properties';
+
 // ============================================================================
 // Fluid Properties
 // ============================================================================
@@ -17,9 +19,15 @@ export interface FluidState {
 
   // DERIVED QUANTITIES (computed from mass, energy, and volume)
   temperature: number;    // K
-  pressure: number;       // Pa
+  pressure: number;       // Pa - total pressure (steam + NCG partial pressures)
   phase: 'liquid' | 'vapor' | 'two-phase';
   quality: number;        // Vapor mass fraction (0-1), only meaningful for two-phase
+
+  // NON-CONDENSIBLE GASES (optional)
+  // When present, total pressure = steam partial pressure + NCG partial pressure
+  // Steam partial pressure is computed from steam tables as before
+  // NCG partial pressure = n_ncg * R * T / V_vapor (Dalton's law)
+  ncg?: GasComposition;   // mol - moles of each NCG species in this node
 }
 
 // ============================================================================
