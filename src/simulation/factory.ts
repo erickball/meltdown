@@ -16,9 +16,12 @@ import {
   ValveState,
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
-import { saturationTemperature } from './water-properties';
+import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
+
+// Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
+const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
 
 /**
  * Create an empty simulation state
@@ -928,20 +931,21 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
       if (fillLevel >= 0.999) {
         // Fully liquid - use specified pressure and temperature
-        const pressure = tank.fluid?.pressure || 1e6;
+        // Use ?? to allow 0 pressure (clamped to minimum), || would treat 0 as falsy
+        const pressure = Math.max(tank.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
         const temp = tank.fluid?.temperature || 350;
         console.log(`[Factory] Tank ${component.id}: creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
         fluid = createFluidState(temp, pressure, 'liquid', 0, volume, ncg);
       } else if (fillLevel <= 0.001) {
         // Fully vapor - use specified pressure and temperature
-        const pressure = tank.fluid?.pressure || 1e5;
+        const pressure = Math.max(tank.fluid?.pressure ?? 1e5, MIN_STEAM_PRESSURE_PA);
         const temp = tank.fluid?.temperature || 400;
         console.log(`[Factory] Tank ${component.id}: creating VAPOR state at ${pressure/1e5} bar, ${temp}K`);
         fluid = createFluidState(temp, pressure, 'vapor', 1, volume, ncg);
       } else {
         // Partially filled - two-phase mixture
         // Use the user-specified pressure, derive saturation temperature from it
-        const pressure = tank.fluid?.pressure || 1e6;
+        const pressure = Math.max(tank.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
         const temp = Water.saturationTemperature(pressure);
 
         // Calculate quality from fill level (volume fraction to mass fraction)
@@ -977,7 +981,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const pipe = component as any;
       const radius = pipe.diameter / 2;
       const volume = Math.PI * radius * radius * pipe.length;
-      const pressure = pipe.fluid?.pressure || 1e6;
+      const pressure = Math.max(pipe.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
       const phase = pipe.fluid?.phase || 'liquid';
       const quality = pipe.fluid?.quality ?? 0;
 
@@ -1017,7 +1021,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const ratedFlow = pump.ratedFlow || 100;
       const volume = Math.max(0.05, 0.0002 * ratedFlow);
       const temp = pump.fluid?.temperature || 350;
-      const pressure = pump.fluid?.pressure || 1e6;
+      const pressure = Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
       return {
         id: component.id,
@@ -1040,7 +1044,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const diameter = valve.diameter || 0.2;
       const volume = Math.max(0.01, Math.PI * Math.pow(diameter / 2, 2) * diameter * 2);
       const temp = valve.fluid?.temperature || 350;
-      const pressure = valve.fluid?.pressure || 1e6;
+      const pressure = Math.max(valve.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
       return {
         id: component.id,
@@ -1059,7 +1063,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const radius = vessel.innerDiameter / 2;
       const volume = Math.PI * radius * radius * vessel.height;
       const temp = vessel.fluid?.temperature || 580; // Higher default for reactor vessel
-      const pressure = vessel.fluid?.pressure || 15e6; // 150 bar typical PWR
+      const pressure = Math.max(vessel.fluid?.pressure ?? 15e6, MIN_STEAM_PRESSURE_PA); // 150 bar typical PWR
 
       // Use fillLevel to determine the liquid/vapor split
       // fillLevel is 0-1, default to 1.0 (full) if not specified
@@ -1163,7 +1167,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
     case 'condenser': {
       const condenser = component as any;
       const volume = condenser.width * condenser.width * condenser.height || 50;
-      const pressure = condenser.fluid?.pressure || 5000; // 0.05 bar = 5 kPa default
+      const pressure = Math.max(condenser.fluid?.pressure ?? 5000, MIN_STEAM_PRESSURE_PA); // 0.05 bar = 5 kPa default
       const temp = saturationTemperature(pressure);
 
       // Get cooling water properties from component
@@ -1242,7 +1246,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const ncg: NcgPartialPressures | undefined = (rv as any).initialNcg;
 
       let fluid: FluidState;
-      const pressure = rv.fluid?.pressure || 155e5; // Default PWR pressure
+      const pressure = Math.max(rv.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA); // Default PWR pressure
 
       if (fillLevel >= 0.999) {
         const temp = rv.fluid?.temperature || 565; // ~292°C
@@ -1287,7 +1291,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const coreVolume = (barrel as any).volume !== undefined ? (barrel as any).volume : calculatedVolume;
 
       // Use fluid from component or default to typical PWR conditions
-      const pressure = barrel.fluid?.pressure || 155e5;
+      const pressure = Math.max(barrel.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
       const fillLevel = 1.0; // Core region is typically full
 
       let fluid: FluidState;

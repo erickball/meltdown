@@ -21,7 +21,7 @@ import {
   Fluid
 } from '../types';
 import { ComponentConfig } from './component-config';
-import { saturationTemperature } from '../simulation/water-properties';
+import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
   saturatedLiquidDensity,
@@ -29,6 +29,16 @@ import {
   saturatedLiquidEnergy,
   saturatedVaporEnergy
 } from '../simulation/water-properties-v3';
+
+// Minimum steam pressure to ensure water stays liquid (not ice)
+// At 1°C (274.15 K), saturation pressure is about 657 Pa (0.00657 bar)
+// We use 1°C as minimum to give some margin above freezing
+const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
+import {
+  emptyGasComposition,
+  ALL_GAS_SPECIES,
+  GasSpecies
+} from '../simulation/gas-properties';
 
 export class ConstructionManager {
   private plantState: PlantState;
@@ -63,13 +73,44 @@ export class ConstructionManager {
     // For two-phase, quality represents fraction of vapor by mass
     // Low fill level with small vapor space = low quality (mostly liquid by mass)
     const defaultQuality = isTwoPhase ? Math.max(0.01, (1 - fillLevel) * 0.1) : 0;
+    const T = props.initialTemperature ? props.initialTemperature + 273.15 : 300;
+    // Steam pressure - ensure minimum to keep water above freezing
+    // Use ?? to allow 0 as a valid value (it will be clamped to minimum)
+    const requestedPressure = (props.initialPressure ?? 150) * 100000; // bar to Pa, default 150 bar
+    const steamPressure = Math.max(requestedPressure, MIN_STEAM_PRESSURE_PA);
     const defaultFluid: Fluid = {
-      temperature: props.initialTemperature ? props.initialTemperature + 273.15 : 300,
-      pressure: props.initialPressure ? props.initialPressure * 100000 : 15000000, // Convert bar to Pa
+      temperature: T,
+      pressure: steamPressure,
       phase: isTwoPhase ? 'two-phase' : 'liquid',
       quality: defaultQuality,
       flowRate: 0
     };
+
+    // Process NCG if specified - convert partial pressures to moles
+    // NCG moles are stored on the fluid, but we need the actual component volume
+    // to correctly recover partial pressure later: P = nRT/V
+    // Volume is set below after we know the component's actual volume
+    if (props.initialNcg && typeof props.initialNcg === 'object') {
+      const ncgPressures = props.initialNcg as Record<string, number>;
+      const hasNcg = Object.values(ncgPressures).some(p => p > 0);
+      if (hasNcg) {
+        const ncg = emptyGasComposition();
+        // Use actual component volume for correct P = nRT/V recovery
+        // For tanks/vessels, props.volume is in m³; default to 10 m³ if not specified
+        const V = props.volume || 10; // m³
+        const R = 8.314; // J/(mol·K)
+        for (const species of ALL_GAS_SPECIES) {
+          const P_bar = ncgPressures[species];
+          if (P_bar && P_bar > 0) {
+            const P_Pa = P_bar * 1e5;
+            ncg[species as GasSpecies] = (P_Pa * V) / (R * T);
+          }
+        }
+        defaultFluid.ncg = ncg;
+        // Set volume on fluid for rendering NCG calculations
+        defaultFluid.volume = V;
+      }
+    }
 
     // Create standard bidirectional ports for passive components (pipes, condensers)
     // Flow direction is determined by physics, not by the component
@@ -150,6 +191,10 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, tank);
         (tank as any).nqa1 = props.nqa1 ?? false;
+        // Store initialNcg for factory to use when creating simulation state
+        if (props.initialNcg) {
+          (tank as any).initialNcg = props.initialNcg;
+        }
         break;
       }
 
@@ -196,6 +241,9 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, pressurizer);
         (pressurizer as any).nqa1 = props.nqa1 ?? true;
+        if (props.initialNcg) {
+          (pressurizer as any).initialNcg = props.initialNcg;
+        }
         break;
       }
 
@@ -206,7 +254,7 @@ export class ConstructionManager {
                            (pipePhase === 'vapor' ? 1 : 0);
         const pipeFluid: Fluid = {
           temperature: props.initialTemperature ? props.initialTemperature + 273.15 : 563.15, // default 290C in K
-          pressure: props.initialPressure ? props.initialPressure * 100000 : 15000000, // bar to Pa
+          pressure: (props.initialPressure ?? 150) * 100000, // bar to Pa, default 150 bar
           phase: pipePhase,
           quality: pipeQuality,
           flowRate: 0
@@ -252,6 +300,9 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, pipe);
         (pipe as any).nqa1 = props.nqa1 ?? false;
+        if (props.initialNcg) {
+          (pipe as any).initialNcg = props.initialNcg;
+        }
         break;
       }
 
@@ -918,6 +969,9 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, condenser);
         (condenser as any).nqa1 = props.nqa1 ?? false;
+        if (props.initialNcg) {
+          (condenser as any).initialNcg = props.initialNcg;
+        }
 
         // If includesPump, also create a condensate pump
         if (props.includesPump) {
@@ -1156,6 +1210,9 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, reactorVessel);
         (reactorVessel as any).nqa1 = props.nqa1 ?? true;
+        if (props.initialNcg) {
+          (reactorVessel as any).initialNcg = props.initialNcg;
+        }
 
         // Create core barrel component inside the vessel (the core region)
         const coreBarrelPorts: Port[] = [
@@ -2027,7 +2084,8 @@ export class ConstructionManager {
 
     // Fluid properties - update initial conditions
     if (properties.initialPressure !== undefined && component.fluid) {
-      component.fluid.pressure = properties.initialPressure * 1e5; // bar to Pa
+      // Apply minimum steam pressure to keep water above freezing
+      component.fluid.pressure = Math.max(properties.initialPressure * 1e5, MIN_STEAM_PRESSURE_PA); // bar to Pa
     }
     if (properties.initialTemperature !== undefined && component.fluid) {
       component.fluid.temperature = properties.initialTemperature + 273.15; // C to K
@@ -2037,6 +2095,33 @@ export class ConstructionManager {
     }
     if (properties.initialQuality !== undefined && component.fluid) {
       component.fluid.quality = properties.initialQuality; // Already 0-1
+    }
+    // NCG (non-condensible gases) - store on component and populate fluid.ncg for rendering
+    if (properties.initialNcg !== undefined) {
+      component.initialNcg = properties.initialNcg;
+      // Also populate fluid.ncg for rendering in construction mode
+      // Convert partial pressures (bar) to moles using ideal gas law: n = PV/RT
+      // Use V=1 m³ as canonical volume so calculateNcgFraction can recover pressures
+      if (component.fluid) {
+        const ncgPressures = properties.initialNcg as Record<string, number>;
+        const hasNcg = Object.values(ncgPressures).some(p => p > 0);
+        if (hasNcg) {
+          const ncg = emptyGasComposition();
+          const T = component.fluid.temperature || 400; // K
+          const V = 1; // m³ - canonical volume for consistent pressure recovery
+          const R = 8.314; // J/(mol·K)
+          for (const species of ALL_GAS_SPECIES) {
+            const P_bar = ncgPressures[species];
+            if (P_bar && P_bar > 0) {
+              const P_Pa = P_bar * 1e5;
+              ncg[species as GasSpecies] = (P_Pa * V) / (R * T);
+            }
+          }
+          component.fluid.ncg = ncg;
+        } else {
+          component.fluid.ncg = undefined;
+        }
+      }
     }
     if (properties.initialLevel !== undefined) {
       component.fillLevel = properties.initialLevel / 100; // % to 0-1

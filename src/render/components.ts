@@ -20,7 +20,18 @@ import {
   Connection,
 } from '../types';
 import { SimulationState, getTurbineCondenserState } from '../simulation';
-import { getFluidColor, getTwoPhaseColors, getFuelColor, rgbToString, COLORS, massQualityToVolumeFraction, getSaturationTemp } from './colors';
+import {
+  getFluidColor,
+  getTwoPhaseColors,
+  getFuelColor,
+  rgbToString,
+  COLORS,
+  massQualityToVolumeFraction,
+  getSaturationTemp,
+  getNcgVisualization,
+  RGB,
+  GasColorInfo,
+} from './colors';
 
 /**
  * Calculate wall thickness from pressure rating using ASME pressure vessel formula.
@@ -83,55 +94,8 @@ function getTimeSeed(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-/**
- * Render two-phase fluid with pixelated droplet/bubble effect
- * Creates a pattern where liquid and vapor pixels are distributed based on quality
- * Pattern re-randomizes every second for animation effect
- */
-function renderTwoPhaseFluid(
-  ctx: CanvasRenderingContext2D,
-  fluid: Fluid,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  pixelSize: number = 4
-): void {
-  if (fluid.phase !== 'two-phase') {
-    ctx.fillStyle = getFluidColor(fluid);
-    ctx.fillRect(x, y, width, height);
-    return;
-  }
-
-  const { liquid, vapor, quality } = getTwoPhaseColors(fluid);
-  const timeSeed = getTimeSeed();
-
-  // Calculate grid dimensions
-  const cols = Math.ceil(width / pixelSize);
-  const rows = Math.ceil(height / pixelSize);
-
-  // Render each pixel
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const px = x + col * pixelSize;
-      const py = y + row * pixelSize;
-      const pw = Math.min(pixelSize, x + width - px);
-      const ph = Math.min(pixelSize, y + height - py);
-
-      // Use seeded random based on position + time for animated pattern
-      const seed = row * 1000 + col + Math.floor(quality * 100) * 10000 + timeSeed * 7919;
-      const rand = seededRandom(seed);
-
-      // Higher quality = more vapor pixels
-      const isVapor = rand < quality;
-
-      ctx.fillStyle = isVapor
-        ? rgbToString(vapor, 0.85)
-        : rgbToString(liquid, 0.9);
-      ctx.fillRect(px, py, pw, ph);
-    }
-  }
-}
+// Note: renderTwoPhaseFluid was removed and replaced by renderFluidWithNcg
+// which handles both two-phase water/steam rendering AND NCG overlay
 
 /**
  * Calculate liquid volume fraction for stratified two-phase display.
@@ -149,8 +113,9 @@ function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean):
     return component.fillLevel;
   }
   // In simulation mode or if no fillLevel, derive from mass quality
+  // Pass fluid for NCG-aware pressure correction
   const massQuality = fluid.quality ?? 0.5;
-  const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
+  const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
   return 1 - vaporVolumeFraction;
 }
 
@@ -186,8 +151,9 @@ function renderStratifiedTwoPhase(
 
   // Get actual mass quality and convert to volume fraction for visual rendering
   // Volume fraction represents what fraction of SPACE is occupied by vapor
+  // Pass fluid for NCG-aware pressure correction
   const massQuality = fluid.quality ?? 0.5;
-  const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
+  const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
 
   // Saturation temperature for coloring
   const T_sat = getSaturationTemp(fluid.pressure);
@@ -282,6 +248,192 @@ function renderZoneWithQuality(
       ctx.fillRect(px, py, pw, ph);
     }
   }
+}
+
+/**
+ * Render NCG (non-condensible gases) overlay on vapor space.
+ *
+ * For air: renders as solid blended color
+ * For other gas mixtures: renders pixelated with each gas species as distinct color
+ *
+ * The NCG is rendered as an overlay on top of the steam, with opacity based on
+ * NCG partial pressure relative to total pressure.
+ */
+function renderNcgOverlay(
+  ctx: CanvasRenderingContext2D,
+  ncgViz: { isAir: boolean; blendedColor: RGB; gasColors: GasColorInfo[]; totalMoles: number },
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  ncgFraction: number,  // Fraction of the vapor space that is NCG (by partial pressure)
+  pixelSize: number = 4
+): void {
+  if (ncgFraction <= 0.01) return; // Skip if negligible NCG
+
+  const timeSeed = getTimeSeed();
+
+  // Air gets solid blended rendering
+  if (ncgViz.isAir) {
+    ctx.fillStyle = rgbToString(ncgViz.blendedColor, ncgFraction * 0.7);
+    ctx.fillRect(x, y, width, height);
+    return;
+  }
+
+  // For non-air mixtures, use pixelated rendering
+  // Each pixel randomly picks a gas species based on mole fractions
+  const cols = Math.ceil(width / pixelSize);
+  const rows = Math.ceil(height / pixelSize);
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const px = x + col * pixelSize;
+      const py = y + row * pixelSize;
+      const pw = Math.min(pixelSize, x + width - px);
+      const ph = Math.min(pixelSize, y + height - py);
+
+      // First decide if this pixel shows NCG at all (based on ncgFraction)
+      const ncgSeed = row * 1000 + col + timeSeed * 3571;
+      const ncgRand = seededRandom(ncgSeed);
+
+      if (ncgRand >= ncgFraction) continue; // This pixel shows steam, not NCG
+
+      // Pick which gas species this pixel represents
+      const speciesSeed = row * 2000 + col + timeSeed * 7919;
+      const speciesRand = seededRandom(speciesSeed);
+
+      // Accumulate fractions to select species
+      let cumulative = 0;
+      let selectedColor: RGB = ncgViz.blendedColor;
+
+      for (const gasInfo of ncgViz.gasColors) {
+        cumulative += gasInfo.fraction;
+        if (speciesRand < cumulative) {
+          selectedColor = gasInfo.color;
+          break;
+        }
+      }
+
+      ctx.fillStyle = rgbToString(selectedColor, 0.8);
+      ctx.fillRect(px, py, pw, ph);
+    }
+  }
+}
+
+/**
+ * Calculate the NCG fraction (by partial pressure) in vapor space.
+ * Returns 0 if liquid-only or no NCG present.
+ *
+ * For ideal gases at the same T and V, mole fraction = partial pressure fraction.
+ * NCG moles were calculated from partial pressures using n = PV/RT.
+ * Using the same formula to convert back gives us the pressure ratio.
+ *
+ * In construction mode, V=1 m³ is used as canonical volume.
+ * In simulation mode, fluid.volume contains the actual node volume.
+ *
+ * NCG fraction = P_ncg / (P_steam + P_ncg)
+ */
+function calculateNcgFraction(fluid: Fluid): number {
+  if (!fluid.ncg) return 0;
+  if (fluid.phase === 'liquid') return 0; // NCG only visible in vapor/two-phase
+
+  // Get NCG visualization to check if there's meaningful NCG
+  const ncgViz = getNcgVisualization(fluid.ncg);
+  if (!ncgViz || ncgViz.totalMoles <= 0) return 0;
+
+  // NOTE: fluid.pressure is TOTAL pressure (steam + NCG) from constraint operator
+  // We need to calculate NCG partial pressure and find its fraction of total
+  const P_total = fluid.pressure; // Already includes NCG (in Pa)
+
+  // NCG partial pressure from moles using ideal gas law: P = nRT/V
+  // Use fluid.volume if available (simulation mode), otherwise V=1 (construction mode)
+  const ncgMoles = ncgViz.totalMoles;
+  const R = 8.314; // J/(mol·K)
+  const T = fluid.temperature || 400; // K
+  const V = fluid.volume || 1; // m³
+
+  const P_ncg = (ncgMoles * R * T) / V; // Pa
+
+  if (P_total <= 0) return 0;
+
+  // NCG fraction of total pressure (for vapor space visualization)
+  return P_ncg / P_total;
+}
+
+/**
+ * Render fluid with NCG overlay if present.
+ * This wraps the standard fluid rendering and adds NCG visualization.
+ *
+ * Uses liquidFraction to stratify the display:
+ * - If liquidFraction is between 0 and 1, shows stratified liquid/vapor
+ * - NCG is rendered as overlay on vapor space
+ */
+function renderFluidWithNcg(
+  ctx: CanvasRenderingContext2D,
+  fluid: Fluid,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  liquidFraction: number,
+  separation: number = 1,
+  pixelSize: number = 4
+): void {
+  // Determine if we should render stratified (liquid + vapor)
+  // Use stratification if:
+  // 1. Explicitly two-phase, OR
+  // 2. liquidFraction is between 0 and 1 (partial fill)
+  const isStratified = fluid.phase === 'two-phase' ||
+    (liquidFraction > 0.001 && liquidFraction < 0.999);
+
+  if (isStratified) {
+    if (fluid.phase === 'two-phase') {
+      // Use pixelated two-phase rendering for actual two-phase fluid
+      renderStratifiedTwoPhase(ctx, fluid, x, y, width, height, liquidFraction, separation);
+    } else {
+      // Simple stratification for partial fill with single-phase fluid
+      // (e.g., low steam pressure + NCG case)
+      const liquidHeight = height * liquidFraction;
+      const vaporHeight = height - liquidHeight;
+
+      // Vapor region (top)
+      if (vaporHeight > 0) {
+        const vaporFluid: Fluid = { ...fluid, phase: 'vapor' };
+        ctx.fillStyle = getFluidColor(vaporFluid);
+        ctx.fillRect(x, y, width, vaporHeight);
+      }
+
+      // Liquid region (bottom)
+      if (liquidHeight > 0) {
+        const liquidFluid: Fluid = { ...fluid, phase: 'liquid' };
+        ctx.fillStyle = getFluidColor(liquidFluid);
+        ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
+      }
+    }
+  } else {
+    // Single phase fills entire region
+    ctx.fillStyle = getFluidColor(fluid);
+    ctx.fillRect(x, y, width, height);
+  }
+
+  // Then add NCG overlay on vapor space
+  const ncgViz = getNcgVisualization(fluid.ncg);
+  if (!ncgViz) return;
+
+  const ncgFraction = calculateNcgFraction(fluid);
+  if (ncgFraction <= 0.01) return;
+
+  // NCG is only visible in vapor space
+  if (isStratified) {
+    const vaporHeight = height * (1 - liquidFraction);
+    if (vaporHeight > 0) {
+      renderNcgOverlay(ctx, ncgViz, x, y, width, vaporHeight, ncgFraction, pixelSize);
+    }
+  } else if (fluid.phase === 'vapor' || liquidFraction < 0.001) {
+    // Pure vapor - NCG overlays the whole region
+    renderNcgOverlay(ctx, ncgViz, x, y, width, height, ncgFraction, pixelSize);
+  }
+  // For pure liquid, NCG is dissolved and not visible
 }
 
 export function screenToWorld(point: Point, view: ViewState): Point {
@@ -389,16 +541,10 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   const innerH = h - wallPx * 2;
 
   if (tank.fluid) {
-    if (tank.fluid.phase === 'two-phase') {
-      // Stratified display: vapor on top, liquid on bottom
-      const liquidFraction = getLiquidFraction(tank, tank.fluid, isSimulating);
-      const separation = tank.fluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, tank.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction, separation);
-    } else {
-      // Single phase fluid fills the entire tank
-      ctx.fillStyle = getFluidColor(tank.fluid);
-      ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH);
-    }
+    const liquidFraction = getLiquidFraction(tank, tank.fluid, isSimulating);
+    const separation = tank.fluid.separation ?? 1;
+    // Use renderFluidWithNcg which handles both water/steam and NCG overlay
+    renderFluidWithNcg(ctx, tank.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction, separation);
   } else {
     // Empty - dark interior
     ctx.fillStyle = '#111';
@@ -432,12 +578,14 @@ function renderPipe(ctx: CanvasRenderingContext2D, pipe: PipeComponent, view: Vi
 
   // Inner pipe (fluid space)
   if (pipe.fluid) {
-    if (pipe.fluid.phase === 'two-phase') {
-      renderTwoPhaseFluid(ctx, pipe.fluid, 0, -innerD / 2, length, innerD, 3);
-    } else {
-      ctx.fillStyle = getFluidColor(pipe.fluid);
-      ctx.fillRect(0, -innerD / 2, length, innerD);
-    }
+    // Pipes are well-mixed (liquidFraction based on quality, no stratification)
+    // Pass fluid for NCG-aware pressure correction
+    const massQuality = pipe.fluid.quality ?? 0;
+    const liquidFraction = pipe.fluid.phase === 'two-phase'
+      ? 1 - massQualityToVolumeFraction(massQuality, pipe.fluid.pressure, pipe.fluid)
+      : (pipe.fluid.phase === 'liquid' ? 1 : 0);
+    const separation = 0; // Pipes don't stratify (horizontal flow)
+    renderFluidWithNcg(ctx, pipe.fluid, 0, -innerD / 2, length, innerD, liquidFraction, separation, 3);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(0, -innerD / 2, length, innerD);
@@ -820,14 +968,9 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
 
   // Fill with fluid color - stratified for two-phase (like pressurizers)
   if (vessel.fluid) {
-    if (vessel.fluid.phase === 'two-phase') {
-      const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
-      const separation = vessel.fluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
-    } else {
-      ctx.fillStyle = getFluidColor(vessel.fluid);
-      ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
-    }
+    const liquidFraction = getLiquidFraction(vessel, vessel.fluid, isSimulating);
+    const separation = vessel.fluid.separation ?? 1;
+    renderFluidWithNcg(ctx, vessel.fluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -1015,14 +1158,9 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   // Legacy: outsideBarrelFluid was the downcomer (fallback to vessel.fluid)
   const downcomerFluid = (vessel as any).outsideBarrelFluid ?? vessel.fluid;
   if (downcomerFluid) {
-    if (downcomerFluid.phase === 'two-phase') {
-      const liquidFraction = getLiquidFraction(vessel, downcomerFluid, isSimulating);
-      const separation = downcomerFluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, downcomerFluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
-    } else {
-      ctx.fillStyle = getFluidColor(downcomerFluid);
-      ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
-    }
+    const liquidFraction = getLiquidFraction(vessel, downcomerFluid, isSimulating);
+    const separation = downcomerFluid.separation ?? 1;
+    renderFluidWithNcg(ctx, downcomerFluid, -innerR, -h / 2, innerR * 2, h, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(-innerR, -h / 2, innerR * 2, h);
@@ -1053,14 +1191,9 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   ctx.clip();
 
   if (coreFluid) {
-    if (coreFluid.phase === 'two-phase') {
-      const liquidFraction = getLiquidFraction(vessel, coreFluid, isSimulating);
-      const separation = coreFluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, coreFluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction, separation);
-    } else {
-      ctx.fillStyle = getFluidColor(coreFluid);
-      ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
-    }
+    const liquidFraction = getLiquidFraction(vessel, coreFluid, isSimulating);
+    const separation = coreFluid.separation ?? 1;
+    renderFluidWithNcg(ctx, coreFluid, -barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(-barrelInnerR, barrelTopY, barrelInnerR * 2, barrelHeight);
@@ -1592,16 +1725,10 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const innerTop = -h / 2 + wallPx;
 
   if (hx.secondaryFluid) {
-    if (hx.secondaryFluid.phase === 'two-phase') {
-      // Stratified: vapor on top, liquid on bottom
-      // HX shell side always uses quality-based calculation (no stored fillLevel)
-      const liquidFraction = getLiquidFraction(hx, hx.secondaryFluid, true);
-      const separation = hx.secondaryFluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
-    } else {
-      ctx.fillStyle = getFluidColor(hx.secondaryFluid);
-      ctx.fillRect(innerLeft, innerTop, innerW, innerH);
-    }
+    // HX shell side always uses quality-based calculation (no stored fillLevel)
+    const liquidFraction = getLiquidFraction(hx, hx.secondaryFluid, true);
+    const separation = hx.secondaryFluid.separation ?? 1;
+    renderFluidWithNcg(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(innerLeft, innerTop, innerW, innerH);
@@ -2156,16 +2283,11 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
   const innerTop = -h / 2 + wallPx;
 
   if (condenser.fluid) {
-    if (condenser.fluid.phase === 'two-phase') {
-      // Stratified: condensate at bottom, steam at top
-      // Condenser always uses quality-based calculation (no stored fillLevel)
-      const liquidFraction = getLiquidFraction(condenser, condenser.fluid, true);
-      const separation = condenser.fluid.separation ?? 1;
-      renderStratifiedTwoPhase(ctx, condenser.fluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
-    } else {
-      ctx.fillStyle = getFluidColor(condenser.fluid);
-      ctx.fillRect(innerLeft, innerTop, innerW, innerH);
-    }
+    // Condenser always uses quality-based calculation (no stored fillLevel)
+    // Condensers often have air ingress (NCG), which will be rendered in vapor space
+    const liquidFraction = getLiquidFraction(condenser, condenser.fluid, true);
+    const separation = condenser.fluid.separation ?? 1;
+    renderFluidWithNcg(ctx, condenser.fluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
     ctx.fillRect(innerLeft, innerTop, innerW, innerH);
@@ -3542,12 +3664,16 @@ export function renderPressureGauge(
     const baseGaugeRadius = 20;
     const gaugeRadius = baseGaugeRadius * gaugeScale;
     const maxPressure = 220e5; // 220 bar in Pa
-    const pressureBar = node.fluid.pressure / 1e5; // Convert to bar
+
+    // node.fluid.pressure is already TOTAL pressure (steam + NCG) from constraint operator
+    // No need to add NCG again - it was added in FluidStateConstraintOperator
+    const totalPressure = node.fluid.pressure;
+    const pressureBar = totalPressure / 1e5; // Convert to bar
 
     // Calculate the angle for the current pressure (arc goes from -135° to +135°, i.e., 270° total)
     const startAngle = -Math.PI * 0.75; // -135°
     const totalArcAngle = Math.PI * 1.5; // 270°
-    const pressureFraction = Math.min(1, Math.max(0, node.fluid.pressure / maxPressure));
+    const pressureFraction = Math.min(1, Math.max(0, totalPressure / maxPressure));
     const currentAngle = startAngle + pressureFraction * totalArcAngle;
 
     // Draw stem from top of component to gauge
@@ -3613,20 +3739,20 @@ export function renderPressureGauge(
     }
 
     // Draw pressure value in center - with 1 decimal place
-    // Use larger font with text outline for better readability at small sizes
-    const valueFontSize = Math.max(9, Math.round(12 * gaugeScale));
+    // Scale font size with gauge, no minimum so it scales to zero at extreme distances
+    const valueFontSize = Math.round(12 * gaugeScale);
     ctx.font = `bold ${valueFontSize}px monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     // Draw text outline for crispness
     ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = Math.max(1, 2 * gaugeScale);
     ctx.strokeText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
     ctx.fillStyle = '#fff';
     ctx.fillText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
 
     // Draw "bar" unit below the value
-    const unitFontSize = Math.max(6, Math.round(7 * gaugeScale));
+    const unitFontSize = Math.round(7 * gaugeScale);
     ctx.font = `${unitFontSize}px monospace`;
     ctx.fillStyle = '#999';
     ctx.fillText('bar', 0, 7 * gaugeScale);

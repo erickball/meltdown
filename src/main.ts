@@ -1691,6 +1691,10 @@ function init() {
       gameLoop.setSimulationState(newSimState);
       plantCanvas.setSimState(newSimState);
 
+      // Sync simulation state back to plant components for correct rendering
+      // This is needed before simulation starts so components display correctly
+      syncSimulationToVisuals(newSimState, plantState);
+
       // Immediately update debug panel to show new configuration
       const currentState = gameLoop.getState();
       const emptyMetrics: SolverMetrics = {
@@ -2371,6 +2375,8 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.phase = vesselNode.fluid.phase;
           component.fluid.quality = vesselNode.fluid.quality;
           component.fluid.separation = vesselNode.separation;
+          component.fluid.ncg = vesselNode.fluid.ncg;
+          component.fluid.volume = vesselNode.volume;
         }
         // Core barrel syncs automatically via normal component loop (it has its own fluid)
         // Sync fuel temperature from core barrel's thermal node
@@ -2396,6 +2402,8 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.phase = insideNode.fluid.phase;
           component.fluid.quality = insideNode.fluid.quality;
           component.fluid.separation = insideNode.separation;
+          component.fluid.ncg = insideNode.fluid.ncg;
+          component.fluid.volume = insideNode.volume;
         }
       }
       // Sync fluid from outside barrel region (downcomer) to outsideBarrelFluid
@@ -2416,6 +2424,8 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           rv.outsideBarrelFluid.phase = outsideNode.fluid.phase;
           rv.outsideBarrelFluid.quality = outsideNode.fluid.quality;
           rv.outsideBarrelFluid.separation = outsideNode.separation;
+          rv.outsideBarrelFluid.ncg = outsideNode.fluid.ncg;
+          rv.outsideBarrelFluid.volume = outsideNode.volume;
         }
       }
       // Sync fuel temperature if present
@@ -2436,6 +2446,12 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.fluid.phase = simNode.fluid.phase;
         component.fluid.quality = simNode.fluid.quality;
         component.fluid.separation = simNode.separation;
+        // Sync NCG and volume for proper visualization
+        component.fluid.ncg = simNode.fluid.ncg;
+        component.fluid.volume = simNode.volume;
+        console.log(`[Sync] ${component.id}: phase=${simNode.fluid.phase}, quality=${simNode.fluid.quality?.toFixed(4)}, P=${(simNode.fluid.pressure/1e5).toFixed(3)} bar, volume=${simNode.volume}`);
+      } else {
+        console.log(`[Sync] ${component.id}: no simNode found for '${simNodeId}'`);
       }
     }
 

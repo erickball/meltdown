@@ -16,6 +16,13 @@ import {
   resetSolverProfile,
   getTurbineCondenserState,
 } from './simulation';
+import {
+  GasComposition,
+  totalMoles,
+  ALL_GAS_SPECIES,
+  GAS_PROPERTIES,
+  R_GAS,
+} from './simulation/gas-properties';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -72,6 +79,37 @@ function formatPressure(pBar: number): string {
   } else {
     return pBar.toFixed(1);   // e.g., "155.3"
   }
+}
+
+/**
+ * Format NCG (Non-Condensible Gas) partial pressures for display.
+ * Converts moles to partial pressure using ideal gas law: P = nRT/V
+ * Returns HTML string for the NCG section, or empty string if no NCGs present.
+ */
+function formatNcgPressures(ncg: GasComposition, temperature: number, volume: number): string {
+  const total = totalMoles(ncg);
+  if (total <= 0) return '';
+
+  let html = '<div style="margin-top: 6px; padding-top: 6px; border-top: 1px solid #444;">';
+  html += '<div style="color: #aaf; font-size: 10px; margin-bottom: 4px;">NCG Partial Pressures</div>';
+
+  // Calculate total NCG pressure
+  const P_total_ncg = (total * R_GAS * temperature) / volume; // Pa
+  html += `<div class="detail-row"><span class="detail-label">Total NCG:</span><span class="detail-value" style="color: #faa;">${formatPressure(P_total_ncg / 1e5)} bar</span></div>`;
+
+  // Show individual species
+  for (const species of ALL_GAS_SPECIES) {
+    const moles = ncg[species];
+    if (moles > 0) {
+      const P_species = (moles * R_GAS * temperature) / volume; // Pa
+      const P_bar = P_species / 1e5;
+      const props = GAS_PROPERTIES[species];
+      html += `<div class="detail-row"><span class="detail-label">${props.formula}:</span><span class="detail-value">${formatPressure(P_bar)} bar</span></div>`;
+    }
+  }
+
+  html += '</div>';
+  return html;
 }
 
 /**
@@ -1017,7 +1055,20 @@ export function updateComponentDetail(
     html += '<div class="detail-section">';
     html += '<div class="detail-section-title">Current Fluid State</div>';
     html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(flowNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-    html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(flowNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+
+    // Show pressure - if NCGs present, show both steam partial pressure and total pressure
+    // NOTE: flowNode.fluid.pressure is TOTAL pressure (steam + NCG) from the constraint operator
+    const totalPressure = flowNode.fluid.pressure;
+    const ncgMoles = flowNode.fluid.ncg ? totalMoles(flowNode.fluid.ncg) : 0;
+    if (ncgMoles > 0) {
+      const ncgPressure = (ncgMoles * R_GAS * flowNode.fluid.temperature) / flowNode.volume;
+      const steamPressure = Math.max(0, totalPressure - ncgPressure);
+      html += `<div class="detail-row"><span class="detail-label">Total Pressure:</span><span class="detail-value" style="color: #ff7;">${formatPressure(totalPressure / 1e5)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Steam P:</span><span class="detail-value">${formatPressure(steamPressure / 1e5)} bar</span></div>`;
+    } else {
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${formatPressure(totalPressure / 1e5)} bar</span></div>`;
+    }
+
     html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${flowNode.fluid.phase}</span></div>`;
     html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${flowNode.fluid.mass.toFixed(0)} kg</span></div>`;
     const specificEnergy = flowNode.fluid.internalEnergy / flowNode.fluid.mass / 1000;
@@ -1026,6 +1077,14 @@ export function updateComponentDetail(
     // Show fill level / quality only for two-phase in containers that can have separate phases
     if (flowNode.fluid.phase === 'two-phase' && hasSeparatePhases(component.type as string)) {
       html += `<div class="detail-row"><span class="detail-label">Quality:</span><span class="detail-value">${(flowNode.fluid.quality * 100).toFixed(1)}%</span></div>`;
+    }
+
+    // Show NCG (Non-Condensible Gas) information if present
+    if (flowNode.fluid.ncg) {
+      const ncgHtml = formatNcgPressures(flowNode.fluid.ncg, flowNode.fluid.temperature, flowNode.volume);
+      if (ncgHtml) {
+        html += ncgHtml;
+      }
     }
     html += '</div>';
   }

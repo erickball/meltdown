@@ -4,6 +4,37 @@ import {
   saturatedLiquidDensity,
   saturatedVaporDensity
 } from '../simulation/water-properties';
+import {
+  GasComposition,
+  GasSpecies,
+  GAS_PROPERTIES,
+  ALL_GAS_SPECIES,
+  totalMoles,
+  R_GAS,
+} from '../simulation/gas-properties';
+
+/**
+ * Get the steam partial pressure from a fluid state.
+ * For fluids with NCG, total pressure = steam + NCG, so we subtract NCG.
+ * This is needed for saturation calculations which depend on steam pressure, not total.
+ *
+ * @param totalPressure - Total pressure (Pa)
+ * @param ncg - NCG composition (if any)
+ * @param temperature - Temperature (K)
+ * @param volume - Volume (m³)
+ */
+function getSteamPartialPressure(
+  totalPressure: number,
+  ncg: GasComposition | undefined,
+  temperature: number,
+  volume: number
+): number {
+  if (!ncg || volume <= 0) return totalPressure;
+  const ncgMoles = totalMoles(ncg);
+  if (ncgMoles <= 0) return totalPressure;
+  const P_ncg = ncgMoles * R_GAS * temperature / volume;
+  return Math.max(0, totalPressure - P_ncg);
+}
 
 // Temperature color mapping for fluids
 // Water: dark blue (cold 0°C) -> light blue (saturation)
@@ -143,11 +174,25 @@ function getSaturatedVaporVolume(pressure: number): number {
  *
  * Volume fraction represents the fraction of space occupied by vapor,
  * which is what we want for visual display (pixel fraction that is white/vapor)
+ *
+ * IMPORTANT: When NCG is present, we must use steam partial pressure (not total)
+ * for saturation calculations. Pass fluid with ncg, temperature, and volume to enable this.
  */
-export function massQualityToVolumeFraction(quality: number, pressure: number): number {
+export function massQualityToVolumeFraction(
+  quality: number,
+  pressure: number,
+  fluid?: Fluid
+): number {
   const x = Math.max(0, Math.min(1, quality));
-  const v_f = getSaturatedLiquidVolume(pressure);
-  const v_g = getSaturatedVaporVolume(pressure);
+
+  // Use steam partial pressure for saturation calculations when NCG is present
+  let steamPressure = pressure;
+  if (fluid?.ncg && fluid.volume && fluid.volume > 0) {
+    steamPressure = getSteamPartialPressure(pressure, fluid.ncg, fluid.temperature, fluid.volume);
+  }
+
+  const v_f = getSaturatedLiquidVolume(steamPressure);
+  const v_g = getSaturatedVaporVolume(steamPressure);
 
   // α = x·v_g / (x·v_g + (1-x)·v_f)
   const numerator = x * v_g;
@@ -200,7 +245,8 @@ export function getTwoPhaseColors(fluid: Fluid): { liquid: RGB; vapor: RGB; qual
   // Convert mass quality to volume fraction for visual display
   // Volume fraction represents what fraction of SPACE is occupied by vapor
   // which is what we want for pixel-based rendering
-  const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure);
+  // Pass fluid for NCG-aware pressure correction
+  const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
   // Get temperature-dependent saturation colors (converge near critical point)
   const T_sat = getSaturationTemp(fluid.pressure);
   return {
@@ -350,5 +396,363 @@ export function getFuelColor(temperature: number, meltingPoint: number = 2800): 
   } else {
     // Above melting point - pulsing bright
     return rgbToString(FUEL_MELTING);
+  }
+}
+
+// ============================================================================
+// NCG (Non-Condensible Gas) Visualization
+// ============================================================================
+
+/**
+ * Check if a gas composition is approximately PURE air (N₂ + O₂ in ~4:1 ratio)
+ * with no significant other gases. If true, use solid blended rendering.
+ *
+ * Returns true only when:
+ * - N₂ and O₂ are in approximately air ratio (78:21)
+ * - Other gases (H₂, He, etc.) are < 1% of total (very strict - any meaningful
+ *   amount of other gas should trigger pixelated display)
+ */
+export function isApproximatelyPureAir(comp: GasComposition): boolean {
+  const total = totalMoles(comp);
+  if (total <= 0) return false;
+
+  const n2Frac = comp.N2 / total;
+  const o2Frac = comp.O2 / total;
+  const otherFrac = 1 - n2Frac - o2Frac;
+
+  // Air is ~78% N₂, ~21% O₂ (ratio 3.71:1)
+  // Air-like ratio range is 3.5-4:1, which corresponds to:
+  //   N₂: 77.8-80%, O₂: 20-22.2%
+  // Use slightly tighter range to avoid false positives
+  // Only use solid rendering when other gases are < 1%
+  return n2Frac >= 0.77 && n2Frac <= 0.80 &&
+         o2Frac >= 0.19 && o2Frac <= 0.23 &&
+         otherFrac < 0.01;
+}
+
+// Keep old name as alias for backwards compatibility
+export const isApproximatelyAir = isApproximatelyPureAir;
+
+/**
+ * Get the color for air - blends N₂ and O₂ colors.
+ * Air is ~78% N₂ (gray-blue) + ~21% O₂ (reddish pink).
+ */
+export function getAirColor(): RGB {
+  // N₂ color: #b8b8c8 = rgb(184, 184, 200)
+  // O₂ color: #e8a0a0 = rgb(232, 160, 160)
+  // Blend at ~78% N₂, ~22% O₂
+  const n2 = hexToRGBColor(GAS_PROPERTIES.N2.color);
+  const o2 = hexToRGBColor(GAS_PROPERTIES.O2.color);
+  return {
+    r: n2.r * 0.78 + o2.r * 0.22,
+    g: n2.g * 0.78 + o2.g * 0.22,
+    b: n2.b * 0.78 + o2.b * 0.22,
+  };
+}
+
+/**
+ * Parse a hex color string to RGB.
+ */
+export function hexToRGBColor(hex: string): RGB {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return result ? {
+    r: parseInt(result[1], 16),
+    g: parseInt(result[2], 16),
+    b: parseInt(result[3], 16),
+  } : { r: 128, g: 128, b: 128 };
+}
+
+/**
+ * Get an array of gas species present in the composition with their colors and fractions.
+ * Used for pixelated NCG rendering.
+ * Returns species sorted by mole fraction (highest first).
+ *
+ * Special handling for N₂ and O₂:
+ * - If they're in air-like ratio (~78:21), combine them into pseudo-species "Air"
+ * - Any excess N₂ or O₂ beyond the air ratio is shown separately
+ * - Other gases (H₂, He, etc.) always shown with their own colors
+ */
+export interface GasColorInfo {
+  species: GasSpecies | 'Air';  // Allow pseudo-species "Air"
+  color: RGB;
+  fraction: number;  // mole fraction
+}
+
+export function getGasColorInfo(comp: GasComposition): GasColorInfo[] {
+  const total = totalMoles(comp);
+  if (total <= 0) return [];
+
+  const result: GasColorInfo[] = [];
+  const n2 = comp.N2;
+  const o2 = comp.O2;
+
+  // Always try to extract maximum "air" from any N₂+O₂ mixture
+  // Air is 78% N₂, 21% O₂, so the limiting component determines how much "air" we have
+  // For every 0.78 mol N₂, we need 0.21 mol O₂ (ratio 3.71:1)
+  if (n2 > 0 && o2 > 0) {
+    const airRatioN2 = 0.78;
+    const airRatioO2 = 0.21;
+
+    // How much air can we make from available N₂ and O₂?
+    const airFromN2 = n2 / airRatioN2;  // mol of "air" if N₂ is limiting
+    const airFromO2 = o2 / airRatioO2;  // mol of "air" if O₂ is limiting
+    const airMoles = Math.min(airFromN2, airFromO2);
+
+    // N₂ and O₂ used for air
+    const n2UsedForAir = airMoles * airRatioN2;
+    const o2UsedForAir = airMoles * airRatioO2;
+
+    // Excess N₂ or O₂
+    const excessN2 = n2 - n2UsedForAir;
+    const excessO2 = o2 - o2UsedForAir;
+
+    // Add "Air" as a pseudo-species if significant
+    const airFraction = (n2UsedForAir + o2UsedForAir) / total;
+    if (airFraction > 0.01) {
+      result.push({
+        species: 'Air',
+        color: getAirColor(),
+        fraction: airFraction,
+      });
+    }
+
+    // Add excess N₂ if significant
+    if (excessN2 > total * 0.01) {
+      result.push({
+        species: 'N2',
+        color: hexToRGBColor(GAS_PROPERTIES.N2.color),
+        fraction: excessN2 / total,
+      });
+    }
+
+    // Add excess O₂ if significant
+    if (excessO2 > total * 0.01) {
+      result.push({
+        species: 'O2',
+        color: hexToRGBColor(GAS_PROPERTIES.O2.color),
+        fraction: excessO2 / total,
+      });
+    }
+  } else {
+    // Only N₂ or only O₂ (no air possible) - show them separately
+    if (n2 > 0) {
+      result.push({
+        species: 'N2',
+        color: hexToRGBColor(GAS_PROPERTIES.N2.color),
+        fraction: n2 / total,
+      });
+    }
+    if (o2 > 0) {
+      result.push({
+        species: 'O2',
+        color: hexToRGBColor(GAS_PROPERTIES.O2.color),
+        fraction: o2 / total,
+      });
+    }
+  }
+
+  // Add all other gas species (not N₂ or O₂)
+  for (const species of ALL_GAS_SPECIES) {
+    if (species === 'N2' || species === 'O2') continue;
+
+    const moles = comp[species];
+    if (moles > 0) {
+      result.push({
+        species,
+        color: hexToRGBColor(GAS_PROPERTIES[species].color),
+        fraction: moles / total,
+      });
+    }
+  }
+
+  // Sort by fraction descending
+  result.sort((a, b) => b.fraction - a.fraction);
+
+  return result;
+}
+
+/**
+ * Get the blended color for a gas mixture (used for air or simple display).
+ * Returns mole-fraction weighted average of component colors.
+ */
+export function getBlendedGasColor(comp: GasComposition): RGB {
+  const total = totalMoles(comp);
+  if (total <= 0) return { r: 128, g: 128, b: 128 };
+
+  let r = 0, g = 0, b = 0;
+
+  for (const species of ALL_GAS_SPECIES) {
+    const fraction = comp[species] / total;
+    if (fraction <= 0) continue;
+
+    const color = hexToRGBColor(GAS_PROPERTIES[species].color);
+    r += color.r * fraction;
+    g += color.g * fraction;
+    b += color.b * fraction;
+  }
+
+  return { r, g, b };
+}
+
+/**
+ * Get NCG visualization data for a fluid.
+ * Returns null if no NCG present.
+ *
+ * isAir = true means pure air (N₂+O₂ in ~78:21, <3% other gases) -> solid rendering
+ * isAir = false means use pixelated rendering with gasColors
+ *
+ * gasColors handles air-like mixtures intelligently:
+ * - If N₂+O₂ are in air ratio, they appear as "Air" pseudo-species
+ * - Any excess N₂ or O₂ beyond the ratio appears separately
+ * - Other gases (H₂, He, etc.) always appear with their own colors
+ */
+export interface NcgVisualization {
+  isAir: boolean;            // True = pure air, use solid blended rendering
+  blendedColor: RGB;         // For pure air or fallback solid rendering
+  gasColors: GasColorInfo[]; // For pixelated rendering (includes "Air" pseudo-species)
+  totalMoles: number;
+}
+
+export function getNcgVisualization(ncg: GasComposition | undefined): NcgVisualization | null {
+  if (!ncg) return null;
+
+  const total = totalMoles(ncg);
+  if (total <= 0) return null;
+
+  const isAir = isApproximatelyPureAir(ncg);
+
+  return {
+    isAir,
+    blendedColor: isAir ? getAirColor() : getBlendedGasColor(ncg),
+    gasColors: getGasColorInfo(ncg),
+    totalMoles: total,
+  };
+}
+
+// ============================================================================
+// Color Legend Rendering
+// ============================================================================
+
+/**
+ * Water color stops for legend gradient (cold to hot)
+ */
+const WATER_GRADIENT_STOPS: RGB[] = [
+  { r: 20, g: 50, b: 120 },    // 20°C - dark blue
+  { r: 30, g: 80, b: 160 },    // ~80°C - medium dark blue
+  { r: 50, g: 120, b: 200 },   // ~180°C - medium blue
+  { r: 120, g: 180, b: 240 },  // ~340°C - light blue (saturation)
+];
+
+/**
+ * Steam color stops for legend gradient (saturated to superheated)
+ */
+const STEAM_GRADIENT_STOPS: RGB[] = [
+  { r: 255, g: 255, b: 255 },  // saturated - white
+  { r: 255, g: 240, b: 130 },  // 100°C superheat - yellow
+  { r: 255, g: 140, b: 50 },   // 500°C superheat - orange
+];
+
+/**
+ * Legend item definition
+ */
+interface LegendItem {
+  label: string;
+  color?: string;        // For solid colors
+  gradient?: RGB[];      // For gradient colors
+}
+
+/**
+ * Render a color/gas legend at the bottom of the canvas.
+ * Shows water gradient, steam gradient, air, and all NCG species.
+ */
+export function renderColorLegend(
+  ctx: CanvasRenderingContext2D,
+  canvasWidth: number,
+  canvasHeight: number
+): void {
+  const legendHeight = 24;
+  const itemHeight = 14;
+  const itemSpacing = 8;
+  const gradientWidth = 50;
+  const solidWidth = 14;
+  const padding = 10;
+  const fontSize = 10;
+
+  // Build legend items
+  const items: LegendItem[] = [
+    { label: 'Water', gradient: WATER_GRADIENT_STOPS },
+    { label: 'Steam', gradient: STEAM_GRADIENT_STOPS },
+    { label: 'Air', color: rgbToString(getAirColor()) },
+  ];
+
+  // Add all gas species
+  for (const species of ALL_GAS_SPECIES) {
+    const props = GAS_PROPERTIES[species];
+    items.push({
+      label: props.formula,
+      color: props.color,
+    });
+  }
+
+  // Calculate total width needed
+  let totalWidth = padding;
+  for (const item of items) {
+    const colorWidth = item.gradient ? gradientWidth : solidWidth;
+    ctx.font = `${fontSize}px sans-serif`;
+    const labelWidth = ctx.measureText(item.label).width;
+    totalWidth += colorWidth + 4 + labelWidth + itemSpacing;
+  }
+  totalWidth -= itemSpacing; // Remove last spacing
+  totalWidth += padding;
+
+  // Position legend at bottom center, above the status bar (~35px tall)
+  const statusBarHeight = 40; // Account for status bar at bottom of viewport
+  const legendX = (canvasWidth - totalWidth) / 2;
+  const legendY = canvasHeight - legendHeight - statusBarHeight;
+
+  // Draw background
+  ctx.fillStyle = 'rgba(20, 30, 40, 0.85)';
+  ctx.fillRect(legendX, legendY, totalWidth, legendHeight);
+  ctx.strokeStyle = 'rgba(100, 120, 140, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(legendX, legendY, totalWidth, legendHeight);
+
+  // Draw items
+  let x = legendX + padding;
+  const y = legendY + (legendHeight - itemHeight) / 2;
+
+  ctx.font = `${fontSize}px sans-serif`;
+  ctx.textBaseline = 'middle';
+
+  for (const item of items) {
+    const colorWidth = item.gradient ? gradientWidth : solidWidth;
+
+    if (item.gradient) {
+      // Draw gradient
+      const gradient = ctx.createLinearGradient(x, 0, x + gradientWidth, 0);
+      const stops = item.gradient;
+      for (let i = 0; i < stops.length; i++) {
+        gradient.addColorStop(i / (stops.length - 1), rgbToString(stops[i]));
+      }
+      ctx.fillStyle = gradient;
+      ctx.fillRect(x, y, gradientWidth, itemHeight);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x, y, gradientWidth, itemHeight);
+    } else if (item.color) {
+      // Draw solid color
+      ctx.fillStyle = item.color;
+      ctx.fillRect(x, y, solidWidth, itemHeight);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.lineWidth = 0.5;
+      ctx.strokeRect(x, y, solidWidth, itemHeight);
+    }
+
+    // Draw label
+    ctx.fillStyle = '#ccc';
+    ctx.fillText(item.label, x + colorWidth + 4, y + itemHeight / 2);
+
+    const labelWidth = ctx.measureText(item.label).width;
+    x += colorWidth + 4 + labelWidth + itemSpacing;
   }
 }

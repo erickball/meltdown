@@ -120,7 +120,7 @@ export const GAS_PROPERTIES: Record<GasSpecies, GasPropertyData> = {
     cp: 29.38,                  // J/(mol·K)
     cv: 21.07,                  // J/(mol·K)
     gamma: 1.39,
-    color: '#e8a0a0',           // reddish pink
+    color: '#d05050',           // red
     name: 'Oxygen',
     formula: 'O₂'
   },

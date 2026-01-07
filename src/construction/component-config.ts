@@ -1,8 +1,12 @@
 // Component configuration definitions and dialog system
 
-import { saturationTemperature } from '../simulation/water-properties';
+import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import { estimateComponentCost, formatCost } from './cost-estimation';
 import { ALL_GAS_SPECIES, GAS_PROPERTIES, type GasSpecies } from '../simulation/gas-properties';
+
+// Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
+const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
+const MIN_STEAM_PRESSURE_BAR = MIN_STEAM_PRESSURE_PA / 1e5; // ~0.00657 bar
 
 export interface ComponentConfig {
   type: string;
@@ -71,7 +75,7 @@ export const componentDefinitions: Record<string, {
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 10, unit: 'bar' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 1, max: 221, step: 1, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
+      { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
       // Calculated fields
@@ -103,7 +107,7 @@ export const componentDefinitions: Record<string, {
       { name: 'heaterPower', type: 'number', label: 'Heater Power', default: 2, min: 0, max: 10, step: 0.5, unit: 'MW' },
       { name: 'sprayFlow', type: 'number', label: 'Max Spray Flow', default: 50, min: 0, max: 200, step: 10, unit: 'kg/s' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%', help: 'Pressurizers are always two-phase at saturation' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 1, max: 221, step: 1, unit: 'bar', help: 'Determines saturation temperature' },
+      { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 155, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). Determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 345, min: 20, max: 374, step: 5, unit: '°C', help: 'Calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to the steam space' },
       // Calculated fields
@@ -137,7 +141,7 @@ export const componentDefinitions: Record<string, {
       { name: 'barrelBottomGap', type: 'number', label: 'Barrel Bottom Gap', default: 1.0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from lower head to barrel bottom' },
       { name: 'barrelTopGap', type: 'number', label: 'Barrel Top Gap', default: 0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from upper head to barrel top' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 100, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 155, min: 50, max: 221, step: 5, unit: 'bar', help: 'For two-phase (0-100% level), determines saturation temperature' },
+      { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 155, min: 0.01, max: 221, step: 5, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to the vapor space' },
       // Calculated fields
@@ -216,7 +220,7 @@ export const componentDefinitions: Record<string, {
         { value: 'two-phase', label: 'Two-Phase (Saturated)' },
         { value: 'vapor', label: 'Superheated Vapor' }
       ], help: 'Fluid phase at start of simulation' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'For two-phase, determines saturation temperature' },
+      { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialQuality', type: 'number', label: 'Initial Quality', default: 0.5, min: 0, max: 1, step: 0.01, help: 'Mass fraction of vapor (0=sat. liquid, 1=sat. vapor). Only for two-phase.' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to vapor' },
@@ -1165,9 +1169,19 @@ export class ComponentDialog {
     };
 
     // Helper to update saturation temperature from pressure
+    // Also clamps pressure to minimum if below freezing point
     const updateSaturationTemp = () => {
       if (isTwoPhase()) {
-        const pressureBar = parseFloat(pressureInput.value) || 150;
+        let pressureBar = parseFloat(pressureInput.value);
+        if (isNaN(pressureBar)) pressureBar = 150;
+
+        // Clamp to minimum pressure to keep water above freezing
+        if (pressureBar < MIN_STEAM_PRESSURE_BAR) {
+          pressureBar = MIN_STEAM_PRESSURE_BAR;
+          // Update the pressure input to show the clamped value
+          pressureInput.value = pressureBar.toFixed(5);
+        }
+
         const pressurePa = pressureBar * 1e5;
         try {
           const satTempK = saturationTemperature(pressurePa);
@@ -1841,6 +1855,21 @@ export class ComponentDialog {
           if (option.min !== undefined) input.min = String(option.min);
           if (option.max !== undefined) input.max = String(option.max);
           if (option.step !== undefined) input.step = String(option.step);
+          break;
+
+        case 'ncg':
+          // NCG input is a button that opens an expandable panel
+          input = document.createElement('input');
+          input.type = 'hidden';
+          input.id = `option-${option.name}`;
+          input.name = option.name;
+          // existingValue may be an object or undefined
+          const ncgValue = (existingValue && typeof existingValue === 'object') ? existingValue : {};
+          input.value = JSON.stringify(ncgValue);
+
+          // Create the NCG control panel with existing values
+          const ncgPanelEdit = this.createNcgPanel(option.name, ncgValue);
+          formGroup.appendChild(ncgPanelEdit);
           break;
 
         default: // text

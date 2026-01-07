@@ -10,6 +10,9 @@ export interface Point {
   y: number;
 }
 
+// Import GasComposition type for NCG support
+import type { GasComposition } from './simulation/gas-properties';
+
 export interface Fluid {
   temperature: number;  // Kelvin
   pressure: number;     // Pascals
@@ -17,6 +20,10 @@ export interface Fluid {
   quality?: number;     // For two-phase: 0 = all liquid, 1 = all vapor
   flowRate: number;     // kg/s (positive = forward direction)
   separation?: number;  // Phase separation factor: 0 = fully mixed, 1 = fully separated
+  // NCG (non-condensible gases) - for rendering simulation state
+  ncg?: GasComposition; // mol - moles of each NCG species
+  mass?: number;        // kg - total fluid mass
+  volume?: number;      // m³ - volume (for NCG fraction calculation)
 }
 
 export type ComponentType =

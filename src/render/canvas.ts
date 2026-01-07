@@ -9,7 +9,7 @@ import {
   getComponentElevation,
   renderDebugGrid,
 } from './isometric';
-import { getFluidColor, COLORS } from './colors';
+import { getFluidColor, COLORS, renderColorLegend } from './colors';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -902,6 +902,9 @@ export class PlantCanvas {
     this.canvas.width = rect.width * dpr;
     this.canvas.height = rect.height * dpr;
 
+    // Reset transform before scaling (setting canvas.width already resets it,
+    // but be explicit to avoid issues)
+    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
   }
 
@@ -1598,7 +1601,7 @@ export class PlantCanvas {
         // Create projection function for components that need world-to-screen mapping
         // Returns both screen position and scale factor for proper perspective rendering
         const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
-        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !!this.simState, this.plantState, worldToScreenFn);
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !this.constructionMode, this.plantState, worldToScreenFn);
 
         // Render elevation label (reset scale first so text isn't squished)
         if (component.type !== 'pipe') {
@@ -1615,7 +1618,7 @@ export class PlantCanvas {
 
         // Render the component
         const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !!this.simState, this.plantState);
+        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !this.constructionMode, this.plantState);
       }
 
       ctx.restore();
@@ -1674,6 +1677,9 @@ export class PlantCanvas {
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
     }
+
+    // Draw color legend at bottom of canvas
+    renderColorLegend(ctx, rect.width, rect.height);
 
     // Schedule next frame
     requestAnimationFrame(() => this.render());

@@ -1026,6 +1026,7 @@ export function createFluidState(
       if (ncgPartialPressures && Object.keys(ncgPartialPressures).length > 0) {
         const ncg = emptyGasComposition();
         let hasNcg = false;
+        let totalNcgPressure = 0; // Pa
 
         for (const species of ALL_GAS_SPECIES) {
           const P_bar = ncgPartialPressures[species as GasSpecies];
@@ -1034,12 +1035,15 @@ export function createFluidState(
             // n = PV / RT
             const moles = (P_Pa * volume) / (R_GAS * temperature);
             ncg[species as GasSpecies] = moles;
+            totalNcgPressure += P_Pa;
             hasNcg = true;
           }
         }
 
         if (hasNcg) {
           fluidState.ncg = ncg;
+          // Add NCG partial pressure to total pressure (Dalton's law)
+          fluidState.pressure += totalNcgPressure;
         }
       }
 
@@ -1071,6 +1075,7 @@ export function createFluidState(
     // Convert partial pressures (bar) to moles using ideal gas law: n = PV/RT
     const ncg = emptyGasComposition();
     let hasNcg = false;
+    let totalNcgPressure = 0; // Pa
 
     for (const species of ALL_GAS_SPECIES) {
       const P_bar = ncgPartialPressures[species as GasSpecies];
@@ -1079,12 +1084,16 @@ export function createFluidState(
         // n = PV / RT
         const moles = (P_Pa * volume) / (R_GAS * temperature);
         ncg[species as GasSpecies] = moles;
+        totalNcgPressure += P_Pa;
         hasNcg = true;
       }
     }
 
     if (hasNcg) {
       fluidState.ncg = ncg;
+      // Add NCG partial pressure to total pressure (Dalton's law)
+      // This makes the pressure field consistent with what constraint operator expects
+      fluidState.pressure += totalNcgPressure;
     }
   }
 
