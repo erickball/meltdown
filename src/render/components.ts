@@ -32,6 +32,7 @@ import {
   RGB,
   GasColorInfo,
 } from './colors';
+import { evaluateFlammability, FlammabilityStatus } from '../simulation/gas-properties';
 
 /**
  * Calculate wall thickness from pressure rating using ASME pressure vessel formula.
@@ -321,6 +322,129 @@ function renderNcgOverlay(
 }
 
 /**
+ * Render a flammability/detonability indicator icon in the vapor space.
+ * Shows a flame icon for flammable mixtures, explosion icon for detonable.
+ *
+ * @param ctx - Canvas context
+ * @param status - Flammability status from evaluateFlammability()
+ * @param centerX - X position for icon center
+ * @param centerY - Y position for icon center
+ * @param size - Icon diameter in pixels
+ */
+function renderFlammabilityIndicator(
+  ctx: CanvasRenderingContext2D,
+  status: FlammabilityStatus,
+  centerX: number,
+  centerY: number,
+  size: number
+): void {
+  if (status === 'safe') return;
+
+  const radius = size / 2;
+
+  ctx.save();
+  ctx.translate(centerX, centerY);
+
+  // Draw black circle background
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+  ctx.fill();
+  ctx.strokeStyle = status === 'detonable' ? '#ff4444' : '#ffaa00';
+  ctx.lineWidth = Math.max(1, size * 0.08);
+  ctx.stroke();
+
+  if (status === 'flammable') {
+    // Draw flame icon
+    const flameScale = radius * 0.7;
+    ctx.fillStyle = '#ff6600';
+
+    // Flame shape using bezier curves
+    ctx.beginPath();
+    ctx.moveTo(0, -flameScale * 0.9);
+    // Left side of flame
+    ctx.bezierCurveTo(
+      -flameScale * 0.3, -flameScale * 0.5,
+      -flameScale * 0.5, -flameScale * 0.1,
+      -flameScale * 0.4, flameScale * 0.4
+    );
+    ctx.bezierCurveTo(
+      -flameScale * 0.3, flameScale * 0.6,
+      -flameScale * 0.1, flameScale * 0.7,
+      0, flameScale * 0.8
+    );
+    // Right side of flame (mirror)
+    ctx.bezierCurveTo(
+      flameScale * 0.1, flameScale * 0.7,
+      flameScale * 0.3, flameScale * 0.6,
+      flameScale * 0.4, flameScale * 0.4
+    );
+    ctx.bezierCurveTo(
+      flameScale * 0.5, -flameScale * 0.1,
+      flameScale * 0.3, -flameScale * 0.5,
+      0, -flameScale * 0.9
+    );
+    ctx.fill();
+
+    // Inner yellow highlight
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.moveTo(0, -flameScale * 0.5);
+    ctx.bezierCurveTo(
+      -flameScale * 0.15, -flameScale * 0.2,
+      -flameScale * 0.2, flameScale * 0.1,
+      -flameScale * 0.1, flameScale * 0.4
+    );
+    ctx.bezierCurveTo(
+      -flameScale * 0.05, flameScale * 0.5,
+      flameScale * 0.05, flameScale * 0.5,
+      flameScale * 0.1, flameScale * 0.4
+    );
+    ctx.bezierCurveTo(
+      flameScale * 0.2, flameScale * 0.1,
+      flameScale * 0.15, -flameScale * 0.2,
+      0, -flameScale * 0.5
+    );
+    ctx.fill();
+  } else {
+    // Draw explosion icon for detonable
+    const explScale = radius * 0.65;
+    ctx.fillStyle = '#ff2200';
+
+    // Draw starburst explosion shape
+    const points = 8;
+    ctx.beginPath();
+    for (let i = 0; i < points * 2; i++) {
+      const angle = (i * Math.PI) / points - Math.PI / 2;
+      const r = i % 2 === 0 ? explScale : explScale * 0.45;
+      const px = Math.cos(angle) * r;
+      const py = Math.sin(angle) * r;
+      if (i === 0) {
+        ctx.moveTo(px, py);
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+    ctx.closePath();
+    ctx.fill();
+
+    // Inner yellow core
+    ctx.fillStyle = '#ffcc00';
+    ctx.beginPath();
+    ctx.arc(0, 0, explScale * 0.3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // White center flash
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(0, 0, explScale * 0.15, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+/**
  * Calculate the NCG fraction (by partial pressure) in vapor space.
  * Returns 0 if liquid-only or no NCG present.
  *
@@ -434,6 +558,36 @@ function renderFluidWithNcg(
     renderNcgOverlay(ctx, ncgViz, x, y, width, height, ncgFraction, pixelSize);
   }
   // For pure liquid, NCG is dissolved and not visible
+
+  // Render flammability indicator if hydrogen is present in vapor space
+  if (fluid.ncg && fluid.ncg.H2 > 0 && (fluid.phase !== 'liquid' || liquidFraction < 0.999)) {
+    // Calculate steam mole fraction for inerting check
+    // Steam partial pressure = P_total - P_ncg
+    const R = 8.314; // J/(mol·K)
+    const T = fluid.temperature || 400; // K
+    const V = fluid.volume || 1; // m³
+    const P_total = fluid.pressure;
+    const ncgMoles = ncgViz ? ncgViz.totalMoles : 0;
+    const P_ncg = (ncgMoles * R * T) / V;
+    const P_steam = Math.max(0, P_total - P_ncg);
+
+    // Convert steam pressure to moles: n = PV/RT
+    const steamMoles = (P_steam * V) / (R * T);
+    const totalMolesInVapor = steamMoles + ncgMoles;
+    const steamMoleFraction = totalMolesInVapor > 0 ? steamMoles / totalMolesInVapor : 0;
+
+    const flammabilityStatus = evaluateFlammability(fluid.ncg, steamMoleFraction, P_total);
+
+    if (flammabilityStatus !== 'safe') {
+      // Position indicator in center of vapor space
+      const vaporHeight = isStratified ? height * (1 - liquidFraction) : height;
+      const indicatorSize = Math.min(width, vaporHeight) * 0.4;
+      const indicatorX = x + width / 2;
+      const indicatorY = y + vaporHeight / 2;
+
+      renderFlammabilityIndicator(ctx, flammabilityStatus, indicatorX, indicatorY, indicatorSize);
+    }
+  }
 }
 
 export function screenToWorld(point: Point, view: ViewState): Point {
