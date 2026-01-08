@@ -2062,22 +2062,25 @@ export class FlowMomentumRateOperator implements RateOperator {
 
       // Friction pressure drop (always opposes flow direction)
       // dP_friction = -K * 0.5 * ρ * v * |v|  (negative when flow is positive)
-      // Uses upstream density since that's the fluid experiencing the friction
-      const dP_friction = -K_eff * 0.5 * rho_upstream * v * Math.abs(v);
+      // Uses rho_flow since that's the fluid actually moving through the connection
+      const dP_friction = -K_eff * 0.5 * rho_flow * v * Math.abs(v);
 
       // Net accelerating pressure
       const dP_net = dP_driving + dP_friction;
 
       // Momentum equation: ΔP = ρ * L * dv/dt  (from inertance I = ρL/A, ΔP = I * dQ/dt where Q = v*A)
       // dv/dt = ΔP / (ρ * L)
-      // Uses upstream density - that's the fluid being accelerated
-      const dv_dt = dP_net / (rho_upstream * L);
+      // Uses rho_flow - the density of the fluid actually in the pipe being accelerated
+      // CRITICAL: Must use rho_flow consistently with velocity calculation (line 1921)
+      // Using rho_upstream here was wrong - it could be very low for large tanks with small mass,
+      // causing enormous acceleration rates even when the flowing phase is liquid.
+      const dv_dt = dP_net / (rho_flow * L);
 
       // Convert velocity rate to mass flow rate:
       // ṁ = ρ * A * v
       // dṁ/dt = ρ * A * dv/dt  (assuming ρ changes slowly)
-      // Uses upstream density since that's what's flowing
-      const dMassFlowRate = rho_upstream * A * dv_dt;
+      // Uses rho_flow since that's what's actually flowing through the connection
+      const dMassFlowRate = rho_flow * A * dv_dt;
 
       rates.flowConnections.set(conn.id, { dMassFlowRate });
     }

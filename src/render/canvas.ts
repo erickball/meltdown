@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -1757,6 +1757,12 @@ export class PlantCanvas {
       // Pass screen bounds getter function for proper gauge positioning
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+
+      // Draw burst overlays (crack symbols and warning borders)
+      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+
+      // Draw break connections (red dashed lines for LOCA flows)
+      renderBreakConnections(ctx, this.simState, this.plantState, this.view);
     }
 
     // Draw color legend at bottom of canvas

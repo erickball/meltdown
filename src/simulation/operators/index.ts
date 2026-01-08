@@ -40,3 +40,5 @@ export {
   type TurbineCondenserConfig,
   type TurbineCondenserState,
 } from './turbine-condenser';
+
+export { BurstCheckOperator } from './burst-operator';

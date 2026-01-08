@@ -16,10 +16,9 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Debug semi-implicit pressure/flow solver
 -Add LOCA capability (atmosphere as boundary condition)
 -Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
--When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified)
+-When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified). This is randomized at the start of the simulation and stored.
 -Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
--Add containment building as an option
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
@@ -58,9 +57,10 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
--Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
--When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
--There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
+X Add containment building as an option
+X Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
+X When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount
+X There should also be a sandbox mode where you have infinite money. That's the one we're doing first.
 X When I move a pipe I can only move the "from" end, the "to" end seems to be stuck in place. Let me position both ends in 3d from the edit menu.
 X Back up a timestep feature, and periodic state-saving
 X Some kind of semi-implicit fluid flow/pressure calculation

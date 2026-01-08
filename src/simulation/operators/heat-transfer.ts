@@ -19,7 +19,7 @@
 import { SimulationState, FlowNode, FluidState, simulationConfig } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
-import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES } from '../gas-properties';
+import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES, totalMoles, mixtureCv } from '../gas-properties';
 
 /**
  * NCG initial condition as partial pressures in bar.
@@ -207,9 +207,21 @@ export class ConvectionOperator implements PhysicsOperator {
       // Update fluid using energy-based approach
       // Add energy to fluid's internal energy, then recalculate state
       const newFluidEnergy = flowNode.fluid.internalEnergy + energyTransferred;
+
+      // Calculate steam energy by subtracting NCG energy (NCG is at thermal equilibrium)
+      let steamEnergy = newFluidEnergy;
+      if (flowNode.fluid.ncg) {
+        const ncgMoles = totalMoles(flowNode.fluid.ncg);
+        if (ncgMoles > 0) {
+          const Cv_mix = mixtureCv(flowNode.fluid.ncg);
+          const ncgEnergy = ncgMoles * Cv_mix * flowNode.fluid.temperature;
+          steamEnergy = Math.max(0, newFluidEnergy - ncgEnergy);
+        }
+      }
+
       const newState_water = Water.calculateState(
         flowNode.fluid.mass,
-        newFluidEnergy,
+        steamEnergy,
         flowNode.volume
       );
 
@@ -273,9 +285,19 @@ export class ConvectionOperator implements PhysicsOperator {
       const dtSolid = solidThermalMass / (2 * hA);
 
       // Fluid constraint using effective specific heat
+      // Subtract NCG energy to get steam energy for water properties
+      let steamEnergy = flowNode.fluid.internalEnergy;
+      if (flowNode.fluid.ncg) {
+        const ncgMoles = totalMoles(flowNode.fluid.ncg);
+        if (ncgMoles > 0) {
+          const Cv_mix = mixtureCv(flowNode.fluid.ncg);
+          const ncgEnergy = ncgMoles * Cv_mix * flowNode.fluid.temperature;
+          steamEnergy = Math.max(0, flowNode.fluid.internalEnergy - ncgEnergy);
+        }
+      }
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
-        flowNode.fluid.internalEnergy,
+        steamEnergy,
         flowNode.volume
       );
       const cv_eff = Water.effectiveSpecificHeat(waterState);
@@ -400,9 +422,27 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
     }>();
 
     for (const [, flowNode] of newState.flowNodes) {
+      // Skip boundary nodes - their state is fixed and should not be recalculated
+      if (flowNode.isBoundary) continue;
+
+      // Calculate water/steam internal energy by subtracting NCG energy from total
+      // NCG energy = n * Cv * T where n is total moles, Cv is mixture heat capacity
+      // We need temperature, but we don't know it yet - use last known temperature as estimate
+      let steamEnergy = flowNode.fluid.internalEnergy;
+      if (flowNode.fluid.ncg) {
+        const ncgMoles = totalMoles(flowNode.fluid.ncg);
+        if (ncgMoles > 0) {
+          // Estimate NCG energy using current temperature
+          // U_ncg = n * Cv_mix * T (ideal gas internal energy)
+          const Cv_mix = mixtureCv(flowNode.fluid.ncg); // J/(mol·K)
+          const ncgEnergy = ncgMoles * Cv_mix * flowNode.fluid.temperature;
+          steamEnergy = Math.max(0, flowNode.fluid.internalEnergy - ncgEnergy);
+        }
+      }
+
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
-        flowNode.fluid.internalEnergy,
+        steamEnergy,
         flowNode.volume
       );
 
@@ -794,9 +834,19 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
     let minDt = Infinity;
 
     for (const [, flowNode] of state.flowNodes) {
+      // Subtract NCG energy to get steam energy
+      let steamEnergy = flowNode.fluid.internalEnergy;
+      if (flowNode.fluid.ncg) {
+        const ncgMoles = totalMoles(flowNode.fluid.ncg);
+        if (ncgMoles > 0) {
+          const Cv_mix = mixtureCv(flowNode.fluid.ncg);
+          const ncgEnergy = ncgMoles * Cv_mix * flowNode.fluid.temperature;
+          steamEnergy = Math.max(0, flowNode.fluid.internalEnergy - ncgEnergy);
+        }
+      }
       const waterState = Water.calculateState(
         flowNode.fluid.mass,
-        flowNode.fluid.internalEnergy,
+        steamEnergy,
         flowNode.volume
       );
       const suggestedDt = Water.suggestMaxTimestep(waterState, flowNode.volume);

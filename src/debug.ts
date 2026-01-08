@@ -170,25 +170,35 @@ export function updateDebugPanel(
     let limiterDisplay = metrics.dtLimitedBy;
     if (limiterDisplay === 'config.maxDt') limiterDisplay = 'maxDt';
 
-    // Build error contributors display if RK45 is limiting dt
+    // Build error contributors display - always reserve space for 3 lines to prevent layout jumping
     let errorContributorsHtml = '';
+    const emptyLine = '<span style="color: #444; font-size: 10px; margin-left: 12px;">•</span>';
     if (metrics.dtLimitedBy === 'RK45-error' && metrics.topErrorContributors && metrics.topErrorContributors.length > 0) {
-      const contributorLines = metrics.topErrorContributors.map(c => {
-        const pct = (c.contribution * 100).toFixed(0);
-        // Format type as a short label
-        const typeLabels: Record<string, string> = {
-          'mass': 'mass',
-          'energy': 'energy',
-          'throughput': 'flow-thru',
-          'momentum': 'momentum',
-          'temperature': 'temp',
-          'power': 'power',
-          'precursor': 'precursor'
-        };
-        const typeLabel = typeLabels[c.type] || c.type;
-        return `<span style="color: #aaa; font-size: 10px; margin-left: 12px;">• ${c.nodeId} <span style="color: #7af;">${typeLabel}</span> (${pct}%): ${c.description}</span>`;
-      }).join('<br>');
-      errorContributorsHtml = `<br><span class="debug-label" style="font-size: 10px;">Error sources:</span><br>${contributorLines}`;
+      const typeLabels: Record<string, string> = {
+        'mass': 'mass',
+        'energy': 'energy',
+        'throughput': 'flow-thru',
+        'momentum': 'momentum',
+        'temperature': 'temp',
+        'power': 'power',
+        'precursor': 'precursor'
+      };
+      // Build lines for each contributor (up to 3)
+      const lines: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        if (i < metrics.topErrorContributors.length) {
+          const c = metrics.topErrorContributors[i];
+          const pct = (c.contribution * 100).toFixed(0);
+          const typeLabel = typeLabels[c.type] || c.type;
+          lines.push(`<span style="color: #aaa; font-size: 10px; margin-left: 12px;">• ${c.nodeId} <span style="color: #7af;">${typeLabel}</span> (${pct}%): ${c.description}</span>`);
+        } else {
+          lines.push(emptyLine);
+        }
+      }
+      errorContributorsHtml = `<br><span class="debug-label" style="font-size: 10px;">Error sources:</span><br>${lines.join('<br>')}`;
+    } else {
+      // Always show the section with placeholder lines to prevent layout jumping
+      errorContributorsHtml = `<br><span class="debug-label" style="font-size: 10px; color: #555;">Error sources:</span><br>${emptyLine}<br>${emptyLine}<br>${emptyLine}`;
     }
 
     // Build pressure solver status display
@@ -312,16 +322,29 @@ export function updateDebugPanel(
       html += `<b>${id}</b>: `;
       html += `<span class="${tempClass}">${formatTemp(tempC)}C</span>, `;
 
+      // Calculate steam pressure if NCG is present
+      const ncgMoles = node.fluid.ncg ? totalMoles(node.fluid.ncg) : 0;
+      let steamPBar = pBar; // Default to total pressure if no NCG
+      if (ncgMoles > 0 && node.volume > 0) {
+        const ncgPressure = (ncgMoles * R_GAS * node.fluid.temperature) / node.volume;
+        steamPBar = Math.max(0, pBar - ncgPressure / 1e5);
+      }
+
       // Show pressure transition if significant change
       if (showTransition) {
         const prevPBar = prevPressure / 1e5;
         const changeBar = (node.fluid.pressure - prevPressure) / 1e5;
         const changeClass = Math.abs(changeBar) > 5 ? 'debug-danger' :
                            Math.abs(changeBar) > 2 ? 'debug-warning' : 'debug-value';
-        html += `${formatPressure(prevPBar)}→<span class="${changeClass}">${formatPressure(pBar)}bar</span>, `;
+        html += `${formatPressure(prevPBar)}→<span class="${changeClass}">${formatPressure(pBar)}bar</span>`;
       } else {
-        html += `${formatPressure(pBar)}bar, `;
+        html += `${formatPressure(pBar)}bar`;
       }
+      // Show steam partial pressure if NCG is present
+      if (ncgMoles > 0) {
+        html += ` <span style="color: #8cf;">(P<sub>stm</sub>=${formatPressure(steamPBar)})</span>`;
+      }
+      html += ', ';
 
       html += `<span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
       html += `${node.fluid.phase}`;
@@ -332,9 +355,26 @@ export function updateDebugPanel(
 
       // Second line: density, separation, and phase-specific debug info
       const rho = massKg / node.volume;
-      const rawState = calculateWaterState(massKg, node.fluid.internalEnergy, node.volume);
-      const rawP_bar = rawState.pressure / 1e5;
-      const u_kJ = node.fluid.internalEnergy / massKg / 1000; // specific energy kJ/kg
+      // For water properties, need to subtract NCG energy from total internal energy
+      // (reuse ncgMoles from above)
+      let steamEnergy = node.fluid.internalEnergy;
+      if (ncgMoles > 0) {
+        // U_ncg = n * Cv * T (ideal gas)
+        // Average Cv for air is ~20.8 J/(mol·K)
+        const avgCv = 20.8; // J/(mol·K) - approximate for air-like mixture
+        const ncgEnergy = ncgMoles * avgCv * node.fluid.temperature;
+        steamEnergy = Math.max(0, node.fluid.internalEnergy - ncgEnergy);
+      }
+      let rawState;
+      let rawP_bar = 0;
+      try {
+        rawState = calculateWaterState(massKg, steamEnergy, node.volume);
+        rawP_bar = rawState.pressure / 1e5;
+      } catch {
+        // Water properties calculation can fail for extreme states
+        rawState = null;
+      }
+      const u_kJ = steamEnergy / Math.max(1, massKg) / 1000; // specific STEAM energy kJ/kg
 
       html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
       html += `ρ=${formatDensity(rho)}`;
@@ -460,10 +500,12 @@ export function updateDebugPanel(
       html += '<br>';
     }
 
-    // Show total mass for conservation check
+    // Show total mass for conservation check (exclude boundary nodes like atmosphere)
     let totalMass = 0;
     let totalEnergy = 0;
     for (const [, node] of state.flowNodes) {
+      // Skip boundary nodes (atmosphere, etc.) - they have effectively infinite mass/energy
+      if (node.isBoundary) continue;
       totalMass += node.fluid.mass;
       totalEnergy += node.fluid.internalEnergy;
     }

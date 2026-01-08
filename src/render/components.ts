@@ -4172,3 +4172,229 @@ function renderBuilding(
     ctx.strokeRect(-w / 2, -h / 2, w, h);
   }
 }
+
+// ============================================================================
+// Burst Overlay Rendering
+// ============================================================================
+
+/**
+ * Draw a crack/lightning bolt symbol for burst components.
+ */
+function renderCrackSymbol(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  scale: number
+): void {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(scale, scale);
+
+  // Lightning bolt crack shape
+  ctx.beginPath();
+  ctx.moveTo(0, -15);
+  ctx.lineTo(5, -5);
+  ctx.lineTo(-1, -3);
+  ctx.lineTo(4, 10);
+  ctx.lineTo(-5, 0);
+  ctx.lineTo(2, -2);
+  ctx.closePath();
+
+  ctx.fillStyle = 'rgba(255, 50, 50, 0.95)';
+  ctx.fill();
+  ctx.strokeStyle = '#990000';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+/**
+ * Render burst overlays (crack symbols and warning borders) for all burst components.
+ */
+export function renderBurstOverlays(
+  ctx: CanvasRenderingContext2D,
+  simState: SimulationState,
+  plantState: PlantState,
+  view: ViewState,
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null
+): void {
+  // Skip if no burst states
+  if (!simState.burstStates || simState.burstStates.size === 0) {
+    return;
+  }
+
+  for (const [nodeId, burstState] of simState.burstStates) {
+    // Only render for burst components
+    if (!burstState.isBurst) continue;
+
+    // Find the component that corresponds to this burst node
+    let component: PlantComponent | undefined;
+    for (const [compId, comp] of plantState.components) {
+      const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+      if (simNodeId === nodeId || compId === nodeId) {
+        component = comp;
+        break;
+      }
+      // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
+      if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+        component = comp;
+        break;
+      }
+    }
+
+    if (!component) continue;
+
+    // Get screen position
+    let screenPos: Point;
+    let scale = 1;
+    let width = 50;
+    let height = 50;
+
+    if (getScreenBounds) {
+      const bounds = getScreenBounds(component);
+      if (!bounds) continue;
+      screenPos = bounds.topCenter;
+      scale = bounds.scale;
+      width = bounds.width ?? 50;
+      height = bounds.height ?? 50;
+    } else {
+      // Fallback: use simple world-to-screen conversion
+      const compBounds = getComponentBounds(component, view);
+      screenPos = worldToScreen(component.position, view);
+      width = compBounds.width;
+      height = compBounds.height;
+    }
+
+    // Draw dashed red warning border around the component
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+    ctx.lineWidth = 3 * scale;
+    ctx.setLineDash([8 * scale, 4 * scale]);
+
+    // Position the border around component center
+    const borderPadding = 5 * scale;
+    ctx.strokeRect(
+      screenPos.x - width / 2 - borderPadding,
+      screenPos.y - height / 2 - borderPadding,
+      width + borderPadding * 2,
+      height + borderPadding * 2
+    );
+    ctx.restore();
+
+    // Draw crack symbol
+    // For pipes, position at break location; for others, center
+    let crackX = screenPos.x;
+    if (burstState.breakLocation !== undefined && component.type === 'pipe') {
+      crackX = screenPos.x + (burstState.breakLocation - 0.5) * width;
+    }
+    const crackY = screenPos.y;
+
+    renderCrackSymbol(ctx, crackX, crackY, scale * 1.2);
+
+    // Draw break percentage label
+    ctx.save();
+    ctx.fillStyle = '#ff3333';
+    ctx.font = `bold ${Math.max(10, 12 * scale)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    const breakPct = (burstState.currentBreakFraction * 100).toFixed(0);
+    ctx.fillText(`${breakPct}% break`, crackX, crackY + 15 * scale);
+    ctx.restore();
+  }
+}
+
+/**
+ * Render break connections with red dashed styling.
+ * These are the flow connections created when components burst.
+ */
+export function renderBreakConnections(
+  ctx: CanvasRenderingContext2D,
+  simState: SimulationState,
+  plantState: PlantState,
+  view: ViewState,
+  getNodeScreenPos?: (nodeId: string) => Point | null
+): void {
+  // Find all break connections
+  for (const conn of simState.flowConnections) {
+    if (!conn.isBreakConnection) continue;
+
+    const fromNode = simState.flowNodes.get(conn.fromNodeId);
+    const toNode = simState.flowNodes.get(conn.toNodeId);
+    if (!fromNode || !toNode) continue;
+
+    // Get screen positions for the connection endpoints
+    let fromScreenPos: Point | null = null;
+    let toScreenPos: Point | null = null;
+
+    if (getNodeScreenPos) {
+      fromScreenPos = getNodeScreenPos(conn.fromNodeId);
+      toScreenPos = getNodeScreenPos(conn.toNodeId);
+    }
+
+    // Fallback: find components and use their positions
+    if (!fromScreenPos || !toScreenPos) {
+      // Find component for "from" node
+      for (const [compId, comp] of plantState.components) {
+        const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+        if (simNodeId === conn.fromNodeId || compId === conn.fromNodeId ||
+            (conn.fromNodeId.startsWith(compId + '-'))) {
+          fromScreenPos = worldToScreen(comp.position, view);
+          break;
+        }
+      }
+
+      // For "to" node - might be atmosphere
+      if (conn.toNodeId === 'atmosphere') {
+        // Draw connection going upward off screen
+        if (fromScreenPos) {
+          toScreenPos = { x: fromScreenPos.x, y: fromScreenPos.y - 100 };
+        }
+      } else {
+        for (const [compId, comp] of plantState.components) {
+          const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+          if (simNodeId === conn.toNodeId || compId === conn.toNodeId ||
+              (conn.toNodeId.startsWith(compId + '-'))) {
+            toScreenPos = worldToScreen(comp.position, view);
+            break;
+          }
+        }
+      }
+    }
+
+    if (!fromScreenPos || !toScreenPos) continue;
+
+    // Draw red dashed line for break connection
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255, 50, 50, 0.9)';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([8, 4]);
+    ctx.lineCap = 'round';
+
+    ctx.beginPath();
+    ctx.moveTo(fromScreenPos.x, fromScreenPos.y);
+    ctx.lineTo(toScreenPos.x, toScreenPos.y);
+    ctx.stroke();
+    ctx.restore();
+
+    // Draw flow rate label for break connection
+    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
+    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
+
+    ctx.save();
+    ctx.fillStyle = '#ff3333';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 2;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+
+    const flowLabel = `${Math.abs(conn.massFlowRate).toFixed(0)} kg/s`;
+    ctx.strokeText(flowLabel, midX, midY - 5);
+    ctx.fillText(flowLabel, midX, midY - 5);
+    ctx.restore();
+
+    // Draw crack symbol at the break source
+    renderCrackSymbol(ctx, fromScreenPos.x, fromScreenPos.y, view.zoom / 60);
+  }
+}

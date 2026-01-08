@@ -18,7 +18,7 @@
 import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG } from './types';
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
-import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition } from './gas-properties';
+import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass } from './gas-properties';
 
 // ============================================================================
 // State Rates - Derivatives for all state variables
@@ -221,6 +221,9 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
   for (const [id, nodeRates] of rates.flowNodes) {
     const node = newState.flowNodes.get(id);
     if (node) {
+      // Skip boundary nodes - their state is fixed
+      if (node.isBoundary) continue;
+
       node.fluid.mass += nodeRates.dMass * dt;
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
 
@@ -496,6 +499,9 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
  */
 export function checkPreConstraintSanity(state: SimulationState): { safe: boolean; reason?: string } {
   for (const [id, node] of state.flowNodes) {
+    // Skip boundary nodes - their state is fixed and may not follow normal physics
+    if (node.isBoundary) continue;
+
     // Check for very low mass - would cause divide-by-zero or extreme specific volume
     if (node.fluid.mass < 0.1) {
       return { safe: false, reason: `${id}: Mass too low (${node.fluid.mass.toFixed(4)} kg)` };
@@ -513,7 +519,10 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
 
     // Check specific volume isn't astronomically high (indicates near-vacuum)
     // At 0.1 kg in 100 m³, v = 1,000,000 mL/kg which is far beyond any valid state
-    const v_mLkg = (node.volume / node.fluid.mass) * 1e6; // m³/kg to mL/kg
+    // For nodes with NCG (like buildings with air), use total mass (steam + NCG)
+    const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+    const totalMass = node.fluid.mass + ncgMass;
+    const v_mLkg = (node.volume / totalMass) * 1e6; // m³/kg to mL/kg
     if (v_mLkg > 1e7) { // 10 million mL/kg is way beyond any physical state
       return { safe: false, reason: `${id}: Specific volume too high (${v_mLkg.toExponential(2)} mL/kg) - near vacuum` };
     }
@@ -521,8 +530,9 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
     // Check specific volume isn't impossibly low (indicates mass accumulation bug)
     // Water at room temp: ~1000 mL/kg, compressed liquid minimum ~900 mL/kg
     // Anything below 800 mL/kg is physically impossible
-    if (v_mLkg < 800) {
-      const density = node.fluid.mass / node.volume;
+    // Skip this check for vapor-dominated nodes with NCG (gas density is much lower than liquid)
+    if (v_mLkg < 800 && node.fluid.phase !== 'vapor') {
+      const density = totalMass / node.volume;
       return { safe: false, reason: `${id}: Specific volume too low (${v_mLkg.toFixed(1)} mL/kg, ρ=${density.toFixed(0)} kg/m³) - mass accumulation` };
     }
   }
@@ -546,6 +556,9 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
 
   // Check each flow node for bad physics
   for (const [id, newNode] of newState.flowNodes) {
+    // Skip boundary nodes - their state is fixed
+    if (newNode.isBoundary) continue;
+
     const oldNode = oldState.flowNodes.get(id);
     if (!oldNode) continue;
 

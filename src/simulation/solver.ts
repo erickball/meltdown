@@ -1142,6 +1142,15 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     });
   }
 
+  // Clone burst states if present
+  let burstStates: Map<string, typeof state.burstStates extends Map<string, infer V> | undefined ? V : never> | undefined;
+  if (state.burstStates) {
+    burstStates = new Map();
+    state.burstStates.forEach((v, k) => {
+      burstStates!.set(k, { ...v });
+    });
+  }
+
   const result = {
     time: state.time,
     thermalNodes,
@@ -1158,6 +1167,12 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     } : undefined,
     // Clone liquid base pressures (for debug display)
     liquidBasePressures: state.liquidBasePressures ? new Map(state.liquidBasePressures) : undefined,
+    // Clone burst states and config
+    burstStates,
+    burstConfig: state.burstConfig ? { ...state.burstConfig } : undefined,
+    atmosphereRelease: state.atmosphereRelease ? { ...state.atmosphereRelease } : undefined,
+    // Clone pending events (shallow clone is fine - they're consumed after processing)
+    pendingEvents: state.pendingEvents ? [...state.pendingEvents] : undefined,
   };
 
   addCloneTime(performance.now() - t0);

@@ -123,6 +123,11 @@ export interface FlowNode {
     topElevation: number;           // m - elevation of top of obstruction
     crossSectionalArea: number;     // m² - area occupied by the obstruction
   }>;
+
+  // Boundary condition flag
+  // If true, this node's fluid state is fixed and should not be updated by physics operators
+  // Used for atmosphere and other infinite reservoirs
+  isBoundary?: boolean;
 }
 
 // ============================================================================
@@ -182,6 +187,10 @@ export interface FlowConnection {
   // LOCA (Loss of Coolant Accident) - pipe break
   breakFraction?: number;           // 0-1, fraction of flow area that is broken (0 = no break)
   breakDischargeCoeff?: number;     // Discharge coefficient for break flow (default 0.6)
+
+  // Break connection metadata (set when component bursts)
+  isBreakConnection?: boolean;      // True if this is a burst-created connection
+  burstSourceNodeId?: string;       // Which node burst to create this connection
 
   // Current flow state (computed by solver)
   massFlowRate: number;             // kg/s (positive = from -> to)
@@ -312,6 +321,14 @@ export interface SimulationState {
   // Pressure model diagnostics (populated by FluidStateOperator)
   // Maps flow node ID to the base pressure used for pressure feedback calculation
   liquidBasePressures?: Map<string, number>;
+
+  // Component burst tracking
+  burstStates?: Map<string, BurstState>;
+  burstConfig?: BurstConfig;
+  atmosphereRelease?: AtmosphereRelease;
+
+  // Pending events for GameLoop to emit (set by constraint operators like BurstCheckOperator)
+  pendingEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
 }
 
 export interface ComponentStates {
@@ -447,4 +464,68 @@ export interface SolverMetrics {
 
   // Per-operator timing (for profiling)
   operatorTimes: Map<string, number>;
+}
+
+// ============================================================================
+// Component Burst State
+// ============================================================================
+
+/**
+ * Tracks burst status for a pressurized component.
+ * Burst pressure = design rating + random 0-40% margin.
+ * Break size scales with overpressure: 1% at burst, ~20% at 1.5x, cap at 100%.
+ */
+export interface BurstState {
+  nodeId: string;                    // FlowNode ID
+  componentId: string;               // Plant component ID (for rendering/events)
+  componentLabel: string;            // Human-readable name
+
+  // Calculated at simulation start
+  designPressure: number;            // Pa - component's pressure rating
+  burstPressure: number;             // Pa - actual burst pressure (design + random margin)
+  randomMargin: number;              // 0-0.4 - the random factor applied
+
+  // Runtime state
+  isBurst: boolean;                  // Has this component ruptured?
+  burstTime?: number;                // Simulation time when burst occurred
+  currentBreakFraction: number;      // 0-1 current break size
+
+  // For pipes: fractional position along length (0-1)
+  breakLocation?: number;
+
+  // For HX tube-side: track shell node for differential pressure
+  isTubeSide?: boolean;
+  shellNodeId?: string;
+
+  // Random seed for deterministic break size variation
+  breakSizeSeed: number;
+}
+
+/**
+ * Configuration for burst mechanics.
+ */
+export interface BurstConfig {
+  minBreakFraction: number;          // Break size at burst pressure (default 0.01 = 1%)
+  maxBreakFraction: number;          // Maximum break size (default 1.0 = 100%)
+  fullBreakOverpressure: number;     // Overpressure ratio for max break (default 0.5 = 1.5x)
+  breakSizeRandomness: number;       // Random variation factor (default 0.3 = ±30%)
+  breakDischargeCoeff: number;       // Discharge coefficient (default 0.62)
+}
+
+export const DEFAULT_BURST_CONFIG: BurstConfig = {
+  minBreakFraction: 0.01,            // 1% at burst pressure
+  maxBreakFraction: 1.0,             // Can reach full guillotine break
+  fullBreakOverpressure: 0.5,        // 100% break at 1.5x burst pressure
+  breakSizeRandomness: 0.3,          // ±30% random variation
+  breakDischargeCoeff: 0.62,         // Sharp-edged orifice
+};
+
+/**
+ * Tracks mass/energy released to atmosphere from LOCAs.
+ */
+export interface AtmosphereRelease {
+  totalMass: number;                 // kg released
+  totalEnergy: number;               // J released
+  steamMass: number;                 // kg of steam released
+  liquidMass: number;                // kg of liquid released
 }

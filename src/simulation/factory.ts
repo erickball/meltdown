@@ -14,6 +14,8 @@ import {
   NeutronicsState,
   PumpState,
   ValveState,
+  BurstState,
+  DEFAULT_BURST_CONFIG,
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
 import { saturationTemperature, saturationPressure } from './water-properties';
@@ -900,6 +902,12 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
   }
 
+  // Add atmosphere node for LOCA scenarios
+  state.flowNodes.set('atmosphere', createAtmosphereNode());
+
+  // Initialize burst states for pressurized components
+  initializeBurstStates(plantState, state);
+
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 
   return state;
@@ -1681,4 +1689,143 @@ function createFlowConnectionFromPlantConnection(
     massFlowRate: 0, // Start at zero
     inertance: length / flowArea,
   };
+}
+
+// ============================================================================
+// Burst/LOCA Support Functions
+// ============================================================================
+
+/**
+ * Create the atmosphere boundary node.
+ * Represents ambient conditions for LOCA scenarios where fluid escapes containment.
+ */
+function createAtmosphereNode(): FlowNode {
+  return {
+    id: 'atmosphere',
+    label: 'Atmosphere',
+    fluid: {
+      mass: 1e12,                    // Effectively infinite
+      internalEnergy: 1e12 * 293 * 1000, // ~20°C air
+      temperature: 293,              // K (20°C)
+      pressure: 101325,              // 1 atm
+      phase: 'vapor',
+      quality: 1,
+    },
+    volume: 1e12,                    // Effectively infinite
+    hydraulicDiameter: 100,
+    flowArea: 1e6,
+    elevation: 0,
+    isBoundary: true,                // Fixed boundary - state never updated by physics
+  };
+}
+
+/**
+ * Initialize burst states for all pressurized components.
+ * Burst pressure = design rating + random 0-40% margin.
+ */
+function initializeBurstStates(
+  plantState: PlantState,
+  state: SimulationState
+): void {
+  state.burstStates = new Map();
+  state.burstConfig = { ...DEFAULT_BURST_CONFIG };
+  state.atmosphereRelease = { totalMass: 0, totalEnergy: 0, steamMass: 0, liquidMass: 0 };
+
+  for (const [compId, component] of plantState.components) {
+    // Get pressure rating if component has one
+    const pressureRating = (component as any).pressureRating;
+    if (!pressureRating || pressureRating <= 0) continue;
+
+    const designPressure = pressureRating * 1e5;  // bar to Pa
+    const randomMargin = Math.random() * 0.4;     // 0-40%
+    const burstPressure = designPressure * (1 + randomMargin);
+
+    // Special handling for heat exchangers (tube + shell sides)
+    if (component.type === 'heatExchanger') {
+      const hx = component as any;
+
+      // Shell side burst state
+      const shellNodeId = `${compId}-shell`;
+      if (state.flowNodes.has(shellNodeId)) {
+        const shellNode = state.flowNodes.get(shellNodeId)!;
+        state.burstStates.set(shellNodeId, {
+          nodeId: shellNodeId,
+          componentId: compId,
+          componentLabel: `${component.label || 'HX'} (shell)`,
+          designPressure,
+          burstPressure,
+          randomMargin,
+          isBurst: false,
+          currentBreakFraction: 0,
+          breakSizeSeed: Math.random() * 10000,
+        });
+        // Set containerId on shell node if not set (breaks go to atmosphere)
+        if (!shellNode.containerId) {
+          shellNode.containerId = undefined; // Explicitly undefined = atmosphere
+        }
+      }
+
+      // Tube side burst state (uses gauge pressure vs shell)
+      const tubeNodeId = `${compId}-tube`;
+      const tubePressureRating = hx.tubePressureRating || hx.pressureRating || pressureRating;
+      const tubeDesignPressure = tubePressureRating * 1e5;
+      const tubeRandomMargin = Math.random() * 0.4;
+      const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
+
+      if (state.flowNodes.has(tubeNodeId)) {
+        state.burstStates.set(tubeNodeId, {
+          nodeId: tubeNodeId,
+          componentId: compId,
+          componentLabel: `${component.label || 'HX'} (tubes)`,
+          designPressure: tubeDesignPressure,
+          burstPressure: tubeBurstPressure,
+          randomMargin: tubeRandomMargin,
+          isBurst: false,
+          currentBreakFraction: 0,
+          breakSizeSeed: Math.random() * 10000,
+          isTubeSide: true,
+          shellNodeId,  // Tube bursts go to shell (gauge pressure comparison)
+        });
+      }
+      continue;
+    }
+
+    // Standard component with single node
+    const simNodeId = (component as any).simNodeId || compId;
+    if (state.flowNodes.has(simNodeId)) {
+      const flowNode = state.flowNodes.get(simNodeId)!;
+      const burstState: BurstState = {
+        nodeId: simNodeId,
+        componentId: compId,
+        componentLabel: component.label || component.type,
+        designPressure,
+        burstPressure,
+        randomMargin,
+        isBurst: false,
+        currentBreakFraction: 0,
+        breakSizeSeed: Math.random() * 10000,
+      };
+
+      // For pipes, breakLocation will be set on burst
+      if (component.type === 'pipe') {
+        burstState.breakLocation = undefined;
+      }
+
+      state.burstStates.set(simNodeId, burstState);
+
+      // Ensure containerId is set for proper gauge pressure calculation
+      // If component has containedBy, link the flow node to its container
+      if (component.containedBy) {
+        const containerComp = plantState.components.get(component.containedBy);
+        if (containerComp) {
+          const containerNodeId = (containerComp as any).simNodeId || component.containedBy;
+          if (state.flowNodes.has(containerNodeId)) {
+            flowNode.containerId = containerNodeId;
+          }
+        }
+      }
+    }
+  }
+
+  console.log(`[Factory] Initialized ${state.burstStates.size} burst states`);
 }

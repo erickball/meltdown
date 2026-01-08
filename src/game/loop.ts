@@ -28,6 +28,7 @@ import {
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
+  BurstCheckOperator,
 } from '../simulation';
 import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
@@ -75,7 +76,8 @@ export type GameEventType =
   | 'phase-change'
   | 'falling-behind'
   | 'auto-slowdown'
-  | 'simulation-error';
+  | 'simulation-error'
+  | 'component-burst';
 
 export interface GameEvent {
   type: GameEventType;
@@ -154,6 +156,7 @@ export class GameLoop {
 
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
+      this.rk45Solver.addConstraintOperator(new BurstCheckOperator()); // Check for component ruptures
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
 
       // Set up substep callback for state history recording
@@ -284,6 +287,9 @@ export class GameLoop {
         // Check for automatic SCRAM conditions
         this.checkScramConditions();
 
+        // Process pending events from constraint operators (e.g., burst events)
+        this.processPendingEvents();
+
         // Check for auto-slowdown conditions
         if (this.config.autoSlowdownEnabled) {
           this.checkAutoSlowdown(frameDt);
@@ -347,6 +353,39 @@ export class GameLoop {
         message: `SCRAM: ${result.reason}`,
       });
     }
+  }
+
+  /**
+   * Process any pending events queued by constraint operators.
+   * This allows operators like BurstCheckOperator to emit events
+   * without having direct access to the event system.
+   */
+  private processPendingEvents(): void {
+    if (!this.state.pendingEvents || this.state.pendingEvents.length === 0) {
+      return;
+    }
+
+    for (const event of this.state.pendingEvents) {
+      this.emitEvent({
+        type: event.type as GameEventType,
+        time: this.state.time,
+        message: event.message,
+        data: event.data,
+      });
+
+      // Auto-slowdown on burst events for visibility
+      if (event.type === 'component-burst' && this.simSpeed > 1) {
+        this.simSpeed = 1;
+        this.emitEvent({
+          type: 'auto-slowdown',
+          time: this.state.time,
+          message: 'Slowed to 1x due to component rupture',
+        });
+      }
+    }
+
+    // Clear the pending events
+    this.state.pendingEvents = [];
   }
 
   /**
@@ -698,6 +737,9 @@ export class GameLoop {
     // Check for automatic SCRAM conditions
     this.checkScramConditions();
 
+    // Process pending events from constraint operators (e.g., burst events)
+    this.processPendingEvents();
+
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);
   }
@@ -723,6 +765,9 @@ export class GameLoop {
 
     // Check for automatic SCRAM conditions
     this.checkScramConditions();
+
+    // Process pending events from constraint operators (e.g., burst events)
+    this.processPendingEvents();
 
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);

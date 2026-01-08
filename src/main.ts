@@ -216,6 +216,9 @@ function init() {
     // Could show notifications to user here
     if (event.type === 'scram') {
       showNotification('SCRAM: ' + event.message, 'warning');
+    } else if (event.type === 'component-burst') {
+      // LOCA - component rupture event
+      showNotification(event.message, 'error');
     } else if (event.type === 'falling-behind') {
       showNotification('Simulation running slower than real time', 'info');
     } else if (event.type === 'simulation-error') {
