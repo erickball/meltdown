@@ -803,6 +803,103 @@ export function estimateSwitchyardCost(props: {
 }
 
 /**
+ * Estimate cost for a building/containment structure
+ *
+ * Major components:
+ * - Foundation and basemat (reinforced concrete)
+ * - Steel containment liner (1/4" to 3/8" thick)
+ * - Reinforced concrete shell (3-4 feet thick)
+ * - Penetrations (equipment hatches, personnel airlocks, piping)
+ * - Containment spray/cooling systems (if applicable)
+ *
+ * Reference costs (2024 USD):
+ * - PWR containment: $200-400M for large units
+ * - Concrete: ~$200-300/yd³ installed for nuclear grade
+ * - Steel liner: ~$15-25/lb installed
+ */
+export function estimateBuildingCost(props: {
+  volume: number;           // m³ - internal volume
+  height: number;           // m
+  wallThickness: number;    // m
+  steelFraction: number;    // 0-1 fraction of wall that is steel
+  pressureRating: number;   // bar
+  shape: 'cylinder' | 'rectangle';
+  nqa1: boolean;
+}): CostEstimate {
+  // Calculate surface area
+  let surfaceArea: number;  // m²
+
+  if (props.shape === 'cylinder') {
+    // Cylinder: V = π * r² * h, solve for r
+    const radius = Math.sqrt(props.volume / (Math.PI * props.height));
+    surfaceArea = 2 * Math.PI * radius * props.height + 2 * Math.PI * radius * radius; // walls + top + bottom
+  } else {
+    // Assume square cross-section for simplicity
+    const sideLength = Math.sqrt(props.volume / props.height);
+    surfaceArea = 4 * sideLength * props.height + 2 * sideLength * sideLength;
+  }
+
+  // Steel liner cost
+  // Steel liner is typically 6-10mm thick, but we use steelFraction of wall
+  const steelThickness = props.wallThickness * props.steelFraction; // m
+  const steelVolume = surfaceArea * steelThickness; // m³
+  const steelDensity = 7850; // kg/m³
+  const steelMass = steelVolume * steelDensity; // kg
+  const steelCostPerKg = 12; // $/kg installed (nuclear grade)
+  const steelCost = steelMass * steelCostPerKg;
+
+  // Concrete shell cost
+  const concreteThickness = props.wallThickness * (1 - props.steelFraction);
+  const concreteVolume = surfaceArea * concreteThickness; // m³
+  // Convert to cubic yards (1 m³ = 1.308 yd³)
+  const concreteCubicYards = concreteVolume * 1.308;
+  const concreteCostPerYard = 800; // $/yd³ installed (nuclear grade with heavy rebar)
+  const concreteCost = concreteCubicYards * concreteCostPerYard;
+
+  // Foundation/basemat
+  // Basemat is typically 3-4m thick for seismic and structural loads
+  const basematThickness = 3; // m
+  const basematArea = props.volume / props.height; // footprint area in m²
+  const basematVolume = basematArea * basematThickness;
+  const basematCost = basematVolume * 1.308 * 600; // Slightly cheaper than walls
+
+  // Penetrations (equipment hatch, personnel airlocks, piping penetrations)
+  // Major cost items - scale with volume
+  const penetrationBaseCost = 5000000; // Base cost for small building
+  const penetrationScaleFactor = Math.pow(props.volume / 10000, 0.5); // Scale with sqrt of volume
+  const penetrationCost = penetrationBaseCost * penetrationScaleFactor;
+
+  // Pressure-related reinforcement
+  // Higher pressure rating requires thicker walls and more reinforcement
+  const pressureFactor = 1 + (props.pressureRating - 3) * 0.15; // 15% more per bar above 3
+
+  const materialCost = (steelCost + concreteCost + basematCost + penetrationCost) * pressureFactor;
+
+  // Installation (containment is complex to construct - use pressure vessel multiplier)
+  const installationCost = materialCost * INSTALLATION_MULTIPLIERS.pressureVessel;
+
+  const subtotal = materialCost + installationCost;
+
+  // NQA-1 is essentially required for containment
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+
+  return {
+    materialCost,
+    fabricationCost: 0,
+    installationCost,
+    subtotal,
+    nqa1Premium,
+    total: subtotal + nqa1Premium,
+    breakdown: {
+      steelCost: Math.round(steelCost),
+      concreteCost: Math.round(concreteCost),
+      basematCost: Math.round(basematCost),
+      penetrationCost: Math.round(penetrationCost),
+    },
+  };
+}
+
+/**
  * Format a dollar amount for display
  */
 export function formatCost(amount: number): string {
@@ -931,6 +1028,27 @@ export function estimateComponentCost(
         reliabilityClass: props.reliabilityClass || 'standard',
         nqa1,
       });
+
+    case 'building': {
+      // Calculate volume based on shape
+      const buildingHeight = props.height || 25;
+      let volume: number;
+      if (props.buildingShape === 'rectangle') {
+        volume = (props.width || 40) * (props.length || 40) * buildingHeight;
+      } else {
+        const diameter = props.diameter || 40;
+        volume = Math.PI * Math.pow(diameter / 2, 2) * buildingHeight;
+      }
+      return estimateBuildingCost({
+        volume,
+        height: buildingHeight,
+        wallThickness: props.wallThickness || 1.5,
+        steelFraction: props.steelFraction || 0.1,
+        pressureRating: props.pressureRating || 4,
+        shape: props.buildingShape || 'cylinder',
+        nqa1,
+      });
+    }
 
     default:
       // Unknown component type - return zero cost

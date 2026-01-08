@@ -41,7 +41,8 @@ export type ComponentType =
   | 'condenser'
   | 'fuelAssembly'
   | 'controller'
-  | 'switchyard';
+  | 'switchyard'
+  | 'building';
 
 export interface Port {
   id: string;
@@ -315,6 +316,31 @@ export interface SwitchyardComponent extends ComponentBase {
   //   - Switchyard reliability affects LOOP frequency component
 }
 
+// Building/Containment - large structure that can contain other components
+// Functionally similar to a tank but with different defaults and rendering
+// Default: air inside, 0% fill level, low pressure rating
+export interface BuildingComponent extends ComponentBase {
+  type: 'building';
+  // Shape and dimensions
+  shape: 'cylinder' | 'rectangle';
+  height: number;               // meters - total height
+  // For cylinder shape
+  diameter?: number;            // meters - diameter (cylindrical buildings)
+  // For rectangle shape
+  width?: number;               // meters - x dimension (rectangular buildings)
+  length?: number;              // meters - y dimension (rectangular buildings)
+  // Wall construction
+  wallThickness: number;        // meters - total wall thickness
+  steelFraction: number;        // 0-1 - fraction of wall that is steel (rest is concrete)
+  // Pressure containment
+  pressureRating: number;       // bar - design pressure (typically low, ~3-5 bar for containment)
+  // Initial conditions - defaults to air at atmospheric pressure
+  fillLevel: number;            // 0-1 - fraction filled with liquid (default 0)
+  // NCG initial conditions (partial pressures in bar)
+  // Default is atmospheric air: { N2: 0.78, O2: 0.21, Ar: 0.009 }
+  initialNcg?: { [species: string]: number };
+}
+
 export type PlantComponent =
   | TankComponent
   | PipeComponent
@@ -328,7 +354,8 @@ export type PlantComponent =
   | TurbineDrivenPumpComponent
   | CondenserComponent
   | ControllerComponent
-  | SwitchyardComponent;
+  | SwitchyardComponent
+  | BuildingComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;

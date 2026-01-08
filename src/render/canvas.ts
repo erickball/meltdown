@@ -38,6 +38,12 @@ export class PlantCanvas {
   // Construction mode - shows grid and component outlines at ground level
   private constructionMode: boolean = true;
 
+  // Placement preview state
+  private placementPreview: {
+    componentType: string;
+    position: Point;
+  } | null = null;
+
   // Callbacks
   public onMouseMove?: (worldPos: Point) => void;
   public onComponentSelect?: (componentId: string | null) => void;
@@ -400,6 +406,46 @@ export class PlantCanvas {
       return this.isPointInQuad(screenPos, screenCorners.map(c => c.pos));
     }
 
+    // Building uses back wall for hit testing (matches its visual rendering)
+    if (component.type === 'building') {
+      const bldg = component as import('../types').BuildingComponent;
+      const bldgWidth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.width || 40);
+      const bldgDepth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
+      const bldgHeight = bldg.height || 50;
+      const bldgHalfW = bldgWidth / 2;
+      const bldgHalfD = bldgDepth / 2;
+
+      // Back wall is at position.y + halfD (farther from camera)
+      const backY = component.position.y + bldgHalfD;
+
+      // Project the four corners of the back wall (bottom-left, bottom-right, top-right, top-left)
+      const backLeftBottom = this.worldToScreenPerspective(
+        { x: component.position.x - bldgHalfW, y: backY }, 0
+      );
+      const backRightBottom = this.worldToScreenPerspective(
+        { x: component.position.x + bldgHalfW, y: backY }, 0
+      );
+      const backRightTop = this.worldToScreenPerspective(
+        { x: component.position.x + bldgHalfW, y: backY }, bldgHeight
+      );
+      const backLeftTop = this.worldToScreenPerspective(
+        { x: component.position.x - bldgHalfW, y: backY }, bldgHeight
+      );
+
+      if (backLeftBottom.scale <= 0 || backRightBottom.scale <= 0 ||
+          backLeftTop.scale <= 0 || backRightTop.scale <= 0) {
+        return false;
+      }
+
+      // Test if point is in the back wall quad
+      return this.isPointInQuad(screenPos, [
+        backLeftTop.pos,
+        backRightTop.pos,
+        backRightBottom.pos,
+        backLeftBottom.pos,
+      ]);
+    }
+
     // For pipes, local coords go from (0, -halfH) to (length, halfH)
     // For others, centered: (-halfW, -halfH) to (halfW, halfH)
     let localLeft = -halfW;
@@ -602,6 +648,28 @@ export class PlantCanvas {
       return {
         topCenter: { x: frontCenterX, y: frontCenterY - 2 * visualHalfH },
         scale: perspectiveScale
+      };
+    } else if (component.type === 'building') {
+      // Buildings: gauge goes at the top of the back wall
+      const bldg = component as import('../types').BuildingComponent;
+      const bldgDepth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
+      const bldgHeight = bldg.height || 50;
+      const bldgHalfD = bldgDepth / 2;
+
+      // Back wall is at position.y + halfD (farther from camera)
+      const backY = component.position.y + bldgHalfD;
+
+      // Project the top-center of the back wall
+      const backTopCenter = this.worldToScreenPerspective(
+        { x: component.position.x, y: backY },
+        bldgHeight
+      );
+
+      if (backTopCenter.scale <= 0) return null;
+
+      return {
+        topCenter: backTopCenter.pos,
+        scale: backTopCenter.scale
       };
     } else {
       // Other components: use center-based positioning (matching component rendering)
@@ -1182,8 +1250,16 @@ export class PlantCanvas {
           // Component center in world space
           // For most components, position IS the center
           // For pipes, position is at one end, so we need to offset to find the center
+          // For buildings, shadow should be at the front (toward camera) not center
           let centerX = component.position.x;
           let centerY = component.position.y;
+
+          // For buildings, move shadow origin to front of the building (toward camera = -Y)
+          if (component.type === 'building') {
+            const bldg = component as any;
+            const bldgDepth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
+            centerY -= bldgDepth / 2;  // Move to front edge
+          }
           // Note: pipe offset handled below by adjusting local corners
 
           // Component corners in local 3D space
@@ -1265,6 +1341,11 @@ export class PlantCanvas {
         for (const component of sortedComponents) {
           this.renderGroundOutline(ctx, component);
         }
+      }
+
+      // Draw placement preview (footprint following cursor)
+      if (this.placementPreview && this.constructionMode) {
+        this.renderPlacementPreview(ctx);
       }
     }
 
@@ -1735,8 +1816,59 @@ export class PlantCanvas {
         return { width: (component as any).width || 1, height: (component as any).height || 1 };
       case 'switchyard':
         return { width: (component as any).width || 15, height: (component as any).height || 12 };
+      case 'building': {
+        const bldg = component as any;
+        // For buildings, the footprint is width x length (depth)
+        const w = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.width || 40);
+        const d = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
+        return { width: w, height: d };
+      }
       default:
         return { width: 1, height: 1 };
+    }
+  }
+
+  // Get default size for a component type (for placement preview)
+  private getDefaultComponentSize(componentType: string): { width: number; height: number } {
+    switch (componentType) {
+      case 'tank':
+        return { width: 2, height: 2 }; // Typical tank footprint
+      case 'pressurizer':
+        return { width: 2, height: 2 };
+      case 'pipe':
+        return { width: 10, height: 0.3 }; // Length x diameter
+      case 'pump':
+        return { width: 1.5, height: 2.2 }; // Pump visual size
+      case 'valve':
+        return { width: 0.4, height: 0.4 };
+      case 'reactor-vessel':
+        return { width: 5, height: 5 }; // Vessel diameter
+      case 'heat-exchanger':
+        return { width: 8, height: 3 };
+      case 'turbine-generator':
+        return { width: 6, height: 4 };
+      case 'condenser':
+        return { width: 8, height: 4 };
+      case 'controller':
+      case 'scram-controller':
+        return { width: 1, height: 1 };
+      case 'switchyard':
+        return { width: 15, height: 12 };
+      case 'building':
+        return { width: 40, height: 40 };
+      case 'core':
+        return { width: 3.4, height: 3.4 };
+      default:
+        return { width: 2, height: 2 };
+    }
+  }
+
+  // Set placement preview (for showing footprint when placing a component)
+  public setPlacementPreview(componentType: string | null, position: Point | null): void {
+    if (componentType && position) {
+      this.placementPreview = { componentType, position };
+    } else {
+      this.placementPreview = null;
     }
   }
 
@@ -2190,6 +2322,49 @@ export class PlantCanvas {
     }
     ctx.closePath();
     ctx.stroke();
+
+    ctx.setLineDash([]);
+  }
+
+  // Render placement preview footprint at cursor position
+  private renderPlacementPreview(ctx: CanvasRenderingContext2D): void {
+    if (!this.placementPreview) return;
+
+    const { componentType, position } = this.placementPreview;
+    const size = this.getDefaultComponentSize(componentType);
+    const halfW = size.width / 2;
+    const halfH = size.height / 2;
+
+    // Get corners at ground level (elevation = 0)
+    const corners: Point[] = [
+      { x: position.x - halfW, y: position.y - halfH },
+      { x: position.x + halfW, y: position.y - halfH },
+      { x: position.x + halfW, y: position.y + halfH },
+      { x: position.x - halfW, y: position.y + halfH },
+    ];
+
+    // Project corners to screen at ground level
+    const screenCorners = corners.map(c => this.worldToScreenPerspective(c, 0));
+
+    // Skip if any corner is behind camera
+    if (screenCorners.some(c => c.scale <= 0)) return;
+
+    // Draw preview outline - more visible than existing outlines
+    ctx.strokeStyle = 'rgba(255, 60, 60, 0.9)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 4]);
+
+    ctx.beginPath();
+    ctx.moveTo(screenCorners[0].pos.x, screenCorners[0].pos.y);
+    for (let i = 1; i < screenCorners.length; i++) {
+      ctx.lineTo(screenCorners[i].pos.x, screenCorners[i].pos.y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+
+    // Add a semi-transparent fill
+    ctx.fillStyle = 'rgba(255, 80, 80, 0.15)';
+    ctx.fill();
 
     ctx.setLineDash([]);
   }

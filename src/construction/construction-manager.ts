@@ -1341,6 +1341,106 @@ export class ConstructionManager {
         break;
       }
 
+      case 'building': {
+        // Building/Containment - large structure that can contain other components
+        // Defaults to air at atmospheric pressure, 0% fill level
+        const shape = props.buildingShape || 'cylinder';
+        const buildingHeight = props.height || 25;
+
+        // Calculate volume and dimensions based on shape
+        let volume: number;
+        const diameter = props.diameter || 40;
+        const buildingWidth = props.width || 40;
+        const buildingLength = props.length || 40;
+
+        if (shape === 'cylinder') {
+          volume = Math.PI * Math.pow(diameter / 2, 2) * buildingHeight;
+        } else {
+          volume = buildingWidth * buildingLength * buildingHeight;
+        }
+
+        // Default NCG is atmospheric air if not specified
+        const defaultNcg = props.initialNcg || {
+          N2: 0.78,   // bar - nitrogen
+          O2: 0.21,   // bar - oxygen
+          Ar: 0.009,  // bar - argon
+        };
+
+        // Default fluid is air at atmospheric pressure
+        const buildingFluid: Fluid = {
+          temperature: props.initialTemperature ? props.initialTemperature + 273.15 : 293, // ~20°C default
+          pressure: (props.initialPressure ?? 1.01325) * 1e5, // Default to 1 atm
+          phase: props.initialLevel && props.initialLevel > 0 ? 'two-phase' : 'vapor',
+          quality: props.initialLevel && props.initialLevel > 0 ? (1 - props.initialLevel / 100) : 1,
+          flowRate: 0,
+          volume: volume
+        };
+
+        // Add NCG to fluid
+        const buildingNcg = emptyGasComposition();
+        const R = 8.314;
+        const T_building = buildingFluid.temperature;
+        for (const species of ALL_GAS_SPECIES) {
+          const P_bar = (defaultNcg as Record<string, number>)[species];
+          if (P_bar && P_bar > 0) {
+            const P_Pa = P_bar * 1e5;
+            buildingNcg[species as GasSpecies] = (P_Pa * volume) / (R * T_building);
+          }
+        }
+        buildingFluid.ncg = buildingNcg;
+
+        // Create ports at cardinal directions at ground level
+        const portRadius = shape === 'cylinder' ? (diameter / 2) : (Math.max(buildingWidth, buildingLength) / 2);
+        const buildingPorts: Port[] = [
+          {
+            id: `${id}-north`,
+            position: { x: 0, y: -portRadius },
+            direction: 'both'
+          },
+          {
+            id: `${id}-south`,
+            position: { x: 0, y: portRadius },
+            direction: 'both'
+          },
+          {
+            id: `${id}-east`,
+            position: { x: portRadius, y: 0 },
+            direction: 'both'
+          },
+          {
+            id: `${id}-west`,
+            position: { x: -portRadius, y: 0 },
+            direction: 'both'
+          }
+        ];
+
+        const building = {
+          id,
+          type: 'building' as const,
+          label: props.name || 'Building',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          shape: shape as 'cylinder' | 'rectangle',
+          height: buildingHeight,
+          diameter: shape === 'cylinder' ? diameter : undefined,
+          width: shape === 'rectangle' ? buildingWidth : undefined,
+          length: shape === 'rectangle' ? buildingLength : undefined,
+          wallThickness: props.wallThickness ?? 1.5,  // Default 1.5m for containment
+          steelFraction: props.steelFraction ?? 0.1,  // Default 10% steel, 90% concrete
+          pressureRating: props.pressureRating ?? 4,  // Default 4 bar for containment
+          fillLevel: (props.initialLevel ?? 0) / 100,
+          ports: buildingPorts,
+          fluid: buildingFluid,
+          initialNcg: defaultNcg
+        };
+
+        this.plantState.components.set(id, building as any);
+        (building as any).nqa1 = props.nqa1 ?? true;
+        console.log(`[Construction] Created building: ${shape}, ${buildingHeight}m tall, ${props.pressureRating ?? 4} bar rating`);
+        break;
+      }
+
       default:
         console.error(`[Construction] Unknown component type: ${config.type}`);
         return null;

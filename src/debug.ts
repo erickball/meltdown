@@ -730,6 +730,16 @@ export function updateComponentDetail(
   const elevation = component.elevation as number | undefined;
   html += `<div class="detail-row"><span class="detail-label">Elevation:</span><span class="detail-value">${elevation !== undefined ? elevation.toFixed(1) : '0'} m</span></div>`;
 
+  // Container (what this component is inside)
+  const containedBy = component.containedBy as string | undefined;
+  if (containedBy) {
+    const container = plantState.components.get(containedBy) as Record<string, unknown> | undefined;
+    const containerLabel = container?.label as string || containedBy;
+    html += `<div class="detail-row"><span class="detail-label">Inside:</span><span class="detail-value" style="color: #aaf;">${containerLabel}</span></div>`;
+  } else {
+    html += `<div class="detail-row"><span class="detail-label">Inside:</span><span class="detail-value" style="color: #888;">Atmosphere</span></div>`;
+  }
+
   // ========== GEOMETRY ==========
   let volume: number | undefined;
   switch (component.type) {

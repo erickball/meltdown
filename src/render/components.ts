@@ -13,6 +13,7 @@ import {
   CondenserComponent,
   ControllerComponent,
   SwitchyardComponent,
+  BuildingComponent,
   ViewState,
   Fluid,
   Point,
@@ -536,8 +537,18 @@ function renderFluidWithNcg(
     }
   } else {
     // Single phase fills entire region
-    ctx.fillStyle = getFluidColor(fluid);
-    ctx.fillRect(x, y, width, height);
+    // For vapor with NCG, reduce steam opacity based on NCG fraction
+    // so that high-NCG fluids (like air) are more transparent
+    const ncgFrac = fluid.phase === 'vapor' ? calculateNcgFraction(fluid) : 0;
+    const steamOpacity = 1 - ncgFrac; // Steam fades out as NCG increases
+
+    if (steamOpacity > 0.01) {
+      const savedAlpha = ctx.globalAlpha;
+      ctx.globalAlpha *= steamOpacity;
+      ctx.fillStyle = getFluidColor(fluid);
+      ctx.fillRect(x, y, width, height);
+      ctx.globalAlpha = savedAlpha;
+    }
   }
 
   // Then add NCG overlay on vapor space
@@ -658,6 +669,9 @@ export function renderComponent(
       break;
     case 'switchyard':
       renderSwitchyard(ctx, component as SwitchyardComponent, view, plantState, worldToScreenFn);
+      break;
+    case 'building':
+      renderBuilding(ctx, component as BuildingComponent, view, isSimulating, worldToScreenFn);
       break;
   }
 
@@ -3284,6 +3298,26 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
         width: sw.width * view.zoom + 10,
         height: sw.height * view.zoom + 10,
       };
+    case 'building':
+      const bldg = component as BuildingComponent;
+      // Calculate footprint dimensions
+      let bldgWidth: number;
+      let bldgDepth: number;
+      if (bldg.shape === 'cylinder') {
+        bldgWidth = (bldg.diameter || 40) * view.zoom;
+        bldgDepth = bldgWidth * 0.5;  // Perspective compression
+      } else {
+        bldgWidth = (bldg.width || 40) * view.zoom;
+        bldgDepth = (bldg.length || 40) * view.zoom * 0.5;
+      }
+      // Include both low wall footprint and back wall height
+      const bldgHeight = bldg.height * view.zoom;
+      return {
+        x: -bldgWidth / 2 - bldgDepth * 0.3 - 5,  // Account for perspective side walls
+        y: -bldgDepth / 2 - bldgHeight / 2 - 5,   // Back wall extends up
+        width: bldgWidth + bldgDepth * 0.6 + 10,
+        height: bldgDepth + bldgHeight / 2 + 10,
+      };
     default:
       return { x: -20, y: -20, width: 40, height: 40 };
   }
@@ -3755,9 +3789,20 @@ export function renderPressureGauge(
   for (const [nodeId, node] of simState.flowNodes) {
     // Find the component that corresponds to this flow node
     let component: PlantComponent | undefined;
-    for (const [, comp] of plantState.components) {
+    for (const [compId, comp] of plantState.components) {
       const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+      // Exact simNodeId match
       if (simNodeId === nodeId) {
+        component = comp;
+        break;
+      }
+      // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
+      if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+        component = comp;
+        break;
+      }
+      // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
+      if (compId === nodeId) {
         component = comp;
         break;
       }
@@ -3787,6 +3832,12 @@ export function renderPressureGauge(
       if (!screenBounds) continue;
 
       gaugeScale = Math.max(0.3, Math.min(2.5, screenBounds.scale));
+
+      // Buildings are large structures - make their pressure gauge 2x bigger
+      if (component.type === 'building') {
+        gaugeScale *= 2;
+      }
+
       let gaugeX = screenBounds.topCenter.x;
       let topY = screenBounds.topCenter.y;
 
@@ -3912,5 +3963,212 @@ export function renderPressureGauge(
     ctx.fillText('bar', 0, 7 * gaugeScale);
 
     ctx.restore();
+  }
+}
+
+/**
+ * Calculate wall thickness for containment buildings.
+ * Accounts for composite steel + concrete construction.
+ * Steel is stronger (higher allowable stress), so more steel = thinner wall.
+ * Steel fraction abstracts both rebar reinforcement and steel liner.
+ *
+ * For pure steel: uses SA-516 Grade 70 allowable stress (~138 MPa)
+ * For pure concrete: uses ~30 MPa for reinforced concrete
+ * Blends based on steelFraction.
+ */
+function calculateBuildingWallThickness(
+  pressureBar: number,
+  innerDiameterM: number,
+  steelFraction: number,
+  shape: 'cylinder' | 'rectangle' = 'cylinder'
+): number {
+  const P = pressureBar * 1e5; // bar to Pa
+  const R = innerDiameterM / 2; // radius in meters
+
+  // Allowable stresses - must match component-config.ts building calculation
+  const S_steel = 172e6;     // Pa - SA-533 Grade B
+  const S_concrete = 20e6;   // Pa - typical concrete
+
+  // Blend allowable stress based on steel fraction
+  // More steel = higher allowable stress = thinner wall
+  const S_effective = S_steel * steelFraction + S_concrete * (1 - steelFraction);
+  const E = 1.0; // Joint efficiency
+
+  // Cylindrical shells are more efficient than rectangular
+  // Rectangular walls need ~1.5x thicker for the same pressure
+  // (flat plates bend, cylinders carry load in membrane tension)
+  const shapeMultiplier = shape === 'rectangle' ? 1.5 : 1.0;
+
+  // ASME-style formula for cylindrical shells (adapted for rectangular)
+  const thickness = shapeMultiplier * P * R / (S_effective * E - 0.6 * P);
+
+  // Minimum 0.3m (300mm) for containment buildings
+  return Math.max(0.3, thickness);
+}
+
+/**
+ * Render a building/containment component.
+ * Draws the back wall like a tank, but positioned at the back of the footprint in world space.
+ * Also draws a wall outline on top of the red dashed footprint.
+ */
+function renderBuilding(
+  ctx: CanvasRenderingContext2D,
+  building: BuildingComponent,
+  view: ViewState,
+  isSimulating: boolean = false,
+  worldToScreenFn?: WorldToScreenFn
+): void {
+  // Get dimensions
+  const faceWidth = building.shape === 'cylinder' ? (building.diameter || 40) : (building.width || 40);
+  const depth = building.shape === 'cylinder' ? (building.diameter || 40) : (building.length || 40);
+  const height = building.height;
+
+  // Wall colors - blend steel and concrete based on steelFraction
+  const steelFrac = building.steelFraction || 0.1;
+  const steelColor = { r: 100, g: 105, b: 115 };
+  const concreteColor = { r: 180, g: 175, b: 165 };
+  const wallColor = {
+    r: Math.round(steelColor.r * steelFrac + concreteColor.r * (1 - steelFrac)),
+    g: Math.round(steelColor.g * steelFrac + concreteColor.g * (1 - steelFrac)),
+    b: Math.round(steelColor.b * steelFrac + concreteColor.b * (1 - steelFrac)),
+  };
+  const wallColorStr = `rgb(${wallColor.r}, ${wallColor.g}, ${wallColor.b})`;
+  const wallHighlightStr = `rgb(${Math.min(255, wallColor.r + 30)}, ${Math.min(255, wallColor.g + 30)}, ${Math.min(255, wallColor.b + 30)})`;
+
+  // Calculate wall thickness from pressure rating and steel fraction
+  // Rectangular buildings need thicker walls than cylindrical for the same pressure
+  const innerDim = building.shape === 'cylinder' ? (building.diameter || 40) : Math.max(building.width || 40, building.length || 40);
+  const buildingShape = building.shape || 'cylinder';
+  let wallThicknessM = building.wallThickness || 0.5;
+  if (building.pressureRating !== undefined && building.pressureRating > 0) {
+    wallThicknessM = calculateBuildingWallThickness(building.pressureRating, innerDim, steelFrac, buildingShape);
+  }
+  const wallPx = Math.max(2, wallThicknessM * view.zoom);
+
+  // In isometric mode with perspective, use worldToScreenFn to properly position
+  // the back wall in world-Y space (farther away = higher on screen, smaller)
+  if (worldToScreenFn) {
+    ctx.save();
+
+    // Reset the context transform to draw in absolute screen coordinates
+    // The canvas renderer has already translated to the component position
+    // We must re-apply the device pixel ratio scale after reset
+    const dpr = window.devicePixelRatio || 1;
+    ctx.resetTransform();
+    ctx.scale(dpr, dpr);
+
+    const halfW = faceWidth / 2;
+    const halfD = depth / 2;
+
+    // Project corners at ground level (elevation = 0) for footprint
+    const frontLeft = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y - halfD }, 0);
+    const frontRight = worldToScreenFn({ x: building.position.x + halfW, y: building.position.y - halfD }, 0);
+    const backLeft = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y + halfD }, 0);
+    const backRight = worldToScreenFn({ x: building.position.x + halfW, y: building.position.y + halfD }, 0);
+
+    // Back wall extends from ground (elevation 0) to building height
+    const backLeftTop = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y + halfD }, height);
+
+    // Back wall dimensions in screen space
+    const backWallWidth = backRight.pos.x - backLeft.pos.x;
+    const backWallHeight = backLeft.pos.y - backLeftTop.pos.y;  // Screen Y is inverted
+
+    // Draw back wall with 35% transparency
+    const wallColorAlpha = `rgba(${wallColor.r}, ${wallColor.g}, ${wallColor.b}, 0.65)`;
+    ctx.fillStyle = wallColorAlpha;
+    ctx.fillRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
+
+    // Inner area
+    const wallPxScaled = wallPx * backLeft.scale;
+    const innerX = backLeft.pos.x + wallPxScaled;
+    const innerY = backLeftTop.pos.y + wallPxScaled;
+    const innerW = backWallWidth - wallPxScaled * 2;
+    const innerH = backWallHeight - wallPxScaled * 2;
+
+    if (building.fluid) {
+      const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
+      const separation = building.fluid.separation ?? 1;
+      // Apply 35% transparency to match wall transparency
+      ctx.globalAlpha = 0.65;
+      renderFluidWithNcg(ctx, building.fluid, innerX, innerY, innerW, innerH, liquidFraction, separation, 6);
+      ctx.globalAlpha = 1.0;
+    } else {
+      ctx.fillStyle = 'rgba(26, 26, 26, 0.65)';
+      ctx.fillRect(innerX, innerY, innerW, innerH);
+    }
+
+    // Highlight edges on back wall
+    ctx.strokeStyle = wallHighlightStr;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
+
+    // Draw wall outline on footprint
+    ctx.strokeStyle = wallColorStr;
+    ctx.lineWidth = Math.max(2, wallPx * frontLeft.scale);
+
+    if (building.shape === 'cylinder') {
+      // Draw an ellipse inscribed in the trapezoid footprint
+      // The trapezoid has parallel top/bottom (front wider, back narrower due to perspective)
+      // Center at midpoint, Y radius = half height to touch front/back edges,
+      // X radius = half width at center height to touch side edges
+
+      const frontWidth = frontRight.pos.x - frontLeft.pos.x;
+      const backWidth = backRight.pos.x - backLeft.pos.x;
+      const trapHeight = frontLeft.pos.y - backLeft.pos.y; // positive (front is lower on screen)
+
+      if (frontWidth > 0 && backWidth > 0 && trapHeight > 0) {
+        // Center at midpoint between front and back edges
+        const centerY = (frontLeft.pos.y + backLeft.pos.y) / 2;
+        const frontCenterX = (frontLeft.pos.x + frontRight.pos.x) / 2;
+        const backCenterX = (backLeft.pos.x + backRight.pos.x) / 2;
+        const centerX = (frontCenterX + backCenterX) / 2;
+
+        // Semi-minor axis (Y) = half the trapezoid height to touch front and back edges
+        const radiusY = trapHeight / 2;
+
+        // Semi-major axis (X) = half the width at the center height (where the ellipse center is)
+        // At t=0.5 (midpoint), interpolate the width and also the X position of the left edge
+        const widthAtCenter = (frontWidth + backWidth) / 2;
+        const radiusX = widthAtCenter / 2;
+
+        ctx.beginPath();
+        ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    } else {
+      // Rectangle
+      ctx.beginPath();
+      ctx.moveTo(frontLeft.pos.x, frontLeft.pos.y);
+      ctx.lineTo(frontRight.pos.x, frontRight.pos.y);
+      ctx.lineTo(backRight.pos.x, backRight.pos.y);
+      ctx.lineTo(backLeft.pos.x, backLeft.pos.y);
+      ctx.closePath();
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  } else {
+    // Non-isometric (2D) fallback - just draw like a tank
+    const w = faceWidth * view.zoom;
+    const h = height * view.zoom;
+
+    ctx.fillStyle = wallColorStr;
+    ctx.fillRect(-w / 2, -h / 2, w, h);
+
+    const innerW = w - wallPx * 2;
+    const innerH = h - wallPx * 2;
+
+    if (building.fluid) {
+      const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
+      const separation = building.fluid.separation ?? 1;
+      renderFluidWithNcg(ctx, building.fluid, -innerW / 2, -innerH / 2, innerW, innerH, liquidFraction, separation, 6);
+    } else {
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(-innerW / 2, -innerH / 2, innerW, innerH);
+    }
+
+    ctx.strokeStyle = wallHighlightStr;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
   }
 }

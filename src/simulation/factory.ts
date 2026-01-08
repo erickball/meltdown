@@ -1324,6 +1324,91 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
+    case 'building': {
+      // Building/Containment - large structure, defaults to air at atmospheric pressure
+      const building = component as any;
+
+      // Calculate volume based on shape
+      let volume: number;
+      let footprintArea: number;
+      let hydraulicDiameter: number;
+
+      if (building.shape === 'cylinder') {
+        const radius = (building.diameter || 40) / 2;
+        volume = Math.PI * radius * radius * building.height;
+        footprintArea = Math.PI * radius * radius;
+        hydraulicDiameter = building.diameter || 40;
+      } else {
+        // Rectangle
+        const width = building.width || 40;
+        const length = building.length || 40;
+        volume = width * length * building.height;
+        footprintArea = width * length;
+        hydraulicDiameter = Math.sqrt(width * length);  // Equivalent diameter
+      }
+
+      // Default to atmospheric pressure (1.01325 bar) and room temperature
+      const fillLevel = building.fillLevel !== undefined ? building.fillLevel : 0;
+      const temp = building.fluid?.temperature || 293;  // ~20°C
+
+      // Default NCG is atmospheric air if not specified
+      const ncg: NcgPartialPressures = building.initialNcg || {
+        N2: 0.78,   // bar - nitrogen
+        O2: 0.21,   // bar - oxygen
+        Ar: 0.009,  // bar - argon
+      };
+
+      // Calculate total NCG pressure from partial pressures
+      let ncgTotalPressure = 0;
+      for (const species of ['N2', 'O2', 'Ar', 'H2', 'He', 'CO2', 'CO'] as const) {
+        if (ncg[species]) {
+          ncgTotalPressure += ncg[species] * 1e5; // bar to Pa
+        }
+      }
+
+      // For buildings, the user-specified pressure is TOTAL pressure (steam + NCG)
+      // We need to calculate steam pressure = total - NCG
+      // Default total pressure is ~1 bar (atmospheric)
+      const totalPressure = building.fluid?.pressure ?? 101325;
+      // Steam pressure is total minus NCG, but must be at least MIN_STEAM_PRESSURE_PA
+      const steamPressure = Math.max(totalPressure - ncgTotalPressure, MIN_STEAM_PRESSURE_PA);
+
+      let fluid: FluidState;
+
+      if (fillLevel >= 0.999) {
+        // Fully liquid (unusual for a building but possible, e.g., flooded)
+        console.log(`[Factory] Building ${component.id}: creating LIQUID state, P_total=${totalPressure/1e5} bar, P_steam=${steamPressure/1e5} bar, ${temp}K`);
+        fluid = createFluidState(temp, steamPressure, 'liquid', 0, volume, ncg);
+      } else if (fillLevel <= 0.001) {
+        // Fully vapor/gas (normal case for containment)
+        console.log(`[Factory] Building ${component.id}: creating VAPOR state, P_total=${totalPressure/1e5} bar, P_steam=${steamPressure/1e5} bar, ${temp}K with air`);
+        fluid = createFluidState(temp, steamPressure, 'vapor', 1, volume, ncg);
+      } else {
+        // Partially filled - two-phase mixture
+        const T_sat = Water.saturationTemperature(steamPressure);
+        const rho_f = Water.saturatedLiquidDensity(T_sat);
+        const rho_g = Water.saturatedVaporDensity(T_sat);
+        const m_liquid = rho_f * fillLevel * volume;
+        const m_vapor = rho_g * (1 - fillLevel) * volume;
+        const totalMass = m_liquid + m_vapor;
+        const quality = m_vapor / totalMass;
+
+        console.log(`[Factory] Building ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P_steam=${(steamPressure/1e5).toFixed(2)} bar, quality=${quality.toFixed(4)}`);
+        fluid = createFluidState(T_sat, steamPressure, 'two-phase', quality, volume, ncg);
+      }
+
+      return {
+        id: component.id,
+        label: component.label || 'Building',
+        fluid,
+        volume,
+        hydraulicDiameter,
+        flowArea: footprintArea,
+        height: building.height,
+        elevation,
+      };
+    }
+
     default:
       console.warn(`[Simulation] Unknown component type: ${(component as any).type}`);
       return null;

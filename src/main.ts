@@ -1806,7 +1806,11 @@ function init() {
     // DEBUG: Track cursor position for gauge debug logging
     (window as any).__debugCursor = { x: Math.round(x), y: Math.round(y) };
 
-    if (currentMode !== 'construction') return;
+    if (currentMode !== 'construction') {
+      // Clear placement preview when not in construction mode
+      plantCanvas.setPlacementPreview(null, null);
+      return;
+    }
 
     if (constructionSubMode === 'connect') {
       const hoveredPort = plantCanvas.getPortAtScreen({ x, y });
@@ -1815,6 +1819,8 @@ function init() {
       } else {
         canvas.style.cursor = 'default';
       }
+      // Clear placement preview in connect mode
+      plantCanvas.setPlacementPreview(null, null);
     } else if (constructionSubMode === 'move') {
       if (isDraggingComponent && movingComponent) {
         // Dragging - move the component
@@ -1876,6 +1882,16 @@ function init() {
           canvas.style.cursor = 'default';
         }
       }
+      // Clear placement preview in move mode
+      plantCanvas.setPlacementPreview(null, null);
+    } else if (constructionSubMode === 'place' && selectedComponentType) {
+      // Show placement preview footprint following cursor
+      const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
+      plantCanvas.setPlacementPreview(selectedComponentType, worldPos);
+      canvas.style.cursor = 'crosshair';
+    } else {
+      // Clear placement preview when not in place mode
+      plantCanvas.setPlacementPreview(null, null);
     }
   });
 
@@ -1977,6 +1993,33 @@ function init() {
       const clickedComponent = plantCanvas.getComponentAtScreen({ x, y });
       const isContainer = clickedComponent && (clickedComponent.type === 'tank' || clickedComponent.type === 'vessel' || clickedComponent.type === 'reactorVessel');
 
+      // Check if click position is inside any building's footprint
+      // Buildings auto-contain components without asking
+      let containingBuilding: PlantComponent | null = null;
+      for (const [, comp] of plantState.components) {
+        if (comp.type === 'building') {
+          const bldg = comp as any;
+          const halfW = bldg.shape === 'cylinder' ? (bldg.diameter || 40) / 2 : (bldg.width || 40) / 2;
+          const halfD = bldg.shape === 'cylinder' ? (bldg.diameter || 40) / 2 : (bldg.length || 40) / 2;
+          const dx = worldPos.x - comp.position.x;
+          const dy = worldPos.y - comp.position.y;
+
+          let isInside = false;
+          if (bldg.shape === 'cylinder') {
+            // Elliptical footprint check
+            isInside = (dx * dx) / (halfW * halfW) + (dy * dy) / (halfD * halfD) <= 1;
+          } else {
+            // Rectangular footprint check
+            isInside = Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
+          }
+
+          if (isInside) {
+            containingBuilding = comp;
+            break;
+          }
+        }
+      }
+
       // Function to proceed with component placement
       const proceedWithPlacement = (containedBy?: string) => {
         // If placing inside a container, use the container's position
@@ -2077,8 +2120,12 @@ function init() {
         }, availableCores, availableGenerators);
       };
 
-      // If clicking on a container, ask if user wants to place inside
-      if (isContainer && clickedComponent) {
+      // If position is inside a building's footprint, auto-contain without dialog
+      if (containingBuilding) {
+        console.log(`[Construction] Auto-placing inside building: ${containingBuilding.label || containingBuilding.id}`);
+        proceedWithPlacement(containingBuilding.id);
+      } else if (isContainer && clickedComponent) {
+        // If clicking on a container (tank, vessel), ask if user wants to place inside
         const containerName = clickedComponent.label || clickedComponent.id;
         showContainmentDialog(containerName, selectedComponentType, (placeInside: boolean | null) => {
           if (placeInside === true) {

@@ -730,6 +730,66 @@ export const componentDefinitions: Record<string, {
         calculate: () => '345'  // Fixed at 345 kV (cosmetic)
       }
     ]
+  },
+
+  // Structures
+  'building': {
+    displayName: 'Building / Containment',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Containment' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: 'Containment buildings are safety-related' },
+      { name: 'buildingShape', type: 'select', label: 'Shape', default: 'cylinder', options: [
+        { value: 'cylinder', label: 'Cylindrical' },
+        { value: 'rectangle', label: 'Rectangular' }
+      ], help: 'Cylindrical is typical for PWR containments' },
+      { name: 'height', type: 'number', label: 'Height', default: 25, min: 10, max: 100, step: 1, unit: 'm' },
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 40, min: 10, max: 80, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'cylinder' } },
+      { name: 'width', type: 'number', label: 'Width', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
+      { name: 'length', type: 'number', label: 'Length', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 4, min: 1, max: 10, step: 0.5, unit: 'bar', help: 'Design pressure for containment (typically 3-5 bar for PWR)' },
+      { name: 'steelFraction', type: 'number', label: 'Steel Liner Fraction', default: 0.1, min: 0, max: 0.5, step: 0.05, help: 'Fraction of wall that is steel (rest is concrete)' },
+      { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'm',
+        calculate: (p) => {
+          // ASME formula with shape factor: t = shapeMultiplier * P*R / (S*E - 0.6*P)
+          // For containment, blend steel (172 MPa) and concrete (~20 MPa) based on steelFraction
+          const P = (p.pressureRating || 4) * 1e5; // bar to Pa
+          const steelFrac = p.steelFraction || 0.1;
+          const S_steel = 172e6; // Pa - SA-533 Grade B
+          const S_concrete = 20e6; // Pa - typical concrete
+          const S_effective = steelFrac * S_steel + (1 - steelFrac) * S_concrete;
+          const E = 1.0;
+          // Get radius based on shape
+          let R: number;
+          if (p.buildingShape === 'rectangle') {
+            // For rectangle, use half of the larger dimension
+            R = Math.max(p.width || 40, p.length || 40) / 2;
+          } else {
+            R = (p.diameter || 40) / 2;
+          }
+          // Shape multiplier: cylindrical is more efficient than rectangular
+          const shapeMultiplier = p.buildingShape === 'rectangle' ? 1.5 : 1.0;
+          const t = shapeMultiplier * P * R / (S_effective * E - 0.6 * P);
+          return Math.max(0.3, t).toFixed(2); // Minimum 0.3m
+        }
+      },
+      { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 0, min: 0, max: 50, step: 1, unit: '%', help: 'Normally 0% (dry containment)' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 1.01325, min: 0.5, max: 5, step: 0.1, unit: 'bar', help: 'Normally atmospheric (1.01 bar)' },
+      { name: 'initialNcg', type: 'ncg', label: 'Atmosphere Gases', default: { N2: 0.78, O2: 0.21, Ar: 0.009 }, help: 'Containment atmosphere composition (default: air)' },
+      // Calculated fields
+      { name: 'volume', type: 'calculated', label: 'Free Volume', default: 0, unit: 'm³',
+        calculate: (p) => {
+          const h = p.height || 25;
+          if (p.buildingShape === 'rectangle') {
+            const w = p.width || 40;
+            const l = p.length || 40;
+            return (w * l * h).toFixed(0);
+          } else {
+            const d = p.diameter || 40;
+            return (Math.PI * Math.pow(d / 2, 2) * h).toFixed(0);
+          }
+        }
+      }
+    ]
   }
 };
 
@@ -1709,7 +1769,8 @@ export class ComponentDialog {
       'turbine-driven-pump': 'turbine-driven-pump',
       'fuelAssembly': 'core',
       'controller': 'scram-controller',
-      'switchyard': 'switchyard'
+      'switchyard': 'switchyard',
+      'building': 'building'
     };
     return mapping[type] || type;
   }
@@ -2089,6 +2150,8 @@ export class ComponentDialog {
       // Turbine-specific mappings
       'inletPressure': ['inletFluid.pressure'],
       'exhaustPressure': ['outletFluid.pressure'],
+      // Building-specific mappings
+      'buildingShape': ['shape'],
     };
 
     const mappings = propertyMappings[optionName];
