@@ -9,16 +9,14 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 ## WATER PROPERTIES NOTES
 - Our saturated steam table data goes all the way from the triple point to the critical point.
 - It is critical to determine phase PURELY by comparing whether a node's (energy, volume) pair is inside the saturation dome in (u,v) space. Any thresholds, approximations, or special case rules will cause problems down the line.
-- Representing the dome boundary as a single curve that concatenates the saturated liquid and saturated vapor lines DOES correctly represent the two-phase region. Testing whether u < u_sat(v) is the ONLY valid way to determine if a node is two-phase (or v > v_sat(u) if you know for sure it's compressed liquid).
+- Representing the dome boundary as a single curve that concatenates the saturated liquid and saturated vapor lines DOES correctly represent the two-phase region. Testing whether u < u_sat(v) is the ONLY valid way to determine if a node is two-phase (or v > v_sat(u) if u < 50).
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions unless you get explicit user approval.
 
 ## TODO List
 -Debug semi-implicit pressure/flow solver
--Add LOCA capability (atmosphere as boundary condition)
--Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
--When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified). This is randomized at the start of the simulation and stored.
 -Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
+-How much pressure can things handle from the outside?
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
@@ -57,6 +55,9 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Add LOCA capability (atmosphere as boundary condition)
+X Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
+X When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified). This is randomized at the start of the simulation and stored.
 X Add containment building as an option
 X Non-condensible gases (air, hydrogen, helium, maybe co2, maybe co)
 X When you are building we will show a running estimate of "overnight construction cost" and then when you finish the design you press build and immediately take out a loan for that amount

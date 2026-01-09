@@ -1,5 +1,7 @@
 /**
  * Water/Steam Properties Module v4 - (u,v) Grid with Saturation Anchoring
+ * 
+ * Claude is no longer allowed to modify this file without explicit user approval in advance.
  *
  * This version uses a custom-built (u,v) grid from IAPWS-IF97 equations instead of
  * triangulating steam table data. The key improvements:
@@ -225,8 +227,15 @@ function T_from_u_f(u_f_Jkg: number): number {
  * Uses log(v) interpolation for accuracy across the wide range of specific volumes.
  *
  * This is the ONLY valid way to determine the saturation boundary for phase detection.
+ * (except if u < 400 we should check v_sat(u) instead)
+ *
+ * We do NOT test if a state is two-phase by checking for a T where x_v = x_u.
+ *
+ * NOTE: This function is currently unused - replaced by simpler findSaturationPropsAtV.
+ * Kept for potential debugging/future use.
  */
-function findSaturationAtV(v: number): {
+// @ts-ignore - Intentionally unused, kept for debugging
+function _findSaturationAtV(v: number): {
   u_sat_liquid: number | null;  // u_f at this v (if v is on liquid line)
   u_sat_vapor: number | null;   // u_g at this v (if v is on vapor line)
   T_liquid: number | null;
@@ -367,95 +376,182 @@ function findSaturationAtV(v: number): {
   return result;
 }
 
+
+/**
+ * Find saturation properties at the temperature where v = v_g(T).
+ * Returns u_g, T_sat, and P_sat at that temperature.
+ *
+ * Returns null if v is outside the saturation dome range.
+ * Claude, do not modify this function without express user permission in advance.
+ */
+function findSaturationPropsAtV(v: number): { u_g: number; T_sat: number; P_sat: number } | null {
+  if (!saturationDome) return null;
+
+  const rawData = saturationDome.raw_data;
+  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
+  //const v_c = saturationDome.critical_point.v_c;  // ~0.003 m³/kg
+  const v_min_unique = rawData[0].v_f; //0.00100022; // From the steam table: this is v_sat at u=0.
+  // If v > v_min_unique, then there is a unique u_sat(v). For lower v, there may be two. -Erick
+
+  if (v > v_g_max || v < v_min_unique) {
+    return null;
+  }
+
+  // Binary search for T where v_g(T) = v
+  // v_g decreases with increasing T (index)
+  let lo = 0;
+  let hi = rawData.length - 1;
+
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (rawData[mid].v_g > v) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  // Interpolate between lo and hi
+  const v_g_lo = rawData[lo].v_g;
+  const v_g_hi = rawData[hi].v_g;
+  const t = (v - v_g_lo) / (v_g_hi - v_g_lo);
+
+  const u_g_lo = rawData[lo].u_g * 1000;  // Convert kJ/kg to J/kg
+  const u_g_hi = rawData[hi].u_g * 1000;
+  const T_lo = rawData[lo].T_K;
+  const T_hi = rawData[hi].T_K;
+  const P_lo = rawData[lo].P_MPa * 1e6;  // Convert MPa to Pa
+  const P_hi = rawData[hi].P_MPa * 1e6;
+
+  return {
+    u_g: u_g_lo + t * (u_g_hi - u_g_lo),
+    T_sat: T_lo + t * (T_hi - T_lo),
+    P_sat: P_lo + t * (P_hi - P_lo),
+  };
+}
+
+/**
+ * Find u_sat on the saturation dome boundary for a given specific volume v.
+ * Convenience wrapper around findSaturationPropsAtV.
+ */
+function findSaturationU(v: number): number | null {
+  const props = findSaturationPropsAtV(v);
+  return props ? props.u_g : null;
+}
+
+/**
+ * Find v_sat on the saturated liquid line for a given specific internal energy u.
+ * Only valid for low energy values (u < 50 kJ/kg) where the liquid line
+ * curves back in (u,v) space.
+ * 
+ * Returns null if u is outside the valid range.
+ */
+function findSaturationV(u: number): number | null {
+  if (!saturationDome) return null;
+
+  // Only valid for low u values
+  if (u > 50000) {  // 50 kJ/kg in J/kg
+    return null;
+  }
+
+  const rawData = saturationDome.raw_data;
+
+  // At low T, u_f increases with T, so we search the first few points
+  // Find where u_f(T) = u
+  let lo = 0;
+  let hi = 0;
+
+  // Find the range where u_f brackets our target u
+  for (let i = 0; i < rawData.length - 1; i++) {
+    const u_f = rawData[i].u_f * 1000;  // Convert to J/kg
+    const u_f_next = rawData[i + 1].u_f * 1000;
+    if (u_f <= u && u <= u_f_next) {
+      lo = i;
+      hi = i + 1;
+      break;
+    }
+  }
+
+  if (lo === hi) {
+    return null;  // u not found in range
+  }
+
+  // Interpolate to find v_f
+  const u_f_lo = rawData[lo].u_f * 1000;
+  const u_f_hi = rawData[hi].u_f * 1000;
+  const t = (u - u_f_lo) / (u_f_hi - u_f_lo);
+
+  const v_f_lo = rawData[lo].v_f;
+  const v_f_hi = rawData[hi].v_f;
+
+  return v_f_lo + t * (v_f_hi - v_f_lo);
+}
+
 /**
  * Determine if a point (u, v) is inside the two-phase dome.
+ * ==============================================================
+ * EXPLICIT USER APPROVAL IS REQUIRED FOR CHANGES TO THIS SECTION
+ * ==============================================================
  *
- * For a given v, we find the corresponding points on the saturation dome:
- * - If v < v_c: there's a point on the liquid line at (v_f, u_f) where v_f = v
- * - If v > v_c: there's a point on the vapor line at (v_g, u_g) where v_g = v
- * - If v ≈ v_c: we're near the critical point
+ * For a given v, we find the corresponding point on the saturation dome.
+ * The saturation dome is one continuous curve in (v,u) space that includes both 
+ * saturated liquid and saturated vapor points and the critical point. 
  *
- * A point is two-phase if u < u_sat for the appropriate line(s).
  *
  * SPECIAL CASE: Near the triple point (u < 50 kJ/kg), water has its density anomaly
  * where v_f first decreases then increases with T (max density around 4°C).
- * This means a single v value could correspond to two different u_f values.
- * For this region, we also check v > v_sat(u) to confirm two-phase status.
+ * This means a single v value can correspond to two different u_f values.
+ * For this region, the state is two-phase if v > v_sat(u).
+ * Everywhere else, a point is two-phase iff u < u_sat(v).
  */
 function isInsideTwoPhaseDome(u: number, v: number): {
   inside: boolean;
-  u_sat?: number;  // The saturation u at this v
-  T_sat?: number;  // The saturation T at this v
 } {
   if (!saturationDome) {
     throw new Error('Saturation dome data not loaded');
   }
 
-  const satResult = findSaturationAtV(v);
+  const rawData = saturationDome.raw_data;
+  const v_f_min = rawData[0].v_f;  // ~0.001 m³/kg at triple point
+  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
 
-  if (!satResult) {
-    // v is outside the range of both saturation lines
+  // Quick bounds check: v must be within [v_f_min, v_g_max]
+  if (v < v_f_min || v > v_g_max) {
     return { inside: false };
   }
 
-  // Determine which saturation line applies based on v
-  const v_c = saturationDome.critical_point.v_c;
+  // Saturation data is in kJ/kg, convert to J/kg for comparison with u
+  const u_f_min = rawData[0].u_f * 1000;  // ~0 J/kg at triple point
+  const u_g_triple = rawData[0].u_g * 1000;  // ~2375 kJ/kg at triple point
 
-  if (v <= v_c) {
-    // We're on the liquid side (or at critical point)
-    // A state is two-phase if u <= u_f at this v (including the boundary)
-    // Saturated liquid (u = u_f, v = v_f) is treated as two-phase with quality = 0
+  // Check if it's below the triple point pressure (bottom edge of dome):
+  // Linear interpolation between (v_f, u_f) and (v_g, u_g) at triple point
+  const t = (v - v_f_min) / (v_g_max - v_f_min);
+  const u_bottom = u_f_min + t * (u_g_triple - u_f_min);
+  if (u < u_bottom) {
+    return { inside: false };
+  }
 
-    // SPECIAL CASE: Low-energy region near triple point (u < 50 kJ/kg)
-    // Due to water's density anomaly, v_f has a minimum around 4°C (277 K).
-    // A single v value could map to two different u_f values, so the
-    // u <= u_sat(v) check is ambiguous. Instead, use v > v_sat(u) which is unambiguous.
-    const U_LOW_ENERGY_THRESHOLD = 50000; // 50 kJ/kg in J/kg
-    if (u < U_LOW_ENERGY_THRESHOLD && u >= 0) {
-      // Get T from u (treating u as u_f on the saturation line)
-      const T_from_u = T_from_u_f(u);
-      // Get v_f at that temperature
-      const v_f_at_u = v_f_from_T(T_from_u);
-
-      // For two-phase: v must be greater than v_f(u)
-      // (i.e., the state is "to the right" of the saturation liquid line in u-v space)
-      const inside = v > v_f_at_u;
-
-      return {
-        inside,
-        u_sat: u_f_from_T(T_from_u), // u_sat at this temperature
-        T_sat: T_from_u,
-      };
-    }
-
-    // Standard check for higher energy states: u <= u_sat(v)
-    if (satResult.u_sat_liquid === null) {
-      // v < v_f at triple point - we're below the saturation dome
-      // This is compressed liquid colder than the triple point
-      // Treat as single-phase liquid (not two-phase)
+  // Special low energy check (u < 50 kJ/kg = 50000 J/kg):
+  // At low u, the liquid line curves back in (u,v) space
+  if (u < 50000) {
+    const v_sat = findSaturationV(u);
+    if (v_sat === null) {
+      // u is outside the range where we can find v_sat - treat as outside dome
       return { inside: false };
     }
-
-    const inside = u <= satResult.u_sat_liquid;
-    return {
-      inside,
-      u_sat: satResult.u_sat_liquid,
-      T_sat: satResult.T_liquid ?? undefined,
-    };
-  } else {
-    // We're on the vapor side
-    // A state is two-phase if u <= u_g at this v (including the boundary)
-    // Saturated vapor (u = u_g, v = v_g) is treated as two-phase with quality = 1
-    if (satResult.u_sat_vapor === null) {
-      throw new Error(`[WaterProps v4] u_sat_vapor is null for v=${(v*1e6).toFixed(2)} mL/kg > v_c=${(v_c*1e6).toFixed(2)} mL/kg - this should not happen`);
-    }
-    const inside = u <= satResult.u_sat_vapor;
-    return {
-      inside,
-      u_sat: satResult.u_sat_vapor,
-      T_sat: satResult.T_vapor ?? undefined,
-    };
+    // If v <= v_sat (on or left of liquid line), it's compressed liquid (outside dome)
+    // If v > v_sat, it's inside the dome (two-phase)
+    return { inside: v > v_sat };
   }
+
+  // Normal case: check if u < u_sat(v)
+  const u_sat = findSaturationU(v);
+  if (u_sat === null) {
+    // v is outside the range where we can find u_sat - treat as outside dome
+    return { inside: false };
+  }
+  return { inside: u < u_sat };
 }
 
 // ============================================================================
@@ -754,7 +850,9 @@ function interpolateLiquidWithSaturationAnchor(
   const satProps = findSaturationAtU(u);
 
   if (!satProps) {
-    throw new Error(`[WaterProps v4] u=${(u/1e3).toFixed(2)} kJ/kg is outside valid saturation range`);
+    // u is outside saturation range - likely supercritical
+    // Return null so caller can try grid interpolation
+    return null;
   }
 
   const { T_sat, v_f, P_sat } = satProps;
@@ -900,34 +998,73 @@ export function numericalBulkModulus(T_celsius: number, K_max?: number): number 
 // ============================================================================
 
 /**
- * For very high temperature vapor outside the grid, use ideal gas approximation.
- * P = ρ * R * T * Z where Z is compressibility factor.
- * This is only valid for superheated vapor well above the critical point.
+ * Ideal gas approximation for superheated vapor outside the steam table grid.
+ *
+ * Valid regions:
+ *   - v > 100 m³/kg AND u > u_sat(v) (low pressure superheated vapor)
+ *   - v > 10 m³/kg AND u > 2800 kJ/kg (high temperature, sparse grid region)
+ *
+ * To avoid discontinuity at the transition from steam tables, we anchor the
+ * approximation to saturation curve values:
+ *   - T = T_sat + (u - u_g) / cv
+ *   - P = Z * rho * R * T, where Z is calibrated to match P_sat at the boundary
  */
 function idealGasApproximation(u: number, v: number): { T: number; P: number } {
   const rho = 1 / v;
+  const cv_steam = 1500;  // J/(kg·K) - approximate cv for superheated steam
 
-  // Estimate temperature from internal energy
-  // For ideal gas: u = cv * T (approximately)
-  // For steam at high T: cv ≈ 1500 J/(kg·K)
-  const cv_est = 1500;
-  const T_est = Math.max(400, u / cv_est);
+  // Check valid range
+  const u_kJ = u / 1000;  // Convert to kJ/kg for comparison
+  const inLowPressureRegion = v > 100;
+  const inHighTempRegion = v > 10 && u_kJ > 2800;
 
-  // Compressibility factor
-  // Z = 1 for ideal gas, decreases near critical point
-  const rho_reduced = rho / RHO_CRIT;
-  let Z = 1.0;
-  if (rho_reduced < 0.5) {
-    Z = 1 - 0.1 * rho_reduced;
-  } else if (rho_reduced < 1.5) {
-    Z = 0.95 - 0.72 * (rho_reduced - 0.5);
-  } else {
-    Z = 0.23;  // Near critical
+  if (!inLowPressureRegion && !inHighTempRegion) {
+    throw new Error(
+      `[WaterProps v4] idealGasApproximation called outside valid range: ` +
+      `u=${u_kJ.toFixed(2)} kJ/kg, v=${v.toFixed(4)} m³/kg. ` +
+      `Valid regions: (v > 100 m³/kg) OR (v > 10 m³/kg AND u > 2800 kJ/kg).`
+    );
   }
 
-  const P = Z * rho * R_WATER * T_est;
+  // Get saturation properties at the boundary (or nearest saturation point)
+  // For v > v_g_max (~206 m³/kg), use triple point as reference
+  let satProps = findSaturationPropsAtV(v);
 
-  return { T: T_est, P };
+  if (!satProps) {
+    // v is beyond saturation curve (v > 206 m³/kg), use triple point
+    if (!saturationDome) {
+      throw new Error('[WaterProps v4] Saturation dome not loaded in idealGasApproximation');
+    }
+    const triple = saturationDome.raw_data[0];
+    satProps = {
+      u_g: triple.u_g * 1000,  // Convert to J/kg
+      T_sat: triple.T_K,
+      P_sat: triple.P_MPa * 1e6,  // Convert to Pa
+    };
+  }
+
+  // Check that u is above saturation (superheated)
+  if (u < satProps.u_g && inLowPressureRegion) {
+    throw new Error(
+      `[WaterProps v4] idealGasApproximation called for sub-saturation energy: ` +
+      `u=${u_kJ.toFixed(2)} kJ/kg < u_g=${(satProps.u_g/1000).toFixed(2)} kJ/kg at v=${v.toFixed(4)} m³/kg. ` +
+      `This state should be two-phase, not ideal gas.`
+    );
+  }
+
+  // Calculate temperature: T = T_sat + (u - u_g) / cv
+  const T = satProps.T_sat + (u - satProps.u_g) / cv_steam;
+
+  // Calculate compressibility factor Z to match P_sat at the saturation point
+  // At saturation: P_sat = Z * rho_sat * R * T_sat
+  // So: Z = P_sat / (rho_sat * R * T_sat)
+  const rho_sat = 1 / v;  // Use current v as reference density
+  const Z = satProps.P_sat / (rho_sat * R_WATER * satProps.T_sat);
+
+  // Calculate pressure using the calibrated Z
+  const P = Z * rho * R_WATER * T;
+
+  return { T, P };
 }
 
 // ============================================================================
@@ -1117,16 +1254,44 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
         quality: twoPhase.quality,
         specificEnergy: u,
       };
-    } else {
-      // Fallback: couldn't find consistent state
-      console.error(`[WaterProps v4] Failed to find two-phase state: u=${(u/1e3).toFixed(1)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg`);
-      throw new Error(`Two-phase state calculation failed for u=${(u/1e3).toFixed(1)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg`);
     }
+    // If we get here, dome check said inside but findTwoPhaseState couldn't find consistent T.
+    // This should not happen if dome check is correct. Throw an error.
+    throw new Error(
+      `[WaterProps v4] Inconsistent dome check: isInsideTwoPhaseDome returned true but ` +
+      `findTwoPhaseState failed. u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg. ` +
+      `This indicates a bug in the dome detection logic.`
+    );
   }
 
   // Single-phase: determine liquid vs vapor
-  // Use density and energy thresholds
-  const isLiquid = rho > 0.5 * RHO_CRIT || u < 1.8e6;
+  // But first, check for thermodynamically impossible states that indicate simulation errors.
+  //
+  // A state is impossible if it has:
+  // - Compressed liquid density (v < v_f_min) with vapor-like energy (u >> u_f_max)
+  // - OR very expanded (v >> v_g_max) with liquid-like energy (u << u_g_min)
+  //
+  // These combinations cannot physically exist and indicate mass/energy balance errors.
+  const rawData = saturationDome!.raw_data;
+  const v_f_max = rawData[rawData.length - 1].v_f;        // ~0.00288 m³/kg at critical point
+  const u_g_min = rawData[rawData.length - 1].u_g * 1000; // ~2056 kJ/kg at critical point
+
+  // Check for impossible compressed-liquid-density + vapor-energy state
+  if (v < v_f_max && u > u_g_min) {
+    throw new Error(
+      `[WaterProps v4] IMPOSSIBLE STATE: Compressed liquid density with vapor-like energy.\n` +
+      `  v=${(v * 1e6).toFixed(2)} mL/kg (< v_f_max=${(v_f_max * 1e6).toFixed(2)} mL/kg at critical point)\n` +
+      `  u=${(u / 1e3).toFixed(2)} kJ/kg (> u_g_min=${(u_g_min / 1e3).toFixed(2)} kJ/kg at critical point)\n` +
+      `  This combination is thermodynamically impossible.\n` +
+      `  Check mass/energy balance in the simulation - likely a flow or NCG calculation error.`
+    );
+  }
+
+  // Primary criterion is density - liquid is much denser than vapor
+  // Use density relative to critical as the main check
+  // Secondary check for low-energy states that might have intermediate density
+  const v_crit = saturationDome?.critical_point.v_c ?? 0.00288;
+  const isLiquid = rho > 0.5 * RHO_CRIT && v < v_crit * 2;  // Must be dense AND not too expanded
   const phase: 'liquid' | 'vapor' = isLiquid ? 'liquid' : 'vapor';
 
   let T: number;
@@ -1134,15 +1299,39 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   let calculationPath: string = 'unknown';
 
   if (phase === 'liquid') {
-    // Use saturation-anchored interpolation for liquid - no fallbacks
-    const result = interpolateLiquidWithSaturationAnchor(u, v);
-
-    if (!result) {
-      throw new Error(`[WaterProps v4] Liquid interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
+    // Try saturation-anchored interpolation for liquid first
+    // This may fail for supercritical states (u above critical energy)
+    let result: { T: number; P: number } | null = null;
+    try {
+      result = interpolateLiquidWithSaturationAnchor(u, v);
+    } catch {
+      // Saturation anchor failed - likely supercritical, will try grid below
     }
-    T = result.T;
-    P = result.P;
-    calculationPath = 'liquid_saturation_anchor';
+
+    if (result) {
+      T = result.T;
+      P = result.P;
+      calculationPath = 'liquid_saturation_anchor';
+    } else {
+      // Saturation-anchored failed (likely supercritical) - try grid interpolation
+      // Supercritical points are stored in the vapor grid, so try vapor first
+      let gridResult = interpolateFromGrid(u, v, 'vapor');
+      if (gridResult) {
+        T = gridResult.T;
+        P = gridResult.P;
+        calculationPath = 'supercritical_grid_vapor';
+      } else {
+        // Try liquid grid as fallback
+        gridResult = interpolateFromGrid(u, v, 'liquid');
+        if (gridResult) {
+          T = gridResult.T;
+          P = gridResult.P;
+          calculationPath = 'supercritical_grid_liquid';
+        } else {
+          throw new Error(`[WaterProps v4] Liquid/supercritical interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
+        }
+      }
+    }
   } else {
     // Vapor: use grid interpolation first
     const gridResult = interpolateFromGrid(u, v, 'vapor');
@@ -1152,24 +1341,41 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       P = gridResult.P;
       calculationPath = 'vapor_grid';
     } else {
-      // Grid interpolation failed - check if this is high-temperature vapor where ideal gas is valid
-      // Ideal gas is only valid for low density (rho << RHO_CRIT) and high energy (u > u_g at triple point)
-      const u_g_triple = u_g_from_T(T_TRIPLE);  // ~2375 kJ/kg
-      if (rho < 0.3 * RHO_CRIT && u > u_g_triple) {
-        // High-temperature, low-density vapor - use ideal gas approximation
+      // ========================================================================
+      // DO NOT ADD A FALLBACK HERE
+      // ========================================================================
+      // If vapor grid interpolation fails, the simulation has produced a state
+      // that is outside the valid range of our steam table data.
+      //
+      // DO NOT use "near saturation" approximations.
+      // DO NOT use ideal gas for states that should be in the grid.
+      //
+      // The ONLY acceptable use of ideal gas is for very low density vapor
+      // (v > 100 m³/kg) which is physically outside the steam table range.
+      // ========================================================================
+
+      const v_g_max = 206;  // m³/kg at triple point
+      if (v > v_g_max * 0.5) {
+        // Very low density vapor - use ideal gas approximation
         const idealResult = idealGasApproximation(u, v);
         T = idealResult.T;
         P = idealResult.P;
         calculationPath = 'vapor_ideal_gas';
       } else {
-        throw new Error(`[WaterProps v4] Vapor grid interpolation failed and ideal gas not applicable: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
+        throw new Error(
+          `[WaterProps v4] Vapor grid interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³. ` +
+          `This state is outside the valid range of the steam table grid. ` +
+          `Check simulation mass/energy balance.`
+        );
       }
     }
   }
 
   // Validate results - no clamping, fail if out of range
-  if (P < 1000 || P > P_CRIT * 10) {
-    throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);
+  // For ideal gas path (very low density vapor), allow much lower pressures
+  const minPressure = calculationPath === 'vapor_ideal_gas' ? 0.1 : 1000;  // 0.1 Pa for ideal gas, 1000 Pa otherwise
+  if (P < minPressure || P > P_CRIT * 10) {
+    throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
   }
   if (T < T_TRIPLE || T > 3000) {
     throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);

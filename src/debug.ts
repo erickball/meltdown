@@ -22,6 +22,7 @@ import {
   ALL_GAS_SPECIES,
   GAS_PROPERTIES,
   R_GAS,
+  mixtureCv,
 } from './simulation/gas-properties';
 
 // Store previous pressures to show transitions
@@ -1123,7 +1124,15 @@ export function updateComponentDetail(
 
     html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${flowNode.fluid.phase}</span></div>`;
     html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${flowNode.fluid.mass.toFixed(0)} kg</span></div>`;
-    const specificEnergy = flowNode.fluid.internalEnergy / flowNode.fluid.mass / 1000;
+
+    // Calculate specific energy of steam only (subtract NCG energy contribution)
+    let steamEnergy = flowNode.fluid.internalEnergy;
+    if (ncgMoles > 0 && flowNode.fluid.ncg) {
+      const Cv_ncg = mixtureCv(flowNode.fluid.ncg);
+      const ncgEnergy = ncgMoles * Cv_ncg * flowNode.fluid.temperature;
+      steamEnergy = Math.max(0, flowNode.fluid.internalEnergy - ncgEnergy);
+    }
+    const specificEnergy = flowNode.fluid.mass > 0 ? steamEnergy / flowNode.fluid.mass / 1000 : 0;
     html += `<div class="detail-row"><span class="detail-label">Spec. Energy:</span><span class="detail-value">${specificEnergy.toFixed(0)} kJ/kg</span></div>`;
 
     // Show fill level / quality only for two-phase in containers that can have separate phases

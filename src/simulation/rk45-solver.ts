@@ -233,10 +233,26 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         if (!node.fluid.ncg) {
           node.fluid.ncg = emptyGasComposition();
         }
+
+        // Get original NCG to enforce conservation
+        const originalNode = state.flowNodes.get(id);
+        const originalNcg = originalNode?.fluid.ncg;
+
         // Apply rate for each gas species
         for (const species of ALL_GAS_SPECIES) {
-          node.fluid.ncg[species] += nodeRates.dNcg[species] * dt;
-          // Ensure non-negative (numerical precision)
+          // Clamp removal rate to not exceed what's in the ORIGINAL state
+          // This prevents RK45 intermediate stages from computing removal rates
+          // based on NCG that was only temporarily deposited during the step
+          let effectiveRate = nodeRates.dNcg[species];
+          if (effectiveRate < 0 && originalNcg) {
+            const originalAmount = originalNcg[species] ?? 0;
+            const maxRemovalRate = originalAmount / dt;
+            effectiveRate = Math.max(effectiveRate, -maxRemovalRate);
+          }
+
+          node.fluid.ncg[species] += effectiveRate * dt;
+
+          // Clamp tiny negative values from floating point error
           if (node.fluid.ncg[species] < 0) {
             node.fluid.ncg[species] = 0;
           }

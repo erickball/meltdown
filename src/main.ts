@@ -1549,6 +1549,10 @@ function init() {
             border: 1px solid #644; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
             Delete
           </button>
+          <button id="dialog-export-btn" style="padding: 8px 12px; background: #353;
+            border: 1px solid #464; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            Export
+          </button>
         </div>
       </div>
 
@@ -1568,6 +1572,7 @@ function init() {
     const saveBtn = dialog.querySelector('#dialog-save-btn') as HTMLButtonElement;
     const loadBtn = dialog.querySelector('#dialog-load-btn') as HTMLButtonElement;
     const deleteBtn = dialog.querySelector('#dialog-delete-btn') as HTMLButtonElement;
+    const exportBtn = dialog.querySelector('#dialog-export-btn') as HTMLButtonElement;
     const closeBtn = dialog.querySelector('#dialog-close-btn') as HTMLButtonElement;
 
     const cleanup = () => document.body.removeChild(overlay);
@@ -1622,6 +1627,30 @@ function init() {
           refreshConfigs();
         }
       }
+    });
+
+    exportBtn.addEventListener('click', () => {
+      const name = configSelect.value;
+      if (!name) {
+        showNotification('Select a configuration to export', 'warning');
+        return;
+      }
+      const json = localStorage.getItem(STORAGE_PREFIX + name);
+      if (!json) {
+        showNotification('Configuration not found', 'error');
+        return;
+      }
+      // Create downloadable file
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showNotification(`Exported '${name}.json'`, 'info');
     });
 
     closeBtn.addEventListener('click', cleanup);

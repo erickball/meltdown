@@ -1094,6 +1094,11 @@ export function createFluidState(
           fluidState.ncg = ncg;
           // Add NCG partial pressure to total pressure (Dalton's law)
           fluidState.pressure += totalNcgPressure;
+          // Add NCG internal energy: U_ncg = n * Cv * T
+          // This is crucial - without it, subtracting NCG energy later would go negative
+          const ncgMoles = totalMoles(ncg);
+          const Cv_ncg = mixtureCv(ncg);
+          fluidState.internalEnergy += ncgMoles * Cv_ncg * temperature;
         }
       }
 
@@ -1144,6 +1149,11 @@ export function createFluidState(
       // Add NCG partial pressure to total pressure (Dalton's law)
       // This makes the pressure field consistent with what constraint operator expects
       fluidState.pressure += totalNcgPressure;
+      // Add NCG internal energy: U_ncg = n * Cv * T
+      // This is crucial - without it, subtracting NCG energy later would go negative
+      const ncgMoles = totalMoles(ncg);
+      const Cv_ncg = mixtureCv(ncg);
+      fluidState.internalEnergy += ncgMoles * Cv_ncg * temperature;
     }
   }
 
