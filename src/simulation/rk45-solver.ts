@@ -630,6 +630,38 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
       maxBadness = Math.max(maxBadness, badness);
     }
 
+    // Check for specific energy below physically possible minimum
+    // This catches energy depletion faster than mass depletion (enthalpy mismatch)
+    // For water: minimum u at any specific volume is on the saturation dome boundary
+    // At the triple point (v_g = 206 m³/kg): u ranges from 0 (liquid) to ~2375 kJ/kg (vapor)
+    // For v > v_f, estimate quality x = (v - v_f) / (v_g - v_f), then u_min = x * u_g_triple
+    const v_specific = newNode.volume / newNode.fluid.mass; // m³/kg
+    const u_specific = newNode.fluid.internalEnergy / newNode.fluid.mass; // J/kg
+
+    // Only check for vapor-like densities (v > 0.01 m³/kg = 10 L/kg)
+    // Liquid water has v ≈ 0.001 m³/kg, so anything > 0.01 should have significant vapor energy
+    if (v_specific > 0.01) {
+      const V_F_TRIPLE = 0.001;    // m³/kg - saturated liquid at triple point
+      const V_G_TRIPLE = 206;      // m³/kg - saturated vapor at triple point
+      const U_G_TRIPLE = 2375000;  // J/kg - saturated vapor internal energy at triple point
+
+      // Estimate quality at triple point for this specific volume
+      const x_est = Math.min(1, Math.max(0, (v_specific - V_F_TRIPLE) / (V_G_TRIPLE - V_F_TRIPLE)));
+
+      // Minimum u at this v (on the saturation dome at triple point temperature)
+      const u_min = x_est * U_G_TRIPLE;
+
+      if (u_specific < u_min * 0.9) {  // Allow 10% margin for numerical error
+        const deficit = (u_min - u_specific) / u_min;
+        console.warn(`[RK45 Sanity] ${id}: Energy too low for vapor density. ` +
+          `u=${(u_specific/1e3).toFixed(1)} kJ/kg < u_min=${(u_min/1e3).toFixed(1)} kJ/kg ` +
+          `(v=${(v_specific*1e3).toFixed(1)} L/kg, x_est=${(x_est*100).toFixed(1)}%)`);
+        // Scale badness based on how far below minimum we are
+        const badness = 1 + deficit * 10;  // 10% below = badness 2, 50% below = badness 6
+        maxBadness = Math.max(maxBadness, badness);
+      }
+    }
+
     // Check for invalid temperature (250K to 2500K covers most scenarios)
     if (!isFinite(newNode.fluid.temperature) ||
         newNode.fluid.temperature < 250 ||
