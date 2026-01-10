@@ -500,7 +500,19 @@ export function updateDebugPanel(
       const P_to = toNode ? getPressureAtConnectionDebug(toNode, conn.toElevation) / 1e5 : 0;
       const dP = P_from - P_to;
 
-      html += `${conn.fromNodeId} → ${conn.toNodeId}: `;
+      // Show flow phase indicator with color
+      let phaseIndicator = '';
+      if (conn.currentFlowPhase) {
+        const phaseColor = conn.currentFlowPhase === 'vapor' ? '#aaf'
+          : conn.currentFlowPhase === 'liquid' ? '#8cf'
+          : '#ccc';
+        const phaseAbbrev = conn.currentFlowPhase === 'vapor' ? 'V'
+          : conn.currentFlowPhase === 'liquid' ? 'L'
+          : 'M';
+        phaseIndicator = `<span style="color: ${phaseColor}; font-size: 9px;">[${phaseAbbrev}]</span> `;
+      }
+
+      html += `${conn.fromNodeId} → ${conn.toNodeId}: ${phaseIndicator}`;
       html += `<span class="${flowClass}">${formatFlow(conn.massFlowRate)} kg/s</span>`;
 
       // Show steady-state target in parentheses if different from actual

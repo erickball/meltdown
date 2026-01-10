@@ -194,6 +194,7 @@ export interface FlowConnection {
 
   // Current flow state (computed by solver)
   massFlowRate: number;             // kg/s (positive = from -> to)
+  currentFlowPhase?: 'liquid' | 'vapor' | 'mixture';  // What phase is currently flowing
 
   // Target flow rate (computed from pressure balance, for debugging)
   targetFlowRate?: number;          // kg/s - what flow would be at equilibrium

@@ -880,6 +880,9 @@ export class FlowRateOperator implements RateOperator {
       // Energy flow rate = mass flow * specific enthalpy
       const energyFlow = absMassFlow * h_up;
 
+      // Store flow phase on connection for debug display
+      conn.currentFlowPhase = flowPhase;
+
       // Update rates: upstream loses mass/energy, downstream gains
       const upRates = rates.flowNodes.get(upstreamId)!;
       const downRates = rates.flowNodes.get(downstreamId)!;
@@ -1750,7 +1753,12 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         const U = flowNode.fluid.internalEnergy;
         const vol = flowNode.volume;
         const v_water = effectiveWaterVolume / mass;
+        const storedT = flowNode.fluid.temperature;
+        const storedP = flowNode.fluid.pressure;
+        const storedPhase = flowNode.fluid.phase;
+        const storedQuality = flowNode.fluid.quality;
         console.error(`[FluidState] Error in ${nodeId}:`);
+        console.error(`  STORED STATE: T=${(storedT - 273.15).toFixed(1)}C, P=${(storedP/1e5).toFixed(2)}bar, phase=${storedPhase}, quality=${(storedQuality ?? 0).toFixed(3)}`);
         console.error(`  mass=${mass.toFixed(1)}kg, U=${(U/1e6).toFixed(3)}MJ, V_total=${(vol*1e3).toFixed(1)}L, V_water=${(effectiveWaterVolume*1e3).toFixed(1)}L`);
         console.error(`  u_total=${(U/mass/1e3).toFixed(2)}kJ/kg, u_steam=${(steamEnergy/mass/1e3).toFixed(2)}kJ/kg`);
         console.error(`  v_total=${(vol/mass*1e6).toFixed(2)}mL/kg, v_water=${(v_water*1e6).toFixed(2)}mL/kg`);
@@ -1927,6 +1935,10 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
       conn.targetFlowRate = targetFlow;
       conn.steadyStateFlow = targetFlow;
 
+      // Determine flow phase for display
+      const upstreamNode = conn.massFlowRate >= 0 ? fromNode : toNode;
+      conn.currentFlowPhase = this.getFlowPhase(upstreamNode, conn.massFlowRate >= 0 ? conn.fromElevation : conn.toElevation);
+
       // === PHYSICAL CONSTRAINTS ON FLOW ===
 
       // Note: Running pumps resist reverse flow via high friction in the rate equation,
@@ -1940,6 +1952,49 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
     }
 
     return newState;
+  }
+
+  /**
+   * Determine what phase of fluid is flowing based on connection elevation
+   * relative to liquid level in a two-phase node.
+   */
+  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
+    // Single-phase nodes flow their phase
+    if (node.fluid.phase === 'liquid') return 'liquid';
+    if (node.fluid.phase === 'vapor') return 'vapor';
+
+    // Two-phase: determine based on connection elevation vs liquid level
+    const quality = node.fluid.quality ?? 0;
+    const T_C = node.fluid.temperature - 273.15;
+
+    // Approximate densities
+    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
+                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
+                       700 - 2.5 * (T_C - 300);
+    const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
+
+    // Void fraction (vapor volume / total volume)
+    const voidFraction = quality > 0 && rho_vapor > 0
+      ? (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor)
+      : 0;
+
+    // Estimate node height from volume (assume cylindrical)
+    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+    const liquidLevel = nodeHeight * (1 - voidFraction);
+
+    // Default to mid-height if not specified
+    const connElevation = connectionElevation ?? nodeHeight / 2;
+
+    // Tolerance zone around interface
+    const tolerance = nodeHeight * 0.1;
+
+    if (connElevation < liquidLevel - tolerance) {
+      return 'liquid';
+    } else if (connElevation > liquidLevel + tolerance) {
+      return 'vapor';
+    } else {
+      return 'mixture';
+    }
   }
 
   private computeSteadyStateFlow(
