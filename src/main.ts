@@ -29,6 +29,35 @@ import { estimateComponentCost, formatCost } from './construction/cost-estimatio
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
 let lastDebugUpdate = 0;
 
+// ============================================================================
+// Settings Persistence
+// ============================================================================
+const SETTINGS_KEY = 'meltdown_settings';
+
+interface AppSettings {
+  deterministicMode?: boolean;
+}
+
+function loadSettings(): AppSettings {
+  try {
+    const json = localStorage.getItem(SETTINGS_KEY);
+    if (json) {
+      return JSON.parse(json);
+    }
+  } catch (e) {
+    console.warn('[Settings] Failed to load settings:', e);
+  }
+  return {};
+}
+
+function saveSettings(settings: AppSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+  } catch (e) {
+    console.warn('[Settings] Failed to save settings:', e);
+  }
+}
+
 // Expose debug utilities to browser console
 declare global {
   interface Window {
@@ -781,11 +810,18 @@ function init() {
   // Advanced solver settings: Deterministic mode enable/disable
   const deterministicModeCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
   if (deterministicModeCheckbox) {
-    // Initialize to unchecked (deterministic mode disabled by default for UI responsiveness)
-    deterministicModeCheckbox.checked = false;
+    // Load saved setting, default to false for UI responsiveness
+    const savedSettings = loadSettings();
+    const initialDeterministic = savedSettings.deterministicMode ?? false;
+    deterministicModeCheckbox.checked = initialDeterministic;
+    gameLoop.setDeterministicMode(initialDeterministic);
 
     deterministicModeCheckbox.addEventListener('change', () => {
       gameLoop.setDeterministicMode(deterministicModeCheckbox.checked);
+      // Persist the setting
+      const settings = loadSettings();
+      settings.deterministicMode = deterministicModeCheckbox.checked;
+      saveSettings(settings);
       console.log(`Deterministic mode: ${deterministicModeCheckbox.checked ? 'enabled' : 'disabled'}`);
     });
   }
