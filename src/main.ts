@@ -6,6 +6,7 @@ import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
   createSimulationFromPlant,
+  setSimulationRandomSeed,
   SimulationState,
   SolverMetrics,
   setWaterPropsDebug,
@@ -777,6 +778,18 @@ function init() {
     });
   }
 
+  // Advanced solver settings: Deterministic mode enable/disable
+  const deterministicModeCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
+  if (deterministicModeCheckbox) {
+    // Initialize to unchecked (deterministic mode disabled by default for UI responsiveness)
+    deterministicModeCheckbox.checked = false;
+
+    deterministicModeCheckbox.addEventListener('change', () => {
+      gameLoop.setDeterministicMode(deterministicModeCheckbox.checked);
+      console.log(`Deterministic mode: ${deterministicModeCheckbox.checked ? 'enabled' : 'disabled'}`);
+    });
+  }
+
   // Listen for auto-slowdown events to update speed display
   gameLoop.addEventListener('auto-slowdown', () => {
     updateSpeedDisplay();
@@ -825,6 +838,9 @@ function init() {
   if (resetScramBtn) {
     resetScramBtn.addEventListener('click', () => {
       // Reset T&H conditions to initial state (recreate simulation)
+      // Set random seed for deterministic mode
+      const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
+      setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
       const newSimState = createSimulationFromPlant(plantState);
       gameLoop.resetState(newSimState);
       // SCRAM is automatically cleared since we have a fresh simulation state
@@ -1719,6 +1735,9 @@ function init() {
 
       // Always create simulation state from current plant configuration
       // (even if empty - this replaces the demo plant with an empty simulation)
+      // Set random seed for deterministic mode
+      const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
+      setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
       const newSimState = createSimulationFromPlant(plantState);
       gameLoop.setSimulationState(newSimState);
       plantCanvas.setSimState(newSimState);
@@ -1750,6 +1769,7 @@ function init() {
         isFallingBehind: false,
         fallingBehindSince: 0,
         operatorTimes: new Map(),
+        lastSimTime: 0,
       };
       updateDebugPanel(currentState, emptyMetrics, gameLoop.getPressureSolverStatus());
 
@@ -2359,6 +2379,7 @@ function init() {
     isFallingBehind: false,
     fallingBehindSince: 0,
     operatorTimes: new Map(),
+    lastSimTime: 0,
   };
   updateDebugPanel(simState, initialMetrics, gameLoop.getPressureSolverStatus());
 

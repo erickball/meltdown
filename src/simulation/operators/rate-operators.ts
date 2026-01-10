@@ -897,26 +897,37 @@ export class FlowRateOperator implements RateOperator {
       if (upstreamNode.fluid.ncg && totalMoles(upstreamNode.fluid.ncg) > 0) {
         // Only transport NCG with vapor or mixture flow (not pure liquid)
         if (flowPhase === 'vapor' || flowPhase === 'mixture') {
-          // Calculate fraction of upstream mass being transported
+          // Calculate fraction of upstream mass being transported per second
           const upstreamMass = upstreamNode.fluid.mass;
           if (upstreamMass > 0) {
             // For vapor: NCGs move with vapor mass
             // For mixture: NCGs move with total mass (they're mixed throughout)
             let ncgTransportFraction: number;
+            let referenceMass: number;  // Mass that NCGs are mixed with
+
             if (flowPhase === 'vapor' && upstreamNode.fluid.phase === 'two-phase') {
               // NCGs are in the vapor space - transport based on vapor mass leaving
               const quality = upstreamNode.fluid.quality ?? 0;
-              const vaporMass = upstreamMass * quality;
-              ncgTransportFraction = vaporMass > 0 ? absMassFlow / vaporMass : 0;
+              referenceMass = upstreamMass * quality;
+              ncgTransportFraction = referenceMass > 0 ? absMassFlow / referenceMass : 0;
             } else {
               // Homogeneous mixture or pure vapor - NCGs transport with bulk flow
+              referenceMass = upstreamMass;
               ncgTransportFraction = absMassFlow / upstreamMass;
             }
 
-            // IMPORTANT: Clamp fraction to 1.0 to prevent transporting more NCG than exists
-            // Without this, high flow rates relative to vapor mass can "create" NCG:
-            // upstream goes negative (clamped to 0), but downstream gets inflated amount
-            ncgTransportFraction = Math.min(1.0, ncgTransportFraction);
+            // CRITICAL FIX: Don't clamp the transport fraction!
+            // When absMassFlow > referenceMass, the steam/vapor is being depleted faster
+            // than 1x per second. NCG must leave at the same rate, otherwise NCG
+            // accumulates as steam mass drops to zero.
+            //
+            // The RK45 solver handles the actual integration. If ncgTransportFraction > 1,
+            // it means "all NCG would leave in less than 1 second at this rate".
+            // The actual amount transported depends on dt, and the solver will take
+            // small enough steps to keep things stable.
+            //
+            // Old code clamped to 1.0, which caused NCG to accumulate when steam
+            // mass was depleted quickly (e.g., through a break connection).
 
             // Create NCG rate entries if not present
             if (!upRates.dNcg) {
@@ -939,9 +950,23 @@ export class FlowRateOperator implements RateOperator {
             // When NCG moles leave, their energy must leave too!
             // Otherwise the source node keeps NCG energy without NCG moles,
             // causing apparent specific energy to blow up.
+            //
+            // Compute effective temperature from energy balance - don't trust stored T.
             if (totalMolesTransferred > 0) {
               const Cv_ncg = mixtureCv(upstreamNode.fluid.ncg);
-              const ncgEnergyFlow = totalMolesTransferred * Cv_ncg * upstreamNode.fluid.temperature;
+              const totalNcgMoles = totalMoles(upstreamNode.fluid.ncg);
+              const totalU = upstreamNode.fluid.internalEnergy;
+              const waterMass = upstreamNode.fluid.mass;
+
+              // Compute effective T from energy balance:
+              // totalU = ncgMoles * Cv_ncg * T + waterMass * (u_ref + Cv_water * (T - 273))
+              const Cv_water = 1900; // J/kg-K for vapor
+              const u_ref = 2.375e6; // J/kg reference energy for vapor at 273K
+              const coeff = totalNcgMoles * Cv_ncg + waterMass * Cv_water;
+              const constant = waterMass * (u_ref - 273 * Cv_water);
+              const effectiveT = Math.max(273, (totalU - constant) / coeff);
+
+              const ncgEnergyFlow = totalMolesTransferred * Cv_ncg * effectiveT;
               upRates.dEnergy -= ncgEnergyFlow;
               downRates.dEnergy += ncgEnergyFlow;
             }
@@ -1085,13 +1110,37 @@ export class FlowRateOperator implements RateOperator {
         const ncgMoles = totalMoles(node.fluid.ncg);
         if (ncgMoles > 0) {
           const Cv_ncg = mixtureCv(node.fluid.ncg);
-          const ncgEnergy = ncgMoles * Cv_ncg * T;
-          waterEnergy = Math.max(0, waterEnergy - ncgEnergy);
 
-          // NCG volume from ideal gas: V_ncg = n * R * T / P_ncg
-          // P_ncg is the partial pressure of NCG
+          // Compute effective temperature from energy balance
+          // Don't trust the stored T - compute what T must be given (totalU, ncgMoles, waterMass)
+          // totalU = ncgMoles * Cv_ncg * T + waterMass * u_water(T)
+          // For vapor: u_water ≈ 2.375e6 + 1900*(T - 273)
+          const waterMass = node.fluid.mass;
+          const totalU = node.fluid.internalEnergy;
+          const u_ref = 2.375e6;
+          const Cv_water = 1900;
+
+          // Solve: totalU = ncgMoles * Cv_ncg * T + waterMass * (u_ref + Cv_water * (T - 273))
+          // totalU = T * (ncgMoles * Cv_ncg + waterMass * Cv_water) + waterMass * (u_ref - Cv_water * 273)
+          const T_eff_coeff = ncgMoles * Cv_ncg + waterMass * Cv_water;
+          const T_eff_const = waterMass * (u_ref - Cv_water * 273);
+          const T_eff = Math.max(273, (totalU - T_eff_const) / T_eff_coeff);
+
+          // NCG energy at effective temperature
+          const ncgEnergy = ncgMoles * Cv_ncg * T_eff;
+          waterEnergy = totalU - ncgEnergy;
+
+          if (waterEnergy < 0) {
+            console.error(`[getSpecificEnthalpy] ${node.id}: Negative water energy!`);
+            console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergy/1e6).toFixed(4)}MJ`);
+            console.error(`  T_eff=${T_eff.toFixed(1)}K, stored T=${T.toFixed(1)}K`);
+            console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, waterMass=${waterMass.toFixed(3)}kg`);
+            waterEnergy = 0;
+          }
+
+          // NCG volume from ideal gas: V_ncg = n * R * T / P
           const R_GAS = 8.314;  // J/(mol·K)
-          const ncgVolume = ncgMoles * R_GAS * T / P;  // Approximate: uses total P
+          const ncgVolume = ncgMoles * R_GAS * T_eff / P;
           waterVolume = Math.max(0.001, waterVolume - ncgVolume);
         }
       }
@@ -1457,70 +1506,160 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         continue;
       }
 
+      // When NCG is present, we need to find the equilibrium state where:
+      // 1. NCG and steam are at the same temperature (thermal equilibrium)
+      // 2. Total energy = NCG energy + water energy
+      // 3. For two-phase water: steam partial pressure = P_sat(T)
+      // 4. Total pressure = P_steam + P_ncg (Dalton's law)
+      //
+      // The vapor space contains NCG + steam, while liquid pools at the bottom.
+      // Volume partition:
+      //   V_total = V_liquid + V_vapor_space
+      //   V_vapor_space contains both steam (at P_sat) and NCG (at P_ncg)
+      //   Both gases occupy the full V_vapor_space at their partial pressures
+      let effectiveWaterVolume = flowNode.volume;
+
       if (ncgMoles > 0) {
         const Cv_ncg = mixtureCv(flowNode.fluid.ncg!);
         const totalU = flowNode.fluid.internalEnergy;
+        const R_WATER = 461.5;  // J/(kg·K) for water vapor
 
-        // Iterate to find temperature that satisfies:
-        // U_total = U_ncg(T) + U_steam(T)
-        // U_ncg = n * Cv * T
-        // U_steam = m * u_steam(T) where u_steam comes from steam tables
-        //
-        // We approximate u_steam based on phase:
-        // - Liquid: u ≈ 4186 * (T - 273.15) J/kg
-        // - Vapor:  u ≈ 2.5e6 + 1500 * (T - 373) J/kg (saturated vapor + superheat)
-        //
-        // Since we don't know the phase a priori, use specific volume to estimate.
+        // Iterate to find equilibrium temperature
+        // At each T, we compute:
+        // - P_sat(T) = steam partial pressure
+        // - Vapor space volume (assuming liquid takes minimal space)
+        // - Steam mass in vapor = P_sat * V_vapor / (R_water * T)
+        // - Liquid mass = total mass - vapor mass
+        // - Energy of each phase
 
-        let T_estimate = flowNode.fluid.temperature;
+        // Start from NCG temperature estimate when water mass is small
+        // This provides a better initial guess and faster convergence
         const ncgThermalMass = ncgMoles * Cv_ncg;  // J/K
-        const v_specific = flowNode.volume / steamMass;  // m³/kg
-
-        // Iterate with approximation
-        for (let iter = 0; iter < 10; iter++) {
-          // Approximate steam specific energy at current T based on estimated phase
-          let u_steam_approx: number;
-          let du_dT: number;
-
-          if (v_specific < 0.01) {
-            // Likely liquid (v < 10 L/kg)
-            u_steam_approx = 4186 * (T_estimate - 273.15);
-            du_dT = 4186;
-          } else {
-            // Likely vapor or two-phase - use saturated vapor approximation
-            // u_g ≈ 2.375e6 at 273K, increases to ~2.5e6 at 373K, then Cv_steam ~ 1500 J/kg-K
-            // Simplified: u_g(T) ≈ 2.375e6 + 1250*(T-273) for T < 373
-            //             u_g(T) ≈ 2.5e6 + 1500*(T-373) for T >= 373
-            if (T_estimate < 373) {
-              u_steam_approx = 2.375e6 + 1250 * (T_estimate - 273);
-              du_dT = 1250;
-            } else {
-              u_steam_approx = 2.5e6 + 1500 * (T_estimate - 373);
-              du_dT = 1500;
-            }
-          }
-
-          const steamEnergyApprox = steamMass * Math.max(0, u_steam_approx);
-
-          // NCG energy at this T
-          const ncgEnergy = ncgMoles * Cv_ncg * T_estimate;
-
-          // Check energy balance
-          const totalEnergyAtT = ncgEnergy + steamEnergyApprox;
-          const energyError = totalU - totalEnergyAtT;
-
-          // Adjust T based on energy error
-          const dUdT = ncgThermalMass + steamMass * du_dT;
-          const dT = energyError / dUdT;
-
-          T_estimate = Math.max(273, Math.min(700, T_estimate + 0.5 * dT));
-
-          if (Math.abs(dT) < 0.1) break;
+        const waterThermalMass = steamMass * 4186;  // Approximate using liquid Cp
+        let T_estimate: number;
+        if (ncgThermalMass > waterThermalMass * 10) {
+          // NCG dominates - use NCG temperature as starting point
+          // T_ncg ≈ U_ncg / (n * Cv) but we don't know U_ncg yet
+          // Approximate: assume most energy is in NCG
+          T_estimate = Math.max(273, Math.min(700, totalU / ncgThermalMass));
+        } else {
+          T_estimate = flowNode.fluid.temperature;
         }
 
-        // Now compute steam energy at converged temperature
-        const ncgEnergy = ncgMoles * Cv_ncg * T_estimate;
-        steamEnergy = Math.max(0, totalU - ncgEnergy);
+        // Iterate to find consistent T
+        let finalEnergyError = 0;
+        let iterCount = 0;
+        const T_initial = T_estimate;
+
+        for (let iter = 0; iter < 20; iter++) {
+          iterCount = iter + 1;
+
+          // Saturation pressure at this temperature
+          const P_sat = Water.saturationPressure(T_estimate);
+
+          // For two-phase equilibrium with NCG:
+          // The vapor space contains steam at P_sat and NCG at P_ncg
+          // Total pressure = P_sat + P_ncg
+          //
+          // Liquid volume is small compared to vapor space for low-pressure systems
+          // Approximate: vapor space ≈ total volume
+          const V_vapor = flowNode.volume;  // Approximation: liquid volume << total
+
+          // NCG pressure in this vapor space (for reference, not used in iteration)
+          // P_ncg = ncgMoles * R_GAS * T_estimate / V_vapor
+          // P_total = P_sat + P_ncg
+
+          // Steam mass in vapor phase: m_v = P_sat * V / (R_water * T)
+          const m_vapor = P_sat * V_vapor / (R_WATER * T_estimate);
+
+          // Liquid mass (rest of the water)
+          const m_liquid = Math.max(0, steamMass - m_vapor);
+
+          // Energy calculation:
+          // Liquid: u_f ≈ 4186 * (T - 273.15) J/kg
+          // Vapor:  u_g ≈ 2.375e6 + 1900*(T - 273) J/kg (better fit for low T)
+          // NCG:    u = Cv * T
+          const u_f = 4186 * Math.max(0, T_estimate - 273.15);
+          const u_g = 2375000 + 1900 * (T_estimate - 273);
+
+          const waterEnergy = m_liquid * u_f + m_vapor * u_g;
+          const ncgEnergy = ncgMoles * Cv_ncg * T_estimate;
+          const totalEnergyAtT = waterEnergy + ncgEnergy;
+
+          // Energy error
+          const energyError = totalU - totalEnergyAtT;
+          finalEnergyError = energyError;
+
+          // Derivative of total energy with respect to T
+          // d(waterEnergy)/dT ≈ m_liquid * 4186 + m_vapor * 1900
+          //                   + (dm_vapor/dT) * (u_g - u_f)
+          // dm_vapor/dT = (dP_sat/dT) * V / (R_water * T) - m_vapor / T
+          //             ≈ m_vapor * (dP_sat/dT) / P_sat - m_vapor / T
+          // Using Clausius-Clapeyron: dP_sat/dT ≈ P_sat * L / (R * T^2)
+          // where L ≈ 2.4e6 J/kg latent heat
+          const L_vap = 2.4e6;
+          const dPsat_dT = P_sat * L_vap / (R_WATER * T_estimate * T_estimate);
+          const dm_vapor_dT = (dPsat_dT * V_vapor / (R_WATER * T_estimate)) - m_vapor / T_estimate;
+
+          const dWaterEnergy_dT = m_liquid * 4186 + m_vapor * 1900 + dm_vapor_dT * (u_g - u_f);
+          const dNcgEnergy_dT = ncgThermalMass;
+          const dTotalEnergy_dT = dWaterEnergy_dT + dNcgEnergy_dT;
+
+          // Newton step with damping
+          const dT = energyError / Math.max(dTotalEnergy_dT, 1000);
+          const T_new = T_estimate + 0.5 * dT;
+
+          // Check if we're hitting the bounds
+          if (T_new < 273.16 || T_new > 647) {
+            console.error(`[NCG+Water T iteration] ${nodeId}: T would go to ${T_new.toFixed(1)}K (out of bounds)`);
+            console.error(`  iter=${iter}, T=${T_estimate.toFixed(1)}K, dT=${dT.toFixed(1)}K`);
+            console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, waterEnergy=${(waterEnergy/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergy/1e6).toFixed(4)}MJ`);
+            console.error(`  energyError=${(energyError/1e6).toFixed(4)}MJ, dE/dT=${dTotalEnergy_dT.toFixed(0)}J/K`);
+            console.error(`  m_vapor=${m_vapor.toFixed(3)}kg, m_liquid=${m_liquid.toFixed(3)}kg, steamMass=${steamMass.toFixed(3)}kg`);
+            console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, P_sat=${(P_sat/1e5).toFixed(4)}bar`);
+          }
+
+          T_estimate = Math.max(273.16, Math.min(647, T_new));
+
+          if (Math.abs(dT) < 0.05) break;
+        }
+
+        // Compute steam energy from ACTUAL energy balance, not from T
+        // steamEnergy = totalU - ncgEnergy
+        const ncgEnergyFinal = ncgMoles * Cv_ncg * T_estimate;
+        steamEnergy = totalU - ncgEnergyFinal;
+
+        // Sanity check: did we converge? Is steam energy physically reasonable?
+        const u_steam_specific = steamEnergy / steamMass;
+        const u_g_at_T = 2375000 + 1900 * (T_estimate - 273);
+
+        // Check for convergence issues
+        if (Math.abs(finalEnergyError) > totalU * 0.01) {
+          console.error(`[NCG+Water T iteration] ${nodeId}: Failed to converge after ${iterCount} iterations`);
+          console.error(`  T_initial=${T_initial.toFixed(1)}K -> T_final=${T_estimate.toFixed(1)}K`);
+          console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergyFinal/1e6).toFixed(4)}MJ, steamEnergy=${(steamEnergy/1e6).toFixed(4)}MJ`);
+          console.error(`  energyError=${(finalEnergyError/1e6).toFixed(4)}MJ (${(100*finalEnergyError/totalU).toFixed(1)}%)`);
+          console.error(`  u_steam=${(u_steam_specific/1e3).toFixed(2)}kJ/kg, expected u_g=${(u_g_at_T/1e3).toFixed(2)}kJ/kg at T=${T_estimate.toFixed(1)}K`);
+          console.error(`  steamMass=${steamMass.toFixed(3)}kg, ncgMoles=${ncgMoles.toFixed(1)}, V=${flowNode.volume.toFixed(2)}m³`);
+        }
+
+        // Check if steam energy is physically impossible (negative or way too low for vapor)
+        if (steamEnergy < 0) {
+          console.error(`[NCG+Water] ${nodeId}: NEGATIVE steam energy! steamEnergy=${(steamEnergy/1e6).toFixed(4)}MJ`);
+          console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergyFinal/1e6).toFixed(4)}MJ`);
+          console.error(`  This means NCG energy > total energy - energy accounting is broken!`);
+          console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, T=${T_estimate.toFixed(1)}K, Cv_ncg=${Cv_ncg.toFixed(1)}J/mol-K`);
+          steamEnergy = 0; // Can't be negative, but this is a band-aid
+        }
+
+        // For the water properties calculation, we need to pass the state correctly
+        // The water "sees" the full volume (vapor shares with NCG, liquid pools below)
+        // But we pass steam-only energy, not total energy
+        effectiveWaterVolume = flowNode.volume;
+
+        // Also update the node's fluid temperature to the equilibrium value
+        // This ensures consistency for next timestep
+        flowNode.fluid.temperature = T_estimate;
       }
 
       // Skip water property lookup only if there's truly zero water mass
@@ -1531,7 +1670,8 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
       // Check for very low density steam (ideal gas regime)
       // The steam tables don't cover v > ~100 m³/kg reliably
       // For such low densities, steam behaves as ideal gas
-      const v_specific_m3_kg = flowNode.volume / steamMass;
+      // IMPORTANT: Use effective water volume when NCG is present
+      const v_specific_m3_kg = effectiveWaterVolume / steamMass;
       const u_specific_steam = steamEnergy / steamMass;
 
       // IMPORTANT: Only use ideal gas approximation if BOTH conditions are met:
@@ -1545,9 +1685,16 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
       // For NCG-dominated nodes, the steam is in thermal equilibrium with NCG at ~vapor conditions
       // Even if u_specific_steam is low (because steamEnergy came from subtracting large NCG energy),
       // the steam is actually superheated vapor at the NCG temperature
+      //
+      // IMPORTANT: When NCG is present, we MUST use ideal gas for high-v conditions.
+      // The steam tables can't handle the apparent v that results from NCG+steam
+      // sharing a volume. The steam partial pressure is much lower than what
+      // the tables would compute from (mass, energy, total_volume).
       const ncgDominates = ncgMoles > 0 && steamEnergy < steamMass * U_VAPOR_THRESHOLD * 0.1;
 
-      if (v_specific_m3_kg > 10 && (u_specific_steam > U_VAPOR_THRESHOLD || ncgDominates)) {
+      // Use ideal gas if: (1) v > 10 m³/kg AND (2) energy is vapor-like OR NCG dominates OR NCG is present
+      // The third condition ensures we don't try to use steam tables when NCG+steam share a volume
+      if (v_specific_m3_kg > 10 && (u_specific_steam > U_VAPOR_THRESHOLD || ncgDominates || ncgMoles > 0)) {
         // Very low density steam - use ideal gas approximation
         // T from energy: u = u_ref + Cv*(T - T_ref)
         // Using u_ref = 2.375e6 J/kg at T_ref = 273K, Cv ≈ 1400 J/kg-K for steam
@@ -1590,19 +1737,23 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
 
       let waterState: Water.WaterState;
       try {
+        // Use effective water volume (full volume minus NCG volume)
+        // This is crucial for correct phase detection when NCG is present
         waterState = Water.calculateState(
           flowNode.fluid.mass,
           steamEnergy,
-          flowNode.volume
+          effectiveWaterVolume
         );
       } catch (e) {
         // Add extra context to the error for debugging
         const mass = flowNode.fluid.mass;
         const U = flowNode.fluid.internalEnergy;
         const vol = flowNode.volume;
+        const v_water = effectiveWaterVolume / mass;
         console.error(`[FluidState] Error in ${nodeId}:`);
-        console.error(`  mass=${mass.toFixed(1)}kg, U=${(U/1e6).toFixed(3)}MJ, V=${(vol*1e3).toFixed(1)}L`);
-        console.error(`  u=${(U/mass/1e3).toFixed(2)}kJ/kg, v=${(vol/mass*1e6).toFixed(2)}mL/kg, ρ=${(mass/vol).toFixed(1)}kg/m³`);
+        console.error(`  mass=${mass.toFixed(1)}kg, U=${(U/1e6).toFixed(3)}MJ, V_total=${(vol*1e3).toFixed(1)}L, V_water=${(effectiveWaterVolume*1e3).toFixed(1)}L`);
+        console.error(`  u_total=${(U/mass/1e3).toFixed(2)}kJ/kg, u_steam=${(steamEnergy/mass/1e3).toFixed(2)}kJ/kg`);
+        console.error(`  v_total=${(vol/mass*1e6).toFixed(2)}mL/kg, v_water=${(v_water*1e6).toFixed(2)}mL/kg`);
         console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, steamEnergy=${(steamEnergy/1e6).toFixed(3)}MJ`);
         throw e;
       }
@@ -2062,6 +2213,9 @@ export class FlowMomentumRateOperator implements RateOperator {
     return 'mixture';
   }
 
+  // Debug flag - set to connection ID prefix to trace momentum calculation
+  private debugConnection: string | null = null; // e.g., 'tan-2' to debug tan-2 connections
+
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
 
@@ -2274,6 +2428,28 @@ export class FlowMomentumRateOperator implements RateOperator {
       // dṁ/dt = ρ * A * dv/dt  (assuming ρ changes slowly)
       // Uses rho_flow since that's what's actually flowing through the connection
       const dMassFlowRate = rho_flow * A * dv_dt;
+
+      // Debug logging for specific connections (console)
+      if (this.debugConnection && (conn.fromNodeId.includes(this.debugConnection) || conn.toNodeId.includes(this.debugConnection))) {
+        console.log(`[Momentum] ${conn.fromNodeId}→${conn.toNodeId}: ` +
+          `ṁ=${currentFlow.toFixed(1)}kg/s, v=${v.toFixed(1)}m/s, ` +
+          `ρ_flow=${rho_flow.toFixed(2)}kg/m³ (${flowPhase}), ` +
+          `L=${L.toFixed(2)}m, A=${A.toFixed(3)}m², K=${K_eff.toFixed(1)}, ` +
+          `dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar, dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar, ` +
+          `dP_pump=${(dP_pump/1e5).toFixed(3)}bar, dP_driving=${(dP_driving/1e5).toFixed(3)}bar, ` +
+          `dP_friction=${(dP_friction/1e5).toFixed(3)}bar, dP_net=${(dP_net/1e5).toFixed(3)}bar, ` +
+          `dv/dt=${dv_dt.toFixed(1)}m/s², dṁ/dt=${dMassFlowRate.toFixed(1)}kg/s²`);
+      }
+
+      // Store debug info on connection for UI display
+      conn.debug = {
+        flowPhase,
+        rho_flow,
+        dP_driving,
+        dP_friction,
+        dP_net,
+        dMassFlowRate,
+      };
 
       rates.flowConnections.set(conn.id, { dMassFlowRate });
     }

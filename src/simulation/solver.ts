@@ -221,6 +221,7 @@ export class Solver {
       isFallingBehind: false,
       fallingBehindSince: -1,
       operatorTimes: new Map(),
+      lastSimTime: 0,
     };
   }
 

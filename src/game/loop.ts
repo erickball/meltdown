@@ -140,6 +140,9 @@ export class GameLoop {
         initialDt: 0.001,
         relTol: 1e-3,
         absTol: 1e-6,
+        // Disable deterministic mode in game loop for UI responsiveness
+        // This allows the solver to bail out early if taking too long
+        deterministicMode: false,
       });
 
       // Add rate operators (compute derivatives)
@@ -643,6 +646,19 @@ export class GameLoop {
     return false;
   }
 
+  setDeterministicMode(enabled: boolean): void {
+    if (this.rk45Solver) {
+      this.rk45Solver.setDeterministicMode(enabled);
+    }
+  }
+
+  getDeterministicMode(): boolean {
+    if (this.rk45Solver) {
+      return this.rk45Solver.getDeterministicMode();
+    }
+    return false;
+  }
+
   /**
    * Get pressure solver status (for debug panel display)
    */
@@ -851,6 +867,7 @@ export class GameLoop {
       isFallingBehind: false,
       fallingBehindSince: 0,
       operatorTimes: new Map(),
+      lastSimTime: this.state?.time ?? 0,
     };
   }
 

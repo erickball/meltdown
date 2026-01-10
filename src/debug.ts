@@ -140,6 +140,28 @@ function formatDensity(rho: number): string {
   }
 }
 
+/**
+ * Calculate pressure at a connection point, including hydrostatic head.
+ * Uses actual density - works for any phase including high-pressure gas or supercritical.
+ */
+function getPressureAtConnectionDebug(node: { fluid: { pressure: number; mass: number }; volume: number; height?: number }, connectionElevation?: number): number {
+  const g = 9.81;
+  const baseP = node.fluid.pressure;
+  const rho = node.fluid.mass / node.volume;
+
+  // Estimate node height
+  const nodeHeight = node.height ?? Math.cbrt(node.volume);
+
+  if (connectionElevation === undefined) {
+    connectionElevation = nodeHeight / 2;
+  }
+
+  // Hydrostatic head from fluid above the connection point
+  // baseP is at top of node, connection is at some elevation from bottom
+  const fluidAbove = nodeHeight - connectionElevation;
+  return baseP + rho * g * fluidAbove;
+}
+
 /** Pressure solver status for debug panel display */
 export interface PressureSolverDebugInfo {
   enabled: boolean;
@@ -230,7 +252,20 @@ export function updateDebugPanel(
       }
     }
 
+    // Format simulation time nicely
+    const simTimeStr = state.time < 60 ? `${state.time.toFixed(2)}s` :
+                       state.time < 3600 ? `${(state.time / 60).toFixed(2)}m` :
+                       `${(state.time / 3600).toFixed(2)}h`;
+
+    // Check if we're viewing a historical state (state time doesn't match latest metrics)
+    // This happens when using history navigation - solver metrics aren't stored per-state
+    const isHistorical = Math.abs(state.time - metrics.lastSimTime) > 0.01;
+    const historyWarning = isHistorical
+      ? `<br><span style="color: #fa0; font-size: 10px;">⚠ Viewing historical state - solver metrics are from latest step</span>`
+      : '';
+
     solverDiv.innerHTML = `
+      <span class="debug-label">Sim time:</span> <span class="debug-value">${simTimeStr}</span> <span style="color: #888;">(${metrics.totalSteps.toLocaleString()} steps)</span>${historyWarning}<br>
       <span class="debug-label">Target dt:</span> ${formatValue(metrics.currentDt * 1000, 'ms')}<br>
       <span class="debug-label">Actual dt:</span> ${formatValue(metrics.actualDt * 1000, 'ms')} <span style="color: #888;">(${limiterDisplay})</span><br>
       <span class="debug-label">Stability limit:</span> ${formatValue(metrics.maxStableDt * 1000, 'ms')} <span style="color: #888;">(${metrics.stabilityLimitedBy}, ×0.8→${formatValue(metrics.maxStableDt * 0.8 * 1000, 'ms')})</span><br>
@@ -306,9 +341,18 @@ export function updateDebugPanel(
     } else {
     let html = '';
     for (const [id, node] of state.flowNodes) {
-      const tempC = node.fluid.temperature - 273;
+      const tempC = node.fluid.temperature - 273.15;
       const pBar = node.fluid.pressure / 1e5;
       const massKg = node.fluid.mass;
+
+      // Calculate NCG properties
+      const ncgMoles = node.fluid.ncg ? totalMoles(node.fluid.ncg) : 0;
+      let steamPBar = pBar;
+      let ncgPBar = 0;
+      if (ncgMoles > 0 && node.volume > 0) {
+        ncgPBar = (ncgMoles * R_GAS * node.fluid.temperature) / node.volume / 1e5;
+        steamPBar = Math.max(0, pBar - ncgPBar);
+      }
 
       // Check for problematic values
       const tempClass = !isFinite(tempC) || tempC > 1000 ? 'debug-danger' :
@@ -316,202 +360,267 @@ export function updateDebugPanel(
       const massClass = !isFinite(massKg) || massKg < 1 ? 'debug-danger' :
                        massKg < 100 ? 'debug-warning' : 'debug-value';
 
-      // Get previous pressure for this node
-      const prevPressure = previousPressures.get(id);
-      const showTransition = prevPressure !== undefined && Math.abs(prevPressure - node.fluid.pressure) > 1000; // Show if change > 0.01 bar
-
+      // === LINE 1: Node ID, phase, temperature, pressure, mass, quality ===
       html += `<b>${id}</b>: `;
-      html += `<span class="${tempClass}">${formatTemp(tempC)}C</span>, `;
-
-      // Calculate steam pressure if NCG is present
-      const ncgMoles = node.fluid.ncg ? totalMoles(node.fluid.ncg) : 0;
-      let steamPBar = pBar; // Default to total pressure if no NCG
-      if (ncgMoles > 0 && node.volume > 0) {
-        const ncgPressure = (ncgMoles * R_GAS * node.fluid.temperature) / node.volume;
-        steamPBar = Math.max(0, pBar - ncgPressure / 1e5);
-      }
-
-      // Show pressure transition if significant change
-      if (showTransition) {
-        const prevPBar = prevPressure / 1e5;
-        const changeBar = (node.fluid.pressure - prevPressure) / 1e5;
-        const changeClass = Math.abs(changeBar) > 5 ? 'debug-danger' :
-                           Math.abs(changeBar) > 2 ? 'debug-warning' : 'debug-value';
-        html += `${formatPressure(prevPBar)}→<span class="${changeClass}">${formatPressure(pBar)}bar</span>`;
-      } else {
-        html += `${formatPressure(pBar)}bar`;
-      }
-      // Show steam partial pressure if NCG is present
+      html += `<span class="${tempClass}">${formatTemp(tempC)}°C</span>, `;
+      html += `${formatPressure(pBar)}bar`;
       if (ncgMoles > 0) {
         html += ` <span style="color: #8cf;">(P<sub>stm</sub>=${formatPressure(steamPBar)})</span>`;
       }
-      html += ', ';
-
-      html += `<span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
+      html += `, <span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
       html += `${node.fluid.phase}`;
       if (node.fluid.phase === 'two-phase') {
         html += ` x=${(node.fluid.quality * 100).toFixed(1)}%`;
       }
       html += '<br>';
 
-      // Second line: density, separation, and phase-specific debug info
-      const rho = massKg / node.volume;
-      // For water properties, need to subtract NCG energy from total internal energy
-      // (reuse ncgMoles from above)
+      // === LINE 2: Density (total), specific internal energy (steam), water state ===
+      const rho = massKg / node.volume; // Total density (includes NCG mass, which is small)
+      // Subtract NCG energy to get steam-only energy
       let steamEnergy = node.fluid.internalEnergy;
       if (ncgMoles > 0) {
-        // U_ncg = n * Cv * T (ideal gas)
-        // Average Cv for air is ~20.8 J/(mol·K)
-        const avgCv = 20.8; // J/(mol·K) - approximate for air-like mixture
-        const ncgEnergy = ncgMoles * avgCv * node.fluid.temperature;
+        // Use actual Cv for the NCG mixture
+        const ncgCv = node.fluid.ncg ? mixtureCv(node.fluid.ncg) : 20.8;
+        const ncgEnergy = ncgMoles * ncgCv * node.fluid.temperature;
         steamEnergy = Math.max(0, node.fluid.internalEnergy - ncgEnergy);
       }
-      let rawState;
+      // Calculate steam mass (total mass minus NCG mass would require knowing NCG mass, but NCG is in moles)
+      // For display, use total mass for u calculation (small error if NCG mass is significant)
+      const steamMass = massKg; // Approximation - NCG mass is typically small
+      const u_kJ = steamEnergy / Math.max(1, steamMass) / 1000;
+
       let rawP_bar = 0;
       try {
-        rawState = calculateWaterState(massKg, steamEnergy, node.volume);
+        const rawState = calculateWaterState(steamMass, steamEnergy, node.volume);
         rawP_bar = rawState.pressure / 1e5;
       } catch {
         // Water properties calculation can fail for extreme states
-        rawState = null;
       }
-      const u_kJ = steamEnergy / Math.max(1, massKg) / 1000; // specific STEAM energy kJ/kg
 
       html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
       html += `ρ=${formatDensity(rho)}`;
       html += `, u=${u_kJ.toFixed(0)}kJ/kg`;
+      html += ` (P<sub>sat</sub>=${formatPressure(rawP_bar)}bar)`;
 
       if (node.fluid.phase === 'two-phase') {
-        // Two-phase: show P_sat, void fraction, and separation factor
-        html += ` (P<sub>sat</sub>=${formatPressure(rawP_bar)}bar)`;
-
-        // Calculate void fraction (volume fraction of vapor) from quality (mass fraction)
-        // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
-        // At low pressure, even tiny quality gives huge void fraction
+        // Calculate void fraction and liquid level
         const quality = node.fluid.quality ?? 0;
         if (quality > 0 && quality < 1) {
-          // Estimate phase densities from temperature (approximate)
           const T_C = node.fluid.temperature - 273.15;
-          // Liquid density approximation
           const rho_f = T_C < 100 ? 1000 - 0.08 * T_C :
                        T_C < 300 ? 958 - 1.3 * (T_C - 100) :
                        Math.max(400, 700 - 2.5 * (T_C - 300));
-          // Vapor density from ideal gas at saturation pressure
-          const P_sat = node.fluid.pressure; // Pa
+          const P_sat = steamPBar * 1e5; // Use steam partial pressure for vapor density
           const T_K = node.fluid.temperature;
-          const R = 8314; // J/(kmol·K)
-          const M = 18; // kg/kmol for water
-          const rho_g = P_sat * M / (R * T_K);
+          const rho_g = P_sat * 0.018 / (R_GAS * T_K);
 
-          const v_vapor = quality / rho_g;
+          const v_vapor = quality / Math.max(0.01, rho_g);
           const v_liquid = (1 - quality) / rho_f;
           const voidFraction = v_vapor / (v_vapor + v_liquid);
-          const voidPct = (voidFraction * 100).toFixed(1);
-          // Color code: high void = warning (pump performance issue)
-          const voidClass = voidFraction > 0.9 ? 'debug-danger' :
-                           voidFraction > 0.5 ? 'debug-warning' : 'debug-value';
-          html += `, <span class="${voidClass}">α=${voidPct}%</span>`;
+          const voidClass = voidFraction > 0.99 ? 'debug-danger' :
+                           voidFraction > 0.9 ? 'debug-warning' : 'debug-value';
+          html += `, <span class="${voidClass}">α=${(voidFraction * 100).toFixed(1)}%</span>`;
 
-          // Calculate liquid level for display
+          // Liquid level
           const liquidMass = node.fluid.mass * (1 - quality);
           const liquidVolume = liquidMass / rho_f;
           const nodeHeight = node.height ?? Math.cbrt(node.volume);
           const baseArea = node.volume / nodeHeight;
           const liquidLevel = liquidVolume / baseArea;
-          const levelPct = (liquidLevel / nodeHeight * 100).toFixed(1);
-          html += `, lvl=${liquidLevel.toFixed(3)}m (${levelPct}%)`;
+          html += `, lvl=${liquidLevel.toFixed(3)}m (${(liquidLevel / nodeHeight * 100).toFixed(1)}%)`;
         }
 
+        // Separation factor
         const sep = node.separation;
         if (sep !== undefined && sep !== null) {
-          const sepPct = (sep * 100).toFixed(0);
-          const sepClass = sep > 0.8 ? 'debug-value' :
-                          sep > 0.3 ? 'debug-warning' : 'debug-danger';
-          html += `, <span class="${sepClass}">sep=${sepPct}%</span>`;
-        } else {
-          html += `, sep=?`;
+          const sepClass = sep > 0.8 ? 'debug-value' : sep > 0.3 ? 'debug-warning' : 'debug-danger';
+          html += `, <span class="${sepClass}">sep=${(sep * 100).toFixed(0)}%</span>`;
         }
-      } else if (node.fluid.phase === 'liquid') {
-        // Liquid: just show raw water properties pressure
-        html += ` (P<sub>wp</sub>=${formatPressure(rawP_bar)}bar)`;
-      } else {
-        // Vapor: just show raw water properties pressure
-        html += ` (P<sub>wp</sub>=${formatPressure(rawP_bar)}bar)`;
       }
-
       html += `</span><br>`;
 
-      // Third line: saturation margin info (v, P_sat(T), distance to saturation)
-      const v_m3kg = node.volume / massKg;  // specific volume m³/kg
-      const u_Jkg = node.fluid.internalEnergy / massKg;  // specific energy J/kg
+      // === LINE 3: Saturation margin (specific volume, distance to dome) ===
+      // When NCG is present, steam only occupies part of the volume
+      // V_steam = V_total - V_ncg, where V_ncg = n*R*T/P_ncg (but NCG and steam share the space)
+      // Actually for ideal gas mixture, each component occupies the full volume at its partial pressure
+      // So v_steam = V_total / m_steam is correct IF we use steam mass, not total mass
+      // But we're using total mass as approximation. For display, note when NCG is significant.
+      const v_m3kg = node.volume / massKg; // Approximate - uses total mass
+      const u_Jkg = steamEnergy / steamMass;
       const P_sat_T = saturationPressure(node.fluid.temperature);
       const satDist = distanceToSaturationLine(u_Jkg, v_m3kg);
+      const ncgSignificant = ncgPBar > 0.1; // More than 0.1 bar NCG
 
-      // Color code based on distance to saturation
-      // Positive = compressed (safe), negative = expanded (approaching two-phase)
-      // Distance is in scaled units where v is mL/kg and u is kJ/kg (both ~1000-1700)
       const absDistance = Math.abs(satDist.distance);
-      const distClass = satDist.distance < 0 ? 'debug-danger' :  // Expanded past v_f - danger!
-                       absDistance < 50 ? 'debug-warning' :      // Close to boundary
-                       'debug-value';                            // Safe compressed liquid
+      const distClass = satDist.distance < 0 ? 'debug-danger' :
+                       absDistance < 50 ? 'debug-warning' : 'debug-value';
 
       html += `<span style="font-size: 9px; color: #888; margin-left: 10px;">`;
       html += `v=${satDist.v_mLkg.toFixed(1)}`;
       html += `, v<sub>f</sub>=${satDist.v_f_closest.toFixed(1)}`;
       html += `, P<sub>sat</sub>(T)=${formatPressure(P_sat_T/1e5)}bar`;
       html += `, <span class="${distClass}">Δsat=${satDist.distance >= 0 ? '+' : ''}${satDist.distance.toFixed(1)}</span>`;
-      html += `</span><br>`;
-    }
-
-
-
-    // Also show flow rates with target flows
-    html += '<br><b>Flow connections:</b><br>';
-    for (const conn of state.flowConnections) {
-      const flowClass = !isFinite(conn.massFlowRate) ? 'debug-danger' :
-                       Math.abs(conn.massFlowRate) < 1 ? 'debug-warning' : 'debug-value';
-
-      html += `${conn.fromNodeId} → ${conn.toNodeId}: `;
-
-      // Show actual flow
-      html += `<span class="${flowClass}">${formatFlow(conn.massFlowRate)}</span>`;
-
-      // If connection has inertance, show steady-state flow vs actual
-      if (conn.inertance && conn.inertance > 0 && conn.steadyStateFlow !== undefined) {
-        const steadyClass = Math.abs(conn.steadyStateFlow - conn.massFlowRate) > 100 ? 'debug-warning' : 'debug-value';
-        html += ` → <span class="${steadyClass}">${formatFlow(conn.steadyStateFlow)}</span>`;
+      if (ncgSignificant) {
+        html += ` <span style="color: #f80;" title="NCG pressure significant - saturation values approximate">⚠</span>`;
       }
+      html += `</span>`;
 
-      html += ` kg/s`;
-
-      // Show pump head if there's a pump providing head on this connection
-      // Only pumps with connectedFlowPath === conn.id actually contribute head
-      for (const [pumpId, pump] of state.components.pumps) {
-        if (pump.connectedFlowPath === conn.id && pump.effectiveSpeed > 0) {
-          // Calculate pump head: dP_pump = effectiveSpeed * ratedHead * rho * g
-          const flowIsForward = conn.massFlowRate >= 0;
-          const upstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
-          const upstreamNode = state.flowNodes.get(upstreamId);
-          const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750; // Default to ~750 kg/m³
-          const g = 9.81;
-          const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * g;
-          html += ` <span style="color: #8af;">[${pumpId}: +${(dP_pump/1e5).toFixed(1)}bar]</span>`;
+      // === LINE 4 (optional): NCG details if present ===
+      if (ncgMoles > 0 && node.fluid.ncg) {
+        html += `<br><span style="font-size: 9px; color: #fca; margin-left: 10px;">`;
+        html += `NCG: ${ncgMoles.toFixed(1)} mol, P<sub>ncg</sub>=${formatPressure(ncgPBar)}bar`;
+        // Show species breakdown
+        const species: string[] = [];
+        for (const gas of ALL_GAS_SPECIES) {
+          const moles = node.fluid.ncg[gas];
+          if (moles && moles > 0.01) {
+            const frac = moles / ncgMoles;
+            const partialP = (moles * R_GAS * node.fluid.temperature) / node.volume / 1e5;
+            species.push(`${gas}:${(frac * 100).toFixed(0)}%/${formatPressure(partialP)}bar`);
+          }
         }
+        if (species.length > 0) {
+          html += ` (${species.join(', ')})`;
+        }
+        html += `</span>`;
       }
       html += '<br>';
     }
 
+    // === FLOW CONNECTIONS ===
+    html += '<br><b>Flow connections:</b><br>';
+    for (const conn of state.flowConnections) {
+      const flowClass = !isFinite(conn.massFlowRate) ? 'debug-danger' :
+                       Math.abs(conn.massFlowRate) < 0.01 ? 'debug-warning' : 'debug-value';
+
+      // Get node pressures for ΔP display (including hydrostatic at connection elevation)
+      const fromNode = state.flowNodes.get(conn.fromNodeId);
+      const toNode = state.flowNodes.get(conn.toNodeId);
+      const P_from = fromNode ? getPressureAtConnectionDebug(fromNode, conn.fromElevation) / 1e5 : 0;
+      const P_to = toNode ? getPressureAtConnectionDebug(toNode, conn.toElevation) / 1e5 : 0;
+      const dP = P_from - P_to;
+
+      html += `${conn.fromNodeId} → ${conn.toNodeId}: `;
+      html += `<span class="${flowClass}">${formatFlow(conn.massFlowRate)} kg/s</span>`;
+
+      // Show steady-state target in parentheses if different from actual
+      if (conn.inertance && conn.inertance > 0 && conn.steadyStateFlow !== undefined) {
+        const diff = Math.abs(conn.steadyStateFlow - conn.massFlowRate);
+        if (diff > 0.1) {
+          const steadyClass = diff > 10 ? 'debug-warning' : 'debug-value';
+          html += ` <span class="${steadyClass}" style="font-size: 9px;">(target: ${formatFlow(conn.steadyStateFlow)})</span>`;
+        }
+      }
+
+      // Show pressure difference
+      const dPClass = Math.abs(dP) > 10 ? 'debug-warning' : 'debug-value';
+      html += ` <span class="${dPClass}" style="font-size: 9px; color: #aaa;">ΔP=${dP >= 0 ? '+' : ''}${formatPressure(dP)}bar</span>`;
+
+      // Show pump info
+      for (const [pumpId, pump] of state.components.pumps) {
+        if (pump.connectedFlowPath === conn.id && pump.effectiveSpeed > 0) {
+          const flowIsForward = conn.massFlowRate >= 0;
+          const upstreamId = flowIsForward ? conn.fromNodeId : conn.toNodeId;
+          const upstreamNode = state.flowNodes.get(upstreamId);
+          const rho = upstreamNode ? upstreamNode.fluid.mass / upstreamNode.volume : 750;
+          const dP_pump = pump.effectiveSpeed * pump.ratedHead * rho * 9.81 / 1e5;
+          html += ` <span style="color: #8af; font-size: 9px;">[${pumpId}: +${dP_pump.toFixed(1)}bar]</span>`;
+        }
+      }
+
+      // Mark break connections
+      if (conn.isBreakConnection) {
+        html += ` <span style="color: #f66; font-size: 9px;">[BREAK]</span>`;
+      }
+
+      html += '<br>';
+
+      // Show momentum debug info on second line if available
+      if (conn.debug) {
+        const d = conn.debug;
+        const phaseColor = d.flowPhase === 'vapor' ? '#aaf' : d.flowPhase === 'liquid' ? '#8cf' : '#ccc';
+        const accelSign = d.dMassFlowRate >= 0 ? '+' : '';
+
+        // Format dṁ/dt with appropriate precision
+        let dMdtStr: string;
+        const absDMdt = Math.abs(d.dMassFlowRate);
+        if (absDMdt < 1) {
+          dMdtStr = d.dMassFlowRate.toFixed(2);
+        } else if (absDMdt < 100) {
+          dMdtStr = d.dMassFlowRate.toFixed(1);
+        } else if (absDMdt < 10000) {
+          dMdtStr = d.dMassFlowRate.toFixed(0);
+        } else {
+          dMdtStr = (d.dMassFlowRate / 1000).toFixed(1) + 'k';
+        }
+
+        // Show why flow is accelerating or decelerating
+        const drivingBar = d.dP_driving / 1e5;
+        const frictionBar = d.dP_friction / 1e5;
+
+        html += `<span style="font-size: 9px; color: #888; margin-left: 20px;">` +
+          `<span style="color: ${phaseColor};">${d.flowPhase}</span> ` +
+          `ρ=${d.rho_flow.toFixed(1)}kg/m³, ` +
+          `dṁ/dt=${accelSign}${dMdtStr}kg/s² ` +
+          `<span style="color: #666;">(driving=${drivingBar >= 0 ? '+' : ''}${formatPressure(drivingBar)}bar, ` +
+          `friction=${formatPressure(frictionBar)}bar)</span>` +
+          `</span><br>`;
+      }
+    }
+
     // Show total mass for conservation check (exclude boundary nodes like atmosphere)
-    let totalMass = 0;
+    // Break down by substance: water/steam vs NCG species
+    let totalWaterMass = 0;
     let totalEnergy = 0;
+    const ncgTotals: Record<string, number> = {}; // moles by species
+
     for (const [, node] of state.flowNodes) {
       // Skip boundary nodes (atmosphere, etc.) - they have effectively infinite mass/energy
       if (node.isBoundary) continue;
-      totalMass += node.fluid.mass;
+      totalWaterMass += node.fluid.mass;
       totalEnergy += node.fluid.internalEnergy;
+
+      // Sum up NCG by species
+      if (node.fluid.ncg) {
+        for (const species of ALL_GAS_SPECIES) {
+          const moles = node.fluid.ncg[species];
+          if (moles && moles > 0) {
+            ncgTotals[species] = (ncgTotals[species] || 0) + moles;
+          }
+        }
+      }
     }
-    html += `<br><b>Total mass:</b> <span class="debug-value">${(totalMass / 1000).toFixed(2)} tons</span><br>`;
-    html += `<b>Total fluid energy:</b> <span class="debug-value">${(totalEnergy / 1e9).toFixed(2)} GJ</span><br>`;
+
+    // Get atmosphere release info
+    const atmoRelease = state.atmosphereRelease;
+    const releasedWater = atmoRelease ? atmoRelease.totalMass : 0;
+    const releasedEnergy = atmoRelease ? atmoRelease.totalEnergy : 0;
+
+    // Water/steam mass
+    html += `<br><b>Mass inventory:</b><br>`;
+    html += `<span class="debug-label">H₂O:</span> <span class="debug-value">${(totalWaterMass / 1000).toFixed(2)} tons</span>`;
+    if (releasedWater > 0) {
+      html += ` <span style="color: #f88;">(+${(releasedWater / 1000).toFixed(2)}t released)</span>`;
+    }
+    html += `<br>`;
+
+    // NCG breakdown
+    const ncgSpeciesList = Object.entries(ncgTotals).filter(([, moles]) => moles > 0.1);
+    if (ncgSpeciesList.length > 0) {
+      for (const [species, moles] of ncgSpeciesList) {
+        // Convert moles to mass: m = n * M (molecular weight in kg/mol)
+        const M = GAS_PROPERTIES[species as keyof typeof GAS_PROPERTIES]?.molecularWeight || 0.029;
+        const massKg = moles * M;
+        html += `<span class="debug-label">${species}:</span> <span class="debug-value">${moles.toFixed(1)} mol</span> <span style="color: #888;">(${massKg.toFixed(1)} kg)</span><br>`;
+      }
+    }
+
+    // Total energy
+    html += `<span class="debug-label">Energy:</span> <span class="debug-value">${(totalEnergy / 1e9).toFixed(2)} GJ</span>`;
+    if (releasedEnergy > 0) {
+      html += ` <span style="color: #f88;">(+${(releasedEnergy / 1e9).toFixed(2)} GJ released)</span>`;
+    }
+    html += `<br>`;
 
     // Show energy diagnostics if available
     if (state.energyDiagnostics) {

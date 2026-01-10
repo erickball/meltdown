@@ -205,6 +205,17 @@ export interface FlowConnection {
   inertance?: number;               // m⁻¹ - L/A ratio (length/area)
   // Note: inertance = length / flowArea
   // The momentum equation: ρ * inertance * d(flow)/dt = ΔP
+
+  // === Debug fields (populated by momentum operator for display) ===
+  // These are for debugging only and may not always be present
+  debug?: {
+    flowPhase: 'liquid' | 'vapor' | 'mixture';  // What phase is flowing
+    rho_flow: number;               // kg/m³ - density of flowing phase
+    dP_driving: number;             // Pa - total driving pressure (pressure + gravity + pump)
+    dP_friction: number;            // Pa - friction pressure drop (always opposes flow)
+    dP_net: number;                 // Pa - net accelerating pressure
+    dMassFlowRate: number;          // kg/s² - acceleration rate
+  };
 }
 
 // ============================================================================
@@ -464,6 +475,9 @@ export interface SolverMetrics {
 
   // Per-operator timing (for profiling)
   operatorTimes: Map<string, number>;
+
+  // Last simulation time when metrics were computed (for detecting historical state viewing)
+  lastSimTime: number;              // s - simulation time when these metrics were captured
 }
 
 // ============================================================================

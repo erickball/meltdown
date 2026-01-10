@@ -681,6 +681,10 @@ export interface RK45Config {
   maxStepsPerFrame: number;   // Maximum integration steps per frame
   maxWallTimeMs: number;      // Maximum wall time per advance() call
 
+  // Deterministic mode: disable wall time and step limits for reproducible results
+  // When true, the solver will complete all steps regardless of wall time
+  deterministicMode?: boolean;
+
   // Semi-implicit pressure solver configuration
   // Set to false to disable (use pure explicit RK45 for all physics)
   pressureSolver?: Partial<PressureSolverConfig> | false;
@@ -700,6 +704,10 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
 
   maxStepsPerFrame: 1000,
   maxWallTimeMs: 100,
+
+  // Default to deterministic mode for reproducibility
+  // The game loop can override this if needed for UI responsiveness
+  deterministicMode: true,
 };
 
 // ============================================================================
@@ -801,6 +809,21 @@ export class RK45Solver {
       enabled: this.pressureSolverEnabled,
       status: this.pressureSolverEnabled ? this.pressureSolver.getLastStatus() : null,
     };
+  }
+
+  /**
+   * Enable or disable deterministic mode.
+   * When enabled, the solver will complete all steps regardless of wall time.
+   */
+  setDeterministicMode(enabled: boolean): void {
+    this.config.deterministicMode = enabled;
+  }
+
+  /**
+   * Check if deterministic mode is enabled.
+   */
+  getDeterministicMode(): boolean {
+    return this.config.deterministicMode ?? false;
   }
 
   /**
@@ -1022,15 +1045,20 @@ export class RK45Solver {
 
     while (remainingTime > 1e-10) {
       // Check limits
-      if (stepsThisFrame >= this.config.maxStepsPerFrame) {
+      // In deterministic mode, we still yield periodically for UI updates (500ms)
+      // but we don't skip steps - the simulation will continue next frame
+      const maxWallTime = this.config.deterministicMode ? 500 : this.config.maxWallTimeMs;
+      const maxSteps = this.config.deterministicMode ? Infinity : this.config.maxStepsPerFrame;
+
+      if (stepsThisFrame >= maxSteps) {
         console.warn(`[RK45] Hit max steps per frame (${this.config.maxStepsPerFrame})`);
         break;
       }
       const now = performance.now();
-      if (now - frameStart > this.config.maxWallTimeMs) {
+      if (now - frameStart > maxWallTime) {
         // Rate limit this warning to once per second
         if (now - this.lastWallTimeLimitLog > 1000) {
-          console.warn(`[RK45] Hit wall time limit (${this.config.maxWallTimeMs}ms)`);
+          console.warn(`[RK45] Hit wall time limit (${maxWallTime}ms)`);
           this.lastWallTimeLimitLog = now;
         }
         break;
@@ -1169,6 +1197,7 @@ export class RK45Solver {
       isFallingBehind: remainingTime > requestedDt * 0.1,
       fallingBehindSince: 0,
       operatorTimes: new Map(this.operatorTimes),
+      lastSimTime: currentState.time,
     };
 
     return { state: currentState, metrics };
@@ -1216,6 +1245,7 @@ export class RK45Solver {
           isFallingBehind: true,
           fallingBehindSince: 0,
           operatorTimes: new Map(),
+          lastSimTime: state.time,
         },
       };
     }
@@ -1253,6 +1283,7 @@ export class RK45Solver {
       isFallingBehind: false,
       fallingBehindSince: 0,
       operatorTimes: new Map(this.operatorTimes),
+      lastSimTime: constrainedState.time,
     };
 
     // Adjust dt for next step based on combined error
