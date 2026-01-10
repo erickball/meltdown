@@ -1274,7 +1274,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   // This check was too strict, now should be ok. It was ruling out high pressure supercritical states that are in the steam table. -Erick
   const rawData = saturationDome!.raw_data;
   const v_f_max = 0.002; //rawData[rawData.length - 1].v_f;        // ~0.00288 m³/kg at critical point
-  const u_g_min = 2195.0; //rawData[rawData.length - 1].u_g * 1000; // ~2056 kJ/kg at critical point
+  const u_g_min = 2195000.0; // ~2195 kJ/kg - minimum saturated vapor energy (at critical point)
 
   // Check for impossible compressed-liquid-density + vapor-energy state
   if (v < v_f_max && u > u_g_min) {
