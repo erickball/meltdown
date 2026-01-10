@@ -154,9 +154,9 @@ export class BurstCheckOperator implements ConstraintOperator {
     burstState.isBurst = true;
     burstState.burstTime = state.time;
 
-    // For pipes, assign random break location along the length
+    // For pipes, assign break location along the length using the seed for determinism
     if (burstState.breakLocation === undefined) {
-      burstState.breakLocation = Math.random();
+      burstState.breakLocation = seededRandom(burstState.breakSizeSeed + 12345);
     }
 
     // Calculate initial break fraction

@@ -62,7 +62,7 @@ export type { PressureSolverStatus } from './operators/pressure-solver';
 export * from './operators';
 
 // Factory for creating simulation state
-export { createSimulationState, createDemoReactor, createSimulationFromPlant } from './factory';
+export { createSimulationState, createDemoReactor, createSimulationFromPlant, setSimulationRandomSeed } from './factory';
 // Note: createDemoReactor is OBSOLETE - throws error if used
 
 // Water properties (including debug and profiling functions)

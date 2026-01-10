@@ -202,9 +202,22 @@ export function massQualityToVolumeFraction(
   return numerator / denominator;
 }
 
+// Debug flag for fluid color tracing
+let debugFluidColor = false;
+let debugFluidColorCount = 0;
+export function setDebugFluidColor(enabled: boolean): void {
+  debugFluidColor = enabled;
+  debugFluidColorCount = 0;
+}
+
 export function getFluidColor(fluid: Fluid): string {
   const T = fluid.temperature;
   const T_sat = getSaturationTemp(fluid.pressure);
+
+  // Check for NCG-dominated vapor/gas mixtures
+  // When NCG is present in vapor phase, blend steam color with NCG color
+  // based on mole fraction
+  const ncgMoles = fluid.ncg ? totalMoles(fluid.ncg) : 0;
 
   // Handle two-phase specially - we return a simple blend here,
   // but components use getTwoPhaseColors for pixelated rendering
@@ -213,29 +226,109 @@ export function getFluidColor(fluid: Fluid): string {
     const vaporColor = getSaturatedVaporColor(T_sat);
     // Default to 50% quality if undefined
     const quality = fluid.quality ?? 0.5;
-    const blended = lerpRGB(liquidColor, vaporColor, quality);
-    return rgbToString(blended, 0.85);
+    let blended = lerpRGB(liquidColor, vaporColor, quality);
+
+    // If NCG is present, blend with NCG color based on partial pressure fraction
+    // This prevents abrupt color changes when steam transitions to two-phase
+    if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
+      const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
+      const P_total = fluid.pressure;
+      const ncgFraction = Math.min(1, Math.max(0, P_ncg / P_total));
+
+      if (debugFluidColor && debugFluidColorCount++ < 20) {
+        console.log(`[getFluidColor] TWO-PHASE: T=${T?.toFixed(1)}K, P=${(P_total/1e5)?.toFixed(3)}bar, ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume?.toFixed(1)}m³, P_ncg=${(P_ncg/1e5).toFixed(3)}bar, ncgFrac=${ncgFraction.toFixed(3)}, quality=${quality.toFixed(3)}`);
+      }
+
+      if (ncgFraction > 0.001) {
+        const ncgColor = getNcgColor(fluid.ncg);
+        blended = lerpRGB(blended, ncgColor, ncgFraction);
+        if (debugFluidColor && debugFluidColorCount < 25) {
+          console.log(`  -> blending with ncgColor: r=${ncgColor.r}, g=${ncgColor.g}, b=${ncgColor.b}, result: r=${blended.r.toFixed(0)}, g=${blended.g.toFixed(0)}, b=${blended.b.toFixed(0)}`);
+        }
+      }
+    } else if (debugFluidColor && ncgMoles > 0 && debugFluidColorCount++ < 20) {
+      console.log(`[getFluidColor] TWO-PHASE (no blend): ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume}, hasNcg=${!!fluid.ncg}`);
+    }
+
+    return rgbToString(blended, 1.0);  // Use same opacity as vapor for consistency
   }
 
   // Handle vapor explicitly - always use steam colors regardless of temperature
   // This ensures vapor is never shown as blue even with impossible state values
   if (fluid.phase === 'vapor') {
+    // Get base steam color
     const steamSat = getSaturatedVaporColor(T_sat);
     const superheat = T - T_sat;
+    let steamColor: RGB;
     if (superheat <= 0) {
-      return rgbToString(steamSat, 1.0);
+      steamColor = steamSat;
     } else if (superheat <= 100) {
-      return rgbToString(lerpRGB(steamSat, STEAM_SUPER_100, superheat / 100), 1.0);
+      steamColor = lerpRGB(steamSat, STEAM_SUPER_100, superheat / 100);
     } else if (superheat <= 500) {
-      return rgbToString(lerpRGB(STEAM_SUPER_100, STEAM_SUPER_500, (superheat - 100) / 400), 1.0);
+      steamColor = lerpRGB(STEAM_SUPER_100, STEAM_SUPER_500, (superheat - 100) / 400);
     } else {
-      return rgbToString(STEAM_SUPER_500, 1.0);
+      steamColor = STEAM_SUPER_500;
     }
+
+    // If NCG is present, blend with NCG color based on partial pressure fraction
+    // Using pressure ratio instead of mole ratio because fluid.mass may not be set
+    if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
+      // Calculate NCG partial pressure: P_ncg = n * R * T / V
+      const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
+      const P_total = fluid.pressure;
+
+      // NCG fraction by partial pressure (which equals mole fraction for ideal gases)
+      const ncgFraction = Math.min(1, Math.max(0, P_ncg / P_total));
+
+      if (debugFluidColor && debugFluidColorCount++ < 20) {
+        console.log(`[getFluidColor] VAPOR: T=${T?.toFixed(1)}K, P=${(P_total/1e5)?.toFixed(3)}bar, ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume?.toFixed(1)}m³, P_ncg=${(P_ncg/1e5).toFixed(3)}bar, ncgFrac=${ncgFraction.toFixed(3)}`);
+      }
+
+      if (ncgFraction > 0.001) {  // Only blend if NCG is significant (> 0.1%)
+        // Get NCG color by blending component colors
+        const ncgColor = getNcgColor(fluid.ncg);
+
+        // Blend steam and NCG colors
+        const blended = lerpRGB(steamColor, ncgColor, ncgFraction);
+        if (debugFluidColor && debugFluidColorCount < 25) {
+          console.log(`  -> blending with ncgColor: r=${ncgColor.r}, g=${ncgColor.g}, b=${ncgColor.b}, result: r=${blended.r.toFixed(0)}, g=${blended.g.toFixed(0)}, b=${blended.b.toFixed(0)}`);
+        }
+        return rgbToString(blended, 1.0);
+      }
+    } else if (debugFluidColor && ncgMoles > 0 && debugFluidColorCount++ < 20) {
+      console.log(`[getFluidColor] VAPOR (no blend): ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume}, hasNcg=${!!fluid.ncg}`);
+    }
+
+    return rgbToString(steamColor, 1.0);
   }
 
   // Liquid - use temperature-based color
   const color = getTemperatureColor(T, T_sat, 'liquid');
   return rgbToString(color, 1.0);
+}
+
+/**
+ * Get the color for an NCG mixture based on composition.
+ */
+function getNcgColor(ncg: GasComposition): RGB {
+  const total = totalMoles(ncg);
+  if (total <= 0) return { r: 128, g: 128, b: 128 };  // Default gray
+
+  let r = 0, g = 0, b = 0;
+
+  for (const species of ALL_GAS_SPECIES) {
+    const fraction = ncg[species] / total;
+    if (fraction <= 0) continue;
+
+    const color = GAS_PROPERTIES[species].color;
+    // Parse hex color #RRGGBB
+    const parsed = parseInt(color.slice(1), 16);
+    r += ((parsed >> 16) & 0xFF) * fraction;
+    g += ((parsed >> 8) & 0xFF) * fraction;
+    b += (parsed & 0xFF) * fraction;
+  }
+
+  return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
 }
 
 // Get liquid and vapor colors at saturation for two-phase rendering

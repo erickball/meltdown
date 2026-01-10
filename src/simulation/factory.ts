@@ -26,6 +26,35 @@ import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBar
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
 
 /**
+ * Simple seeded pseudo-random number generator (mulberry32).
+ * Returns a function that generates deterministic random numbers in [0, 1).
+ */
+function createSeededRandom(seed: number): () => number {
+  return function() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// Global random function - can be seeded for deterministic mode
+let simulationRandom: () => number = Math.random;
+
+/**
+ * Set deterministic mode for simulation creation.
+ * When seed is provided, all random values will be deterministic.
+ * When seed is undefined, uses Math.random (non-deterministic).
+ */
+export function setSimulationRandomSeed(seed?: number): void {
+  if (seed !== undefined) {
+    simulationRandom = createSeededRandom(seed);
+  } else {
+    simulationRandom = Math.random;
+  }
+}
+
+/**
  * Create an empty simulation state
  */
 export function createSimulationState(): SimulationState {
@@ -1737,7 +1766,7 @@ function initializeBurstStates(
     if (!pressureRating || pressureRating <= 0) continue;
 
     const designPressure = pressureRating * 1e5;  // bar to Pa
-    const randomMargin = Math.random() * 0.4;     // 0-40%
+    const randomMargin = simulationRandom() * 0.4;     // 0-40%
     const burstPressure = designPressure * (1 + randomMargin);
 
     // Special handling for heat exchangers (tube + shell sides)
@@ -1757,7 +1786,7 @@ function initializeBurstStates(
           randomMargin,
           isBurst: false,
           currentBreakFraction: 0,
-          breakSizeSeed: Math.random() * 10000,
+          breakSizeSeed: simulationRandom() * 10000,
         });
         // Set containerId on shell node if not set (breaks go to atmosphere)
         if (!shellNode.containerId) {
@@ -1769,7 +1798,7 @@ function initializeBurstStates(
       const tubeNodeId = `${compId}-tube`;
       const tubePressureRating = hx.tubePressureRating || hx.pressureRating || pressureRating;
       const tubeDesignPressure = tubePressureRating * 1e5;
-      const tubeRandomMargin = Math.random() * 0.4;
+      const tubeRandomMargin = simulationRandom() * 0.4;
       const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
 
       if (state.flowNodes.has(tubeNodeId)) {
@@ -1782,7 +1811,7 @@ function initializeBurstStates(
           randomMargin: tubeRandomMargin,
           isBurst: false,
           currentBreakFraction: 0,
-          breakSizeSeed: Math.random() * 10000,
+          breakSizeSeed: simulationRandom() * 10000,
           isTubeSide: true,
           shellNodeId,  // Tube bursts go to shell (gauge pressure comparison)
         });
@@ -1803,7 +1832,7 @@ function initializeBurstStates(
         randomMargin,
         isBurst: false,
         currentBreakFraction: 0,
-        breakSizeSeed: Math.random() * 10000,
+        breakSizeSeed: simulationRandom() * 10000,
       };
 
       // For pipes, breakLocation will be set on burst

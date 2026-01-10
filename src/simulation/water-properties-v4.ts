@@ -1269,12 +1269,12 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   //
   // A state is impossible if it has:
   // - Compressed liquid density (v < v_f_min) with vapor-like energy (u >> u_f_max)
-  // - OR very expanded (v >> v_g_max) with liquid-like energy (u << u_g_min)
   //
   // These combinations cannot physically exist and indicate mass/energy balance errors.
+  // This check was too strict, now should be ok. It was ruling out high pressure supercritical states that are in the steam table. -Erick
   const rawData = saturationDome!.raw_data;
-  const v_f_max = rawData[rawData.length - 1].v_f;        // ~0.00288 m³/kg at critical point
-  const u_g_min = rawData[rawData.length - 1].u_g * 1000; // ~2056 kJ/kg at critical point
+  const v_f_max = 0.002; //rawData[rawData.length - 1].v_f;        // ~0.00288 m³/kg at critical point
+  const u_g_min = 2195.0; //rawData[rawData.length - 1].u_g * 1000; // ~2056 kJ/kg at critical point
 
   // Check for impossible compressed-liquid-density + vapor-energy state
   if (v < v_f_max && u > u_g_min) {
@@ -1285,6 +1285,30 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       `  This combination is thermodynamically impossible.\n` +
       `  Check mass/energy balance in the simulation - likely a flow or NCG calculation error.`
     );
+  }
+
+  // Check for states below the triple point pressure, which are ice-vapor mixes.
+  const v_f_min = rawData[0].v_f;  // ~0.001 m³/kg at triple point
+  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
+
+  // Saturation data is in kJ/kg, convert to J/kg for comparison with u
+  const u_f_min = rawData[0].u_f * 1000;  // ~0 J/kg at triple point
+  const u_g_triple = rawData[0].u_g * 1000;  // ~2375 kJ/kg at triple point
+
+  // Check if it's below the triple point pressure (bottom edge of dome):
+  // Linear interpolation between (v_f, u_f) and (v_g, u_g) at triple point
+  const t = (v - v_f_min) / (v_g_max - v_f_min);
+  const u_bottom = u_f_min + t * (u_g_triple - u_f_min);
+  if (u < u_bottom) {
+    let x_est = (v - v_f_min) / (v_g_max - v_f_min)
+    if (x_est < 1.0) { // later maybe we change this so high-quality ice-vapor mix acts like vapor.
+      throw new Error(
+        `[WaterProps v4] IMPOSSIBLE STATE: below triple point with substantial ice component.\n` +
+        `  v=${(v * 1e6).toFixed(2)} mL/kg (< v_f_max=${(v_f_max * 1e6).toFixed(2)} mL/kg at critical point)\n` +
+        `  u=${(u / 1e3).toFixed(2)} kJ/kg (> u_g_min=${(u_g_min / 1e3).toFixed(2)} kJ/kg at critical point)\n` +
+        `  Check mass/energy balance in the simulation - likely a flow or NCG calculation error.`
+      );
+    }
   }
 
   // Primary criterion is density - liquid is much denser than vapor

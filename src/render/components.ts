@@ -171,11 +171,14 @@ function renderStratifiedTwoPhase(
 
     if (separation >= 0.99) {
       // Nearly fully separated: draw as pure vapor
+      // Preserve NCG and volume info for proper color blending
       const vaporFluid: Fluid = {
         temperature: T_sat,
         pressure: fluid.pressure,
         phase: 'vapor',
         flowRate: 0,
+        ncg: fluid.ncg,
+        volume: fluid.volume,
       };
       ctx.fillStyle = getFluidColor(vaporFluid);
       ctx.fillRect(x, y, width, vaporHeight);
@@ -512,23 +515,37 @@ function renderFluidWithNcg(
     (liquidFraction > 0.001 && liquidFraction < 0.999);
 
   if (isStratified) {
+    // For two-phase or stratified display, we need to apply NCG-based opacity reduction
+    // to the vapor portion so that high-NCG fluids (like air) don't suddenly appear
+    // when transitioning from pure vapor to two-phase
+    const ncgFrac = calculateNcgFraction(fluid);
+    const steamOpacity = 1 - ncgFrac; // Steam fades out as NCG increases
+    const savedAlpha = ctx.globalAlpha;
+
     if (fluid.phase === 'two-phase') {
       // Use pixelated two-phase rendering for actual two-phase fluid
-      renderStratifiedTwoPhase(ctx, fluid, x, y, width, height, liquidFraction, separation);
+      // Apply steam opacity to maintain consistency with pure vapor rendering
+      if (steamOpacity > 0.01) {
+        ctx.globalAlpha = savedAlpha * steamOpacity;
+        renderStratifiedTwoPhase(ctx, fluid, x, y, width, height, liquidFraction, separation);
+        ctx.globalAlpha = savedAlpha;
+      }
     } else {
       // Simple stratification for partial fill with single-phase fluid
       // (e.g., low steam pressure + NCG case)
       const liquidHeight = height * liquidFraction;
       const vaporHeight = height - liquidHeight;
 
-      // Vapor region (top)
-      if (vaporHeight > 0) {
+      // Vapor region (top) - apply steam opacity
+      if (vaporHeight > 0 && steamOpacity > 0.01) {
+        ctx.globalAlpha = savedAlpha * steamOpacity;
         const vaporFluid: Fluid = { ...fluid, phase: 'vapor' };
         ctx.fillStyle = getFluidColor(vaporFluid);
         ctx.fillRect(x, y, width, vaporHeight);
+        ctx.globalAlpha = savedAlpha;
       }
 
-      // Liquid region (bottom)
+      // Liquid region (bottom) - full opacity
       if (liquidHeight > 0) {
         const liquidFluid: Fluid = { ...fluid, phase: 'liquid' };
         ctx.fillStyle = getFluidColor(liquidFluid);
