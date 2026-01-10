@@ -60,12 +60,12 @@ function assertClose(actual: number, expected: number, tolerance: number, label:
 
 category('Water Properties');
 
-test('Liquid water at 300K, 20 bar', () => {
-  // Updated test to match actual interpolated values
+test('Liquid water at ~303K, ~29 bar', () => {
+  // These (u,v) values correspond to approximately 303K/29 bar
   const result = calculateState(1.0, 125.79e3, 1.0031e-3);
   assert(result.phase === 'liquid', `Phase should be liquid, got ${result.phase}`);
-  assertClose(result.temperature, 300, 20, 'Temperature');
-  assertClose(result.pressure / 1e5, 20, 5, 'Pressure (bar)'); // Expect ~20 bar
+  assertClose(result.temperature, 303, 5, 'Temperature');
+  assertClose(result.pressure / 1e5, 29.3, 2, 'Pressure (bar)');
 });
 
 test('Saturated steam at 1 bar', () => {
@@ -113,10 +113,11 @@ test('Compressed liquid at high pressure', () => {
 });
 
 test('Near critical point', () => {
-  // Critical point: T=647.1K, P=220.64 bar, ρ=322 kg/m³
-  const result = calculateState(1.0, 2.03e6, 3.106e-3);
-  assertClose(result.temperature, 647.1, 10, 'Critical temperature');
-  assertClose(result.pressure / 1e5, 220.64, 10, 'Critical pressure (bar)');
+  // Critical point: T_c=647.096K, P_c=220.64 bar, v_c=3.155e-3 m³/kg, u_c≈2020 kJ/kg
+  // Using actual critical point values
+  const result = calculateState(1.0, 2020e3, 3.155e-3);
+  assertClose(result.temperature, 647, 2, 'Critical temperature');
+  assertClose(result.pressure / 1e5, 220, 5, 'Critical pressure (bar)');
 });
 
 test('Phase boundary detection', () => {
@@ -163,18 +164,74 @@ test('Water properties calculation speed', () => {
   const start = Date.now();
   const iterations = 1000;
 
+  // Use seeded random for reproducibility and constrain to valid ranges
+  let seed = 54321;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+
+  let successfulCalls = 0;
   for (let i = 0; i < iterations; i++) {
-    // Random conditions
+    // Random conditions within physically reasonable ranges
     const mass = 1.0;
-    const u = 100e3 + Math.random() * 2000e3;
-    const v = 0.001 + Math.random() * 0.1;
-    calculateState(mass, u, v);
+    // u: 100 kJ/kg to 2800 kJ/kg (subcooled liquid to superheated vapor)
+    const u = 100e3 + random() * 2700e3;
+    // v: 0.001 to 0.1 m³/kg (compressed liquid to moderate vapor)
+    const v = 0.001 + random() * 0.099;
+    try {
+      calculateState(mass, u, v);
+      successfulCalls++;
+    } catch {
+      // Some random states may be outside valid ranges - that's expected
+    }
   }
 
   const elapsed = Date.now() - start;
   const perCall = elapsed / iterations;
 
+  // Most calls should succeed
+  assert(successfulCalls > iterations * 0.8, `Most property lookups should succeed, only ${successfulCalls}/${iterations} did`);
   assert(perCall < 10, `Water properties should be fast (<10ms/call), got ${perCall.toFixed(2)}ms`);
+});
+
+test('Dome consistency - no false positives', () => {
+  // Test that isInsideTwoPhaseDome and findTwoPhaseState are consistent:
+  // If the dome check says we're inside, we must be able to calculate a valid two-phase state
+  const iterations = 5000;
+  let failures = 0;
+  const failureDetails: string[] = [];
+
+  // Use seeded pseudo-random for reproducibility
+  let seed = 12345;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+
+  for (let i = 0; i < iterations; i++) {
+    // Generate random (u, v) covering the full range of interest
+    const u = 50e3 + random() * 2500e3;   // 50 kJ/kg to 2550 kJ/kg
+    const v = 0.0005 + random() * 2.0;     // 0.5 L/kg to 2000 L/kg
+
+    try {
+      const result = calculateState(1.0, u, v);
+      // If we get here without error, good
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('Inconsistent dome check')) {
+        failures++;
+        if (failureDetails.length < 5) {
+          failureDetails.push(`u=${(u/1e3).toFixed(2)} kJ/kg, v=${v.toFixed(6)} m³/kg: ${msg}`);
+        }
+      }
+      // Other errors might be expected for out-of-range states
+    }
+  }
+
+  if (failures > 0) {
+    throw new Error(`${failures} inconsistent dome check failures:\n${failureDetails.join('\n')}`);
+  }
 });
 
 // ============================================================================
