@@ -116,106 +116,187 @@ interface SpatialIndex {
 
 let spatialIndex: SpatialIndex | null = null;
 
+// Saturation curve in (v, u) space - single continuous curve from liquid to vapor
+// Sorted by v (ascending). Built at initialization from raw saturation data.
+interface SaturationCurvePoint {
+  v: number;  // m³/kg
+  u: number;  // J/kg
+}
+let saturationCurve: SaturationCurvePoint[] = [];
+
 // Grid cell parameters
 const GRID_CELL_SIZE_LOGV = 0.1;  // ~26% change in v per cell
 const GRID_CELL_SIZE_U = 50;      // 50 kJ/kg per cell
 
 // ============================================================================
-// Polynomial Evaluation
-// ============================================================================
-
-function evalPolynomial(x: number, fits: PolynomialFit[]): number {
-  // Find the appropriate segment
-  for (const fit of fits) {
-    if (x >= fit.x_min && x <= fit.x_max) {
-      // Evaluate polynomial: coeffs = [a_n, a_{n-1}, ..., a_1, a_0]
-      let result = 0;
-      for (const coeff of fit.coeffs) {
-        result = result * x + coeff;
-      }
-      return result;
-    }
-  }
-
-  // Extrapolate from nearest segment
-  if (x < fits[0].x_min) {
-    const fit = fits[0];
-    let result = 0;
-    for (const coeff of fit.coeffs) {
-      result = result * x + coeff;
-    }
-    return result;
-  } else {
-    const fit = fits[fits.length - 1];
-    let result = 0;
-    for (const coeff of fit.coeffs) {
-      result = result * x + coeff;
-    }
-    return result;
-  }
-}
-
-// ============================================================================
-// Saturation Property Functions
+// Saturation Property Functions (Linear Interpolation on Raw Data)
 // ============================================================================
 
 /**
+ * Find the bracketing indices in the raw saturation data for a given temperature.
+ * Returns { lo, hi, t } where t is the interpolation factor.
+ */
+function findTempBracket(T_K: number): { lo: number; hi: number; t: number } {
+  if (!saturationDome) throw new Error('Saturation dome not loaded');
+
+  const rawData = saturationDome.raw_data;
+  const n = rawData.length;
+
+  // Clamp to valid range
+  if (T_K <= rawData[0].T_K) {
+    return { lo: 0, hi: 0, t: 0 };
+  }
+  if (T_K >= rawData[n - 1].T_K) {
+    return { lo: n - 1, hi: n - 1, t: 0 };
+  }
+
+  // Binary search for bracketing indices
+  let lo = 0;
+  let hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (rawData[mid].T_K <= T_K) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  const T_lo = rawData[lo].T_K;
+  const T_hi = rawData[hi].T_K;
+  const t = (T_K - T_lo) / (T_hi - T_lo);
+
+  return { lo, hi, t };
+}
+
+/**
  * Get saturation pressure from temperature (K).
+ * Uses linear interpolation on raw saturation data.
  * @returns Pressure in Pa
  */
 function P_sat_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
-  const P_MPa = evalPolynomial(T_K, saturationDome.polynomials.P_sat_from_T);
+
+  const { lo, hi, t } = findTempBracket(T_K);
+  const rawData = saturationDome.raw_data;
+
+  const P_lo = rawData[lo].P_MPa;
+  const P_hi = rawData[hi].P_MPa;
+  const P_MPa = P_lo + t * (P_hi - P_lo);
+
   return P_MPa * 1e6;
 }
 
 /**
  * Get saturated liquid internal energy from temperature (K).
+ * Uses linear interpolation on raw saturation data.
  * @returns Internal energy in J/kg
  */
 function u_f_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
-  const u_kJkg = evalPolynomial(T_K, saturationDome.polynomials.u_f_from_T);
+
+  const { lo, hi, t } = findTempBracket(T_K);
+  const rawData = saturationDome.raw_data;
+
+  const u_lo = rawData[lo].u_f;
+  const u_hi = rawData[hi].u_f;
+  const u_kJkg = u_lo + t * (u_hi - u_lo);
+
   return u_kJkg * 1000;
 }
 
 /**
  * Get saturated liquid specific volume from temperature (K).
+ * Uses linear interpolation on raw saturation data.
  * @returns Specific volume in m³/kg
  */
 function v_f_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
-  return evalPolynomial(T_K, saturationDome.polynomials.v_f_from_T);
+
+  const { lo, hi, t } = findTempBracket(T_K);
+  const rawData = saturationDome.raw_data;
+
+  const v_lo = rawData[lo].v_f;
+  const v_hi = rawData[hi].v_f;
+
+  return v_lo + t * (v_hi - v_lo);
 }
 
 /**
  * Get saturated vapor internal energy from temperature (K).
+ * Uses linear interpolation on raw saturation data.
  * @returns Internal energy in J/kg
  */
 function u_g_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
-  const u_kJkg = evalPolynomial(T_K, saturationDome.polynomials.u_g_from_T);
+
+  const { lo, hi, t } = findTempBracket(T_K);
+  const rawData = saturationDome.raw_data;
+
+  const u_lo = rawData[lo].u_g;
+  const u_hi = rawData[hi].u_g;
+  const u_kJkg = u_lo + t * (u_hi - u_lo);
+
   return u_kJkg * 1000;
 }
 
 /**
  * Get saturated vapor specific volume from temperature (K).
+ * Uses linear interpolation on raw saturation data.
  * @returns Specific volume in m³/kg
  */
 function v_g_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
-  return evalPolynomial(T_K, saturationDome.polynomials.v_g_from_T);
+
+  const { lo, hi, t } = findTempBracket(T_K);
+  const rawData = saturationDome.raw_data;
+
+  const v_lo = rawData[lo].v_g;
+  const v_hi = rawData[hi].v_g;
+
+  return v_lo + t * (v_hi - v_lo);
 }
 
 /**
  * Get temperature from saturated liquid internal energy.
+ * Uses binary search and linear interpolation on raw saturation data.
  * @param u_f Internal energy in J/kg
  * @returns Temperature in K
  */
 function T_from_u_f(u_f_Jkg: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
+
   const u_kJkg = u_f_Jkg / 1000;
-  return evalPolynomial(u_kJkg, saturationDome.polynomials.T_from_u_f);
+  const rawData = saturationDome.raw_data;
+  const n = rawData.length;
+
+  // u_f increases monotonically with T, so binary search works
+  // Clamp to valid range
+  if (u_kJkg <= rawData[0].u_f) {
+    return rawData[0].T_K;
+  }
+  if (u_kJkg >= rawData[n - 1].u_f) {
+    return rawData[n - 1].T_K;
+  }
+
+  // Binary search
+  let lo = 0;
+  let hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (rawData[mid].u_f <= u_kJkg) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  // Linear interpolation
+  const u_lo = rawData[lo].u_f;
+  const u_hi = rawData[hi].u_f;
+  const t = (u_kJkg - u_lo) / (u_hi - u_lo);
+
+  return rawData[lo].T_K + t * (rawData[hi].T_K - rawData[lo].T_K);
 }
 
 // ============================================================================
@@ -432,11 +513,44 @@ function findSaturationPropsAtV(v: number): { u_g: number; T_sat: number; P_sat:
 
 /**
  * Find u_sat on the saturation dome boundary for a given specific volume v.
- * Convenience wrapper around findSaturationPropsAtV.
+ * Uses binary search on the pre-built saturation curve.
+ *
+ * The saturation curve is a single continuous curve in (v, u) space,
+ * sorted by v ascending, combining both the liquid and vapor lines.
  */
 function findSaturationU(v: number): number | null {
-  const props = findSaturationPropsAtV(v);
-  return props ? props.u_g : null;
+  if (saturationCurve.length === 0) return null;
+
+  const vMin = saturationCurve[0].v;
+  const vMax = saturationCurve[saturationCurve.length - 1].v;
+
+  // Check bounds
+  if (v < vMin || v > vMax) {
+    return null;
+  }
+
+  // Binary search for bracketing points
+  let lo = 0;
+  let hi = saturationCurve.length - 1;
+
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (saturationCurve[mid].v <= v) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  // Interpolate between lo and hi
+  const v_lo = saturationCurve[lo].v;
+  const v_hi = saturationCurve[hi].v;
+  const u_lo = saturationCurve[lo].u;
+  const u_hi = saturationCurve[hi].u;
+
+  // Linear interpolation in v
+  const t = (v - v_lo) / (v_hi - v_lo);
+  return u_lo + t * (u_hi - u_lo);
 }
 
 /**
@@ -562,6 +676,20 @@ function isInsideTwoPhaseDome(u: number, v: number): {
  * Find the saturation temperature where x_v = x_u for a given (u, v) state.
  * This is where the state is consistent on the saturation dome.
  */
+// Store diagnostic info from last failed findTwoPhaseState call
+let lastTwoPhaseFailure: {
+  u: number;
+  v: number;
+  diff_lo: { x_v: number; x_u: number; diff: number };
+  diff_hi: { x_v: number; x_u: number; diff: number };
+  T_lo: number;
+  T_hi: number;
+} | null = null;
+
+export function getLastTwoPhaseFailure() {
+  return lastTwoPhaseFailure;
+}
+
 function findTwoPhaseState(u: number, v: number): {
   T: number;
   P: number;
@@ -575,8 +703,8 @@ function findTwoPhaseState(u: number, v: number): {
   // x_v = (v - v_f) / (v_g - v_f)
   // x_u = (u - u_f) / (u_g - u_f)
 
-  let T_lo = T_TRIPLE + 0.1;
-  let T_hi = T_CRIT - 0.5;
+  let T_lo = T_TRIPLE + 0.001;  // Start very close to triple point
+  let T_hi = T_CRIT - 0.01;    // Get close to critical point
 
   function calcQualityDiff(T: number): { x_v: number; x_u: number; diff: number } {
     const v_f = v_f_from_T(T);
@@ -590,12 +718,56 @@ function findTwoPhaseState(u: number, v: number): {
     return { x_v, x_u, diff: x_v - x_u };
   }
 
+  // Narrow T_hi to where v < v_g(T) - otherwise x_v > 1 and no valid solution
+  // Binary search for max valid T where v_g(T) > v
+  // Only needed if v_g at current T_hi is less than v
+  const v_g_initial = v_g_from_T(T_hi);
+  if (v_g_initial < v) {
+    // Need to find where v_g(T) = v
+    let lo = T_lo;
+    let hi = T_hi;
+    while (hi - lo > 0.0001) {  // Fine tolerance
+      const mid = (lo + hi) / 2;
+      const v_g_mid = v_g_from_T(mid);
+      if (v_g_mid > v) {
+        // v_g is still larger than v, can go higher
+        lo = mid;
+      } else {
+        // v_g is smaller than v, need lower T
+        hi = mid;
+      }
+    }
+    // Use lo, which guarantees v_g(T_hi) >= v, so x_v <= 1
+    T_hi = lo;
+  }
+
   let diff_lo = calcQualityDiff(T_lo);
   let diff_hi = calcQualityDiff(T_hi);
+
+  // Check if either endpoint is already close enough to a solution
+  const tolerance = 1e-6;
+  if (Math.abs(diff_lo.diff) < tolerance && diff_lo.x_v >= 0 && diff_lo.x_v <= 1) {
+    const quality = Math.max(0, Math.min(1, (diff_lo.x_v + diff_lo.x_u) / 2));
+    return {
+      T: T_lo,
+      P: P_sat_from_T(T_lo),
+      quality,
+    };
+  }
+  if (Math.abs(diff_hi.diff) < tolerance && diff_hi.x_v >= 0 && diff_hi.x_v <= 1) {
+    const quality = Math.max(0, Math.min(1, (diff_hi.x_v + diff_hi.x_u) / 2));
+    return {
+      T: T_hi,
+      P: P_sat_from_T(T_hi),
+      quality,
+    };
+  }
 
   // Check if there's a sign change
   if (diff_lo.diff * diff_hi.diff > 0) {
     // No crossing - not a valid two-phase state
+    // Store diagnostic info for error reporting
+    lastTwoPhaseFailure = { u, v, diff_lo, diff_hi, T_lo, T_hi };
     return null;
   }
 
@@ -645,6 +817,45 @@ function getCellKey(logV: number, u_kJkg: number): string {
   const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
   const cellY = Math.floor(u_kJkg / GRID_CELL_SIZE_U);
   return `${cellX},${cellY}`;
+}
+
+/**
+ * Build the saturation curve in (v, u) space.
+ * This is a single continuous curve combining the liquid and vapor lines,
+ * sorted by v (ascending).
+ *
+ * The curve goes: liquid line (low v to v_c) then vapor line (v_c to high v).
+ */
+function buildSaturationCurve(): void {
+  if (!saturationDome) return;
+
+  const rawData = saturationDome.raw_data;
+  saturationCurve = [];
+
+  // Add liquid line points (v_f, u_f) - these increase in v with temperature
+  for (const pt of rawData) {
+    saturationCurve.push({
+      v: pt.v_f,
+      u: pt.u_f * 1000,  // Convert kJ/kg to J/kg
+    });
+  }
+
+  // Add vapor line points (v_g, u_g) in reverse order - v_g decreases with temperature,
+  // so reversing gives us ascending v order continuing from where liquid line ended
+  for (let i = rawData.length - 1; i >= 0; i--) {
+    const pt = rawData[i];
+    // Skip if this v_g equals the last v_f (at critical point they meet)
+    if (saturationCurve.length > 0 && Math.abs(pt.v_g - saturationCurve[saturationCurve.length - 1].v) < 1e-9) {
+      continue;
+    }
+    saturationCurve.push({
+      v: pt.v_g,
+      u: pt.u_g * 1000,  // Convert kJ/kg to J/kg
+    });
+  }
+
+  // Sort by v to ensure binary search works correctly
+  saturationCurve.sort((a, b) => a.v - b.v);
 }
 
 function buildSpatialIndex(): void {
@@ -1211,9 +1422,10 @@ function loadDataSync(): void {
   }
 
   buildSpatialIndex();
+  buildSaturationCurve();
   dataLoaded = true;
 
-  console.log(`[WaterProps v4] Data loaded: ${saturationDome?.raw_data.length} saturation points, ${gridPoints.length} grid points`);
+  console.log(`[WaterProps v4] Data loaded: ${saturationDome?.raw_data.length} saturation points, ${gridPoints.length} grid points, ${saturationCurve.length} curve points`);
 }
 
 // ============================================================================
@@ -1256,11 +1468,17 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       };
     }
     // If we get here, dome check said inside but findTwoPhaseState couldn't find consistent T.
-    // This should not happen if dome check is correct. Throw an error.
+    // This should not happen if dome check is correct. Throw an error with diagnostics.
+    const diag = lastTwoPhaseFailure;
+    let diagStr = '';
+    if (diag) {
+      diagStr = `\n  At T_lo=${(diag.T_lo - 273.15).toFixed(1)}C: x_v=${diag.diff_lo.x_v.toFixed(4)}, x_u=${diag.diff_lo.x_u.toFixed(4)}, diff=${diag.diff_lo.diff.toFixed(6)}` +
+        `\n  At T_hi=${(diag.T_hi - 273.15).toFixed(1)}C: x_v=${diag.diff_hi.x_v.toFixed(4)}, x_u=${diag.diff_hi.x_u.toFixed(4)}, diff=${diag.diff_hi.diff.toFixed(6)}` +
+        `\n  No sign change in (x_v - x_u) means no consistent two-phase T exists.`;
+    }
     throw new Error(
       `[WaterProps v4] Inconsistent dome check: isInsideTwoPhaseDome returned true but ` +
-      `findTwoPhaseState failed. u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg. ` +
-      `This indicates a bug in the dome detection logic.`
+      `findTwoPhaseState failed. u=${(u/1e3).toFixed(2)} kJ/kg, v=${v.toFixed(4)} m³/kg.${diagStr}`
     );
   }
 
@@ -1300,13 +1518,15 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   const t = (v - v_f_min) / (v_g_max - v_f_min);
   const u_bottom = u_f_min + t * (u_g_triple - u_f_min);
   if (u < u_bottom) {
-    let x_est = (v - v_f_min) / (v_g_max - v_f_min)
+    const x_est = (v - v_f_min) / (v_g_max - v_f_min);
     if (x_est < 1.0) { // later maybe we change this so high-quality ice-vapor mix acts like vapor.
       throw new Error(
-        `[WaterProps v4] IMPOSSIBLE STATE: below triple point with substantial ice component.\n` +
-        `  v=${(v * 1e6).toFixed(2)} mL/kg (< v_f_max=${(v_f_max * 1e6).toFixed(2)} mL/kg at critical point)\n` +
-        `  u=${(u / 1e3).toFixed(2)} kJ/kg (> u_g_min=${(u_g_min / 1e3).toFixed(2)} kJ/kg at critical point)\n` +
-        `  Check mass/energy balance in the simulation - likely a flow or NCG calculation error.`
+        `[WaterProps v4] IMPOSSIBLE STATE: below triple point (ice-vapor region).\n` +
+        `  v=${(v * 1e6).toFixed(2)} mL/kg, u=${(u / 1e3).toFixed(2)} kJ/kg\n` +
+        `  At this specific volume, minimum energy for two-phase is u_bottom=${(u_bottom / 1e3).toFixed(2)} kJ/kg.\n` +
+        `  Estimated quality x=${(x_est * 100).toFixed(1)}% (ice-vapor mix at triple point).\n` +
+        `  This state has vapor-like density but not enough energy to be vapor.\n` +
+        `  Check mass/energy balance - likely more mass left than energy, or NCG calculation error.`
       );
     }
   }
@@ -1516,6 +1736,9 @@ export async function preloadWaterProperties(): Promise<void> {
 
   await loadSaturationDome();
   await loadGridData();
+
+  // Build the saturation curve after dome data is loaded
+  buildSaturationCurve();
 
   dataLoaded = true;
   console.log('[WaterProps v4] Preload complete');
@@ -1732,4 +1955,17 @@ export function analyzeStability(state: WaterState, volume: number): StabilityIn
 
 export function suggestMaxTimestep(_state: WaterState, _volume: number): number {
   return 0.1;
+}
+
+// Debug exports for testing saturation curve
+export function DEBUG_getSaturationCurve() {
+  return saturationCurve;
+}
+
+export function DEBUG_findSaturationU(v: number): number | null {
+  return findSaturationU(v);
+}
+
+export function DEBUG_isInsideTwoPhaseDome(u: number, v: number) {
+  return isInsideTwoPhaseDome(u, v);
 }
