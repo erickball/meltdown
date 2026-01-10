@@ -228,6 +228,15 @@ function renderZoneWithQuality(
 ): void {
   const timeSeed = getTimeSeed();
 
+  // Fill background with blended color first to avoid visible gaps between pixels
+  const blendedColor = {
+    r: Math.round(liquidColor.r * (1 - quality) + vaporColor.r * quality),
+    g: Math.round(liquidColor.g * (1 - quality) + vaporColor.g * quality),
+    b: Math.round(liquidColor.b * (1 - quality) + vaporColor.b * quality),
+  };
+  ctx.fillStyle = rgbToString(blendedColor, 0.87);
+  ctx.fillRect(x, y, width, height);
+
   // Calculate grid dimensions
   const cols = Math.ceil(width / pixelSize);
   const rows = Math.ceil(height / pixelSize);
@@ -287,6 +296,11 @@ function renderNcgOverlay(
 
   // For non-air mixtures, use pixelated rendering
   // Each pixel randomly picks a gas species based on mole fractions
+
+  // Fill background with blended NCG color first to avoid visible gaps between pixels
+  ctx.fillStyle = rgbToString(ncgViz.blendedColor, ncgFraction * 0.7);
+  ctx.fillRect(x, y, width, height);
+
   const cols = Math.ceil(width / pixelSize);
   const rows = Math.ceil(height / pixelSize);
 
