@@ -207,6 +207,10 @@ export interface FlowConnection {
   // Note: inertance = length / flowArea
   // The momentum equation: ρ * inertance * d(flow)/dt = ΔP
 
+  // Choked flow state (computed by flow operator)
+  isChoked?: boolean;               // True if flow is limited by sonic velocity
+  machNumber?: number;              // Mach number (velocity / sound speed)
+
   // === Debug fields (populated by momentum operator for display) ===
   // These are for debugging only and may not always be present
   debug?: {

@@ -545,6 +545,14 @@ export function updateDebugPanel(
         html += ` <span style="color: #f66; font-size: 9px;">[BREAK]</span>`;
       }
 
+      // Mark choked flow
+      if (conn.isChoked) {
+        html += ` <span style="color: #f90; font-size: 9px; font-weight: bold;">[CHOKED Ma=${(conn.machNumber ?? 1).toFixed(2)}]</span>`;
+      } else if (conn.machNumber !== undefined && conn.machNumber > 0.3) {
+        // Show Mach number for high-speed vapor flow even if not choked
+        html += ` <span style="color: #cc8; font-size: 9px;">Ma=${conn.machNumber.toFixed(2)}</span>`;
+      }
+
       html += '<br>';
 
       // Show momentum debug info on second line if available

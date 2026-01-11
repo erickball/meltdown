@@ -18,6 +18,7 @@ import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState, Check
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
 import { saturationPressure } from '../water-properties';
+import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
 
 // ============================================================================
 // Flow Operator
@@ -535,7 +536,34 @@ export class FlowOperator implements PhysicsOperator {
     const sign = dP_driving >= 0 ? 1 : -1;
     const dP_abs = Math.abs(dP_driving);
     const v_steady = Math.sqrt(2 * dP_abs / (rho * K));
-    const steadyStateFlow = sign * rho * A * v_steady;
+    let steadyStateFlow = sign * rho * A * v_steady;
+
+    // Calculate choked flow limit for compressible flow (vapor, two-phase)
+    // Determine downstream node based on flow direction
+    const downstreamNode = sign >= 0 ? toNode : fromNode;
+    const chokedLimit = this.getChokedFlowLimit(conn, upstreamNode, downstreamNode, flowPhase);
+
+    // Apply choked flow limiting to steady-state calculation
+    if (Math.abs(steadyStateFlow) > chokedLimit) {
+      steadyStateFlow = sign * chokedLimit;
+      (conn as any).isChoked = true;
+
+      // Calculate Mach number for display (always 1.0 when choked, but calculate actual for sub-choked)
+      const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
+      const c = soundSpeed(upstreamState);
+      (conn as any).machNumber = v_steady / c;
+    } else {
+      // Not choked - calculate actual Mach number for display
+      if (flowPhase !== 'liquid') {
+        const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
+        const c = soundSpeed(upstreamState);
+        (conn as any).machNumber = v_steady / c;
+        (conn as any).isChoked = false;
+      } else {
+        (conn as any).machNumber = 0;
+        (conn as any).isChoked = false;
+      }
+    }
 
     // Store for debug display
     conn.steadyStateFlow = steadyStateFlow;
@@ -560,29 +588,23 @@ export class FlowOperator implements PhysicsOperator {
       const acceleration = dP_net / (rho * conn.inertance);
 
       // New velocity using forward Euler integration
-      const newVelocity = currentVelocity + acceleration * dt;
+      let newVelocity = currentVelocity + acceleration * dt;
 
-      // New mass flow rate
-      const massFlow = rho * A * newVelocity;
-
-      // Debug: log calculated flow for feedwater-sg
-      // if (conn.id === "flow-feedwater-sg") {
-      //   console.log(`  [Inertial] flow=${massFlow.toFixed(1)} kg/s, v: ${currentVelocity.toFixed(2)}→${newVelocity.toFixed(2)} m/s`);
-      //   console.log(`    dP_driving=${(dP_driving/1e5).toFixed(3)} bar, dP_friction=${(dP_friction/1e5).toFixed(3)} bar`);
-      //   console.log(`    acceleration=${acceleration.toFixed(3)} m/s², inertance=${conn.inertance.toFixed(1)} m⁻¹`);
-      //   console.log(`    Steady-state flow would be: ${steadyStateFlow.toFixed(1)} kg/s`);
-      // }
+      // Apply choked flow limiting to inertial flow as well
+      let massFlow = rho * A * newVelocity;
+      if (Math.abs(massFlow) > chokedLimit) {
+        massFlow = Math.sign(massFlow) * chokedLimit;
+        newVelocity = massFlow / (rho * A);
+        (conn as any).isChoked = true;
+        (conn as any).machNumber = 1.0;
+      }
 
       return massFlow;
 
     } else {
       // WITHOUT INERTANCE: Use steady-state equation (backward compatibility)
       // The steady-state flow we calculated above is the actual flow
-
-      // Debug: log calculated flow for feedwater-sg
-      // if (conn.id === "flow-feedwater-sg") {
-      //   console.log(`  [Steady] flow=${steadyStateFlow.toFixed(1)} kg/s (v=${(sign*v_steady).toFixed(2)} m/s, K=${K.toFixed(3)})`);
-      // }
+      // (already limited by choked flow above)
 
       return steadyStateFlow;
     }
@@ -941,6 +963,92 @@ export class FlowOperator implements PhysicsOperator {
         }
       }
     }
+  }
+
+  /**
+   * Convert a FlowNode to a WaterState for sound speed calculations.
+   *
+   * @param node The flow node
+   * @param phaseOverride Optional phase override for when we know what's flowing
+   */
+  private nodeToWaterState(node: FlowNode, phaseOverride?: 'liquid' | 'vapor' | 'mixture'): WaterState {
+    const fluid = node.fluid;
+    const phase = phaseOverride === 'mixture' ? 'two-phase' : (phaseOverride ?? fluid.phase);
+
+    return {
+      temperature: fluid.temperature,
+      pressure: fluid.pressure,
+      density: phase === 'liquid'
+        ? this.getNodeDensity(node, 'liquid')
+        : phase === 'vapor'
+          ? this.getNodeDensity(node, 'vapor')
+          : fluid.mass / node.volume,
+      phase: phase === 'two-phase' ? 'two-phase' : phase,
+      quality: fluid.phase === 'two-phase' ? fluid.quality : (phase === 'vapor' ? 1 : 0),
+      specificEnergy: fluid.internalEnergy / fluid.mass,
+    };
+  }
+
+  /**
+   * Calculate choked flow limit for a connection.
+   *
+   * Returns the maximum absolute mass flow rate (kg/s) based on sonic velocity.
+   * For compressible flow (vapor, two-phase), this is when flow velocity reaches
+   * sound speed. For liquid, returns Infinity (incompressible).
+   *
+   * Also checks critical pressure ratio - if downstream pressure is below critical,
+   * flow is definitely choked regardless of velocity.
+   *
+   * @param conn The flow connection
+   * @param upstreamNode Upstream flow node
+   * @param downstreamNode Downstream flow node
+   * @param flowPhase Phase of the flowing fluid
+   * @returns Maximum mass flow rate in kg/s (always positive)
+   */
+  private getChokedFlowLimit(
+    conn: FlowConnection,
+    upstreamNode: FlowNode,
+    downstreamNode: FlowNode,
+    flowPhase: 'liquid' | 'vapor' | 'mixture'
+  ): number {
+    // Liquid flow doesn't choke (incompressible)
+    if (flowPhase === 'liquid') {
+      return Infinity;
+    }
+
+    // Get upstream state for sound speed calculation
+    const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
+
+    // Calculate sound speed and critical mass flux
+    const c = soundSpeed(upstreamState);
+    const rho = upstreamState.density;
+    const A = conn.flowArea;
+
+    // Maximum flow at sonic velocity
+    // Apply discharge coefficient for restrictions (sharp-edged orifice ~0.62)
+    const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
+    const maxFlow = dischargeCoeff * rho * A * c;
+
+    // Also check critical pressure ratio
+    const critRatio = criticalPressureRatio(upstreamState);
+    if (critRatio > 0) {
+      const P_up = upstreamNode.fluid.pressure;
+      const P_down = downstreamNode.fluid.pressure;
+      const actualRatio = P_down / P_up;
+
+      // If downstream pressure is below critical, flow is definitely choked
+      if (actualRatio < critRatio) {
+        // Store choked status on connection for display
+        (conn as any).isChoked = true;
+        (conn as any).machNumber = 1.0;
+        return maxFlow;
+      }
+    }
+
+    // Flow may or may not be choked - return the limit anyway
+    // The actual flow from pressure drop might be less than this
+    (conn as any).isChoked = false;
+    return maxFlow;
   }
 }
 

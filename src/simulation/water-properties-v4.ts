@@ -1280,6 +1280,142 @@ export function numericalBulkModulus(T_celsius: number, K_max?: number): number 
 }
 
 // ============================================================================
+// Sound Speed Calculation (for choked flow)
+// ============================================================================
+
+/**
+ * Calculate sound speed in water/steam for choked flow calculations.
+ *
+ * For liquid water: c = sqrt(K / rho) where K is bulk modulus
+ * For steam/vapor: c = sqrt(gamma * R * T) using ideal gas approximation
+ * For two-phase: Uses Wood's equation for bubbly/droplet mixtures
+ *
+ * @param state - Water state from calculateState()
+ * @returns Sound speed in m/s
+ */
+export function soundSpeed(state: WaterState): number {
+  const T_C = state.temperature - 273.15;
+
+  if (state.phase === 'liquid') {
+    // Liquid: c = sqrt(K / rho)
+    const K = bulkModulus(T_C);  // Pa
+    const rho = state.density;   // kg/m³
+    return Math.sqrt(K / rho);   // m/s, typically 1400-1500 m/s for water
+  }
+
+  if (state.phase === 'vapor') {
+    // Steam: c = sqrt(gamma * R * T)
+    // For steam, gamma (Cp/Cv) varies from ~1.33 at low T to ~1.13 near critical
+    // Use a simplified approximation:
+    //   gamma ≈ 1.33 at 100°C, decreasing toward critical point
+    const T_ratio = Math.min(1, (state.temperature - 373) / (647 - 373));
+    const gamma = 1.33 - 0.20 * T_ratio;  // 1.33 at 100°C, ~1.13 at critical
+
+    return Math.sqrt(gamma * R_WATER * state.temperature);  // m/s, typically 400-500 m/s
+  }
+
+  // Two-phase: Use Wood's equation for mixture sound speed
+  // This is a simplified model valid for well-mixed flow
+  //
+  // 1/(rho_m * c_m^2) = alpha/(rho_g * c_g^2) + (1-alpha)/(rho_f * c_f^2)
+  // where alpha is void fraction (volume fraction of vapor)
+  //
+  // Two-phase sound speed can be VERY low (down to ~20 m/s) due to
+  // the compressibility of vapor combined with the inertia of liquid
+
+  const x = state.quality;  // Mass quality
+
+  // Get saturation properties
+  const T_sat = state.temperature;
+  const rho_f = saturatedLiquidDensity(T_sat);
+  const rho_g = saturatedVaporDensity(T_sat);
+
+  // Calculate void fraction from quality: alpha = x * rho_f / (x * rho_f + (1-x) * rho_g)
+  // Simplified: alpha ≈ x * (rho_f / rho_g) for x << 1
+  const v_f = 1 / rho_f;
+  const v_g = 1 / rho_g;
+  const alpha = x * v_g / (x * v_g + (1 - x) * v_f);
+
+  // Sound speeds of each phase
+  const K_liquid = bulkModulus(T_sat - 273.15);
+  const c_f = Math.sqrt(K_liquid / rho_f);
+
+  const T_ratio = Math.min(1, (T_sat - 373) / (647 - 373));
+  const gamma = 1.33 - 0.20 * T_ratio;
+  const c_g = Math.sqrt(gamma * R_WATER * T_sat);
+
+  // Mixture density
+  const rho_m = state.density;
+
+  // Wood's equation: 1/(rho_m * c_m^2) = alpha/(rho_g * c_g^2) + (1-alpha)/(rho_f * c_f^2)
+  const term_g = alpha / (rho_g * c_g * c_g);
+  const term_f = (1 - alpha) / (rho_f * c_f * c_f);
+  const c_m_sq = 1 / (rho_m * (term_g + term_f));
+
+  // Sound speed can be very low in two-phase mixtures - typical minimum around 20-50 m/s
+  return Math.sqrt(Math.max(c_m_sq, 400));  // Minimum 20 m/s to prevent numerical issues
+}
+
+/**
+ * Calculate critical (sonic) mass flux for choked flow.
+ *
+ * For single-phase compressible flow through a restriction, the maximum
+ * mass flux occurs when the flow becomes sonic (Ma = 1).
+ *
+ * G_crit = rho * c where c is sound speed
+ *
+ * For two-phase flow, this is a simplified model. More accurate models
+ * like HEM (Homogeneous Equilibrium Model) or Moody's correlation exist
+ * but require more complex calculations.
+ *
+ * @param state - Water state at the upstream (stagnation) conditions
+ * @returns Critical mass flux in kg/(m²·s)
+ */
+export function criticalMassFlux(state: WaterState): number {
+  const c = soundSpeed(state);
+  return state.density * c;
+}
+
+/**
+ * Calculate the critical pressure ratio for choked flow.
+ *
+ * For ideal gas: P_crit / P_0 = (2/(gamma+1))^(gamma/(gamma-1))
+ * For steam at ~1.3 gamma: this is approximately 0.545
+ * For liquid: no critical ratio (incompressible)
+ * For two-phase: pressure ratio can be much higher (0.6-0.9)
+ *
+ * @param state - Water state at upstream conditions
+ * @returns Critical pressure ratio (P_downstream / P_upstream for choking)
+ */
+export function criticalPressureRatio(state: WaterState): number {
+  if (state.phase === 'liquid') {
+    // Liquid is essentially incompressible - no choking
+    // Return 0 to indicate choking doesn't apply
+    return 0;
+  }
+
+  if (state.phase === 'vapor') {
+    // Steam: use ideal gas critical pressure ratio
+    const T_ratio = Math.min(1, (state.temperature - 373) / (647 - 373));
+    const gamma = 1.33 - 0.20 * T_ratio;
+
+    // P_crit / P_0 = (2/(gamma+1))^(gamma/(gamma-1))
+    const ratio = Math.pow(2 / (gamma + 1), gamma / (gamma - 1));
+    return ratio;  // ~0.54 for steam
+  }
+
+  // Two-phase: critical ratio is higher (harder to choke)
+  // Use empirical correlation based on quality
+  // At low quality (mostly liquid), ratio approaches 1 (no choking)
+  // At high quality (mostly vapor), ratio approaches gas value (~0.55)
+  const x = state.quality;
+  const vapor_ratio = 0.55;
+  const liquid_ratio = 0.95;  // Effectively no choking
+
+  return liquid_ratio + x * (vapor_ratio - liquid_ratio);
+}
+
+// ============================================================================
 // High-Temperature Vapor (Ideal Gas Approximation)
 // ============================================================================
 
