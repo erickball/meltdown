@@ -19,6 +19,7 @@ import { PhysicsOperator, cloneSimulationState } from '../solver';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
 import { saturationPressure } from '../water-properties';
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
+import { totalMoles, steamNcgSoundSpeed, ncgSoundSpeed, R_GAS } from '../gas-properties';
 
 // ============================================================================
 // Flow Operator
@@ -996,6 +997,9 @@ export class FlowOperator implements PhysicsOperator {
    * For compressible flow (vapor, two-phase), this is when flow velocity reaches
    * sound speed. For liquid, returns Infinity (incompressible).
    *
+   * Handles steam+NCG mixtures by calculating effective sound speed for the
+   * gas mixture based on mole-weighted properties.
+   *
    * Also checks critical pressure ratio - if downstream pressure is below critical,
    * flow is definitely choked regardless of velocity.
    *
@@ -1016,12 +1020,45 @@ export class FlowOperator implements PhysicsOperator {
       return Infinity;
     }
 
-    // Get upstream state for sound speed calculation
-    const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
+    const fluid = upstreamNode.fluid;
+    const T = fluid.temperature;
+    const P = fluid.pressure;
+    const V = upstreamNode.volume;
 
-    // Calculate sound speed and critical mass flux
-    const c = soundSpeed(upstreamState);
-    const rho = upstreamState.density;
+    // Check if NCG is present
+    const ncg = fluid.ncg;
+    const ncgMoles = ncg ? totalMoles(ncg) : 0;
+
+    let c: number;  // Sound speed
+    let rho: number;  // Density for mass flux calculation
+
+    if (ncgMoles > 0 && V > 0) {
+      // NCG is present - need to calculate mixture sound speed
+      // First, estimate steam moles from partial pressure
+      // P_steam = P_total - P_ncg
+      const P_ncg = ncgMoles * R_GAS * T / V;
+      const P_steam = Math.max(0, P - P_ncg);
+
+      // Estimate steam moles: n = PV/RT
+      const steamMoles = P_steam * V / (R_GAS * T);
+
+      if (steamMoles < ncgMoles * 0.02) {
+        // Negligible steam - use pure NCG sound speed
+        c = ncgSoundSpeed(ncg!, T);
+      } else {
+        // Steam + NCG mixture
+        c = steamNcgSoundSpeed(ncg!, steamMoles, T);
+      }
+
+      // For density, use actual mixture density (mass/volume)
+      rho = fluid.mass / V;
+    } else {
+      // Pure steam (no NCG) - use water properties sound speed
+      const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
+      c = soundSpeed(upstreamState);
+      rho = upstreamState.density;
+    }
+
     const A = conn.flowArea;
 
     // Maximum flow at sonic velocity
@@ -1029,8 +1066,9 @@ export class FlowOperator implements PhysicsOperator {
     const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
     const maxFlow = dischargeCoeff * rho * A * c;
 
-    // Also check critical pressure ratio
-    const critRatio = criticalPressureRatio(upstreamState);
+    // Also check critical pressure ratio (use approximate value for gas mixtures)
+    // For air-like mixtures, gamma ≈ 1.4, giving critical ratio ≈ 0.528
+    const critRatio = ncgMoles > 0 ? 0.53 : criticalPressureRatio(this.nodeToWaterState(upstreamNode, flowPhase));
     if (critRatio > 0) {
       const P_up = upstreamNode.fluid.pressure;
       const P_down = downstreamNode.fluid.pressure;
@@ -1039,8 +1077,8 @@ export class FlowOperator implements PhysicsOperator {
       // If downstream pressure is below critical, flow is definitely choked
       if (actualRatio < critRatio) {
         // Store choked status on connection for display
-        (conn as any).isChoked = true;
-        (conn as any).machNumber = 1.0;
+        conn.isChoked = true;
+        conn.machNumber = 1.0;
         return maxFlow;
       }
     }

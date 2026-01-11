@@ -273,6 +273,86 @@ export function mixtureCv(comp: GasComposition): number {
   return cvSum / total;
 }
 
+/**
+ * Get the mixture gamma (Cp/Cv) using mole-fraction weighting.
+ */
+export function mixtureGamma(comp: GasComposition): number {
+  const cp = mixtureCp(comp);
+  const cv = mixtureCv(comp);
+  if (cv <= 0) return 1.4;  // Default to air-like value
+  return cp / cv;
+}
+
+/**
+ * Calculate sound speed in an NCG mixture (no steam).
+ * c = sqrt(gamma * R * T / M)
+ *
+ * For ideal gas mixtures, sound speed depends on:
+ * - gamma (Cp/Cv) of the mixture
+ * - Temperature
+ * - Average molecular weight of the mixture
+ *
+ * @param comp - Gas composition (moles)
+ * @param T_K - Temperature in Kelvin
+ * @returns Sound speed in m/s
+ */
+export function ncgSoundSpeed(comp: GasComposition, T_K: number): number {
+  const total = totalMoles(comp);
+  if (total <= 0) return 340;  // Default to air at room temp
+
+  const gamma = mixtureGamma(comp);
+  const M_avg = averageMolecularWeight(comp);  // kg/mol
+
+  // c = sqrt(gamma * R * T / M)
+  return Math.sqrt(gamma * R_GAS * T_K / M_avg);
+}
+
+/**
+ * Calculate sound speed in a steam + NCG mixture.
+ *
+ * For a mixture of steam and NCG, we treat them as an ideal gas mixture
+ * and calculate the effective gamma and molecular weight.
+ *
+ * @param ncg - NCG composition (moles)
+ * @param steamMoles - Moles of steam in the mixture
+ * @param T_K - Temperature in Kelvin
+ * @returns Sound speed in m/s
+ */
+export function steamNcgSoundSpeed(ncg: GasComposition, steamMoles: number, T_K: number): number {
+  const ncgMoles = totalMoles(ncg);
+  const totalMol = ncgMoles + steamMoles;
+
+  if (totalMol <= 0) return 400;  // Default to steam-like
+
+  // Steam properties (approximate)
+  const M_steam = 0.018015;  // kg/mol
+  // Steam gamma varies with temperature, ~1.33 at low T, ~1.13 near critical
+  const T_ratio = Math.min(1, Math.max(0, (T_K - 373) / (647 - 373)));
+  const gamma_steam = 1.33 - 0.20 * T_ratio;
+  // Steam Cp ≈ 37 J/(mol·K) at low pressure
+  const cp_steam = 37;
+  const cv_steam = cp_steam / gamma_steam;
+
+  // Calculate mixture properties
+  const steamFrac = steamMoles / totalMol;
+  const ncgFrac = ncgMoles / totalMol;
+
+  // Mole-weighted average molecular weight
+  const M_ncg = ncgMoles > 0 ? averageMolecularWeight(ncg) : 0.029;  // Default to air M
+  const M_mix = steamFrac * M_steam + ncgFrac * M_ncg;
+
+  // Mole-weighted Cp and Cv
+  const cp_ncg = ncgMoles > 0 ? mixtureCp(ncg) : 29;  // Default to N2
+  const cv_ncg = ncgMoles > 0 ? mixtureCv(ncg) : 21;
+
+  const cp_mix = steamFrac * cp_steam + ncgFrac * cp_ncg;
+  const cv_mix = steamFrac * cv_steam + ncgFrac * cv_ncg;
+  const gamma_mix = cp_mix / cv_mix;
+
+  // c = sqrt(gamma * R * T / M)
+  return Math.sqrt(gamma_mix * R_GAS * T_K / M_mix);
+}
+
 // ============================================================================
 // Ideal Gas Law Calculations
 // ============================================================================
