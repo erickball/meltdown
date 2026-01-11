@@ -264,14 +264,20 @@ function renderZoneWithQuality(
   }
 }
 
+// Steam color for mixed gas rendering (white)
+const STEAM_COLOR: RGB = { r: 255, g: 255, b: 255 };
+
+// Threshold below which steam is not shown in mixed-gas rendering
+const STEAM_VISIBILITY_THRESHOLD = 0.02; // 2%
+
 /**
- * Render NCG (non-condensible gases) overlay on vapor space.
+ * Render NCG (non-condensible gases) in vapor space as a mixed-gas display.
  *
- * For air: renders as solid blended color
- * For other gas mixtures: renders pixelated with each gas species as distinct color
+ * When steam fraction >= 2%: pixelated rendering with steam as white pixels
+ *   interspersed with NCG species pixels (air, N2, O2, H2, etc.)
+ * When steam fraction < 2%: pure NCG rendering (solid air or pixelated NCG)
  *
- * The NCG is rendered as an overlay on top of the steam, with opacity based on
- * NCG partial pressure relative to total pressure.
+ * This replaces the old overlay approach which caused blending artifacts.
  */
 function renderNcgOverlay(
   ctx: CanvasRenderingContext2D,
@@ -285,20 +291,86 @@ function renderNcgOverlay(
 ): void {
   if (ncgFraction <= 0.01) return; // Skip if negligible NCG
 
+  const steamFraction = 1 - ncgFraction;
   const timeSeed = getTimeSeed();
 
-  // Air gets solid blended rendering
-  if (ncgViz.isAir) {
-    ctx.fillStyle = rgbToString(ncgViz.blendedColor, ncgFraction * 0.7);
+  // If steam is below threshold, show pure NCG (no steam pixels)
+  if (steamFraction < STEAM_VISIBILITY_THRESHOLD) {
+    // Pure NCG rendering
+    if (ncgViz.isAir) {
+      // Air gets solid blended rendering
+      ctx.fillStyle = rgbToString(ncgViz.blendedColor, 1.0);
+      ctx.fillRect(x, y, width, height);
+      return;
+    }
+
+    // Non-air NCG: pixelated rendering of just the NCG species
+    ctx.fillStyle = rgbToString(ncgViz.blendedColor, 1.0);
     ctx.fillRect(x, y, width, height);
+
+    const cols = Math.ceil(width / pixelSize);
+    const rows = Math.ceil(height / pixelSize);
+
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const px = x + col * pixelSize;
+        const py = y + row * pixelSize;
+        const pw = Math.min(pixelSize, x + width - px);
+        const ph = Math.min(pixelSize, y + height - py);
+
+        // Pick which gas species this pixel represents
+        const speciesSeed = row * 2000 + col + timeSeed * 7919;
+        const speciesRand = seededRandom(speciesSeed);
+
+        let cumulative = 0;
+        let selectedColor: RGB = ncgViz.blendedColor;
+
+        for (const gasInfo of ncgViz.gasColors) {
+          cumulative += gasInfo.fraction;
+          if (speciesRand < cumulative) {
+            selectedColor = gasInfo.color;
+            break;
+          }
+        }
+
+        ctx.fillStyle = rgbToString(selectedColor, 0.9);
+        ctx.fillRect(px, py, pw, ph);
+      }
+    }
     return;
   }
 
-  // For non-air mixtures, use pixelated rendering
-  // Each pixel randomly picks a gas species based on mole fractions
+  // Steam + NCG mixture: pixelated rendering with both steam and NCG as distinct species
+  // Steam is shown as white pixels, NCG species as their respective colors
 
-  // Fill background with blended NCG color first to avoid visible gaps between pixels
-  ctx.fillStyle = rgbToString(ncgViz.blendedColor, ncgFraction * 0.7);
+  // Build combined species list: steam + NCG gases
+  // Fractions are already normalized (steamFraction + ncgFraction = 1)
+  interface MixedGasInfo {
+    label: string;
+    color: RGB;
+    fraction: number;
+  }
+
+  const mixedGases: MixedGasInfo[] = [
+    { label: 'Steam', color: STEAM_COLOR, fraction: steamFraction },
+  ];
+
+  // Add NCG species with their fractions scaled by ncgFraction
+  for (const gasInfo of ncgViz.gasColors) {
+    mixedGases.push({
+      label: String(gasInfo.species),
+      color: gasInfo.color,
+      fraction: gasInfo.fraction * ncgFraction,
+    });
+  }
+
+  // Fill background with blended color to avoid gaps
+  const blendedBg = {
+    r: STEAM_COLOR.r * steamFraction + ncgViz.blendedColor.r * ncgFraction,
+    g: STEAM_COLOR.g * steamFraction + ncgViz.blendedColor.g * ncgFraction,
+    b: STEAM_COLOR.b * steamFraction + ncgViz.blendedColor.b * ncgFraction,
+  };
+  ctx.fillStyle = rgbToString(blendedBg, 0.85);
   ctx.fillRect(x, y, width, height);
 
   const cols = Math.ceil(width / pixelSize);
@@ -311,29 +383,22 @@ function renderNcgOverlay(
       const pw = Math.min(pixelSize, x + width - px);
       const ph = Math.min(pixelSize, y + height - py);
 
-      // First decide if this pixel shows NCG at all (based on ncgFraction)
-      const ncgSeed = row * 1000 + col + timeSeed * 3571;
-      const ncgRand = seededRandom(ncgSeed);
-
-      if (ncgRand >= ncgFraction) continue; // This pixel shows steam, not NCG
-
-      // Pick which gas species this pixel represents
+      // Pick which gas (steam or NCG species) this pixel represents
       const speciesSeed = row * 2000 + col + timeSeed * 7919;
       const speciesRand = seededRandom(speciesSeed);
 
-      // Accumulate fractions to select species
       let cumulative = 0;
-      let selectedColor: RGB = ncgViz.blendedColor;
+      let selectedColor: RGB = blendedBg;
 
-      for (const gasInfo of ncgViz.gasColors) {
-        cumulative += gasInfo.fraction;
+      for (const gas of mixedGases) {
+        cumulative += gas.fraction;
         if (speciesRand < cumulative) {
-          selectedColor = gasInfo.color;
+          selectedColor = gas.color;
           break;
         }
       }
 
-      ctx.fillStyle = rgbToString(selectedColor, 0.8);
+      ctx.fillStyle = rgbToString(selectedColor, 0.9);
       ctx.fillRect(px, py, pw, ph);
     }
   }
@@ -508,7 +573,12 @@ function calculateNcgFraction(fluid: Fluid): number {
  *
  * Uses liquidFraction to stratify the display:
  * - If liquidFraction is between 0 and 1, shows stratified liquid/vapor
- * - NCG is rendered as overlay on vapor space
+ * - NCG in vapor space is rendered using mixed-gas pixelated display
+ *
+ * For vapor space with NCG:
+ * - When NCG > 1%: renderNcgOverlay handles the entire vapor space as a mixed-gas
+ *   display (steam as white pixels + NCG species as their colors)
+ * - When NCG <= 1%: render pure steam
  */
 function renderFluidWithNcg(
   ctx: CanvasRenderingContext2D,
@@ -521,6 +591,10 @@ function renderFluidWithNcg(
   separation: number = 1,
   pixelSize: number = 4
 ): void {
+  // Check NCG fraction upfront - if high enough, renderNcgOverlay will handle vapor space
+  const ncgFrac = calculateNcgFraction(fluid);
+  const hasSignificantNcg = ncgFrac > 0.01;
+
   // Determine if we should render stratified (liquid + vapor)
   // Use stratification if:
   // 1. Explicitly two-phase, OR
@@ -529,75 +603,84 @@ function renderFluidWithNcg(
     (liquidFraction > 0.001 && liquidFraction < 0.999);
 
   if (isStratified) {
-    // For two-phase or stratified display, we need to apply NCG-based opacity reduction
-    // to the vapor portion so that high-NCG fluids (like air) don't suddenly appear
-    // when transitioning from pure vapor to two-phase
-    const ncgFrac = calculateNcgFraction(fluid);
-    const steamOpacity = 1 - ncgFrac; // Steam fades out as NCG increases
-    const savedAlpha = ctx.globalAlpha;
+    const liquidHeight = height * liquidFraction;
+    const vaporHeight = height - liquidHeight;
 
     if (fluid.phase === 'two-phase') {
-      // Use pixelated two-phase rendering for actual two-phase fluid
-      // Apply steam opacity to maintain consistency with pure vapor rendering
-      if (steamOpacity > 0.01) {
-        ctx.globalAlpha = savedAlpha * steamOpacity;
+      if (hasSignificantNcg) {
+        // With significant NCG, render liquid portion only (vapor handled by NCG overlay)
+        // For two-phase, still need to render the liquid zone
+        if (liquidHeight > 0) {
+          const T_sat = getSaturationTemp(fluid.pressure);
+          const { liquid: liquidColor } = getTwoPhaseColors(fluid);
+          const massQuality = fluid.quality ?? 0.5;
+          const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
+
+          // Liquid zone effective quality
+          const liquidZoneQuality = (1 - separation) * volumeFraction;
+
+          if (separation >= 0.99) {
+            // Pure liquid zone
+            const liquidFluid: Fluid = {
+              temperature: T_sat,
+              pressure: fluid.pressure,
+              phase: 'liquid',
+              flowRate: 0,
+            };
+            ctx.fillStyle = getFluidColor(liquidFluid);
+            ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
+          } else {
+            // Mixed liquid zone (pixelated)
+            const { vapor: vaporColor } = getTwoPhaseColors(fluid);
+            renderZoneWithQuality(ctx, x, y + vaporHeight, width, liquidHeight,
+              liquidColor, vaporColor, liquidZoneQuality);
+          }
+        }
+      } else {
+        // No significant NCG - use normal two-phase rendering
         renderStratifiedTwoPhase(ctx, fluid, x, y, width, height, liquidFraction, separation);
-        ctx.globalAlpha = savedAlpha;
       }
     } else {
       // Simple stratification for partial fill with single-phase fluid
-      // (e.g., low steam pressure + NCG case)
-      const liquidHeight = height * liquidFraction;
-      const vaporHeight = height - liquidHeight;
-
-      // Vapor region (top) - apply steam opacity
-      if (vaporHeight > 0 && steamOpacity > 0.01) {
-        ctx.globalAlpha = savedAlpha * steamOpacity;
-        const vaporFluid: Fluid = { ...fluid, phase: 'vapor' };
-        ctx.fillStyle = getFluidColor(vaporFluid);
-        ctx.fillRect(x, y, width, vaporHeight);
-        ctx.globalAlpha = savedAlpha;
-      }
-
-      // Liquid region (bottom) - full opacity
+      // Liquid region (bottom) - full opacity, always rendered
       if (liquidHeight > 0) {
         const liquidFluid: Fluid = { ...fluid, phase: 'liquid' };
         ctx.fillStyle = getFluidColor(liquidFluid);
         ctx.fillRect(x, y + vaporHeight, width, liquidHeight);
       }
+
+      // Vapor region (top) - only render if NCG is low (otherwise NCG overlay handles it)
+      if (vaporHeight > 0 && !hasSignificantNcg) {
+        const vaporFluid: Fluid = { ...fluid, phase: 'vapor' };
+        ctx.fillStyle = getFluidColor(vaporFluid);
+        ctx.fillRect(x, y, width, vaporHeight);
+      }
     }
   } else {
     // Single phase fills entire region
-    // For vapor with NCG, reduce steam opacity based on NCG fraction
-    // so that high-NCG fluids (like air) are more transparent
-    const ncgFrac = fluid.phase === 'vapor' ? calculateNcgFraction(fluid) : 0;
-    const steamOpacity = 1 - ncgFrac; // Steam fades out as NCG increases
-
-    if (steamOpacity > 0.01) {
-      const savedAlpha = ctx.globalAlpha;
-      ctx.globalAlpha *= steamOpacity;
+    if (fluid.phase === 'vapor' && hasSignificantNcg) {
+      // Vapor with significant NCG - NCG overlay will handle entire region
+      // Don't draw steam here to avoid blending issues
+    } else {
+      // Pure liquid, or vapor with negligible NCG - draw normally
       ctx.fillStyle = getFluidColor(fluid);
       ctx.fillRect(x, y, width, height);
-      ctx.globalAlpha = savedAlpha;
     }
   }
 
-  // Then add NCG overlay on vapor space
+  // Render NCG mixed-gas display in vapor space
   const ncgViz = getNcgVisualization(fluid.ncg);
-  if (!ncgViz) return;
-
-  const ncgFraction = calculateNcgFraction(fluid);
-  if (ncgFraction <= 0.01) return;
+  if (!ncgViz || ncgFrac <= 0.01) return;
 
   // NCG is only visible in vapor space
   if (isStratified) {
     const vaporHeight = height * (1 - liquidFraction);
     if (vaporHeight > 0) {
-      renderNcgOverlay(ctx, ncgViz, x, y, width, vaporHeight, ncgFraction, pixelSize);
+      renderNcgOverlay(ctx, ncgViz, x, y, width, vaporHeight, ncgFrac, pixelSize);
     }
   } else if (fluid.phase === 'vapor' || liquidFraction < 0.001) {
-    // Pure vapor - NCG overlays the whole region
-    renderNcgOverlay(ctx, ncgViz, x, y, width, height, ncgFraction, pixelSize);
+    // Pure vapor - NCG covers the whole region
+    renderNcgOverlay(ctx, ncgViz, x, y, width, height, ncgFrac, pixelSize);
   }
   // For pure liquid, NCG is dissolved and not visible
 

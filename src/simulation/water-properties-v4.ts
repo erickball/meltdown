@@ -512,6 +512,61 @@ function findSaturationPropsAtV(v: number): { u_g: number; T_sat: number; P_sat:
 }
 
 /**
+ * Find ALL saturation properties at the temperature where v = v_g(T).
+ * Returns T, P, u_f, u_g, v_f, v_g at that temperature.
+ * Used by findTwoPhaseState for consistent interpolation at the high-quality boundary.
+ *
+ * Returns null if v is outside the saturation dome range.
+ */
+function findAllSaturationPropsAtV(v: number): {
+  T: number;
+  P: number;
+  u_f: number;
+  u_g: number;
+  v_f: number;
+  v_g: number;
+} | null {
+  if (!saturationDome) return null;
+
+  const rawData = saturationDome.raw_data;
+  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
+  const v_g_min = rawData[rawData.length - 1].v_g;  // ~0.00494 m³/kg near critical point
+
+  // v must be within the range of v_g values on the saturation curve
+  if (v > v_g_max || v < v_g_min) {
+    return null;
+  }
+
+  // Binary search for T where v_g(T) = v
+  // v_g decreases with increasing T (index)
+  let lo = 0;
+  let hi = rawData.length - 1;
+
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (rawData[mid].v_g > v) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+
+  // Interpolate between lo and hi
+  const v_g_lo = rawData[lo].v_g;
+  const v_g_hi = rawData[hi].v_g;
+  const t = (v - v_g_lo) / (v_g_hi - v_g_lo);
+
+  return {
+    T: rawData[lo].T_K + t * (rawData[hi].T_K - rawData[lo].T_K),
+    P: (rawData[lo].P_MPa + t * (rawData[hi].P_MPa - rawData[lo].P_MPa)) * 1e6,
+    u_f: (rawData[lo].u_f + t * (rawData[hi].u_f - rawData[lo].u_f)) * 1000,
+    u_g: (rawData[lo].u_g + t * (rawData[hi].u_g - rawData[lo].u_g)) * 1000,
+    v_f: rawData[lo].v_f + t * (rawData[hi].v_f - rawData[lo].v_f),
+    v_g: v,  // By definition, this is exactly v
+  };
+}
+
+/**
  * Find u_sat on the saturation dome boundary for a given specific volume v.
  * Uses binary search on the pre-built saturation curve.
  *
@@ -680,8 +735,8 @@ function isInsideTwoPhaseDome(u: number, v: number): {
 let lastTwoPhaseFailure: {
   u: number;
   v: number;
-  diff_lo: { x_v: number; x_u: number; diff: number };
-  diff_hi: { x_v: number; x_u: number; diff: number };
+  diff_lo: { x_v: number; x_u: number; diff: number; v_f: number; v_g: number; u_f: number; u_g: number };
+  diff_hi: { x_v: number; x_u: number; diff: number; v_f: number; v_g: number; u_f: number; u_g: number };
   T_lo: number;
   T_hi: number;
 } | null = null;
@@ -703,10 +758,14 @@ function findTwoPhaseState(u: number, v: number): {
   // x_v = (v - v_f) / (v_g - v_f)
   // x_u = (u - u_f) / (u_g - u_f)
 
-  let T_lo = T_TRIPLE + 0.001;  // Start very close to triple point
-  let T_hi = T_CRIT - 0.01;    // Get close to critical point
+  const rawData = saturationDome.raw_data;
+  const T_data_min = rawData[0].T_K;  // Triple point temperature from data
+  const T_data_max = rawData[rawData.length - 1].T_K;  // Highest T in saturation data
 
-  function calcQualityDiff(T: number): { x_v: number; x_u: number; diff: number } {
+  let T_lo = T_data_min;
+  let T_hi = T_data_max;
+
+  function calcQualityDiff(T: number): { x_v: number; x_u: number; diff: number; v_f: number; v_g: number; u_f: number; u_g: number } {
     const v_f = v_f_from_T(T);
     const v_g = v_g_from_T(T);
     const u_f = u_f_from_T(T);
@@ -715,34 +774,50 @@ function findTwoPhaseState(u: number, v: number): {
     const x_v = (v - v_f) / (v_g - v_f);
     const x_u = (u - u_f) / (u_g - u_f);
 
-    return { x_v, x_u, diff: x_v - x_u };
+    return { x_v, x_u, diff: x_v - x_u, v_f, v_g, u_f, u_g };
   }
 
-  // Narrow T_hi to where v < v_g(T) - otherwise x_v > 1 and no valid solution
-  // Binary search for max valid T where v_g(T) > v
-  // Only needed if v_g at current T_hi is less than v
-  const v_g_initial = v_g_from_T(T_hi);
-  if (v_g_initial < v) {
-    // Need to find where v_g(T) = v
-    let lo = T_lo;
-    let hi = T_hi;
-    while (hi - lo > 0.0001) {  // Fine tolerance
-      const mid = (lo + hi) / 2;
-      const v_g_mid = v_g_from_T(mid);
-      if (v_g_mid > v) {
-        // v_g is still larger than v, can go higher
-        lo = mid;
-      } else {
-        // v_g is smaller than v, need lower T
-        hi = mid;
-      }
-    }
-    // Use lo, which guarantees v_g(T_hi) >= v, so x_v <= 1
-    T_hi = lo;
-  }
+  // For the high-quality endpoint, use v-indexed interpolation to find exact T where v_g(T) = v.
+  // This ensures consistency with findSaturationU which also uses v-indexed interpolation.
+  const satPropsAtV = findAllSaturationPropsAtV(v);
 
   let diff_lo = calcQualityDiff(T_lo);
-  let diff_hi = calcQualityDiff(T_hi);
+  let diff_hi: { x_v: number; x_u: number; diff: number; v_f: number; v_g: number; u_f: number; u_g: number };
+
+  if (satPropsAtV) {
+    // Use the exact saturation properties at v_g = v
+    T_hi = satPropsAtV.T;
+    const x_v = (v - satPropsAtV.v_f) / (satPropsAtV.v_g - satPropsAtV.v_f);  // Should be exactly 1.0
+    const x_u = (u - satPropsAtV.u_f) / (satPropsAtV.u_g - satPropsAtV.u_f);
+    diff_hi = {
+      x_v,
+      x_u,
+      diff: x_v - x_u,
+      v_f: satPropsAtV.v_f,
+      v_g: satPropsAtV.v_g,
+      u_f: satPropsAtV.u_f,
+      u_g: satPropsAtV.u_g,
+    };
+  } else {
+    // v is outside the saturation dome range - use T-indexed fallback
+    const v_g_initial = v_g_from_T(T_hi);
+    if (v_g_initial < v) {
+      // Need to find where v_g(T) = v via binary search
+      let lo = T_lo;
+      let hi = T_hi;
+      while (hi - lo > 0.0001) {
+        const mid = (lo + hi) / 2;
+        const v_g_mid = v_g_from_T(mid);
+        if (v_g_mid > v) {
+          lo = mid;
+        } else {
+          hi = mid;
+        }
+      }
+      T_hi = lo;
+    }
+    diff_hi = calcQualityDiff(T_hi);
+  }
 
   // Check if either endpoint is already close enough to a solution
   const tolerance = 1e-6;
@@ -1470,15 +1545,24 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     // If we get here, dome check said inside but findTwoPhaseState couldn't find consistent T.
     // This should not happen if dome check is correct. Throw an error with diagnostics.
     const diag = lastTwoPhaseFailure;
+    const u_sat = findSaturationU(v);
     let diagStr = '';
     if (diag) {
-      diagStr = `\n  At T_lo=${(diag.T_lo - 273.15).toFixed(1)}C: x_v=${diag.diff_lo.x_v.toFixed(4)}, x_u=${diag.diff_lo.x_u.toFixed(4)}, diff=${diag.diff_lo.diff.toFixed(6)}` +
-        `\n  At T_hi=${(diag.T_hi - 273.15).toFixed(1)}C: x_v=${diag.diff_hi.x_v.toFixed(4)}, x_u=${diag.diff_hi.x_u.toFixed(4)}, diff=${diag.diff_hi.diff.toFixed(6)}` +
+      diagStr = `\n  Dome check: u=${(u/1e3).toFixed(9)} kJ/kg, u_sat=${u_sat !== null ? (u_sat/1e3).toFixed(9) : 'null'} kJ/kg` +
+        `\n  Margin: u - u_sat = ${u_sat !== null ? ((u - u_sat)/1e3).toFixed(9) : 'N/A'} kJ/kg` +
+        `\n  At T_lo=${(diag.T_lo - 273.15).toFixed(4)}C:` +
+        `\n    x_v=${diag.diff_lo.x_v.toFixed(9)}, x_u=${diag.diff_lo.x_u.toFixed(9)}, diff=${diag.diff_lo.diff.toFixed(9)}` +
+        `\n    v_f=${diag.diff_lo.v_f.toFixed(9)}, v_g=${diag.diff_lo.v_g.toFixed(9)}` +
+        `\n    u_f=${(diag.diff_lo.u_f/1e3).toFixed(9)} kJ/kg, u_g=${(diag.diff_lo.u_g/1e3).toFixed(9)} kJ/kg` +
+        `\n  At T_hi=${(diag.T_hi - 273.15).toFixed(4)}C:` +
+        `\n    x_v=${diag.diff_hi.x_v.toFixed(9)}, x_u=${diag.diff_hi.x_u.toFixed(9)}, diff=${diag.diff_hi.diff.toFixed(9)}` +
+        `\n    v_f=${diag.diff_hi.v_f.toFixed(9)}, v_g=${diag.diff_hi.v_g.toFixed(9)}` +
+        `\n    u_f=${(diag.diff_hi.u_f/1e3).toFixed(9)} kJ/kg, u_g=${(diag.diff_hi.u_g/1e3).toFixed(9)} kJ/kg` +
         `\n  No sign change in (x_v - x_u) means no consistent two-phase T exists.`;
     }
     throw new Error(
       `[WaterProps v4] Inconsistent dome check: isInsideTwoPhaseDome returned true but ` +
-      `findTwoPhaseState failed. u=${(u/1e3).toFixed(2)} kJ/kg, v=${v.toFixed(4)} m³/kg.${diagStr}`
+      `findTwoPhaseState failed. u=${(u/1e3).toFixed(9)} kJ/kg, v=${v.toFixed(9)} m³/kg.${diagStr}`
     );
   }
 
