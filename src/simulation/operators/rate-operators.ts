@@ -883,6 +883,33 @@ export class FlowRateOperator implements RateOperator {
       // Store flow phase on connection for debug display
       conn.currentFlowPhase = flowPhase;
 
+      // DEBUG: Log flow rates for connections with high energy/mass ratio or break connections
+      const isBreak = conn.isBreakConnection ?? false;
+      const upstreamU = upstreamNode.fluid.internalEnergy;
+      const upstreamM = upstreamNode.fluid.mass;
+      const u_upstream = upstreamM > 0 ? upstreamU / upstreamM : 0;
+      const drainFraction = upstreamM > 0 ? absMassFlow / upstreamM : 0;
+
+      // Log if:
+      // 1. This is a break connection with significant flow
+      // 2. Or enthalpy is much higher than specific internal energy (h >> u suggests bad Pv)
+      // 3. Or drain rate is very high (>10% per second)
+      const enthalpyRatio = u_upstream > 0 ? h_up / u_upstream : 0;
+      const shouldLogFlow = (isBreak && absMassFlow > 0.1) ||
+                            (enthalpyRatio > 2 && absMassFlow > 0.01) ||
+                            (drainFraction > 0.1);
+
+      if (shouldLogFlow) {
+        console.warn(`[FlowRate DEBUG] ${conn.id}: ${upstreamId} → ${downstreamId}`);
+        console.warn(`  Flow: ${absMassFlow.toFixed(3)} kg/s ${flowPhase}, h=${(h_up/1e3).toFixed(1)} kJ/kg`);
+        console.warn(`  Upstream: mass=${upstreamM.toFixed(3)}kg, U=${(upstreamU/1e6).toFixed(4)}MJ, u=${(u_upstream/1e3).toFixed(1)}kJ/kg`);
+        console.warn(`  Rates: dMass=${(-absMassFlow).toFixed(3)}kg/s, dEnergy=${(-energyFlow/1e6).toFixed(4)}MJ/s`);
+        console.warn(`  Drain: ${(drainFraction*100).toFixed(1)}%/s, h/u ratio=${enthalpyRatio.toFixed(2)}`);
+        if (isBreak) {
+          console.warn(`  Break connection: fraction=${conn.breakFraction?.toFixed(3) ?? '?'}, area=${conn.flowArea?.toFixed(4) ?? '?'}m²`);
+        }
+      }
+
       // Update rates: upstream loses mass/energy, downstream gains
       const upRates = rates.flowNodes.get(upstreamId)!;
       const downRates = rates.flowNodes.get(downstreamId)!;
@@ -1156,7 +1183,77 @@ export class FlowRateOperator implements RateOperator {
 
       const u = waterEnergy / waterMass;
       const v = waterVolume / waterMass;
-      return u + P * v;
+
+      // CRITICAL: Don't blindly trust stored P - it may be stale!
+      // The enthalpy h = u + Pv must use a pressure consistent with the current (u, v).
+      // If stored P is inconsistent, we'd remove more energy per mass than actually exists.
+      //
+      // Compute P from ideal gas at energy-consistent temperature:
+      //   For steam: u ≈ u_ref + Cv*(T - T_ref), so T = T_ref + (u - u_ref)/Cv
+      //   Then P_ideal = (R/M) * T / v
+      //
+      // Blend between stored P and ideal gas P based on specific volume:
+      //   - At v < 0.001 (liquid): use stored P (Pv term is tiny anyway)
+      //   - At v > 0.1 (vapor): use ideal gas P
+      //   - In between: smooth blend to avoid discontinuities
+      const R_over_M = 8.314 / 0.018;  // ~462 J/kg-K for water
+      const Cv_steam = 1400;           // J/kg-K
+      const u_ref = 2.375e6;           // J/kg at 273K
+      const T_ref = 273;               // K
+
+      // Estimate T from energy: u = u_ref + Cv*(T - T_ref)
+      const T_from_energy = T_ref + (u - u_ref) / Cv_steam;
+
+      let P_ideal: number;
+      if (T_from_energy > 10) {
+        P_ideal = (1 / v) * R_over_M * T_from_energy;
+      } else {
+        // Extremely low energy - use minimal T to get minimal P
+        // This prevents runaway energy extraction from unphysical states
+        P_ideal = (1 / v) * R_over_M * 10;
+      }
+
+      // Blend factor: 0 at v<=0.001, 1 at v>=0.1, smooth in between
+      // Using log scale for smooth transition across density range
+      let blendFactor: number;
+      if (v <= 0.001) {
+        blendFactor = 0;  // Pure liquid - use stored P
+      } else if (v >= 0.1) {
+        blendFactor = 1;  // Pure vapor - use ideal gas P
+      } else {
+        // Log-linear blend from v=0.001 to v=0.1 (factor of 100)
+        blendFactor = Math.log10(v / 0.001) / 2;  // 0 at 0.001, 1 at 0.1
+      }
+
+      const effectiveP = (1 - blendFactor) * P + blendFactor * P_ideal;
+      const h = u + effectiveP * v;
+
+      // DEBUG: Log enthalpy calculation details for problem diagnosis
+      // Enable for nodes with suspicious energy states or significant P mismatch
+      const h_stored_P = u + P * v;
+      const h_ideal_P = u + P_ideal * v;
+      const pMismatchRatio = Math.abs(P - P_ideal) / Math.max(P, P_ideal, 1);
+
+      // Log if:
+      // 1. There's >50% difference between stored and ideal P for vapor-like densities
+      // 2. Or energy implies T < 100K for vapor (anomalously cold)
+      // 3. Or specific energy is very low for vapor (<500 kJ/kg at v>0.01)
+      const shouldLog = (pMismatchRatio > 0.5 && v > 0.01) ||
+                        (T_from_energy < 100 && v > 0.01) ||
+                        (u < 500e3 && v > 0.01);
+
+      if (shouldLog) {
+        console.warn(`[getSpecificEnthalpy DEBUG] ${node.id}:`);
+        console.warn(`  State: mass=${waterMass.toFixed(3)}kg, U=${(waterEnergy/1e6).toFixed(4)}MJ, V=${(waterVolume*1e3).toFixed(1)}L`);
+        console.warn(`  Specific: u=${(u/1e3).toFixed(2)}kJ/kg, v=${(v*1e3).toFixed(2)}L/kg`);
+        console.warn(`  Stored: T=${(T-273.15).toFixed(1)}C, P=${(P/1e5).toFixed(3)}bar, phase=${node.fluid.phase}`);
+        console.warn(`  Computed: T_from_u=${(T_from_energy-273.15).toFixed(1)}C, P_ideal=${(P_ideal/1e5).toFixed(3)}bar`);
+        console.warn(`  Blend: factor=${blendFactor.toFixed(3)}, P_eff=${(effectiveP/1e5).toFixed(3)}bar`);
+        console.warn(`  Enthalpy: h_stored_P=${(h_stored_P/1e3).toFixed(1)}kJ/kg, h_ideal_P=${(h_ideal_P/1e3).toFixed(1)}kJ/kg, h_used=${(h/1e3).toFixed(1)}kJ/kg`);
+        console.warn(`  Pv work: stored=${(P*v/1e3).toFixed(1)}kJ/kg, ideal=${(P_ideal*v/1e3).toFixed(1)}kJ/kg, eff=${(effectiveP*v/1e3).toFixed(1)}kJ/kg`);
+      }
+
+      return h;
     }
 
     // For two-phase node drawing from specific phase, use phase-specific properties

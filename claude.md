@@ -4,6 +4,7 @@ In windows file paths, always use backslashes. Using forward slashes will cause 
 ## PROJECT GUIDELINES
 This project is intended as a sandbox environment with game-like aspects, to allow users to experiment with a wide variety of reactor designs. We don't need perfect accuracy, but I want all the qualitative behavior to be physically plausible, so a knowledgeable engineer looking at the simulation would not be able to tell anything is off unless they check the numbers. That also means it needs to be robust to weird configurations and poorly set up initial conditions by having a fully internally consistent physics model. It is best to avoid special cases, hard-coded values, thresholds, hysteresis, clamping, and other simplifications that may cause unstable simulation behavior. If normal methods fail (especially related to calculating water properties) any fallback assumptions must come with a very noticeable error message. Don't clamp anything. If simplifications or heuristics are needed, please discuss with me before adding them. The components should be generic building blocks as much as possible. This sandbox can simulate PWRs, BWRs, advanced reactors, or new and weird ideas for reactor designs. All the physics needs to be robust to all configurations the user might throw at us. To get there, we should follow the "anti-robustness principle" - fail loudly so we can find the source of the problem. Do not add band-aids.
 Whenever there's something potentially confusing in an interface, add a tooltip to explain.
+After any substantive changes to the code, run npm test to see if it still works.
 Style note: please avoid starting a response by telling me I'm right, unless I specifically ask whether I'm right. This is a pet peeve of mine.
 
 ## WATER PROPERTIES NOTES
@@ -13,7 +14,6 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 - If we ever fail to find a good match between x_u and x_v, we need to stop and throw a big error message. Do NOT use any fallback assumptions unless you get explicit user approval.
 
 ## TODO List
--Choked flow
 -Debug semi-implicit pressure/flow solver
 -Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
@@ -57,6 +57,7 @@ Style note: please avoid starting a response by telling me I'm right, unless I s
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 
 ## Done List
+X Choked flow
 X Add LOCA capability (atmosphere as boundary condition)
 X Make pipes, tanks, etc. rupture on high pressure (dependent on thickness)
 X When you create a component you specify pressure rating but the actual break pressure should have a random element as well (let's say 0-40% higher than specified). This is randomized at the start of the simulation and stored.
