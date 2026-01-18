@@ -3804,8 +3804,9 @@ export function renderFlowConnectionArrows(
       }
     }
 
-    // If we couldn't find port positions, fall back to old method
+    // If we couldn't find port positions, use old method (log error)
     if (!fromScreenPos || !toScreenPos) {
+      console.error(`[renderFlowConnectionArrows] Could not find port positions for ${conn.id}, using fallback`);
       const arrowInfo = getFlowConnectionPosition(conn, conn.fromNodeId, plantState);
       if (!arrowInfo) continue;
 
@@ -3970,7 +3971,8 @@ export function renderPressureGauge(
       stemBottomPos = { x: gaugeX, y: topY };
       gaugePos = { x: gaugeX, y: topY - stemLengthPx * gaugeScale };
     } else {
-      // Fallback: use simple world-to-screen conversion (2D mode without callback)
+      // No getScreenBounds callback - this shouldn't happen in normal operation
+      console.error(`[renderPressureGauge] No getScreenBounds callback provided for ${boundsComponent.id}`);
       const bounds = getComponentBounds(boundsComponent, view);
       const screenCenter = worldToScreen(boundsComponent.position, view);
       const topY = screenCenter.y + bounds.y;
@@ -4370,10 +4372,14 @@ export function renderBurstOverlays(
       if (!bounds) continue;
       screenPos = bounds.topCenter;
       scale = bounds.scale;
+      if (bounds.width === undefined || bounds.height === undefined) {
+        console.error(`[renderBurstOverlays] getScreenBounds returned no width/height for ${component.id}`);
+      }
       width = bounds.width ?? 50;
       height = bounds.height ?? 50;
     } else {
-      // Fallback: use simple world-to-screen conversion
+      // No getScreenBounds callback - this shouldn't happen in normal operation
+      console.error(`[renderBurstOverlays] No getScreenBounds callback provided for ${component.id}`);
       const compBounds = getComponentBounds(component, view);
       screenPos = worldToScreen(component.position, view);
       width = compBounds.width;
@@ -4386,23 +4392,44 @@ export function renderBurstOverlays(
     ctx.lineWidth = 3 * scale;
     ctx.setLineDash([8 * scale, 4 * scale]);
 
-    // Position the border around component center
+    // screenPos is topCenter (top of component), so the component extends from
+    // screenPos.y (top) to screenPos.y + height (bottom)
     const borderPadding = 5 * scale;
     ctx.strokeRect(
       screenPos.x - width / 2 - borderPadding,
-      screenPos.y - height / 2 - borderPadding,
+      screenPos.y - borderPadding,  // Start at top
       width + borderPadding * 2,
       height + borderPadding * 2
     );
     ctx.restore();
 
-    // Draw crack symbol
-    // For pipes, position at break location; for others, center
+    // Draw crack symbol at break location
+    // For pipes, position at break location along length; for others, use break elevation
+    // Note: screenPos is topCenter (top of component), so default crackY is at component center
     let crackX = screenPos.x;
+    let crackY = screenPos.y + height / 2;  // Default to center of component
+
     if (burstState.breakLocation !== undefined && component.type === 'pipe') {
+      // Pipe: break location is along the length (X direction)
       crackX = screenPos.x + (burstState.breakLocation - 0.5) * width;
     }
-    const crackY = screenPos.y;
+
+    // Get break elevation to position crack vertically
+    // breakElevation is absolute elevation; we need to convert to screen Y offset
+    if (burstState.breakElevation !== undefined) {
+      const flowNode = simState.flowNodes.get(nodeId);
+      if (flowNode) {
+        const nodeHeight = flowNode.height ?? 1;
+        const nodeElevation = flowNode.elevation ?? 0;
+        // Calculate fractional position within the component (0 = bottom, 1 = top)
+        const breakFraction = (burstState.breakElevation - nodeElevation) / nodeHeight;
+        // screenPos is topCenter (top of component); Y increases downward in screen space
+        // breakFraction=1 (top) -> crackY = screenPos.y (top)
+        // breakFraction=0 (bottom) -> crackY = screenPos.y + height (bottom)
+        const clampedFraction = Math.max(0, Math.min(1, breakFraction));
+        crackY = screenPos.y + (1 - clampedFraction) * height;
+      }
+    }
 
     renderCrackSymbol(ctx, crackX, crackY, scale * 1.2);
 
@@ -4422,14 +4449,19 @@ export function renderBurstOverlays(
  * Render break connections with red dashed styling.
  * These are the flow connections created when components burst.
  */
+// Type for screen bounds callback (matches renderBurstOverlays)
+type ScreenBoundsGetter = (comp: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null;
+type GroundYGetter = (worldPos: Point) => number | null;
+
 export function renderBreakConnections(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  getNodeScreenPos?: (nodeId: string) => Point | null
+  _getNodeScreenPos?: (nodeId: string) => Point | null,  // Deprecated, kept for API compatibility
+  getScreenBounds?: ScreenBoundsGetter,
+  getGroundY?: GroundYGetter
 ): void {
-  // Find all break connections
   for (const conn of simState.flowConnections) {
     if (!conn.isBreakConnection) continue;
 
@@ -4440,43 +4472,85 @@ export function renderBreakConnections(
     // Get screen positions for the connection endpoints
     let fromScreenPos: Point | null = null;
     let toScreenPos: Point | null = null;
+    let fromComponent: PlantComponent | undefined;
 
-    if (getNodeScreenPos) {
-      fromScreenPos = getNodeScreenPos(conn.fromNodeId);
-      toScreenPos = getNodeScreenPos(conn.toNodeId);
-    }
-
-    // Fallback: find components and use their positions
-    if (!fromScreenPos || !toScreenPos) {
-      // Find component for "from" node
-      for (const [compId, comp] of plantState.components) {
-        const simNodeId = (comp as { simNodeId?: string }).simNodeId;
-        if (simNodeId === conn.fromNodeId || compId === conn.fromNodeId ||
-            (conn.fromNodeId.startsWith(compId + '-'))) {
-          fromScreenPos = worldToScreen(comp.position, view);
-          break;
-        }
-      }
-
-      // For "to" node - might be atmosphere
-      if (conn.toNodeId === 'atmosphere') {
-        // Draw connection going upward off screen
-        if (fromScreenPos) {
-          toScreenPos = { x: fromScreenPos.x, y: fromScreenPos.y - 100 };
-        }
-      } else {
-        for (const [compId, comp] of plantState.components) {
-          const simNodeId = (comp as { simNodeId?: string }).simNodeId;
-          if (simNodeId === conn.toNodeId || compId === conn.toNodeId ||
-              (conn.toNodeId.startsWith(compId + '-'))) {
-            toScreenPos = worldToScreen(comp.position, view);
-            break;
-          }
-        }
+    // Find the FROM component (the one that burst)
+    for (const [compId, comp] of plantState.components) {
+      const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+      if (simNodeId === conn.fromNodeId || compId === conn.fromNodeId ||
+          conn.fromNodeId.startsWith(compId + '-')) {
+        fromComponent = comp;
+        break;
       }
     }
 
-    if (!fromScreenPos || !toScreenPos) continue;
+    // Get screen position and scale for the FROM component (the one that burst)
+    let fromBounds: { topCenter: Point; scale: number; width?: number; height?: number } | null = null;
+    if (getScreenBounds && fromComponent) {
+      fromBounds = getScreenBounds(fromComponent);
+      if (fromBounds) {
+        fromScreenPos = { ...fromBounds.topCenter };
+      }
+    }
+
+    // Error if getScreenBounds didn't work
+    if (!fromScreenPos && fromComponent) {
+      console.error(`[renderBreakConnections] getScreenBounds failed for ${fromComponent.id}, using worldToScreen`);
+      fromScreenPos = worldToScreen(fromComponent.position, view);
+    }
+
+    if (!fromScreenPos) {
+      continue;
+    }
+
+    // Calculate connection length based on the burst component's largest dimension
+    if (fromBounds?.width === undefined || fromBounds?.height === undefined) {
+      console.error(`[renderBreakConnections] No width/height from getScreenBounds for ${conn.fromNodeId}`);
+    }
+    const compWidth = fromBounds?.width ?? 50;
+    const compHeight = fromBounds?.height ?? 50;
+    const maxDimension = Math.max(compWidth, compHeight);
+
+    // Adjust FROM position based on break elevation (from the flow connection's fromElevation)
+    // fromElevation is relative to node bottom, so we need to convert to screen Y offset
+    // Note: fromScreenPos starts at topCenter (top of component)
+    if (conn.fromElevation !== undefined && fromNode.height) {
+      const nodeHeight = fromNode.height;
+      // Calculate fractional position within the component (0 = bottom, 1 = top)
+      const breakFraction = conn.fromElevation / nodeHeight;
+      // fromScreenPos is topCenter (top of component); Y increases downward in screen space
+      // breakFraction=1 (top) -> fromScreenPos.y stays at topCenter.y
+      // breakFraction=0 (bottom) -> fromScreenPos.y = topCenter.y + compHeight
+      const clampedFraction = Math.max(0, Math.min(1, breakFraction));
+      fromScreenPos.y = fromScreenPos.y + (1 - clampedFraction) * compHeight;
+    } else {
+      // No break elevation specified, default to center of component
+      fromScreenPos.y = fromScreenPos.y + compHeight / 2;
+    }
+
+    // Connection length is 0.5-1x the largest dimension
+    const connectionLength = maxDimension * 0.75;
+
+    // Use the randomized break direction from the connection, or default to upward
+    const breakDirection = conn.breakDirection ?? -Math.PI / 2;  // Default: upward
+
+    // Calculate TO position based on direction and length from the FROM position
+    toScreenPos = {
+      x: fromScreenPos.x + Math.cos(breakDirection) * connectionLength,
+      y: fromScreenPos.y + Math.sin(breakDirection) * connectionLength,
+    };
+
+    // Clamp toScreenPos.y so it doesn't go below ground level (elevation 0)
+    if (getGroundY && fromComponent) {
+      const groundY = getGroundY(fromComponent.position);
+      if (groundY !== null && toScreenPos.y > groundY) {
+        toScreenPos.y = groundY;
+      }
+    }
+
+    // Calculate midpoint for label and arrow
+    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
+    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
 
     // Draw red dashed line for break connection
     ctx.save();
@@ -4491,10 +4565,48 @@ export function renderBreakConnections(
     ctx.stroke();
     ctx.restore();
 
-    // Draw flow rate label for break connection
-    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
-    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
+    // Draw flow arrow (if there's significant flow)
+    const flowRate = Math.abs(conn.massFlowRate);
+    if (flowRate >= 1) {
+      // Calculate angle from "from" to "to" in screen space
+      const dx = toScreenPos.x - fromScreenPos.x;
+      const dy = toScreenPos.y - fromScreenPos.y;
+      const angle = Math.atan2(dy, dx) + (conn.massFlowRate < 0 ? Math.PI : 0);
 
+      // Calculate arrow size based on mass flow rate (square root scaling)
+      // Match the scaling used by regular flow arrows
+      const massFlow = Math.min(10000, flowRate);
+      const baseArrowSize = Math.max(8, 8 + Math.sqrt(massFlow) * 0.72);
+      const perspectiveScale = fromBounds?.scale ?? 1;
+      const perspectiveMultiplier = Math.max(0.3, Math.min(2.5, perspectiveScale));
+      const arrowSize = baseArrowSize * perspectiveMultiplier;
+
+      // Draw arrow at midpoint
+      ctx.save();
+      ctx.translate(midX, midY);
+      ctx.rotate(angle);
+
+      // Arrow color: orange/red for break flow
+      ctx.fillStyle = 'rgba(255, 80, 30, 1.0)';
+
+      // Draw arrow shape (pointing right when angle=0) - same as regular flow arrows
+      ctx.beginPath();
+      ctx.moveTo(arrowSize, 0);
+      ctx.lineTo(-arrowSize / 2, -arrowSize / 2);
+      ctx.lineTo(-arrowSize / 4, 0);
+      ctx.lineTo(-arrowSize / 2, arrowSize / 2);
+      ctx.closePath();
+      ctx.fill();
+
+      // Draw outline
+      ctx.strokeStyle = 'rgba(100, 0, 0, 0.8)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // Draw flow rate label for break connection
     ctx.save();
     ctx.fillStyle = '#ff3333';
     ctx.strokeStyle = '#fff';
@@ -4504,8 +4616,8 @@ export function renderBreakConnections(
     ctx.textBaseline = 'bottom';
 
     const flowLabel = `${Math.abs(conn.massFlowRate).toFixed(0)} kg/s`;
-    ctx.strokeText(flowLabel, midX, midY - 5);
-    ctx.fillText(flowLabel, midX, midY - 5);
+    ctx.strokeText(flowLabel, midX, midY - 15);
+    ctx.fillText(flowLabel, midX, midY - 15);
     ctx.restore();
 
     // Draw crack symbol at the break source

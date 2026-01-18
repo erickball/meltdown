@@ -524,7 +524,8 @@ export class PlantCanvas {
         }
       }
 
-      // Fallback for pipes without endpoint data
+      // Fallback for pipes without endpoint data (should not happen)
+      console.error(`[isPointInProjectedComponent] Pipe ${component.id} has no endpoint data`);
       const visualTop = backLeft.y - 2 * visualHalfH;
       const visualBottom = backLeft.y;
       visualQuad = [
@@ -557,7 +558,7 @@ export class PlantCanvas {
    * Returns the top-center position and scale, suitable for attaching gauges.
    * This uses the same calculation as isPointInProjectedComponent for consistency.
    */
-  public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number } | null {
+  public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
     if (!this.isometric.enabled) {
       // In 2D mode, use simple world-to-screen conversion
       const bounds = getComponentBounds(component, this.view);
@@ -565,7 +566,9 @@ export class PlantCanvas {
       const topY = screenCenter.y + bounds.y;
       return {
         topCenter: { x: screenCenter.x, y: topY },
-        scale: 1
+        scale: 1,
+        width: bounds.width,
+        height: bounds.height,
       };
     }
 
@@ -635,19 +638,25 @@ export class PlantCanvas {
           const visualThickness = halfH * avgScale * 50;
           const midX = (startScreen.pos.x + endScreen.pos.x) / 2;
           const midY = (startScreen.pos.y + endScreen.pos.y) / 2;
+          const pipeScreenLength = Math.hypot(endScreen.pos.x - startScreen.pos.x, endScreen.pos.y - startScreen.pos.y);
           // Top of pipe is at midY - visualThickness
           return {
             topCenter: { x: midX, y: midY - visualThickness },
-            scale: avgScale
+            scale: avgScale,
+            width: pipeScreenLength,
+            height: visualThickness * 2,
           };
         }
       }
-      // Fallback
+      // Fallback for pipes without endpoint data (should not happen)
+      console.error(`[getComponentScreenBounds] Pipe ${component.id} has no endpoint data`);
       const frontCenterX = (frontLeft.x + frontRight.x) / 2;
       const frontCenterY = (frontLeft.y + frontRight.y) / 2;
       return {
         topCenter: { x: frontCenterX, y: frontCenterY - 2 * visualHalfH },
-        scale: perspectiveScale
+        scale: perspectiveScale,
+        width: frontWidth,
+        height: visualHalfH * 4,
       };
     } else if (component.type === 'building') {
       // Buildings: gauge goes at the top of the back wall
@@ -667,9 +676,16 @@ export class PlantCanvas {
 
       if (backTopCenter.scale <= 0) return null;
 
+      // Calculate building screen dimensions
+      const bldgWidth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.width || 40);
+      const bldgScreenWidth = bldgWidth * backTopCenter.scale * 50;
+      const bldgScreenHeight = bldgHeight * backTopCenter.scale * 50;
+
       return {
         topCenter: backTopCenter.pos,
-        scale: backTopCenter.scale
+        scale: backTopCenter.scale,
+        width: bldgScreenWidth,
+        height: bldgScreenHeight,
       };
     } else {
       // Other components: use center-based positioning (matching component rendering)
@@ -691,9 +707,12 @@ export class PlantCanvas {
       // Component is drawn with center at (0, centerVisualHalfH) in local coords
       // So the top is at centerScreen.pos.y - 2 * centerVisualHalfH
       const topY = centerScreen.pos.y - 2 * centerVisualHalfH;
+      const centerVisualHalfW = halfW * centerZoom * verticalScale;
       return {
         topCenter: { x: centerScreen.pos.x, y: topY },
-        scale: centerScreen.scale
+        scale: centerScreen.scale,
+        width: centerVisualHalfW * 2,
+        height: centerVisualHalfH * 2,  // Full height from top to bottom (halfH * 2 = full height)
       };
     }
   }
@@ -1129,6 +1148,19 @@ export class PlantCanvas {
       return this.worldToScreenPerspective(worldPos, elevation).pos;
     } else {
       return worldToScreen(worldPos, this.view);
+    }
+  }
+
+  // Get the screen Y coordinate for ground level (elevation 0) at a given world position
+  // Used for clamping break connections so they don't go below ground
+  public getGroundY(worldPos: Point): number | null {
+    if (this.isometric.enabled) {
+      const result = this.worldToScreenPerspective(worldPos, 0);
+      if (result.scale <= 0) return null;
+      return result.pos.y;
+    } else {
+      // In 2D mode, ground level is at some fixed Y based on view
+      return worldToScreen(worldPos, this.view).y;
     }
   }
 
@@ -1641,7 +1673,8 @@ export class PlantCanvas {
             }
           }
 
-          // Fallback for pipes without endpoint data
+          // Fallback for pipes without endpoint data (should not happen)
+          console.error(`[render] Pipe ${component.id} has no endpoint data`);
           const visualHalfH = halfH * projectedZoom;
           translateX = backLeft.x;
           translateY = backLeft.y - visualHalfH;
@@ -1762,7 +1795,8 @@ export class PlantCanvas {
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
 
       // Draw break connections (red dashed lines for LOCA flows)
-      renderBreakConnections(ctx, this.simState, this.plantState, this.view);
+      const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
+      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
     }
 
     // Draw color legend at bottom of canvas
