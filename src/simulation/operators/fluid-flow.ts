@@ -51,6 +51,18 @@ export function resetFlowOperatorProfile(): void {
   };
 }
 
+/**
+ * OBSOLETE: FlowOperator - Old Euler-method flow calculation
+ *
+ * This class is NO LONGER USED in the simulation. It was replaced by:
+ * - FlowMomentumRateOperator (computes dṁ/dt for RK45 integration)
+ * - FlowRateOperator (computes mass/energy transport rates)
+ *
+ * The choked flow logic in this class (getChokedFlowLimit, computeFlowRate)
+ * is NOT being executed because the game loop uses the RateOperator system.
+ *
+ * TODO: Migrate choked flow limiting to FlowMomentumRateOperator
+ */
 export class FlowOperator implements PhysicsOperator {
   name = 'FluidFlow';
 
@@ -545,6 +557,9 @@ export class FlowOperator implements PhysicsOperator {
     const chokedLimit = this.getChokedFlowLimit(conn, upstreamNode, downstreamNode, flowPhase);
 
     // Apply choked flow limiting to steady-state calculation
+    // Note: getChokedFlowLimit may have already set isChoked=true based on pressure ratio
+    const wasChokedByPressureRatio = conn.isChoked === true;
+
     if (Math.abs(steadyStateFlow) > chokedLimit) {
       steadyStateFlow = sign * chokedLimit;
       (conn as any).isChoked = true;
@@ -553,8 +568,8 @@ export class FlowOperator implements PhysicsOperator {
       const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
       const c = soundSpeed(upstreamState);
       (conn as any).machNumber = v_steady / c;
-    } else {
-      // Not choked - calculate actual Mach number for display
+    } else if (!wasChokedByPressureRatio) {
+      // Not choked by either pressure ratio or flow limit - calculate actual Mach number for display
       if (flowPhase !== 'liquid') {
         const upstreamState = this.nodeToWaterState(upstreamNode, flowPhase);
         const c = soundSpeed(upstreamState);
@@ -565,6 +580,8 @@ export class FlowOperator implements PhysicsOperator {
         (conn as any).isChoked = false;
       }
     }
+    // If wasChokedByPressureRatio is true and flow <= limit, keep isChoked=true and machNumber=1.0
+    // (already set by getChokedFlowLimit)
 
     // Store for debug display
     conn.steadyStateFlow = steadyStateFlow;

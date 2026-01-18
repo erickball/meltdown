@@ -191,6 +191,7 @@ export interface FlowConnection {
   // Break connection metadata (set when component bursts)
   isBreakConnection?: boolean;      // True if this is a burst-created connection
   burstSourceNodeId?: string;       // Which node burst to create this connection
+  breakDirection?: number;          // Radians - direction of break for rendering (0 = right, π/2 = down)
 
   // Current flow state (computed by solver)
   massFlowRate: number;             // kg/s (positive = from -> to)
@@ -220,6 +221,8 @@ export interface FlowConnection {
     dP_friction: number;            // Pa - friction pressure drop (always opposes flow)
     dP_net: number;                 // Pa - net accelerating pressure
     dMassFlowRate: number;          // kg/s² - acceleration rate
+    isChoked?: boolean;             // True if flow is choked (sonic velocity)
+    machNumber?: number;            // Mach number (v/c)
   };
 }
 
@@ -511,6 +514,10 @@ export interface BurstState {
 
   // For pipes: fractional position along length (0-1)
   breakLocation?: number;
+
+  // Elevation of break relative to component bottom (m)
+  // Calculated at burst time based on component height and seed
+  breakElevation?: number;
 
   // For HX tube-side: track shell node for differential pressure
   isTubeSide?: boolean;

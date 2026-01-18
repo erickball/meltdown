@@ -159,6 +159,17 @@ export class BurstCheckOperator implements ConstraintOperator {
       burstState.breakLocation = seededRandom(burstState.breakSizeSeed + 12345);
     }
 
+    // Calculate break elevation along component height using the seed
+    // Uses a different seed offset to get independent randomness from breakLocation
+    const node = state.flowNodes.get(burstState.nodeId);
+    if (node && node.height !== undefined && node.height > 0) {
+      const elevationFraction = seededRandom(burstState.breakSizeSeed + 67890);
+      burstState.breakElevation = node.elevation + elevationFraction * node.height;
+    } else if (node) {
+      // If node has no height defined, use node's elevation as break point
+      burstState.breakElevation = node.elevation;
+    }
+
     // Calculate initial break fraction
     burstState.currentBreakFraction = calculateBreakFraction(
       pressure,
@@ -172,15 +183,19 @@ export class BurstCheckOperator implements ConstraintOperator {
 
     // Queue event for GameLoop to emit
     if (!state.pendingEvents) state.pendingEvents = [];
+    const elevationStr = burstState.breakElevation !== undefined
+      ? ` at ${burstState.breakElevation.toFixed(1)}m elevation`
+      : '';
     state.pendingEvents.push({
       type: 'component-burst',
-      message: `LOCA: ${burstState.componentLabel} ruptured at ${(pressure / 1e5).toFixed(1)} bar gauge (burst threshold: ${(burstState.burstPressure / 1e5).toFixed(1)} bar)`,
+      message: `LOCA: ${burstState.componentLabel} ruptured${elevationStr} at ${(pressure / 1e5).toFixed(1)} bar gauge (burst threshold: ${(burstState.burstPressure / 1e5).toFixed(1)} bar)`,
       data: {
         nodeId: burstState.nodeId,
         componentId: burstState.componentId,
         pressure: pressure,
         burstPressure: burstState.burstPressure,
         breakFraction: burstState.currentBreakFraction,
+        breakElevation: burstState.breakElevation,
       },
     });
 
@@ -223,6 +238,16 @@ export class BurstCheckOperator implements ConstraintOperator {
       // Calculate break area based on node's flow area
       const breakArea = node.flowArea * burstState.currentBreakFraction;
 
+      // Calculate fromElevation relative to node bottom
+      // Use the pseudorandom break elevation if set, otherwise fall back to node midpoint
+      const fromElev = burstState.breakElevation !== undefined
+        ? burstState.breakElevation - node.elevation
+        : (node.height ?? 0) / 2;
+
+      // Generate random direction for the break (0 to 2π)
+      // Use a different seed offset than break size to get independent randomness
+      const breakDirection = seededRandom(burstState.breakSizeSeed + 7777) * Math.PI * 2;
+
       breakConn = {
         id: breakConnId,
         fromNodeId: burstState.nodeId,
@@ -230,13 +255,15 @@ export class BurstCheckOperator implements ConstraintOperator {
         flowArea: breakArea,
         hydraulicDiameter: Math.sqrt(4 * breakArea / Math.PI),
         length: 0.1,                         // Short path for break
-        elevation: 0,                        // Assumes break is at node midpoint
+        elevation: 0,                        // Net elevation change (break to target)
+        fromElevation: fromElev,             // Elevation of break relative to node bottom
         resistanceCoeff: 2.0,                // Sharp-edged orifice
         massFlowRate: 0,
         isBreakConnection: true,
         burstSourceNodeId: burstState.nodeId,
         breakFraction: burstState.currentBreakFraction,
         breakDischargeCoeff: config.breakDischargeCoeff,
+        breakDirection,                      // Random direction for rendering
       };
       state.flowConnections.push(breakConn);
     }
