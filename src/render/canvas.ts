@@ -739,16 +739,10 @@ export class PlantCanvas {
   }
 
   public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
-    // Check all components for nearby ports
-    // Sort so contained components are checked first (they're rendered on top)
-    const components = Array.from(this.plantState.components.values()).sort((a, b) => {
-      // Contained components should be checked first
-      if (a.containedBy && !b.containedBy) return -1;
-      if (!a.containedBy && b.containedBy) return 1;
-      return 0;
-    });
+    // Collect all ports that match, then return the one visually in front
+    const matches: Array<{ component: PlantComponent, port: any, worldPos: Point, worldY: number, localY: number }> = [];
 
-    for (const component of components) {
+    for (const component of this.plantState.components.values()) {
       if (!component.ports) continue;
 
       for (const port of component.ports) {
@@ -764,28 +758,46 @@ export class PlantCanvas {
             screenPos.y - portScreenPos.y
           );
 
-          // Use a screen-space radius for detection
-          const detectionRadius = Math.max(15, portScreenPos.radius * 1.5);
+          // Include the stroke width in detection radius (stroke is ~25% of radius, centered on edge)
+          const strokeWidth = Math.max(1, portScreenPos.radius * 0.25);
+          const detectionRadius = portScreenPos.radius + strokeWidth / 2;
           if (distance <= detectionRadius) {
-            return { component, port, worldPos: portWorldPos };
+            matches.push({ component, port, worldPos: portWorldPos, worldY: portWorldPos.y, localY: port.position.y });
           }
         } else {
           // In 2D mode, use world coordinate check
           const worldPos = screenToWorld(screenPos, this.view);
-          const portRadius = 0.3; // Detection radius in meters
+          const portRadius = 0.18; // Detection radius in meters (includes stroke)
           const distance = Math.hypot(
             worldPos.x - portWorldPos.x,
             worldPos.y - portWorldPos.y
           );
 
           if (distance <= portRadius) {
-            return { component, port, worldPos: portWorldPos };
+            matches.push({ component, port, worldPos: portWorldPos, worldY: portWorldPos.y, localY: port.position.y });
           }
         }
       }
     }
 
-    return null;
+    if (matches.length === 0) return null;
+
+    // Return the port that is visually in front
+    matches.sort((a, b) => {
+      // Contained components are rendered on top
+      if (a.component.containedBy && !b.component.containedBy) return -1;
+      if (!a.component.containedBy && b.component.containedBy) return 1;
+      // For ports on the same component (like cross-vessel inner vs annulus ports),
+      // higher local Y = lower on component = closer to camera in isometric view
+      if (a.component === b.component) {
+        return b.localY - a.localY;
+      }
+      // For different components, lower world Y = closer to camera
+      return a.worldY - b.worldY;
+    });
+
+    const best = matches[0];
+    return { component: best.component, port: best.port, worldPos: best.worldPos };
   }
 
   // Get port screen position in isometric mode, matching component visual rendering
@@ -1362,6 +1374,119 @@ export class PlantCanvas {
           ctx.closePath();
           ctx.fill();
 
+          // For HX, add additional shadow pieces for plenum and bulge
+          if (component.type === 'heatExchanger') {
+            const hx = component as import('../types').HeatExchangerComponent;
+            const isVertical = (hx.height || 8) > (hx.width || 2.5);
+            const hxType = hx.hxType || 'utube';
+            const shellDiameter = isVertical ? (hx.width || 2.5) : (hx.height || 2.5);
+            const plenumLen = hx.plenumLength || 0;
+
+            // Draw plenum shadow (extends below shell bottom for vertical, or to left for horizontal)
+            if (plenumLen > 0) {
+              const plenumCorners: Point[] = [];
+              if (isVertical) {
+                // Plenum extends below shell (z from elevation-plenumLen to elevation)
+                const plenumBottom = elevation - plenumLen;
+                const plenumTop = elevation;
+                const plenumHalfW = shellDiameter / 2;
+                const plenumCorners3D = [
+                  { x: -plenumHalfW, y: 0, z: plenumTop },
+                  { x: plenumHalfW, y: 0, z: plenumTop },
+                  { x: plenumHalfW, y: 0, z: plenumBottom },
+                  { x: -plenumHalfW, y: 0, z: plenumBottom }
+                ];
+                for (const local of plenumCorners3D) {
+                  const worldX = centerX + local.x * cos - local.y * sin;
+                  const worldY = centerY + local.x * sin + local.y * cos;
+                  const groundX = worldX + local.z * shadowOffsetXPerZ;
+                  const groundY = worldY + local.z * shadowOffsetYPerZ;
+                  plenumCorners.push({ x: groundX, y: groundY });
+                }
+              } else {
+                // Horizontal: plenum extends to left (negative x)
+                const plenumHalfH = shellDiameter / 2;
+                const shellLeft = -worldWidth / 2;
+                const plenumCorners3D = [
+                  { x: shellLeft, y: 0, z: elevation },
+                  { x: shellLeft, y: 0, z: elevation + shellDiameter },
+                  { x: shellLeft - plenumLen, y: 0, z: elevation + shellDiameter },
+                  { x: shellLeft - plenumLen, y: 0, z: elevation }
+                ];
+                for (const local of plenumCorners3D) {
+                  const worldX = centerX + local.x * cos - local.y * sin;
+                  const worldY = centerY + local.x * sin + local.y * cos;
+                  const groundX = worldX + local.z * shadowOffsetXPerZ;
+                  const groundY = worldY + local.z * shadowOffsetYPerZ;
+                  plenumCorners.push({ x: groundX, y: groundY });
+                }
+              }
+
+              const plenumScreenCorners = plenumCorners.map(c => this.worldToScreenPerspective(c, 0));
+              if (!plenumScreenCorners.some(c => c.scale <= 0)) {
+                ctx.beginPath();
+                ctx.moveTo(plenumScreenCorners[0].pos.x, plenumScreenCorners[0].pos.y);
+                for (let i = 1; i < plenumScreenCorners.length; i++) {
+                  ctx.lineTo(plenumScreenCorners[i].pos.x, plenumScreenCorners[i].pos.y);
+                }
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+
+            // Draw bulge shadow for U-tube (extends above shell top for vertical, or to right for horizontal)
+            if (hxType === 'utube') {
+              const bulgeRadius = shellDiameter / 2;
+              const bulgeCorners: Point[] = [];
+              if (isVertical) {
+                // Bulge extends above shell (z from topZ to topZ + bulgeRadius)
+                const bulgeBottom = topZ;
+                const bulgeTop = topZ + bulgeRadius;
+                const bulgeHalfW = shellDiameter / 2;
+                const bulgeCorners3D = [
+                  { x: -bulgeHalfW, y: 0, z: bulgeBottom },
+                  { x: bulgeHalfW, y: 0, z: bulgeBottom },
+                  { x: bulgeHalfW, y: 0, z: bulgeTop },
+                  { x: -bulgeHalfW, y: 0, z: bulgeTop }
+                ];
+                for (const local of bulgeCorners3D) {
+                  const worldX = centerX + local.x * cos - local.y * sin;
+                  const worldY = centerY + local.x * sin + local.y * cos;
+                  const groundX = worldX + local.z * shadowOffsetXPerZ;
+                  const groundY = worldY + local.z * shadowOffsetYPerZ;
+                  bulgeCorners.push({ x: groundX, y: groundY });
+                }
+              } else {
+                // Horizontal: bulge extends to right
+                const shellRight = worldWidth / 2;
+                const bulgeCorners3D = [
+                  { x: shellRight, y: 0, z: elevation },
+                  { x: shellRight, y: 0, z: elevation + shellDiameter },
+                  { x: shellRight + bulgeRadius, y: 0, z: elevation + shellDiameter },
+                  { x: shellRight + bulgeRadius, y: 0, z: elevation }
+                ];
+                for (const local of bulgeCorners3D) {
+                  const worldX = centerX + local.x * cos - local.y * sin;
+                  const worldY = centerY + local.x * sin + local.y * cos;
+                  const groundX = worldX + local.z * shadowOffsetXPerZ;
+                  const groundY = worldY + local.z * shadowOffsetYPerZ;
+                  bulgeCorners.push({ x: groundX, y: groundY });
+                }
+              }
+
+              const bulgeScreenCorners = bulgeCorners.map(c => this.worldToScreenPerspective(c, 0));
+              if (!bulgeScreenCorners.some(c => c.scale <= 0)) {
+                ctx.beginPath();
+                ctx.moveTo(bulgeScreenCorners[0].pos.x, bulgeScreenCorners[0].pos.y);
+                for (let i = 1; i < bulgeScreenCorners.length; i++) {
+                  ctx.lineTo(bulgeScreenCorners[i].pos.x, bulgeScreenCorners[i].pos.y);
+                }
+                ctx.closePath();
+                ctx.fill();
+              }
+            }
+          }
+
           ctx.restore();
         } catch (e) {
           console.error('Shadow rendering error:', e);
@@ -1863,7 +1988,11 @@ export class PlantCanvas {
         const d = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
         return { width: w, height: d };
       }
+      case 'crossVessel':
+        // Cross-vessel: length is horizontal extent, outerDiameter is the height/depth
+        return { width: (component as any).length || 3, height: (component as any).outerDiameter || 1 };
       default:
+        console.warn(`[getComponentSize] Unknown component type: ${(component as any).type}, using default size`);
         return { width: 1, height: 1 };
     }
   }
@@ -1884,7 +2013,7 @@ export class PlantCanvas {
       case 'reactor-vessel':
         return { width: 5, height: 5 }; // Vessel diameter
       case 'heat-exchanger':
-        return { width: 8, height: 3 };
+        return { width: 2.5, height: 8 }; // Vertical orientation (default): width=diameter, height=length
       case 'turbine-generator':
         return { width: 6, height: 4 };
       case 'condenser':
@@ -1898,6 +2027,8 @@ export class PlantCanvas {
         return { width: 40, height: 40 };
       case 'core':
         return { width: 3.4, height: 3.4 };
+      case 'cross-vessel':
+        return { width: 3, height: 1 };
       default:
         return { width: 2, height: 2 };
     }
@@ -2123,9 +2254,35 @@ export class PlantCanvas {
     let adjustedFromScreen = fromScreen.pos;
     let adjustedToScreen = toScreen.pos;
 
+    // Special handling for cross-vessel connections
+    // Cross-vessels physically connect to their targets, so the connection should be very short
+    // to avoid drawing a gap between them
+    const isCrossVesselConnection = fromComponent.type === 'crossVessel' || toComponent.type === 'crossVessel';
+    if (isCrossVesselConnection) {
+      // For cross-vessel connections, make the connection line very short (5% of distance)
+      // This creates a nearly seamless appearance
+      const fromIsCrossVessel = fromComponent.type === 'crossVessel';
+      const crossVessel = fromIsCrossVessel ? fromComponent : toComponent;
+      const targetId = (crossVessel as any).targetComponentId;
+
+      // If this connection is between cross-vessel and its designated target, minimize the line
+      if (targetId && (targetId === fromComponent.id || targetId === toComponent.id)) {
+        const t = 0.05;
+        const midX = (fromScreen.pos.x + toScreen.pos.x) / 2;
+        const midY = (fromScreen.pos.y + toScreen.pos.y) / 2;
+        adjustedFromScreen = {
+          x: fromScreen.pos.x + (1 - t) * (midX - fromScreen.pos.x) * 2,
+          y: fromScreen.pos.y + (1 - t) * (midY - fromScreen.pos.y) * 2
+        };
+        adjustedToScreen = {
+          x: toScreen.pos.x + (1 - t) * (midX - toScreen.pos.x) * 2,
+          y: toScreen.pos.y + (1 - t) * (midY - toScreen.pos.y) * 2
+        };
+      }
+    }
     // If fromComponent is contained by toComponent, adjust the "to" endpoint
     // to stop partway between the inner (from) edge and the outer (to) edge
-    if (fromContainedBy === toComponent.id) {
+    else if (fromContainedBy === toComponent.id) {
       // Move the "to" endpoint only 10% of the way from "from" to "to"
       // This places it just barely past the inner component edge
       const t = 0.1;

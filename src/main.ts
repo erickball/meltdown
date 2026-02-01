@@ -93,6 +93,61 @@ function getScramSetpointsFromPlant(plantState: PlantState): ScramSetpoints | un
   return undefined;
 }
 
+/**
+ * Extract a human-readable port type from the port ID.
+ * Port IDs are like "comp-id-tube-1", "comp-id-shell-2", "comp-id-inlet", etc.
+ */
+function getPortTypeLabel(portId: string, componentId: string): string {
+  // Remove the component ID prefix to get the port suffix
+  const suffix = portId.startsWith(componentId + '-')
+    ? portId.slice(componentId.length + 1)
+    : portId;
+
+  // Map common suffixes to readable labels
+  // Only use "Inlet"/"Outlet" for ports that actually have directional function (pumps, turbines, etc.)
+  // For passive/bidirectional components, use positional names (Left, Right, 1, 2, etc.)
+  const typeMap: Record<string, string> = {
+    // Directional ports (pumps, turbines, valves with clear in/out)
+    'inlet': 'Inlet',
+    'outlet': 'Outlet',
+    'steam-inlet': 'Steam Inlet',
+    'steam-outlet': 'Steam Outlet',
+    'water-inlet': 'Water Inlet',
+    'water-outlet': 'Water Outlet',
+    // Heat exchanger ports (bidirectional)
+    'tube-1': 'Tube 1',
+    'tube-2': 'Tube 2',
+    'tube-left': 'Tube Left',
+    'tube-right': 'Tube Right',
+    'tube-top': 'Tube Top',
+    'tube-bottom': 'Tube Bottom',
+    'shell-1': 'Shell 1',
+    'shell-2': 'Shell 2',
+    // Cross-vessel ports (bidirectional)
+    'inner-in': 'Inner 1',
+    'inner-out': 'Inner 2',
+    'annulus-1': 'Annulus 1',
+    'annulus-2': 'Annulus 2',
+    // Positional ports (tanks, vessels, buildings)
+    'top': 'Top',
+    'bottom': 'Bottom',
+    'left': 'Left',
+    'right': 'Right',
+    'north': 'North',
+    'south': 'South',
+    'east': 'East',
+    'west': 'West',
+    // Reactor vessel ports (bidirectional, positional)
+    'inlet-left': 'Left',
+    'inlet-right': 'Right',
+    'outlet-left': 'Left',
+    'outlet-right': 'Right',
+  };
+
+  return typeMap[suffix] || suffix.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+
+
 // Initialize the application
 function init() {
   const canvas = document.getElementById('plant-canvas') as HTMLCanvasElement;
@@ -100,6 +155,8 @@ function init() {
     console.error('Canvas element not found');
     return;
   }
+
+  const portTooltip = document.getElementById('port-tooltip') as HTMLDivElement;
 
   // Start with empty plant (user can create components)
   // To load the demo plant instead, uncomment the lines below:
@@ -1605,6 +1662,11 @@ function init() {
             border: 1px solid #464; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
             Export
           </button>
+          <button id="dialog-import-btn" style="padding: 8px 12px; background: #335;
+            border: 1px solid #446; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            Import
+          </button>
+          <input type="file" id="dialog-import-file" accept=".json" style="display: none;">
         </div>
       </div>
 
@@ -1625,6 +1687,8 @@ function init() {
     const loadBtn = dialog.querySelector('#dialog-load-btn') as HTMLButtonElement;
     const deleteBtn = dialog.querySelector('#dialog-delete-btn') as HTMLButtonElement;
     const exportBtn = dialog.querySelector('#dialog-export-btn') as HTMLButtonElement;
+    const importBtn = dialog.querySelector('#dialog-import-btn') as HTMLButtonElement;
+    const importFileInput = dialog.querySelector('#dialog-import-file') as HTMLInputElement;
     const closeBtn = dialog.querySelector('#dialog-close-btn') as HTMLButtonElement;
 
     const cleanup = () => document.body.removeChild(overlay);
@@ -1703,6 +1767,45 @@ function init() {
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
       showNotification(`Exported '${name}.json'`, 'info');
+    });
+
+    importBtn.addEventListener('click', () => {
+      importFileInput.click();
+    });
+
+    importFileInput.addEventListener('change', () => {
+      const file = importFileInput.files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const json = e.target?.result as string;
+          const data = JSON.parse(json);
+
+          // Validate the data has the expected structure
+          if (!data.components || !Array.isArray(data.components)) {
+            showNotification('Invalid configuration file: missing components', 'error');
+            return;
+          }
+
+          // Load directly into plant state
+          deserializePlantState(data);
+          updateConstructionCostPanel();
+          showNotification(`Imported '${file.name}'`, 'info');
+          cleanup();
+        } catch (err) {
+          console.error('[Import] Failed to parse JSON:', err);
+          showNotification('Failed to import: invalid JSON file', 'error');
+        }
+      };
+      reader.onerror = () => {
+        showNotification('Failed to read file', 'error');
+      };
+      reader.readAsText(file);
+
+      // Reset the input so the same file can be selected again
+      importFileInput.value = '';
     });
 
     closeBtn.addEventListener('click', cleanup);
@@ -1894,6 +1997,37 @@ function init() {
     // DEBUG: Track cursor position for gauge debug logging
     (window as any).__debugCursor = { x: Math.round(x), y: Math.round(y) };
 
+    // Port tooltip - show on hover in any mode
+    const hoveredPortInfo = plantCanvas.getPortAtScreen({ x, y });
+    if (hoveredPortInfo && portTooltip) {
+      const { component, port, worldPos } = hoveredPortInfo;
+      const portType = getPortTypeLabel(port.id, component.id);
+      const elevation = component.elevation ?? 0;
+
+      // Calculate port elevation offset (some ports are above/below component center)
+      // For most components, port.position.y affects elevation
+      let portElevation = elevation;
+      if (component.type === 'tank' || component.type === 'vessel' || component.type === 'reactorVessel' || component.type === 'heatExchanger') {
+        // Vertical components: port Y offset is vertical
+        // For HX, the component.elevation is the shell bottom, and port positions already include plenum offset
+        portElevation = elevation - port.position.y;
+      }
+
+      portTooltip.innerHTML = `
+        <div class="port-component">${component.label || component.id}</div>
+        <div class="port-type">${portType}</div>
+        <div class="port-coords">Position: (${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) m</div>
+        <div class="port-coords">Elevation: ${portElevation.toFixed(1)} m</div>
+      `;
+
+      // Position tooltip near cursor
+      portTooltip.style.left = `${e.clientX + 15}px`;
+      portTooltip.style.top = `${e.clientY + 10}px`;
+      portTooltip.classList.add('visible');
+    } else if (portTooltip) {
+      portTooltip.classList.remove('visible');
+    }
+
     if (currentMode !== 'construction') {
       // Clear placement preview when not in construction mode
       plantCanvas.setPlacementPreview(null, null);
@@ -1959,6 +2093,10 @@ function init() {
           // Non-pipe components: move normally
           movingComponent.position.x = worldClick.x - moveStartOffset.x;
           movingComponent.position.y = worldClick.y - moveStartOffset.y;
+        }
+        // Update component detail panel to show new position immediately
+        if (selectedComponentId) {
+          updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
         }
         canvas.style.cursor = 'grabbing';
       } else {
@@ -2036,6 +2174,13 @@ function init() {
 
       canvas.style.cursor = 'grabbing';
       e.preventDefault(); // Prevent text selection while dragging
+    }
+  });
+
+  // Hide port tooltip when mouse leaves canvas
+  canvas.addEventListener('mouseleave', () => {
+    if (portTooltip) {
+      portTooltip.classList.remove('visible');
     }
   });
 

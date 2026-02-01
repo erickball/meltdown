@@ -50,11 +50,17 @@ export class ConnectionDialog {
     this.cancelButton.addEventListener('click', () => this.handleCancel());
     this.closeButton.addEventListener('click', () => this.handleCancel());
 
-    // Close on background click
+    // Close on background click - but only if mousedown also started on backdrop
+    // This prevents accidental closes when dragging to select text
+    let mouseDownOnBackdrop = false;
+    this.dialog.addEventListener('mousedown', (e) => {
+      mouseDownOnBackdrop = (e.target === this.dialog);
+    });
     this.dialog.addEventListener('click', (e) => {
-      if (e.target === this.dialog) {
+      if (e.target === this.dialog && mouseDownOnBackdrop) {
         this.handleCancel();
       }
+      mouseDownOnBackdrop = false;
     });
 
     // Close on Escape key
