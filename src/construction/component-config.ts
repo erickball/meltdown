@@ -919,7 +919,8 @@ export class ComponentDialog {
     position: { x: number; y: number },
     callback: (config: ComponentConfig | null) => void,
     availableCores?: Array<{ id: string; label: string }>,
-    availableGenerators?: Array<{ id: string; label: string }>
+    availableGenerators?: Array<{ id: string; label: string }>,
+    defaultName?: string
   ) {
     const definition = componentDefinitions[componentType];
     if (!definition) {
@@ -936,8 +937,8 @@ export class ComponentDialog {
     // Set title
     this.titleElement.textContent = `Configure ${definition.displayName}`;
 
-    // Build form (pass available cores for controller dropdowns)
-    this.buildForm(definition.options, availableCores);
+    // Build form (pass available cores for controller dropdowns, and optional default name)
+    this.buildForm(definition.options, availableCores, defaultName);
 
     // Show dialog
     this.dialog.style.display = 'flex';
@@ -949,12 +950,23 @@ export class ComponentDialog {
     }
   }
 
-  private buildForm(options: ComponentOption[], availableCores?: Array<{ id: string; label: string }>) {
+  private buildForm(options: ComponentOption[], availableCores?: Array<{ id: string; label: string }>, defaultName?: string) {
     this.bodyElement.innerHTML = '';
 
     // Separate calculated options from input options
     const inputOptions = options.filter(o => o.type !== 'calculated');
     const calculatedOptions = options.filter(o => o.type === 'calculated');
+
+    // Override default name if provided
+    if (defaultName) {
+      inputOptions.forEach(option => {
+        if (option.name === 'name') {
+          option = { ...option, default: defaultName };
+          const idx = inputOptions.findIndex(o => o.name === 'name');
+          if (idx >= 0) inputOptions[idx] = option;
+        }
+      });
+    }
 
     // Add price estimate at the top
     const priceGroup = document.createElement('div');

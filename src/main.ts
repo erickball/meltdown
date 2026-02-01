@@ -20,7 +20,7 @@ import {
   getTurbineCondenserState,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
-import { ComponentDialog, ComponentConfig } from './construction/component-config';
+import { ComponentDialog, ComponentConfig, componentDefinitions } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 import { estimateComponentCost, formatCost } from './construction/cost-estimation';
@@ -2304,12 +2304,53 @@ function init() {
           }
         }
 
-        componentDialog.show(selectedComponentType!, placementPos, (config: ComponentConfig | null) => {
-          if (config) {
-            console.log(`[Construction] Component configured:`, config);
+        // Generate numbered default name based on existing components of this type
+        const definition = componentDefinitions[selectedComponentType!];
+        let defaultName: string | undefined;
+        if (definition) {
+          const baseName = definition.displayName;
+          // Map definition type to component type stored in plantState
+          const componentTypeMap: Record<string, string> = {
+            'tank': 'tank',
+            'pressurizer': 'tank',
+            'reactor-vessel': 'reactorVessel',
+            'pipe': 'pipe',
+            'valve': 'valve',
+            'check-valve': 'valve',
+            'relief-valve': 'valve',
+            'porv': 'valve',
+            'pump': 'pump',
+            'heat-exchanger': 'heatExchanger',
+            'condenser': 'condenser',
+            'turbine-generator': 'turbine-generator',
+            'turbine-driven-pump': 'turbine-driven-pump',
+            'core': 'fuelAssembly',
+            'scram-controller': 'controller',
+            'switchyard': 'switchyard',
+            'building': 'building',
+            'cross-vessel': 'crossVessel',
+          };
+          const storedType = componentTypeMap[selectedComponentType!] || selectedComponentType!;
 
-            // Special case: placing a core inside a container
-            if (config.type === 'core' && containedBy && clickedComponent) {
+          // Count existing components with labels starting with this base name
+          let count = 0;
+          for (const [, comp] of plantState.components) {
+            if (comp.type === storedType || (comp.label && comp.label.startsWith(baseName))) {
+              count++;
+            }
+          }
+          defaultName = `${baseName} ${count + 1}`;
+        }
+
+        componentDialog.show(
+          selectedComponentType!,
+          placementPos,
+          (config: ComponentConfig | null) => {
+            if (config) {
+              console.log(`[Construction] Component configured:`, config);
+
+              // Special case: placing a core inside a container
+              if (config.type === 'core' && containedBy && clickedComponent) {
               // Add fuel rod properties to the container (reactor vessel or tank)
               // The container handles rendering the fuel rods at the correct position
               const result = constructionManager.addCoreToContainer(containedBy, config.properties);
@@ -2372,7 +2413,7 @@ function init() {
           } else {
             console.log(`[Construction] Component placement cancelled`);
           }
-        }, availableCores, availableGenerators);
+        }, availableCores, availableGenerators, defaultName);
       };
 
       // If position is inside a building's footprint, auto-contain without dialog
