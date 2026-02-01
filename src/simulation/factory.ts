@@ -841,6 +841,64 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         surfaceArea: (component as any).tubeCount * 0.6, // Tube outer surface slightly larger
       });
     }
+
+    // Create thermal node, annulus flow node, and convection connections for cross-vessels
+    // Like HX: inner pipe and annulus are separate flow nodes with thermal coupling
+    if (component.type === 'crossVessel') {
+      const cv = component as any;
+      // Create annulus flow node (like HX shell)
+      const annulusNode = createCrossVesselAnnulusNode(component);
+      state.flowNodes.set(annulusNode.id, annulusNode);
+
+      // Create thermal node for the inner pipe wall
+      const innerRadius = cv.innerDiameter / 2;
+      const outerRadius = innerRadius + cv.innerWallThickness;
+      const innerSurfaceArea = 2 * Math.PI * innerRadius * cv.length;  // Inner surface
+      const outerSurfaceArea = 2 * Math.PI * outerRadius * cv.length;  // Outer surface
+
+      // Pipe wall thermal properties (steel)
+      const steelDensity = 7800;  // kg/m³
+      const steelCp = 500;  // J/kg-K
+      const wallVolume = Math.PI * (outerRadius * outerRadius - innerRadius * innerRadius) * cv.length;
+      const wallMass = wallVolume * steelDensity;
+
+      // Initial wall temperature - average of hot and cold side
+      const hotTemp = cv.fluid?.temperature || 593;  // Hot leg temp
+      const coldTemp = cv.annulusFluid?.temperature || 565;  // Cold leg/annulus temp
+      const wallTemp = (hotTemp + coldTemp) / 2;
+
+      const cvThermalNode: ThermalNode = {
+        id: `${id}-wall`,
+        label: `${component.label || 'Cross-Vessel'} Wall`,
+        temperature: wallTemp,
+        mass: wallMass,
+        specificHeat: steelCp,
+        thermalConductivity: 50,  // W/m-K for steel
+        characteristicLength: cv.innerWallThickness,
+        surfaceArea: innerSurfaceArea + outerSurfaceArea,
+        heatGeneration: 0,
+        maxTemperature: 900,  // K - typical steel limit
+      };
+      state.thermalNodes.set(cvThermalNode.id, cvThermalNode);
+
+      // Convection from inner hot flow to wall
+      state.convectionConnections.push({
+        id: `convection-${id}-inner`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: `${id}-inner`,  // Inner pipe flow node
+        surfaceArea: innerSurfaceArea,
+      });
+
+      // Convection from wall to annulus
+      state.convectionConnections.push({
+        id: `convection-${id}-annulus`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: `${id}-annulus`,  // Annulus flow node
+        surfaceArea: outerSurfaceArea,
+      });
+
+      console.log(`[Factory] CrossVessel ${id}: created inner pipe and annulus flow nodes with thermal coupling`);
+    }
   }
 
   // Second pass: Create flow connections from plant connections
@@ -1361,6 +1419,37 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
+    case 'crossVessel': {
+      // Cross-vessel - like a horizontal straight-tube HX with one tube
+      // Two flow nodes: inner pipe (hot leg) and annulus (cold)
+      // Return inner pipe node here; annulus is created separately like HX shell
+      const cv = component as any;
+
+      // Inner pipe volume and properties
+      const innerRadius = cv.innerDiameter / 2;
+      const innerVolume = (cv as any).innerVolume || Math.PI * innerRadius * innerRadius * cv.length;
+
+      // Use fluid from component or default to typical hot leg conditions
+      const pressure = Math.max(cv.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
+      const temp = cv.fluid?.temperature || 593; // ~320°C typical hot leg
+
+      let fluid: FluidState;
+      console.log(`[Factory] CrossVessel ${component.id}: creating inner pipe LIQUID state at ${pressure/1e5} bar, ${temp}K`);
+      fluid = createFluidState(temp, pressure, 'liquid', 0, innerVolume);
+
+      // Return inner pipe node; annulus is created separately
+      return {
+        id: `${component.id}-inner`,
+        label: `${component.label || 'Cross-Vessel'} Inner`,
+        fluid,
+        volume: innerVolume,
+        hydraulicDiameter: cv.innerDiameter,
+        flowArea: Math.PI * innerRadius * innerRadius,
+        height: 0,  // Horizontal, well-mixed
+        elevation,
+      };
+    }
+
     case 'building': {
       // Building/Containment - large structure, defaults to air at atmospheric pressure
       const building = component as any;
@@ -1618,6 +1707,41 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
 }
 
 /**
+ * Create annulus flow node for cross-vessel (like HX shell)
+ */
+function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
+  const cv = component as any;
+  const elevation = cv.elevation || 0;
+
+  // Calculate annulus volume
+  const innerRadius = cv.innerDiameter / 2;
+  const outerRadius = cv.outerDiameter / 2;
+  const innerOuterRadius = innerRadius + cv.innerWallThickness;
+  const outerInnerRadius = outerRadius - cv.wallThickness;
+  const annulusVolume = cv.annulusVolume ||
+    Math.PI * cv.length * (outerInnerRadius * outerInnerRadius - innerOuterRadius * innerOuterRadius);
+
+  // Annulus fluid - cold primary coolant
+  const annulusTemp = cv.annulusFluid?.temperature || 565; // ~292°C typical cold leg
+  const annulusPressure = cv.annulusFluid?.pressure || cv.fluid?.pressure || 155e5;
+
+  // Hydraulic diameter of annulus: D_h = D_outer - D_inner (for annular flow)
+  const hydraulicDiameter = 2 * (outerInnerRadius - innerOuterRadius);
+  const flowArea = Math.PI * (outerInnerRadius * outerInnerRadius - innerOuterRadius * innerOuterRadius);
+
+  return {
+    id: `${component.id}-annulus`,
+    label: `${component.label || 'Cross-Vessel'} Annulus`,
+    fluid: createFluidState(annulusTemp, annulusPressure, 'liquid', 0, annulusVolume),
+    volume: annulusVolume,
+    hydraulicDiameter,
+    flowArea,
+    height: 0,  // Horizontal, well-mixed
+    elevation,
+  };
+}
+
+/**
  * Create a flow connection from a plant connection
  */
 function createFlowConnectionFromPlantConnection(
@@ -1649,6 +1773,22 @@ function createFlowConnectionFromPlantConnection(
       toNodeId = `${connection.toComponentId}-tube`;
     } else if (connection.toPortId.includes('shell')) {
       toNodeId = `${connection.toComponentId}-shell`;
+    }
+  }
+
+  // Handle cross-vessel port mappings (inner vs annulus)
+  if (fromComponent.type === 'crossVessel') {
+    if (connection.fromPortId.includes('inner')) {
+      fromNodeId = `${connection.fromComponentId}-inner`;
+    } else if (connection.fromPortId.includes('annulus')) {
+      fromNodeId = `${connection.fromComponentId}-annulus`;
+    }
+  }
+  if (toComponent.type === 'crossVessel') {
+    if (connection.toPortId.includes('inner')) {
+      toNodeId = `${connection.toComponentId}-inner`;
+    } else if (connection.toPortId.includes('annulus')) {
+      toNodeId = `${connection.toComponentId}-annulus`;
     }
   }
 

@@ -16,6 +16,7 @@ import {
   CondenserComponent,
   ControllerComponent,
   SwitchyardComponent,
+  CrossVesselComponent,
   Connection,
   Port,
   Fluid
@@ -523,11 +524,24 @@ export class ConstructionManager {
         const isVertical = props.orientation === 'vertical';
         const shellDiam = props.shellDiameter || 2.5;
         const shellLen = props.shellLength || 8;
+        // Cap plenum length to shell radius (semi-ellipsoid can't exceed the diameter it matches)
+        const maxPlenumLen = shellDiam / 2;
+        const plenumLen = Math.min(props.plenumLength || 0.8, maxPlenumLen);
 
-        // Calculate derived values
+        // Pressure ratings
+        const tubePressureRating = props.tubePressure || 150; // bar
+        const shellPressureRating = props.shellPressure || 60; // bar
+
+        // Calculate tube wall thickness from tube pressure rating
+        // ASME formula: t = P*R / (S*E - 0.6*P)
         const tubeOD_m = (props.tubeOD || 19) / 1000; // mm to m
-        const tubeThickness_m = (props.tubeThickness || 1.2) / 1000;
+        const P_tube = tubePressureRating * 1e5; // bar to Pa
+        const R_tube = tubeOD_m / 2;
+        const S_tube = 137e6; // Inconel 690 allowable stress at 300°C (Pa)
+        const E_tube = 1.0; // Seamless tube
+        const tubeThickness_m = Math.max(0.0005, P_tube * R_tube / (S_tube * E_tube - 0.6 * P_tube));
         const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
+
         const tubeCount = props.tubeCount || 3000;
         const hxType = props.hxType || 'utube';
         const tubeLength = hxType === 'utube' ? shellLen * 1.8 : shellLen;
@@ -553,20 +567,22 @@ export class ConstructionManager {
 
         // Heat exchangers are passive - flow direction is determined by physics
         // Port names indicate typical flow direction but all are bidirectional
+        // For U-tube: shell-2 is at top center (on the rounded bulge)
+        const bulgeRadius = shellDiam / 2; // Semi-circular bulge matching shell diameter
         if (isVertical) {
           if (hxType === 'utube') {
-            // U-tube vertical: both tube connections at bottom (tube sheet), shell on sides
+            // U-tube vertical: tube connections at bottom (plenum), shell-1 on side, shell-2 at top center
             hxPorts = [
-              { id: `${id}-tube-1`, position: { x: -halfW * 0.3, y: halfH }, direction: 'both' },
-              { id: `${id}-tube-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' },
+              { id: `${id}-tube-1`, position: { x: -halfW * 0.3, y: halfH + plenumLen }, direction: 'both' },
+              { id: `${id}-tube-2`, position: { x: halfW * 0.3, y: halfH + plenumLen }, direction: 'both' },
               { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.5 }, direction: 'both' }
+              { id: `${id}-shell-2`, position: { x: 0, y: -halfH - bulgeRadius }, direction: 'both' } // Top center of bulge
             ];
           } else {
             // Straight or helical vertical: tube at top/bottom; shell on sides
             hxPorts = [
-              { id: `${id}-tube-bottom`, position: { x: 0, y: halfH }, direction: 'both' },
-              { id: `${id}-tube-top`, position: { x: 0, y: -halfH }, direction: 'both' },
+              { id: `${id}-tube-bottom`, position: { x: 0, y: halfH + plenumLen }, direction: 'both' },
+              { id: `${id}-tube-top`, position: { x: 0, y: -halfH - plenumLen }, direction: 'both' },
               { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
               { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'both' }
             ];
@@ -574,18 +590,18 @@ export class ConstructionManager {
         } else {
           // Horizontal orientation
           if (hxType === 'utube') {
-            // U-tube horizontal: both tube connections at left (tube sheet), shell on top/bottom
+            // U-tube horizontal: tube connections at left (plenum), shell-1 on bottom, shell-2 at right center
             hxPorts = [
-              { id: `${id}-tube-1`, position: { x: -halfW, y: -halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-tube-2`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: halfW * 0.5, y: halfH }, direction: 'both' }
+              { id: `${id}-tube-1`, position: { x: -halfW - plenumLen, y: -halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-tube-2`, position: { x: -halfW - plenumLen, y: halfH * 0.3 }, direction: 'both' },
+              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: halfH }, direction: 'both' },
+              { id: `${id}-shell-2`, position: { x: halfW + bulgeRadius, y: 0 }, direction: 'both' } // Right center of bulge
             ];
           } else {
             // Straight or helical horizontal: tube at left/right; shell on top/bottom
             hxPorts = [
-              { id: `${id}-tube-left`, position: { x: -halfW, y: 0 }, direction: 'both' },
-              { id: `${id}-tube-right`, position: { x: halfW, y: 0 }, direction: 'both' },
+              { id: `${id}-tube-left`, position: { x: -halfW - plenumLen, y: 0 }, direction: 'both' },
+              { id: `${id}-tube-right`, position: { x: halfW + plenumLen, y: 0 }, direction: 'both' },
               { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
               { id: `${id}-shell-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' }
             ];
@@ -604,19 +620,24 @@ export class ConstructionManager {
           hxType: hxType,
           primaryFluid: {
             ...defaultFluid,
-            pressure: (props.tubePressure || 150) * 100000
+            pressure: tubePressureRating * 100000
           },
           secondaryFluid: {
             temperature: 280 + 273.15,
-            pressure: (props.shellPressure || 60) * 100000,
+            pressure: shellPressureRating * 100000,
             phase: 'two-phase',
             quality: 0.5,
             flowRate: 0
           },
           tubeCount: 5, // Visual tube count for rendering (not the real engineering value)
           ports: hxPorts,
-          pressureRating: props.shellPressure || 60
+          pressureRating: shellPressureRating,
+          plenumLength: plenumLen
         };
+
+        // Store pressure ratings for wall thickness calculations
+        (hx as any).tubePressureRating = tubePressureRating;
+        (hx as any).shellPressureRating = shellPressureRating;
 
         // Store additional properties for simulation (can be accessed via component)
         (hx as any).heatTransferArea = heatTransferArea;
@@ -1438,6 +1459,139 @@ export class ConstructionManager {
         this.plantState.components.set(id, building as any);
         (building as any).nqa1 = props.nqa1 ?? true;
         console.log(`[Construction] Created building: ${shape}, ${buildingHeight}m tall, ${props.pressureRating ?? 4} bar rating`);
+
+        // Capture existing components that fall within this building's footprint
+        const halfW = shape === 'cylinder' ? diameter / 2 : buildingWidth / 2;
+        const halfD = shape === 'cylinder' ? diameter / 2 : buildingLength / 2;
+        let capturedCount = 0;
+
+        for (const [compId, comp] of this.plantState.components) {
+          // Skip the building itself, pipes, and components already contained by something
+          if (compId === id || comp.type === 'building' || comp.type === 'pipe' || comp.containedBy) {
+            continue;
+          }
+
+          // Check if component position is inside this building's footprint
+          const dx = comp.position.x - worldX;
+          const dy = comp.position.y - worldY;
+
+          let isInside = false;
+          if (shape === 'cylinder') {
+            // Circular footprint check
+            const distSq = dx * dx + dy * dy;
+            isInside = distSq <= halfW * halfW;
+          } else {
+            // Rectangular footprint check
+            isInside = Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
+          }
+
+          if (isInside) {
+            comp.containedBy = id;
+            capturedCount++;
+            console.log(`[Construction] Component '${compId}' is now contained by building '${id}'`);
+          }
+        }
+
+        if (capturedCount > 0) {
+          console.log(`[Construction] Building '${id}' captured ${capturedCount} existing component(s)`);
+        }
+
+        break;
+      }
+
+      case 'cross-vessel': {
+        // Cross-vessel - like a horizontal straight-tube HX with one tube
+        // Two flow nodes: inner pipe (hot leg) and annulus (cold, connected to RPV)
+        // The outer shell is the pressure boundary; annulus connects to vessel at each end
+        const outerDiam = props.outerDiameter || 1.0;   // Default 1m outer diameter
+        const innerDiam = props.innerDiameter || 0.5;   // Default 0.5m inner hot leg
+        const cvLength = props.length || 3.0;           // Default 3m length
+        const pressureRating = props.pressureRating || 150; // Default 150 bar (match typical RPV)
+        const orientation = props.orientation || 'horizontal';
+        const angle = props.angle || 0;
+
+        // Calculate wall thicknesses from pressure rating using ASME formula
+        const P = pressureRating * 1e5; // bar to Pa
+        const S = 172e6; // Pa - SA-533 Grade B Class 1 allowable stress
+        const E = 1.0; // Joint efficiency
+        const outerWallThickness = Math.max(0.02, (P * (outerDiam / 2)) / (S * E - 0.6 * P));
+        const innerWallThickness = Math.max(0.01, (P * (innerDiam / 2)) / (S * E - 0.6 * P));
+
+        // Calculate volumes for simulation
+        const outerRadius = outerDiam / 2;
+        const innerOuterRadius = innerDiam / 2 + innerWallThickness;
+        // Annulus volume = volume between inner pipe outer wall and outer shell inner wall
+        const annulusVolume = Math.PI * cvLength * (
+          Math.pow(outerRadius - outerWallThickness, 2) - Math.pow(innerOuterRadius, 2)
+        );
+        // Inner pipe volume
+        const innerVolume = Math.PI * Math.pow(innerDiam / 2, 2) * cvLength;
+
+        // Ports: inner pipe has in/out at each end, annulus has ports at each end
+        // Annulus ports must connect with zero-length connections (physically touching)
+        const halfLen = cvLength / 2;
+        const halfOuter = outerDiam / 2;
+        // Inner ports at the center (y=0 is center of inner pipe)
+        // Annulus ports at the midpoint of the lower annulus region
+        // Lower annulus goes from innerOuterRadius to (outerRadius - outerWallThickness)
+        const annulusLowerMidpoint = (innerOuterRadius + (outerRadius - outerWallThickness)) / 2;
+        const crossVesselPorts: Port[] = [
+          // Inner pipe ports (for hot leg flow) - at center of inner pipe
+          { id: `${id}-inner-in`, position: { x: -halfLen, y: 0 }, direction: 'both' },
+          { id: `${id}-inner-out`, position: { x: halfLen, y: 0 }, direction: 'both' },
+          // Annulus ports (for cold flow from/to RPV) - at midpoint of lower annulus
+          { id: `${id}-annulus-1`, position: { x: -halfLen, y: annulusLowerMidpoint }, direction: 'both' },
+          { id: `${id}-annulus-2`, position: { x: halfLen, y: annulusLowerMidpoint }, direction: 'both' }
+        ];
+
+        // Default fluid state for inner hot leg (hot primary coolant)
+        const innerFluid: Fluid = {
+          temperature: props.innerTemperature ? props.innerTemperature + 273.15 : 593.15, // Default 320°C
+          pressure: (props.innerPressure ?? pressureRating) * 1e5, // Default to pressure rating
+          phase: 'liquid',
+          quality: 0,
+          flowRate: 0
+        };
+
+        // Default fluid state for annulus (cold primary coolant)
+        const annulusFluid: Fluid = {
+          temperature: props.annulusTemperature ? props.annulusTemperature + 273.15 : 565, // Default ~292°C
+          pressure: (props.annulusPressure ?? pressureRating) * 1e5,
+          phase: 'liquid',
+          quality: 0,
+          flowRate: 0
+        };
+
+        const crossVessel: CrossVesselComponent = {
+          id,
+          type: 'crossVessel',
+          label: props.name || 'Cross-Vessel',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          outerDiameter: outerDiam,
+          wallThickness: outerWallThickness,
+          length: cvLength,
+          innerDiameter: innerDiam,
+          innerWallThickness: innerWallThickness,
+          pressureRating: pressureRating,
+          targetComponentId: props.targetComponentId,
+          orientation: orientation,
+          angle: angle,
+          ports: crossVesselPorts,
+          fluid: innerFluid  // fluid property represents the inner hot leg
+        };
+
+        // Store additional properties for simulation
+        (crossVessel as any).annulusVolume = annulusVolume;
+        (crossVessel as any).innerVolume = innerVolume;
+        (crossVessel as any).annulusFluid = annulusFluid;
+
+        this.plantState.components.set(id, crossVessel);
+        (crossVessel as any).nqa1 = props.nqa1 ?? true;
+
+        console.log(`[Construction] Created cross-vessel: ${outerDiam.toFixed(2)}m outer, ${innerDiam.toFixed(2)}m inner, ${cvLength.toFixed(1)}m long, ${pressureRating} bar`);
+        console.log(`[Construction] Cross-vessel volumes: annulus ${annulusVolume.toFixed(2)} m³, inner ${innerVolume.toFixed(2)} m³`);
         break;
       }
 
@@ -1633,6 +1787,121 @@ export class ConstructionManager {
     const calcFromElev = fromElevation ?? this.getPortRelativeElevation(fromComponent, fromPort);
     const calcToElev = toElevation ?? this.getPortRelativeElevation(toComponent, toPort);
 
+    // Special handling for cross-vessel annulus connections
+    // The cross-vessel must physically touch what it connects to:
+    // - First annulus connection: move the cross-vessel so it touches the component
+    // - Second annulus connection: resize length and move so both ends touch their components
+    let effectiveLength = length;
+    const fromIsCrossVesselAnnulus = fromComponent.type === 'crossVessel' && fromPortId.includes('annulus');
+    const toIsCrossVesselAnnulus = toComponent.type === 'crossVessel' && toPortId.includes('annulus');
+
+    if (fromIsCrossVesselAnnulus || toIsCrossVesselAnnulus) {
+      const crossVessel = (fromIsCrossVesselAnnulus ? fromComponent : toComponent) as any;
+      const cvPortId = fromIsCrossVesselAnnulus ? fromPortId : toPortId;
+      const otherComponent = fromIsCrossVesselAnnulus ? toComponent : fromComponent;
+
+      // Check if there's already an annulus connection (making this the second one)
+      const existingAnnulusConnection = this.plantState.connections.find(conn => {
+        const isFromCV = conn.fromComponentId === crossVessel.id && conn.fromPortId.includes('annulus');
+        const isToCV = conn.toComponentId === crossVessel.id && conn.toPortId.includes('annulus');
+        return isFromCV || isToCV;
+      });
+
+      if (existingAnnulusConnection) {
+        // Second annulus connection: resize length to span between both connected components
+        // Find the first connected component
+        const firstConnectedId = existingAnnulusConnection.fromComponentId === crossVessel.id
+          ? existingAnnulusConnection.toComponentId
+          : existingAnnulusConnection.fromComponentId;
+        const firstConnectedPort = existingAnnulusConnection.fromComponentId === crossVessel.id
+          ? existingAnnulusConnection.fromPortId
+          : existingAnnulusConnection.toPortId;
+        const firstComponent = this.plantState.components.get(firstConnectedId);
+
+        if (firstComponent) {
+          // Calculate positions of both connected components
+          const pos1 = firstComponent.position;
+          const pos2 = otherComponent.position;
+
+          // Calculate the distance between the two components
+          const dx = pos2.x - pos1.x;
+          const dy = pos2.y - pos1.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+
+          // New length is the distance between the two components
+          const newLength = distance;
+
+          // Position cross-vessel at midpoint
+          const newPosX = (pos1.x + pos2.x) / 2;
+          const newPosY = (pos1.y + pos2.y) / 2;
+
+          console.log(`[Construction] Cross-vessel '${crossVessel.id}' second annulus connection:`);
+          console.log(`  - Moving from (${crossVessel.position.x.toFixed(1)}, ${crossVessel.position.y.toFixed(1)}) to (${newPosX.toFixed(1)}, ${newPosY.toFixed(1)})`);
+          console.log(`  - Resizing length from ${crossVessel.length.toFixed(2)}m to ${newLength.toFixed(2)}m`);
+
+          crossVessel.position.x = newPosX;
+          crossVessel.position.y = newPosY;
+          crossVessel.length = newLength;
+
+          // Update port positions to match new length
+          const newHalfLen = newLength / 2;
+          for (const port of crossVessel.ports) {
+            if (port.id.includes('inner-in') || port.id.includes('annulus-1')) {
+              port.position.x = -newHalfLen;
+            } else if (port.id.includes('inner-out') || port.id.includes('annulus-2')) {
+              port.position.x = newHalfLen;
+            }
+          }
+
+          // Determine which annulus port connects to which component based on position
+          // annulus-1 is at -halfLen (left), annulus-2 is at +halfLen (right)
+          // We need to ensure the ports point toward the correct components
+          const cvToFirst = { x: pos1.x - newPosX, y: pos1.y - newPosY };
+          const firstIsOnNegativeSide = cvToFirst.x < 0;
+
+          // If first component is on negative side, annulus-1 should connect to it
+          // Otherwise annulus-2 should connect to it
+          if ((firstConnectedPort.includes('annulus-1') && !firstIsOnNegativeSide) ||
+              (firstConnectedPort.includes('annulus-2') && firstIsOnNegativeSide)) {
+            // Need to swap port assignments - but for now just log a warning
+            console.log(`  - Note: Port assignment may need manual adjustment`);
+          }
+
+          // Recalculate volumes
+          const outerRadius = crossVessel.outerDiameter / 2;
+          const innerRadius = crossVessel.innerDiameter / 2;
+          const innerOuterRadius = innerRadius + crossVessel.innerWallThickness;
+          crossVessel.annulusVolume = Math.PI * newLength * (
+            Math.pow(outerRadius - crossVessel.wallThickness, 2) - Math.pow(innerOuterRadius, 2)
+          );
+          crossVessel.innerVolume = Math.PI * Math.pow(innerRadius, 2) * newLength;
+        }
+      } else {
+        // First annulus connection: move cross-vessel so this port touches the other component
+        // Determine which end of the cross-vessel is being connected
+        const isAnnulus1 = cvPortId.includes('annulus-1');
+        const halfLen = crossVessel.length / 2;
+
+        // Move cross-vessel so the connected port is at the other component's position
+        // annulus-1 is at -halfLen from center, annulus-2 is at +halfLen from center
+        if (isAnnulus1) {
+          // Port is at (center.x - halfLen), so center should be at (other.x + halfLen)
+          crossVessel.position.x = otherComponent.position.x + halfLen;
+          crossVessel.position.y = otherComponent.position.y;
+        } else {
+          // Port is at (center.x + halfLen), so center should be at (other.x - halfLen)
+          crossVessel.position.x = otherComponent.position.x - halfLen;
+          crossVessel.position.y = otherComponent.position.y;
+        }
+
+        console.log(`[Construction] Cross-vessel '${crossVessel.id}' first annulus connection: moved to (${crossVessel.position.x.toFixed(1)}, ${crossVessel.position.y.toFixed(1)}) to touch '${otherComponent.id}'`);
+      }
+
+      // Force connection length to 0 for annulus connections (physically touching)
+      effectiveLength = 0;
+      console.log(`[Construction] Cross-vessel annulus connection: forcing length to 0 (physically touching)`);
+    }
+
     // Update port connections
     fromPort.connectedTo = toPortId;
     toPort.connectedTo = fromPortId;
@@ -1659,7 +1928,7 @@ export class ConstructionManager {
       fromPhaseTolerance: effectiveFromPhaseTolerance,
       toPhaseTolerance: toPhaseTolerance,
       flowArea: flowArea,
-      length: length
+      length: effectiveLength
     };
 
     this.plantState.connections.push(connection);
@@ -2253,7 +2522,10 @@ export class ConstructionManager {
 
     // Heat exchanger specific
     if (properties.tubeCount !== undefined) {
-      component.tubeCount = properties.tubeCount;
+      // tubeCount property in dialog is the real engineering count
+      // component.tubeCount stays as visual count (capped at 10 for rendering)
+      component.realTubeCount = properties.tubeCount;
+      component.tubeCount = Math.min(properties.tubeCount, 10);
     }
     if (properties.shellDiameter !== undefined) {
       component.width = properties.shellDiameter;
@@ -2263,6 +2535,22 @@ export class ConstructionManager {
     }
     if (properties.hxType !== undefined) {
       component.hxType = properties.hxType;
+    }
+    if (properties.plenumLength !== undefined) {
+      // Cap plenum length to shell radius (use width for vertical, height for horizontal orientation)
+      const shellDiam = component.width < component.height ? component.width : component.height;
+      const maxPlenumLen = shellDiam / 2;
+      component.plenumLength = Math.min(properties.plenumLength, maxPlenumLen);
+    }
+    if (properties.tubePressure !== undefined) {
+      component.tubePressureRating = properties.tubePressure;
+    }
+    if (properties.shellPressure !== undefined) {
+      component.shellPressureRating = properties.shellPressure;
+      component.pressureRating = properties.shellPressure; // For wall thickness calc
+    }
+    if (properties.tubeOD !== undefined) {
+      component.tubeOD = properties.tubeOD / 1000; // mm to m
     }
 
     // Condenser specific

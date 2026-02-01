@@ -1050,6 +1050,54 @@ export function estimateComponentCost(
       });
     }
 
+    case 'cross-vessel': {
+      // Cross-vessel is a structural extension of the parent vessel
+      // Cost includes both outer shell and inner hot leg pipe
+      const outerDiam = props.outerDiameter || 1.0;
+      const innerDiam = props.innerDiameter || 0.5;
+      const cvLength = props.length || 3.0;
+      const pressureRating = props.pressureRating || 150;
+
+      // Calculate wall thicknesses from pressure rating
+      const P = pressureRating * 1e5;
+      const S = 172e6; // SA-533 allowable stress
+      const E = 1.0;
+      const outerWallThickness = Math.max(0.02, (P * (outerDiam / 2)) / (S * E - 0.6 * P));
+      const innerWallThickness = Math.max(0.01, (P * (innerDiam / 2)) / (S * E - 0.6 * P));
+
+      // Outer shell steel mass (cylindrical shell)
+      const outerShellVolume = Math.PI * outerDiam * outerWallThickness * cvLength;
+      // Inner pipe steel mass
+      const innerPipeVolume = Math.PI * innerDiam * innerWallThickness * cvLength;
+      // Add end forgings/flanges (~20% of shell)
+      const totalSteelVolume = (outerShellVolume + innerPipeVolume) * 1.2;
+      const steelMass = totalSteelVolume * STEEL_DENSITY;
+
+      // Use low-alloy steel for reactor-grade pressure boundary
+      const materialCost = steelMass * STEEL_PRICES.lowAlloySteel;
+      const fabricationCost = materialCost * FABRICATION_MULTIPLIERS.reactorVessel;
+      const installationCost = (materialCost + fabricationCost) * INSTALLATION_MULTIPLIERS.pressureVessel;
+      const subtotal = materialCost + fabricationCost + installationCost;
+      const nqa1Premium = nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+
+      return {
+        materialCost,
+        fabricationCost,
+        installationCost,
+        subtotal,
+        nqa1Premium,
+        total: subtotal + nqa1Premium,
+        breakdown: {
+          'Outer shell steel': materialCost * (outerShellVolume / totalSteelVolume) * 1.2,
+          'Inner pipe steel': materialCost * (innerPipeVolume / totalSteelVolume) * 1.2,
+          'Forgings/flanges': materialCost * 0.2,
+          'Fabrication': fabricationCost,
+          'Installation': installationCost,
+          ...(nqa1 ? { 'NQA-1 premium': nqa1Premium } : {}),
+        },
+      };
+    }
+
     default:
       // Unknown component type - return zero cost
       return {

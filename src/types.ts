@@ -42,7 +42,8 @@ export type ComponentType =
   | 'fuelAssembly'
   | 'controller'
   | 'switchyard'
-  | 'building';
+  | 'building'
+  | 'crossVessel';
 
 export interface Port {
   id: string;
@@ -190,7 +191,11 @@ export interface HeatExchangerComponent extends ComponentBase {
   primaryFluid?: Fluid;
   secondaryFluid?: Fluid;
   tubeCount: number;
-  pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
+  pressureRating?: number;       // Shell-side design pressure (bar) - used to calculate shell wall thickness
+  tubePressureRating?: number;   // Tube-side design pressure (bar) - used to calculate tube wall thickness
+  shellPressureRating?: number;  // Shell-side design pressure (bar)
+  plenumLength?: number;         // Length of tube-side plenums (semi-ellipsoid) in meters
+  tubeOD?: number;               // Tube outer diameter in meters
 }
 
 export interface TurbineGeneratorComponent extends ComponentBase {
@@ -341,6 +346,29 @@ export interface BuildingComponent extends ComponentBase {
   initialNcg?: { [species: string]: number };
 }
 
+// Cross-vessel pipe - a structural extension of a vessel that allows a hot pipe to pass through
+// The cross-vessel is a protrusion of the parent vessel's pressure boundary, containing an
+// internal hot leg pipe. The space between the inner pipe and outer wall is continuous with
+// the parent vessel's fluid (typically cold annulus coolant). This design keeps the pressure
+// wall at cold temperature while allowing hot fluid to pass through.
+// Used in SMR designs where the hot leg connects directly to an external steam generator.
+export interface CrossVesselComponent extends ComponentBase {
+  type: 'crossVessel';
+  // Outer vessel (protrusion of parent vessel)
+  outerDiameter: number;      // meters - outer diameter of the cross-vessel extension
+  wallThickness: number;      // meters - wall thickness (same material as parent vessel)
+  length: number;             // meters - length from parent vessel wall to target component
+  // Inner hot leg pipe
+  innerDiameter: number;      // meters - inner diameter of the hot leg pipe
+  innerWallThickness: number; // meters - wall thickness of the inner pipe
+  pressureRating: number;     // bar - design pressure (should match parent vessel)
+  // Connection info
+  targetComponentId?: string; // ID of component this connects to (e.g., steam generator)
+  // Rendering/orientation
+  orientation: 'horizontal' | 'angled';  // How the cross-vessel extends from parent
+  angle?: number;             // degrees from horizontal (for angled orientation)
+}
+
 export type PlantComponent =
   | TankComponent
   | PipeComponent
@@ -355,7 +383,8 @@ export type PlantComponent =
   | CondenserComponent
   | ControllerComponent
   | SwitchyardComponent
-  | BuildingComponent;
+  | BuildingComponent
+  | CrossVesselComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;
