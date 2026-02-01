@@ -14,6 +14,7 @@ import {
   ControllerComponent,
   SwitchyardComponent,
   BuildingComponent,
+  CrossVesselComponent,
   ViewState,
   Fluid,
   Point,
@@ -786,6 +787,9 @@ export function renderComponent(
       break;
     case 'building':
       renderBuilding(ctx, component as BuildingComponent, view, isSimulating, worldToScreenFn);
+      break;
+    case 'crossVessel':
+      renderCrossVessel(ctx, component as CrossVesselComponent, view, isSimulating, worldToScreenFn);
       break;
   }
 
@@ -1984,6 +1988,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   // Defensive: ensure valid dimensions
   const w = Math.max((hx.width || 2) * view.zoom, 20);
   const h = Math.max((hx.height || 4) * view.zoom, 20);
+  const hxType = hx.hxType || 'utube';
 
   // Calculate wall thickness from pressure rating if available
   // Use the smaller dimension as the "diameter" for cylindrical approximation
@@ -1996,31 +2001,85 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   // Detect orientation: horizontal when width > height, vertical when height > width
   const isHorizontal = w > h;
 
-  // Shell
-  ctx.fillStyle = COLORS.steel;
-  ctx.fillRect(-w / 2, -h / 2, w, h);
+  // For U-tube, add a semi-circular bulge at the U-bend end
+  // The bulge center is at the edge of the rectangular shell
+  const bulgeRadius = isHorizontal ? h / 2 : w / 2;
+  const innerBulgeRadius = bulgeRadius - wallPx;
 
-  // Shell-side fluid (secondary) - stratified if two-phase
+  // Shell-side fluid dimensions
   const innerW = Math.max(w - wallPx * 2, 10);
   const innerH = Math.max(h - wallPx * 2, 10);
   const innerLeft = -w / 2 + wallPx;
   const innerTop = -h / 2 + wallPx;
 
+  // Draw shell and fluid together to avoid seams
+  // First draw the outer shell shape
+  ctx.fillStyle = COLORS.steel;
+  ctx.beginPath();
+  if (hxType === 'utube') {
+    if (isHorizontal) {
+      // Horizontal U-tube: bulge on right side, arc centered at right edge of rect
+      ctx.moveTo(-w / 2, -h / 2);
+      ctx.lineTo(w / 2, -h / 2);
+      ctx.arc(w / 2, 0, bulgeRadius, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(-w / 2, h / 2);
+      ctx.closePath();
+    } else {
+      // Vertical U-tube: bulge on top, arc centered at top edge of rect
+      ctx.moveTo(-w / 2, h / 2);
+      ctx.lineTo(-w / 2, -h / 2);
+      ctx.arc(0, -h / 2, bulgeRadius, Math.PI, 0);
+      ctx.lineTo(w / 2, h / 2);
+      ctx.closePath();
+    }
+  } else {
+    ctx.rect(-w / 2, -h / 2, w, h);
+  }
+  ctx.fill();
+
+  // Now draw the inner fluid region (clipped)
+  ctx.save();
+  ctx.beginPath();
+  if (hxType === 'utube') {
+    if (isHorizontal) {
+      // Inner region - arc centered at same point but with smaller radius
+      ctx.moveTo(innerLeft, innerTop);
+      ctx.lineTo(w / 2, innerTop);
+      ctx.arc(w / 2, 0, innerBulgeRadius, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(innerLeft, h / 2 - wallPx);
+      ctx.closePath();
+    } else {
+      // Inner region - arc centered at same point but with smaller radius
+      ctx.moveTo(innerLeft, h / 2 - wallPx);
+      ctx.lineTo(innerLeft, -h / 2);
+      ctx.arc(0, -h / 2, innerBulgeRadius, Math.PI, 0);
+      ctx.lineTo(w / 2 - wallPx, h / 2 - wallPx);
+      ctx.closePath();
+    }
+  } else {
+    ctx.rect(innerLeft, innerTop, innerW, innerH);
+  }
+  ctx.clip();
+
   if (hx.secondaryFluid) {
     // HX shell side always uses quality-based calculation (no stored fillLevel)
     const liquidFraction = getLiquidFraction(hx, hx.secondaryFluid, true);
     const separation = hx.secondaryFluid.separation ?? 1;
-    renderFluidWithNcg(ctx, hx.secondaryFluid, innerLeft, innerTop, innerW, innerH, liquidFraction, separation);
+    // For clipped region, draw a larger rect that fills the clip area
+    const fluidW = hxType === 'utube' ? (isHorizontal ? innerW + bulgeRadius : innerW) : innerW;
+    const fluidH = hxType === 'utube' ? (isHorizontal ? innerH : innerH + bulgeRadius) : innerH;
+    renderFluidWithNcg(ctx, hx.secondaryFluid, innerLeft, innerTop - (hxType === 'utube' && !isHorizontal ? bulgeRadius : 0), fluidW, fluidH, liquidFraction, separation);
   } else {
     ctx.fillStyle = '#111';
-    ctx.fillRect(innerLeft, innerTop, innerW, innerH);
+    ctx.fillRect(innerLeft, innerTop - (hxType === 'utube' && !isHorizontal ? bulgeRadius : 0),
+      innerW + (hxType === 'utube' && isHorizontal ? bulgeRadius : 0),
+      innerH + (hxType === 'utube' && !isHorizontal ? bulgeRadius : 0));
   }
+  ctx.restore();
 
   // Tubes (primary side) - rendering depends on hxType and orientation
   // Use a small visual tube count (cap at 10 for rendering)
   const visualTubeCount = Math.min(Math.max(hx.tubeCount || 5, 1), 10);
-  const hxType = hx.hxType || 'utube';
-  const tubeWall = 1;
   const tubeSheetThickness = 5;
 
   // Primary fluid color
@@ -2030,6 +2089,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     // HORIZONTAL ORIENTATION: tubes run left-to-right
     const tubeSpacing = innerH / (visualTubeCount + 1);
     const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
+    // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
+    const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
     for (let i = 0; i < visualTubeCount; i++) {
       const y = innerTop + tubeSpacing * (i + 1);
@@ -2075,32 +2136,29 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.stroke();
       } else {
         // U-tube - tubes with U-bends at the right end
-        ctx.fillStyle = COLORS.steel;
-        ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness - 10, (tubeRadius + tubeWall) * 2);
+        // Position U-bend center where tubes meet the bulge arc
+        const uBendX = innerLeft + innerW - tubeRadius - tubeWall;
 
-        ctx.fillStyle = primaryColor;
-        ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness - 10 - tubeWall * 2, tubeRadius * 2);
-
-        // Tube header at left (inlet/outlet plenum)
+        // Draw tube steel (outer wall) - extend into bulge area
         ctx.fillStyle = COLORS.steel;
         ctx.beginPath();
+        // Start at left plenum
         ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
+        // Rectangle to U-bend
+        ctx.lineTo(uBendX, y - tubeRadius - tubeWall);
+        ctx.arc(uBendX, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
+        ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius + tubeWall);
+        ctx.closePath();
         ctx.fill();
 
+        // Draw tube interior (fluid)
         ctx.fillStyle = primaryColor;
         ctx.beginPath();
         ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
-        ctx.fill();
-
-        // U-bend at right
-        ctx.fillStyle = COLORS.steel;
-        ctx.beginPath();
-        ctx.arc(innerLeft + innerW - 10, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
-        ctx.fill();
-
-        ctx.fillStyle = primaryColor;
-        ctx.beginPath();
-        ctx.arc(innerLeft + innerW - 10, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
+        ctx.lineTo(uBendX, y - tubeRadius);
+        ctx.arc(uBendX, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
+        ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius);
+        ctx.closePath();
         ctx.fill();
       }
     }
@@ -2115,6 +2173,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     // VERTICAL ORIENTATION: tubes run bottom-to-top
     const tubeSpacing = innerW / (visualTubeCount + 1);
     const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
+    // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
+    const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
     for (let i = 0; i < visualTubeCount; i++) {
       const x = innerLeft + tubeSpacing * (i + 1);
@@ -2160,32 +2220,29 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.stroke();
       } else {
         // U-tube - tubes with tube sheet at BOTTOM and U-bends at TOP (standard SG configuration)
-        ctx.fillStyle = COLORS.steel;
-        ctx.fillRect(x - tubeRadius - tubeWall, innerTop + 10, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness - 10);
+        // Position U-bend center where tubes meet the bulge arc
+        const uBendY = innerTop + tubeRadius + tubeWall;
 
-        ctx.fillStyle = primaryColor;
-        ctx.fillRect(x - tubeRadius, innerTop + 10 + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness - 10 - tubeWall * 2);
-
-        // U-bend at TOP
+        // Draw tube steel (outer wall) - extend into bulge area
         ctx.fillStyle = COLORS.steel;
         ctx.beginPath();
-        ctx.arc(x, innerTop + 10, tubeRadius + tubeWall, Math.PI, 0);
-        ctx.fill();
-
-        ctx.fillStyle = primaryColor;
-        ctx.beginPath();
-        ctx.arc(x, innerTop + 10, tubeRadius, Math.PI, 0);
-        ctx.fill();
-
-        // Tube header at bottom (inlet/outlet plenum)
-        ctx.fillStyle = COLORS.steel;
-        ctx.beginPath();
+        // Start with semicircle at top
+        ctx.arc(x, uBendY, tubeRadius + tubeWall, Math.PI, 0);
+        // Rectangle down to tube sheet
+        ctx.lineTo(x + tubeRadius + tubeWall, innerTop + innerH - tubeSheetThickness);
         ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius + tubeWall, 0, Math.PI);
+        ctx.lineTo(x - tubeRadius - tubeWall, uBendY);
+        ctx.closePath();
         ctx.fill();
 
+        // Draw tube interior (fluid)
         ctx.fillStyle = primaryColor;
         ctx.beginPath();
+        ctx.arc(x, uBendY, tubeRadius, Math.PI, 0);
+        ctx.lineTo(x + tubeRadius, innerTop + innerH - tubeSheetThickness);
         ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius, 0, Math.PI);
+        ctx.lineTo(x - tubeRadius, uBendY);
+        ctx.closePath();
         ctx.fill();
       }
     }
@@ -2205,10 +2262,193 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     }
   }
 
-  // Outline
+  // Draw plenums (semi-ellipsoid tube-side headers)
+  const plenumLength = (hx.plenumLength || 0) * view.zoom;
+  if (plenumLength > 0) {
+    const plenumColor = COLORS.steel;
+    const plenumHighlight = COLORS.steelHighlight;
+    const dividerThickness = 3; // Pixels for divider plate
+
+    if (isHorizontal) {
+      // Horizontal HX: plenums are vertical semi-ellipsoids at left (and right for straight tubes)
+      const plenumRadiusY = h / 2; // Match shell diameter
+
+      if (hxType === 'utube') {
+        // U-tube: single plenum at left, divided in half by a divider plate
+        // Draw plenum cap (semi-ellipse extending to the left)
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.fill();
+
+        // Fill top half of plenum with primary fluid using clip
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-w / 2 - plenumLength - 1, -plenumRadiusY, plenumLength + 2, plenumRadiusY - dividerThickness / 2);
+        ctx.clip();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.fill();
+        ctx.restore();
+
+        // Fill bottom half of plenum with primary fluid using clip
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-w / 2 - plenumLength - 1, dividerThickness / 2, plenumLength + 2, plenumRadiusY);
+        ctx.clip();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.fill();
+        ctx.restore();
+
+        // Draw divider plate on top of fluid
+        ctx.fillStyle = COLORS.steelDark;
+        ctx.fillRect(-w / 2 - plenumLength + wallPx, -dividerThickness / 2, plenumLength - wallPx, dividerThickness);
+
+        // Plenum outline
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.stroke();
+      } else {
+        // Straight/helical: plenums at both ends
+        // Left plenum (bulges to the left)
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.fill();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.fill();
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+        ctx.stroke();
+
+        // Right plenum (bulges to the right)
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
+        ctx.fill();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, false);
+        ctx.fill();
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
+        ctx.stroke();
+      }
+    } else {
+      // Vertical HX: plenums are horizontal semi-ellipsoids at bottom (and top for straight tubes)
+      const plenumRadiusX = w / 2; // Match shell diameter
+
+      if (hxType === 'utube') {
+        // U-tube: single plenum at bottom, divided in half by a divider plate
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+        ctx.fill();
+
+        // Fill right half of plenum with primary fluid using clip
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(dividerThickness / 2, h / 2 - 1, plenumRadiusX, plenumLength + 2);
+        ctx.clip();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
+        ctx.fill();
+        ctx.restore();
+
+        // Fill left half of plenum with primary fluid using clip
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-plenumRadiusX, h / 2 - 1, plenumRadiusX - dividerThickness / 2, plenumLength + 2);
+        ctx.clip();
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
+        ctx.fill();
+        ctx.restore();
+
+        // Draw divider plate on top of fluid
+        ctx.fillStyle = COLORS.steelDark;
+        ctx.fillRect(-dividerThickness / 2, h / 2, dividerThickness, plenumLength - wallPx);
+
+        // Plenum outline
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+        ctx.stroke();
+      } else {
+        // Straight/helical: plenums at both ends
+        // Bottom plenum
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+        ctx.fill();
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+        ctx.stroke();
+        // Fill with primary fluid
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, 0, Math.PI, false);
+        ctx.fill();
+
+        // Top plenum
+        ctx.fillStyle = plenumColor;
+        ctx.beginPath();
+        ctx.ellipse(0, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
+        ctx.fill();
+        ctx.strokeStyle = plenumHighlight;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(0, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
+        ctx.stroke();
+        // Fill with primary fluid
+        ctx.fillStyle = primaryColor;
+        ctx.beginPath();
+        ctx.ellipse(0, -h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, Math.PI, 0, false);
+        ctx.fill();
+      }
+    }
+  }
+
+  // Outline - match the shell shape
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 2;
-  ctx.strokeRect(-w / 2, -h / 2, w, h);
+  ctx.beginPath();
+  if (hxType === 'utube') {
+    if (isHorizontal) {
+      // Horizontal U-tube: bulge on right side
+      ctx.moveTo(-w / 2, -h / 2);
+      ctx.lineTo(w / 2, -h / 2);
+      ctx.arc(w / 2, 0, bulgeRadius, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(-w / 2, h / 2);
+      ctx.closePath();
+    } else {
+      // Vertical U-tube: bulge on top
+      ctx.moveTo(-w / 2, h / 2);
+      ctx.lineTo(-w / 2, -h / 2);
+      ctx.arc(0, -h / 2, bulgeRadius, Math.PI, 0);
+      ctx.lineTo(w / 2, h / 2);
+      ctx.closePath();
+    }
+  } else {
+    ctx.rect(-w / 2, -h / 2, w, h);
+  }
+  ctx.stroke();
 }
 
 function renderTurbineGenerator(ctx: CanvasRenderingContext2D, turbine: TurbineGeneratorComponent, view: ViewState): void {
@@ -3367,13 +3607,35 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
         width: vd + 10,
         height: vd + 50,
       };
-    case 'heatExchanger':
-      return {
-        x: -component.width * view.zoom / 2 - 5,
-        y: -component.height * view.zoom / 2 - 5,
-        width: component.width * view.zoom + 10,
-        height: component.height * view.zoom + 10,
-      };
+    case 'heatExchanger': {
+      const hxComp = component as HeatExchangerComponent;
+      const plenumLen = (hxComp.plenumLength || 0) * view.zoom;
+      const hxIsHorizontal = hxComp.width > hxComp.height;
+      const hxType = hxComp.hxType || 'utube';
+      // U-tube has a semi-circular bulge at the U-bend end (same radius as shell)
+      const bulgeRadius = hxIsHorizontal ? component.height * view.zoom / 2 : component.width * view.zoom / 2;
+      const hasBulge = hxType === 'utube';
+
+      if (hxIsHorizontal) {
+        // Plenums extend left, bulge extends right for U-tube
+        const rightExtent = hasBulge ? bulgeRadius : plenumLen;
+        return {
+          x: -component.width * view.zoom / 2 - plenumLen - 5,
+          y: -component.height * view.zoom / 2 - 5,
+          width: component.width * view.zoom + plenumLen + rightExtent + 10,
+          height: component.height * view.zoom + 10,
+        };
+      } else {
+        // Plenums extend bottom, bulge extends top for U-tube
+        const topExtent = hasBulge ? bulgeRadius : plenumLen;
+        return {
+          x: -component.width * view.zoom / 2 - 5,
+          y: -component.height * view.zoom / 2 - topExtent - 5,
+          width: component.width * view.zoom + 10,
+          height: component.height * view.zoom + plenumLen + topExtent + 10,
+        };
+      }
+    }
     case 'turbine-generator':
       // Include generator on the right side
       const genR = component.height * view.zoom / 3;
@@ -3431,6 +3693,16 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
         y: -bldgDepth / 2 - bldgHeight / 2 - 5,   // Back wall extends up
         width: bldgWidth + bldgDepth * 0.6 + 10,
         height: bldgDepth + bldgHeight / 2 + 10,
+      };
+    case 'crossVessel':
+      const cv = component as CrossVesselComponent;
+      const cvLength = cv.length * view.zoom;
+      const cvDiam = cv.outerDiameter * view.zoom;
+      return {
+        x: -cvLength / 2 - 5,
+        y: -cvDiam / 2 - 5,
+        width: cvLength + 10,
+        height: cvDiam + 10,
       };
     default:
       return { x: -20, y: -20, width: 40, height: 40 };
@@ -4287,6 +4559,75 @@ function renderBuilding(
     ctx.lineWidth = 1;
     ctx.strokeRect(-w / 2, -h / 2, w, h);
   }
+}
+
+/**
+ * Render a cross-vessel component.
+ * Cross-vessels are structural extensions of a parent vessel (like RPV) that allow
+ * a hot pipe to pass through to an external component (like a steam generator).
+ * The outer shell is continuous with the parent vessel; the inner pipe carries hot fluid.
+ */
+function renderCrossVessel(
+  ctx: CanvasRenderingContext2D,
+  cv: CrossVesselComponent,
+  view: ViewState,
+  _isSimulating: boolean = false,
+  _worldToScreenFn?: WorldToScreenFn
+): void {
+  // Cross-vessel renders the same way as heat exchanger - using local coordinates
+  // with the canvas transform handling isometric projection and positioning.
+  // This ensures bounding box, selection, and ports all line up correctly.
+  const length = cv.length;
+  const outerDiam = cv.outerDiameter;
+  const innerDiam = cv.innerDiameter;
+  const wallThickness = cv.wallThickness;
+  const innerWallThickness = cv.innerWallThickness;
+
+  // Steel colors for the vessel wall
+  const steelColor = { r: 100, g: 105, b: 115 };
+  const steelColorStr = `rgb(${steelColor.r}, ${steelColor.g}, ${steelColor.b})`;
+  const steelHighlightStr = `rgb(${Math.min(255, steelColor.r + 30)}, ${Math.min(255, steelColor.g + 30)}, ${Math.min(255, steelColor.b + 30)})`;
+
+  // Draw in local coordinates (centered at origin) - let canvas transform handle positioning
+  const lengthPx = length * view.zoom;
+  const outerDiamPx = outerDiam * view.zoom;
+  const innerDiamPx = innerDiam * view.zoom;
+  const wallPx = Math.max(2, wallThickness * view.zoom);
+  const innerWallPx = Math.max(1, innerWallThickness * view.zoom);
+
+  // Outer shell
+  ctx.fillStyle = steelColorStr;
+  ctx.fillRect(-lengthPx / 2, -outerDiamPx / 2, lengthPx, outerDiamPx);
+
+  // Annulus (cold fluid)
+  const annulusFluid = (cv as any).annulusFluid;
+  if (annulusFluid) {
+    ctx.fillStyle = getFluidColor(annulusFluid);
+  } else {
+    ctx.fillStyle = getFluidColor({ temperature: 565, pressure: 15.5e6, phase: 'liquid', quality: 0, flowRate: 0 });
+  }
+  ctx.fillRect(-lengthPx / 2 + wallPx, -outerDiamPx / 2 + wallPx,
+    lengthPx - wallPx * 2, outerDiamPx - wallPx * 2);
+
+  // Inner pipe wall
+  const innerOuterDiamPx = innerDiamPx + innerWallPx * 2;
+  ctx.fillStyle = steelColorStr;
+  ctx.fillRect(-lengthPx / 2 + wallPx, -innerOuterDiamPx / 2,
+    lengthPx - wallPx * 2, innerOuterDiamPx);
+
+  // Inner hot fluid
+  if (cv.fluid) {
+    ctx.fillStyle = getFluidColor(cv.fluid);
+  } else {
+    ctx.fillStyle = getFluidColor({ temperature: 593, pressure: 15.5e6, phase: 'liquid', quality: 0, flowRate: 0 });
+  }
+  ctx.fillRect(-lengthPx / 2 + wallPx + innerWallPx, -innerDiamPx / 2,
+    lengthPx - wallPx * 2 - innerWallPx * 2, innerDiamPx);
+
+  // Outline
+  ctx.strokeStyle = steelHighlightStr;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-lengthPx / 2, -outerDiamPx / 2, lengthPx, outerDiamPx);
 }
 
 // ============================================================================

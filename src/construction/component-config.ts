@@ -443,15 +443,38 @@ export const componentDefinitions: Record<string, {
         { value: 'vertical', label: 'Vertical' },
         { value: 'horizontal', label: 'Horizontal' }
       ]},
-      { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 2, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level' },
+      { name: 'elevation', type: 'number', label: 'Elevation (Shell Bottom)', default: 2, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground of shell bottom. Plenums extend below this for vertical HX.' },
       { name: 'shellDiameter', type: 'number', label: 'Shell Diameter', default: 2.5, min: 0.5, max: 10, step: 0.1, unit: 'm' },
       { name: 'shellLength', type: 'number', label: 'Shell Length', default: 8, min: 1, max: 25, step: 0.5, unit: 'm' },
+      { name: 'plenumLength', type: 'number', label: 'Plenum Length', default: 0.8, min: 0.1, max: 5, step: 0.1, unit: 'm', help: 'Length of tube-side plenums (semi-ellipsoid caps). Capped to shell radius.' },
       { name: 'tubeCount', type: 'number', label: 'Number of Tubes', default: 3000, min: 10, max: 20000, step: 100 },
       { name: 'tubeOD', type: 'number', label: 'Tube Outer Diameter', default: 19, min: 6, max: 50, step: 1, unit: 'mm' },
-      { name: 'tubeThickness', type: 'number', label: 'Tube Wall Thickness', default: 1.2, min: 0.5, max: 5, step: 0.1, unit: 'mm' },
-      { name: 'tubePressure', type: 'number', label: 'Tube-Side Pressure', default: 150, min: 1, max: 300, step: 10, unit: 'bar' },
-      { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure', default: 60, min: 1, max: 100, step: 5, unit: 'bar' },
+      { name: 'tubePressure', type: 'number', label: 'Tube-Side Pressure Rating', default: 150, min: 1, max: 300, step: 10, unit: 'bar', help: 'Design pressure for tube side (determines tube wall thickness)' },
+      { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure Rating', default: 60, min: 1, max: 100, step: 5, unit: 'bar', help: 'Design pressure for shell side (determines shell and plenum wall thickness)' },
       // Calculated fields - displayed but not editable
+      { name: 'tubeWallThickness', type: 'calculated', label: 'Tube Wall Thickness', default: 0, unit: 'mm',
+        calculate: (p) => {
+          // ASME formula for thin-walled tubes: t = P*R / (S*E - 0.6*P)
+          // Tube pressure is differential (tube side minus unpressurized shell)
+          const P = (p.tubePressure || 150) * 1e5; // bar to Pa
+          const R = (p.tubeOD || 19) / 2000;       // outer radius in m (from mm)
+          const S = 137e6; // Inconel 690 allowable stress at 300°C (Pa)
+          const E = 1.0;   // Joint efficiency (seamless tube)
+          const thickness = P * R / (S * E - 0.6 * P);
+          return (Math.max(0.0005, thickness) * 1000).toFixed(2); // m to mm
+        }
+      },
+      { name: 'shellWallThickness', type: 'calculated', label: 'Shell Wall Thickness', default: 0, unit: 'mm',
+        calculate: (p) => {
+          // ASME formula for cylindrical vessels: t = P*R / (S*E - 0.6*P)
+          const P = (p.shellPressure || 60) * 1e5; // bar to Pa
+          const R = (p.shellDiameter || 2.5) / 2;   // inner radius in m
+          const S = 172e6; // SA-533 Grade B Class 1 allowable stress (Pa)
+          const E = 1.0;   // Joint efficiency
+          const thickness = P * R / (S * E - 0.6 * P);
+          return (Math.max(0.002, thickness) * 1000).toFixed(0); // m to mm
+        }
+      },
       { name: 'heatTransferArea', type: 'calculated', label: 'Heat Transfer Area', default: 0, unit: 'm²',
         calculate: (p) => {
           const tubeOD_m = (p.tubeOD || 19) / 1000; // mm to m
@@ -463,7 +486,12 @@ export const componentDefinitions: Record<string, {
       { name: 'tubeSideVolume', type: 'calculated', label: 'Tube-Side Volume', default: 0, unit: 'm³',
         calculate: (p) => {
           const tubeOD_m = (p.tubeOD || 19) / 1000;
-          const tubeThickness_m = (p.tubeThickness || 1.2) / 1000;
+          // Calculate tube thickness from pressure rating
+          const P = (p.tubePressure || 150) * 1e5;
+          const R = tubeOD_m / 2;
+          const S = 137e6; // Inconel 690
+          const E = 1.0;
+          const tubeThickness_m = Math.max(0.0005, P * R / (S * E - 0.6 * P));
           const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
           const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8);
           const volume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
@@ -480,17 +508,6 @@ export const componentDefinitions: Record<string, {
           const tubeDisplacement = Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
           const volume = shellVolume - tubeDisplacement;
           return Math.max(0, volume).toFixed(1);
-        }
-      },
-      { name: 'shellWallThickness', type: 'calculated', label: 'Shell Wall Thickness', default: 0, unit: 'mm',
-        calculate: (p) => {
-          // ASME formula for cylindrical vessels: t = P*R / (S*E - 0.6*P)
-          const P = (p.shellPressure || 60) * 1e5; // bar to Pa
-          const R = (p.shellDiameter || 2.5) / 2;   // inner radius in m
-          const S = 172e6; // SA-533 Grade B Class 1 allowable stress (Pa)
-          const E = 1.0;   // Joint efficiency
-          const thickness = P * R / (S * E - 0.6 * P);
-          return (Math.max(0.002, thickness) * 1000).toFixed(0); // m to mm
         }
       }
     ]
@@ -790,6 +807,63 @@ export const componentDefinitions: Record<string, {
         }
       }
     ]
+  },
+
+  // Cross-vessel - structural extension for hot leg piping through cold annulus
+  'cross-vessel': {
+    displayName: 'Cross-Vessel',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Cross-Vessel' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: 'Cross-vessels are part of the primary pressure boundary' },
+      { name: 'outerDiameter', type: 'number', label: 'Outer Diameter', default: 1.0, min: 0.3, max: 3.0, step: 0.1, unit: 'm', help: 'Diameter of the outer shell (annulus boundary)' },
+      { name: 'innerDiameter', type: 'number', label: 'Inner Pipe Diameter', default: 0.5, min: 0.1, max: 2.0, step: 0.05, unit: 'm', help: 'Diameter of the inner hot leg pipe' },
+      { name: 'length', type: 'number', label: 'Length', default: 3.0, min: 0.5, max: 15.0, step: 0.5, unit: 'm', help: 'Will auto-adjust when annulus ports are connected' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 170, min: 50, max: 250, step: 5, unit: 'bar', help: 'Should match connected vessel' },
+      { name: 'elevation', type: 'number', label: 'Elevation', default: 5, min: 0, max: 50, step: 0.5, unit: 'm', help: 'Height above ground' },
+      { name: 'wallThickness', type: 'calculated', label: 'Outer Wall Thickness', default: 0, unit: 'm',
+        calculate: (p) => {
+          const P = (p.pressureRating || 170) * 1e5;
+          const R = (p.outerDiameter || 1.0) / 2;
+          const S = 172e6;
+          const E = 1.0;
+          const t = P * R / (S * E - 0.6 * P);
+          return Math.max(0.02, t).toFixed(3);
+        }
+      },
+      { name: 'innerWallThickness', type: 'calculated', label: 'Inner Pipe Wall Thickness', default: 0, unit: 'm',
+        calculate: (p) => {
+          const P = (p.pressureRating || 170) * 1e5;
+          const R = (p.innerDiameter || 0.5) / 2;
+          const S = 172e6;
+          const E = 1.0;
+          const t = P * R / (S * E - 0.6 * P);
+          return Math.max(0.01, t).toFixed(3);
+        }
+      },
+      { name: 'innerTemperature', type: 'number', label: 'Inner Pipe Temperature', default: 320, min: 100, max: 400, step: 5, unit: '°C', help: 'Hot leg temperature' },
+      { name: 'annulusTemperature', type: 'number', label: 'Annulus Temperature', default: 290, min: 100, max: 400, step: 5, unit: '°C', help: 'Cold leg/downcomer temperature' },
+      { name: 'annulusVolume', type: 'calculated', label: 'Annulus Volume', default: 0, unit: 'm³',
+        calculate: (p) => {
+          const outerR = (p.outerDiameter || 1.0) / 2;
+          const innerR = (p.innerDiameter || 0.5) / 2;
+          const P = (p.pressureRating || 170) * 1e5;
+          const S = 172e6;
+          const outerWall = Math.max(0.02, P * outerR / (S - 0.6 * P));
+          const innerWall = Math.max(0.01, P * innerR / (S - 0.6 * P));
+          const outerInner = outerR - outerWall;
+          const innerOuter = innerR + innerWall;
+          const length = p.length || 3.0;
+          return (Math.PI * length * (outerInner * outerInner - innerOuter * innerOuter)).toFixed(2);
+        }
+      },
+      { name: 'innerVolume', type: 'calculated', label: 'Inner Pipe Volume', default: 0, unit: 'm³',
+        calculate: (p) => {
+          const innerR = (p.innerDiameter || 0.5) / 2;
+          const length = p.length || 3.0;
+          return (Math.PI * innerR * innerR * length).toFixed(2);
+        }
+      }
+    ]
   }
 };
 
@@ -819,11 +893,17 @@ export class ComponentDialog {
     this.cancelButton.addEventListener('click', () => this.handleCancel());
     this.closeButton.addEventListener('click', () => this.handleCancel());
 
-    // Close on background click
+    // Close on background click - but only if mousedown also started on backdrop
+    // This prevents accidental closes when dragging to select text
+    let mouseDownOnBackdrop = false;
+    this.dialog.addEventListener('mousedown', (e) => {
+      mouseDownOnBackdrop = (e.target === this.dialog);
+    });
     this.dialog.addEventListener('click', (e) => {
-      if (e.target === this.dialog) {
+      if (e.target === this.dialog && mouseDownOnBackdrop) {
         this.handleCancel();
       }
+      mouseDownOnBackdrop = false;
     });
 
     // Close on Escape key
@@ -1770,7 +1850,8 @@ export class ComponentDialog {
       'fuelAssembly': 'core',
       'controller': 'scram-controller',
       'switchyard': 'switchyard',
-      'building': 'building'
+      'building': 'building',
+      'crossVessel': 'cross-vessel'
     };
     return mapping[type] || type;
   }
@@ -2113,7 +2194,16 @@ export class ComponentDialog {
           optionName === 'blowdown') {
         return value * 100;  // 0-1 to %
       }
+      // Convert m to mm for tube OD (stored in meters)
+      if (optionName === 'tubeOD') {
+        return value * 1000;  // m to mm
+      }
       return value;
+    }
+
+    // Special case: tubeCount should read from realTubeCount for HX components
+    if (optionName === 'tubeCount' && component.realTubeCount !== undefined) {
+      return component.realTubeCount;
     }
 
     // Map option names to component properties
