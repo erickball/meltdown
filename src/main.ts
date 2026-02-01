@@ -1054,6 +1054,10 @@ function init() {
         if (hx.tubeOD) {
           costProps.tubeOD = hx.tubeOD * 1000;
         }
+        // tubeCount is visual (capped at 10), realTubeCount is the actual engineering value
+        if (hx.realTubeCount) {
+          costProps.tubeCount = hx.realTubeCount;
+        }
         // Map pressure rating properties
         costProps.shellPressure = hx.shellPressureRating || hx.pressureRating || 60;
         costProps.tubePressure = hx.tubePressureRating || 150;
