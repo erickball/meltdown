@@ -495,6 +495,7 @@ export interface SolverMetrics {
 /**
  * Tracks burst status for a pressurized component.
  * Burst pressure = design rating + random 0-40% margin.
+ * Collapse pressure = calculated from geometry (buckling under external pressure).
  * Break size scales with overpressure: 1% at burst, ~20% at 1.5x, cap at 100%.
  */
 export interface BurstState {
@@ -503,12 +504,14 @@ export interface BurstState {
   componentLabel: string;            // Human-readable name
 
   // Calculated at simulation start
-  designPressure: number;            // Pa - component's pressure rating
+  designPressure: number;            // Pa - component's pressure rating (internal)
   burstPressure: number;             // Pa - actual burst pressure (design + random margin)
+  collapsePressure: number;          // Pa - external pressure differential to cause buckling
   randomMargin: number;              // 0-0.4 - the random factor applied
 
   // Runtime state
   isBurst: boolean;                  // Has this component ruptured?
+  isCollapse?: boolean;              // True if failure was due to external pressure (collapse)
   burstTime?: number;                // Simulation time when burst occurred
   currentBreakFraction: number;      // 0-1 current break size
 

@@ -1889,8 +1889,97 @@ function createAtmosphereNode(): FlowNode {
 }
 
 /**
+ * Calculate collapse pressure from geometry using elastic buckling formula.
+ *
+ * For a thin-walled cylinder under external pressure, collapse occurs at:
+ *   P_collapse = 2 * E * (t/D)³ / (1 - ν²)
+ *
+ * where:
+ *   E = Young's modulus (~200 GPa for steel)
+ *   ν = Poisson's ratio (~0.3 for steel)
+ *   t = wall thickness
+ *   D = diameter
+ *
+ * This assumes the same random margin as burst pressure for variability.
+ * The ratio of collapse to burst pressure scales with (t/D)², so thin-walled
+ * vessels are much more vulnerable to external pressure than internal.
+ */
+function calculateCollapsePressure(
+  diameter: number,      // m - inner diameter
+  thickness: number,     // m - wall thickness
+  randomMargin: number   // same margin as burst (0-0.4)
+): number {
+  const E = 200e9;       // Pa - Young's modulus for steel
+  const nu = 0.3;        // Poisson's ratio for steel
+
+  const tOverD = thickness / diameter;
+  const designCollapse = (2 * E * Math.pow(tOverD, 3)) / (1 - nu * nu);
+
+  // Apply same random margin as burst pressure
+  return designCollapse * (1 + randomMargin);
+}
+
+/**
+ * Get geometry (diameter and wall thickness) from a component.
+ * Uses explicit values when available, or calculates from pressure rating.
+ * Returns null if geometry cannot be determined.
+ */
+function getComponentGeometry(
+  component: PlantComponent,
+  pressureRatingBar: number
+): { diameter: number; thickness: number } | null {
+  const comp = component as any;
+
+  // Pipes have explicit diameter and thickness
+  if (component.type === 'pipe' && comp.diameter && comp.thickness) {
+    return { diameter: comp.diameter, thickness: comp.thickness };
+  }
+
+  // Vessels have explicit innerDiameter and wallThickness
+  if (component.type === 'vessel' && comp.innerDiameter && comp.wallThickness) {
+    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
+  }
+
+  // Tanks have explicit innerDiameter and wallThickness
+  if (component.type === 'tank' && comp.innerDiameter && comp.wallThickness) {
+    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
+  }
+
+  // Valves have diameter, calculate thickness from pressure rating
+  if (component.type === 'valve' && comp.diameter) {
+    const thickness = calculateThicknessFromPressure(pressureRatingBar, comp.diameter);
+    return { diameter: comp.diameter, thickness };
+  }
+
+  // Pumps have diameter, calculate thickness from pressure rating
+  if (component.type === 'pump' && comp.diameter) {
+    const thickness = calculateThicknessFromPressure(pressureRatingBar, comp.diameter);
+    return { diameter: comp.diameter, thickness };
+  }
+
+  // Reactor vessels have innerDiameter and wallThickness
+  if (component.type === 'reactorVessel' && comp.innerDiameter && comp.wallThickness) {
+    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
+  }
+
+  return null;
+}
+
+/**
+ * Calculate wall thickness from pressure rating using simplified Barlow formula.
+ * t = P * D / (2 * S) where S = 138 MPa (SA-106 Grade B)
+ */
+function calculateThicknessFromPressure(pressureBar: number, diameter: number): number {
+  const P = pressureBar * 1e5;  // bar to Pa
+  const S = 138e6;              // Pa - allowable stress
+  const thickness = P * diameter / (2 * S);
+  return Math.max(0.002, thickness);  // minimum 2mm
+}
+
+/**
  * Initialize burst states for all pressurized components.
  * Burst pressure = design rating + random 0-40% margin.
+ * Collapse pressure = calculated from geometry (buckling under external pressure).
  */
 function initializeBurstStates(
   plantState: PlantState,
@@ -1917,12 +2006,18 @@ function initializeBurstStates(
       const shellNodeId = `${compId}-shell`;
       if (state.flowNodes.has(shellNodeId)) {
         const shellNode = state.flowNodes.get(shellNodeId)!;
+        // For HX shell, estimate diameter from width/height (whichever is smaller is typically the diameter)
+        const shellDiameter = Math.min(hx.width || 1, hx.height || 1);
+        const shellThickness = calculateThicknessFromPressure(pressureRating, shellDiameter);
+        const shellCollapsePressure = calculateCollapsePressure(shellDiameter, shellThickness, randomMargin);
+
         state.burstStates.set(shellNodeId, {
           nodeId: shellNodeId,
           componentId: compId,
           componentLabel: `${component.label || 'HX'} (shell)`,
           designPressure,
           burstPressure,
+          collapsePressure: shellCollapsePressure,
           randomMargin,
           isBurst: false,
           currentBreakFraction: 0,
@@ -1941,6 +2036,11 @@ function initializeBurstStates(
       const tubeRandomMargin = simulationRandom() * 0.4;
       const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
 
+      // For HX tubes, use tubeOD or default to 19mm (3/4" standard)
+      const tubeOD = hx.tubeOD || 0.019;
+      const tubeThickness = calculateThicknessFromPressure(tubePressureRating, tubeOD);
+      const tubeCollapsePressure = calculateCollapsePressure(tubeOD, tubeThickness, tubeRandomMargin);
+
       if (state.flowNodes.has(tubeNodeId)) {
         state.burstStates.set(tubeNodeId, {
           nodeId: tubeNodeId,
@@ -1948,6 +2048,7 @@ function initializeBurstStates(
           componentLabel: `${component.label || 'HX'} (tubes)`,
           designPressure: tubeDesignPressure,
           burstPressure: tubeBurstPressure,
+          collapsePressure: tubeCollapsePressure,
           randomMargin: tubeRandomMargin,
           isBurst: false,
           currentBreakFraction: 0,
@@ -1963,12 +2064,20 @@ function initializeBurstStates(
     const simNodeId = (component as any).simNodeId || compId;
     if (state.flowNodes.has(simNodeId)) {
       const flowNode = state.flowNodes.get(simNodeId)!;
+
+      // Calculate collapse pressure from geometry
+      const geometry = getComponentGeometry(component, pressureRating);
+      const collapsePressure = geometry
+        ? calculateCollapsePressure(geometry.diameter, geometry.thickness, randomMargin)
+        : burstPressure * 0.5;  // Default: assume thin-walled, collapse at half burst pressure
+
       const burstState: BurstState = {
         nodeId: simNodeId,
         componentId: compId,
         componentLabel: component.label || component.type,
         designPressure,
         burstPressure,
+        collapsePressure,
         randomMargin,
         isBurst: false,
         currentBreakFraction: 0,

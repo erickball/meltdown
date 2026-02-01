@@ -90,16 +90,24 @@ export class BurstCheckOperator implements ConstraintOperator {
       const node = newState.flowNodes.get(nodeId);
       if (!node) continue;
 
-      // Calculate effective (gauge) pressure relative to container
-      const effectivePressure = this.getEffectivePressure(node, burstState, newState);
+      // Calculate gauge pressure relative to container (can be positive or negative)
+      const gaugePressure = this.getGaugePressure(node, burstState, newState);
 
-      // Check for new burst
-      if (!burstState.isBurst && effectivePressure > burstState.burstPressure) {
-        this.initiateBurst(burstState, effectivePressure, newState, config);
+      // Check for new failure (burst from internal overpressure or collapse from external)
+      if (!burstState.isBurst) {
+        if (gaugePressure > burstState.burstPressure) {
+          // Internal overpressure - burst
+          this.initiateBurst(burstState, gaugePressure, newState, config, false);
+        } else if (-gaugePressure > burstState.collapsePressure) {
+          // External overpressure - collapse (treated same as burst for now)
+          this.initiateBurst(burstState, -gaugePressure, newState, config, true);
+        }
       }
 
-      // Update break size for existing bursts (can grow with increasing pressure)
+      // Update break size for existing failures (can grow with increasing pressure differential)
       if (burstState.isBurst) {
+        // Use absolute gauge pressure for break growth
+        const effectivePressure = burstState.isCollapse ? -gaugePressure : gaugePressure;
         this.updateBreakSize(burstState, effectivePressure, newState, config);
       }
     }
@@ -108,13 +116,14 @@ export class BurstCheckOperator implements ConstraintOperator {
   }
 
   /**
-   * Calculate effective pressure for burst comparison.
-   * Always uses gauge pressure relative to the container.
+   * Calculate gauge pressure (internal minus external).
+   * Positive = internal overpressure (can burst)
+   * Negative = external overpressure (can collapse)
    *
    * For HX tube side: compare to shell pressure
    * For all other components: compare to container pressure (or atmosphere if no container)
    */
-  private getEffectivePressure(
+  private getGaugePressure(
     node: FlowNode,
     burstState: BurstState,
     state: SimulationState
@@ -125,8 +134,7 @@ export class BurstCheckOperator implements ConstraintOperator {
     if (burstState.isTubeSide && burstState.shellNodeId) {
       const shell = state.flowNodes.get(burstState.shellNodeId);
       if (shell) {
-        // Tubes can burst in either direction if pressure differential exceeds rating
-        return Math.abs(absolutePressure - shell.fluid.pressure);
+        return absolutePressure - shell.fluid.pressure;
       }
     }
 
@@ -143,15 +151,18 @@ export class BurstCheckOperator implements ConstraintOperator {
   }
 
   /**
-   * Initiate a new burst event.
+   * Initiate a new burst or collapse event.
+   * @param isCollapse - true if failure is due to external overpressure (collapse), false for internal (burst)
    */
   private initiateBurst(
     burstState: BurstState,
     pressure: number,
     state: SimulationState,
-    config: BurstConfig
+    config: BurstConfig,
+    isCollapse: boolean
   ): void {
     burstState.isBurst = true;
+    burstState.isCollapse = isCollapse;
     burstState.burstTime = state.time;
 
     // For pipes, assign break location along the length using the seed for determinism
@@ -170,10 +181,11 @@ export class BurstCheckOperator implements ConstraintOperator {
       burstState.breakElevation = node.elevation;
     }
 
-    // Calculate initial break fraction
+    // Calculate initial break fraction using the appropriate threshold
+    const thresholdPressure = isCollapse ? burstState.collapsePressure : burstState.burstPressure;
     burstState.currentBreakFraction = calculateBreakFraction(
       pressure,
-      burstState.burstPressure,
+      thresholdPressure,
       config,
       burstState.breakSizeSeed
     );
@@ -186,22 +198,26 @@ export class BurstCheckOperator implements ConstraintOperator {
     const elevationStr = burstState.breakElevation !== undefined
       ? ` at ${burstState.breakElevation.toFixed(1)}m elevation`
       : '';
+    const failureType = isCollapse ? 'collapsed' : 'ruptured';
+    const thresholdLabel = isCollapse ? 'collapse' : 'burst';
     state.pendingEvents.push({
       type: 'component-burst',
-      message: `LOCA: ${burstState.componentLabel} ruptured${elevationStr} at ${(pressure / 1e5).toFixed(1)} bar gauge (burst threshold: ${(burstState.burstPressure / 1e5).toFixed(1)} bar)`,
+      message: `LOCA: ${burstState.componentLabel} ${failureType}${elevationStr} at ${(pressure / 1e5).toFixed(1)} bar differential (${thresholdLabel} threshold: ${(thresholdPressure / 1e5).toFixed(1)} bar)`,
       data: {
         nodeId: burstState.nodeId,
         componentId: burstState.componentId,
         pressure: pressure,
         burstPressure: burstState.burstPressure,
+        collapsePressure: burstState.collapsePressure,
+        isCollapse,
         breakFraction: burstState.currentBreakFraction,
         breakElevation: burstState.breakElevation,
       },
     });
 
     console.log(
-      `[BurstCheck] BURST: ${burstState.componentLabel} at t=${state.time.toFixed(2)}s, ` +
-      `P=${(pressure / 1e5).toFixed(1)} bar gauge, break=${(burstState.currentBreakFraction * 100).toFixed(1)}%`
+      `[BurstCheck] ${isCollapse ? 'COLLAPSE' : 'BURST'}: ${burstState.componentLabel} at t=${state.time.toFixed(2)}s, ` +
+      `ΔP=${(pressure / 1e5).toFixed(1)} bar, break=${(burstState.currentBreakFraction * 100).toFixed(1)}%`
     );
   }
 
@@ -270,7 +286,7 @@ export class BurstCheckOperator implements ConstraintOperator {
   }
 
   /**
-   * Update break size for an already-burst component.
+   * Update break size for an already-burst/collapsed component.
    * Breaks can grow if pressure continues to increase, but cannot shrink.
    */
   private updateBreakSize(
@@ -279,9 +295,13 @@ export class BurstCheckOperator implements ConstraintOperator {
     state: SimulationState,
     config: BurstConfig
   ): void {
+    // Use appropriate threshold based on failure mode
+    const thresholdPressure = burstState.isCollapse
+      ? burstState.collapsePressure
+      : burstState.burstPressure;
     const newBreakFraction = calculateBreakFraction(
       pressure,
-      burstState.burstPressure,
+      thresholdPressure,
       config,
       burstState.breakSizeSeed
     );

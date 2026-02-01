@@ -1,6 +1,5 @@
 ## TODO List
 -Debug semi-implicit pressure/flow solver
--How much pressure can things handle from the outside?
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
@@ -41,6 +40,7 @@
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X How much pressure can things handle from the outside?
 X Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 X If I build a building around existing stuff, put it inside
 X break at random elevation. Maybe show a hole? with the red box around it
