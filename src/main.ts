@@ -2304,42 +2304,12 @@ function init() {
           }
         }
 
-        // Generate numbered default name based on existing components of this type
+        // Generate default name with number matching the ID that will be assigned
         const definition = componentDefinitions[selectedComponentType!];
         let defaultName: string | undefined;
         if (definition) {
-          const baseName = definition.displayName;
-          // Map definition type to component type stored in plantState
-          const componentTypeMap: Record<string, string> = {
-            'tank': 'tank',
-            'pressurizer': 'tank',
-            'reactor-vessel': 'reactorVessel',
-            'pipe': 'pipe',
-            'valve': 'valve',
-            'check-valve': 'valve',
-            'relief-valve': 'valve',
-            'porv': 'valve',
-            'pump': 'pump',
-            'heat-exchanger': 'heatExchanger',
-            'condenser': 'condenser',
-            'turbine-generator': 'turbine-generator',
-            'turbine-driven-pump': 'turbine-driven-pump',
-            'core': 'fuelAssembly',
-            'scram-controller': 'controller',
-            'switchyard': 'switchyard',
-            'building': 'building',
-            'cross-vessel': 'crossVessel',
-          };
-          const storedType = componentTypeMap[selectedComponentType!] || selectedComponentType!;
-
-          // Count existing components with labels starting with this base name
-          let count = 0;
-          for (const [, comp] of plantState.components) {
-            if (comp.type === storedType || (comp.label && comp.label.startsWith(baseName))) {
-              count++;
-            }
-          }
-          defaultName = `${baseName} ${count + 1}`;
+          const nextIdNum = constructionManager.getNextIdNumber();
+          defaultName = `${definition.displayName} ${nextIdNum}`;
         }
 
         componentDialog.show(

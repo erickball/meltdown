@@ -2000,11 +2000,11 @@ export class ConstructionManager {
     return (height / 2) - port.position.y;
   }
 
-  private generateComponentId(type: string): string {
-    const prefix = type.substring(0, 3);
-
-    // Find the highest existing ID number for any component type to avoid collisions
-    // This handles cases where components are deleted and new ones created
+  /**
+   * Get the next component ID number that will be assigned (without incrementing).
+   * Used for generating default component names that match their IDs.
+   */
+  getNextIdNumber(): number {
     let maxExistingId = 0;
     for (const componentId of this.plantState.components.keys()) {
       const match = componentId.match(/^[a-z]+-(\d+)/);
@@ -2015,11 +2015,13 @@ export class ConstructionManager {
         }
       }
     }
+    return Math.max(this.nextComponentId, maxExistingId + 1);
+  }
 
-    // Use the higher of nextComponentId or maxExistingId + 1
-    const nextId = Math.max(this.nextComponentId, maxExistingId + 1);
+  private generateComponentId(type: string): string {
+    const prefix = type.substring(0, 3);
+    const nextId = this.getNextIdNumber();
     this.nextComponentId = nextId + 1;
-
     return `${prefix}-${nextId}`;
   }
 
