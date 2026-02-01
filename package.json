@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && vite build && move dist\\index.html dist\\meltdown.html",
     "preview": "vite preview",
     "test": "npx tsx src/simulation/test-suite.ts"
   },

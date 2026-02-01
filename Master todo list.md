@@ -1,9 +1,7 @@
 ## TODO List
 -Debug semi-implicit pressure/flow solver
 -Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
--Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 -How much pressure can things handle from the outside?
--If I build a building around existing stuff, put it inside
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
@@ -37,11 +35,16 @@
 -We could even account for interest rates? Maybe
 -We should make a pebble bed core option, too
 -Not sure how to handle needing big graphite reflectors though?
--How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right?
+-How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right? Probably not it sounds like
+-Fix the way cylindrical buildings are displayed. The outline moves around, and the back wall really should look like half a cylindrical shell.
+-Water and steam coloring: should it be proportional to internal energy? Maybe it should, with white as the critical energy and fading into blue below that and yellow/orange above that. With max saturated vapor (~2604) being a very pale yellow. This will create a clear split in two-phase nodes, but less noticeable as you approach the critical pressure. It does mean that high pressure steam and low pressure steam at the same energy can be the same color, but that's fine I guess.
 
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
+-As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
+X If I build a building around existing stuff, put it inside
 X break at random elevation. Maybe show a hole? with the red box around it
 X make the red box big enough for the text
 X arrows for break flow
