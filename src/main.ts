@@ -1026,6 +1026,8 @@ function init() {
         else if (valve.valveType === 'porv') costType = 'porv';
       } else if (component.type === 'controller') {
         costType = 'scram-controller';
+      } else if (component.type === 'crossVessel') {
+        costType = 'cross-vessel';
       } else if (component.type === 'coreBarrel') {
         // Core barrel cost is included in reactor vessel
         continue;
@@ -1039,6 +1041,22 @@ function init() {
       }
       if (costType === 'condenser') {
         costProps.coolingCapacity = costProps.coolingCapacity / 1e6;
+      }
+      if (costType === 'heat-exchanger') {
+        // HX stores width/height but cost estimation expects shellDiameter/shellLength
+        // For vertical HX: width=diameter, height=length
+        // For horizontal HX: width=length, height=diameter
+        const hx = component as any;
+        const isHorizontal = hx.rotation === 90 || hx.rotation === 270;
+        costProps.shellDiameter = isHorizontal ? hx.height : hx.width;
+        costProps.shellLength = isHorizontal ? hx.width : hx.height;
+        // tubeOD is stored in meters, cost estimation expects mm
+        if (hx.tubeOD) {
+          costProps.tubeOD = hx.tubeOD * 1000;
+        }
+        // Map pressure rating properties
+        costProps.shellPressure = hx.shellPressureRating || hx.pressureRating || 60;
+        costProps.tubePressure = hx.tubePressureRating || 150;
       }
 
       const estimate = estimateComponentCost(costType, costProps);
