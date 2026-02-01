@@ -5,8 +5,7 @@
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
 -Maybe find a good way to display relative pressure at connections
--Pixelated display should apply to the tube side of a HX
--Figure out why power increases after a scram? Just fix neutronics in general, something about it isn't right anymore.
+-Fix neutronics in general, something about it isn't right anymore. Plus it needs to work for every type of reactor and idk how to get reasonable reactivity coefficients from whatever core and coolant parameters are available.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Add FW heaters?
 -Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.

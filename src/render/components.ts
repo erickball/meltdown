@@ -265,6 +265,68 @@ function renderZoneWithQuality(
   }
 }
 
+/**
+ * Create a CanvasPattern for two-phase fluid rendering.
+ * Returns the pattern or null if the fluid is not two-phase.
+ */
+function createTwoPhasePattern(
+  ctx: CanvasRenderingContext2D,
+  fluid: Fluid | undefined,
+  pixelSize: number = 4
+): CanvasPattern | null {
+  if (!fluid || fluid.phase !== 'two-phase' || fluid.quality === undefined) {
+    return null;
+  }
+
+  const quality = fluid.quality;
+  const liquidColor = getFluidColorRGB(fluid, false); // liquid
+  const vaporColor = { r: 255, g: 255, b: 255 }; // steam is white
+
+  // Create an offscreen canvas for the pattern
+  const patternSize = pixelSize * 8; // 8x8 pixel pattern
+  const patternCanvas = document.createElement('canvas');
+  patternCanvas.width = patternSize;
+  patternCanvas.height = patternSize;
+  const patternCtx = patternCanvas.getContext('2d')!;
+
+  const timeSeed = getTimeSeed();
+  const cols = patternSize / pixelSize;
+  const rows = patternSize / pixelSize;
+
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const seed = row * 1000 + col + Math.floor(quality * 100) * 10000 + timeSeed * 7919;
+      const rand = seededRandom(seed);
+      const isVapor = rand < quality;
+
+      const color = isVapor ? vaporColor : liquidColor;
+      patternCtx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+      patternCtx.fillRect(col * pixelSize, row * pixelSize, pixelSize, pixelSize);
+    }
+  }
+
+  return ctx.createPattern(patternCanvas, 'repeat');
+}
+
+/**
+ * Get fluid color as RGB object for pattern creation.
+ */
+function getFluidColorRGB(fluid: Fluid, isVapor: boolean = false): RGB {
+  // Get temperature-based blue color for liquid water
+  const T = fluid.temperature || 293;
+  const T_norm = Math.max(0, Math.min(1, (T - 273) / (647 - 273)));
+
+  if (isVapor) {
+    return { r: 255, g: 255, b: 255 }; // White steam
+  }
+
+  // Liquid: blue that gets lighter at higher temps
+  const r = Math.round(30 + T_norm * 150);
+  const g = Math.round(100 + T_norm * 100);
+  const b = Math.round(200 + T_norm * 55);
+  return { r, g, b };
+}
+
 // Steam color for mixed gas rendering (white)
 const STEAM_COLOR: RGB = { r: 255, g: 255, b: 255 };
 
@@ -2082,8 +2144,10 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const visualTubeCount = Math.min(Math.max(hx.tubeCount || 5, 1), 10);
   const tubeSheetThickness = 5;
 
-  // Primary fluid color
+  // Primary fluid color - use pixelated pattern for two-phase
   const primaryColor = hx.primaryFluid ? getFluidColor(hx.primaryFluid) : '#111';
+  const primaryPattern = createTwoPhasePattern(ctx, hx.primaryFluid, 3);
+  const primaryFill: string | CanvasPattern = primaryPattern || primaryColor;
 
   if (isHorizontal) {
     // HORIZONTAL ORIENTATION: tubes run left-to-right
@@ -2100,7 +2164,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.fillStyle = COLORS.steel;
         ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
 
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
       } else if (hxType === 'helical') {
         // Helical coil - draw as a wavy/zigzag pattern horizontally
@@ -2152,7 +2216,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.fill();
 
         // Draw tube interior (fluid)
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
         ctx.lineTo(uBendX, y - tubeRadius);
@@ -2184,7 +2248,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.fillStyle = COLORS.steel;
         ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
 
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
       } else if (hxType === 'helical') {
         // Helical coil - draw as a wavy/zigzag pattern to suggest coiled tubes
@@ -2236,7 +2300,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.fill();
 
         // Draw tube interior (fluid)
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.arc(x, uBendY, tubeRadius, Math.PI, 0);
         ctx.lineTo(x + tubeRadius, innerTop + innerH - tubeSheetThickness);
@@ -2286,7 +2350,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.rect(-w / 2 - plenumLength - 1, -plenumRadiusY, plenumLength + 2, plenumRadiusY - dividerThickness / 2);
         ctx.clip();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
         ctx.fill();
@@ -2297,7 +2361,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.rect(-w / 2 - plenumLength - 1, dividerThickness / 2, plenumLength + 2, plenumRadiusY);
         ctx.clip();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
         ctx.fill();
@@ -2320,7 +2384,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
         ctx.fill();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
         ctx.fill();
@@ -2335,7 +2399,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.ellipse(w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
         ctx.fill();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, false);
         ctx.fill();
@@ -2361,7 +2425,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.rect(dividerThickness / 2, h / 2 - 1, plenumRadiusX, plenumLength + 2);
         ctx.clip();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
         ctx.fill();
@@ -2372,7 +2436,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.beginPath();
         ctx.rect(-plenumRadiusX, h / 2 - 1, plenumRadiusX - dividerThickness / 2, plenumLength + 2);
         ctx.clip();
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
         ctx.fill();
@@ -2401,7 +2465,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
         ctx.stroke();
         // Fill with primary fluid
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, 0, Math.PI, false);
         ctx.fill();
@@ -2417,7 +2481,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.ellipse(0, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
         ctx.stroke();
         // Fill with primary fluid
-        ctx.fillStyle = primaryColor;
+        ctx.fillStyle = primaryFill;
         ctx.beginPath();
         ctx.ellipse(0, -h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, Math.PI, 0, false);
         ctx.fill();
