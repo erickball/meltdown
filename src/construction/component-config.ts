@@ -2206,6 +2206,19 @@ export class ComponentDialog {
       return component.realTubeCount;
     }
 
+    // Special case: HX shellDiameter/shellLength mapping depends on orientation
+    // For vertical HX: width=diameter, height=length
+    // For horizontal HX: width=length, height=diameter (swapped)
+    if (component.type === 'heatExchanger') {
+      const isHorizontal = component.rotation === 90 || component.rotation === 270;
+      if (optionName === 'shellDiameter') {
+        return isHorizontal ? component.height : component.width;
+      }
+      if (optionName === 'shellLength') {
+        return isHorizontal ? component.width : component.height;
+      }
+    }
+
     // Map option names to component properties
     const propertyMappings: Record<string, string[]> = {
       'name': ['label'],
@@ -2220,8 +2233,6 @@ export class ComponentDialog {
       'ratedFlow': ['ratedFlow'],
       'ratedHead': ['ratedHead'],
       'volume': ['volume'],
-      'shellDiameter': ['width'],
-      'shellLength': ['height'],
       // Pipe endpoint mappings
       'startX': ['position.x'],
       'startY': ['position.y'],
