@@ -73,19 +73,30 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Height of tank bottom above ground level' },
       { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 1000, step: 0.1, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 10, unit: 'bar' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 0.1, max: 600, step: 10, unit: 'bar', help: 'Must be at least enough to hold the hydrostatic head of water' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
       // Calculated fields
+      { name: 'minPressureRating', type: 'calculated', label: 'Min Pressure (Hydrostatic)', default: 0, unit: 'bar',
+        calculate: (p) => {
+          // Hydrostatic pressure: P = ρgh, where ρ = 1000 kg/m³, g = 9.81 m/s²
+          const h = p.height || 4;
+          const hydrostaticPa = 1000 * 9.81 * h; // Pa
+          return (hydrostaticPa / 1e5).toFixed(2); // Convert to bar
+        }
+      },
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm',
         calculate: (p) => {
           // ASME formula: t = P*R / (S*E - 0.6*P)
           // S = 137 MPa (carbon steel), E = 0.85 (spot radiograph)
-          const P = (p.pressureRating || 200) * 1e5; // bar to Pa
-          const vol = p.volume || 10;
+          // Use the higher of pressure rating or hydrostatic pressure
           const h = p.height || 4;
+          const hydrostaticBar = (1000 * 9.81 * h) / 1e5;
+          const effectivePressure = Math.max(p.pressureRating || 200, hydrostaticBar);
+          const P = effectivePressure * 1e5; // bar to Pa
+          const vol = p.volume || 10;
           const R = Math.sqrt(vol / (Math.PI * h)); // Derive radius from volume and height
           const S = 137e6; // Pa
           const E = 0.85;
@@ -1673,7 +1684,8 @@ export class ComponentDialog {
   }
 
   /**
-   * Validate that initial pressure does not exceed pressure rating
+   * Validate that initial pressure does not exceed pressure rating,
+   * and that pressure rating is at least the hydrostatic head for tanks.
    */
   private validatePressure(properties: Record<string, any>): string | null {
     const initialPressure = properties.initialPressure;
@@ -1683,6 +1695,18 @@ export class ComponentDialog {
     if (initialPressure !== undefined && pressureRating !== undefined) {
       if (initialPressure > pressureRating) {
         return `Initial pressure (${initialPressure} bar) cannot exceed pressure rating (${pressureRating} bar)`;
+      }
+    }
+
+    // For tanks, check that pressure rating is at least the hydrostatic head
+    if (this.currentType === 'tank' || this.currentType === 'pressurizer') {
+      const height = properties.height;
+      if (height !== undefined && pressureRating !== undefined) {
+        // Hydrostatic pressure: P = ρgh, where ρ = 1000 kg/m³, g = 9.81 m/s²
+        const hydrostaticBar = (1000 * 9.81 * height) / 1e5;
+        if (pressureRating < hydrostaticBar) {
+          return `Pressure rating (${pressureRating} bar) must be at least ${hydrostaticBar.toFixed(2)} bar to contain a ${height}m water column`;
+        }
       }
     }
 

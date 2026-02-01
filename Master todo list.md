@@ -1,6 +1,5 @@
 ## TODO List
 -Debug semi-implicit pressure/flow solver
--Minimum pressure rating allowed for a tank is what's needed for the hydrostatic pressure at its height
 -How much pressure can things handle from the outside?
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
