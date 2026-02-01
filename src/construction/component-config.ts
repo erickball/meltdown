@@ -703,6 +703,7 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'Core' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'height', type: 'number', label: 'Active Height', default: 3.66, min: 1, max: 6, step: 0.1, unit: 'm', help: 'Height of the active fuel region' },
+      { name: 'coreBottomElevation', type: 'number', label: 'Core Bottom Elevation', default: 0.5, min: 0, step: 0.1, unit: 'm', help: 'Height of core bottom above the bottom of the core barrel region. Affects heat transfer when liquid level drops.' },
       { name: 'diameter', type: 'number', label: 'Core Diameter', default: 3.2, min: 1, max: 6, step: 0.1, unit: 'm' },
       { name: 'rodDiameter', type: 'number', label: 'Fuel Rod Diameter', default: 9.5, min: 5, max: 15, step: 0.5, unit: 'mm' },
       { name: 'rodPitch', type: 'number', label: 'Rod Pitch', default: 12.6, min: 8, max: 20, step: 0.5, unit: 'mm', help: 'Center-to-center spacing between rods' },

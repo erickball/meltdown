@@ -244,6 +244,7 @@ export function createDemoReactor(): SimulationState {
 
   // Core coolant - at elevation 0, so P_base ≈ 150 + 0.69 ≈ 150.7 bar
   const coreVolume = 25; // m³
+  const coreHeight = 4; // m - active fuel height
   const P_core = P_base_at(elevations['core-coolant']);
   const coreCoolant: FlowNode = {
     id: 'core-coolant',
@@ -253,6 +254,7 @@ export function createDemoReactor(): SimulationState {
     hydraulicDiameter: 0.012, // m
     flowArea: 4, // m²
     elevation: elevations['core-coolant'],
+    height: coreHeight, // m - vertical extent for liquid level calculation
   };
   state.flowNodes.set(coreCoolant.id, coreCoolant);
 
@@ -321,6 +323,7 @@ export function createDemoReactor(): SimulationState {
   const P_sg_sec = 5.5e6; // Pa - 55 bar
   const T_sg_sec = saturationTemperature(P_sg_sec);
   const sgSecVolume = 50; // m³
+  const sgSecondaryHeight = 10; // m - vertical height of SG secondary side
   const sgSecondary: FlowNode = {
     id: 'sg-secondary',
     label: 'SG Secondary Side',
@@ -329,6 +332,7 @@ export function createDemoReactor(): SimulationState {
     hydraulicDiameter: 0.1, // m
     flowArea: 5, // m²
     elevation: 5, // m
+    height: sgSecondaryHeight, // m - vertical extent for liquid level calculation
   };
   state.flowNodes.set(sgSecondary.id, sgSecondary);
 
@@ -413,11 +417,14 @@ export function createDemoReactor(): SimulationState {
   // =========================================================================
 
   // Cladding to core coolant
+  // Fuel rods span the full core height
   state.convectionConnections.push({
     id: 'clad-coolant',
     thermalNodeId: 'clad',
     flowNodeId: 'core-coolant',
     surfaceArea: 5000, // m²
+    tubeBottomElevation: 0, // m - rods start at bottom of coolant channel
+    tubeHeight: coreHeight, // m - rods span full active height
   });
 
   // SG tubes to primary coolant
@@ -429,11 +436,14 @@ export function createDemoReactor(): SimulationState {
   });
 
   // SG tubes to secondary (boiling) side
+  // Tubes extend through most of the SG height, starting just above the bottom
   state.convectionConnections.push({
     id: 'sg-tube-secondary',
     thermalNodeId: 'sg-tubes',
     flowNodeId: 'sg-secondary',
     surfaceArea: 5500, // m² (tube outer surface)
+    tubeBottomElevation: 0.5, // m - tubes start slightly above bottom
+    tubeHeight: sgSecondaryHeight - 1.5, // m - tubes extend to near top (leaving steam space)
   });
 
   // Vessel wall to cold leg (simplified)
@@ -809,11 +819,18 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         coolantFlowNodeId = id;
       }
 
+      // Get fuel geometry for liquid-level-dependent heat transfer
+      const coreComp = component as any;
+      const activeFuelHeight = coreComp.activeFuelHeight ?? coreComp.height ?? 4; // Default 4m
+      const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5; // Default 0.5m above barrel bottom
+
       state.convectionConnections.push({
         id: `convection-${id}`,
         thermalNodeId: `${id}-fuel`,
         flowNodeId: coolantFlowNodeId,
         surfaceArea: 5000, // Approximate fuel surface area
+        tubeBottomElevation: coreBottomElevation,
+        tubeHeight: activeFuelHeight,
       });
     }
 
@@ -828,17 +845,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
       // Create convection connections for tube and shell sides
       // The HX creates two flow nodes: id-tube and id-shell
+      const hxComp = component as any;
+      const hxHeight = hxComp.height || 5; // m - default HX height
       state.convectionConnections.push({
         id: `convection-${id}-tube`,
         thermalNodeId: `${id}-tubes`,
         flowNodeId: `${id}-tube`,
-        surfaceArea: (component as any).tubeCount * 0.5, // Tube inner surface
+        surfaceArea: hxComp.tubeCount * 0.5, // Tube inner surface
+        // Tube side is typically forced convection, geometry not critical
       });
       state.convectionConnections.push({
         id: `convection-${id}-shell`,
         thermalNodeId: `${id}-tubes`,
         flowNodeId: `${id}-shell`,
-        surfaceArea: (component as any).tubeCount * 0.6, // Tube outer surface slightly larger
+        surfaceArea: hxComp.tubeCount * 0.6, // Tube outer surface slightly larger
+        tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
+        tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
       });
     }
 

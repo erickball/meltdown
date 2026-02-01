@@ -2803,6 +2803,16 @@ export class ConstructionManager {
       if (rv.coreBarrelId) {
         const coreBarrel = this.plantState.components.get(rv.coreBarrelId) as CoreBarrelComponent;
         if (coreBarrel) {
+          // Get active fuel height and bottom elevation from core properties
+          const activeFuelHeight = coreProperties.height || coreBarrel.height;
+          const coreBottomElevation = coreProperties.coreBottomElevation ?? 0.5;
+
+          // Validate that core fits within barrel
+          const coreTopElevation = coreBottomElevation + activeFuelHeight;
+          if (coreTopElevation > coreBarrel.height) {
+            console.warn(`[Construction] Core does not fit in barrel: bottom=${coreBottomElevation}m + height=${activeFuelHeight}m = ${coreTopElevation}m exceeds barrel height ${coreBarrel.height}m. Clamping.`);
+          }
+
           // Transfer fuel properties to the core barrel
           coreBarrel.fuelRodCount = container.fuelRodCount;
           coreBarrel.actualFuelRodCount = actualFuelRodCount;
@@ -2810,6 +2820,8 @@ export class ConstructionManager {
           coreBarrel.fuelMeltingPoint = container.fuelMeltingPoint;
           coreBarrel.controlRodCount = container.controlRodCount;
           coreBarrel.controlRodPosition = container.controlRodPosition;
+          coreBarrel.activeFuelHeight = activeFuelHeight;
+          coreBarrel.coreBottomElevation = coreBottomElevation;
           // Clear from vessel (they belong on core barrel now)
           delete (container as any).fuelRodCount;
           delete (container as any).actualFuelRodCount;
@@ -2817,7 +2829,7 @@ export class ConstructionManager {
           delete (container as any).fuelMeltingPoint;
           delete (container as any).controlRodCount;
           delete (container as any).controlRodPosition;
-          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId}`);
+          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId} (fuel: ${coreBottomElevation}m to ${coreTopElevation}m)`);
         }
       }
       // Legacy support for old save files

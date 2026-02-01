@@ -178,6 +178,8 @@ export interface CoreBarrelComponent extends ComponentBase {
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
   fuelTemperature?: number;     // Current fuel temperature in Kelvin
   fuelMeltingPoint?: number;    // Fuel melting point in Kelvin (default 2800)
+  activeFuelHeight?: number;    // Height of active fuel region (m)
+  coreBottomElevation?: number; // Elevation of core bottom above barrel bottom (m)
   // Control rod properties
   controlRodCount?: number;     // Number of control rod banks to display
   controlRodPosition?: number;  // 0 = fully inserted, 1 = fully withdrawn

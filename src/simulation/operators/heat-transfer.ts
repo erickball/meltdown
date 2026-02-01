@@ -16,10 +16,11 @@
  * based on flow conditions.
  */
 
-import { SimulationState, FlowNode, FluidState, simulationConfig } from '../types';
+import { SimulationState, FlowNode, FluidState, ConvectionConnection, simulationConfig } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES, totalMoles, mixtureCv } from '../gas-properties';
+import { calculateLiquidLevelWithObstructions } from './rate-operators';
 
 /**
  * NCG initial condition as partial pressures in bar.
@@ -180,11 +181,18 @@ export class ConvectionOperator implements PhysicsOperator {
 
       if (!thermalNode || !flowNode) continue;
 
-      // Compute heat transfer coefficient based on flow conditions
-      const h = computeHeatTransferCoeff(flowNode, state);
+      // Calculate effective surface areas based on liquid level
+      // Liquid-wetted area gets liquid h, vapor-exposed area gets vapor h
+      const { liquidArea, vaporArea } = calculateEffectiveSurfaceAreas(conn, flowNode);
+
+      // Compute heat transfer coefficients for each phase
+      const h_liquid = computeHeatTransferCoeff(flowNode, state);
+      const h_vapor = computeVaporHeatTransferCoeff(flowNode, state);
 
       // Heat flow from solid to fluid (positive if T_solid > T_fluid)
-      const Q = h * conn.surfaceArea * (thermalNode.temperature - flowNode.fluid.temperature);
+      // Q = h_liquid * A_liquid * ΔT + h_vapor * A_vapor * ΔT
+      const dT = thermalNode.temperature - flowNode.fluid.temperature;
+      const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       // Store heat transfer rate for diagnostics
       newState.energyDiagnostics.heatTransferRates.set(conn.id, Q);
@@ -275,10 +283,12 @@ export class ConvectionOperator implements PhysicsOperator {
 
       if (!thermalNode || !flowNode) continue;
 
-      const h = computeHeatTransferCoeff(flowNode, state);
-      if (h === 0) continue;
-
-      const hA = h * conn.surfaceArea;
+      // Calculate effective hA accounting for liquid level
+      const { liquidArea, vaporArea } = calculateEffectiveSurfaceAreas(conn, flowNode);
+      const h_liquid = computeHeatTransferCoeff(flowNode, state);
+      const h_vapor = computeVaporHeatTransferCoeff(flowNode, state);
+      const hA = h_liquid * liquidArea + h_vapor * vaporArea;
+      if (hA === 0) continue;
 
       // Solid constraint
       const solidThermalMass = thermalNode.mass * thermalNode.specificHeat;
@@ -882,6 +892,91 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
 // ============================================================================
 
 /**
+ * Calculate liquid level in a flow node (m from bottom).
+ * For two-phase, uses the detailed calculation with obstructions.
+ * For single-phase, returns full height (liquid) or 0 (vapor).
+ */
+function calculateLiquidLevel(flowNode: FlowNode): number {
+  const nodeHeight = flowNode.height ?? Math.cbrt(flowNode.volume);
+
+  if (flowNode.fluid.phase === 'liquid') {
+    return nodeHeight;
+  }
+  if (flowNode.fluid.phase === 'vapor') {
+    return 0;
+  }
+
+  // Two-phase: calculate based on liquid mass and density
+  const quality = flowNode.fluid.quality || 0;
+  const rho_f = Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+  const liquidMass = flowNode.fluid.mass * (1 - quality);
+  const liquidVolume = liquidMass / rho_f;
+
+  return calculateLiquidLevelWithObstructions(flowNode, liquidVolume);
+}
+
+/**
+ * Calculate effective wetted surface area based on liquid level.
+ *
+ * For connections with tube/rod geometry specified, the effective surface area
+ * depends on how much of the tubes are submerged in liquid vs exposed to vapor.
+ *
+ * The liquid-wetted portion gets full convective heat transfer.
+ * The vapor-exposed portion gets reduced heat transfer (vapor h is much lower).
+ *
+ * Returns { liquidArea, vaporArea } where liquidArea + vaporArea = surfaceArea
+ */
+function calculateEffectiveSurfaceAreas(
+  conn: ConvectionConnection,
+  flowNode: FlowNode
+): { liquidArea: number; vaporArea: number } {
+  // If no tube geometry specified, assume fully wetted (backward compatible)
+  if (conn.tubeHeight === undefined || conn.tubeBottomElevation === undefined) {
+    // For single-phase, all area is in that phase
+    if (flowNode.fluid.phase === 'liquid') {
+      return { liquidArea: conn.surfaceArea, vaporArea: 0 };
+    } else if (flowNode.fluid.phase === 'vapor') {
+      return { liquidArea: 0, vaporArea: conn.surfaceArea };
+    }
+    // For two-phase without geometry, scale by liquid volume fraction
+    // This is a rough approximation - with geometry we can do better
+    const quality = flowNode.fluid.quality || 0;
+    const rho_f = Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+    const rho_g = Water.saturatedVaporDensity(flowNode.fluid.temperature);
+    const liquidVolFrac = (1 - quality) / rho_f / ((1 - quality) / rho_f + quality / rho_g);
+    return {
+      liquidArea: conn.surfaceArea * liquidVolFrac,
+      vaporArea: conn.surfaceArea * (1 - liquidVolFrac)
+    };
+  }
+
+  // Calculate liquid level in the flow node
+  const liquidLevel = calculateLiquidLevel(flowNode);
+
+  // Tube geometry
+  const tubeBottom = conn.tubeBottomElevation;
+  const tubeTop = tubeBottom + conn.tubeHeight;
+
+  // Calculate what fraction of tube height is submerged
+  let submergedFraction: number;
+  if (liquidLevel <= tubeBottom) {
+    // Liquid level below tubes - all vapor
+    submergedFraction = 0;
+  } else if (liquidLevel >= tubeTop) {
+    // Liquid level above tubes - all liquid
+    submergedFraction = 1;
+  } else {
+    // Partial submersion
+    submergedFraction = (liquidLevel - tubeBottom) / conn.tubeHeight;
+  }
+
+  return {
+    liquidArea: conn.surfaceArea * submergedFraction,
+    vaporArea: conn.surfaceArea * (1 - submergedFraction)
+  };
+}
+
+/**
  * Compute convective heat transfer coefficient (W/m²-K)
  *
  * Uses Dittus-Boelter correlation for turbulent flow:
@@ -925,6 +1020,52 @@ function computeHeatTransferCoeff(flowNode: FlowNode, state: SimulationState): n
   // n = 0.4 for heating, 0.3 for cooling - use 0.4 as default
   const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4);
   const h_forced = Nu * k / D;
+
+  return Math.max(h_forced, h_natural);
+}
+
+/**
+ * Compute heat transfer coefficient for vapor/steam (W/m²-K)
+ *
+ * Uses Dittus-Boelter with vapor properties. For tubes/rods exposed above
+ * the liquid level, this gives the heat transfer to the vapor space.
+ *
+ * Vapor has much lower thermal conductivity than liquid, so h is much lower.
+ */
+function computeVaporHeatTransferCoeff(flowNode: FlowNode, state: SimulationState): number {
+  // Get flow rate through this node
+  let totalMassFlow = 0;
+  for (const conn of state.flowConnections) {
+    if (conn.fromNodeId === flowNode.id || conn.toNodeId === flowNode.id) {
+      totalMassFlow += Math.abs(conn.massFlowRate);
+    }
+  }
+
+  // Vapor properties
+  const T = flowNode.fluid.temperature;
+  const rho_g = Water.saturatedVaporDensity(T);
+  const k_vapor = 0.03;      // W/m-K (steam)
+  const mu_vapor = 0.00002;  // Pa-s
+  const Pr_vapor = 1.0;
+
+  const D = flowNode.hydraulicDiameter;
+  const A = flowNode.flowArea;
+
+  // For vapor flow, estimate velocity - vapor takes up volume above liquid
+  // This is approximate; in reality vapor velocity depends on boil-off rate
+  const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * A) : 0;
+
+  const Re = rho_g * velocity * D / mu_vapor;
+
+  // Natural convection minimum for vapor (lower than liquid)
+  const h_natural = 50; // W/m²-K - typical for vapor natural convection
+
+  if (Re < 2300) {
+    return h_natural;
+  }
+
+  const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr_vapor, 0.4);
+  const h_forced = Nu * k_vapor / D;
 
   return Math.max(h_forced, h_natural);
 }

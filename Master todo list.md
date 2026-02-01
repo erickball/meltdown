@@ -7,7 +7,6 @@
 -Fix neutronics in general, something about it isn't right anymore. Plus it needs to work for every type of reactor and idk how to get reasonable reactivity coefficients from whatever core and coolant parameters are available.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Add FW heaters?
--Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom.
 -Add other types of system controllers (turbine pressure controller, FW level control, etc)
 -Improve performance (why are timesteps getting so small?)
@@ -40,6 +39,7 @@
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.
 X How much pressure can things handle from the outside?
 X Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg
 X If I build a building around existing stuff, put it inside

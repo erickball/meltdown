@@ -149,8 +149,14 @@ export interface ConvectionConnection {
   flowNodeId: string;               // Fluid node
 
   // Heat transfer parameters
-  surfaceArea: number;              // m² - wetted surface area
+  surfaceArea: number;              // m² - total wetted surface area (when fully submerged)
   // Heat transfer coefficient computed dynamically based on flow
+
+  // Tube/rod geometry for liquid-level-dependent heat transfer
+  // If specified, effective surface area scales with liquid level
+  // Surface area is assumed uniformly distributed over the height
+  tubeBottomElevation?: number;     // m - bottom of tubes/rods relative to flow node bottom
+  tubeHeight?: number;              // m - vertical extent of tubes/rods
 }
 
 export interface FlowConnection {
