@@ -200,6 +200,12 @@ export interface HeatExchangerComponent extends ComponentBase {
   tubeOD?: number;               // Tube outer diameter in meters
 }
 
+export interface ExtractionPort {
+  id: string;              // e.g., 'extraction-1'
+  pressure: number;        // Target extraction pressure in Pa
+  maxFlow?: number;        // Optional max extraction flow kg/s
+}
+
 export interface TurbineGeneratorComponent extends ComponentBase {
   type: 'turbine-generator';
   width: number;          // Length of turbine (inlet to exhaust) in meters
@@ -215,6 +221,7 @@ export interface TurbineGeneratorComponent extends ComponentBase {
   generatorEfficiency: number; // Generator efficiency (0-1), typically 0.98
   inletFluid?: Fluid;     // Steam inlet conditions
   outletFluid?: Fluid;    // Exhaust conditions
+  extractionPorts?: ExtractionPort[];  // Extraction points for feedwater heating, ordered high to low pressure
 }
 
 export interface TurbineDrivenPumpComponent extends ComponentBase {

@@ -585,6 +585,10 @@ export const componentDefinitions: Record<string, {
       { name: 'turbineEfficiency', type: 'number', label: 'Turbine Isentropic Eff.', default: 85, min: 70, max: 95, step: 5, unit: '%' },
       { name: 'generatorEfficiency', type: 'number', label: 'Generator Efficiency', default: 98, min: 95, max: 99, step: 0.5, unit: '%' },
       { name: 'governorValve', type: 'number', label: 'Governor Valve Position', default: 100, min: 0, max: 100, step: 5, unit: '%' },
+      // Extraction ports for feedwater heating
+      { name: 'extraction1Pressure', type: 'number', label: 'Extraction 1 Pressure', default: 0, min: 0, max: 50, step: 1, unit: 'bar', help: 'Set to 0 to disable. High-pressure extraction for HP feedwater heater.' },
+      { name: 'extraction2Pressure', type: 'number', label: 'Extraction 2 Pressure', default: 0, min: 0, max: 30, step: 0.5, unit: 'bar', help: 'Set to 0 to disable. Intermediate-pressure extraction.' },
+      { name: 'extraction3Pressure', type: 'number', label: 'Extraction 3 Pressure', default: 0, min: 0, max: 10, step: 0.1, unit: 'bar', help: 'Set to 0 to disable. Low-pressure extraction for LP feedwater heater or deaerator.' },
       // Calculated fields
       { name: 'ratedSteamFlow', type: 'calculated', label: 'Rated Steam Flow', default: 0, unit: 'kg/s',
         calculate: (p) => {
@@ -1999,6 +2003,25 @@ export class ComponentDialog {
               optionElement.value = core.id;
               optionElement.textContent = core.label || core.id;
               if (core.id === existingValue) {
+                optionElement.selected = true;
+              }
+              input.appendChild(optionElement);
+            });
+          } else if (option.name === 'connectedGenerator' && this.availableGenerators.length > 0) {
+            // Special case: dynamically populate generator dropdown for switchyards
+            const noneOption = document.createElement('option');
+            noneOption.value = '';
+            noneOption.textContent = '-- Select a generator --';
+            if (!existingValue) {
+              noneOption.selected = true;
+            }
+            input.appendChild(noneOption);
+
+            this.availableGenerators.forEach(gen => {
+              const optionElement = document.createElement('option');
+              optionElement.value = gen.id;
+              optionElement.textContent = gen.label || gen.id;
+              if (gen.id === existingValue) {
                 optionElement.selected = true;
               }
               input.appendChild(optionElement);

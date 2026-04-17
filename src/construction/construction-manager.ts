@@ -19,7 +19,8 @@ import {
   CrossVesselComponent,
   Connection,
   Port,
-  Fluid
+  Fluid,
+  ExtractionPort
 } from '../types';
 import { ComponentConfig } from './component-config';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
@@ -672,6 +673,25 @@ export class ConstructionManager {
 
         const orientation = props.orientation || 'left-right';
 
+        // Build extraction ports array from config
+        const extractionPorts: ExtractionPort[] = [];
+        const ext1Press = (props.extraction1Pressure || 0) * 1e5;  // bar to Pa
+        const ext2Press = (props.extraction2Pressure || 0) * 1e5;
+        const ext3Press = (props.extraction3Pressure || 0) * 1e5;
+
+        if (ext1Press > 0 && ext1Press < P_in) {
+          extractionPorts.push({ id: 'extraction-1', pressure: ext1Press });
+        }
+        if (ext2Press > 0 && ext2Press < P_in) {
+          extractionPorts.push({ id: 'extraction-2', pressure: ext2Press });
+        }
+        if (ext3Press > 0 && ext3Press < P_in) {
+          extractionPorts.push({ id: 'extraction-3', pressure: ext3Press });
+        }
+
+        // Sort extraction ports by pressure descending (highest first, closest to inlet)
+        extractionPorts.sort((a, b) => b.pressure - a.pressure);
+
         // Adjust port positions based on orientation and size
         // Outlet Y offset for exhaust (points slightly downward toward condenser)
         const outletY = exhaustDiameter * 0.5;  // Outlet side is larger
@@ -698,6 +718,23 @@ export class ConstructionManager {
             direction: 'out'
           }
         ];
+
+        // Add extraction ports - positioned along turbine body, bottom side
+        const numExtractions = extractionPorts.length;
+        for (let i = 0; i < numExtractions; i++) {
+          const ext = extractionPorts[i];
+          // Position evenly between 25% and 75% of turbine length
+          const xFraction = 0.25 + (0.5 * i / Math.max(1, numExtractions - 1));
+          const xPos = orientation === 'left-right'
+            ? -turbineLength / 2 + turbineLength * (numExtractions === 1 ? 0.5 : xFraction)
+            : turbineLength / 2 - turbineLength * (numExtractions === 1 ? 0.5 : xFraction);
+
+          turbineGenPorts.push({
+            id: `${id}-${ext.id}`,
+            position: { x: xPos, y: exhaustDiameter / 2 },  // Bottom of turbine
+            direction: 'out'
+          });
+        }
 
         // Pressure rating is 1.5x inlet pressure (provides margin for transients)
         const turbinePressureRating = (props.inletPressure || 60) * 1.5;
@@ -736,7 +773,8 @@ export class ConstructionManager {
             quality: 0.9,
             flowRate: 0
           },
-          ports: turbineGenPorts
+          ports: turbineGenPorts,
+          extractionPorts: extractionPorts.length > 0 ? extractionPorts : undefined
         };
         // Add pressure rating for pipe creation
         (turbineGen as any).pressureRating = turbinePressureRating;
@@ -2597,6 +2635,34 @@ export class ConstructionManager {
     }
     if (properties.stages !== undefined) {
       component.stages = properties.stages;
+    }
+
+    // Turbine extraction ports
+    if (component.type === 'turbine-generator') {
+      const P_in = component.inletFluid?.pressure || 60e5;
+      const extractionPorts: ExtractionPort[] = [];
+
+      const ext1Press = (properties.extraction1Pressure ?? 0) * 1e5;
+      const ext2Press = (properties.extraction2Pressure ?? 0) * 1e5;
+      const ext3Press = (properties.extraction3Pressure ?? 0) * 1e5;
+
+      if (ext1Press > 0 && ext1Press < P_in) {
+        extractionPorts.push({ id: 'extraction-1', pressure: ext1Press });
+      }
+      if (ext2Press > 0 && ext2Press < P_in) {
+        extractionPorts.push({ id: 'extraction-2', pressure: ext2Press });
+      }
+      if (ext3Press > 0 && ext3Press < P_in) {
+        extractionPorts.push({ id: 'extraction-3', pressure: ext3Press });
+      }
+
+      // Sort by pressure descending
+      extractionPorts.sort((a, b) => b.pressure - a.pressure);
+      component.extractionPorts = extractionPorts.length > 0 ? extractionPorts : undefined;
+
+      // Note: Port positions are set at component creation time and would need
+      // component recreation to change. Users should recreate the turbine if
+      // they want to change extraction port count.
     }
 
     // Core-specific properties

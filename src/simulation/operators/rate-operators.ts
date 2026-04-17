@@ -1302,31 +1302,33 @@ export class TurbineCondenserRateOperator implements RateOperator {
     let totalTurbinePower = 0;
     let totalCondenserHeat = 0;
 
-    // Find turbines dynamically by looking for nodes that have "turbine" in the label
-    // and are connected to condensers
+    // Find turbines dynamically by looking for nodes that have "turbine-generator" in the ID
+    // Skip extraction nodes (they have parentTurbineId set)
     for (const [turbineNodeId, turbineNode] of state.flowNodes) {
-      // Check if this is a turbine node (by label or id pattern)
-      const isTurbine = turbineNode.label?.toLowerCase().includes('turbine') ||
-                        turbineNodeId.includes('turbine-generator');
+      // Check if this is a main turbine node (not an extraction node)
+      const isTurbine = turbineNodeId.includes('turbine-generator') ||
+                        (turbineNode.label?.toLowerCase().includes('turbine') &&
+                         !turbineNode.parentTurbineId);
 
       if (!isTurbine) continue;
+      if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
 
       // Find flow INTO the turbine
-      let massFlowRate = 0;
+      let inletMassFlow = 0;
       let outletNodeId: string | null = null;
 
       for (const conn of state.flowConnections) {
         // Flow into turbine
         if (conn.toNodeId === turbineNodeId && conn.massFlowRate > 0) {
-          massFlowRate += conn.massFlowRate;
+          inletMassFlow += conn.massFlowRate;
         }
-        // Flow out of turbine - find the outlet (likely condenser)
+        // Flow out of turbine main outlet (to condenser)
         if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
           outletNodeId = conn.toNodeId;
         }
       }
 
-      if (massFlowRate < 1 || !outletNodeId) continue;
+      if (inletMassFlow < 1 || !outletNodeId) continue;
 
       const outletNode = state.flowNodes.get(outletNodeId);
       if (!outletNode) continue;
@@ -1339,25 +1341,101 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       if (P_in <= P_out) continue;
 
-      // Compute enthalpy at turbine
+      // Compute inlet enthalpy
       const u_in = turbineNode.fluid.internalEnergy / turbineNode.fluid.mass;
       const v_in = turbineNode.volume / turbineNode.fluid.mass;
       const h_in = u_in + P_in * v_in;
 
-      // Approximate isentropic expansion
-      const pressureRatio = P_out / P_in;
-      const h_out_ideal = h_in * Math.pow(pressureRatio, 0.3);
-      const deltaH = this.turbineEfficiency * (h_in - h_out_ideal);
+      // Find all extraction nodes belonging to this turbine
+      const extractionNodes: Array<{
+        nodeId: string;
+        node: typeof turbineNode;
+        pressure: number;
+        extractionFlow: number;
+      }> = [];
 
-      // Power extracted
-      const power = massFlowRate * deltaH;
-      totalTurbinePower += power;
+      for (const [nodeId, node] of state.flowNodes) {
+        if (node.parentTurbineId === turbineNodeId && node.extractionPressure) {
+          // Find extraction flow (flow leaving this extraction node)
+          let extractionFlow = 0;
+          for (const conn of state.flowConnections) {
+            if (conn.fromNodeId === nodeId && conn.massFlowRate > 0) {
+              extractionFlow += conn.massFlowRate;
+            }
+          }
+          // Check valve behavior: extraction flow cannot be negative
+          extractionFlow = Math.max(0, extractionFlow);
+
+          extractionNodes.push({
+            nodeId,
+            node,
+            pressure: node.extractionPressure,
+            extractionFlow,
+          });
+        }
+      }
+
+      // Sort extraction nodes by pressure (high to low) - expansion order
+      extractionNodes.sort((a, b) => b.pressure - a.pressure);
+
+      // Calculate staged expansion with extraction
+      let remainingFlow = inletMassFlow;
+      let h_current = h_in;
+      let P_current = P_in;
+      let turbinePower = 0;
+
+      // Process each extraction stage
+      for (const extraction of extractionNodes) {
+        const P_ext = extraction.pressure;
+
+        // Skip if extraction pressure is higher than current pressure
+        if (P_ext >= P_current) continue;
+
+        // Isentropic expansion to extraction pressure
+        const pressureRatio = P_ext / P_current;
+        const h_ext_ideal = h_current * Math.pow(pressureRatio, 0.3);
+        const h_ext = h_current - this.turbineEfficiency * (h_current - h_ext_ideal);
+
+        // Power from this expansion segment (all flow expands through this stage)
+        const segmentPower = remainingFlow * (h_current - h_ext);
+        turbinePower += segmentPower;
+
+        // Update extraction node energy rate
+        // The extraction flow exits at h_ext enthalpy
+        // We need to ensure the extraction node has the right energy content
+        const extRates = rates.flowNodes.get(extraction.nodeId);
+        if (extRates && extraction.extractionFlow > 0) {
+          // Energy carried by extraction flow
+          // This is handled by flow advection, but we need to ensure
+          // the extraction node reflects the correct enthalpy
+          // The extraction node's fluid state should equilibrate to h_ext
+        }
+
+        // Reduce remaining flow by extraction amount
+        remainingFlow -= extraction.extractionFlow;
+        remainingFlow = Math.max(0, remainingFlow);
+
+        // Update state for next stage
+        h_current = h_ext;
+        P_current = P_ext;
+      }
+
+      // Final expansion to exhaust pressure
+      if (remainingFlow > 0 && P_out < P_current) {
+        const pressureRatio = P_out / P_current;
+        const h_out_ideal = h_current * Math.pow(pressureRatio, 0.3);
+        const h_out = h_current - this.turbineEfficiency * (h_current - h_out_ideal);
+        const exhaustPower = remainingFlow * (h_current - h_out);
+        turbinePower += exhaustPower;
+      }
+
+      totalTurbinePower += turbinePower;
 
       // Remove energy from the TURBINE node (where work is extracted)
-      // The flow operator will then advect the reduced-enthalpy steam to the condenser
+      // The flow operator will then advect the reduced-enthalpy steam downstream
       const turbineRates = rates.flowNodes.get(turbineNodeId);
       if (turbineRates) {
-        turbineRates.dEnergy -= power;
+        turbineRates.dEnergy -= turbinePower;
       }
     }
 

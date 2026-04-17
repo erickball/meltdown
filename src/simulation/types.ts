@@ -128,6 +128,10 @@ export interface FlowNode {
   // If true, this node's fluid state is fixed and should not be updated by physics operators
   // Used for atmosphere and other infinite reservoirs
   isBoundary?: boolean;
+
+  // Turbine extraction port properties (only for extraction nodes)
+  extractionPressure?: number;        // Pa - target extraction pressure for this port
+  parentTurbineId?: string;           // ID of the parent turbine component
 }
 
 // ============================================================================

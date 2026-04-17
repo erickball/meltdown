@@ -215,6 +215,37 @@ export function createTurbineGenerator(
   height: number,
   options: Partial<TurbineGeneratorComponent> = {}
 ): TurbineGeneratorComponent {
+  // Build ports array: inlet, extraction ports, outlet
+  const ports: Array<{ id: string; position: Point; direction: 'in' | 'out' }> = [
+    { id: 'inlet', position: { x: -width / 2, y: 0 }, direction: 'in' },
+  ];
+
+  // Add extraction ports if specified
+  // Position them along the turbine length based on their pressure ratio
+  // (higher pressure extractions closer to inlet)
+  const extractionPorts = options.extractionPorts || [];
+  if (extractionPorts.length > 0) {
+    // Sort by pressure descending (highest pressure first, closest to inlet)
+    const sortedExtractions = [...extractionPorts].sort((a, b) => b.pressure - a.pressure);
+    const numExtractions = sortedExtractions.length;
+
+    for (let i = 0; i < numExtractions; i++) {
+      const ext = sortedExtractions[i];
+      // Position extraction ports evenly between inlet and outlet
+      // First extraction at 25% of width, last at 75%
+      const xFraction = 0.25 + (0.5 * i / Math.max(1, numExtractions - 1));
+      const xPos = -width / 2 + width * (numExtractions === 1 ? 0.5 : xFraction);
+
+      ports.push({
+        id: ext.id,
+        position: { x: xPos, y: -height / 2 },  // Bottom of turbine for extraction
+        direction: 'out',
+      });
+    }
+  }
+
+  ports.push({ id: 'outlet', position: { x: width / 2, y: 0 }, direction: 'out' });
+
   return {
     id: generateId('turbine-gen'),
     type: 'turbine-generator',
@@ -231,10 +262,7 @@ export function createTurbineGenerator(
     efficiency: 0.87,
     generatorEfficiency: 0.98,
     governorValve: 1.0,
-    ports: [
-      { id: 'inlet', position: { x: -width / 2, y: 0 }, direction: 'in' },
-      { id: 'outlet', position: { x: width / 2, y: 0 }, direction: 'out' },
-    ],
+    ports,
     ...options,
   };
 }

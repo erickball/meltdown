@@ -921,6 +921,17 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
       console.log(`[Factory] CrossVessel ${id}: created inner pipe and annulus flow nodes with thermal coupling`);
     }
+
+    // Create extraction flow nodes for turbine-generators with extraction ports
+    if (component.type === 'turbine-generator') {
+      const extractionNodes = createTurbineExtractionNodes(component);
+      for (const extNode of extractionNodes) {
+        state.flowNodes.set(extNode.id, extNode);
+      }
+      if (extractionNodes.length > 0) {
+        console.log(`[Factory] Turbine ${id}: created ${extractionNodes.length} extraction flow nodes`);
+      }
+    }
   }
 
   // Second pass: Create flow connections from plant connections
@@ -1764,6 +1775,42 @@ function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
 }
 
 /**
+ * Create extraction flow nodes for turbine extraction ports.
+ * Each extraction port gets its own flow node at the extraction pressure.
+ */
+function createTurbineExtractionNodes(component: PlantComponent): FlowNode[] {
+  const turbine = component as any;
+  const extractionPorts = turbine.extractionPorts || [];
+  const elevation = turbine.elevation || 0;
+
+  const nodes: FlowNode[] = [];
+
+  for (const extraction of extractionPorts) {
+    const extPressure = extraction.pressure;
+    // Extraction steam is partially expanded - use saturation temp at extraction pressure
+    // The actual enthalpy is computed dynamically in the rate operator
+    const extTemp = saturationTemperature(extPressure);
+    const volume = 2; // m³ - small volume for extraction line
+
+    nodes.push({
+      id: `${component.id}-${extraction.id}`,
+      label: `${component.label || 'Turbine'} ${extraction.id}`,
+      fluid: createFluidState(extTemp, extPressure, 'vapor', 0, volume),
+      volume,
+      hydraulicDiameter: 0.2,
+      flowArea: 0.05,
+      height: 0,  // Extraction ports are well-mixed
+      elevation,
+      // Store extraction pressure for rate operator reference
+      extractionPressure: extPressure,
+      parentTurbineId: component.id,
+    });
+  }
+
+  return nodes;
+}
+
+/**
  * Create a flow connection from a plant connection
  */
 function createFlowConnectionFromPlantConnection(
@@ -1811,6 +1858,21 @@ function createFlowConnectionFromPlantConnection(
       toNodeId = `${connection.toComponentId}-inner`;
     } else if (connection.toPortId.includes('annulus')) {
       toNodeId = `${connection.toComponentId}-annulus`;
+    }
+  }
+
+  // Handle turbine-generator extraction port mappings
+  // Extraction ports connect as: turbine-id-extraction-id (e.g., turbine-gen-1-extraction-1)
+  if (fromComponent.type === 'turbine-generator') {
+    // Check if this is an extraction port (not inlet or outlet)
+    if (connection.fromPortId !== 'inlet' && connection.fromPortId !== 'outlet') {
+      fromNodeId = `${connection.fromComponentId}-${connection.fromPortId}`;
+    }
+  }
+  if (toComponent.type === 'turbine-generator') {
+    // Check if this is an extraction port (not inlet or outlet)
+    if (connection.toPortId !== 'inlet' && connection.toPortId !== 'outlet') {
+      toNodeId = `${connection.toComponentId}-${connection.toPortId}`;
     }
   }
 

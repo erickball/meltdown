@@ -7,7 +7,7 @@
 -Fix neutronics in general, something about it isn't right anymore. Plus it needs to work for every type of reactor and idk how to get reasonable reactivity coefficients from whatever core and coolant parameters are available.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Add FW heaters?
--Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom.
+-Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
 -Add other types of system controllers (turbine pressure controller, FW level control, etc)
 -Improve performance (why are timesteps getting so small?)
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
