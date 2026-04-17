@@ -15,12 +15,7 @@ export {
   type NcgPartialPressures,
 } from './heat-transfer';
 
-export {
-  FlowOperator,
-  getFlowOperatorProfile,
-  resetFlowOperatorProfile,
-  type FlowOperatorProfile,
-} from './fluid-flow';
+// FlowOperator removed - replaced by FlowMomentumRateOperator and FlowRateOperator
 
 export {
   NeutronicsOperator,
@@ -32,9 +27,6 @@ export {
 } from './neutronics';
 
 export {
-  TurbineCondenserOperator,  // OBSOLETE: throws error if used
-  createDefaultTurbineCondenserConfig,  // OBSOLETE: throws error if used
-  createTurbineCondenserConfigFromPlant,  // OBSOLETE: throws error if used
   getTurbineCondenserState,
   updateTurbineCondenserState,
   type TurbineCondenserConfig,

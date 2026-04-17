@@ -1568,7 +1568,6 @@ export class ConstructionManager {
         // Ports: inner pipe has in/out at each end, annulus has ports at each end
         // Annulus ports must connect with zero-length connections (physically touching)
         const halfLen = cvLength / 2;
-        const halfOuter = outerDiam / 2;
         // Inner ports at the center (y=0 is center of inner pipe)
         // Annulus ports at the midpoint of the lower annulus region
         // Lower annulus goes from innerOuterRadius to (outerRadius - outerWallThickness)

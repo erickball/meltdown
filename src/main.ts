@@ -298,7 +298,6 @@ function init() {
 
   // Handle game events
   gameLoop.onEvent = (event) => {
-    console.log('[Event] ' + event.type + ': ' + event.message);
 
     // Could show notifications to user here
     if (event.type === 'scram') {
@@ -383,7 +382,6 @@ function init() {
     selectedComponentId = componentId;
     if (componentId) {
       const component = plantState.components.get(componentId);
-      console.log('Selected component:', component);
     }
     // Update detail panel immediately
     updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
@@ -409,7 +407,6 @@ function init() {
       componentButtons.forEach(b => b.classList.remove('selected'));
       button.classList.add('selected');
       const componentType = button.getAttribute('data-component');
-      console.log('Selected component type for placement:', componentType);
     });
   });
 
@@ -791,7 +788,6 @@ function init() {
     // Handle changes
     pressureModelSelect.addEventListener('change', () => {
       simulationConfig.pressureModel = pressureModelSelect.value as 'hybrid' | 'pure-triangulation';
-      console.log(`Pressure model changed to: ${simulationConfig.pressureModel}`);
     });
   }
 
@@ -817,7 +813,6 @@ function init() {
         minTimestepValue.textContent = formatMinTimestep(minDt);
       }
       gameLoop.setMinTimestep(minDt);
-      console.log(`Min timestep set to: ${(minDt * 1000).toFixed(3)}ms (slider=${sliderVal})`);
     });
 
     // Initialize display AND apply initial value
@@ -842,7 +837,6 @@ function init() {
       // Convert MPa to Pa and set (undefined at max means no cap)
       const kMaxPa = kMaxMPa >= 2200 ? undefined : kMaxMPa * 1e6;
       gameLoop.setKMax(kMaxPa);
-      console.log(`K_max set to: ${kMaxMPa >= 2200 ? 'unlimited (physical)' : kMaxMPa + ' MPa'}`);
     });
 
     // Initialize display
@@ -860,7 +854,6 @@ function init() {
 
     pressureSolverCheckbox.addEventListener('change', () => {
       gameLoop.setPressureSolverEnabled(pressureSolverCheckbox.checked);
-      console.log(`Pressure solver: ${pressureSolverCheckbox.checked ? 'enabled' : 'disabled'}`);
     });
   }
 
@@ -879,7 +872,6 @@ function init() {
       const settings = loadSettings();
       settings.deterministicMode = deterministicModeCheckbox.checked;
       saveSettings(settings);
-      console.log(`Deterministic mode: ${deterministicModeCheckbox.checked ? 'enabled' : 'disabled'}`);
     });
   }
 
@@ -938,7 +930,6 @@ function init() {
       gameLoop.resetState(newSimState);
       // SCRAM is automatically cleared since we have a fresh simulation state
       updateScramDisplay();
-      console.log('[Main] SCRAM reset with initial T&H conditions');
     });
   }
 
@@ -1135,7 +1126,6 @@ function init() {
         e.preventDefault();
         gameLoop.togglePause();
         updatePauseButton();
-        console.log(gameLoop.getIsPaused() ? 'Paused' : 'Resumed');
         break;
       case '+':
       case '=':
@@ -1190,7 +1180,6 @@ function init() {
         // If editing a controller, update the game loop scram setpoints
         if (component.type === 'controller') {
           gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-          console.log('[Main] Controller edited, scram setpoints updated');
         }
         // Refresh the component detail panel
         if (gameLoop) {
@@ -1210,7 +1199,6 @@ function init() {
       // If we deleted a controller, update the scram setpoints
       if (wasController) {
         gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-        console.log('[Main] Scram controller deleted, checking for remaining controllers');
       }
 
       // Clear selection
@@ -1280,7 +1268,6 @@ function init() {
         // Note: length affects inertance which is calculated at simulation start,
         // so changing it during simulation won't have full effect until restart
 
-        console.log(`[Edit] Updated connection: fromElev=${result.fromElevation}m, toElev=${result.toElevation}m, area=${result.flowArea.toFixed(4)}m², length=${result.length}m`);
 
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
@@ -1322,7 +1309,6 @@ function init() {
         plantConn.flowArea = result.flowArea;
         plantConn.length = result.length;
 
-        console.log(`[Edit] Updated plant connection: fromElev=${result.fromElevation}m, toElev=${result.toElevation}m, area=${result.flowArea.toFixed(4)}m², length=${result.length}m`);
 
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
@@ -1362,7 +1348,6 @@ function init() {
     isometricBtn.addEventListener('click', () => {
       plantCanvas.toggleIsometric();
       isometricBtn.classList.toggle('active', plantCanvas.getIsometric());
-      console.log(`[View] Isometric mode: ${plantCanvas.getIsometric() ? 'enabled' : 'disabled'}`);
     });
   }
 
@@ -1448,7 +1433,6 @@ function init() {
       // For legacy pipes without elevation, assume horizontal
       pipe.endElevation = pipe.elevation ?? 0;
 
-      console.log(`[Migration] Added endPosition to pipe ${id}: (${pipe.endPosition.x.toFixed(2)}, ${pipe.endPosition.y.toFixed(2)}) @ ${pipe.endElevation}m`);
     }
   }
 
@@ -1463,7 +1447,6 @@ function init() {
       if (rv.coreBarrelId) continue;
       if (!rv.insideBarrelId || !rv.outsideBarrelId) continue;
 
-      console.log(`[Migration] Converting reactor vessel ${id} from sibling to parent-child architecture`);
 
       const insideBarrel = state.components.get(rv.insideBarrelId) as any;
       const outsideBarrel = state.components.get(rv.outsideBarrelId) as any;
@@ -1563,7 +1546,6 @@ function init() {
       // Keep legacy fields for reference (they're marked as deprecated in types)
       // Don't delete them so we can track what was migrated
 
-      console.log(`[Migration] Reactor vessel ${id} migrated successfully`);
     }
   }
 
@@ -1585,7 +1567,6 @@ function init() {
       const data = serializePlantState(plantState);
       const json = JSON.stringify(data);
       localStorage.setItem(STORAGE_PREFIX + name, json);
-      console.log(`[Save] Configuration '${name}' saved (${json.length} bytes)`);
       return true;
     } catch (e) {
       console.error('[Save] Failed to save configuration:', e);
@@ -1604,7 +1585,6 @@ function init() {
 
       const data = JSON.parse(json);
       deserializePlantState(data);
-      console.log(`[Load] Configuration '${name}' loaded (${plantState.components.size} components)`);
       return true;
     } catch (e) {
       console.error('[Load] Failed to load configuration:', e);
@@ -1616,7 +1596,6 @@ function init() {
   function deleteConfiguration(name: string): boolean {
     try {
       localStorage.removeItem(STORAGE_PREFIX + name);
-      console.log(`[Delete] Configuration '${name}' deleted`);
       return true;
     } catch (e) {
       console.error('[Delete] Failed to delete configuration:', e);
@@ -1870,7 +1849,6 @@ function init() {
       // Pause simulation
       gameLoop.pause();
 
-      console.log('[Mode] Switched to Construction mode');
     } else {
       // Simulation mode
       modeConstructionBtn?.classList.remove('active');
@@ -1935,15 +1913,12 @@ function init() {
       updateDebugPanel(currentState, emptyMetrics, gameLoop.getPressureSolverStatus());
 
       if (plantState.components.size > 0) {
-        console.log(`[Mode] Created simulation from user plant (${plantState.components.size} components)`);
       } else {
-        console.log('[Mode] Created empty simulation (no components in plant)');
       }
 
       // Update pause button to reflect actual paused state
       updatePauseButton();
 
-      console.log('[Mode] Switched to Simulation mode');
     }
   }
 
@@ -1973,7 +1948,6 @@ function init() {
         if (placementHintDiv) {
           placementHintDiv.style.display = 'none';
         }
-        console.log(`[Construction] Deselected component: ${componentType}`);
         return;
       }
 
@@ -1997,7 +1971,6 @@ function init() {
         placementHintDiv.style.display = 'block';
       }
 
-      console.log(`[Construction] Selected component: ${componentType}`);
     });
   });
 
@@ -2242,7 +2215,6 @@ function init() {
       // Component placement mode - convert screen to world coordinates
       // Uses perspective projection when in isometric mode
       const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
-      console.log(`[Construction] Opening config dialog for ${selectedComponentType} at world (${worldPos.x.toFixed(2)}, ${worldPos.y.toFixed(2)})`);
 
       // Check if clicking on an existing container component (tank, vessel, reactor vessel)
       const clickedComponent = plantCanvas.getComponentAtScreen({ x, y });
@@ -2317,7 +2289,6 @@ function init() {
           placementPos,
           (config: ComponentConfig | null) => {
             if (config) {
-              console.log(`[Construction] Component configured:`, config);
 
               // Special case: placing a core inside a container
               if (config.type === 'core' && containedBy && clickedComponent) {
@@ -2325,7 +2296,6 @@ function init() {
               // The container handles rendering the fuel rods at the correct position
               const result = constructionManager.addCoreToContainer(containedBy, config.properties);
               if (result.success) {
-                console.log(`[Construction] Added core to ${clickedComponent.label || containedBy}`);
                 showNotification(`Added reactor core to ${clickedComponent.label || containedBy}`, 'info');
               } else {
                 console.error(`[Construction] Failed to add core to container: ${result.error}`);
@@ -2350,12 +2320,10 @@ function init() {
               const componentId = constructionManager.createComponent(config);
 
               if (componentId) {
-                console.log(`[Construction] Successfully created component '${componentId}'`);
 
                 // If a scram controller was placed, update the game loop setpoints
                 if (config.type === 'scram-controller') {
                   gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-                  console.log('[Main] Scram controller placed, automatic scram enabled');
                 }
 
                 // Update construction cost panel
@@ -2381,14 +2349,12 @@ function init() {
               placementHintDiv.style.display = 'none';
             }
           } else {
-            console.log(`[Construction] Component placement cancelled`);
           }
         }, availableCores, availableGenerators, defaultName);
       };
 
       // If position is inside a building's footprint, auto-contain without dialog
       if (containingBuilding) {
-        console.log(`[Construction] Auto-placing inside building: ${containingBuilding.label || containingBuilding.id}`);
         proceedWithPlacement(containingBuilding.id);
       } else if (isContainer && clickedComponent) {
         // If clicking on a container (tank, vessel), ask if user wants to place inside
@@ -2404,9 +2370,7 @@ function init() {
       }
     } else if (constructionSubMode === 'connect') {
       // Connection mode - detect clicked port
-      console.log(`[Connection] Click at (${x}, ${y})`);
       const portInfo = plantCanvas.getPortAtScreen({ x, y });
-      console.log(`[Connection] Found port:`, portInfo);
 
       if (portInfo) {
         if (!connectingFrom) {
@@ -2439,10 +2403,8 @@ function init() {
             (config: ConnectionConfig | null) => {
               if (config) {
                 // Create the connection
-                console.log(`[Connection Config] createPipe: ${config.createPipe}, flowArea: ${config.flowArea}, length: ${config.length}`);
                 let success: boolean;
                 if (config.createPipe) {
-                  console.log(`[Main] Calling createConnectionWithPipe`);
                   success = constructionManager.createConnectionWithPipe(
                     config.fromPort.id,
                     config.toPort.id,
@@ -2452,7 +2414,6 @@ function init() {
                     config.toElevation
                   );
                 } else {
-                  console.log(`[Main] Calling createConnection (direct)`);
                   success = constructionManager.createConnection(
                     config.fromPort.id,
                     config.toPort.id,
@@ -2528,7 +2489,6 @@ function init() {
       }
     }
 
-    console.log(`[Construction] Switched to ${mode} mode`);
   }
 
   // Connect mode button handler
@@ -2612,16 +2572,6 @@ function init() {
     singleStep: () => gameLoop.singleStep(),
   };
 
-  console.log('Meltdown initialized!');
-  console.log('Debug utilities available via window.meltdown:');
-  console.log('  meltdown.setWaterPropsDebug(true) - Enable water property logging');
-  console.log('  meltdown.setSeparationDebug(true) - Enable phase separation logging');
-  console.log('  meltdown.getWaterPropsDebugLog() - Get recent log entries');
-  console.log('  meltdown.getState() - Get current simulation state');
-  console.log('  meltdown.pause() / meltdown.resume() - Control simulation');
-  console.log('Controls:');
-  console.log('  Space: Pause/Resume');
-  console.log('  +/-: Speed up/slow down');
   console.log('  S: Manual SCRAM');
   console.log('  Mouse drag: Pan view');
   console.log('  Mouse wheel: Zoom');

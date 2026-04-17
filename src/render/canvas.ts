@@ -1405,7 +1405,6 @@ export class PlantCanvas {
                 }
               } else {
                 // Horizontal: plenum extends to left (negative x)
-                const plenumHalfH = shellDiameter / 2;
                 const shellLeft = -worldWidth / 2;
                 const plenumCorners3D = [
                   { x: shellLeft, y: 0, z: elevation },
