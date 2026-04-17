@@ -30,7 +30,7 @@ import {
   saturatedVaporDensity,
   saturatedLiquidEnergy,
   saturatedVaporEnergy
-} from '../simulation/water-properties-v3';
+} from '../simulation/water-properties-v4';
 
 // Minimum steam pressure to ensure water stays liquid (not ice)
 // At 1°C (274.15 K), saturation pressure is about 657 Pa (0.00657 bar)

@@ -380,9 +380,6 @@ function init() {
 
   plantCanvas.onComponentSelect = (componentId) => {
     selectedComponentId = componentId;
-    if (componentId) {
-      const component = plantState.components.get(componentId);
-    }
     // Update detail panel immediately
     updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
   };
@@ -406,7 +403,8 @@ function init() {
     button.addEventListener('click', () => {
       componentButtons.forEach(b => b.classList.remove('selected'));
       button.classList.add('selected');
-      const componentType = button.getAttribute('data-component');
+      // Store selected component type for placement
+      button.getAttribute('data-component');
     });
   });
 
@@ -1409,7 +1407,7 @@ function init() {
 
   // Migrate pipes to have endPosition and endElevation for 3D rendering
   function migratePipeEndpoints(state: PlantState): void {
-    for (const [id, component] of state.components) {
+    for (const [_id, component] of state.components) {
       if (component.type !== 'pipe') continue;
       const pipe = component as PipeComponent;
 

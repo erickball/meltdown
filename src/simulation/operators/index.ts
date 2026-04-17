@@ -16,6 +16,11 @@ export {
 } from './heat-transfer';
 
 // FlowOperator removed - replaced by FlowMomentumRateOperator and FlowRateOperator
+export {
+  getFlowOperatorProfile,
+  resetFlowOperatorProfile,
+  type FlowOperatorProfile,
+} from './fluid-flow';
 
 export {
   NeutronicsOperator,
