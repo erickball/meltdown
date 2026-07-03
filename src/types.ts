@@ -254,6 +254,7 @@ export interface CondenserComponent extends ComponentBase {
   coolingWaterFlow: number; // Cooling water mass flow rate in kg/s
   coolingCapacity: number;  // Design heat rejection capacity in W
   tubeCount: number;
+  fillLevel?: number;      // 0-1, fraction of shell volume filled with hotwell liquid (default 0.05)
 }
 
 // Scram setpoint configuration

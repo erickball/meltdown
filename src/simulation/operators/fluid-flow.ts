@@ -884,8 +884,8 @@ export class FlowOperator implements PhysicsOperator {
     const g = 9.81;
     const baseP = node.fluid.pressure;
 
-    // Get node height estimate
-    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
+    // Use stored height if available, otherwise estimate from volume
+    const nodeHeight = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
 
     // Default connection elevation to mid-height if not specified
     if (connectionElevation === undefined) {

@@ -1236,7 +1236,12 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
     case 'heatExchanger': {
       const hx = component as any;
       // Heat exchangers create TWO flow nodes - tube side and shell side
-      const tubeVolume = 10; // Approximate
+      // Tube volume scales with tube count/size, not a fixed constant - otherwise a HX
+      // sized for a small or large plant would have identical (and often unrealistically
+      // tiny) primary-side inventory, which starves residence time and destabilizes the solver.
+      const tubeOD = hx.tubeOD || 0.02;                 // m
+      const tubeEffectiveLength = hx.hxType === 'straight' ? (hx.height || 10) : 2 * (hx.height || 10); // u-tube/helical go up and back down
+      const tubeVolume = Math.max(1, hx.tubeCount * Math.PI * Math.pow(tubeOD / 2, 2) * tubeEffectiveLength);
       const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
       const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
 
@@ -1255,7 +1260,10 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'turbine-generator': {
       const turbineGen = component as any;
-      const volume = 10;
+      // Approximate as a cylinder (length = width, diameter = height), scaled down for
+      // internal blading/casing. A fixed volume regardless of turbine size gives unrealistically
+      // short steam residence time for large machines, destabilizing the solver.
+      const volume = Math.max(2, Math.PI * Math.pow((turbineGen.height || 4) / 2, 2) * (turbineGen.width || 10) * 0.6);
       const temp = turbineGen.inletFluid?.temperature || saturationTemperature(5.5e6);
       const pressure = turbineGen.inletFluid?.pressure || 5.5e6;
       // Governor valve position: 0 = closed, 1 = open
@@ -1340,10 +1348,23 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Condensers often have air ingress that needs to be evacuated
       const ncg: NcgPartialPressures | undefined = condenser.initialNcg;
 
+      // Compute initial quality from fillLevel (volume fraction of hotwell liquid),
+      // same approach as tank/vessel components. A hardcoded mass-fraction quality
+      // is not physically meaningful here: at condenser pressure, vapor is ~4-5 orders
+      // of magnitude less dense than liquid, so a small mass fraction of liquid still
+      // corresponds to nearly the entire volume - and vice versa, a small mass fraction
+      // of vapor (e.g. quality=0.1) corresponds to a nearly-empty hotwell.
+      const fillLevel = condenser.fillLevel !== undefined ? condenser.fillLevel : 0.05;
+      const rho_f = Water.saturatedLiquidDensity(temp);
+      const rho_g = Water.saturatedVaporDensity(temp);
+      const m_liquid = rho_f * fillLevel * volume;
+      const m_vapor = rho_g * (1 - fillLevel) * volume;
+      const quality = m_vapor / (m_liquid + m_vapor);
+
       return {
         id: component.id,
         label: component.label || 'Condenser',
-        fluid: createFluidState(temp, pressure, 'two-phase', 0.1, volume, ncg),
+        fluid: createFluidState(temp, pressure, 'two-phase', quality, volume, ncg),
         volume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
@@ -1721,7 +1742,9 @@ function createHeatExchangerThermalNode(component: PlantComponent): ThermalNode 
 function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const hx = component as any;
   const elevation = hx.elevation || 0;
-  const shellVolume = 30;
+  // Approximate shell as a cylinder (diameter = width) minus tube bundle volume,
+  // rather than a fixed constant - see tube-side volume comment above for why.
+  const shellVolume = Math.max(2, Math.PI * Math.pow((hx.width || 3) / 2, 2) * (hx.height || 10) * 0.75);
   const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
   const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
   const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
