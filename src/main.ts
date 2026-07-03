@@ -1,6 +1,8 @@
 import { PlantCanvas } from './render/canvas';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
+import pwrPresetData from './presets/pwr.json';
+import bwrPresetData from './presets/bwr.json';
 import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
@@ -1642,6 +1644,22 @@ function init() {
       <hr style="border: none; border-top: 1px solid #445566; margin: 15px 0;" />
 
       <div style="margin-bottom: 15px;">
+        <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Load Preset Plant</label>
+        <div style="display: flex; gap: 5px;">
+          <button id="dialog-preset-pwr-btn" style="flex: 1; padding: 8px; background: #334455;
+            border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            PWR (Demo)
+          </button>
+          <button id="dialog-preset-bwr-btn" style="flex: 1; padding: 8px; background: #334455;
+            border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
+            BWR (Demo)
+          </button>
+        </div>
+      </div>
+
+      <hr style="border: none; border-top: 1px solid #445566; margin: 15px 0;" />
+
+      <div style="margin-bottom: 15px;">
         <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Load Saved Design</label>
         <select id="dialog-config-select" style="width: 100%; padding: 8px; margin-bottom: 8px;
           background: #2a2e38; color: #d0d8e0; border: 1px solid #445566; border-radius: 4px;">
@@ -1682,6 +1700,8 @@ function init() {
 
     const saveNameInput = dialog.querySelector('#save-name-input') as HTMLInputElement;
     const configSelect = dialog.querySelector('#dialog-config-select') as HTMLSelectElement;
+    const presetPwrBtn = dialog.querySelector('#dialog-preset-pwr-btn') as HTMLButtonElement;
+    const presetBwrBtn = dialog.querySelector('#dialog-preset-bwr-btn') as HTMLButtonElement;
     const saveBtn = dialog.querySelector('#dialog-save-btn') as HTMLButtonElement;
     const loadBtn = dialog.querySelector('#dialog-load-btn') as HTMLButtonElement;
     const deleteBtn = dialog.querySelector('#dialog-delete-btn') as HTMLButtonElement;
@@ -1697,6 +1717,20 @@ function init() {
       configSelect.innerHTML = '<option value="">-- Select Configuration --</option>' +
         names.map(name => `<option value="${name}">${name}</option>`).join('');
     };
+
+    const loadPreset = (presetData: unknown, label: string) => {
+      // Presets are shared, cached JSON module objects - deserializePlantState (and its
+      // migration passes) mutate component objects in place, so clone before loading
+      // to avoid corrupting the preset for future loads in this session.
+      const data = JSON.parse(JSON.stringify(presetData));
+      deserializePlantState(data);
+      updateConstructionCostPanel();
+      showNotification(`Loaded '${label}' preset`, 'info');
+      cleanup();
+    };
+
+    presetPwrBtn.addEventListener('click', () => loadPreset(pwrPresetData, 'PWR (Demo)'));
+    presetBwrBtn.addEventListener('click', () => loadPreset(bwrPresetData, 'BWR (Demo)'));
 
     saveBtn.addEventListener('click', () => {
       const name = saveNameInput.value.trim();
