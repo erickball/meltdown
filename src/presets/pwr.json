@@ -61,6 +61,7 @@
       "id": "pump-1", "type": "pump", "label": "Reactor Coolant Pump",
       "position": {"x": 48, "y": 85}, "rotation": 0, "elevation": 0,
       "diameter": 0.7, "running": true, "speed": 1.0, "ratedFlow": 5200, "ratedHead": 90,
+      "pressureRating": 172,
       "orientation": "left-right",
       "ports": [
         {"id": "pump-1-inlet", "position": {"x": -0.5, "y": 0}, "direction": "in"},
@@ -109,6 +110,7 @@
       "id": "cond-pump-1", "type": "pump", "label": "Condensate Pump",
       "position": {"x": 90, "y": 82}, "rotation": 0, "elevation": 0,
       "diameter": 0.4, "running": true, "speed": 1.0, "ratedFlow": 550, "ratedHead": 100,
+      "pressureRating": 25,
       "orientation": "left-right",
       "ports": [
         {"id": "cond-pump-1-inlet", "position": {"x": -0.3, "y": 0}, "direction": "in"},
@@ -121,6 +123,7 @@
       "id": "fw-pump-1", "type": "pump", "label": "Feedwater Pump",
       "position": {"x": 78, "y": 82}, "rotation": 0, "elevation": 0,
       "diameter": 0.4, "running": true, "speed": 1.0, "ratedFlow": 450, "ratedHead": 650,
+      "pressureRating": 100,
       "orientation": "left-right",
       "ports": [
         {"id": "fw-pump-1-inlet", "position": {"x": -0.3, "y": 0}, "direction": "in"},

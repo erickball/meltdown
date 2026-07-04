@@ -29,6 +29,7 @@ import {
   R_GAS,
 } from '../gas-properties';
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
+import { pumpHeadPressure } from './pump-curve';
 
 // ============================================================================
 // Phase Separation Calculation (shared utility)
@@ -795,6 +796,11 @@ export class NeutronicsRateOperator implements RateOperator {
 // Flow Rate Operator - Mass and Energy Transport
 // ============================================================================
 
+// Rate limiter for the getSpecificEnthalpy diagnostic dump (wall-clock ms).
+// Without it, a persistently-suspicious node logs 8 lines on every rate
+// evaluation (7+ per RK45 step) and console I/O dominates the frame time.
+let lastEnthalpyDebugLog = 0;
+
 export class FlowRateOperator implements RateOperator {
   name = 'FluidFlow';
 
@@ -1215,11 +1221,16 @@ export class FlowRateOperator implements RateOperator {
       // 1. There's >50% difference between stored and ideal P for vapor-like densities
       // 2. Or energy implies T < 100K for vapor (anomalously cold)
       // 3. Or specific energy is very low for vapor (<500 kJ/kg at v>0.01)
-      const shouldLog = (pMismatchRatio > 0.5 && v > 0.01) ||
-                        (T_from_energy < 100 && v > 0.01) ||
-                        (u < 500e3 && v > 0.01);
+      // Boundary nodes are excluded - their synthetic reservoir states (e.g. the
+      // atmosphere) trip these conditions by construction, and logging them every
+      // rate evaluation floods the console badly enough to slow the simulation.
+      const shouldLog = !node.isBoundary &&
+                        ((pMismatchRatio > 0.5 && v > 0.01) ||
+                         (T_from_energy < 100 && v > 0.01) ||
+                         (u < 500e3 && v > 0.01));
 
-      if (shouldLog) {
+      if (shouldLog && performance.now() - lastEnthalpyDebugLog > 1000) {
+        lastEnthalpyDebugLog = performance.now();
         console.warn(`[getSpecificEnthalpy DEBUG] ${node.id}:`);
         console.warn(`  State: mass=${waterMass.toFixed(3)}kg, U=${(waterEnergy/1e6).toFixed(4)}MJ, V=${(waterVolume*1e3).toFixed(1)}L`);
         console.warn(`  Specific: u=${(u/1e3).toFixed(2)}kJ/kg, v=${(v*1e3).toFixed(2)}L/kg`);
@@ -2165,11 +2176,18 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
     const dz = conn.elevation || 0;
     const dP_gravity = -rho_avg * 9.81 * dz;
 
-    // Pump head
-    let dP_pump = 0;
+    // Pump curve terms: dP_pump(Q) = dP_shutoff - a_pump * Q², so the pump's
+    // falling curve enters the steady-state balance alongside friction.
+    let a_pump = 0;      // Pa per (kg/s)²
+    let dP_shutoff = 0;  // Pa
     for (const [, pump] of state.components.pumps) {
       if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0) {
-        dP_pump = pump.effectiveSpeed * pump.ratedHead * rho_avg * 9.81;
+        const s = pump.effectiveSpeed;
+        const gH = pump.ratedHead * rho_avg * 9.81;
+        dP_shutoff = 1.25 * s * s * gH;
+        if (pump.ratedFlow > 0) {
+          a_pump = 0.25 * gH / (pump.ratedFlow * pump.ratedFlow);
+        }
       }
     }
 
@@ -2185,18 +2203,21 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
       return 0; // Valve closed
     }
 
-    // Total driving pressure
-    const dP_total = dP_pressure + dP_gravity + dP_pump;
+    // Static driving pressure (pump contribution at zero flow)
+    const dP_static = dP_pressure + dP_gravity + dP_shutoff;
 
-    // Flow from steady-state momentum: dP = K * (1/2) * rho * v²
+    // Steady-state momentum: dP_static - a_pump * Q² = K * (1/2) * rho * v²
+    // => Q = sqrt(dP_static / (a_fric + a_pump)) with a_fric = K / (2 rho A²)
     const K = (conn.resistanceCoeff || 10) / Math.pow(valveOpenFraction, 2);
     const A = conn.flowArea || 0.1;
+    const a_fric = K / (2 * rho_avg * A * A);
 
-    const sign = dP_total >= 0 ? 1 : -1;
-    const v = sign * Math.sqrt(2 * Math.abs(dP_total) / (K * rho_avg));
-    const massFlow = rho_avg * A * v;
-
-    return massFlow;
+    if (dP_static >= 0) {
+      return Math.sqrt(dP_static / (a_fric + a_pump));
+    }
+    // Reverse flow: pump curve doesn't assist (reverse sees shutoff head, already
+    // counted in dP_static), only friction resists
+    return -Math.sqrt(-dP_static / a_fric);
   }
 }
 
@@ -2614,7 +2635,10 @@ export class FlowMomentumRateOperator implements RateOperator {
             // Otherwise use mixture density (pump is cavitating)
           }
 
-          dP_pump = pump.effectiveSpeed * pump.ratedHead * pumpRho * g;
+          // Head from the pump curve: falls off with flow, zero at runout.
+          // This is what bounds loop flows near rated - with constant head the
+          // flow is limited only by pipe friction (typically ~2x rated).
+          dP_pump = pumpHeadPressure(pump, currentFlow, pumpRho);
         }
       }
 

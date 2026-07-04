@@ -76,6 +76,15 @@ export interface ConstraintOperator {
   name: string;
 
   /**
+   * Only apply this operator to accepted (final) states, not to intermediate
+   * RK stages. Use for operators with irreversible side effects (e.g. bursting
+   * a component): intermediate stages routinely overshoot into transient states
+   * that the error controller then rejects, and permanent decisions must not be
+   * made from them.
+   */
+  finalOnly?: boolean;
+
+  /**
    * Apply algebraic constraints to the state (e.g., thermodynamic consistency).
    * Returns a new state with constraints satisfied.
    */
@@ -559,6 +568,10 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
  * Check if a state has obviously bad physics that should cause step rejection.
  * Returns a score > 1 if the state is bad (larger = worse).
  */
+// Tracks which node/check drove the most recent checkStateSanity() rejection,
+// for diagnostics - the aggregate score alone doesn't say what actually happened.
+export let lastSanityFailureReason = '';
+
 export function checkStateSanity(oldState: SimulationState, newState: SimulationState, dt: number): number {
   let maxBadness = 0;
 
@@ -584,11 +597,25 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
       return 1000; // Definitely reject
     }
 
-    // Check for large pressure change (more than 20% in one step)
-    const pressureRatio = newNode.fluid.pressure / oldNode.fluid.pressure;
-    if (pressureRatio > 1.2 || pressureRatio < 0.833) {
-      // Scale badness: 20% change = badness 1, 50% change = badness ~4
-      const badness = Math.abs(Math.log(pressureRatio)) / Math.log(1.2);
+    // Check for large pressure change (more than 20% in one step).
+    // The change is measured against max(P_old, 2 bar): what destabilizes the
+    // flow network is a pressure jump comparable to the driving pressures (~bar
+    // scale), not relative noise at near-vacuum. Without the floor, a node
+    // sitting at condenser vacuum (~7 kPa) rejects steps over ~1.5 kPa of
+    // saturation-line jitter and grinds the whole simulation to sub-ms steps.
+    // The floor must also admit the ~0.5 bar/step swings of small liquid nodes
+    // ringing at the saturation boundary (cavitation surge): the semi-implicit
+    // pressure solver damps that mode with strength ~(w*dt)^2, so rejecting the
+    // larger steps traps the simulation on the wrong side of the stiffness
+    // crossover and the ringing never decays. Sub-bar accuracy at low pressure
+    // is still protected by the RK45 embedded error estimate.
+    const P_SCALE_FLOOR = 2e5; // Pa
+    const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
+    const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
+    if (pChange > 0.2) {
+      // Scale badness: 20% change = badness 1, 40% = 2, etc.
+      const badness = pChange / 0.2;
+      if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)`;
       maxBadness = Math.max(maxBadness, badness);
     }
 
@@ -616,6 +643,7 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
       if (massFraction > 0.2) {
         // More than 20% of mass moved in one step - too aggressive
         const badness = massFraction / 0.2; // 20% = 1, 40% = 2, etc.
+        if (badness > maxBadness) lastSanityFailureReason = `${id}: massFraction=${(massFraction*100).toFixed(1)}% throughput=${throughput.toFixed(2)}kg/s mass=${newNode.fluid.mass.toFixed(2)}kg`;
         maxBadness = Math.max(maxBadness, badness);
       }
     }
@@ -627,6 +655,7 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
     if (relMassChange > 0.5) {
       // More than 50% mass change in one step - suspicious
       const badness = relMassChange / 0.5;
+      if (badness > maxBadness) lastSanityFailureReason = `${id}: relMassChange=${(relMassChange*100).toFixed(1)}% (${oldNode.fluid.mass.toFixed(2)}->${newNode.fluid.mass.toFixed(2)}kg)`;
       maxBadness = Math.max(maxBadness, badness);
     }
 
@@ -780,7 +809,7 @@ export class RK45Solver {
   private pressureSolver: PressureSolver | null = null;
 
   // Flag to dynamically enable/disable pressure solver at runtime
-  public pressureSolverEnabled: boolean = false;  // Disabled by default
+  public pressureSolverEnabled: boolean = true;
 
   // Metrics
   private totalSteps = 0;
@@ -866,8 +895,12 @@ export class RK45Solver {
    * current state. Otherwise intermediate RK stages use stale values.
    *
    * Returns null if the state is too bad to process (pre-constraint sanity failure).
+   *
+   * Pass alreadyConstrained=true when the caller just ran applyAllConstraints on
+   * this state - constraint operators are algebraic, so re-applying them would
+   * only burn time (water-property lookups dominate the step cost).
    */
-  private computeTotalRates(state: SimulationState): StateRates | null {
+  private computeTotalRates(state: SimulationState, alreadyConstrained = false): StateRates | null {
     // Quick sanity check before constraints to avoid crashing water properties
     const preCheck = checkPreConstraintSanity(state);
     if (!preCheck.safe) {
@@ -878,9 +911,28 @@ export class RK45Solver {
     // First, ensure algebraic constraints are satisfied for this state
     // This updates flow rates based on current pressures, which is critical
     // for the DAE nature of this system
+    //
+    // A state can pass checkPreConstraintSanity (finite, non-negative, plausible
+    // specific volume) yet still be a (mass, energy, volume) combination that has
+    // no valid pressure solution - e.g. an RK intermediate stage that overshoots
+    // into a density/energy pair no real fluid state reaches at any pressure.
+    // Water-properties throws loudly in that case (by design - see CLAUDE.md).
+    // Treat that the same as a pre-constraint sanity failure: reject this stage
+    // so the adaptive step controller can shrink dt and retry, instead of letting
+    // the exception crash the whole simulation before BurstCheckOperator or the
+    // error-based step rejection ever get a chance to run.
     let constrainedState = state;
-    for (const op of this.constraintOperators) {
-      constrainedState = op.applyConstraints(constrainedState);
+    if (!alreadyConstrained) {
+      try {
+        for (const op of this.constraintOperators) {
+          if (op.finalOnly) continue; // side-effecting ops run only on accepted states
+          constrainedState = op.applyConstraints(constrainedState);
+        }
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn(`[RK45 computeRates] Constraint operator threw, rejecting stage: ${message}`);
+        return null;
+      }
     }
 
     // Now compute rates using the constrained state
@@ -898,8 +950,14 @@ export class RK45Solver {
 
   /**
    * Apply all constraint operators
+   *
+   * @param dt - The timestep this constraint application belongs to. Used by the
+   *   semi-implicit pressure solver to scale its flow corrections.
+   * @param isFinal - True when this state is a step-acceptance candidate rather
+   *   than an intermediate RK stage. Operators marked finalOnly (irreversible
+   *   side effects like bursting components) run only when this is true.
    */
-  private applyAllConstraints(state: SimulationState): SimulationState {
+  private applyAllConstraints(state: SimulationState, dt: number, isFinal = false): SimulationState {
     let result = state;
 
     // FIRST: Run semi-implicit pressure solver to pre-condition flow rates
@@ -912,12 +970,13 @@ export class RK45Solver {
     // computed by FluidStateConstraintOperator from (m, U, V).
     if (this.pressureSolver && this.pressureSolverEnabled) {
       const t0 = performance.now();
-      this.pressureSolver.solve(result, this.currentDt);
+      this.pressureSolver.solve(result, dt);
       this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
     }
 
     // THEN: Apply standard constraint operators (thermodynamic consistency, etc.)
     for (const op of this.constraintOperators) {
+      if (op.finalOnly && !isFinal) continue;
       const t0 = performance.now();
       result = op.applyConstraints(result);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
@@ -973,11 +1032,26 @@ export class RK45Solver {
         };
       }
 
-      // Apply constraints at intermediate stages for stability
-      const constrainedStage = this.applyAllConstraints(stageState);
+      // Apply constraints at intermediate stages for stability.
+      // Like the computeTotalRates() call below, this can throw if the stage
+      // overshot into a state water-properties can't resolve - reject the
+      // stage in that case rather than letting the exception propagate.
+      let constrainedStage: SimulationState;
+      try {
+        constrainedStage = this.applyAllConstraints(stageState, dt);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn(`[RK45] Constraint operator threw on intermediate stage, rejecting: ${message}`);
+        return {
+          newState: state,
+          error: 1e10,
+          k,
+          errorRates: createZeroRates(),
+        };
+      }
 
-      // computeTotalRates also does sanity check but constrained state should be fine
-      const ki = this.computeTotalRates(constrainedStage);
+      // Stage was just constrained above - skip the redundant constraint pass
+      const ki = this.computeTotalRates(constrainedStage, true);
       if (ki === null) {
         // Constraint operators made state worse somehow - return failure
         return {
@@ -1125,8 +1199,35 @@ export class RK45Solver {
         continue;
       }
 
-      // Apply constraints to get final state
-      const constrainedState = this.applyAllConstraints(newState);
+      // Apply constraints to get final state.
+      // This can throw if the accepted step overshot into a (mass, energy, volume)
+      // combination water-properties can't resolve to a valid pressure. Treat that
+      // exactly like the pre-constraint sanity failure above: reject the step and
+      // shrink dt, rather than letting the exception crash the simulation before
+      // BurstCheckOperator (which runs as part of applyAllConstraints, after
+      // FluidStateConstraintOperator) ever gets a chance to open a relief path.
+      let constrainedState: SimulationState;
+      try {
+        constrainedState = this.applyAllConstraints(newState, stepDt, true);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn(`[RK45] Constraint operator threw on accepted step, rejecting: ${message}`);
+        rejectsThisFrame++;
+        this.rejectedSteps++;
+        this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
+
+        if (this.currentDt <= this.config.minDt * 1.01) {
+          consecutiveRejectsAtMinDt++;
+          if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+            throw new Error(
+              `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
+              `Constraint operator threw: ${message}. ` +
+              `The physics is unstable and cannot be resolved by shrinking the timestep.`
+            );
+          }
+        }
+        continue;
+      }
 
       // Check for obviously bad physics (in addition to RK45 error estimate)
       const sanityScore = checkStateSanity(currentState, constrainedState, stepDt);
@@ -1192,7 +1293,7 @@ export class RK45Solver {
         if (sanityScore > 1) {
           // Sanity check failed - be more aggressive about shrinking
           this.currentDt = stepDt * 0.25;
-          console.log(`[RK45] Sanity check failed (score=${sanityScore.toFixed(2)}), shrinking dt to ${(this.currentDt*1000).toFixed(3)}ms`);
+          console.log(`[RK45] Sanity check failed (score=${sanityScore.toFixed(2)}), shrinking dt to ${(this.currentDt*1000).toFixed(3)}ms - ${lastSanityFailureReason}`);
         } else {
           this.currentDt = this.computeOptimalDt(effectiveError, stepDt);
         }
@@ -1282,7 +1383,42 @@ export class RK45Solver {
       };
     }
 
-    const constrainedState = this.applyAllConstraints(newState);
+    let constrainedState: SimulationState;
+    try {
+      constrainedState = this.applyAllConstraints(newState, this.currentDt, true);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.warn(`[RK45 singleStep] Constraint operator threw, rejecting: ${message}`);
+      this.rejectedSteps++;
+      return {
+        state,
+        dt: this.currentDt,
+        error: 1000, // Indicate failure
+        metrics: {
+          currentDt: this.currentDt,
+          actualDt: 0,
+          maxStableDt: this.config.maxDt,
+          dtLimitedBy: 'pre-sanity-fail',
+          stabilityLimitedBy: 'none',
+          minDtUsed: this.currentDt,
+          subcycleCount: 0,
+          totalSteps: this.totalSteps,
+          lastStepWallTime: 0,
+          avgStepWallTime: 0,
+          retriesThisFrame: 1,
+          maxPressureChange: 0,
+          maxFlowChange: 0,
+          maxMassChange: 0,
+          consecutiveSuccesses: 0,
+          topErrorContributors: computeErrorContributors(errorRates, state, 3),
+          realTimeRatio: 0,
+          isFallingBehind: true,
+          fallingBehindSince: 0,
+          operatorTimes: new Map(),
+          lastSimTime: state.time,
+        },
+      };
+    }
 
     // Check sanity and log warning if needed
     const sanityScore = checkStateSanity(state, constrainedState, this.currentDt);

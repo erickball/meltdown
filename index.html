@@ -82,8 +82,8 @@
                 <div class="slider-labels" style="font-size: 9px;"><span>25 MPa</span><span>2200 MPa</span></div>
               </div>
               <div style="margin-top: 8px;">
-                <label style="font-size: 11px;">
-                  <input type="checkbox" id="pressure-solver-enabled" />
+                <label style="font-size: 11px;" title="Semi-implicit correction that removes water-hammer stiffness from liquid-filled nodes, allowing much larger timesteps. Corrections scale with node stiffness, so soft (vapor/two-phase) nodes are unaffected. Disable to integrate all pressure dynamics explicitly (much slower when liquid loops are present).">
+                  <input type="checkbox" id="pressure-solver-enabled" checked />
                   Enable pressure solver
                 </label>
               </div>

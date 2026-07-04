@@ -101,15 +101,30 @@ console.log(`\n=== Running ${numTicks} ticks (dt=${dt}s) ===\n`);
 let state = simState;
 let lastLogTime = 0;
 const logInterval = 1.0; // Log every 1 second of sim time
+const wallStart = performance.now();
+const operatorTotals = new Map<string, number>();
+let lastMetrics: ReturnType<typeof solver.advance>['metrics'] | null = null;
 
 try {
   for (let tick = 0; tick < numTicks; tick++) {
     const result = solver.advance(state, dt);
     state = result.state;
+    lastMetrics = result.metrics;
+    for (const [name, ms] of result.metrics.operatorTimes) {
+      operatorTotals.set(name, (operatorTotals.get(name) || 0) + ms);
+    }
 
     // Log periodically
     if (state.time - lastLogTime >= logInterval || tick === numTicks - 1) {
+      const wallSec = (performance.now() - wallStart) / 1000;
       console.log(`\n--- t = ${state.time.toFixed(2)}s (tick ${tick + 1}) ---`);
+      console.log(`[perf] wall=${wallSec.toFixed(1)}s speed=${(state.time / wallSec).toFixed(2)}x realtime, ` +
+        `steps=${result.metrics.totalSteps}, dt=${(result.metrics.currentDt * 1000).toFixed(2)}ms, ` +
+        `rejects this frame=${result.metrics.retriesThisFrame}`);
+      const contributors = result.metrics.topErrorContributors
+        .map(c => `${c.nodeId}[${c.type}] ${(c.contribution * 100).toFixed(0)}% (${c.description})`)
+        .join(', ');
+      if (contributors) console.log(`[perf] error contributors: ${contributors}`);
       logSimState(state);
       lastLogTime = state.time;
     }
@@ -133,6 +148,21 @@ try {
 }
 
 console.log('\n=== Simulation Complete ===');
+{
+  const wallSec = (performance.now() - wallStart) / 1000;
+  const solverMetrics = solver.getMetrics();
+  console.log(`Simulated ${state.time.toFixed(2)}s in ${wallSec.toFixed(1)}s wall time ` +
+    `(${(state.time / wallSec).toFixed(2)}x realtime)`);
+  console.log(`Total steps: ${solverMetrics.totalSteps}, rejected: ${solverMetrics.rejectedSteps}, ` +
+    `final dt: ${(solverMetrics.currentDt * 1000).toFixed(2)}ms`);
+  if (lastMetrics) {
+    console.log('Operator wall time totals:');
+    const sorted = [...operatorTotals.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [name, ms] of sorted) {
+      console.log(`  ${name}: ${(ms / 1000).toFixed(2)}s`);
+    }
+  }
+}
 
 // Helper function to log simulation state
 function logSimState(state: SimulationState): void {

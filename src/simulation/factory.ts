@@ -1141,13 +1141,18 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'pump': {
       const pump = component as any;
-      // Pump internal volume scales with flow capacity
-      // A typical RCP (~5000 kg/s) has ~1-2 m³ internal volume
-      // Small pumps (~100 kg/s) have ~0.1 m³
-      // Scale: volume ≈ 0.0002 * ratedFlow (so 100 kg/s → 0.02 m³, 5000 kg/s → 1 m³)
-      // Minimum 0.05 m³ to avoid numerical issues
+      // Pump node volume = pump casing PLUS its associated piping run.
+      // Flow connections in this model carry no volume of their own, so the
+      // liquid sitting in the suction/discharge piping (several m³ for a large
+      // pump: e.g. 10 m of 0.4 m pipe is 1.3 m³) must be lumped into the pump
+      // node. Modeling only the bare casing (~0.1 m³) gives the node an
+      // unrealistically high acoustic impedance Z = sqrt(K*L/(V*A)) - any kg/s
+      // flow slam then produces tens of bar of water hammer that real piping
+      // inventory would absorb.
+      // Scale: volume ≈ 0.002 * ratedFlow (500 kg/s → 1 m³, 5000 kg/s → 10 m³,
+      // consistent with casing + connected pipe inventory). Minimum 0.1 m³.
       const ratedFlow = pump.ratedFlow || 100;
-      const volume = Math.max(0.05, 0.0002 * ratedFlow);
+      const volume = Math.max(0.1, 0.002 * ratedFlow);
       const temp = pump.fluid?.temperature || 350;
       const pressure = Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
@@ -1606,7 +1611,11 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     id: component.id,
     running: isRunning,
     speed: isRunning ? 1.0 : 0,  // Target speed (1.0 = 100%)
-    effectiveSpeed: isRunning ? 1.0 : 0, // If running at start, assume already at speed
+    // Running pumps ramp up from zero over rampUpTime. Starting at full speed
+    // with all flows initialized to zero slams shutoff head onto stationary
+    // liquid columns - a guaranteed water hammer at t=0 that can burst small
+    // components before the flow field has any chance to develop.
+    effectiveSpeed: 0,
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
     efficiency: 0.85,
@@ -2075,12 +2084,18 @@ function getComponentGeometry(
 /**
  * Calculate wall thickness from pressure rating using simplified Barlow formula.
  * t = P * D / (2 * S) where S = 138 MPa (SA-106 Grade B)
+ *
+ * The minimum is diameter-proportional (D/50, floor 3mm) rather than a fixed
+ * 2mm: this is used for cast bodies (pumps, valves, HX shells), which are far
+ * thicker than the Barlow minimum for castability and rigidity. A fixed 2mm
+ * wall on a 0.4m pump gives a buckling collapse pressure below 1 bar, which
+ * would (unphysically) crush any pump pulling suction from a condenser vacuum.
  */
 function calculateThicknessFromPressure(pressureBar: number, diameter: number): number {
   const P = pressureBar * 1e5;  // bar to Pa
   const S = 138e6;              // Pa - allowable stress
   const thickness = P * diameter / (2 * S);
-  return Math.max(0.002, thickness);  // minimum 2mm
+  return Math.max(0.003, diameter / 50, thickness);
 }
 
 /**

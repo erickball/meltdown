@@ -849,8 +849,8 @@ function init() {
   // Advanced solver settings: Pressure solver enable/disable
   const pressureSolverCheckbox = document.getElementById('pressure-solver-enabled') as HTMLInputElement;
   if (pressureSolverCheckbox) {
-    // Initialize to unchecked (pressure solver disabled by default)
-    pressureSolverCheckbox.checked = false;
+    // Reflect the solver's actual default (enabled)
+    pressureSolverCheckbox.checked = gameLoop.getPressureSolverEnabled();
 
     pressureSolverCheckbox.addEventListener('change', () => {
       gameLoop.setPressureSolverEnabled(pressureSolverCheckbox.checked);

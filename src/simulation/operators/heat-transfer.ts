@@ -21,6 +21,7 @@ import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES, totalMoles, mixtureCv } from '../gas-properties';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
+import { pumpHeadPressure } from './pump-curve';
 
 /**
  * NCG initial condition as partial pressures in bar.
@@ -578,9 +579,9 @@ export class FluidStateUpdateOperator implements PhysicsOperator {
                 }
                 const pumpRho = pumpUpstreamNode.fluid.mass / pumpUpstreamNode.volume;
 
-                // Pump head in pressure units: ΔP = ρ * g * H
-                // effectiveSpeed is maintained by FlowOperator.updatePumpSpeeds()
-                const pumpHead = pump.effectiveSpeed * pump.ratedHead * pumpRho * 9.81;
+                // Pump head in pressure units, from the pump curve at the
+                // connection's current flow (consistent with FlowMomentumRateOperator)
+                const pumpHead = pumpHeadPressure(pump, conn.massFlowRate, pumpRho);
                 // If propagating in the forward direction (same as pump flow), pressure increases
                 // If propagating backwards (against pump flow), pressure decreases
                 // BFS propagates from two-phase source, so:

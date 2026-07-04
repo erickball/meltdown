@@ -72,6 +72,11 @@ function calculateBreakFraction(
 export class BurstCheckOperator implements ConstraintOperator {
   name = 'BurstCheck';
 
+  // Bursting is irreversible - it must only be decided from accepted states,
+  // never from intermediate RK stages, which routinely overshoot into transient
+  // pressures that the step controller then rejects.
+  finalOnly = true;
+
   applyConstraints(state: SimulationState): SimulationState {
     // If no burst states are configured, nothing to do
     if (!state.burstStates || state.burstStates.size === 0) {
