@@ -42,6 +42,7 @@ export interface ThermalNodeRates {
 export interface NeutronicsRates {
   dPower: number;                    // W/s - rate of power change
   dPrecursorConcentration: number;   // 1/s - rate of precursor change
+  dDecayHeatPools?: number[];        // W/s - rate of change per decay-heat group
 }
 
 export interface PumpRates {
@@ -170,6 +171,15 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     dPower: a.neutronics.dPower + b.neutronics.dPower,
     dPrecursorConcentration: a.neutronics.dPrecursorConcentration + b.neutronics.dPrecursorConcentration,
   };
+  if (a.neutronics.dDecayHeatPools || b.neutronics.dDecayHeatPools) {
+    const aPools = a.neutronics.dDecayHeatPools ?? [];
+    const bPools = b.neutronics.dDecayHeatPools ?? [];
+    const n = Math.max(aPools.length, bPools.length);
+    result.neutronics.dDecayHeatPools = Array.from(
+      { length: n },
+      (_, i) => (aPools[i] ?? 0) + (bPools[i] ?? 0)
+    );
+  }
 
   // Combine pump rates
   const allPumpIds = new Set([...a.pumps.keys(), ...b.pumps.keys()]);
@@ -223,6 +233,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     dPower: rates.neutronics.dPower * factor,
     dPrecursorConcentration: rates.neutronics.dPrecursorConcentration * factor,
   };
+  if (rates.neutronics.dDecayHeatPools) {
+    result.neutronics.dDecayHeatPools = rates.neutronics.dDecayHeatPools.map(r => r * factor);
+  }
 
   for (const [id, r] of rates.pumps) {
     result.pumps.set(id, {
@@ -308,6 +321,13 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
   // Apply neutronics rates
   newState.neutronics.power += rates.neutronics.dPower * dt;
   newState.neutronics.precursorConcentration += rates.neutronics.dPrecursorConcentration * dt;
+  if (rates.neutronics.dDecayHeatPools) {
+    const pools = newState.neutronics.decayHeatPools ?? [];
+    rates.neutronics.dDecayHeatPools.forEach((r, i) => {
+      pools[i] = (pools[i] ?? 0) + r * dt;
+    });
+    newState.neutronics.decayHeatPools = pools;
+  }
 
   // Apply pump rates
   for (const [id, pumpRates] of rates.pumps) {
@@ -345,6 +365,13 @@ export function findNonFiniteRate(rates: StateRates): string {
   }
   if (!isFinite(rates.neutronics.dPower)) return `neutronics.dPower=${rates.neutronics.dPower}`;
   if (!isFinite(rates.neutronics.dPrecursorConcentration)) return 'neutronics.dPrecursorConcentration';
+  if (rates.neutronics.dDecayHeatPools) {
+    for (let i = 0; i < rates.neutronics.dDecayHeatPools.length; i++) {
+      if (!isFinite(rates.neutronics.dDecayHeatPools[i])) {
+        return `neutronics.dDecayHeatPools[${i}]=${rates.neutronics.dDecayHeatPools[i]}`;
+      }
+    }
+  }
   for (const [id, r] of rates.pumps) {
     if (!isFinite(r.dEffectiveSpeed)) return `pump ${id}.dEffectiveSpeed=${r.dEffectiveSpeed}`;
   }

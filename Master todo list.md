@@ -9,8 +9,7 @@
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
 -Wire auto-tuned controllers into the BWR and two-loop presets (PWR done - rods/governor/3-elem FW/hotwell/pzr heaters+spray; framework in docs/controllers-steady-state-plan.md)
 -Construction-mode UI for creating/editing PID controllers (sim + JSON presets work today; scram-controller UI pattern extends)
--Decay heat: power->0 currently removes ALL heat input; fission-product decay term should persist (~7% initially, decaying)
--SG heat transfer capacity review: PWR preset needed tubeCount 12000 for ~3 MW/K effective UA; running 1000 MW wants ~10x more (per-tube area or convection correlations look low)
+-Upgrade ConvectionRateOperator (the RK45 path): it uses single-phase Dittus-Boelter with the NODE's hydraulic diameter (meters, not tube-scale) and flat surface area. The level-dependent wetted-area split and two-phase h only exist in the obsolete Euler ConvectionOperator (heat-transfer.ts). Port wetted-area + add boiling h + per-tube characteristic diameter -> should lift SG UA ~10x and let the PWR preset run at high power (currently capped ~3-10% by SG capacity; raise the steady-state test's power bar when this lands).
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
 -AI assistant to help users add to, fix, or understand the model (use sonnet 5, cap usage at $10/month. context: a bunch of game documentation, the current plant model - full list of components and their connections and properties, the last few changes the user made, what mode they're in, and the most recent simulation results for this model (if any). Also the ability to look at the code but let's try to make the documentation good enough it doesn't usually have to.)
 -Add ability to wait for random initiating event (once steady state is achieved)
@@ -42,6 +41,7 @@
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Decay heat: 4-group fission-product pools (coarse ANS-5.1 fit) build with power history and keep ~5%/3%/1.5% of prior power flowing at 10s/100s/1000s after shutdown. Scrammed cores now need cooling.
 X Fully implicit (RELAP-style) pressure-flow momentum solver - default on, explicit path selectable. Presets now run 20-30x realtime (two-loop PWR went 0.17x -> ~17x). See docs/semi-implicit-flow-solver-plan.md Outcome section.
 X Improve performance (why are timesteps getting so small?) - acoustic modes of liquid loops; removed by the implicit momentum solver.
 X Reactor power was never deposited into the fuel node for factory-built cores (no Doppler feedback at all); fixed along with point-kinetics overflow during prompt-supercritical excursions.

@@ -1173,7 +1173,13 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     thermalConnections,
     convectionConnections,
     flowConnections,
-    neutronics: { ...state.neutronics },
+    neutronics: {
+      ...state.neutronics,
+      // Arrays must be copied by value or RK45 stage clones share pools
+      decayHeatPools: state.neutronics.decayHeatPools
+        ? [...state.neutronics.decayHeatPools]
+        : undefined,
+    },
     components: { pumps, valves, checkValves, controllers },
     // Clone energy diagnostics if present
     energyDiagnostics: state.energyDiagnostics ? {

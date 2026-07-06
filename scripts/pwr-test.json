@@ -35,7 +35,7 @@
       "fuelRodCount": 8, "actualFuelRodCount": 38000, "fuelTemperature": 900, "fuelMeltingPoint": 2800,
       "activeFuelHeight": 3.66, "coreBottomElevation": 0.3,
       "controlRodCount": 4, "controlRodPosition": 0.85,
-      "initializeCritical": true, "excessReactivity": 0.025, "initialPower": 50000000,
+      "initializeCritical": true, "excessReactivity": 0.025, "initialPower": 50000000, "controlRodWorth": 0.09,
       "coolantDensityCoeff": 0.0002,
       "ports": [
         {"id": "cb-1-inlet", "position": {"x": 0, "y": 5}, "direction": "both"},

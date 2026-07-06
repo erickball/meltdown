@@ -293,6 +293,15 @@ export interface NeutronicsState {
   // Decay heat (fraction of nominal power)
   decayHeatFraction: number;        // Computed from operating history
 
+  // Fission-product decay heat pools (W per group). Each group g builds up
+  // toward f_g * P_fission with time constant 1/lambda_g and releases its
+  // power into the fuel alongside prompt fission heat:
+  //   dQ_g/dt = lambda_g * (f_g * P_fission - Q_g)
+  // Thermal power deposited = (1 - sum f_g) * P_fission + sum Q_g, which
+  // equals P_fission at equilibrium and ~5%/3%/1.5% of prior power at
+  // 10 s / 100 s / 1000 s after shutdown (coarse ANS-5.1 fit).
+  decayHeatPools?: number[];
+
   // SCRAM state
   scrammed: boolean;
   scramTime: number;                // Simulation time when SCRAM occurred

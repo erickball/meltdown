@@ -18,6 +18,7 @@ import {
   DEFAULT_BURST_CONFIG,
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
+import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -108,6 +109,7 @@ function createDefaultNeutronics(): NeutronicsState {
     controlRodWorth: 0.05,   // 5000 pcm total worth
 
     decayHeatFraction: 0,
+    decayHeatPools: DECAY_HEAT_GROUPS.map(() => 0), // no operating history
     scrammed: false,
     scramTime: -1,
     scramReason: '',
@@ -1867,6 +1869,10 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     controlRodWorth,
     excessReactivity,
     decayHeatFraction: 0.07, // Start with steady-state decay heat
+    // Pools at equilibrium with the initial power (long prior operation):
+    // total thermal deposit starts exactly at `power`, and a shutdown leaves
+    // the physically-correct decaying heat source behind.
+    decayHeatPools: DECAY_HEAT_GROUPS.map(g => g.fraction * power),
     scrammed: false,
     scramTime: -1,
     scramReason: '',

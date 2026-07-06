@@ -248,8 +248,19 @@ export class HeatGenerationRateOperator implements RateOperator {
         ? id === state.neutronics.fuelNodeId
         : id.includes('fuel'); // legacy fallback when no explicit linkage exists
       if (state.neutronics.coreId && isNeutronicsFuel) {
-        const power = state.neutronics.power;
-        const dT = power / (node.mass * node.specificHeat);
+        // Thermal deposit = prompt fission fraction + fission-product decay
+        // heat. Equals P_fission at equilibrium; after shutdown the pools
+        // keep ~5% of prior power flowing (decaying), so a scrammed core
+        // still needs cooling - the thing the old model got wrong.
+        const fission = state.neutronics.power;
+        const pools = state.neutronics.decayHeatPools;
+        let deposit = fission;
+        if (pools && pools.length > 0) {
+          let decayPower = 0;
+          for (const q of pools) decayPower += q;
+          deposit = (1 - DECAY_HEAT_TOTAL_FRACTION) * fission + decayPower;
+        }
+        const dT = deposit / (node.mass * node.specificHeat);
         rates.thermalNodes.set(id, { dTemperature: dT });
       } else if (node.heatGeneration > 0) {
         // Other heat-generating nodes use their fixed rate
@@ -280,6 +291,22 @@ export class HeatGenerationRateOperator implements RateOperator {
 // ============================================================================
 // Neutronics Rate Operator
 // ============================================================================
+
+/**
+ * Fission-product decay heat groups: a coarse 4-group fit to ANS-5.1 decay
+ * power after long operation. Each group builds toward fraction*P_fission
+ * with time constant 1/lambda and releases its inventory after shutdown:
+ * ~5% of prior power at 10 s, ~3% at 100 s, ~1.5% at 1000 s.
+ */
+export const DECAY_HEAT_GROUPS: ReadonlyArray<{ fraction: number; lambda: number }> = [
+  { fraction: 0.026, lambda: 0.1 },   // short-lived products, tau ~10 s
+  { fraction: 0.020, lambda: 0.01 },  // tau ~100 s
+  { fraction: 0.012, lambda: 1e-3 },  // tau ~17 min
+  { fraction: 0.012, lambda: 1e-4 },  // tau ~2.8 h
+];
+
+/** Fraction of fission energy that is delayed (deposited via the pools) */
+export const DECAY_HEAT_TOTAL_FRACTION = DECAY_HEAT_GROUPS.reduce((s, g) => s + g.fraction, 0);
 
 export class NeutronicsRateOperator implements RateOperator {
   name = 'Neutronics';
@@ -378,6 +405,21 @@ export class NeutronicsRateOperator implements RateOperator {
     // Convert back to absolute power rate
     rates.neutronics.dPower = dN_dt * n.nominalPower;
     rates.neutronics.dPrecursorConcentration = dC_dt;
+
+    // Fission-product decay heat pools: dQ_g/dt = lambda_g*(f_g*P - Q_g).
+    // States without pools (pre-upgrade snapshots) simply don't get them -
+    // the factory initializes pools at equilibrium for every real sim.
+    const pools = n.decayHeatPools;
+    if (pools) {
+      if (pools.length !== DECAY_HEAT_GROUPS.length) {
+        throw new Error(
+          `[Neutronics] decayHeatPools has ${pools.length} groups, expected ${DECAY_HEAT_GROUPS.length}`
+        );
+      }
+      rates.neutronics.dDecayHeatPools = DECAY_HEAT_GROUPS.map(
+        (g, i) => g.lambda * (g.fraction * n.power - pools[i])
+      );
+    }
 
     return rates;
   }

@@ -201,6 +201,7 @@ function init() {
       controlRodPosition: 1,
       controlRodWorth: 0.08,
       decayHeatFraction: 0,
+      decayHeatPools: [0, 0, 0, 0],
       scrammed: false,
       scramTime: 0,
       scramReason: '',
