@@ -1695,6 +1695,9 @@ export class PlantCanvas {
         // after the vertical compression is applied
         let translateX: number;
         let translateY: number;
+        // Screen-pixel offset from the component's drawing origin down to its
+        // visual base (used to anchor the elevation label at the base)
+        let labelBaseOffsetY = 0;
 
         if (component.type === 'pipe') {
           // For pipes with endpoint data, project both endpoints and draw between them
@@ -1802,6 +1805,7 @@ export class PlantCanvas {
           const visualHalfH = halfH * projectedZoom;
           translateX = backLeft.x;
           translateY = backLeft.y - visualHalfH;
+          labelBaseOffsetY = visualHalfH;
         } else {
           // Other components draw centered at their position
           // Project the actual center point (component.position) to screen space
@@ -1817,6 +1821,7 @@ export class PlantCanvas {
           // Position so the component's center is at the projected center point
           translateX = centerScreen.pos.x;
           translateY = centerScreen.pos.y - visualHalfH;
+          labelBaseOffsetY = visualHalfH;
 
           // Override projectedZoom with center-based zoom for this component
           projectedZoom = centerZoom;
@@ -1845,7 +1850,7 @@ export class PlantCanvas {
         if (component.type !== 'pipe') {
           ctx.scale(1, 1 / verticalScale);
         }
-        renderElevationLabel(ctx, component, isometricView, this.isometric);
+        renderElevationLabel(ctx, component, labelBaseOffsetY);
       } else {
         const screenPos = worldToScreen(component.position, this.view);
         ctx.translate(screenPos.x, screenPos.y);

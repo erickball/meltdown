@@ -16,7 +16,6 @@ import {
   calculateWaterState,
   enableCalculationDebug,
   getCalculationDebugLog,
-  simulationConfig,
   preloadWaterProperties,
   setSeparationDebug,
   getTurbineCondenserState,
@@ -240,7 +239,11 @@ function init() {
     const speedDisplay = document.getElementById('sim-speed');
     if (speedDisplay) {
       const speed = gameLoop.getSimSpeed();
+      const target = gameLoop.getTargetSimSpeed();
       speedDisplay.textContent = 'Speed: ' + speed.toFixed(1) + 'x';
+      if (speed < target - 0.001) {
+        speedDisplay.textContent += ` (auto-slow from ${target.toFixed(0)}x)`;
+      }
       if (metrics.isFallingBehind) {
         speedDisplay.style.color = '#ff4444';
         speedDisplay.textContent += ' [LAGGING]';
@@ -248,6 +251,10 @@ function init() {
         speedDisplay.style.color = '#aaa';
       }
     }
+
+    // Keep the toolbar speed readout in sync: auto-slowdown and its silent
+    // recovery ramp change the effective speed without any user input
+    updateSpeedDisplay();
 
     // Update MW to grid display from turbine-condenser state
     const mwValueEl = document.getElementById('mw-value');
@@ -463,13 +470,21 @@ function init() {
 
   function updateSpeedDisplay() {
     const speed = gameLoop.getSimSpeed();
+    const target = gameLoop.getTargetSimSpeed();
+    const autoSlowed = speed < target - 0.001;
     if (speedDisplay) {
-      speedDisplay.textContent = speed >= 1 ? `${speed.toFixed(0)}x` : `${speed}x`;
+      // Recovery from auto-slow passes through fractional speeds (1.5x, ...)
+      const label = Number.isInteger(speed) ? `${speed}` : speed < 1 ? `${speed}` : speed.toFixed(1);
+      speedDisplay.textContent = autoSlowed ? `${label}x*` : `${label}x`;
+      speedDisplay.title = autoSlowed
+        ? `Auto-slowdown active: running at ${label}x, returning to ${target}x once the transient settles`
+        : 'Simulation speed';
     }
-    // Update preset button highlighting
+    // Highlight the preset the user asked for (the target), not the
+    // momentary auto-slowed speed
     speedPresets.forEach(btn => {
       const presetSpeed = parseFloat(btn.getAttribute('data-speed') || '1');
-      btn.classList.toggle('active', Math.abs(speed - presetSpeed) < 0.001);
+      btn.classList.toggle('active', Math.abs(target - presetSpeed) < 0.001);
     });
   }
 
@@ -781,17 +796,9 @@ function init() {
     gameLoop.setMaxTimestep(initialMs / 1000);
   }
 
-  // Pressure model control
-  const pressureModelSelect = document.getElementById('pressure-model') as HTMLSelectElement;
-  if (pressureModelSelect) {
-    // Set initial value to match configuration
-    pressureModelSelect.value = simulationConfig.pressureModel;
-
-    // Handle changes
-    pressureModelSelect.addEventListener('change', () => {
-      simulationConfig.pressureModel = pressureModelSelect.value as 'hybrid' | 'pure-triangulation';
-    });
-  }
+  // Pressure model dropdown removed: the old 'hybrid' bulk-modulus model is
+  // obsolete (a no-op that silently disabled triangulation pressure
+  // feedback), so the config stays at its 'pure-triangulation' default.
 
   // Advanced solver settings: Min timestep control (logarithmic scale)
   // Slider value 0-5 maps to 1µs (1e-6) to 100ms (0.1) via exponential: 10^(sliderValue - 6)
@@ -841,11 +848,12 @@ function init() {
       gameLoop.setKMax(kMaxPa);
     });
 
-    // Initialize display
+    // Initialize display and apply the initial value (2200 = no cap)
     const initialKMax = parseInt(kMaxSlider.value, 10);
     if (kMaxValue) {
       kMaxValue.textContent = initialKMax.toString();
     }
+    gameLoop.setKMax(initialKMax >= 2200 ? undefined : initialKMax * 1e6);
   }
 
   // Advanced solver settings: Pressure solver enable/disable
@@ -2803,9 +2811,36 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
   const rodSlider = document.getElementById('rod-position') as HTMLInputElement;
   const rodValueDisplay = document.getElementById('rod-position-value');
   if (rodSlider) {
+    // If an auto rod controller owns the rods, the slider is an indicator
+    // only: manual writes would be overwritten on the next solver step.
+    let rodControllerId: string | null = null;
+    const controllers = simState.components.controllers;
+    if (controllers) {
+      for (const [, ctl] of controllers) {
+        if (ctl.actuator.kind === 'control-rods' && ctl.mode !== 'manual') {
+          rodControllerId = ctl.id;
+          break;
+        }
+      }
+    }
+    const scrammed = simState.neutronics.scrammed;
+    rodSlider.disabled = scrammed || rodControllerId !== null;
+    if (scrammed) {
+      rodSlider.title = 'SCRAM active: rods are fully inserted';
+    } else if (rodControllerId) {
+      const ctlComponent = plantState.components.get(rodControllerId);
+      const ctlName = (ctlComponent?.label as string | undefined) ?? rodControllerId;
+      rodSlider.title = `Rod position is driven by "${ctlName}" (auto mode); the slider shows the actual position`;
+    } else {
+      rodSlider.title = 'Manual control rod insertion (0% = withdrawn, 100% = inserted)';
+    }
+
     const insertionPercent = Math.round((1 - rodPosition) * 100);
     const currentSliderValue = parseInt(rodSlider.value);
-    if (Math.abs(currentSliderValue - insertionPercent) > 1) {
+    // When the slider is a passive indicator, track the sim exactly; the
+    // 1% deadband only exists to avoid fighting active user input
+    const deadband = rodSlider.disabled ? 0 : 1;
+    if (Math.abs(currentSliderValue - insertionPercent) > deadband) {
       rodSlider.value = String(insertionPercent);
       if (rodValueDisplay) {
         rodValueDisplay.textContent = insertionPercent + '%';

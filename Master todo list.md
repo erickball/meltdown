@@ -1,48 +1,58 @@
 ## TODO List
+Misc:
+-AI assistant to help users add to, fix, or understand the model (use sonnet 5, cap usage at $10/month. context: a bunch of game documentation, the current plant model - full list of components and their connections and properties, the last few changes the user made, what mode they're in, and the most recent simulation results for this model (if any). Also the ability to look at the code but let's try to make the documentation good enough it doesn't usually have to.)
 
--In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
+
+Display & minor issues:
+-We should probably display a thermometer, at least on large hydraulic nodes.
+-Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
+-Add FW heaters? (did we already solve this by deciding they're just heat exchangers, and turbines can have extraction steam outlets?)
 -Clean up the debug display
 -Maybe find a good way to display relative pressure at connections
+-Construction-mode UI for creating/editing PID controllers (sim + JSON presets work today; scram-controller UI pattern extends). Includes a manual/auto toggle so the rod slider can take back control from an auto rod controller.
+-BWR preset control suite (rods on dome pressure, recirc, level): still a manually-operated plant; PWR preset now ships with full auto control.
+-Maybe show the UHS as a river or ocean?
+-Water and steam coloring: should it be proportional to internal energy? Maybe it should, with white as the critical energy and fading into blue below that and yellow/orange above that. With max saturated vapor (~2604) being a very pale yellow. This will create a clear split in two-phase nodes, but less noticeable as you approach the critical pressure. It does mean that high pressure steam and low pressure steam at the same energy can be the same color, but that's fine I guess.
+-Maybe to put anything at negative elevation you should first have to "dig" voxels out Minecraft-style
+-Maybe you can build seismic supports under things to give them earthquake resistance. So anything elevated off the ground should by default have a real spindly scaffold holding it up, and then you can optionally beef it up.
+-Steam separators? Maybe not. What's the point
+-How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right? Probably not it sounds like
+
+
+
+Modeling gaps:
 -Neutronics remaining: solid-moderated lattices (graphite/pebble + gas coolant need a solidModerationFraction so the lattice model doesn't collapse without water); boron/soluble poison as an operator control (would also enable the positive-MTC-at-high-boron failure mode); estimated-critical-position display from latticeKeff.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
--Add FW heaters?
--Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
 -Wire auto-tuned controllers into the BWR and two-loop presets (PWR done - rods/governor/3-elem FW/hotwell/pzr heaters+spray; framework in docs/controllers-steady-state-plan.md)
--Construction-mode UI for creating/editing PID controllers (sim + JSON presets work today; scram-controller UI pattern extends)
 -Post-CHF heat transfer (film boiling / dryout h collapse past the boiling crisis): the new boiling model saturates flux smoothly at Zuber CHF but does not yet model the h collapse - needed for realistic fuel-damage sequences.
--Feedwater check valves in the presets: throttled feed pumps facing 60-bar SGs leak ~20 kg/s backward through the reverse-block friction; real feed lines have check valves.
--BWR preset control suite (rods on dome pressure, recirc, level): still a manually-operated plant; PWR preset now ships with full auto control.
--Maybe something about a control room, but I don't want the user to have to worry about this a lot
--AI assistant to help users add to, fix, or understand the model (use sonnet 5, cap usage at $10/month. context: a bunch of game documentation, the current plant model - full list of components and their connections and properties, the last few changes the user made, what mode they're in, and the most recent simulation results for this model (if any). Also the ability to look at the code but let's try to make the documentation good enough it doesn't usually have to.)
+-Model vessel creep rupture and SG tube creep rupture
+-Model core-concrete interaction
+-Add cladding oxidation and hydrogen explosions
+-Diesel generators (and electric power in general)
+-Add fuel melting and radionuclide release ("meltdown!")
+-Add advanced reactor options (pebble bed fuel, helium or metal coolant)
+-Not sure how to handle needing big graphite reflectors though?
+
+Game mode:
+-In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
 -After an accident you get told how many people you may have given cancer to ("but we'll never know for certain"). Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit. For the game-flavor sequences (intro, post-accident, story progression, etc.) I'm thinking kind of a corny pixelated 90s-game aesthetic, where it's some text you click through, some MIDI music, and a two-frame animation of a cartoon person with different expressions depending on what's happening. The boss character is kind of a stereotype of a fat-cat 1960s-70s businessman who hates environmentalists, safety concerns, and the government.
 -I guess that means we're building in some sort of MACCS-lite?
 -Add cool visuals for different initiating events
--Model vessel creep rupture and SG tube creep rupture
--Model core-concrete interaction
--Add cladding oxidation and hydrogen explosions
--Maybe show the UHS as a river or ocean?
--Maybe you can build seismic supports under things to give them earthquake resistance, to replace the air
--Steam separators? Maybe not
+-Maybe something about a control room, but I don't want the user to have to worry about this a lot
 -"Operator actions" initiated by the user (with delay and progress bar) by clicking on a pump or w/e
--Diesel generators (and electric power in general)
--Add fuel melting and radionuclide release ("meltdown!")
--Show power in MWt along with %
--Add advanced reactor options (pebble bed fuel, helium or metal coolant)
 -We can do operating cost estimates based on fuel use, number of employees (how many do you need for maintenance of this many components, etc). But we're glossing over outages.
 -We could even account for interest rates? Maybe
--We should make a pebble bed core option, too
--Not sure how to handle needing big graphite reflectors though?
--How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right? Probably not it sounds like
--Fix the way cylindrical buildings are displayed. The outline moves around, and the back wall really should look like half a cylindrical shell.
--Water and steam coloring: should it be proportional to internal energy? Maybe it should, with white as the critical energy and fading into blue below that and yellow/orange above that. With max saturated vapor (~2604) being a very pale yellow. This will create a clear split in two-phase nodes, but less noticeable as you approach the critical pressure. It does mean that high pressure steam and low pressure steam at the same energy can be the same color, but that's fine I guess.
 
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Display cleanup batch: PID controller cabinets show their loop label/mode/setpoint (no more universal "SCRAM"/"NO CORE"); reactor thermal power shown on the RPV graphic and detail panel in MWt and % of rated (player-built cores' thermalPower now actually sets nominalPower); Heat Transfer panel reads live RK45 convection rates instead of the dead Euler diagnostics map; elevation labels small/black/at component base; fuel rods drawn from the core barrel's activeFuelHeight and limited at construction to fit the barrel; toolbar speed display tracks auto-slow and its recovery ramp, RT ratio now measures achieved speed vs wall time; rod slider becomes a tracking indicator while an auto rod controller owns the rods; obsolete "hybrid" pressure model removed from the UI, K_max applied on init.
+X Fix the way cylindrical buildings are displayed. The outline moves around, and the back wall really should look like half a cylindrical shell. (footprint ellipse now projects the true center/axis endpoints; backdrop is a cylinder silhouette with curvature shading)
+X Feedwater check valves in the PWR and BWR presets (val-fwcv-1 between FW pump and SG/RPV): a stopped feed pump facing the 60-bar SG / 72-bar RPV leaked ~20 kg/s backward through the reverse-block friction; the check valve holds it to zero. scripts/pwr-test.json kept in sync.
 X Reactivity coefficients derived from core geometry (lattice-lite four-factor model, simulation/lattice.ts): enrichment + fuel material are user settings (default 5% UO2); Doppler/density coefficients and excess reactivity come from rod size/count/pitch/core size. Natural uranium correctly fails in light water; over-moderated lattices flip the density coefficient sign. Player-built cores use it; presets keep validated explicit values.
 X SG/core heat transfer fixed on the RK45 path: wetted-area split by liquid level, Thom nucleate boiling h with smooth Zuber CHF saturation, per-tube/rod characteristic diameters, tube areas from real geometry (pi*d*L*N). SG UA went ~3 -> ~35 MW/K; the PWR preset now converges to ~100% power under its controllers, and the shipping pwr.json preset ships with the full auto-control suite.
 X Decay heat: 4-group fission-product pools (coarse ANS-5.1 fit) build with power history and keep ~5%/3%/1.5% of prior power flowing at 10s/100s/1000s after shutdown. Scrammed cores now need cooling.

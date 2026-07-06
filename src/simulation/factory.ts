@@ -1814,7 +1814,9 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
 function createNeutronicsFromCore(component: PlantComponent, state?: SimulationState): NeutronicsState {
   const vessel = component as any;
 
-  const nominalPower = vessel.nominalPower ?? 1000e6;
+  // Rated thermal power: construction stores the user's setting as
+  // thermalPower (W); nominalPower is accepted as an explicit override.
+  const nominalPower = vessel.nominalPower ?? vessel.thermalPower ?? 1000e6;
   const controlRodWorth = vessel.controlRodWorth ?? 0.05;
 
   // Actual initial conditions (for critical initialization)

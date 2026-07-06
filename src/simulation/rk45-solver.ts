@@ -1316,8 +1316,12 @@ export class RK45Solver {
 
   /**
    * Advance the simulation by the requested time
+   *
+   * @param wallFrameTimeMs - actual wall-clock time between frames (ms). Used
+   *   for the real-time ratio so it reflects achieved speed, not solver
+   *   throughput capacity; without it the ratio divides by compute time only.
    */
-  advance(state: SimulationState, requestedDt: number): {
+  advance(state: SimulationState, requestedDt: number, wallFrameTimeMs?: number): {
     state: SimulationState;
     metrics: SolverMetrics;
   } {
@@ -1552,7 +1556,7 @@ export class RK45Solver {
       maxMassChange: 0,
       consecutiveSuccesses: stepsThisFrame - rejectsThisFrame,
       topErrorContributors,
-      realTimeRatio: (requestedDt - remainingTime) / (frameTime / 1000),
+      realTimeRatio: (requestedDt - remainingTime) / ((wallFrameTimeMs ?? frameTime) / 1000),
       isFallingBehind: remainingTime > requestedDt * 0.1,
       fallingBehindSince: 0,
       operatorTimes: new Map(this.operatorTimes),

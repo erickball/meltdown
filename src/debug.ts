@@ -15,6 +15,8 @@ import {
   getSolverProfile,
   resetSolverProfile,
   getTurbineCondenserState,
+  getConvectionHeatRates,
+  getReactorPowerState,
 } from './simulation';
 import {
   GasComposition,
@@ -1083,9 +1085,61 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Core Volume:</span><span class="detail-value">${coreVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Downcomer Volume:</span><span class="detail-value">${downcomerVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Total Volume:</span><span class="detail-value">${totalVolume.toFixed(2)} m³</span></div>`;
+
+      // Reactor power (when this vessel hosts the linked neutronics core)
+      {
+        const rp = getReactorPowerState();
+        const barrelId = component.coreBarrelId as string | undefined;
+        if (rp.coreId && (rp.coreId === barrelId || rp.coreId === componentId)) {
+          const pct = rp.nominalPower > 0 ? (rp.thermalPower / rp.nominalPower) * 100 : 0;
+          html += '<div class="detail-section">';
+          html += '<div class="detail-section-title">Reactor Power</div>';
+          html += `<div class="detail-row"><span class="detail-label">Thermal Power:</span><span class="detail-value" style="color: #fc6;" title="Total heat deposited in the fuel: prompt fission power plus fission-product decay heat">${(rp.thermalPower / 1e6).toFixed(1)} MWt (${pct.toFixed(1)}%)</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Rated Power:</span><span class="detail-value" title="100% power for this core">${(rp.nominalPower / 1e6).toFixed(0)} MWt</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Fission Power:</span><span class="detail-value">${(rp.fissionPower / 1e6).toFixed(1)} MW</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Decay Heat:</span><span class="detail-value">${(rp.decayHeatPower / 1e6).toFixed(1)} MW</span></div>`;
+          html += '</div>';
+        }
+      }
       break;
     }
     case 'controller': {
+      const controllerType = component.controllerType as string | undefined;
+      if (controllerType === 'pid') {
+        const pid = component.pid as {
+          sensor: { kind: string; targetId: string };
+          setpoint: number;
+          actuator: { kind: string; targetId: string; min?: number; max?: number; rateLimit?: number };
+          feedforward?: { kind: string; targetId: string };
+          mode?: string;
+          aggressiveness?: number;
+          invert?: boolean;
+        } | undefined;
+        html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">Process Controller (auto-tuned PI)</span></div>`;
+        if (pid) {
+          const spUnits: Record<string, (sp: number) => string> = {
+            'node-pressure': sp => `${(sp / 1e6).toFixed(2)} MPa`,
+            'node-temperature': sp => `${sp.toFixed(1)} K`,
+            'node-level': sp => `${sp.toFixed(2)} m`,
+            'reactor-power': sp => `${(sp * 100).toFixed(0)}% nominal`,
+            'connection-flow': sp => `${sp.toFixed(1)} kg/s`,
+          };
+          const spText = (spUnits[pid.sensor.kind] ?? ((sp: number) => `${sp}`))(pid.setpoint);
+          html += `<div class="detail-row"><span class="detail-label">Mode:</span><span class="detail-value" style="color: ${pid.mode === 'manual' ? '#fa4' : '#7f7'};">${pid.mode === 'manual' ? 'Manual' : 'Auto'}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Sensor:</span><span class="detail-value">${pid.sensor.kind}${pid.sensor.targetId ? ` @ ${pid.sensor.targetId}` : ''}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Setpoint:</span><span class="detail-value">${spText}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Actuator:</span><span class="detail-value">${pid.actuator.kind}${pid.actuator.targetId ? ` @ ${pid.actuator.targetId}` : ''}</span></div>`;
+          if (pid.feedforward) {
+            html += `<div class="detail-row"><span class="detail-label">Feedforward:</span><span class="detail-value">${pid.feedforward.kind} @ ${pid.feedforward.targetId}</span></div>`;
+          }
+          if (pid.invert) {
+            html += `<div class="detail-row"><span class="detail-label">Action:</span><span class="detail-value">Reverse-acting</span></div>`;
+          }
+        } else {
+          html += `<div class="detail-row"><span class="detail-label">Config:</span><span class="detail-value" style="color: #f77;">Missing</span></div>`;
+        }
+        break;
+      }
       const connectedCoreId = component.connectedCoreId as string | undefined;
       const setpoints = component.setpoints as { highPower: number; lowPower: number; highFuelTemp: number; lowCoolantFlow: number };
       html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">SCRAM Controller</span></div>`;
@@ -1587,9 +1641,12 @@ export function updateComponentDetail(
     heatRate?: number;
   }> = [];
 
+  // Live rates come from the RK45 rate operator (the energyDiagnostics map is
+  // only written by the obsolete Euler path)
+  const liveHeatRates = getConvectionHeatRates();
   for (const conv of simState.convectionConnections) {
     if (nodeIds.has(conv.flowNodeId)) {
-      const heatRate = simState.energyDiagnostics?.heatTransferRates.get(conv.id);
+      const heatRate = liveHeatRates.get(conv.id) ?? simState.energyDiagnostics?.heatTransferRates.get(conv.id);
       heatConnections.push({
         thermalNodeId: conv.thermalNodeId,
         flowNodeId: conv.flowNodeId,
@@ -1603,7 +1660,7 @@ export function updateComponentDetail(
   if (thermalNode) {
     for (const conv of simState.convectionConnections) {
       if (conv.thermalNodeId === componentId) {
-        const heatRate = simState.energyDiagnostics?.heatTransferRates.get(conv.id);
+        const heatRate = liveHeatRates.get(conv.id) ?? simState.energyDiagnostics?.heatTransferRates.get(conv.id);
         heatConnections.push({
           thermalNodeId: conv.thermalNodeId,
           flowNodeId: conv.flowNodeId,

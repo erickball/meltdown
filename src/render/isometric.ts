@@ -448,34 +448,20 @@ export function renderComponentShadow(
 export function renderElevationLabel(
   ctx: CanvasRenderingContext2D,
   component: PlantComponent,
-  _view: ViewState,
-  _config: IsometricConfig
+  baseOffsetY: number
 ): void {
   const elevation = getComponentElevation(component);
   if (elevation === 0) return; // Don't show label for ground level
 
-  // Position label above component
-  const bounds = getComponentBounds(component);
-  const labelX = 0;
-  const labelY = -bounds.height / 2 - 20;
-
   ctx.save();
 
-  // White text with dark outline for visibility
-  ctx.font = '11px monospace';
+  // Unobtrusive label at the component's visual base showing the absolute
+  // elevation of the base above grade
+  ctx.font = '10px monospace';
   ctx.textAlign = 'center';
-  ctx.textBaseline = 'bottom';
-
-  const elevText = elevation > 0 ? `+${elevation.toFixed(1)}m` : `${elevation.toFixed(1)}m`;
-
-  // Draw outline
-  ctx.strokeStyle = '#000';
-  ctx.lineWidth = 3;
-  ctx.strokeText(elevText, labelX, labelY);
-
-  // Draw text
-  ctx.fillStyle = elevation > 0 ? '#8f8' : '#f88';
-  ctx.fillText(elevText, labelX, labelY);
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#000';
+  ctx.fillText(`${elevation.toFixed(1)} m`, 0, baseOffsetY + 2);
 
   ctx.restore();
 }
@@ -580,20 +566,3 @@ export function renderDebugGrid(
   ctx.restore();
 }
 
-// Helper to get component bounds for shadow/label positioning
-function getComponentBounds(component: PlantComponent): { width: number, height: number } {
-  switch (component.type) {
-    case 'tank':
-      return { width: (component as any).width, height: (component as any).height };
-    case 'pipe':
-      return { width: (component as any).length, height: (component as any).diameter };
-    case 'pump':
-      const d = (component as any).diameter;
-      return { width: d, height: d };
-    case 'vessel':
-      const r = (component as any).innerDiameter / 2 + (component as any).wallThickness;
-      return { width: r * 2, height: (component as any).height };
-    default:
-      return { width: 2, height: 2 };
-  }
-}

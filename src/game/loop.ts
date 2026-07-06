@@ -283,7 +283,7 @@ export class GameLoop {
         if (!this.rk45Solver) {
           throw new Error('[GameLoop] No solver configured');
         }
-        const result = this.rk45Solver.advance(this.state, simDt);
+        const result = this.rk45Solver.advance(this.state, simDt, frameDt * 1000);
         this.state = result.state;
         this.lastMetrics = result.metrics;
         // Note: State history recording happens via onSubstepComplete callback
@@ -564,6 +564,14 @@ export class GameLoop {
    */
   getSimSpeed(): number {
     return this.simSpeed;
+  }
+
+  /**
+   * Get the user-requested speed (differs from getSimSpeed while
+   * auto-slowdown holds the effective speed below it)
+   */
+  getTargetSimSpeed(): number {
+    return this.targetSimSpeed;
   }
 
   /**

@@ -21,7 +21,7 @@ import {
   PlantState,
   Connection,
 } from '../types';
-import { SimulationState, getTurbineCondenserState } from '../simulation';
+import { SimulationState, getTurbineCondenserState, getReactorPowerState } from '../simulation';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -1419,6 +1419,35 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
 
   ctx.closePath();
   ctx.stroke();
+
+  // Thermal power readout for standalone cores built as bare vessels
+  renderCorePowerLabel(ctx, [vessel.id], h / 2 + 15, view);
+}
+
+/**
+ * Draw the reactor thermal power below a component that hosts the linked
+ * neutronics core (same visual convention as the condenser's MW label).
+ */
+function renderCorePowerLabel(
+  ctx: CanvasRenderingContext2D,
+  coreIds: (string | undefined)[],
+  y: number,
+  view: ViewState
+): void {
+  const rp = getReactorPowerState();
+  if (!rp.coreId || !coreIds.includes(rp.coreId)) return;
+
+  const mw = rp.thermalPower / 1e6;
+  const pct = rp.nominalPower > 0 ? (rp.thermalPower / rp.nominalPower) * 100 : 0;
+  const fontSize = Math.max(8, 10 * view.zoom / 60);
+  const smallFontSize = Math.max(6, 8 * view.zoom / 60);
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.fillStyle = '#1a1a1a';
+  ctx.textAlign = 'center';
+  ctx.fillText(`${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`, 0, y);
+  ctx.font = `${smallFontSize}px monospace`;
+  ctx.fillStyle = '#333';
+  ctx.fillText(`${pct.toFixed(0)}% of ${(rp.nominalPower / 1e6).toFixed(0)} MW rated`, 0, y + 10);
 }
 
 function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[], isSimulating: boolean = false, plantState?: PlantState): void {
@@ -1562,22 +1591,28 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
     const coreDiameterWorld = (vessel as any).coreDiameter ?? (vessel.barrelDiameter - vessel.barrelThickness / 2);
     const coreRadiusPx = (coreDiameterWorld / 2) * view.zoom;
 
-    // Core height - use stored coreHeight or default to barrel height
-    const coreHeightWorld = (vessel as any).coreHeight ?? barrelHeight / view.zoom;
+    // Fuel geometry lives on the core barrel (new architecture); it is what
+    // the simulation's fuel-coolant convection actually uses, so the drawn
+    // rods match the thermally coupled region. Legacy fallbacks keep the
+    // rods inside the barrel.
+    const barrelHeightWorld = barrelHeight / view.zoom;
+    const coreHeightWorld = coreBarrel?.activeFuelHeight
+      ?? (vessel as any).coreHeight
+      ?? barrelHeightWorld * 0.9;
     const coreHeightPx = coreHeightWorld * view.zoom;
 
-    // Position core closer to the bottom of the barrel (more realistic)
-    // Leave a small gap (10% of barrel height) at the bottom for lower plenum
-    const bottomGap = barrelHeight * 0.1;
-    const coreTop = barrelBottomY - bottomGap - coreHeightPx;
+    // Position of the fuel above the barrel-region bottom (lower plenum)
+    const coreBottomElevWorld = coreBarrel?.coreBottomElevation
+      ?? barrelHeightWorld * 0.1;
+    const coreTop = barrelBottomY - coreBottomElevWorld * view.zoom - coreHeightPx;
 
     // Calculate grid dimensions based on rod pitch
-    const rodPitchMm = (vessel as any).rodPitch ?? 12.6;
+    const rodPitchMm = (coreBarrel as any)?.rodPitch ?? (vessel as any).rodPitch ?? 12.6;
     const rodPitchWorld = rodPitchMm / 1000; // Convert mm to m
     const rodPitchPx = rodPitchWorld * view.zoom;
 
     // Rod diameter (typically ~9.5mm for PWR fuel rods)
-    const rodDiameterMm = (vessel as any).rodDiameter ?? 9.5;
+    const rodDiameterMm = (coreBarrel as any)?.rodDiameter ?? (vessel as any).rodDiameter ?? 9.5;
     const rodDiameterWorld = rodDiameterMm / 1000;
 
     // Calculate the ratio of rod diameter to pitch (typically ~0.75)
@@ -1800,6 +1835,10 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   }
 
   ctx.stroke();
+
+  // Thermal power readout below the vessel (core lives on the core barrel in
+  // the new architecture, or on the vessel itself in legacy plants)
+  renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], h / 2 + 15, view);
 }
 
 function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
@@ -2929,6 +2968,53 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
   ctx.strokeRect(-w / 2, -h / 2, w, h);
 }
 
+/** Cabinet title for a PID controller: its label split into up to two lines,
+ *  falling back to a name derived from the actuator kind. */
+function controllerTitleLines(controller: ControllerComponent): string[] {
+  const actuatorNames: Record<string, string> = {
+    'control-rods': 'ROD CONTROL',
+    'governor-valve': 'GOVERNOR',
+    'valve-position': 'VALVE CTRL',
+    'pump-speed': 'PUMP CTRL',
+    'heater-power': 'HEATER CTRL',
+  };
+  const label = controller.label
+    ?? actuatorNames[controller.pid?.actuator.kind ?? '']
+    ?? 'CONTROLLER';
+  // Split "Rod Control (T-avg)" into ["Rod Control", "(T-avg)"]
+  const parenIdx = label.indexOf(' (');
+  if (parenIdx > 0) {
+    return [label.slice(0, parenIdx), label.slice(parenIdx + 1)];
+  }
+  // Otherwise wrap long labels near the middle at a word break
+  if (label.length > 12) {
+    const words = label.split(' ');
+    if (words.length > 1) {
+      let line1 = words[0];
+      let i = 1;
+      while (i < words.length && (line1 + ' ' + words[i]).length <= label.length / 2 + 2) {
+        line1 += ' ' + words[i++];
+      }
+      const line2 = words.slice(i).join(' ');
+      if (line2) return [line1, line2];
+    }
+  }
+  return [label];
+}
+
+/** Format a PID setpoint with units appropriate to the sensor kind. */
+function formatPidSetpoint(pid: NonNullable<ControllerComponent['pid']>): string {
+  const sp = pid.setpoint;
+  switch (pid.sensor.kind) {
+    case 'node-pressure': return `${(sp / 1e6).toFixed(2)} MPa`;
+    case 'node-temperature': return `${sp.toFixed(0)} K`;
+    case 'node-level': return `${sp.toFixed(2)} m`;
+    case 'reactor-power': return `${(sp * 100).toFixed(0)}%`;
+    case 'connection-flow': return `${sp.toFixed(0)} kg/s`;
+    default: return `${sp}`;
+  }
+}
+
 function renderController(ctx: CanvasRenderingContext2D, controller: ControllerComponent, view: ViewState): void {
   const w = controller.width * view.zoom;
   const h = controller.height * view.zoom;
@@ -2964,14 +3050,25 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   }
   ctx.restore();
 
-  // SCRAM label - positioned below stripes with more space
-  ctx.font = `bold ${h * 0.16}px monospace`;
-  ctx.fillStyle = '#ff4444';
+  // Title - what this controller does. Scram cabinets keep the classic red
+  // SCRAM label; PID cabinets show their loop label (e.g. "Rod Control").
+  const isPid = controller.controllerType === 'pid';
+  const titleLines = isPid
+    ? controllerTitleLines(controller)
+    : ['SCRAM'];
+  const maxLineLen = Math.max(...titleLines.map(l => l.length), 1);
+  // Monospace glyphs are ~0.62em wide; size the font so the longest line fits
+  const titleFontSize = Math.min(h * 0.13, (w * 0.92) / (0.62 * maxLineLen));
+  ctx.font = `bold ${titleFontSize}px monospace`;
+  ctx.fillStyle = isPid ? '#ffcc44' : '#ff4444';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText('SCRAM', 0, -h / 2 + stripeHeight + h * 0.14);
+  const titleTop = -h / 2 + stripeHeight + h * 0.09;
+  titleLines.forEach((line, i) => {
+    ctx.fillText(line, 0, titleTop + i * titleFontSize * 1.2);
+  });
 
-  // Status panel area (darker inset) - positioned below SCRAM label
+  // Status panel area (darker inset) - positioned below the title
   const panelTop = -h / 2 + stripeHeight + h * 0.24;
   const panelHeight = h * 0.22;
   ctx.fillStyle = '#1a1a2a';
@@ -2980,14 +3077,24 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   ctx.lineWidth = 1;
   ctx.strokeRect(-w / 2 + w * 0.08, panelTop, w * 0.84, panelHeight);
 
-  // Status text - simplified: just "STATUS: CONNECTED" or "STATUS: NO CORE"
-  const isConnected = controller.connectedCoreId !== undefined && controller.connectedCoreId !== '';
+  // Status text. Scram: connection to a core. PID: mode + setpoint.
+  const isConnected = isPid
+    ? controller.pid !== undefined
+    : controller.connectedCoreId !== undefined && controller.connectedCoreId !== '';
   ctx.font = `${h * 0.09}px monospace`;
   ctx.textAlign = 'left';
-  ctx.fillStyle = '#6f6';
-  ctx.fillText('STATUS:', -w / 2 + w * 0.12, panelTop + panelHeight * 0.4);
-  ctx.fillStyle = isConnected ? '#6f6' : '#f66';
-  ctx.fillText(isConnected ? 'CONNECTED' : 'NO CORE', -w / 2 + w * 0.12, panelTop + panelHeight * 0.7);
+  if (isPid && controller.pid) {
+    const manual = controller.pid.mode === 'manual';
+    ctx.fillStyle = manual ? '#fa4' : '#6f6';
+    ctx.fillText(manual ? 'MANUAL' : 'AUTO', -w / 2 + w * 0.12, panelTop + panelHeight * 0.4);
+    ctx.fillStyle = '#9cf';
+    ctx.fillText(`SP ${formatPidSetpoint(controller.pid)}`, -w / 2 + w * 0.12, panelTop + panelHeight * 0.7);
+  } else {
+    ctx.fillStyle = '#6f6';
+    ctx.fillText('STATUS:', -w / 2 + w * 0.12, panelTop + panelHeight * 0.4);
+    ctx.fillStyle = isConnected ? '#6f6' : '#f66';
+    ctx.fillText(isConnected ? 'CONNECTED' : 'NO CORE', -w / 2 + w * 0.12, panelTop + panelHeight * 0.7);
+  }
 
   // Indicator lights row
   const lightsY = panelTop + panelHeight + h * 0.07;
@@ -3021,20 +3128,36 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   const buttonY = lightsY + h * 0.12;
   const buttonSize = w * 0.08;
 
-  // Manual SCRAM button (red)
-  ctx.beginPath();
-  ctx.arc(0, buttonY, buttonSize, 0, Math.PI * 2);
-  ctx.fillStyle = '#c00';
-  ctx.fill();
-  ctx.strokeStyle = '#600';
-  ctx.lineWidth = Math.max(1, w * 0.015);
-  ctx.stroke();
+  if (isPid) {
+    // Setpoint adjust knob (gray) - PID cabinets have no scram button
+    ctx.beginPath();
+    ctx.arc(0, buttonY, buttonSize, 0, Math.PI * 2);
+    ctx.fillStyle = '#667';
+    ctx.fill();
+    ctx.strokeStyle = '#334';
+    ctx.lineWidth = Math.max(1, w * 0.015);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, buttonY);
+    ctx.lineTo(0, buttonY - buttonSize * 0.8);
+    ctx.strokeStyle = '#ccd';
+    ctx.stroke();
+  } else {
+    // Manual SCRAM button (red)
+    ctx.beginPath();
+    ctx.arc(0, buttonY, buttonSize, 0, Math.PI * 2);
+    ctx.fillStyle = '#c00';
+    ctx.fill();
+    ctx.strokeStyle = '#600';
+    ctx.lineWidth = Math.max(1, w * 0.015);
+    ctx.stroke();
 
-  // Button highlight
-  ctx.beginPath();
-  ctx.arc(-buttonSize * 0.2, buttonY - buttonSize * 0.2, buttonSize * 0.3, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,100,100,0.4)';
-  ctx.fill();
+    // Button highlight
+    ctx.beginPath();
+    ctx.arc(-buttonSize * 0.2, buttonY - buttonSize * 0.2, buttonSize * 0.3, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,100,100,0.4)';
+    ctx.fill();
+  }
 
   // Setpoint display at bottom (scram controllers only; PID controllers
   // carry their config in controller.pid instead)
@@ -4514,84 +4637,136 @@ function renderBuilding(
 
     const halfW = faceWidth / 2;
     const halfD = depth / 2;
-
-    // Project corners at ground level (elevation = 0) for footprint
-    const frontLeft = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y - halfD }, 0);
-    const frontRight = worldToScreenFn({ x: building.position.x + halfW, y: building.position.y - halfD }, 0);
-    const backLeft = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y + halfD }, 0);
-    const backRight = worldToScreenFn({ x: building.position.x + halfW, y: building.position.y + halfD }, 0);
-
-    // Back wall extends from ground (elevation 0) to building height
-    const backLeftTop = worldToScreenFn({ x: building.position.x - halfW, y: building.position.y + halfD }, height);
-
-    // Back wall dimensions in screen space
-    const backWallWidth = backRight.pos.x - backLeft.pos.x;
-    const backWallHeight = backLeft.pos.y - backLeftTop.pos.y;  // Screen Y is inverted
-
-    // Draw back wall with 35% transparency
-    const wallColorAlpha = `rgba(${wallColor.r}, ${wallColor.g}, ${wallColor.b}, 0.65)`;
-    ctx.fillStyle = wallColorAlpha;
-    ctx.fillRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
-
-    // Inner area
-    const wallPxScaled = wallPx * backLeft.scale;
-    const innerX = backLeft.pos.x + wallPxScaled;
-    const innerY = backLeftTop.pos.y + wallPxScaled;
-    const innerW = backWallWidth - wallPxScaled * 2;
-    const innerH = backWallHeight - wallPxScaled * 2;
-
-    if (building.fluid) {
-      const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
-      const separation = building.fluid.separation ?? 1;
-      // Apply 35% transparency to match wall transparency
-      ctx.globalAlpha = 0.65;
-      renderFluidWithNcg(ctx, building.fluid, innerX, innerY, innerW, innerH, liquidFraction, separation, 6);
-      ctx.globalAlpha = 1.0;
-    } else {
-      ctx.fillStyle = 'rgba(26, 26, 26, 0.65)';
-      ctx.fillRect(innerX, innerY, innerW, innerH);
-    }
-
-    // Highlight edges on back wall
-    ctx.strokeStyle = wallHighlightStr;
-    ctx.lineWidth = 1;
-    ctx.strokeRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
-
-    // Draw wall outline on footprint
-    ctx.strokeStyle = wallColorStr;
-    ctx.lineWidth = Math.max(2, wallPx * frontLeft.scale);
+    const pos = building.position;
 
     if (building.shape === 'cylinder') {
-      // Draw an ellipse inscribed in the trapezoid footprint
-      // The trapezoid has parallel top/bottom (front wider, back narrower due to perspective)
-      // Center at midpoint, Y radius = half height to touch front/back edges,
-      // X radius = half width at center height to touch side edges
+      // Cylindrical shell. All geometry is derived by projecting the TRUE
+      // center and axis endpoints of the circle - never a centroid of
+      // projected bounding-box corners, which drifts as the (nonlinear)
+      // perspective projection changes with view angle.
+      const r = halfW;
+      const projectEllipse = (elev: number) => {
+        const e = worldToScreenFn({ x: pos.x + r, y: pos.y }, elev);
+        const w = worldToScreenFn({ x: pos.x - r, y: pos.y }, elev);
+        const back = worldToScreenFn({ x: pos.x, y: pos.y + r }, elev);
+        const front = worldToScreenFn({ x: pos.x, y: pos.y - r }, elev);
+        return {
+          cx: (e.pos.x + w.pos.x) / 2,
+          cy: (back.pos.y + front.pos.y) / 2,
+          rx: Math.max(0, (e.pos.x - w.pos.x) / 2),
+          ry: Math.max(0, (front.pos.y - back.pos.y) / 2),
+        };
+      };
+      const base = projectEllipse(0);
+      const top = projectEllipse(height);
 
-      const frontWidth = frontRight.pos.x - frontLeft.pos.x;
-      const backWidth = backRight.pos.x - backLeft.pos.x;
-      const trapHeight = frontLeft.pos.y - backLeft.pos.y; // positive (front is lower on screen)
-
-      if (frontWidth > 0 && backWidth > 0 && trapHeight > 0) {
-        // Center at midpoint between front and back edges
-        const centerY = (frontLeft.pos.y + backLeft.pos.y) / 2;
-        const frontCenterX = (frontLeft.pos.x + frontRight.pos.x) / 2;
-        const backCenterX = (backLeft.pos.x + backRight.pos.x) / 2;
-        const centerX = (frontCenterX + backCenterX) / 2;
-
-        // Semi-minor axis (Y) = half the trapezoid height to touch front and back edges
-        const radiusY = trapHeight / 2;
-
-        // Semi-major axis (X) = half the width at the center height (where the ellipse center is)
-        // At t=0.5 (midpoint), interpolate the width and also the X position of the left edge
-        const widthAtCenter = (frontWidth + backWidth) / 2;
-        const radiusX = widthAtCenter / 2;
-
+      // Silhouette of the shell: up the left side, over the top rim, down
+      // the right side, back along the front half of the base ellipse
+      const shellPath = () => {
         ctx.beginPath();
-        ctx.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
-        ctx.stroke();
+        ctx.moveTo(base.cx - base.rx, base.cy);
+        ctx.lineTo(top.cx - top.rx, top.cy);
+        ctx.ellipse(top.cx, top.cy, top.rx, top.ry, 0, Math.PI, 2 * Math.PI, false);
+        ctx.lineTo(base.cx + base.rx, base.cy);
+        ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI, false);
+        ctx.closePath();
+      };
+
+      // Backdrop fill: horizontal gradient suggests wall curvature
+      const grad = ctx.createLinearGradient(base.cx - base.rx, 0, base.cx + base.rx, 0);
+      const dark = `rgba(${Math.round(wallColor.r * 0.7)}, ${Math.round(wallColor.g * 0.7)}, ${Math.round(wallColor.b * 0.7)}, 0.65)`;
+      const light = `rgba(${Math.min(255, wallColor.r + 25)}, ${Math.min(255, wallColor.g + 25)}, ${Math.min(255, wallColor.b + 25)}, 0.65)`;
+      grad.addColorStop(0, dark);
+      grad.addColorStop(0.35, light);
+      grad.addColorStop(0.65, light);
+      grad.addColorStop(1, dark);
+      shellPath();
+      ctx.fillStyle = grad;
+      ctx.fill();
+
+      // Interior (fluid or dark void), clipped to the shell silhouette
+      const baseScale = worldToScreenFn({ x: pos.x, y: pos.y }, 0).scale;
+      const wallPxScaled = wallPx * baseScale;
+      ctx.save();
+      shellPath();
+      ctx.clip();
+      const innerX = base.cx - base.rx + wallPxScaled;
+      const innerW = 2 * (base.rx - wallPxScaled);
+      const innerY = top.cy - top.ry;
+      const innerH = base.cy + base.ry - innerY;
+      if (building.fluid) {
+        const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
+        const separation = building.fluid.separation ?? 1;
+        ctx.globalAlpha = 0.65;
+        renderFluidWithNcg(ctx, building.fluid, innerX, innerY, innerW, innerH, liquidFraction, separation, 6);
+        ctx.globalAlpha = 1.0;
+      } else {
+        ctx.fillStyle = 'rgba(26, 26, 26, 0.65)';
+        ctx.fillRect(innerX, innerY, innerW, innerH);
       }
+      ctx.restore();
+
+      // Shell outline and roof rim
+      ctx.strokeStyle = wallHighlightStr;
+      ctx.lineWidth = 1;
+      shellPath();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(top.cx, top.cy, top.rx, top.ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Footprint wall outline (matches the projected base circle exactly)
+      ctx.strokeStyle = wallColorStr;
+      ctx.lineWidth = Math.max(2, wallPx * baseScale);
+      ctx.beginPath();
+      ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI * 2);
+      ctx.stroke();
     } else {
-      // Rectangle
+      // Project corners at ground level (elevation = 0) for footprint
+      const frontLeft = worldToScreenFn({ x: pos.x - halfW, y: pos.y - halfD }, 0);
+      const frontRight = worldToScreenFn({ x: pos.x + halfW, y: pos.y - halfD }, 0);
+      const backLeft = worldToScreenFn({ x: pos.x - halfW, y: pos.y + halfD }, 0);
+      const backRight = worldToScreenFn({ x: pos.x + halfW, y: pos.y + halfD }, 0);
+
+      // Back wall extends from ground (elevation 0) to building height
+      const backLeftTop = worldToScreenFn({ x: pos.x - halfW, y: pos.y + halfD }, height);
+
+      // Back wall dimensions in screen space
+      const backWallWidth = backRight.pos.x - backLeft.pos.x;
+      const backWallHeight = backLeft.pos.y - backLeftTop.pos.y;  // Screen Y is inverted
+
+      // Draw back wall with 35% transparency
+      const wallColorAlpha = `rgba(${wallColor.r}, ${wallColor.g}, ${wallColor.b}, 0.65)`;
+      ctx.fillStyle = wallColorAlpha;
+      ctx.fillRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
+
+      // Inner area
+      const wallPxScaled = wallPx * backLeft.scale;
+      const innerX = backLeft.pos.x + wallPxScaled;
+      const innerY = backLeftTop.pos.y + wallPxScaled;
+      const innerW = backWallWidth - wallPxScaled * 2;
+      const innerH = backWallHeight - wallPxScaled * 2;
+
+      if (building.fluid) {
+        const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
+        const separation = building.fluid.separation ?? 1;
+        // Apply 35% transparency to match wall transparency
+        ctx.globalAlpha = 0.65;
+        renderFluidWithNcg(ctx, building.fluid, innerX, innerY, innerW, innerH, liquidFraction, separation, 6);
+        ctx.globalAlpha = 1.0;
+      } else {
+        ctx.fillStyle = 'rgba(26, 26, 26, 0.65)';
+        ctx.fillRect(innerX, innerY, innerW, innerH);
+      }
+
+      // Highlight edges on back wall
+      ctx.strokeStyle = wallHighlightStr;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(backLeft.pos.x, backLeftTop.pos.y, backWallWidth, backWallHeight);
+
+      // Draw wall outline on footprint
+      ctx.strokeStyle = wallColorStr;
+      ctx.lineWidth = Math.max(2, wallPx * frontLeft.scale);
       ctx.beginPath();
       ctx.moveTo(frontLeft.pos.x, frontLeft.pos.y);
       ctx.lineTo(frontRight.pos.x, frontRight.pos.y);

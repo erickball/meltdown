@@ -2878,13 +2878,21 @@ export class ConstructionManager {
         const coreBarrel = this.plantState.components.get(rv.coreBarrelId) as CoreBarrelComponent;
         if (coreBarrel) {
           // Get active fuel height and bottom elevation from core properties
-          const activeFuelHeight = coreProperties.height || coreBarrel.height;
-          const coreBottomElevation = coreProperties.coreBottomElevation ?? 0.5;
+          let activeFuelHeight = coreProperties.height || coreBarrel.height;
+          let coreBottomElevation = coreProperties.coreBottomElevation ?? 0.5;
 
-          // Validate that core fits within barrel
+          // Rods are only thermally coupled to the core barrel region, so
+          // they may not extend past its top: limit bottom elevation, then
+          // fuel height, to fit within the barrel.
+          if (coreBottomElevation >= coreBarrel.height) {
+            console.warn(`[Construction] Core bottom elevation ${coreBottomElevation}m exceeds barrel height ${coreBarrel.height}m; resetting to 0.`);
+            coreBottomElevation = 0;
+          }
           const coreTopElevation = coreBottomElevation + activeFuelHeight;
           if (coreTopElevation > coreBarrel.height) {
-            console.warn(`[Construction] Core does not fit in barrel: bottom=${coreBottomElevation}m + height=${activeFuelHeight}m = ${coreTopElevation}m exceeds barrel height ${coreBarrel.height}m. Clamping.`);
+            const limited = coreBarrel.height - coreBottomElevation;
+            console.warn(`[Construction] Core does not fit in barrel: bottom=${coreBottomElevation}m + height=${activeFuelHeight}m = ${coreTopElevation}m exceeds barrel height ${coreBarrel.height}m. Limiting fuel height to ${limited.toFixed(2)}m.`);
+            activeFuelHeight = limited;
           }
 
           // Transfer fuel properties to the core barrel
@@ -2903,7 +2911,7 @@ export class ConstructionManager {
           delete (container as any).fuelMeltingPoint;
           delete (container as any).controlRodCount;
           delete (container as any).controlRodPosition;
-          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId} (fuel: ${coreBottomElevation}m to ${coreTopElevation}m)`);
+          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId} (fuel: ${coreBottomElevation}m to ${coreBottomElevation + activeFuelHeight}m)`);
         }
       }
       // Legacy support for old save files

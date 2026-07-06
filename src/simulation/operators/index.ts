@@ -39,3 +39,9 @@ export {
 } from './turbine-condenser';
 
 export { BurstCheckOperator } from './burst-operator';
+
+export {
+  getConvectionHeatRates,
+  getReactorPowerState,
+  type ReactorPowerDisplayState,
+} from './rate-operators';

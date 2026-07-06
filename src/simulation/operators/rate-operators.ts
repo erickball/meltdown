@@ -147,6 +147,32 @@ export class ConductionRateOperator implements RateOperator {
 // Convection Rate Operator
 // ============================================================================
 
+// Module-level display state for UI access (mirrors the
+// getTurbineCondenserState pattern): the RK45 path never writes
+// state.energyDiagnostics, so the panels read these instead.
+const lastConvectionHeatRates = new Map<string, number>();
+
+/** Last computed per-connection convective heat rate (W), keyed by connection id */
+export function getConvectionHeatRates(): ReadonlyMap<string, number> {
+  return lastConvectionHeatRates;
+}
+
+export interface ReactorPowerDisplayState {
+  coreId: string | null;
+  fissionPower: number;    // W - prompt fission power
+  decayHeatPower: number;  // W - fission-product decay heat
+  thermalPower: number;    // W - total heat deposited in the fuel
+  nominalPower: number;    // W - 100% rated power
+}
+
+let lastReactorPower: ReactorPowerDisplayState = {
+  coreId: null, fissionPower: 0, decayHeatPower: 0, thermalPower: 0, nominalPower: 0,
+};
+
+export function getReactorPowerState(): ReactorPowerDisplayState {
+  return { ...lastReactorPower };
+}
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
@@ -169,6 +195,8 @@ export class ConvectionRateOperator implements RateOperator {
       const h_liquid = this.liquidHeatTransferCoeff(flowNode, state, conn, D);
       const h_vapor = this.vaporHeatTransferCoeff(flowNode, state, D);
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
+
+      lastConvectionHeatRates.set(conn.id, Q);
 
       // Solid temperature rate
       const dT_solid = -Q / (thermalNode.mass * thermalNode.specificHeat);
@@ -365,6 +393,27 @@ export class HeatGenerationRateOperator implements RateOperator {
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
+
+    // Publish reactor power for the UI (thermal deposit = prompt fission
+    // fraction + decay heat, same formula as the fuel-node deposit below)
+    {
+      const n = state.neutronics;
+      const fission = n.coreId ? n.power : 0;
+      let decayPower = 0;
+      if (n.decayHeatPools) {
+        for (const q of n.decayHeatPools) decayPower += q;
+      }
+      const thermalPower = n.decayHeatPools && n.decayHeatPools.length > 0
+        ? (1 - DECAY_HEAT_TOTAL_FRACTION) * fission + decayPower
+        : fission;
+      lastReactorPower = {
+        coreId: n.coreId ?? null,
+        fissionPower: fission,
+        decayHeatPower: decayPower,
+        thermalPower,
+        nominalPower: n.nominalPower,
+      };
+    }
 
     // Add heat generation to thermal nodes
     for (const [id, node] of state.thermalNodes) {
