@@ -7,13 +7,17 @@
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Add FW heaters?
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
--Add other types of system controllers (turbine pressure controller, FW level control, etc)
+-Wire auto-tuned controllers into the BWR and two-loop presets (PWR done - rods/governor/3-elem FW/hotwell/pzr heaters+spray; framework in docs/controllers-steady-state-plan.md)
+-Construction-mode UI for creating/editing PID controllers (sim + JSON presets work today; scram-controller UI pattern extends)
+-Decay heat: power->0 currently removes ALL heat input; fission-product decay term should persist (~7% initially, decaying)
+-SG heat transfer capacity review: PWR preset needed tubeCount 12000 for ~3 MW/K effective UA; running 1000 MW wants ~10x more (per-tube area or convection correlations look low)
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
--AI assistant to help users add to, fix, or understand the model
+-AI assistant to help users add to, fix, or understand the model (use sonnet 5, cap usage at $10/month. context: a bunch of game documentation, the current plant model - full list of components and their connections and properties, the last few changes the user made, what mode they're in, and the most recent simulation results for this model (if any). Also the ability to look at the code but let's try to make the documentation good enough it doesn't usually have to.)
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
--After an accident you get told how many people you may have given cancer to ("but we'll never know for certain"). Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit.
+-After an accident you get told how many people you may have given cancer to ("but we'll never know for certain"). Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit. For the game-flavor sequences (intro, post-accident, story progression, etc.) I'm thinking kind of a corny pixelated 90s-game aesthetic, where it's some text you click through, some MIDI music, and a two-frame animation of a cartoon person with different expressions depending on what's happening. The boss character is kind of a stereotype of a fat-cat 1960s-70s businessman who hates environmentalists, safety concerns, and the government.
+-I guess that means we're building in some sort of MACCS-lite?
 -Add cool visuals for different initiating events
 -Model vessel creep rupture and SG tube creep rupture
 -Model core-concrete interaction

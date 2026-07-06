@@ -23,6 +23,8 @@ import {
   ChokedFlowDisplayOperator,
   PumpSpeedRateOperator,
   BurstCheckOperator,
+  ControlSystemOperator,
+  SteadyStateDetector,
 } from '../../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../../src/types';
 import type { SimulationState } from '../../src/simulation/types';
@@ -143,6 +145,8 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addConstraintOperator(new FluidStateConstraintOperator());
   solver.addConstraintOperator(new BurstCheckOperator());
   solver.addConstraintOperator(new ChokedFlowDisplayOperator());
+  // Sampled process controllers act last, on the accepted state (finalOnly)
+  solver.addConstraintOperator(new ControlSystemOperator());
   return solver;
 }
 
@@ -184,6 +188,30 @@ export function nodePressure(state: SimulationState, id: string): number {
   const node = state.flowNodes.get(id);
   if (!node) throw new Error(`node ${id} not found`);
   return node.fluid.pressure;
+}
+
+/**
+ * Run the sim until the SteadyStateDetector declares steady, or maxSeconds
+ * elapses. Returns whether steady was reached plus the detector for
+ * diagnostics. tickDt is the outer advance() granularity.
+ */
+export function runUntilSteady(
+  sim: Sim,
+  maxSeconds: number,
+  tickDt = 0.5,
+  detectorConfig: ConstructorParameters<typeof SteadyStateDetector>[0] = {}
+): { steady: boolean; detector: SteadyStateDetector; elapsed: number } {
+  const detector = new SteadyStateDetector(detectorConfig);
+  detector.update(sim.state);
+  const start = sim.state.time;
+  while (sim.state.time - start < maxSeconds) {
+    run(sim, tickDt, tickDt);
+    detector.update(sim.state);
+    if (detector.isSteady()) {
+      return { steady: true, detector, elapsed: sim.state.time - start };
+    }
+  }
+  return { steady: false, detector, elapsed: sim.state.time - start };
 }
 
 export function totalMassAndEnergy(state: SimulationState): { mass: number; energy: number } {

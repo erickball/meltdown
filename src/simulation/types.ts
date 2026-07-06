@@ -115,6 +115,14 @@ export interface FlowNode {
   // Affects flow resistance into the turbine
   governorValve?: number;
 
+  // Electric heater power currently deposited into this node's fluid (W).
+  // Generic - any tank can have heaters (pressurizer heaters being the
+  // canonical use). Set by a heater-power controller actuator (or the user);
+  // deposited as dEnergy by HeatGenerationRateOperator.
+  heaterPower?: number;
+  // Installed heater capacity (W) - upper bound for heater actuators.
+  heaterCapacity?: number;
+
   // Internal obstructions that reduce available cross-sectional area at certain elevations
   // Used for accurate liquid level calculation when components are inside this node
   // (e.g., a core barrel inside a reactor vessel annulus)
@@ -276,6 +284,12 @@ export interface NeutronicsState {
   controlRodPosition: number;       // 0-1 (0 = fully inserted, 1 = fully withdrawn)
   controlRodWorth: number;          // Total reactivity worth when fully inserted
 
+  // Built-in positive reactivity margin (enrichment excess) so criticality
+  // sits at partial rod insertion. Without it, rods-fully-withdrawn is
+  // exactly critical at reference conditions and a rod controller has no
+  // authority to raise power. Default 0 preserves legacy behavior.
+  excessReactivity?: number;        // Δk/k, >= 0
+
   // Decay heat (fraction of nominal power)
   decayHeatFraction: number;        // Computed from operating history
 
@@ -364,6 +378,85 @@ export interface ComponentStates {
   pumps: Map<string, PumpState>;
   valves: Map<string, ValveState>;
   checkValves: Map<string, CheckValveState>;
+  controllers: Map<string, ControllerState>;
+}
+
+// ============================================================================
+// Process Controllers (auto-tuned PI loops)
+// ============================================================================
+
+export type ControllerSensorKind =
+  | 'node-level'        // liquid level in a flow node (m from node bottom)
+  | 'node-pressure'     // flow node pressure (Pa)
+  | 'node-temperature'  // flow node temperature (K)
+  | 'connection-flow'   // mass flow rate of a flow connection (kg/s)
+  | 'reactor-power';    // neutronics power as fraction of nominal (0-1+)
+
+export type ControllerActuatorKind =
+  | 'valve-position'    // ValveState.position (0-1)
+  | 'pump-speed'        // PumpState.speed target (0-1)
+  | 'governor-valve'    // FlowNode.governorValve on a turbine node (0-1)
+  | 'heater-power'      // FlowNode.heaterPower (W)
+  | 'control-rods';     // NeutronicsState.controlRodPosition (0-1)
+
+/**
+ * A generic auto-tuned process controller: one sensor, one actuator, a
+ * setpoint. Gains are derived each step from the plant's own physics
+ * (see ControlSystemOperator) unless manually overridden. Controllers are
+ * DEVICES, not physics: they may saturate, rate-limit, and dead-band.
+ */
+export interface ControllerState {
+  id: string;
+  label: string;
+  /** 'auto' = closed loop; 'manual' = hold manualOutput (bumpless transfer back) */
+  mode: 'auto' | 'manual';
+
+  sensor: {
+    kind: ControllerSensorKind;
+    /** flow node id, connection id, or '' for reactor-power */
+    targetId: string;
+  };
+  /** Setpoint in the sensor's SI units (reactor-power: fraction of nominal) */
+  setpoint: number;
+
+  /** Optional feedforward measurement (three-element control): commanded
+   *  flow starts from this measured flow, PI only trims the residual.
+   *  The canonical use is feedwater = steam flow + level trim. */
+  feedforward?: {
+    kind: 'connection-flow';
+    targetId: string;
+  };
+
+  actuator: {
+    kind: ControllerActuatorKind;
+    /** valve id / pump id / flow node id (governor, heater) / '' for rods */
+    targetId: string;
+    min: number;          // output lower limit (0-1 or W)
+    max: number;          // output upper limit
+    rateLimit: number;    // max |d(output)/dt| in output units per second
+  };
+
+  /** Scales the closed-loop time constant: >1 faster, <1 gentler. Default 1. */
+  aggressiveness: number;
+  /** Reverse-acting loop (more output DECREASES the sensor reading, e.g.
+   *  spray valve on pressure, steam valve on upstream pressure). */
+  invert?: boolean;
+  /** Manual gain override (advanced): Kp in output-units per sensor-unit,
+   *  Ki in output-units per sensor-unit-second. Undefined = auto-derive. */
+  gains?: { kp: number; ki: number };
+  /** Output to hold in manual mode */
+  manualOutput?: number;
+
+  // ---- runtime state (updated once per accepted solver step) ----
+  lastOutput: number;
+  lastError: number;
+  /** previous feedforward measurement (velocity-form feedforward) */
+  lastFeedforward?: number;
+  /** auxiliary memory (rod controller: previous reactor power for the
+   *  withdrawal-inhibit period estimate) */
+  lastAux?: number;
+  /** most recent auto-derived gains, for display/debugging */
+  lastAutoGains?: { kp: number; ki: number };
 }
 
 export interface PumpState {

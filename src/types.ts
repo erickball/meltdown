@@ -265,13 +265,42 @@ export interface ScramSetpoints {
   lowCoolantFlow: number; // kg/s (default 10)
 }
 
+// Auto-tuned PID process controller configuration.
+// The user states an intent (sensor, actuator, setpoint); gains are derived
+// from the plant physics unless overridden. See ControllerState in
+// simulation/types.ts and docs/controllers-steady-state-plan.md.
+export interface PidControllerConfig {
+  sensor: {
+    kind: 'node-level' | 'node-pressure' | 'node-temperature' | 'connection-flow' | 'reactor-power';
+    targetId: string;     // sim flow node id / connection id / '' for reactor-power
+  };
+  setpoint: number;       // SI units; reactor-power in fraction of nominal
+  feedforward?: {
+    kind: 'connection-flow';
+    targetId: string;     // e.g. steam-line connection for three-element FW control
+  };
+  actuator: {
+    kind: 'valve-position' | 'pump-speed' | 'governor-valve' | 'heater-power' | 'control-rods';
+    targetId: string;     // valve/pump id, flow node id, or '' for rods
+    min?: number;         // default 0
+    max?: number;         // default 1 (set explicitly for heater-power, in W)
+    rateLimit?: number;   // output units per second (default 0.1)
+  };
+  aggressiveness?: number;      // closed-loop speed knob, default 1
+  invert?: boolean;             // reverse-acting loop (spray, steam relief)
+  gains?: { kp: number; ki: number };  // manual override (advanced)
+  mode?: 'auto' | 'manual';
+  manualOutput?: number;
+}
+
 export interface ControllerComponent extends ComponentBase {
   type: 'controller';
-  controllerType: 'scram';  // For future controller types
+  controllerType: 'scram' | 'pid';
   width: number;
   height: number;
-  connectedCoreId?: string;  // ID of the core/reactor vessel this controller monitors
-  setpoints: ScramSetpoints;
+  connectedCoreId?: string;  // ID of the core/reactor vessel this controller monitors (scram)
+  setpoints?: ScramSetpoints; // scram controllers
+  pid?: PidControllerConfig;  // pid controllers
 }
 
 // Reliability class affects likelihood of LOOP events and recovery time

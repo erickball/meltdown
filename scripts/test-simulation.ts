@@ -25,6 +25,7 @@ import {
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
   BurstCheckOperator,
+  ControlSystemOperator,
 } from '../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
@@ -104,6 +105,7 @@ solver.addRateOperator(new PumpSpeedRateOperator());
 solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
 solver.addConstraintOperator(new FluidStateConstraintOperator());
 solver.addConstraintOperator(new BurstCheckOperator());
+solver.addConstraintOperator(new ControlSystemOperator());
 
 // Log initial state
 console.log('\n=== Initial State ===');

@@ -3036,13 +3036,16 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   ctx.fillStyle = 'rgba(255,100,100,0.4)';
   ctx.fill();
 
-  // Setpoint display at bottom
-  ctx.font = `${h * 0.07}px monospace`;
-  ctx.fillStyle = '#888';
-  ctx.textAlign = 'center';
-  const setpointY = buttonY + buttonSize + h * 0.08;
-  ctx.fillText(`Hi:${controller.setpoints.highPower}%  Lo:${controller.setpoints.lowPower}%`, 0, setpointY);
-  ctx.fillText(`Temp:${Math.round(controller.setpoints.highFuelTemp * 100)}%  Flow:${controller.setpoints.lowCoolantFlow}`, 0, setpointY + h * 0.09);
+  // Setpoint display at bottom (scram controllers only; PID controllers
+  // carry their config in controller.pid instead)
+  if (controller.setpoints) {
+    ctx.font = `${h * 0.07}px monospace`;
+    ctx.fillStyle = '#888';
+    ctx.textAlign = 'center';
+    const setpointY = buttonY + buttonSize + h * 0.08;
+    ctx.fillText(`Hi:${controller.setpoints.highPower}%  Lo:${controller.setpoints.lowPower}%`, 0, setpointY);
+    ctx.fillText(`Temp:${Math.round(controller.setpoints.highFuelTemp * 100)}%  Flow:${controller.setpoints.lowCoolantFlow}`, 0, setpointY + h * 0.09);
+  }
 
   // Outer highlight
   ctx.strokeStyle = '#555';

@@ -14,13 +14,14 @@
 
 import {
   test, assert, assertBetween, report,
-  buildSimFromFile, run, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
+  buildSimFromFile, run, runUntilSteady, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
   assertStateSane,
 } from './lib/sim-harness';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
 const PLANT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'test-plants');
+const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 // ---------------------------------------------------------------------------
 // Two-loop PWR: parallel primary loops, merged steam lines, split feed train
@@ -152,6 +153,68 @@ test('Kitchen sink: awkward topology runs clean', () => {
   const after = totalMassAndEnergy(state);
   const massDrift = Math.abs(after.mass - before.mass) / before.mass;
   assert(massDrift < 1e-6, `closed system mass drift ${(massDrift * 100).toExponential(2)}%`);
+});
+
+// ---------------------------------------------------------------------------
+// Controlled PWR: converges to an operating steady state and holds it
+// ---------------------------------------------------------------------------
+// The PWR preset carries six auto-tuned controllers (rods on T_cold, governor
+// on SG pressure, three-element feedwater, hotwell level, pressurizer heaters
+// + spray). Starting from a consistent low-power critical state, the plant
+// must reach a HELD operating point: reactor critical at meaningful power,
+// primary pressure on the heater setpoint, SG pressure on the governor
+// setpoint, levels stable, and the SteadyStateDetector satisfied.
+
+test('Controlled PWR converges to operating steady state and holds', () => {
+  // 900 s of plant time: ~40 s wall under the implicit solver, ~25 min under
+  // the explicit reference. Skip in explicit A/B runs (IMPLICIT_MOMENTUM=0);
+  // the explicit path's physics is covered by every other suite.
+  if (process.env.IMPLICIT_MOMENTUM === '0') {
+    console.log('[test] skipping controlled-PWR steady-state test under explicit momentum (too slow)');
+    return;
+  }
+  const sim = buildSimFromFile(path.join(SCRIPTS_DIR, 'pwr-test.json'));
+
+  // Allow the startup approach (~8 min of plant time; tens of seconds wall
+  // under the implicit solver), then require the detector to latch steady.
+  const { steady, detector, elapsed } = runUntilSteady(sim, 900, 0.5, {
+    // Tolerances sized to realistic plant noise: a boiling SG and a hunting
+    // feed train wander a little forever; "steady" means bounded wander,
+    // not silence. The long window lets episodic dome-edge pressure bounces
+    // average out while monotonic drift still accumulates.
+    windowSeconds: 60,
+    fractionalRateTol: 2e-3,
+    temperatureRateTol: 0.1,
+    holdSeconds: 60,
+  });
+  const worst = detector.worstOffender();
+  assert(steady,
+    `plant should reach steady state within 900 s (worst drift after ${elapsed.toFixed(0)} s: ` +
+    `${worst?.metric}=${worst?.value.toExponential(2)} vs tol ${worst?.tolerance.toExponential(2)})`);
+
+  const state = sim.state;
+  const n = state.neutronics;
+
+  // Reactor critical at meaningful power, rods NOT parked at a limit
+  const powerFrac = n.power / n.nominalPower;
+  assert(powerFrac > 0.04, `reactor should hold meaningful power, got ${(powerFrac * 100).toFixed(1)}%`);
+  assertBetween(n.controlRodPosition, 0.1, 0.9, 'rods should hold an interior position');
+
+  // Pressurizer pressure held near the heater setpoint (155 bar)
+  assertBetween(nodePressure(state, 'pzr-1'), 148e5, 162e5, 'pressurizer pressure on setpoint');
+
+  // SG pressure held near the governor setpoint (60 bar)
+  assertBetween(nodePressure(state, 'hx-1-shell'), 55e5, 65e5, 'SG pressure on setpoint');
+
+  // Primary loop circulating
+  assert(flowRate(state, 'pump-1', 'rv-1') > 3000,
+    `primary loop should circulate strongly, got ${flowRate(state, 'pump-1', 'rv-1').toFixed(0)} kg/s`);
+
+  // Steam produced and condensate returned (secondary side alive)
+  assert(flowRate(state, 'hx-1', 'turbine-1') > 10,
+    `turbine should draw steam, got ${flowRate(state, 'hx-1', 'turbine-1').toFixed(1)} kg/s`);
+
+  assertStateSane(state);
 });
 
 report('Plant Scenario Regression Suite');

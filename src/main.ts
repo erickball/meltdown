@@ -211,6 +211,7 @@ function init() {
       pumps: new Map(),
       valves: new Map(),
       checkValves: new Map(),
+      controllers: new Map(),
     },
   };
 

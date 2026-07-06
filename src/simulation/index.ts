@@ -59,6 +59,13 @@ export {
 export { PressureSolver } from './operators/pressure-solver';
 export type { PressureSolverStatus } from './operators/pressure-solver';
 
+// Auto-tuned process controllers (see docs/controllers-steady-state-plan.md)
+export { ControlSystemOperator, nodeLiquidLevel } from './operators/control-system';
+
+// Steady-state detection
+export { SteadyStateDetector, DEFAULT_STEADY_STATE_CONFIG } from './steady-state';
+export type { SteadyStateConfig } from './steady-state';
+
 // Operators
 export * from './operators';
 

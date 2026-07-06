@@ -96,8 +96,12 @@ export interface ConstraintOperator {
   /**
    * Apply algebraic constraints to the state (e.g., thermodynamic consistency).
    * Returns a new state with constraints satisfied.
+   *
+   * @param dt - The timestep of the step this application belongs to.
+   *   Provided by applyAllConstraints; sampled-control operators (the
+   *   control system) use it, purely algebraic operators ignore it.
    */
-  applyConstraints(state: SimulationState): SimulationState;
+  applyConstraints(state: SimulationState, dt?: number): SimulationState;
 }
 
 // ============================================================================
@@ -1106,7 +1110,7 @@ export class RK45Solver {
     for (const op of this.constraintOperators) {
       if (op.finalOnly && !isFinal) continue;
       const t0 = performance.now();
-      result = op.applyConstraints(result);
+      result = op.applyConstraints(result, dt);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
     }
 

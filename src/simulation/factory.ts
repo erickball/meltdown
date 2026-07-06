@@ -70,6 +70,7 @@ export function createSimulationState(): SimulationState {
       pumps: new Map(),
       valves: new Map(),
       checkValves: new Map(),
+      controllers: new Map(),
     },
   };
 }
@@ -801,8 +802,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         state.thermalNodes.set(node.id, node);
       }
 
-      // Set up neutronics
-      state.neutronics = createNeutronicsFromCore(component);
+      // Set up neutronics (thermal + flow nodes for this core exist by now)
+      state.neutronics = createNeutronicsFromCore(component, state);
 
       // Create convection connection from fuel to coolant
       // For core barrels, the coolant is the core barrel's own flow node
@@ -950,7 +951,19 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       if (fromComponent?.type === 'pump') {
         const pumpState = state.components.pumps.get(fromComponent.id);
         if (pumpState) {
-          pumpState.connectedFlowPath = flowConnection.id;
+          if (!pumpState.connectedFlowPath) {
+            pumpState.connectedFlowPath = flowConnection.id;
+          } else {
+            // A pump drives exactly ONE discharge path. Additional outlet
+            // connections (e.g. a small spray/bypass tap) are passive
+            // branches fed by the pump node's pressure - letting a later
+            // connection steal connectedFlowPath would silently move the
+            // pump head onto the branch and kill the main loop.
+            console.warn(
+              `[Factory] Pump ${fromComponent.id} has multiple outlet connections: head drives ` +
+              `'${pumpState.connectedFlowPath}'; '${flowConnection.id}' is a passive branch`
+            );
+          }
         }
       }
       // NOTE: We intentionally do NOT set connectedFlowPath when pump is the TO component
@@ -1020,6 +1033,83 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         }
       }
     }
+  }
+
+  // Fourth pass: translate PID controller components. Done after connection
+  // processing so actuator/sensor targets (including connection ids and
+  // connectedFlowPath links) exist for validation and bumpless-start init.
+  for (const [id, component] of plantState.components) {
+    if (component.type !== 'controller') continue;
+    const ctlComp = component as any;
+    if (ctlComp.controllerType !== 'pid') continue; // scram handled at game level
+    const pid = ctlComp.pid;
+    if (!pid || !pid.sensor || !pid.actuator || pid.setpoint === undefined) {
+      throw new Error(
+        `[Factory] PID controller '${id}' is missing its pid config (sensor/actuator/setpoint)`
+      );
+    }
+
+    // Initialize lastOutput from the actuator's actual initial state so the
+    // controller starts bumplessly instead of slewing from 0.
+    let initialOutput: number;
+    switch (pid.actuator.kind) {
+      case 'valve-position': {
+        const v = state.components.valves.get(pid.actuator.targetId);
+        if (!v) throw new Error(`[Factory] PID controller '${id}': valve '${pid.actuator.targetId}' not found`);
+        initialOutput = v.position;
+        break;
+      }
+      case 'pump-speed': {
+        const p = state.components.pumps.get(pid.actuator.targetId);
+        if (!p) throw new Error(`[Factory] PID controller '${id}': pump '${pid.actuator.targetId}' not found`);
+        initialOutput = p.speed;
+        break;
+      }
+      case 'governor-valve': {
+        const n = state.flowNodes.get(pid.actuator.targetId);
+        if (!n) throw new Error(`[Factory] PID controller '${id}': flow node '${pid.actuator.targetId}' not found`);
+        initialOutput = n.governorValve ?? 1;
+        break;
+      }
+      case 'heater-power': {
+        const n = state.flowNodes.get(pid.actuator.targetId);
+        if (!n) throw new Error(`[Factory] PID controller '${id}': flow node '${pid.actuator.targetId}' not found`);
+        initialOutput = n.heaterPower ?? 0;
+        break;
+      }
+      case 'control-rods': {
+        initialOutput = state.neutronics.controlRodPosition;
+        break;
+      }
+      default:
+        throw new Error(`[Factory] PID controller '${id}': unknown actuator kind '${pid.actuator.kind}'`);
+    }
+
+    state.components.controllers.set(id, {
+      id,
+      label: component.label || id,
+      mode: pid.mode ?? 'auto',
+      sensor: { kind: pid.sensor.kind, targetId: pid.sensor.targetId },
+      setpoint: pid.setpoint,
+      feedforward: pid.feedforward
+        ? { kind: pid.feedforward.kind, targetId: pid.feedforward.targetId }
+        : undefined,
+      actuator: {
+        kind: pid.actuator.kind,
+        targetId: pid.actuator.targetId,
+        min: pid.actuator.min ?? 0,
+        max: pid.actuator.max ?? 1,
+        rateLimit: pid.actuator.rateLimit ?? 0.1,
+      },
+      aggressiveness: pid.aggressiveness ?? 1,
+      invert: pid.invert,
+      gains: pid.gains ? { ...pid.gains } : undefined,
+      manualOutput: pid.manualOutput,
+      lastOutput: initialOutput,
+      lastError: 0,
+    });
+    console.log(`[Factory] PID controller '${id}': ${pid.sensor.kind}(${pid.sensor.targetId}) -> ` +
+      `${pid.actuator.kind}(${pid.actuator.targetId}), setpoint=${pid.setpoint}`);
   }
 
   // Add atmosphere node for LOCA scenarios
@@ -1102,6 +1192,10 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         flowArea: tank.width * (tank.width || 1),
         height: tank.height,
         elevation,
+        // Immersion heaters (e.g. pressurizer): capacity bounds any
+        // heater-power controller actuator targeting this node
+        heaterCapacity: tank.heaterCapacity,
+        heaterPower: tank.initialHeaterPower ?? 0,
       };
     }
 
@@ -1610,12 +1704,15 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
   return {
     id: component.id,
     running: isRunning,
-    speed: isRunning ? 1.0 : 0,  // Target speed (1.0 = 100%)
-    // Running pumps ramp up from zero over rampUpTime. Starting at full speed
-    // with all flows initialized to zero slams shutoff head onto stationary
-    // liquid columns - a guaranteed water hammer at t=0 that can burst small
-    // components before the flow field has any chance to develop.
-    effectiveSpeed: 0,
+    speed: isRunning ? (pump.speed ?? 1.0) : 0,  // Target speed (fraction of rated)
+    // Pumps marked running start AT speed: the plant is loaded "already
+    // operating", and a reactor at full power with stagnant coolant boils its
+    // core during the ramp (density feedback then crushes the power).
+    // Starting at speed used to be a water-hammer risk when momentum was
+    // integrated explicitly, but the implicit pressure-flow solve brings the
+    // loop to its friction-limited equilibrium smoothly. Pumps toggled on
+    // mid-simulation still ramp via PumpSpeedRateOperator.
+    effectiveSpeed: isRunning ? (pump.speed ?? 1.0) : 0,
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
     efficiency: 0.85,
@@ -1680,11 +1777,72 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
 }
 
 /**
- * Create neutronics state from a core component
+ * Create neutronics state from a core component.
+ *
+ * With `initializeCritical: true` on the core component, the reactor starts
+ * AT its operating point: feedback references are anchored to the actual
+ * initial fuel/coolant state (so feedback reactivity is exactly 0 at t=0),
+ * rods are placed at the critical position 1 - excess/worth, power is at
+ * nominal, and precursors are at equilibrium. A rod controller then only has
+ * to hold the point, not find it.
+ *
+ * @param state - simulation state built so far (coolant flow node and fuel
+ *   thermal node for this core must already exist)
  */
-function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
+function createNeutronicsFromCore(component: PlantComponent, state?: SimulationState): NeutronicsState {
   const vessel = component as any;
-  const rodPosition = vessel.controlRodPosition ?? 0.8;
+
+  const nominalPower = vessel.nominalPower ?? 1000e6;
+  const controlRodWorth = vessel.controlRodWorth ?? 0.05;
+  // Built-in enrichment margin: >0 puts the critical rod position at partial
+  // insertion so a rod controller has authority in both directions.
+  const excessReactivity = vessel.excessReactivity ?? 0;
+
+  // Actual initial conditions (for critical initialization)
+  const coolantNode = state?.flowNodes.get(component.id);
+  const fuelNode = state?.thermalNodes.get(`${component.id}-fuel`);
+
+  let refFuelTemp = 887;
+  let refCoolantTemp = 520;
+  let refCoolantDensity = 750;
+  let rodPosition = vessel.controlRodPosition ?? 0.8;
+  let power = nominalPower;
+
+  if (vessel.initializeCritical) {
+    if (!coolantNode || !fuelNode) {
+      throw new Error(
+        `[Factory] Core '${component.id}' has initializeCritical but its coolant/fuel nodes ` +
+        `were not created first - cannot anchor feedback references`
+      );
+    }
+    // Anchor feedback references at the initial state: feedback rho = 0 now
+    refFuelTemp = fuelNode.temperature;
+    refCoolantTemp = coolantNode.fluid.temperature;
+    refCoolantDensity = coolantNode.fluid.mass / coolantNode.volume;
+    // Critical position: rho = excess - worth*(1 - pos) = 0
+    rodPosition = 1 - excessReactivity / controlRodWorth;
+    if (rodPosition < 0.05 || rodPosition > 0.95) {
+      throw new Error(
+        `[Factory] Core '${component.id}': critical rod position ${rodPosition.toFixed(3)} is ` +
+        `outside [0.05, 0.95] - excessReactivity (${excessReactivity}) vs rod worth ` +
+        `(${controlRodWorth}) leaves no control margin`
+      );
+    }
+    power = vessel.initialPower ?? nominalPower;
+    console.log(
+      `[Factory] Core '${component.id}': initialized critical at rods=${(rodPosition * 100).toFixed(1)}%, ` +
+      `P=${(power / 1e6).toFixed(0)} MW, refs T_fuel=${refFuelTemp.toFixed(0)}K ` +
+      `T_cool=${refCoolantTemp.toFixed(0)}K rho_cool=${refCoolantDensity.toFixed(0)}kg/m³`
+    );
+  }
+
+  const promptNeutronLifetime = 1e-4;
+  const delayedNeutronFraction = 0.0065;
+  const precursorDecayConstant = 0.08;
+  // Precursor equilibrium for the initial power: dC/dt = 0 => C = beta*N/(lambda*Lambda)
+  const precursorConcentration =
+    (delayedNeutronFraction * (power / nominalPower)) /
+    (precursorDecayConstant * promptNeutronLifetime);
 
   return {
     // Link to this specific core
@@ -1692,21 +1850,22 @@ function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
     fuelNodeId: `${component.id}-fuel`,
     coolantNodeId: component.id, // The vessel's flow node
 
-    power: 1000e6, // Start at full power
-    nominalPower: 1000e6,
+    power,
+    nominalPower,
     reactivity: 0,
-    promptNeutronLifetime: 1e-4,
-    delayedNeutronFraction: 0.0065,
-    precursorConcentration: 800.0,
-    precursorDecayConstant: 0.08,
-    fuelTempCoeff: -2.5e-5,
-    coolantTempCoeff: -1e-5,
-    coolantDensityCoeff: 0.001,
-    refFuelTemp: 887,
-    refCoolantTemp: 520,
-    refCoolantDensity: 750,
+    promptNeutronLifetime,
+    delayedNeutronFraction,
+    precursorConcentration,
+    precursorDecayConstant,
+    fuelTempCoeff: vessel.fuelTempCoeff ?? -2.5e-5,
+    coolantTempCoeff: vessel.coolantTempCoeff ?? -1e-5,
+    coolantDensityCoeff: vessel.coolantDensityCoeff ?? 0.001,
+    refFuelTemp,
+    refCoolantTemp,
+    refCoolantDensity,
     controlRodPosition: rodPosition,
-    controlRodWorth: 0.05,
+    controlRodWorth,
+    excessReactivity,
     decayHeatFraction: 0.07, // Start with steady-state decay heat
     scrammed: false,
     scramTime: -1,
@@ -1718,9 +1877,9 @@ function createNeutronicsFromCore(component: PlantComponent): NeutronicsState {
       coolantDensity: 0,
     },
     diagnostics: {
-      fuelTemp: 887,
-      coolantTemp: 520,
-      coolantDensity: 850,
+      fuelTemp: refFuelTemp,
+      coolantTemp: refCoolantTemp,
+      coolantDensity: refCoolantDensity,
     },
   };
 }
@@ -1970,7 +2129,10 @@ function createFlowConnectionFromPlantConnection(
     toElevation: connToElevation,
     fromPhaseTolerance,
     toPhaseTolerance,
-    resistanceCoeff: 5, // Default resistance
+    // Loss coefficient: user-specifiable per connection (loop hydraulics are
+    // a real design lever - the default 5 costs a PWR primary loop ~30% of
+    // its rated flow), default 5.
+    resistanceCoeff: (connection as any).resistanceCoeff ?? 5,
     massFlowRate: 0, // Start at zero
     inertance: length / flowArea,
   };

@@ -1143,6 +1143,20 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     });
   }
 
+  const controllers = new Map<string, typeof state.components.controllers extends Map<string, infer V> ? V : never>();
+  if (state.components.controllers) {
+    state.components.controllers.forEach((v, k) => {
+      controllers.set(k, {
+        ...v,
+        sensor: { ...v.sensor },
+        actuator: { ...v.actuator },
+        feedforward: v.feedforward ? { ...v.feedforward } : undefined,
+        gains: v.gains ? { ...v.gains } : undefined,
+        lastAutoGains: v.lastAutoGains ? { ...v.lastAutoGains } : undefined,
+      });
+    });
+  }
+
   // Clone burst states if present
   let burstStates: Map<string, typeof state.burstStates extends Map<string, infer V> | undefined ? V : never> | undefined;
   if (state.burstStates) {
@@ -1160,7 +1174,7 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     convectionConnections,
     flowConnections,
     neutronics: { ...state.neutronics },
-    components: { pumps, valves, checkValves },
+    components: { pumps, valves, checkValves, controllers },
     // Clone energy diagnostics if present
     energyDiagnostics: state.energyDiagnostics ? {
       ...state.energyDiagnostics,

@@ -30,6 +30,7 @@ import {
   PumpSpeedRateOperator,
   BurstCheckOperator,
   ChokedFlowDisplayOperator,
+  ControlSystemOperator,
 } from '../simulation';
 import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
@@ -163,6 +164,7 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new BurstCheckOperator()); // Check for component ruptures
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
       this.rk45Solver.addConstraintOperator(new ChokedFlowDisplayOperator()); // Sets conn.isChoked for debug display
+      this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
 
       // Set up substep callback for state history recording
       // This records state after each accepted substep, not just once per frame

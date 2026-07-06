@@ -258,6 +258,21 @@ export class HeatGenerationRateOperator implements RateOperator {
       }
     }
 
+    // Electric heaters immersed in flow nodes (pressurizer heaters etc.):
+    // heaterPower is set by a heater-power controller actuator or the user.
+    for (const [id, node] of state.flowNodes) {
+      if (node.isBoundary) continue;
+      const q = node.heaterPower ?? 0;
+      if (q > 0) {
+        const existing = rates.flowNodes.get(id);
+        if (existing) {
+          existing.dEnergy += q;
+        } else {
+          rates.flowNodes.set(id, { dMass: 0, dEnergy: q });
+        }
+      }
+    }
+
     return rates;
   }
 }
@@ -540,7 +555,12 @@ export class NeutronicsRateOperator implements RateOperator {
     const dRho_coolant = coolantDensity - n.refCoolantDensity;
     const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
-    return rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+    // Built-in excess reactivity (enrichment margin) - shifts the critical
+    // rod position to partial insertion so a rod controller has authority
+    // in both directions. 0 (default) preserves legacy behavior.
+    const rhoExcess = n.excessReactivity ?? 0;
+
+    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
   }
 
   private getAverageFuelTemperature(state: SimulationState, n: any): number {
