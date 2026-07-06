@@ -1421,12 +1421,15 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   ctx.stroke();
 
   // Thermal power readout for standalone cores built as bare vessels
-  renderCorePowerLabel(ctx, [vessel.id], h / 2 + 15, view);
+  // (fuel occupies the middle of the vessel; label over its center)
+  renderCorePowerLabel(ctx, [vessel.id], 0, view);
 }
 
 /**
- * Draw the reactor thermal power below a component that hosts the linked
- * neutronics core (same visual convention as the condenser's MW label).
+ * Draw the reactor thermal power over the center of the core, for the
+ * component that hosts the linked neutronics core. Same outlined-text style
+ * as the flow-rate labels, slightly larger. (Percent of rated power lives in
+ * the selection dialog.)
  */
 function renderCorePowerLabel(
   ctx: CanvasRenderingContext2D,
@@ -1438,16 +1441,18 @@ function renderCorePowerLabel(
   if (!rp.coreId || !coreIds.includes(rp.coreId)) return;
 
   const mw = rp.thermalPower / 1e6;
-  const pct = rp.nominalPower > 0 ? (rp.thermalPower / rp.nominalPower) * 100 : 0;
-  const fontSize = Math.max(8, 10 * view.zoom / 60);
-  const smallFontSize = Math.max(6, 8 * view.zoom / 60);
-  ctx.font = `bold ${fontSize}px monospace`;
-  ctx.fillStyle = '#1a1a1a';
+  const label = `${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`;
+  const fontSize = Math.max(10, Math.min(18, 13 * view.zoom / 60));
+  ctx.save();
+  ctx.font = `${fontSize}px monospace`;
+  ctx.fillStyle = '#000';
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 2;
   ctx.textAlign = 'center';
-  ctx.fillText(`${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`, 0, y);
-  ctx.font = `${smallFontSize}px monospace`;
-  ctx.fillStyle = '#333';
-  ctx.fillText(`${pct.toFixed(0)}% of ${(rp.nominalPower / 1e6).toFixed(0)} MW rated`, 0, y + 10);
+  ctx.textBaseline = 'middle';
+  ctx.strokeText(label, 0, y);
+  ctx.fillText(label, 0, y);
+  ctx.restore();
 }
 
 function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesselComponent, view: ViewState, connections?: Connection[], isSimulating: boolean = false, plantState?: PlantState): void {
@@ -1836,9 +1841,9 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
   ctx.stroke();
 
-  // Thermal power readout below the vessel (core lives on the core barrel in
-  // the new architecture, or on the vessel itself in legacy plants)
-  renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], h / 2 + 15, view);
+  // Thermal power readout over the core region (core lives on the core
+  // barrel in the new architecture, or on the vessel itself in legacy plants)
+  renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], (barrelTopY + barrelBottomY) / 2, view);
 }
 
 function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
@@ -4589,6 +4594,89 @@ function calculateBuildingWallThickness(
  * Draws the back wall like a tank, but positioned at the back of the footprint in world space.
  * Also draws a wall outline on top of the red dashed footprint.
  */
+/** Wall color for a building: steel/concrete blend by steelFraction */
+function buildingWallColor(building: BuildingComponent): { r: number; g: number; b: number } {
+  const steelFrac = building.steelFraction || 0.1;
+  const steelColor = { r: 100, g: 105, b: 115 };
+  const concreteColor = { r: 180, g: 175, b: 165 };
+  return {
+    r: Math.round(steelColor.r * steelFrac + concreteColor.r * (1 - steelFrac)),
+    g: Math.round(steelColor.g * steelFrac + concreteColor.g * (1 - steelFrac)),
+    b: Math.round(steelColor.b * steelFrac + concreteColor.b * (1 - steelFrac)),
+  };
+}
+
+/**
+ * Project the circle of radius r around pos at the given elevation to a
+ * screen-space ellipse. Uses the TRUE center and axis endpoints - never a
+ * centroid of projected bounding-box corners, which drifts as the
+ * (nonlinear) perspective projection changes with view angle.
+ */
+function projectCircleToEllipse(
+  worldToScreenFn: WorldToScreenFn,
+  pos: Point,
+  r: number,
+  elev: number
+): { cx: number; cy: number; rx: number; ry: number } {
+  const e = worldToScreenFn({ x: pos.x + r, y: pos.y }, elev);
+  const w = worldToScreenFn({ x: pos.x - r, y: pos.y }, elev);
+  const back = worldToScreenFn({ x: pos.x, y: pos.y + r }, elev);
+  const front = worldToScreenFn({ x: pos.x, y: pos.y - r }, elev);
+  return {
+    cx: (e.pos.x + w.pos.x) / 2,
+    cy: (back.pos.y + front.pos.y) / 2,
+    rx: Math.max(0, (e.pos.x - w.pos.x) / 2),
+    ry: Math.max(0, (front.pos.y - back.pos.y) / 2),
+  };
+}
+
+/** Horizontal gradient suggesting the curvature of a cylindrical wall */
+function buildingShellGradient(
+  ctx: CanvasRenderingContext2D,
+  wallColor: { r: number; g: number; b: number },
+  cx: number,
+  rx: number
+): CanvasGradient {
+  const grad = ctx.createLinearGradient(cx - rx, 0, cx + rx, 0);
+  const dark = `rgba(${Math.round(wallColor.r * 0.7)}, ${Math.round(wallColor.g * 0.7)}, ${Math.round(wallColor.b * 0.7)}, 0.65)`;
+  const light = `rgba(${Math.min(255, wallColor.r + 25)}, ${Math.min(255, wallColor.g + 25)}, ${Math.min(255, wallColor.b + 25)}, 0.65)`;
+  grad.addColorStop(0, dark);
+  grad.addColorStop(0.35, light);
+  grad.addColorStop(0.65, light);
+  grad.addColorStop(1, dark);
+  return grad;
+}
+
+/**
+ * Floor of a cylindrical building (the filled base ellipse). Drawn in an
+ * early ground pass so shadows, construction footprint outlines, and
+ * contained components all render on top of it; renderBuilding then draws
+ * only the wall band above it.
+ */
+export function renderBuildingFloor(
+  ctx: CanvasRenderingContext2D,
+  building: BuildingComponent,
+  worldToScreenFn: WorldToScreenFn
+): void {
+  if (building.shape !== 'cylinder') return;
+
+  const r = (building.diameter || 40) / 2;
+  const base = projectCircleToEllipse(worldToScreenFn, building.position, r, 0);
+  if (base.rx <= 0 || base.ry <= 0) return;
+
+  ctx.save();
+  const dpr = window.devicePixelRatio || 1;
+  ctx.resetTransform();
+  ctx.scale(dpr, dpr);
+
+  ctx.beginPath();
+  ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI * 2);
+  ctx.fillStyle = buildingShellGradient(ctx, buildingWallColor(building), base.cx, base.rx);
+  ctx.fill();
+
+  ctx.restore();
+}
+
 function renderBuilding(
   ctx: CanvasRenderingContext2D,
   building: BuildingComponent,
@@ -4645,46 +4733,30 @@ function renderBuilding(
       // projected bounding-box corners, which drifts as the (nonlinear)
       // perspective projection changes with view angle.
       const r = halfW;
-      const projectEllipse = (elev: number) => {
-        const e = worldToScreenFn({ x: pos.x + r, y: pos.y }, elev);
-        const w = worldToScreenFn({ x: pos.x - r, y: pos.y }, elev);
-        const back = worldToScreenFn({ x: pos.x, y: pos.y + r }, elev);
-        const front = worldToScreenFn({ x: pos.x, y: pos.y - r }, elev);
-        return {
-          cx: (e.pos.x + w.pos.x) / 2,
-          cy: (back.pos.y + front.pos.y) / 2,
-          rx: Math.max(0, (e.pos.x - w.pos.x) / 2),
-          ry: Math.max(0, (front.pos.y - back.pos.y) / 2),
-        };
-      };
-      const base = projectEllipse(0);
-      const top = projectEllipse(height);
+      const base = projectCircleToEllipse(worldToScreenFn, pos, r, 0);
+      const top = projectCircleToEllipse(worldToScreenFn, pos, r, height);
 
-      // Silhouette of the shell: up the left side, over the top rim, down
-      // the right side, back along the front half of the base ellipse
+      // Wall band of the shell: up the left side, over the top rim, down
+      // the right side, closed along the BACK arc of the base ellipse. The
+      // base ellipse interior (the floor) is excluded - it is drawn by
+      // renderBuildingFloor in an early ground pass so shadows, footprint
+      // outlines, and contained components appear on top of it.
       const shellPath = () => {
         ctx.beginPath();
         ctx.moveTo(base.cx - base.rx, base.cy);
         ctx.lineTo(top.cx - top.rx, top.cy);
         ctx.ellipse(top.cx, top.cy, top.rx, top.ry, 0, Math.PI, 2 * Math.PI, false);
         ctx.lineTo(base.cx + base.rx, base.cy);
-        ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI, false);
+        ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI, true);
         ctx.closePath();
       };
 
       // Backdrop fill: horizontal gradient suggests wall curvature
-      const grad = ctx.createLinearGradient(base.cx - base.rx, 0, base.cx + base.rx, 0);
-      const dark = `rgba(${Math.round(wallColor.r * 0.7)}, ${Math.round(wallColor.g * 0.7)}, ${Math.round(wallColor.b * 0.7)}, 0.65)`;
-      const light = `rgba(${Math.min(255, wallColor.r + 25)}, ${Math.min(255, wallColor.g + 25)}, ${Math.min(255, wallColor.b + 25)}, 0.65)`;
-      grad.addColorStop(0, dark);
-      grad.addColorStop(0.35, light);
-      grad.addColorStop(0.65, light);
-      grad.addColorStop(1, dark);
       shellPath();
-      ctx.fillStyle = grad;
+      ctx.fillStyle = buildingShellGradient(ctx, wallColor, base.cx, base.rx);
       ctx.fill();
 
-      // Interior (fluid or dark void), clipped to the shell silhouette
+      // Interior (fluid or dark void), clipped to the wall band
       const baseScale = worldToScreenFn({ x: pos.x, y: pos.y }, 0).scale;
       const wallPxScaled = wallPx * baseScale;
       ctx.save();
@@ -4693,7 +4765,7 @@ function renderBuilding(
       const innerX = base.cx - base.rx + wallPxScaled;
       const innerW = 2 * (base.rx - wallPxScaled);
       const innerY = top.cy - top.ry;
-      const innerH = base.cy + base.ry - innerY;
+      const innerH = base.cy - innerY;
       if (building.fluid) {
         const liquidFraction = getLiquidFraction(building, building.fluid, isSimulating);
         const separation = building.fluid.separation ?? 1;

@@ -291,10 +291,18 @@ export function updateDebugPanel(
       const rb = n.reactivityBreakdown;
 
       // Format reactivity components in pcm
+      const excessPcm = ((rb.excess ?? n.excessReactivity ?? 0) * 1e5).toFixed(1);
       const rodsPcm = (rb.controlRods * 1e5).toFixed(1);
       const dopplerPcm = (rb.doppler * 1e5).toFixed(1);
       const coolantTempPcm = (rb.coolantTemp * 1e5).toFixed(1);
       const coolantDensityPcm = (rb.coolantDensity * 1e5).toFixed(1);
+
+      // Feedback coefficients (lattice-derived when the core specifies its
+      // fuel design, otherwise preset/default values)
+      const dopplerCoeff = (n.fuelTempCoeff * 1e5).toFixed(2);
+      const coolantTempCoeff = (n.coolantTempCoeff * 1e5).toFixed(2);
+      const densityCoeff = (n.coolantDensityCoeff * 1e5).toFixed(2);
+      const rodWorthPcm = (n.controlRodWorth * 1e5).toFixed(0);
 
       // Diagnostic values
       const diag = n.diagnostics;
@@ -307,10 +315,11 @@ export function updateDebugPanel(
         <span class="debug-label">Core:</span> <span class="debug-value">${n.coreId}</span><br>
         <span class="debug-label">Power:</span> ${formatValue(powerPct, '%', 100, 120)}<br>
         <span class="debug-label">Reactivity:</span> ${formatValue(parseFloat(rhoDisplay), ' pcm')}<br>
-        <span class="debug-label" style="margin-left: 10px; color: #888;">Rods:</span> <span class="debug-value">${rodsPcm} pcm</span><br>
-        <span class="debug-label" style="margin-left: 10px; color: #888;">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C)<br>
-        <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C)<br>
-        <span class="debug-label" style="margin-left: 10px; color: #888;">Coolant ρ:</span> <span class="debug-value">${coolantDensityPcm} pcm</span> (ρ=${coolantRho}, ref=${refCoolantRho})<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Built-in enrichment margin after burnable poison, from the lattice model">Excess:</span> <span class="debug-value">${excessPcm} pcm</span><br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Total worth ${rodWorthPcm} pcm when fully inserted">Rods:</span> <span class="debug-value">${rodsPcm} pcm</span><br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Fuel temperature coefficient ${dopplerCoeff} pcm/K">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C, ${dopplerCoeff} pcm/K)<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Coolant temperature coefficient ${coolantTempCoeff} pcm/K">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C, ${coolantTempCoeff} pcm/K)<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Coolant density coefficient ${densityCoeff} pcm per kg/m³ — positive means voiding removes reactivity">Coolant ρ:</span> <span class="debug-value">${coolantDensityPcm} pcm</span> (ρ=${coolantRho}, ref=${refCoolantRho}, ${densityCoeff} pcm/(kg/m³))<br>
         <span class="debug-label">Precursors:</span> ${formatValue(n.precursorConcentration, '')}<br>
         <span class="debug-label">Rod insertion:</span> ${formatValue((1 - n.controlRodPosition) * 100, '%')}<br>
         <span class="debug-label">Decay heat:</span> ${formatValue(n.decayHeatFraction * 100, '%')}<br>
@@ -828,7 +837,11 @@ export function initDebugPanel(): void {
   if (toggleBtn && panel) {
     toggleBtn.addEventListener('click', () => {
       panel.classList.toggle('collapsed');
-      toggleBtn.textContent = panel.classList.contains('collapsed') ? 'Show' : 'Hide';
+      const collapsed = panel.classList.contains('collapsed');
+      toggleBtn.textContent = collapsed ? 'Show' : 'Hide';
+      // Signal layout state so the component detail dialog can take the
+      // right edge while the debug panel is collapsed (see style.css)
+      document.getElementById('app')?.classList.toggle('debug-collapsed', collapsed);
     });
   }
 

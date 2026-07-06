@@ -338,6 +338,25 @@ body {
   display: none;
 }
 
+/* Collapsed debug panel shrinks to a small chip so the top-right corner is
+   free for the component detail dialog */
+#debug-panel.collapsed {
+  width: auto;
+}
+
+#debug-panel.collapsed h4 {
+  margin-bottom: 0;
+  gap: 8px;
+}
+
+/* With the debug panel collapsed, the component detail dialog takes the
+   right edge (below the collapsed chip) instead of its usual spot to the
+   left of the full-width panel */
+#app.debug-collapsed #component-detail {
+  right: 10px;
+  top: 52px;
+}
+
 .debug-section {
   margin-bottom: 12px;
   padding-bottom: 8px;

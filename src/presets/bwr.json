@@ -16,7 +16,7 @@
     ["rv-1", {
       "id": "rv-1", "type": "reactorVessel", "label": "RPV",
       "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 0,
-      "innerDiameter": 5, "wallThickness": 0.17, "height": 20, "pressureRating": 90, "fillLevel": 0.7,
+      "innerDiameter": 5, "wallThickness": 0.17, "height": 20, "pressureRating": 120, "fillLevel": 0.6,
       "barrelDiameter": 4, "barrelThickness": 0.06, "barrelBottomGap": 1.5, "barrelTopGap": 8,
       "coreBarrelId": "cb-1",
       "ports": [
@@ -35,18 +35,20 @@
       "fuelRodCount": 8, "actualFuelRodCount": 47000, "fuelTemperature": 560, "fuelMeltingPoint": 2800,
       "activeFuelHeight": 3.7, "coreBottomElevation": 0.3,
       "controlRodCount": 4, "controlRodPosition": 0.85,
+      "initializeCritical": true, "excessReactivity": 0.035, "controlRodWorth": 0.12,
+      "coolantDensityCoeff": 0.00003,
       "ports": [
         {"id": "cb-1-inlet", "position": {"x": 0, "y": 3}, "direction": "both"},
         {"id": "cb-1-outlet", "position": {"x": 0, "y": -3}, "direction": "both"}
       ],
-      "fluid": {"temperature": 558, "pressure": 7200000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "fluid": {"temperature": 561, "pressure": 7200000, "phase": "two-phase", "quality": 0.01, "flowRate": 0},
       "nqa1": true, "containedBy": "rv-1"
     }],
     ["recirc-pump-1", {
       "id": "recirc-pump-1", "type": "pump", "label": "Recirculation Pump",
       "position": {"x": 46, "y": 88}, "rotation": 0, "elevation": 0,
-      "diameter": 0.6, "running": true, "speed": 1.0, "ratedFlow": 6000, "ratedHead": 30,
-      "pressureRating": 90,
+      "diameter": 0.6, "running": true, "speed": 1.0, "ratedFlow": 8000, "ratedHead": 80,
+      "pressureRating": 120,
       "orientation": "left-right",
       "ports": [
         {"id": "recirc-pump-1-inlet", "position": {"x": -0.4, "y": 0}, "direction": "in"},
@@ -59,8 +61,8 @@
       "id": "turbine-1", "type": "turbine-generator", "label": "Turbine-Generator",
       "position": {"x": 75, "y": 75}, "rotation": 0, "elevation": 0,
       "width": 15, "height": 4, "orientation": "left-right", "stages": 1,
-      "running": true, "power": 0, "ratedPower": 330000000, "ratedSteamFlow": 650,
-      "efficiency": 0.85, "governorValve": 1.0, "generatorEfficiency": 0.98,
+      "running": true, "power": 0, "ratedPower": 330000000, "ratedSteamFlow": 800,
+      "efficiency": 0.85, "governorValve": 0.85, "generatorEfficiency": 0.98,
       "ports": [
         {"id": "inlet", "position": {"x": -7.5, "y": 0}, "direction": "in"},
         {"id": "outlet", "position": {"x": 7.5, "y": 0}, "direction": "out"}
@@ -97,7 +99,7 @@
     ["fw-pump-1", {
       "id": "fw-pump-1", "type": "pump", "label": "Feedwater Pump",
       "position": {"x": 78, "y": 82}, "rotation": 0, "elevation": 0,
-      "diameter": 0.4, "running": true, "speed": 1.0, "ratedFlow": 450, "ratedHead": 800,
+      "diameter": 0.4, "running": true, "speed": 0.85, "ratedFlow": 450, "ratedHead": 1600,
       "pressureRating": 120,
       "orientation": "left-right",
       "ports": [
@@ -117,17 +119,70 @@
       ],
       "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true
+    }],
+    ["ctl-scram-1", {
+      "id": "ctl-scram-1", "type": "controller", "controllerType": "scram", "label": "Reactor Protection (SCRAM)",
+      "position": {"x": 20, "y": 75}, "rotation": 0, "elevation": 0,
+      "width": 2, "height": 2, "ports": [],
+      "connectedCoreId": "cb-1",
+      "setpoints": {"highPower": 125, "lowPower": 2, "highFuelTemp": 0.95, "lowCoolantFlow": 10}
+    }],
+    ["ctl-rods-1", {
+      "id": "ctl-rods-1", "type": "controller", "controllerType": "pid", "label": "Rod Control (Power)",
+      "position": {"x": 20, "y": 60}, "rotation": 0, "elevation": 0,
+      "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "reactor-power", "targetId": ""},
+        "setpoint": 1.0,
+        "actuator": {"kind": "control-rods", "targetId": "", "min": 0, "max": 1, "rateLimit": 0.003}
+      }
+    }],
+    ["ctl-gov-1", {
+      "id": "ctl-gov-1", "type": "controller", "controllerType": "pid", "label": "Dome Pressure (Governor)",
+      "position": {"x": 20, "y": 63}, "rotation": 0, "elevation": 0,
+      "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-pressure", "targetId": "rv-1"},
+        "setpoint": 7200000,
+        "invert": true,
+        "aggressiveness": 6,
+        "actuator": {"kind": "governor-valve", "targetId": "turbine-1", "min": 0.02, "max": 1, "rateLimit": 0.2}
+      }
+    }],
+    ["ctl-rvl-1", {
+      "id": "ctl-rvl-1", "type": "controller", "controllerType": "pid", "label": "RPV Level (3-elem FW)",
+      "position": {"x": 20, "y": 66}, "rotation": 0, "elevation": 0,
+      "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-level", "targetId": "rv-1"},
+        "setpoint": 10,
+        "feedforward": {"kind": "connection-flow", "targetId": "flow-rv-1-turbine-1"},
+        "actuator": {"kind": "pump-speed", "targetId": "fw-pump-1", "min": 0.5, "max": 1, "rateLimit": 0.03}
+      }
+    }],
+    ["ctl-hwl-1", {
+      "id": "ctl-hwl-1", "type": "controller", "controllerType": "pid", "label": "Hotwell Level (Cond Pump)",
+      "position": {"x": 20, "y": 69}, "rotation": 0, "elevation": 0,
+      "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-level", "targetId": "condenser-1"},
+        "setpoint": 0.5,
+        "invert": true,
+        "actuator": {"kind": "pump-speed", "targetId": "cond-pump-1", "min": 0.05, "max": 1, "rateLimit": 0.1}
+      }
     }]
   ],
   "connections": [
     {"fromComponentId": "rv-1", "fromPortId": "rv-1-recirc-out", "toComponentId": "recirc-pump-1", "toPortId": "recirc-pump-1-inlet",
-     "fromElevation": 1, "toElevation": 0, "flowArea": 0.45, "length": 5},
+     "fromElevation": 1, "toElevation": 0, "flowArea": 0.45, "length": 5, "resistanceCoeff": 10, "initialFlowRate": 3800},
     {"fromComponentId": "recirc-pump-1", "fromPortId": "recirc-pump-1-outlet", "toComponentId": "cb-1", "toPortId": "cb-1-inlet",
-     "fromElevation": 0, "toElevation": 0, "flowArea": 0.5, "length": 3},
+     "fromElevation": 0, "toElevation": 0, "flowArea": 0.5, "length": 3, "resistanceCoeff": 10, "initialFlowRate": 3800},
     {"fromComponentId": "cb-1", "fromPortId": "cb-1-outlet", "toComponentId": "rv-1", "toPortId": "rv-1-core-return",
-     "fromElevation": 6, "toElevation": 10, "flowArea": 8, "length": 3},
+     "fromElevation": 6, "toElevation": 10, "flowArea": 2, "length": 3, "resistanceCoeff": 50, "initialFlowRate": 3800,
+     "fromPhaseTolerance": 3},
     {"fromComponentId": "rv-1", "fromPortId": "rv-1-steam", "toComponentId": "turbine-1", "toPortId": "inlet",
-     "fromElevation": 18, "toElevation": 0, "flowArea": 0.045, "length": 25},
+     "fromElevation": 18, "toElevation": 0, "flowArea": 0.045, "length": 25, "initialFlowRate": 380,
+     "fromPhaseTolerance": 0.5},
     {"fromComponentId": "turbine-1", "fromPortId": "outlet", "toComponentId": "condenser-1", "toPortId": "condenser-1-inlet",
      "fromElevation": 0, "toElevation": 5, "flowArea": 0.35, "length": 5},
     {"fromComponentId": "condenser-1", "fromPortId": "condenser-1-bottom", "toComponentId": "cond-pump-1", "toPortId": "cond-pump-1-inlet",

@@ -211,12 +211,30 @@ function logSimState(state: SimulationState): void {
     );
   }
 
+  // Log actuator positions (governor valves, pump speeds, controller outputs)
+  for (const [nodeId, node] of state.flowNodes) {
+    if (node.governorValve !== undefined) {
+      console.log(`governor ${nodeId}: ${node.governorValve.toFixed(3)}`);
+    }
+  }
+  if (state.components.pumps) {
+    for (const [id, pump] of state.components.pumps) {
+      console.log(`pump ${id}: speed=${pump.speed.toFixed(3)}`);
+    }
+  }
+  if (state.components.controllers) {
+    for (const [id, ctl] of state.components.controllers) {
+      console.log(`controller ${id}: out=${ctl.lastOutput.toFixed(4)} err=${ctl.lastError.toExponential(2)}`);
+    }
+  }
+
   // Log flows
   if (state.flowConnections.length > 0) {
     console.log('\nFlows:');
     for (const conn of state.flowConnections) {
       if (Math.abs(conn.massFlowRate) > 0.001) {
-        console.log(`  ${conn.fromNodeId} -> ${conn.toNodeId}: ${conn.massFlowRate.toFixed(3)} kg/s`);
+        const phase = (conn as any).currentFlowPhase;
+        console.log(`  ${conn.fromNodeId} -> ${conn.toNodeId}: ${conn.massFlowRate.toFixed(3)} kg/s${phase ? ` [${phase}]` : ''}`);
       }
     }
   }

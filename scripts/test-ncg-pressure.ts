@@ -57,7 +57,7 @@ function createTestState(flowNode: FlowNode): SimulationState {
       scrammed: false,
       scramTime: 0,
       scramReason: '',
-      reactivityBreakdown: { controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
+      reactivityBreakdown: { excess: 0, controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
       diagnostics: { fuelTemp: 900, coolantTemp: 580, coolantDensity: 700 },
     },
     components: {

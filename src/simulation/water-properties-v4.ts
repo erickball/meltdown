@@ -116,6 +116,19 @@ interface SpatialIndex {
 
 let spatialIndex: SpatialIndex | null = null;
 
+// Hot edge of the vapor/supercritical grid: for each logV cell, the grid
+// point with the highest internal energy. Used to anchor the superheated
+// extrapolation (see superheatedVaporExtrapolation) so states hotter than
+// the table's coverage extend continuously instead of throwing.
+interface VaporHotEdgePoint {
+  cellX: number;   // logV cell index
+  logV: number;    // log10(v) of the edge point
+  u: number;       // J/kg
+  T_K: number;
+  P_Pa: number;
+}
+let vaporHotEdge: VaporHotEdgePoint[] = [];
+
 // Saturation curve in (v, u) space - single continuous curve from liquid to vapor
 // Sorted by v (ascending). Built at initialization from raw saturation data.
 interface SaturationCurvePoint {
@@ -974,6 +987,19 @@ function buildSpatialIndex(): void {
 
   console.log(`[WaterProps v4] Spatial index built: ${spatialIndex.liquidPoints.length} liquid, ` +
     `${spatialIndex.vaporPoints.length} vapor, ${spatialIndex.supercriticalPoints.length} supercritical`);
+
+  // Build the hot edge of the vapor/supercritical grid: max-u point per logV cell
+  const edgeByCell = new Map<number, VaporHotEdgePoint>();
+  for (const pt of [...spatialIndex.vaporPoints, ...spatialIndex.supercriticalPoints]) {
+    const logV = Math.log10(pt.v);
+    const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
+    const u_J = pt.u * 1000;
+    const existing = edgeByCell.get(cellX);
+    if (!existing || u_J > existing.u) {
+      edgeByCell.set(cellX, { cellX, logV, u: u_J, T_K: pt.T_K, P_Pa: pt.P_MPa * 1e6 });
+    }
+  }
+  vaporHotEdge = Array.from(edgeByCell.values()).sort((a, b) => a.cellX - b.cellX);
 }
 
 // ============================================================================
@@ -1527,6 +1553,80 @@ export function criticalPressureRatio(state: WaterState): number {
  *   - T = T_sat + (u - u_g) / cv
  *   - P = Z * rho * R * T, where Z is calibrated to match P_sat at the boundary
  */
+// Rate limiter for the superheated-extrapolation notice (wall-clock ms)
+let lastSuperheatWarn = 0;
+
+/**
+ * Extrapolate vapor properties for states HOTTER than the steam table grid
+ * covers at a given specific volume (e.g. severely superheated steam after a
+ * reactivity excursion). Steam far above saturation behaves close to an
+ * ideal gas, so we anchor at the grid's hot edge for this v and extend at
+ * constant volume:
+ *
+ *   T from u:  u - u_edge = integral of cv(T) dT with cv(T) = CV_A + CV_B*T
+ *              (ideal-gas cv of steam: ~1630 J/kg-K at 600 K rising to
+ *               ~2100 J/kg-K at 1500 K)
+ *   P from T:  P = Z_edge * R * T / v  (constant volume, compressibility
+ *              frozen at the edge value so the seam is exactly continuous)
+ *
+ * Returns null if the state is NOT beyond the hot edge (i.e. the grid miss
+ * has some other cause and the caller should fail loudly as usual).
+ */
+function superheatedVaporExtrapolation(u: number, v: number): { T: number; P: number } | null {
+  if (vaporHotEdge.length === 0) return null;
+
+  const logV = Math.log10(v);
+
+  // Locate the edge entries bracketing this logV; require the query to be
+  // within (or very near) the grid's v coverage - one cell of slack.
+  const first = vaporHotEdge[0];
+  const last = vaporHotEdge[vaporHotEdge.length - 1];
+  if (logV < first.logV - GRID_CELL_SIZE_LOGV || logV > last.logV + GRID_CELL_SIZE_LOGV) {
+    return null;
+  }
+
+  let lo = first;
+  let hi = last;
+  for (let i = 0; i < vaporHotEdge.length; i++) {
+    if (vaporHotEdge[i].logV <= logV) lo = vaporHotEdge[i];
+    if (vaporHotEdge[i].logV >= logV) { hi = vaporHotEdge[i]; break; }
+  }
+
+  // Interpolate the edge state at this v (linear in logV; T and ln P vary
+  // smoothly along the edge)
+  const span = hi.logV - lo.logV;
+  const t = span > 1e-12 ? Math.max(0, Math.min(1, (logV - lo.logV) / span)) : 0;
+  const u_edge = lo.u + t * (hi.u - lo.u);
+  const T_edge = lo.T_K + t * (hi.T_K - lo.T_K);
+  const P_edge = Math.exp(Math.log(lo.P_Pa) + t * (Math.log(hi.P_Pa) - Math.log(lo.P_Pa)));
+
+  if (u <= u_edge) return null; // not a hot-side miss
+
+  // Temperature from energy with linearly temperature-dependent cv
+  const CV_A = 1300;   // J/(kg·K)
+  const CV_B = 0.55;   // J/(kg·K²)
+  // u - u_edge = CV_A*(T - T_edge) + CV_B/2*(T² - T_edge²)  -> quadratic in T
+  const rhs = (u - u_edge) + CV_A * T_edge + 0.5 * CV_B * T_edge * T_edge;
+  const T = (-CV_A + Math.sqrt(CV_A * CV_A + 2 * CV_B * rhs)) / CV_B;
+
+  // Pressure at constant volume with compressibility anchored at the edge
+  const Z_edge = (P_edge * v) / (R_WATER * T_edge);
+  const P = Z_edge * R_WATER * T / v;
+
+  const now = Date.now();
+  if (now - lastSuperheatWarn > 1000) {
+    lastSuperheatWarn = now;
+    console.warn(
+      `[WaterProps v4] Superheated vapor beyond steam-table grid - using ideal-gas ` +
+      `extrapolation: u=${(u / 1e3).toFixed(0)} kJ/kg, v=${(v * 1e6).toFixed(0)} mL/kg ` +
+      `-> T=${(T - 273.15).toFixed(0)}°C, P=${(P / 1e5).toFixed(1)} bar ` +
+      `(grid edge: ${(T_edge - 273.15).toFixed(0)}°C)`
+    );
+  }
+
+  return { T, P };
+}
+
 function idealGasApproximation(u: number, v: number): { T: number; P: number } {
   const rho = 1 / v;
   const cv_steam = 1500;  // J/(kg·K) - approximate cv for superheated steam
@@ -1902,20 +2002,29 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       calculationPath = 'vapor_grid';
     } else {
       // ========================================================================
-      // DO NOT ADD A FALLBACK HERE
+      // DO NOT ADD A FALLBACK HERE (beyond the two physical extensions below)
       // ========================================================================
-      // If vapor grid interpolation fails, the simulation has produced a state
-      // that is outside the valid range of our steam table data.
+      // If vapor grid interpolation fails, the state is outside the steam
+      // table's coverage. Only TWO extensions are physically legitimate:
+      //
+      // 1. HOTTER than the grid's hot edge at this v (severely superheated
+      //    steam, e.g. after a reactivity excursion): steam approaches ideal
+      //    gas - extrapolate anchored at the grid edge (approved with user).
+      // 2. Very low density vapor (v > 100 m³/kg), physically outside the
+      //    steam table range: ideal gas.
       //
       // DO NOT use "near saturation" approximations.
       // DO NOT use ideal gas for states that should be in the grid.
-      //
-      // The ONLY acceptable use of ideal gas is for very low density vapor
-      // (v > 100 m³/kg) which is physically outside the steam table range.
+      // Anything else means broken mass/energy bookkeeping - fail loudly.
       // ========================================================================
 
+      const superheated = superheatedVaporExtrapolation(u, v);
       const v_g_max = 206;  // m³/kg at triple point
-      if (v > v_g_max * 0.5) {
+      if (superheated) {
+        T = superheated.T;
+        P = superheated.P;
+        calculationPath = 'vapor_superheat_extrapolation';
+      } else if (v > v_g_max * 0.5) {
         // Very low density vapor - use ideal gas approximation
         const idealResult = idealGasApproximation(u, v);
         T = idealResult.T;
@@ -1924,7 +2033,8 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       } else {
         throw new Error(
           `[WaterProps v4] Vapor grid interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³. ` +
-          `This state is outside the valid range of the steam table grid. ` +
+          `This state is outside the valid range of the steam table grid ` +
+          `(and not beyond its hot edge, so this is not a superheat miss). ` +
           `Check simulation mass/energy balance.`
         );
       }
@@ -1937,7 +2047,10 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   if (P < minPressure || P > P_CRIT * 10) {
     throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
   }
-  if (T < T_TRIPLE || T > 3000) {
+  // Ceiling admits severe-accident superheat (steam near molten fuel). Above
+  // ~2500K dissociation makes the ideal-gas extension overestimate T, which
+  // is qualitatively acceptable for the sandbox; NaN/divergence still throws.
+  if (T < T_TRIPLE || T > 5000) {
     throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);
   }
 

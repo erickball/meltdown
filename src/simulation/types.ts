@@ -316,6 +316,7 @@ export interface NeutronicsState {
 
   // Reactivity breakdown (for debugging)
   reactivityBreakdown: {
+    excess: number;                 // Built-in excess (enrichment margin after poisoning)
     controlRods: number;            // Reactivity from control rods
     doppler: number;                // Fuel temperature feedback
     coolantTemp: number;            // Coolant temperature feedback

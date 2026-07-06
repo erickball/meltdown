@@ -204,7 +204,7 @@ function init() {
       scrammed: false,
       scramTime: 0,
       scramReason: '',
-      reactivityBreakdown: { controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
+      reactivityBreakdown: { excess: 0, controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
       diagnostics: { fuelTemp: 0, coolantTemp: 0, coolantDensity: 0 },
     },
     components: {
@@ -1899,6 +1899,7 @@ function init() {
 
       // Enable construction mode visuals (grid, outlines)
       plantCanvas.setConstructionMode(true);
+      plantCanvas.setMoveMode(constructionSubMode === 'move');
 
       // Pause simulation
       gameLoop.pause();
@@ -1919,6 +1920,7 @@ function init() {
 
       // Disable construction mode visuals
       plantCanvas.setConstructionMode(false);
+      plantCanvas.setMoveMode(false);
 
       // Clear component selection
       selectedComponentType = null;
@@ -2032,6 +2034,7 @@ function init() {
   let movingComponent: PlantComponent | null = null;
   let moveStartOffset = { x: 0, y: 0 };
   let isDraggingComponent = false;
+  let moveMouseDownPos = { x: 0, y: 0 }; // to distinguish a click from a drag
   // For pipes: which end is being dragged ('start', 'end', or 'both')
   let pipeDragMode: 'start' | 'end' | 'both' = 'both';
   // For pipes: offset from end position when dragging 'end'
@@ -2184,6 +2187,7 @@ function init() {
       // Start dragging this component
       movingComponent = component;
       isDraggingComponent = true;
+      moveMouseDownPos = { x, y };
 
       // Calculate offset from component position to click point
       const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
@@ -2236,7 +2240,17 @@ function init() {
   // Mouse up handler for ending drag in move mode
   canvas.addEventListener('mouseup', (e) => {
     if (isDraggingComponent && movingComponent) {
-      showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
+      // A press-and-release without movement is a click: select instead of move
+      const upRect = canvas.getBoundingClientRect();
+      const dragDist = Math.hypot(
+        e.clientX - upRect.left - moveMouseDownPos.x,
+        e.clientY - upRect.top - moveMouseDownPos.y
+      );
+      if (dragDist < 4) {
+        plantCanvas.selectComponent(movingComponent.id);
+      } else {
+        showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
+      }
       movingComponent = null;
       isDraggingComponent = false;
       moveStartOffset = { x: 0, y: 0 };
@@ -2509,6 +2523,10 @@ function init() {
 
     // Show ports when in connect mode
     plantCanvas.setShowPorts(mode === 'connect');
+
+    // In move mode the canvas must not select on mousedown (it's the start
+    // of a click-and-drag; selection happens on mouseup without movement)
+    plantCanvas.setMoveMode(mode === 'move');
 
     // Update UI visibility
     if (connectionInfo) {

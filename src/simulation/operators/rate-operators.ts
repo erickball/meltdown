@@ -549,10 +549,16 @@ export class NeutronicsRateOperator implements RateOperator {
       // Power follows equilibrium with precursors
       const N_eq = lambda * Lambda * C / subcriticalMargin;
 
-      // Rate of power change = rate of approach to equilibrium
-      // Use a relaxation timescale based on precursor decay
-      // This gives smooth behavior without the stiff prompt response
-      const tau_relax = 1.0 / lambda; // ~10 seconds, same as precursor timescale
+      // Rate of power change = rate of approach to equilibrium. Physically
+      // this IS the prompt jump - timescale Λ/(β-ρ), sub-millisecond - so N
+      // should snap to N_eq essentially instantly. Cap the relaxation at
+      // 50 ms so the adaptive step controller can resolve it instead of
+      // integrating a stiff sub-ms mode. Do NOT slow this to the precursor
+      // timescale (1/λ ~ 12 s): a quenched power excursion would then
+      // "coast" at GW-scale fission power for tens of seconds, releasing
+      // orders of magnitude more energy than the physics allows.
+      const tau_prompt = Lambda / subcriticalMargin;
+      const tau_relax = Math.max(0.05, tau_prompt);
       dN_dt = (N_eq - N) / tau_relax;
     } else {
       // Near critical or supercritical: use analytical solution
@@ -781,7 +787,22 @@ export class NeutronicsRateOperator implements RateOperator {
     // in both directions. 0 (default) preserves legacy behavior.
     const rhoExcess = n.excessReactivity ?? 0;
 
-    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+
+    // Store diagnostics on the evaluated state so displays and logs see the
+    // live reactivity (rate operators otherwise never write state, and
+    // n.reactivity would stay frozen at its initial value forever).
+    n.reactivity = rho;
+    n.reactivityBreakdown = {
+      excess: rhoExcess,
+      controlRods: rhoRods,
+      doppler: rhoDoppler,
+      coolantTemp: rhoCoolantTemp,
+      coolantDensity: rhoCoolantDensity,
+    };
+    n.diagnostics = { fuelTemp, coolantTemp, coolantDensity };
+
+    return rho;
   }
 
   private getAverageFuelTemperature(state: SimulationState, n: any): number {
@@ -891,9 +912,10 @@ export class FlowRateOperator implements RateOperator {
       // This prevents unrealistic phase separation when flow exceeds what the
       // interface can supply. (Approved fallback - discussed with user)
       //
-      // Conservative limit: 2x per second max drain rate for a single phase.
-      // At typical timesteps of 1-10ms, this means we'd drain 0.2-2% per step,
-      // which is reasonable. At extreme 100ms timesteps, we'd drain 20% max.
+      // Conservative limit: 10x per second max drain rate for a single phase.
+      // This is deliberately a last-resort backstop, not a physical model -
+      // real volumes can drain fast, and phase replenishment (boiling,
+      // flashing) is already part of the energy bookkeeping.
       // If drain rate exceeds this, switch to mixture mode which draws from
       // the whole mass proportionally.
       if (upstreamNode.fluid.phase === 'two-phase' && flowPhase !== 'mixture') {
@@ -2037,7 +2059,7 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
 
       // Sanity checks - log warnings but do NOT clamp values
       // Clamping hides problems; we need to see what's causing invalid states
-      if (!isFinite(flowNode.fluid.temperature) || flowNode.fluid.temperature < 200 || flowNode.fluid.temperature > 2000) {
+      if (!isFinite(flowNode.fluid.temperature) || flowNode.fluid.temperature < 200 || flowNode.fluid.temperature > 4500) {
         console.warn(`[FluidState] Invalid temperature in ${nodeId}: ${flowNode.fluid.temperature}K, mass=${flowNode.fluid.mass.toFixed(1)}kg, U=${(flowNode.fluid.internalEnergy/1e6).toFixed(2)}MJ`);
       }
       // Triple point pressure is 611.657 Pa - warn if we get close to or below it

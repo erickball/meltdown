@@ -115,6 +115,7 @@ function createDefaultNeutronics(): NeutronicsState {
     scramTime: -1,
     scramReason: '',
     reactivityBreakdown: {
+      excess: 0,
       controlRods: 0,
       doppler: 0,
       coolantTemp: 0,
@@ -1562,24 +1563,24 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
       // Use fluid from component or default to typical PWR conditions
       const pressure = Math.max(barrel.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
-      const fillLevel = 1.0; // Core region is typically full
 
       let fluid: FluidState;
 
-      if (fillLevel >= 0.999) {
+      const initQuality = barrel.fluid?.quality ?? 0;
+      if (barrel.fluid?.phase === 'two-phase' && initQuality > 0) {
+        // Boiling core (e.g. BWR): initialize at saturation with the specified
+        // steam quality so the equilibrium void content is present from t=0.
+        // Critical initialization anchors density feedback to this state, so
+        // starting a boiling core liquid-full would insert several dollars of
+        // negative reactivity as soon as operating voids develop.
+        const quality = initQuality;
+        const temp = Water.saturationTemperature(pressure);
+        console.log(`[Factory] CoreBarrel ${component.id}: creating TWO-PHASE state: P=${(pressure/1e5).toFixed(1)} bar, quality=${quality.toFixed(4)}`);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, coreVolume);
+      } else {
         const temp = barrel.fluid?.temperature || 580; // Slightly hotter than inlet
         console.log(`[Factory] CoreBarrel ${component.id}: creating LIQUID state at ${pressure/1e5} bar, ${temp}K`);
         fluid = createFluidState(temp, pressure, 'liquid', 0, coreVolume);
-      } else {
-        const temp = Water.saturationTemperature(pressure);
-        const rho_f = Water.saturatedLiquidDensity(temp);
-        const rho_g = Water.saturatedVaporDensity(temp);
-        const m_liquid = rho_f * fillLevel * coreVolume;
-        const m_vapor = rho_g * (1 - fillLevel) * coreVolume;
-        const totalMass = m_liquid + m_vapor;
-        const quality = m_vapor / totalMass;
-        console.log(`[Factory] CoreBarrel ${component.id}: creating TWO-PHASE state: P=${(pressure/1e5).toFixed(1)} bar, quality=${quality.toFixed(4)}`);
-        fluid = createFluidState(temp, pressure, 'two-phase', quality, coreVolume);
       }
 
       return {
@@ -1926,6 +1927,29 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     (delayedNeutronFraction * (power / nominalPower)) /
     (precursorDecayConstant * promptNeutronLifetime);
 
+  // Evaluate the reactivity breakdown at the initial state (same expressions
+  // as NeutronicsRateOperator.computeTotalReactivity) so the debug display
+  // shows real values at t=0 instead of placeholder zeros. The rate operator
+  // overwrites these on the first solver step.
+  const fuelTempCoeff = vessel.fuelTempCoeff ?? derivedCoeffs?.fuelTempCoeff ?? -2.5e-5;
+  const coolantTempCoeff = vessel.coolantTempCoeff ?? derivedCoeffs?.coolantTempCoeff ?? -1e-5;
+  const coolantDensityCoeff = vessel.coolantDensityCoeff ?? derivedCoeffs?.coolantDensityCoeff ?? 0.001;
+  const initFuelTemp = fuelNode?.temperature ?? refFuelTemp;
+  const initCoolantTemp = coolantNode?.fluid.temperature ?? refCoolantTemp;
+  const initCoolantDensity = coolantNode
+    ? coolantNode.fluid.mass / coolantNode.volume
+    : refCoolantDensity;
+  const initBreakdown = {
+    excess: excessReactivity,
+    controlRods: -controlRodWorth * (1 - rodPosition),
+    doppler: fuelTempCoeff * (initFuelTemp - refFuelTemp),
+    coolantTemp: coolantTempCoeff * (initCoolantTemp - refCoolantTemp),
+    coolantDensity: coolantDensityCoeff * (initCoolantDensity - refCoolantDensity),
+  };
+  const initReactivity =
+    initBreakdown.excess + initBreakdown.controlRods + initBreakdown.doppler +
+    initBreakdown.coolantTemp + initBreakdown.coolantDensity;
+
   return {
     // Link to this specific core
     coreId: component.id,
@@ -1934,14 +1958,14 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
 
     power,
     nominalPower,
-    reactivity: 0,
+    reactivity: initReactivity,
     promptNeutronLifetime,
     delayedNeutronFraction,
     precursorConcentration,
     precursorDecayConstant,
-    fuelTempCoeff: vessel.fuelTempCoeff ?? derivedCoeffs?.fuelTempCoeff ?? -2.5e-5,
-    coolantTempCoeff: vessel.coolantTempCoeff ?? derivedCoeffs?.coolantTempCoeff ?? -1e-5,
-    coolantDensityCoeff: vessel.coolantDensityCoeff ?? derivedCoeffs?.coolantDensityCoeff ?? 0.001,
+    fuelTempCoeff,
+    coolantTempCoeff,
+    coolantDensityCoeff,
     refFuelTemp,
     refCoolantTemp,
     refCoolantDensity,
@@ -1960,16 +1984,11 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     scrammed: false,
     scramTime: -1,
     scramReason: '',
-    reactivityBreakdown: {
-      controlRods: 0,
-      doppler: 0,
-      coolantTemp: 0,
-      coolantDensity: 0,
-    },
+    reactivityBreakdown: initBreakdown,
     diagnostics: {
-      fuelTemp: refFuelTemp,
-      coolantTemp: refCoolantTemp,
-      coolantDensity: refCoolantDensity,
+      fuelTemp: initFuelTemp,
+      coolantTemp: initCoolantTemp,
+      coolantDensity: initCoolantDensity,
     },
   };
 }
@@ -2223,7 +2242,10 @@ function createFlowConnectionFromPlantConnection(
     // a real design lever - the default 5 costs a PWR primary loop ~30% of
     // its rated flow), default 5.
     resistanceCoeff: (connection as any).resistanceCoeff ?? 5,
-    massFlowRate: 0, // Start at zero
+    // Initial flow (kg/s): lets a preset start with its loops already
+    // circulating instead of slamming from zero, which matters for cores
+    // whose reactivity feedback depends on the flow-dependent void state.
+    massFlowRate: (connection as any).initialFlowRate ?? 0,
     inertance: length / flowArea,
   };
 }

@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -131,14 +131,14 @@ export class PlantCanvas {
 
     if (e.button === 0) { // Left click
       if (clickedComponent) {
+        // In move mode, mousedown is the start of a click-and-drag, not a
+        // selection: the construction-mode move handler (main.ts) owns the
+        // drag, and selection happens on mouseup if the mouse didn't move.
+        if (this.moveMode) {
+          return;
+        }
         this.selectedComponentId = clickedComponent.id;
         this.onComponentSelect?.(clickedComponent.id);
-
-        // In move mode, start dragging the component
-        if (this.moveMode) {
-          this.isMovingComponent = true;
-          this.dragStart = { x, y };
-        }
       } else {
         // Start panning (only if not in move mode, or nothing selected)
         this.isDragging = true;
@@ -535,18 +535,34 @@ export class PlantCanvas {
         { x: backLeft.x, y: visualBottom },   // bottom-left
       ];
     } else {
-      // Other components: translateX = frontCenterX, translateY = frontCenterY - visualHalfH
-      // Visual center is at (frontCenterX, frontCenterY - visualHalfH)
-      // Visual spans from center ± visualHalfW/H
-      const frontCenterX = (frontLeft.x + frontRight.x) / 2;
-      const frontCenterY = (frontLeft.y + frontRight.y) / 2;
-      const visualHalfW = halfW * projectedZoom;
-      const visualCenterY = frontCenterY - visualHalfH;
+      // Other components: mirror the draw path exactly (see the render loop):
+      // project the component CENTER at its elevation, zoom from the center
+      // scale, verticalScale on the height, visual center one half-height
+      // above the projected point, then screen-space rotation (pumps mirror
+      // instead of rotating).
+      const centerScreen = this.worldToScreenPerspective(
+        { x: component.position.x, y: component.position.y },
+        elevation
+      );
+      if (centerScreen.scale <= 0) return false;
+      const { verticalScale } = this.getViewTransform();
+      const centerZoom = centerScreen.scale * 50;
+      const visualHalfW = halfW * centerZoom;
+      const centerVisualHalfH = halfH * centerZoom * verticalScale;
+      const cx = centerScreen.pos.x;
+      const cy = centerScreen.pos.y - centerVisualHalfH;
+      const rot = component.type === 'pump' ? 0 : component.rotation;
+      const rc = Math.cos(rot);
+      const rs = Math.sin(rot);
+      const corner = (sx: number, sy: number): Point => ({
+        x: cx + sx * rc - sy * rs,
+        y: cy + sx * rs + sy * rc,
+      });
       visualQuad = [
-        { x: frontCenterX - visualHalfW, y: visualCenterY - visualHalfH },  // top-left
-        { x: frontCenterX + visualHalfW, y: visualCenterY - visualHalfH },  // top-right
-        { x: frontCenterX + visualHalfW, y: visualCenterY + visualHalfH },  // bottom-right
-        { x: frontCenterX - visualHalfW, y: visualCenterY + visualHalfH },  // bottom-left
+        corner(-visualHalfW, -centerVisualHalfH),  // top-left
+        corner(visualHalfW, -centerVisualHalfH),   // top-right
+        corner(visualHalfW, centerVisualHalfH),    // bottom-right
+        corner(-visualHalfW, centerVisualHalfH),   // bottom-left
       ];
     }
 
@@ -1261,6 +1277,18 @@ export class PlantCanvas {
     // Draw shadows first (if isometric)
     // Shadows are computed in world space using 3D ray-plane intersection
     if (this.isometric.enabled) {
+      // Building floors go first, directly on the ground: shadows,
+      // construction footprint outlines, and components all draw on top
+      for (const component of sortedComponents) {
+        if (component.type === 'building') {
+          renderBuildingFloor(
+            ctx,
+            component as import('../types').BuildingComponent,
+            (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
+          );
+        }
+      }
+
       // Sun direction vector (direction light travels, from sun toward ground)
       // Sun at 45 degrees elevation, behind objects and slightly to the left
       const sunElevation = 45 * Math.PI / 180; // 45 degrees above horizon
@@ -2686,6 +2714,11 @@ export class PlantCanvas {
   public clearSelection(): void {
     this.selectedComponentId = null;
     this.onComponentSelect?.(null);
+  }
+
+  public selectComponent(id: string): void {
+    this.selectedComponentId = id;
+    this.onComponentSelect?.(id);
   }
 
   public setMoveMode(enabled: boolean): void {

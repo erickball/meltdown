@@ -632,13 +632,16 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
       return { safe: false, reason: `${id}: Negative internal energy` };
     }
 
-    // Check specific volume isn't astronomically high (indicates near-vacuum)
-    // At 0.1 kg in 100 m³, v = 1,000,000 mL/kg which is far beyond any valid state
+    // Check specific volume isn't astronomically high (indicates near-vacuum
+    // divergence). The threshold must sit well ABOVE physically reachable
+    // states: saturated vapor at the triple point is 206 m³/kg (2.06e8 mL/kg)
+    // and a steam node blowing down to condenser vacuum routinely passes
+    // 10-40 m³/kg - the low-density ideal-gas path resolves those fine.
     // For nodes with NCG (like buildings with air), use total mass (steam + NCG)
     const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
     const totalMass = node.fluid.mass + ncgMass;
     const v_mLkg = (node.volume / totalMass) * 1e6; // m³/kg to mL/kg
-    if (v_mLkg > 1e7) { // 10 million mL/kg is way beyond any physical state
+    if (v_mLkg > 1e9) { // 1000 m³/kg - far beyond the triple-point vapor line
       return { safe: false, reason: `${id}: Specific volume too high (${v_mLkg.toExponential(2)} mL/kg) - near vacuum` };
     }
 
@@ -797,10 +800,12 @@ export function checkStateSanity(
       }
     }
 
-    // Check for invalid temperature (250K to 2500K covers most scenarios)
+    // Check for invalid temperature. The ceiling must admit severe-accident
+    // states (steam in contact with molten fuel can approach fuel temperature,
+    // ~3400K) - it exists to catch NaN/divergence, not physical extremes.
     if (!isFinite(newNode.fluid.temperature) ||
         newNode.fluid.temperature < 250 ||
-        newNode.fluid.temperature > 2500) {
+        newNode.fluid.temperature > 5000) {
       console.warn(`[RK45 Sanity] ${id}: Invalid temperature ${newNode.fluid.temperature}`);
       return 1000;
     }
@@ -935,6 +940,7 @@ export class RK45Solver {
   // Metrics
   private totalSteps = 0;
   private rejectedSteps = 0;
+  private lastStageSanityWarn = 0;
   private operatorTimes = new Map<string, number>();
 
   // Rejection cause histogram (for performance diagnosis): maps a coarse
@@ -1070,6 +1076,12 @@ export class RK45Solver {
     // Now compute rates using the constrained state
     let totalRates = createZeroRates();
 
+    // The neutronics rate operator stores live diagnostics (reactivity and
+    // its breakdown) on the state it evaluates. That is `constrainedState`,
+    // a throwaway clone - copy the diagnostics back to the caller's state so
+    // accepted states (and everything cloned from them) display live values.
+    const carryNeutronicsDiagnostics = constrainedState !== state;
+
     const implicitMomentum = this.implicitMomentumActive();
     for (const op of this.rateOperators) {
       // The implicit pressure-flow solve owns connection momentum: skip the
@@ -1080,6 +1092,12 @@ export class RK45Solver {
       const opRates = op.computeRates(constrainedState);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
       totalRates = addRates(totalRates, opRates);
+    }
+
+    if (carryNeutronicsDiagnostics) {
+      state.neutronics.reactivity = constrainedState.neutronics.reactivity;
+      state.neutronics.reactivityBreakdown = constrainedState.neutronics.reactivityBreakdown;
+      state.neutronics.diagnostics = constrainedState.neutronics.diagnostics;
     }
 
     return totalRates;
@@ -1203,7 +1221,15 @@ export class RK45Solver {
       // Quick sanity check before constraints to avoid crashing water properties
       const preCheck = checkPreConstraintSanity(stageState);
       if (!preCheck.safe) {
-        // Intermediate stage is catastrophically bad - return failure
+        // Intermediate stage is catastrophically bad - return failure.
+        // Log (rate-limited) - this is the only stage-rejection path that
+        // would otherwise be silent, and a simulation dying "at minimum dt"
+        // with no message is undiagnosable.
+        const now = performance.now();
+        if (now - this.lastStageSanityWarn > 1000) {
+          this.lastStageSanityWarn = now;
+          console.warn(`[RK45] Intermediate stage failed pre-constraint sanity, rejecting: ${preCheck.reason}`);
+        }
         return {
           newState: state,
           error: 1e10,

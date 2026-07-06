@@ -248,8 +248,12 @@ export class NeutronicsOperator implements PhysicsOperator {
     const dRho_coolant = coolantDensity - n.refCoolantDensity;
     const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
+    // Built-in excess reactivity (enrichment margin)
+    const rhoExcess = n.excessReactivity ?? 0;
+
     // Store breakdown for debugging
     n.reactivityBreakdown = {
+      excess: rhoExcess,
       controlRods: rhoRods,
       doppler: rhoDoppler,
       coolantTemp: rhoCoolantTemp,
@@ -263,7 +267,7 @@ export class NeutronicsOperator implements PhysicsOperator {
       coolantDensity,
     };
 
-    return rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
   }
 
   /**
