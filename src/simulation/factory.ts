@@ -827,11 +827,20 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const activeFuelHeight = coreComp.activeFuelHeight ?? coreComp.height ?? 4; // Default 4m
       const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5; // Default 0.5m above barrel bottom
 
+      // Fuel surface from rod geometry when available (pi*d*L*N); the old
+      // 5000 m² constant is the fallback and is close for a typical PWR.
+      const rodDiameterM = coreComp.rodDiameter ? coreComp.rodDiameter / 1000 : 0.0095;
+      const rodCount = coreComp.actualFuelRodCount;
+      const fuelArea = rodCount
+        ? Math.PI * rodDiameterM * activeFuelHeight * rodCount
+        : 5000;
+
       state.convectionConnections.push({
         id: `convection-${id}`,
         thermalNodeId: `${id}-fuel`,
         flowNodeId: coolantFlowNodeId,
-        surfaceArea: 5000, // Approximate fuel surface area
+        surfaceArea: fuelArea,
+        characteristicDiameter: rodDiameterM,
         tubeBottomElevation: coreBottomElevation,
         tubeHeight: activeFuelHeight,
       });
@@ -850,18 +859,27 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       // The HX creates two flow nodes: id-tube and id-shell
       const hxComp = component as any;
       const hxHeight = hxComp.height || 5; // m - default HX height
+      // Tube surface from actual tube geometry: per-tube length is ~2.1x the
+      // bundle height for a U-tube (up + bend + down), ~1x for straight.
+      // The old 0.5 m²/tube constant underestimated a 13 m U-tube ~3x, which
+      // (together with node-scale h) silently capped SG capacity.
+      const tubeOD = hxComp.tubeOD || 0.022; // m
+      const tubeLengthFactor = hxComp.hxType === 'utube' ? 2.1 : 1.0;
+      const tubeLength = tubeLengthFactor * Math.max(1, hxHeight - (hxComp.plenumLength ?? 0.5));
+      const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000);
       state.convectionConnections.push({
         id: `convection-${id}-tube`,
         thermalNodeId: `${id}-tubes`,
         flowNodeId: `${id}-tube`,
-        surfaceArea: hxComp.tubeCount * 0.5, // Tube inner surface
-        // Tube side is typically forced convection, geometry not critical
+        surfaceArea: tubeArea * 0.9, // inner surface slightly smaller than OD surface
+        characteristicDiameter: tubeOD,
       });
       state.convectionConnections.push({
         id: `convection-${id}-shell`,
         thermalNodeId: `${id}-tubes`,
         flowNodeId: `${id}-shell`,
-        surfaceArea: hxComp.tubeCount * 0.6, // Tube outer surface slightly larger
+        surfaceArea: tubeArea,
+        characteristicDiameter: tubeOD,
         tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
         tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
       });
@@ -1104,6 +1122,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         rateLimit: pid.actuator.rateLimit ?? 0.1,
       },
       aggressiveness: pid.aggressiveness ?? 1,
+      powerLimit: pid.powerLimit,
       invert: pid.invert,
       gains: pid.gains ? { ...pid.gains } : undefined,
       manualOutput: pid.manualOutput,

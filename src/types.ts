@@ -287,6 +287,7 @@ export interface PidControllerConfig {
     rateLimit?: number;   // output units per second (default 0.1)
   };
   aggressiveness?: number;      // closed-loop speed knob, default 1
+  powerLimit?: number;          // rod controllers: withdrawal permissive (fraction of nominal, default 1)
   invert?: boolean;             // reverse-acting loop (spray, steam relief)
   gains?: { kp: number; ki: number };  // manual override (advanced)
   mode?: 'auto' | 'manual';

@@ -8,7 +8,7 @@
  * Each operator returns StateRates describing dm/dt, dU/dt, dT/dt, etc.
  */
 
-import { SimulationState, FlowNode, FlowConnection } from '../types';
+import { SimulationState, FlowNode, FlowConnection, ConvectionConnection } from '../types';
 import {
   RateOperator,
   ConstraintOperator,
@@ -159,9 +159,16 @@ export class ConvectionRateOperator implements RateOperator {
 
       if (!thermalNode || !flowNode) continue;
 
-      // Heat transfer coefficient
-      const h = this.computeHeatTransferCoeff(flowNode, state);
-      const Q = h * conn.surfaceArea * (thermalNode.temperature - flowNode.fluid.temperature);
+      // Split the surface into liquid-wetted and vapor-exposed portions by
+      // the node's liquid level (tubes above the water line barely transfer).
+      const { liquidArea, vaporArea } = this.effectiveSurfaceAreas(conn, flowNode);
+
+      const dT = thermalNode.temperature - flowNode.fluid.temperature;
+      const D = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
+
+      const h_liquid = this.liquidHeatTransferCoeff(flowNode, state, conn, D);
+      const h_vapor = this.vaporHeatTransferCoeff(flowNode, state, D);
+      const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       // Solid temperature rate
       const dT_solid = -Q / (thermalNode.mass * thermalNode.specificHeat);
@@ -185,45 +192,168 @@ export class ConvectionRateOperator implements RateOperator {
     return rates;
   }
 
-  private computeHeatTransferCoeff(flowNode: FlowNode, state: SimulationState): number {
+  /**
+   * Liquid-wetted surface split by node liquid level (same model the level-
+   * dependent HX work introduced; previously only the obsolete Euler path
+   * applied it).
+   */
+  private effectiveSurfaceAreas(
+    conn: ConvectionConnection,
+    flowNode: FlowNode
+  ): { liquidArea: number; vaporArea: number } {
+    const phase = flowNode.fluid.phase;
+    if (conn.tubeHeight === undefined || conn.tubeBottomElevation === undefined) {
+      if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
+      if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
+      // Two-phase without geometry: split by liquid volume fraction
+      const quality = flowNode.fluid.quality ?? 0;
+      const rho_f = Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+      const rho_g = Water.saturatedVaporDensity(flowNode.fluid.temperature);
+      const liquidVolFrac =
+        ((1 - quality) / rho_f) / ((1 - quality) / rho_f + quality / rho_g);
+      return {
+        liquidArea: conn.surfaceArea * liquidVolFrac,
+        vaporArea: conn.surfaceArea * (1 - liquidVolFrac),
+      };
+    }
+
+    if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
+    if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
+
+    const quality = flowNode.fluid.quality ?? 0;
+    const liquidMass = flowNode.fluid.mass * (1 - quality);
+    const liquidVolume = liquidMass / Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+    const liquidLevel = calculateLiquidLevelWithObstructions(flowNode, liquidVolume);
+
+    const tubeBottom = conn.tubeBottomElevation;
+    let submergedFraction: number;
+    if (liquidLevel <= tubeBottom) {
+      submergedFraction = 0;
+    } else if (liquidLevel >= tubeBottom + conn.tubeHeight) {
+      submergedFraction = 1;
+    } else {
+      submergedFraction = (liquidLevel - tubeBottom) / conn.tubeHeight;
+    }
+
+    return {
+      liquidArea: conn.surfaceArea * submergedFraction,
+      vaporArea: conn.surfaceArea * (1 - submergedFraction),
+    };
+  }
+
+  /**
+   * Wetted-surface heat transfer coefficient: single-phase forced convection
+   * (Dittus-Boelter at the connection's characteristic diameter) plus, for a
+   * saturated (two-phase) node, a phase-change term - Thom's nucleate-boiling
+   * correlation with a Zuber critical-heat-flux saturation. The two add
+   * (Rohsenow superposition), so the transition is smooth: no thresholds, no
+   * hysteresis. The phase-change term is applied symmetrically (boiling on
+   * hot walls, condensation on cold walls) - both are far stronger than
+   * single-phase convection and of broadly similar magnitude.
+   */
+  private liquidHeatTransferCoeff(
+    flowNode: FlowNode,
+    state: SimulationState,
+    conn: ConvectionConnection,
+    D: number
+  ): number {
     const fluid = flowNode.fluid;
 
     // Get flow rate through this node
     let totalMassFlow = 0;
-    for (const conn of state.flowConnections) {
-      if (conn.fromNodeId === flowNode.id || conn.toNodeId === flowNode.id) {
-        totalMassFlow += Math.abs(conn.massFlowRate);
+    for (const fc of state.flowConnections) {
+      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
+        totalMassFlow += Math.abs(fc.massFlowRate);
       }
     }
 
-    // Fluid properties
-    const rho = fluid.mass / flowNode.volume;
-    const mu = fluid.phase === 'liquid' ? 0.0003 : 0.00002; // Pa·s
-    const k = fluid.phase === 'liquid' ? 0.6 : 0.03; // W/m-K
-    const Pr = fluid.phase === 'liquid' ? 2.0 : 1.0;
+    // Liquid-phase properties (representative values)
+    const rho = fluid.phase === 'two-phase'
+      ? Water.saturatedLiquidDensity(fluid.temperature)
+      : fluid.mass / flowNode.volume;
+    const mu = 0.0003; // Pa·s
+    const k = 0.6;     // W/m-K
+    const Pr = 2.0;
 
-    const D = flowNode.hydraulicDiameter;
-    const A = flowNode.flowArea;
+    const velocity = totalMassFlow / (rho * flowNode.flowArea);
+    const Re = (rho * velocity * D) / mu;
 
-    // Velocity from mass flow
-    const velocity = totalMassFlow / (rho * A);
-
-    // Reynolds number
-    const Re = rho * velocity * D / mu;
-
-    // Minimum h for natural convection
-    const h_natural = 500; // W/m²-K
-
-    if (Re < 2300) {
-      return h_natural;
+    const h_natural = 500; // W/m²-K floor (natural convection)
+    let h = h_natural;
+    if (Re >= 2300) {
+      const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4);
+      h = Math.max(h_natural, (Nu * k) / D);
     }
 
-    // Turbulent: Dittus-Boelter correlation
-    const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4);
-    const h_forced = Nu * k / D;
+    // Phase-change enhancement on saturated nodes
+    if (fluid.phase === 'two-phase') {
+      const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
+      if (thermalNode) {
+        const dT = Math.abs(thermalNode.temperature - fluid.temperature);
+        if (dT > 0) {
+          // Thom: dT_sat = 22.65 * q[MW/m²]^0.5 * exp(-P/8.7 MPa)
+          //   =>  q = (dT * exp(P/8.7e6) / 22.65)^2 * 1e6  [W/m²]
+          const P = fluid.pressure;
+          const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
+          // Zuber CHF saturation: q = qThom / (1 + qThom/qCHF) approaches the
+          // pool-boiling critical heat flux smoothly instead of running to
+          // absurd fluxes at large superheat. (True post-CHF dryout - the
+          // h COLLAPSE past the boiling crisis - is future work, needed for
+          // fuel-damage modeling.)
+          const qCHF = zuberCriticalHeatFlux(fluid.temperature);
+          const qBoil = qThom / (1 + qThom / qCHF);
+          h += qBoil / dT;
+        }
+      }
+    }
 
-    return Math.max(h_natural, h_forced);
+    return h;
   }
+
+  /**
+   * Vapor-exposed surface: Dittus-Boelter with steam properties - much lower
+   * conductivity, so tubes above the water line transfer little (dryout).
+   */
+  private vaporHeatTransferCoeff(flowNode: FlowNode, state: SimulationState, D: number): number {
+    let totalMassFlow = 0;
+    for (const fc of state.flowConnections) {
+      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
+        totalMassFlow += Math.abs(fc.massFlowRate);
+      }
+    }
+
+    const rho_g = Water.saturatedVaporDensity(flowNode.fluid.temperature);
+    const k_vapor = 0.03;
+    const mu_vapor = 0.00002;
+    const Pr_vapor = 1.0;
+
+    const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowNode.flowArea) : 0;
+    const Re = (rho_g * velocity * D) / mu_vapor;
+
+    const h_natural = 50; // W/m²-K
+    if (Re < 2300) return h_natural;
+
+    const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr_vapor, 0.4);
+    return Math.max(h_natural, (Nu * k_vapor) / D);
+  }
+}
+
+/**
+ * Zuber pool-boiling critical heat flux (W/m²):
+ *   q_CHF = 0.131 * h_fg * rho_g^0.5 * [sigma * g * (rho_f - rho_g)]^0.25
+ * Surface tension from the standard IAPWS-shaped fit
+ * sigma = 0.2358*(1 - T/647.096)^1.256*(1 - 0.625*(1 - T/647.096)).
+ * ~1.1 MW/m² at 1 bar, peaking ~3.9 MW/m² near 70 bar, falling toward zero
+ * at the critical point - all from the same saturated-property tables.
+ */
+function zuberCriticalHeatFlux(T: number): number {
+  const Tr = Math.max(0, 1 - T / 647.096);
+  const sigma = 0.2358 * Math.pow(Tr, 1.256) * (1 - 0.625 * Tr);
+  const rho_f = Water.saturatedLiquidDensity(T);
+  const rho_g = Water.saturatedVaporDensity(T);
+  const h_fg = Math.max(1e4, Water.latentHeat(T));
+  const g = 9.81;
+  return 0.131 * h_fg * Math.sqrt(rho_g) * Math.pow(sigma * g * Math.max(0, rho_f - rho_g), 0.25);
 }
 
 // ============================================================================

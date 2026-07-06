@@ -169,6 +169,13 @@ export interface ConvectionConnection {
   // Surface area is assumed uniformly distributed over the height
   tubeBottomElevation?: number;     // m - bottom of tubes/rods relative to flow node bottom
   tubeHeight?: number;              // m - vertical extent of tubes/rods
+
+  // Characteristic length for the convection correlation (m): tube OD / rod
+  // diameter for bundles. Falls back to the flow node's hydraulic diameter
+  // when absent - which for large vessels is meters and badly underestimates
+  // h (Nu*k/D with node-scale D was the main reason SG heat transfer ran
+  // ~10x low).
+  characteristicDiameter?: number;
 }
 
 export interface FlowConnection {
@@ -447,6 +454,12 @@ export interface ControllerState {
 
   /** Scales the closed-loop time constant: >1 faster, <1 gentler. Default 1. */
   aggressiveness: number;
+  /** Rod controllers only: block WITHDRAWAL above this power (fraction of
+   *  nominal, default 1.0) - the rod-withdrawal permissive of a real plant.
+   *  A temperature-mode rod controller has no intrinsic power ceiling (with
+   *  a strong SG, T_cold barely depends on power), so this is what stops the
+   *  reactor at rated power. Insertion is never blocked. */
+  powerLimit?: number;
   /** Reverse-acting loop (more output DECREASES the sensor reading, e.g.
    *  spray valve on pressure, steam valve on upstream pressure). */
   invert?: boolean;

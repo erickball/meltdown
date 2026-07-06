@@ -32,7 +32,7 @@
       "id": "cb-1", "type": "coreBarrel", "label": "Core",
       "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 1,
       "innerDiameter": 3.1, "thickness": 0.05, "height": 10, "bottomGap": 1, "topGap": 1,
-      "fuelRodCount": 8, "actualFuelRodCount": 38000, "fuelTemperature": 900, "fuelMeltingPoint": 2800,
+      "fuelRodCount": 8, "actualFuelRodCount": 38000, "fuelTemperature": 570, "fuelMeltingPoint": 2800,
       "activeFuelHeight": 3.66, "coreBottomElevation": 0.3,
       "controlRodCount": 4, "controlRodPosition": 0.85,
       "initializeCritical": true, "excessReactivity": 0.025, "initialPower": 50000000, "controlRodWorth": 0.09,
@@ -47,7 +47,7 @@
     ["hx-1", {
       "id": "hx-1", "type": "heatExchanger", "label": "Steam Generator",
       "position": {"x": 55, "y": 75}, "rotation": 0, "elevation": 0,
-      "width": 4, "height": 13, "hxType": "utube", "tubeCount": 12000,
+      "width": 4, "height": 13, "hxType": "utube", "tubeCount": 3400,
       "pressureRating": 100, "tubePressureRating": 172, "shellPressureRating": 100,
       "plenumLength": 1, "tubeOD": 0.0222,
       "ports": [
@@ -57,7 +57,7 @@
         {"id": "hx-1-shell-2", "position": {"x": 2, "y": 0}, "direction": "both"}
       ],
       "primaryFluid": {"temperature": 566, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
-      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.012, "flowRate": 0},
+      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.02, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["pump-1", {
@@ -126,7 +126,7 @@
     ["fw-pump-1", {
       "id": "fw-pump-1", "type": "pump", "label": "Feedwater Pump",
       "position": {"x": 78, "y": 82}, "rotation": 0, "elevation": 0,
-      "diameter": 0.4, "running": true, "speed": 0.55, "ratedFlow": 450, "ratedHead": 650,
+      "diameter": 0.4, "running": true, "speed": 0.55, "ratedFlow": 550, "ratedHead": 650,
       "orientation": "left-right",
       "ports": [
         {"id": "fw-pump-1-inlet", "position": {"x": -0.3, "y": 0}, "direction": "in"},
@@ -151,7 +151,7 @@
       "position": {"x": 30, "y": 60}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-temperature", "targetId": "rv-1"},
-        "setpoint": 580,
+        "setpoint": 567,
         "actuator": {"kind": "control-rods", "targetId": "", "min": 0, "max": 1, "rateLimit": 0.001}
       }
     }],
@@ -170,7 +170,7 @@
       "position": {"x": 30, "y": 66}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-level", "targetId": "hx-1-shell"},
-        "setpoint": 10.0,
+        "setpoint": 8.5,
         "feedforward": {"kind": "connection-flow", "targetId": "flow-hx-1-turbine-1"},
         "actuator": {"kind": "pump-speed", "targetId": "fw-pump-1", "min": 0.05, "max": 1, "rateLimit": 0.05}
       }

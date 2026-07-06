@@ -26,21 +26,23 @@
         {"id": "rv-1-core-in", "position": {"x": 0, "y": 2}, "direction": "both"},
         {"id": "rv-1-surge", "position": {"x": 2, "y": -3}, "direction": "both"}
       ],
-      "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "fluid": {"temperature": 553, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["cb-1", {
       "id": "cb-1", "type": "coreBarrel", "label": "Core",
       "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 1,
       "innerDiameter": 3.1, "thickness": 0.05, "height": 10, "bottomGap": 1, "topGap": 1,
-      "fuelRodCount": 8, "actualFuelRodCount": 38000, "fuelTemperature": 900, "fuelMeltingPoint": 2800,
+      "fuelRodCount": 8, "actualFuelRodCount": 38000, "fuelTemperature": 565, "fuelMeltingPoint": 2800,
       "activeFuelHeight": 3.66, "coreBottomElevation": 0.3,
       "controlRodCount": 4, "controlRodPosition": 0.85,
+      "initializeCritical": true, "excessReactivity": 0.025, "controlRodWorth": 0.09,
+      "initialPower": 200000000, "coolantDensityCoeff": 0.0002,
       "ports": [
         {"id": "cb-1-inlet", "position": {"x": 0, "y": 5}, "direction": "both"},
         {"id": "cb-1-outlet", "position": {"x": 0, "y": -5}, "direction": "both"}
       ],
-      "fluid": {"temperature": 592, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "fluid": {"temperature": 556, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "rv-1"
     }],
     ["hx-1", {
@@ -55,8 +57,8 @@
         {"id": "hx-1-shell-1", "position": {"x": -2, "y": -6}, "direction": "both"},
         {"id": "hx-1-shell-2", "position": {"x": 2, "y": 0}, "direction": "both"}
       ],
-      "primaryFluid": {"temperature": 593, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
-      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.5, "flowRate": 0},
+      "primaryFluid": {"temperature": 554, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.02, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["hx-2", {
@@ -71,8 +73,8 @@
         {"id": "hx-2-shell-1", "position": {"x": 2, "y": -6}, "direction": "both"},
         {"id": "hx-2-shell-2", "position": {"x": -2, "y": 0}, "direction": "both"}
       ],
-      "primaryFluid": {"temperature": 593, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
-      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.5, "flowRate": 0},
+      "primaryFluid": {"temperature": 554, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "secondaryFluid": {"temperature": 549, "pressure": 6000000, "phase": "two-phase", "quality": 0.02, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["pump-1", {
@@ -85,7 +87,7 @@
         {"id": "pump-1-inlet", "position": {"x": -0.5, "y": 0}, "direction": "in"},
         {"id": "pump-1-outlet", "position": {"x": 0.5, "y": 0}, "direction": "out"}
       ],
-      "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "fluid": {"temperature": 553, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["pump-2", {
@@ -98,13 +100,14 @@
         {"id": "pump-2-inlet", "position": {"x": 0.5, "y": 0}, "direction": "in"},
         {"id": "pump-2-outlet", "position": {"x": -0.5, "y": 0}, "direction": "out"}
       ],
-      "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "fluid": {"temperature": 553, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["pzr-1", {
       "id": "pzr-1", "type": "tank", "label": "Pressurizer",
       "position": {"x": 44, "y": 70}, "rotation": 0, "elevation": 12,
       "width": 2.4, "height": 10, "wallThickness": 0.15, "fillLevel": 0.5, "pressureRating": 172,
+      "heaterCapacity": 3600000,
       "ports": [
         {"id": "pzr-1-bottom", "position": {"x": 0, "y": 5}, "direction": "both"}
       ],
@@ -116,7 +119,7 @@
       "position": {"x": 75, "y": 75}, "rotation": 0, "elevation": 0,
       "width": 15, "height": 4, "orientation": "left-right", "stages": 1,
       "running": true, "power": 0, "ratedPower": 660000000, "ratedSteamFlow": 1100,
-      "efficiency": 0.85, "governorValve": 1.0, "generatorEfficiency": 0.98,
+      "efficiency": 0.85, "governorValve": 0.15, "generatorEfficiency": 0.98,
       "ports": [
         {"id": "inlet", "position": {"x": -7.5, "y": 0}, "direction": "in"},
         {"id": "outlet", "position": {"x": 7.5, "y": 0}, "direction": "out"}
@@ -140,7 +143,7 @@
     ["cond-pump-1", {
       "id": "cond-pump-1", "type": "pump", "label": "Condensate Pump",
       "position": {"x": 90, "y": 82}, "rotation": 0, "elevation": 0,
-      "diameter": 0.5, "running": true, "speed": 1.0, "ratedFlow": 1100, "ratedHead": 100,
+      "diameter": 0.5, "running": true, "speed": 0.6, "ratedFlow": 1100, "ratedHead": 100,
       "pressureRating": 25,
       "orientation": "left-right",
       "ports": [
@@ -153,7 +156,7 @@
     ["fw-pump-1", {
       "id": "fw-pump-1", "type": "pump", "label": "Feedwater Pump",
       "position": {"x": 78, "y": 82}, "rotation": 0, "elevation": 0,
-      "diameter": 0.5, "running": true, "speed": 1.0, "ratedFlow": 900, "ratedHead": 650,
+      "diameter": 0.5, "running": true, "speed": 0.5, "ratedFlow": 900, "ratedHead": 650,
       "pressureRating": 100,
       "orientation": "left-right",
       "ports": [
@@ -162,6 +165,55 @@
       ],
       "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true
+    }],
+    ["ctl-rods-1", {
+      "id": "ctl-rods-1", "type": "controller", "controllerType": "pid", "label": "Rod Control (T-cold)",
+      "position": {"x": 30, "y": 60}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-temperature", "targetId": "rv-1"},
+        "setpoint": 567,
+        "powerLimit": 1.0,
+        "actuator": {"kind": "control-rods", "targetId": "", "min": 0, "max": 1, "rateLimit": 0.001}
+      }
+    }],
+    ["ctl-sgp-1", {
+      "id": "ctl-sgp-1", "type": "controller", "controllerType": "pid", "label": "SG Pressure (Governor)",
+      "position": {"x": 30, "y": 63}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-pressure", "targetId": "hx-1-shell"},
+        "setpoint": 6000000,
+        "invert": true,
+        "actuator": {"kind": "governor-valve", "targetId": "turbine-1", "min": 0.02, "max": 1, "rateLimit": 0.05}
+      }
+    }],
+    ["ctl-sgl-1", {
+      "id": "ctl-sgl-1", "type": "controller", "controllerType": "pid", "label": "SG A Level (3-elem FW)",
+      "position": {"x": 30, "y": 66}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-level", "targetId": "hx-1-shell"},
+        "setpoint": 8.5,
+        "feedforward": {"kind": "connection-flow", "targetId": "flow-hx-1-turbine-1"},
+        "actuator": {"kind": "pump-speed", "targetId": "fw-pump-1", "min": 0.05, "max": 1, "rateLimit": 0.05}
+      }
+    }],
+    ["ctl-pzrh-1", {
+      "id": "ctl-pzrh-1", "type": "controller", "controllerType": "pid", "label": "Pzr Pressure (Heaters)",
+      "position": {"x": 30, "y": 72}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-pressure", "targetId": "pzr-1"},
+        "setpoint": 15500000,
+        "actuator": {"kind": "heater-power", "targetId": "pzr-1", "min": 0, "max": 3600000, "rateLimit": 720000}
+      }
+    }],
+    ["ctl-hwl-1", {
+      "id": "ctl-hwl-1", "type": "controller", "controllerType": "pid", "label": "Hotwell Level (Cond Pump)",
+      "position": {"x": 30, "y": 69}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "pid": {
+        "sensor": {"kind": "node-level", "targetId": "condenser-1"},
+        "setpoint": 0.5,
+        "invert": true,
+        "actuator": {"kind": "pump-speed", "targetId": "cond-pump-1", "min": 0.05, "max": 1, "rateLimit": 0.1}
+      }
     }]
   ],
   "connections": [

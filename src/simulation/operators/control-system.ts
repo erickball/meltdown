@@ -200,6 +200,15 @@ export class ControlSystemOperator implements ConstraintOperator {
     }
     ctl.lastAux = n.power;
 
+    // Rod-withdrawal permissive: never withdraw above the power limit
+    // (default rated power). A temperature-mode controller has no intrinsic
+    // power ceiling - with a strong SG, T_cold barely depends on power, so
+    // chasing a T setpoint would ratchet power indefinitely.
+    const powerLimit = ctl.powerLimit ?? 1.0;
+    if (velocityDemand > 0 && n.power >= powerLimit * n.nominalPower) {
+      velocityDemand = 0;
+    }
+
     const newPos = Math.max(
       ctl.actuator.min,
       Math.min(ctl.actuator.max, n.controlRodPosition + velocityDemand * ctl.actuator.rateLimit * dt)
