@@ -1869,10 +1869,14 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     controlRodWorth,
     excessReactivity,
     decayHeatFraction: 0.07, // Start with steady-state decay heat
-    // Pools at equilibrium with the initial power (long prior operation):
-    // total thermal deposit starts exactly at `power`, and a shutdown leaves
-    // the physically-correct decaying heat source behind.
-    decayHeatPools: DECAY_HEAT_GROUPS.map(g => g.fraction * power),
+    // Pools at equilibrium with the plant's operating history. By default
+    // that history is the initial power; a scenario that starts LOW but
+    // recently ran high (e.g. "just tripped from full power") can set
+    // decayHeatPower on the core component to the prior operating power so
+    // the transient begins with the correct inherited decay heat.
+    decayHeatPools: DECAY_HEAT_GROUPS.map(
+      g => g.fraction * (vessel.decayHeatPower ?? power)
+    ),
     scrammed: false,
     scramTime: -1,
     scramReason: '',
