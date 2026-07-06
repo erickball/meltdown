@@ -992,11 +992,14 @@ function findNearbyPoints(u: number, v: number, phase: 'liquid' | 'vapor'): Grid
 
   const grid = phase === 'liquid' ? spatialIndex.liquidGrid : spatialIndex.vaporGrid;
 
-  // Get points from current cell and neighboring cells
+  // Get points from the current cell and a 5x5 block of neighbors. The block
+  // must fully cover the smooth-taper support radius used by
+  // interpolateFromGrid (2 cells), so that a grid point can never pop in or
+  // out of the candidate set while its taper weight is still nonzero.
   const nearby: GridPoint[] = [];
 
-  for (let dx = -1; dx <= 1; dx++) {
-    for (let dy = -1; dy <= 1; dy++) {
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dy = -2; dy <= 2; dy++) {
       const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV) + dx;
       const cellY = Math.floor(u_kJkg / GRID_CELL_SIZE_U) + dy;
       const neighborKey = `${cellX},${cellY}`;
@@ -1012,8 +1015,43 @@ function findNearbyPoints(u: number, v: number, phase: 'liquid' | 'vapor'): Grid
 }
 
 /**
- * Interpolate T and P from nearby grid points using inverse distance weighting.
- * For compressed liquid near saturation, uses saturation anchoring.
+ * Interpolate T and P from nearby grid points using moving least squares.
+ *
+ * The old scheme was inverse-distance weighting truncated to a 3x3 block of
+ * spatial-index cells. That had two coupled defects:
+ * - The interpolant JUMPED (by up to ~3 bar in P) whenever the query crossed
+ *   a cell boundary and grid points popped in/out of the candidate set.
+ * - Its apparent gradients came mostly from relative-weight shifts among FAR
+ *   points (the vapor grid holds only ~1-2 points per cell), so locally the
+ *   surface was nearly flat around each grid point with spurious steps
+ *   between - exactly the facet noise that continuously excites acoustic
+ *   modes in the flow solver and caps the timestep.
+ *
+ * Moving least squares fixes both: fit a local linear model
+ *
+ *   f(x, y) = a + b*x + c*y,   x = logV - logV_query, y = (u - u_query)*scale
+ *
+ * by weighted least squares over nearby grid points and evaluate at the query
+ * (= coefficient a). Fitted fields are T and ln(P): for an ideal gas at fixed
+ * T, ln P is exactly linear in logV, so a linear model in these variables
+ * reproduces vapor behavior nearly exactly and P stays positive by
+ * construction.
+ *
+ * Weights use a Wendland C² taper with a near-singular core:
+ *
+ *   w = (1 - q)^4 (4q + 1) / (d² + eps),   q = d/R,   w = 0 for q >= 1
+ *
+ * - The taper reaches zero WITH zero slope at radius R = 2 cells in the
+ *   normalized metric, and findNearbyPoints searches a 5x5 block which fully
+ *   covers that radius - so the fitted surface is C¹: points can never enter
+ *   or leave the support discontinuously.
+ * - The near-singular core makes the fit pass (almost) exactly through grid
+ *   points, preserving agreement with the steam tables.
+ *
+ * If the support holds fewer than 3 points or the normal equations are
+ * ill-conditioned (collinear points, grid fringe), fall back to plain
+ * inverse-distance weighting over the search block - the pre-existing
+ * behavior - rather than failing states that previously resolved.
  */
 function interpolateFromGrid(
   u: number,
@@ -1029,45 +1067,103 @@ function interpolateFromGrid(
   const logV = Math.log10(v);
   const u_kJkg = u / 1000;
 
-  // Calculate inverse distance weights
-  // Use (logV, u) space with appropriate scaling
-  let totalWeight = 0;
-  let T_weighted = 0;
-  let P_weighted = 0;
-
   // Scale factors to make logV and u comparable
   // logV range: about -3 to 2 (5 units)
   // u range: about 0 to 3300 kJ/kg (3300 units)
   // Scale u down by ~600 to make them comparable
   const U_SCALE = 1 / 600;
 
-  for (const pt of nearby) {
-    const pt_logV = Math.log10(pt.v);
-    const dLogV = logV - pt_logV;
-    const dU = (u_kJkg - pt.u) * U_SCALE;
+  // Taper support radius: two cells in the normalized metric (covered by the
+  // 5x5 search block in findNearbyPoints)
+  const R = 2 * Math.min(GRID_CELL_SIZE_LOGV, GRID_CELL_SIZE_U * U_SCALE);
+  const EPS = 1e-10; // regularizes the singular core; keeps fit near-interpolating
 
-    // Distance in normalized space
-    const distSq = dLogV * dLogV + dU * dU;
+  // Weighted normal equations for basis [1, x, y]:
+  // S * [a b c]^T = m for each fitted field
+  let S00 = 0, S01 = 0, S02 = 0, S11 = 0, S12 = 0, S22 = 0;
+  let mT0 = 0, mT1 = 0, mT2 = 0;
+  let mP0 = 0, mP1 = 0, mP2 = 0;
+  let supportCount = 0;
+
+  // Plain inverse-distance sums (fringe/degenerate fallback = old behavior)
+  let plainWeight = 0, plainT = 0, plainP = 0;
+
+  for (const pt of nearby) {
+    const x = logV - Math.log10(pt.v);
+    const y = (u_kJkg - pt.u) * U_SCALE;
+    const distSq = x * x + y * y;
 
     if (distSq < 1e-12) {
       // Almost exactly on a point
       return { T: pt.T_K, P: pt.P_MPa * 1e6 };
     }
 
-    // Inverse distance weighting with power = 2
-    const weight = 1 / distSq;
-    totalWeight += weight;
-    T_weighted += weight * pt.T_K;
-    P_weighted += weight * pt.P_MPa;
+    const plain = 1 / distSq;
+    plainWeight += plain;
+    plainT += plain * pt.T_K;
+    plainP += plain * pt.P_MPa;
+
+    const q = Math.sqrt(distSq) / R;
+    if (q >= 1) continue;
+
+    const oneMinusQ = 1 - q;
+    const taper = oneMinusQ * oneMinusQ * oneMinusQ * oneMinusQ * (4 * q + 1);
+    const w = taper / (distSq + EPS);
+    const lnP = Math.log(pt.P_MPa);
+
+    supportCount++;
+    S00 += w;
+    S01 += w * x;
+    S02 += w * y;
+    S11 += w * x * x;
+    S12 += w * x * y;
+    S22 += w * y * y;
+    mT0 += w * pt.T_K;
+    mT1 += w * pt.T_K * x;
+    mT2 += w * pt.T_K * y;
+    mP0 += w * lnP;
+    mP1 += w * lnP * x;
+    mP2 += w * lnP * y;
   }
 
-  if (totalWeight === 0) {
+  if (supportCount >= 3) {
+    // Solve the 3x3 SPD system by Cholesky-style elimination; bail out to the
+    // fallback if a pivot degenerates (collinear support points).
+    // Normalize by S00 to make pivot thresholds scale-free.
+    const inv00 = 1 / S00;
+    const a01 = S01 * inv00, a02 = S02 * inv00;
+    const b11 = S11 - S01 * a01;
+    const b12 = S12 - S01 * a02;
+    const b22 = S22 - S02 * a02;
+    // Pivot threshold: fraction of the support radius squared - if the spread
+    // of points about their weighted mean is this degenerate, the linear fit
+    // direction is unconstrained.
+    const PIVOT_MIN = 1e-6 * R * R;
+    if (b11 > PIVOT_MIN) {
+      const c12 = b12 / b11;
+      const c22 = b22 - b12 * c12;
+      if (c22 > PIVOT_MIN) {
+        const solve = (m0: number, m1: number, m2: number): number => {
+          const r1 = m1 - m0 * a01;
+          const r2 = m2 - m0 * a02;
+          const cc = (r2 - r1 * c12) / c22;      // coefficient c
+          const bb = (r1 - b12 * cc) / b11;      // coefficient b
+          return m0 * inv00 - a01 * bb - a02 * cc; // coefficient a = value at query
+        };
+        const T = solve(mT0, mT1, mT2);
+        const P = Math.exp(solve(mP0, mP1, mP2)) * 1e6; // MPa -> Pa
+        return { T, P };
+      }
+    }
+  }
+
+  if (plainWeight === 0) {
     return null;
   }
 
   return {
-    T: T_weighted / totalWeight,
-    P: (P_weighted / totalWeight) * 1e6,  // Convert MPa to Pa
+    T: plainT / plainWeight,
+    P: (plainP / plainWeight) * 1e6,  // Convert MPa to Pa
   };
 }
 

@@ -74,7 +74,11 @@ const simState = createSimulationFromPlant(plantState);
 console.log(`Created simulation with ${simState.flowNodes.size} flow nodes, ${simState.flowConnections.length} flow connections`);
 
 // Create solver with operators (same setup as game loop)
-const solver = new RK45Solver();
+// RELTOL env var overrides the RK45 relative error tolerance (default 1e-3)
+// for accuracy-vs-speed experiments.
+const relTol = process.env.RELTOL ? parseFloat(process.env.RELTOL) : undefined;
+const solver = relTol ? new RK45Solver({ relTol }) : new RK45Solver();
+if (relTol) console.log(`[test-simulation] RK45 relTol overridden to ${relTol}`);
 
 // Add rate operators (order matters!)
 solver.addRateOperator(new FlowRateOperator());
