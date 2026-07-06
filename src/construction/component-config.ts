@@ -711,6 +711,11 @@ export const componentDefinitions: Record<string, {
       { name: 'diameter', type: 'number', label: 'Core Diameter', default: 3.2, min: 1, max: 6, step: 0.1, unit: 'm' },
       { name: 'rodDiameter', type: 'number', label: 'Fuel Rod Diameter', default: 9.5, min: 5, max: 15, step: 0.5, unit: 'mm' },
       { name: 'rodPitch', type: 'number', label: 'Rod Pitch', default: 12.6, min: 8, max: 20, step: 0.5, unit: 'mm', help: 'Center-to-center spacing between rods' },
+      { name: 'enrichmentPct', type: 'number', label: 'Enrichment', default: 5, min: 0.7, max: 20, step: 0.1, unit: '% U-235', help: 'Fuel enrichment. Drives available excess reactivity and, with the lattice geometry, the reactivity feedback coefficients. 0.7% is natural uranium (will not go critical in a light-water lattice).' },
+      { name: 'fuelMaterial', type: 'select', label: 'Fuel Material', default: 'UO2', options: [
+        { value: 'UO2', label: 'UO₂ ceramic' },
+        { value: 'metal', label: 'U metal alloy' },
+      ], help: 'Ceramic UO₂ runs hot inside (strong Doppler); metal fuel conducts better and has a slightly harder spectrum.' },
       { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks (displayed as individual rods)' },
       { name: 'thermalPower', type: 'number', label: 'Thermal Power', default: 3000, min: 100, max: 5000, step: 100, unit: 'MWt' },
       { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%', help: '0% = fully inserted, 100% = fully withdrawn' },

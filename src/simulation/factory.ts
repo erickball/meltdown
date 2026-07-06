@@ -19,6 +19,7 @@ import {
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
 import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
+import { deriveNeutronics } from './lattice';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -1815,13 +1816,60 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
 
   const nominalPower = vessel.nominalPower ?? 1000e6;
   const controlRodWorth = vessel.controlRodWorth ?? 0.05;
-  // Built-in enrichment margin: >0 puts the critical rod position at partial
-  // insertion so a rod controller has authority in both directions.
-  const excessReactivity = vessel.excessReactivity ?? 0;
 
   // Actual initial conditions (for critical initialization)
   const coolantNode = state?.flowNodes.get(component.id);
   const fuelNode = state?.thermalNodes.get(`${component.id}-fuel`);
+
+  // ---- Lattice-derived reactivity physics --------------------------------
+  // When the core specifies its fuel design (enrichment / material), the
+  // feedback coefficients and available excess reactivity come from the
+  // geometry the player actually built (simulation/lattice.ts). Explicit
+  // per-coefficient overrides on the component still win.
+  let derivedCoeffs: ReturnType<typeof deriveNeutronics> | null = null;
+  // Built-in reactivity margin. With lattice derivation this is the POISON
+  // TARGET: burnable poison is auto-sized to leave this much hot excess
+  // (real design practice); without derivation it is the excess itself.
+  const excessTarget = vessel.excessReactivity ?? 0.025;
+  let excessReactivity = vessel.excessReactivity ?? 0;
+
+  if (vessel.enrichment !== undefined || vessel.fuelMaterial !== undefined) {
+    const rodDiameterM = (vessel.rodDiameter ?? 9.5) / 1000;
+    const rodCount = vessel.actualFuelRodCount ?? 38000;
+    const coreDiameter = vessel.innerDiameter ?? 3.1;
+    const activeHeight = vessel.activeFuelHeight ?? vessel.height ?? 3.66;
+    const refModeratorDensity = coolantNode
+      ? coolantNode.fluid.mass / coolantNode.volume
+      : 700;
+    derivedCoeffs = deriveNeutronics({
+      enrichment: vessel.enrichment ?? 0.05,
+      fuelMaterial: vessel.fuelMaterial ?? 'UO2',
+      rodDiameter: rodDiameterM,
+      rodCount,
+      coreDiameter,
+      activeHeight,
+      refModeratorDensity,
+      refFuelTemp: fuelNode?.temperature ?? vessel.fuelTemperature ?? 600,
+    });
+    // Poison the raw beginning-of-life excess down to the target margin; a
+    // lattice that cannot even reach the target (low enrichment, bad
+    // moderation, heavy leakage) keeps its raw value - possibly negative,
+    // in which case the core simply cannot go critical as built.
+    excessReactivity = Math.min(derivedCoeffs.excessReactivity, excessTarget);
+    console.log(
+      `[Factory] Core '${component.id}' lattice: k_eff=${derivedCoeffs.kEffRef.toFixed(3)} ` +
+      `(mod ratio ${derivedCoeffs.moderationRatio.toFixed(2)}${derivedCoeffs.overModerated ? ', OVER-moderated' : ''}), ` +
+      `raw excess ${(derivedCoeffs.excessReactivity * 1e5).toFixed(0)} pcm -> poisoned to ` +
+      `${(excessReactivity * 1e5).toFixed(0)} pcm, Doppler ${(derivedCoeffs.fuelTempCoeff * 1e5).toFixed(2)} pcm/K, ` +
+      `density ${(derivedCoeffs.coolantDensityCoeff * 1e5).toFixed(2)} pcm/(kg/m³)`
+    );
+    if (derivedCoeffs.excessReactivity < 0) {
+      console.warn(
+        `[Factory] Core '${component.id}' is SUBCRITICAL as designed ` +
+        `(k_eff=${derivedCoeffs.kEffRef.toFixed(3)}) - it cannot reach criticality even with rods out`
+      );
+    }
+  }
 
   let refFuelTemp = 887;
   let refCoolantTemp = 520;
@@ -1843,11 +1891,22 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     // Critical position: rho = excess - worth*(1 - pos) = 0
     rodPosition = 1 - excessReactivity / controlRodWorth;
     if (rodPosition < 0.05 || rodPosition > 0.95) {
-      throw new Error(
-        `[Factory] Core '${component.id}': critical rod position ${rodPosition.toFixed(3)} is ` +
-        `outside [0.05, 0.95] - excessReactivity (${excessReactivity}) vs rod worth ` +
-        `(${controlRodWorth}) leaves no control margin`
-      );
+      if (derivedCoeffs) {
+        // Lattice-derived margin: a marginal/subcritical DESIGN is a valid
+        // player outcome, not a config error - start with rods out and let
+        // the plant show it can't reach power.
+        console.warn(
+          `[Factory] Core '${component.id}': critical rod position ${rodPosition.toFixed(3)} ` +
+          `out of control range - design has ${rodPosition > 0.95 ? 'insufficient excess reactivity' : 'excess beyond rod worth'}`
+        );
+        rodPosition = Math.max(0, Math.min(1, rodPosition));
+      } else {
+        throw new Error(
+          `[Factory] Core '${component.id}': critical rod position ${rodPosition.toFixed(3)} is ` +
+          `outside [0.05, 0.95] - excessReactivity (${excessReactivity}) vs rod worth ` +
+          `(${controlRodWorth}) leaves no control margin`
+        );
+      }
     }
     power = vessel.initialPower ?? nominalPower;
     console.log(
@@ -1878,9 +1937,9 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     delayedNeutronFraction,
     precursorConcentration,
     precursorDecayConstant,
-    fuelTempCoeff: vessel.fuelTempCoeff ?? -2.5e-5,
-    coolantTempCoeff: vessel.coolantTempCoeff ?? -1e-5,
-    coolantDensityCoeff: vessel.coolantDensityCoeff ?? 0.001,
+    fuelTempCoeff: vessel.fuelTempCoeff ?? derivedCoeffs?.fuelTempCoeff ?? -2.5e-5,
+    coolantTempCoeff: vessel.coolantTempCoeff ?? derivedCoeffs?.coolantTempCoeff ?? -1e-5,
+    coolantDensityCoeff: vessel.coolantDensityCoeff ?? derivedCoeffs?.coolantDensityCoeff ?? 0.001,
     refFuelTemp,
     refCoolantTemp,
     refCoolantDensity,

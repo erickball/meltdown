@@ -8,6 +8,7 @@
  */
 
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
+import { deriveNeutronics, LatticeParams } from './lattice.js';
 
 // Test result tracking
 interface TestResult {
@@ -232,6 +233,76 @@ test('Dome consistency - no false positives', () => {
   if (failures > 0) {
     throw new Error(`${failures} inconsistent dome check failures:\n${failureDetails.join('\n')}`);
   }
+});
+
+// ============================================================================
+// Lattice-Derived Neutronics Tests
+// ============================================================================
+
+category('Lattice Neutronics');
+
+// A standard 5 w/o UO2 PWR lattice (the shipping preset's geometry)
+const PWR_LATTICE: LatticeParams = {
+  enrichment: 0.05,
+  fuelMaterial: 'UO2',
+  rodDiameter: 0.0095,
+  rodCount: 38000,
+  coreDiameter: 3.1,
+  activeHeight: 3.66,
+  refModeratorDensity: 700,
+  refFuelTemp: 600,
+};
+
+test('PWR lattice lands in published coefficient ranges', () => {
+  const d = deriveNeutronics(PWR_LATTICE);
+  assert(d.kEffRef > 1.15 && d.kEffRef < 1.6,
+    `clean 5% lattice k_eff should be ~1.2-1.6, got ${d.kEffRef.toFixed(3)}`);
+  assert(d.fuelTempCoeff < -1e-5 && d.fuelTempCoeff > -6e-5,
+    `Doppler should be -1..-6 pcm/K, got ${(d.fuelTempCoeff * 1e5).toFixed(2)}`);
+  assert(d.coolantDensityCoeff > 5e-5 && d.coolantDensityCoeff < 8e-4,
+    `density coefficient should be +5..+80 pcm/(kg/m³), got ${(d.coolantDensityCoeff * 1e5).toFixed(2)}`);
+  assert(!d.overModerated, 'a typical PWR lattice is under-moderated');
+  assert(d.moderationRatio > 1 && d.moderationRatio < 3,
+    `moderation ratio should be ~1-3, got ${d.moderationRatio.toFixed(2)}`);
+});
+
+test('enrichment raises excess reactivity monotonically', () => {
+  const lo = deriveNeutronics({ ...PWR_LATTICE, enrichment: 0.02 });
+  const mid = deriveNeutronics({ ...PWR_LATTICE, enrichment: 0.05 });
+  const hi = deriveNeutronics({ ...PWR_LATTICE, enrichment: 0.10 });
+  assert(lo.excessReactivity < mid.excessReactivity && mid.excessReactivity < hi.excessReactivity,
+    `excess should grow with enrichment: ${lo.excessReactivity.toFixed(3)} / ${mid.excessReactivity.toFixed(3)} / ${hi.excessReactivity.toFixed(3)}`);
+});
+
+test('natural uranium cannot go critical in a light-water lattice', () => {
+  const nat = deriveNeutronics({ ...PWR_LATTICE, enrichment: 0.0072 });
+  assert(nat.kEffRef < 1,
+    `natural-uranium LWR lattice must be subcritical, got k_eff=${nat.kEffRef.toFixed(3)}`);
+});
+
+test('over-moderated lattice flips the density coefficient sign', () => {
+  // Spread the same rods over a much larger core: moderation ratio >> optimum
+  const wet = deriveNeutronics({ ...PWR_LATTICE, coreDiameter: 6.5 });
+  assert(wet.moderationRatio > 5, `should be heavily over-moderated, ratio=${wet.moderationRatio.toFixed(1)}`);
+  assert(wet.overModerated && wet.coolantDensityCoeff < 0,
+    `over-moderated lattice must have NEGATIVE density coefficient, got ${(wet.coolantDensityCoeff * 1e5).toFixed(2)} pcm/(kg/m³)`);
+});
+
+test('fatter rods self-shield: weaker Doppler per kelvin (at fixed moderation)', () => {
+  // Hold the moderation ratio constant by trading rod count against rod
+  // area, so only the self-shielding effect of rod size remains
+  const thin = deriveNeutronics({
+    ...PWR_LATTICE,
+    rodDiameter: 0.006,
+    rodCount: Math.round(38000 * Math.pow(0.0095 / 0.006, 2)),
+  });
+  const fat = deriveNeutronics({
+    ...PWR_LATTICE,
+    rodDiameter: 0.014,
+    rodCount: Math.round(38000 * Math.pow(0.0095 / 0.014, 2)),
+  });
+  assert(Math.abs(fat.fuelTempCoeff) < Math.abs(thin.fuelTempCoeff),
+    `fat-rod Doppler (${(fat.fuelTempCoeff * 1e5).toFixed(2)}) should be weaker than thin-rod (${(thin.fuelTempCoeff * 1e5).toFixed(2)})`);
 });
 
 // ============================================================================

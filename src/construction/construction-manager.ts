@@ -2678,6 +2678,12 @@ export class ConstructionManager {
     if (properties.rodDiameter !== undefined) {
       component.rodDiameter = properties.rodDiameter;
     }
+    if (properties.enrichmentPct !== undefined) {
+      component.enrichment = properties.enrichmentPct / 100; // % to fraction
+    }
+    if (properties.fuelMaterial !== undefined) {
+      component.fuelMaterial = properties.fuelMaterial;
+    }
     if (properties.rodPitch !== undefined) {
       component.rodPitch = properties.rodPitch;
       // Recalculate fuel rod count if pitch changed
@@ -2841,6 +2847,9 @@ export class ConstructionManager {
     container.rodPitch = rodPitch; // mm
     container.thermalPower = (coreProperties.thermalPower || 3000) * 1e6; // W
     container.coreHeight = coreProperties.height; // Core height (may be less than container height)
+    // Fuel design - drives lattice-derived reactivity coefficients
+    container.enrichment = (coreProperties.enrichmentPct ?? 5) / 100;
+    container.fuelMaterial = coreProperties.fuelMaterial || 'UO2';
 
     // If the container is a tank, convert it to a vessel type for proper rendering
     // (vessels render with domes and fuel rods, tanks don't have domes by default)

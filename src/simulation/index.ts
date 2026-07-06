@@ -66,6 +66,10 @@ export { ControlSystemOperator, nodeLiquidLevel } from './operators/control-syst
 export { SteadyStateDetector, DEFAULT_STEADY_STATE_CONFIG } from './steady-state';
 export type { SteadyStateConfig } from './steady-state';
 
+// Lattice-derived reactivity physics
+export { deriveNeutronics, latticeKeff } from './lattice';
+export type { LatticeParams, DerivedNeutronics, FuelMaterial } from './lattice';
+
 // Operators
 export * from './operators';
 

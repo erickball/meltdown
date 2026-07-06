@@ -173,6 +173,11 @@ export interface CoreBarrelComponent extends ComponentBase {
   height: number;           // Barrel height (m)
   bottomGap: number;        // Gap from vessel bottom to barrel bottom (m)
   topGap: number;           // Gap from vessel top to barrel top (m)
+  // Fuel design (drives lattice-derived reactivity coefficients when set;
+  // see simulation/lattice.ts). Default 5 w/o UO2.
+  enrichment?: number;      // U-235 weight fraction (e.g. 0.05)
+  fuelMaterial?: 'UO2' | 'metal';
+  rodDiameter?: number;     // Fuel rod diameter (mm - construction UI unit)
   // Fuel properties
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation
