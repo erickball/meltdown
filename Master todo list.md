@@ -3,7 +3,7 @@
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
 -Maybe find a good way to display relative pressure at connections
--Fix neutronics in general, something about it isn't right anymore. Plus it needs to work for every type of reactor and idk how to get reasonable reactivity coefficients from whatever core and coolant parameters are available.
+-Neutronics remaining: solid-moderated lattices (graphite/pebble + gas coolant need a solidModerationFraction so the lattice model doesn't collapse without water); boron/soluble poison as an operator control (would also enable the positive-MTC-at-high-boron failure mode); estimated-critical-position display from latticeKeff.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Add FW heaters?
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
@@ -43,6 +43,7 @@
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Reactivity coefficients derived from core geometry (lattice-lite four-factor model, simulation/lattice.ts): enrichment + fuel material are user settings (default 5% UO2); Doppler/density coefficients and excess reactivity come from rod size/count/pitch/core size. Natural uranium correctly fails in light water; over-moderated lattices flip the density coefficient sign. Player-built cores use it; presets keep validated explicit values.
 X SG/core heat transfer fixed on the RK45 path: wetted-area split by liquid level, Thom nucleate boiling h with smooth Zuber CHF saturation, per-tube/rod characteristic diameters, tube areas from real geometry (pi*d*L*N). SG UA went ~3 -> ~35 MW/K; the PWR preset now converges to ~100% power under its controllers, and the shipping pwr.json preset ships with the full auto-control suite.
 X Decay heat: 4-group fission-product pools (coarse ANS-5.1 fit) build with power history and keep ~5%/3%/1.5% of prior power flowing at 10s/100s/1000s after shutdown. Scrammed cores now need cooling.
 X Fully implicit (RELAP-style) pressure-flow momentum solver - default on, explicit path selectable. Presets now run 20-30x realtime (two-loop PWR went 0.17x -> ~17x). See docs/semi-implicit-flow-solver-plan.md Outcome section.
