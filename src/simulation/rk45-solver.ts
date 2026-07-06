@@ -756,7 +756,15 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   maxDt: 1.0,
   initialDt: 0.001,
 
-  relTol: 1e-3,
+  // relTol was tuned empirically (2026-07, RELTOL sweeps on the PWR/BWR/
+  // tankburst scenarios): total step attempts form a shallow bowl with the
+  // minimum near 1e-4..2e-4. Counterintuitively, LOOSER tolerance is slower -
+  // it lets the marginally-damped acoustic modes of liquid loops go
+  // under-resolved, they amplify, and the sanity guard thrashes the timestep.
+  // Tighter tolerance keeps those modes small: 2e-4 does ~16-21% less work
+  // than 1e-3 on the reactor presets with 5x better accuracy, and is neutral
+  // on scenarios without liquid loops.
+  relTol: 2e-4,
   absTol: 1e-6,
 
   safetyFactor: 0.9,
