@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build && move dist\\index.html dist\\meltdown.html",
     "preview": "vite preview",
-    "test": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts"
+    "test": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts",
+    "test:plants": "npx tsx scripts/test-plant-scenarios.ts",
+    "test:all": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts && npx tsx scripts/test-plant-scenarios.ts"
   },
   "devDependencies": {
     "tsx": "^4.7.0",

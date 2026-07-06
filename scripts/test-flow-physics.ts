@@ -17,56 +17,12 @@
  */
 
 import {
-  createSimulationFromPlant,
-  setSimulationRandomSeed,
-  RK45Solver,
-  ConductionRateOperator,
-  ConvectionRateOperator,
-  HeatGenerationRateOperator,
-  NeutronicsRateOperator,
-  FlowRateOperator,
-  FlowMomentumRateOperator,
-  TurbineCondenserRateOperator,
-  FluidStateConstraintOperator,
-  FlowDynamicsConstraintOperator,
-  ChokedFlowDisplayOperator,
-  PumpSpeedRateOperator,
-  BurstCheckOperator,
-} from '../src/simulation';
+  test, assert, assertBetween, report,
+  buildSim, run, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
+} from './lib/sim-harness';
 import { soundSpeed, WaterState } from '../src/simulation/water-properties-v4';
-import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
+import type { PlantComponent, PlantConnection } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
-
-// ============================================================================
-// Mini test framework (same output style as src/simulation/test-suite.ts)
-// ============================================================================
-
-interface TestResult {
-  name: string;
-  passed: boolean;
-  error?: string;
-}
-const results: TestResult[] = [];
-
-function test(name: string, fn: () => void) {
-  try {
-    fn();
-    results.push({ name, passed: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    results.push({ name, passed: false, error: message });
-  }
-}
-
-function assert(condition: boolean, message: string) {
-  if (!condition) throw new Error(message);
-}
-
-function assertBetween(actual: number, lo: number, hi: number, label: string) {
-  if (!(actual >= lo && actual <= hi)) {
-    throw new Error(`${label}: expected ${lo.toPrecision(4)}..${hi.toPrecision(4)}, got ${actual.toPrecision(6)}`);
-  }
-}
 
 // ============================================================================
 // Plant-building helpers
@@ -138,79 +94,6 @@ function makeConn(o: ConnOpts): PlantConnection {
     flowArea: o.flowArea ?? 0.02, length: o.length ?? 2,
     fromElevation: o.fromElevation ?? 0.1, toElevation: o.toElevation ?? 0.1,
   } as unknown as PlantConnection;
-}
-
-function buildSim(
-  components: Array<[string, PlantComponent]>,
-  connections: PlantConnection[],
-  solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {}
-): { state: SimulationState; solver: RK45Solver } {
-  setSimulationRandomSeed(0);
-  const plantState: PlantState = {
-    components: new Map<string, PlantComponent>(components),
-    connections,
-  };
-  const state = createSimulationFromPlant(plantState);
-  const solver = new RK45Solver(solverConfig);
-  solver.addRateOperator(new FlowRateOperator());
-  solver.addRateOperator(new FlowMomentumRateOperator());
-  solver.addRateOperator(new ConductionRateOperator());
-  solver.addRateOperator(new ConvectionRateOperator());
-  solver.addRateOperator(new HeatGenerationRateOperator());
-  solver.addRateOperator(new NeutronicsRateOperator());
-  solver.addRateOperator(new TurbineCondenserRateOperator());
-  solver.addRateOperator(new PumpSpeedRateOperator());
-  solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
-  solver.addConstraintOperator(new FluidStateConstraintOperator());
-  solver.addConstraintOperator(new BurstCheckOperator());
-  solver.addConstraintOperator(new ChokedFlowDisplayOperator());
-  return { state, solver };
-}
-
-/** Advance the sim to the given time; optional callback per outer tick. */
-function run(
-  sim: { state: SimulationState; solver: RK45Solver },
-  seconds: number,
-  dt = 0.02,
-  onTick?: (state: SimulationState) => void
-): SimulationState {
-  let state = sim.state;
-  const ticks = Math.round(seconds / dt);
-  for (let i = 0; i < ticks; i++) {
-    state = sim.solver.advance(state, dt).state;
-    state.pendingEvents = [];
-    onTick?.(state);
-  }
-  sim.state = state;
-  return state;
-}
-
-function flowRate(state: SimulationState, from: string, to: string): number {
-  const conn = state.flowConnections.find(c => c.id === `flow-${from}-${to}`);
-  if (!conn) throw new Error(`connection flow-${from}-${to} not found`);
-  return conn.massFlowRate;
-}
-
-function nodeMass(state: SimulationState, id: string): number {
-  const node = state.flowNodes.get(id);
-  if (!node) throw new Error(`node ${id} not found`);
-  return node.fluid.mass;
-}
-
-function nodePressure(state: SimulationState, id: string): number {
-  const node = state.flowNodes.get(id);
-  if (!node) throw new Error(`node ${id} not found`);
-  return node.fluid.pressure;
-}
-
-function totalMassAndEnergy(state: SimulationState): { mass: number; energy: number } {
-  let mass = 0, energy = 0;
-  for (const [, node] of state.flowNodes) {
-    if (node.isBoundary) continue;
-    mass += node.fluid.mass;
-    energy += node.fluid.internalEnergy;
-  }
-  return { mass, energy };
 }
 
 /** Sonic mass-flow bound for a connection from the given vapor node's state. */
@@ -508,26 +391,4 @@ test('Connected tanks equalize liquid levels', () => {
   assert(dm > -0.3 * dm0, `equalization should not overshoot badly (imbalance now ${dm.toFixed(0)} kg)`);
 });
 
-// ============================================================================
-// Report
-// ============================================================================
-
-console.log('\nRunning Flow Physics Regression Suite...\n');
-
-const passed = results.filter(r => r.passed).length;
-const failed = results.filter(r => !r.passed);
-
-for (const r of results) {
-  const symbol = r.passed ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
-  console.log(`${symbol} ${r.name}`);
-  if (!r.passed) console.log(`    ${r.error}`);
-}
-
-console.log('\n' + '='.repeat(60));
-if (failed.length === 0) {
-  console.log(`\x1b[32m✓ All ${passed} flow physics tests passed!\x1b[0m`);
-  process.exit(0);
-} else {
-  console.log(`\x1b[31m✗ ${failed.length} of ${results.length} flow physics tests failed\x1b[0m`);
-  process.exit(1);
-}
+report('Flow Physics Regression Suite');

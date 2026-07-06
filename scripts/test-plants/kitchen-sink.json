@@ -1,0 +1,99 @@
+{
+  "_comment": "Deliberately awkward topology to catch tailoring to well-formed plants: a pumped loop between a two-phase tank and a subcooled tank with TWO parallel return paths (one through a half-open valve), an explicit pipe component in the flow path, a dead-end stub tank, mixed elevations, and part of the system inside an NCG-filled building. Nothing here should burst, leak mass, or grind.",
+  "components": [
+    ["shed-1", {
+      "id": "shed-1", "type": "building", "label": "Shed",
+      "position": {"x": 40, "y": 90}, "rotation": 0, "elevation": 0,
+      "shape": "cylinder", "height": 18, "diameter": 18, "wallThickness": 0.5, "steelFraction": 0.1,
+      "pressureRating": 5, "fillLevel": 0,
+      "ports": [
+        {"id": "shed-1-north", "position": {"x": 0, "y": -9}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 293, "pressure": 101325, "phase": "vapor", "quality": 1, "flowRate": 0},
+      "initialNcg": {"N2": 0.78, "O2": 0.21, "Ar": 0.009}
+    }],
+    ["hot-1", {
+      "id": "hot-1", "type": "tank", "label": "Hot Tank",
+      "position": {"x": 38, "y": 88}, "rotation": 0, "elevation": 2,
+      "width": 1.6, "height": 4, "wallThickness": 0.08, "fillLevel": 0.6, "pressureRating": 60,
+      "ports": [
+        {"id": "hot-1-top", "position": {"x": 0, "y": -2}, "direction": "both"},
+        {"id": "hot-1-bottom", "position": {"x": 0, "y": 2}, "direction": "both"},
+        {"id": "hot-1-side", "position": {"x": 0.8, "y": 0}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 485, "pressure": 1900000, "phase": "two-phase", "quality": 0.03, "flowRate": 0},
+      "containedBy": "shed-1"
+    }],
+    ["pipe-1", {
+      "id": "pipe-1", "type": "pipe", "label": "Suction Pipe",
+      "position": {"x": 40, "y": 92}, "rotation": 0, "elevation": 1,
+      "diameter": 0.25, "length": 6, "thickness": 0.02, "pressureRating": 60,
+      "ports": [
+        {"id": "pipe-1-in", "position": {"x": -3, "y": 0}, "direction": "both"},
+        {"id": "pipe-1-out", "position": {"x": 3, "y": 0}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 480, "pressure": 1900000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "containedBy": "shed-1"
+    }],
+    ["circ-1", {
+      "id": "circ-1", "type": "pump", "label": "Circulation Pump",
+      "position": {"x": 44, "y": 94}, "rotation": 0, "elevation": 0,
+      "diameter": 0.3, "running": true, "speed": 1.0, "ratedFlow": 300, "ratedHead": 40,
+      "pressureRating": 60,
+      "orientation": "left-right",
+      "ports": [
+        {"id": "circ-1-inlet", "position": {"x": -0.3, "y": 0}, "direction": "in"},
+        {"id": "circ-1-outlet", "position": {"x": 0.3, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 480, "pressure": 1900000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "containedBy": "shed-1"
+    }],
+    ["cool-1", {
+      "id": "cool-1", "type": "tank", "label": "Cool Tank",
+      "position": {"x": 55, "y": 92}, "rotation": 0, "elevation": 0,
+      "width": 2.2, "height": 4, "wallThickness": 0.08, "fillLevel": 1.0, "pressureRating": 60,
+      "ports": [
+        {"id": "cool-1-top", "position": {"x": 0, "y": -2}, "direction": "both"},
+        {"id": "cool-1-in", "position": {"x": -1.1, "y": 0}, "direction": "both"},
+        {"id": "cool-1-out", "position": {"x": 1.1, "y": 0}, "direction": "both"},
+        {"id": "cool-1-stub", "position": {"x": 0, "y": 2}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 430, "pressure": 1900000, "phase": "liquid", "quality": 0, "flowRate": 0}
+    }],
+    ["byp-1", {
+      "id": "byp-1", "type": "valve", "label": "Bypass Valve", "valveType": "gate",
+      "position": {"x": 50, "y": 86}, "rotation": 0, "elevation": 3,
+      "diameter": 0.12, "opening": 0.35,
+      "ports": [
+        {"id": "byp-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "byp-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 430, "pressure": 1900000, "phase": "liquid", "quality": 0, "flowRate": 0}
+    }],
+    ["stub-1", {
+      "id": "stub-1", "type": "tank", "label": "Dead Leg",
+      "position": {"x": 58, "y": 97}, "rotation": 0, "elevation": -1,
+      "width": 0.6, "height": 2, "wallThickness": 0.05, "fillLevel": 1.0, "pressureRating": 60,
+      "ports": [
+        {"id": "stub-1-top", "position": {"x": 0, "y": -1}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 430, "pressure": 2000000, "phase": "liquid", "quality": 0, "flowRate": 0}
+    }]
+  ],
+  "connections": [
+    {"fromComponentId": "hot-1", "fromPortId": "hot-1-bottom", "toComponentId": "pipe-1", "toPortId": "pipe-1-in",
+     "fromElevation": 0.1, "toElevation": 0.5, "flowArea": 0.05, "length": 3},
+    {"fromComponentId": "pipe-1", "fromPortId": "pipe-1-out", "toComponentId": "circ-1", "toPortId": "circ-1-inlet",
+     "fromElevation": 0.5, "toElevation": 0, "flowArea": 0.05, "length": 2},
+    {"fromComponentId": "circ-1", "fromPortId": "circ-1-outlet", "toComponentId": "cool-1", "toPortId": "cool-1-in",
+     "fromElevation": 0, "toElevation": 1, "flowArea": 0.04, "length": 6},
+    {"fromComponentId": "cool-1", "fromPortId": "cool-1-out", "toComponentId": "hot-1", "toPortId": "hot-1-side",
+     "fromElevation": 2, "toElevation": 1.5, "flowArea": 0.03, "length": 8},
+    {"fromComponentId": "cool-1", "fromPortId": "cool-1-top", "toComponentId": "byp-1", "toPortId": "byp-1-in",
+     "fromElevation": 3.5, "toElevation": 0, "flowArea": 0.011, "length": 4},
+    {"fromComponentId": "byp-1", "fromPortId": "byp-1-out", "toComponentId": "hot-1", "toPortId": "hot-1-top",
+     "fromElevation": 0, "toElevation": 3.5, "flowArea": 0.011, "length": 4},
+    {"fromComponentId": "cool-1", "fromPortId": "cool-1-stub", "toComponentId": "stub-1", "toPortId": "stub-1-top",
+     "fromElevation": 0.05, "toElevation": 1.9, "flowArea": 0.005, "length": 2}
+  ]
+}

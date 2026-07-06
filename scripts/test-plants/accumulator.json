@@ -1,0 +1,64 @@
+{
+  "_comment": "Passive safety injection: a pressurized vessel blows down through a drain valve (opened by the test script) into a dump tank; an elevated accumulator behind a check valve injects once vessel pressure falls below accumulator pressure. Exercises check valves in context, blowdown/flashing, and valve actuation mid-run.",
+  "components": [
+    ["vsl-1", {
+      "id": "vsl-1", "type": "tank", "label": "Vessel",
+      "position": {"x": 40, "y": 90}, "rotation": 0, "elevation": 0,
+      "width": 0.798, "height": 4, "wallThickness": 0.12, "fillLevel": 0.5, "pressureRating": 100,
+      "ports": [
+        {"id": "vsl-1-top", "position": {"x": 0, "y": -2}, "direction": "both"},
+        {"id": "vsl-1-bottom", "position": {"x": 0, "y": 2}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 507, "pressure": 3000000, "phase": "two-phase", "quality": 0.01, "flowRate": 0}
+    }],
+    ["drain-1", {
+      "id": "drain-1", "type": "valve", "label": "Drain Valve", "valveType": "gate",
+      "position": {"x": 50, "y": 95}, "rotation": 0, "elevation": 0,
+      "diameter": 0.05, "opening": 0.0,
+      "ports": [
+        {"id": "drain-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "drain-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 400, "pressure": 200000, "phase": "liquid", "quality": 0, "flowRate": 0}
+    }],
+    ["dump-1", {
+      "id": "dump-1", "type": "tank", "label": "Dump Tank",
+      "position": {"x": 60, "y": 95}, "rotation": 0, "elevation": 0,
+      "width": 7.98, "height": 4, "wallThickness": 0.05, "fillLevel": 0.05,
+      "ports": [
+        {"id": "dump-1-top", "position": {"x": 0, "y": -2}, "direction": "both"},
+        {"id": "dump-1-in", "position": {"x": -4, "y": 0}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 373, "pressure": 101325, "phase": "two-phase", "quality": 0.3, "flowRate": 0}
+    }],
+    ["acc-1", {
+      "id": "acc-1", "type": "tank", "label": "Accumulator",
+      "position": {"x": 30, "y": 70}, "rotation": 0, "elevation": 8,
+      "width": 1.784, "height": 4, "wallThickness": 0.08, "fillLevel": 0.6, "pressureRating": 30,
+      "ports": [
+        {"id": "acc-1-bottom", "position": {"x": 0, "y": 2}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 453, "pressure": 1000000, "phase": "two-phase", "quality": 0.02, "flowRate": 0}
+    }],
+    ["cv-1", {
+      "id": "cv-1", "type": "valve", "label": "Injection Check Valve", "valveType": "check",
+      "position": {"x": 32, "y": 82}, "rotation": 0, "elevation": 2,
+      "diameter": 0.08, "opening": 1.0, "crackingPressure": 10000,
+      "ports": [
+        {"id": "cv-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "cv-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 453, "pressure": 1000000, "phase": "liquid", "quality": 0, "flowRate": 0}
+    }]
+  ],
+  "connections": [
+    {"fromComponentId": "vsl-1", "fromPortId": "vsl-1-bottom", "toComponentId": "drain-1", "toPortId": "drain-1-in",
+     "fromElevation": 0.1, "toElevation": 0, "flowArea": 0.005, "length": 2},
+    {"fromComponentId": "drain-1", "fromPortId": "drain-1-out", "toComponentId": "dump-1", "toPortId": "dump-1-in",
+     "fromElevation": 0, "toElevation": 2, "flowArea": 0.005, "length": 4},
+    {"fromComponentId": "acc-1", "fromPortId": "acc-1-bottom", "toComponentId": "cv-1", "toPortId": "cv-1-in",
+     "fromElevation": 0.1, "toElevation": 0, "flowArea": 0.005, "length": 6},
+    {"fromComponentId": "cv-1", "fromPortId": "cv-1-out", "toComponentId": "vsl-1", "toPortId": "vsl-1-top",
+     "fromElevation": 0, "toElevation": 1, "flowArea": 0.005, "length": 4}
+  ]
+}

@@ -81,10 +81,20 @@ the regression suite in `scripts/test-flow-physics.ts` pins each one:
 ## Phasing
 
 **Phase 0 — Regression baseline (done with this commit).**
-`scripts/test-flow-physics.ts`: 9 scenario tests asserting today's correct
-behavior for choking, valves, check valves, pump curve equilibrium, deadhead,
-conservation, level equalization, and small-dt acoustic fidelity. Wired into
-`npm test`. Any Phase 1+ change must keep these green.
+Two suites, both must stay green through every later phase:
+- `scripts/test-flow-physics.ts` (in `npm test`): 10 focused rig tests for
+  choking, valves, check valves, pump curve equilibrium, deadhead,
+  conservation, level equalization, and small-dt acoustic fidelity.
+- `scripts/test-plant-scenarios.ts` (`npm run test:plants`, or `test:all`):
+  structurally diverse whole plants under `scripts/test-plants/` so the solver
+  is never tuned to just the shipping presets - a two-loop PWR (parallel
+  primary loops, merged steam lines, split feed), a pump-free natural-
+  circulation condensing loop, an accumulator/check-valve safety injection
+  with mid-run valve actuation, and a deliberately awkward "kitchen sink"
+  (parallel return paths, pipe component, dead leg, half-open valve, NCG
+  building). Run `test:all` before landing each phase; the two-loop plant is
+  also the current worst-case performance benchmark (~0.06x realtime - a
+  direct measure of what the implicit solver should improve).
 
 **Phase 1 — Implicit momentum inside PressureSolver, opt-in.**
 Extend `PressureSolver.solve()` to optionally perform the full BE momentum
