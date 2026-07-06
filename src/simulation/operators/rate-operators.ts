@@ -801,6 +801,26 @@ export class NeutronicsRateOperator implements RateOperator {
 // evaluation (7+ per RK45 step) and console I/O dominates the frame time.
 let lastEnthalpyDebugLog = 0;
 
+/**
+ * Find the check valve guarding a flow connection.
+ *
+ * Check valves created from plant components are keyed by COMPONENT id with
+ * the guarded connection recorded in connectedFlowPath, so a plain
+ * checkValves.get(conn.id) never matches them (a long-standing silent bug -
+ * user-built check valves did nothing). Match connectedFlowPath, with a
+ * map-key fallback for any connection-keyed entries.
+ */
+export function findCheckValveForConnection(
+  state: SimulationState,
+  connId: string
+): { crackingPressure: number } | undefined {
+  if (!state.components.checkValves) return undefined;
+  for (const [, cv] of state.components.checkValves) {
+    if (cv.connectedFlowPath === connId) return cv;
+  }
+  return state.components.checkValves.get(connId);
+}
+
 export class FlowRateOperator implements RateOperator {
   name = 'FluidFlow';
 
@@ -2108,7 +2128,7 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
       // not hard clamping here. This provides smoother dynamics.
 
       // Check valves prevent reverse flow
-      const checkValve = newState.components.checkValves?.get(conn.id);
+      const checkValve = findCheckValveForConnection(newState, conn.id);
       if (checkValve && conn.massFlowRate < 0) {
         conn.massFlowRate = 0;
       }
@@ -2665,7 +2685,7 @@ export class FlowMomentumRateOperator implements RateOperator {
       const dP_driving = dP_pressure + dP_gravity + dP_pump;
 
       // Check valve - prevents reverse flow and requires cracking pressure to open
-      const checkValve = state.components.checkValves?.get(conn.id);
+      const checkValve = findCheckValveForConnection(state, conn.id);
       if (checkValve) {
         const crackingPressure = checkValve.crackingPressure ?? 0;
         // Check valve remains closed if:

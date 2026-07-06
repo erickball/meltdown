@@ -294,7 +294,15 @@ export class PressureSolver {
     // Check valve currently holding (no forward flow): treat as closed.
     // FlowDynamicsConstraintOperator zeroes reverse flow through check valves,
     // so a non-positive flow means the valve is shut.
-    const checkValve = state.components.checkValves?.get(conn.id);
+    // Check valves are keyed by component id with connectedFlowPath naming the
+    // guarded connection (matching findCheckValveForConnection in rate-operators).
+    let checkValve: { crackingPressure: number } | undefined;
+    if (state.components.checkValves) {
+      for (const [, cv] of state.components.checkValves) {
+        if (cv.connectedFlowPath === conn.id) { checkValve = cv; break; }
+      }
+      checkValve = checkValve ?? state.components.checkValves.get(conn.id);
+    }
     if (checkValve && conn.massFlowRate <= 0) return 0;
 
     // Governor valve on turbine inlet (mirrors FlowMomentumRateOperator)

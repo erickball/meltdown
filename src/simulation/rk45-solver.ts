@@ -826,6 +826,7 @@ export class RK45Solver {
 
   // Rate limiting for log messages (wall time in ms)
   private lastWallTimeLimitLog = 0;
+  private lastSanityFailLog = 0;
 
   // Optional callback invoked after each accepted substep (for state history recording)
   public onSubstepComplete?: (state: SimulationState, stepNumber: number) => void;
@@ -1299,9 +1300,14 @@ export class RK45Solver {
         this.rejectedSteps++;
 
         if (sanityScore > 1) {
-          // Sanity check failed - be more aggressive about shrinking
+          // Sanity check failed - be more aggressive about shrinking.
+          // Rate-limit the log: transients can reject hundreds of steps per
+          // second and per-rejection logging floods the console.
           this.currentDt = stepDt * 0.25;
-          console.log(`[RK45] Sanity check failed (score=${sanityScore.toFixed(2)}), shrinking dt to ${(this.currentDt*1000).toFixed(3)}ms - ${lastSanityFailureReason}`);
+          if (now - this.lastSanityFailLog > 1000) {
+            console.log(`[RK45] Sanity check failed (score=${sanityScore.toFixed(2)}), shrinking dt to ${(this.currentDt*1000).toFixed(3)}ms - ${lastSanityFailureReason}`);
+            this.lastSanityFailLog = now;
+          }
         } else {
           this.currentDt = this.computeOptimalDt(effectiveError, stepDt);
         }
