@@ -135,6 +135,17 @@
       "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true
     }],
+    ["val-fwcv-1", {
+      "id": "val-fwcv-1", "type": "valve", "label": "FW Check Valve", "valveType": "check",
+      "position": {"x": 70, "y": 80}, "rotation": 0, "elevation": 0,
+      "diameter": 0.25, "opening": 0, "crackingPressure": 10000,
+      "ports": [
+        {"id": "val-fwcv-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "val-fwcv-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "nqa1": true
+    }],
     ["val-spray-1", {
       "id": "val-spray-1", "type": "valve", "label": "Pzr Spray Valve", "valveType": "globe",
       "position": {"x": 46, "y": 72}, "rotation": 0, "elevation": 20,
@@ -224,8 +235,10 @@
      "fromElevation": 0.1, "toElevation": 0, "flowArea": 0.25, "length": 3},
     {"fromComponentId": "cond-pump-1", "fromPortId": "cond-pump-1-outlet", "toComponentId": "fw-pump-1", "toPortId": "fw-pump-1-inlet",
      "fromElevation": 0, "toElevation": 0, "flowArea": 0.05, "length": 3},
-    {"fromComponentId": "fw-pump-1", "fromPortId": "fw-pump-1-outlet", "toComponentId": "hx-1", "toPortId": "hx-1-shell-2",
-     "fromElevation": 0, "toElevation": 6, "flowArea": 0.05, "length": 10},
+    {"fromComponentId": "fw-pump-1", "fromPortId": "fw-pump-1-outlet", "toComponentId": "val-fwcv-1", "toPortId": "val-fwcv-1-in",
+     "fromElevation": 0, "toElevation": 0, "flowArea": 0.05, "length": 3},
+    {"fromComponentId": "val-fwcv-1", "fromPortId": "val-fwcv-1-out", "toComponentId": "hx-1", "toPortId": "hx-1-shell-2",
+     "fromElevation": 0, "toElevation": 6, "flowArea": 0.05, "length": 7},
     {"fromComponentId": "rv-1", "fromPortId": "rv-1-spray-out", "toComponentId": "val-spray-1", "toPortId": "val-spray-1-in",
      "fromElevation": 11, "toElevation": 0, "flowArea": 0.001, "length": 15},
     {"fromComponentId": "val-spray-1", "fromPortId": "val-spray-1-out", "toComponentId": "pzr-1", "toPortId": "pzr-1-spray",

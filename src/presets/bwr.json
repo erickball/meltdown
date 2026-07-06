@@ -106,6 +106,17 @@
       ],
       "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true
+    }],
+    ["val-fwcv-1", {
+      "id": "val-fwcv-1", "type": "valve", "label": "FW Check Valve", "valveType": "check",
+      "position": {"x": 68, "y": 82}, "rotation": 0, "elevation": 0,
+      "diameter": 0.25, "opening": 0, "crackingPressure": 10000,
+      "ports": [
+        {"id": "val-fwcv-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "val-fwcv-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 306, "pressure": 5000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "nqa1": true
     }]
   ],
   "connections": [
@@ -123,7 +134,9 @@
      "fromElevation": 0.1, "toElevation": 0, "flowArea": 0.25, "length": 3},
     {"fromComponentId": "cond-pump-1", "fromPortId": "cond-pump-1-outlet", "toComponentId": "fw-pump-1", "toPortId": "fw-pump-1-inlet",
      "fromElevation": 0, "toElevation": 0, "flowArea": 0.05, "length": 3},
-    {"fromComponentId": "fw-pump-1", "fromPortId": "fw-pump-1-outlet", "toComponentId": "rv-1", "toPortId": "rv-1-feedwater",
-     "fromElevation": 0, "toElevation": 12, "flowArea": 0.05, "length": 15}
+    {"fromComponentId": "fw-pump-1", "fromPortId": "fw-pump-1-outlet", "toComponentId": "val-fwcv-1", "toPortId": "val-fwcv-1-in",
+     "fromElevation": 0, "toElevation": 0, "flowArea": 0.05, "length": 3},
+    {"fromComponentId": "val-fwcv-1", "fromPortId": "val-fwcv-1-out", "toComponentId": "rv-1", "toPortId": "rv-1-feedwater",
+     "fromElevation": 0, "toElevation": 12, "flowArea": 0.05, "length": 12}
   ]
 }
