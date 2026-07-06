@@ -1,6 +1,7 @@
 # Plan: Fully Semi-Implicit Pressure–Flow Solver (RELAP-style)
 
-*Drafted 2026-07-06. Status: planning — not started.*
+*Drafted 2026-07-06. Status: **IMPLEMENTED** (2026-07-06) — all phases landed,
+implicit momentum is the default. See "Outcome" at the end of this document.*
 
 ## Why
 
@@ -145,3 +146,117 @@ the reference implementation.
 - No per-node hard switches — ownership rules must be continuous or per-
   connection structural (a connection is owned or not), never state-threshold
   driven.
+
+## Outcome (implemented 2026-07-06)
+
+All four phases landed in one pass. The final architecture differs from the
+sketch above in three ways that came out of Phase 3 debugging, all
+improvements:
+
+1. **One solve per step attempt, not per RK stage.** The BE momentum solve
+   runs once in `RK45Solver.step()` (on a clone, since attempts can be
+   rejected) and the end-of-step flows ṁ¹ are frozen through all seven DOPRI5
+   stages. Per-stage re-solves gave each stage slightly different flows, and
+   the 5th-order combination of those deposited stage-averaged mass matching
+   NO balance — a ppm-scale error that stiff liquid nodes amplify into
+   bar-scale pressure flicker. With frozen flows the advected mass exactly
+   equals the solve's mass-balance closure (and 6 of 7 linear solves are
+   saved).
+
+2. **Quadratic backward-Euler predictor, not linearized friction.** Friction
+   linearized at ṁ⁰ is catastrophically wrong for large per-step flow changes
+   (zero friction at zero flow ⇒ multi-x overshoot of the friction
+   equilibrium ⇒ slosh divergence in small nodes). The BE predictor solves
+   the full quadratic resistance (pipe friction + pump-curve falloff) in
+   closed form: ṁ* = sign(b)·(√(1+4·G0·C·|b|)−1)/(2·G0·C), b = ṁ⁰+G0·ΔP_nf,
+   G0 = dt·A/L. Bounded by the friction equilibrium as dt→∞, exactly explicit
+   Euler as dt→0. The δP conductance is then linearized at ṁ* (not ṁ⁰).
+   Note the momentum conductance is G0 = dt·A/L — in mass-flow form the
+   density cancels (dṁ/dt = (A/L)·ΔP). The legacy correction-only path keeps
+   its historical dt·A/(ρL) scaling untouched.
+
+3. **Secant compliance for dome-edge crossings.** The compliance c_i uses the
+   blended bulk modulus, which understates true liquid stiffness by ~10³ for
+   nodes at the saturation boundary (a hotwell pump body full of saturated
+   condensate lives there permanently). After the first solve, any node whose
+   predicted inflow c_i·δP_i·dt carries it onto/across the liquid edge gets
+   its compliance replaced by the secant of the true EOS response over the
+   step, and the system is re-solved once (shared with the choked-flow cap
+   re-solve). This is a Newton iteration on the real nonlinearity — no tuning
+   constants — and it removed ~90 % of step rejections on the reactor presets.
+
+Other notes:
+- Shared hydraulics model lives in `operators/connection-hydraulics.ts` (one
+  model, two callers: `FlowMomentumRateOperator` and `PressureSolver`).
+- Pump head density now always comes from the pump's own node (the from-node
+  of its outlet connection), not the flow-direction upstream node. For forward
+  flow these are identical; for momentary reverse leaks the old rule evaluated
+  a liquid-filled pump's head with the downstream node's *vapor* density
+  (~0.25 bar instead of ~12 bar), which could latch a condensate train into a
+  permanently stalled reverse-leak state under the implicit solve.
+- `checkStateSanity`'s flow-change check is skipped under implicit momentum
+  (BE legitimately jumps flows to equilibrium in one step); the pressure-change
+  check REMAINS active in both modes — it is what forces dt down to resolve
+  genuine dome-edge crossings the linearized solve cannot represent.
+- Open question 1 resolved: implicit owns ALL connections; choking is a
+  post-solve cap with fixed-flow re-solve. Open question 2: one re-solve
+  suffices (shared by caps and secant compliance). Open question 3: PWR
+  pressurizer coupling verified against the explicit reference (end states
+  agree to ~0.1–1 %). Open question 4: conservation suites all green; the
+  frozen-flow structure makes advected mass exactly consistent.
+
+Measured on the regression scenarios (20 s sim, 0.1 s ticks, same machine):
+
+| Scenario | Explicit | Implicit | Speedup |
+|---|---|---|---|
+| PWR preset | 0.82x realtime | 28–31x | ~35x |
+| BWR preset | ~1.1x | 19–28x | ~20x |
+| Two-loop PWR (worst case) | 0.17x | 16–18x | ~100x |
+| Tank burst (LOCA) | 2.8x | 20x | ~7x |
+
+End-state accuracy vs the explicit reference on the PWR startup transient
+(t = 20 s): all node pressures/temperatures/masses within ~0.1–1 %. The
+tankburst LOCA fires in both modes (burst differential 23.7 bar explicit vs
+24.4 bar implicit — threshold overshoot from the larger accepted step).
+relTol no longer affects step counts in implicit mode (dt is limited by the
+mass-movement and pressure sanity guards, i.e. by transport accuracy), so the
+2e-4 default stays.
+
+Both test harnesses accept `IMPLICIT_MOMENTUM=1|0` to force either scheme;
+the UI exposes an "Implicit flow momentum" checkbox next to the pressure
+solver toggle. The explicit momentum path remains the reference
+implementation and must stay green in CI (`IMPLICIT_MOMENTUM=0`).
+
+### Pre-existing bugs exposed by long-horizon validation
+
+Running the PWR preset to 200 s (impossible before — explicit took ~4 min of
+wall time and both modes crashed identically at t ≈ 183 s) surfaced two
+neutronics bugs unrelated to the flow solver, now fixed:
+
+1. **Reactor power was never deposited into the fuel.**
+   `HeatGenerationRateOperator` gated the neutronics branch on
+   `node.heatGeneration > 0`, but factory-built cores create the fuel node
+   with `heatGeneration: 0 // Set by neutronics` (the code that set it was
+   lost in a commented-out refactor). Consequence: the core heated nothing,
+   fuel temperature simply relaxed to coolant temperature, and there was NO
+   Doppler feedback at all — an uncontrolled cooldown eventually re-inserted
+   enough reactivity to go prompt-supercritical with nothing to quench it
+   (power reached 1e276 MW and overflowed to NaN). The operator now deposits
+   `neutronics.power` into the linked fuel node unconditionally (exact
+   `fuelNodeId` match preferred; `includes('fuel')` fallback only when no
+   linkage exists).
+
+2. **Point-kinetics matrix exponential overflowed for prompt-supercritical
+   cores.** The analytic solution used a fixed 100 ms secant window;
+   exp(λ₁·0.1) overflows double precision for λ₁ ≳ 7000/s. The positive
+   exponent is now capped at 3 (window 3/λ₁), keeping the secant slope within
+   ~7x of the true tangent so RK45 resolves excursions like explicit dynamics
+   and Doppler quenches them physically. Negative (prompt-decay) eigenvalues
+   are untouched, so normal-operation behavior is identical.
+
+Hardening added alongside: non-finite RK45 error estimates are named
+(`findNonFiniteRate`), rejected (never force-accepted at min-dt), counted in
+`RK45Solver.rejectionStats`, shrink dt deterministically instead of poisoning
+it (NaN dt froze the old controller), and trip the stuck-detector with a
+loud error if persistent. `checkPreConstraintSanity` also rejects non-finite
+neutronics state.

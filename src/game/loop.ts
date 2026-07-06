@@ -648,6 +648,25 @@ export class GameLoop {
     return false;
   }
 
+  /**
+   * Enable or disable the fully implicit momentum solve (backward-Euler
+   * pressure-flow coupling). When disabled, flow momentum is integrated
+   * explicitly by RK45 (reference scheme, resolves water hammer, much slower
+   * on liquid loops).
+   */
+  setImplicitMomentumEnabled(enabled: boolean): void {
+    if (this.rk45Solver && (this.rk45Solver as any).pressureSolver) {
+      (this.rk45Solver as any).pressureSolver.config.implicitMomentum = enabled;
+    }
+  }
+
+  getImplicitMomentumEnabled(): boolean {
+    if (this.rk45Solver && (this.rk45Solver as any).pressureSolver) {
+      return !!(this.rk45Solver as any).pressureSolver.config.implicitMomentum;
+    }
+    return false;
+  }
+
   setDeterministicMode(enabled: boolean): void {
     if (this.rk45Solver) {
       this.rk45Solver.setDeterministicMode(enabled);

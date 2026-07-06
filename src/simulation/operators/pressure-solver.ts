@@ -54,6 +54,13 @@ import {
 } from '../water-properties';
 import { totalMass as ncgTotalMass } from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
+import {
+  computeConnectionHydraulics,
+  computeChokeLimit,
+  ConnectionHydraulics,
+  ChokeLimit,
+  CLOSED_FLOW_DECAY_TAU,
+} from './connection-hydraulics';
 
 /** Status of the last pressure solve */
 export interface PressureSolverStatus {
@@ -146,6 +153,11 @@ export class PressureSolver {
       c[i] = (rho * node.volume) / (K * dt);
     }
 
+    if (this.config.implicitMomentum) {
+      this.solveImplicit(state, dt, index, nodeList, c, n);
+      return;
+    }
+
     // Build the linear system M * dP = b where
     //   M = diag(c) + weighted graph Laplacian of connection conductances
     //   b = current net mass inflow per node (kg/s)
@@ -206,6 +218,286 @@ export class PressureSolver {
     this.lastStatus = {
       ran: true,
       iterations: 1,
+      converged: true,
+      stagnated: false,
+      maxImbalance: maxResidual,
+      K_max: this.config.K_max,
+    };
+  }
+
+  /**
+   * Fully implicit (backward-Euler) pressure-flow solve, RELAP-style.
+   *
+   * Replaces explicit momentum integration entirely: connection flows are set
+   * to their end-of-step values ṁ¹, solved simultaneously with the virtual
+   * node pressure corrections δP.
+   *
+   * Momentum per connection (friction/pump-curve linearized at ṁ⁰; note
+   * dṁ/dt = (A/L)·ΔP since ṁ = ρAv and dv/dt = ΔP/(ρL) - density cancels):
+   *
+   *   ṁ¹ = ṁ⁰ + dt·(A/L)·[ ΔP⁰_net + (δP_from − δP_to) − R'·(ṁ¹ − ṁ⁰) ]
+   *
+   * which with D = (dt·A/L) / (1 + dt·A·R'/L) rearranges to
+   *
+   *   ṁ¹ = ṁ* + D·(δP_from − δP_to),   ṁ* = ṁ⁰ + D·ΔP⁰_net
+   *
+   * where ΔP⁰_net = ΔP_driving(ṁ⁰) + ΔP_friction(ṁ⁰) is the full explicit
+   * driving pressure from the SAME model the explicit momentum operator uses
+   * (connection-hydraulics.ts). Substituting into the node mass/compliance
+   * closure Σ±ṁ¹ = c_i·δP_i gives the same SPD compliance+Laplacian system as
+   * the correction-only path, just with ṁ* on the right-hand side instead of
+   * ṁ⁰.
+   *
+   * Backward Euler damps every acoustic mode unconditionally (|amplification|
+   * < 1 at all dt) yet D → dt·A/L as dt → 0, recovering explicit physics
+   * (water hammer) when the user caps the timestep.
+   *
+   * Choked flow is a post-solve cap: capped connections become fixed-flow
+   * sources (conductance dropped from the Laplacian) and the system is
+   * re-solved once so neighbors see the capped flow (one RELAP-style outer
+   * iteration).
+   */
+  private solveImplicit(
+    state: SimulationState,
+    dt: number,
+    index: Map<string, number>,
+    nodeList: FlowNode[],
+    c: Float64Array,
+    n: number
+  ): void {
+    interface ImplicitEntry {
+      conn: FlowConnection;
+      h: ConnectionHydraulics;
+      D: number;       // conductance (kg/s per Pa)
+      m0: number;      // start-of-step flow (kg/s)
+      mStar: number;   // BE-predicted flow before pressure correction (kg/s)
+      iFrom: number;
+      iTo: number;
+      choke: ChokeLimit | null;
+      capped: boolean;
+      cappedFlow: number;
+    }
+
+    // Fixed b contributions from connections that don't participate in the
+    // solve (closed valves / held check valves, whose flows decay to zero).
+    const bFixed = new Float64Array(n);
+    const entries: ImplicitEntry[] = [];
+
+    for (const conn of state.flowConnections) {
+      const fromNode = state.flowNodes.get(conn.fromNodeId);
+      const toNode = state.flowNodes.get(conn.toNodeId);
+      if (!fromNode || !toNode) continue;
+
+      const iFrom = index.get(conn.fromNodeId) ?? -1;
+      const iTo = index.get(conn.toNodeId) ?? -1;
+
+      const h = computeConnectionHydraulics(state, conn, fromNode, toNode);
+
+      // Closed valve, closed governor, or check valve without cracking
+      // pressure: no conductance, and the flow decays to zero (implicit form
+      // of the explicit operator's dṁ/dt = -ṁ/τ).
+      const closed =
+        h.valveClosed ||
+        h.governorClosed ||
+        (h.checkValve !== undefined && h.dP_driving < h.crackingPressure);
+      if (closed) {
+        const mNew = conn.massFlowRate / (1 + dt / CLOSED_FLOW_DECAY_TAU);
+        conn.massFlowRate = mNew;
+        conn.isChoked = false;
+        conn.machNumber = 0;
+        if (iFrom >= 0) bFixed[iFrom] -= mNew;
+        if (iTo >= 0) bFixed[iTo] += mNew;
+        continue;
+      }
+
+      const m0 = conn.massFlowRate;
+      // Momentum in mass-flow form: dṁ/dt = (A/L)·ΔP (ṁ = ρAv, the density
+      // cancels), so the flow produced by 1 Pa over dt is G0 = dt·A/L.
+      const G0 = (dt * h.A) / h.L;
+
+      // Backward-Euler predictor with FULL quadratic resistance (pipe friction
+      // plus the pump curve's quadratic falloff). Linearizing friction at ṁ⁰
+      // is catastrophically wrong when |ṁ| grows in one step (friction ≈ 0 at
+      // low flow lets the prediction overshoot the friction equilibrium by
+      // multiples, then slam back - divergence in small nodes). The quadratic
+      // BE has a closed form, is monotone in dt, and is bounded by the
+      // friction-equilibrium flow √(ΔP/C) as dt → ∞:
+      //
+      //   ṁ* = ṁ⁰ + G0·(ΔP_nf − C·ṁ*|ṁ*|)
+      //   ⇒ sign(ṁ*) = sign(b),  b = ṁ⁰ + G0·ΔP_nf
+      //   ⇒ |ṁ*| = (√(1 + 4·G0·C·|b|) − 1) / (2·G0·C)
+      //
+      // ΔP_nf collects the non-quadratic driving terms (node pressures,
+      // gravity, pump shutoff head); C is branch-dependent: forward flow sees
+      // pipe friction + pump-curve quadratic, reverse flow sees pipe friction
+      // + the reverse-block resistance of running pumps.
+      const dP_nf = h.dP_pressure + h.dP_gravity + h.pumpShutoff;
+      const b = m0 + G0 * dP_nf;
+      const C = b >= 0
+        ? h.frictionQuadForward + h.pumpQuad
+        : h.frictionQuadReverse;
+      const gC = G0 * C;
+      let mStar: number;
+      if (gC * Math.abs(b) < 1e-9) {
+        // Resistance negligible over this step - linear limit (also avoids
+        // 0/0 and floating-point cancellation in the closed form)
+        mStar = b;
+      } else {
+        mStar = Math.sign(b) * (Math.sqrt(1 + 4 * gC * Math.abs(b)) - 1) / (2 * gC);
+      }
+
+      // Conductance for the δP coupling, linearized at the END-of-step flow
+      // (resistance slope d(C·ṁ²)/dṁ = 2·C·|ṁ*|) - consistent with the
+      // predictor instead of the stale start-of-step flow.
+      const D = G0 / (1 + 2 * gC * Math.abs(mStar));
+      if (!isFinite(D) || D < 0 || !isFinite(mStar)) {
+        throw new Error(
+          `[PressureSolver] Invalid implicit momentum for connection '${conn.id}': ` +
+          `D=${D} kg/s/Pa, mStar=${mStar} kg/s (m0=${m0}, rho_flow=${h.rho_flow}, ` +
+          `C=${C}, dP_nf=${dP_nf})`
+        );
+      }
+
+      const choke = computeChokeLimit(conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow);
+      entries.push({ conn, h, D, m0, mStar, iFrom, iTo, choke, capped: false, cappedFlow: 0 });
+    }
+
+    // Assemble and solve (diag(c) + Laplacian(D)) δP = net predicted inflow.
+    // Capped connections contribute as fixed flows with zero conductance.
+    const solveNetwork = (): Float64Array => {
+      const M = new Float64Array(n * n);
+      const b = Float64Array.from(bFixed);
+      for (let i = 0; i < n; i++) M[i * n + i] = c[i];
+      for (const e of entries) {
+        const flowFixed = e.capped;
+        const flow = flowFixed ? e.cappedFlow : e.mStar;
+        if (e.iFrom >= 0) b[e.iFrom] -= flow;
+        if (e.iTo >= 0) b[e.iTo] += flow;
+        if (flowFixed) continue;
+        if (e.iFrom >= 0) {
+          M[e.iFrom * n + e.iFrom] += e.D;
+          if (e.iTo >= 0) M[e.iFrom * n + e.iTo] -= e.D;
+        }
+        if (e.iTo >= 0) {
+          M[e.iTo * n + e.iTo] += e.D;
+          if (e.iFrom >= 0) M[e.iTo * n + e.iFrom] -= e.D;
+        }
+      }
+      return solveLinearSystem(M, b, n);
+    };
+
+    let dP = solveNetwork();
+    const flowOf = (e: ImplicitEntry): number => {
+      if (e.capped) return e.cappedFlow;
+      const pFrom = e.iFrom >= 0 ? dP[e.iFrom] : 0;
+      const pTo = e.iTo >= 0 ? dP[e.iTo] : 0;
+      return e.mStar + e.D * (pFrom - pTo);
+    };
+
+    // Post-solve choked-flow capping. The sonic bound uses the same discharge
+    // coefficients and 0.95 near-sonic margin as the explicit operator.
+    let anyCapped = false;
+    for (const e of entries) {
+      if (!e.choke) continue;
+      const capMag = e.choke.chokedByRatio
+        ? e.choke.m_dot_choked
+        : 0.95 * e.choke.m_dot_choked;
+      const m1 = flowOf(e);
+      if (Math.abs(m1) > capMag) {
+        e.capped = true;
+        e.cappedFlow = (m1 >= 0 ? 1 : -1) * capMag;
+        anyCapped = true;
+      }
+    }
+
+    // Secant compliance correction for saturation-dome-edge crossings.
+    //
+    // The compliance c_i is linearized at the start-of-step state, with the
+    // bulk modulus blended across the dome edge to stay continuous. For a
+    // node that the predicted inflow carries ONTO or ACROSS the liquid
+    // boundary within this step (a hotwell pump body full of saturated
+    // condensate is the canonical case), that linearization understates the
+    // true stiffness by orders of magnitude: the solve then permits residual
+    // inflow that the real EOS answers with a bar-scale pressure spike, which
+    // the step controller must reject. Replace c_i with the secant compliance
+    // of the true EOS response over this step - the absorbed mass divided by
+    // the pressure rise the liquid branch actually produces - and re-solve.
+    // This is one Newton-style iteration on the genuine nonlinearity; no
+    // tuning constants beyond the physics already in the tables.
+    let anyStiffened = false;
+    for (let i = 0; i < n; i++) {
+      const node = nodeList[i];
+      const dm = c[i] * dP[i] * dt; // predicted absorbed mass this step (kg)
+      if (!(dm > 0)) continue;      // only inflow compression spikes
+      // NCG provides a real gas cushion - the liquid branch never applies
+      const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+      if (ncgMass > 1e-6 * node.fluid.mass) continue;
+
+      const u = node.fluid.internalEnergy / node.fluid.mass;
+      const v = node.volume / node.fluid.mass;
+      const sat = distanceToSaturationLine(u, v);
+      const v_f = sat.v_f_closest * 1e-6; // m³/kg
+      if (!(v_f > 0)) continue;
+      // Mass the node can still absorb before it is liquid-full at v_f
+      // (≤ 0 means it is already on the liquid side of the edge)
+      const mEdge = node.volume / v_f - node.fluid.mass;
+
+      const K_liq = numericalBulkModulus(node.fluid.temperature - 273.15, this.config.K_max);
+      let cSecant: number | null = null;
+      if (mEdge <= 0) {
+        // Already liquid: the true stiffness is the full liquid bulk modulus
+        // (the dome-edge blend may have softened c_i by orders of magnitude)
+        cSecant = node.fluid.mass / (K_liq * dt);
+      } else if (dm > mEdge) {
+        // Crossing into liquid this step: pressure response of the true EOS
+        // is ~zero until the edge, then liquid compression beyond it
+        const dP_true = (K_liq * (dm - mEdge)) / node.fluid.mass;
+        cSecant = dm / (dP_true * dt);
+      }
+      // Only intervene when the true response is materially stiffer than the
+      // linearization (avoid churn from tiny corrections)
+      if (cSecant !== null && cSecant < 0.5 * c[i]) {
+        c[i] = cSecant;
+        anyStiffened = true;
+      }
+    }
+
+    if (anyCapped || anyStiffened) {
+      dP = solveNetwork();
+    }
+
+    // Apply end-of-step flows and refresh per-connection display state.
+    for (const e of entries) {
+      const m1 = flowOf(e);
+      e.conn.massFlowRate = m1;
+      const isChoked = e.choke !== null && e.choke.chokedByRatio;
+      e.conn.isChoked = isChoked;
+      e.conn.machNumber = e.choke
+        ? (isChoked ? 1.0 : Math.min(1, Math.abs(m1 / (e.h.rho_flow * e.h.A)) / e.choke.soundSpeed))
+        : 0;
+      e.conn.debug = {
+        flowPhase: e.h.flowPhase,
+        rho_flow: e.h.rho_flow,
+        dP_driving: e.h.dP_driving,
+        dP_friction: e.h.dP_friction,
+        dP_net: e.h.dP_driving + e.h.dP_friction,
+        dMassFlowRate: (m1 - e.m0) / dt,
+        isChoked,
+        machNumber: e.conn.machNumber,
+      };
+    }
+
+    // Residual imbalance c_i * dP_i is the intended remaining net inflow that
+    // produces the real pressure change dP_i over dt (identical closure to the
+    // correction-only path).
+    let maxResidual = 0;
+    for (let i = 0; i < n; i++) {
+      maxResidual = Math.max(maxResidual, Math.abs(c[i] * dP[i]));
+    }
+
+    this.lastStatus = {
+      ran: true,
+      iterations: anyCapped ? 2 : 1,
       converged: true,
       stagnated: false,
       maxImbalance: maxResidual,

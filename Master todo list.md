@@ -1,5 +1,4 @@
 ## TODO List
--Debug semi-implicit pressure/flow solver
 
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Clean up the debug display
@@ -9,8 +8,8 @@
 -Add FW heaters?
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
 -Add other types of system controllers (turbine pressure controller, FW level control, etc)
--Improve performance (why are timesteps getting so small?)
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
+-AI assistant to help users add to, fix, or understand the model
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
@@ -39,6 +38,9 @@
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Fully implicit (RELAP-style) pressure-flow momentum solver - default on, explicit path selectable. Presets now run 20-30x realtime (two-loop PWR went 0.17x -> ~17x). See docs/semi-implicit-flow-solver-plan.md Outcome section.
+X Improve performance (why are timesteps getting so small?) - acoustic modes of liquid loops; removed by the implicit momentum solver.
+X Reactor power was never deposited into the fuel node for factory-built cores (no Doppler feedback at all); fixed along with point-kinetics overflow during prompt-supercritical excursions.
 X Heat transfer in a HX should depend on liquid level. In the core too. In a way that makes physical sense.
 X How much pressure can things handle from the outside?
 X Ability to put things inside other things, e.g. containment building, or cross-vessel with internal hot leg

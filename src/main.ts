@@ -857,6 +857,18 @@ function init() {
     });
   }
 
+  // Advanced solver settings: Implicit flow momentum (backward-Euler
+  // pressure-flow solve) enable/disable
+  const implicitMomentumCheckbox = document.getElementById('implicit-momentum-enabled') as HTMLInputElement;
+  if (implicitMomentumCheckbox) {
+    // Reflect the solver's actual default (enabled)
+    implicitMomentumCheckbox.checked = gameLoop.getImplicitMomentumEnabled();
+
+    implicitMomentumCheckbox.addEventListener('change', () => {
+      gameLoop.setImplicitMomentumEnabled(implicitMomentumCheckbox.checked);
+    });
+  }
+
   // Advanced solver settings: Deterministic mode enable/disable
   const deterministicModeCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
   if (deterministicModeCheckbox) {

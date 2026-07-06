@@ -88,6 +88,12 @@
                 </label>
               </div>
               <div style="margin-top: 8px;">
+                <label style="font-size: 11px;" title="Fully implicit (RELAP-style) momentum: end-of-step flows are solved together with the pressure corrections, so acoustic modes in liquid loops are unconditionally damped and the timestep is limited only by thermal and transport accuracy (typically 10-50x faster). Fast transients slower than the timestep are still resolved; sub-timestep water hammer is smoothed to its net effect. Disable to integrate flow momentum explicitly with RK45 - the reference scheme for water-hammer studies (much slower). Requires the pressure solver.">
+                  <input type="checkbox" id="implicit-momentum-enabled" checked />
+                  Implicit flow momentum
+                </label>
+              </div>
+              <div style="margin-top: 8px;">
                 <label style="font-size: 11px;" title="When enabled, the solver will complete all steps regardless of wall time. This makes results reproducible but may cause UI freezes if timesteps become very small.">
                   <input type="checkbox" id="deterministic-mode" />
                   Deterministic mode

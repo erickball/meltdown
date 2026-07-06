@@ -117,6 +117,19 @@ export function buildSimFromFile(
 }
 
 function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45Solver {
+  // A/B override for the implicit momentum solve (semi-implicit-flow-solver
+  // plan): IMPLICIT_MOMENTUM=1 forces it on, =0 forces it off, unset uses the
+  // shipping default. Lets every suite in scripts/ run against both schemes.
+  const env = process.env.IMPLICIT_MOMENTUM;
+  if (env !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        implicitMomentum: env === '1',
+      },
+    };
+  }
   const solver = new RK45Solver(config);
   solver.addRateOperator(new FlowRateOperator());
   solver.addRateOperator(new FlowMomentumRateOperator());

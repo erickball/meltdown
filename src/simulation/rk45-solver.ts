@@ -65,6 +65,15 @@ export interface RateOperator {
   name: string;
 
   /**
+   * Marks the operator that produces explicit flow-momentum rates (dṁ/dt).
+   * When the semi-implicit pressure solver owns the momentum update
+   * (implicitMomentum mode), the solver skips operators with this flag -
+   * connection flows are then set by the implicit solve during constraint
+   * application instead of being integrated by RK45.
+   */
+  providesFlowMomentum?: boolean;
+
+  /**
    * Compute the rates of change for this physics domain.
    * Does NOT modify the input state.
    */
@@ -310,6 +319,38 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
 }
 
 /**
+ * Locate the first non-finite entry in a rates structure, for diagnosis when
+ * the error norm comes out NaN/Inf. Fail-loudly support: a NaN rate always
+ * has a specific physical source and should be named, not swallowed.
+ */
+export function findNonFiniteRate(rates: StateRates): string {
+  for (const [id, r] of rates.flowNodes) {
+    if (!isFinite(r.dMass)) return `${id}.dMass=${r.dMass}`;
+    if (!isFinite(r.dEnergy)) return `${id}.dEnergy=${r.dEnergy}`;
+    if (r.dNcg) {
+      for (const species of ALL_GAS_SPECIES) {
+        if (!isFinite(r.dNcg[species])) return `${id}.dNcg.${species}=${r.dNcg[species]}`;
+      }
+    }
+  }
+  for (const [id, r] of rates.flowConnections) {
+    if (!isFinite(r.dMassFlowRate)) return `${id}.dMassFlowRate=${r.dMassFlowRate}`;
+  }
+  for (const [id, r] of rates.thermalNodes) {
+    if (!isFinite(r.dTemperature)) return `${id}.dTemperature=${r.dTemperature}`;
+  }
+  if (!isFinite(rates.neutronics.dPower)) return `neutronics.dPower=${rates.neutronics.dPower}`;
+  if (!isFinite(rates.neutronics.dPrecursorConcentration)) return 'neutronics.dPrecursorConcentration';
+  for (const [id, r] of rates.pumps) {
+    if (!isFinite(r.dEffectiveSpeed)) return `pump ${id}.dEffectiveSpeed=${r.dEffectiveSpeed}`;
+  }
+  return 'no non-finite rate found (check state normalization denominators)';
+}
+
+// Rate limiter for the NaN-rate diagnostic log (wall-clock ms)
+let lastRatesNormNaNLog = 0;
+
+/**
  * Compute the L2 norm of rates for error estimation.
  * Also considers flow magnitude relative to node mass (throughput ratio)
  * to handle stiffness from high flow through small volumes.
@@ -376,6 +417,14 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
     const relPrecRate = rates.neutronics.dPrecursorConcentration / state.neutronics.precursorConcentration;
     sumSq += relPrecRate * relPrecRate;
     count++;
+  }
+
+  if (!isFinite(sumSq)) {
+    const now = performance.now();
+    if (now - lastRatesNormNaNLog > 1000) {
+      console.warn(`[RK45] Non-finite rate in error norm: ${findNonFiniteRate(rates)}`);
+      lastRatesNormNaNLog = now;
+    }
   }
 
   return count > 0 ? Math.sqrt(sumSq / count) : 0;
@@ -523,6 +572,16 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
  * Returns true if the state is safe enough to pass to constraint operators.
  */
 export function checkPreConstraintSanity(state: SimulationState): { safe: boolean; reason?: string } {
+  // Neutronics overflow (e.g. an unquenched prompt-critical excursion) must
+  // be rejected before it poisons the state - a NaN/Inf power propagates into
+  // heat generation and every error norm afterwards.
+  if (!isFinite(state.neutronics.power) || !isFinite(state.neutronics.precursorConcentration)) {
+    return {
+      safe: false,
+      reason: `neutronics: non-finite power (${state.neutronics.power}) or precursors (${state.neutronics.precursorConcentration})`,
+    };
+  }
+
   for (const [id, node] of state.flowNodes) {
     // Skip boundary nodes - their state is fixed and may not follow normal physics
     if (node.isBoundary) continue;
@@ -572,7 +631,12 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
 // for diagnostics - the aggregate score alone doesn't say what actually happened.
 export let lastSanityFailureReason = '';
 
-export function checkStateSanity(oldState: SimulationState, newState: SimulationState, dt: number): number {
+export function checkStateSanity(
+  oldState: SimulationState,
+  newState: SimulationState,
+  dt: number,
+  implicitFlows = false
+): number {
   let maxBadness = 0;
 
   // Build throughput map for new state
@@ -609,14 +673,25 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
     // larger steps traps the simulation on the wrong side of the stiffness
     // crossover and the ringing never decays. Sub-bar accuracy at low pressure
     // is still protected by the RK45 embedded error estimate.
-    const P_SCALE_FLOOR = 2e5; // Pa
-    const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
-    const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
-    if (pChange > 0.2) {
-      // Scale badness: 20% change = badness 1, 40% = 2, etc.
-      const badness = pChange / 0.2;
-      if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)`;
-      maxBadness = Math.max(maxBadness, badness);
+    //
+    // This guard stays active under the implicit momentum solve too: the
+    // implicit scheme is unconditionally stable for the LINEARIZED
+    // pressure-flow pair, but the linearization itself (compliance from the
+    // local bulk modulus, conductance at the predicted flow) is only valid for
+    // moderate pressure excursions. Steps that cross the saturation-dome edge
+    // or swing a stiff liquid node by more than the driving-pressure scale
+    // must still be resolved by shrinking dt, or the step-scale cavitation
+    // slosh diverges.
+    {
+      const P_SCALE_FLOOR = 2e5; // Pa
+      const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
+      const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
+      if (pChange > 0.2) {
+        // Scale badness: 20% change = badness 1, 40% = 2, etc.
+        const badness = pChange / 0.2;
+        if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)`;
+        maxBadness = Math.max(maxBadness, badness);
+      }
     }
 
     // Check for very low mass
@@ -700,19 +775,26 @@ export function checkStateSanity(oldState: SimulationState, newState: Simulation
     }
   }
 
-  // Check flow connections for extreme accelerations
-  for (const newConn of newState.flowConnections) {
-    const oldConn = oldState.flowConnections.find(c => c.id === newConn.id);
-    if (!oldConn) continue;
+  // Check flow connections for extreme accelerations. Skipped when the
+  // implicit pressure-flow solve owns momentum: a backward-Euler solve
+  // legitimately jumps flows straight to their new equilibrium in one step
+  // (valve opening, pump start) - that is the point of the implicit scheme,
+  // not an integration overshoot. Mass/pressure consequences of those jumps
+  // are still guarded by the node checks above.
+  if (!implicitFlows) {
+    for (const newConn of newState.flowConnections) {
+      const oldConn = oldState.flowConnections.find(c => c.id === newConn.id);
+      if (!oldConn) continue;
 
-    // Check for flow reversal or huge change
-    const flowChange = Math.abs(newConn.massFlowRate - oldConn.massFlowRate);
-    const refFlow = Math.max(100, Math.abs(oldConn.massFlowRate), Math.abs(newConn.massFlowRate));
-    const relChange = flowChange / refFlow;
+      // Check for flow reversal or huge change
+      const flowChange = Math.abs(newConn.massFlowRate - oldConn.massFlowRate);
+      const refFlow = Math.max(100, Math.abs(oldConn.massFlowRate), Math.abs(newConn.massFlowRate));
+      const relChange = flowChange / refFlow;
 
-    if (relChange > 1.0) {
-      // Flow changed by more than 100% - suspicious
-      maxBadness = Math.max(maxBadness, relChange);
+      if (relChange > 1.0) {
+        // Flow changed by more than 100% - suspicious
+        maxBadness = Math.max(maxBadness, relChange);
+      }
     }
   }
 
@@ -824,6 +906,15 @@ export class RK45Solver {
   private rejectedSteps = 0;
   private operatorTimes = new Map<string, number>();
 
+  // Rejection cause histogram (for performance diagnosis): maps a coarse
+  // cause key ("rk45-error", "pre-sanity", "constraint-throw", or the
+  // node+check that tripped the sanity guard) to a count.
+  public rejectionStats = new Map<string, number>();
+
+  private countRejection(cause: string): void {
+    this.rejectionStats.set(cause, (this.rejectionStats.get(cause) || 0) + 1);
+  }
+
   // Rate limiting for log messages (wall time in ms)
   private lastWallTimeLimitLog = 0;
   private lastSanityFailLog = 0;
@@ -863,6 +954,7 @@ export class RK45Solver {
     this.currentDt = this.config.initialDt;
     this.totalSteps = 0;
     this.rejectedSteps = 0;
+    this.rejectionStats.clear();
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -947,7 +1039,12 @@ export class RK45Solver {
     // Now compute rates using the constrained state
     let totalRates = createZeroRates();
 
+    const implicitMomentum = this.implicitMomentumActive();
     for (const op of this.rateOperators) {
+      // The implicit pressure-flow solve owns connection momentum: skip the
+      // explicit momentum operator entirely. Its absence also removes flow
+      // momentum from the RK45 error estimate (no rates -> no contribution).
+      if (op.providesFlowMomentum && implicitMomentum) continue;
       const t0 = performance.now();
       const opRates = op.computeRates(constrainedState);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
@@ -955,6 +1052,19 @@ export class RK45Solver {
     }
 
     return totalRates;
+  }
+
+  /**
+   * True when the semi-implicit pressure solver is active AND configured to
+   * own the full momentum update (backward-Euler flows replace explicit RK45
+   * momentum integration).
+   */
+  implicitMomentumActive(): boolean {
+    return !!(
+      this.pressureSolver &&
+      this.pressureSolverEnabled &&
+      this.pressureSolver.config.implicitMomentum
+    );
   }
 
   /**
@@ -977,7 +1087,16 @@ export class RK45Solver {
     // Note: The pressure solver does NOT modify node pressures - it only adjusts
     // flow rates. The actual pressures remain thermodynamically consistent as
     // computed by FluidStateConstraintOperator from (m, U, V).
-    if (this.pressureSolver && this.pressureSolverEnabled) {
+    //
+    // In implicit momentum mode this is NOT done here: the backward-Euler
+    // momentum solve runs exactly ONCE per step attempt (see step()), and the
+    // resulting end-of-step flows are frozen through all RK stages so the
+    // advected mass exactly matches the solve's mass-balance closure. Re-
+    // solving per stage would give each stage slightly different flows, and
+    // the 5th-order combination of those would deposit stage-averaged mass
+    // that matches NO balance - a ppm-scale mass error that stiff liquid
+    // nodes amplify into bar-scale pressure flicker.
+    if (this.pressureSolver && this.pressureSolverEnabled && !this.implicitMomentumActive()) {
       const t0 = performance.now();
       this.pressureSolver.solve(result, dt);
       this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
@@ -1004,6 +1123,27 @@ export class RK45Solver {
     k: StateRates[];
     errorRates: StateRates;
   } {
+    // Implicit momentum: perform the backward-Euler pressure-flow solve ONCE
+    // per step attempt, on a clone (the attempt may be rejected and retried
+    // with a smaller dt, and the solve is dt-dependent). The solved end-of-
+    // step flows ṁ¹ are frozen through all RK stages - transport integrates
+    // against constant flows, so the mass each node receives is exactly the
+    // net flow the solve balanced. applyAllConstraints() skips the solver in
+    // this mode.
+    if (this.implicitMomentumActive() && this.pressureSolver) {
+      const t0 = performance.now();
+      const solvedState = cloneSimulationState(state);
+      try {
+        this.pressureSolver.solve(solvedState, dt);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn(`[RK45] Implicit momentum solve failed, rejecting step: ${message}`);
+        return { newState: state, error: 1e10, k: [], errorRates: createZeroRates() };
+      }
+      this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
+      state = solvedState;
+    }
+
     // Compute the 7 stages of DOPRI5
     const k: StateRates[] = [];
 
@@ -1118,6 +1258,15 @@ export class RK45Solver {
   private computeOptimalDt(error: number, dt: number): number {
     const tol = this.config.relTol; // Use relative tolerance
 
+    // A non-finite error means some rate went NaN/Inf (a broken stage state).
+    // Treat it like a maximal rejection: shrink hard. Letting NaN through
+    // poisons currentDt permanently - Math.max(NaN, minDt) is NaN, every
+    // subsequent comparison is false, and the solver spins forever without
+    // even tripping the stuck-detector.
+    if (!isFinite(error) || !isFinite(dt)) {
+      return Math.max((isFinite(dt) ? dt : this.config.initialDt) * this.config.minShrinkFactor, this.config.minDt);
+    }
+
     if (error === 0) {
       return dt * this.config.maxGrowthFactor;
     }
@@ -1192,6 +1341,7 @@ export class RK45Solver {
         console.warn(`[RK45] Pre-constraint sanity failed: ${preCheck.reason}`);
         rejectsThisFrame++;
         this.rejectedSteps++;
+        this.countRejection(`pre-sanity:${(preCheck.reason ?? 'unknown').split(':')[0]}`);
         this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
 
         // Track consecutive rejects at minimum dt
@@ -1223,6 +1373,7 @@ export class RK45Solver {
         console.warn(`[RK45] Constraint operator threw on accepted step, rejecting: ${message}`);
         rejectsThisFrame++;
         this.rejectedSteps++;
+        this.countRejection('constraint-throw');
         this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
 
         if (this.currentDt <= this.config.minDt * 1.01) {
@@ -1239,16 +1390,18 @@ export class RK45Solver {
       }
 
       // Check for obviously bad physics (in addition to RK45 error estimate)
-      const sanityScore = checkStateSanity(currentState, constrainedState, stepDt);
+      const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive());
 
       // Combine RK45 error with sanity check
       // Sanity score > 1 means something suspicious happened
       const effectiveError = Math.max(error, sanityScore * this.config.relTol);
 
-      // Accept or reject based on combined error
+      // Accept or reject based on combined error. A non-finite error is never
+      // acceptable - not even at minimum dt - because it means some rate went
+      // NaN/Inf and the candidate state cannot be trusted.
       const tol = this.config.relTol;
 
-      if (effectiveError <= tol || stepDt <= this.config.minDt) {
+      if (isFinite(effectiveError) && (effectiveError <= tol || stepDt <= this.config.minDt)) {
         // Accept step (possibly forced at minimum dt)
         if (stepDt <= this.config.minDt && effectiveError > tol) {
           // Forced acceptance at minimum dt with high error
@@ -1298,6 +1451,34 @@ export class RK45Solver {
         // Reject step - shrink timestep and retry
         rejectsThisFrame++;
         this.rejectedSteps++;
+
+        if (sanityScore > 1) {
+          const reason = lastSanityFailureReason;
+          const kind = reason.includes('pressure change') ? 'pressure'
+            : reason.includes('massFraction') ? 'throughput'
+            : reason.includes('relMassChange') ? 'massChange'
+            : 'other';
+          this.countRejection(`sanity:${reason.split(':')[0]}:${kind}`);
+        } else if (!isFinite(effectiveError)) {
+          // Broken stage produced NaN/Inf rates - reject loudly; the dt
+          // controller shrinks hard (see computeOptimalDt).
+          this.countRejection('nan-error');
+          if (now - this.lastSanityFailLog > 1000) {
+            console.warn(`[RK45] Non-finite error estimate at dt=${(stepDt * 1000).toFixed(3)}ms - rejecting step and shrinking`);
+            this.lastSanityFailLog = now;
+          }
+          if (stepDt <= this.config.minDt * 1.01) {
+            consecutiveRejectsAtMinDt++;
+            if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+              throw new Error(
+                `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive non-finite error estimates at minimum dt. ` +
+                `Some physics rate is producing NaN/Inf and cannot be resolved by shrinking the timestep.`
+              );
+            }
+          }
+        } else {
+          this.countRejection(error >= 1e10 ? 'stage-failure' : 'rk45-error');
+        }
 
         if (sanityScore > 1) {
           // Sanity check failed - be more aggressive about shrinking.
@@ -1435,7 +1616,7 @@ export class RK45Solver {
     }
 
     // Check sanity and log warning if needed
-    const sanityScore = checkStateSanity(state, constrainedState, this.currentDt);
+    const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive());
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }

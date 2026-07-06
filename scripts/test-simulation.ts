@@ -74,11 +74,21 @@ const simState = createSimulationFromPlant(plantState);
 console.log(`Created simulation with ${simState.flowNodes.size} flow nodes, ${simState.flowConnections.length} flow connections`);
 
 // Create solver with operators (same setup as game loop)
-// RELTOL env var overrides the RK45 relative error tolerance (default 1e-3)
-// for accuracy-vs-speed experiments.
+// Env overrides for accuracy-vs-speed experiments:
+//   RELTOL            RK45 relative error tolerance
+//   MAXDT             maximum timestep (s)
+//   IMPLICIT_MOMENTUM 1|0 forces the implicit pressure-flow momentum solve on/off
 const relTol = process.env.RELTOL ? parseFloat(process.env.RELTOL) : undefined;
-const solver = relTol ? new RK45Solver({ relTol }) : new RK45Solver();
+const maxDt = process.env.MAXDT ? parseFloat(process.env.MAXDT) : undefined;
+const implicitEnv = process.env.IMPLICIT_MOMENTUM;
+const solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {};
+if (relTol) solverConfig.relTol = relTol;
+if (maxDt) solverConfig.maxDt = maxDt;
+if (implicitEnv !== undefined) solverConfig.pressureSolver = { implicitMomentum: implicitEnv === '1' };
+const solver = new RK45Solver(solverConfig);
 if (relTol) console.log(`[test-simulation] RK45 relTol overridden to ${relTol}`);
+if (maxDt) console.log(`[test-simulation] RK45 maxDt overridden to ${maxDt}s`);
+if (implicitEnv !== undefined) console.log(`[test-simulation] implicit momentum forced ${implicitEnv === '1' ? 'ON' : 'OFF'}`);
 
 // Add rate operators (order matters!)
 solver.addRateOperator(new FlowRateOperator());
@@ -159,6 +169,13 @@ console.log('\n=== Simulation Complete ===');
     `(${(state.time / wallSec).toFixed(2)}x realtime)`);
   console.log(`Total steps: ${solverMetrics.totalSteps}, rejected: ${solverMetrics.rejectedSteps}, ` +
     `final dt: ${(solverMetrics.currentDt * 1000).toFixed(2)}ms`);
+  if (solver.rejectionStats.size > 0) {
+    console.log('Rejection causes:');
+    const sortedRejects = [...solver.rejectionStats.entries()].sort((a, b) => b[1] - a[1]);
+    for (const [cause, count] of sortedRejects.slice(0, 12)) {
+      console.log(`  ${cause}: ${count}`);
+    }
+  }
   if (lastMetrics) {
     console.log('Operator wall time totals:');
     const sorted = [...operatorTotals.entries()].sort((a, b) => b[1] - a[1]);
@@ -170,6 +187,14 @@ console.log('\n=== Simulation Complete ===');
 
 // Helper function to log simulation state
 function logSimState(state: SimulationState): void {
+  const nn = state.neutronics;
+  if (nn && nn.nominalPower > 0) {
+    console.log(`neutronics: P=${(nn.power / 1e6).toFixed(3)}MW (${(100 * nn.power / nn.nominalPower).toFixed(1)}%) ` +
+      `C=${nn.precursorConcentration.toExponential(3)} reactivity=${nn.reactivity?.toExponential(3) ?? '?'}`);
+  }
+  for (const [id, tn] of state.thermalNodes) {
+    console.log(`thermal ${id}: T=${(tn.temperature - 273.15).toFixed(1)}C heatGen=${(tn.heatGeneration / 1e6).toFixed(1)}MW`);
+  }
   for (const [nodeId, node] of state.flowNodes) {
     const fluid = node.fluid;
     const ncgMoles = fluid.ncg ?

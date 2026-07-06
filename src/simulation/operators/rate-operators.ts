@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Rate-Based Physics Operators for RK45 Integration
  *
  * These operators compute derivatives (rates of change) rather than
@@ -29,256 +29,27 @@ import {
   R_GAS,
 } from '../gas-properties';
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
-import { pumpHeadPressure } from './pump-curve';
+import {
+  calculateSeparation,
+  calculateLiquidLevelWithObstructions,
+  findCheckValveForConnection,
+  computeConnectionHydraulics,
+  computeChokeLimit,
+  CLOSED_FLOW_DECAY_TAU,
+} from './connection-hydraulics';
 
-// ============================================================================
-// Phase Separation Calculation (shared utility)
-// ============================================================================
+// Shared per-connection hydraulics now live in connection-hydraulics.ts (one
+// model consumed by both this file's explicit momentum operator and the
+// semi-implicit PressureSolver). Re-export the utilities that other modules
+// historically imported from here.
+export {
+  calculateSeparation,
+  setSeparationDebug,
+  calculateLiquidLevelWithObstructions,
+  calculateVolumeAtElevation,
+  findCheckValveForConnection,
+} from './connection-hydraulics';
 
-/**
- * Calculate phase separation factor for a two-phase node.
- * separation = 0 means fully mixed (homogeneous)
- * separation = 1 means fully separated (distinct liquid and vapor regions)
- *
- * This is used by both rendering (to show pixelation) and flow calculations
- * (to determine what phase flows out of connections at different elevations).
- */
-// Debug flag for separation calculation
-let separationDebugEnabled = false;
-let separationDebugLastLog = 0;
-
-export function setSeparationDebug(enabled: boolean): void {
-  separationDebugEnabled = enabled;
-}
-
-export function calculateSeparation(node: FlowNode, massFlowRate: number): number {
-  // Pumps, pipes, valves, turbines are always well-mixed (small volume, high turbulence)
-  // Condensers CAN separate - they have a hotwell where liquid collects
-  const id = node.id.toLowerCase();
-  if (id.startsWith('pum-') || id.startsWith('pip-') || id.startsWith('val-') ||
-      id.startsWith('tur-') || id.startsWith('tdp-')) {
-    return 0;  // No separation
-  }
-
-  // If height is explicitly 0, the node is well-mixed
-  if (node.height === 0) {
-    if (separationDebugEnabled && id.startsWith('con-')) {
-      console.log(`[Sep] ${node.id}: height=0, returning 0`);
-    }
-    return 0;
-  }
-
-  // Get node height - use stored value or estimate from volume
-  const nodeHeight = node.height ?? Math.cbrt(node.volume);  // Assume cube if no height
-  if (nodeHeight < 0.1) {
-    if (separationDebugEnabled && id.startsWith('con-')) {
-      console.log(`[Sep] ${node.id}: nodeHeight=${nodeHeight.toFixed(3)}m < 0.1m, returning 0`);
-    }
-    return 0;  // Too small for meaningful separation
-  }
-
-  // Get flow properties
-  const quality = node.fluid.quality ?? 0;
-  const T_C = node.fluid.temperature - 273.15;
-  const P = node.fluid.pressure;
-
-  // Approximate saturated liquid/vapor densities
-  const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                     T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                     Math.max(400, 700 - 2.5 * (T_C - 300));
-  const rho_vapor = Math.max(0.1, P * 0.018 / (8.314 * node.fluid.temperature));
-  const rho_mixture = rho_liquid * (1 - quality) + rho_vapor * quality;
-
-  // Density difference drives separation
-  const delta_rho = rho_liquid - rho_vapor;
-
-  // Characteristic bubble/droplet size (m)
-  // Smaller at higher pressure due to surface tension effects
-  const d_bubble = 0.005 * Math.sqrt(1e5 / Math.max(P, 1e5));  // ~5mm at 1 bar, smaller at high P
-
-  // Terminal settling velocity (simplified Stokes drag)
-  // v_settle = (Δρ × g × d²) / (18 × μ)
-  // For water at typical conditions, μ ≈ 0.0003 Pa·s
-  const g = 9.81;
-  const mu = 0.0003;
-  const v_settle = (delta_rho * g * d_bubble * d_bubble) / (18 * mu);
-
-  // Flow velocity through the node
-  // Use the node's internal flow area, not the connection flow area
-  const v_flow = Math.abs(massFlowRate) / (rho_mixture * Math.max(node.flowArea, 0.01));
-
-  // Residence time
-  const tau = node.volume * rho_mixture / Math.max(Math.abs(massFlowRate), 0.01);
-
-  // Separation height achievable during residence time
-  const h_sep = v_settle * tau;
-
-  // Separation factor based on how much of the height can be settled
-  let separation = Math.min(1, h_sep / nodeHeight);
-
-  // Reduce separation if flow velocity is high relative to settling velocity
-  // High turbulence from flow re-mixes the phases
-  const turbulence_factor = v_flow > 0.01 ? Math.exp(-v_flow / v_settle) : 1;
-  if (v_flow > 0.01) {
-    separation *= turbulence_factor;
-  }
-
-  // Debug logging for condensers
-  if (separationDebugEnabled && id.startsWith('con-')) {
-    const now = Date.now();
-    if (now - separationDebugLastLog > 1000) {  // Log at most once per second
-      separationDebugLastLog = now;
-      console.log(`[Sep] ${node.id}: height=${node.height}, nodeHeight=${nodeHeight.toFixed(2)}m, ` +
-        `vol=${node.volume.toFixed(1)}m³, flowArea=${node.flowArea.toFixed(3)}m², ` +
-        `x=${(quality*100).toFixed(1)}%, mdot=${massFlowRate.toFixed(1)}kg/s`);
-      console.log(`      ρ_liq=${rho_liquid.toFixed(0)}, ρ_vap=${rho_vapor.toFixed(3)}, ρ_mix=${rho_mixture.toFixed(1)}, ` +
-        `Δρ=${delta_rho.toFixed(0)}, d_bub=${(d_bubble*1000).toFixed(1)}mm`);
-      console.log(`      v_settle=${v_settle.toFixed(3)}m/s, v_flow=${v_flow.toFixed(3)}m/s, ` +
-        `τ=${tau.toFixed(1)}s, h_sep=${h_sep.toFixed(2)}m`);
-      console.log(`      h_sep/H=${(h_sep/nodeHeight).toFixed(2)}, turb_factor=${turbulence_factor.toFixed(3)}, ` +
-        `sep=${(separation*100).toFixed(1)}%`);
-    }
-  }
-
-  // Clamp to valid range
-  return Math.max(0, Math.min(1, separation));
-}
-
-// ============================================================================
-// Liquid Level Calculation with Internal Obstructions
-// ============================================================================
-
-/**
- * Calculate liquid level in a node that may contain internal obstructions.
- *
- * For nodes with internal components (e.g., reactor vessel with core barrel),
- * the available cross-sectional area varies with elevation. This function
- * computes the liquid level accounting for this variation.
- *
- * Given liquid volume V_liq, we need to find height h such that:
- *   V_liq = ∫₀ʰ A(z) dz
- *
- * where A(z) = A_outer - Σ A_obstruction(z) for obstructions present at elevation z.
- *
- * @param node The flow node
- * @param liquidVolume Volume of liquid to fill (m³)
- * @returns Liquid level height from node bottom (m)
- */
-export function calculateLiquidLevelWithObstructions(node: FlowNode, liquidVolume: number): number {
-  const nodeHeight = node.height ?? Math.cbrt(node.volume);
-  if (nodeHeight <= 0) return 0;
-
-  // Base cross-sectional area (total volume / height)
-  const baseArea = node.volume / nodeHeight;
-
-  // If no obstructions, simple calculation
-  if (!node.internalObstructions || node.internalObstructions.length === 0) {
-    return Math.min(nodeHeight, liquidVolume / baseArea);
-  }
-
-  // Build sorted list of elevation breakpoints where area changes
-  const breakpoints = new Set<number>([0, nodeHeight]);
-  for (const obs of node.internalObstructions) {
-    if (obs.bottomElevation > 0 && obs.bottomElevation < nodeHeight) {
-      breakpoints.add(obs.bottomElevation);
-    }
-    if (obs.topElevation > 0 && obs.topElevation < nodeHeight) {
-      breakpoints.add(obs.topElevation);
-    }
-  }
-  const sortedBreakpoints = Array.from(breakpoints).sort((a, b) => a - b);
-
-  // Calculate area at a given elevation
-  const getAreaAt = (z: number): number => {
-    let area = baseArea;
-    for (const obs of node.internalObstructions!) {
-      if (z >= obs.bottomElevation && z < obs.topElevation) {
-        area -= obs.crossSectionalArea;
-      }
-    }
-    return Math.max(0, area); // Never negative
-  };
-
-  // Integrate piecewise to find liquid level
-  let volumeAccumulated = 0;
-
-  for (let i = 0; i < sortedBreakpoints.length - 1; i++) {
-    const z_low = sortedBreakpoints[i];
-    const z_high = sortedBreakpoints[i + 1];
-    const sliceArea = getAreaAt((z_low + z_high) / 2); // Area is constant in this slice
-    const sliceHeight = z_high - z_low;
-    const sliceVolume = sliceArea * sliceHeight;
-
-    if (volumeAccumulated + sliceVolume >= liquidVolume) {
-      // Liquid level is within this slice
-      const remainingVolume = liquidVolume - volumeAccumulated;
-      const levelInSlice = sliceArea > 0 ? remainingVolume / sliceArea : 0;
-      return z_low + levelInSlice;
-    }
-
-    volumeAccumulated += sliceVolume;
-  }
-
-  // Liquid volume exceeds node capacity - return max height
-  return nodeHeight;
-}
-
-/**
- * Calculate the total available volume in a node up to a given elevation,
- * accounting for internal obstructions.
- *
- * This is the inverse operation of calculateLiquidLevelWithObstructions.
- *
- * @param node The flow node
- * @param elevation Height from node bottom (m)
- * @returns Volume available up to that elevation (m³)
- */
-export function calculateVolumeAtElevation(node: FlowNode, elevation: number): number {
-  const nodeHeight = node.height ?? Math.cbrt(node.volume);
-  if (nodeHeight <= 0 || elevation <= 0) return 0;
-
-  const clampedElevation = Math.min(elevation, nodeHeight);
-  const baseArea = node.volume / nodeHeight;
-
-  // If no obstructions, simple calculation
-  if (!node.internalObstructions || node.internalObstructions.length === 0) {
-    return baseArea * clampedElevation;
-  }
-
-  // Build sorted list of elevation breakpoints
-  const breakpoints = new Set<number>([0, clampedElevation]);
-  for (const obs of node.internalObstructions) {
-    if (obs.bottomElevation > 0 && obs.bottomElevation < clampedElevation) {
-      breakpoints.add(obs.bottomElevation);
-    }
-    if (obs.topElevation > 0 && obs.topElevation < clampedElevation) {
-      breakpoints.add(obs.topElevation);
-    }
-  }
-  const sortedBreakpoints = Array.from(breakpoints).sort((a, b) => a - b);
-
-  // Calculate area at a given elevation
-  const getAreaAt = (z: number): number => {
-    let area = baseArea;
-    for (const obs of node.internalObstructions!) {
-      if (z >= obs.bottomElevation && z < obs.topElevation) {
-        area -= obs.crossSectionalArea;
-      }
-    }
-    return Math.max(0, area);
-  };
-
-  // Integrate piecewise
-  let totalVolume = 0;
-  for (let i = 0; i < sortedBreakpoints.length - 1; i++) {
-    const z_low = sortedBreakpoints[i];
-    const z_high = sortedBreakpoints[i + 1];
-    const sliceArea = getAreaAt((z_low + z_high) / 2);
-    totalVolume += sliceArea * (z_high - z_low);
-  }
-
-  return totalVolume;
-}
 
 // ============================================================================
 // Debug Tracking for Pump-5
@@ -467,17 +238,23 @@ export class HeatGenerationRateOperator implements RateOperator {
 
     // Add heat generation to thermal nodes
     for (const [id, node] of state.thermalNodes) {
-      if (node.heatGeneration > 0) {
-        // For fuel nodes linked to neutronics, use reactor power
-        if (id === state.neutronics.fuelNodeId || id.includes('fuel')) {
-          const power = state.neutronics.power;
-          const dT = power / (node.mass * node.specificHeat);
-          rates.thermalNodes.set(id, { dTemperature: dT });
-        } else {
-          // Other heat-generating nodes use their fixed rate
-          const dT = node.heatGeneration / (node.mass * node.specificHeat);
-          rates.thermalNodes.set(id, { dTemperature: dT });
-        }
+      // Fuel nodes linked to neutronics receive the reactor power. This must
+      // NOT be gated on the static heatGeneration field: factory-built cores
+      // create their fuel node with heatGeneration = 0 ("set by neutronics"),
+      // and gating on it silently disconnected reactor power from the thermal
+      // system entirely - no fuel heatup, and therefore no Doppler feedback
+      // to quench reactivity excursions.
+      const isNeutronicsFuel = state.neutronics.fuelNodeId
+        ? id === state.neutronics.fuelNodeId
+        : id.includes('fuel'); // legacy fallback when no explicit linkage exists
+      if (state.neutronics.coreId && isNeutronicsFuel) {
+        const power = state.neutronics.power;
+        const dT = power / (node.mass * node.specificHeat);
+        rates.thermalNodes.set(id, { dTemperature: dT });
+      } else if (node.heatGeneration > 0) {
+        // Other heat-generating nodes use their fixed rate
+        const dT = node.heatGeneration / (node.mass * node.specificHeat);
+        rates.thermalNodes.set(id, { dTemperature: dT });
       }
     }
 
@@ -631,9 +408,23 @@ export class NeutronicsRateOperator implements RateOperator {
     const det = a * d - b * c; // = -lambda * rho / Lambda
     const D = tr * tr - 4 * det;
 
-    // Use an arbitrary timestep - the choice doesn't matter since we divide by it
-    // Use a value on the order of the precursor timescale for numerical stability
-    const dt = 0.1; // 100 ms - large enough to capture dynamics, small enough to be accurate
+    // Secant window for the effective rate. Nominally 100 ms (precursor
+    // scale, long enough that the fast NEGATIVE prompt eigenvalue fully
+    // relaxes - that is the point of the analytic solution). But a POSITIVE
+    // eigenvalue grows: for a prompt-supercritical core λ₁ ≈ (ρ-β)/Λ can
+    // reach 10³-10⁴ 1/s, and exp(λ₁·0.1) overflows double precision, turning
+    // the power rate into Inf-Inf = NaN. Worse, any exponent cap much above
+    // O(1) yields secant slopes of e^cap·N that make force-accepted minimum-dt
+    // steps jump power by astronomical factors before Doppler feedback can
+    // respond. Capping the POSITIVE exponent at 3 keeps the secant slope
+    // within ~7x of the true tangent λ₁N, so the excursion integrates like
+    // explicit dynamics: the step controller resolves it, fuel heats, and
+    // Doppler quenches it physically. Negative eigenvalues are left alone
+    // (exp underflows harmlessly to 0).
+    const growthEigenvalue = D >= 0
+      ? (tr + Math.sqrt(Math.max(0, D))) / 2
+      : tr / 2;
+    const dt = growthEigenvalue > 30 ? 3 / growthEigenvalue : 0.1;
 
     let N_new: number;
     let C_new: number;
@@ -800,26 +591,6 @@ export class NeutronicsRateOperator implements RateOperator {
 // Without it, a persistently-suspicious node logs 8 lines on every rate
 // evaluation (7+ per RK45 step) and console I/O dominates the frame time.
 let lastEnthalpyDebugLog = 0;
-
-/**
- * Find the check valve guarding a flow connection.
- *
- * Check valves created from plant components are keyed by COMPONENT id with
- * the guarded connection recorded in connectedFlowPath, so a plain
- * checkValves.get(conn.id) never matches them (a long-standing silent bug -
- * user-built check valves did nothing). Match connectedFlowPath, with a
- * map-key fallback for any connection-keyed entries.
- */
-export function findCheckValveForConnection(
-  state: SimulationState,
-  connId: string
-): { crackingPressure: number } | undefined {
-  if (!state.components.checkValves) return undefined;
-  for (const [, cv] of state.components.checkValves) {
-    if (cv.connectedFlowPath === connId) return cv;
-  }
-  return state.components.checkValves.get(connId);
-}
 
 export class FlowRateOperator implements RateOperator {
   name = 'FluidFlow';
@@ -2320,246 +2091,26 @@ export class PumpSpeedConstraintOperator implements ConstraintOperator {
  * The result is integrated by RK45 to update conn.massFlowRate each timestep.
  *
  * NOTE: This replaces the old FlowOperator (in fluid-flow.ts) which is now OBSOLETE.
- * Any flow-related features (like choked flow limiting) must be added HERE, not there.
  *
- * Computes the rate of change of mass flow rate for each flow connection
- * using the momentum equation:
+ * The per-connection physics (driving pressures, phase-dependent flow density,
+ * resistances, choking limits) lives in connection-hydraulics.ts and is SHARED
+ * with the semi-implicit PressureSolver - one model, two callers. Flow-physics
+ * changes belong there, not here. When the pressure solver owns the momentum
+ * update (implicitMomentum mode), the RK45 solver skips this operator entirely
+ * (see providesFlowMomentum).
  *
- *   ρ * (L/A) * dv/dt = ΔP - friction
+ * Momentum equation:
  *
- * where:
- *   - L/A is the inertance (length / flow area)
- *   - ΔP is the net driving pressure (pressure diff + gravity + pump)
- *   - friction = K * 0.5 * ρ * v²
+ *   ρ_flow * (L/A) * dv/dt = ΔP_driving + ΔP_friction
  *
- * Converting to mass flow rate ṁ = ρ * A * v:
- *   dṁ/dt = A * (ΔP - friction) / inertance
- *
- * TODO: Add choked flow limiting - limit acceleration to prevent exceeding sonic velocity
+ * Converting to mass flow rate ṁ = ρ_flow * A * v:
+ *   dṁ/dt = A * (ΔP_driving + ΔP_friction) / L
  */
 export class FlowMomentumRateOperator implements RateOperator {
   name = 'FlowMomentum';
-
-  /**
-   * Calculate pressure at a specific connection elevation within a node,
-   * accounting for hydrostatic head within the node.
-   */
-  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
-    const g = 9.81;
-    const baseP = node.fluid.pressure;
-
-    // Estimate node height (assume cylindrical with height ≈ diameter)
-    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    if (connectionElevation === undefined) {
-      connectionElevation = nodeHeight / 2;
-    }
-
-    if (node.fluid.phase === 'two-phase') {
-      // Calculate liquid level from quality
-      const quality = node.fluid.quality || 0;
-      // Approximate liquid/vapor densities
-      const T_C = node.fluid.temperature - 273.15;
-      const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                         T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                         700 - 2.5 * (T_C - 300);
-      const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
-
-      // Void fraction and liquid level
-      const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
-      const liquidVolumeFraction = 1 - voidFraction;
-      const liquidLevel = nodeHeight * liquidVolumeFraction;
-
-      if (connectionElevation < liquidLevel) {
-        // Below liquid: add hydrostatic head
-        return baseP + rho_liquid * g * (liquidLevel - connectionElevation);
-      }
-      return baseP;  // In steam space
-    } else if (node.fluid.phase === 'liquid') {
-      // Liquid nodes: base pressure is at top, add hydrostatic head below
-      const rho = node.fluid.mass / node.volume;
-      const liquidHead = nodeHeight - connectionElevation;
-      return baseP + rho * g * liquidHead;
-    }
-
-    return baseP;  // Vapor - no adjustment
-  }
-
-  /**
-   * Get approximate saturated liquid density at node temperature
-   */
-  private getLiquidDensity(node: FlowNode): number {
-    const T_C = node.fluid.temperature - 273.15;
-    if (T_C < 100) {
-      return 1000 - 0.08 * T_C;
-    } else if (T_C < 300) {
-      return 958 - 1.3 * (T_C - 100);
-    } else {
-      return Math.max(400, 700 - 2.5 * (T_C - 300));
-    }
-  }
-
-  /**
-   * Get approximate saturated vapor density at node conditions
-   */
-  private getVaporDensity(node: FlowNode): number {
-    // Ideal gas approximation: ρ = PM/(RT)
-    const P = node.fluid.pressure;
-    const T = node.fluid.temperature;
-    const M = 0.018; // kg/mol for water
-    const R = 8.314; // J/mol-K
-    return Math.max(0.1, P * M / (R * T));
-  }
-
-  /**
-   * Determine what phase is flowing based on connection elevation and liquid level.
-   * @param node The upstream flow node
-   * @param connectionElevation Height of connection relative to node bottom (m)
-   * @param phaseTolerance Tolerance zone around interface (m). 0 = no tolerance, undefined = use default.
-   */
-  private getFlowPhase(node: FlowNode, connectionElevation?: number, phaseTolerance?: number): 'liquid' | 'vapor' | 'mixture' {
-    // Single phase nodes always flow their phase
-    if (node.fluid.phase !== 'two-phase') {
-      return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
-    }
-
-    // Get node height
-    const nodeHeight = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    // Default to mid-height if not specified
-    if (connectionElevation === undefined) {
-      connectionElevation = nodeHeight / 2;
-    }
-
-    // Calculate separation factor - use the shared function
-    // For simplicity here, assume good separation for condensers (high residence time)
-    const separation = calculateSeparation(node, 0);
-
-    // If separation is low, return mixture
-    if (separation < 0.1) {
-      return 'mixture';
-    }
-
-    // Calculate liquid level based on actual mass in the node
-    // For separated two-phase: liquid mass settles at the bottom
-    // liquid_volume = liquid_mass / rho_liquid
-    // liquid_level = calculated from volume accounting for internal obstructions
-    //
-    // Quality x = vapor_mass / total_mass, so liquid_mass = total_mass * (1 - x)
-    const quality = node.fluid.quality ?? 0;
-    const rho_liquid = this.getLiquidDensity(node);
-
-    // Calculate liquid mass and volume
-    const liquidMass = node.fluid.mass * (1 - quality);
-    const liquidVolume = liquidMass / rho_liquid;
-
-    // Calculate liquid level accounting for internal obstructions
-    const liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
-
-    // Tolerance zone around the interface
-    // If phaseTolerance is specified (including 0), use it directly
-    // Otherwise use default: wider when separation is low
-    const tolerance = phaseTolerance !== undefined
-      ? phaseTolerance
-      : 0.1 + (1 - separation) * nodeHeight * 0.3;
-
-    if (connectionElevation < liquidLevel - tolerance) {
-      return 'liquid';
-    } else if (connectionElevation > liquidLevel + tolerance) {
-      return 'vapor';
-    }
-    return 'mixture';
-  }
-
-  /**
-   * Calculate sound speed for choked flow detection.
-   * Accounts for NCG presence using mixture properties.
-   */
-  private getSoundSpeed(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    // Liquid is essentially incompressible - very high sound speed
-    if (flowPhase === 'liquid') {
-      return 1500; // m/s - approximate for water
-    }
-
-    const fluid = node.fluid;
-    const T = fluid.temperature;
-    const P = fluid.pressure;
-    const V = node.volume;
-
-    // Check if NCG is present
-    const ncg = fluid.ncg;
-    const ncgMoles = ncg ? totalMoles(ncg) : 0;
-
-    if (ncgMoles > 0 && V > 0) {
-      // NCG is present - calculate mixture sound speed
-      const P_ncg = ncgMoles * R_GAS * T / V;
-      const P_steam = Math.max(0, P - P_ncg);
-      const steamMoles = P_steam * V / (R_GAS * T);
-
-      if (steamMoles < ncgMoles * 0.02) {
-        // Negligible steam - use pure NCG sound speed
-        return ncgSoundSpeed(ncg!, T);
-      } else {
-        // Steam + NCG mixture
-        return steamNcgSoundSpeed(ncg!, steamMoles, T);
-      }
-    }
-
-    // Pure steam - use water properties
-    const quality = fluid.phase === 'two-phase' ? (fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
-    const rho = flowPhase === 'vapor'
-      ? this.getVaporDensity(node)
-      : flowPhase === 'mixture'
-        ? fluid.mass / V
-        : this.getLiquidDensity(node);
-
-    const waterState: WaterState = {
-      temperature: T,
-      pressure: P,
-      density: rho,
-      phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
-      quality: quality,
-      specificEnergy: fluid.internalEnergy / fluid.mass,
-    };
-
-    return soundSpeed(waterState);
-  }
-
-  /**
-   * Get critical pressure ratio for choked flow detection.
-   * Returns the P_downstream/P_upstream ratio below which flow is choked.
-   */
-  private getCriticalPressureRatio(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    if (flowPhase === 'liquid') {
-      return 0; // Liquid doesn't choke
-    }
-
-    const fluid = node.fluid;
-    const ncg = fluid.ncg;
-    const ncgMoles = ncg ? totalMoles(ncg) : 0;
-
-    // NCG mixtures use air-like critical ratio
-    if (ncgMoles > 0) {
-      return 0.53; // gamma ≈ 1.4 for air
-    }
-
-    // Pure steam - use water properties
-    const quality = fluid.phase === 'two-phase' ? (fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
-    const rho = flowPhase === 'vapor'
-      ? this.getVaporDensity(node)
-      : fluid.mass / node.volume;
-
-    const waterState: WaterState = {
-      temperature: fluid.temperature,
-      pressure: fluid.pressure,
-      density: rho,
-      phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
-      quality: quality,
-      specificEnergy: fluid.internalEnergy / fluid.mass,
-    };
-
-    return criticalPressureRatio(waterState);
-  }
+  /** Marks this operator as the explicit flow-momentum source, so the RK45
+   *  solver can skip it when the implicit pressure-flow solve owns momentum. */
+  providesFlowMomentum = true;
 
   // Debug flag - set to connection ID prefix to trace momentum calculation
   private debugConnection: string | null = null; // e.g., 'tan-2' to debug tan-2 connections
@@ -2573,237 +2124,44 @@ export class FlowMomentumRateOperator implements RateOperator {
 
       if (!fromNode || !toNode) continue;
 
-      // Get pipe length L for momentum equation
-      // Standard inertance I = ρL/A, and ΔP = I * dQ/dt where Q = v*A
-      // This gives: ΔP = ρL/A * A * dv/dt = ρL * dv/dt
-      // So: dv/dt = ΔP / (ρ * L)
-      // We store just L here; density is applied separately
-      let L = conn.length;
-      if (!L || L <= 0) {
-        L = 10; // Default 10m pipe length
-      }
-
-      // Current flow state
       const currentFlow = conn.massFlowRate;
-      const A = conn.flowArea || 0.1;
+      const h = computeConnectionHydraulics(state, conn, fromNode, toNode);
 
-      // Densities for momentum calculations
-      const rho_from = fromNode.fluid.mass / fromNode.volume;
-      const rho_to = toNode.fluid.mass / toNode.volume;
-
-      // For momentum/inertia, use upstream density - that's the fluid actually moving
-      // For positive flow (from->to), upstream is fromNode
-      // For negative flow (to->from), upstream is toNode
-      const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
-      const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
-      const upstreamPhaseTolerance = currentFlow >= 0 ? conn.fromPhaseTolerance : conn.toPhaseTolerance;
-      const rho_upstream = currentFlow >= 0 ? rho_from : rho_to;
-
-      // Determine what phase is flowing based on connection elevation at upstream node
-      const flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation, upstreamPhaseTolerance);
-
-      // Get density for the flowing phase
-      let rho_flow: number;
-      if (flowPhase === 'liquid') {
-        rho_flow = this.getLiquidDensity(upstreamNode);
-      } else if (flowPhase === 'vapor') {
-        rho_flow = this.getVaporDensity(upstreamNode);
-      } else {
-        rho_flow = rho_upstream; // mixture - use actual density
-      }
-
-      // Current velocity - use flow density since that's what's actually moving
-      const v = currentFlow / (rho_flow * A);
-
-      // === Driving pressures ===
-
-      // Pressure difference at connection points, with hydrostatic adjustment
-      // This accounts for liquid head within each node based on connection elevation
-      const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
-      const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
-      const dP_pressure = P_from - P_to;
-
-      // Gravity head (positive = downward flow is favored)
-      // IMPORTANT: Use the density of the fluid filling the pipe between nodes.
-      // If liquid is flowing from upstream (e.g., from bottom of condenser),
-      // the pipe is filled with liquid, so use liquid density for gravity.
-      const g = 9.81;
-      const dz = conn.elevation || 0; // positive = upward
-      const dP_gravity = -rho_flow * g * dz; // negative if going up, uses flowing phase density
-
-      // Pump head - need to determine correct density for pump suction
-      let dP_pump = 0;
-      for (const [, pump] of state.components.pumps) {
-        if (pump.connectedFlowPath === conn.id && pump.running && pump.effectiveSpeed > 0) {
-          // For two-phase suction, pumps draw from the bottom (liquid) if available
-          const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
-          let pumpRho = rho_upstream; // Default to upstream density
-
-          if (upstreamNode.fluid.phase === 'two-phase' && upstreamNode.fluid.quality !== undefined) {
-            // Check if there's enough liquid to draw from
-            const liquidFraction = 1 - upstreamNode.fluid.quality;
-            const liquidMass = upstreamNode.fluid.mass * liquidFraction;
-
-            // If there's significant liquid (more than 10kg), use liquid density
-            if (liquidMass > 10) {
-              // Approximate saturated liquid density
-              const T_C = upstreamNode.fluid.temperature - 273.15;
-              pumpRho = T_C < 100 ? 1000 - 0.08 * T_C :
-                        T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                        700 - 2.5 * (T_C - 300);
-            }
-            // Otherwise use mixture density (pump is cavitating)
-          }
-
-          // Head from the pump curve: falls off with flow, zero at runout.
-          // This is what bounds loop flows near rated - with constant head the
-          // flow is limited only by pipe friction (typically ~2x rated).
-          dP_pump = pumpHeadPressure(pump, currentFlow, pumpRho);
-        }
-      }
-
-      // === Resistances ===
-
-      // Valve position affects resistance
-      let valveOpenFraction = 1.0;
-      for (const [, valve] of state.components.valves) {
-        if (valve.connectedFlowPath === conn.id) {
-          valveOpenFraction = valve.position;
-        }
-      }
-
-      // If valve is closed, flow rate should decay to zero
-      if (valveOpenFraction < 0.01) {
-        // Apply strong damping to bring flow to zero
-        // dṁ/dt = -ṁ / τ where τ is a short time constant
-        const tau = 0.1; // 100ms decay time
-        rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
+      // Closed valve (or fully closed turbine governor): decay flow to zero
+      // with a short time constant instead of integrating the momentum equation.
+      if (h.valveClosed || h.governorClosed) {
+        rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / CLOSED_FLOW_DECAY_TAU });
         continue;
       }
 
-      // === Total driving pressure (computed early for pump/valve checks) ===
-      const dP_driving = dP_pressure + dP_gravity + dP_pump;
-
-      // Check valve - prevents reverse flow and requires cracking pressure to open
-      const checkValve = findCheckValveForConnection(state, conn.id);
-      if (checkValve) {
-        const crackingPressure = checkValve.crackingPressure ?? 0;
-        // Check valve remains closed if:
-        // 1. Driving pressure is below cracking pressure (not enough to open)
-        // 2. OR driving pressure is negative (trying to reverse)
-        if (dP_driving < crackingPressure) {
-          // Check valve is closed - decay flow to zero
-          const tau = 0.1;
-          rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
-          continue;
-        }
-      }
-
-      // Check if there's a running pump on this connection
-      // A pump affects flow on BOTH its inlet and outlet connections:
-      // - Outlet connection: pump.connectedFlowPath matches conn.id
-      // - Inlet connection: pump is the toNode of this connection
-      let pumpOnOutlet: { running: boolean; effectiveSpeed: number } | undefined;
-      let pumpOnInlet: { running: boolean; effectiveSpeed: number } | undefined;
-
-      for (const [pumpId, pump] of state.components.pumps) {
-        if (pump.connectedFlowPath === conn.id) {
-          // This is the pump's outlet connection (pump is fromNode)
-          pumpOnOutlet = pump;
-        }
-        if (conn.toNodeId === pumpId) {
-          // This is the pump's inlet connection (pump is toNode)
-          pumpOnInlet = pump;
-        }
-      }
-
-      // Resistance coefficient (K-factor)
-      const K_base = conn.resistanceCoeff || 10;
-      // Valve increases resistance as it closes: K_eff = K_base / position²
-      let K_eff = K_base / Math.pow(valveOpenFraction, 2);
-
-      // Governor valve on turbines affects inlet flow resistance
-      // Check if destination node is a turbine with a governor valve
-      if (toNode.governorValve !== undefined && toNode.governorValve < 1.0) {
-        const gvPosition = Math.max(0.01, toNode.governorValve); // Prevent division by zero
-        // Governor valve acts like a control valve: K increases as it closes
-        K_eff = K_eff / Math.pow(gvPosition, 2);
-
-        // If governor valve is nearly closed, decay flow to zero
-        if (gvPosition < 0.01) {
-          const tau = 0.1; // 100ms decay time
-          rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / tau });
-          continue;
-        }
-      }
-
-      // Running pumps have very high resistance to reverse flow through the pump
-      // The pump impeller physically blocks backflow - model this as extremely high friction
-      //
-      // For outlet connection (pump is fromNode):
-      //   - Positive flow = normal (pump pushes out)
-      //   - Negative flow = reverse (downstream pushes back through pump) → block
-      //
-      // For inlet connection (pump is toNode):
-      //   - Positive flow = normal (upstream flows into pump)
-      //   - Negative flow = reverse (pump pushes back through its inlet) → block
-      //
-      // Note: Both cases involve currentFlow < 0, which means flow going from toNode to fromNode
-      if (pumpOnOutlet && pumpOnOutlet.running && currentFlow < 0) {
-        K_eff += 10000 * K_base;
-      }
-      if (pumpOnInlet && pumpOnInlet.running && currentFlow < 0) {
-        K_eff += 10000 * K_base;
+      // Check valve - prevents reverse flow and requires cracking pressure to open.
+      // Closed if driving pressure is below cracking pressure (or negative).
+      if (h.checkValve && h.dP_driving < h.crackingPressure) {
+        rates.flowConnections.set(conn.id, { dMassFlowRate: -currentFlow / CLOSED_FLOW_DECAY_TAU });
+        continue;
       }
 
       // === Momentum equation ===
 
-      // Friction pressure drop (always opposes flow direction)
-      // dP_friction = -K * 0.5 * ρ * v * |v|  (negative when flow is positive)
-      // Uses rho_flow since that's the fluid actually moving through the connection
-      const dP_friction = -K_eff * 0.5 * rho_flow * v * Math.abs(v);
+      // Net accelerating pressure at the current flow
+      const dP_net = h.dP_driving + h.dP_friction;
 
-      // Net accelerating pressure
-      const dP_net = dP_driving + dP_friction;
-
-      // Momentum equation: ΔP = ρ * L * dv/dt  (from inertance I = ρL/A, ΔP = I * dQ/dt where Q = v*A)
-      // dv/dt = ΔP / (ρ * L)
-      // Uses rho_flow - the density of the fluid actually in the pipe being accelerated
-      // CRITICAL: Must use rho_flow consistently with velocity calculation (line 1921)
-      // Using rho_upstream here was wrong - it could be very low for large tanks with small mass,
-      // causing enormous acceleration rates even when the flowing phase is liquid.
-      const dv_dt = dP_net / (rho_flow * L);
-
-      // Convert velocity rate to mass flow rate:
-      // ṁ = ρ * A * v
-      // dṁ/dt = ρ * A * dv/dt  (assuming ρ changes slowly)
-      // Uses rho_flow since that's what's actually flowing through the connection
-      let dMassFlowRate = rho_flow * A * dv_dt;
+      // dv/dt = ΔP_net / (ρ_flow * L); dṁ/dt = ρ_flow * A * dv/dt.
+      // rho_flow (the density of the phase actually in the pipe) must be used
+      // consistently with the velocity - see connection-hydraulics.ts.
+      const dv_dt = dP_net / (h.rho_flow * h.L);
+      let dMassFlowRate = h.rho_flow * h.A * dv_dt;
 
       // === Choked flow limiting ===
-      // For compressible flow (vapor/mixture), limit flow to sonic velocity
-      // Also check pressure ratio to detect if flow is definitely choked
+      // For compressible flow (vapor/mixture), limit flow to sonic velocity.
       let isChoked = false;
       let machNumber = 0;
 
-      if (flowPhase !== 'liquid') {
-        const c = this.getSoundSpeed(upstreamNode, flowPhase);
-        const v_sonic = c;
-        const m_dot_sonic = rho_flow * A * v_sonic;
+      const choke = computeChokeLimit(conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow);
+      if (choke) {
+        const m_dot_choked = choke.m_dot_choked;
 
-        // Apply discharge coefficient for restrictions
-        const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
-        const m_dot_choked = dischargeCoeff * m_dot_sonic;
-
-        // Check pressure ratio for choked flow condition
-        const critRatio = this.getCriticalPressureRatio(upstreamNode, flowPhase);
-        const P_up = upstreamNode.fluid.pressure;
-        const downstreamNode = currentFlow >= 0 ? toNode : fromNode;
-        const P_down = downstreamNode.fluid.pressure;
-        const actualRatio = P_down / P_up;
-
-        // Flow is choked if pressure ratio is below critical
-        if (critRatio > 0 && actualRatio < critRatio) {
+        if (choke.chokedByRatio) {
           isChoked = true;
           machNumber = 1.0;
 
@@ -2811,15 +2169,12 @@ export class FlowMomentumRateOperator implements RateOperator {
           const currentFlowSign = currentFlow >= 0 ? 1 : -1;
           const targetFlow = currentFlowSign * m_dot_choked;
 
-          // If current flow is below choked limit, allow acceleration up to it
-          // If current flow is at or above choked limit, decay toward choked value
           if (Math.abs(currentFlow) >= m_dot_choked) {
             // At or above choked - bring flow back to choked value
             const tau = 0.05; // Fast response (50ms)
             dMassFlowRate = (targetFlow - currentFlow) / tau;
           } else if (dMassFlowRate * currentFlowSign > 0) {
             // Accelerating toward choked - limit acceleration to not exceed choked
-            // Calculate what flow would be after this acceleration (rough estimate)
             const dt_estimate = 0.01; // 10ms estimate
             const futureFlow = currentFlow + dMassFlowRate * dt_estimate;
             if (Math.abs(futureFlow) > m_dot_choked) {
@@ -2829,7 +2184,7 @@ export class FlowMomentumRateOperator implements RateOperator {
           }
         } else {
           // Not choked by pressure ratio - calculate Mach number
-          machNumber = Math.abs(v) / c;
+          machNumber = Math.abs(h.v) / choke.soundSpeed;
 
           // Even if not choked by pressure ratio, don't let flow exceed sonic
           if (Math.abs(currentFlow) > m_dot_choked * 0.95) {
@@ -2854,12 +2209,12 @@ export class FlowMomentumRateOperator implements RateOperator {
       // Debug logging for specific connections (console)
       if (this.debugConnection && (conn.fromNodeId.includes(this.debugConnection) || conn.toNodeId.includes(this.debugConnection))) {
         console.log(`[Momentum] ${conn.fromNodeId}→${conn.toNodeId}: ` +
-          `ṁ=${currentFlow.toFixed(1)}kg/s, v=${v.toFixed(1)}m/s, ` +
-          `ρ_flow=${rho_flow.toFixed(2)}kg/m³ (${flowPhase}), ` +
-          `L=${L.toFixed(2)}m, A=${A.toFixed(3)}m², K=${K_eff.toFixed(1)}, ` +
-          `dP_pressure=${(dP_pressure/1e5).toFixed(3)}bar, dP_gravity=${(dP_gravity/1e5).toFixed(3)}bar, ` +
-          `dP_pump=${(dP_pump/1e5).toFixed(3)}bar, dP_driving=${(dP_driving/1e5).toFixed(3)}bar, ` +
-          `dP_friction=${(dP_friction/1e5).toFixed(3)}bar, dP_net=${(dP_net/1e5).toFixed(3)}bar, ` +
+          `ṁ=${currentFlow.toFixed(1)}kg/s, v=${h.v.toFixed(1)}m/s, ` +
+          `ρ_flow=${h.rho_flow.toFixed(2)}kg/m³ (${h.flowPhase}), ` +
+          `L=${h.L.toFixed(2)}m, A=${h.A.toFixed(3)}m², K=${h.K_eff.toFixed(1)}, ` +
+          `dP_pressure=${(h.dP_pressure/1e5).toFixed(3)}bar, dP_gravity=${(h.dP_gravity/1e5).toFixed(3)}bar, ` +
+          `dP_pump=${(h.dP_pump/1e5).toFixed(3)}bar, dP_driving=${(h.dP_driving/1e5).toFixed(3)}bar, ` +
+          `dP_friction=${(h.dP_friction/1e5).toFixed(3)}bar, dP_net=${(dP_net/1e5).toFixed(3)}bar, ` +
           `dv/dt=${dv_dt.toFixed(1)}m/s², dṁ/dt=${dMassFlowRate.toFixed(1)}kg/s²`);
       }
 
@@ -2867,10 +2222,10 @@ export class FlowMomentumRateOperator implements RateOperator {
       // NOTE: isChoked and machNumber are stored here because rate operators
       // work on cloned state - direct conn.isChoked won't persist to original
       conn.debug = {
-        flowPhase,
-        rho_flow,
-        dP_driving,
-        dP_friction,
+        flowPhase: h.flowPhase,
+        rho_flow: h.rho_flow,
+        dP_driving: h.dP_driving,
+        dP_friction: h.dP_friction,
         dP_net,
         dMassFlowRate,
         isChoked,

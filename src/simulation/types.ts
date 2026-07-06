@@ -432,11 +432,33 @@ export interface PressureSolverConfig {
    *  Setting this caps how stiff the pressure response can be. At K_max = 200 MPa,
    *  a 0.01% density error causes ~20 bar pressure change instead of ~220 bar. */
   K_max?: number;
+  /** Fully implicit momentum (RELAP-style semi-implicit pressure-flow solve).
+   *
+   *  When true, the pressure solver performs the complete backward-Euler
+   *  momentum update: end-of-step connection flows are solved simultaneously
+   *  with the virtual pressure corrections, with the explicit driving
+   *  pressures (hydrostatic heads, gravity, pump curve, friction at the
+   *  current flow) on the right-hand side. The explicit
+   *  FlowMomentumRateOperator is skipped and flow momentum drops out of the
+   *  RK45 error estimate, so the timestep is limited by thermal/neutronic/
+   *  phase-change accuracy instead of the marginally-damped acoustic modes of
+   *  liquid loops. Backward Euler's damping vanishes as dt -> 0, so capping
+   *  maxDt still recovers water-hammer physics.
+   *
+   *  When false, the solver only corrects flows toward mass balance (the
+   *  momentum leg stays explicit in RK45) - the legacy half-implicit scheme. */
+  implicitMomentum?: boolean;
 }
 
 /** Default configuration for pressure solver */
 export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   K_max: undefined,  // Physical K - the direct solve doesn't need a cap for stability
+  // Fully implicit momentum is the default (18-38x realtime on the reactor
+  // presets vs <1x explicit, with end states matching the explicit reference
+  // to ~0.1-1%). The explicit path stays selectable in the UI and via
+  // IMPLICIT_MOMENTUM=0 in the test harnesses for water-hammer studies and as
+  // the reference implementation. See docs/semi-implicit-flow-solver-plan.md.
+  implicitMomentum: true,
 };
 
 // ============================================================================
