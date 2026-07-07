@@ -85,6 +85,19 @@ export interface RateOperator {
    * Does NOT modify the input state.
    */
   computeRates(state: SimulationState): StateRates;
+
+  /**
+   * Optional hard stability ceiling on the integration step for this
+   * operator's stiffest mode. RK45's error controller catches modes whose
+   * per-step error grows, but a mode sitting just outside the explicit
+   * stability region (dt*lambda below about -3.3 on the real axis) diverges
+   * slowly with SMALL per-step error - the controller accepts every step
+   * while the mode drifts to nonsense (observed: the neutronics prompt-jump
+   * relaxation, tau 50 ms, oscillating fission power negative at dt=0.2 s
+   * and draining the decay-heat pools). Operators with such a mode must
+   * declare it.
+   */
+  getMaxStableDt?(state: SimulationState): number;
 }
 
 export interface ConstraintOperator {
@@ -1463,8 +1476,14 @@ export class RK45Solver {
         break;
       }
 
-      // Don't overshoot remaining time
-      const stepDt = Math.min(this.currentDt, remainingTime);
+      // Don't overshoot remaining time, and honor any operator's declared
+      // stability ceiling (see RateOperator.getMaxStableDt)
+      let stepDt = Math.min(this.currentDt, remainingTime);
+      for (const op of this.rateOperators) {
+        if (op.getMaxStableDt) {
+          stepDt = Math.min(stepDt, op.getMaxStableDt(currentState));
+        }
+      }
 
       // Take a step
       const { newState, error, errorRates } = this.step(currentState, stepDt);

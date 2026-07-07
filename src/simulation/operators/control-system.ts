@@ -72,10 +72,18 @@ export class ControlSystemOperator implements ConstraintOperator {
     const controllers = state.components.controllers;
     const boronPending = state.neutronics.boronTargetPpm !== undefined &&
       (state.neutronics.boronPpm ?? 0) !== state.neutronics.boronTargetPpm;
-    if ((!controllers || controllers.size === 0) && !boronPending) return state;
+    let hasRelief = false;
+    for (const [, v] of state.components.valves) {
+      if (v.relief) { hasRelief = true; break; }
+    }
+    if ((!controllers || controllers.size === 0) && !boronPending && !hasRelief) return state;
     if (dt === undefined || !(dt > 0)) return state;
 
     const newState = cloneSimulationState(state);
+
+    if (hasRelief) {
+      this.updateReliefValves(newState, dt);
+    }
 
     // CVCS boration/dilution: the operator sets a target concentration and
     // the charging system slews toward it. Real plants change RCS boron at
@@ -95,6 +103,46 @@ export class ControlSystemOperator implements ConstraintOperator {
       }
     }
     return newState;
+  }
+
+  /**
+   * Relief valves and PORVs: spring/pilot-actuated devices, not PI loops.
+   * Pop fully open when the sensed pressure reaches the setpoint; stay open
+   * (latched) until the pressure falls to setpoint*(1-blowdown), then reseat.
+   * The disc strokes at a finite rate so the flow solver sees a continuous
+   * resistance change rather than a step (a real safety valve pops in ~0.1 s;
+   * we use a slightly gentler stroke, which matters only for the first
+   * fraction of a second of each lift).
+   */
+  private updateReliefValves(state: SimulationState, dt: number): void {
+    const FULL_STROKE_SECONDS = 0.3;
+    for (const [, valve] of state.components.valves) {
+      const relief = valve.relief;
+      if (!relief) continue;
+      const senseNode = state.flowNodes.get(relief.senseNodeId);
+      if (!senseNode) {
+        throw new Error(
+          `[ControlSystem] Relief valve '${valve.id}': sense node '${relief.senseNodeId}' not found`
+        );
+      }
+
+      let demandOpen: boolean;
+      switch (relief.controlMode) {
+        case 'open': demandOpen = true; break;
+        case 'closed': demandOpen = false; break;
+        default: {
+          const P = senseNode.fluid.pressure;
+          if (P >= relief.setpoint) demandOpen = true;
+          else if (P <= relief.setpoint * (1 - relief.blowdown)) demandOpen = false;
+          else demandOpen = valve.reliefOpen ?? false; // between reseat and pop: hold latch
+        }
+      }
+      valve.reliefOpen = demandOpen;
+
+      const target = demandOpen ? 1 : 0;
+      const maxStep = dt / FULL_STROKE_SECONDS;
+      valve.position += Math.max(-maxStep, Math.min(maxStep, target - valve.position));
+    }
   }
 
   private updateController(state: SimulationState, ctl: ControllerState, dt: number): void {

@@ -741,6 +741,18 @@ export const DECAY_HEAT_TOTAL_FRACTION = DECAY_HEAT_GROUPS.reduce((s, g) => s + 
 export class NeutronicsRateOperator implements RateOperator {
   name = 'Neutronics';
 
+  /**
+   * Stability ceiling: the prompt-jump branch relaxes N toward equilibrium
+   * with tau capped at 50 ms (see computeRates). That linear mode has
+   * eigenvalue -20/s; explicit RK45 is stable only to dt*lambda ~ -3.3, so
+   * steps beyond ~0.16 s diverge SLOWLY (small per-step error, accepted by
+   * the error controller) - observed as fission power oscillating negative
+   * and draining the decay-heat pools at dt=0.2 s. Cap with margin.
+   */
+  getMaxStableDt(state: SimulationState): number {
+    return state.neutronics.coreId ? 0.12 : Infinity;
+  }
+
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
     const n = state.neutronics;
@@ -1262,18 +1274,11 @@ export class FlowRateOperator implements RateOperator {
           totalMolesTransferred += molesTransferred;
         }
 
-        // Compute effective T from energy balance - don't trust stored T:
-        // totalU = ncgMoles * Cv_ncg * T + waterMass * (u_ref + Cv_water * (T - 273))
-        const Cv_ncg = mixtureCv(upNcg);
+        // Bill the gas at the node's effective mixture temperature (phase-
+        // aware energy-balance inversion; see ncgEffectiveT). Enthalpy (Cp),
+        // not internal energy: the gas carries its flow work with it.
         const Cp_ncg = mixtureCp(upNcg);
-        const totalNcgMoles = totalMoles(upNcg);
-        const totalU = upstreamNode.fluid.internalEnergy;
-        const waterMass = upstreamNode.fluid.mass;
-        const Cv_water = 1900; // J/kg-K for vapor
-        const u_ref = 2.375e6; // J/kg reference energy for vapor at 273K
-        const coeff = totalNcgMoles * Cv_ncg + waterMass * Cv_water;
-        const constant = waterMass * (u_ref - 273 * Cv_water);
-        const effectiveT = Math.max(273, (totalU - constant) / coeff);
+        const effectiveT = this.ncgEffectiveT(upstreamNode);
 
         const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * effectiveT;
         upRates.dEnergy -= ncgEnergyFlow;
@@ -1412,6 +1417,47 @@ export class FlowRateOperator implements RateOperator {
    * Get specific enthalpy of the flowing phase.
    * h = u + Pv for the phase actually being drawn from the node.
    */
+  /**
+   * Effective mixture temperature of a node holding water + NCG, from the
+   * energy balance with the water's ACTUAL phase split:
+   *   totalU = n*Cv_ncg*T + m_vap*(u_ref + Cv_vap*(T-273)) + m_liq*c_f*(T-273.15)
+   *
+   * The previous version assumed ALL water was vapor, which floored the
+   * inversion to 273 K for liquid-dominated nodes (e.g. an accumulator's N2
+   * cushion over 28 t of water reads as T=273 instead of ~306 K). NCG leaving
+   * such nodes was then billed ~30 K too cold, and the receiving node
+   * accumulated an energy deficit that drove it below the water-property
+   * floor (LOCA accumulator nitrogen breakthrough froze the injection line
+   * nodes and crashed the run).
+   *
+   * No 273 K floor here: if the books say the gas is cold, billing it cold is
+   * what keeps the energy accounting conservative. A very low result means
+   * the accounting is already broken - fail loudly.
+   */
+  private ncgEffectiveT(node: FlowNode): number {
+    const ncg = node.fluid.ncg!;
+    const n = totalMoles(ncg);
+    const Cv_ncg = mixtureCv(ncg);
+    const quality = node.fluid.phase === 'vapor' ? 1
+      : node.fluid.phase === 'liquid' ? 0
+      : (node.fluid.quality ?? 0);
+    const mVap = node.fluid.mass * quality;
+    const mLiq = node.fluid.mass - mVap;
+    const C_F = 4186;      // J/kg-K liquid water
+    const CV_VAP = 1900;   // J/kg-K water vapor
+    const U_REF = 2.375e6; // J/kg vapor internal energy at 273 K
+    const coeff = n * Cv_ncg + mVap * CV_VAP + mLiq * C_F;
+    const constant = mVap * (U_REF - 273 * CV_VAP) - mLiq * C_F * 273.15;
+    const T = (node.fluid.internalEnergy - constant) / Math.max(coeff, 1e-9);
+    if (!(T > 50)) {
+      console.error(`[ncgEffectiveT] ${node.id}: effective T=${T.toFixed(1)}K - energy accounting broken ` +
+        `(totalU=${(node.fluid.internalEnergy / 1e6).toFixed(4)}MJ, ncg=${n.toFixed(1)}mol, ` +
+        `m=${node.fluid.mass.toFixed(3)}kg, phase=${node.fluid.phase}, x=${quality.toFixed(3)})`);
+      return 50;
+    }
+    return T;
+  }
+
   private getSpecificEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
     const P = node.fluid.pressure;
     const T = node.fluid.temperature;
@@ -1430,20 +1476,11 @@ export class FlowRateOperator implements RateOperator {
         if (ncgMoles > 0) {
           const Cv_ncg = mixtureCv(node.fluid.ncg);
 
-          // Compute effective temperature from energy balance
-          // Don't trust the stored T - compute what T must be given (totalU, ncgMoles, waterMass)
-          // totalU = ncgMoles * Cv_ncg * T + waterMass * u_water(T)
-          // For vapor: u_water ≈ 2.375e6 + 1900*(T - 273)
-          const waterMass = node.fluid.mass;
+          // Effective temperature from the phase-aware energy-balance
+          // inversion (see ncgEffectiveT - the old all-vapor assumption
+          // floored liquid-dominated nodes to 273 K)
           const totalU = node.fluid.internalEnergy;
-          const u_ref = 2.375e6;
-          const Cv_water = 1900;
-
-          // Solve: totalU = ncgMoles * Cv_ncg * T + waterMass * (u_ref + Cv_water * (T - 273))
-          // totalU = T * (ncgMoles * Cv_ncg + waterMass * Cv_water) + waterMass * (u_ref - Cv_water * 273)
-          const T_eff_coeff = ncgMoles * Cv_ncg + waterMass * Cv_water;
-          const T_eff_const = waterMass * (u_ref - Cv_water * 273);
-          const T_eff = Math.max(273, (totalU - T_eff_const) / T_eff_coeff);
+          const T_eff = this.ncgEffectiveT(node);
 
           // NCG energy at effective temperature
           const ncgEnergy = ncgMoles * Cv_ncg * T_eff;
@@ -1453,7 +1490,7 @@ export class FlowRateOperator implements RateOperator {
             console.error(`[getSpecificEnthalpy] ${node.id}: Negative water energy!`);
             console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergy/1e6).toFixed(4)}MJ`);
             console.error(`  T_eff=${T_eff.toFixed(1)}K, stored T=${T.toFixed(1)}K`);
-            console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, waterMass=${waterMass.toFixed(3)}kg`);
+            console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, waterMass=${node.fluid.mass.toFixed(3)}kg`);
             waterEnergy = 0;
           }
 
@@ -2557,6 +2594,37 @@ export class PumpSpeedRateOperator implements RateOperator {
 
     for (const [id, pump] of state.components.pumps) {
       let dEffectiveSpeed = 0;
+
+      if (pump.steamDriven) {
+        // Turbine-driven pump: speed follows the steam flow through the drive
+        // turbine (quasi-static torque balance). No motor and no trip - if
+        // steam flows, the pump turns. Steam admission is throttled by the
+        // governorValve on the steam node, so "stopping" the pump means
+        // closing the governor (running=false also parks it, as a trip valve).
+        let steamFlow = 0;
+        for (const conn of state.flowConnections) {
+          if (conn.toNodeId === pump.steamDriven.steamNodeId) {
+            steamFlow += Math.max(0, conn.massFlowRate);
+          }
+          if (conn.fromNodeId === pump.steamDriven.steamNodeId) {
+            steamFlow += Math.max(0, -conn.massFlowRate);
+          }
+        }
+        const targetSpeed = pump.running
+          ? Math.min(1, steamFlow / pump.steamDriven.ratedSteamFlow)
+          : 0;
+        // Deadband on coast-down so speed doesn't chatter against the noisy
+        // steam-flow signal; ramp rates as for motor pumps.
+        if (pump.effectiveSpeed < targetSpeed) {
+          dEffectiveSpeed = 1.0 / pump.rampUpTime;
+        } else if (pump.effectiveSpeed > targetSpeed + 0.02) {
+          dEffectiveSpeed = -1.0 / pump.coastDownTime;
+        }
+        if (dEffectiveSpeed !== 0) {
+          rates.pumps.set(id, { dEffectiveSpeed });
+        }
+        continue;
+      }
 
       if (pump.running) {
         const targetSpeed = pump.speed;

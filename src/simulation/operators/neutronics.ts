@@ -490,16 +490,19 @@ export function checkScramConditions(
     }
   }
 
-  // Low coolant flow (simplified check)
-  let totalCoolantFlow = 0;
-  for (const conn of state.flowConnections) {
-    if (conn.fromNodeId.includes('core') || conn.toNodeId.includes('core')) {
-      totalCoolantFlow += Math.abs(conn.massFlowRate);
+  // Low coolant flow: inflow to the core coolant node (the node neutronics
+  // reads its feedback from). Name-based matching ('core' in the node id)
+  // silently read zero flow on plants whose core node is named differently.
+  if (n.coolantNodeId) {
+    let totalCoolantFlow = 0;
+    for (const conn of state.flowConnections) {
+      if (conn.toNodeId === n.coolantNodeId) totalCoolantFlow += Math.max(0, conn.massFlowRate);
+      if (conn.fromNodeId === n.coolantNodeId) totalCoolantFlow += Math.max(0, -conn.massFlowRate);
     }
-  }
-  // Only scram on low flow if power is significant
-  if (totalCoolantFlow < setpoints.lowCoolantFlow && n.power > n.nominalPower * 0.1) {
-    return { shouldScram: true, reason: `Low coolant flow (<${setpoints.lowCoolantFlow} kg/s)` };
+    // Only scram on low flow if power is significant
+    if (totalCoolantFlow < setpoints.lowCoolantFlow && n.power > n.nominalPower * 0.1) {
+      return { shouldScram: true, reason: `Low coolant flow (<${setpoints.lowCoolantFlow} kg/s)` };
+    }
   }
 
   return { shouldScram: false, reason: '' };

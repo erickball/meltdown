@@ -776,10 +776,24 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         // Link plant component to check valve state for debug panel
         (component as any).simValveId = component.id;
       } else if (valve.valveType === 'relief' || valve.valveType === 'porv') {
-        // Relief valves and PORVs - for now, treat as regular valves
-        // TODO: Add proper relief valve logic with setpoint
+        // Relief valves and PORVs: pressure-actuated devices. The pop/reseat
+        // logic runs in ControlSystemOperator; here we record the setpoint
+        // config. senseNodeId is resolved after connections are processed.
+        if (!(valve.setpoint > 0)) {
+          throw new Error(
+            `[Factory] ${valve.valveType} valve '${component.id}' has no setpoint - ` +
+            `a relief valve without a set pressure cannot function`
+          );
+        }
         const valveState = createValveStateFromComponent(component);
         if (valveState) {
+          valveState.relief = {
+            setpoint: valve.setpoint,
+            blowdown: valve.blowdown ?? 0.05,
+            senseNodeId: '', // Resolved after connections are processed
+            controlMode: valve.valveType === 'porv' ? (valve.controlMode ?? 'auto') : 'auto',
+          };
+          valveState.reliefOpen = (valveState.position ?? 0) > 0.01;
           state.components.valves.set(valveState.id, valveState);
           (component as any).simValveId = valveState.id;
         }
@@ -1013,6 +1027,60 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       console.log(`[Factory] CrossVessel ${id}: created inner pipe and annulus flow nodes with thermal coupling`);
     }
 
+    // Turbine-driven pumps: the base flow node (component id) is the steam
+    // path through the drive turbine; the pumped fluid needs its own node.
+    // The pump speed follows steam flow (see PumpSpeedRateOperator), so the
+    // assembly needs no electrical supply - steam admission is throttled by
+    // the governorValve on the steam node.
+    if (component.type === 'turbine-driven-pump') {
+      const tdPump = component as any;
+      const pumpNodeId = `${id}-pump`;
+      const waterTemp = 300;
+      const waterPressure = Math.max(1e5, MIN_STEAM_PRESSURE_PA);
+      state.flowNodes.set(pumpNodeId, {
+        id: pumpNodeId,
+        label: `${component.label || 'TD Pump'} (pump side)`,
+        fluid: createFluidState(waterTemp, waterPressure, 'liquid', 0, 0.3),
+        volume: 0.3,
+        hydraulicDiameter: 0.3,
+        flowArea: 0.07,
+        height: 0,
+        elevation: (component as any).elevation || 0,
+      });
+
+      // Steam admission: initial governor position from the component
+      const steamNode = state.flowNodes.get(id);
+      if (steamNode) {
+        steamNode.governorValve = tdPump.governorValve ?? 0;
+      }
+
+      const ratedSteamFlow = tdPump.ratedSteamFlow;
+      if (!(ratedSteamFlow > 0)) {
+        throw new Error(
+          `[Factory] Turbine-driven pump '${id}' has no ratedSteamFlow - ` +
+          `cannot derive pump speed from steam flow`
+        );
+      }
+      state.components.pumps.set(id, {
+        id,
+        running: tdPump.running ?? true,
+        speed: 1.0,
+        effectiveSpeed: 0,
+        ratedHead: tdPump.ratedHead || 500,
+        ratedFlow: tdPump.ratedPumpFlow || 100,
+        efficiency: tdPump.pumpEfficiency || 0.75,
+        connectedFlowPath: '', // Set when connections are processed
+        rampUpTime: 10.0,
+        coastDownTime: 10.0,
+        npshRequired: 4,
+        pumpType: 'centrifugal',
+        steamDriven: { steamNodeId: id, ratedSteamFlow },
+      });
+      (component as any).simPumpId = id;
+      console.log(`[Factory] Turbine-driven pump ${id}: steam node '${id}', pump node '${pumpNodeId}', ` +
+        `rated ${tdPump.ratedPumpFlow || 100} kg/s @ ${tdPump.ratedHead || 500} m from ${ratedSteamFlow} kg/s steam`);
+    }
+
     // Create extraction flow nodes for turbine-generators with extraction ports
     if (component.type === 'turbine-generator') {
       const extractionNodes = createTurbineExtractionNodes(component);
@@ -1059,6 +1127,16 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       // NOTE: We intentionally do NOT set connectedFlowPath when pump is the TO component
       // because pump head should only be applied on the outlet side
 
+      // Turbine-driven pump: head drives the pump-discharge connection only
+      // (the steam-exhaust connection is a passive steam path)
+      if (fromComponent?.type === 'turbine-driven-pump' &&
+          connection.fromPortId.endsWith('pump-discharge')) {
+        const pumpState = state.components.pumps.get(fromComponent.id);
+        if (pumpState && !pumpState.connectedFlowPath) {
+          pumpState.connectedFlowPath = flowConnection.id;
+        }
+      }
+
       // Link valve to its flow connection
       if (fromComponent?.type === 'valve') {
         const fromValve = fromComponent as any;
@@ -1089,6 +1167,27 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         }
       }
     }
+  }
+
+  // Relief/PORV wiring pass: resolve which node the valve senses and which
+  // connection it throttles. A relief valve protects the component upstream of
+  // its inlet, so it senses the from-node of the connection INTO the valve and
+  // throttles the connection OUT of the valve (the generic valve-linking loop
+  // above may have left connectedFlowPath pointing at either one).
+  for (const [valveId, valveState] of state.components.valves) {
+    if (!valveState.relief) continue;
+    const inletConn = state.flowConnections.find(c => c.toNodeId === valveId);
+    const outletConn = state.flowConnections.find(c => c.fromNodeId === valveId);
+    if (!inletConn || !outletConn) {
+      throw new Error(
+        `[Factory] Relief valve '${valveId}' must have exactly one inlet connection ` +
+        `(into the valve, from the protected component) and one outlet connection ` +
+        `(from the valve, to the discharge destination). ` +
+        `Found inlet=${inletConn?.id ?? 'NONE'}, outlet=${outletConn?.id ?? 'NONE'}`
+      );
+    }
+    valveState.relief.senseNodeId = inletConn.fromNodeId;
+    valveState.connectedFlowPath = outletConn.id;
   }
 
   // Third pass: Update pumps/valves with matchUpstream=true to use upstream fluid conditions
@@ -1381,7 +1480,12 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // For 0.2m valve: V ≈ 0.013 m³
       // Minimum 0.01 m³ to avoid numerical issues
       const diameter = valve.diameter || 0.2;
-      const volume = Math.max(0.01, Math.PI * Math.pow(diameter / 2, 2) * diameter * 2);
+      // Explicit volume lets a preset lump the connected piping inventory into
+      // the valve node (tiny nodes on violent lines, e.g. relief discharge,
+      // otherwise drain to the mass floor and collapse the timestep).
+      const volume = valve.volume !== undefined
+        ? valve.volume
+        : Math.max(0.01, Math.PI * Math.pow(diameter / 2, 2) * diameter * 2);
       const temp = valve.fluid?.temperature || 350;
       const pressure = Math.max(valve.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
@@ -1840,7 +1944,10 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
   return {
     id: component.id,
     running: isRunning,
-    speed: isRunning ? (pump.speed ?? 1.0) : 0,  // Target speed (fraction of rated)
+    // Target speed (fraction of rated). Preserved even for pumps built
+    // stopped: `running` is the switch, `speed` the setpoint - zeroing the
+    // setpoint made a later `running = true` silently spin the pump at 0.
+    speed: pump.speed ?? 1.0,
     // Pumps marked running start AT speed: the plant is loaded "already
     // operating", and a reactor at full power with stagnant coolant boils its
     // core during the ramp (density feedback then crushes the power).
@@ -2376,6 +2483,19 @@ function createFlowConnectionFromPlantConnection(
     } else if (connection.toPortId.includes('shell')) {
       toNodeId = `${connection.toComponentId}-shell`;
     }
+  }
+
+  // Handle turbine-driven pump port mappings (steam path vs pumped fluid).
+  // Construction names the ports `${id}-pump-suction` / `${id}-pump-discharge`
+  // (water) and `${id}-steam-inlet` / `${id}-steam-exhaust` (steam); match on
+  // the suffix so a component id containing 'pump' doesn't misroute steam.
+  const isTdPumpWaterPort = (portId: string) =>
+    portId.endsWith('pump-suction') || portId.endsWith('pump-discharge');
+  if (fromComponent.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.fromPortId)) {
+    fromNodeId = `${connection.fromComponentId}-pump`;
+  }
+  if (toComponent.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.toPortId)) {
+    toNodeId = `${connection.toComponentId}-pump`;
   }
 
   // Handle cross-vessel port mappings (inner vs annulus)

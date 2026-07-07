@@ -1502,6 +1502,14 @@ export function updateComponentDetail(
       const posColor = valve.position > 0.9 ? '#7f7' : valve.position < 0.1 ? '#f55' : '#fa0';
       html += `<div class="detail-row"><span class="detail-label">Position:</span><span class="detail-value" style="color: ${posColor};">${(valve.position * 100).toFixed(0)}% open</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Fail Position:</span><span class="detail-value">${(valve.failPosition * 100).toFixed(0)}%</span></div>`;
+      if (valve.relief) {
+        const reseat = valve.relief.setpoint * (1 - valve.relief.blowdown);
+        const latchColor = valve.reliefOpen ? '#f55' : '#7f7';
+        html += `<div class="detail-row"><span class="detail-label">Set Pressure:</span><span class="detail-value">${(valve.relief.setpoint / 1e5).toFixed(1)} bar</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Reseat At:</span><span class="detail-value">${(reseat / 1e5).toFixed(1)} bar</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Mode:</span><span class="detail-value">${valve.relief.controlMode}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">State:</span><span class="detail-value" style="color: ${latchColor};">${valve.reliefOpen ? 'LIFTED' : 'seated'}</span></div>`;
+      }
       html += '</div>';
     }
   }

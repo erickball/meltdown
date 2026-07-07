@@ -130,6 +130,41 @@ test('Accumulator holds at high vessel pressure, injects after blowdown', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Relief valve: pops at setpoint, blows down, reseats, cycles
+// ---------------------------------------------------------------------------
+
+test('Relief valve pops at setpoint, reseats after blowdown, and cycles', () => {
+  const sim = buildSimFromFile(path.join(PLANT_DIR, 'relief-valve.json'));
+
+  let pops = 0, reseats = 0;
+  let prevOpen = false;
+  let maxP = 0;
+  let minPAfterFirstPop = Infinity;
+  for (let t = 0; t < 120; t += 0.5) {
+    run(sim, 0.5, 0.02);
+    const valve = sim.state.components.valves.get('rv')!;
+    const P = nodePressure(sim.state, 'boiler');
+    maxP = Math.max(maxP, P);
+    const open = valve.reliefOpen ?? false;
+    if (open && !prevOpen) pops++;
+    if (!open && prevOpen) reseats++;
+    prevOpen = open;
+    if (pops > 0) minPAfterFirstPop = Math.min(minPAfterFirstPop, P);
+  }
+
+  // 10 MW into ~7 t of saturated water raises pressure ~0.5 bar in ~20 s, and
+  // the open valve dumps ~20 MW equivalent - expect several full cycles.
+  assert(pops >= 2, `valve should cycle (only ${pops} pops in 120 s)`);
+  assert(reseats >= 1, `valve should reseat after blowdown (pops=${pops}, reseats=${reseats})`);
+  // Setpoint 32 bar: pressure must not overshoot it by more than the stroke
+  // transient, and must not fall below the blowdown target minus margin
+  assert(maxP < 33.5e5, `pressure should be capped near the 32 bar setpoint, peaked at ${(maxP / 1e5).toFixed(2)} bar`);
+  assert(minPAfterFirstPop > 28e5,
+    `valve should reseat at ~30 bar (6% blowdown), fell to ${(minPAfterFirstPop / 1e5).toFixed(2)} bar`);
+  assertStateSane(sim.state);
+});
+
+// ---------------------------------------------------------------------------
 // Kitchen sink: awkward topology - parallel returns, pipe component,
 // dead leg, half-open valve, NCG building
 // ---------------------------------------------------------------------------
