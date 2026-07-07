@@ -594,6 +594,12 @@ function filmBoilingCoeff(T_sat: number, T_wall: number, D: number): number {
 // Heat Generation Rate Operator (for reactor cores)
 // ============================================================================
 
+// Share of total decay power carried by the volatile fission products
+// (noble gases + iodine/cesium class) - the species our release model
+// tracks. Roughly 30% at accident timescales; the balance is non-volatile
+// FPs that stay with the fuel.
+const VOLATILE_DECAY_SHARE = 0.30;
+
 export class HeatGenerationRateOperator implements RateOperator {
   name = 'HeatGeneration';
 
@@ -644,6 +650,45 @@ export class HeatGenerationRateOperator implements RateOperator {
           let decayPower = 0;
           for (const q of pools) decayPower += q;
           deposit = (1 - DECAY_HEAT_TOTAL_FRACTION) * fission + decayPower;
+
+          // Decay heat follows the fission products. The volatile species
+          // (noble gases, iodine/cesium class) carry roughly 30% of decay
+          // power; whatever fraction of them has escaped the fuel takes its
+          // share of the decay heat along - deposited wherever the Xe/CsI
+          // actually is (including plate-out), or lost with the moles that
+          // reached the environment.
+          const fp = node.fissionProducts;
+          const initialFp = (fp?.initialNobleGas ?? 0) + (fp?.initialVolatile ?? 0);
+          if (fp && initialFp > 0) {
+            const releasedFrac = Math.max(0, 1 - (fp.nobleGas + fp.volatile) / initialFp);
+            const escapedPower = decayPower * VOLATILE_DECAY_SHARE * releasedFrac;
+            if (escapedPower > 0) {
+              // Weigh by where the escaped moles actually are
+              let totalEscapedMoles = 0;
+              const nodeMoles: Array<[string, number]> = [];
+              for (const [fnId, fn] of state.flowNodes) {
+                const moles = (fn.fluid.ncg?.Xe ?? 0) + (fn.fluid.ncg?.CsI ?? 0) + (fn.depositedCsI ?? 0);
+                if (moles > 0 && !fn.isBoundary) nodeMoles.push([fnId, moles]);
+                if (moles > 0) totalEscapedMoles += moles;
+              }
+              // Environment share simply leaves the plant energy balance
+              totalEscapedMoles += (state.environmentalRelease?.Xe ?? 0) +
+                (state.environmentalRelease?.CsI ?? 0);
+
+              if (totalEscapedMoles > 0) {
+                deposit -= escapedPower;
+                for (const [fnId, moles] of nodeMoles) {
+                  const q = escapedPower * (moles / totalEscapedMoles);
+                  const existing = rates.flowNodes.get(fnId);
+                  if (existing) {
+                    existing.dEnergy += q;
+                  } else {
+                    rates.flowNodes.set(fnId, { dMass: 0, dEnergy: q });
+                  }
+                }
+              }
+            }
+          }
         }
         const dT = deposit / nodeHeatCapacity(node);
         rates.thermalNodes.set(id, { dTemperature: dT });
