@@ -1,0 +1,51 @@
+{
+  "comment": "Reference player build for level 1: a reactor vessel + core exactly as the construction manager would create them from the dialogs (vessel with auto core barrel, fuel properties transferred to the barrel, lattice-derived neutronics from enrichment), plus the three player connections: cold leg (RCP -> downcomer), hot leg (core barrel top -> SG tubes), surge line (downcomer -> pressurizer). barrelTopGap=0.05 (<0.1) so there is no internal top-gap short circuit; the hot leg comes straight off the upper plenum like a real PWR.",
+  "components": [
+    ["rv-p", {
+      "id": "rv-p", "type": "reactorVessel", "label": "Reactor Vessel",
+      "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 0,
+      "innerDiameter": 4, "wallThickness": 0.25, "height": 12, "pressureRating": 172,
+      "barrelDiameter": 3.2, "barrelThickness": 0.05, "barrelBottomGap": 1, "barrelTopGap": 0.05,
+      "coreBarrelId": "rv-p-core",
+      "volume": 57.0, "fillLevel": 1.0,
+      "fuelRodVolume": 10.4,
+      "ports": [
+        {"id": "rv-p-inlet-left", "position": {"x": -2, "y": -3}, "direction": "both"},
+        {"id": "rv-p-outlet-right", "position": {"x": 2, "y": -3}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "nqa1": true, "containedBy": "bui-1"
+    }],
+    ["rv-p-core", {
+      "id": "rv-p-core", "type": "coreBarrel", "label": "Reactor Vessel Core Barrel",
+      "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 1.834,
+      "innerDiameter": 3.15, "thickness": 0.05, "height": 9.282,
+      "bottomGap": 1, "topGap": 0.05,
+      "volume": 72.3, "fillLevel": 1.0, "isHydraulicOnly": true,
+      "fuelRodCount": 8, "actualFuelRodCount": 40071,
+      "fuelTemperature": 873.15, "fuelMeltingPoint": 3073.15,
+      "controlRodCount": 4, "controlRodPosition": 0.7,
+      "activeFuelHeight": 3.66, "coreBottomElevation": 0.5,
+      "rodDiameter": 9.5, "rodPitch": 12.6, "cladThickness": 0.6,
+      "enrichment": 0.05, "fuelMaterial": "UO2",
+      "thermalPower": 1000000000,
+      "initialPower": 50000000,
+      "ports": [
+        {"id": "rv-p-core-bottom", "position": {"x": 0, "y": 4.64}, "direction": "both"},
+        {"id": "rv-p-core-top", "position": {"x": 0, "y": -4.64}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 567, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
+      "nqa1": true, "containedBy": "rv-p"
+    }]
+  ],
+  "connections": [
+    {"fromComponentId": "rv-p", "fromPortId": "rv-p-inlet-left", "toComponentId": "rv-p-core", "toPortId": "rv-p-core-bottom",
+     "fromElevation": 0.5, "toElevation": 0, "flowArea": 7.79, "length": 1},
+    {"fromComponentId": "pump-1", "fromPortId": "pump-1-outlet", "toComponentId": "rv-p", "toPortId": "rv-p-inlet-left",
+     "fromElevation": 0, "toElevation": 6, "flowArea": 0.45, "length": 8},
+    {"fromComponentId": "rv-p-core", "fromPortId": "rv-p-core-top", "toComponentId": "hx-1", "toPortId": "hx-1-tube-1",
+     "fromElevation": 9.28, "toElevation": 1, "flowArea": 0.5, "length": 10},
+    {"fromComponentId": "rv-p", "fromPortId": "rv-p-outlet-right", "toComponentId": "pzr-1", "toPortId": "pzr-1-bottom",
+     "fromElevation": 9, "toElevation": 0, "flowArea": 0.05, "length": 5}
+  ]
+}

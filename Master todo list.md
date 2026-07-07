@@ -27,6 +27,24 @@ Modeling gaps:
 -Lattice derivation needs a guard for voided cores (refModeratorDensity near zero blows up k and coefficients with a loud warning; scenario cores that start voided should omit `enrichment` for now).
 
 Game mode:
+STATUS (game-mode branch): first playable shipped - 4 levels, title screen, career save.
+See docs/game-mode-design.md for the design and src/game-mode/ for the code.
+Done on the branch: build lock-in pricing (75% salvage / diff+10% work fee / 25% burst
+repair fee), money from generation ($/MWh with day-night price curve, loan interest,
+"fiscal compression" 1 sim-min = 1 fiscal day), random + scripted failures (pump trips,
+turbine trips, LOCA/SGTR through the real burst physics, price spikes/crashes),
+MACCS-lite cancer estimate + accident/bankruptcy sequences with the boss rant,
+corny 90s dialogue scenes (pixel portraits, typewriter, WebAudio chiptunes),
+operator actions panel (click a pump/valve/controller in sim mode; 20s walk-out
+delay with progress bar). Level 1 is the "reactor for an existing secondary" build.
+Still open from the list below:
+-Option to test a design in steady state before you "build" it
+-Waiting-for-initiating-event mode (events are currently poisson-timed while generating)
+-Cool visuals for different initiating events
+-Control room concept beyond instant-vs-walk-out actions
+-Operating cost estimates (fuel use, employees); interest rates ARE in
+-Skyline fills with buildings as the region grows
+Original notes:
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components

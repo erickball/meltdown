@@ -1121,6 +1121,81 @@ export function estimateComponentCost(
 }
 
 /**
+ * Price a stored PlantComponent (as found in PlantState.components), handling
+ * the stored-unit -> estimator-unit conversions (Watts -> MW, HX geometry,
+ * tube OD m -> mm). This is the single pricing entry point used by both the
+ * construction cost panel and the career-mode economy.
+ * Returns null for components that are priced as part of their parent
+ * (core barrels are included in the reactor vessel estimate).
+ */
+export function estimatePlantComponentCost(
+  component: Record<string, any>
+): CostEstimate | null {
+  let costType: string = component.type;
+
+  if (component.type === 'tank') {
+    const label = (component.label || '').toLowerCase();
+    costType = label.includes('pressurizer') ? 'pressurizer' : 'tank';
+  } else if (component.type === 'vessel') {
+    if (component.fuelRodCount !== undefined || component.controlRodCount !== undefined) {
+      costType = 'core';
+    } else {
+      costType = 'pressurizer';
+    }
+  } else if (component.type === 'reactorVessel') {
+    costType = 'reactor-vessel';
+  } else if (component.type === 'heatExchanger') {
+    costType = 'heat-exchanger';
+  } else if (component.type === 'valve') {
+    if (component.valveType === 'check') costType = 'check-valve';
+    else if (component.valveType === 'relief') costType = 'relief-valve';
+    else if (component.valveType === 'porv') costType = 'porv';
+  } else if (component.type === 'controller') {
+    costType = component.controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
+  } else if (component.type === 'crossVessel') {
+    costType = 'cross-vessel';
+  } else if (component.type === 'coreBarrel') {
+    // Barrel steel is part of the reactor vessel estimate, but a fueled
+    // barrel carries the core itself (fuel assemblies, control rods,
+    // internals) - price that with the core estimator.
+    if (component.actualFuelRodCount || component.fuelForm === 'pebbles') {
+      return estimateComponentCost('core', {
+        thermalPower: (component.thermalPower ?? 3000e6) / 1e6,
+        fuelRodCount: String(component.actualFuelRodCount ?? 50000),
+        height: component.activeFuelHeight ?? 3.66,
+        diameter: component.innerDiameter ?? 3.2,
+        nqa1: component.nqa1 ?? true,
+      });
+    }
+    return null; // unfueled barrel: included in the reactor vessel estimate
+  }
+
+  // Stored components use SI units; the estimators expect MW / mm in places
+  const costProps: Record<string, any> = { ...component };
+  if (costType === 'turbine-generator') {
+    costProps.ratedPower = costProps.ratedPower / 1e6;
+  }
+  if (costType === 'condenser') {
+    costProps.coolingCapacity = costProps.coolingCapacity / 1e6;
+  }
+  if (costType === 'heat-exchanger') {
+    const isHorizontal = component.rotation === 90 || component.rotation === 270;
+    costProps.shellDiameter = isHorizontal ? component.height : component.width;
+    costProps.shellLength = isHorizontal ? component.width : component.height;
+    if (component.tubeOD) {
+      costProps.tubeOD = component.tubeOD * 1000;
+    }
+    if (component.realTubeCount) {
+      costProps.tubeCount = component.realTubeCount;
+    }
+    costProps.shellPressure = component.shellPressureRating || component.pressureRating || 60;
+    costProps.tubePressure = component.tubePressureRating || 150;
+  }
+
+  return estimateComponentCost(costType, costProps);
+}
+
+/**
  * Calculate total plant construction cost from all components
  */
 export function calculateTotalPlantCost(

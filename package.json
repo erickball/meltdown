@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts",
     "test:plants": "npx tsx scripts/test-plant-scenarios.ts",
+    "test:levels": "npx tsx scripts/test-game-levels.ts all",
     "test:all": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts && npx tsx scripts/test-plant-scenarios.ts"
   },
   "devDependencies": {
