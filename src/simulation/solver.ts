@@ -1095,7 +1095,8 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
   // Clone thermal nodes - use forEach instead of Array.from().map()
   const thermalNodes = new Map<string, typeof state.thermalNodes extends Map<string, infer V> ? V : never>();
   state.thermalNodes.forEach((v, k) => {
-    thermalNodes.set(k, { ...v });
+    // oxidation is a mutable nested object (integrated by RK45) - deep clone
+    thermalNodes.set(k, v.oxidation ? { ...v, oxidation: { ...v.oxidation } } : { ...v });
   });
 
   // Clone flow nodes with nested fluid object (including NCG if present)

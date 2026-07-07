@@ -272,12 +272,25 @@ export class ConvectionRateOperator implements RateOperator {
   /**
    * Wetted-surface heat transfer coefficient: single-phase forced convection
    * (Dittus-Boelter at the connection's characteristic diameter) plus, for a
-   * saturated (two-phase) node, a phase-change term - Thom's nucleate-boiling
-   * correlation with a Zuber critical-heat-flux saturation. The two add
-   * (Rohsenow superposition), so the transition is smooth: no thresholds, no
-   * hysteresis. The phase-change term is applied symmetrically (boiling on
-   * hot walls, condensation on cold walls) - both are far stronger than
-   * single-phase convection and of broadly similar magnitude.
+   * saturated (two-phase) node, a phase-change term.
+   *
+   * Cold walls (condensation): Thom's nucleate-boiling correlation with a
+   * Zuber critical-heat-flux saturation, added to the convective term
+   * (Rohsenow superposition) - condensation has no boiling crisis, so the
+   * saturated-Thom form applies at any subcooling.
+   *
+   * Hot walls (boiling): the full boiling curve. Below the critical heat
+   * flux the same saturated-Thom nucleate term applies. Past the boiling
+   * crisis the wall progressively vapor-blankets: we model transition
+   * boiling as partial surface wetting - a wetted fraction f that falls
+   * smoothly (logistic in log-superheat) from ~0.9 at the CHF superheat
+   * (Thom inverted at the Zuber flux) to ~0.1 at the minimum-film-boiling
+   * superheat (homogeneous nucleation limit, Lienhard). The dry fraction
+   * transfers by Bromley film boiling
+   * plus radiation across the vapor film. The result is the classic
+   * N-shaped q(dT) curve - nucleate rise, transition collapse, slow film-
+   * boiling recovery - with no thresholds, no hysteresis, and every branch
+   * evaluated from the same saturated-property tables.
    */
   private liquidHeatTransferCoeff(
     flowNode: FlowNode,
@@ -317,20 +330,28 @@ export class ConvectionRateOperator implements RateOperator {
     if (fluid.phase === 'two-phase') {
       const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
       if (thermalNode) {
-        const dT = Math.abs(thermalNode.temperature - fluid.temperature);
-        if (dT > 0) {
+        const dTsigned = thermalNode.temperature - fluid.temperature;
+        const P = fluid.pressure;
+        if (dTsigned < 0) {
+          // Cold wall: condensation - no vapor blanketing, so the saturated-
+          // Thom enhancement applies at any subcooling.
           // Thom: dT_sat = 22.65 * q[MW/m²]^0.5 * exp(-P/8.7 MPa)
           //   =>  q = (dT * exp(P/8.7e6) / 22.65)^2 * 1e6  [W/m²]
-          const P = fluid.pressure;
+          // Zuber saturation q = qThom / (1 + qThom/qCHF) keeps the flux from
+          // running to absurd values at large subcooling.
+          const dT = -dTsigned;
           const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
-          // Zuber CHF saturation: q = qThom / (1 + qThom/qCHF) approaches the
-          // pool-boiling critical heat flux smoothly instead of running to
-          // absurd fluxes at large superheat. (True post-CHF dryout - the
-          // h COLLAPSE past the boiling crisis - is future work, needed for
-          // fuel-damage modeling.)
           const qCHF = zuberCriticalHeatFlux(fluid.temperature);
-          const qBoil = qThom / (1 + qThom / qCHF);
-          h += qBoil / dT;
+          if (qCHF > 0) h += qThom / (1 + qThom / qCHF);
+        } else if (dTsigned > 0) {
+          // Hot wall: full boiling curve with post-CHF collapse.
+          // Convection and nucleate boiling act only on the wetted fraction;
+          // the vapor film replaces (not augments) them on the rest of the
+          // surface - this IS the h collapse.
+          const { wettedFraction, h_phaseChange } = boilingCurve(
+            fluid.temperature, P, thermalNode.temperature, D
+          );
+          h = wettedFraction * h + h_phaseChange;
         }
       }
     }
@@ -382,6 +403,117 @@ function zuberCriticalHeatFlux(T: number): number {
   const h_fg = Math.max(1e4, Water.latentHeat(T));
   const g = 9.81;
   return 0.131 * h_fg * Math.sqrt(rho_g) * Math.pow(sigma * g * Math.max(0, rho_f - rho_g), 0.25);
+}
+
+/**
+ * Hot-wall boiling curve for a wetted surface at saturation temperature
+ * T_sat and pressure P facing a wall at T_wall (> T_sat), with characteristic
+ * diameter D. Returns:
+ *  - wettedFraction f: the surface fraction still in liquid contact, falling
+ *    smoothly (logistic in log-superheat) from ~0.9 at the CHF superheat
+ *    (Thom inverted at the Zuber flux) to ~0.1 at the minimum-film-boiling
+ *    superheat (homogeneous nucleation limit, Lienhard's correlation).
+ *    Transition boiling is physically patchy wetting, so
+ *    blending by surface fraction is the mechanism, not just an
+ *    interpolation trick. The caller scales its single-phase convective h by
+ *    f, since dry patches see no liquid convection either.
+ *  - h_phaseChange: f * (saturated-Thom nucleate h) + (1-f) * (Bromley film
+ *    boiling + radiation).
+ * Together these produce the classic N-shaped q(dT) curve: nucleate rise,
+ * transition collapse, slow film-boiling recovery.
+ *
+ * Near the critical point dT_MFB and dT_CHF both -> 0 and can cross; the
+ * half-width floor (0.1 in ln-space) only sets how sharply the degenerate
+ * curve rolls over, never the pre- or post-CHF values.
+ *
+ * Exported for direct testing of the curve shape.
+ */
+export function boilingCurve(
+  T_sat: number, P: number, T_wall: number, D: number
+): { wettedFraction: number; h_phaseChange: number } {
+  const dT = T_wall - T_sat;
+  const qCHF = zuberCriticalHeatFlux(T_sat);
+  if (!(dT > 0) || !(qCHF > 0)) return { wettedFraction: 1, h_phaseChange: 0 };
+
+  const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
+  const qNb = qThom / (1 + qThom / qCHF);
+
+  // Superheat where nucleate boiling reaches the Zuber flux (Thom inverted
+  // at qCHF), and where the film first becomes stable (Berenson).
+  const dT_CHF = 22.65 * Math.sqrt(qCHF / 1e6) * Math.exp(-P / 8.7e6);
+  const dT_MFB = minFilmBoilingSuperheat(T_sat);
+
+  const lnHi = Math.log(Math.max(dT_MFB, dT_CHF));
+  const lnLo = Math.log(dT_CHF);
+  const lnMid = 0.5 * (lnHi + lnLo);
+  // Half-width floor (ln-space): only active in the near-critical degenerate
+  // regime where dT_MFB collapses onto dT_CHF; it spreads the f rolloff over
+  // ~a factor of 2 in superheat so the curve stays integrator-friendly. It
+  // never changes the fully-wetted or fully-filmed levels.
+  const lnHalfWidth = Math.max(0.5 * (lnHi - lnLo), 0.35);
+  const z = ((Math.log(dT) - lnMid) / lnHalfWidth) * Math.log(9);
+  const f = 1 / (1 + Math.exp(z));
+
+  const h_film = filmBoilingCoeff(T_sat, T_wall, D);
+  return { wettedFraction: f, h_phaseChange: f * (qNb / dT) + (1 - f) * h_film };
+}
+
+/**
+ * Minimum-film-boiling superheat (K) - the wall superheat above which a
+ * stable vapor film cannot be rewetted, taken as the homogeneous-nucleation
+ * (liquid superheat) limit via Lienhard's correlation:
+ *   T_hn / T_c = 0.905 + 0.095 * (T_sat/T_c)^8
+ * Liquid physically cannot contact a wall hotter than its superheat limit,
+ * so this is the thermodynamic Leidenfrost point. Surface-condition
+ * correlations (Berenson) extrapolate absurdly above a few bar; this form is
+ * what severe-accident codes fall back on, is smooth in T_sat alone, and is
+ * exactly T_c at the critical point. ~210 K superheat at 1 bar, ~45 K at
+ * 70 bar, -> 0 at the critical point.
+ */
+function minFilmBoilingSuperheat(T_sat: number): number {
+  const T_c = 647.096;
+  const T_hn = T_c * (0.905 + 0.095 * Math.pow(T_sat / T_c, 8));
+  return Math.max(0, T_hn - T_sat);
+}
+
+/**
+ * Film-boiling heat transfer coefficient (W/m²-K) for a dry (vapor-
+ * blanketed) patch: Bromley's correlation for film boiling on a cylinder of
+ * diameter D, with vapor conductivity/viscosity evaluated at the film
+ * temperature (linear fits to steam data, 400-1100 K), latent heat augmented
+ * for vapor superheating, plus Bromley's standard 0.75-weighted radiation
+ * term (emissivity 0.8, oxidized cladding/steel). ~150-300 W/m²-K for water
+ * near atmospheric pressure - the collapsed post-CHF coefficient that lets
+ * fuel run away thermally.
+ */
+function filmBoilingCoeff(T_sat: number, T_wall: number, D: number): number {
+  const dT = T_wall - T_sat;
+  const T_film = 0.5 * (T_wall + T_sat);
+
+  // Superheated-steam transport properties at the film temperature
+  const k_g = Math.max(0.02, 1.06e-4 * T_film - 0.016);  // W/m-K
+  const mu_g = Math.max(1e-5, 3.7e-8 * T_film - 5e-7);   // Pa·s
+  const cp_g = 2100;                                      // J/kg-K
+
+  const rho_f = Water.saturatedLiquidDensity(T_sat);
+  const rho_g = Water.saturatedVaporDensity(T_sat);
+  const h_fg = Math.max(1e4, Water.latentHeat(T_sat));
+  const dRho = Math.max(1e-6, rho_f - rho_g);
+  const g = 9.81;
+
+  // Bromley, with the effective latent heat h'_fg = h_fg (1 + 0.4 cp dT/h_fg)
+  const h_fg_eff = h_fg * (1 + (0.4 * cp_g * dT) / h_fg);
+  const h_conv = 0.62 * Math.pow(
+    (Math.pow(k_g, 3) * rho_g * dRho * g * h_fg_eff) / (mu_g * D * dT),
+    0.25
+  );
+
+  // Radiation across the film (linearized coefficient)
+  const eps = 0.8;
+  const sigmaSB = 5.67e-8;
+  const h_rad = (eps * sigmaSB * (Math.pow(T_wall, 4) - Math.pow(T_sat, 4))) / dT;
+
+  return h_conv + 0.75 * h_rad;
 }
 
 // ============================================================================

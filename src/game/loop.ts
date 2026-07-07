@@ -20,6 +20,7 @@ import {
   RK45Solver,
   ConductionRateOperator,
   ConvectionRateOperator,
+  CladdingOxidationRateOperator,
   HeatGenerationRateOperator,
   NeutronicsRateOperator,
   FlowRateOperator,
@@ -154,6 +155,7 @@ export class GameLoop {
       this.rk45Solver.addRateOperator(new HeatGenerationRateOperator());
       this.rk45Solver.addRateOperator(new ConductionRateOperator());
       this.rk45Solver.addRateOperator(new ConvectionRateOperator());
+      this.rk45Solver.addRateOperator(new CladdingOxidationRateOperator()); // Zr-steam oxidation + H2 generation
       this.rk45Solver.addRateOperator(new TurbineCondenserRateOperator());
 
       // Add pump speed rate operator (integrates pump ramp-up/coast-down)

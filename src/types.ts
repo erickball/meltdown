@@ -178,6 +178,7 @@ export interface CoreBarrelComponent extends ComponentBase {
   enrichment?: number;      // U-235 weight fraction (e.g. 0.05)
   fuelMaterial?: 'UO2' | 'metal';
   rodDiameter?: number;     // Fuel rod diameter (mm - construction UI unit)
+  cladThickness?: number;   // Cladding thickness (mm), default 0.6
   // Fuel properties
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation

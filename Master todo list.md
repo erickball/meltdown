@@ -24,10 +24,9 @@ Modeling gaps:
 -Neutronics remaining: solid-moderated lattices (graphite/pebble + gas coolant need a solidModerationFraction so the lattice model doesn't collapse without water); boron/soluble poison as an operator control (would also enable the positive-MTC-at-high-boron failure mode); estimated-critical-position display from latticeKeff.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Wire auto-tuned controllers into the BWR and two-loop presets (PWR done - rods/governor/3-elem FW/hotwell/pzr heaters+spray; framework in docs/controllers-steady-state-plan.md)
--Post-CHF heat transfer (film boiling / dryout h collapse past the boiling crisis): the new boiling model saturates flux smoothly at Zuber CHF but does not yet model the h collapse - needed for realistic fuel-damage sequences.
 -Model vessel creep rupture and SG tube creep rupture
 -Model core-concrete interaction
--Add cladding oxidation and hydrogen explosions
+-Hydrogen explosions (H2 generation from cladding oxidation is done and released as NCG; combustion/deflagration when it meets air is not modeled yet)
 -Diesel generators (and electric power in general)
 -Add fuel melting and radionuclide release ("meltdown!")
 -Add advanced reactor options (pebble bed fuel, helium or metal coolant)
@@ -50,6 +49,8 @@ Game mode:
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Post-CHF heat transfer: full boiling curve on hot walls - nucleate (Thom, Zuber-saturated) below the crisis, smooth wetted-fraction collapse (logistic in log-superheat between the CHF point and the homogeneous-nucleation/Leidenfrost limit, Lienhard) into Bromley film boiling + radiation. scripts/check-boiling-curve.ts prints the curve. Condensation on cold walls unchanged.
+X Cladding properly in the heat path for component-built cores: fuel -> clad (gap conductance) -> coolant convection; fuel/clad masses, areas, and conductances derived from rod geometry (cladThickness now a component field, default 0.6mm); clad is the surface the boiling curve sees. CladdingOxidationRateOperator (Baker-Just Zr-steam kinetics, exothermic heat, H2 to coolant NCG) wired into the game loop and test harnesses; oxidation state attached to every player-built core's clad node. Prompt-crit test now drives clad to ~920C through the boiling crisis - fuel-damage sequences are live.
 X Display cleanup batch: PID controller cabinets show their loop label/mode/setpoint (no more universal "SCRAM"/"NO CORE"); reactor thermal power shown on the RPV graphic and detail panel in MWt and % of rated (player-built cores' thermalPower now actually sets nominalPower); Heat Transfer panel reads live RK45 convection rates instead of the dead Euler diagnostics map; elevation labels small/black/at component base; fuel rods drawn from the core barrel's activeFuelHeight and limited at construction to fit the barrel; toolbar speed display tracks auto-slow and its recovery ramp, RT ratio now measures achieved speed vs wall time; rod slider becomes a tracking indicator while an auto rod controller owns the rods; obsolete "hybrid" pressure model removed from the UI, K_max applied on init.
 X Fix the way cylindrical buildings are displayed. The outline moves around, and the back wall really should look like half a cylindrical shell. (footprint ellipse now projects the true center/axis endpoints; backdrop is a cylinder silhouette with curvature shading)
 X Feedwater check valves in the PWR and BWR presets (val-fwcv-1 between FW pump and SG/RPV): a stopped feed pump facing the 60-bar SG / 72-bar RPV leaked ~20 kg/s backward through the reverse-block friction; the check valve holds it to zero. scripts/pwr-test.json kept in sync.

@@ -16,6 +16,7 @@ import {
   RK45Solver,
   ConductionRateOperator,
   ConvectionRateOperator,
+  CladdingOxidationRateOperator,
   HeatGenerationRateOperator,
   NeutronicsRateOperator,
   FlowRateOperator,
@@ -96,6 +97,7 @@ solver.addRateOperator(new FlowRateOperator());
 solver.addRateOperator(new FlowMomentumRateOperator());
 solver.addRateOperator(new ConductionRateOperator());
 solver.addRateOperator(new ConvectionRateOperator());
+solver.addRateOperator(new CladdingOxidationRateOperator());
 solver.addRateOperator(new HeatGenerationRateOperator());
 solver.addRateOperator(new NeutronicsRateOperator());
 solver.addRateOperator(new TurbineCondenserRateOperator());

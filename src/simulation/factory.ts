@@ -826,26 +826,53 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
       // Get fuel geometry for liquid-level-dependent heat transfer
       const coreComp = component as any;
-      const activeFuelHeight = coreComp.activeFuelHeight ?? coreComp.height ?? 4; // Default 4m
+      const geo = coreRodGeometry(component);
       const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5; // Default 0.5m above barrel bottom
 
-      // Fuel surface from rod geometry when available (pi*d*L*N); the old
-      // 5000 m² constant is the fallback and is close for a typical PWR.
-      const rodDiameterM = coreComp.rodDiameter ? coreComp.rodDiameter / 1000 : 0.0095;
-      const rodCount = coreComp.actualFuelRodCount;
-      const fuelArea = rodCount
-        ? Math.PI * rodDiameterM * activeFuelHeight * rodCount
-        : 5000;
-
+      // Heat path is fuel -> clad (conduction) -> coolant (convection), so
+      // the surface the boiling curve sees is the CLADDING - the node whose
+      // temperature drives post-CHF dryout, oxidation, and damage limits.
       state.convectionConnections.push({
         id: `convection-${id}`,
-        thermalNodeId: `${id}-fuel`,
+        thermalNodeId: `${id}-clad`,
         flowNodeId: coolantFlowNodeId,
-        surfaceArea: fuelArea,
-        characteristicDiameter: rodDiameterM,
+        surfaceArea: geo.rodOuterArea,
+        characteristicDiameter: geo.rodDiameter,
         tubeBottomElevation: coreBottomElevation,
-        tubeHeight: activeFuelHeight,
+        tubeHeight: geo.activeHeight,
       });
+
+      // Fuel-to-clad conductance per unit rod area: series resistance of
+      // (a) pellet interior, average-to-surface, r/(4k) for a heat-generating
+      //     cylinder,
+      // (b) pellet-clad gap, h_gap ~ 5000 W/m²-K (typical beginning-of-life
+      //     gas gap conductance),
+      // (c) half the clad wall, t/(2k), to the clad node's mean temperature.
+      const isMetalFuel = coreComp.fuelMaterial === 'metal';
+      const kFuel = isMetalFuel ? 27 : 3; // W/m-K
+      const hGap = 5000; // W/m²-K
+      const hFuelToClad = 1 / (
+        geo.pelletRadius / (4 * kFuel) +
+        1 / hGap +
+        geo.cladThickness / (2 * 16)
+      );
+      state.thermalConnections.push({
+        id: `conduction-${id}-fuel-clad`,
+        fromNodeId: `${id}-fuel`,
+        toNodeId: `${id}-clad`,
+        conductance: hFuelToClad * geo.rodOuterArea, // W/K
+      });
+
+      // High-temperature Zr-steam oxidation tracking on the clad (Baker-Just
+      // kinetics in CladdingOxidationRateOperator; H2 released to coolant).
+      const cladNode = state.thermalNodes.get(`${id}-clad`);
+      if (cladNode) {
+        cladNode.oxidation = {
+          oxidizedFraction: 0,
+          totalZrMass: cladNode.mass,
+          associatedCoolantNode: coolantFlowNodeId,
+        };
+      }
     }
 
     // Create thermal nodes and shell-side flow node for heat exchangers
@@ -1762,36 +1789,71 @@ function createValveStateFromComponent(component: PlantComponent): ValveState | 
 }
 
 /**
- * Create thermal nodes for a reactor core
+ * Rod geometry shared by thermal-node creation and the fuel-clad-coolant
+ * heat path wiring. Everything derives from the rod design the user built;
+ * the defaults reproduce a typical PWR (38k rods, 9.5 mm OD, 0.6 mm clad).
+ */
+function coreRodGeometry(component: PlantComponent) {
+  const vessel = component as any;
+  const rodDiameter = vessel.rodDiameter ? vessel.rodDiameter / 1000 : 0.0095; // m
+  const cladThickness = vessel.cladThickness ? vessel.cladThickness / 1000 : 0.0006; // m
+  const rodCount = vessel.actualFuelRodCount ?? 38000;
+  const activeHeight = vessel.activeFuelHeight ?? vessel.height ?? 4; // m
+  // Pellet radius: neglect the ~0.08 mm pellet-clad gap width
+  const pelletRadius = Math.max(1e-4, rodDiameter / 2 - cladThickness);
+  const rodOuterArea = Math.PI * rodDiameter * activeHeight * rodCount; // m²
+  const pelletArea = 2 * Math.PI * pelletRadius * activeHeight * rodCount; // m²
+  return { rodDiameter, cladThickness, rodCount, activeHeight, pelletRadius, rodOuterArea, pelletArea };
+}
+
+/**
+ * Create thermal nodes for a reactor core. Fuel and cladding masses, areas,
+ * and conduction lengths all come from the rod geometry rather than fixed
+ * PWR constants, so small cores carry proportionally small thermal inertia.
  */
 function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
   const vessel = component as any;
   const nodes: ThermalNode[] = [];
+  const geo = coreRodGeometry(component);
+
+  // Fuel material properties (UO2 default; 'metal' = uranium metal)
+  const isMetal = vessel.fuelMaterial === 'metal';
+  const fuelDensity = isMetal ? 19050 : 10970; // kg/m³
+  const fuelCp = isMetal ? 120 : 300;          // J/kg-K
+  const fuelK = isMetal ? 27 : 3;              // W/m-K
+
+  const fuelMass =
+    Math.PI * geo.pelletRadius * geo.pelletRadius * geo.activeHeight * geo.rodCount * fuelDensity;
 
   // Fuel node
   nodes.push({
     id: `${component.id}-fuel`,
     label: `${component.label || 'Core'} Fuel`,
     temperature: vessel.fuelTemperature || 900,
-    mass: 80000,
-    specificHeat: 300,
-    thermalConductivity: 3,
-    characteristicLength: 0.005,
-    surfaceArea: 5000,
+    mass: fuelMass,
+    specificHeat: fuelCp,
+    thermalConductivity: fuelK,
+    characteristicLength: geo.pelletRadius,
+    surfaceArea: geo.pelletArea,
     heatGeneration: 0, // Set by neutronics
     maxTemperature: vessel.fuelMeltingPoint || 2800,
   });
 
-  // Cladding node
+  // Cladding node (Zircaloy). Starts at the coolant temperature: the clad's
+  // thermal time constant against the coolant is well under a second, so any
+  // other choice just injects a startup transient.
+  const cladMass =
+    Math.PI * geo.cladThickness * (geo.rodDiameter - geo.cladThickness) *
+    geo.activeHeight * geo.rodCount * 6500;
   nodes.push({
     id: `${component.id}-clad`,
     label: `${component.label || 'Core'} Cladding`,
-    temperature: 620,
-    mass: 25000,
+    temperature: vessel.fluid?.temperature ?? 620,
+    mass: cladMass,
     specificHeat: 330,
     thermalConductivity: 16,
-    characteristicLength: 0.0006,
-    surfaceArea: 5000,
+    characteristicLength: geo.cladThickness,
+    surfaceArea: geo.rodOuterArea,
     heatGeneration: 0,
     maxTemperature: 1500,
   });
