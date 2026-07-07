@@ -2806,6 +2806,9 @@ function init() {
   }, 100);
 }
 
+// Components already warned about missing sim nodes (warn once, not per frame)
+const warnedMissingSimNodes = new Set<string>();
+
 function syncSimulationToVisuals(simState: SimulationState, plantState: PlantState): void {
   // Sync all components to their simulation nodes
   // Uses simNodeId if set, otherwise falls back to component.id
@@ -2934,9 +2937,10 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // Sync NCG and volume for proper visualization
         component.fluid.ncg = simNode.fluid.ncg;
         component.fluid.volume = simNode.volume;
-        console.log(`[Sync] ${component.id}: phase=${simNode.fluid.phase}, quality=${simNode.fluid.quality?.toFixed(4)}, P=${(simNode.fluid.pressure/1e5).toFixed(3)} bar, volume=${simNode.volume}`);
-      } else {
-        console.log(`[Sync] ${component.id}: no simNode found for '${simNodeId}'`);
+      } else if (!warnedMissingSimNodes.has(component.id)) {
+        // Warn once per component, not every frame
+        console.warn(`[Sync] ${component.id}: no simNode found for '${simNodeId}'`);
+        warnedMissingSimNodes.add(component.id);
       }
     }
 
