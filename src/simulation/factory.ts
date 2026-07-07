@@ -1169,6 +1169,47 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
   }
 
+  // Pipe-inventory lumping pass: flow connections carry no volume of their
+  // own, so the fluid that physically sits in the run of pipe a connection
+  // represents must be lumped into a node. Small in-line components (valves,
+  // pumps, turbine-driven pumps) previously modeled only their bare bodies -
+  // acoustic impedance Z = sqrt(K*L/(V*A)) then made any liquid line a
+  // water-hammer resonator (kg/s-scale flow noise ringing at tens of bar,
+  // burst components, dt collapse). Each such node takes HALF of every
+  // adjacent connection's A*L; the large-volume side of a connection (tank,
+  // vessel, HX) keeps its geometric volume as before. The fluid state is
+  // scaled at constant intensive properties, so the initial condition is
+  // unchanged except for holding the piping's inventory. Users cannot set
+  // this ringing up by accident: any in-line component automatically owns
+  // its share of the piping it is connected to.
+  for (const [id, component] of plantState.components) {
+    if (component.type !== 'valve' && component.type !== 'pump' &&
+        component.type !== 'turbine-driven-pump') continue;
+    const nodeIds = component.type === 'turbine-driven-pump'
+      ? [id, `${id}-pump`]
+      : [id];
+    for (const nodeId of nodeIds) {
+      const node = state.flowNodes.get(nodeId);
+      if (!node || node.isBoundary) continue;
+      let pipeVolume = 0;
+      for (const conn of state.flowConnections) {
+        if (conn.fromNodeId === nodeId || conn.toNodeId === nodeId) {
+          pipeVolume += conn.flowArea * conn.length / 2;
+        }
+      }
+      if (!(pipeVolume > 0)) continue;
+      const factor = (node.volume + pipeVolume) / node.volume;
+      node.volume += pipeVolume;
+      node.fluid.mass *= factor;
+      node.fluid.internalEnergy *= factor;
+      if (node.fluid.ncg) {
+        for (const species of Object.keys(node.fluid.ncg)) {
+          node.fluid.ncg[species as keyof typeof node.fluid.ncg]! *= factor;
+        }
+      }
+    }
+  }
+
   // Relief/PORV wiring pass: resolve which node the valve senses and which
   // connection it throttles. A relief valve protects the component upstream of
   // its inlet, so it senses the from-node of the connection INTO the valve and
@@ -1433,8 +1474,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // unrealistically high acoustic impedance Z = sqrt(K*L/(V*A)) - any kg/s
       // flow slam then produces tens of bar of water hammer that real piping
       // inventory would absorb.
-      // Scale: volume ≈ 0.002 * ratedFlow (500 kg/s → 1 m³, 5000 kg/s → 10 m³,
-      // consistent with casing + connected pipe inventory). Minimum 0.1 m³.
+      // Scale: volume ≈ 0.004 * ratedFlow (500 kg/s → 2 m³, 5000 kg/s → 20 m³,
+      // consistent with casing + connected pipe inventory; a large pump's
+      // casing alone is several m³ and its station piping several more).
+      // Minimum 0.3 m³. Raised from 0.002/0.1 after pump bodies remained the
+      // dominant water-hammer resonators (and dt-rejection source) even with
+      // the connection pipe-inventory lumping pass - see that pass in
+      // createSimulationFromPlant.
       const ratedFlow = pump.ratedFlow || 100;
       const temp = pump.fluid?.temperature || 350;
       const pressure = Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
@@ -1448,7 +1494,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // moves ~150x the volume, and its ducting is correspondingly large -
       // scale by the design gas density or the node's tiny gas mass caps the
       // whole loop's timestep.
-      let volume = Math.max(0.1, 0.002 * ratedFlow);
+      let volume = Math.max(0.3, 0.004 * ratedFlow);
       if (pumpPhase === 'vapor') {
         let rhoGas = Math.max(0.1, (pressure * 0.018) / (8.314 * temp)); // steam
         if (pump.initialNcg) {
