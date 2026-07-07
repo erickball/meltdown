@@ -3,6 +3,11 @@ import { PlantCanvas } from './render/canvas';
 // import { createDemoPlant } from './plant/factory';
 import pwrPresetData from './presets/pwr.json';
 import bwrPresetData from './presets/bwr.json';
+import htgrPresetData from './presets/htgr.json';
+import twoLoopPresetData from './presets/two-loop.json';
+import promptCritPresetData from './presets/prompt-crit.json';
+import sboPresetData from './presets/sbo.json';
+import meltdownDemoPresetData from './presets/meltdown-demo.json';
 import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
@@ -1667,15 +1672,7 @@ function init() {
 
       <div style="margin-bottom: 15px;">
         <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Load Preset Plant</label>
-        <div style="display: flex; gap: 5px;">
-          <button id="dialog-preset-pwr-btn" style="flex: 1; padding: 8px; background: #334455;
-            border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
-            PWR (Demo)
-          </button>
-          <button id="dialog-preset-bwr-btn" style="flex: 1; padding: 8px; background: #334455;
-            border: 1px solid #556677; border-radius: 4px; color: #d0d8e0; cursor: pointer;">
-            BWR (Demo)
-          </button>
+        <div id="dialog-preset-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 5px;">
         </div>
       </div>
 
@@ -1722,8 +1719,7 @@ function init() {
 
     const saveNameInput = dialog.querySelector('#save-name-input') as HTMLInputElement;
     const configSelect = dialog.querySelector('#dialog-config-select') as HTMLSelectElement;
-    const presetPwrBtn = dialog.querySelector('#dialog-preset-pwr-btn') as HTMLButtonElement;
-    const presetBwrBtn = dialog.querySelector('#dialog-preset-bwr-btn') as HTMLButtonElement;
+    const presetGrid = dialog.querySelector('#dialog-preset-grid') as HTMLDivElement;
     const saveBtn = dialog.querySelector('#dialog-save-btn') as HTMLButtonElement;
     const loadBtn = dialog.querySelector('#dialog-load-btn') as HTMLButtonElement;
     const deleteBtn = dialog.querySelector('#dialog-delete-btn') as HTMLButtonElement;
@@ -1751,8 +1747,57 @@ function init() {
       cleanup();
     };
 
-    presetPwrBtn.addEventListener('click', () => loadPreset(pwrPresetData, 'PWR (Demo)'));
-    presetBwrBtn.addEventListener('click', () => loadPreset(bwrPresetData, 'BWR (Demo)'));
+    // Preset catalog: working plants first, then accident scenarios.
+    // Tooltips explain what each one is and what to expect.
+    const PRESETS: Array<{ label: string; data: unknown; tooltip: string }> = [
+      {
+        label: 'PWR', data: pwrPresetData,
+        tooltip: 'Pressurized water reactor with a full automatic control suite ' +
+          '(rods, turbine governor, feedwater, pressurizer). Converges to 100% power on its own.',
+      },
+      {
+        label: 'BWR', data: bwrPresetData,
+        tooltip: 'Boiling water reactor. Manually operated - you drive the rods, ' +
+          'recirculation, and feedwater yourself.',
+      },
+      {
+        label: 'HTGR (Pebble Bed)', data: htgrPresetData,
+        tooltip: 'Helium-cooled, graphite-moderated pebble-bed reactor (250 MWt) with a ' +
+          'helical steam generator. Losing the helium barely changes reactivity, and the ' +
+          'graphite pebbles are a huge passive heat sink.',
+      },
+      {
+        label: 'Two-Loop PWR', data: twoLoopPresetData,
+        tooltip: 'PWR with two parallel coolant loops sharing one core - watch the loops ' +
+          'share load, or idle one and see the asymmetry.',
+      },
+      {
+        label: 'Prompt Criticality', data: promptCritPresetData,
+        tooltip: 'Reactivity accident demo: a reactor set up to go prompt-critical. ' +
+          'Doppler feedback quenches the excursion, but not before the fuel takes a beating.',
+      },
+      {
+        label: 'Station Blackout', data: sboPresetData,
+        tooltip: 'Full-power PWR with every pump dead and no automatic controls. ' +
+          'Surprisingly stable at first: feedback throttles the reactor and natural ' +
+          'circulation carries decay heat to the steam generators - until inventories run out.',
+      },
+      {
+        label: 'Meltdown Demo', data: meltdownDemoPresetData,
+        tooltip: 'Severe-accident showcase: a freshly scrammed core with full decay heat, ' +
+          'almost no water, and a flimsy containment. Dryout, cladding oxidation (hydrogen!), ' +
+          'fuel melt, and fission-product release to the environment - in about 10 minutes.',
+      },
+    ];
+    for (const preset of PRESETS) {
+      const btn = document.createElement('button');
+      btn.textContent = preset.label;
+      btn.title = preset.tooltip;
+      btn.style.cssText = 'padding: 8px; background: #334455; border: 1px solid #556677; ' +
+        'border-radius: 4px; color: #d0d8e0; cursor: pointer;';
+      btn.addEventListener('click', () => loadPreset(preset.data, preset.label));
+      presetGrid.appendChild(btn);
+    }
 
     saveBtn.addEventListener('click', () => {
       const name = saveNameInput.value.trim();

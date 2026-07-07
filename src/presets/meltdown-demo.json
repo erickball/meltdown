@@ -1,0 +1,59 @@
+{
+ "components": [
+  ["bui-1", {
+   "id": "bui-1", "type": "building", "label": "Containment",
+   "position": {"x": 50, "y": 80}, "rotation": 0, "elevation": 0,
+   "shape": "cylinder", "height": 20, "diameter": 16,
+   "wallThickness": 0.5, "steelFraction": 0.05,
+   "pressureRating": 0.3, "fillLevel": 0,
+   "ports": [
+    {"id": "bui-1-north", "position": {"x": 0, "y": -8}, "direction": "both"}
+   ],
+   "fluid": {"temperature": 293, "pressure": 101325, "phase": "vapor", "quality": 1, "flowRate": 0},
+   "initialNcg": {"N2": 0.78, "O2": 0.21, "Ar": 0.009}
+  }],
+  ["rv-1", {
+   "id": "rv-1", "type": "reactorVessel", "label": "RPV",
+   "position": {"x": 46, "y": 80}, "rotation": 0, "elevation": 0,
+   "innerDiameter": 2.2, "wallThickness": 0.15, "height": 7,
+   "pressureRating": 100, "fillLevel": 0.15,
+   "barrelDiameter": 1.5, "barrelThickness": 0.04,
+   "barrelBottomGap": 0.8, "barrelTopGap": 0.8,
+   "coreBarrelId": "cb-1",
+   "ports": [
+    {"id": "rv-1-cold-leg", "position": {"x": -1.1, "y": 0}, "direction": "both"},
+    {"id": "rv-1-core-in", "position": {"x": 0, "y": 1}, "direction": "both"},
+    {"id": "rv-1-relief", "position": {"x": 1, "y": -3.2}, "direction": "both"}
+   ],
+   "fluid": {"temperature": 407, "pressure": 300000, "phase": "two-phase", "quality": 0.1, "flowRate": 0},
+   "containedBy": "bui-1"
+  }],
+  ["cb-1", {
+   "id": "cb-1", "type": "coreBarrel", "label": "Core",
+   "position": {"x": 46, "y": 80}, "rotation": 0, "elevation": 0.8,
+   "innerDiameter": 1.4, "thickness": 0.04, "height": 5.4,
+   "bottomGap": 0.8, "topGap": 0.8,
+   "fuelRodCount": 8, "actualFuelRodCount": 9000, "rodDiameter": 9.5,
+   "fuelTemperature": 500, "fuelMeltingPoint": 2800,
+   "activeFuelHeight": 3.5, "coreBottomElevation": 0.3,
+   "controlRodCount": 4, "controlRodPosition": 0,
+   "controlRodWorth": 0.12,
+   "thermalPower": 1000000000,
+   "decayHeatPower": 1000000000,
+   "ports": [
+    {"id": "cb-1-inlet", "position": {"x": 0, "y": 2.7}, "direction": "both"},
+    {"id": "cb-1-outlet", "position": {"x": 0, "y": -2.7}, "direction": "both"}
+   ],
+   "fluid": {"temperature": 407, "pressure": 300000, "phase": "two-phase", "quality": 0.5, "flowRate": 0},
+   "containedBy": "rv-1"
+  }]
+ ],
+ "connections": [
+  {"fromComponentId": "rv-1", "fromPortId": "rv-1-core-in", "toComponentId": "cb-1", "toPortId": "cb-1-inlet",
+   "fromElevation": 0.3, "toElevation": 0, "flowArea": 1.0, "length": 1, "resistanceCoeff": 3},
+  {"fromComponentId": "cb-1", "fromPortId": "cb-1-outlet", "toComponentId": "rv-1", "toPortId": "rv-1-cold-leg",
+   "fromElevation": 5.2, "toElevation": 6.2, "flowArea": 0.5, "length": 2, "resistanceCoeff": 3},
+  {"fromComponentId": "rv-1", "fromPortId": "rv-1-relief", "toComponentId": "bui-1", "toPortId": "bui-1-north",
+   "fromElevation": 6.8, "toElevation": 3, "flowArea": 0.01, "length": 5, "resistanceCoeff": 5}
+ ]
+}

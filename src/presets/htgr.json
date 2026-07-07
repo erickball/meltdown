@@ -1,0 +1,660 @@
+{
+ "components": [
+  [
+   "bui-1",
+   {
+    "id": "bui-1",
+    "type": "building",
+    "label": "Containment",
+    "position": {
+     "x": 50,
+     "y": 80
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "shape": "cylinder",
+    "height": 45,
+    "diameter": 36,
+    "wallThickness": 1.2,
+    "steelFraction": 0.05,
+    "pressureRating": 4,
+    "fillLevel": 0,
+    "ports": [
+     {
+      "id": "bui-1-north",
+      "position": {
+       "x": 0,
+       "y": -18
+      },
+      "direction": "both"
+     },
+     {
+      "id": "bui-1-south",
+      "position": {
+       "x": 0,
+       "y": 18
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293,
+     "pressure": 101325,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "initialNcg": {
+     "N2": 0.78,
+     "O2": 0.21,
+     "Ar": 0.009
+    },
+    "nqa1": true
+   }
+  ],
+  [
+   "rv-1",
+   {
+    "id": "rv-1",
+    "type": "reactorVessel",
+    "label": "HTGR Vessel",
+    "position": {
+     "x": 40,
+     "y": 80
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "innerDiameter": 4,
+    "wallThickness": 0.25,
+    "height": 12,
+    "pressureRating": 90,
+    "fillLevel": 0,
+    "barrelDiameter": 3.2,
+    "barrelThickness": 0.05,
+    "barrelBottomGap": 1,
+    "barrelTopGap": 1,
+    "coreBarrelId": "cb-1",
+    "ports": [
+     {
+      "id": "rv-1-cold-leg",
+      "position": {
+       "x": -2,
+       "y": 0
+      },
+      "direction": "both"
+     },
+     {
+      "id": "rv-1-core-in",
+      "position": {
+       "x": 0,
+       "y": 2
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 523,
+     "pressure": 700,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "nqa1": true,
+    "containedBy": "bui-1",
+    "initialNcg": {
+     "He": 70
+    }
+   }
+  ],
+  [
+   "cb-1",
+   {
+    "id": "cb-1",
+    "type": "coreBarrel",
+    "label": "Pebble Core",
+    "position": {
+     "x": 40,
+     "y": 80
+    },
+    "rotation": 0,
+    "elevation": 1,
+    "innerDiameter": 3.1,
+    "thickness": 0.05,
+    "height": 10,
+    "bottomGap": 1,
+    "topGap": 1,
+    "fuelRodCount": 8,
+    "fuelTemperature": 950,
+    "fuelMeltingPoint": 2800,
+    "activeFuelHeight": 9,
+    "coreBottomElevation": 0.3,
+    "controlRodCount": 4,
+    "controlRodPosition": 0.85,
+    "initializeCritical": true,
+    "excessReactivity": 0.025,
+    "initialPower": 250000000,
+    "controlRodWorth": 0.09,
+    "ports": [
+     {
+      "id": "cb-1-inlet",
+      "position": {
+       "x": 0,
+       "y": 5
+      },
+      "direction": "both"
+     },
+     {
+      "id": "cb-1-outlet",
+      "position": {
+       "x": 0,
+       "y": -5
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 973,
+     "pressure": 700,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "nqa1": true,
+    "containedBy": "rv-1",
+    "fuelForm": "pebbles",
+    "pebbleDiameter": 60,
+    "pebbleCount": 400000,
+    "heavyMetalPerPebble": 7,
+    "enrichment": 0.085,
+    "reflectorThickness": 0.8,
+    "thermalPower": 250000000,
+    "initialNcg": {
+     "He": 70
+    }
+   }
+  ],
+  [
+   "hx-1",
+   {
+    "id": "hx-1",
+    "type": "heatExchanger",
+    "label": "Helical SG",
+    "position": {
+     "x": 55,
+     "y": 75
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "width": 4,
+    "height": 13,
+    "hxType": "helical",
+    "tubeCount": 2200,
+    "pressureRating": 100,
+    "tubePressureRating": 90,
+    "shellPressureRating": 100,
+    "plenumLength": 1,
+    "tubeOD": 0.019,
+    "ports": [
+     {
+      "id": "hx-1-tube-1",
+      "position": {
+       "x": -0.6,
+       "y": 6
+      },
+      "direction": "both"
+     },
+     {
+      "id": "hx-1-tube-2",
+      "position": {
+       "x": 0.6,
+       "y": 6
+      },
+      "direction": "both"
+     },
+     {
+      "id": "hx-1-shell-1",
+      "position": {
+       "x": -2,
+       "y": -6
+      },
+      "direction": "both"
+     },
+     {
+      "id": "hx-1-shell-2",
+      "position": {
+       "x": 2,
+       "y": 0
+      },
+      "direction": "both"
+     }
+    ],
+    "primaryFluid": {
+     "temperature": 973,
+     "pressure": 700,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "secondaryFluid": {
+     "temperature": 549,
+     "pressure": 6000000,
+     "phase": "two-phase",
+     "quality": 0.02,
+     "flowRate": 0
+    },
+    "nqa1": true,
+    "containedBy": "bui-1",
+    "initialNcg": {
+     "He": 70
+    }
+   }
+  ],
+  [
+   "pump-1",
+   {
+    "id": "pump-1",
+    "type": "pump",
+    "label": "He Circulator",
+    "position": {
+     "x": 48,
+     "y": 85
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "diameter": 0.8,
+    "running": true,
+    "speed": 1,
+    "ratedFlow": 100,
+    "ratedHead": 2000,
+    "orientation": "left-right",
+    "ports": [
+     {
+      "id": "pump-1-inlet",
+      "position": {
+       "x": -0.5,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "pump-1-outlet",
+      "position": {
+       "x": 0.5,
+       "y": 0
+      },
+      "direction": "out"
+     },
+     {
+      "id": "pump-1-outlet2",
+      "position": {
+       "x": 0.3,
+       "y": -0.3
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 523,
+     "pressure": 700,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "nqa1": true,
+    "containedBy": "bui-1",
+    "initialNcg": {
+     "He": 70
+    }
+   }
+  ],
+  [
+   "turbine-1",
+   {
+    "id": "turbine-1",
+    "type": "turbine-generator",
+    "label": "Turbine-Generator",
+    "position": {
+     "x": 75,
+     "y": 75
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "width": 15,
+    "height": 4,
+    "orientation": "left-right",
+    "stages": 1,
+    "running": true,
+    "power": 0,
+    "ratedPower": 330000000,
+    "ratedSteamFlow": 550,
+    "efficiency": 0.85,
+    "governorValve": 1,
+    "generatorEfficiency": 0.98,
+    "ports": [
+     {
+      "id": "inlet",
+      "position": {
+       "x": -7.5,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "outlet",
+      "position": {
+       "x": 7.5,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "inletFluid": {
+     "temperature": 549,
+     "pressure": 6000000,
+     "phase": "vapor",
+     "quality": 1,
+     "flowRate": 0
+    },
+    "outletFluid": {
+     "temperature": 306,
+     "pressure": 5000,
+     "phase": "two-phase",
+     "quality": 0.9,
+     "flowRate": 0
+    },
+    "nqa1": true
+   }
+  ],
+  [
+   "condenser-1",
+   {
+    "id": "condenser-1",
+    "type": "condenser",
+    "label": "Condenser",
+    "position": {
+     "x": 90,
+     "y": 75
+    },
+    "rotation": 0,
+    "elevation": 3,
+    "width": 8,
+    "height": 6,
+    "pressureRating": 2,
+    "heatRejection": 0,
+    "fillLevel": 0.08,
+    "coolingWaterTemp": 293,
+    "coolingWaterFlow": 50000,
+    "coolingCapacity": 680000000,
+    "tubeCount": 20000,
+    "ports": [
+     {
+      "id": "condenser-1-inlet",
+      "position": {
+       "x": -4,
+       "y": -3
+      },
+      "direction": "in"
+     },
+     {
+      "id": "condenser-1-bottom",
+      "position": {
+       "x": 0,
+       "y": 3
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 306,
+     "pressure": 5000,
+     "phase": "two-phase",
+     "quality": 0.1,
+     "flowRate": 0
+    },
+    "nqa1": true
+   }
+  ],
+  [
+   "cond-pump-1",
+   {
+    "id": "cond-pump-1",
+    "type": "pump",
+    "label": "Condensate Pump",
+    "position": {
+     "x": 90,
+     "y": 82
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "diameter": 0.4,
+    "running": true,
+    "speed": 0.65,
+    "ratedFlow": 550,
+    "ratedHead": 100,
+    "orientation": "left-right",
+    "ports": [
+     {
+      "id": "cond-pump-1-inlet",
+      "position": {
+       "x": -0.3,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "cond-pump-1-outlet",
+      "position": {
+       "x": 0.3,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 306,
+     "pressure": 5000,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "nqa1": true
+   }
+  ],
+  [
+   "fw-pump-1",
+   {
+    "id": "fw-pump-1",
+    "type": "pump",
+    "label": "Feedwater Pump",
+    "position": {
+     "x": 78,
+     "y": 82
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "diameter": 0.4,
+    "running": true,
+    "speed": 0.55,
+    "ratedFlow": 550,
+    "ratedHead": 650,
+    "orientation": "left-right",
+    "ports": [
+     {
+      "id": "fw-pump-1-inlet",
+      "position": {
+       "x": -0.3,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "fw-pump-1-outlet",
+      "position": {
+       "x": 0.3,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 306,
+     "pressure": 5000,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "nqa1": true
+   }
+  ],
+  [
+   "val-fwcv-1",
+   {
+    "id": "val-fwcv-1",
+    "type": "valve",
+    "label": "FW Check Valve",
+    "valveType": "check",
+    "position": {
+     "x": 70,
+     "y": 80
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "diameter": 0.25,
+    "opening": 0,
+    "crackingPressure": 10000,
+    "ports": [
+     {
+      "id": "val-fwcv-1-in",
+      "position": {
+       "x": -0.1,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "val-fwcv-1-out",
+      "position": {
+       "x": 0.1,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 306,
+     "pressure": 5000,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "nqa1": true
+   }
+  ]
+ ],
+ "connections": [
+  {
+   "fromComponentId": "rv-1",
+   "fromPortId": "rv-1-core-in",
+   "toComponentId": "cb-1",
+   "toPortId": "cb-1-inlet",
+   "fromElevation": 0.5,
+   "toElevation": 0,
+   "flowArea": 7.5,
+   "length": 1,
+   "resistanceCoeff": 3
+  },
+  {
+   "fromComponentId": "cb-1",
+   "fromPortId": "cb-1-outlet",
+   "toComponentId": "hx-1",
+   "toPortId": "hx-1-tube-1",
+   "fromElevation": 10,
+   "toElevation": 1,
+   "flowArea": 0.5,
+   "length": 10,
+   "resistanceCoeff": 3
+  },
+  {
+   "fromComponentId": "hx-1",
+   "fromPortId": "hx-1-tube-2",
+   "toComponentId": "pump-1",
+   "toPortId": "pump-1-inlet",
+   "fromElevation": 1,
+   "toElevation": 0,
+   "flowArea": 0.5,
+   "length": 5,
+   "resistanceCoeff": 3
+  },
+  {
+   "fromComponentId": "pump-1",
+   "fromPortId": "pump-1-outlet",
+   "toComponentId": "rv-1",
+   "toPortId": "rv-1-cold-leg",
+   "fromElevation": 0,
+   "toElevation": 6,
+   "flowArea": 0.45,
+   "length": 8,
+   "resistanceCoeff": 3
+  },
+  {
+   "fromComponentId": "hx-1",
+   "fromPortId": "hx-1-shell-1",
+   "toComponentId": "turbine-1",
+   "toPortId": "inlet",
+   "fromElevation": 11,
+   "toElevation": 0,
+   "flowArea": 0.1,
+   "length": 30
+  },
+  {
+   "fromComponentId": "turbine-1",
+   "fromPortId": "outlet",
+   "toComponentId": "condenser-1",
+   "toPortId": "condenser-1-inlet",
+   "fromElevation": 0,
+   "toElevation": 5,
+   "flowArea": 0.3,
+   "length": 5
+  },
+  {
+   "fromComponentId": "condenser-1",
+   "fromPortId": "condenser-1-bottom",
+   "toComponentId": "cond-pump-1",
+   "toPortId": "cond-pump-1-inlet",
+   "fromElevation": 0.1,
+   "toElevation": 0,
+   "flowArea": 0.25,
+   "length": 3
+  },
+  {
+   "fromComponentId": "cond-pump-1",
+   "fromPortId": "cond-pump-1-outlet",
+   "toComponentId": "fw-pump-1",
+   "toPortId": "fw-pump-1-inlet",
+   "fromElevation": 0,
+   "toElevation": 0,
+   "flowArea": 0.05,
+   "length": 3
+  },
+  {
+   "fromComponentId": "fw-pump-1",
+   "fromPortId": "fw-pump-1-outlet",
+   "toComponentId": "val-fwcv-1",
+   "toPortId": "val-fwcv-1-in",
+   "fromElevation": 0,
+   "toElevation": 0,
+   "flowArea": 0.05,
+   "length": 3
+  },
+  {
+   "fromComponentId": "val-fwcv-1",
+   "fromPortId": "val-fwcv-1-out",
+   "toComponentId": "hx-1",
+   "toPortId": "hx-1-shell-2",
+   "fromElevation": 0,
+   "toElevation": 6,
+   "flowArea": 0.05,
+   "length": 7
+  }
+ ]
+}
