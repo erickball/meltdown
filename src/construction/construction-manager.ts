@@ -41,6 +41,88 @@ import {
   ALL_GAS_SPECIES,
   GasSpecies
 } from '../simulation/gas-properties';
+import { PidControllerConfig } from '../types';
+
+/**
+ * Translate PID controller dialog properties (per-kind setpoint fields in
+ * display units, stroke time, % limits) into the SI PidControllerConfig the
+ * simulation factory consumes. Shared by create and edit paths.
+ */
+export function buildPidConfigFromProps(props: Record<string, any>): PidControllerConfig {
+  const sensorKind = props.sensorKind as PidControllerConfig['sensor']['kind'];
+  let sensorTarget = '';
+  let setpoint = 0;
+  switch (sensorKind) {
+    case 'node-level':
+      sensorTarget = props.sensorNode || '';
+      setpoint = props.setpointLevel ?? 5;
+      break;
+    case 'node-pressure':
+      sensorTarget = props.sensorNode || '';
+      setpoint = (props.setpointPressure ?? 60) * 1e5; // bar to Pa
+      break;
+    case 'node-temperature':
+      sensorTarget = props.sensorNode || '';
+      setpoint = (props.setpointTemperature ?? 300) + 273.15; // C to K
+      break;
+    case 'connection-flow':
+      sensorTarget = props.sensorConnection || '';
+      setpoint = props.setpointFlow ?? 500;
+      break;
+    case 'reactor-power':
+      sensorTarget = '';
+      setpoint = (props.setpointPower ?? 100) / 100; // % to fraction of nominal
+      break;
+    default:
+      throw new Error(`[Construction] Unknown PID sensor kind '${sensorKind}'`);
+  }
+
+  const actuatorKind = props.actuatorKind as PidControllerConfig['actuator']['kind'];
+  let actuatorTarget = '';
+  let min = 0;
+  let max = 1;
+  switch (actuatorKind) {
+    case 'valve-position':
+      actuatorTarget = props.actuatorValve || '';
+      min = (props.outputMinPct ?? 0) / 100;
+      max = (props.outputMaxPct ?? 100) / 100;
+      break;
+    case 'pump-speed':
+      actuatorTarget = props.actuatorPump || '';
+      min = (props.outputMinPct ?? 0) / 100;
+      max = (props.outputMaxPct ?? 100) / 100;
+      break;
+    case 'governor-valve':
+      actuatorTarget = props.actuatorTurbine || '';
+      min = (props.outputMinPct ?? 0) / 100;
+      max = (props.outputMaxPct ?? 100) / 100;
+      break;
+    case 'heater-power':
+      actuatorTarget = props.actuatorHeaterNode || '';
+      min = 0;
+      max = (props.heaterCapacityMW ?? 2) * 1e6; // MW to W
+      break;
+    case 'control-rods':
+      actuatorTarget = '';
+      min = 0;
+      max = 1;
+      break;
+    default:
+      throw new Error(`[Construction] Unknown PID actuator kind '${actuatorKind}'`);
+  }
+
+  const strokeTime = Math.max(1, props.strokeTime ?? 20);
+  const rateLimit = (max - min) / strokeTime;
+
+  return {
+    sensor: { kind: sensorKind, targetId: sensorTarget },
+    setpoint,
+    actuator: { kind: actuatorKind, targetId: actuatorTarget, min, max, rateLimit },
+    aggressiveness: props.aggressiveness ?? 1,
+    invert: props.invert || undefined,
+    powerLimit: actuatorKind === 'control-rods' ? (props.powerLimitPct ?? 100) / 100 : undefined,
+  };
+}
 
 export class ConstructionManager {
   private plantState: PlantState;
@@ -1368,6 +1450,28 @@ export class ConstructionManager {
         this.plantState.components.set(id, controller);
         (controller as any).nqa1 = props.nqa1 ?? true;
         console.log(`[Construction] Created scram controller connected to ${props.connectedCore || 'no core'}`);
+        break;
+      }
+
+      case 'pid-controller': {
+        // Auto-tuned process controller cabinet (same footprint as scram cabinet)
+        const controller: ControllerComponent = {
+          id,
+          type: 'controller',
+          controllerType: 'pid',
+          label: props.name || 'PID Controller',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          width: 1.2,
+          height: 2.0,
+          pid: buildPidConfigFromProps(props),
+          ports: [] // Controllers have no hydraulic ports
+        };
+
+        this.plantState.components.set(id, controller);
+        (controller as any).nqa1 = props.nqa1 ?? false;
+        console.log(`[Construction] Created PID controller: ${controller.pid!.sensor.kind}(${controller.pid!.sensor.targetId}) -> ${controller.pid!.actuator.kind}(${controller.pid!.actuator.targetId})`);
         break;
       }
 
@@ -2755,7 +2859,20 @@ export class ConstructionManager {
     }
 
     // Controller-specific properties
-    if (component.type === 'controller') {
+    if (component.type === 'controller' && (component as any).controllerType === 'pid') {
+      // Rebuild the pid config from the dialog fields, preserving the
+      // advanced bits the dialog doesn't expose (feedforward, manual gains,
+      // runtime mode)
+      const existing = (component as ControllerComponent).pid;
+      if (properties.sensorKind !== undefined && properties.actuatorKind !== undefined) {
+        const rebuilt = buildPidConfigFromProps(properties);
+        rebuilt.feedforward = existing?.feedforward;
+        rebuilt.gains = existing?.gains;
+        rebuilt.mode = existing?.mode;
+        rebuilt.manualOutput = existing?.manualOutput;
+        (component as ControllerComponent).pid = rebuilt;
+      }
+    } else if (component.type === 'controller') {
       if (properties.connectedCore !== undefined) {
         component.connectedCoreId = properties.connectedCore || undefined;
       }

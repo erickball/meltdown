@@ -100,6 +100,63 @@ function getScramSetpointsFromPlant(plantState: PlantState): ScramSetpoints | un
 }
 
 /**
+ * Build the plant-derived choice lists for the PID controller dialog's
+ * dynamic dropdowns. IDs must match what the simulation factory will create:
+ * flow nodes use the component id (heat exchangers add -tube/-shell),
+ * connections are flow-{from}-{to}, valves/pumps/turbines use their ids.
+ */
+function getPidDynamicChoices(plantState: PlantState): Record<string, Array<{ id: string; label: string }>> {
+  const flowNodes: Array<{ id: string; label: string }> = [];
+  const valves: Array<{ id: string; label: string }> = [];
+  const pumps: Array<{ id: string; label: string }> = [];
+  const turbines: Array<{ id: string; label: string }> = [];
+  const flowConnections: Array<{ id: string; label: string }> = [];
+
+  for (const [id, comp] of plantState.components) {
+    const label = comp.label || id;
+    switch (comp.type) {
+      case 'tank':
+      case 'pipe':
+      case 'vessel':
+      case 'condenser':
+      case 'crossVessel':
+      case 'coreBarrel':
+        flowNodes.push({ id, label });
+        break;
+      case 'reactorVessel':
+        flowNodes.push({ id, label: `${label} (downcomer)` });
+        break;
+      case 'heatExchanger':
+        flowNodes.push({ id: `${id}-tube`, label: `${label} (tube/primary)` });
+        flowNodes.push({ id: `${id}-shell`, label: `${label} (shell/secondary)` });
+        break;
+      case 'valve':
+        valves.push({ id, label });
+        break;
+      case 'pump':
+        pumps.push({ id, label });
+        break;
+      case 'turbine-generator':
+        turbines.push({ id, label });
+        break;
+    }
+  }
+
+  for (const conn of plantState.connections.values()) {
+    const fromComp = plantState.components.get(conn.fromComponentId);
+    const toComp = plantState.components.get(conn.toComponentId);
+    const fromLabel = fromComp?.label || conn.fromComponentId;
+    const toLabel = toComp?.label || conn.toComponentId;
+    flowConnections.push({
+      id: `flow-${conn.fromComponentId}-${conn.toComponentId}`,
+      label: `${fromLabel} → ${toLabel}`,
+    });
+  }
+
+  return { flowNodes, valves, pumps, turbines, flowConnections };
+}
+
+/**
  * Extract a human-readable port type from the port ID.
  * Port IDs are like "comp-id-tube-1", "comp-id-shell-2", "comp-id-inlet", etc.
  */
@@ -466,6 +523,28 @@ function init() {
           (comp as any).controlRodPosition = withdrawalPosition;
         }
       }
+    });
+  }
+
+  // Rod controller manual/auto toggle: flips every control-rods PID
+  // controller between auto and manual. Bumpless in both directions (the
+  // velocity-form controller has no integrator state to wind up).
+  const rodModeBtn = document.getElementById('rod-mode-btn') as HTMLButtonElement;
+  if (rodModeBtn) {
+    rodModeBtn.addEventListener('click', () => {
+      gameLoop.updateState((state) => {
+        const controllers = state.components.controllers;
+        if (controllers) {
+          for (const [, ctl] of controllers) {
+            if (ctl.actuator.kind === 'control-rods') {
+              ctl.mode = ctl.mode === 'manual' ? 'auto' : 'manual';
+              // Manual mode holds position until the slider commands otherwise
+              ctl.manualOutput = undefined;
+            }
+          }
+        }
+        return state;
+      });
     });
   }
 
@@ -1046,7 +1125,7 @@ function init() {
         else if (valve.valveType === 'relief') costType = 'relief-valve';
         else if (valve.valveType === 'porv') costType = 'porv';
       } else if (component.type === 'controller') {
-        costType = 'scram-controller';
+        costType = (component as any).controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
       } else if (component.type === 'crossVessel') {
         costType = 'cross-vessel';
       } else if (component.type === 'coreBarrel') {
@@ -1192,6 +1271,11 @@ function init() {
           availableCores.push({ id, label: comp.label || id });
         }
       }
+    }
+
+    // PID controllers need plant-derived target lists for their dropdowns
+    if (component.type === 'controller' && (component as any).controllerType === 'pid') {
+      componentDialog.setDynamicChoices(getPidDynamicChoices(plantState));
     }
 
     // Get available generators for switchyard dropdowns
@@ -2392,6 +2476,11 @@ function init() {
           }
         }
 
+        // PID controllers need plant-derived target lists for their dropdowns
+        if (selectedComponentType === 'pid-controller') {
+          componentDialog.setDynamicChoices(getPidDynamicChoices(plantState));
+        }
+
         // Generate default name with number matching the ID that will be assigned
         const definition = componentDefinitions[selectedComponentType!];
         let defaultName: string | undefined;
@@ -2880,16 +2969,32 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     // If an auto rod controller owns the rods, the slider is an indicator
     // only: manual writes would be overwritten on the next solver step.
     let rodControllerId: string | null = null;
+    let anyRodController = false;
     const controllers = simState.components.controllers;
     if (controllers) {
       for (const [, ctl] of controllers) {
-        if (ctl.actuator.kind === 'control-rods' && ctl.mode !== 'manual') {
+        if (ctl.actuator.kind !== 'control-rods') continue;
+        anyRodController = true;
+        if (ctl.mode !== 'manual') {
           rodControllerId = ctl.id;
           break;
         }
       }
     }
     const scrammed = simState.neutronics.scrammed;
+
+    // Manual/auto toggle is only offered when a rod controller exists
+    const rodModeBtn = document.getElementById('rod-mode-btn') as HTMLButtonElement | null;
+    if (rodModeBtn) {
+      rodModeBtn.style.display = anyRodController ? 'block' : 'none';
+      if (anyRodController) {
+        const isAuto = rodControllerId !== null;
+        rodModeBtn.textContent = isAuto ? 'Rods: AUTO' : 'Rods: MANUAL';
+        rodModeBtn.title = isAuto
+          ? 'Rod controller is in automatic mode. Click to take manual control with the slider.'
+          : 'Rod controller is in manual mode (slider drives the rods). Click to return to automatic control.';
+      }
+    }
     rodSlider.disabled = scrammed || rodControllerId !== null;
     if (scrammed) {
       rodSlider.title = 'SCRAM active: rods are fully inserted';

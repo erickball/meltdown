@@ -101,6 +101,10 @@
             <input type="range" id="rod-position" min="0" max="100" value="15" />
             <div class="slider-labels"><span>Out</span><span>In</span></div>
           </div>
+          <button id="rod-mode-btn" class="sim-btn" style="display: none; margin-top: 4px;"
+                  title="Toggle between the automatic rod controller and manual slider control. Switching is bumpless - rods stay where they are until commanded.">
+            Rods: AUTO
+          </button>
           <div class="scram-controls" style="margin-top: 10px;">
             <button id="scram-btn" class="sim-btn" style="background: #d00; color: white; font-weight: bold;">SCRAM</button>
             <button id="reset-scram-btn" class="sim-btn" style="display: none;">Reset SCRAM</button>
@@ -150,6 +154,7 @@
           <details open>
             <summary>Controllers</summary>
             <button data-component="scram-controller" class="component-btn">Scram Controller</button>
+            <button data-component="pid-controller" class="component-btn" title="Auto-tuned process controller: pick a measurement (level/pressure/temperature/flow/power) and an actuator (valve/pump/governor/heater/rods); gains are derived from the plant physics">PID Controller</button>
           </details>
         </div>
         <div class="construction-info" style="margin-top: 10px; font-size: 11px; color: #888;">

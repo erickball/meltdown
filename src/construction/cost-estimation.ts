@@ -669,18 +669,20 @@ export function estimateCoreCost(props: {
 }
 
 /**
- * Estimate cost for a scram controller
+ * Estimate cost for a controller cabinet
  *
- * Reactor protection system instrumentation and controls.
- * This includes: sensors, logic cabinets, power supplies, cabling.
+ * Scram: reactor protection system I&C - redundant channels, logic cabinets,
+ * power supplies, cabling.
+ * PID: a single process-control loop - one sensor set, one cabinet, wiring
+ * to its actuator (no channel redundancy).
  */
 export function estimateControllerCost(props: {
-  controllerType: 'scram';
+  controllerType: 'scram' | 'pid';
   nqa1: boolean;
 }): CostEstimate {
-  // RPS channel cost (4 channels for safety)
+  // RPS needs 4 redundant channels; a process control loop needs one
   const channelCost = 500000; // Per redundant channel
-  const numChannels = 4;
+  const numChannels = props.controllerType === 'scram' ? 4 : 1;
 
   // Logic cabinets
   const cabinetCost = 200000;
@@ -1021,6 +1023,12 @@ export function estimateComponentCost(
         nqa1,
       });
 
+    case 'pid-controller':
+      return estimateControllerCost({
+        controllerType: 'pid',
+        nqa1,
+      });
+
     case 'switchyard':
       return estimateSwitchyardCost({
         transformerRating: props.transformerRating || 1200,
@@ -1137,6 +1145,11 @@ export function calculateTotalPlantCost(
  * Map component type from PlantComponent to cost estimation key
  */
 function mapComponentTypeToDefinition(type: string, component?: Record<string, any>): string {
+  // Special case: controller can be scram or pid
+  if (type === 'controller' && component) {
+    return component.controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
+  }
+
   // Special case: vessel can be either pressurizer or core
   if (type === 'vessel' && component) {
     if (component.fuelRodCount !== undefined || component.controlRodCount !== undefined) {

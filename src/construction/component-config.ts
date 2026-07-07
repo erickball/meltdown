@@ -59,7 +59,11 @@ export interface ComponentOption {
   // For calculated fields: function that computes value from other properties
   calculate?: (props: Record<string, any>) => string;
   // For conditional visibility: show/hide based on another field's value
-  dependsOn?: { field: string; value: any };
+  // (value may be an array: show when the field matches ANY entry)
+  dependsOn?: { field: string; value: any | any[] };
+  // For selects populated at dialog-open time from the current plant
+  // (key into the dynamicChoices map passed via setDynamicChoices)
+  dynamicOptions?: string;
 }
 
 export const componentDefinitions: Record<string, {
@@ -750,6 +754,69 @@ export const componentDefinitions: Record<string, {
     ]
   },
 
+  'pid-controller': {
+    displayName: 'PID Controller',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'PID Controller' },
+      { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: 'Process controllers are typically non-safety related (the scram system is the safety backstop)' },
+      { name: 'sensorKind', type: 'select', label: 'Measured Variable', default: 'node-level', options: [
+        { value: 'node-level', label: 'Liquid level' },
+        { value: 'node-pressure', label: 'Pressure' },
+        { value: 'node-temperature', label: 'Temperature' },
+        { value: 'connection-flow', label: 'Flow rate' },
+        { value: 'reactor-power', label: 'Reactor power' },
+      ], help: 'What the controller measures. Gains are auto-tuned from the plant physics - just state the intent.' },
+      { name: 'sensorNode', type: 'select', label: 'Measured Component', default: '', options: [], dynamicOptions: 'flowNodes',
+        dependsOn: { field: 'sensorKind', value: ['node-level', 'node-pressure', 'node-temperature'] },
+        help: 'Component whose level/pressure/temperature is measured' },
+      { name: 'sensorConnection', type: 'select', label: 'Measured Flow Path', default: '', options: [], dynamicOptions: 'flowConnections',
+        dependsOn: { field: 'sensorKind', value: 'connection-flow' },
+        help: 'Connection whose mass flow rate is measured' },
+      { name: 'setpointLevel', type: 'number', label: 'Level Setpoint', default: 5, min: 0, step: 0.1, unit: 'm',
+        dependsOn: { field: 'sensorKind', value: 'node-level' }, help: 'Liquid level above the bottom of the component' },
+      { name: 'setpointPressure', type: 'number', label: 'Pressure Setpoint', default: 60, min: 0.01, step: 0.5, unit: 'bar',
+        dependsOn: { field: 'sensorKind', value: 'node-pressure' } },
+      { name: 'setpointTemperature', type: 'number', label: 'Temperature Setpoint', default: 300, step: 1, unit: '°C',
+        dependsOn: { field: 'sensorKind', value: 'node-temperature' } },
+      { name: 'setpointFlow', type: 'number', label: 'Flow Setpoint', default: 500, step: 10, unit: 'kg/s',
+        dependsOn: { field: 'sensorKind', value: 'connection-flow' } },
+      { name: 'setpointPower', type: 'number', label: 'Power Setpoint', default: 100, min: 0, max: 120, step: 1, unit: '% nominal',
+        dependsOn: { field: 'sensorKind', value: 'reactor-power' } },
+      { name: 'actuatorKind', type: 'select', label: 'Actuator', default: 'valve-position', options: [
+        { value: 'valve-position', label: 'Valve position' },
+        { value: 'pump-speed', label: 'Pump speed' },
+        { value: 'governor-valve', label: 'Turbine governor valve' },
+        { value: 'heater-power', label: 'Heater power' },
+        { value: 'control-rods', label: 'Control rods' },
+      ], help: 'What the controller drives. Control rods work with power, temperature, or pressure measurements (not level/flow).' },
+      { name: 'actuatorValve', type: 'select', label: 'Controlled Valve', default: '', options: [], dynamicOptions: 'valves',
+        dependsOn: { field: 'actuatorKind', value: 'valve-position' } },
+      { name: 'actuatorPump', type: 'select', label: 'Controlled Pump', default: '', options: [], dynamicOptions: 'pumps',
+        dependsOn: { field: 'actuatorKind', value: 'pump-speed' } },
+      { name: 'actuatorTurbine', type: 'select', label: 'Controlled Turbine', default: '', options: [], dynamicOptions: 'turbines',
+        dependsOn: { field: 'actuatorKind', value: 'governor-valve' } },
+      { name: 'actuatorHeaterNode', type: 'select', label: 'Heated Component', default: '', options: [], dynamicOptions: 'flowNodes',
+        dependsOn: { field: 'actuatorKind', value: 'heater-power' },
+        help: 'Component containing the heaters (e.g. pressurizer)' },
+      { name: 'heaterCapacityMW', type: 'number', label: 'Heater Capacity', default: 2, min: 0.01, step: 0.1, unit: 'MW',
+        dependsOn: { field: 'actuatorKind', value: 'heater-power' } },
+      { name: 'invert', type: 'checkbox', label: 'Reverse acting', default: false,
+        help: 'Output increases when the measurement is ABOVE setpoint (e.g. spray on high pressure, steam-relief on high pressure, drain on high level)' },
+      { name: 'aggressiveness', type: 'number', label: 'Aggressiveness', default: 1, min: 0.2, max: 5, step: 0.1,
+        help: 'Closed-loop speed multiplier on the auto-tuned gains. 1 = commissioning defaults; higher is faster but less robust.' },
+      { name: 'strokeTime', type: 'number', label: 'Actuator Stroke Time', default: 20, min: 1, step: 1, unit: 's',
+        help: 'Time for the actuator to travel its full range (sets the rate limit). Control rod drives are much slower than valves - typically ~1000 s for a full stroke.' },
+      { name: 'powerLimitPct', type: 'number', label: 'Rod Withdrawal Power Limit', default: 100, min: 10, max: 120, step: 1, unit: '%',
+        dependsOn: { field: 'actuatorKind', value: 'control-rods' },
+        help: 'Rods never withdraw above this reactor power (withdrawal permissive)' },
+      { name: 'outputMinPct', type: 'number', label: 'Output Minimum', default: 0, min: 0, max: 100, step: 1, unit: '%',
+        dependsOn: { field: 'actuatorKind', value: ['valve-position', 'pump-speed', 'governor-valve'] },
+        help: 'Lower saturation limit (e.g. 5% minimum pump speed to protect the pump)' },
+      { name: 'outputMaxPct', type: 'number', label: 'Output Maximum', default: 100, min: 0, max: 100, step: 1, unit: '%',
+        dependsOn: { field: 'actuatorKind', value: ['valve-position', 'pump-speed', 'governor-valve'] } },
+    ]
+  },
+
   // Electrical
   'switchyard': {
     displayName: 'Switchyard',
@@ -902,6 +969,18 @@ export class ComponentDialog {
   private currentPosition: { x: number; y: number } = { x: 0, y: 0 };
   private availableCores: Array<{ id: string; label: string }> = [];
   private availableGenerators: Array<{ id: string; label: string }> = [];
+  // Plant-derived choice lists for options with dynamicOptions (keyed by list
+  // name, e.g. 'flowNodes', 'valves'). Set via setDynamicChoices before show().
+  private dynamicChoices: Record<string, Array<{ id: string; label: string }>> = {};
+
+  /**
+   * Provide plant-derived choice lists for selects declared with
+   * dynamicOptions. Call before show()/showEdit(); lists persist until
+   * replaced.
+   */
+  setDynamicChoices(choices: Record<string, Array<{ id: string; label: string }>>): void {
+    this.dynamicChoices = choices;
+  }
 
   constructor() {
     this.dialog = document.getElementById('component-dialog')!;
@@ -1107,6 +1186,9 @@ export class ComponentDialog {
             if (this.availableGenerators.length > 0) {
               (input as HTMLSelectElement).value = this.availableGenerators[0].id;
             }
+          } else if (option.dynamicOptions) {
+            // Plant-derived choice list (flow nodes, valves, pumps, ...)
+            this.populateDynamicSelect(input as HTMLSelectElement, option.dynamicOptions, undefined);
           } else if (option.options) {
             option.options.forEach(opt => {
               const optionElement = document.createElement('option');
@@ -1187,7 +1269,10 @@ export class ComponentDialog {
             } else {
               currentValue = controllingInput.value;
             }
-            const shouldShow = currentValue === option.dependsOn.value;
+            const depValue = option.dependsOn.value;
+            const shouldShow = Array.isArray(depValue)
+              ? depValue.some(v => String(v) === String(currentValue))
+              : currentValue === depValue;
             formGroup.style.display = shouldShow ? '' : 'none';
           }
         }
@@ -1682,6 +1767,15 @@ export class ComponentDialog {
       return;
     }
 
+    // Validate: PID controller sensor/actuator wiring
+    if (this.currentType === 'pid-controller') {
+      const pidError = this.validatePidConfig(properties);
+      if (pidError) {
+        this.showValidationError(pidError);
+        return;
+      }
+    }
+
     const config: ComponentConfig = {
       type: this.currentType,
       name: properties.name || componentDefinitions[this.currentType].displayName,
@@ -1695,6 +1789,48 @@ export class ComponentDialog {
       this.currentCallback(config);
       this.currentCallback = null;
     }
+  }
+
+  /**
+   * Validate PID controller wiring: required targets must be selected, and
+   * control rods only work with the sensor kinds the rod controller supports.
+   */
+  private validatePidConfig(props: Record<string, any>): string | null {
+    const sensorKind = props.sensorKind;
+    const actuatorKind = props.actuatorKind;
+
+    if (sensorKind === 'connection-flow') {
+      if (!props.sensorConnection) return 'Select the flow path to measure';
+    } else if (sensorKind !== 'reactor-power') {
+      if (!props.sensorNode) return 'Select the component to measure';
+    }
+
+    switch (actuatorKind) {
+      case 'valve-position':
+        if (!props.actuatorValve) return 'Select the valve to control';
+        break;
+      case 'pump-speed':
+        if (!props.actuatorPump) return 'Select the pump to control';
+        break;
+      case 'governor-valve':
+        if (!props.actuatorTurbine) return 'Select the turbine to control';
+        break;
+      case 'heater-power':
+        if (!props.actuatorHeaterNode) return 'Select the component containing the heaters';
+        break;
+      case 'control-rods':
+        if (sensorKind === 'node-level' || sensorKind === 'connection-flow') {
+          return 'Control rods work with reactor power, temperature, or pressure measurements (not level or flow)';
+        }
+        break;
+    }
+
+    if (props.outputMinPct !== undefined && props.outputMaxPct !== undefined &&
+        props.outputMinPct >= props.outputMaxPct) {
+      return 'Output minimum must be below output maximum';
+    }
+
+    return null;
   }
 
   /**
@@ -1859,6 +1995,11 @@ export class ComponentDialog {
    * For vessels, detect if it's a core (has fuelRodCount) vs pressurizer
    */
   private mapComponentTypeToDefinition(type: string, component?: Record<string, any>): string {
+    // Special case: controller can be scram or pid
+    if (type === 'controller' && component) {
+      return component.controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
+    }
+
     // Special case: vessel can be either pressurizer or core
     if (type === 'vessel' && component) {
       // If it has fuelRodCount or controlRodCount, it's a core
@@ -2035,6 +2176,9 @@ export class ComponentDialog {
               }
               input.appendChild(optionElement);
             });
+          } else if (option.dynamicOptions) {
+            // Plant-derived choice list (flow nodes, valves, pumps, ...)
+            this.populateDynamicSelect(input as HTMLSelectElement, option.dynamicOptions, existingValue);
           } else if (option.options) {
             option.options.forEach(opt => {
               const optionElement = document.createElement('option');
@@ -2117,7 +2261,10 @@ export class ComponentDialog {
             } else {
               currentValue = controllingInput.value;
             }
-            const shouldShow = currentValue === option.dependsOn.value;
+            const depValue = option.dependsOn.value;
+            const shouldShow = Array.isArray(depValue)
+              ? depValue.some(v => String(v) === String(currentValue))
+              : currentValue === depValue;
             formGroup.style.display = shouldShow ? '' : 'none';
           }
         }
@@ -2235,9 +2382,73 @@ export class ComponentDialog {
   }
 
   /**
+   * Populate a select from a dynamicChoices list. Selects the existing value
+   * when provided (edit), else the first entry (create).
+   */
+  private populateDynamicSelect(
+    input: HTMLSelectElement,
+    listName: string,
+    existingValue: string | undefined
+  ): void {
+    const choices = this.dynamicChoices[listName] || [];
+    const noneOption = document.createElement('option');
+    noneOption.value = '';
+    noneOption.textContent = choices.length > 0 ? '-- Select --' : '-- None available --';
+    input.appendChild(noneOption);
+    choices.forEach(choice => {
+      const optionElement = document.createElement('option');
+      optionElement.value = choice.id;
+      optionElement.textContent = choice.label || choice.id;
+      if (choice.id === existingValue) {
+        optionElement.selected = true;
+      }
+      input.appendChild(optionElement);
+    });
+    if (existingValue === undefined && choices.length > 0) {
+      input.value = choices[0].id;
+    }
+  }
+
+  /**
    * Get existing value from component, handling property name mapping
    */
   private getExistingValue(optionName: string, component: Record<string, any>, defaultValue: any): any {
+    // PID controller fields live in the nested pid config with SI units
+    if (component.controllerType === 'pid' && component.pid) {
+      const pid = component.pid;
+      const sKind = pid.sensor?.kind;
+      const aKind = pid.actuator?.kind;
+      switch (optionName) {
+        case 'sensorKind': return sKind;
+        case 'sensorNode':
+        case 'sensorConnection': return pid.sensor?.targetId ?? '';
+        case 'setpointLevel': if (sKind === 'node-level') return pid.setpoint; break;
+        case 'setpointPressure': if (sKind === 'node-pressure') return pid.setpoint / 1e5; break;
+        case 'setpointTemperature': if (sKind === 'node-temperature') return pid.setpoint - 273.15; break;
+        case 'setpointFlow': if (sKind === 'connection-flow') return pid.setpoint; break;
+        case 'setpointPower': if (sKind === 'reactor-power') return pid.setpoint * 100; break;
+        case 'actuatorKind': return aKind;
+        case 'actuatorValve':
+        case 'actuatorPump':
+        case 'actuatorTurbine':
+        case 'actuatorHeaterNode': return pid.actuator?.targetId ?? '';
+        case 'heaterCapacityMW':
+          if (aKind === 'heater-power') return (pid.actuator?.max ?? 2e6) / 1e6;
+          break;
+        case 'invert': return !!pid.invert;
+        case 'aggressiveness': return pid.aggressiveness ?? 1;
+        case 'strokeTime': {
+          const min = pid.actuator?.min ?? 0;
+          const max = pid.actuator?.max ?? 1;
+          const rl = pid.actuator?.rateLimit ?? 0.1;
+          return Math.round((max - min) / Math.max(rl, 1e-12));
+        }
+        case 'powerLimitPct': return (pid.powerLimit ?? 1) * 100;
+        case 'outputMinPct': return (pid.actuator?.min ?? 0) * 100;
+        case 'outputMaxPct': return (pid.actuator?.max ?? 1) * 100;
+      }
+    }
+
     // Direct property match with unit conversions for pressure values stored in Pa
     if (component[optionName] !== undefined) {
       const value = component[optionName];
