@@ -715,25 +715,54 @@ export const componentDefinitions: Record<string, {
       { name: 'height', type: 'number', label: 'Active Height', default: 3.66, min: 1, max: 6, step: 0.1, unit: 'm', help: 'Height of the active fuel region' },
       { name: 'coreBottomElevation', type: 'number', label: 'Core Bottom Elevation', default: 0.5, min: 0, step: 0.1, unit: 'm', help: 'Height of core bottom above the bottom of the core barrel region. Affects heat transfer when liquid level drops.' },
       { name: 'diameter', type: 'number', label: 'Core Diameter', default: 3.2, min: 1, max: 6, step: 0.1, unit: 'm' },
-      { name: 'rodDiameter', type: 'number', label: 'Fuel Rod Diameter', default: 9.5, min: 5, max: 15, step: 0.5, unit: 'mm' },
-      { name: 'rodPitch', type: 'number', label: 'Rod Pitch', default: 12.6, min: 8, max: 20, step: 0.5, unit: 'mm', help: 'Center-to-center spacing between rods' },
-      { name: 'enrichmentPct', type: 'number', label: 'Enrichment', default: 5, min: 0.7, max: 20, step: 0.1, unit: '% U-235', help: 'Fuel enrichment. Drives available excess reactivity and, with the lattice geometry, the reactivity feedback coefficients. 0.7% is natural uranium (will not go critical in a light-water lattice).' },
+      { name: 'fuelForm', type: 'select', label: 'Fuel Form', default: 'rods', options: [
+        { value: 'rods', label: 'Fuel rods (clad pins)' },
+        { value: 'pebbles', label: 'TRISO pebbles (graphite bed)' },
+      ], help: 'Rods: water-moderated lattice of clad fuel pins. Pebbles: packed bed of graphite spheres with dispersed TRISO kernels - solid-moderated, meant for gas coolant (fill the vessel with helium and 0% water level).' },
+      { name: 'rodDiameter', type: 'number', label: 'Fuel Rod Diameter', default: 9.5, min: 5, max: 15, step: 0.5, unit: 'mm',
+        dependsOn: { field: 'fuelForm', value: 'rods' } },
+      { name: 'rodPitch', type: 'number', label: 'Rod Pitch', default: 12.6, min: 8, max: 20, step: 0.5, unit: 'mm', help: 'Center-to-center spacing between rods',
+        dependsOn: { field: 'fuelForm', value: 'rods' } },
+      { name: 'cladThickness', type: 'number', label: 'Cladding Thickness', default: 0.6, min: 0.2, max: 2, step: 0.1, unit: 'mm', help: 'Zircaloy cladding wall. Thinner clad leaves more pellet volume but fails sooner in accidents.',
+        dependsOn: { field: 'fuelForm', value: 'rods' } },
+      { name: 'pebbleDiameter', type: 'number', label: 'Pebble Diameter', default: 60, min: 20, max: 120, step: 5, unit: 'mm',
+        dependsOn: { field: 'fuelForm', value: 'pebbles' } },
+      { name: 'pebbleCount', type: 'number', label: 'Pebble Count', default: 400000, min: 1000, step: 1000,
+        dependsOn: { field: 'fuelForm', value: 'pebbles' },
+        help: 'A randomly packed bed fills ~61% of the core volume with pebbles (see suggested count)' },
+      { name: 'heavyMetalPerPebble', type: 'number', label: 'Heavy Metal per Pebble', default: 7, min: 1, max: 30, step: 0.5, unit: 'g',
+        dependsOn: { field: 'fuelForm', value: 'pebbles' },
+        help: 'Uranium mass in the TRISO kernels of each pebble (~7 g is typical)' },
+      { name: 'reflectorThickness', type: 'number', label: 'Reflector Thickness', default: 0.8, min: 0, max: 2, step: 0.1, unit: 'm',
+        dependsOn: { field: 'fuelForm', value: 'pebbles' },
+        help: 'Graphite reflector surrounding the core - buys back neutron leakage (small cores need it to go critical)' },
+      { name: 'enrichmentPct', type: 'number', label: 'Enrichment', default: 5, min: 0.7, max: 20, step: 0.1, unit: '% U-235', help: 'Fuel enrichment. Drives available excess reactivity and, with the lattice geometry, the reactivity feedback coefficients. 0.7% is natural uranium (will not go critical in a light-water lattice, but can in a graphite pile). Pebble beds typically use 8-15%.' },
       { name: 'fuelMaterial', type: 'select', label: 'Fuel Material', default: 'UO2', options: [
         { value: 'UO2', label: 'UO₂ ceramic' },
         { value: 'metal', label: 'U metal alloy' },
-      ], help: 'Ceramic UO₂ runs hot inside (strong Doppler); metal fuel conducts better and has a slightly harder spectrum.' },
+      ], help: 'Ceramic UO₂ runs hot inside (strong Doppler); metal fuel conducts better and has a slightly harder spectrum.',
+        dependsOn: { field: 'fuelForm', value: 'rods' } },
       { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks (displayed as individual rods)' },
       { name: 'thermalPower', type: 'number', label: 'Thermal Power', default: 3000, min: 100, max: 5000, step: 100, unit: 'MWt' },
       { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%', help: '0% = fully inserted, 100% = fully withdrawn' },
       // Calculated fields
       { name: 'fuelRodCount', type: 'calculated', label: 'Fuel Rods (approx)', default: 0,
         calculate: (p) => {
+          if (p.fuelForm === 'pebbles') return '—';
           const coreDiam = (p.diameter || 3.37) * 1000; // m to mm
           const pitch = p.rodPitch || 12.6; // mm
           const coreArea = Math.PI * Math.pow(coreDiam / 2, 2); // mm²
           const rodsPerArea = 1 / (pitch * pitch); // rods per mm²
           const rodCount = Math.floor(coreArea * rodsPerArea * 0.9); // 90% packing efficiency
           return rodCount.toLocaleString();
+        }
+      },
+      { name: 'pebbleCountSuggested', type: 'calculated', label: 'Pebbles at 61% packing', default: 0,
+        calculate: (p) => {
+          if (p.fuelForm !== 'pebbles') return '—';
+          const coreVolume = Math.PI * Math.pow((p.diameter || 3.2) / 2, 2) * (p.height || 3.66);
+          const pebbleVolume = (Math.PI / 6) * Math.pow((p.pebbleDiameter || 60) / 1000, 3);
+          return Math.round(0.61 * coreVolume / pebbleVolume).toLocaleString();
         }
       }
     ]

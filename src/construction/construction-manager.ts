@@ -154,9 +154,12 @@ export class ConstructionManager {
     // If initial level < 100%, the component is two-phase (liquid + vapor space)
     const fillLevel = props.initialLevel !== undefined ? props.initialLevel / 100 : 1;
     const isTwoPhase = fillLevel > 0 && fillLevel < 1;
+    // 0% water level means a pure vapor/gas fill (e.g. a helium-cooled
+    // vessel); the factory keys gas initialization off phase === 'vapor'
+    const isVapor = fillLevel <= 0;
     // For two-phase, quality represents fraction of vapor by mass
     // Low fill level with small vapor space = low quality (mostly liquid by mass)
-    const defaultQuality = isTwoPhase ? Math.max(0.01, (1 - fillLevel) * 0.1) : 0;
+    const defaultQuality = isVapor ? 1 : isTwoPhase ? Math.max(0.01, (1 - fillLevel) * 0.1) : 0;
     const T = props.initialTemperature ? props.initialTemperature + 273.15 : 300;
     // Steam pressure - ensure minimum to keep water above freezing
     // Use ?? to allow 0 as a valid value (it will be clamped to minimum)
@@ -165,7 +168,7 @@ export class ConstructionManager {
     const defaultFluid: Fluid = {
       temperature: T,
       pressure: steamPressure,
-      phase: isTwoPhase ? 'two-phase' : 'liquid',
+      phase: isVapor ? 'vapor' : isTwoPhase ? 'two-phase' : 'liquid',
       quality: defaultQuality,
       flowRate: 0
     };
@@ -1256,7 +1259,18 @@ export class ConstructionManager {
         // Store additional properties for reference
         (core as any).rodDiameter = props.rodDiameter || 9.5;  // mm
         (core as any).rodPitch = props.rodPitch || 12.6;  // mm
+        (core as any).cladThickness = props.cladThickness ?? 0.6;  // mm
         (core as any).thermalPower = (props.thermalPower || 3000) * 1e6;  // Convert MW to W
+        // Fuel design - drives lattice-derived reactivity coefficients
+        (core as any).enrichment = (props.enrichmentPct ?? 5) / 100;
+        (core as any).fuelMaterial = props.fuelMaterial || 'UO2';
+        if (props.fuelForm === 'pebbles') {
+          (core as any).fuelForm = 'pebbles';
+          (core as any).pebbleDiameter = props.pebbleDiameter ?? 60;  // mm
+          (core as any).pebbleCount = props.pebbleCount ?? 400000;
+          (core as any).heavyMetalPerPebble = props.heavyMetalPerPebble ?? 7;  // g
+          (core as any).reflectorThickness = props.reflectorThickness ?? 0.8;  // m
+        }
 
         this.plantState.components.set(id, core);
         (core as any).nqa1 = props.nqa1 ?? true;
@@ -1380,6 +1394,11 @@ export class ConstructionManager {
         (coreBarrel as any).volume = coreVolume;
         (coreBarrel as any).fillLevel = initialFillLevel;
         (coreBarrel as any).isHydraulicOnly = true; // Don't render separately (vessel renders both)
+        if (props.initialNcg) {
+          // NCG partial pressures are intensive - same fill gas in the core
+          // region as the downcomer (a helium RV needs helium in the core)
+          (coreBarrel as any).initialNcg = props.initialNcg;
+        }
 
         this.plantState.components.set(coreBarrelId, coreBarrel);
 
@@ -2801,6 +2820,24 @@ export class ConstructionManager {
     if (properties.thermalPower !== undefined) {
       component.thermalPower = properties.thermalPower * 1e6; // MW to W
     }
+    if (properties.cladThickness !== undefined) {
+      component.cladThickness = properties.cladThickness; // mm
+    }
+    if (properties.fuelForm !== undefined) {
+      component.fuelForm = properties.fuelForm;
+    }
+    if (properties.pebbleDiameter !== undefined) {
+      component.pebbleDiameter = properties.pebbleDiameter; // mm
+    }
+    if (properties.pebbleCount !== undefined) {
+      component.pebbleCount = properties.pebbleCount;
+    }
+    if (properties.heavyMetalPerPebble !== undefined) {
+      component.heavyMetalPerPebble = properties.heavyMetalPerPebble; // g
+    }
+    if (properties.reflectorThickness !== undefined) {
+      component.reflectorThickness = properties.reflectorThickness; // m
+    }
 
     // Reactor vessel-specific properties
     if (component.type === 'reactorVessel') {
@@ -2942,11 +2979,12 @@ export class ConstructionManager {
       return { success: false, error };
     }
 
+    const isPebbleBed = coreProperties.fuelForm === 'pebbles';
     const rodPitch = coreProperties.rodPitch || 12.6; // mm
     const pitch_m = rodPitch / 1000;
     const coreArea = Math.PI * Math.pow(coreDiameter / 2, 2);
     const pitchArea = pitch_m * pitch_m;
-    const actualFuelRodCount = Math.floor(coreArea / pitchArea * 0.9);
+    const actualFuelRodCount = isPebbleBed ? 0 : Math.floor(coreArea / pitchArea * 0.9);
 
     // Add fuel rod properties to the container
     // fuelRodCount is for VISUAL rendering (8-12 rods look good)
@@ -2962,11 +3000,20 @@ export class ConstructionManager {
     container.coreDiameter = coreDiameter; // Actual core diameter
     container.rodDiameter = coreProperties.rodDiameter || 9.5; // mm
     container.rodPitch = rodPitch; // mm
+    container.cladThickness = coreProperties.cladThickness ?? 0.6; // mm
     container.thermalPower = (coreProperties.thermalPower || 3000) * 1e6; // W
     container.coreHeight = coreProperties.height; // Core height (may be less than container height)
     // Fuel design - drives lattice-derived reactivity coefficients
     container.enrichment = (coreProperties.enrichmentPct ?? 5) / 100;
     container.fuelMaterial = coreProperties.fuelMaterial || 'UO2';
+    // Pebble-bed fuel form (graphite-moderated TRISO bed; see htgr preset)
+    if (isPebbleBed) {
+      container.fuelForm = 'pebbles';
+      container.pebbleDiameter = coreProperties.pebbleDiameter ?? 60; // mm
+      container.pebbleCount = coreProperties.pebbleCount ?? 400000;
+      container.heavyMetalPerPebble = coreProperties.heavyMetalPerPebble ?? 7; // g
+      container.reflectorThickness = coreProperties.reflectorThickness ?? 0.8; // m
+    }
 
     // If the container is a tank, convert it to a vessel type for proper rendering
     // (vessels render with domes and fuel rods, tanks don't have domes by default)
@@ -2979,7 +3026,8 @@ export class ConstructionManager {
       container.hasBottom = true;
     }
 
-    // Calculate and subtract fuel rod volume from the core region
+    // Calculate and subtract fuel volume from the core region
+    // (pebble beds: the factory subtracts the bed volume itself at sim build)
     const rodDiameter_m = (coreProperties.rodDiameter || 9.5) / 1000; // mm to m
     const coreHeight_m = coreProperties.height || 3.66; // Default to typical PWR height
     const singleRodVolume = Math.PI * Math.pow(rodDiameter_m / 2, 2) * coreHeight_m;
@@ -3021,14 +3069,30 @@ export class ConstructionManager {
           coreBarrel.controlRodPosition = container.controlRodPosition;
           coreBarrel.activeFuelHeight = activeFuelHeight;
           coreBarrel.coreBottomElevation = coreBottomElevation;
+          // Fuel design also belongs on the barrel: the simulation factory
+          // reads rod geometry, enrichment, thermal power, and pebble fields
+          // from the fuel-bearing component (the barrel in this architecture)
+          (coreBarrel as any).rodDiameter = container.rodDiameter;
+          (coreBarrel as any).rodPitch = container.rodPitch;
+          (coreBarrel as any).cladThickness = container.cladThickness;
+          (coreBarrel as any).enrichment = container.enrichment;
+          (coreBarrel as any).fuelMaterial = container.fuelMaterial;
+          (coreBarrel as any).thermalPower = container.thermalPower;
+          if (container.fuelForm === 'pebbles') {
+            (coreBarrel as any).fuelForm = 'pebbles';
+            (coreBarrel as any).pebbleDiameter = container.pebbleDiameter;
+            (coreBarrel as any).pebbleCount = container.pebbleCount;
+            (coreBarrel as any).heavyMetalPerPebble = container.heavyMetalPerPebble;
+            (coreBarrel as any).reflectorThickness = container.reflectorThickness;
+          }
           // Clear from vessel (they belong on core barrel now)
           delete (container as any).fuelRodCount;
           delete (container as any).actualFuelRodCount;
           delete (container as any).fuelTemperature;
           delete (container as any).fuelMeltingPoint;
+          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId} (fuel: ${coreBottomElevation}m to ${coreBottomElevation + activeFuelHeight}m, ${coreBarrel.controlRodCount} control rod banks)`);
           delete (container as any).controlRodCount;
           delete (container as any).controlRodPosition;
-          console.log(`[Construction] Transferred core properties to core barrel ${rv.coreBarrelId} (fuel: ${coreBottomElevation}m to ${coreBottomElevation + activeFuelHeight}m)`);
         }
       }
       // Legacy support for old save files
@@ -3060,7 +3124,10 @@ export class ConstructionManager {
       }
     }
 
-    console.log(`[Construction] Added core to ${containerId}: ${actualFuelRodCount} fuel rods (${totalFuelRodVolume.toFixed(2)} m³), ${container.controlRodCount} control rod banks`);
+    const fuelDesc = isPebbleBed
+      ? `${container.pebbleCount ?? coreProperties.pebbleCount} pebbles`
+      : `${actualFuelRodCount} fuel rods (${totalFuelRodVolume.toFixed(2)} m³)`;
+    console.log(`[Construction] Added core to ${containerId}: ${fuelDesc}`);
     return { success: true };
   }
 }
