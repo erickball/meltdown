@@ -66,17 +66,35 @@ Stock plants derive from the shipping presets, so convergence is proven.
 1. **FIRST LIGHT** — Full PWR secondary + pressurizer + RCP + containment on
    site (free); the old reactor was "decommissioned by a previous incident."
    Player builds the reactor vessel + core and pipes it in (cold leg → RPV,
-   core outlet → SG, RPV top → pressurizer surge). Manual rods (no rod
-   controller on site). Goals: 150 MWe sustained, 300 MWh delivered. No
-   random events.
+   core barrel top → SG, RPV → pressurizer surge). Manual rods (no rod
+   controller on site). Goals: hold 150 MWe for 2 min, deliver 25 MWh.
+   No random events. Loan cap $750M (reference reactor prices at ~$560M).
 2. **SHAKEDOWN** — Complete PWR with full autocontrol, free. Operate it.
-   Goals: 1500 MWh + end with positive cash. One scripted feedwater-pump trip
-   plus electricity-price volatility. Teaches operator actions.
-3. **GOING CONCERN** — Empty site, big loan cap. Build whatever delivers.
-   Goals: 3000 MWh + cash target. Random events at moderate rate.
+   Goals: 60 MWh + grow cash $20M → $32M. One scripted feedwater-pump trip
+   plus a price spike. Teaches operator actions.
+3. **GOING CONCERN** — Empty site, $6B loan cap. Build whatever delivers.
+   Goals: hold 250 MWe for 5 min, 120 MWh, stay above $40M. Random events
+   at moderate rate (pump/turbine trips, price swings).
 4. **THE INSPECTION** — Two-loop PWR, free. An NRC stress test: one surprise
    major initiating event (SGTR / small LOCA / RCP trip / turbine trip) at a
-   random time. Goals: 1000 MWh, estimated cancers < 0.01, stay solvent.
+   random time. Goals: 100 MWh, cash to $50M, estimated cancers < 0.01.
+
+## Playtest notes / known issues
+
+- Headless, both the level-1 plant AND the shipping pwr.json preset currently
+  run at ~1.1x realtime (RK45 dt pinned to a few ms, mostly around the FW
+  check-valve node). The perf memory says presets used to do 20-30x, so this
+  may be a recent regression on master - worth a look, because level pacing
+  assumes the player can run 5-20x. Level goals are sized to ~10-15 sim-min
+  of operation as a hedge.
+- The level-1 reference reactor (rods parked at 70% withdrawn, lattice-derived
+  coefficients, 5% enrichment) settles at ~48% of 1000 MWt nominal ->
+  ~208 MWe. The briefing tells the player to trim rods by hand; the 150 MWe /
+  25 MWh goals leave slack for less-optimal builds.
+- The career flow is integration-tested only headlessly (physics + economy);
+  the DOM flow (title -> briefing -> BUILD -> operate -> debrief) still needs
+  a human playtest pass.
+- Goal/economy numbers (prices, APRs, bonuses) are first-pass tuning.
 
 ## Deferred (noted in master todo)
 
