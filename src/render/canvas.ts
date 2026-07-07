@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -1947,6 +1947,9 @@ export class PlantCanvas {
       // Pass screen bounds getter function for proper gauge positioning
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+
+      // Draw thermometers on large hydraulic nodes
+      renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
 
       // Draw burst overlays (crack symbols and warning borders)
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);

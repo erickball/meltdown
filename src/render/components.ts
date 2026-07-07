@@ -4360,6 +4360,25 @@ export function renderFlowConnectionArrows(
  * Render pressure dial gauges on flow nodes
  * Each gauge is attached to the top-center of its component with a thin black stem
  */
+/**
+ * Find the visual component corresponding to a flow node.
+ * Matches by simNodeId, heat-exchanger tube/shell suffix, or direct ID.
+ */
+function findComponentForFlowNode(nodeId: string, plantState: PlantState): PlantComponent | undefined {
+  for (const [compId, comp] of plantState.components) {
+    const simNodeId = (comp as { simNodeId?: string }).simNodeId;
+    // Exact simNodeId match
+    if (simNodeId === nodeId) return comp;
+    // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
+    if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+      return comp;
+    }
+    // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
+    if (compId === nodeId) return comp;
+  }
+  return undefined;
+}
+
 export function renderPressureGauge(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
@@ -4370,26 +4389,7 @@ export function renderPressureGauge(
   // Draw a pressure gauge for each flow node that has a corresponding visual component
   for (const [nodeId, node] of simState.flowNodes) {
     // Find the component that corresponds to this flow node
-    let component: PlantComponent | undefined;
-    for (const [compId, comp] of plantState.components) {
-      const simNodeId = (comp as { simNodeId?: string }).simNodeId;
-      // Exact simNodeId match
-      if (simNodeId === nodeId) {
-        component = comp;
-        break;
-      }
-      // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
-      if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
-        component = comp;
-        break;
-      }
-      // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
-      if (compId === nodeId) {
-        component = comp;
-        break;
-      }
-    }
-
+    const component = findComponentForFlowNode(nodeId, plantState);
     if (!component) continue;
 
     // Check if this component is contained by a reactor vessel - if so, use the parent vessel's geometry
@@ -4544,6 +4544,128 @@ export function renderPressureGauge(
     ctx.font = `${unitFontSize}px monospace`;
     ctx.fillStyle = '#999';
     ctx.fillText('bar', 0, 7 * gaugeScale);
+
+    ctx.restore();
+  }
+}
+
+// Only flow nodes at least this large get a thermometer (keeps pipes/valves uncluttered)
+const THERMOMETER_MIN_VOLUME = 5; // m³
+
+/**
+ * Render a thermometer beside each large hydraulic node, next to its pressure
+ * gauge. Fixed 0-400°C column so readings are visually comparable across the
+ * plant; the numeric value is printed alongside.
+ */
+export function renderThermometers(
+  ctx: CanvasRenderingContext2D,
+  simState: SimulationState,
+  plantState: PlantState,
+  view: ViewState,
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number } | null
+): void {
+  if (!getScreenBounds) return;
+
+  for (const [nodeId, node] of simState.flowNodes) {
+    if (!node.volume || node.volume < THERMOMETER_MIN_VOLUME) continue;
+
+    const component = findComponentForFlowNode(nodeId, plantState);
+    if (!component) continue;
+
+    // Use parent reactor vessel geometry for contained sub-nodes (same as gauges)
+    const containedBy = (component as { containedBy?: string }).containedBy;
+    const parentVessel = containedBy ? plantState.components.get(containedBy) : undefined;
+    const boundsComponent = (parentVessel && parentVessel.type === 'reactorVessel') ? parentVessel : component;
+
+    const screenBounds = getScreenBounds(boundsComponent);
+    if (!screenBounds) continue;
+
+    const scale = Math.max(0.3, Math.min(2.5, screenBounds.scale));
+    const stemLengthPx = 25;
+    const gaugeRadius = 20 * scale;
+
+    let anchorX = screenBounds.topCenter.x;
+    let topY = screenBounds.topCenter.y;
+
+    // Mirror the pressure-gauge X offsets for reactor vessel sub-nodes
+    if (parentVessel && parentVessel.type === 'reactorVessel') {
+      const rv = parentVessel as ReactorVesselComponent;
+      const isInsideBarrel = component.id.includes('-inside');
+      anchorX += rv.innerDiameter * view.zoom * scale * (isInsideBarrel ? -0.15 : 0.15);
+      if (isInsideBarrel) topY += 10 * scale;
+    }
+
+    // Place the thermometer just left of the pressure gauge
+    const centerX = anchorX - (gaugeRadius + 12 * scale);
+    const centerY = topY - stemLengthPx * scale - gaugeRadius;
+
+    const T_C = node.fluid.temperature - 273.15;
+    const tubeH = 30 * scale;
+    const tubeW = 5 * scale;
+    const bulbR = 4.5 * scale;
+
+    // Fill fraction on a fixed 0-400°C scale
+    const frac = Math.min(1, Math.max(0, T_C / 400));
+
+    ctx.save();
+    ctx.translate(centerX, centerY);
+
+    const tubeTop = -tubeH / 2;
+    const tubeBottom = tubeH / 2;
+
+    // Glass tube (rounded) + bulb outline
+    ctx.beginPath();
+    ctx.moveTo(-tubeW / 2, tubeBottom);
+    ctx.lineTo(-tubeW / 2, tubeTop);
+    ctx.arc(0, tubeTop, tubeW / 2, Math.PI, 0);
+    ctx.lineTo(tubeW / 2, tubeBottom);
+    ctx.fillStyle = 'rgba(230, 238, 245, 0.9)';
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, tubeBottom + bulbR * 0.6, bulbR, 0, Math.PI * 2);
+    ctx.fillStyle = '#e03030';
+    ctx.fill();
+
+    // Mercury column
+    const colH = frac * tubeH;
+    ctx.fillStyle = '#e03030';
+    ctx.fillRect(-tubeW / 4, tubeBottom - colH, tubeW / 2, colH + bulbR * 0.4);
+
+    // Tick marks every 100°C
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = Math.max(0.5, scale * 0.8);
+    for (let i = 1; i <= 3; i++) {
+      const y = tubeBottom - (i / 4) * tubeH;
+      ctx.beginPath();
+      ctx.moveTo(tubeW / 2, y);
+      ctx.lineTo(tubeW / 2 + 2.5 * scale, y);
+      ctx.stroke();
+    }
+
+    // Outline the tube and bulb
+    ctx.beginPath();
+    ctx.moveTo(-tubeW / 2, tubeBottom);
+    ctx.lineTo(-tubeW / 2, tubeTop);
+    ctx.arc(0, tubeTop, tubeW / 2, Math.PI, 0);
+    ctx.lineTo(tubeW / 2, tubeBottom);
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = Math.max(0.8, scale);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, tubeBottom + bulbR * 0.6, bulbR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Numeric value to the left of the tube
+    const fontSize = Math.round(9 * scale);
+    ctx.font = `bold ${fontSize}px monospace`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    const label = `${Math.round(T_C)}°C`;
+    ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
+    ctx.lineWidth = Math.max(1, 2 * scale);
+    ctx.strokeText(label, -tubeW / 2 - 3 * scale, 0);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, -tubeW / 2 - 3 * scale, 0);
 
     ctx.restore();
   }
