@@ -538,6 +538,18 @@ export interface ValveState {
   position: number;                 // 0 = closed, 1 = fully open
   failPosition: number;             // Position on loss of power/signal
   connectedFlowPath: string;        // Flow connection ID
+  // Relief valve / PORV pressure actuation (set for valveType 'relief'/'porv').
+  // The valve is a spring-loaded (relief) or pilot-operated (porv) device: it
+  // pops open when the sensed pressure reaches setpoint and reseats when the
+  // pressure falls to setpoint*(1-blowdown). The config object is immutable
+  // (shared across cloned states); the pop/reseat latch lives in reliefOpen.
+  relief?: {
+    setpoint: number;               // Pa - pop/open pressure
+    blowdown: number;               // fraction - reseat at setpoint*(1-blowdown)
+    senseNodeId: string;            // flow node whose pressure actuates the valve
+    controlMode: 'auto' | 'open' | 'closed';  // PORV manual override ('auto' for safeties)
+  };
+  reliefOpen?: boolean;             // latch state between pop and reseat pressures
 }
 
 export interface CheckValveState {
