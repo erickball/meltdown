@@ -24,6 +24,10 @@
 import { SimulationState, NeutronicsState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 
+// Differential boron worth at reference moderator density. ~-8 pcm/ppm is
+// the textbook PWR value; components may override via boronWorthPerPpm.
+export const BORON_WORTH_PER_PPM = -8e-5;
+
 // ============================================================================
 // Neutronics Operator
 // ============================================================================
@@ -248,6 +252,16 @@ export class NeutronicsOperator implements PhysicsOperator {
     const dRho_coolant = coolantDensity - n.refCoolantDensity;
     const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
+    // Soluble boron: worth proportional to concentration AND to how much
+    // borated water is actually in the core. Voiding expels absorber along
+    // with moderator, so at high ppm the net density coefficient can flip
+    // sign (the classic positive-MTC-at-high-boron failure mode).
+    const boronPpm = n.boronPpm ?? 0;
+    const rhoBoron = boronPpm !== 0
+      ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
+        (coolantDensity / Math.max(1, n.refCoolantDensity))
+      : 0;
+
     // Built-in excess reactivity (enrichment margin)
     const rhoExcess = n.excessReactivity ?? 0;
 
@@ -258,6 +272,7 @@ export class NeutronicsOperator implements PhysicsOperator {
       doppler: rhoDoppler,
       coolantTemp: rhoCoolantTemp,
       coolantDensity: rhoCoolantDensity,
+      boron: rhoBoron,
     };
 
     // Store diagnostic values
@@ -267,7 +282,7 @@ export class NeutronicsOperator implements PhysicsOperator {
       coolantDensity,
     };
 
-    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron;
   }
 
   /**

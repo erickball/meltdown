@@ -70,12 +70,29 @@ export class ControlSystemOperator implements ConstraintOperator {
 
   applyConstraints(state: SimulationState, dt?: number): SimulationState {
     const controllers = state.components.controllers;
-    if (!controllers || controllers.size === 0) return state;
+    const boronPending = state.neutronics.boronTargetPpm !== undefined &&
+      (state.neutronics.boronPpm ?? 0) !== state.neutronics.boronTargetPpm;
+    if ((!controllers || controllers.size === 0) && !boronPending) return state;
     if (dt === undefined || !(dt > 0)) return state;
 
     const newState = cloneSimulationState(state);
-    for (const [, ctl] of newState.components.controllers) {
-      this.updateController(newState, ctl, dt);
+
+    // CVCS boration/dilution: the operator sets a target concentration and
+    // the charging system slews toward it. Real plants change RCS boron at
+    // a few ppm/min; we allow a brisk 0.5 ppm/s so it is playable at 1x.
+    if (boronPending) {
+      const n = newState.neutronics;
+      const BORON_SLEW = 0.5; // ppm/s
+      const current = n.boronPpm ?? 0;
+      const target = n.boronTargetPpm ?? 0;
+      const step = Math.max(-BORON_SLEW * dt, Math.min(BORON_SLEW * dt, target - current));
+      n.boronPpm = current + step;
+    }
+
+    if (controllers) {
+      for (const [, ctl] of newState.components.controllers) {
+        this.updateController(newState, ctl, dt);
+      }
     }
     return newState;
   }

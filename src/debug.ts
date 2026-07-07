@@ -297,6 +297,23 @@ export function updateDebugPanel(
       const dopplerPcm = (rb.doppler * 1e5).toFixed(1);
       const coolantTempPcm = (rb.coolantTemp * 1e5).toFixed(1);
       const coolantDensityPcm = (rb.coolantDensity * 1e5).toFixed(1);
+      const boronPcm = ((rb.boron ?? 0) * 1e5).toFixed(1);
+      const boronPpm = n.boronPpm ?? 0;
+
+      // Estimated critical position: the rod insertion at which total
+      // reactivity would be zero under CURRENT conditions (linear rod worth)
+      const rhoNonRod = n.reactivity - rb.controlRods;
+      let ecpHtml = '';
+      if (n.controlRodWorth > 0) {
+        const insertionAtCrit = rhoNonRod / n.controlRodWorth; // fraction inserted
+        if (insertionAtCrit < 0) {
+          ecpHtml = '<span class="debug-warning">subcritical even with rods out</span>';
+        } else if (insertionAtCrit > 1) {
+          ecpHtml = '<span class="debug-warning">supercritical even with rods in</span>';
+        } else {
+          ecpHtml = `<span class="debug-value">${(insertionAtCrit * 100).toFixed(1)}% inserted</span>`;
+        }
+      }
 
       // Feedback coefficients (lattice-derived when the core specifies its
       // fuel design, otherwise preset/default values)
@@ -321,8 +338,10 @@ export function updateDebugPanel(
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Fuel temperature coefficient ${dopplerCoeff} pcm/K">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C, ${dopplerCoeff} pcm/K)<br>
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Coolant temperature coefficient ${coolantTempCoeff} pcm/K">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C, ${coolantTempCoeff} pcm/K)<br>
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Coolant density coefficient ${densityCoeff} pcm per kg/m³ — positive means voiding removes reactivity">Coolant ρ:</span> <span class="debug-value">${coolantDensityPcm} pcm</span> (ρ=${coolantRho}, ref=${refCoolantRho}, ${densityCoeff} pcm/(kg/m³))<br>
+        ${boronPpm > 0 || (rb.boron ?? 0) !== 0 ? `<span class="debug-label" style="margin-left: 10px; color: #888;" title="Soluble boron, worth scaled by in-core water density">Boron:</span> <span class="debug-value">${boronPcm} pcm</span> (${boronPpm.toFixed(0)} ppm)<br>` : ''}
         <span class="debug-label">Precursors:</span> ${formatValue(n.precursorConcentration, '')}<br>
         <span class="debug-label">Rod insertion:</span> ${formatValue((1 - n.controlRodPosition) * 100, '%')}<br>
+        ${ecpHtml ? `<span class="debug-label" title="Rod position at which the core would be exactly critical under current conditions (linear rod worth)">Est. critical pos:</span> ${ecpHtml}<br>` : ''}
         <span class="debug-label">Decay heat:</span> ${formatValue(n.decayHeatFraction * 100, '%')}<br>
         <span class="debug-label">SCRAM:</span> ${n.scrammed ? '<span class="debug-danger">YES</span>' : 'No'}
       `;

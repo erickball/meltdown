@@ -16,6 +16,7 @@ import {
   createZeroRates,
 } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
+import { BORON_WORTH_PER_PPM } from './neutronics';
 import * as Water from '../water-properties';
 import { simulationConfig } from '../types';
 import {
@@ -987,12 +988,21 @@ export class NeutronicsRateOperator implements RateOperator {
     const dRho_coolant = coolantDensity - n.refCoolantDensity;
     const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
+    // Soluble boron: worth proportional to concentration AND to the water
+    // density actually in the core (voiding expels absorber with moderator,
+    // so high ppm can flip the net density coefficient positive).
+    const boronPpm = n.boronPpm ?? 0;
+    const rhoBoron = boronPpm !== 0
+      ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
+        (coolantDensity / Math.max(1, n.refCoolantDensity))
+      : 0;
+
     // Built-in excess reactivity (enrichment margin) - shifts the critical
     // rod position to partial insertion so a rod controller has authority
     // in both directions. 0 (default) preserves legacy behavior.
     const rhoExcess = n.excessReactivity ?? 0;
 
-    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity;
+    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron;
 
     // Store diagnostics on the evaluated state so displays and logs see the
     // live reactivity (rate operators otherwise never write state, and
@@ -1004,6 +1014,7 @@ export class NeutronicsRateOperator implements RateOperator {
       doppler: rhoDoppler,
       coolantTemp: rhoCoolantTemp,
       coolantDensity: rhoCoolantDensity,
+      boron: rhoBoron,
     };
     n.diagnostics = { fuelTemp, coolantTemp, coolantDensity };
 

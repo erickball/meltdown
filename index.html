@@ -105,6 +105,12 @@
                   title="Toggle between the automatic rod controller and manual slider control. Switching is bumpless - rods stay where they are until commanded.">
             Rods: AUTO
           </button>
+          <div class="slider-control" style="margin-top: 8px;"
+               title="Soluble boron in the coolant (CVCS boration/dilution). Slews toward the target at ~0.5 ppm/s. Boron worth rides on the water actually in the core, so at high concentration voiding can add reactivity (positive-MTC failure mode).">
+            <label for="boron-target">Boron: <span id="boron-value">0 ppm</span></label>
+            <input type="range" id="boron-target" min="0" max="3000" value="0" step="10" />
+            <div class="slider-labels"><span>0</span><span>3000 ppm</span></div>
+          </div>
           <div class="scram-controls" style="margin-top: 10px;">
             <button id="scram-btn" class="sim-btn" style="background: #d00; color: white; font-weight: bold;">SCRAM</button>
             <button id="reset-scram-btn" class="sim-btn" style="display: none;">Reset SCRAM</button>

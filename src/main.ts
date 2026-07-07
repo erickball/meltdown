@@ -526,6 +526,18 @@ function init() {
     });
   }
 
+  // Soluble boron target (CVCS boration/dilution)
+  const boronSlider = document.getElementById('boron-target') as HTMLInputElement;
+  if (boronSlider) {
+    boronSlider.addEventListener('input', () => {
+      const targetPpm = parseInt(boronSlider.value);
+      gameLoop.updateState((state) => {
+        state.neutronics.boronTargetPpm = targetPpm;
+        return state;
+      });
+    });
+  }
+
   // Rod controller manual/auto toggle: flips every control-rods PID
   // controller between auto and manual. Bumpless in both directions (the
   // velocity-form controller has no integrator state to wind up).
@@ -3017,6 +3029,16 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         rodValueDisplay.textContent = insertionPercent + '%';
       }
     }
+  }
+
+  // Boron display: show current concentration, and the target while slewing
+  const boronValueEl = document.getElementById('boron-value');
+  if (boronValueEl) {
+    const current = simState.neutronics.boronPpm ?? 0;
+    const target = simState.neutronics.boronTargetPpm ?? current;
+    boronValueEl.textContent = Math.abs(target - current) > 0.5
+      ? `${current.toFixed(0)} → ${target.toFixed(0)} ppm`
+      : `${current.toFixed(0)} ppm`;
   }
 
   // Sync turbine-generator state using component's simNodeId

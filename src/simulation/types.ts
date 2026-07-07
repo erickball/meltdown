@@ -315,6 +315,14 @@ export interface NeutronicsState {
   // authority to raise power. Default 0 preserves legacy behavior.
   excessReactivity?: number;        // Δk/k, >= 0
 
+  // Soluble boron (operator control, CVCS boration/dilution).
+  // Worth scales with the water density actually in the core, so at high
+  // concentrations voiding REMOVES absorber and the effective moderator
+  // density coefficient can flip sign (the positive-MTC failure mode).
+  boronPpm?: number;                // ppm currently in the coolant
+  boronTargetPpm?: number;          // ppm the operator is borating/diluting toward
+  boronWorthPerPpm?: number;        // Δk/k per ppm at reference density (negative), default -8e-5
+
   // Decay heat (fraction of nominal power)
   decayHeatFraction: number;        // Computed from operating history
 
@@ -339,6 +347,7 @@ export interface NeutronicsState {
     doppler: number;                // Fuel temperature feedback
     coolantTemp: number;            // Coolant temperature feedback
     coolantDensity: number;         // Coolant density feedback
+    boron?: number;                 // Soluble boron (density-weighted)
   };
 
   // Diagnostic values (for debugging feedback calculations)
