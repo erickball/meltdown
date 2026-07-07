@@ -37,6 +37,8 @@ export interface FlowConnectionRates {
 export interface ThermalNodeRates {
   dTemperature: number;  // K/s - rate of temperature change (for solids)
   dOxidizedFraction?: number;  // 1/s - rate of cladding oxidation (for cladding nodes only)
+  dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
+  dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
 }
 
 export interface NeutronicsRates {
@@ -55,6 +57,9 @@ export interface StateRates {
   thermalNodes: Map<string, ThermalNodeRates>;
   neutronics: NeutronicsRates;
   pumps: Map<string, PumpRates>;  // pump speed dynamics
+  // mol/s of NCG leaving the modeled system through boundary nodes
+  // (accumulates into state.environmentalRelease - the radiological source term)
+  environmentalRelease?: GasComposition;
 }
 
 // ============================================================================
@@ -163,6 +168,13 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     if (aRates.dOxidizedFraction !== undefined || bRates.dOxidizedFraction !== undefined) {
       combined.dOxidizedFraction = (aRates.dOxidizedFraction ?? 0) + (bRates.dOxidizedFraction ?? 0);
     }
+    // Combine fission-product release rates if either has them
+    if (aRates.dFpNobleGas !== undefined || bRates.dFpNobleGas !== undefined) {
+      combined.dFpNobleGas = (aRates.dFpNobleGas ?? 0) + (bRates.dFpNobleGas ?? 0);
+    }
+    if (aRates.dFpVolatile !== undefined || bRates.dFpVolatile !== undefined) {
+      combined.dFpVolatile = (aRates.dFpVolatile ?? 0) + (bRates.dFpVolatile ?? 0);
+    }
     result.thermalNodes.set(id, combined);
   }
 
@@ -189,6 +201,15 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     result.pumps.set(id, {
       dEffectiveSpeed: aRates.dEffectiveSpeed + bRates.dEffectiveSpeed,
     });
+  }
+
+  // Combine environmental release rates
+  if (a.environmentalRelease || b.environmentalRelease) {
+    result.environmentalRelease = emptyGasComposition();
+    for (const species of ALL_GAS_SPECIES) {
+      result.environmentalRelease[species] =
+        (a.environmentalRelease?.[species] ?? 0) + (b.environmentalRelease?.[species] ?? 0);
+    }
   }
 
   return result;
@@ -226,6 +247,12 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     if (r.dOxidizedFraction !== undefined) {
       scaled.dOxidizedFraction = r.dOxidizedFraction * factor;
     }
+    if (r.dFpNobleGas !== undefined) {
+      scaled.dFpNobleGas = r.dFpNobleGas * factor;
+    }
+    if (r.dFpVolatile !== undefined) {
+      scaled.dFpVolatile = r.dFpVolatile * factor;
+    }
     result.thermalNodes.set(id, scaled);
   }
 
@@ -241,6 +268,13 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     result.pumps.set(id, {
       dEffectiveSpeed: r.dEffectiveSpeed * factor,
     });
+  }
+
+  if (rates.environmentalRelease) {
+    result.environmentalRelease = emptyGasComposition();
+    for (const species of ALL_GAS_SPECIES) {
+      result.environmentalRelease[species] = (rates.environmentalRelease[species] ?? 0) * factor;
+    }
   }
 
   return result;
@@ -315,6 +349,28 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         // Clamp to [0, 1]
         node.oxidation.oxidizedFraction = Math.max(0, Math.min(1, node.oxidation.oxidizedFraction));
       }
+      // Apply fission-product release (inventory can only fall, floor at 0)
+      if (node.fissionProducts) {
+        if (nodeRates.dFpNobleGas !== undefined) {
+          node.fissionProducts.nobleGas =
+            Math.max(0, node.fissionProducts.nobleGas + nodeRates.dFpNobleGas * dt);
+        }
+        if (nodeRates.dFpVolatile !== undefined) {
+          node.fissionProducts.volatile =
+            Math.max(0, node.fissionProducts.volatile + nodeRates.dFpVolatile * dt);
+        }
+      }
+    }
+  }
+
+  // Accumulate NCG vented through boundary nodes (radiological source term)
+  if (rates.environmentalRelease) {
+    if (!newState.environmentalRelease) {
+      newState.environmentalRelease = emptyGasComposition();
+    }
+    for (const species of ALL_GAS_SPECIES) {
+      newState.environmentalRelease[species] = (newState.environmentalRelease[species] ?? 0) +
+        (rates.environmentalRelease[species] ?? 0) * dt;
     }
   }
 

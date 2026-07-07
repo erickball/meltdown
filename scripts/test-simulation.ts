@@ -17,6 +17,8 @@ import {
   ConductionRateOperator,
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
+  FissionProductReleaseOperator,
+  meltFraction,
   HeatGenerationRateOperator,
   NeutronicsRateOperator,
   FlowRateOperator,
@@ -98,6 +100,7 @@ solver.addRateOperator(new FlowMomentumRateOperator());
 solver.addRateOperator(new ConductionRateOperator());
 solver.addRateOperator(new ConvectionRateOperator());
 solver.addRateOperator(new CladdingOxidationRateOperator());
+solver.addRateOperator(new FissionProductReleaseOperator());
 solver.addRateOperator(new HeatGenerationRateOperator());
 solver.addRateOperator(new NeutronicsRateOperator());
 solver.addRateOperator(new TurbineCondenserRateOperator());
@@ -197,7 +200,21 @@ function logSimState(state: SimulationState): void {
       `C=${nn.precursorConcentration.toExponential(3)} reactivity=${nn.reactivity?.toExponential(3) ?? '?'}`);
   }
   for (const [id, tn] of state.thermalNodes) {
-    console.log(`thermal ${id}: T=${(tn.temperature - 273.15).toFixed(1)}C heatGen=${(tn.heatGeneration / 1e6).toFixed(1)}MW`);
+    const melt = meltFraction(tn);
+    const extras = [
+      melt > 0.001 ? ` MELT=${(melt * 100).toFixed(1)}%` : '',
+      tn.oxidation && tn.oxidation.oxidizedFraction > 0.001
+        ? ` oxidized=${(tn.oxidation.oxidizedFraction * 100).toFixed(1)}%` : '',
+      tn.fissionProducts
+        ? ` FP=${tn.fissionProducts.nobleGas.toFixed(1)}/${tn.fissionProducts.volatile.toFixed(1)}mol` : '',
+    ].join('');
+    console.log(`thermal ${id}: T=${(tn.temperature - 273.15).toFixed(1)}C heatGen=${(tn.heatGeneration / 1e6).toFixed(1)}MW${extras}`);
+  }
+  if (state.environmentalRelease) {
+    const rel = state.environmentalRelease;
+    if ((rel.Xe ?? 0) > 0.001 || (rel.CsI ?? 0) > 0.001) {
+      console.log(`RADIOLOGICAL RELEASE to environment: Xe=${(rel.Xe ?? 0).toFixed(2)}mol CsI=${(rel.CsI ?? 0).toFixed(3)}mol`);
+    }
   }
   for (const [nodeId, node] of state.flowNodes) {
     const fluid = node.fluid;

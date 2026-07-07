@@ -19,7 +19,7 @@ import {
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
 import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
-import { GAS_PROPERTIES, GasSpecies } from './gas-properties';
+import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-properties';
 import { deriveNeutronics } from './lattice';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
@@ -898,6 +898,19 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             associatedCoolantNode: coolantFlowNodeId,
           };
         }
+      }
+
+      // Fission-product inventory for release modeling (equilibrium core:
+      // ~700 mol noble gas, ~250 mol volatile CsI-class per GWt). Released
+      // by FissionProductReleaseOperator when the fuel overheats.
+      const fpFuelNode = state.thermalNodes.get(`${id}-fuel`);
+      if (fpFuelNode) {
+        const ratedPower = coreComp.nominalPower ?? coreComp.thermalPower ?? 1000e6;
+        fpFuelNode.fissionProducts = {
+          nobleGas: 700e-9 * ratedPower,
+          volatile: 250e-9 * ratedPower,
+          associatedCoolantNode: coolantFlowNodeId,
+        };
       }
     }
 
@@ -1933,6 +1946,8 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
       surfaceArea: geo.bedSurfaceArea,
       heatGeneration: 0, // Set by neutronics
       maxTemperature: vessel.fuelMeltingPoint || 2800,
+      meltingPoint: vessel.fuelMeltingPoint || 2800,
+      latentHeatFusion: 274e3, // UO2
     });
     nodes.push({
       id: `${component.id}-clad`,
@@ -1961,7 +1976,7 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
   const fuelMass =
     Math.PI * geo.pelletRadius * geo.pelletRadius * geo.activeHeight * geo.rodCount * fuelDensity;
 
-  // Fuel node
+  // Fuel node. Metal uranium melts at 1405 K - one of its real drawbacks.
   nodes.push({
     id: `${component.id}-fuel`,
     label: `${component.label || 'Core'} Fuel`,
@@ -1972,7 +1987,9 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
     characteristicLength: geo.pelletRadius,
     surfaceArea: geo.pelletArea,
     heatGeneration: 0, // Set by neutronics
-    maxTemperature: vessel.fuelMeltingPoint || 2800,
+    maxTemperature: vessel.fuelMeltingPoint || (isMetal ? 1405 : 2800),
+    meltingPoint: vessel.fuelMeltingPoint || (isMetal ? 1405 : 2800),
+    latentHeatFusion: isMetal ? 38e3 : 274e3, // J/kg
   });
 
   // Cladding node (Zircaloy). Starts at the coolant temperature: the clad's
@@ -1992,6 +2009,8 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
     surfaceArea: geo.rodOuterArea,
     heatGeneration: 0,
     maxTemperature: 1500,
+    meltingPoint: 2100,       // Zircaloy
+    latentHeatFusion: 225e3,  // J/kg
   });
 
   return nodes;
@@ -2596,6 +2615,7 @@ function initializeBurstStates(
   state.burstStates = new Map();
   state.burstConfig = { ...DEFAULT_BURST_CONFIG };
   state.atmosphereRelease = { totalMass: 0, totalEnergy: 0, steamMass: 0, liquidMass: 0 };
+  state.environmentalRelease = emptyGasComposition();
 
   for (const [compId, component] of plantState.components) {
     // Get pressure rating if component has one

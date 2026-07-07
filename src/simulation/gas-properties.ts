@@ -13,6 +13,11 @@
  * - CO₂ (carbon dioxide) - advanced reactor coolant, from MCCI
  * - Xe (xenon) - fission product gas
  * - Ar (argon) - inert cover gas
+ * - CsI (cesium iodide) - volatile fission-product AEROSOL. Not a real gas:
+ *   it rides the gas flow like one (which is how aerosols move), its moles
+ *   are tiny so its pressure contribution is negligible, and reusing the NCG
+ *   machinery gives radionuclide transport through breaks, valves, and
+ *   containment for free. Deposition/plate-out is not modeled.
  */
 
 // ============================================================================
@@ -23,12 +28,12 @@
  * Gas species identifiers.
  * Each species has distinct thermodynamic properties.
  */
-export type GasSpecies = 'N2' | 'O2' | 'H2' | 'He' | 'CO' | 'CO2' | 'Xe' | 'Ar';
+export type GasSpecies = 'N2' | 'O2' | 'H2' | 'He' | 'CO' | 'CO2' | 'Xe' | 'Ar' | 'CsI';
 
 /**
  * All supported gas species in order.
  */
-export const ALL_GAS_SPECIES: readonly GasSpecies[] = ['N2', 'O2', 'H2', 'He', 'CO', 'CO2', 'Xe', 'Ar'] as const;
+export const ALL_GAS_SPECIES: readonly GasSpecies[] = ['N2', 'O2', 'H2', 'He', 'CO', 'CO2', 'Xe', 'Ar', 'CsI'] as const;
 
 /**
  * Gas composition - moles of each species present.
@@ -43,6 +48,7 @@ export interface GasComposition {
   CO2: number;  // mol - carbon dioxide
   Xe: number;   // mol - xenon
   Ar: number;   // mol - argon
+  CsI: number;  // mol - cesium iodide aerosol (radioactive fission product)
 }
 
 /**
@@ -57,7 +63,8 @@ export function emptyGasComposition(): GasComposition {
     CO: 0,
     CO2: 0,
     Xe: 0,
-    Ar: 0
+    Ar: 0,
+    CsI: 0
   };
 }
 
@@ -69,10 +76,11 @@ export function createGasComposition(partial: Partial<GasComposition>): GasCompo
 }
 
 /**
- * Clone a gas composition.
+ * Clone a gas composition. Spread over an empty composition so states saved
+ * before a species existed (e.g. CsI) come back with explicit zeros.
  */
 export function cloneGasComposition(comp: GasComposition): GasComposition {
-  return { ...comp };
+  return { ...emptyGasComposition(), ...comp };
 }
 
 // ============================================================================
@@ -177,6 +185,15 @@ export const GAS_PROPERTIES: Record<GasSpecies, GasPropertyData> = {
     color: '#d0a0d0',           // light purple
     name: 'Argon',
     formula: 'Ar'
+  },
+  CsI: {
+    molecularWeight: 0.2598,    // kg/mol
+    cp: 20.79,                  // J/(mol·K) - treated as monatomic (thermal role negligible)
+    cv: 12.47,                  // J/(mol·K)
+    gamma: 1.67,
+    color: '#ff30c0',           // hot magenta - radioactive aerosol, meant to alarm
+    name: 'Cesium Iodide (fission products)',
+    formula: 'CsI'
   }
 };
 
@@ -200,6 +217,7 @@ const GAS_TRANSPORT: Record<GasSpecies, { k300: number; mu300: number }> = {
   CO2: { k300: 0.0166, mu300: 1.49e-5 },
   Xe:  { k300: 0.0057, mu300: 2.30e-5 },
   Ar:  { k300: 0.0177, mu300: 2.26e-5 },
+  CsI: { k300: 0.005,  mu300: 2.30e-5 }, // aerosol - never thermally significant
 };
 
 /**
@@ -211,7 +229,7 @@ export function mixtureThermalConductivity(comp: GasComposition, T_K: number): n
   if (total <= 0) return 0.026; // air-like default
   let k = 0;
   for (const species of ALL_GAS_SPECIES) {
-    if (comp[species] > 0) k += (comp[species] / total) * GAS_TRANSPORT[species].k300;
+    if ((comp[species] ?? 0) > 0) k += ((comp[species] ?? 0) / total) * GAS_TRANSPORT[species].k300;
   }
   return k * Math.pow(Math.max(200, T_K) / 300, 0.75);
 }
@@ -224,7 +242,7 @@ export function mixtureViscosity(comp: GasComposition, T_K: number): number {
   if (total <= 0) return 1.8e-5; // air-like default
   let mu = 0;
   for (const species of ALL_GAS_SPECIES) {
-    if (comp[species] > 0) mu += (comp[species] / total) * GAS_TRANSPORT[species].mu300;
+    if ((comp[species] ?? 0) > 0) mu += ((comp[species] ?? 0) / total) * GAS_TRANSPORT[species].mu300;
   }
   return mu * Math.pow(Math.max(200, T_K) / 300, 0.7);
 }
@@ -246,7 +264,7 @@ export const R_GAS = 8.31446;
 export function totalMoles(comp: GasComposition): number {
   let sum = 0;
   for (const species of ALL_GAS_SPECIES) {
-    sum += comp[species];
+    sum += comp[species] ?? 0;
   }
   return sum;
 }
@@ -258,7 +276,7 @@ export function totalMoles(comp: GasComposition): number {
 export function moleFraction(comp: GasComposition, species: GasSpecies): number {
   const total = totalMoles(comp);
   if (total <= 0) return 0;
-  return comp[species] / total;
+  return (comp[species] ?? 0) / total;
 }
 
 /**
@@ -268,7 +286,7 @@ export function allMoleFractions(comp: GasComposition): Record<GasSpecies, numbe
   const total = totalMoles(comp);
   const fractions: Partial<Record<GasSpecies, number>> = {};
   for (const species of ALL_GAS_SPECIES) {
-    fractions[species] = total > 0 ? comp[species] / total : 0;
+    fractions[species] = total > 0 ? (comp[species] ?? 0) / total : 0;
   }
   return fractions as Record<GasSpecies, number>;
 }
@@ -279,7 +297,7 @@ export function allMoleFractions(comp: GasComposition): Record<GasSpecies, numbe
 export function totalMass(comp: GasComposition): number {
   let mass = 0;
   for (const species of ALL_GAS_SPECIES) {
-    mass += comp[species] * GAS_PROPERTIES[species].molecularWeight;
+    mass += (comp[species] ?? 0) * GAS_PROPERTIES[species].molecularWeight;
   }
   return mass;
 }
@@ -303,7 +321,7 @@ export function mixtureCp(comp: GasComposition): number {
 
   let cpSum = 0;
   for (const species of ALL_GAS_SPECIES) {
-    cpSum += comp[species] * GAS_PROPERTIES[species].cp;
+    cpSum += (comp[species] ?? 0) * GAS_PROPERTIES[species].cp;
   }
   return cpSum / total;
 }
@@ -317,7 +335,7 @@ export function mixtureCv(comp: GasComposition): number {
 
   let cvSum = 0;
   for (const species of ALL_GAS_SPECIES) {
-    cvSum += comp[species] * GAS_PROPERTIES[species].cv;
+    cvSum += (comp[species] ?? 0) * GAS_PROPERTIES[species].cv;
   }
   return cvSum / total;
 }
@@ -438,7 +456,7 @@ export function speciesPartialPressure(
   V_m3: number
 ): number {
   if (V_m3 <= 0) return 0;
-  return comp[species] * R_GAS * T_K / V_m3;
+  return (comp[species] ?? 0) * R_GAS * T_K / V_m3;
 }
 
 /**
@@ -596,7 +614,7 @@ export function molesFromPVT(P_Pa: number, V_m3: number, T_K: number): number {
 export function addCompositions(a: GasComposition, b: GasComposition): GasComposition {
   const result = emptyGasComposition();
   for (const species of ALL_GAS_SPECIES) {
-    result[species] = a[species] + b[species];
+    result[species] = (a[species] ?? 0) + (b[species] ?? 0);
   }
   return result;
 }
@@ -607,7 +625,7 @@ export function addCompositions(a: GasComposition, b: GasComposition): GasCompos
 export function subtractCompositions(a: GasComposition, b: GasComposition): GasComposition {
   const result = emptyGasComposition();
   for (const species of ALL_GAS_SPECIES) {
-    result[species] = Math.max(0, a[species] - b[species]);
+    result[species] = Math.max(0, (a[species] ?? 0) - (b[species] ?? 0));
   }
   return result;
 }
@@ -618,7 +636,7 @@ export function subtractCompositions(a: GasComposition, b: GasComposition): GasC
 export function scaleComposition(comp: GasComposition, factor: number): GasComposition {
   const result = emptyGasComposition();
   for (const species of ALL_GAS_SPECIES) {
-    result[species] = comp[species] * factor;
+    result[species] = (comp[species] ?? 0) * factor;
   }
   return result;
 }
@@ -646,7 +664,7 @@ export function mixedGasColor(comp: GasComposition): string {
   let r = 0, g = 0, b = 0;
 
   for (const species of ALL_GAS_SPECIES) {
-    const fraction = comp[species] / total;
+    const fraction = (comp[species] ?? 0) / total;
     if (fraction <= 0) continue;
 
     const color = GAS_PROPERTIES[species].color;
@@ -674,7 +692,7 @@ export function compositionSummary(comp: GasComposition): string {
 
   const parts: string[] = [];
   for (const species of ALL_GAS_SPECIES) {
-    const fraction = comp[species] / total;
+    const fraction = (comp[species] ?? 0) / total;
     if (fraction >= 0.001) {  // > 0.1%
       const pct = (fraction * 100).toFixed(1);
       parts.push(`${GAS_PROPERTIES[species].formula}: ${pct}%`);

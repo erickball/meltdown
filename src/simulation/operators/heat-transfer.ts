@@ -36,6 +36,7 @@ export interface NcgPartialPressures {
   CO2?: number;
   Xe?: number;
   Ar?: number;
+  CsI?: number;  // fission-product aerosol (never a sensible initial fill)
 }
 
 // ============================================================================

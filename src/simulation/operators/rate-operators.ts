@@ -114,6 +114,47 @@ export function dumpDebugHistory(): void {
 }
 
 // ============================================================================
+// Melting (apparent heat capacity)
+// ============================================================================
+
+// Width of the smoothed melting transition (K). Real irradiated fuel has a
+// solidus-liquidus spread of this order; numerically it keeps the latent
+// plateau RK45-friendly.
+const MELT_WIDTH = 25;
+
+/**
+ * Melt fraction of a thermal node, derived purely from its temperature:
+ * a logistic ramp centered on meltingPoint with width ~MELT_WIDTH. 0 for
+ * nodes without melting data.
+ */
+export function meltFraction(node: { temperature: number; meltingPoint?: number; latentHeatFusion?: number }): number {
+  if (!node.meltingPoint || !node.latentHeatFusion) return 0;
+  const z = (node.temperature - node.meltingPoint) / MELT_WIDTH;
+  return 1 / (1 + Math.exp(-1.7 * z));
+}
+
+/**
+ * Effective heat capacity (J/K) of a thermal node: m*cp plus, for nodes
+ * with melting data, a smooth latent-heat bump (the derivative of
+ * meltFraction times m*L). Crossing the melting range therefore absorbs
+ * exactly m*L of energy while the temperature plateaus - the apparent-
+ * heat-capacity method. Every operator that turns watts into dT/dt must
+ * use this, not m*cp directly, or melting nodes will skip their plateau.
+ */
+export function nodeHeatCapacity(node: {
+  mass: number; specificHeat: number; temperature: number;
+  meltingPoint?: number; latentHeatFusion?: number;
+}): number {
+  let C = node.mass * node.specificHeat;
+  if (node.meltingPoint && node.latentHeatFusion) {
+    const z = (node.temperature - node.meltingPoint) / MELT_WIDTH;
+    const s = 1 / (1 + Math.exp(-1.7 * z));
+    C += node.mass * node.latentHeatFusion * (1.7 / MELT_WIDTH) * s * (1 - s);
+  }
+  return C;
+}
+
+// ============================================================================
 // Conduction Rate Operator
 // ============================================================================
 
@@ -133,9 +174,9 @@ export class ConductionRateOperator implements RateOperator {
       // Heat flow from node1 to node2 (W)
       const Q = conn.conductance * (node1.temperature - node2.temperature);
 
-      // Temperature rate: dT/dt = Q / (m * cp)
-      const dT1 = -Q / (node1.mass * node1.specificHeat);
-      const dT2 = Q / (node2.mass * node2.specificHeat);
+      // Temperature rate: dT/dt = Q / C_eff (latent-heat plateau included)
+      const dT1 = -Q / nodeHeatCapacity(node1);
+      const dT2 = Q / nodeHeatCapacity(node2);
 
       // Accumulate rates
       const existing1 = rates.thermalNodes.get(conn.fromNodeId) || { dTemperature: 0 };
@@ -204,8 +245,8 @@ export class ConvectionRateOperator implements RateOperator {
 
       lastConvectionHeatRates.set(conn.id, Q);
 
-      // Solid temperature rate
-      const dT_solid = -Q / (thermalNode.mass * thermalNode.specificHeat);
+      // Solid temperature rate (effective capacity includes latent heat)
+      const dT_solid = -Q / nodeHeatCapacity(thermalNode);
 
       // Fluid energy rate (positive Q means heat INTO fluid)
       const dU_fluid = Q;
@@ -603,11 +644,11 @@ export class HeatGenerationRateOperator implements RateOperator {
           for (const q of pools) decayPower += q;
           deposit = (1 - DECAY_HEAT_TOTAL_FRACTION) * fission + decayPower;
         }
-        const dT = deposit / (node.mass * node.specificHeat);
+        const dT = deposit / nodeHeatCapacity(node);
         rates.thermalNodes.set(id, { dTemperature: dT });
       } else if (node.heatGeneration > 0) {
         // Other heat-generating nodes use their fixed rate
-        const dT = node.heatGeneration / (node.mass * node.specificHeat);
+        const dT = node.heatGeneration / nodeHeatCapacity(node);
         rates.thermalNodes.set(id, { dTemperature: dT });
       }
     }
@@ -1181,6 +1222,20 @@ export class FlowRateOperator implements RateOperator {
         const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * effectiveT;
         upRates.dEnergy -= ncgEnergyFlow;
         downRates.dEnergy += ncgEnergyFlow;
+
+        // Gas crossing into a boundary node (atmosphere) leaves the modeled
+        // system: accumulate it as the environmental release source term
+        // (the boundary node itself never integrates rates)
+        const downstreamNode = state.flowNodes.get(downstreamId);
+        if (downstreamNode?.isBoundary) {
+          if (!rates.environmentalRelease) {
+            rates.environmentalRelease = emptyGasComposition();
+          }
+          for (const species of ALL_GAS_SPECIES) {
+            rates.environmentalRelease[species] +=
+              (gasFlow * (upNcg[species] ?? 0)) / gasMassInSpace;
+          }
+        }
       }
 
       // Track flows for debug node
@@ -2966,8 +3021,8 @@ export class CladdingOxidationRateOperator implements RateOperator {
       const mol_Zr_dt = dm_Zr_dt / CladdingOxidationRateOperator.ZR_MOLAR_MASS;
       const Q_release = mol_Zr_dt * CladdingOxidationRateOperator.OXIDATION_ENTHALPY; // W
 
-      // Add heat to cladding (increases temperature)
-      existingRates.dTemperature += Q_release / (node.mass * node.specificHeat);
+      // Add heat to cladding (increases temperature; latent plateau applies)
+      existingRates.dTemperature += Q_release / nodeHeatCapacity(node);
       rates.thermalNodes.set(id, existingRates);
 
       // Calculate H₂ production rate
@@ -2996,6 +3051,76 @@ export class CladdingOxidationRateOperator implements RateOperator {
       // At high temperature it's less, but use conservative estimate
       const h_fg = 2.0e6; // J/kg (approximate at high T)
       coolantRates.dEnergy -= dm_steam * h_fg;
+    }
+
+    return rates;
+  }
+}
+
+// ============================================================================
+// Fission Product Release Rate Operator
+// ============================================================================
+
+/**
+ * Fission Product Release Rate Operator ("meltdown!")
+ *
+ * Overheated fuel releases its fission-product inventory at CORSOR-style
+ * Arrhenius fractional rates:
+ *   dN/dt = -N * k0 * exp(-Q/(R*T_fuel))
+ * Constants are fit so release is negligible below ~1300 K, ~1%/20 min at
+ * 1600 K (failed cladding, hot fuel), and minutes-scale at fuel melting -
+ * so the release curve tracks damage severity with no discrete "clad
+ * failure" or "melt" events. Volatiles (CsI) come out ~3x slower than noble
+ * gases at the same temperature.
+ *
+ * Released moles enter the associated coolant node's NCG as Xe (noble
+ * gases) and CsI (volatile aerosol) and from there ride the ordinary NCG
+ * transport - out breaks, through valves, into containment, to the
+ * environment (tracked in state.environmentalRelease when they cross a
+ * boundary node).
+ */
+export class FissionProductReleaseOperator implements RateOperator {
+  name = 'FissionProductRelease';
+
+  // Arrhenius constants (fit described above)
+  private static readonly Q_OVER_R = 25800;  // K
+  private static readonly K0_NOBLE = 100;    // 1/s
+  private static readonly K0_VOLATILE = 33;  // 1/s
+
+  computeRates(state: SimulationState): StateRates {
+    const rates = createZeroRates();
+
+    for (const [id, node] of state.thermalNodes) {
+      const fp = node.fissionProducts;
+      if (!fp) continue;
+
+      const T = node.temperature;
+      // Below ~1000 K the Arrhenius rate is < 1e-9/s (nothing in sim
+      // lifetimes) - skip the map churn, not a behavioral threshold
+      if (T < 1000) continue;
+      if (fp.nobleGas <= 0 && fp.volatile <= 0) continue;
+
+      const coolantNode = state.flowNodes.get(fp.associatedCoolantNode);
+      if (!coolantNode) continue;
+
+      const arrhenius = Math.exp(-FissionProductReleaseOperator.Q_OVER_R / T);
+      const dNoble = -fp.nobleGas * FissionProductReleaseOperator.K0_NOBLE * arrhenius;
+      const dVolatile = -fp.volatile * FissionProductReleaseOperator.K0_VOLATILE * arrhenius;
+
+      const thermalRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+      thermalRates.dFpNobleGas = dNoble;
+      thermalRates.dFpVolatile = dVolatile;
+      rates.thermalNodes.set(id, thermalRates);
+
+      // Releases arrive in the coolant carrying their thermal energy at the
+      // coolant temperature (keeps the NCG energy balance consistent)
+      const coolantRates = rates.flowNodes.get(fp.associatedCoolantNode) || { dMass: 0, dEnergy: 0 };
+      if (!coolantRates.dNcg) coolantRates.dNcg = emptyGasComposition();
+      coolantRates.dNcg.Xe += -dNoble;
+      coolantRates.dNcg.CsI += -dVolatile;
+      const Cv_Xe = 12.47; // J/mol-K, monatomic
+      coolantRates.dEnergy += (-dNoble - dVolatile) * Cv_Xe * coolantNode.fluid.temperature;
+      rates.flowNodes.set(fp.associatedCoolantNode, coolantRates);
     }
 
     return rates;

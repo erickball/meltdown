@@ -1095,8 +1095,12 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
   // Clone thermal nodes - use forEach instead of Array.from().map()
   const thermalNodes = new Map<string, typeof state.thermalNodes extends Map<string, infer V> ? V : never>();
   state.thermalNodes.forEach((v, k) => {
-    // oxidation is a mutable nested object (integrated by RK45) - deep clone
-    thermalNodes.set(k, v.oxidation ? { ...v, oxidation: { ...v.oxidation } } : { ...v });
+    // oxidation/fissionProducts are mutable nested objects (integrated by
+    // RK45) - deep clone them
+    const clone = { ...v };
+    if (v.oxidation) clone.oxidation = { ...v.oxidation };
+    if (v.fissionProducts) clone.fissionProducts = { ...v.fissionProducts };
+    thermalNodes.set(k, clone);
   });
 
   // Clone flow nodes with nested fluid object (including NCG if present)
@@ -1193,6 +1197,7 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     burstStates,
     burstConfig: state.burstConfig ? { ...state.burstConfig } : undefined,
     atmosphereRelease: state.atmosphereRelease ? { ...state.atmosphereRelease } : undefined,
+    environmentalRelease: state.environmentalRelease ? { ...state.environmentalRelease } : undefined,
     // Clone pending events (shallow clone is fine - they're consumed after processing)
     pendingEvents: state.pendingEvents ? [...state.pendingEvents] : undefined,
   };

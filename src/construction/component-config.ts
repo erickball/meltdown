@@ -29,6 +29,7 @@ export interface NcgInitialCondition {
   CO2?: number;
   Xe?: number;
   Ar?: number;
+  CsI?: number;  // fission-product aerosol - transport product, not a fill gas
 }
 
 /** Display names for gas species */
@@ -41,6 +42,7 @@ const GAS_DISPLAY_NAMES: Record<GasSpecies, string> = {
   CO2: 'Carbon Dioxide (CO₂)',
   Xe: 'Xenon (Xe)',
   Ar: 'Argon (Ar)',
+  CsI: 'Cesium Iodide (CsI, fission products)',
 };
 
 export interface ComponentOption {
@@ -1461,6 +1463,8 @@ export class ComponentDialog {
     const gasInputs: Map<GasSpecies, HTMLInputElement> = new Map();
 
     for (const species of ALL_GAS_SPECIES) {
+      // CsI is a fission-product transport species, not a fill gas
+      if (species === 'CsI') continue;
       const row = document.createElement('div');
       row.style.cssText = 'display: flex; align-items: center; margin-bottom: 6px;';
 

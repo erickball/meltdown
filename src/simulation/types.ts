@@ -56,6 +56,22 @@ export interface ThermalNode {
   // Limits for damage modeling
   maxTemperature: number;           // K - failure/damage threshold
 
+  // Melting (apparent-heat-capacity method): near meltingPoint the node's
+  // effective heat capacity carries a smooth latent-heat bump, so its
+  // temperature plateaus while it melts. Melt fraction is DERIVED from
+  // temperature (see meltFraction in rate-operators) - no integrated state.
+  meltingPoint?: number;            // K
+  latentHeatFusion?: number;        // J/kg
+
+  // Fission-product inventory for release modeling (fuel nodes only).
+  // Moles remaining IN the fuel; released via Arrhenius rates into the
+  // coolant NCG as Xe (noble gases) and CsI (volatile aerosol).
+  fissionProducts?: {
+    nobleGas: number;               // mol remaining
+    volatile: number;               // mol remaining
+    associatedCoolantNode: string;  // FlowNode ID receiving releases
+  };
+
   // Cladding oxidation state (only for cladding nodes)
   // Zr + 2H₂O → ZrO₂ + 2H₂ (exothermic: 586 kJ/mol Zr)
   // Tracks oxidation progress and H₂ generation
@@ -386,6 +402,10 @@ export interface SimulationState {
   burstStates?: Map<string, BurstState>;
   burstConfig?: BurstConfig;
   atmosphereRelease?: AtmosphereRelease;
+
+  // Cumulative NCG moles vented through boundary nodes (atmosphere) - the
+  // radiological source term is the Xe/CsI entries (integrated by RK45)
+  environmentalRelease?: GasComposition;
 
   // Pending events for GameLoop to emit (set by constraint operators like BurstCheckOperator)
   pendingEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
