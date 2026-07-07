@@ -27,6 +27,7 @@ import {
   mixtureCv,
 } from './simulation/gas-properties';
 import { pumpHeadPressure } from './simulation/operators/pump-curve';
+import { meltFraction } from './simulation/operators/rate-operators';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -339,7 +340,25 @@ export function updateDebugPanel(
         const tempC = node.temperature - 273;
         const pctOfMax = (node.temperature / node.maxTemperature) * 100;
         const tempClass = pctOfMax > 95 ? 'debug-danger' : pctOfMax > 80 ? 'debug-warning' : 'debug-value';
-        html += `<span class="debug-label">${id}:</span> <span class="${tempClass}">${tempC.toFixed(0)}C</span> (${pctOfMax.toFixed(0)}% max)<br>`;
+        html += `<span class="debug-label">${id}:</span> <span class="${tempClass}">${tempC.toFixed(0)}C</span> (${pctOfMax.toFixed(0)}% max)`;
+        // Melt fraction (derived from temperature) for nodes with melting data
+        const melt = meltFraction(node);
+        if (melt > 0.001) {
+          html += ` <span class="debug-danger" title="Melt fraction (derived from temperature)">molten ${(melt * 100).toFixed(0)}%</span>`;
+        }
+        // Cladding oxidation progress
+        if (node.oxidation && node.oxidation.oxidizedFraction > 0.001) {
+          html += ` <span class="debug-warning" title="Fraction of Zr cladding oxidized (Zr + 2H₂O → ZrO₂ + 2H₂)">ox ${(node.oxidation.oxidizedFraction * 100).toFixed(0)}%</span>`;
+        }
+        // Fission products released from this fuel node
+        const fp = node.fissionProducts;
+        if (fp?.initialNobleGas && fp.initialNobleGas > 0) {
+          const releasedFrac = 1 - fp.nobleGas / fp.initialNobleGas;
+          if (releasedFrac > 0.0001) {
+            html += ` <span class="debug-danger" title="Fraction of noble-gas fission-product inventory released from the fuel">FP rel ${(releasedFrac * 100).toFixed(1)}%</span>`;
+          }
+        }
+        html += '<br>';
       }
       thermalDiv.innerHTML = html;
     }
@@ -649,6 +668,20 @@ export function updateDebugPanel(
       }
     }
 
+    // Radiological source term: NCG that has crossed a boundary node
+    const envRelease = state.environmentalRelease;
+    if (envRelease) {
+      const envSpecies = Object.entries(envRelease).filter(([, moles]) => (moles as number) > 1e-6);
+      if (envSpecies.length > 0) {
+        html += `<b>Released to environment:</b><br>`;
+        for (const [species, moles] of envSpecies) {
+          const isRadioactive = species === 'Xe' || species === 'CsI';
+          const cls = isRadioactive ? 'debug-danger' : 'debug-value';
+          html += `<span class="debug-label">${species}:</span> <span class="${cls}">${(moles as number).toFixed(3)} mol</span><br>`;
+        }
+      }
+    }
+
     // Total energy
     html += `<span class="debug-label">Energy:</span> <span class="debug-value">${(totalEnergy / 1e9).toFixed(2)} GJ</span>`;
     if (releasedEnergy > 0) {
@@ -766,6 +799,63 @@ export function updateDebugPanel(
     perfInfo.style.color = metrics.realTimeRatio < 0.5 ? '#f55' :
                           metrics.realTimeRatio < 0.95 ? '#fa0' : '#aaa';
   }
+}
+
+/**
+ * Update the core-damage / radiological-release banner in the sim controls.
+ * Hidden until fuel starts melting or fission products escape the fuel;
+ * escalates to red once activity reaches the environment.
+ */
+export function updateCoreDamageIndicator(state: SimulationState): void {
+  const el = document.getElementById('core-damage-indicator');
+  if (!el) return;
+
+  // Mass-weighted melt fraction and FP release over fuel nodes
+  let fuelMass = 0;
+  let moltenMass = 0;
+  let fpInitialNoble = 0;
+  let fpInitialVolatile = 0;
+  let fpNobleInFuel = 0;
+  let fpVolatileInFuel = 0;
+  for (const [, node] of state.thermalNodes) {
+    if (node.fissionProducts) {
+      fuelMass += node.mass;
+      moltenMass += node.mass * meltFraction(node);
+      fpInitialNoble += node.fissionProducts.initialNobleGas ?? node.fissionProducts.nobleGas;
+      fpInitialVolatile += node.fissionProducts.initialVolatile ?? node.fissionProducts.volatile;
+      fpNobleInFuel += node.fissionProducts.nobleGas;
+      fpVolatileInFuel += node.fissionProducts.volatile;
+    }
+  }
+
+  const meltFrac = fuelMass > 0 ? moltenMass / fuelMass : 0;
+  const fpReleasedFrac = fpInitialNoble > 0 ? 1 - fpNobleInFuel / fpInitialNoble : 0;
+
+  const envXe = state.environmentalRelease?.Xe ?? 0;
+  const envCsI = state.environmentalRelease?.CsI ?? 0;
+  const envXeFrac = fpInitialNoble > 0 ? envXe / fpInitialNoble : 0;
+  const envCsIFrac = fpInitialVolatile > 0 ? envCsI / fpInitialVolatile : 0;
+
+  const lines: string[] = [];
+  if (meltFrac > 0.001) {
+    lines.push(`☢ FUEL MELTING: ${(meltFrac * 100).toFixed(0)}% of core`);
+  }
+  if (fpReleasedFrac > 0.0005) {
+    lines.push(`☢ FISSION PRODUCTS ESCAPING FUEL: ${(fpReleasedFrac * 100).toFixed(1)}%`);
+  }
+  const envReleaseSignificant = envXeFrac > 0.0001 || envCsIFrac > 0.0001;
+  if (envReleaseSignificant) {
+    lines.push(`☢ RELEASE TO ENVIRONMENT: Xe ${(envXeFrac * 100).toFixed(1)}%, CsI ${(envCsIFrac * 100).toFixed(2)}% of inventory`);
+  }
+
+  if (lines.length === 0) {
+    el.style.display = 'none';
+    return;
+  }
+  el.style.display = 'block';
+  // Escalate color: orange for in-plant damage, red once the environment is contaminated
+  el.style.color = envReleaseSignificant ? '#d00' : '#e80';
+  el.innerHTML = lines.join('<br>');
 }
 
 /**

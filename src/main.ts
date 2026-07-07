@@ -25,7 +25,7 @@ import {
   setSeparationDebug,
   getTurbineCondenserState,
 } from './simulation';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { ComponentDialog, ComponentConfig, componentDefinitions } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
@@ -281,6 +281,9 @@ function init() {
     const now = performance.now();
     if (now - lastDebugUpdate >= DEBUG_UPDATE_INTERVAL_MS) {
       updateDebugPanel(state, metrics, gameLoop.getPressureSolverStatus());
+
+      // Core damage / radiological release banner
+      updateCoreDamageIndicator(state);
 
       // Update component detail panel if something is selected
       if (selectedComponentId) {

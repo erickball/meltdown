@@ -909,6 +909,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         fpFuelNode.fissionProducts = {
           nobleGas: 700e-9 * ratedPower,
           volatile: 250e-9 * ratedPower,
+          initialNobleGas: 700e-9 * ratedPower,
+          initialVolatile: 250e-9 * ratedPower,
           associatedCoolantNode: coolantFlowNodeId,
         };
       }

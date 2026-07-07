@@ -69,6 +69,8 @@ export interface ThermalNode {
   fissionProducts?: {
     nobleGas: number;               // mol remaining
     volatile: number;               // mol remaining
+    initialNobleGas?: number;       // mol at startup (for release-fraction display)
+    initialVolatile?: number;       // mol at startup
     associatedCoolantNode: string;  // FlowNode ID receiving releases
   };
 
