@@ -65,6 +65,29 @@ function calculateBreakFraction(
   return Math.min(config.maxBreakFraction, Math.max(0, baseFraction * randomFactor));
 }
 
+// ============================================================================
+// Creep rupture (Larson-Miller, time-fraction damage)
+// ============================================================================
+// Membrane stress relative to ultimate is the pressure ratio s = P/P_burst
+// (P_burst is where the wall reaches ultimate strength by construction).
+// Larson-Miller for low-alloy steel: LMP = T·(C + log10(t_r[h])) with C=20,
+// and the required LMP at a given stress ratio fit to SA-533B-class data:
+//   LMP_req(s) = 14660 - 6074·log10(s)
+// Anchors: s=0.22 at 811 K ruptures in ~1000 h; s=0.027 at 1273 K in ~6 min.
+// Cold components get astronomically long rupture times - no thresholds.
+const LM_C = 20;
+const LM_A = 14660;
+const LM_B = 6074;
+
+/** Creep rupture time (seconds) at stress ratio s = P/P_burst and wall T (K). */
+export function creepRuptureTime(stressRatio: number, wallTempK: number): number {
+  if (stressRatio <= 0) return Infinity;
+  if (stressRatio >= 1) return 0;
+  const lmpRequired = LM_A - LM_B * Math.log10(stressRatio);
+  const log10Hours = lmpRequired / wallTempK - LM_C;
+  return Math.pow(10, log10Hours) * 3600;
+}
+
 /**
  * Checks all pressurized components for burst conditions.
  * Creates/updates break connections when components burst.
@@ -77,7 +100,7 @@ export class BurstCheckOperator implements ConstraintOperator {
   // pressures that the step controller then rejects.
   finalOnly = true;
 
-  applyConstraints(state: SimulationState): SimulationState {
+  applyConstraints(state: SimulationState, dt?: number): SimulationState {
     // If no burst states are configured, nothing to do
     if (!state.burstStates || state.burstStates.size === 0) {
       return state;
@@ -106,6 +129,22 @@ export class BurstCheckOperator implements ConstraintOperator {
         } else if (-gaugePressure > burstState.collapsePressure) {
           // External overpressure - collapse (treated same as burst for now)
           this.initiateBurst(burstState, -gaugePressure, newState, config, true);
+        } else if (dt !== undefined && dt > 0 && gaugePressure > 0) {
+          // Creep damage: a hot pressurized wall fails below its burst
+          // pressure given time (SG tube rupture, vessel lower head).
+          const wallT = this.getWallTemperature(node, burstState, newState);
+          const tRupture = creepRuptureTime(gaugePressure / burstState.burstPressure, wallT);
+          if (isFinite(tRupture) && tRupture > 0) {
+            burstState.creepDamage = (burstState.creepDamage ?? 0) + dt / tRupture;
+            if (burstState.creepDamage >= 1) {
+              // The creeping wall has weakened to the current load: rupture
+              // now, with the failure threshold at today's pressure so the
+              // break starts small and can grow if pressure rises.
+              burstState.isCreepRupture = true;
+              burstState.burstPressure = gaugePressure;
+              this.initiateBurst(burstState, gaugePressure, newState, config, false);
+            }
+          }
         }
       }
 
@@ -118,6 +157,23 @@ export class BurstCheckOperator implements ConstraintOperator {
     }
 
     return newState;
+  }
+
+  /**
+   * Wall temperature for creep: the component's metal thermal node when one
+   * exists (HX tubes), otherwise the contained fluid temperature (walls track
+   * their fluid closely at these timescales).
+   */
+  private getWallTemperature(
+    node: FlowNode,
+    burstState: BurstState,
+    state: SimulationState
+  ): number {
+    if (burstState.isTubeSide) {
+      const tubeMetal = state.thermalNodes.get(`${burstState.componentId}-tubes`);
+      if (tubeMetal) return tubeMetal.temperature;
+    }
+    return node.fluid.temperature;
   }
 
   /**
@@ -203,8 +259,10 @@ export class BurstCheckOperator implements ConstraintOperator {
     const elevationStr = burstState.breakElevation !== undefined
       ? ` at ${burstState.breakElevation.toFixed(1)}m elevation`
       : '';
-    const failureType = isCollapse ? 'collapsed' : 'ruptured';
-    const thresholdLabel = isCollapse ? 'collapse' : 'burst';
+    const failureType = burstState.isCreepRupture ? 'creep-ruptured'
+      : isCollapse ? 'collapsed' : 'ruptured';
+    const thresholdLabel = burstState.isCreepRupture ? 'creep-weakened'
+      : isCollapse ? 'collapse' : 'burst';
     state.pendingEvents.push({
       type: 'component-burst',
       message: `LOCA: ${burstState.componentLabel} ${failureType}${elevationStr} at ${(pressure / 1e5).toFixed(1)} bar differential (${thresholdLabel} threshold: ${(thresholdPressure / 1e5).toFixed(1)} bar)`,

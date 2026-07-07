@@ -702,6 +702,12 @@ export interface BurstState {
   isTubeSide?: boolean;
   shellNodeId?: string;
 
+  // Cumulative creep damage (time-fraction rule): dD/dt = 1/t_rupture(σ,T)
+  // with t_rupture from a Larson-Miller correlation on the stress ratio
+  // P/P_burst. Ruptures when it reaches 1. See BurstCheckOperator.
+  creepDamage?: number;
+  isCreepRupture?: boolean;          // True if the failure was creep-driven
+
   // Random seed for deterministic break size variation
   breakSizeSeed: number;
 }

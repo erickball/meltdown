@@ -425,6 +425,11 @@ export function updateDebugPanel(
       if ((node.depositedCsI ?? 0) > 1e-6) {
         html += ` <span class="debug-warning" title="CsI aerosol plated out onto this component's surfaces">CsI dep ${node.depositedCsI!.toFixed(3)}mol</span>`;
       }
+      const burst = state.burstStates?.get(id);
+      if (burst && !burst.isBurst && (burst.creepDamage ?? 0) > 0.01) {
+        const dmgClass = burst.creepDamage! > 0.5 ? 'debug-danger' : 'debug-warning';
+        html += ` <span class="${dmgClass}" title="Cumulative creep damage: the hot pressurized wall fails when this reaches 100%">creep ${(burst.creepDamage! * 100).toFixed(0)}%</span>`;
+      }
       html += '<br>';
 
       // === LINE 2: Density (total), specific internal energy (steam), water state ===
