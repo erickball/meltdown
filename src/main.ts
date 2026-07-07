@@ -26,10 +26,11 @@ import {
   getTurbineCondenserState,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
+import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
-import { estimateComponentCost, formatCost } from './construction/cost-estimation';
+import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -289,8 +290,14 @@ function init() {
     autoSlowdownEnabled: true,
   });
 
+  // Career mode manager (constructed later, once the plant/save helpers
+  // below exist; null until then and forever in pure-sandbox flows)
+  let gameMode: GameModeManager | null = null;
+
   // Bridge simulation state to visual components
   gameLoop.onStateUpdate = (state: SimulationState, metrics: SolverMetrics) => {
+    // Career-mode bookkeeping (revenue, objectives, random events)
+    gameMode?.onSimUpdate(state);
     // Update time display
     const timeDisplay = document.getElementById('sim-time');
     if (timeDisplay) {
@@ -374,6 +381,8 @@ function init() {
 
   // Handle game events
   gameLoop.onEvent = (event) => {
+    // Career mode reacts to bursts/scrams (repair billing, HUD alarms)
+    gameMode?.onGameEvent(event);
 
     // Could show notifications to user here
     if (event.type === 'scram') {
@@ -458,6 +467,8 @@ function init() {
     selectedComponentId = componentId;
     // Update detail panel immediately
     updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
+    // Career mode: offer operator actions on the selected machine
+    gameMode?.onComponentSelect(componentId);
   };
 
   // Toolbar buttons - zoom controls
@@ -1050,6 +1061,7 @@ function init() {
       const newSimState = createSimulationFromPlant(plantState);
       gameLoop.resetState(newSimState);
       // SCRAM is automatically cleared since we have a fresh simulation state
+      gameMode?.onSimReset();
       updateScramDisplay();
     });
   }
@@ -1105,77 +1117,10 @@ function init() {
     let totalCost = 0;
     const componentCosts: Array<{ label: string; cost: number }> = [];
 
-    // Calculate cost for each component
+    // Calculate cost for each component (shared pricing entry point)
     for (const [id, component] of plantState.components) {
-      // Map component type to cost estimation key
-      // Some components store a different 'type' than their definition key
-      // (e.g., pressurizer is stored as type='tank', turbine-generator as type='turbine-generator')
-      let costType: string = component.type;
-
-      if (component.type === 'tank') {
-        // Distinguish between tank and pressurizer by label
-        const label = (component.label || '').toLowerCase();
-        if (label.includes('pressurizer')) {
-          costType = 'pressurizer';
-        } else {
-          costType = 'tank';
-        }
-      } else if (component.type === 'vessel') {
-        // Check if it's a core or pressurizer
-        if ((component as any).fuelRodCount !== undefined || (component as any).controlRodCount !== undefined) {
-          costType = 'core';
-        } else {
-          costType = 'pressurizer';
-        }
-      } else if (component.type === 'reactorVessel') {
-        costType = 'reactor-vessel';
-      } else if (component.type === 'heatExchanger') {
-        costType = 'heat-exchanger';
-      } else if (component.type === 'valve') {
-        const valve = component as any;
-        if (valve.valveType === 'check') costType = 'check-valve';
-        else if (valve.valveType === 'relief') costType = 'relief-valve';
-        else if (valve.valveType === 'porv') costType = 'porv';
-      } else if (component.type === 'controller') {
-        costType = (component as any).controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
-      } else if (component.type === 'crossVessel') {
-        costType = 'cross-vessel';
-      } else if (component.type === 'coreBarrel') {
-        // Core barrel cost is included in reactor vessel
-        continue;
-      }
-
-      // Create a copy of component properties with units converted to what estimateComponentCost expects
-      // Stored components use SI units (Watts), but cost estimation expects MW
-      const costProps: Record<string, any> = { ...component };
-      if (costType === 'turbine-generator') {
-        costProps.ratedPower = costProps.ratedPower / 1e6;
-      }
-      if (costType === 'condenser') {
-        costProps.coolingCapacity = costProps.coolingCapacity / 1e6;
-      }
-      if (costType === 'heat-exchanger') {
-        // HX stores width/height but cost estimation expects shellDiameter/shellLength
-        // For vertical HX: width=diameter, height=length
-        // For horizontal HX: width=length, height=diameter
-        const hx = component as any;
-        const isHorizontal = hx.rotation === 90 || hx.rotation === 270;
-        costProps.shellDiameter = isHorizontal ? hx.height : hx.width;
-        costProps.shellLength = isHorizontal ? hx.width : hx.height;
-        // tubeOD is stored in meters, cost estimation expects mm
-        if (hx.tubeOD) {
-          costProps.tubeOD = hx.tubeOD * 1000;
-        }
-        // tubeCount is visual (capped at 10), realTubeCount is the actual engineering value
-        if (hx.realTubeCount) {
-          costProps.tubeCount = hx.realTubeCount;
-        }
-        // Map pressure rating properties
-        costProps.shellPressure = hx.shellPressureRating || hx.pressureRating || 60;
-        costProps.tubePressure = hx.tubePressureRating || 150;
-      }
-
-      const estimate = estimateComponentCost(costType, costProps);
+      const estimate = estimatePlantComponentCost(component as any);
+      if (!estimate) continue; // priced as part of parent (core barrel)
       totalCost += estimate.total;
       componentCosts.push({
         label: component.label || id,
@@ -1208,6 +1153,9 @@ function init() {
 
       costBreakdownDisplay.innerHTML = html;
     }
+
+    // Keep the career HUD's budget readout in sync with the design
+    gameMode?.refreshConstructionHud();
   }
 
   // Keyboard controls
@@ -2022,6 +1970,11 @@ function init() {
   }
 
   function setMode(mode: 'construction' | 'simulation'): void {
+    // Career mode gates mode switches (BUILD required before operating;
+    // returning to construction mid-run is an outage with repair billing)
+    if (gameMode && !gameMode.beforeModeSwitch(mode)) {
+      return;
+    }
     currentMode = mode;
 
     if (mode === 'construction') {
@@ -2741,8 +2694,28 @@ function init() {
     });
   }
 
+  // Career mode: constructed here so it can close over the plant/save
+  // helpers; the title screen below offers CAREER or SANDBOX.
+  gameMode = new GameModeManager({
+    plantState,
+    gameLoop,
+    setMode,
+    loadPlantData: (data: unknown) => {
+      deserializePlantState(data);
+      updateConstructionCostPanel();
+    },
+    clearPlant: () => {
+      deserializePlantState({ components: [], connections: [] });
+      updateConstructionCostPanel();
+    },
+    showNotification,
+  });
+
   // Start in construction mode
   setMode('construction');
+
+  // Title screen: pick CAREER (a level) or SANDBOX (everything as before)
+  gameMode.showTitle();
 
   // Start the game loop (paused for debugging)
   gameLoop.start();
