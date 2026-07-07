@@ -617,9 +617,12 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
     // Skip boundary nodes - their state is fixed and may not follow normal physics
     if (node.isBoundary) continue;
 
-    // Check for very low mass - would cause divide-by-zero or extreme specific volume
-    if (node.fluid.mass < 0.1) {
-      return { safe: false, reason: `${id}: Mass too low (${node.fluid.mass.toFixed(4)} kg)` };
+    // Check for very low TOTAL inventory (water + NCG) - would cause
+    // divide-by-zero or extreme specific volume. A helium-filled node
+    // legitimately carries ~zero water; its gas mass is what matters.
+    const gasMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+    if (node.fluid.mass + gasMass < 0.1) {
+      return { safe: false, reason: `${id}: Mass too low (${node.fluid.mass.toFixed(4)} kg water + ${gasMass.toFixed(4)} kg gas)` };
     }
 
     // Check for non-finite values that would crash calculations
@@ -728,9 +731,12 @@ export function checkStateSanity(
       }
     }
 
-    // Check for very low mass
-    if (newNode.fluid.mass < 0.1) {
-      console.warn(`[RK45 Sanity] ${id}: Mass too low ${newNode.fluid.mass}`);
+    // Check for very low TOTAL inventory (water + NCG - a helium-filled
+    // node legitimately carries ~zero water)
+    const newGasMass = newNode.fluid.ncg ? ncgTotalMass(newNode.fluid.ncg) : 0;
+    const newTotalMass = newNode.fluid.mass + newGasMass;
+    if (newTotalMass < 0.1) {
+      console.warn(`[RK45 Sanity] ${id}: Mass too low ${newNode.fluid.mass} water + ${newGasMass} gas`);
       return 1000;
     }
 
@@ -743,16 +749,16 @@ export function checkStateSanity(
       return 1000; // Definitely reject
     }
 
-    // Check for large mass change relative to node mass
+    // Check for large mass change relative to node inventory (water + NCG)
     // If flow * dt > 20% of node mass, the timestep is probably too large
     const throughput = nodeThroughput.get(id) || 0;
-    if (throughput > 0 && newNode.fluid.mass > 0) {
+    if (throughput > 0 && newTotalMass > 0) {
       const massMovedThisStep = throughput * 0.5 * dt; // 0.5 because we counted both ends
-      const massFraction = massMovedThisStep / newNode.fluid.mass;
+      const massFraction = massMovedThisStep / newTotalMass;
       if (massFraction > 0.2) {
         // More than 20% of mass moved in one step - too aggressive
         const badness = massFraction / 0.2; // 20% = 1, 40% = 2, etc.
-        if (badness > maxBadness) lastSanityFailureReason = `${id}: massFraction=${(massFraction*100).toFixed(1)}% throughput=${throughput.toFixed(2)}kg/s mass=${newNode.fluid.mass.toFixed(2)}kg`;
+        if (badness > maxBadness) lastSanityFailureReason = `${id}: massFraction=${(massFraction*100).toFixed(1)}% throughput=${throughput.toFixed(2)}kg/s mass=${newTotalMass.toFixed(2)}kg`;
         maxBadness = Math.max(maxBadness, badness);
       }
     }

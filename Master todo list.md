@@ -21,7 +21,7 @@ Display & minor issues:
 
 
 Modeling gaps:
--Neutronics remaining: solid-moderated lattices (graphite/pebble + gas coolant need a solidModerationFraction so the lattice model doesn't collapse without water); boron/soluble poison as an operator control (would also enable the positive-MTC-at-high-boron failure mode); estimated-critical-position display from latticeKeff.
+-Neutronics remaining: boron/soluble poison as an operator control (would also enable the positive-MTC-at-high-boron failure mode); estimated-critical-position display from latticeKeff.
 -Things could also have a failure temperature. Or maybe this is just creep rupture.
 -Wire auto-tuned controllers into the BWR and two-loop presets (PWR done - rods/governor/3-elem FW/hotwell/pzr heaters+spray; framework in docs/controllers-steady-state-plan.md)
 -Model vessel creep rupture and SG tube creep rupture
@@ -29,8 +29,7 @@ Modeling gaps:
 -Hydrogen explosions (H2 generation from cladding oxidation is done and released as NCG; combustion/deflagration when it meets air is not modeled yet)
 -Diesel generators (and electric power in general)
 -Add fuel melting and radionuclide release ("meltdown!")
--Add advanced reactor options (pebble bed fuel, helium or metal coolant)
--Not sure how to handle needing big graphite reflectors though?
+-Advanced reactors remaining: metal coolant (sodium/lead - needs a second liquid property system, big); construction-mode UI for pebble/helium options (JSON + factory support works today, see scripts/htgr-test.json); direct Brayton cycle (turbine operator assumes steam - gas loops must use an HX + steam secondary for now); graphite air-ingress oxidation/fires.
 
 Game mode:
 -In game mode, after you press build, you're locked in and additional changes will cost more. Deleting a component gets you 75% of the cost back. Editing one you just have to pay the difference in value minus a 10% work fee, and if the new version is cheaper you don't get anything back. But maybe you should get an option to test a design in steady state before you "build" it.
@@ -49,6 +48,7 @@ Game mode:
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
 ## Done List
+X Gas-cooled pebble-bed reactors end-to-end (simulation/JSON level): lattice model extended with solid (graphite) moderation, dispersed-TRISO Doppler (kernel-scale self-shielding), and reflector savings - nat-U works in a graphite pile but not light water, helium LOCA inserts <50 pcm, water lattices bit-identical. Flow stack made gas-competent: bulk/vapor densities and pump head include NCG mass (gas circulators develop rho*g*H head), total-mixture flow split between water and NCG by flowing-phase composition (NCG advected with Cp enthalpy), FluidState NCG+water iteration handles full evaporation (no more 647 K pin on hot gas loops), vapor-side HTC blends steam with the actual gas mixture (He conducts ~5x better), per-species k/mu in gas-properties. coreBarrel/pump/valve/HX-tube accept vapor-phase + initialNcg fills; pebble cores get kernel fuel node + graphite matrix node (near-isothermal, the walk-away-safe heat sink) and coolant volume/flow area shrink to the packing voids. scripts/htgr-test.json: 250 MWt helium pebble-bed with steam secondary runs at 3.5x realtime, 144 kg/s He, critical with derived coefficients. Remaining pieces tracked in the Advanced-reactors line above.
 X Post-CHF heat transfer: full boiling curve on hot walls - nucleate (Thom, Zuber-saturated) below the crisis, smooth wetted-fraction collapse (logistic in log-superheat between the CHF point and the homogeneous-nucleation/Leidenfrost limit, Lienhard) into Bromley film boiling + radiation. scripts/check-boiling-curve.ts prints the curve. Condensation on cold walls unchanged.
 X Cladding properly in the heat path for component-built cores: fuel -> clad (gap conductance) -> coolant convection; fuel/clad masses, areas, and conductances derived from rod geometry (cladThickness now a component field, default 0.6mm); clad is the surface the boiling curve sees. CladdingOxidationRateOperator (Baker-Just Zr-steam kinetics, exothermic heat, H2 to coolant NCG) wired into the game loop and test harnesses; oxidation state attached to every player-built core's clad node. Prompt-crit test now drives clad to ~920C through the boiling crisis - fuel-damage sequences are live.
 X Display cleanup batch: PID controller cabinets show their loop label/mode/setpoint (no more universal "SCRAM"/"NO CORE"); reactor thermal power shown on the RPV graphic and detail panel in MWt and % of rated (player-built cores' thermalPower now actually sets nominalPower); Heat Transfer panel reads live RK45 convection rates instead of the dead Euler diagnostics map; elevation labels small/black/at component base; fuel rods drawn from the core barrel's activeFuelHeight and limited at construction to fit the barrel; toolbar speed display tracks auto-slow and its recovery ramp, RT ratio now measures achieved speed vs wall time; rod slider becomes a tracking indicator while an auto rod controller owns the rods; obsolete "hybrid" pressure model removed from the UI, K_max applied on init.

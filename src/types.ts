@@ -179,6 +179,14 @@ export interface CoreBarrelComponent extends ComponentBase {
   fuelMaterial?: 'UO2' | 'metal';
   rodDiameter?: number;     // Fuel rod diameter (mm - construction UI unit)
   cladThickness?: number;   // Cladding thickness (mm), default 0.6
+  // Pebble-bed fuel (graphite-moderated, gas-cooled). When fuelForm is
+  // 'pebbles', the rod fields above are ignored and the core is a packed bed
+  // of graphite spheres with dispersed TRISO fuel kernels.
+  fuelForm?: 'rods' | 'pebbles';
+  pebbleDiameter?: number;      // Pebble diameter (mm), default 60
+  pebbleCount?: number;         // Number of pebbles in the core
+  heavyMetalPerPebble?: number; // Uranium loading per pebble (g), default 7
+  reflectorThickness?: number;  // Graphite reflector thickness (m), default 0
   // Fuel properties
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)
   actualFuelRodCount?: number;  // Actual number of fuel rods for simulation

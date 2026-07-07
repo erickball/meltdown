@@ -181,6 +181,55 @@ export const GAS_PROPERTIES: Record<GasSpecies, GasPropertyData> = {
 };
 
 // ============================================================================
+// Transport Properties (thermal conductivity, viscosity)
+// ============================================================================
+
+/**
+ * Transport properties at 300 K with power-law temperature scaling:
+ *   k(T) = k300 * (T/300)^0.75,  mu(T) = mu300 * (T/300)^0.7
+ * Good to ~±10% over 300-1500 K - plenty for heat-transfer correlations.
+ * Helium and hydrogen conduct ~5-7x better than steam or air, which is why
+ * they make good reactor coolants.
+ */
+const GAS_TRANSPORT: Record<GasSpecies, { k300: number; mu300: number }> = {
+  N2:  { k300: 0.0259, mu300: 1.78e-5 },
+  O2:  { k300: 0.0263, mu300: 2.06e-5 },
+  H2:  { k300: 0.186,  mu300: 0.89e-5 },
+  He:  { k300: 0.152,  mu300: 1.99e-5 },
+  CO:  { k300: 0.0250, mu300: 1.77e-5 },
+  CO2: { k300: 0.0166, mu300: 1.49e-5 },
+  Xe:  { k300: 0.0057, mu300: 2.30e-5 },
+  Ar:  { k300: 0.0177, mu300: 2.26e-5 },
+};
+
+/**
+ * Mixture thermal conductivity (W/m-K) at temperature T, mole-fraction
+ * weighted (crude vs. Wilke's rule but fine for correlation-grade work).
+ */
+export function mixtureThermalConductivity(comp: GasComposition, T_K: number): number {
+  const total = totalMoles(comp);
+  if (total <= 0) return 0.026; // air-like default
+  let k = 0;
+  for (const species of ALL_GAS_SPECIES) {
+    if (comp[species] > 0) k += (comp[species] / total) * GAS_TRANSPORT[species].k300;
+  }
+  return k * Math.pow(Math.max(200, T_K) / 300, 0.75);
+}
+
+/**
+ * Mixture dynamic viscosity (Pa·s) at temperature T, mole-fraction weighted.
+ */
+export function mixtureViscosity(comp: GasComposition, T_K: number): number {
+  const total = totalMoles(comp);
+  if (total <= 0) return 1.8e-5; // air-like default
+  let mu = 0;
+  for (const species of ALL_GAS_SPECIES) {
+    if (comp[species] > 0) mu += (comp[species] / total) * GAS_TRANSPORT[species].mu300;
+  }
+  return mu * Math.pow(Math.max(200, T_K) / 300, 0.7);
+}
+
+// ============================================================================
 // Universal Gas Constant
 // ============================================================================
 

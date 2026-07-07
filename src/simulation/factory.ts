@@ -19,6 +19,7 @@ import {
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
 import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
+import { GAS_PROPERTIES, GasSpecies } from './gas-properties';
 import { deriveNeutronics } from './lattice';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
@@ -826,52 +827,77 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
       // Get fuel geometry for liquid-level-dependent heat transfer
       const coreComp = component as any;
-      const geo = coreRodGeometry(component);
+      const isPebbleBed = coreComp.fuelForm === 'pebbles';
       const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5; // Default 0.5m above barrel bottom
 
-      // Heat path is fuel -> clad (conduction) -> coolant (convection), so
-      // the surface the boiling curve sees is the CLADDING - the node whose
-      // temperature drives post-CHF dryout, oxidation, and damage limits.
+      // Coolant-facing surface: rod cladding, or the pebble bed's spheres.
+      // Heat path is fuel -> clad/matrix (conduction) -> coolant
+      // (convection), so the surface the boiling curve sees is the node
+      // whose temperature drives post-CHF dryout, oxidation, damage limits.
+      const geo = isPebbleBed ? null : coreRodGeometry(component);
+      const pebbleGeo = isPebbleBed ? corePebbleGeometry(component) : null;
+      const surfaceArea = isPebbleBed ? pebbleGeo!.bedSurfaceArea : geo!.rodOuterArea;
+      const surfaceD = isPebbleBed ? pebbleGeo!.pebbleDiameter : geo!.rodDiameter;
+      const activeH = isPebbleBed ? pebbleGeo!.activeHeight : geo!.activeHeight;
+
       state.convectionConnections.push({
         id: `convection-${id}`,
         thermalNodeId: `${id}-clad`,
         flowNodeId: coolantFlowNodeId,
-        surfaceArea: geo.rodOuterArea,
-        characteristicDiameter: geo.rodDiameter,
+        surfaceArea,
+        characteristicDiameter: surfaceD,
         tubeBottomElevation: coreBottomElevation,
-        tubeHeight: geo.activeHeight,
+        tubeHeight: activeH,
       });
 
-      // Fuel-to-clad conductance per unit rod area: series resistance of
-      // (a) pellet interior, average-to-surface, r/(4k) for a heat-generating
-      //     cylinder,
-      // (b) pellet-clad gap, h_gap ~ 5000 W/m²-K (typical beginning-of-life
-      //     gas gap conductance),
-      // (c) half the clad wall, t/(2k), to the clad node's mean temperature.
-      const isMetalFuel = coreComp.fuelMaterial === 'metal';
-      const kFuel = isMetalFuel ? 27 : 3; // W/m-K
-      const hGap = 5000; // W/m²-K
-      const hFuelToClad = 1 / (
-        geo.pelletRadius / (4 * kFuel) +
-        1 / hGap +
-        geo.cladThickness / (2 * 16)
-      );
-      state.thermalConnections.push({
-        id: `conduction-${id}-fuel-clad`,
-        fromNodeId: `${id}-fuel`,
-        toNodeId: `${id}-clad`,
-        conductance: hFuelToClad * geo.rodOuterArea, // W/K
-      });
+      if (isPebbleBed) {
+        // Kernels are dispersed in the matrix: the conduction path is the
+        // pebble interior, r/(5k) average-to-surface for a heat-generating
+        // sphere. Pebbles run nearly isothermal - the walk-away-safe part.
+        // No Zr in a pebble core, so no cladding-oxidation tracking
+        // (graphite air-ingress oxidation is a separate, unmodeled
+        // phenomenon).
+        const hKernelToSurface = (5 * 25) / (pebbleGeo!.pebbleDiameter / 2);
+        state.thermalConnections.push({
+          id: `conduction-${id}-fuel-clad`,
+          fromNodeId: `${id}-fuel`,
+          toNodeId: `${id}-clad`,
+          conductance: hKernelToSurface * pebbleGeo!.bedSurfaceArea, // W/K
+        });
+      } else {
+        // Fuel-to-clad conductance per unit rod area: series resistance of
+        // (a) pellet interior, average-to-surface, r/(4k) for a
+        //     heat-generating cylinder,
+        // (b) pellet-clad gap, h_gap ~ 5000 W/m²-K (typical beginning-of-
+        //     life gas gap conductance),
+        // (c) half the clad wall, t/(2k), to the clad node's mean
+        //     temperature.
+        const isMetalFuel = coreComp.fuelMaterial === 'metal';
+        const kFuel = isMetalFuel ? 27 : 3; // W/m-K
+        const hGap = 5000; // W/m²-K
+        const hFuelToClad = 1 / (
+          geo!.pelletRadius / (4 * kFuel) +
+          1 / hGap +
+          geo!.cladThickness / (2 * 16)
+        );
+        state.thermalConnections.push({
+          id: `conduction-${id}-fuel-clad`,
+          fromNodeId: `${id}-fuel`,
+          toNodeId: `${id}-clad`,
+          conductance: hFuelToClad * geo!.rodOuterArea, // W/K
+        });
 
-      // High-temperature Zr-steam oxidation tracking on the clad (Baker-Just
-      // kinetics in CladdingOxidationRateOperator; H2 released to coolant).
-      const cladNode = state.thermalNodes.get(`${id}-clad`);
-      if (cladNode) {
-        cladNode.oxidation = {
-          oxidizedFraction: 0,
-          totalZrMass: cladNode.mass,
-          associatedCoolantNode: coolantFlowNodeId,
-        };
+        // High-temperature Zr-steam oxidation tracking on the clad
+        // (Baker-Just kinetics in CladdingOxidationRateOperator; H2
+        // released to coolant).
+        const cladNode = state.thermalNodes.get(`${id}-clad`);
+        if (cladNode) {
+          cladNode.oxidation = {
+            oxidizedFraction: 0,
+            totalZrMass: cladNode.mass,
+            associatedCoolantNode: coolantFlowNodeId,
+          };
+        }
       }
     }
 
@@ -1296,14 +1322,35 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Scale: volume ≈ 0.002 * ratedFlow (500 kg/s → 1 m³, 5000 kg/s → 10 m³,
       // consistent with casing + connected pipe inventory). Minimum 0.1 m³.
       const ratedFlow = pump.ratedFlow || 100;
-      const volume = Math.max(0.1, 0.002 * ratedFlow);
       const temp = pump.fluid?.temperature || 350;
       const pressure = Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
+      // Gas circulators: honor a vapor-phase spec and an NCG fill (partial
+      // pressures in bar), like tanks/pipes
+      const pumpPhase = pump.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+
+      // The 0.002 * ratedFlow scale is a RESIDENCE-TIME inventory (casing +
+      // piping run) sized for water. A gas circulator moving the same kg/s
+      // moves ~150x the volume, and its ducting is correspondingly large -
+      // scale by the design gas density or the node's tiny gas mass caps the
+      // whole loop's timestep.
+      let volume = Math.max(0.1, 0.002 * ratedFlow);
+      if (pumpPhase === 'vapor') {
+        let rhoGas = Math.max(0.1, (pressure * 0.018) / (8.314 * temp)); // steam
+        if (pump.initialNcg) {
+          for (const [species, bar] of Object.entries(pump.initialNcg as Record<string, number>)) {
+            const M = GAS_PROPERTIES[species as GasSpecies]?.molecularWeight ?? 0.028;
+            rhoGas += ((bar as number) * 1e5 * M) / (8.314 * temp);
+          }
+        }
+        volume = Math.max(0.5, (0.002 * ratedFlow * 1000) / rhoGas);
+      }
       return {
         id: component.id,
         label: component.label || 'Pump',
-        fluid: createFluidState(temp, pressure, 'liquid', 0, volume),
+        fluid: createFluidState(
+          temp, pressure, pumpPhase, pumpPhase === 'vapor' ? 1 : 0, volume, pump.initialNcg
+        ),
         volume,
         hydraulicDiameter: pump.diameter || 0.3,
         flowArea: Math.PI * Math.pow((pump.diameter || 0.3) / 2, 2),
@@ -1323,10 +1370,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const temp = valve.fluid?.temperature || 350;
       const pressure = Math.max(valve.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
+      const valvePhase = valve.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
       return {
         id: component.id,
         label: component.label || 'Valve',
-        fluid: createFluidState(temp, pressure, 'liquid', 0, volume),
+        fluid: createFluidState(
+          temp, pressure, valvePhase, valvePhase === 'vapor' ? 1 : 0, volume, valve.initialNcg
+        ),
         volume,
         hydraulicDiameter: valve.diameter || 0.2,
         flowArea: Math.PI * Math.pow((valve.diameter || 0.2) / 2, 2),
@@ -1393,12 +1443,17 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const tubeVolume = Math.max(1, hx.tubeCount * Math.PI * Math.pow(tubeOD / 2, 2) * tubeEffectiveLength);
       const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
       const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
+      // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
+      // (initialNcg = tube side, partial pressures in bar)
+      const tubePhase = (hx.tubeFluid?.phase ?? hx.primaryFluid?.phase) === 'vapor' ? 'vapor' : 'liquid';
 
       // Return tube-side node, shell-side is created separately
       return {
         id: `${component.id}-tube`,
         label: `${component.label || 'HX'} Tube`,
-        fluid: createFluidState(tubeTemp, tubePressure, 'liquid', 0, tubeVolume),
+        fluid: createFluidState(
+          tubeTemp, tubePressure, tubePhase, tubePhase === 'vapor' ? 1 : 0, tubeVolume, hx.initialNcg
+        ),
         volume: tubeVolume,
         hydraulicDiameter: 0.02,
         flowArea: 2,
@@ -1586,7 +1641,17 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Fallback to simplified calculation if not available
       const coreRadius = barrel.innerDiameter / 2;
       const calculatedVolume = Math.PI * coreRadius * coreRadius * barrel.height;
-      const coreVolume = (barrel as any).volume !== undefined ? (barrel as any).volume : calculatedVolume;
+      let coreVolume = (barrel as any).volume !== undefined ? (barrel as any).volume : calculatedVolume;
+
+      // A pebble bed displaces most of the barrel: coolant only fills the
+      // packing voids (~39%), and the open flow area shrinks to match
+      let flowArea = Math.PI * coreRadius * coreRadius;
+      if ((barrel as any).fuelForm === 'pebbles') {
+        const pg = corePebbleGeometry(component);
+        const pebbleVolume = pg.pebbleCount * (Math.PI / 6) * Math.pow(pg.pebbleDiameter, 3);
+        coreVolume = Math.max(0.05 * coreVolume, coreVolume - pebbleVolume);
+        flowArea *= 0.39;
+      }
 
       // Use fluid from component or default to typical PWR conditions
       const pressure = Math.max(barrel.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
@@ -1594,7 +1659,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       let fluid: FluidState;
 
       const initQuality = barrel.fluid?.quality ?? 0;
-      if (barrel.fluid?.phase === 'two-phase' && initQuality > 0) {
+      if (barrel.fluid?.phase === 'vapor') {
+        // Gas-cooled core: steam at its (usually tiny) partial pressure plus
+        // an NCG fill (initialNcg, partial pressures in bar)
+        const temp = barrel.fluid?.temperature || 700;
+        console.log(`[Factory] CoreBarrel ${component.id}: creating VAPOR state at ${pressure/1e5} bar (steam) + NCG, ${temp}K`);
+        fluid = createFluidState(temp, pressure, 'vapor', 1, coreVolume, (barrel as any).initialNcg);
+      } else if (barrel.fluid?.phase === 'two-phase' && initQuality > 0) {
         // Boiling core (e.g. BWR): initialize at saturation with the specified
         // steam quality so the equilibrium void content is present from t=0.
         // Critical initialization anchors density feedback to this state, so
@@ -1616,7 +1687,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         fluid,
         volume: coreVolume,
         hydraulicDiameter: barrel.innerDiameter,
-        flowArea: Math.PI * coreRadius * coreRadius,
+        flowArea,
         height: barrel.height,
         elevation,
       };
@@ -1807,13 +1878,78 @@ function coreRodGeometry(component: PlantComponent) {
 }
 
 /**
+ * Pebble-bed geometry: a packed bed of graphite spheres with dispersed TRISO
+ * fuel kernels. The kernels are the fuel volume; the matrix graphite is the
+ * (solid) moderator; the coolant fills the packing voids.
+ */
+function corePebbleGeometry(component: PlantComponent) {
+  const vessel = component as any;
+  const pebbleDiameter = (vessel.pebbleDiameter ?? 60) / 1000; // m
+  const pebbleCount = vessel.pebbleCount ?? 100000;
+  const heavyMetalPerPebble = (vessel.heavyMetalPerPebble ?? 7) / 1000; // kg
+  const activeHeight = vessel.activeFuelHeight ?? vessel.height ?? 4; // m
+  const pebbleVolume = (Math.PI / 6) * Math.pow(pebbleDiameter, 3); // m³ each
+  // UO2 mass = HM * (270/238); TRISO kernel compound density ~10500 kg/m³
+  const fuelMassPerPebble = heavyMetalPerPebble * (270 / 238);
+  const kernelVolumePerPebble = fuelMassPerPebble / 10500;
+  const graphiteMassPerPebble =
+    Math.max(0, pebbleVolume - kernelVolumePerPebble) * 1750; // kg (matrix graphite)
+  const bedSurfaceArea = pebbleCount * Math.PI * pebbleDiameter * pebbleDiameter; // m²
+  return {
+    pebbleDiameter, pebbleCount, activeHeight,
+    fuelMass: pebbleCount * fuelMassPerPebble,
+    fuelVolume: pebbleCount * kernelVolumePerPebble,
+    graphiteMass: pebbleCount * graphiteMassPerPebble,
+    solidModeratorVolume: pebbleCount * Math.max(0, pebbleVolume - kernelVolumePerPebble),
+    bedSurfaceArea,
+  };
+}
+
+/**
  * Create thermal nodes for a reactor core. Fuel and cladding masses, areas,
  * and conduction lengths all come from the rod geometry rather than fixed
  * PWR constants, so small cores carry proportionally small thermal inertia.
+ *
+ * Pebble-bed cores get a fuel node (the dispersed TRISO kernels - tiny
+ * thermal mass, fast Doppler response) and a graphite-matrix node in place
+ * of cladding (huge thermal mass - the passive heat sink that makes pebble
+ * beds walk-away safe). The matrix node keeps the `-clad` id so downstream
+ * consumers (convection wiring, display) work unchanged.
  */
 function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
   const vessel = component as any;
   const nodes: ThermalNode[] = [];
+
+  if (vessel.fuelForm === 'pebbles') {
+    const geo = corePebbleGeometry(component);
+    nodes.push({
+      id: `${component.id}-fuel`,
+      label: `${component.label || 'Core'} Fuel Kernels`,
+      temperature: vessel.fuelTemperature || 900,
+      mass: geo.fuelMass,
+      specificHeat: 300,
+      thermalConductivity: 3,
+      characteristicLength: 0.00025, // TRISO kernel radius
+      surfaceArea: geo.bedSurfaceArea,
+      heatGeneration: 0, // Set by neutronics
+      maxTemperature: vessel.fuelMeltingPoint || 2800,
+    });
+    nodes.push({
+      id: `${component.id}-clad`,
+      label: `${component.label || 'Core'} Pebble Graphite`,
+      temperature: vessel.fluid?.temperature ?? 700,
+      mass: geo.graphiteMass,
+      specificHeat: 1000,          // graphite, averaged over 600-1600 K
+      thermalConductivity: 25,
+      characteristicLength: geo.pebbleDiameter / 2,
+      surfaceArea: geo.bedSurfaceArea,
+      heatGeneration: 0,
+      // TRISO particles fail (release fission products) above ~1900-2100 K
+      maxTemperature: 2000,
+    });
+    return nodes;
+  }
+
   const geo = coreRodGeometry(component);
 
   // Fuel material properties (UO2 default; 'metal' = uranium metal)
@@ -1898,23 +2034,37 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
   const excessTarget = vessel.excessReactivity ?? 0.025;
   let excessReactivity = vessel.excessReactivity ?? 0;
 
-  if (vessel.enrichment !== undefined || vessel.fuelMaterial !== undefined) {
+  const isPebbleBed = vessel.fuelForm === 'pebbles';
+  if (vessel.enrichment !== undefined || vessel.fuelMaterial !== undefined || isPebbleBed) {
     const rodDiameterM = (vessel.rodDiameter ?? 9.5) / 1000;
     const rodCount = vessel.actualFuelRodCount ?? 38000;
     const coreDiameter = vessel.innerDiameter ?? 3.1;
     const activeHeight = vessel.activeFuelHeight ?? vessel.height ?? 3.66;
+    // The lattice sees the coolant's WATER density (fluid.mass excludes
+    // NCG): a helium coolant moderates/absorbs ~nothing, so a gas-filled
+    // core carries only its trace-steam density here - which is the point.
     const refModeratorDensity = coolantNode
       ? coolantNode.fluid.mass / coolantNode.volume
       : 700;
+    // Pebble-bed overrides: TRISO kernels are the fuel volume (dispersed -
+    // kernel-scale Doppler self-shielding), the pebble matrix is a solid
+    // graphite moderator, and the reflector buys back leakage.
+    const pebbleGeo = isPebbleBed ? corePebbleGeometry(component) : null;
     derivedCoeffs = deriveNeutronics({
-      enrichment: vessel.enrichment ?? 0.05,
+      enrichment: vessel.enrichment ?? (isPebbleBed ? 0.085 : 0.05),
       fuelMaterial: vessel.fuelMaterial ?? 'UO2',
-      rodDiameter: rodDiameterM,
-      rodCount,
+      rodDiameter: isPebbleBed ? pebbleGeo!.pebbleDiameter : rodDiameterM,
+      rodCount: isPebbleBed ? pebbleGeo!.pebbleCount : rodCount,
       coreDiameter,
       activeHeight,
       refModeratorDensity,
       refFuelTemp: fuelNode?.temperature ?? vessel.fuelTemperature ?? 600,
+      ...(isPebbleBed ? {
+        fuelVolume: pebbleGeo!.fuelVolume,
+        dopplerLengthScale: 0.0005, // TRISO kernel diameter
+        solidModeratorVolume: pebbleGeo!.solidModeratorVolume,
+      } : {}),
+      reflectorThickness: vessel.reflectorThickness ?? 0,
     });
     // Poison the raw beginning-of-life excess down to the target margin; a
     // lattice that cannot even reach the target (low enrichment, bad

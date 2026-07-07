@@ -8,7 +8,7 @@
  */
 
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
-import { deriveNeutronics, LatticeParams } from './lattice.js';
+import { deriveNeutronics, latticeKeff, LatticeParams } from './lattice.js';
 
 // Test result tracking
 interface TestResult {
@@ -286,6 +286,82 @@ test('over-moderated lattice flips the density coefficient sign', () => {
   assert(wet.moderationRatio > 5, `should be heavily over-moderated, ratio=${wet.moderationRatio.toFixed(1)}`);
   assert(wet.overModerated && wet.coolantDensityCoeff < 0,
     `over-moderated lattice must have NEGATIVE density coefficient, got ${(wet.coolantDensityCoeff * 1e5).toFixed(2)} pcm/(kg/m³)`);
+});
+
+// A pebble-bed-like graphite lattice: HTR-PM-ish proportions. 420k pebbles
+// of 6 cm diameter (packing ~0.61 in a 3 m x 11 m core), each carrying ~7 g
+// heavy metal as dispersed TRISO kernels: ~0.32 m³ of actual fuel compound
+// swimming in ~47 m³ of graphite, cooled by ~5 kg/m³ helium.
+const PEBBLE_LATTICE: LatticeParams = {
+  enrichment: 0.085,
+  fuelMaterial: 'UO2',
+  rodDiameter: 0.06,          // pebble diameter (display/geometry scale)
+  rodCount: 420000,
+  coreDiameter: 3.0,
+  activeHeight: 11.0,
+  // The lattice sees the coolant node's WATER density; a dry helium loop
+  // carries only trace steam (helium itself moderates/absorbs ~nothing)
+  refModeratorDensity: 0.05,
+  refFuelTemp: 900,
+  fuelVolume: 0.32,           // TRISO kernel volume, not pebble volume
+  dopplerLengthScale: 0.0005, // kernel scale - dispersed fuel, little self-shielding
+  solidModeratorVolume: 47,   // pebble graphite matrix
+  reflectorThickness: 0.8,
+};
+
+test('graphite pebble-bed lattice: critical, LOCA-insensitive, strong Doppler', () => {
+  const d = deriveNeutronics(PEBBLE_LATTICE);
+  assert(d.kEffRef > 1.05,
+    `well-moderated graphite lattice should be supercritical rods-out, got k_eff=${d.kEffRef.toFixed(3)}`);
+  // Complete loss of coolant (trace steam -> bone dry) inserts ~nothing:
+  // the graphite does all the moderating
+  const kDry = latticeKeff(PEBBLE_LATTICE, PEBBLE_LATTICE.refFuelTemp, 0.001);
+  const dRho = (kDry - d.kEffRef) / (kDry * d.kEffRef); // rho difference
+  assert(Math.abs(dRho) < 5e-4,
+    `depressurizing the helium loop should insert < 50 pcm, got ${(dRho * 1e5).toFixed(1)} pcm`);
+  assert(d.fuelTempCoeff < -1.5e-5,
+    `dispersed TRISO fuel should have solid Doppler (< -1.5 pcm/K), got ${(d.fuelTempCoeff * 1e5).toFixed(2)}`);
+  // ...and stronger than the same lattice would have with pebble-diameter
+  // self-shielding: dispersal is what buys the feedback
+  const lumped = deriveNeutronics({ ...PEBBLE_LATTICE, dopplerLengthScale: undefined });
+  assert(Math.abs(d.fuelTempCoeff) > 2 * Math.abs(lumped.fuelTempCoeff),
+    `kernel-scale Doppler (${(d.fuelTempCoeff * 1e5).toFixed(2)}) should be much stronger than lumped (${(lumped.fuelTempCoeff * 1e5).toFixed(2)})`);
+});
+
+test('natural uranium goes critical in a big graphite pile (X-10/Magnox)', () => {
+  // Metal nat-U rods in a large graphite block reactor: ~1500 channels of
+  // 2.5 cm rods in a 7 m graphite cylinder, ~56:1 graphite:fuel by volume
+  const pile = deriveNeutronics({
+    enrichment: 0.0072,
+    fuelMaterial: 'metal',
+    rodDiameter: 0.025,
+    rodCount: 1500,
+    coreDiameter: 7.0,
+    activeHeight: 7.0,
+    refModeratorDensity: 1.2,  // air/CO2 cooling channels
+    refFuelTemp: 500,
+    solidModeratorVolume: 250, // most of the ~270 m³ core is graphite
+    reflectorThickness: 0.9,
+  });
+  assert(pile.kEffRef > 1.0 && pile.kEffRef < 1.15,
+    `nat-U graphite pile should be barely critical (k ~1.0-1.1), got ${pile.kEffRef.toFixed(3)}`);
+});
+
+test('small graphite core leaks itself subcritical without a reflector', () => {
+  const bare = deriveNeutronics({ ...PEBBLE_LATTICE, coreDiameter: 1.2, activeHeight: 2.0,
+    solidModeratorVolume: 2.1, fuelVolume: 0.015, rodCount: 20000, reflectorThickness: 0 });
+  const reflected = deriveNeutronics({ ...PEBBLE_LATTICE, coreDiameter: 1.2, activeHeight: 2.0,
+    solidModeratorVolume: 2.1, fuelVolume: 0.015, rodCount: 20000, reflectorThickness: 1.0 });
+  assert(reflected.kEffRef > bare.kEffRef + 0.05,
+    `reflector should buy back leakage: bare k=${bare.kEffRef.toFixed(3)}, reflected k=${reflected.kEffRef.toFixed(3)}`);
+});
+
+test('water lattices unchanged by solid-moderation extension (regression)', () => {
+  const d = deriveNeutronics({ ...PWR_LATTICE, solidModeratorVolume: 0, reflectorThickness: 0 });
+  const ref = deriveNeutronics(PWR_LATTICE);
+  assert(Math.abs(d.kEffRef - ref.kEffRef) < 1e-12 &&
+    Math.abs(d.fuelTempCoeff - ref.fuelTempCoeff) < 1e-15,
+    'zero solid moderator / zero reflector must be identical to the water-only path');
 });
 
 test('fatter rods self-shield: weaker Doppler per kelvin (at fixed moderation)', () => {

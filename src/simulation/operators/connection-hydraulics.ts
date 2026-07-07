@@ -21,6 +21,7 @@
 import { SimulationState, FlowNode, FlowConnection } from '../types';
 import {
   totalMoles,
+  totalMass as ncgTotalMass,
   ncgSoundSpeed,
   steamNcgSoundSpeed,
   R_GAS,
@@ -365,15 +366,39 @@ export function approxLiquidDensity(node: FlowNode): number {
 }
 
 /**
- * Get approximate saturated vapor density at node conditions
+ * Total node density including non-condensible gas mass. fluid.mass is
+ * WATER only (NCG is tracked in moles alongside), so any density used for
+ * momentum, inertia, or pump head on a gas-bearing node must add the NCG
+ * mass back or a helium-filled node reads as near-vacuum.
+ */
+export function nodeBulkDensity(node: FlowNode): number {
+  const gasMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+  return (node.fluid.mass + gasMass) / node.volume;
+}
+
+/**
+ * Get approximate vapor-space density at node conditions: ideal-gas steam at
+ * its partial pressure plus the NCG mixture at its own. For a pure-steam
+ * node this is the old PM/(RT); for a helium-filled node it is the helium
+ * density (0.018 kg/mol water would overestimate helium ~4.5x). Two-phase
+ * nodes use the whole node volume for the NCG share - consistent with the
+ * FluidState solver's vapor-space approximation.
  */
 export function approxVaporDensity(node: FlowNode): number {
-  // Ideal gas approximation: ρ = PM/(RT)
-  const P = node.fluid.pressure;
   const T = node.fluid.temperature;
-  const M = 0.018; // kg/mol for water
   const R = 8.314; // J/mol-K
-  return Math.max(0.1, P * M / (R * T));
+  let P_ncg = 0;
+  let rho_ncg = 0;
+  if (node.fluid.ncg && node.volume > 0) {
+    const n = totalMoles(node.fluid.ncg);
+    if (n > 0) {
+      P_ncg = (n * R * T) / node.volume;
+      rho_ncg = ncgTotalMass(node.fluid.ncg) / node.volume;
+    }
+  }
+  const P_steam = Math.max(0, node.fluid.pressure - P_ncg);
+  const M = 0.018; // kg/mol for water
+  return Math.max(0.1, (P_steam * M) / (R * T) + rho_ncg);
 }
 
 /**
@@ -628,9 +653,10 @@ export function computeConnectionHydraulics(
   const A = conn.flowArea || 0.1;
   const currentFlow = conn.massFlowRate;
 
-  // For momentum/inertia, use upstream density - that's the fluid actually moving
-  const rho_from = fromNode.fluid.mass / fromNode.volume;
-  const rho_to = toNode.fluid.mass / toNode.volume;
+  // For momentum/inertia, use upstream density - that's the fluid actually
+  // moving. Bulk density includes NCG mass (a helium loop is all NCG).
+  const rho_from = nodeBulkDensity(fromNode);
+  const rho_to = nodeBulkDensity(toNode);
   const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
   const downstreamNode = currentFlow >= 0 ? toNode : fromNode;
   const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
@@ -684,7 +710,10 @@ export function computeConnectionHydraulics(
       // full head against backflow, while a vapor-bound pump develops almost
       // nothing (gas-locked) regardless of what leaks backward through it.
       const pumpNode = fromNode;
-      let pumpRho = pumpNode.fluid.mass / pumpNode.volume;
+      // Include NCG mass: a gas circulator develops rho*g*H head from the
+      // gas it actually contains (a few % of a water pump's - physical for
+      // the same impeller, so gas loops need high-head circulators).
+      let pumpRho = nodeBulkDensity(pumpNode);
 
       if (pumpNode.fluid.phase === 'two-phase' && pumpNode.fluid.quality !== undefined) {
         // Pumps draw from the bottom (liquid) if there is enough of it

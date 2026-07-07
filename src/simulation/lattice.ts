@@ -27,10 +27,24 @@
  *     over-moderated ones flip sign, exactly like the real k vs pitch curve
  *   - fatter rods self-shield more, weakening Doppler per kelvin
  *
- * SCOPE: water-moderated cores only. Solid-moderated designs (graphite /
- * pebble bed with gas coolant) need a solidModerationFraction parameter so
- * that p and f do not collapse when the coolant carries no moderation -
- * planned alongside the advanced-reactor components.
+ * SOLID MODERATION: a lattice may also carry a solid moderator (graphite -
+ * pebble matrix or prismatic blocks). Graphite contributes slowing-down
+ * power and a little absorption per unit volume, in water-equivalent units,
+ * so p and f no longer collapse when the coolant is a gas. Consequences fall
+ * out of the same formulas with no special cases:
+ *   - helium coolant carries ~no moderation or absorption, so the coolant
+ *     density coefficient is ~0 (loss-of-coolant adds ~nothing) while
+ *     Doppler still works
+ *   - natural uranium goes critical in a large graphite pile (X-10/Magnox)
+ *     but not in light water
+ *   - graphite's much larger migration area makes small solid-moderated
+ *     cores leak themselves subcritical - hence reflectorThickness, which
+ *     buys back leakage via standard reflector savings
+ *
+ * DISPERSED FUEL: fuelVolume/dopplerLengthScale overrides describe fuel
+ * that is not a rod array (TRISO kernels in pebbles). A sub-mm kernel
+ * self-shields far less than a 9.5 mm rod, so dispersed fuel gets the
+ * strong Doppler that makes pebble beds famously self-limiting.
  *
  * This is a game-fidelity model: constants below are calibrated so a
  * standard 5 w/o UO2 PWR lattice lands in published ranges (Doppler -1..-4
@@ -56,6 +70,28 @@ export interface LatticeParams {
   refModeratorDensity: number;
   /** reference fuel temperature (K) */
   refFuelTemp: number;
+  /**
+   * Volume of solid moderator (graphite) inside the active core (m³):
+   * pebble matrix graphite or prismatic blocks. 0/absent = water-moderated.
+   */
+  solidModeratorVolume?: number;
+  /**
+   * Graphite reflector thickness around the core (m). Buys back neutron
+   * leakage via reflector savings (saturates at the reflector's diffusion
+   * length ~0.5 m - beyond that, thicker graphite does nothing).
+   */
+  reflectorThickness?: number;
+  /**
+   * Total fuel (heavy-metal compound) volume override (m³). When set, the
+   * rod-array volume rodCount * pi (d/2)^2 * H is ignored - used for
+   * dispersed TRISO fuel where kernels, not pebbles, are the fuel volume.
+   */
+  fuelVolume?: number;
+  /**
+   * Doppler self-shielding length scale override (m). Defaults to
+   * rodDiameter; set to the kernel scale (~0.5-1 mm) for TRISO fuel.
+   */
+  dopplerLengthScale?: number;
 }
 
 export interface DerivedNeutronics {
@@ -101,6 +137,23 @@ const EPSILON = 1.03;
 // Migration area of water at reference density (m²) - leakage term
 const M2_REF = 0.0060;             // 60 cm²
 const RHO_WATER_REF = 750;         // kg/m³ scale for M² density dependence
+// --- Solid moderator (graphite) constants, per volume RELATIVE to water at
+// the 750 kg/m³ reference scale used by rhoTilde ---
+// Slowing-down power xi*Sigma_s: graphite ~0.061 /cm vs hot water ~1.0 /cm.
+const GRAPHITE_SDP_REL = 0.061;
+// Thermal absorption per unit volume relative to water. Physical Sigma_a
+// ratio is ~0.015, but this is an EFFECTIVE value calibrated (like
+// MOD_ABSORPTION_COEFF) so a natural-uranium graphite pile lands at
+// k_inf ~ 1.05 - the historically marginal result - while still leaving
+// enriched pebble lattices comfortably supercritical.
+const GRAPHITE_ABS_REL = 0.05;
+// Migration/transport per unit volume relative to water at the 750 kg/m³
+// scale: sqrt(M2_REF / M2_graphite) with M2_graphite ~ 350 cm², i.e. pure
+// graphite stops neutron migration ~41% as well per volume as hot water.
+// Graphite cores must be physically big or well-reflected.
+const GRAPHITE_MIGRATION_REL = 0.414;
+// Graphite reflector diffusion length (m): reflector savings saturate here.
+const L_REFLECTOR = 0.5;
 
 /**
  * k_eff for the lattice at the given fuel temperature and moderator density.
@@ -109,35 +162,60 @@ const RHO_WATER_REF = 750;         // kg/m³ scale for M² density dependence
 export function latticeKeff(params: LatticeParams, T_fuel: number, rhoMod: number): number {
   const e = Math.max(0.003, Math.min(0.3, params.enrichment));
 
-  // Geometry: fuel and moderator volumes
-  const V_fuel = params.rodCount * Math.PI * Math.pow(params.rodDiameter / 2, 2) * params.activeHeight;
+  // Geometry: fuel, solid moderator, and coolant volumes
+  const V_fuel = params.fuelVolume ??
+    (params.rodCount * Math.PI * Math.pow(params.rodDiameter / 2, 2) * params.activeHeight);
   const V_core = Math.PI * Math.pow(params.coreDiameter / 2, 2) * params.activeHeight;
-  const V_mod = Math.max(1e-6, V_core - V_fuel);
-  const r = V_mod / V_fuel; // moderation ratio
-  // Moderator density relative to nominal cold water scale
+  const V_solid = Math.min(params.solidModeratorVolume ?? 0, Math.max(0, V_core - V_fuel));
+  const V_cool = Math.max(1e-6, V_core - V_fuel - V_solid);
+  const rCool = V_cool / V_fuel;   // coolant-to-fuel volume ratio
+  const rSolid = V_solid / V_fuel; // solid-moderator-to-fuel volume ratio
+  // Coolant density relative to nominal hot water scale. A gas coolant
+  // (helium ~5 kg/m³) contributes essentially nothing here - which is the
+  // whole point: its density coefficient comes out ~0.
   const rhoTilde = Math.max(1e-3, rhoMod / RHO_WATER_REF);
+
+  // Moderation and absorption in water-equivalent units: coolant scaled by
+  // density, graphite by its per-volume slowing-down power / absorption.
+  const modUnits = Math.max(1e-6, rCool * rhoTilde + rSolid * GRAPHITE_SDP_REL);
+  const absUnits = rCool * rhoTilde + rSolid * GRAPHITE_ABS_REL;
 
   // eta: fission neutrons per absorption in fuel (enrichment lever).
   // Metal fuel has a slightly harder spectrum captured as a small bonus.
   const etaBonus = params.fuelMaterial === 'metal' ? 1.03 : 1.0;
   const eta = etaBonus * (NU * e * SIGMA_F5) / (e * SIGMA_A5 + (1 - e) * SIGMA_A8);
 
-  // f: thermal utilization - moderator absorption scales with how much
-  // water (by mass) shares the cell with the fuel
-  const f = 1 / (1 + MOD_ABSORPTION_COEFF * r * rhoTilde);
+  // f: thermal utilization - parasitic absorption in whatever shares the
+  // cell with the fuel (water by mass, graphite by volume)
+  const f = 1 / (1 + MOD_ABSORPTION_COEFF * absUnits);
 
-  // p: resonance escape - less moderator (volume OR density) means more
-  // resonance capture in U-238; fuel temperature broadens the resonances
-  const beta = DOPPLER_BETA_REF * Math.sqrt(DOPPLER_REF_ROD_D / Math.max(1e-3, params.rodDiameter));
+  // p: resonance escape - less slowing-down power means more resonance
+  // capture in U-238; fuel temperature broadens the resonances. The
+  // self-shielding length scale defaults to the rod diameter; dispersed
+  // TRISO kernels are far thinner, so they broaden much harder.
+  const dopplerScale = params.dopplerLengthScale ?? params.rodDiameter;
+  const beta = DOPPLER_BETA_REF * Math.sqrt(DOPPLER_REF_ROD_D / Math.max(1e-4, dopplerScale));
   const doppler = 1 + beta * (Math.sqrt(Math.max(1, T_fuel)) - Math.sqrt(T_DOPPLER_ANCHOR));
-  const p = Math.exp((-RESONANCE_COEFF * doppler) / (r * rhoTilde));
+  const p = Math.exp((-RESONANCE_COEFF * doppler) / modUnits);
 
-  // Leakage: buckling from core dimensions, migration area grows as the
-  // moderator thins (longer neutron travel)
-  const R = params.coreDiameter / 2;
-  const H = params.activeHeight;
+  // Leakage: buckling from core dimensions; migration area scales as
+  // 1/(scattering content)² of the non-fuel cell volume, in water-equivalent
+  // units. Water-only cells reduce exactly to the original M2_REF/rhoTilde²;
+  // a gas-cooled graphite cell is dominated by the graphite term plus the
+  // streaming penalty of its void coolant fraction.
+  const scatteringContent = Math.max(
+    1e-3,
+    (V_cool * rhoTilde + V_solid * GRAPHITE_MIGRATION_REL) / (V_cool + V_solid)
+  );
+  const M2 = M2_REF / Math.pow(scatteringContent, 2);
+  // Reflector savings: a graphite reflector extends the effective core
+  // dimensions, saturating at its diffusion length.
+  const delta = params.reflectorThickness
+    ? L_REFLECTOR * Math.tanh(params.reflectorThickness / L_REFLECTOR)
+    : 0;
+  const R = params.coreDiameter / 2 + delta;
+  const H = params.activeHeight + 2 * delta;
   const B2 = Math.pow(2.405 / R, 2) + Math.pow(Math.PI / H, 2); // 1/m²
-  const M2 = M2_REF / Math.pow(rhoTilde, 2);
   const nonLeakage = 1 / (1 + M2 * B2);
 
   return eta * EPSILON * p * f * nonLeakage;
@@ -171,7 +249,8 @@ export function deriveNeutronics(params: LatticeParams): DerivedNeutronics {
   // as a fixed -1 pcm/K; the dominant moderator feedback is the density term.
   const coolantTempCoeff = -1e-5;
 
-  const V_fuel = params.rodCount * Math.PI * Math.pow(params.rodDiameter / 2, 2) * params.activeHeight;
+  const V_fuel = params.fuelVolume ??
+    (params.rodCount * Math.PI * Math.pow(params.rodDiameter / 2, 2) * params.activeHeight);
   const V_core = Math.PI * Math.pow(params.coreDiameter / 2, 2) * params.activeHeight;
 
   return {
