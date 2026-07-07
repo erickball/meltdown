@@ -3098,8 +3098,33 @@ export class FissionProductReleaseOperator implements RateOperator {
   private static readonly K0_NOBLE = 100;    // 1/s
   private static readonly K0_VOLATILE = 33;  // 1/s
 
+  // Aerosol settling velocity for agglomerated CsI (Stokes law):
+  // v = rho_p d² g / (18 mu) with rho_p = 4510 kg/m³ (CsI), d ~ 3 µm
+  // (aged/agglomerated aerosol), mu ~ 2e-5 Pa·s -> ~1 mm/s. In a
+  // containment-sized volume (V/A ~ 10 m) that is a removal half-life of
+  // a couple of hours, consistent with MELCOR-scale behavior.
+  private static readonly CSI_SETTLING_VELOCITY = 1.1e-3; // m/s
+
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
+
+    // CsI aerosol deposition: first-order plate-out in every node carrying
+    // airborne CsI. lambda = v_settle * A_floor / V (the fraction of the
+    // volume swept clean per second); A_floor = V/height.
+    for (const [id, node] of state.flowNodes) {
+      const airborne = node.fluid.ncg?.CsI ?? 0;
+      if (airborne <= 0) continue;
+      if (node.isBoundary) continue; // atmosphere is tracked via environmentalRelease
+      const height = node.height && node.height > 0 ? node.height : Math.cbrt(node.volume);
+      const lambda = FissionProductReleaseOperator.CSI_SETTLING_VELOCITY / height; // 1/s
+      const depositionRate = airborne * lambda; // mol/s
+
+      const nodeRates = rates.flowNodes.get(id) || { dMass: 0, dEnergy: 0 };
+      if (!nodeRates.dNcg) nodeRates.dNcg = emptyGasComposition();
+      nodeRates.dNcg.CsI -= depositionRate;
+      nodeRates.dDepositedCsI = (nodeRates.dDepositedCsI ?? 0) + depositionRate;
+      rates.flowNodes.set(id, nodeRates);
+    }
 
     for (const [id, node] of state.thermalNodes) {
       const fp = node.fissionProducts;

@@ -28,6 +28,7 @@ export interface FlowNodeRates {
   dMass: number;      // kg/s - rate of mass change
   dEnergy: number;    // W - rate of internal energy change
   dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
+  dDepositedCsI?: number; // mol/s - CsI aerosol plating out onto this node's surfaces
 }
 
 export interface FlowConnectionRates {
@@ -143,6 +144,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
         combined.dNcg[species] = (aRates.dNcg?.[species] ?? 0) + (bRates.dNcg?.[species] ?? 0);
       }
     }
+    if (aRates.dDepositedCsI !== undefined || bRates.dDepositedCsI !== undefined) {
+      combined.dDepositedCsI = (aRates.dDepositedCsI ?? 0) + (bRates.dDepositedCsI ?? 0);
+    }
     result.flowNodes.set(id, combined);
   }
 
@@ -229,6 +233,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
       for (const species of ALL_GAS_SPECIES) {
         scaled.dNcg[species] = r.dNcg[species] * factor;
       }
+    }
+    if (r.dDepositedCsI !== undefined) {
+      scaled.dDepositedCsI = r.dDepositedCsI * factor;
     }
     result.flowNodes.set(id, scaled);
   }
@@ -326,6 +333,11 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
             node.fluid.ncg[species] = 0;
           }
         }
+      }
+
+      // Accumulate plated-out CsI (its removal from the gas is in dNcg)
+      if (nodeRates.dDepositedCsI !== undefined) {
+        node.depositedCsI = Math.max(0, (node.depositedCsI ?? 0) + nodeRates.dDepositedCsI * dt);
       }
     }
   }

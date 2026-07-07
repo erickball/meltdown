@@ -422,6 +422,9 @@ export function updateDebugPanel(
       if (node.fluid.phase === 'two-phase') {
         html += ` x=${(node.fluid.quality * 100).toFixed(1)}%`;
       }
+      if ((node.depositedCsI ?? 0) > 1e-6) {
+        html += ` <span class="debug-warning" title="CsI aerosol plated out onto this component's surfaces">CsI dep ${node.depositedCsI!.toFixed(3)}mol</span>`;
+      }
       html += '<br>';
 
       // === LINE 2: Density (total), specific internal energy (steam), water state ===

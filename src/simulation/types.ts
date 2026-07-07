@@ -128,6 +128,11 @@ export interface FlowNode {
   // Used by renderer to show appropriate pixelation in each zone
   separation?: number;              // 0-1, degree of phase separation
 
+  // CsI aerosol plated out onto this node's surfaces (mol). Deposited
+  // activity stays put - it no longer rides gas transport toward the
+  // environment. See FissionProductReleaseOperator for the settling model.
+  depositedCsI?: number;
+
   // Governor valve for turbines (0-1)
   // 0 = fully closed, 1 = fully open
   // Affects flow resistance into the turbine
