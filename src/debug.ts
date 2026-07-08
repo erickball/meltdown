@@ -1525,6 +1525,7 @@ export function updateComponentDetail(
         html += `<div class="detail-row"><span class="detail-label">Reseat At:</span><span class="detail-value">${(reseat / 1e5).toFixed(1)} bar</span></div>`;
         html += `<div class="detail-row"><span class="detail-label">Mode:</span><span class="detail-value">${valve.relief.controlMode}</span></div>`;
         html += `<div class="detail-row"><span class="detail-label">State:</span><span class="detail-value" style="color: ${latchColor};">${valve.reliefOpen ? 'LIFTED' : 'seated'}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label">Lifts:</span><span class="detail-value">${(valve.liftCount ?? 0).toFixed(0)}</span></div>`;
       }
       html += '</div>';
     }

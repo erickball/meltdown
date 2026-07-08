@@ -567,6 +567,8 @@ export interface ValveState {
     controlMode: 'auto' | 'open' | 'closed';  // PORV manual override ('auto' for safeties)
   };
   reliefOpen?: boolean;             // latch state between pop and reseat pressures
+  liftCount?: number;               // cumulative pops (each lift risks sticking open;
+                                    // averaged-cycling mode increments fractionally)
 }
 
 export interface CheckValveState {

@@ -186,6 +186,16 @@ export class BurstCheckOperator implements ConstraintOperator {
         return tubeMetal.temperature;
       }
     }
+    // Real wall node (wall thermal-node pass): read the metal directly
+    const wallMetal = state.thermalNodes.get(`${burstState.componentId}-wall`);
+    if (wallMetal) {
+      const lowerHeadNode = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
+      const wallT = lowerHeadNode
+        ? Math.max(wallMetal.temperature, lowerHeadNode.temperature)
+        : wallMetal.temperature;
+      burstState.wallTemperature = wallT;
+      return wallT;
+    }
     const lowerHead = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
 
     const prev = burstState.wallTemperature ?? node.fluid.temperature;
