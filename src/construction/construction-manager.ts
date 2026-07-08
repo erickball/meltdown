@@ -1369,10 +1369,14 @@ export class ConstructionManager {
           (reactorVessel as any).initialNcg = props.initialNcg;
         }
 
-        // Create core barrel component inside the vessel (the core region)
+        // Create core barrel component inside the vessel (the core region).
+        // Port position is a HORIZONTAL-plane offset from the barrel centre, not
+        // an elevation - both nozzles sit on the vessel axis (x=0, y=0) so an
+        // external connection (e.g. the hot leg off the core outlet) renders on
+        // top of the vessel; its height comes from the connection's elevation.
         const coreBarrelPorts: Port[] = [
-          { id: `${coreBarrelId}-bottom`, position: { x: 0, y: barrelHeight / 2 }, direction: 'both' },
-          { id: `${coreBarrelId}-top`, position: { x: 0, y: -barrelHeight / 2 }, direction: 'both' }
+          { id: `${coreBarrelId}-bottom`, position: { x: 0, y: 0 }, direction: 'both' },
+          { id: `${coreBarrelId}-top`, position: { x: 0, y: 0 }, direction: 'both' }
         ];
 
         const coreBarrel: CoreBarrelComponent = {

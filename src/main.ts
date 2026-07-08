@@ -25,7 +25,7 @@ import {
   setSeparationDebug,
   getTurbineCondenserState,
 } from './simulation';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
@@ -1263,6 +1263,67 @@ function init() {
     }, availableCores, availableGenerators);
   });
 
+  // Edit the core installed in a reactor vessel. The vessel's own Edit button
+  // reaches only the vessel geometry; the fuel/enrichment/power/rods live on
+  // the core barrel. Reverse the addCoreToContainer transforms to pre-fill the
+  // core dialog, then re-apply the edited values to the barrel.
+  setCoreEditCallback((reactorVesselId: string) => {
+    const rv = constructionManager.getComponent(reactorVesselId) as any;
+    if (!rv || !rv.coreBarrelId) return;
+    const barrel = constructionManager.getComponent(rv.coreBarrelId) as any;
+    if (!barrel) return;
+
+    const coreRecord: Record<string, any> = {
+      // type 'vessel' + fuelRodCount marker maps to the 'core' dialog definition
+      type: 'vessel', fuelRodCount: 1,
+      label: `${rv.label || 'Reactor'} Core`,
+      position: rv.position,
+      name: `${rv.label || 'Reactor'} Core`,
+      nqa1: barrel.nqa1 ?? true,
+      height: barrel.activeFuelHeight ?? barrel.coreHeight ?? 3.66,
+      coreBottomElevation: barrel.coreBottomElevation ?? 0.5,
+      diameter: barrel.coreDiameter ?? barrel.innerDiameter ?? 3.2,
+      fuelForm: barrel.fuelForm ?? 'rods',
+      rodDiameter: barrel.rodDiameter ?? 9.5,
+      rodPitch: barrel.rodPitch ?? 12.6,
+      cladThickness: barrel.cladThickness ?? 0.6,
+      pebbleDiameter: barrel.pebbleDiameter ?? 60,
+      pebbleCount: barrel.pebbleCount ?? 400000,
+      heavyMetalPerPebble: barrel.heavyMetalPerPebble ?? 7,
+      reflectorThickness: barrel.reflectorThickness ?? 0.8,
+      enrichmentPct: (barrel.enrichment ?? 0.05) * 100,
+      fuelMaterial: barrel.fuelMaterial ?? 'UO2',
+      controlRodBanks: barrel.controlRodCount ?? 4,
+      thermalPower: (barrel.thermalPower ?? 3000e6) / 1e6,
+      initialRodPosition: Math.round((1 - (barrel.controlRodPosition ?? 0.5)) * 100),
+    };
+
+    componentDialog.showEdit(coreRecord, (properties) => {
+      if (!properties) return;
+      const result = constructionManager.addCoreToContainer(reactorVesselId, properties);
+      if (result.success) {
+        updateConstructionCostPanel();
+        if (gameLoop) updateComponentDetail(reactorVesselId, plantState, gameLoop.getState());
+        showNotification('Core updated', 'info');
+      } else {
+        showNotification(result.error || 'Failed to update core', 'error');
+      }
+    });
+  });
+
+  // "Move"/"Move Building": arm this component and switch to move mode so the
+  // next click-drag repositions it (the only way to move a building).
+  setComponentMoveCallback((componentId: string) => {
+    if (currentMode !== 'construction') {
+      showNotification('Switch to construction mode to move components.', 'warning');
+      return;
+    }
+    setConstructionSubMode('move');
+    armedMoveId = componentId;
+    const c = plantState.components.get(componentId);
+    showNotification(`Click and drag anywhere to move "${c?.label || componentId}".`, 'info');
+  });
+
   setComponentDeleteCallback((componentId: string) => {
     if (confirm(`Delete component "${componentId}"? This will also remove all its connections.`)) {
       // Check if this is a controller before deleting
@@ -2136,6 +2197,30 @@ function init() {
   let pipeDragMode: 'start' | 'end' | 'both' = 'both';
   // For pipes: offset from end position when dragging 'end'
   let moveEndOffset = { x: 0, y: 0 };
+  // Buildings only move via the "Move Building" button (too easy to grab by
+  // accident otherwise). moveLocked = grabbed a building without arming it, so
+  // the drag is a no-op. armedMoveId = a component armed for a deliberate move.
+  let moveLocked = false;
+  let armedMoveId: string | null = null;
+  // Pre-drag snapshot so a cancelled containment change can be reverted
+  let movePreDrag: { x: number; y: number; endX?: number; endY?: number; containedBy?: string } | null = null;
+
+  // Find the building whose footprint contains a world position (or null).
+  function findContainingBuilding(worldPos: { x: number; y: number }): PlantComponent | null {
+    for (const [, comp] of plantState.components) {
+      if (comp.type !== 'building') continue;
+      const b = comp as any;
+      const halfW = b.shape === 'cylinder' ? (b.diameter || 40) / 2 : (b.width || 40) / 2;
+      const halfD = b.shape === 'cylinder' ? (b.diameter || 40) / 2 : (b.length || 40) / 2;
+      const dx = worldPos.x - comp.position.x;
+      const dy = worldPos.y - comp.position.y;
+      const inside = b.shape === 'cylinder'
+        ? (dx * dx) / (halfW * halfW) + (dy * dy) / (halfD * halfD) <= 1
+        : Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
+      if (inside) return comp;
+    }
+    return null;
+  }
 
   // Canvas mouse move handler for visual feedback and dragging
   canvas.addEventListener('mousemove', (e) => {
@@ -2193,7 +2278,7 @@ function init() {
       // Clear placement preview in connect mode
       plantCanvas.setPlacementPreview(null, null);
     } else if (constructionSubMode === 'move') {
-      if (isDraggingComponent && movingComponent) {
+      if (isDraggingComponent && movingComponent && !moveLocked) {
         // Dragging - move the component
         const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
 
@@ -2279,12 +2364,29 @@ function init() {
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
 
-    const component = plantCanvas.getComponentAtScreen({ x, y });
+    // If a component was armed via its "Move" button, that specific component
+    // is grabbed wherever the user clicks (this is how buildings move).
+    let component = armedMoveId ? plantState.components.get(armedMoveId) ?? null : null;
+    const armedThisPress = component !== null;
+    if (!component) {
+      component = plantCanvas.getComponentAtScreen({ x, y });
+    }
     if (component) {
+      // Buildings are only movable when deliberately armed - otherwise a drag
+      // that grabbed a building is locked (a click still selects it on mouseup).
+      moveLocked = component.type === 'building' && !armedThisPress;
+
       // Start dragging this component
       movingComponent = component;
       isDraggingComponent = true;
       moveMouseDownPos = { x, y };
+      movePreDrag = {
+        x: component.position.x,
+        y: component.position.y,
+        endX: (component as PipeComponent).endPosition?.x,
+        endY: (component as PipeComponent).endPosition?.y,
+        containedBy: (component as any).containedBy,
+      };
 
       // Calculate offset from component position to click point
       const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
@@ -2343,16 +2445,32 @@ function init() {
         e.clientX - upRect.left - moveMouseDownPos.x,
         e.clientY - upRect.top - moveMouseDownPos.y
       );
-      if (dragDist < 4) {
-        plantCanvas.selectComponent(movingComponent.id);
-      } else {
-        showNotification(`Moved ${movingComponent.label || movingComponent.id}`, 'info');
-      }
+
+      const moved = movingComponent;
+      const wasLocked = moveLocked;
+      const preDrag = movePreDrag;
+
+      // Reset drag state before any (blocking) confirmation dialog
       movingComponent = null;
       isDraggingComponent = false;
       moveStartOffset = { x: 0, y: 0 };
       moveEndOffset = { x: 0, y: 0 };
       pipeDragMode = 'both';
+      moveLocked = false;
+      armedMoveId = null;
+      movePreDrag = null;
+
+      if (dragDist < 4) {
+        // A click selects (works for buildings, whose drag is otherwise locked)
+        plantCanvas.selectComponent(moved.id);
+      } else if (wasLocked) {
+        showNotification('To move a building, select it and click "Move Building".', 'info');
+      } else {
+        // A real move: if it crossed a building boundary, confirm the
+        // containment change (and revert the move if the player cancels).
+        maybeConfirmContainmentChange(moved, preDrag);
+        showNotification(`Moved ${moved.label || moved.id}`, 'info');
+      }
 
       // Check what's under cursor now
       const rect = canvas.getBoundingClientRect();
@@ -2362,6 +2480,53 @@ function init() {
       canvas.style.cursor = hoveredComponent ? 'grab' : 'default';
     }
   });
+
+  // If a move put a component into or out of a building, ask before changing
+  // its containment; on cancel, snap it back to where the drag started.
+  function maybeConfirmContainmentChange(
+    moved: PlantComponent,
+    preDrag: { x: number; y: number; endX?: number; endY?: number; containedBy?: string } | null
+  ): void {
+    if (!preDrag) return;
+    // Buildings and cores are structural containers, not contained items here
+    if (moved.type === 'building') return;
+
+    const newBuilding = findContainingBuilding(moved.position);
+    const newBuildingId = newBuilding?.id ?? null;
+    const prevContainedBy = preDrag.containedBy;
+    const prevBuilding = (prevContainedBy &&
+      plantState.components.get(prevContainedBy)?.type === 'building') ? prevContainedBy : null;
+
+    if (newBuildingId === prevBuilding) return; // no building-containment change
+
+    const nameOf = (id: string | null) => id ? (plantState.components.get(id)?.label || id) : '';
+    let msg: string;
+    if (newBuildingId && !prevBuilding) {
+      msg = `Move "${moved.label || moved.id}" INTO "${nameOf(newBuildingId)}"?`;
+    } else if (!newBuildingId && prevBuilding) {
+      msg = `Move "${moved.label || moved.id}" OUT of "${nameOf(prevBuilding)}"?`;
+    } else {
+      msg = `Move "${moved.label || moved.id}" from "${nameOf(prevBuilding)}" into "${nameOf(newBuildingId)}"?`;
+    }
+
+    if (confirm(msg)) {
+      if (newBuildingId) (moved as any).containedBy = newBuildingId;
+      else delete (moved as any).containedBy;
+      updateConstructionCostPanel();
+    } else {
+      // Revert the move entirely
+      moved.position.x = preDrag.x;
+      moved.position.y = preDrag.y;
+      const pipe = moved as PipeComponent;
+      if (pipe.endPosition && preDrag.endX !== undefined && preDrag.endY !== undefined) {
+        pipe.endPosition.x = preDrag.endX;
+        pipe.endPosition.y = preDrag.endY;
+      }
+    }
+    if (selectedComponentId) {
+      updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
+    }
+  }
 
   // Canvas click handler for placing components or making connections
   canvas.addEventListener('click', (e) => {

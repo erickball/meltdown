@@ -37,8 +37,7 @@
       "orientation": "left-right",
       "ports": [
         {"id": "pump-1-inlet", "position": {"x": -0.5, "y": 0}, "direction": "in"},
-        {"id": "pump-1-outlet", "position": {"x": 0.5, "y": 0}, "direction": "out"},
-        {"id": "pump-1-outlet2", "position": {"x": 0.3, "y": -0.3}, "direction": "out"}
+        {"id": "pump-1-outlet", "position": {"x": 0.5, "y": 0}, "direction": "out"}
       ],
       "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"

@@ -31,8 +31,8 @@
       "thermalPower": 1000000000,
       "initialPower": 50000000,
       "ports": [
-        {"id": "rv-p-core-bottom", "position": {"x": 0, "y": 4.64}, "direction": "both"},
-        {"id": "rv-p-core-top", "position": {"x": 0, "y": -4.64}, "direction": "both"}
+        {"id": "rv-p-core-bottom", "position": {"x": 0, "y": 0}, "direction": "both"},
+        {"id": "rv-p-core-top", "position": {"x": 0, "y": 0}, "direction": "both"}
       ],
       "fluid": {"temperature": 567, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "rv-p"

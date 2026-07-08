@@ -2432,14 +2432,15 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     controlRodPosition: rodPosition,
     controlRodWorth,
     excessReactivity,
-    decayHeatFraction: 0.07, // Start with steady-state decay heat
-    // Pools at equilibrium with the plant's operating history. By default
-    // that history is the initial power; a scenario that starts LOW but
-    // recently ran high (e.g. "just tripped from full power") can set
-    // decayHeatPower on the core component to the prior operating power so
-    // the transient begins with the correct inherited decay heat.
+    // Decay heat reflects OPERATING HISTORY, not rated power. A freshly built
+    // core that has never run carries no fission-product inventory and so no
+    // decay heat; a core initialized at a steady operating point (presets)
+    // carries the equilibrium inventory for that power. `decayHeatPower` is
+    // an explicit override for "started low but recently tripped from high."
+    // Priority: explicit hint > steady-operating-point power > zero (fresh).
+    decayHeatFraction: (vessel.decayHeatPower ?? (vessel.initializeCritical ? power : 0)) > 0 ? 0.07 : 0,
     decayHeatPools: DECAY_HEAT_GROUPS.map(
-      g => g.fraction * (vessel.decayHeatPower ?? power)
+      g => g.fraction * (vessel.decayHeatPower ?? (vessel.initializeCritical ? power : 0))
     ),
     scrammed: false,
     scramTime: -1,

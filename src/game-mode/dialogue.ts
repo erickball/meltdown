@@ -43,6 +43,13 @@ export class DialogueOverlay {
     this.startLine();
   }
 
+  /** Jump to the end of the scene, firing the completion callback once. */
+  private skip(): void {
+    const done = this.onDone;
+    this.dismiss();
+    done?.();
+  }
+
   /** Tear down without firing the completion callback. */
   dismiss(): void {
     if (this.typeTimer !== null) { clearInterval(this.typeTimer); this.typeTimer = null; }
@@ -63,12 +70,25 @@ export class DialogueOverlay {
         <div class="gm-dialogue-right">
           <div class="gm-dialogue-name"></div>
           <div class="gm-dialogue-text"></div>
-          <div class="gm-dialogue-prompt">&#9660; CLICK TO CONTINUE</div>
+          <div class="gm-dialogue-bottom">
+            <div class="gm-dialogue-prompt">&#9660; CLICK TO CONTINUE</div>
+            <button class="gm-dialogue-skip">SKIP &#9654;&#9654;</button>
+          </div>
         </div>
       </div>
     `;
     document.body.appendChild(overlay);
     this.overlay = overlay;
+
+    // Skip jumps straight to the end of the scene (handy on replays). Stop the
+    // click from also advancing one line via the overlay handler.
+    const skipBtn = overlay.querySelector('.gm-dialogue-skip') as HTMLButtonElement;
+    skipBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.tunes.unlock();
+      this.skip();
+    });
 
     const canvas = overlay.querySelector('.gm-dialogue-portrait') as HTMLCanvasElement;
     const ctx = canvas.getContext('2d')!;

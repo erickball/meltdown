@@ -185,13 +185,35 @@
   white-space: pre-wrap;
 }
 
+.gm-dialogue-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+}
+
 .gm-dialogue-prompt {
-  align-self: flex-end;
   font-size: 11px;
   color: #8fc;
   letter-spacing: 2px;
   animation: gm-blink 0.9s steps(1) infinite;
 }
+
+.gm-dialogue-skip {
+  background: #24405c;
+  border: 2px outset #6a8ac0;
+  color: #cde;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.gm-dialogue-skip:hover { background: #2f5478; color: #fff; }
+.gm-dialogue-skip:active { border-style: inset; }
 
 @keyframes gm-blink {
   50% { opacity: 0; }
@@ -225,11 +247,86 @@
   margin: 5px 0;
 }
 
+.gm-choice-diag {
+  margin: 14px auto 4px;
+  max-width: 480px;
+  text-align: left;
+  border: 1px solid #445;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.gm-choice-diag-toggle {
+  width: 100%;
+  background: #1a2436;
+  border: none;
+  color: #8cf;
+  font-family: 'Consolas', 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  padding: 5px 8px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.gm-choice-diag-body {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: #bcc;
+}
+
+.gm-choice-diag[data-open="0"] .gm-choice-diag-body {
+  display: none;
+}
+
+.gm-choice-diag-line {
+  margin: 2px 0;
+}
+
 .gm-choice-buttons {
   display: flex;
   gap: 10px;
   justify-content: center;
   margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+/* ---- Accident "absorb it" banner (plant stays visible behind it) ---- */
+.gm-accident-banner {
+  position: fixed;
+  top: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6500;
+  background: rgba(40, 8, 8, 0.94);
+  border: 3px double #c04040;
+  box-shadow: 0 0 0 3px #100404, 0 0 40px rgba(200, 40, 40, 0.4);
+  padding: 14px 26px;
+  text-align: center;
+  font-family: 'Consolas', 'Courier New', monospace;
+  animation: gm-accident-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes gm-accident-pulse {
+  50% { box-shadow: 0 0 0 3px #100404, 0 0 60px rgba(240, 60, 60, 0.7); }
+}
+
+.gm-accident-title {
+  color: #ff5050;
+  font-size: 24px;
+  font-weight: bold;
+  letter-spacing: 3px;
+}
+
+.gm-accident-sub {
+  color: #f0c0c0;
+  font-size: 13px;
+  margin: 6px 0 12px;
+}
+
+.gm-accident-continue {
+  background: #542424;
+  border-color: #a06a6a;
 }
 
 .gm-choice-btn {
@@ -241,11 +338,11 @@
 .gm-hud {
   position: fixed;
   top: 0;
-  left: 50%;
-  transform: translateX(-50%);
+  /* Anchored between the left toolbar and the right component-detail panel so
+     the HUD never covers the selected-component info (which lives top-right). */
+  left: 210px;
+  right: 320px;
   z-index: 900;
-  min-width: 760px;
-  max-width: 96vw;
   background: rgba(8, 12, 22, 0.94);
   border: 3px double #4a6a9a;
   border-top: none;

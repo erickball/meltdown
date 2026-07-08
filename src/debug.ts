@@ -962,6 +962,12 @@ export function initDebugPanel(): void {
   const panel = document.getElementById('debug-panel');
 
   if (toggleBtn && panel) {
+    // Collapsed by default: the debug panel is a developer tool, not part of
+    // the normal play surface. Click "Show" to expand it.
+    panel.classList.add('collapsed');
+    toggleBtn.textContent = 'Show';
+    document.getElementById('app')?.classList.add('debug-collapsed');
+
     toggleBtn.addEventListener('click', () => {
       panel.classList.toggle('collapsed');
       const collapsed = panel.classList.contains('collapsed');
@@ -1851,8 +1857,23 @@ export function updateComponentDetail(
   }
 
   // ========== EDIT/DELETE BUTTONS ==========
+  // A reactor vessel keeps its fuel on a separate core-barrel sub-component,
+  // so its own Edit only reaches the vessel geometry. Offer a second button
+  // that edits the core (fuel/enrichment/power/rods) when one is installed.
+  const barrelId = (component as any).coreBarrelId as string | undefined;
+  const barrel = barrelId ? plantState.components.get(barrelId) as any : undefined;
+  const hasEditableCore = component.type === 'reactorVessel' && barrel &&
+    (barrel.actualFuelRodCount || barrel.fuelForm === 'pebbles' || barrel.thermalPower);
+
+  const isBuilding = component.type === 'building';
   html += '<div class="detail-section" style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #445;">';
-  html += `<button id="edit-component-btn" style="background: #357; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">Edit</button>`;
+  html += `<button id="edit-component-btn" style="background: #357; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">${component.type === 'reactorVessel' ? 'Edit Vessel' : 'Edit'}</button>`;
+  if (hasEditableCore) {
+    html += `<button id="edit-core-btn" style="background: #375; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">Edit Core</button>`;
+  }
+  // Buildings can only be moved via this button (dragging is locked so they're
+  // not shoved around by accident). Offered on all components for convenience.
+  html += `<button id="move-component-btn" style="background: #556; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">${isBuilding ? 'Move Building' : 'Move'}</button>`;
   html += `<button id="delete-component-btn" style="background: #744; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px;">Delete</button>`;
   html += '</div>';
 
@@ -1860,12 +1881,30 @@ export function updateComponentDetail(
 
   // Set up button handlers
   const editBtn = document.getElementById('edit-component-btn');
+  const editCoreBtn = document.getElementById('edit-core-btn');
+  const moveBtn = document.getElementById('move-component-btn');
   const deleteBtn = document.getElementById('delete-component-btn');
+
+  if (moveBtn) {
+    moveBtn.addEventListener('click', () => {
+      if (componentMoveCallback) {
+        componentMoveCallback(componentId);
+      }
+    });
+  }
 
   if (editBtn) {
     editBtn.addEventListener('click', () => {
       if (componentEditCallback) {
         componentEditCallback(componentId);
+      }
+    });
+  }
+
+  if (editCoreBtn) {
+    editCoreBtn.addEventListener('click', () => {
+      if (coreEditCallback) {
+        coreEditCallback(componentId);
       }
     });
   }
@@ -1884,6 +1923,8 @@ export function updateComponentDetail(
 
 // Callbacks for edit/delete actions
 let componentEditCallback: ((componentId: string) => void) | null = null;
+let coreEditCallback: ((reactorVesselId: string) => void) | null = null;
+let componentMoveCallback: ((componentId: string) => void) | null = null;
 let componentDeleteCallback: ((componentId: string) => void) | null = null;
 let connectionEditCallback: ((connectionId: string) => void) | null = null;
 let plantConnectionEditCallback: ((fromId: string, toId: string) => void) | null = null;
@@ -1894,6 +1935,22 @@ let connectionDeleteCallback: ((fromId: string, toId: string) => void) | null = 
  */
 export function setComponentEditCallback(callback: (componentId: string) => void): void {
   componentEditCallback = callback;
+}
+
+/**
+ * Set callback for when the "Edit Core" button is clicked (reactor vessels
+ * with an installed core barrel). Passes the reactor vessel id.
+ */
+export function setCoreEditCallback(callback: (reactorVesselId: string) => void): void {
+  coreEditCallback = callback;
+}
+
+/**
+ * Set callback for when the "Move"/"Move Building" button is clicked. Arms
+ * the component for a deliberate drag-move (the only way to move a building).
+ */
+export function setComponentMoveCallback(callback: (componentId: string) => void): void {
+  componentMoveCallback = callback;
 }
 
 /**

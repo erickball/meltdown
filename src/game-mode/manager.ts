@@ -11,7 +11,7 @@
 import { PlantState } from '../types';
 import { SimulationState, getTurbineCondenserState } from '../simulation';
 import { GameLoop, GameEvent } from '../game';
-import { LevelDef, GamePhase, GoalProgress, CareerSave, GameEventKind, FiredEvent } from './types';
+import { LevelDef, GamePhase, GoalProgress, CareerSave, GameEventKind, FiredEvent, DialogueLine } from './types';
 import { Ledger } from './economy';
 import { assessRelease } from './consequences';
 import { RandomEventEngine } from './events';
@@ -61,6 +61,13 @@ export class GameModeManager {
   private firedKinds = new Set<GameEventKind>();
   private lastHudUpdate = 0;
   private titleEl: HTMLDivElement | null = null;
+
+  // Post-mortem material: the design as built (so a failed level can be
+  // retried from the same design instead of the stock plant) plus run peaks
+  // for the diagnostics summary.
+  private capturedDesign: unknown | null = null;
+  private runPeakFuelTemp = 0;
+  private runPeakMWe = 0;
 
   constructor(private host: GameHost) {
     this.save = this.loadSave();
@@ -148,7 +155,7 @@ export class GameModeManager {
   // Level lifecycle
   // ==========================================================================
 
-  startLevel(index: number): void {
+  startLevel(index: number, designOverride?: unknown): void {
     const level = LEVELS[index];
     if (!level) return;
     this.teardownLevel();
@@ -164,16 +171,28 @@ export class GameModeManager {
     this.burstThisRun = [];
     this.firedEvents = [];
     this.firedKinds = new Set();
+    this.capturedDesign = null;
+    this.runPeakFuelTemp = 0;
+    this.runPeakMWe = 0;
 
-    // load stock plant (free equipment already on site)
-    if (level.stockPlant) {
+    // Load the starting plant. A retry-with-design provides the player's own
+    // failed layout; otherwise the level's free stock plant (or an empty site).
+    if (designOverride) {
+      this.host.loadPlantData(JSON.parse(JSON.stringify(designOverride)));
+    } else if (level.stockPlant) {
       this.host.loadPlantData(JSON.parse(JSON.stringify(level.stockPlant)));
     } else {
       this.host.clearPlant();
     }
-    for (const id of this.host.plantState.components.keys()) {
-      this.ledger.stockIds.add(id);
+    // Stock components (free) are identified by the level's stock plant ids,
+    // whether we loaded the stock plant or the player's design on top of it.
+    const stockIds = new Set<string>();
+    if (level.stockPlant) {
+      for (const [id] of (level.stockPlant as { components: Array<[string, unknown]> }).components) {
+        stockIds.add(id);
+      }
     }
+    for (const id of stockIds) this.ledger.stockIds.add(id);
 
     this.hud.show();
     this.hud.setLevel(level.title);
@@ -359,6 +378,12 @@ export class GameModeManager {
 
       this.updateGoalTracking(electricWatts);
       this.operatorPanel.tick(state);
+
+      // Track run peaks for the post-mortem diagnostics summary
+      this.runPeakMWe = Math.max(this.runPeakMWe, electricWatts / 1e6);
+      const fuelId = state.neutronics.fuelNodeId;
+      const fuelNode = fuelId ? state.thermalNodes.get(fuelId) : undefined;
+      if (fuelNode) this.runPeakFuelTemp = Math.max(this.runPeakFuelTemp, fuelNode.temperature);
     }
 
     // throttle HUD DOM updates
@@ -599,47 +624,137 @@ export class GameModeManager {
     });
   }
 
+  /** Snapshot the plant as built so a failed level can be retried from it. */
+  private captureDesign(): unknown {
+    return {
+      components: Array.from(this.host.plantState.components.entries())
+        .map(([id, c]) => [id, JSON.parse(JSON.stringify(c))]),
+      connections: JSON.parse(JSON.stringify(this.host.plantState.connections)),
+    };
+  }
+
+  /** Post-mortem summary lines for the failure screen. */
+  private runDiagnostics(headline: string[]): string[] {
+    const l = this.ledger!;
+    const d = [...headline];
+    d.push(`Time on line: ${(this.operatedSeconds / 60).toFixed(1)} sim-min`);
+    d.push(`Energy delivered: ${l.energyMWh.toFixed(1)} MWh`);
+    d.push(`Peak generation: ${this.runPeakMWe.toFixed(0)} MWe`);
+    if (this.runPeakFuelTemp > 0) {
+      d.push(`Peak fuel temperature: ${(this.runPeakFuelTemp - 273.15).toFixed(0)} °C`);
+    }
+    d.push(`Revenue ${formatCost(l.revenue)} – interest ${formatCost(l.interestPaid)} – repairs ${formatCost(l.repairsPaid)}`);
+    if (this.burstThisRun.length) {
+      d.push(`Ruptured: ${this.burstThisRun.map(b => b.label).join(', ')}`);
+    }
+    if (this.firedEvents.length) {
+      d.push(`Initiating events: ${this.firedEvents.map(e => e.kind).join(', ')}`);
+    }
+    return d;
+  }
+
+  /** Common tail for both failure modes: dialogue, then the choice screen. */
+  private failureChoices(title: string, headline: string[], lines: DialogueLine[]): void {
+    this.capturedDesign = this.captureDesign();
+    const diagnostics = this.runDiagnostics(headline);
+    this.dialogue.show(lines, () => {
+      this.choiceOverlay(title, [], [
+        ...(this.builtOnce
+          ? [{ label: 'RETRY WITH THIS DESIGN', action: () => this.startLevel(this.levelIndex, this.capturedDesign ?? undefined) }]
+          : []),
+        { label: 'START OVER', action: () => this.startLevel(this.levelIndex) },
+        { label: 'TITLE SCREEN', action: () => this.showTitle() },
+      ], diagnostics);
+    });
+  }
+
   private radiologicalFailure(cancers: number, verdict: string): void {
     if (!this.level) return;
     this.host.gameLoop.pause();
     this.setPhase('failed');
     this.eventEngine?.disarm();
-    this.tunes.play('disaster');
+    this.tunes.sfx('alarm');
 
-    this.dialogue.show([
-      { who: 'grubb', mood: 'panic', text: 'The phones. The PHONES. Every line is a reporter, a lawyer, or my mother. WHAT DID YOU DO?' },
-      { who: 'inspector', mood: 'alarmed', text: `Preliminary assessment: ${verdict}` },
-      { who: 'grubb', mood: 'furious', text: 'Do you know what the interest does while we\'re shut down "out for repairs"? It COMPOUNDS. Millions a day, compounding, while you hose down the parking lot!' },
-      { who: 'grubb', mood: 'angry', text: 'The board is calling it a "career development opportunity." For your replacement. Unless you want to try that level again and get it RIGHT.' },
-    ], () => {
-      this.choiceOverlay('RADIOLOGICAL RELEASE', [
-        `Estimated statistical cancers: ${cancers < 0.01 ? '<0.01' : cancers.toFixed(2)}`,
-        verdict,
-      ], [
-        { label: 'TRY AGAIN', action: () => this.startLevel(this.levelIndex) },
-        { label: 'TITLE SCREEN', action: () => this.showTitle() },
-      ]);
-    });
+    // Give the player ~15 s with the frozen plant to absorb what happened
+    // before Mr. Grubb's phone starts ringing.
+    this.delayThenFailure(
+      '☢ RADIOLOGICAL RELEASE',
+      'The plant is releasing to the environment. Take a look at the damage.',
+      15,
+      () => {
+        this.tunes.play('disaster');
+        this.failureChoices(
+          'RADIOLOGICAL RELEASE',
+          [
+            `Estimated statistical cancers: ${cancers < 0.01 ? '<0.01' : cancers.toFixed(2)}`,
+            verdict,
+          ],
+          [
+            { who: 'grubb', mood: 'panic', text: 'The phones. The PHONES. Every line is a reporter, a lawyer, or my mother. WHAT DID YOU DO?' },
+            { who: 'inspector', mood: 'alarmed', text: `Preliminary assessment: ${verdict}` },
+            { who: 'grubb', mood: 'furious', text: 'Do you know what the interest does while we\'re shut down "out for repairs"? It COMPOUNDS. Millions a day, compounding, while you hose down the parking lot!' },
+            { who: 'grubb', mood: 'angry', text: 'The board is calling it a "career development opportunity." For your replacement. Unless you want to try that level again and get it RIGHT.' },
+          ]
+        );
+      }
+    );
   }
 
   private bankruptcyFailure(): void {
     this.host.gameLoop.pause();
     this.setPhase('failed');
     this.eventEngine?.disarm();
-    this.tunes.play('disaster');
+    this.tunes.sfx('alarm');
 
-    this.dialogue.show([
-      { who: 'grubb', mood: 'furious', text: 'ZERO. The account says ZERO. It said ZERO to the payroll department, and now it\'s saying ZERO to me.' },
-      { who: 'grubb', mood: 'angry', text: 'You know who visits when a nuclear plant misses an interest payment? Everyone. The bank, the NRC, and a man from the state who staples things.' },
-      { who: 'grubb', mood: 'neutral', text: 'I talked them into one more chance. I had to give them my boat. Get back in there, and this time, GENERATE.' },
-    ], () => {
-      this.choiceOverlay('BANKRUPTCY', [
-        'The account hit zero with the interest clock still running.',
-      ], [
-        { label: 'TRY AGAIN', action: () => this.startLevel(this.levelIndex) },
-        { label: 'TITLE SCREEN', action: () => this.showTitle() },
-      ]);
-    });
+    this.delayThenFailure(
+      '$ INSOLVENT',
+      'The account has hit zero. Interest is still running.',
+      8,
+      () => {
+        this.tunes.play('disaster');
+        this.failureChoices(
+          'BANKRUPTCY',
+          ['The account hit zero with the interest clock still running.'],
+          [
+            { who: 'grubb', mood: 'furious', text: 'ZERO. The account says ZERO. It said ZERO to the payroll department, and now it\'s saying ZERO to me.' },
+            { who: 'grubb', mood: 'angry', text: 'You know who visits when a nuclear plant misses an interest payment? Everyone. The bank, the NRC, and a man from the state who staples things.' },
+            { who: 'grubb', mood: 'neutral', text: 'I talked them into one more chance. I had to give them my boat. Get back in there, and this time, GENERATE.' },
+          ]
+        );
+      }
+    );
+  }
+
+  /**
+   * Freeze on a terse alarm banner (plant still visible behind it) for a few
+   * seconds so the player can register what broke, then proceed. A CONTINUE
+   * button skips the wait.
+   */
+  private delayThenFailure(title: string, sub: string, seconds: number, proceed: () => void): void {
+    const overlay = document.createElement('div');
+    overlay.className = 'gm-accident-banner';
+    let remaining = seconds;
+    overlay.innerHTML = `
+      <div class="gm-accident-title">${title}</div>
+      <div class="gm-accident-sub">${sub}</div>
+      <button class="gm-hud-btn gm-accident-continue">CONTINUE <span class="gm-accident-count">(${remaining})</span></button>
+    `;
+    document.body.appendChild(overlay);
+    const countEl = overlay.querySelector('.gm-accident-count') as HTMLElement | null;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      overlay.remove();
+      proceed();
+    };
+    const timer = window.setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) { finish(); return; }
+      if (countEl) countEl.textContent = `(${remaining})`;
+    }, 1000);
+    overlay.querySelector('.gm-accident-continue')?.addEventListener('click', finish);
   }
 
   private confirmAbandon(): void {
@@ -655,19 +770,40 @@ export class GameModeManager {
   private choiceOverlay(
     title: string,
     lines: string[],
-    choices: Array<{ label: string; action: () => void }>
+    choices: Array<{ label: string; action: () => void }>,
+    diagnostics?: string[]
   ): void {
     const overlay = document.createElement('div');
     overlay.className = 'gm-dialogue-overlay gm-scanlines';
+    const diagBlock = diagnostics && diagnostics.length
+      ? `<div class="gm-choice-diag" data-open="1">
+           <button class="gm-choice-diag-toggle">&#9660; RUN DIAGNOSTICS</button>
+           <div class="gm-choice-diag-body">
+             ${diagnostics.map(d => `<div class="gm-choice-diag-line">${d}</div>`).join('')}
+           </div>
+         </div>`
+      : '';
     overlay.innerHTML = `
       <div class="gm-choice-box">
         <div class="gm-choice-title">${title}</div>
         ${lines.map(l => `<div class="gm-choice-line">${l}</div>`).join('')}
+        ${diagBlock}
         <div class="gm-choice-buttons">
           ${choices.map((c, i) => `<button class="gm-hud-btn gm-choice-btn" data-choice="${i}">${c.label}</button>`).join('')}
         </div>
       </div>`;
     document.body.appendChild(overlay);
+
+    // Diagnostics start expanded; the toggle collapses/expands them.
+    const diag = overlay.querySelector('.gm-choice-diag') as HTMLElement | null;
+    overlay.querySelector('.gm-choice-diag-toggle')?.addEventListener('click', () => {
+      if (!diag) return;
+      const open = diag.getAttribute('data-open') === '1';
+      diag.setAttribute('data-open', open ? '0' : '1');
+      const toggle = diag.querySelector('.gm-choice-diag-toggle') as HTMLElement;
+      toggle.innerHTML = (open ? '&#9654;' : '&#9660;') + ' RUN DIAGNOSTICS';
+    });
+
     overlay.querySelectorAll<HTMLButtonElement>('[data-choice]').forEach(btn => {
       btn.addEventListener('click', () => {
         this.tunes.sfx('click');
