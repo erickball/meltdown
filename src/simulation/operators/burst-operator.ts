@@ -95,10 +95,13 @@ export function creepRuptureTime(stressRatio: number, wallTempK: number): number
 export class BurstCheckOperator implements ConstraintOperator {
   name = 'BurstCheck';
 
-  // Bursting is irreversible - it must only be decided from accepted states,
-  // never from intermediate RK stages, which routinely overshoot into transient
-  // pressures that the step controller then rejects.
-  finalOnly = true;
+  // Bursting is irreversible - it must only be decided from ACCEPTED states.
+  // finalOnly was not enough: end-of-step candidates still run finalOnly
+  // constraints BEFORE the accept/reject decision, so transient garbage
+  // pressures (which the sanity check then rejects) were announcing - and in
+  // the worst case committing - phantom bursts. postAcceptOnly runs strictly
+  // after acceptance.
+  postAcceptOnly = true;
 
   applyConstraints(state: SimulationState, dt?: number): SimulationState {
     // If no burst states are configured, nothing to do

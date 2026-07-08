@@ -105,13 +105,22 @@ export interface ConstraintOperator {
   name: string;
 
   /**
-   * Only apply this operator to accepted (final) states, not to intermediate
-   * RK stages. Use for operators with irreversible side effects (e.g. bursting
-   * a component): intermediate stages routinely overshoot into transient states
-   * that the error controller then rejects, and permanent decisions must not be
-   * made from them.
+   * Only apply this operator to end-of-step candidate states, not to
+   * intermediate RK stages. NOTE: a "final" application still happens BEFORE
+   * the accept/reject decision - the candidate can be discarded afterward.
+   * Operators that only need per-accepted-step sampling (controllers) belong
+   * here; operators with IRREVERSIBLE side effects belong in postAcceptOnly.
    */
   finalOnly?: boolean;
+
+  /**
+   * Only apply this operator to states that have been ACCEPTED (passed the
+   * error controller and the sanity check). Use for irreversible outcomes
+   * (bursting a component): candidate states routinely overshoot into
+   * transient garbage pressures before being rejected, and permanent
+   * decisions must never be made from a state that is then discarded.
+   */
+  postAcceptOnly?: boolean;
 
   /**
    * Apply algebraic constraints to the state (e.g., thermodynamic consistency).
@@ -1241,11 +1250,32 @@ export class RK45Solver {
     // THEN: Apply standard constraint operators (thermodynamic consistency, etc.)
     for (const op of this.constraintOperators) {
       if (op.finalOnly && !isFinal) continue;
+      if (op.postAcceptOnly) continue; // deferred until the step is ACCEPTED
       const t0 = performance.now();
       result = op.applyConstraints(result, dt);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
     }
 
+    return result;
+  }
+
+  /**
+   * Constraint operators that commit irreversible outcomes (bursting) run
+   * only here, on a state that has already passed the error controller AND
+   * the sanity check. Candidate states routinely overshoot into transient
+   * garbage pressures before being rejected; deciding a burst there either
+   * spams phantom events (state discarded) or, if the garbage slips past
+   * the checks, permanently ruptures a component off a state that never
+   * physically existed.
+   */
+  private applyPostAcceptConstraints(state: SimulationState, dt: number): SimulationState {
+    let result = state;
+    for (const op of this.constraintOperators) {
+      if (!op.postAcceptOnly) continue;
+      const t0 = performance.now();
+      result = op.applyConstraints(result, dt);
+      this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
+    }
     return result;
   }
 
@@ -1517,8 +1547,8 @@ export class RK45Solver {
       // combination water-properties can't resolve to a valid pressure. Treat that
       // exactly like the pre-constraint sanity failure above: reject the step and
       // shrink dt, rather than letting the exception crash the simulation before
-      // BurstCheckOperator (which runs as part of applyAllConstraints, after
-      // FluidStateConstraintOperator) ever gets a chance to open a relief path.
+      // BurstCheckOperator (which runs after acceptance, see
+      // applyPostAcceptConstraints) ever gets a chance to open a relief path.
       let constrainedState: SimulationState;
       try {
         constrainedState = this.applyAllConstraints(newState, stepDt, true);
@@ -1584,6 +1614,8 @@ export class RK45Solver {
 
         currentState = constrainedState;
         currentState.time += stepDt;
+        // Irreversible-outcome operators (bursting) see only ACCEPTED states
+        currentState = this.applyPostAcceptConstraints(currentState, stepDt);
         remainingTime -= stepDt;
         stepsThisFrame++;
         this.totalSteps++;
@@ -1776,6 +1808,8 @@ export class RK45Solver {
     }
 
     constrainedState.time += this.currentDt;
+    // singleStep always accepts - run the irreversible-outcome operators too
+    constrainedState = this.applyPostAcceptConstraints(constrainedState, this.currentDt);
 
     const effectiveError = Math.max(error, sanityScore * this.config.relTol);
 
