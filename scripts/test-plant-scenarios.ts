@@ -14,7 +14,7 @@
 
 import {
   test, assert, assertBetween, report,
-  buildSimFromFile, run, runUntilSteady, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
+  buildSim, buildSimFromFile, run, runUntilSteady, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
   assertStateSane,
 } from './lib/sim-harness';
 import { triggerScram, nodeLiquidLevel } from '../src/simulation';
@@ -162,6 +162,78 @@ test('Relief valve pops at setpoint, reseats after blowdown, and cycles', () => 
   assert(minPAfterFirstPop > 28e5,
     `valve should reseat at ~30 bar (6% blowdown), fell to ${(minPAfterFirstPop / 1e5).toFixed(2)} bar`);
   assertStateSane(sim.state);
+});
+
+// ---------------------------------------------------------------------------
+// Hydrogen combustion: continuous-rate deflagration in a closed vessel
+// ---------------------------------------------------------------------------
+
+function h2VesselPlant(h2Bar: number, airBar: number, tempK: number, steamFill: number) {
+  // A closed 65 m3 vessel (tank, no connections). fillLevel 0 -> vapor
+  // branch honors the given temperature; steamFill > 0 makes a two-phase
+  // node whose vapor space carries the steam mole fraction for inerting.
+  return [
+    ['ves', {
+      id: 'ves', type: 'tank', label: 'Test Vessel',
+      position: { x: 40, y: 90 }, rotation: 0, elevation: 0,
+      width: 4, height: 5.2, wallThickness: 0.08, fillLevel: steamFill, pressureRating: 40,
+      ports: [],
+      fluid: { temperature: tempK, pressure: steamFill > 0 ? 800000 : 25000, phase: steamFill > 0 ? 'two-phase' : 'vapor', quality: 1, flowRate: 0 },
+      initialNcg: { N2: airBar * 0.79, O2: airBar * 0.21, H2: h2Bar },
+    }],
+  ] as any;
+}
+
+test('Hydrogen deflagration: hot flammable mixture burns, spikes pressure, conserves books', () => {
+  // ~12% H2 in air at 620 K: kinetics self-ignite within a couple of minutes
+  const sim = buildSim(h2VesselPlant(0.14, 1.0, 620, 0), []);
+  const node0 = sim.state.flowNodes.get('ves')!;
+  const h2_0 = node0.fluid.ncg!.H2;
+  const o2_0 = node0.fluid.ncg!.O2;
+  const m0 = node0.fluid.mass;
+  const p0 = node0.fluid.pressure;
+  assert(h2_0 > 50, `test setup should charge a real H2 inventory, got ${h2_0.toFixed(1)} mol`);
+
+  let maxP = p0;
+  run(sim, 240, 0.05, s => {
+    maxP = Math.max(maxP, s.flowNodes.get('ves')!.fluid.pressure);
+  });
+  const node1 = sim.state.flowNodes.get('ves')!;
+
+  // Burn completed: H2 essentially consumed, O2 down by half the H2 burned
+  const h2Burned = h2_0 - node1.fluid.ncg!.H2;
+  assert(node1.fluid.ncg!.H2 < 0.05 * h2_0,
+    `H2 should burn out, ${node1.fluid.ncg!.H2.toFixed(1)} of ${h2_0.toFixed(1)} mol left`);
+  const o2Used = o2_0 - node1.fluid.ncg!.O2;
+  assertBetween(o2Used / h2Burned, 0.45, 0.55, 'O2 consumption should be stoichiometric (1:2)');
+
+  // Product water joined the vessel inventory
+  const massGain = node1.fluid.mass - m0;
+  assertBetween(massGain / (h2Burned * 0.018), 0.95, 1.05, 'burned H2 should appear as product water');
+
+  // Deflagration pressure spike: well above initial, well below detonation
+  // scale (AICC for this mixture is roughly 4-5x initial absolute pressure)
+  assert(maxP > 2 * p0, `burn should spike pressure (peak ${(maxP / 1e5).toFixed(2)} vs initial ${(p0 / 1e5).toFixed(2)} bar)`);
+  assertStateSane(sim.state);
+});
+
+test('Hydrogen combustion respects flammability limits (lean and steam-inerted)', () => {
+  // Lean: ~2% H2 (below the 4% LFL) at the same hot temperature
+  const lean = buildSim(h2VesselPlant(0.02, 1.0, 620, 0), []);
+  const leanH2_0 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
+  run(lean, 120, 0.05);
+  const leanH2_1 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
+  assert(leanH2_1 > 0.98 * leanH2_0,
+    `lean mixture must not burn (${leanH2_0.toFixed(1)} -> ${leanH2_1.toFixed(1)} mol)`);
+
+  // Steam-inerted: plenty of H2 and O2 but the vapor space is mostly steam
+  // (two-phase node at 8 bar; steam partial pressure dominates the gas space)
+  const inert = buildSim(h2VesselPlant(0.5, 0.9, 445, 0.3), []);
+  const inertH2_0 = inert.state.flowNodes.get('ves')!.fluid.ncg!.H2;
+  run(inert, 120, 0.05);
+  const inertH2_1 = inert.state.flowNodes.get('ves')!.fluid.ncg!.H2;
+  assert(inertH2_1 > 0.98 * inertH2_0,
+    `steam-inerted mixture must not burn (${inertH2_0.toFixed(1)} -> ${inertH2_1.toFixed(1)} mol)`);
 });
 
 // ---------------------------------------------------------------------------

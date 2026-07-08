@@ -928,6 +928,80 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
           associatedCoolantNode: coolantFlowNodeId,
         };
       }
+
+      // ------------------------------------------------------------------
+      // Corium relocation targets (rod cores in a vessel): molten fuel/clad
+      // candles down into a melt pool in the vessel lower head
+      // (CoriumRelocationRateOperator moves the mass). Two nodes:
+      //   `${id}-corium`          the relocated melt pool
+      //   `${vesselId}-lowerhead` the lower head steel it sits on (creep
+      //                           rupture reads this as the wall T)
+      // Pebble beds are excluded: TRISO fuel doesn't slump (graphite
+      // matrix holds geometry to far higher temperatures).
+      // ------------------------------------------------------------------
+      if (!isPebbleBed) {
+        const vesselId = isCoreBarrel ? (component as any).containedBy : id;
+        const vesselComp = vesselId ? plantState.components.get(vesselId) : undefined;
+        const vesselNode = vesselId ? state.flowNodes.get(vesselId) : undefined;
+        if (!vesselComp || !vesselNode) {
+          console.warn(`[Factory] Core ${id}: no containing vessel - corium relocation disabled ` +
+            `(a bare core barrel has no lower head to slump into)`);
+        } else {
+          const fuelNode = state.thermalNodes.get(`${id}-fuel`);
+          const cladNode = state.thermalNodes.get(`${id}-clad`);
+          if (fuelNode) fuelNode.initialMass = fuelNode.mass;
+          if (cladNode) cladNode.initialMass = cladNode.mass;
+
+          const headRadius = ((vesselComp as any).innerDiameter ?? 4) / 2;
+          const headThickness = (vesselComp as any).wallThickness ?? 0.2;
+          const headArea = 2 * Math.PI * headRadius * headRadius; // hemisphere inner
+          const poolArea = Math.PI * headRadius * headRadius;
+
+          state.thermalNodes.set(`${id}-corium`, {
+            id: `${id}-corium`,
+            label: `${component.label || 'Core'} corium (relocated melt)`,
+            associatedVesselNode: vesselId,
+            temperature: fuelNode?.temperature ?? 600,
+            mass: 1, // seed mass; relocation grows it (zero mass breaks dT/dt)
+            initialMass: 1,
+            specificHeat: 400,        // UO2/Zr mixture scale
+            thermalConductivity: 3,
+            characteristicLength: 0.3,
+            surfaceArea: poolArea,
+            heatGeneration: 0,        // decay-heat share deposited by HeatGeneration
+            maxTemperature: 3200,
+            meltingPoint: 2800,
+            latentHeatFusion: 270e3,
+          });
+
+          state.thermalNodes.set(`${vesselId}-lowerhead`, {
+            id: `${vesselId}-lowerhead`,
+            label: `${vesselComp.label || 'Vessel'} lower head`,
+            temperature: vesselNode.fluid.temperature,
+            mass: headArea * headThickness * 7850,
+            specificHeat: 490,        // steel
+            thermalConductivity: 40,
+            characteristicLength: headThickness,
+            surfaceArea: headArea,
+            heatGeneration: 0,
+            maxTemperature: 1700,     // steel melting
+          });
+
+          // Corium heat transfer (pool -> lower head, pool -> water quench)
+          // lives in CoriumRelocationRateOperator with MASS-SCALED contact
+          // areas: a static full-pool coupling on the 1 kg seed node gives
+          // it a ~60 ms time constant that throttles the whole simulation.
+          state.convectionConnections.push({
+            id: `convection-${vesselId}-lowerhead`,
+            thermalNodeId: `${vesselId}-lowerhead`,
+            flowNodeId: vesselId,
+            surfaceArea: headArea,
+            characteristicDiameter: 2 * headRadius,
+            tubeBottomElevation: 0,
+            tubeHeight: headRadius,
+          });
+        }
+      }
     }
 
     // Create thermal nodes and shell-side flow node for heat exchangers

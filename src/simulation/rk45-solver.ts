@@ -37,6 +37,7 @@ export interface FlowConnectionRates {
 
 export interface ThermalNodeRates {
   dTemperature: number;  // K/s - rate of temperature change (for solids)
+  dMass?: number;        // kg/s - mass relocation between solid nodes (corium)
   dOxidizedFraction?: number;  // 1/s - rate of cladding oxidation (for cladding nodes only)
   dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
   dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
@@ -190,6 +191,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     const combined: ThermalNodeRates = {
       dTemperature: aRates.dTemperature + bRates.dTemperature,
     };
+    if (aRates.dMass !== undefined || bRates.dMass !== undefined) {
+      combined.dMass = (aRates.dMass ?? 0) + (bRates.dMass ?? 0);
+    }
     // Combine oxidation rates if either has them
     if (aRates.dOxidizedFraction !== undefined || bRates.dOxidizedFraction !== undefined) {
       combined.dOxidizedFraction = (aRates.dOxidizedFraction ?? 0) + (bRates.dOxidizedFraction ?? 0);
@@ -272,6 +276,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     const scaled: ThermalNodeRates = {
       dTemperature: r.dTemperature * factor,
     };
+    if (r.dMass !== undefined) {
+      scaled.dMass = r.dMass * factor;
+    }
     // Scale oxidation rate if present
     if (r.dOxidizedFraction !== undefined) {
       scaled.dOxidizedFraction = r.dOxidizedFraction * factor;
@@ -377,6 +384,11 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
     const node = newState.thermalNodes.get(id);
     if (node) {
       node.temperature += nodeRates.dTemperature * dt;
+      // Mass relocation between solid nodes (corium): rates are proportional
+      // to remaining mass, so this stays positive at any stable dt
+      if (nodeRates.dMass !== undefined) {
+        node.mass += nodeRates.dMass * dt;
+      }
       // Apply oxidation rate if present
       if (nodeRates.dOxidizedFraction !== undefined && node.oxidation) {
         node.oxidation.oxidizedFraction += nodeRates.dOxidizedFraction * dt;

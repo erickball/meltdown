@@ -55,8 +55,17 @@ export {
   meltFraction,                   // Derived melt fraction for display
   nodeHeatCapacity,               // Effective heat capacity incl. latent heat
   ChokedFlowDisplayOperator,  // Sets conn.isChoked for debug display
+} from './operators/rate-operators';
+export {
   setSeparationDebug,  // Debug toggle for phase separation calculation
 } from './operators/rate-operators';
+export {
+  HydrogenCombustionRateOperator,  // 2H₂ + O₂ → 2H₂O deflagration (continuous rate)
+} from './operators/combustion';
+export {
+  CoriumRelocationRateOperator,    // molten fuel/clad slumps to the lower head
+  relocatedFuelFraction,           // relocated fraction for displays/neutronics
+} from './operators/corium';
 
 // Semi-implicit pressure solver
 export { PressureSolver } from './operators/pressure-solver';

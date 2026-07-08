@@ -39,6 +39,8 @@ export {
 } from './turbine-condenser';
 
 export { BurstCheckOperator } from './burst-operator';
+export { HydrogenCombustionRateOperator } from './combustion';
+export { CoriumRelocationRateOperator, relocatedFuelFraction } from './corium';
 
 export {
   getConvectionHeatRates,

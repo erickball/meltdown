@@ -17,6 +17,8 @@ import {
   ConductionRateOperator,
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
+  HydrogenCombustionRateOperator,
+  CoriumRelocationRateOperator,
   FissionProductReleaseOperator,
   meltFraction,
   HeatGenerationRateOperator,
@@ -102,6 +104,8 @@ solver.addRateOperator(new FlowMomentumRateOperator());
 solver.addRateOperator(new ConductionRateOperator());
 solver.addRateOperator(new ConvectionRateOperator());
 solver.addRateOperator(new CladdingOxidationRateOperator());
+solver.addRateOperator(new HydrogenCombustionRateOperator());
+solver.addRateOperator(new CoriumRelocationRateOperator());
 solver.addRateOperator(new FissionProductReleaseOperator());
 solver.addRateOperator(new HeatGenerationRateOperator());
 solver.addRateOperator(new NeutronicsRateOperator());

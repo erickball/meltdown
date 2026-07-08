@@ -690,8 +690,23 @@ export class HeatGenerationRateOperator implements RateOperator {
             }
           }
         }
+        // Relocated melt keeps its decay heat: split the fuel deposit by
+        // mass between the in-core fuel node and its corium pool (the
+        // corium node exists for rod cores in a vessel; seed mass ~1 kg
+        // makes the split a no-op until relocation actually happens).
+        const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
+        if (corium && corium.mass > 2) {
+          const fuelShare = node.mass / (node.mass + corium.mass);
+          const coriumDeposit = deposit * (1 - fuelShare);
+          deposit *= fuelShare;
+          const corRates = rates.thermalNodes.get(corium.id) || { dTemperature: 0 };
+          corRates.dTemperature += coriumDeposit / nodeHeatCapacity(corium);
+          rates.thermalNodes.set(corium.id, corRates);
+        }
         const dT = deposit / nodeHeatCapacity(node);
-        rates.thermalNodes.set(id, { dTemperature: dT });
+        const fuelRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+        fuelRates.dTemperature += dT;
+        rates.thermalNodes.set(id, fuelRates);
       } else if (node.heatGeneration > 0) {
         // Other heat-generating nodes use their fixed rate
         const dT = node.heatGeneration / nodeHeatCapacity(node);
@@ -1059,7 +1074,21 @@ export class NeutronicsRateOperator implements RateOperator {
     // in both directions. 0 (default) preserves legacy behavior.
     const rhoExcess = n.excessReactivity ?? 0;
 
-    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron;
+    // Relocated (slumped) fuel has left the lattice: a debris bed in the
+    // lower head is far from the moderated critical geometry, so relocation
+    // carries a shutdown-scale negative worth. (Recriticality of a
+    // reflooded debris bed is real physics but out of scope - flagged in
+    // operators/corium.ts.)
+    let rhoRelocation = 0;
+    if (n.fuelNodeId) {
+      const fuelNode = state.thermalNodes.get(n.fuelNodeId);
+      if (fuelNode?.initialMass && fuelNode.initialMass > 0) {
+        const relocated = Math.max(0, Math.min(1, 1 - fuelNode.mass / fuelNode.initialMass));
+        rhoRelocation = -0.5 * relocated;
+      }
+    }
+
+    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron + rhoRelocation;
 
     // Store diagnostics on the evaluated state so displays and logs see the
     // live reactivity (rate operators otherwise never write state, and
@@ -3243,7 +3272,13 @@ export class FissionProductReleaseOperator implements RateOperator {
       const fp = node.fissionProducts;
       if (!fp) continue;
 
-      const T = node.temperature;
+      // FP inventory stays booked on the fuel node through relocation (so
+      // per-node initial-inventory fractions keep meaning), but relocated
+      // melt keeps outgassing: the release temperature is the hotter of the
+      // fuel node and its corium pool.
+      let T = node.temperature;
+      const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
+      if (corium && corium.mass > 2) T = Math.max(T, corium.temperature);
       // Below ~1000 K the Arrhenius rate is < 1e-9/s (nothing in sim
       // lifetimes) - skip the map churn, not a behavioral threshold
       if (T < 1000) continue;

@@ -844,7 +844,8 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
   let fpInitialVolatile = 0;
   let fpNobleInFuel = 0;
   let fpVolatileInFuel = 0;
-  for (const [, node] of state.thermalNodes) {
+  let relocatedMass = 0;
+  for (const [id, node] of state.thermalNodes) {
     if (node.fissionProducts) {
       fuelMass += node.mass;
       moltenMass += node.mass * meltFraction(node);
@@ -852,6 +853,12 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
       fpInitialVolatile += node.fissionProducts.initialVolatile ?? node.fissionProducts.volatile;
       fpNobleInFuel += node.fissionProducts.nobleGas;
       fpVolatileInFuel += node.fissionProducts.volatile;
+    } else if (id.endsWith('-corium') && node.mass > 2) {
+      // Relocated melt counts as molten core mass (it carries no
+      // fissionProducts record - inventory stays booked on the fuel node)
+      fuelMass += node.mass;
+      moltenMass += node.mass;
+      relocatedMass += node.mass;
     }
   }
 
@@ -866,6 +873,9 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
   const lines: string[] = [];
   if (meltFrac > 0.001) {
     lines.push(`☢ FUEL MELTING: ${(meltFrac * 100).toFixed(0)}% of core`);
+  }
+  if (relocatedMass > 0 && fuelMass > 0) {
+    lines.push(`☢ CORE SLUMPING: ${((relocatedMass / fuelMass) * 100).toFixed(0)}% relocated to lower head`);
   }
   if (fpReleasedFrac > 0.0005) {
     lines.push(`☢ FISSION PRODUCTS ESCAPING FUEL: ${(fpReleasedFrac * 100).toFixed(1)}%`);
