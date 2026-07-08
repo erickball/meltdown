@@ -135,7 +135,7 @@ export class BurstCheckOperator implements ConstraintOperator {
         } else if (dt !== undefined && dt > 0 && gaugePressure > 0) {
           // Creep damage: a hot pressurized wall fails below its burst
           // pressure given time (SG tube rupture, vessel lower head).
-          const wallT = this.getWallTemperature(node, burstState, newState);
+          const wallT = this.updateWallTemperature(node, burstState, newState, dt);
           const tRupture = creepRuptureTime(gaugePressure / burstState.burstPressure, wallT);
           if (isFinite(tRupture) && tRupture > 0) {
             burstState.creepDamage = (burstState.creepDamage ?? 0) + dt / tRupture;
@@ -163,20 +163,42 @@ export class BurstCheckOperator implements ConstraintOperator {
   }
 
   /**
-   * Wall temperature for creep: the component's metal thermal node when one
-   * exists (HX tubes), otherwise the contained fluid temperature (walls track
-   * their fluid closely at these timescales).
+   * Wall temperature for creep. Components with a real metal thermal node
+   * read it directly: HX tubes, and the vessel lower head once a corium
+   * pool can heat it (a dry head under corium runs far above the steam
+   * temperature). Everything else gets a first-order lag of the fluid
+   * temperature: tau = (wall areal mass * cp) / h_film, ~1-2 minutes under
+   * liquid contact (h ~ 2000 W/m2K on ~5 cm of steel) but HOURS under gas
+   * contact (h ~ 30) - so a seconds-scale deflagration's 2000 K flame gas
+   * does not instantly "creep-rupture" a cold steel shell (it did, before
+   * the lag: the fluid-T-as-wall-T proxy held only for liquid contact).
    */
-  private getWallTemperature(
+  private updateWallTemperature(
     node: FlowNode,
     burstState: BurstState,
-    state: SimulationState
+    state: SimulationState,
+    dt: number
   ): number {
     if (burstState.isTubeSide) {
       const tubeMetal = state.thermalNodes.get(`${burstState.componentId}-tubes`);
-      if (tubeMetal) return tubeMetal.temperature;
+      if (tubeMetal) {
+        burstState.wallTemperature = tubeMetal.temperature;
+        return tubeMetal.temperature;
+      }
     }
-    return node.fluid.temperature;
+    const lowerHead = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
+
+    const prev = burstState.wallTemperature ?? node.fluid.temperature;
+    const gasContact = node.fluid.phase === 'vapor';
+    const tau = gasContact ? 6000 : 90; // s - steel areal mass over film h
+    const alpha = Math.min(1, dt / tau);
+    let wallT = prev + alpha * (node.fluid.temperature - prev);
+
+    // Creep is governed by the hottest part of the wall
+    if (lowerHead) wallT = Math.max(wallT, lowerHead.temperature);
+
+    burstState.wallTemperature = wallT;
+    return wallT;
   }
 
   /**

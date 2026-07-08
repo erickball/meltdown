@@ -43,6 +43,10 @@ export interface ThermalNode {
 
   // Material properties
   mass: number;                     // kg
+  // As-built mass, recorded when relocation can move mass between nodes
+  // (fuel/clad -> corium). Lets neutronics and displays reason about the
+  // relocated fraction without new integrated state.
+  initialMass?: number;             // kg
   specificHeat: number;             // J/kg-K (can be temperature-dependent later)
   thermalConductivity: number;      // W/m-K
 
@@ -55,6 +59,11 @@ export interface ThermalNode {
 
   // Limits for damage modeling
   maxTemperature: number;           // K - failure/damage threshold
+
+  // Corium pools: the vessel flow node this pool sits in (set by the
+  // factory). CoriumRelocationRateOperator uses it for mass-scaled quench
+  // and lower-head heat transfer.
+  associatedVesselNode?: string;
 
   // Melting (apparent-heat-capacity method): near meltingPoint the node's
   // effective heat capacity carries a smooth latent-heat bump, so its
@@ -726,6 +735,13 @@ export interface BurstState {
   // with t_rupture from a Larson-Miller correlation on the stress ratio
   // P/P_burst. Ruptures when it reaches 1. See BurstCheckOperator.
   creepDamage?: number;
+  // Lagged wall temperature for creep (K). Walls are tonnes of steel behind
+  // a film resistance: they track LIQUID contact within ~minutes but a hot
+  // GAS transient (an H2 deflagration's ~2000 K flame) barely warms them.
+  // First-order lag toward the fluid temperature, integrated per accepted
+  // step; components with a real metal thermal node (-tubes, -lowerhead)
+  // read it directly instead.
+  wallTemperature?: number;
   isCreepRupture?: boolean;          // True if the failure was creep-driven
 
   // Random seed for deterministic break size variation
