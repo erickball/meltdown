@@ -124,6 +124,12 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   // A/B override for the implicit momentum solve (semi-implicit-flow-solver
   // plan): IMPLICIT_MOMENTUM=1 forces it on, =0 forces it off, unset uses the
   // shipping default. Lets every suite in scripts/ run against both schemes.
+  // A/B override for the quiet-node sanity relaxation: QUIET_TOL=1 restores
+  // the strict pre-relaxation guard, QUIET_TOL=N scales the quiet tolerance.
+  const quietEnv = process.env.QUIET_TOL;
+  if (quietEnv !== undefined) {
+    config = { ...config, quietPressureToleranceScale: parseFloat(quietEnv) };
+  }
   const env = process.env.IMPLICIT_MOMENTUM;
   if (env !== undefined && config.pressureSolver !== false) {
     config = {

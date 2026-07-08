@@ -85,9 +85,11 @@ console.log(`Created simulation with ${simState.flowNodes.size} flow nodes, ${si
 const relTol = process.env.RELTOL ? parseFloat(process.env.RELTOL) : undefined;
 const maxDt = process.env.MAXDT ? parseFloat(process.env.MAXDT) : undefined;
 const implicitEnv = process.env.IMPLICIT_MOMENTUM;
+const quietTolEnv = process.env.QUIET_TOL;
 const solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {};
 if (relTol) solverConfig.relTol = relTol;
 if (maxDt) solverConfig.maxDt = maxDt;
+if (quietTolEnv !== undefined) solverConfig.quietPressureToleranceScale = parseFloat(quietTolEnv);
 if (implicitEnv !== undefined) solverConfig.pressureSolver = { implicitMomentum: implicitEnv === '1' };
 const solver = new RK45Solver(solverConfig);
 if (relTol) console.log(`[test-simulation] RK45 relTol overridden to ${relTol}`);

@@ -762,7 +762,8 @@ export function checkStateSanity(
   oldState: SimulationState,
   newState: SimulationState,
   dt: number,
-  implicitFlows = false
+  implicitFlows = false,
+  quietPressureToleranceScale = 1
 ): number {
   let maxBadness = 0;
 
@@ -809,25 +810,46 @@ export function checkStateSanity(
     // or swing a stiff liquid node by more than the driving-pressure scale
     // must still be resolved by shrinking dt, or the step-scale cavitation
     // slosh diverges.
-    {
-      const P_SCALE_FLOOR = 2e5; // Pa
-      const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
-      const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
-      if (pChange > 0.2) {
-        // Scale badness: 20% change = badness 1, 40% = 2, etc.
-        const badness = pChange / 0.2;
-        if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)`;
-        maxBadness = Math.max(maxBadness, badness);
-      }
-    }
-
     // Check for very low TOTAL inventory (water + NCG - a helium-filled
-    // node legitimately carries ~zero water)
+    // node legitimately carries ~zero water). Computed before the pressure
+    // guard because the quiet-node relaxation below needs the inventory.
     const newGasMass = newNode.fluid.ncg ? ncgTotalMass(newNode.fluid.ncg) : 0;
     const newTotalMass = newNode.fluid.mass + newGasMass;
     if (newTotalMass < 0.1) {
       console.warn(`[RK45 Sanity] ${id}: Mass too low ${newNode.fluid.mass} water + ${newGasMass} gas`);
       return 1000;
+    }
+
+    {
+      const P_SCALE_FLOOR = 2e5; // Pa
+      const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
+      const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
+
+      // QUIET-NODE RELAXATION: what makes a large per-step pressure swing
+      // dangerous is its transport consequence - advection integrated against
+      // a badly wrong pressure moves the wrong mass into neighbors. A node
+      // whose throughput moves almost none of its inventory this step (a
+      // stagnant dead leg ringing acoustically: huge dP, tiny flows against
+      // tiny compliance) has no such consequence, and the semi-implicit
+      // pressure solve damps that mode with strength ~(w*dt)^2 - it needs the
+      // LARGE steps this guard would otherwise reject. Rejecting them traps
+      // dt on the wrong side of the stiffness crossover and the ringing never
+      // decays (observed: 2/3 of all steps rejected on tripped-feedtrain
+      // valve/pump bodies). Bounded relaxation, never across a phase change:
+      // the implicit solve's linearization is only trusted for excursions
+      // that stay on one side of the dome.
+      const throughputHere = nodeThroughput.get(id) || 0;
+      const inventoryFractionMoved = (throughputHere * 0.5 * dt) / newTotalMass;
+      const quiet = inventoryFractionMoved < 0.01 &&
+        oldNode.fluid.phase === newNode.fluid.phase;
+      const pTol = 0.2 * (quiet ? Math.max(1, quietPressureToleranceScale) : 1);
+
+      if (pChange > pTol) {
+        // Scale badness: tolerance = badness 1, 2x tolerance = 2, etc.
+        const badness = pChange / pTol;
+        if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)${quiet ? ' [quiet]' : ''}`;
+        maxBadness = Math.max(maxBadness, badness);
+      }
     }
 
     // Check for physically impossible density (mass accumulation bug)
@@ -963,6 +985,13 @@ export interface RK45Config {
   // Semi-implicit pressure solver configuration
   // Set to false to disable (use pure explicit RK45 for all physics)
   pressureSolver?: Partial<PressureSolverConfig> | false;
+
+  // Quiet-node relaxation of the sanity check's per-step pressure-change
+  // guard (see checkStateSanity): nodes moving <1% of their inventory this
+  // step get their 20% tolerance scaled by this factor, letting the implicit
+  // pressure solve take the large steps that damp dead-leg acoustic ringing
+  // instead of rejecting them. 1 disables (strict guard everywhere).
+  quietPressureToleranceScale?: number;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -991,6 +1020,8 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   // Default to deterministic mode for reproducibility
   // The game loop can override this if needed for UI responsiveness
   deterministicMode: true,
+
+  quietPressureToleranceScale: 4,
 };
 
 // ============================================================================
@@ -1574,7 +1605,8 @@ export class RK45Solver {
       }
 
       // Check for obviously bad physics (in addition to RK45 error estimate)
-      const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive());
+      const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive(),
+        this.config.quietPressureToleranceScale ?? 1);
 
       // Combine RK45 error with sanity check
       // Sanity score > 1 means something suspicious happened
@@ -1802,7 +1834,8 @@ export class RK45Solver {
     }
 
     // Check sanity and log warning if needed
-    const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive());
+    const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive(),
+      this.config.quietPressureToleranceScale ?? 1);
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }

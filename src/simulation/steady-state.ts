@@ -84,15 +84,27 @@ export class SteadyStateDetector {
       };
 
       let maxVolume = 0;
+      let totalMass = 0;
       for (const [, node] of state.flowNodes) {
-        if (!node.isBoundary) maxVolume = Math.max(maxVolume, node.volume);
+        if (node.isBoundary) continue;
+        maxVolume = Math.max(maxVolume, node.volume);
+        totalMass += node.fluid.mass;
       }
+      // Mass-drift normalization floor: a node's drift is judged against a
+      // PLANT-significant inventory, not just its own. A ~17 kg valve body
+      // exchanging 0.1 kg/s with the pressurizer steam space while the
+      // heaters recover pressure reads 0.7%/s against its own mass - and
+      // held the whole-plant verdict hostage - but is utterly negligible
+      // against the plant (same reasoning as the volume weighting on the
+      // pressure metric below).
+      const massScaleFloor = Math.max(1, 1e-4 * totalMass);
 
       for (const [id, node] of state.flowNodes) {
         if (node.isBoundary) continue;
         const prev = this.lastNodes.get(id);
         if (!prev) continue;
-        ewma(`${id}.mass`, (node.fluid.mass - prev.mass) / (Math.max(node.fluid.mass, 1) * dt));
+        ewma(`${id}.mass`,
+          (node.fluid.mass - prev.mass) / (Math.max(node.fluid.mass, massScaleFloor) * dt));
         ewma(`${id}.temp`, (node.fluid.temperature - prev.temperature) / dt);
         // Pressure drift, volume-weighted. Per-node inventory drift is
         // already covered by the mass/temperature metrics; what pressure
