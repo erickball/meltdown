@@ -988,9 +988,20 @@ export interface RK45Config {
 
   // Quiet-node relaxation of the sanity check's per-step pressure-change
   // guard (see checkStateSanity): nodes moving <1% of their inventory this
-  // step get their 20% tolerance scaled by this factor, letting the implicit
-  // pressure solve take the large steps that damp dead-leg acoustic ringing
-  // instead of rejecting them. 1 disables (strict guard everywhere).
+  // step get their 20% tolerance scaled by this factor. 1 disables (strict
+  // guard everywhere - the DEFAULT).
+  //
+  // EXPERIMENT RESULT (2026-07-07, the third falsified guard relaxation):
+  // scale 4 looked excellent short-term (+30% speed, trajectories matching
+  // strict to ~0.005% at 60 s) but over 1200 s the admitted 20-80%
+  // same-phase swings on dead-leg nodes whose ringing path runs through a
+  // BLOCKED connection (closed break valve, held check valves) compounded
+  // instead of damping - the implicit solve cannot damp a node with no open
+  // flow path - ending in negative node water masses and a 4000 K
+  // divergence. Like the momentum-error de-weighting attempts before it,
+  // the strict guard is load-bearing: rejecting those steps is what keeps
+  // the marginally-damped modes small. Do not raise the default; re-test
+  // only with a mechanism that excludes blocked-path nodes.
   quietPressureToleranceScale?: number;
 }
 
@@ -1021,7 +1032,7 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   // The game loop can override this if needed for UI responsiveness
   deterministicMode: true,
 
-  quietPressureToleranceScale: 4,
+  quietPressureToleranceScale: 1,
 };
 
 // ============================================================================
