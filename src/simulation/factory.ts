@@ -1243,6 +1243,19 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
   }
 
+  // Wall thermal-node pass (EXPERIMENT, env-gated): give pressure-boundary
+  // components a real steel wall node - inner convection to their own fluid,
+  // outer convection to the containing fluid when containedBy is set. Creep
+  // rupture then reads actual metal temperature instead of the lagged fluid
+  // proxy, and walls become the passive heat sink they are in reality
+  // (containment blowdown response especially). Policies, via WALL_NODES:
+  //   'none' (default) - current behavior
+  //   'rpv-bui'        - reactor vessels + buildings
+  //   'thick'          - + tanks and pipes with wall > WALL_THICK_MIN (25.4mm)
+  //   'all'            - + all tanks, pipes, pumps, valves
+  // Components with dedicated metal nodes (HX, crossVessel, cores) excluded.
+  createWallThermalNodes(plantState, state);
+
   // Pipe-inventory lumping pass: flow connections carry no volume of their
   // own, so the fluid that physically sits in the run of pipe a connection
   // represents must be lumped into a node. Small in-line components (valves,
@@ -2721,6 +2734,164 @@ function createFlowConnectionFromPlantConnection(
     massFlowRate: (connection as any).initialFlowRate ?? 0,
     inertance: length / flowArea,
   };
+}
+
+// ============================================================================
+// Wall thermal nodes (experiment - see the call site in
+// createSimulationFromPlant for the policy description)
+// ============================================================================
+
+function wallNodePolicy(): 'none' | 'rpv-bui' | 'thick' | 'all' {
+  // globalThis dance: 'process' exists under node/tsx but not in the browser
+  // build (no @types/node in the front-end tsconfig)
+  const env = (globalThis as { process?: { env?: Record<string, string> } }).process?.env;
+  const p = env?.WALL_NODES;
+  if (p === 'none' || p === 'rpv-bui' || p === 'thick' || p === 'all') return p;
+  // Default: reactor vessels + buildings. Benchmarked (2026-07-08) as ~1-14%
+  // step cost on w4loop for the two walls that matter - the containment
+  // shell absorbs ~0.2 bar of LOCA blowdown in the first two minutes and
+  // vessel creep reads real metal. The wider tiers ('thick', 'all') tripled
+  // the node count for no visible physics change in the same transients.
+  return 'rpv-bui';
+}
+
+function createWallThermalNodes(plantState: PlantState, state: SimulationState): void {
+  const policy = wallNodePolicy();
+  if (policy === 'none') return;
+  const envThick = (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.WALL_THICK_MIN;
+  const thickMin = envThick ? parseFloat(envThick) : 0.0254;
+
+  let created = 0;
+  for (const [id, component] of plantState.components) {
+    const comp = component as any;
+    const flowNode = state.flowNodes.get(id);
+    if (!flowNode || flowNode.isBoundary) continue;
+    if (state.thermalNodes.has(`${id}-wall`)) continue; // crossVessel etc.
+
+    // Geometry per component family: inner surface area + wall thickness
+    let area = 0;
+    let thickness = 0;
+    let isBuilding = false;
+    switch (component.type) {
+      case 'reactorVessel': {
+        // Cylindrical shell + upper head; the lower head has its own node
+        // when a core is present (corium relocation) - avoid double counting
+        const r = comp.innerDiameter / 2;
+        area = Math.PI * comp.innerDiameter * comp.height + 2 * Math.PI * r * r;
+        thickness = comp.wallThickness;
+        break;
+      }
+      case 'building': {
+        if (policy !== 'rpv-bui' && policy !== 'thick' && policy !== 'all') break;
+        isBuilding = true;
+        if (comp.shape === 'cylinder') {
+          const r = (comp.diameter ?? 20) / 2;
+          area = Math.PI * (comp.diameter ?? 20) * comp.height + 2 * Math.PI * r * r;
+        } else {
+          const w = comp.width ?? 20, l = comp.length ?? 20, h = comp.height;
+          area = 2 * (w + l) * h + 2 * w * l;
+        }
+        thickness = comp.wallThickness;
+        break;
+      }
+      case 'tank': {
+        if (policy === 'rpv-bui') continue;
+        if (policy === 'thick' && (comp.wallThickness ?? 0) <= thickMin) continue;
+        area = Math.PI * comp.width * comp.height +
+          2 * Math.PI * (comp.width / 2) * (comp.width / 2);
+        thickness = comp.wallThickness ?? 0.01;
+        break;
+      }
+      case 'pipe': {
+        if (policy === 'rpv-bui') continue;
+        if (policy === 'thick' && (comp.thickness ?? 0) <= thickMin) continue;
+        area = Math.PI * comp.diameter * comp.length;
+        thickness = comp.thickness ?? 0.01;
+        break;
+      }
+      case 'pump':
+      case 'valve': {
+        if (policy !== 'all') continue;
+        const d = comp.diameter ?? 0.3;
+        // Body ~ cylinder 2 diameters long; thickness from rating
+        area = Math.PI * d * (2 * d);
+        thickness = calculateThicknessFromPressure(comp.pressureRating ?? 20, d);
+        break;
+      }
+      default:
+        continue;
+    }
+    if (area <= 0 || thickness <= 0) continue;
+
+    // Buildings are concrete with a steel liner; on transient timescales
+    // only the liner plus the first ~decimeter of concrete participates
+    // (diffusing into 1.1 m of concrete takes days), so cap the thermal
+    // thickness rather than crediting the full wall as an instant sink.
+    let mass: number;
+    let cp: number;
+    let conductivity: number;
+    if (isBuilding) {
+      const steelFrac = comp.steelFraction ?? 0.05;
+      const effThickness = Math.min(thickness, 0.1);
+      const rhoEff = steelFrac * 7850 + (1 - steelFrac) * 2300;
+      cp = steelFrac > 0.5 ? 490 : 880;
+      conductivity = 1.5; // concrete-dominated
+      mass = area * effThickness * rhoEff;
+    } else {
+      mass = area * thickness * 7850;
+      cp = 490;
+      conductivity = 40;
+    }
+
+    state.thermalNodes.set(`${id}-wall`, {
+      id: `${id}-wall`,
+      label: `${component.label || id} wall`,
+      temperature: flowNode.fluid.temperature,
+      mass,
+      specificHeat: cp,
+      thermalConductivity: conductivity,
+      characteristicLength: thickness,
+      surfaceArea: area,
+      heatGeneration: 0,
+      maxTemperature: isBuilding ? 1500 : 1700,
+    });
+
+    // Inner face: wall <-> own fluid
+    state.convectionConnections.push({
+      id: `convection-${id}-wall`,
+      thermalNodeId: `${id}-wall`,
+      flowNodeId: id,
+      surfaceArea: area,
+      characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
+    });
+
+    // Outer face: wall <-> containing fluid (tank inside containment etc.);
+    // an uncontained BUILDING rejects to ambient instead - this is what lets
+    // a pressurized containment equilibrate over days instead of ramping
+    // monotonically (the atmosphere node is a fixed boundary).
+    const containerId = component.containedBy;
+    if (containerId && state.flowNodes.has(containerId)) {
+      state.convectionConnections.push({
+        id: `convection-${id}-wall-outer`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: containerId,
+        surfaceArea: area,
+        characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
+      });
+    } else if (isBuilding) {
+      state.convectionConnections.push({
+        id: `convection-${id}-wall-outer`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: 'atmosphere',
+        surfaceArea: area,
+        characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
+      });
+    }
+    created++;
+  }
+  if (created > 0) {
+    console.log(`[Factory] Wall thermal nodes: policy '${policy}' created ${created}`);
+  }
 }
 
 // ============================================================================

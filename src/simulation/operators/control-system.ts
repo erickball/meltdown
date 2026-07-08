@@ -137,6 +137,9 @@ export class ControlSystemOperator implements ConstraintOperator {
           else demandOpen = valve.reliefOpen ?? false; // between reseat and pop: hold latch
         }
       }
+      if (demandOpen && !(valve.reliefOpen ?? false)) {
+        valve.liftCount = (valve.liftCount ?? 0) + 1;
+      }
       valve.reliefOpen = demandOpen;
 
       const target = demandOpen ? 1 : 0;
