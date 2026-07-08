@@ -75,8 +75,8 @@ export interface LevelDef {
   interestAPR: number;
 
   goals: GoalDef[];
-  /** Level fails if estimated cancers from releases reach this. */
-  maxCancers: number;
+  /** Level fails if the radiological release severity index reaches this. */
+  maxRelease: number;
 
   events: EventScheduleDef;
 

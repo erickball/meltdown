@@ -33,7 +33,9 @@ Done on the branch: build lock-in pricing (75% salvage / diff+10% work fee / 25%
 repair fee), money from generation ($/MWh with day-night price curve, loan interest,
 "fiscal compression" 1 sim-min = 1 fiscal day), random + scripted failures (pump trips,
 turbine trips, LOCA/SGTR through the real burst physics, price spikes/crashes),
-MACCS-lite cancer estimate + accident/bankruptcy sequences with the boss rant,
+radiological release source-term reporting (moles + becquerels released; a
+severity index sets each level's release limit) + accident/bankruptcy
+sequences with the boss rant,
 corny 90s dialogue scenes (pixel portraits, typewriter, WebAudio chiptunes),
 operator actions panel (click a pump/valve/controller in sim mode; 20s walk-out
 delay with progress bar). Level 1 is the "reactor for an existing secondary" build.
@@ -49,8 +51,8 @@ Original notes:
 -Add ability to wait for random initiating event (once steady state is achieved)
 -Add random failures for active components
 -Add money earning system based on generation (in game mode). 
--After an accident you get told how many people you may have given cancer to ("but we'll never know for certain"). Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit. For the game-flavor sequences (intro, post-accident, story progression, etc.) I'm thinking kind of a corny pixelated 90s-game aesthetic, where it's some text you click through, some MIDI music, and a two-frame animation of a cartoon person with different expressions depending on what's happening. The boss character is kind of a stereotype of a fat-cat 1960s-70s businessman who hates environmentalists, safety concerns, and the government.
--I guess that means we're building in some sort of MACCS-lite?
+-After an accident you get told how much radioactive material you released to the environment. Then you go to "Out For Repairs" (construction mode, basically) and your boss gives you a little angry rant about the interest accumulating by the millions every day. But there's no actual time limit. For the game-flavor sequences (intro, post-accident, story progression, etc.) I'm thinking kind of a corny pixelated 90s-game aesthetic, where it's some text you click through, some MIDI music, and a two-frame animation of a cartoon person with different expressions depending on what's happening. The boss character is kind of a stereotype of a fat-cat 1960s-70s businessman who hates environmentalists, safety concerns, and the government.
+-Some kind of simplified consequence/source-term model for releases
 -Add cool visuals for different initiating events
 -Maybe something about a control room, but I don't want the user to have to worry about this a lot
 -"Operator actions" initiated by the user (with delay and progress bar) by clicking on a pump or w/e

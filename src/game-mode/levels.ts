@@ -27,7 +27,7 @@ export const LEVELS: LevelDef[] = [
       { kind: 'power', mwe: 150, holdSeconds: 120, label: 'Reach 150 MWe and hold it' },
       { kind: 'energy', mwh: 25, label: 'Deliver 25 MWh to the grid' },
     ],
-    maxCancers: 1,
+    maxRelease: 1,
     events: { warmupSeconds: Infinity, meanIntervalSeconds: Infinity, pool: [] },
     briefing: [
       { who: 'grubb', mood: 'neutral', text: 'So you\'re the new Chief Engineer. Welcome to Gigawatt Power & Light. Don\'t get comfortable.' },
@@ -66,7 +66,7 @@ export const LEVELS: LevelDef[] = [
       { kind: 'energy', mwh: 60, label: 'Deliver 60 MWh' },
       { kind: 'cash', dollars: 32e6, label: 'Grow the account to $32M' },
     ],
-    maxCancers: 1,
+    maxRelease: 1,
     events: {
       warmupSeconds: 240,
       meanIntervalSeconds: Infinity,
@@ -108,7 +108,7 @@ export const LEVELS: LevelDef[] = [
       { kind: 'energy', mwh: 120, label: 'Deliver 120 MWh' },
       { kind: 'cash', dollars: 40e6, label: 'Stay solvent: keep $40M+' },
     ],
-    maxCancers: 1,
+    maxRelease: 1,
     events: {
       warmupSeconds: 600,
       meanIntervalSeconds: 900,
@@ -150,7 +150,7 @@ export const LEVELS: LevelDef[] = [
       { kind: 'energy', mwh: 100, label: 'Deliver 100 MWh during the audit' },
       { kind: 'cash', dollars: 50e6, label: 'End the audit above $50M' },
     ],
-    maxCancers: 0.01,
+    maxRelease: 0.01,
     events: {
       warmupSeconds: 300,
       meanIntervalSeconds: Infinity,

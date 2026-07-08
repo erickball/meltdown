@@ -42,22 +42,24 @@ screen).
 5. **DEBRIEF / FAILURE** —
    - All objectives met → payout, boss praise, next level unlocked.
    - Cash < $0 → bankruptcy rant, retry level.
-   - Radiological release (estimated cancers ≥ 1) → the accident screen:
-     "how many people you may have given cancer (but we'll never know for
-     certain)", then the boss rant about interest accumulating, then back to
-     construction ("Out For Repairs") or retry.
+   - Radiological release (severity index ≥ the level's limit) → the plant
+     keeps running ~15 s so the player watches it unfold, then the accident
+     screen reports how much radioactive material reached the environment
+     (moles of aerosol + noble gas, ≈ becquerels), then the boss rant about
+     interest accumulating, then back to construction ("Out For Repairs") or
+     retry.
 
-## MACCS-lite
+## Release severity
 
-`estimatedCancers = 60 × CsI_moles_released + 0.02 × Xe_moles_released`
+`severity = 60 × CsI_moles_released + 0.02 × Xe_moles_released`
 
-Hand-wave chain (documented so the number is defensible-ish in spirit): CsI
-moles → Cs-137-equivalent activity → generic Gaussian-plume population dose →
-LNT 5%/person-Sv. Calibrated so a full-core volatile release from a ~3 GWt
-core (~750 mol) lands in the low tens-of-thousands — Chernobyl-order — and a
-scram-and-leak whiff lands well under one statistical cancer. Noble gases are
-~3 orders of magnitude less consequential per mole. Constraint objectives use
-this number; the accident screen displays a deliberately fuzzy range.
+CsI aerosol deposits downwind and dominates the significance of a release;
+noble-gas xenon disperses and is ~3 orders of magnitude less significant per
+mole. Weights are calibrated so a full-core volatile release from a ~3 GWt
+core (~750 mol CsI-equivalent) lands at severity ~10^4 and a scram-and-leak
+whiff lands well under 1. The level's `maxRelease` limit is a threshold on this
+index. For flavor the accident screen also reports an approximate released
+activity (~5e14 Bq per mole of CsI-equivalent, 5e11 per mole of Xe).
 
 ## Levels (first playable set)
 
@@ -77,7 +79,7 @@ Stock plants derive from the shipping presets, so convergence is proven.
    at moderate rate (pump/turbine trips, price swings).
 4. **THE INSPECTION** — Two-loop PWR, free. An NRC stress test: one surprise
    major initiating event (SGTR / small LOCA / RCP trip / turbine trip) at a
-   random time. Goals: 100 MWh, cash to $50M, estimated cancers < 0.01.
+   random time. Goals: 100 MWh, cash to $50M, release severity < 0.01.
 
 ## Playtest notes / known issues
 
@@ -113,7 +115,7 @@ src/game-mode/
   index.ts        initGameMode(host) — the only export main.ts touches
   types.ts        LevelDef, GoalDef, EventDef, phase enum, career save
   economy.ts      Ledger: cash/loan/interest, price curve, lock-in pricing
-  consequences.ts cancersFromRelease(), accident text helpers
+  consequences.ts assessRelease(), release/accident text helpers
   events.ts       RandomEventEngine (poisson timing, weighted picks)
   levels.ts       LEVELS[] with dialogue scripts and goal defs
   levels/*.json   stock plants (level 1 partial PWR; others reuse presets)

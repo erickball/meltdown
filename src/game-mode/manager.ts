@@ -13,7 +13,7 @@ import { SimulationState, getTurbineCondenserState } from '../simulation';
 import { GameLoop, GameEvent } from '../game';
 import { LevelDef, GamePhase, GoalProgress, CareerSave, GameEventKind, FiredEvent, DialogueLine } from './types';
 import { Ledger } from './economy';
-import { assessRelease } from './consequences';
+import { assessRelease, formatActivity } from './consequences';
 import { RandomEventEngine } from './events';
 import { LEVELS, MAJOR_SURPRISES } from './levels';
 import { DialogueOverlay } from './dialogue';
@@ -68,6 +68,10 @@ export class GameModeManager {
   private capturedDesign: unknown | null = null;
   private runPeakFuelTemp = 0;
   private runPeakMWe = 0;
+  // Once a release trips the limit we let the plant keep running for ~15 s
+  // (the player watches it unfold) before the boss steps in. This guards
+  // against re-arming and against other end conditions preempting it.
+  private releaseArmed = false;
 
   constructor(private host: GameHost) {
     this.save = this.loadSave();
@@ -174,6 +178,7 @@ export class GameModeManager {
     this.capturedDesign = null;
     this.runPeakFuelTemp = 0;
     this.runPeakMWe = 0;
+    this.releaseArmed = false;
 
     // Load the starting plant. A retry-with-design provides the player's own
     // failed layout; otherwise the level's free stock plant (or an empty site).
@@ -575,11 +580,12 @@ export class GameModeManager {
 
   private checkEndConditions(state: SimulationState): void {
     if (!this.level || !this.ledger || this.phase !== 'operation') return;
+    if (this.releaseArmed) return; // release failure is already counting down
 
     // radiological release
     const release = assessRelease(state.environmentalRelease as any);
-    if (release.cancers >= this.level.maxCancers) {
-      this.radiologicalFailure(release.cancers, release.verdict);
+    if (release.severity >= this.level.maxRelease) {
+      this.armReleaseFailure();
       return;
     }
 
@@ -668,35 +674,49 @@ export class GameModeManager {
     });
   }
 
-  private radiologicalFailure(cancers: number, verdict: string): void {
+  /**
+   * A release has crossed the level's limit. Let the plant KEEP RUNNING for
+   * ~15 s (real time) so the player watches it unfold, showing an alarm
+   * banner, then the boss steps in with the final tally.
+   */
+  private armReleaseFailure(): void {
+    if (this.releaseArmed) return;
+    this.releaseArmed = true;
+    this.eventEngine?.disarm();
+    this.tunes.sfx('alarm');
+    this.hud.ticker('☢ RADIOLOGICAL RELEASE IN PROGRESS - containment breached', true);
+
+    const banner = this.showPersistentBanner(
+      '☢ RADIOLOGICAL RELEASE',
+      'Containment is breached and venting. The plant is still running...'
+    );
+    window.setTimeout(() => {
+      banner.remove();
+      this.radiologicalFailure();
+    }, 15000);
+  }
+
+  private radiologicalFailure(): void {
     if (!this.level) return;
     this.host.gameLoop.pause();
     this.setPhase('failed');
-    this.eventEngine?.disarm();
-    this.tunes.sfx('alarm');
+    this.tunes.play('disaster');
 
-    // Give the player ~15 s with the frozen plant to absorb what happened
-    // before Mr. Grubb's phone starts ringing.
-    this.delayThenFailure(
-      '☢ RADIOLOGICAL RELEASE',
-      'The plant is releasing to the environment. Take a look at the damage.',
-      15,
-      () => {
-        this.tunes.play('disaster');
-        this.failureChoices(
-          'RADIOLOGICAL RELEASE',
-          [
-            `Estimated statistical cancers: ${cancers < 0.01 ? '<0.01' : cancers.toFixed(2)}`,
-            verdict,
-          ],
-          [
-            { who: 'grubb', mood: 'panic', text: 'The phones. The PHONES. Every line is a reporter, a lawyer, or my mother. WHAT DID YOU DO?' },
-            { who: 'inspector', mood: 'alarmed', text: `Preliminary assessment: ${verdict}` },
-            { who: 'grubb', mood: 'furious', text: 'Do you know what the interest does while we\'re shut down "out for repairs"? It COMPOUNDS. Millions a day, compounding, while you hose down the parking lot!' },
-            { who: 'grubb', mood: 'angry', text: 'The board is calling it a "career development opportunity." For your replacement. Unless you want to try that level again and get it RIGHT.' },
-          ]
-        );
-      }
+    // Re-assess at trip time: the release kept growing during the 15 s.
+    const release = assessRelease(this.host.gameLoop.getState().environmentalRelease as any);
+    this.failureChoices(
+      'RADIOLOGICAL RELEASE',
+      [
+        release.verdict,
+        `Released to the environment: ${release.csiMoles.toFixed(1)} mol aerosol + ` +
+          `${release.xenonMoles.toFixed(0)} mol noble gas (~${formatActivity(release.becquerels)}).`,
+      ],
+      [
+        { who: 'grubb', mood: 'panic', text: 'The phones. The PHONES. Every line is a reporter, a lawyer, or my mother. WHAT DID YOU DO?' },
+        { who: 'inspector', mood: 'alarmed', text: `Preliminary source term: ${formatActivity(release.becquerels)} to the environment.` },
+        { who: 'grubb', mood: 'furious', text: 'Do you know what the interest does while we\'re shut down "out for repairs"? It COMPOUNDS. Millions a day, compounding, while you hose down the parking lot!' },
+        { who: 'grubb', mood: 'angry', text: 'The board is calling it a "career development opportunity." For your replacement. Unless you want to try that level again and get it RIGHT.' },
+      ]
     );
   }
 
@@ -755,6 +775,22 @@ export class GameModeManager {
       if (countEl) countEl.textContent = `(${remaining})`;
     }, 1000);
     overlay.querySelector('.gm-accident-continue')?.addEventListener('click', finish);
+  }
+
+  /**
+   * A persistent alarm banner shown while the plant KEEPS running (used for a
+   * release, which the player watches unfold before the boss arrives).
+   * Returns the element so the caller can remove it. No countdown, no pause.
+   */
+  private showPersistentBanner(title: string, sub: string): HTMLDivElement {
+    const overlay = document.createElement('div');
+    overlay.className = 'gm-accident-banner';
+    overlay.innerHTML = `
+      <div class="gm-accident-title">${title}</div>
+      <div class="gm-accident-sub">${sub}</div>
+    `;
+    document.body.appendChild(overlay);
+    return overlay;
   }
 
   private confirmAbandon(): void {

@@ -898,7 +898,7 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
 /**
  * Check for NaN/Infinity in simulation state and report issues
  */
-export function checkSimulationHealth(state: SimulationState): { healthy: boolean; issues: string[] } {
+export function checkSimulationSanity(state: SimulationState): { ok: boolean; issues: string[] } {
   const issues: string[] = [];
 
   // Check thermal nodes
@@ -949,7 +949,7 @@ export function checkSimulationHealth(state: SimulationState): { healthy: boolea
   }
 
   return {
-    healthy: issues.length === 0,
+    ok: issues.length === 0,
     issues,
   };
 }
