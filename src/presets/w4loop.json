@@ -1049,7 +1049,7 @@
     "ratedPower": 1150000000,
     "ratedSteamFlow": 1500,
     "efficiency": 0.85,
-    "governorValve": 1.0,
+    "governorValve": 0.12,
     "generatorEfficiency": 0.98,
     "ports": [
      {
