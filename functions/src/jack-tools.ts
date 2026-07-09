@@ -11,8 +11,19 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: "list_component_types",
     description:
-      "Get the catalog of component types that can be built, with their key properties and defaults. Call this before adding a component type you haven't added in this conversation.",
-    input_schema: { type: "object", properties: {}, additionalProperties: false },
+      "List buildable component types. With no arguments returns just the type keys and display names (cheap). Pass types=[...] to get the full property schema (property names, units, ranges, defaults, help) for those types. Fetch a type's schema before the first time you add or edit that type in a conversation.",
+    input_schema: {
+      type: "object",
+      properties: {
+        types: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Type keys to fetch full property schemas for (e.g. ['relief-valve'])",
+        },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "get_component_details",

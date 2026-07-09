@@ -11,7 +11,10 @@ initializeApp();
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
 const MODEL = "claude-sonnet-5";
-const MAX_OUTPUT_TOKENS = 2000;
+// Generous cap: adaptive thinking counts against max_tokens, and starving it
+// truncates the reply mid-tool-loop with no visible text. Output is only
+// billed as used.
+const MAX_OUTPUT_TOKENS = 8000;
 
 // Hard monthly spend ceiling for the whole app, in USD.
 const MONTHLY_BUDGET_USD = 10;
@@ -118,11 +121,23 @@ export const jackChat = onRequest(
 
     const client = new Anthropic({ apiKey: anthropicApiKey.value() });
 
+    // Cache the conversation prefix: mark the last content block of the
+    // final message so tool-loop rounds (seconds apart) and follow-up turns
+    // re-read the transcript from cache instead of re-paying it in full.
+    const lastContent = body.messages[body.messages.length - 1]?.content;
+    if (Array.isArray(lastContent) && lastContent.length > 0) {
+      lastContent[lastContent.length - 1].cache_control = { type: "ephemeral" };
+    }
+
     let response: Anthropic.Messages.Message;
     try {
       response = await client.messages.create({
         model: MODEL,
         max_tokens: MAX_OUTPUT_TOKENS,
+        // Adaptive thinking at low effort: quick chat replies, still smart
+        // enough for sizing math; keeps think-time (Jack "getting stuck") down.
+        thinking: { type: "adaptive" },
+        output_config: { effort: "low" },
         tools: JACK_TOOLS,
         system: [
           {

@@ -86,7 +86,8 @@ quiet until the 1st.
 
 ## Known limitations / future work
 
-- No streaming — replies appear all at once (fine at ~2000 max output tokens).
+- No streaming — replies appear all at once (client shows tool-action lines
+  and any interim text between rounds; 100s fetch timeout per round).
 - Auto-placement puts a new component to the right of the current plant
   (or at the origin on an empty site); Jack can't see the canvas viewport.
 - Conversation resets on page reload; capped at 80 messages per conversation.

@@ -82,7 +82,9 @@ export function executeJackTool(
 ): unknown {
   switch (name) {
     case 'list_component_types':
-      return buildComponentCatalog();
+      return buildComponentCatalog(
+        Array.isArray(input.types) ? (input.types as string[]) : undefined
+      );
 
     case 'get_component_details': {
       const comp = resolveComponent(host, String(input.component ?? ''));

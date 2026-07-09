@@ -225,17 +225,29 @@ export class JackManager {
     this.messages.push({ role: 'user', content });
 
     this.setBusy(true);
+    let renderedText = false;
     try {
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-        const resp = await fetch(this.endpoint(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messages: this.messages }),
-        });
+        // Hard timeout so a wedged request shows an error instead of an
+        // eternal typing indicator.
+        const abort = new AbortController();
+        const timer = setTimeout(() => abort.abort(), 100_000);
+        let resp: Response;
+        try {
+          resp = await fetch(this.endpoint(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: this.messages }),
+            signal: abort.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
         if (!resp.ok) {
           let jackSays = `Line's dead (HTTP ${resp.status}). Try me again in a bit.`;
           try {
             const errBody = await resp.json();
+            console.warn('[Jack] server error', resp.status, errBody);
             if (errBody.jackSays) jackSays = errBody.jackSays;
             else if (errBody.error) jackSays += ` [${errBody.error}]`;
           } catch {
@@ -255,13 +267,28 @@ export class JackManager {
         for (const block of data.content) {
           if (block.type === 'text' && (block as TextBlock).text.trim()) {
             this.addBubble('jack-msg-jack', (block as TextBlock).text);
+            renderedText = true;
           }
         }
 
         const toolUses = data.content.filter(
           (b): b is ToolUseBlock => b.type === 'tool_use'
         );
-        if (data.stop_reason !== 'tool_use' || toolUses.length === 0) return;
+        if (data.stop_reason !== 'tool_use' || toolUses.length === 0) {
+          if (data.stop_reason === 'max_tokens') {
+            this.addBubble(
+              'jack-msg-error',
+              'Jack got cut off mid-sentence (length limit). Ask him to pick up where he left off.'
+            );
+          } else if (!renderedText) {
+            console.warn('[Jack] turn ended with no text', data);
+            this.addBubble(
+              'jack-msg-error',
+              "Jack went quiet without answering — that's a bug on our end. Try asking again."
+            );
+          }
+          return;
+        }
 
         const results: ContentBlock[] = [];
         for (const tu of toolUses) {
@@ -295,9 +322,13 @@ export class JackManager {
         "Jack's gone quiet — too many back-and-forths in one request. Ask again."
       );
     } catch (e) {
+      console.warn('[Jack] request failed', e);
+      const timedOut = e instanceof DOMException && e.name === 'AbortError';
       this.addBubble(
         'jack-msg-error',
-        `Can't reach the site office (${String(e)}). Check your connection and try again.`
+        timedOut
+          ? "That call took too long — site office must be swamped. Ask again; you won't lose your place."
+          : `Can't reach the site office (${String(e)}). Check your connection and try again.`
       );
       this.messages.length = checkpoint;
     } finally {
