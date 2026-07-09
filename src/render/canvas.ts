@@ -113,6 +113,11 @@ export class PlantCanvas {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
+    // Don't steal arrow keys from text fields (e.g. Jack's chat box)
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      return;
+    }
     // Only handle arrow keys in isometric mode for elevation control
     if (!this.isometric.enabled) return;
 
