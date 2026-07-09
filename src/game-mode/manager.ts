@@ -161,7 +161,14 @@ export class GameModeManager {
   // Level lifecycle
   // ==========================================================================
 
-  startLevel(index: number, designOverride?: unknown): void {
+  startLevel(index: number, opts?: {
+    /** Load this plant instead of the stock one (retry-with-design, answer key). */
+    design?: unknown;
+    /** Replace the level's HUD hints (the answer key ships operating notes). */
+    hints?: string[];
+    /** Skip the briefing scene (the answer key's scolding already played). */
+    skipBriefing?: boolean;
+  }): void {
     const level = LEVELS[index];
     if (!level) return;
     this.teardownLevel();
@@ -182,10 +189,11 @@ export class GameModeManager {
     this.runPeakMWe = 0;
     this.releaseArmed = false;
 
-    // Load the starting plant. A retry-with-design provides the player's own
-    // failed layout; otherwise the level's free stock plant (or an empty site).
-    if (designOverride) {
-      this.host.loadPlantData(JSON.parse(JSON.stringify(designOverride)));
+    // Load the starting plant. A design override carries the player's own
+    // failed layout (retry) or the reference solution (answer key); otherwise
+    // the level's free stock plant (or an empty site).
+    if (opts?.design) {
+      this.host.loadPlantData(JSON.parse(JSON.stringify(opts.design)));
     } else if (level.stockPlant) {
       this.host.loadPlantData(JSON.parse(JSON.stringify(level.stockPlant)));
     } else {
@@ -203,13 +211,18 @@ export class GameModeManager {
 
     this.hud.show();
     this.hud.setLevel(level.title);
-    this.hud.setHints(level.hints);
-    this.setPhase('briefing');
+    this.hud.setHints(opts?.hints ?? level.hints);
     this.tunes.play('briefing');
-    this.dialogue.show(level.briefing, () => {
+    if (opts?.skipBriefing) {
       this.setPhase('construction');
       this.host.setMode('construction');
-    });
+    } else {
+      this.setPhase('briefing');
+      this.dialogue.show(level.briefing, () => {
+        this.setPhase('construction');
+        this.host.setMode('construction');
+      });
+    }
   }
 
   private teardownLevel(): void {
@@ -671,11 +684,33 @@ export class GameModeManager {
     this.dialogue.show(lines, () => {
       this.choiceOverlay(title, [], [
         ...(this.builtOnce
-          ? [{ label: 'RETRY WITH THIS DESIGN', action: () => this.startLevel(this.levelIndex, this.capturedDesign ?? undefined) }]
+          ? [{ label: 'RETRY WITH THIS DESIGN', action: () => this.startLevel(this.levelIndex, { design: this.capturedDesign ?? undefined }) }]
           : []),
         { label: 'START OVER', action: () => this.startLevel(this.levelIndex) },
+        ...(this.level?.reference
+          ? [{
+              label: 'SHOW ME THE ANSWER',
+              tooltip: 'Restart with a known-good design and the boss\'s operating notes. He will have opinions.',
+              action: () => this.startReference(),
+            }]
+          : []),
         { label: 'TITLE SCREEN', action: () => this.showTitle() },
       ], diagnostics);
+    });
+  }
+
+  /**
+   * The player asked for the answer key: Grubb hands over the reference
+   * design (meanly), then the level restarts with it loaded and the
+   * reference's operating notes in place of the usual hints. The briefing
+   * is skipped - the scolding was the briefing.
+   */
+  private startReference(): void {
+    const ref = this.level?.reference;
+    if (!ref) return;
+    const index = this.levelIndex;
+    this.dialogue.show(ref.scolding, () => {
+      this.startLevel(index, { design: ref.design, hints: ref.notes, skipBriefing: true });
     });
   }
 
@@ -811,7 +846,7 @@ export class GameModeManager {
   private choiceOverlay(
     title: string,
     lines: string[],
-    choices: Array<{ label: string; action: () => void }>,
+    choices: Array<{ label: string; action: () => void; tooltip?: string }>,
     diagnostics?: string[]
   ): void {
     const overlay = document.createElement('div');
@@ -830,7 +865,7 @@ export class GameModeManager {
         ${lines.map(l => `<div class="gm-choice-line">${l}</div>`).join('')}
         ${diagBlock}
         <div class="gm-choice-buttons">
-          ${choices.map((c, i) => `<button class="gm-hud-btn gm-choice-btn" data-choice="${i}">${c.label}</button>`).join('')}
+          ${choices.map((c, i) => `<button class="gm-hud-btn gm-choice-btn" data-choice="${i}"${c.tooltip ? ` title="${c.tooltip}"` : ''}>${c.label}</button>`).join('')}
         </div>
       </div>`;
     document.body.appendChild(overlay);

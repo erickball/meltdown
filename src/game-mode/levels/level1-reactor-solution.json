@@ -1,5 +1,5 @@
 {
-  "comment": "Reference player build for level 1: a reactor vessel + core exactly as the construction manager would create them from the dialogs (vessel with auto core barrel, fuel properties transferred to the barrel, lattice-derived neutronics from enrichment), plus the three player connections: cold leg (RCP -> downcomer), hot leg (core barrel top -> SG tubes), surge line (downcomer -> pressurizer). barrelTopGap=0.05 (<0.1) so there is no internal top-gap short circuit; the hot leg comes straight off the upper plenum like a real PWR.",
+  "comment": "Reference player build for level 1: a reactor vessel + core exactly as the construction manager would create them from the dialogs (vessel with auto core barrel, fuel properties transferred to the barrel, lattice-derived neutronics from enrichment), plus the three player connections: cold leg (RCP -> downcomer), hot leg (core barrel top -> SG tubes), surge line (downcomer -> pressurizer). barrelTopGap=0.05 (<0.1) so there is no internal top-gap short circuit; the hot leg comes straight off the upper plenum like a real PWR. startCritical=true so the factory solves the rod position for rho=0 at the initial conditions; the player (or the headless operator in scripts/test-game-levels.ts) then eases the rods out to raise power.",
   "components": [
     ["rv-p", {
       "id": "rv-p", "type": "reactorVessel", "label": "Reactor Vessel",
@@ -24,7 +24,7 @@
       "volume": 72.3, "fillLevel": 1.0, "isHydraulicOnly": true,
       "fuelRodCount": 8, "actualFuelRodCount": 40071,
       "fuelTemperature": 873.15, "fuelMeltingPoint": 3073.15,
-      "controlRodCount": 4, "controlRodPosition": 0.7,
+      "controlRodCount": 4, "controlRodPosition": 0.7, "startCritical": true,
       "activeFuelHeight": 3.66, "coreBottomElevation": 0.5,
       "rodDiameter": 9.5, "rodPitch": 12.6, "cladThickness": 0.6,
       "enrichment": 0.05, "fuelMaterial": "UO2",

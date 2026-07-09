@@ -11,7 +11,11 @@
  *   npx tsx scripts/test-game-levels.ts <level|all> [simSeconds]
  *
  * Levels:
- *   1: level1-site.json + level1-player-reactor.json, expect >=150 MWe
+ *   1: level1-site.json + level1-reactor-solution.json (the in-game reference
+ *      solution) with a scripted operator easing the rods out, expect >=150 MWe
+ *   2: pwr.json (the stock plant IS the solution), expect it self-starts
+ *   3: pwr.json as the reference build for the empty site, expect >=250 MWe
+ *   4: two-loop.json (stock = solution), expect steady generation
  */
 
 import * as fs from 'fs';
@@ -93,6 +97,25 @@ interface LevelCheck {
   simSeconds: number;
   /** optional per-run tweak of the merged plant before simulation */
   prepare?: (plant: PlantState) => void;
+  /** optional scripted operator, called once per accepted frame */
+  operate?: (state: ReturnType<typeof createSimulationFromPlant>, dt: number) => void;
+}
+
+/**
+ * Scripted operator for manually-rodded cores (level 1): ease the rods out
+ * toward a target core power the way the briefing tells the player to.
+ * Movement is rate-limited and pauses whenever reactivity is already
+ * meaningfully positive, so the approach is a slow, stable power ascension.
+ */
+function rodOperator(targetMWt: number) {
+  return (state: ReturnType<typeof createSimulationFromPlant>, dt: number) => {
+    const nn = state.neutronics;
+    if (!nn || nn.scrammed) return;
+    const err = (targetMWt * 1e6 - nn.power) / (targetMWt * 1e6);
+    let step = 0.0005 * dt * Math.max(-1, Math.min(1, err * 5));
+    if (step > 0 && nn.reactivity > 50e-5) step = 0; // already rising - wait
+    nn.controlRodPosition = Math.max(0, Math.min(1, nn.controlRodPosition + step));
+  };
 }
 
 const CHECKS: Record<string, LevelCheck> = {
@@ -100,9 +123,28 @@ const CHECKS: Record<string, LevelCheck> = {
     name: 'Level 1: FIRST LIGHT (stock site + reference player reactor)',
     parts: [
       'src/game-mode/levels/level1-site.json',
-      'scripts/game-level-solutions/level1-player-reactor.json',
+      'src/game-mode/levels/level1-reactor-solution.json',
     ],
     targetMWe: 150,
+    simSeconds: 900,
+    operate: rodOperator(700),
+  },
+  '2': {
+    name: 'Level 2: SHAKEDOWN (stock pwr preset self-starts)',
+    parts: ['src/presets/pwr.json'],
+    targetMWe: 100,
+    simSeconds: 900,
+  },
+  '3': {
+    name: 'Level 3: GOING CONCERN (reference build = pwr preset on the empty site)',
+    parts: ['src/presets/pwr.json'],
+    targetMWe: 250,
+    simSeconds: 900,
+  },
+  '4': {
+    name: 'Level 4: THE INSPECTION (stock two-loop preset)',
+    parts: ['src/presets/two-loop.json'],
+    targetMWe: 300,
     simSeconds: 900,
   },
 };
@@ -126,6 +168,7 @@ async function runCheck(key: string, check: LevelCheck, simSecondsOverride?: num
   while (state.time < simSeconds) {
     const result = solver.advance(state, frameDt);
     state = result.state;
+    check.operate?.(state, frameDt);
     const tc = getTurbineCondenserState();
     const mwe = tc.turbinePower / 1e6;
     peakMWe = Math.max(peakMWe, mwe);

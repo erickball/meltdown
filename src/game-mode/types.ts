@@ -84,6 +84,22 @@ export interface LevelDef {
   debrief: DialogueLine[];
   /** Optional construction-phase hints shown in the HUD. */
   hints?: string[];
+
+  /**
+   * The answer key, offered after a failure: a complete plant design that
+   * beats the level (validated headlessly in scripts/test-game-levels.ts)
+   * plus the operating notes to run it. For levels whose stock plant already
+   * IS the answer, design repeats the stock plant and the notes carry the
+   * value. Grubb hands it over in the scolding scene; he is not gracious.
+   */
+  reference?: {
+    /** Complete plant JSON (preset format) that satisfies the goals. */
+    design: unknown;
+    /** Operating instructions, shown as the HUD hints for the reference run. */
+    notes: string[];
+    /** Grubb handing over the answer, meanly. Plays before the restart. */
+    scolding: DialogueLine[];
+  };
 }
 
 /** Live progress for one goal (mirrors GoalDef order). */

@@ -8,8 +8,30 @@
 
 import { LevelDef } from './types';
 import level1Site from './levels/level1-site.json';
+import level1ReactorSolution from './levels/level1-reactor-solution.json';
 import pwrPreset from '../presets/pwr.json';
 import twoLoopPreset from '../presets/two-loop.json';
+
+/**
+ * Merge preset-format plant fragments into one plant (components must have
+ * distinct ids). Used to lay the reference reactor into the level-1 site the
+ * same way scripts/test-game-levels.ts does for the headless validation runs.
+ */
+function mergePlantJson(...parts: unknown[]): unknown {
+  const seen = new Set<string>();
+  const components: unknown[] = [];
+  const connections: unknown[] = [];
+  for (const part of parts as Array<{ components?: unknown[]; connections?: unknown[] }>) {
+    for (const entry of part.components ?? []) {
+      const id = (entry as [string, unknown])[0];
+      if (seen.has(id)) throw new Error(`Duplicate component id '${id}' merging reference plant`);
+      seen.add(id);
+      components.push(entry);
+    }
+    connections.push(...(part.connections ?? []));
+  }
+  return { components, connections };
+}
 
 export const LEVELS: LevelDef[] = [
   // =========================================================================
@@ -50,6 +72,19 @@ export const LEVELS: LevelDef[] = [
       'Connect: RCP outlet -> vessel inlet. Core barrel top -> SG tube port. Vessel outlet -> pressurizer bottom.',
       'After BUILD: withdraw rods slowly until the core settles near your target power.',
     ],
+    reference: {
+      design: mergePlantJson(level1Site, level1ReactorSolution),
+      notes: [
+        'GRUBB\'S DRAWINGS: vessel and core are placed and piped. Cold leg -> downcomer, hot leg -> SG tubes, surge line -> pressurizer. Just press BUILD IT.',
+        'The rods start at the critical position. Withdraw a percent at a time, then WAIT for power to settle before the next pull.',
+        'Keep the reactivity readout under ~50 pcm on the way up. Around 60% core power the generator clears 150 MWe.',
+      ],
+      scolding: [
+        { who: 'grubb', mood: 'furious', text: 'THREE PIPES. The job was THREE PIPES and a slow hand on the rods, and you gave me modern art.' },
+        { who: 'grubb', mood: 'angry', text: 'Here. The as-built drawings from the old plant. I was saving them for someone who didn\'t need them. Clearly that ship has SAILED.' },
+        { who: 'grubb', mood: 'neutral', text: 'The rod procedure is on the binder cover: SLOWLY. Underlined. Twice. The man who underlined it is the reason we had a job opening.' },
+      ],
+    },
   },
   // =========================================================================
   {
@@ -91,6 +126,18 @@ export const LEVELS: LevelDef[] = [
       'Select a pump in simulation mode to open the OPERATOR ACTIONS panel.',
       'Watch the price ticker: a spike is worth chasing with full output.',
     ],
+    reference: {
+      design: pwrPreset,
+      notes: [
+        'GRUBB\'S BINDER: the plant is fine - press BUILD IT and let the controllers take it to full power. Your job starts when something stops.',
+        'When a pump trips, click it and press START in the OPERATOR ACTIONS panel. Do it promptly; the core does not enjoy waiting.',
+        'A price spike is free money: hold full output until it fades. Interest never sleeps, so neither should the turbine.',
+      ],
+      scolding: [
+        { who: 'grubb', mood: 'furious', text: 'The plant runs ITSELF. The ONE thing it can\'t do is walk outside and flip its own breaker. That part - the WALKING - is what I pay you for.' },
+        { who: 'grubb', mood: 'angry', text: 'Here\'s the operating binder. Chapter one: when a machine stops, START IT AGAIN. There is no chapter two. My nephew wrote it and even HE passed this level.' },
+      ],
+    },
   },
   // =========================================================================
   {
@@ -134,6 +181,19 @@ export const LEVELS: LevelDef[] = [
       'Controllers cost pocket change and they never fall asleep at 3 AM. Buy them.',
       'Loan interest runs whether you generate or not: build fast, start fast.',
     ],
+    reference: {
+      design: pwrPreset,
+      notes: [
+        'GRUBB\'S DRAWINGS: the Shakedown plant, about $3.8B all-in - well under the loan cap. Press BUILD IT; the controllers handle startup.',
+        'Interest on the build runs roughly $7,000 a sim-second. Revenue at full power is around $12,000. Conclusion: BE at full power.',
+        'Out here things break. Click the tripped machine, OPERATOR ACTIONS, restart it. Ride out price crashes at full output; they pass.',
+      ],
+      scolding: [
+        { who: 'grubb', mood: 'furious', text: 'Six BILLION dollars of credit, a flat field, and you built the bank a CRATER. They\'re framing your loan application as a warning to others.' },
+        { who: 'grubb', mood: 'angry', text: 'So here. The drawings from the auction plant. Yes, I\'m giving you the answers. Yes, like your homework. No, I\'m not proud either.' },
+        { who: 'grubb', mood: 'neutral', text: 'Build it EXACTLY as drawn, keep it running, and maybe the interest doesn\'t eat us alive before the meter does its job.' },
+      ],
+    },
   },
   // =========================================================================
   {
@@ -176,6 +236,19 @@ export const LEVELS: LevelDef[] = [
       'A steam generator tube rupture pushes primary coolant into the steam side: isolate and cool.',
       'Scram early beats explaining a release to Pruitt. He has a form for it.',
     ],
+    reference: {
+      design: twoLoopPreset,
+      notes: [
+        'GRUBB\'S PROCEDURES: the plant passes the audit as-is. Bank your 100 MWh early, before Pruitt\'s surprise lands (after about 7 minutes).',
+        'Tube rupture: primary is leaking into the steam side. Scram, then keep the ruptured SG bottled up while the intact loop removes heat.',
+        'A tripped pump or slammed governor: restart it from OPERATOR ACTIONS / the controller and carry on. And remember Pruitt\'s math: a scram costs money, a release costs EVERYTHING.',
+      ],
+      scolding: [
+        { who: 'grubb', mood: 'panic', text: 'Pruitt is still in the building. He watched the WHOLE thing. He asked for a second clipboard. He\'s never needed a SECOND CLIPBOARD.' },
+        { who: 'grubb', mood: 'furious', text: 'The emergency procedures were IN YOUR DESK. I found them just now. You were using them as a COASTER.' },
+        { who: 'grubb', mood: 'neutral', text: 'One more chance. Follow the book, keep the dosimeter bored, and if in doubt - SCRAM. Nobody ever went to prison for a scram.' },
+      ],
+    },
   },
 ];
 
