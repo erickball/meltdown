@@ -31,6 +31,7 @@ import { ComponentDialog, ComponentConfig, componentDefinitions } from './constr
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
+import { JackManager } from './jack/jack-manager';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -2937,6 +2938,17 @@ function init() {
     },
     showNotification,
     refreshSimControls: () => updatePauseButton(),
+  });
+
+  // "Atom" Jack: AI contractor chat in the bottom-right corner. Constructed
+  // here (like career mode) so its host closures can reach init()'s state.
+  new JackManager({
+    plantState,
+    constructionManager,
+    getSimState: () => gameLoop.getState(),
+    getMode: () => currentMode,
+    getSelectedComponentId: () => selectedComponentId,
+    refreshCostPanel: () => updateConstructionCostPanel(),
   });
 
   // Start in construction mode
