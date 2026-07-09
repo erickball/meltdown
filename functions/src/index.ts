@@ -33,6 +33,8 @@ const MAX_BODY_BYTES = 400_000;
 const ALLOWED_ORIGINS = [
   "https://unityriskresearch.web.app",
   "https://unityriskresearch.firebaseapp.com",
+  "https://unityriskresearch.com",
+  "https://www.unityriskresearch.com",
 ];
 const LOCALHOST_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 

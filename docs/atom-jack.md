@@ -1,9 +1,12 @@
 # "Atom" Jack — AI contractor assistant
 
 Jack is the Sonnet-powered head of operations at Atom Enterprises. He lives in
-the bottom-right corner of the screen (hard hat says JACK); clicking him opens
-a chat panel. He can explain the model, diagnose simulation behavior, and
-add/edit/connect/delete components in construction mode.
+the bottom-right corner of the screen (hard hat says JACK) with an always-
+visible "Ask Jack..." entry field next to his head; focusing it (or clicking
+him) expands the conversation panel, which opens with a scripted intro (no API
+call — the system prompt quotes it so he won't re-introduce himself). He can
+explain the model, diagnose simulation behavior, and add/edit/connect/delete
+components in construction mode.
 
 ## Architecture
 

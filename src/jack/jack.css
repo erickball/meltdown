@@ -12,6 +12,13 @@
   font-family: 'Courier New', monospace;
 }
 
+/* Always-visible bottom row: entry pill next to Jack's head */
+#jack-bottom-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 #jack-portrait {
   cursor: pointer;
   line-height: 0;
@@ -19,13 +26,56 @@
   transition: transform 0.1s ease;
 }
 #jack-portrait:hover {
-  transform: scale(1.07);
+  transform: scale(1.05);
 }
 
+#jack-entry {
+  display: flex;
+  align-items: center;
+  width: 250px;
+  background: rgba(16, 20, 31, 0.95);
+  border: 1px solid #e8b840;
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+#jack-input {
+  flex: 1;
+  background: none;
+  color: #dce8f5;
+  border: none;
+  padding: 9px 4px 9px 14px;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.3;
+  resize: none;
+  outline: none;
+}
+#jack-input:disabled {
+  opacity: 0.5;
+}
+#jack-send {
+  width: 34px;
+  align-self: stretch;
+  background: none;
+  color: #e8b840;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+#jack-send:hover:not(:disabled) {
+  color: #fff;
+}
+#jack-send:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Expanding conversation panel above the row */
 #jack-panel {
-  width: 340px;
-  height: 440px;
-  max-height: calc(100vh - 120px);
+  width: 354px;
+  height: 400px;
+  max-height: calc(100vh - 170px);
   display: flex;
   flex-direction: column;
   background: rgba(20, 20, 35, 0.96);
@@ -103,38 +153,4 @@
   background: #4a2020;
   color: #f0c0c0;
   border-left: 3px solid #c04040;
-}
-
-#jack-input-row {
-  display: flex;
-  border-top: 1px solid #444;
-}
-#jack-input {
-  flex: 1;
-  background: #10141f;
-  color: #dce8f5;
-  border: none;
-  padding: 7px 9px;
-  font-family: inherit;
-  font-size: 12px;
-  resize: none;
-  outline: none;
-}
-#jack-input:disabled {
-  opacity: 0.5;
-}
-#jack-send {
-  width: 44px;
-  background: #2a3450;
-  color: #e8b840;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-}
-#jack-send:hover:not(:disabled) {
-  background: #3a4666;
-}
-#jack-send:disabled {
-  opacity: 0.5;
-  cursor: default;
 }

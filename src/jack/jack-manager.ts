@@ -25,6 +25,14 @@ const PROD_ENDPOINT =
   'https://us-central1-unityriskresearch.cloudfunctions.net/jackChat';
 const MAX_TOOL_ROUNDS = 8;
 
+// Scripted opening line — shown instantly on first open, no API call. The
+// server system prompt quotes this verbatim and tells Jack not to
+// re-introduce himself; keep the two in sync.
+const JACK_INTRO =
+  "Jack. Head of operations, Atom Enterprises — your EPC contractor, which " +
+  "is a fancy way of saying I'm the plumber. Questions, complaints, custom " +
+  'hardware: I handle all of it. What are we working on, boss?';
+
 /**
  * "Atom" Jack — the player's EPC contractor. Portrait sits in the bottom
  * right; clicking it opens a chat panel. Jack answers questions about the
@@ -117,17 +125,19 @@ export class JackManager {
       <div id="jack-panel" class="hidden">
         <div id="jack-header">
           <span>"Atom" Jack — Atom Enterprises</span>
-          <button id="jack-close" title="Close chat">×</button>
+          <button id="jack-close" title="Collapse chat">×</button>
         </div>
         <div id="jack-log"></div>
-        <div id="jack-input-row">
-          <textarea id="jack-input" rows="2"
-            placeholder="Ask Jack... (Enter to send)"></textarea>
+      </div>
+      <div id="jack-bottom-row">
+        <div id="jack-entry">
+          <textarea id="jack-input" rows="1"
+            placeholder="Ask Jack..."></textarea>
           <button id="jack-send" title="Send">▶</button>
         </div>
-      </div>
-      <div id="jack-portrait" title="Chat with Jack, head of operations at Atom Enterprises — your EPC contractor. He can explain, troubleshoot, and modify your plant.">
-        ${jackPortraitSvg()}
+        <div id="jack-portrait" title="&quot;Atom&quot; Jack, head of operations at Atom Enterprises — your EPC contractor. He can explain, troubleshoot, and modify your plant.">
+          ${jackPortraitSvg()}
+        </div>
       </div>`;
     document.getElementById('app')!.appendChild(this.container);
 
@@ -142,6 +152,7 @@ export class JackManager {
     this.container
       .querySelector('#jack-close')!
       .addEventListener('click', () => this.togglePanel(false));
+    this.input.addEventListener('focus', () => this.togglePanel(true));
     this.sendBtn.addEventListener('click', () => this.handleSend());
     this.input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -154,12 +165,11 @@ export class JackManager {
   private togglePanel(open?: boolean): void {
     const show = open ?? this.panel.classList.contains('hidden');
     this.panel.classList.toggle('hidden', !show);
-    if (show) {
-      this.input.focus();
-      if (!this.introduced && this.messages.length === 0) {
-        this.introduced = true;
-        void this.converse('__INTRO__', true);
-      }
+    if (show && !this.introduced) {
+      // Scripted intro, rendered instantly — costs nothing, and the server
+      // prompt tells Jack he already said it.
+      this.introduced = true;
+      this.addBubble('jack-msg-jack', JACK_INTRO);
     }
   }
 
@@ -192,26 +202,23 @@ export class JackManager {
   private handleSend(): void {
     const text = this.input.value.trim();
     if (!text || this.busy) return;
+    this.togglePanel(true);
     this.input.value = '';
     this.addBubble('jack-msg-user', text);
-    void this.converse(text, false);
+    void this.converse(text);
   }
 
   // ------------------------------------------------------------------
   // Conversation loop: send -> maybe execute tools -> send results -> ...
   // ------------------------------------------------------------------
-  private async converse(userText: string, isIntro: boolean): Promise<void> {
+  private async converse(userText: string): Promise<void> {
     // On any failure, roll the transcript back to here so a dangling
     // tool_use turn can't poison the next request.
     const checkpoint = this.messages.length;
-    const content: ContentBlock[] = [];
-    if (!isIntro) {
-      content.push({
-        type: 'text',
-        text: buildContextBlock(this.host, this.changes),
-      });
-    }
-    content.push({ type: 'text', text: userText });
+    const content: ContentBlock[] = [
+      { type: 'text', text: buildContextBlock(this.host, this.changes) },
+      { type: 'text', text: userText },
+    ];
     this.messages.push({ role: 'user', content });
 
     this.setBusy(true);
@@ -319,20 +326,56 @@ function describeToolCall(tu: ToolUseBlock): string {
 }
 
 function jackPortraitSvg(): string {
-  // Corny-90s pixel-adjacent portrait: hard hat (JACK), squint, mustache.
+  // Jack: hi-vis vest, weathered face, wry eyebrow, big mustache, hard hat
+  // stenciled JACK. Clipped to the badge circle.
   return `
-  <svg viewBox="0 0 64 64" width="72" height="72" xmlns="http://www.w3.org/2000/svg">
-    <circle cx="32" cy="32" r="31" fill="#1a2438" stroke="#e8b840" stroke-width="2"/>
-    <ellipse cx="32" cy="44" rx="16" ry="14" fill="#d9a066"/>
-    <rect x="16" y="52" width="32" height="12" fill="#3a5a8c"/>
-    <rect x="28" y="50" width="8" height="6" fill="#d9a066"/>
-    <path d="M 12 30 Q 12 14 32 14 Q 52 14 52 30 L 54 30 L 54 34 L 10 34 L 10 30 Z" fill="#e8b840"/>
-    <rect x="27" y="10" width="10" height="6" rx="2" fill="#e8b840"/>
-    <text x="32" y="31" font-family="monospace" font-size="9" font-weight="bold"
-      fill="#7a5c10" text-anchor="middle">JACK</text>
-    <rect x="20" y="38" width="8" height="2.5" rx="1" fill="#4a3520"/>
-    <rect x="36" y="38" width="8" height="2.5" rx="1" fill="#4a3520"/>
-    <rect x="22" y="47" width="20" height="4" rx="2" fill="#8a6a40"/>
-    <ellipse cx="32" cy="45" rx="3" ry="2" fill="#c08850"/>
+  <svg viewBox="0 0 96 96" width="96" height="96" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <clipPath id="jack-badge"><circle cx="48" cy="48" r="45"/></clipPath>
+    </defs>
+    <circle cx="48" cy="48" r="45" fill="#1a2438"/>
+    <g clip-path="url(#jack-badge)">
+      <!-- neck + hi-vis vest -->
+      <rect x="41" y="66" width="14" height="14" fill="#c98d55"/>
+      <path d="M12 96 L12 88 Q29 75 48 75 Q67 75 84 88 L84 96 Z" fill="#e07020"/>
+      <path d="M16 90 Q48 76 80 90" fill="none" stroke="#ffd84a" stroke-width="4"/>
+      <path d="M42 76 L48 84 L54 76" fill="none" stroke="#b85812" stroke-width="2"/>
+      <!-- ears + head -->
+      <ellipse cx="28.5" cy="55" rx="4" ry="5.5" fill="#d9a066"/>
+      <ellipse cx="67.5" cy="55" rx="4" ry="5.5" fill="#d9a066"/>
+      <ellipse cx="48" cy="54" rx="19" ry="22" fill="#e0a878"/>
+      <!-- stubble shading on the jaw -->
+      <path d="M31 60 Q31 76 48 76 Q65 76 65 60 Q65 71 48 71 Q31 71 31 60 Z"
+        fill="#c08850" opacity="0.45"/>
+      <!-- eyebrows: one cocked -->
+      <rect x="32" y="46.5" width="11" height="3.2" rx="1.6" fill="#5a3a1a"
+        transform="rotate(-9 37.5 48)"/>
+      <rect x="53" y="45.5" width="11" height="3.2" rx="1.6" fill="#5a3a1a"
+        transform="rotate(5 58.5 47)"/>
+      <!-- eyes -->
+      <ellipse cx="38" cy="54.5" rx="4.2" ry="3.1" fill="#f5f0e6"/>
+      <ellipse cx="58" cy="54.5" rx="4.2" ry="3.1" fill="#f5f0e6"/>
+      <circle cx="39" cy="54.8" r="1.9" fill="#3a2a1a"/>
+      <circle cx="59" cy="54.8" r="1.9" fill="#3a2a1a"/>
+      <circle cx="39.6" cy="54.1" r="0.6" fill="#fff"/>
+      <circle cx="59.6" cy="54.1" r="0.6" fill="#fff"/>
+      <!-- nose -->
+      <path d="M48 55 L46.2 61.5 Q47.8 63.4 50.2 61.8" fill="none"
+        stroke="#b8804f" stroke-width="1.7" stroke-linecap="round"/>
+      <!-- mustache + smirk -->
+      <path d="M48 64.5 C43 62.5 37 63.5 34.5 67.5 C38.5 71.5 45 70 48 67.5
+        C51 70 57.5 71.5 61.5 67.5 C59 63.5 53 62.5 48 64.5 Z" fill="#6a4423"/>
+      <path d="M43.5 73 Q48 75 54 72.4" fill="none" stroke="#a06a3c"
+        stroke-width="1.5" stroke-linecap="round"/>
+      <!-- hard hat -->
+      <path d="M27 40 Q27 17 48 17 Q69 17 69 40 Z" fill="#f2c230"/>
+      <path d="M27 40 Q27 17 48 17 L48 40 Z" fill="#ffffff" opacity="0.10"/>
+      <rect x="43" y="12.5" width="10" height="8" rx="3.5" fill="#f2c230"/>
+      <rect x="21" y="38" width="54" height="7" rx="3.5" fill="#d9a428"/>
+      <text x="48" y="34.5" font-family="Courier New, monospace" font-size="11"
+        font-weight="bold" fill="#8a6510" text-anchor="middle"
+        letter-spacing="0.5">JACK</text>
+    </g>
+    <circle cx="48" cy="48" r="45" fill="none" stroke="#e8b840" stroke-width="2.5"/>
   </svg>`;
 }
