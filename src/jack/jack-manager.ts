@@ -350,6 +350,8 @@ function describeToolCall(tu: ToolUseBlock): string {
       return `🔧 Jack installs a ${i.type} ("${i.name}")`;
     case 'edit_component':
       return `🔧 Jack adjusts ${i.component}`;
+    case 'move_component':
+      return `🔧 Jack relocates ${i.component} to (${i.x}, ${i.y})`;
     case 'connect_components':
       return `🔧 Jack runs pipe from ${i.from} to ${i.to}`;
     case 'delete_component':

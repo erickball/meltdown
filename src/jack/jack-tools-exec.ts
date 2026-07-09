@@ -46,8 +46,36 @@ function componentDetails(host: JackHost, comp: PlantComponent): unknown {
     unitsNote: 'stored values are SI (Pa, K, m, W); edits use catalog units',
     ports,
     connections,
+    insideBuildingFootprint:
+      comp.type === 'building' ? undefined : findContainingBuilding(host, comp.position)?.id ?? null,
     estimatedCost: est ? formatCost(est.total) : undefined,
   };
+}
+
+/** Footprint half-extents of a building (position = footprint center). */
+export function buildingFootprint(b: any): { halfW: number; halfD: number } {
+  const halfW = b.shape === 'cylinder' ? (b.diameter || 40) / 2 : (b.width || 40) / 2;
+  const halfD = b.shape === 'cylinder' ? (b.diameter || 40) / 2 : (b.length || 40) / 2;
+  return { halfW, halfD };
+}
+
+/** Same containment test the move UI uses (main.ts findContainingBuilding). */
+export function findContainingBuilding(
+  host: JackHost,
+  pos: { x: number; y: number }
+): PlantComponent | null {
+  for (const comp of host.plantState.components.values()) {
+    if (comp.type !== 'building') continue;
+    const { halfW, halfD } = buildingFootprint(comp);
+    const dx = pos.x - comp.position.x;
+    const dy = pos.y - comp.position.y;
+    const inside =
+      (comp as any).shape === 'cylinder'
+        ? (dx * dx) / (halfW * halfW) + (dy * dy) / (halfD * halfD) <= 1
+        : Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
+    if (inside) return comp;
+  }
+  return null;
 }
 
 function autoPosition(host: JackHost): { x: number; y: number } {
@@ -164,15 +192,26 @@ export function executeJackTool(
       const compName = String(input.name ?? '');
       if (!type || !compName) return err('type and name are required');
       let containedById: string | undefined;
+      let container: PlantComponent | null = null;
       if (input.containedBy) {
-        const container = resolveComponent(host, String(input.containedBy));
+        container = resolveComponent(host, String(input.containedBy));
         if (!container) return err(`No container named "${input.containedBy}"`);
         containedById = container.id;
+      }
+      const posIn = input.position as { x?: unknown; y?: unknown } | undefined;
+      let position: { x: number; y: number };
+      if (posIn && Number.isFinite(posIn.x) && Number.isFinite(posIn.y)) {
+        position = { x: Number(posIn.x), y: Number(posIn.y) };
+      } else if (container) {
+        // Default into the container's footprint center
+        position = { x: container.position.x, y: container.position.y };
+      } else {
+        position = autoPosition(host);
       }
       const id = host.constructionManager.createComponent({
         type,
         name: compName,
-        position: autoPosition(host),
+        position,
         properties: {
           name: compName,
           ...((input.properties as Record<string, unknown>) ?? {}),
@@ -206,6 +245,49 @@ export function executeJackTool(
           .join(', ')}`
       );
       return { ok: true, updated: componentDetails(host, comp) };
+    }
+
+    case 'move_component': {
+      const modeErr = requireConstruction(host);
+      if (modeErr) return err(modeErr);
+      const comp = resolveComponent(host, String(input.component ?? ''));
+      if (!comp) return err(`No component named "${input.component}"`);
+      if (!Number.isFinite(input.x) || !Number.isFinite(input.y)) {
+        return err('x and y must be numbers (plan meters)');
+      }
+      const x = Number(input.x);
+      const y = Number(input.y);
+      const dx = x - comp.position.x;
+      const dy = y - comp.position.y;
+      comp.position.x = x;
+      comp.position.y = y;
+      // Pipes carry a second endpoint; translate it with the move
+      const end = (comp as any).endPosition;
+      if (end && Number.isFinite(end.x) && Number.isFinite(end.y)) {
+        end.x += dx;
+        end.y += dy;
+      }
+      // Update building containment from the destination, like the move UI.
+      // Non-building containment (e.g. a core inside a vessel) is left alone.
+      let containment = 'unchanged';
+      const currentContainer = comp.containedBy
+        ? host.plantState.components.get(comp.containedBy)
+        : undefined;
+      const containedByNonBuilding = currentContainer && currentContainer.type !== 'building';
+      if (comp.type !== 'building' && !containedByNonBuilding) {
+        const b = findContainingBuilding(host, comp.position);
+        const prevB = currentContainer?.type === 'building' ? currentContainer.id : null;
+        if ((b?.id ?? null) !== prevB) {
+          if (b) (comp as any).containedBy = b.id;
+          else delete (comp as any).containedBy;
+          containment = b
+            ? `now inside ${b.label ?? b.id}`
+            : 'now outside any building';
+          host.refreshCostPanel();
+        }
+      }
+      record(`Jack moved ${comp.id} to (${x}, ${y}) — containment ${containment}`);
+      return { ok: true, moved: comp.id, position: { x, y }, containment };
     }
 
     case 'connect_components': {

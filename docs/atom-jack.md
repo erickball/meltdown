@@ -88,8 +88,12 @@ quiet until the 1st.
 
 - No streaming — replies appear all at once (client shows tool-action lines
   and any interim text between rounds; 100s fetch timeout per round).
-- Auto-placement puts a new component to the right of the current plant
-  (or at the origin on an empty site); Jack can't see the canvas viewport.
+- Placement: the plant overview gives Jack plan positions and building
+  footprints, so he can place explicitly (inside/outside containment) and
+  move components (move_component updates building containment
+  automatically). Without an explicit position, a new component lands at
+  its container's footprint center, or beside the plant. He still can't
+  see the canvas viewport itself.
 - Conversation resets on page reload; capped at 80 messages per conversation.
 - `connect_components` picks the first free port matching direction unless
   the model names one; complex multi-port hookups may need the user.

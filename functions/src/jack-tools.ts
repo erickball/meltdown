@@ -80,8 +80,34 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
           description:
             "Optional: name of a building/containment the component should be placed inside",
         },
+        position: {
+          type: "object",
+          properties: {
+            x: { type: "number" },
+            y: { type: "number" },
+          },
+          required: ["x", "y"],
+          additionalProperties: false,
+          description:
+            "Optional plan-view position in meters. Building footprints are in the plant overview — pick a position inside the right building's footprint. If omitted: center of containedBy's footprint when given, else auto-placed beside the existing plant.",
+        },
       },
       required: ["type", "name"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "move_component",
+    description:
+      "Move an existing component to a new plan-view position (meters, construction mode only). Building containment (containedBy) is updated automatically from the destination: inside a building's footprint means contained by it. Check footprints in the plant overview before moving something into or out of containment.",
+    input_schema: {
+      type: "object",
+      properties: {
+        component: { type: "string", description: "Display name or id" },
+        x: { type: "number", description: "Plan x in meters" },
+        y: { type: "number", description: "Plan y in meters" },
+      },
+      required: ["component", "x", "y"],
       additionalProperties: false,
     },
   },
