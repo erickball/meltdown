@@ -1,10 +1,12 @@
 ## TODO List
-Misc:
+AI:
 -AI assistant to help users add to, fix, or understand the model (use sonnet 5, cap usage at $10/month. context: a bunch of game documentation, the current plant model - full list of components and their connections and properties, the last few changes the user made, what mode they're in, and the most recent simulation results for this model (if any). Also the ability to look at the code but let's try to make the documentation good enough it doesn't usually have to.)
+-and Sonnet plays the character of "Atom" Jack, head of operations at your primary EPC contractor Atom Enterprises. Jack knows this is all digital but doesn't bring it up unless the user does first. He has a colorful irreverent personality and likes to refer to himself as "just the plumber" and similar, although he does understand the engineering pretty well. He can help with creating customized components (e.g. "add a relief valve to this tank" and he can come up with reasonable sizing and setpoints and add the component to the model). Please write a good character prompt to make him fun to talk to (but not so overboard that it gets annoying). Jack stands in the bottom right corner of the screen (head visible, hard hat says Jack), and a chat box next to his head that expands when you click on it, and then he introduces himself.
+-Firebase has my API key.
 
 
 Display & minor issues:
--Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.)
+-Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.) Maybe the better option is a legit two-phase level?
 -Clean up the debug display (light pass done: per-frame [Sync] console spam removed; panel itself still busy)
 -Maybe find a good way to display relative pressure at connections
 -BWR preset: two loops sit saturated instead of regulating - governor holds ~98.6 bar dome pressure against a ~72 bar setpoint, and the RPV level controller reads level 7.5m above setpoint with the FW pump pinned at max while inventory is actually steady (suspect nodeLiquidLevel on the mostly-liquid two-phase RPV). Plant is stable at 100% power regardless; needs investigation, not urgent.
@@ -13,9 +15,6 @@ Display & minor issues:
 -Maybe show the UHS as a river or ocean?
 -Maybe to put anything at negative elevation you should first have to "dig" voxels out Minecraft-style
 -Maybe you can build seismic supports under things to give them earthquake resistance. So anything elevated off the ground should by default have a real spindly scaffold holding it up, and then you can optionally beef it up.
--Steam separators? Maybe not. What's the point
--How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right? Probably not it sounds like
-
 
 
 Modeling gaps:
@@ -24,7 +23,7 @@ Modeling gaps:
 -Diesel generators (and electric power in general)
 -Meltdown remaining: molten fuel relocation/corium (slumping to the lower head, geometry change, molten pool heat transfer to the vessel wall - feeds the creep-rupture wall temperature); aerosol pool scrubbing/condensation washout and resuspension (dry settling is modeled).
 -Advanced reactors remaining: metal coolant (sodium/lead - needs a second liquid property system, big); direct Brayton cycle (turbine operator assumes steam - gas loops must use an HX + steam secondary for now); graphite air-ingress oxidation/fires.
--Lattice derivation needs a guard for voided cores (refModeratorDensity near zero blows up k and coefficients with a loud warning; scenario cores that start voided should omit `enrichment` for now).
+-Auto-sized burnable poison ignores initial soluble boron: a PWR-style borate-then-dilute cold start would want the poison sizing to credit boron at the initial conditions (and construction may not expose initial boron ppm at all). Bank-count rod worth covers the BWR-style path already.
 
 Game mode:
 STATUS (game-mode branch): first playable shipped - 4 levels, title screen, career save.
@@ -62,7 +61,20 @@ Original notes:
 -Level 1, we give you a turbine generator condenser and FW pump, and you just basically have to create a vessel and core and hook them up and you've got power. Maybe it's for like, an emergency situation or an isolated island community or something? Maybe I don't need that much story. A mining operation might be better.
 -As you get farther along and are more successful, the skyline starts to fill up with buildings showing local population increase.
 
+## To-Don't List
+-Steam separators? Maybe not. What's the point
+-How hard would it be to have the liquid and vapor spaces get separate temperatures, like MELCOR does? Do we need this, maybe for pressurizer spray to work right? Probably not it sounds like
+
 ## Done List
+X Reactivity reference values eliminated for lattice-derived cores: reactivity is now (k-1)/k from latticeKeff at the LIVE fuel temp + coolant density every step (no linearization; exact for voiding, cold-to-hot swings, hot fuel). Fixed en route: player-built cores had ~+3500 pcm phantom feedback (coefficients derived at build-state, refs hardcoded 887K/520K/750kg-m3). Burnable poison is a user setting (auto-size default leaves ~1000 pcm shutdown margin with rods full-in at initial conditions); presets' excessReactivity still works as a poison target. Fast-fission floor keeps voided lattices finite (was the "voided-core guard" gap). Both operators + factory t=0 share one computeReactivityComponents.
+X Control rod worth derived from bank count (each bank adds absorber into the lattice's thermal-utilization competition): ~1700 pcm/bank on the reference PWR lattice, 4 banks = PWR-like 6800 pcm, 10 banks = BWR-like 17000 pcm (cold shutdown on rods alone, survives the cold-to-hot swing). CRDM cost scales with banks x core size. Core dialog shows est. rod worth + avg linear heat rate (kW/m or kW/pebble, warns when high).
+X Default initial rod position = critical: startCritical checkbox (default on) solves rods for exactly rho=0 at the initial conditions (both feedback paths, boron included). Fixed en route: construction stored controlRodPosition INVERTED vs the sim/renderer/preset convention (0=inserted,1=withdrawn) - manual rod positions ran backwards from what the player typed.
+X Make auto-slow less aggressive, it's only supposed to be for big events and there should be some obvious indication of why it slowed. (default threshold 10%->50%, warning notification names the quantity and rate)
+X Start off paused when switching to simulation mode.
+X HUD collapse/expand button should say hide/show along with the arrow, and when collapsed it should still show level number, budget/spent, and the build it button.
+X Advanced solver settings should be collapsed by default, and also should go at the bottom, as should the auto-slow setting.
+X Run 1 step button should go in the advanced solver settings
+X The Rods AUTO button doesn't need to be on its own line, it should fit next to the Control Rods section title.
 X Water/steam coloring by internal energy: all fluid colors derive from u - deep blue cold liquid -> white at the critical-point energy (~2030 kJ/kg) -> very pale yellow at max saturated vapor (~2604) -> yellow/orange superheat. Two-phase liquid/vapor pixel split (u_f vs u_g) fades naturally near critical pressure. Legend samples the same stops.
 X Thermometers on large hydraulic nodes (>=5 m3): mercury-style column, fixed 0-400C scale with ticks + numeric readout, positioned beside the pressure gauge.
 X UI for melt fraction and radiological release: core-damage banner (fuel melt %, FP escape %, environment Xe/CsI as % of core inventory - orange in-plant, red on environmental release); debug shows per-node molten/oxidized/FP-release %, plated-out CsI, and an environment release breakdown. fissionProducts records initial inventory so fractions are exact.

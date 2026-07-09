@@ -19,6 +19,7 @@ import {
   CrossVesselComponent,
   Connection,
   Port,
+  Point,
   Fluid,
   ExtractionPort
 } from '../types';
@@ -381,6 +382,7 @@ export class ConstructionManager {
           // End position: pipe extends in +X direction from start
           endPosition: { x: worldX + pipeLength, y: worldY },
           endElevation: endElevation,
+          pressureRating: props.pressureRating ?? 155, // bar (design pressure)
           ports: pipePorts,  // Pipes are bidirectional - flow determined by physics
           fluid: pipeFluid
         };
@@ -509,65 +511,12 @@ export class ConstructionManager {
         // Port positions for upright RCP-style pump
         // Layout: motor on top, coupling, casing, suction nozzle, inlet pipe at bottom
         // Outlet is on the side (volute discharge)
-        const scale = calculatedDiameter * 1.3; // 30% bigger to match render
-        const pumpCasingWidth = scale * 0.75;
-        const pumpCasingHeight = scale * 0.5;
-        const suctionNozzleHeight = scale * 0.35;
-        const inletPipeLength = scale * 0.3;
-        const voluteBulge = scale * 0.18;
-        const outletPipeLength = scale * 0.45;
-
-        // Total height: motor (0.9) + coupling (0.15) + casing (0.5) + nozzle (0.35)
-        const totalHeight = scale * 1.9;
-        const motorTop = -totalHeight / 2;
-        const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
-        const casingBottom = couplingBottom + pumpCasingHeight;
-        const nozzleBottom = casingBottom + suctionNozzleHeight;
-
-        // Base positions (for left-right orientation):
-        // Inlet at bottom of inlet pipe, outlet on right side
-        const baseInletY = nozzleBottom + inletPipeLength;
-        const baseOutletY = couplingBottom + pumpCasingHeight * 0.35;
-        const baseOutletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
-
-        // Calculate port positions based on orientation
-        // The rendering applies transforms, so port positions must match:
-        // - left-right: inlet bottom, outlet right (default)
-        // - right-left: inlet bottom, outlet left (mirrored X)
-        // - bottom-top: inlet left, outlet up (rotated -90°)
-        // - top-bottom: inlet right, outlet down (rotated +90°)
         // Port IDs must include component ID to be unique across multiple pumps
-        let pumpPorts: Port[];
-        switch (orientation) {
-          case 'right-left':
-            // Mirror X: inlet stays at bottom, outlet on left
-            pumpPorts = [
-              { id: `${id}-inlet`, position: { x: 0, y: baseInletY }, direction: 'in' },
-              { id: `${id}-outlet`, position: { x: -baseOutletX, y: baseOutletY }, direction: 'out' }
-            ];
-            break;
-          case 'bottom-top':
-            // Rotate -90°: (x,y) -> (y, -x)
-            // Inlet goes to left side, outlet goes to top
-            pumpPorts = [
-              { id: `${id}-inlet`, position: { x: -baseInletY, y: 0 }, direction: 'in' },
-              { id: `${id}-outlet`, position: { x: -baseOutletY, y: -baseOutletX }, direction: 'out' }
-            ];
-            break;
-          case 'top-bottom':
-            // Rotate +90°: (x,y) -> (-y, x)
-            // Inlet goes to right side, outlet goes to bottom
-            pumpPorts = [
-              { id: `${id}-inlet`, position: { x: baseInletY, y: 0 }, direction: 'in' },
-              { id: `${id}-outlet`, position: { x: baseOutletY, y: baseOutletX }, direction: 'out' }
-            ];
-            break;
-          default: // left-right
-            pumpPorts = [
-              { id: `${id}-inlet`, position: { x: 0, y: baseInletY }, direction: 'in' },
-              { id: `${id}-outlet`, position: { x: baseOutletX, y: baseOutletY }, direction: 'out' }
-            ];
-        }
+        const portPositions = this.pumpPortPositions(calculatedDiameter, orientation);
+        const pumpPorts: Port[] = [
+          { id: `${id}-inlet`, position: portPositions.inlet, direction: 'in' },
+          { id: `${id}-outlet`, position: portPositions.outlet, direction: 'out' }
+        ];
 
         // Create pump-specific fluid state from user properties
         // If matchUpstream is true, use placeholder values - factory will override
@@ -1245,7 +1194,11 @@ export class ConstructionManager {
           fuelTemperature: 600 + 273.15,  // Initial fuel temp
           fuelMeltingPoint: 2800 + 273.15,
           controlRodCount: props.controlRodBanks || 4,  // Number of control rod banks
-          controlRodPosition: (100 - (props.initialRodPosition || 50)) / 100,  // Convert to 0-1 (0=withdrawn, 1=inserted)
+          // 0 = fully inserted, 1 = fully withdrawn - the same convention as
+          // the simulation and renderer (this used to be stored inverted).
+          // With startCritical the factory overrides it with the solved
+          // critical position at simulation build.
+          controlRodPosition: (props.initialRodPosition ?? 50) / 100,
           ports: corePorts,
           fluid: {
             temperature: 320 + 273.15,  // Typical core outlet temp
@@ -1264,6 +1217,13 @@ export class ConstructionManager {
         // Fuel design - drives lattice-derived reactivity coefficients
         (core as any).enrichment = (props.enrichmentPct ?? 5) / 100;
         (core as any).fuelMaterial = props.fuelMaterial || 'UO2';
+        // Burnable poison: absent = auto-sized by the factory
+        (core as any).autoPoison = props.autoPoison !== false;
+        if (props.autoPoison === false && props.burnablePoisonPcm !== undefined) {
+          (core as any).burnablePoisonPcm = props.burnablePoisonPcm;
+        }
+        // Rods placed at the critical position (rho = 0) by the factory
+        (core as any).startCritical = props.startCritical !== false;
         if (props.fuelForm === 'pebbles') {
           (core as any).fuelForm = 'pebbles';
           (core as any).pebbleDiameter = props.pebbleDiameter ?? 60;  // mm
@@ -1370,13 +1330,14 @@ export class ConstructionManager {
         }
 
         // Create core barrel component inside the vessel (the core region).
-        // Port position is a HORIZONTAL-plane offset from the barrel centre, not
-        // an elevation - both nozzles sit on the vessel axis (x=0, y=0) so an
-        // external connection (e.g. the hot leg off the core outlet) renders on
-        // top of the vessel; its height comes from the connection's elevation.
+        // Ports are on the vessel axis (x=0) but separated vertically so their
+        // indicator dots don't stack (bottom = +height/2 lower, top = -height/2
+        // upper, matching the vertical-vessel convention in the presets). If
+        // both sat at y=0 the outlet dot hid behind the inlet and was
+        // unclickable. Actual flow elevation still comes from the connection.
         const coreBarrelPorts: Port[] = [
-          { id: `${coreBarrelId}-bottom`, position: { x: 0, y: 0 }, direction: 'both' },
-          { id: `${coreBarrelId}-top`, position: { x: 0, y: 0 }, direction: 'both' }
+          { id: `${coreBarrelId}-bottom`, position: { x: 0, y: barrelHeight / 2 }, direction: 'both' },
+          { id: `${coreBarrelId}-top`, position: { x: 0, y: -barrelHeight / 2 }, direction: 'both' }
         ];
 
         const coreBarrel: CoreBarrelComponent = {
@@ -1814,6 +1775,19 @@ export class ConstructionManager {
       return false;
     }
 
+    // Turn pump endpoints toward the new partner BEFORE the pipe is laid
+    // out, so the pipe attaches to the final port positions. The dialog's
+    // pump-side elevation was computed from the old geometry, so recompute
+    // it when the ports move.
+    if (fromComponent.type === 'pump' &&
+        this.autoOrientPump(fromComponent.id, { pumpPortId: fromPortId, partnerPortId: toPortId })) {
+      fromElevation = this.getPortRelativeElevation(fromComponent, fromPort);
+    }
+    if (toComponent.type === 'pump' &&
+        this.autoOrientPump(toComponent.id, { pumpPortId: toPortId, partnerPortId: fromPortId })) {
+      toElevation = this.getPortRelativeElevation(toComponent, toPort);
+    }
+
     // Calculate 3D endpoint positions for the pipe
     // In isometric mode, we store both endpoints and project them during rendering
     // Position (x, y) is in the ground plane, elevation is vertical height
@@ -1866,10 +1840,13 @@ export class ConstructionManager {
       fromComponent, toComponent, fromElevation, toElevation, fromPort, toPort
     );
 
-    // Get pressure rating from connected components - use the higher of the two
-    const fromPressureRating = (fromComponent as any).pressureRating ?? 0;
-    const toPressureRating = (toComponent as any).pressureRating ?? 0;
+    // Get pressure rating from connected components - use the higher of the
+    // two, resolved per-PORT (a pipe off the SG tube plenum must hold the
+    // primary 172 bar, not the 100 bar shell rating).
+    const fromPressureRating = this.effectivePressureRating(fromComponent, fromPortId);
+    const toPressureRating = this.effectivePressureRating(toComponent, toPortId);
     const pipePressureRating = Math.max(fromPressureRating, toPressureRating) || 155; // Default 155 bar if neither has rating
+    console.log(`[Construction] Auto-pipe rating: max(${fromPressureRating}, ${toPressureRating}) = ${pipePressureRating} bar`);
 
     const pipe: PipeComponent = {
       id: pipeId,
@@ -1903,6 +1880,27 @@ export class ConstructionManager {
 
     console.log(`[Construction] Created pipe '${pipeId}' with diameter ${diameter.toFixed(3)}m between components`);
     return true;
+  }
+
+  /**
+   * The design pressure a connection at this port must hold. Handles the cases
+   * where the rating does not live on the component's top-level pressureRating:
+   *  - heat exchangers: tube-side ports use tubePressureRating, shell-side ports
+   *    use shellPressureRating (each side has its own design pressure)
+   *  - core barrels: no rating of their own, they inherit the parent vessel's
+   *  - anything else: its own pressureRating (0 if unrated)
+   */
+  private effectivePressureRating(component: Record<string, any>, portId: string): number {
+    if (component.type === 'heatExchanger') {
+      if (portId.includes('tube')) return component.tubePressureRating ?? component.pressureRating ?? 0;
+      if (portId.includes('shell')) return component.shellPressureRating ?? component.pressureRating ?? 0;
+      return component.pressureRating ?? 0;
+    }
+    if (component.type === 'coreBarrel' && component.containedBy) {
+      const parent = this.plantState.components.get(component.containedBy) as Record<string, any> | undefined;
+      if (parent) return (parent.pressureRating as number) ?? (component.pressureRating as number) ?? 0;
+    }
+    return (component.pressureRating as number) ?? 0;
   }
 
   createConnection(
@@ -2097,8 +2095,62 @@ export class ConstructionManager {
 
     this.plantState.connections.push(connection);
 
-    console.log(`[Construction] Created connection from ${fromPortId} to ${toPortId} (elevations: ${calcFromElev.toFixed(1)}m → ${calcToElev.toFixed(1)}m)`);
+    // Turn pump endpoints to face what they're connected to (re-picks the
+    // orientation that best matches all of the pump's partners, and updates
+    // this connection's pump-side elevation if the ports move)
+    if (fromComponent.type === 'pump') this.autoOrientPump(fromComponent.id);
+    if (toComponent.type === 'pump') this.autoOrientPump(toComponent.id);
+
+    console.log(`[Construction] Created connection from ${fromPortId} to ${toPortId} (elevations: ${connection.fromElevation?.toFixed(1)}m → ${connection.toElevation?.toFixed(1)}m)`);
     return true;
+  }
+
+  /**
+   * Pump inlet/outlet port positions (relative to component center) for a
+   * given diameter and orientation. Single source of truth for the pump
+   * port geometry, matching the transforms the renderer applies:
+   * - left-right: inlet bottom, outlet right (default)
+   * - right-left: inlet bottom, outlet left (mirrored X)
+   * - bottom-top: inlet left, outlet up (rotated -90°)
+   * - top-bottom: inlet right, outlet down (rotated +90°)
+   */
+  private pumpPortPositions(
+    diameter: number,
+    orientation: string
+  ): { inlet: Point; outlet: Point } {
+    const scale = diameter * 1.3; // 30% bigger to match render
+    const pumpCasingWidth = scale * 0.75;
+    const pumpCasingHeight = scale * 0.5;
+    const suctionNozzleHeight = scale * 0.35;
+    const inletPipeLength = scale * 0.3;
+    const voluteBulge = scale * 0.18;
+    const outletPipeLength = scale * 0.45;
+
+    // Total height: motor (0.9) + coupling (0.15) + casing (0.5) + nozzle (0.35)
+    const totalHeight = scale * 1.9;
+    const motorTop = -totalHeight / 2;
+    const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
+    const casingBottom = couplingBottom + pumpCasingHeight;
+    const nozzleBottom = casingBottom + suctionNozzleHeight;
+
+    // Base positions (for left-right orientation):
+    // Inlet at bottom of inlet pipe, outlet on right side
+    const baseInletY = nozzleBottom + inletPipeLength;
+    const baseOutletY = couplingBottom + pumpCasingHeight * 0.35;
+    const baseOutletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
+
+    switch (orientation) {
+      case 'right-left':
+        return { inlet: { x: 0, y: baseInletY }, outlet: { x: -baseOutletX, y: baseOutletY } };
+      case 'bottom-top':
+        // Rotate -90°: (x,y) -> (y, -x)
+        return { inlet: { x: -baseInletY, y: 0 }, outlet: { x: -baseOutletY, y: -baseOutletX } };
+      case 'top-bottom':
+        // Rotate +90°: (x,y) -> (-y, x)
+        return { inlet: { x: baseInletY, y: 0 }, outlet: { x: baseOutletY, y: baseOutletX } };
+      default: // left-right
+        return { inlet: { x: 0, y: baseInletY }, outlet: { x: baseOutletX, y: baseOutletY } };
+    }
   }
 
   /**
@@ -2111,42 +2163,123 @@ export class ConstructionManager {
     }
 
     const orientation = (component as any).orientation || 'left-right';
-    const scale = component.diameter * 1.3;
-    const pumpCasingWidth = scale * 0.75;
-    const pumpCasingHeight = scale * 0.5;
-    const suctionNozzleHeight = scale * 0.35;
-    const inletPipeLength = scale * 0.3;
-    const voluteBulge = scale * 0.18;
-    const outletPipeLength = scale * 0.45;
-    const totalHeight = scale * 1.9;
-    const motorTop = -totalHeight / 2;
-    const couplingBottom = motorTop + scale * 0.9 + scale * 0.15;
-    const casingBottom = couplingBottom + pumpCasingHeight;
-    const nozzleBottom = casingBottom + suctionNozzleHeight;
+    const { inlet, outlet } = this.pumpPortPositions(component.diameter, orientation);
+    component.ports[0].position = inlet;
+    component.ports[1].position = outlet;
+    // Stored connection elevations are derived from port geometry, so any
+    // connections already attached to the pump must follow the ports
+    this.refreshPumpConnectionElevations(component);
+  }
 
-    // Base positions (for left-right orientation)
-    const baseInletY = nozzleBottom + inletPipeLength;
-    const baseOutletY = couplingBottom + pumpCasingHeight * 0.35;
-    const baseOutletX = pumpCasingWidth / 2 + voluteBulge + outletPipeLength;
-
-    // Calculate port positions based on orientation
-    switch (orientation) {
-      case 'right-left':
-        component.ports[0].position = { x: 0, y: baseInletY };
-        component.ports[1].position = { x: -baseOutletX, y: baseOutletY };
-        break;
-      case 'bottom-top':
-        component.ports[0].position = { x: -baseInletY, y: 0 };
-        component.ports[1].position = { x: -baseOutletY, y: -baseOutletX };
-        break;
-      case 'top-bottom':
-        component.ports[0].position = { x: baseInletY, y: 0 };
-        component.ports[1].position = { x: baseOutletY, y: baseOutletX };
-        break;
-      default: // left-right
-        component.ports[0].position = { x: 0, y: baseInletY };
-        component.ports[1].position = { x: baseOutletX, y: baseOutletY };
+  /**
+   * Recompute the pump-side stored elevation of every connection attached
+   * to this pump from the current port geometry. Pump nozzle elevations are
+   * physical features of the pump, so they always track the ports.
+   */
+  private refreshPumpConnectionElevations(pump: PlantComponent): void {
+    for (const conn of this.plantState.connections) {
+      if (conn.fromComponentId === pump.id) {
+        const port = pump.ports.find(p => p.id === conn.fromPortId);
+        if (port) conn.fromElevation = this.getPortRelativeElevation(pump, port);
+      }
+      if (conn.toComponentId === pump.id) {
+        const port = pump.ports.find(p => p.id === conn.toPortId);
+        if (port) conn.toElevation = this.getPortRelativeElevation(pump, port);
+      }
     }
+  }
+
+  /**
+   * Re-orient a pump so its ports face the components it is connected to.
+   * Each candidate orientation is scored by the total squared distance from
+   * the pump's ports to their connected partner ports (horizontal X plus
+   * absolute port elevation - the same coordinates connection elevations are
+   * stored in), over every connection touching the pump; the best one wins.
+   * Ties keep the current orientation. Port positions and the pump-side
+   * stored elevations of its connections are refreshed on a change.
+   *
+   * `pending` names an attachment that doesn't exist as a connection yet,
+   * for calling this before the connection object is created.
+   *
+   * Pumps without an orientation property (legacy saves and the auto-created
+   * condensate pump, which have ad-hoc port layouts that pumpPortPositions
+   * doesn't describe) are left alone.
+   */
+  autoOrientPump(
+    pumpId: string,
+    pending?: { pumpPortId: string; partnerPortId: string }
+  ): boolean {
+    const pump = this.plantState.components.get(pumpId);
+    if (!pump || pump.type !== 'pump' || !(pump as any).orientation) return false;
+    if (!pump.ports || pump.ports.length < 2) return false;
+
+    // Collect the world position (x, absolute elevation) of every partner
+    // port connected to the pump, tagged with which pump port it uses
+    const attachments: Array<{ pumpPortId: string; partnerX: number; partnerElev: number }> = [];
+    const addAttachment = (pumpPortId: string, partnerComponentId: string, partnerPortId: string) => {
+      if (partnerComponentId === pumpId) return; // ignore self-connections
+      const partner = this.plantState.components.get(partnerComponentId);
+      const port = partner?.ports.find(p => p.id === partnerPortId);
+      if (!partner || !port) return;
+      const cos = Math.cos(partner.rotation || 0);
+      const sin = Math.sin(partner.rotation || 0);
+      attachments.push({
+        pumpPortId,
+        partnerX: partner.position.x + port.position.x * cos - port.position.y * sin,
+        partnerElev: ((partner as any).elevation ?? 0) + this.getPortRelativeElevation(partner, port),
+      });
+    };
+
+    for (const conn of this.plantState.connections) {
+      if (conn.fromComponentId === pumpId) {
+        addAttachment(conn.fromPortId, conn.toComponentId, conn.toPortId);
+      } else if (conn.toComponentId === pumpId) {
+        addAttachment(conn.toPortId, conn.fromComponentId, conn.fromPortId);
+      }
+    }
+    if (pending) {
+      for (const [, comp] of this.plantState.components) {
+        const port = comp.ports.find(p => p.id === pending.partnerPortId);
+        if (port) {
+          addAttachment(pending.pumpPortId, comp.id, port.id);
+          break;
+        }
+      }
+    }
+    if (attachments.length === 0) return false;
+
+    const pumpElev = (pump as any).elevation ?? 0;
+    const halfH = this.getComponentHeight(pump) / 2;
+    const outletId = pump.ports[1].id;
+
+    const score = (orientation: string): number => {
+      const pos = this.pumpPortPositions(pump.diameter, orientation);
+      let total = 0;
+      for (const a of attachments) {
+        const p = a.pumpPortId === outletId ? pos.outlet : pos.inlet;
+        const dx = (pump.position.x + p.x) - a.partnerX;
+        const dv = (pumpElev + (halfH - p.y)) - a.partnerElev;
+        total += dx * dx + dv * dv;
+      }
+      return total;
+    };
+
+    const current = (pump as any).orientation as string;
+    let best = current;
+    let bestScore = score(current);
+    for (const candidate of ['left-right', 'right-left', 'bottom-top', 'top-bottom']) {
+      const s = score(candidate);
+      if (s < bestScore - 1e-9) {
+        best = candidate;
+        bestScore = s;
+      }
+    }
+    if (best === current) return false;
+
+    (pump as any).orientation = best;
+    this.updatePumpPorts(pump);
+    console.log(`[Construction] Auto-oriented pump '${pumpId}': ${current} → ${best}`);
+    return true;
   }
 
   /**
@@ -2517,6 +2650,13 @@ export class ConstructionManager {
     if (properties.length !== undefined) {
       component.length = properties.length;
     }
+    // Generic pressure rating (pipes, tanks, pressurizers, ...). Heat exchangers
+    // and reactor vessels have their own rating fields handled below and must
+    // NOT be overwritten by this generic path.
+    if (properties.pressureRating !== undefined &&
+        component.type !== 'heatExchanger' && component.type !== 'reactorVessel') {
+      component.pressureRating = properties.pressureRating;
+    }
     if (properties.volume !== undefined) {
       // For tanks, calculate width from volume and height
       if (component.type === 'tank' && component.height) {
@@ -2799,8 +2939,12 @@ export class ConstructionManager {
     if (properties.controlRodBanks !== undefined) {
       component.controlRodCount = properties.controlRodBanks;
     }
+    if (properties.startCritical !== undefined) {
+      component.startCritical = properties.startCritical !== false;
+    }
     if (properties.initialRodPosition !== undefined && component.controlRodPosition !== undefined) {
-      component.controlRodPosition = (100 - properties.initialRodPosition) / 100; // Convert % to 0-1
+      // 0 = fully inserted, 1 = fully withdrawn (was stored inverted before)
+      component.controlRodPosition = properties.initialRodPosition / 100;
     }
     if (properties.rodDiameter !== undefined) {
       component.rodDiameter = properties.rodDiameter;
@@ -2810,6 +2954,14 @@ export class ConstructionManager {
     }
     if (properties.fuelMaterial !== undefined) {
       component.fuelMaterial = properties.fuelMaterial;
+    }
+    if (properties.autoPoison !== undefined) {
+      component.autoPoison = properties.autoPoison !== false;
+      if (properties.autoPoison === false && properties.burnablePoisonPcm !== undefined) {
+        component.burnablePoisonPcm = properties.burnablePoisonPcm;
+      } else {
+        delete component.burnablePoisonPcm;
+      }
     }
     if (properties.rodPitch !== undefined) {
       component.rodPitch = properties.rodPitch;
@@ -2963,6 +3115,19 @@ export class ConstructionManager {
       return { success: false, error };
     }
 
+    // A core must go into a reactor vessel, vessel, or tank - never a building.
+    // (The placement path once routed cores here with the containment building
+    // as the target, silently fueling the building.)
+    if (container.type === 'building') {
+      const error = `Cannot install a core directly in building '${container.label || containerId}' - place it inside a reactor vessel (click the vessel itself)`;
+      console.error(`[Construction] ${error}`);
+      return { success: false, error };
+    }
+
+    console.log(`[Construction] addCoreToContainer: target='${containerId}' (${container.type}), ` +
+      `thermalPower=${coreProperties.thermalPower} MWt, diameter=${coreProperties.diameter} m, ` +
+      `enrichment=${coreProperties.enrichmentPct}%, rods@${coreProperties.initialRodPosition}%`);
+
     // Determine the available diameter for the core
     let availableDiameter: number;
     if (container.type === 'reactorVessel') {
@@ -2998,7 +3163,12 @@ export class ConstructionManager {
     container.fuelTemperature = 600 + 273.15; // Initial fuel temp in K
     container.fuelMeltingPoint = 2800 + 273.15; // UO2 melting point in K
     container.controlRodCount = coreProperties.controlRodBanks || 4;
-    container.controlRodPosition = (100 - (coreProperties.initialRodPosition || 50)) / 100;
+    // 0 = fully inserted, 1 = fully withdrawn - same convention as the
+    // simulation and renderer (this used to be stored inverted). With
+    // startCritical the factory overrides it with the solved critical
+    // position at simulation build.
+    container.controlRodPosition = (coreProperties.initialRodPosition ?? 50) / 100;
+    container.startCritical = coreProperties.startCritical !== false;
 
     // Store additional core properties for reference
     container.coreDiameter = coreDiameter; // Actual core diameter
@@ -3010,6 +3180,14 @@ export class ConstructionManager {
     // Fuel design - drives lattice-derived reactivity coefficients
     container.enrichment = (coreProperties.enrichmentPct ?? 5) / 100;
     container.fuelMaterial = coreProperties.fuelMaterial || 'UO2';
+    // Burnable poison: absent = auto-sized by the factory for shutdown
+    // margin at the initial conditions; present = user-set worth (pcm)
+    container.autoPoison = coreProperties.autoPoison !== false;
+    if (coreProperties.autoPoison === false && coreProperties.burnablePoisonPcm !== undefined) {
+      container.burnablePoisonPcm = coreProperties.burnablePoisonPcm;
+    } else {
+      delete container.burnablePoisonPcm;
+    }
     // Pebble-bed fuel form (graphite-moderated TRISO bed; see htgr preset)
     if (isPebbleBed) {
       container.fuelForm = 'pebbles';
@@ -3079,8 +3257,16 @@ export class ConstructionManager {
           (coreBarrel as any).rodDiameter = container.rodDiameter;
           (coreBarrel as any).rodPitch = container.rodPitch;
           (coreBarrel as any).cladThickness = container.cladThickness;
+          (coreBarrel as any).coreDiameter = container.coreDiameter;
           (coreBarrel as any).enrichment = container.enrichment;
           (coreBarrel as any).fuelMaterial = container.fuelMaterial;
+          (coreBarrel as any).autoPoison = container.autoPoison;
+          if (container.burnablePoisonPcm !== undefined) {
+            (coreBarrel as any).burnablePoisonPcm = container.burnablePoisonPcm;
+          } else {
+            delete (coreBarrel as any).burnablePoisonPcm;
+          }
+          (coreBarrel as any).startCritical = container.startCritical;
           (coreBarrel as any).thermalPower = container.thermalPower;
           if (container.fuelForm === 'pebbles') {
             (coreBarrel as any).fuelForm = 'pebbles';

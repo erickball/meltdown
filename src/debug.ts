@@ -332,8 +332,8 @@ export function updateDebugPanel(
       neutronicsDiv.innerHTML = `
         <span class="debug-label">Core:</span> <span class="debug-value">${n.coreId}</span><br>
         <span class="debug-label">Power:</span> ${formatValue(powerPct, '%', 100, 120)}<br>
-        <span class="debug-label">Reactivity:</span> ${formatValue(parseFloat(rhoDisplay), ' pcm')}<br>
-        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Built-in enrichment margin after burnable poison, from the lattice model">Excess:</span> <span class="debug-value">${excessPcm} pcm</span><br>
+        <span class="debug-label">Reactivity:</span> ${formatValue(parseFloat(rhoDisplay), ' pcm')}${n.latticeParams ? ' <span style="color: #888;" title="Reactivity evaluated directly from the lattice k_eff model at the live fuel temperature and coolant density (nonlinear); coefficients shown are slopes at the initial anchor">(lattice)</span>' : ''}<br>
+        <span class="debug-label" style="margin-left: 10px; color: #888;" title="Built-in enrichment margin after burnable poison, at the initial anchor conditions${n.poisonWorth !== undefined ? `. Burnable poison worth ${(n.poisonWorth * 1e5).toFixed(0)} pcm` : ''}">Excess:</span> <span class="debug-value">${excessPcm} pcm</span>${n.poisonWorth ? ` <span style="color: #888;">(poison ${(n.poisonWorth * 1e5).toFixed(0)} pcm)</span>` : ''}<br>
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Total worth ${rodWorthPcm} pcm when fully inserted">Rods:</span> <span class="debug-value">${rodsPcm} pcm</span><br>
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Fuel temperature coefficient ${dopplerCoeff} pcm/K">Doppler:</span> <span class="debug-value">${dopplerPcm} pcm</span> (T=${fuelTempC}C, ${dopplerCoeff} pcm/K)<br>
         <span class="debug-label" style="margin-left: 10px; color: #888;" title="Coolant temperature coefficient ${coolantTempCoeff} pcm/K">Coolant T:</span> <span class="debug-value">${coolantTempPcm} pcm</span> (T=${coolantTempC}C, ${coolantTempCoeff} pcm/K)<br>
@@ -995,6 +995,17 @@ import { Connection } from './types';
 /**
  * Update the component detail panel with selected component info
  */
+/**
+ * Suffix for pressure rows in the component detail panel: the component's
+ * design rating next to the live value, red when exceeded.
+ */
+function designPressureNote(currentPa: number, designBar: number | undefined): string {
+  if (designBar === undefined || !isFinite(designBar)) return '';
+  const over = currentPa / 1e5 > designBar;
+  return ` <span style="color: ${over ? '#f55' : '#8899aa'}; font-size: 10px;"` +
+    ` title="Design pressure rating${over ? ' - EXCEEDED' : ''}">/ ${designBar} bar design</span>`;
+}
+
 export function updateComponentDetail(
   componentId: string | null,
   plantState: { components: Map<string, unknown>; connections: Connection[] },
@@ -1232,7 +1243,54 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Downcomer Volume:</span><span class="detail-value">${downcomerVolume.toFixed(2)} m³</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Total Volume:</span><span class="detail-value">${totalVolume.toFixed(2)} m³</span></div>`;
 
-      // Reactor power (when this vessel hosts the linked neutronics core)
+      // Fuel design (from the installed core barrel; available in construction
+      // mode before any simulation exists)
+      {
+        const barrel = coreBarrelId
+          ? plantState.components.get(coreBarrelId) as Record<string, unknown> | undefined
+          : undefined;
+        const hasCore = !!barrel &&
+          (!!barrel.actualFuelRodCount || barrel.fuelForm === 'pebbles' || !!barrel.thermalPower);
+        if (hasCore && barrel) {
+          html += '<div class="detail-section">';
+          html += '<div class="detail-section-title">Fuel</div>';
+          const ratedMW = barrel.thermalPower !== undefined ? (barrel.thermalPower as number) / 1e6 : undefined;
+          if (ratedMW !== undefined) {
+            html += `<div class="detail-row"><span class="detail-label">Rated Power:</span><span class="detail-value">${ratedMW.toFixed(0)} MWt</span></div>`;
+          }
+          if (barrel.fuelForm === 'pebbles') {
+            html += `<div class="detail-row"><span class="detail-label">Fuel Form:</span><span class="detail-value">${(barrel.pebbleCount as number)?.toLocaleString()} TRISO pebbles</span></div>`;
+          } else {
+            html += `<div class="detail-row"><span class="detail-label">Fuel Rods:</span><span class="detail-value">${(barrel.actualFuelRodCount as number)?.toLocaleString()}</span></div>`;
+          }
+          if (barrel.enrichment !== undefined) {
+            html += `<div class="detail-row"><span class="detail-label">Enrichment:</span><span class="detail-value">${((barrel.enrichment as number) * 100).toFixed(1)}% U-235 ${barrel.fuelMaterial ?? ''}</span></div>`;
+          }
+          if (barrel.activeFuelHeight !== undefined) {
+            html += `<div class="detail-row"><span class="detail-label">Active Height:</span><span class="detail-value">${(barrel.activeFuelHeight as number).toFixed(2)} m</span></div>`;
+          }
+          if (barrel.controlRodCount !== undefined) {
+            html += `<div class="detail-row"><span class="detail-label">Rod Banks:</span><span class="detail-value">${barrel.controlRodCount}</span></div>`;
+          }
+          // Live fuel temperature (simulation running)
+          const fuelNode = simState?.thermalNodes?.get(`${coreBarrelId}-fuel`);
+          if (fuelNode) {
+            const meltK = (barrel.fuelMeltingPoint as number) ?? fuelNode.maxTemperature;
+            const tColor = fuelNode.temperature > meltK ? '#f55'
+              : fuelNode.temperature > meltK - 500 ? '#fa4' : '#fc6';
+            html += `<div class="detail-row"><span class="detail-label">Fuel Temp:</span><span class="detail-value" style="color: ${tColor};">${(fuelNode.temperature - 273.15).toFixed(0)} C</span></div>`;
+            const meltFraction = (fuelNode as unknown as Record<string, unknown>).meltFraction as number | undefined;
+            if (meltFraction !== undefined && meltFraction > 0) {
+              html += `<div class="detail-row"><span class="detail-label">Fuel Melted:</span><span class="detail-value" style="color: #f55;">${(meltFraction * 100).toFixed(1)}%</span></div>`;
+            }
+          }
+          html += '</div>';
+        } else {
+          html += `<div class="detail-row"><span class="detail-label">Fuel:</span><span class="detail-value" style="color: #f77;">No core installed</span></div>`;
+        }
+      }
+
+      // Reactor power + neutronics (when this vessel hosts the linked core)
       {
         const rp = getReactorPowerState();
         const barrelId = component.coreBarrelId as string | undefined;
@@ -1244,6 +1302,16 @@ export function updateComponentDetail(
           html += `<div class="detail-row"><span class="detail-label">Rated Power:</span><span class="detail-value" title="100% power for this core">${(rp.nominalPower / 1e6).toFixed(0)} MWt</span></div>`;
           html += `<div class="detail-row"><span class="detail-label">Fission Power:</span><span class="detail-value">${(rp.fissionPower / 1e6).toFixed(1)} MW</span></div>`;
           html += `<div class="detail-row"><span class="detail-label">Decay Heat:</span><span class="detail-value">${(rp.decayHeatPower / 1e6).toFixed(1)} MW</span></div>`;
+
+          // Neutronics summary (full breakdown lives in the debug panel)
+          const n = simState?.neutronics;
+          if (n && n.coreId === rp.coreId) {
+            html += `<div class="detail-row"><span class="detail-label">Reactivity:</span><span class="detail-value" title="Total reactivity; 0 pcm = critical. See the debug panel for the full breakdown.">${(n.reactivity * 1e5).toFixed(0)} pcm</span></div>`;
+            html += `<div class="detail-row"><span class="detail-label">Rod Insertion:</span><span class="detail-value" title="0% = fully withdrawn, 100% = fully inserted">${((1 - n.controlRodPosition) * 100).toFixed(1)}%</span></div>`;
+            if (n.scrammed) {
+              html += `<div class="detail-row"><span class="detail-label">SCRAM:</span><span class="detail-value" style="color: #f55; font-weight: bold;">${n.scramReason || 'YES'}</span></div>`;
+            }
+          }
           html += '</div>';
         }
       }
@@ -1368,7 +1436,7 @@ export function updateComponentDetail(
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Core Region</div>';
       html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(coreNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(coreNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(coreNode.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(coreNode.fluid.pressure, component.pressureRating as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${coreNode.fluid.phase}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${coreNode.fluid.mass.toFixed(0)} kg</span></div>`;
       if (coreNode.fluid.phase === 'two-phase') {
@@ -1381,7 +1449,7 @@ export function updateComponentDetail(
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Downcomer</div>';
       html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(downcomerNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(downcomerNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(downcomerNode.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(downcomerNode.fluid.pressure, component.pressureRating as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${downcomerNode.fluid.phase}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${downcomerNode.fluid.mass.toFixed(0)} kg</span></div>`;
       if (downcomerNode.fluid.phase === 'two-phase') {
@@ -1415,7 +1483,7 @@ export function updateComponentDetail(
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Primary (Tube Side)</div>';
       html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(tubeNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(tubeNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(tubeNode.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(tubeNode.fluid.pressure, (component.tubePressureRating ?? component.pressureRating) as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${tubeNode.fluid.phase}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${tubeNode.fluid.mass.toFixed(0)} kg</span></div>`;
       html += '</div>';
@@ -1425,7 +1493,7 @@ export function updateComponentDetail(
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Secondary (Shell Side)</div>';
       html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(shellNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(shellNode.fluid.pressure / 1e5).toFixed(2)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(shellNode.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(shellNode.fluid.pressure, (component.shellPressureRating ?? component.pressureRating) as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${shellNode.fluid.phase}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${shellNode.fluid.mass.toFixed(0)} kg</span></div>`;
       // Show fill level only for two-phase shell side
@@ -1447,10 +1515,10 @@ export function updateComponentDetail(
     if (ncgMoles > 0) {
       const ncgPressure = (ncgMoles * R_GAS * flowNode.fluid.temperature) / flowNode.volume;
       const steamPressure = Math.max(0, totalPressure - ncgPressure);
-      html += `<div class="detail-row"><span class="detail-label">Total Pressure:</span><span class="detail-value" style="color: #ff7;">${formatPressure(totalPressure / 1e5)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Total Pressure:</span><span class="detail-value" style="color: #ff7;">${formatPressure(totalPressure / 1e5)} bar${designPressureNote(totalPressure, component.pressureRating as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Steam P:</span><span class="detail-value">${formatPressure(steamPressure / 1e5)} bar</span></div>`;
     } else {
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${formatPressure(totalPressure / 1e5)} bar</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${formatPressure(totalPressure / 1e5)} bar${designPressureNote(totalPressure, component.pressureRating as number | undefined)}</span></div>`;
     }
 
     html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${flowNode.fluid.phase}</span></div>`;

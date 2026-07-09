@@ -16,7 +16,7 @@ import {
   createZeroRates,
 } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
-import { BORON_WORTH_PER_PPM } from './neutronics';
+import { computeReactivityComponents, getRelocatedFuelFraction } from './neutronics';
 import * as Water from '../water-properties';
 import { simulationConfig } from '../types';
 import {
@@ -1042,69 +1042,25 @@ export class NeutronicsRateOperator implements RateOperator {
   }
 
   private computeTotalReactivity(n: any, state: SimulationState): number {
-    // Control rod contribution
-    const rhoRods = -n.controlRodWorth * (1 - n.controlRodPosition);
-
-    // Fuel temperature feedback (Doppler)
     const fuelTemp = this.getAverageFuelTemperature(state, n);
-    const dT_fuel = fuelTemp - n.refFuelTemp;
-    const rhoDoppler = n.fuelTempCoeff * dT_fuel;
-
-    // Coolant temperature feedback
     const coolantTemp = this.getAverageCoolantTemperature(state, n);
-    const dT_coolant = coolantTemp - n.refCoolantTemp;
-    const rhoCoolantTemp = n.coolantTempCoeff * dT_coolant;
-
-    // Coolant density feedback
     const coolantDensity = this.getAverageCoolantDensity(state, n);
-    const dRho_coolant = coolantDensity - n.refCoolantDensity;
-    const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
-    // Soluble boron: worth proportional to concentration AND to the water
-    // density actually in the core (voiding expels absorber with moderator,
-    // so high ppm can flip the net density coefficient positive).
-    const boronPpm = n.boronPpm ?? 0;
-    const rhoBoron = boronPpm !== 0
-      ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
-        (coolantDensity / Math.max(1, n.refCoolantDensity))
-      : 0;
-
-    // Built-in excess reactivity (enrichment margin) - shifts the critical
-    // rod position to partial insertion so a rod controller has authority
-    // in both directions. 0 (default) preserves legacy behavior.
-    const rhoExcess = n.excessReactivity ?? 0;
-
-    // Relocated (slumped) fuel has left the lattice: a debris bed in the
-    // lower head is far from the moderated critical geometry, so relocation
-    // carries a shutdown-scale negative worth. (Recriticality of a
-    // reflooded debris bed is real physics but out of scope - flagged in
-    // operators/corium.ts.)
-    let rhoRelocation = 0;
-    if (n.fuelNodeId) {
-      const fuelNode = state.thermalNodes.get(n.fuelNodeId);
-      if (fuelNode?.initialMass && fuelNode.initialMass > 0) {
-        const relocated = Math.max(0, Math.min(1, 1 - fuelNode.mass / fuelNode.initialMass));
-        rhoRelocation = -0.5 * relocated;
-      }
-    }
-
-    const rho = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron + rhoRelocation;
+    const { total, breakdown } = computeReactivityComponents(n, {
+      fuelTemp,
+      coolantTemp,
+      coolantDensity,
+      relocatedFuelFraction: getRelocatedFuelFraction(n, state),
+    });
 
     // Store diagnostics on the evaluated state so displays and logs see the
     // live reactivity (rate operators otherwise never write state, and
     // n.reactivity would stay frozen at its initial value forever).
-    n.reactivity = rho;
-    n.reactivityBreakdown = {
-      excess: rhoExcess,
-      controlRods: rhoRods,
-      doppler: rhoDoppler,
-      coolantTemp: rhoCoolantTemp,
-      coolantDensity: rhoCoolantDensity,
-      boron: rhoBoron,
-    };
+    n.reactivity = total;
+    n.reactivityBreakdown = breakdown;
     n.diagnostics = { fuelTemp, coolantTemp, coolantDensity };
 
-    return rho;
+    return total;
   }
 
   private getAverageFuelTemperature(state: SimulationState, n: any): number {

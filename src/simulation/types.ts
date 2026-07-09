@@ -7,6 +7,7 @@
  */
 
 import type { GasComposition } from './gas-properties';
+import type { LatticeParams } from './lattice';
 
 // ============================================================================
 // Fluid Properties
@@ -309,12 +310,29 @@ export interface NeutronicsState {
   precursorConcentration: number;   // Relative units
   precursorDecayConstant: number;   // 1/s (λ) - effective value ~0.08
 
-  // Reactivity feedback coefficients
+  // Reactivity feedback coefficients. When latticeParams is present these
+  // are DIAGNOSTIC slopes at the reference point (the lattice model is
+  // evaluated directly instead); coolantTempCoeff remains live physics (the
+  // small spectral term the lattice does not model).
   fuelTempCoeff: number;            // Δρ/ΔT_fuel (Doppler), typically negative
   coolantTempCoeff: number;         // Δρ/ΔT_coolant, sign varies
   coolantDensityCoeff: number;      // Δρ/Δρ_coolant (void coefficient)
 
-  // Reference conditions for feedback
+  // Lattice model for direct nonlinear feedback evaluation. When present,
+  // reactivity is computed as (k-1)/k from latticeKeff at the CURRENT fuel
+  // temperature and coolant density every step - no linearization, no
+  // reference-point bookkeeping. Treat as immutable (shared across clones).
+  latticeParams?: LatticeParams;
+
+  // Burnable poison worth (Δk/k, >= 0), constant. Only used with
+  // latticeParams: subtracted from the lattice reactivity. Sized at build
+  // time (user-set or auto-sized for shutdown margin).
+  poisonWorth?: number;
+
+  // Reference conditions. For the linear-coefficient path these anchor the
+  // feedback terms (physics). For the lattice path they only anchor the
+  // BREAKDOWN attribution (excess vs Doppler vs density) and the spectral
+  // coolant-temperature term - the total is anchor-independent.
   refFuelTemp: number;              // K
   refCoolantTemp: number;           // K
   refCoolantDensity: number;        // kg/m³

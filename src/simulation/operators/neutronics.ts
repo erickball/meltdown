@@ -23,10 +23,129 @@
 
 import { SimulationState, NeutronicsState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
+import { latticeKeff } from '../lattice';
 
 // Differential boron worth at reference moderator density. ~-8 pcm/ppm is
 // the textbook PWR value; components may override via boronWorthPerPpm.
 export const BORON_WORTH_PER_PPM = -8e-5;
+
+// ============================================================================
+// Shared reactivity computation (used by NeutronicsOperator,
+// NeutronicsRateOperator, and the factory's t=0 initialization)
+// ============================================================================
+
+export interface ReactivityInputs {
+  fuelTemp: number;                 // K
+  coolantTemp: number;              // K
+  coolantDensity: number;           // kg/m³
+  relocatedFuelFraction: number;    // 0-1, fuel mass slumped out of the lattice
+}
+
+export interface ReactivityResult {
+  total: number;
+  breakdown: NeutronicsState['reactivityBreakdown'];
+}
+
+/**
+ * Compute total reactivity and its breakdown from the sampled core state.
+ *
+ * Two feedback models:
+ * - Lattice path (n.latticeParams present): reactivity is (k-1)/k from
+ *   latticeKeff evaluated at the CURRENT fuel temperature and coolant
+ *   density, minus the constant burnable-poison worth. Exact at every
+ *   state - no linearization. The breakdown attributes the lattice total
+ *   to excess/Doppler/density by evaluating k at the reference anchors
+ *   (a telescoping decomposition, so the parts sum exactly to the total).
+ * - Linear path (no latticeParams): classic coefficient * deviation terms
+ *   around the reference conditions (presets with validated explicit
+ *   coefficients).
+ *
+ * Terms the lattice does not model are additive in both paths: control
+ * rods, soluble boron (density-weighted), the small spectral coolant-
+ * temperature term, and relocated-fuel worth.
+ */
+export function computeReactivityComponents(
+  n: NeutronicsState,
+  inp: ReactivityInputs
+): ReactivityResult {
+  // Control rods: position 0 = inserted = full negative worth
+  const rhoRods = -n.controlRodWorth * (1 - n.controlRodPosition);
+
+  // Soluble boron: worth proportional to concentration AND to the water
+  // density actually in the core (voiding expels absorber with moderator,
+  // so high ppm can flip the net density coefficient positive).
+  const boronPpm = n.boronPpm ?? 0;
+  const rhoBoron = boronPpm !== 0
+    ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
+      (inp.coolantDensity / Math.max(1, n.refCoolantDensity))
+    : 0;
+
+  // Relocated (slumped) fuel has left the moderated critical geometry:
+  // shutdown-scale negative worth (recriticality of reflooded debris is
+  // out of scope - flagged in operators/corium.ts).
+  const rhoRelocation = -0.5 * inp.relocatedFuelFraction;
+
+  // Small direct spectral term at constant density (the lattice model does
+  // not resolve moderator temperature separately from density).
+  const rhoCoolantTemp = n.coolantTempCoeff * (inp.coolantTemp - n.refCoolantTemp);
+
+  let rhoExcess: number;
+  let rhoDoppler: number;
+  let rhoCoolantDensity: number;
+
+  if (n.latticeParams) {
+    const lp = n.latticeParams;
+    const poison = n.poisonWorth ?? 0;
+    const rhoOf = (k: number) => (k - 1) / k;
+    const rhoAnchor = rhoOf(latticeKeff(lp, n.refFuelTemp, n.refCoolantDensity));
+    const rhoT = rhoOf(latticeKeff(lp, inp.fuelTemp, n.refCoolantDensity));
+    const rhoNow = rhoOf(latticeKeff(lp, inp.fuelTemp, inp.coolantDensity));
+    rhoExcess = rhoAnchor - poison;
+    rhoDoppler = rhoT - rhoAnchor;
+    rhoCoolantDensity = rhoNow - rhoT;
+  } else {
+    rhoExcess = n.excessReactivity ?? 0;
+    rhoDoppler = n.fuelTempCoeff * (inp.fuelTemp - n.refFuelTemp);
+    rhoCoolantDensity = n.coolantDensityCoeff * (inp.coolantDensity - n.refCoolantDensity);
+  }
+
+  const total = rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp +
+    rhoCoolantDensity + rhoBoron + rhoRelocation;
+
+  if (!isFinite(total)) {
+    throw new Error(
+      `[Neutronics] Non-finite reactivity: excess=${rhoExcess} rods=${rhoRods} ` +
+      `doppler=${rhoDoppler} coolantT=${rhoCoolantTemp} density=${rhoCoolantDensity} ` +
+      `boron=${rhoBoron} relocation=${rhoRelocation} ` +
+      `(T_fuel=${inp.fuelTemp} K, rho_cool=${inp.coolantDensity} kg/m³). Physics has failed.`
+    );
+  }
+
+  return {
+    total,
+    breakdown: {
+      excess: rhoExcess,
+      controlRods: rhoRods,
+      doppler: rhoDoppler,
+      coolantTemp: rhoCoolantTemp,
+      coolantDensity: rhoCoolantDensity,
+      boron: rhoBoron,
+    },
+  };
+}
+
+/**
+ * Fraction of fuel mass that has relocated (slumped) out of the lattice,
+ * from the fuel thermal node's mass vs its initial mass.
+ */
+export function getRelocatedFuelFraction(n: NeutronicsState, state: SimulationState): number {
+  if (!n.fuelNodeId) return 0;
+  const fuelNode = state.thermalNodes.get(n.fuelNodeId);
+  if (fuelNode?.initialMass && fuelNode.initialMass > 0) {
+    return Math.max(0, Math.min(1, 1 - fuelNode.mass / fuelNode.initialMass));
+  }
+  return 0;
+}
 
 // ============================================================================
 // Neutronics Operator
@@ -232,57 +351,21 @@ export class NeutronicsOperator implements PhysicsOperator {
    * Also stores the breakdown in n.reactivityBreakdown for debugging
    */
   private computeTotalReactivity(n: NeutronicsState, state: SimulationState): number {
-    // Control rod contribution
-    // Position 0 = inserted = negative reactivity
-    // Position 1 = withdrawn = zero contribution
-    const rhoRods = -n.controlRodWorth * (1 - n.controlRodPosition);
-
-    // Fuel temperature feedback (Doppler)
     const fuelTemp = this.getAverageFuelTemperature(state);
-    const dT_fuel = fuelTemp - n.refFuelTemp;
-    const rhoDoppler = n.fuelTempCoeff * dT_fuel;
-
-    // Coolant temperature feedback
     const coolantTemp = this.getAverageCoolantTemperature(state);
-    const dT_coolant = coolantTemp - n.refCoolantTemp;
-    const rhoCoolantTemp = n.coolantTempCoeff * dT_coolant;
-
-    // Coolant density feedback (void coefficient)
     const coolantDensity = this.getAverageCoolantDensity(state);
-    const dRho_coolant = coolantDensity - n.refCoolantDensity;
-    const rhoCoolantDensity = n.coolantDensityCoeff * dRho_coolant;
 
-    // Soluble boron: worth proportional to concentration AND to how much
-    // borated water is actually in the core. Voiding expels absorber along
-    // with moderator, so at high ppm the net density coefficient can flip
-    // sign (the classic positive-MTC-at-high-boron failure mode).
-    const boronPpm = n.boronPpm ?? 0;
-    const rhoBoron = boronPpm !== 0
-      ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
-        (coolantDensity / Math.max(1, n.refCoolantDensity))
-      : 0;
-
-    // Built-in excess reactivity (enrichment margin)
-    const rhoExcess = n.excessReactivity ?? 0;
-
-    // Store breakdown for debugging
-    n.reactivityBreakdown = {
-      excess: rhoExcess,
-      controlRods: rhoRods,
-      doppler: rhoDoppler,
-      coolantTemp: rhoCoolantTemp,
-      coolantDensity: rhoCoolantDensity,
-      boron: rhoBoron,
-    };
-
-    // Store diagnostic values
-    n.diagnostics = {
+    const { total, breakdown } = computeReactivityComponents(n, {
       fuelTemp,
       coolantTemp,
       coolantDensity,
-    };
+      relocatedFuelFraction: getRelocatedFuelFraction(n, state),
+    });
 
-    return rhoExcess + rhoRods + rhoDoppler + rhoCoolantTemp + rhoCoolantDensity + rhoBoron;
+    n.reactivityBreakdown = breakdown;
+    n.diagnostics = { fuelTemp, coolantTemp, coolantDensity };
+
+    return total;
   }
 
   /**

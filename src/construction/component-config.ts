@@ -3,10 +3,61 @@
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import { estimateComponentCost, formatCost } from './cost-estimation';
 import { ALL_GAS_SPECIES, GAS_PROPERTIES, type GasSpecies } from '../simulation/gas-properties';
+import { deriveControlRodWorth, type LatticeParams } from '../simulation/lattice';
+import { corePebbleGeometry } from '../simulation/factory';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
 const MIN_STEAM_PRESSURE_BAR = MIN_STEAM_PRESSURE_PA / 1e5; // ~0.00657 bar
+
+/**
+ * Lattice params from the core dialog's current values, for the estimated
+ * rod-worth readout. Uses nominal hot conditions (700 kg/m³ water for rod
+ * lattices, trace steam for pebble beds, 900 K fuel) - the simulation
+ * anchors at the actual initial plant state, so this is a design-time
+ * estimate, not the exact in-game number.
+ */
+function dialogLatticeParams(p: Record<string, any>): LatticeParams {
+  const isPebbleBed = p.fuelForm === 'pebbles';
+  const coreDiameter = p.diameter || 3.2;
+  const height = p.height || 3.66;
+  if (isPebbleBed) {
+    const geo = corePebbleGeometry({
+      pebbleDiameter: p.pebbleDiameter ?? 60,
+      pebbleCount: p.pebbleCount ?? 400000,
+      heavyMetalPerPebble: p.heavyMetalPerPebble ?? 7,
+      activeFuelHeight: height,
+    } as any);
+    return {
+      enrichment: (p.enrichmentPct ?? 8.5) / 100,
+      fuelMaterial: 'UO2',
+      rodDiameter: geo.pebbleDiameter,
+      rodCount: geo.pebbleCount,
+      coreDiameter,
+      activeHeight: height,
+      refModeratorDensity: 0.05,
+      refFuelTemp: 900,
+      fuelVolume: geo.fuelVolume,
+      dopplerLengthScale: 0.0005,
+      solidModeratorVolume: geo.solidModeratorVolume,
+      reflectorThickness: p.reflectorThickness ?? 0.8,
+    };
+  }
+  const pitch = (p.rodPitch || 12.6) / 1000;
+  const coreArea = Math.PI * Math.pow(coreDiameter / 2, 2);
+  const rodCount = Math.floor(coreArea / (pitch * pitch) * 0.9);
+  return {
+    enrichment: (p.enrichmentPct ?? 5) / 100,
+    fuelMaterial: p.fuelMaterial || 'UO2',
+    rodDiameter: (p.rodDiameter || 9.5) / 1000,
+    rodCount,
+    coreDiameter,
+    activeHeight: height,
+    refModeratorDensity: 700,
+    refFuelTemp: 900,
+    reflectorThickness: 0,
+  };
+}
 
 export interface ComponentConfig {
   type: string;
@@ -402,7 +453,7 @@ export const componentDefinitions: Record<string, {
         { value: 'centrifugal', label: 'Centrifugal' },
         { value: 'positive', label: 'Positive Displacement' }
       ]},
-      { name: 'orientation', type: 'select', label: 'Flow Direction', default: 'left-right', options: [
+      { name: 'orientation', type: 'select', label: 'Flow Direction', default: 'left-right', help: 'Re-picked automatically whenever you connect the pump (it turns to face whatever it is connected to). Edit it here afterward to override.', options: [
         { value: 'left-right', label: 'Inlet Left → Outlet Right' },
         { value: 'right-left', label: 'Inlet Right → Outlet Left' },
         { value: 'bottom-top', label: 'Inlet Bottom → Outlet Top' },
@@ -711,6 +762,7 @@ export const componentDefinitions: Record<string, {
     displayName: 'Reactor Core',
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Core' },
+      { name: 'thermalPower', type: 'number', label: 'Thermal Power', default: 3000, min: 100, max: 5000, step: 100, unit: 'MWt', help: 'Rated thermal power. Drives fuel cost - size it to what the plant actually needs.' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'height', type: 'number', label: 'Active Height', default: 3.66, min: 1, max: 6, step: 0.1, unit: 'm', help: 'Height of the active fuel region' },
       { name: 'coreBottomElevation', type: 'number', label: 'Core Bottom Elevation', default: 0.5, min: 0, step: 0.1, unit: 'm', help: 'Height of core bottom above the bottom of the core barrel region. Affects heat transfer when liquid level drops.' },
@@ -742,9 +794,17 @@ export const componentDefinitions: Record<string, {
         { value: 'metal', label: 'U metal alloy' },
       ], help: 'Ceramic UO₂ runs hot inside (strong Doppler); metal fuel conducts better and has a slightly harder spectrum.',
         dependsOn: { field: 'fuelForm', value: 'rods' } },
-      { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks (displayed as individual rods)' },
-      { name: 'thermalPower', type: 'number', label: 'Thermal Power', default: 3000, min: 100, max: 5000, step: 100, unit: 'MWt' },
-      { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%', help: '0% = fully inserted, 100% = fully withdrawn' },
+      { name: 'autoPoison', type: 'checkbox', label: 'Auto-size burnable poison', default: true,
+        help: 'Burnable absorbers in the fuel hold down excess reactivity. Auto: sized so that fully inserting the control rods leaves ~1000 pcm shutdown margin at the initial plant conditions. Uncheck to set the poison worth yourself.' },
+      { name: 'burnablePoisonPcm', type: 'number', label: 'Burnable Poison Worth', default: 2000, min: 0, max: 100000, step: 100, unit: 'pcm',
+        dependsOn: { field: 'autoPoison', value: false },
+        help: 'Reactivity permanently held down by burnable absorbers. Too little and the rods cannot shut the core down; too much and it cannot go critical. Note: a core that starts cold loses several thousand pcm of moderator reactivity as it heats up to operating temperature, so leave extra excess if you plan a cold startup.' },
+      { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks. Total rod worth scales with bank count (see the estimate at right): ~4 banks is PWR-like (rods alone cannot hold a cold core down - pair with boron), 8-10 banks is BWR-like (enough authority for cold shutdown on rods alone, with generous excess for the cold-to-hot reactivity swing). Each bank adds drive mechanisms, so more authority costs more.' },
+      { name: 'startCritical', type: 'checkbox', label: 'Start at critical rod position', default: true,
+        help: 'Place the control rods where total reactivity is exactly zero at the initial plant conditions, so the reactor starts steady instead of ramping. Uncheck to set the position yourself (e.g. to start shut down).' },
+      { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%',
+        dependsOn: { field: 'startCritical', value: false },
+        help: '0% = fully inserted, 100% = fully withdrawn' },
       // Calculated fields
       { name: 'fuelRodCount', type: 'calculated', label: 'Fuel Rods (approx)', default: 0,
         calculate: (p) => {
@@ -763,6 +823,32 @@ export const componentDefinitions: Record<string, {
           const coreVolume = Math.PI * Math.pow((p.diameter || 3.2) / 2, 2) * (p.height || 3.66);
           const pebbleVolume = (Math.PI / 6) * Math.pow((p.pebbleDiameter || 60) / 1000, 3);
           return Math.round(0.61 * coreVolume / pebbleVolume).toLocaleString();
+        }
+      },
+      { name: 'estRodWorth', type: 'calculated', label: 'Est. rod worth (hot)', default: 0,
+        calculate: (p) => {
+          try {
+            const worth = deriveControlRodWorth(dialogLatticeParams(p), p.controlRodBanks || 4);
+            return `${Math.round(worth * 1e5).toLocaleString()} pcm`;
+          } catch {
+            return 'n/a';
+          }
+        }
+      },
+      { name: 'linearHeatRate', type: 'calculated', label: 'Avg heat rate', default: 0,
+        calculate: (p) => {
+          const powerW = (p.thermalPower || 3000) * 1e6;
+          if (p.fuelForm === 'pebbles') {
+            const kwPerPebble = powerW / 1000 / (p.pebbleCount || 400000);
+            // Typical pebble beds run ~0.5-1 kW per pebble
+            return `${kwPerPebble.toFixed(2)} kW/pebble${kwPerPebble > 2 ? ' ⚠ high' : ''}`;
+          }
+          const pitch = (p.rodPitch || 12.6) / 1000;
+          const coreArea = Math.PI * Math.pow((p.diameter || 3.2) / 2, 2);
+          const rodCount = Math.max(1, Math.floor(coreArea / (pitch * pitch) * 0.9));
+          const kwPerM = powerW / 1000 / (rodCount * (p.height || 3.66));
+          // Typical PWR average ~18 kW/m; peak rods run 2-2.5x average
+          return `${kwPerM.toFixed(1)} kW/m${kwPerM > 25 ? ' ⚠ high' : ''}`;
         }
       }
     ]
@@ -1245,6 +1331,7 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
           input.value = String(option.default);
+          input.dataset.initialValue = input.value; // for range validation on confirm
 
           if (option.min !== undefined) input.min = String(option.min);
           if (option.max !== undefined) input.max = String(option.max);
@@ -1782,6 +1869,15 @@ export class ComponentDialog {
       }
     });
 
+    // Validate: every visible number field must hold a finite number inside
+    // its declared range (catches NaN from garbage text and typos like
+    // 3000500 MWt that HTML number inputs happily accept)
+    const rangeError = this.validateNumberRanges(properties);
+    if (rangeError) {
+      this.showValidationError(rangeError);
+      return;
+    }
+
     // Validate: initial pressure must not exceed pressure rating
     const pressureError = this.validatePressure(properties);
     if (pressureError) {
@@ -1945,6 +2041,47 @@ export class ComponentDialog {
   /**
    * Show a validation error message in the dialog
    */
+  /**
+   * Every visible number input must contain a finite number within the
+   * option's declared [min, max]. Fields hidden by dependsOn are skipped
+   * (their values are not used). Fields the user did NOT touch are exempt
+   * from the range check (edit dialogs can legitimately prefill values
+   * outside the spinner range, e.g. a pipe length derived from endpoints) -
+   * but never from the not-a-number check.
+   */
+  private validateNumberRanges(properties: Record<string, any>): string | null {
+    const definition = componentDefinitions[this.currentType];
+    if (!definition) return null;
+
+    for (const option of definition.options) {
+      if (option.type !== 'number') continue;
+      const input = document.getElementById(`option-${option.name}`) as HTMLInputElement | null;
+      if (!input) continue;
+
+      // Skip fields hidden by dependsOn
+      const group = input.closest('.form-group') as HTMLElement | null;
+      if (group && group.style.display === 'none') continue;
+
+      const value = properties[option.name];
+      const label = option.label + (option.unit ? ` (${option.unit})` : '');
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        return `${label}: '${input.value}' is not a number`;
+      }
+
+      const untouched = input.dataset.initialValue !== undefined &&
+        input.value === input.dataset.initialValue;
+      if (untouched) continue;
+
+      if (option.min !== undefined && value < option.min) {
+        return `${label}: ${value} is below the minimum of ${option.min}`;
+      }
+      if (option.max !== undefined && value > option.max) {
+        return `${label}: ${value} is above the maximum of ${option.max}`;
+      }
+    }
+    return null;
+  }
+
   private showValidationError(message: string): void {
     // Remove any existing error message
     const existingError = this.bodyElement.querySelector('.validation-error');
@@ -2235,6 +2372,7 @@ export class ComponentDialog {
           input.id = `option-${option.name}`;
           input.name = option.name;
           input.value = String(existingValue);
+          input.dataset.initialValue = input.value; // for range validation on confirm
 
           if (option.min !== undefined) input.min = String(option.min);
           if (option.max !== undefined) input.max = String(option.max);
@@ -2588,7 +2726,8 @@ export class ComponentDialog {
           if (prop === 'opening') return component[prop] * 100; // 0-1 to %
           if (prop === 'running') return component[prop] ? 'on' : 'off';
           if (prop === 'fillLevel') return component[prop] * 100; // 0-1 to %
-          if (prop === 'controlRodPosition') return (1 - component[prop]) * 100; // Inverted: 0=fully inserted, 1=withdrawn -> 0%=inserted, 100%=withdrawn
+          // Same convention everywhere: 0 = fully inserted, 1 = fully withdrawn
+          if (prop === 'controlRodPosition') return component[prop] * 100;
           return component[prop];
         }
       }

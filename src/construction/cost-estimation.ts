@@ -630,16 +630,22 @@ export function estimateCoreCost(props: {
   fuelRodCount: number;
   height: number;           // m (active fuel height)
   diameter: number;         // m (core diameter)
+  controlRodBanks?: number; // rod banks (drives total rod worth)
   nqa1: boolean;
 }): CostEstimate {
   // Fuel fabrication cost scales with power
   // Reference: $50/kWt for initial core
   const fuelFabCost = props.thermalPower * 1000 * 50;
 
-  // Control rod drive mechanisms: ~$200K each
-  // Assume 1 CRDM per 4 assemblies, and about 200-300 assemblies for a typical PWR
+  // Control rod drive mechanisms: ~$200K each. Each bank is a set of
+  // absorber rods covering a fixed fraction of the core, so drive count
+  // scales with BOTH core size and bank count: one drive per ~16 assemblies
+  // per bank (4 banks on a ~200-assembly PWR gives the familiar ~50 CRDMs;
+  // 10 banks approaches a BWR's blade count and price - shutdown authority
+  // is bought, not free).
   const assemblyCount = Math.ceil(props.fuelRodCount / 264); // 17x17 array minus some
-  const crdmCount = Math.ceil(assemblyCount / 4);
+  const banks = props.controlRodBanks ?? 4;
+  const crdmCount = Math.max(banks, Math.ceil(assemblyCount / 16) * banks);
   const crdmCost = crdmCount * 200000;
 
   // Core support structures
@@ -652,7 +658,14 @@ export function estimateCoreCost(props: {
   const installationCost = fuelFabCost * 0.1; // 10% for loading operations
 
   const subtotal = equipmentCost + fabricationCost + installationCost;
-  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+  // The $50/kWt fuel-fabrication reference is a MARKET price for finished
+  // nuclear fuel, already made under NQA-1 - so the NQA-1 premium applies only
+  // to the plant-side scope (CRDMs, core support, loading), not to the fuel
+  // itself. Applying the 5x multiplier to the whole subtotal double-counted
+  // the premium on the dominant fuel term (a 3000 MWt core came out ~$913M vs
+  // a realistic ~$280M).
+  const nqa1Base = fabricationCost + installationCost;
+  const nqa1Premium = props.nqa1 ? nqa1Base * (NQA1_MULTIPLIER - 1) : 0;
 
   return {
     materialCost: equipmentCost,
@@ -1014,6 +1027,8 @@ export function estimateComponentCost(
         fuelRodCount: parseInt(props.fuelRodCount?.replace(/,/g, '') || '50000'),
         height: props.height || 3.66,
         diameter: props.diameter || 3.2,
+        // controlRodBanks from the dialog; controlRodCount from stored components
+        controlRodBanks: props.controlRodBanks ?? props.controlRodCount ?? 4,
         nqa1,
       });
 
@@ -1164,6 +1179,7 @@ export function estimatePlantComponentCost(
         fuelRodCount: String(component.actualFuelRodCount ?? 50000),
         height: component.activeFuelHeight ?? 3.66,
         diameter: component.innerDiameter ?? 3.2,
+        controlRodBanks: component.controlRodCount ?? 4,
         nqa1: component.nqa1 ?? true,
       });
     }

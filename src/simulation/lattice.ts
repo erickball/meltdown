@@ -154,12 +154,42 @@ const GRAPHITE_ABS_REL = 0.05;
 const GRAPHITE_MIGRATION_REL = 0.414;
 // Graphite reflector diffusion length (m): reflector savings saturate here.
 const L_REFLECTOR = 0.5;
+// --- Control rods ---
+// Absorption added by one control rod bank, in the same water-equivalent
+// units as the moderator absorption term (each bank is a set of absorber
+// rods covering a fixed fraction of the core, so worth scales with bank
+// count and competes with everything else absorbing in the cell - rods are
+// worth less in a heavily-absorbing or poorly-thermalized lattice, more in
+// a clean well-moderated one). Calibrated so 4 banks in the reference
+// 5 w/o PWR lattice total ~6800 pcm (real PWR all-rods-in ~5000-9000 pcm)
+// and 10 banks reach BWR-scale ~17000 pcm.
+const CONTROL_ABS_PER_BANK = 0.5;
+// --- Fast-fission floor ---
+// A dry lattice is not k = 0: with no moderation the chain runs (weakly) on
+// fast and epithermal fission (U-238 threshold fission plus unmoderated
+// U-235), k_inf ~ 0.25 for LEU. Without this term the thermal cycle's
+// p = exp(-c/modUnits) underflows to exactly zero when a tight lattice
+// voids, and (k-1)/k becomes -Infinity -> NaN in the point kinetics. The
+// blend scale is the water-equivalent moderation below which the spectrum
+// stays fast; at any operable moderation (modUnits > ~0.3) the term is
+// < ~10^-3 of k and the calibration anchors are untouched.
+const FAST_KINF = 0.25;
+const FAST_BLEND_UNITS = 0.05;
 
 /**
  * k_eff for the lattice at the given fuel temperature and moderator density.
  * Exposed for tests and (later) an "estimated critical position" display.
+ *
+ * @param controlAbsUnits - extra thermal absorption from inserted control
+ *   rods, in water-equivalent units (banks * CONTROL_ABS_PER_BANK). 0 = all
+ *   rods out.
  */
-export function latticeKeff(params: LatticeParams, T_fuel: number, rhoMod: number): number {
+export function latticeKeff(
+  params: LatticeParams,
+  T_fuel: number,
+  rhoMod: number,
+  controlAbsUnits: number = 0
+): number {
   const e = Math.max(0.003, Math.min(0.3, params.enrichment));
 
   // Geometry: fuel, solid moderator, and coolant volumes
@@ -178,7 +208,7 @@ export function latticeKeff(params: LatticeParams, T_fuel: number, rhoMod: numbe
   // Moderation and absorption in water-equivalent units: coolant scaled by
   // density, graphite by its per-volume slowing-down power / absorption.
   const modUnits = Math.max(1e-6, rCool * rhoTilde + rSolid * GRAPHITE_SDP_REL);
-  const absUnits = rCool * rhoTilde + rSolid * GRAPHITE_ABS_REL;
+  const absUnits = rCool * rhoTilde + rSolid * GRAPHITE_ABS_REL + controlAbsUnits;
 
   // eta: fission neutrons per absorption in fuel (enrichment lever).
   // Metal fuel has a slightly harder spectrum captured as a small bonus.
@@ -218,7 +248,26 @@ export function latticeKeff(params: LatticeParams, T_fuel: number, rhoMod: numbe
   const B2 = Math.pow(2.405 / R, 2) + Math.pow(Math.PI / H, 2); // 1/m²
   const nonLeakage = 1 / (1 + M2 * B2);
 
-  return eta * EPSILON * p * f * nonLeakage;
+  // Thermal cycle plus the fast-fission floor (see constants above): keeps
+  // k strictly positive so (k-1)/k stays finite for a fully voided lattice.
+  const kInfFast = FAST_KINF * Math.exp(-modUnits / FAST_BLEND_UNITS);
+  return (eta * EPSILON * p * f + kInfFast) * nonLeakage;
+}
+
+/**
+ * Total control rod worth (Δk/k, positive) for the given number of rod
+ * banks, evaluated at the reference conditions: the reactivity difference
+ * between all-rods-out and all-rods-in. Point kinetics interpolates
+ * linearly in rod position between those endpoints.
+ */
+export function deriveControlRodWorth(params: LatticeParams, banks: number): number {
+  const rhoOf = (k: number) => (k - 1) / k;
+  const kOut = latticeKeff(params, params.refFuelTemp, params.refModeratorDensity);
+  const kIn = latticeKeff(
+    params, params.refFuelTemp, params.refModeratorDensity,
+    Math.max(0, banks) * CONTROL_ABS_PER_BANK
+  );
+  return rhoOf(kOut) - rhoOf(kIn);
 }
 
 /**

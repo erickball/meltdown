@@ -20,7 +20,8 @@ import {
 import { createFluidState, NcgPartialPressures } from './operators';
 import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
 import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-properties';
-import { deriveNeutronics } from './lattice';
+import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
+import { computeReactivityComponents } from './operators/neutronics';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -2137,7 +2138,7 @@ function coreRodGeometry(component: PlantComponent) {
  * fuel kernels. The kernels are the fuel volume; the matrix graphite is the
  * (solid) moderator; the coolant fills the packing voids.
  */
-function corePebbleGeometry(component: PlantComponent) {
+export function corePebbleGeometry(component: PlantComponent) {
   const vessel = component as any;
   const pebbleDiameter = (vessel.pebbleDiameter ?? 60) / 1000; // m
   const pebbleCount = vessel.pebbleCount ?? 100000;
@@ -2258,6 +2259,12 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
   return nodes;
 }
 
+// Default shutdown margin for auto-sized burnable poison: with no explicit
+// poison or excess target on the component, poison is sized so that fully
+// inserted rods leave this much subcriticality at the initial conditions
+// (~1000 pcm, a typical tech-spec minimum).
+const DEFAULT_SHUTDOWN_MARGIN = 0.01;
+
 /**
  * Create neutronics state from a core component.
  *
@@ -2277,7 +2284,9 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
   // Rated thermal power: construction stores the user's setting as
   // thermalPower (W); nominalPower is accepted as an explicit override.
   const nominalPower = vessel.nominalPower ?? vessel.thermalPower ?? 1000e6;
-  const controlRodWorth = vessel.controlRodWorth ?? 0.05;
+  // Explicit worth (presets) wins; lattice cores derive it from the number
+  // of rod banks below, before the poison sizing that depends on it.
+  let controlRodWorth = vessel.controlRodWorth ?? 0.05;
 
   // Actual initial conditions (for critical initialization)
   const coolantNode = state?.flowNodes.get(component.id);
@@ -2285,17 +2294,20 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
 
   // ---- Lattice-derived reactivity physics --------------------------------
   // When the core specifies its fuel design (enrichment / material), the
-  // feedback coefficients and available excess reactivity come from the
-  // geometry the player actually built (simulation/lattice.ts). Explicit
-  // per-coefficient overrides on the component still win.
+  // lattice model (simulation/lattice.ts) IS the feedback physics: the
+  // params are stored on the neutronics state and k_eff is evaluated at the
+  // live fuel temperature / coolant density every step - no linearization.
+  // Explicit per-coefficient overrides (fuelTempCoeff/coolantDensityCoeff)
+  // force the legacy linear path instead, since the nonlinear model cannot
+  // honor a typed-in slope.
   let derivedCoeffs: ReturnType<typeof deriveNeutronics> | null = null;
-  // Built-in reactivity margin. With lattice derivation this is the POISON
-  // TARGET: burnable poison is auto-sized to leave this much hot excess
-  // (real design practice); without derivation it is the excess itself.
-  const excessTarget = vessel.excessReactivity ?? 0.025;
+  let latticeParams: LatticeParams | null = null;
+  let poisonWorth = 0;
   let excessReactivity = vessel.excessReactivity ?? 0;
 
   const isPebbleBed = vessel.fuelForm === 'pebbles';
+  const hasExplicitCoeffs =
+    vessel.fuelTempCoeff !== undefined || vessel.coolantDensityCoeff !== undefined;
   if (vessel.enrichment !== undefined || vessel.fuelMaterial !== undefined || isPebbleBed) {
     const rodDiameterM = (vessel.rodDiameter ?? 9.5) / 1000;
     const rodCount = vessel.actualFuelRodCount ?? 38000;
@@ -2311,7 +2323,7 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     // kernel-scale Doppler self-shielding), the pebble matrix is a solid
     // graphite moderator, and the reflector buys back leakage.
     const pebbleGeo = isPebbleBed ? corePebbleGeometry(component) : null;
-    derivedCoeffs = deriveNeutronics({
+    latticeParams = {
       enrichment: vessel.enrichment ?? (isPebbleBed ? 0.085 : 0.05),
       fuelMaterial: vessel.fuelMaterial ?? 'UO2',
       rodDiameter: isPebbleBed ? pebbleGeo!.pebbleDiameter : rodDiameterM,
@@ -2326,30 +2338,85 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
         solidModeratorVolume: pebbleGeo!.solidModeratorVolume,
       } : {}),
       reflectorThickness: vessel.reflectorThickness ?? 0,
-    });
-    // Poison the raw beginning-of-life excess down to the target margin; a
-    // lattice that cannot even reach the target (low enrichment, bad
-    // moderation, heavy leakage) keeps its raw value - possibly negative,
-    // in which case the core simply cannot go critical as built.
-    excessReactivity = Math.min(derivedCoeffs.excessReactivity, excessTarget);
+    };
+    derivedCoeffs = deriveNeutronics(latticeParams);
+
+    // Control rod worth from the number of rod banks: each bank adds
+    // absorber to the lattice's thermal-utilization competition, so worth
+    // emerges from the same model as everything else (a PWR-ish 4 banks
+    // ~6-7000 pcm; 10 banks reach BWR-scale worth - enough to hold a cold
+    // core down on rods alone).
+    if (vessel.controlRodWorth === undefined) {
+      const rodBanks = vessel.controlRodCount ?? 4;
+      controlRodWorth = deriveControlRodWorth(latticeParams, rodBanks);
+      console.log(
+        `[Factory] Core '${component.id}': rod worth ${(controlRodWorth * 1e5).toFixed(0)} pcm ` +
+        `from ${rodBanks} banks`
+      );
+    }
+
+    if (hasExplicitCoeffs) {
+      console.log(
+        `[Factory] Core '${component.id}' has explicit feedback coefficients - ` +
+        `using the linear model (lattice used only for missing coefficient defaults)`
+      );
+      latticeParams = null;
+    }
+
+    // Burnable poison: a constant negative worth subtracted from the
+    // lattice reactivity. Sizing precedence:
+    //   1. burnablePoisonPcm on the component (user-set in construction)
+    //   2. excessReactivity on the component = poison TARGET (legacy preset
+    //      semantics: poison down to this much excess at initial conditions)
+    //   3. default: rods fully inserted leave DEFAULT_SHUTDOWN_MARGIN of
+    //      subcriticality at the initial conditions, i.e. excess is sized
+    //      to (rod worth - margin)
+    // Poison cannot be negative; a design below its target keeps its raw
+    // (possibly negative) excess and simply cannot go critical as built.
+    const rawExcess = derivedCoeffs.excessReactivity;
+    if (vessel.burnablePoisonPcm !== undefined) {
+      poisonWorth = Math.max(0, vessel.burnablePoisonPcm * 1e-5);
+    } else if (vessel.excessReactivity !== undefined) {
+      poisonWorth = Math.max(0, rawExcess - vessel.excessReactivity);
+    } else {
+      poisonWorth = Math.max(0, rawExcess - (controlRodWorth - DEFAULT_SHUTDOWN_MARGIN));
+    }
+    excessReactivity = rawExcess - poisonWorth;
     console.log(
       `[Factory] Core '${component.id}' lattice: k_eff=${derivedCoeffs.kEffRef.toFixed(3)} ` +
       `(mod ratio ${derivedCoeffs.moderationRatio.toFixed(2)}${derivedCoeffs.overModerated ? ', OVER-moderated' : ''}), ` +
-      `raw excess ${(derivedCoeffs.excessReactivity * 1e5).toFixed(0)} pcm -> poisoned to ` +
-      `${(excessReactivity * 1e5).toFixed(0)} pcm, Doppler ${(derivedCoeffs.fuelTempCoeff * 1e5).toFixed(2)} pcm/K, ` +
+      `raw excess ${(rawExcess * 1e5).toFixed(0)} pcm, poison ${(poisonWorth * 1e5).toFixed(0)} pcm ` +
+      `-> excess ${(excessReactivity * 1e5).toFixed(0)} pcm, Doppler ${(derivedCoeffs.fuelTempCoeff * 1e5).toFixed(2)} pcm/K, ` +
       `density ${(derivedCoeffs.coolantDensityCoeff * 1e5).toFixed(2)} pcm/(kg/m³)`
     );
-    if (derivedCoeffs.excessReactivity < 0) {
+    if (rawExcess < 0) {
       console.warn(
         `[Factory] Core '${component.id}' is SUBCRITICAL as designed ` +
         `(k_eff=${derivedCoeffs.kEffRef.toFixed(3)}) - it cannot reach criticality even with rods out`
       );
+    } else if (excessReactivity < 0) {
+      console.warn(
+        `[Factory] Core '${component.id}' is OVER-POISONED: burnable poison ` +
+        `${(poisonWorth * 1e5).toFixed(0)} pcm exceeds the raw excess ` +
+        `${(rawExcess * 1e5).toFixed(0)} pcm - it cannot go critical at the initial conditions`
+      );
     }
   }
 
+  // Reference conditions. On the lattice path these anchor the reactivity
+  // BREAKDOWN attribution and the small spectral coolant-temperature term;
+  // they must match the state the lattice params were derived at so that
+  // "excess" means reactivity at the initial conditions. On the linear path
+  // they anchor the feedback physics itself (legacy defaults preserved for
+  // presets without initializeCritical).
   let refFuelTemp = 887;
   let refCoolantTemp = 520;
   let refCoolantDensity = 750;
+  if (latticeParams) {
+    refFuelTemp = latticeParams.refFuelTemp;
+    refCoolantDensity = latticeParams.refModeratorDensity;
+    refCoolantTemp = coolantNode?.fluid.temperature ?? refCoolantTemp;
+  }
   let rodPosition = vessel.controlRodPosition ?? 0.8;
   let power = nominalPower;
 
@@ -2400,10 +2467,9 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     (delayedNeutronFraction * (power / nominalPower)) /
     (precursorDecayConstant * promptNeutronLifetime);
 
-  // Evaluate the reactivity breakdown at the initial state (same expressions
-  // as NeutronicsRateOperator.computeTotalReactivity) so the debug display
-  // shows real values at t=0 instead of placeholder zeros. The rate operator
-  // overwrites these on the first solver step.
+  // Coefficient fields: physics for the linear path, diagnostic slopes at
+  // the reference point for the lattice path (coolantTempCoeff stays live
+  // physics on both - the spectral term the lattice does not model).
   const fuelTempCoeff = vessel.fuelTempCoeff ?? derivedCoeffs?.fuelTempCoeff ?? -2.5e-5;
   const coolantTempCoeff = vessel.coolantTempCoeff ?? derivedCoeffs?.coolantTempCoeff ?? -1e-5;
   const coolantDensityCoeff = vessel.coolantDensityCoeff ?? derivedCoeffs?.coolantDensityCoeff ?? 0.001;
@@ -2412,18 +2478,8 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
   const initCoolantDensity = coolantNode
     ? coolantNode.fluid.mass / coolantNode.volume
     : refCoolantDensity;
-  const initBreakdown = {
-    excess: excessReactivity,
-    controlRods: -controlRodWorth * (1 - rodPosition),
-    doppler: fuelTempCoeff * (initFuelTemp - refFuelTemp),
-    coolantTemp: coolantTempCoeff * (initCoolantTemp - refCoolantTemp),
-    coolantDensity: coolantDensityCoeff * (initCoolantDensity - refCoolantDensity),
-  };
-  const initReactivity =
-    initBreakdown.excess + initBreakdown.controlRods + initBreakdown.doppler +
-    initBreakdown.coolantTemp + initBreakdown.coolantDensity;
 
-  return {
+  const neutronics: NeutronicsState = {
     // Link to this specific core
     coreId: component.id,
     fuelNodeId: `${component.id}-fuel`,
@@ -2431,7 +2487,7 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
 
     power,
     nominalPower,
-    reactivity: initReactivity,
+    reactivity: 0, // set from the shared computation below
     promptNeutronLifetime,
     delayedNeutronFraction,
     precursorConcentration,
@@ -2439,6 +2495,8 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     fuelTempCoeff,
     coolantTempCoeff,
     coolantDensityCoeff,
+    latticeParams: latticeParams ?? undefined,
+    poisonWorth: latticeParams ? poisonWorth : undefined,
     refFuelTemp,
     refCoolantTemp,
     refCoolantDensity,
@@ -2458,13 +2516,60 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     scrammed: false,
     scramTime: -1,
     scramReason: '',
-    reactivityBreakdown: initBreakdown,
+    reactivityBreakdown: {
+      excess: 0, controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0,
+    },
     diagnostics: {
       fuelTemp: initFuelTemp,
       coolantTemp: initCoolantTemp,
       coolantDensity: initCoolantDensity,
     },
   };
+
+  const initInputs = {
+    fuelTemp: initFuelTemp,
+    coolantTemp: initCoolantTemp,
+    coolantDensity: initCoolantDensity,
+    relocatedFuelFraction: 0,
+  };
+
+  // startCritical (construction default): place the rods where TOTAL
+  // reactivity is exactly zero at the initial conditions. Everything except
+  // the rod term is position-independent, so evaluate rods-out and solve
+  // rho = base - worth*(1 - pos) = 0 directly. Exact on both feedback
+  // paths, boron included. initializeCritical (presets) already did its
+  // own positioning above and takes precedence.
+  if (vessel.startCritical && !vessel.initializeCritical) {
+    neutronics.controlRodPosition = 1;
+    const base = computeReactivityComponents(neutronics, initInputs).total;
+    let pos = 1 - base / controlRodWorth;
+    if (pos < 0 || pos > 1) {
+      console.warn(
+        `[Factory] Core '${component.id}': cannot start critical - rods-out reactivity ` +
+        `${(base * 1e5).toFixed(0)} pcm vs rod worth ${(controlRodWorth * 1e5).toFixed(0)} pcm ` +
+        `puts the critical position at ${(pos * 100).toFixed(1)}%. ` +
+        (pos > 1
+          ? 'Core is subcritical even with rods fully out.'
+          : 'Excess exceeds rod worth - core is supercritical even with rods fully in.')
+      );
+      pos = Math.max(0, Math.min(1, pos));
+    } else {
+      console.log(
+        `[Factory] Core '${component.id}': rods start at critical position ` +
+        `${(pos * 100).toFixed(1)}% withdrawn (rho = 0)`
+      );
+    }
+    neutronics.controlRodPosition = pos;
+  }
+
+  // Evaluate the reactivity breakdown at the initial state with the SAME
+  // function the rate operator uses, so the debug display shows real values
+  // at t=0 and critical initialization starts at exactly rho = 0.
+  const init = computeReactivityComponents(neutronics, initInputs);
+  neutronics.reactivity = init.total;
+  neutronics.reactivityBreakdown = init.breakdown;
+
+  return neutronics;
 }
 
 /**

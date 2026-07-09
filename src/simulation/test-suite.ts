@@ -8,7 +8,9 @@
  */
 
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
-import { deriveNeutronics, latticeKeff, LatticeParams } from './lattice.js';
+import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
+import { computeReactivityComponents } from './operators/neutronics.js';
+import type { NeutronicsState } from './types.js';
 
 // Test result tracking
 interface TestResult {
@@ -379,6 +381,120 @@ test('fatter rods self-shield: weaker Doppler per kelvin (at fixed moderation)',
   });
   assert(Math.abs(fat.fuelTempCoeff) < Math.abs(thin.fuelTempCoeff),
     `fat-rod Doppler (${(fat.fuelTempCoeff * 1e5).toFixed(2)}) should be weaker than thin-rod (${(thin.fuelTempCoeff * 1e5).toFixed(2)})`);
+});
+
+test('fully voided lattice: k stays finite and strictly positive (fast-fission floor)', () => {
+  // A tight water lattice, bone dry: the thermal cycle collapses (p -> 0)
+  // but the fast-fission floor keeps k > 0 so (k-1)/k never hits -Infinity.
+  // rodCount scaled up so coolant-to-fuel ratio < 1 (the worst case: without
+  // the floor, p underflows to exactly zero here).
+  const tight: LatticeParams = { ...PWR_LATTICE, rodCount: 70000 };
+  const kDry = latticeKeff(tight, 1500, 0.001);
+  assert(isFinite(kDry) && kDry > 0, `voided k must be finite and positive, got ${kDry}`);
+  const rhoDry = (kDry - 1) / kDry;
+  assert(isFinite(rhoDry) && rhoDry < -0.5,
+    `voided lattice must be deeply subcritical with finite rho, got ${rhoDry}`);
+  // ...and the floor must not disturb the operating point: at nominal
+  // moderation the fast term is < 1e-10 of k
+  const kNominal = latticeKeff(PWR_LATTICE, 900, 700);
+  assert(kNominal > 1.1 && kNominal < 1.4,
+    `nominal k_eff must be unaffected by the fast floor, got ${kNominal.toFixed(4)}`);
+});
+
+// Minimal NeutronicsState for reactivity-path tests
+function makeNeutronics(over: Partial<NeutronicsState>): NeutronicsState {
+  return {
+    coreId: 'test-core', fuelNodeId: null, coolantNodeId: null,
+    power: 1e9, nominalPower: 1e9, reactivity: 0,
+    promptNeutronLifetime: 1e-4, delayedNeutronFraction: 0.0065,
+    precursorConcentration: 1, precursorDecayConstant: 0.08,
+    fuelTempCoeff: -2.5e-5, coolantTempCoeff: -1e-5, coolantDensityCoeff: 1e-4,
+    refFuelTemp: 900, refCoolantTemp: 580, refCoolantDensity: 700,
+    controlRodPosition: 1, controlRodWorth: 0.05,
+    decayHeatFraction: 0.07, scrammed: false, scramTime: -1, scramReason: '',
+    reactivityBreakdown: { excess: 0, controlRods: 0, doppler: 0, coolantTemp: 0, coolantDensity: 0 },
+    diagnostics: { fuelTemp: 0, coolantTemp: 0, coolantDensity: 0 },
+    ...over,
+  };
+}
+
+test('lattice reactivity path: zero feedback at anchor, exact nonlinear totals', () => {
+  const lp: LatticeParams = { ...PWR_LATTICE, refModeratorDensity: 700, refFuelTemp: 900 };
+  const raw = deriveNeutronics(lp).excessReactivity;
+  const poison = raw - 0.025;
+  const n = makeNeutronics({
+    latticeParams: lp, poisonWorth: poison,
+    refFuelTemp: 900, refCoolantTemp: 580, refCoolantDensity: 700,
+  });
+
+  // At the anchor state: feedback terms are zero by construction, total =
+  // excess (rods out)
+  const atAnchor = computeReactivityComponents(n, {
+    fuelTemp: 900, coolantTemp: 580, coolantDensity: 700, relocatedFuelFraction: 0,
+  });
+  assertClose(atAnchor.breakdown.doppler, 0, 1e-12, 'Doppler at anchor');
+  assertClose(atAnchor.breakdown.coolantDensity, 0, 1e-12, 'density at anchor');
+  assertClose(atAnchor.total, 0.025, 1e-9, 'total at anchor = poisoned excess');
+
+  // At a perturbed state: breakdown sums exactly to the total, and the total
+  // equals the lattice model evaluated directly (no linearization error)
+  const hot = computeReactivityComponents(n, {
+    fuelTemp: 1400, coolantTemp: 590, coolantDensity: 350, relocatedFuelFraction: 0,
+  });
+  const parts = hot.breakdown;
+  const sum = parts.excess + parts.controlRods + parts.doppler +
+    parts.coolantTemp + parts.coolantDensity + (parts.boron ?? 0);
+  assertClose(hot.total, sum, 1e-12, 'breakdown must sum to total');
+  const kHot = latticeKeff(lp, 1400, 350);
+  const expected = (kHot - 1) / kHot - poison + (-1e-5) * (590 - 580);
+  assertClose(hot.total, expected, 1e-12, 'total must equal direct lattice evaluation');
+});
+
+test('auto-sized poison leaves the target shutdown margin with rods inserted', () => {
+  // Mirrors the factory default: poison = raw - (rodWorth - margin), so a
+  // fully inserted rod bank sits exactly margin subcritical at the anchor
+  const lp: LatticeParams = { ...PWR_LATTICE, refModeratorDensity: 700, refFuelTemp: 900 };
+  const raw = deriveNeutronics(lp).excessReactivity;
+  const rodWorth = 0.05, margin = 0.01;
+  const poison = Math.max(0, raw - (rodWorth - margin));
+  assert(poison > 0, `5 w/o lattice should need poison, raw=${raw.toFixed(4)}`);
+  const n = makeNeutronics({
+    latticeParams: lp, poisonWorth: poison, controlRodWorth: rodWorth,
+    controlRodPosition: 0, // fully inserted
+    refFuelTemp: 900, refCoolantTemp: 580, refCoolantDensity: 700,
+  });
+  const rodsIn = computeReactivityComponents(n, {
+    fuelTemp: 900, coolantTemp: 580, coolantDensity: 700, relocatedFuelFraction: 0,
+  });
+  assertClose(rodsIn.total, -margin, 1e-9, 'rods-in reactivity = -shutdown margin');
+});
+
+test('control rod worth scales with bank count into published ranges', () => {
+  const w4 = deriveControlRodWorth(PWR_LATTICE, 4);
+  const w10 = deriveControlRodWorth(PWR_LATTICE, 10);
+  const w1 = deriveControlRodWorth(PWR_LATTICE, 1);
+  // 4 banks: PWR all-rods-in territory (~5000-9000 pcm)
+  assert(w4 > 0.04 && w4 < 0.10,
+    `4 banks should be worth 4000-10000 pcm, got ${(w4 * 1e5).toFixed(0)}`);
+  // 10 banks: BWR-scale authority, enough to hold a cold core
+  assert(w10 > 0.12 && w10 < 0.30,
+    `10 banks should be worth 12000-30000 pcm, got ${(w10 * 1e5).toFixed(0)}`);
+  assert(w1 < w4 && w4 < w10, 'worth must grow monotonically with banks');
+  // Zero control absorption must leave latticeKeff bit-identical (the
+  // default-argument path is the pre-rods code)
+  const k0 = latticeKeff(PWR_LATTICE, 900, 700);
+  const k0rods = latticeKeff(PWR_LATTICE, 900, 700, 0);
+  assert(k0 === k0rods, 'controlAbsUnits=0 must not change k_eff');
+});
+
+test('lattice reactivity path survives full voiding without NaN', () => {
+  const lp: LatticeParams = { ...PWR_LATTICE, rodCount: 70000 };
+  const n = makeNeutronics({ latticeParams: lp, poisonWorth: 0.01 });
+  const voided = computeReactivityComponents(n, {
+    fuelTemp: 2500, coolantTemp: 650, coolantDensity: 0.5, relocatedFuelFraction: 0.3,
+  });
+  assert(isFinite(voided.total) && voided.total < -0.5,
+    `voided core must be finite and deeply subcritical, got ${voided.total}`);
 });
 
 // ============================================================================

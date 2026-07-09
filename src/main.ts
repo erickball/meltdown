@@ -484,6 +484,37 @@ function init() {
     plantCanvas.resetView();
   });
 
+  const edgePanToggle = document.getElementById('edge-pan-toggle') as HTMLInputElement | null;
+  edgePanToggle?.addEventListener('change', () => {
+    plantCanvas.setEdgePanEnabled(edgePanToggle.checked);
+  });
+
+  // Keep the bottom edge-scroll trigger ABOVE the full-width status bar (in
+  // visible canvas) rather than the 1px strip beneath it.
+  const statusBarEl = document.getElementById('status-bar');
+  const applyEdgePanInsets = () => {
+    plantCanvas.setEdgePanInsets({ bottom: statusBarEl?.getBoundingClientRect().height ?? 0 });
+  };
+  applyEdgePanInsets();
+  window.addEventListener('resize', applyEdgePanInsets);
+
+  // Fullscreen toggle. Uses the whole document so all panels stay visible;
+  // fullscreen also keeps the cursor from leaving the window while edge-scrolling.
+  const fullscreenBtn = document.getElementById('toggle-fullscreen');
+  fullscreenBtn?.addEventListener('click', () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(err => console.warn('[Fullscreen] exit failed:', err));
+    } else {
+      document.documentElement.requestFullscreen().catch(err =>
+        showNotification(`Fullscreen unavailable: ${err.message}`, 'warning'));
+    }
+  });
+  document.addEventListener('fullscreenchange', () => {
+    if (fullscreenBtn) {
+      fullscreenBtn.textContent = document.fullscreenElement ? '⛶ Exit Fullscreen' : '⛶ Fullscreen';
+    }
+  });
+
   // Component placement buttons (placeholder for now)
   const componentButtons = document.querySelectorAll('#toolbar button[data-component]');
   componentButtons.forEach(button => {
@@ -1007,9 +1038,12 @@ function init() {
     });
   }
 
-  // Listen for auto-slowdown events to update speed display
-  gameLoop.addEventListener('auto-slowdown', () => {
+  // Listen for auto-slowdown events: update the speed display and tell the
+  // user what tripped the slowdown (the event message names the quantity
+  // and how fast it was moving)
+  gameLoop.addEventListener('auto-slowdown', (event) => {
     updateSpeedDisplay();
+    showNotification(`⏱ ${event.message}`, 'warning');
   });
 
   // Initial display update
@@ -1294,12 +1328,20 @@ function init() {
       enrichmentPct: (barrel.enrichment ?? 0.05) * 100,
       fuelMaterial: barrel.fuelMaterial ?? 'UO2',
       controlRodBanks: barrel.controlRodCount ?? 4,
-      thermalPower: (barrel.thermalPower ?? 3000e6) / 1e6,
-      initialRodPosition: Math.round((1 - (barrel.controlRodPosition ?? 0.5)) * 100),
+      // Keep W here: the dialog's getExistingValue converts thermalPower W->MW
+      // for display (pre-dividing made a 3000 MWt core show as 0.003 MWt)
+      thermalPower: barrel.thermalPower ?? 3000e6,
+      // 0 = fully inserted, 1 = fully withdrawn (same convention everywhere)
+      initialRodPosition: Math.round((barrel.controlRodPosition ?? 0.5) * 100),
+      startCritical: barrel.startCritical !== false,
+      autoPoison: barrel.autoPoison !== false,
+      ...(barrel.burnablePoisonPcm !== undefined ? { burnablePoisonPcm: barrel.burnablePoisonPcm } : {}),
     };
+    console.log(`[EditCore] open for ${reactorVesselId}: barrel ${rv.coreBarrelId} thermalPower=${((barrel.thermalPower ?? 3000e6) / 1e6).toFixed(0)} MWt`);
 
     componentDialog.showEdit(coreRecord, (properties) => {
       if (!properties) return;
+      console.log(`[EditCore] apply to ${reactorVesselId}: thermalPower=${properties.thermalPower} MWt, diameter=${properties.diameter} m, enrichment=${properties.enrichmentPct}%`);
       const result = constructionManager.addCoreToContainer(reactorVesselId, properties);
       if (result.success) {
         updateConstructionCostPanel();
@@ -2130,6 +2172,11 @@ function init() {
       } else {
       }
 
+      // Start paused so the user can look the plant over (and step through)
+      // before time starts moving; career mode resumes explicitly when the
+      // plant goes online
+      gameLoop.pause();
+
       // Update pause button to reflect actual paused state
       updatePauseButton();
 
@@ -2629,9 +2676,12 @@ function init() {
               if (config.type === 'core' && containedBy && clickedComponent) {
               // Add fuel rod properties to the container (reactor vessel or tank)
               // The container handles rendering the fuel rods at the correct position
+              const coreTarget = plantState.components.get(containedBy);
+              console.log(`[Placement] core -> addCoreToContainer('${containedBy}' [${coreTarget?.type}]), thermalPower=${config.properties.thermalPower} MWt`);
               const result = constructionManager.addCoreToContainer(containedBy, config.properties);
               if (result.success) {
-                showNotification(`Added reactor core to ${clickedComponent.label || containedBy}`, 'info');
+                // Name the ACTUAL container - it is not always the clicked component
+                showNotification(`Added reactor core to ${coreTarget?.label || containedBy}`, 'info');
               } else {
                 console.error(`[Construction] Failed to add core to container: ${result.error}`);
                 showNotification(result.error || 'Failed to add core to container', 'error');
@@ -2665,8 +2715,11 @@ function init() {
                 updateConstructionCostPanel();
 
                 // The canvas will automatically re-render in its render loop
-                // Just show success notification
-                const containerNote = containedBy ? ` inside ${clickedComponent?.label || clickedComponent?.id}` : '';
+                // Just show success notification. Name the actual container -
+                // with building auto-contain there is no clicked component
+                // (this used to print "inside undefined").
+                const containerComp = containedBy ? plantState.components.get(containedBy) : undefined;
+                const containerNote = containedBy ? ` inside ${containerComp?.label || containedBy}` : '';
                 showNotification(`Created ${config.name} (${config.type})${containerNote}`, 'info');
               } else {
                 console.error(`[Construction] Failed to create component`);
@@ -2688,11 +2741,17 @@ function init() {
         }, availableCores, availableGenerators, defaultName);
       };
 
-      // If position is inside a building's footprint, auto-contain without dialog
-      if (containingBuilding) {
-        proceedWithPlacement(containingBuilding.id);
-      } else if (isContainer && clickedComponent) {
-        // If clicking on a container (tank, vessel), ask if user wants to place inside
+      console.log(`[Placement] ${selectedComponentType} click at world (${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}): ` +
+        `hit=${clickedComponent ? `${clickedComponent.id} (${clickedComponent.type})` : 'nothing'}, ` +
+        `building=${containingBuilding ? containingBuilding.id : 'none'} -> ` +
+        `${isContainer && clickedComponent ? 'container prompt' : containingBuilding ? 'auto-contain in building' : 'open ground'}`);
+
+      // Clicking a container component (tank/vessel/reactor vessel) takes
+      // priority over the building footprint: ask about the clicked container.
+      // (Building-first silently dropped a core "placed in the vessel" into the
+      // containment building whenever the click's ground point fell inside the
+      // building footprint.)
+      if (isContainer && clickedComponent) {
         const containerName = clickedComponent.label || clickedComponent.id;
         showContainmentDialog(containerName, selectedComponentType, (placeInside: boolean | null) => {
           if (placeInside === true) {
@@ -2700,6 +2759,9 @@ function init() {
           }
           // If placeInside is false/null, user cancelled - do nothing
         });
+      } else if (containingBuilding) {
+        // Position is inside a building's footprint: auto-contain without dialog
+        proceedWithPlacement(containingBuilding.id);
       } else {
         proceedWithPlacement();
       }
@@ -2874,6 +2936,7 @@ function init() {
       updateConstructionCostPanel();
     },
     showNotification,
+    refreshSimControls: () => updatePauseButton(),
   });
 
   // Start in construction mode
@@ -3140,7 +3203,9 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     // Manual/auto toggle is only offered when a rod controller exists
     const rodModeBtn = document.getElementById('rod-mode-btn') as HTMLButtonElement | null;
     if (rodModeBtn) {
-      rodModeBtn.style.display = anyRodController ? 'block' : 'none';
+      // .sim-btn carries `display: inline-flex !important`, so a plain
+      // style.display write is ignored - the toggle needs !important too
+      rodModeBtn.style.setProperty('display', anyRodController ? 'inline-flex' : 'none', 'important');
       if (anyRodController) {
         const isAuto = rodControllerId !== null;
         rodModeBtn.textContent = isAuto ? 'Rods: AUTO' : 'Rods: MANUAL';
@@ -3224,6 +3289,9 @@ function showNotification(message: string, type: 'info' | 'warning' | 'error' = 
     animation: slideDown 0.3s ease-out;
     max-width: 80%;
     text-align: center;
+    display: flex;
+    align-items: center;
+    gap: 12px;
   `;
 
   // Color based on type
@@ -3244,20 +3312,46 @@ function showNotification(message: string, type: 'info' | 'warning' | 'error' = 
       notification.style.color = '#d0e8ff';
   }
 
-  notification.textContent = message;
+  const text = document.createElement('span');
+  text.textContent = message;
+  text.style.flex = '1';
+  notification.appendChild(text);
+
+  let removed = false;
+  const remove = () => {
+    if (removed) return;
+    removed = true;
+    notification.style.opacity = '0';
+    notification.style.transition = 'opacity 0.3s ease-out';
+    setTimeout(() => {
+      if (notification.parentNode) document.body.removeChild(notification);
+    }, 300);
+  };
+
+  // Manual close button (X) - dismiss immediately without waiting for the timer
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Dismiss';
+  closeBtn.style.cssText = `
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+    opacity: 0.7;
+  `;
+  closeBtn.addEventListener('mouseenter', () => { closeBtn.style.opacity = '1'; });
+  closeBtn.addEventListener('mouseleave', () => { closeBtn.style.opacity = '0.7'; });
+  closeBtn.addEventListener('click', remove);
+  notification.appendChild(closeBtn);
+
   document.body.appendChild(notification);
 
   // Auto-remove after delay (longer for errors)
   const duration = type === 'error' ? 5000 : type === 'warning' ? 4000 : 3000;
-  setTimeout(() => {
-    notification.style.opacity = '0';
-    notification.style.transition = 'opacity 0.3s ease-out';
-    setTimeout(() => {
-      if (notification.parentNode) {
-        document.body.removeChild(notification);
-      }
-    }, 300);
-  }, duration);
+  setTimeout(remove, duration);
 }
 
 // Show a dialog asking if user wants to place component inside a container
