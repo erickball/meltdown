@@ -1195,6 +1195,13 @@ function init() {
 
   // Keyboard controls
   document.addEventListener('keydown', (e) => {
+    // Don't steal keystrokes from text fields (e.g. Jack's chat box):
+    // space/Delete/+/- are shortcuts only when not typing.
+    const target = e.target as HTMLElement | null;
+    if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      return;
+    }
+
     // Don't handle keyboard shortcuts if a dialog is open
     const componentDialogEl = document.getElementById('component-dialog');
     const connectionDialogEl = document.getElementById('connection-dialog');

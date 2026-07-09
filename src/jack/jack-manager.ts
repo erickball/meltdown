@@ -155,6 +155,9 @@ export class JackManager {
     this.input.addEventListener('focus', () => this.togglePanel(true));
     this.sendBtn.addEventListener('click', () => this.handleSend());
     this.input.addEventListener('keydown', (e) => {
+      // Keep keystrokes out of the game's global shortcut handlers
+      // (space = pause, Delete = delete component, +/- = sim speed).
+      e.stopPropagation();
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         this.handleSend();
