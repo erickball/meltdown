@@ -35,6 +35,22 @@ export class PlantCanvas {
   private moveMode: boolean = false;
   private isMovingComponent: boolean = false;
 
+  // RTS-style edge-scroll panning (opt-in). When the cursor sits within
+  // EDGE_PAN_MARGIN of a canvas edge, the camera pans that way each frame.
+  // Panels are inset >=1px from the screen edge (see CSS), so the extreme edge
+  // is always canvas and stays reachable even where a panel covers the margin.
+  private edgePanEnabled: boolean = false;
+  private mouseOverCanvas: boolean = false;
+  private lastMouseScreen: Point = { x: 0, y: 0 };
+  private lastFrameTime: number | null = null;
+  // Per-edge insets (px) that pull the pan trigger boundary inward from the
+  // canvas edge. Used for the bottom, where the full-width status bar covers the
+  // edge: the trigger sits just ABOVE the bar (in visible canvas) instead of the
+  // 1px strip beneath it.
+  private edgePanInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+  private static readonly EDGE_PAN_MARGIN = 28; // px from edge that triggers panning
+  private static readonly EDGE_PAN_SPEED = 900;  // px/second at the very edge
+
   // Construction mode - shows grid and component outlines at ground level
   private constructionMode: boolean = true;
 
@@ -78,6 +94,11 @@ export class PlantCanvas {
     this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
     this.canvas.addEventListener('mouseleave', this.handleMouseUp.bind(this));
     this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
+
+    // Track whether the cursor is over the open canvas (vs a UI panel, which
+    // overlaps the canvas and steals the pointer) - gates edge-scroll panning.
+    this.canvas.addEventListener('mouseenter', () => { this.mouseOverCanvas = true; });
+    this.canvas.addEventListener('mouseleave', () => { this.mouseOverCanvas = false; });
 
     // Touch events for mobile
     this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this));
@@ -155,6 +176,11 @@ export class PlantCanvas {
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+
+    // Remember screen position (edge-scroll keeps panning while the cursor is
+    // held still at the edge, when no further mousemove events fire)
+    this.lastMouseScreen = { x, y };
+    this.mouseOverCanvas = true;
 
     // Update world position callback
     const worldPos = screenToWorld({ x, y }, this.view);
@@ -1199,6 +1225,67 @@ export class PlantCanvas {
 
   // Clamp view offset to keep content visible
   // In isometric mode, limit panning to a reasonable range
+  /** Enable/disable RTS-style edge-scroll panning. */
+  public setEdgePanEnabled(enabled: boolean): void {
+    this.edgePanEnabled = enabled;
+  }
+
+  /** Pull edge-pan trigger boundaries inward (px) - e.g. bottom above the status bar. */
+  public setEdgePanInsets(insets: Partial<{ top: number; right: number; bottom: number; left: number }>): void {
+    this.edgePanInsets = { ...this.edgePanInsets, ...insets };
+  }
+
+  /**
+   * RTS edge-scroll: if enabled and the cursor is within EDGE_PAN_MARGIN of a
+   * canvas edge (and not mid-drag/placement), pan the camera toward that edge.
+   * Speed ramps from 0 at the margin boundary to full at the very edge, and is
+   * scaled by real elapsed time so it's framerate-independent. dtSeconds is the
+   * time since the previous frame.
+   */
+  private updateEdgePan(dtSeconds: number): void {
+    if (!this.edgePanEnabled) return;
+    if (!this.mouseOverCanvas) return;
+    if (this.isDragging || this.isMovingComponent) return; // don't fight an active drag
+
+    const rect = this.canvas.getBoundingClientRect();
+    const { x, y } = this.lastMouseScreen;
+    const margin = PlantCanvas.EDGE_PAN_MARGIN;
+    const ins = this.edgePanInsets;
+
+    // Effective play-area edges (inset inward where a panel covers the edge)
+    const leftEdge = ins.left;
+    const rightEdge = rect.width - ins.right;
+    const topEdge = ins.top;
+    const bottomEdge = rect.height - ins.bottom;
+
+    // Signed intensity per axis: -1..1 scaled by proximity to the (effective)
+    // edge. 0 in the interior, ramping to 1 at the edge.
+    const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
+    let ix = 0, iy = 0;
+    if (x <= leftEdge + margin) ix = -clamp01((leftEdge + margin - x) / margin);
+    else if (x >= rightEdge - margin) ix = clamp01((x - (rightEdge - margin)) / margin);
+    if (y <= topEdge + margin) iy = -clamp01((topEdge + margin - y) / margin);
+    else if (y >= bottomEdge - margin) iy = clamp01((y - (bottomEdge - margin)) / margin);
+
+    if (ix === 0 && iy === 0) return;
+
+    // Screen-space pan amount this frame. Moving the camera toward an edge means
+    // shifting the world the opposite way, i.e. decreasing the offset on that side.
+    const step = PlantCanvas.EDGE_PAN_SPEED * dtSeconds;
+    const panX = -ix * step;
+    const panY = -iy * step;
+
+    if (this.isometric.enabled) {
+      // Match the drag mapping: horizontal -> offsetX, vertical -> cameraDepth
+      this.view.offsetX += panX;
+      this.cameraDepth -= panY;
+    } else {
+      this.view.offsetX += panX;
+      this.view.offsetY += panY;
+    }
+    this.clampView();
+  }
+
   private clampView(): void {
     const rect = this.canvas.getBoundingClientRect();
 
@@ -1224,6 +1311,12 @@ export class PlantCanvas {
   public render(): void {
     const ctx = this.ctx;
     const rect = this.canvas.getBoundingClientRect();
+
+    // Framerate-independent edge-scroll panning (uses real elapsed time)
+    const now = performance.now();
+    const dtSeconds = this.lastFrameTime === null ? 0 : Math.min(0.1, (now - this.lastFrameTime) / 1000);
+    this.lastFrameTime = now;
+    this.updateEdgePan(dtSeconds);
 
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);

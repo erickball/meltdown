@@ -1426,10 +1426,10 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
 }
 
 /**
- * Draw the reactor thermal power over the center of the core, for the
- * component that hosts the linked neutronics core. Same outlined-text style
- * as the flow-rate labels, slightly larger. (Percent of rated power lives in
- * the selection dialog.)
+ * Draw the reactor thermal power over the center of the fuel region, for the
+ * component that hosts the linked neutronics core: bold white text inside a
+ * red outline with a red flare/glow so it reads against the fuel rods.
+ * (Percent of rated power lives in the selection dialog.)
  */
 function renderCorePowerLabel(
   ctx: CanvasRenderingContext2D,
@@ -1442,15 +1442,21 @@ function renderCorePowerLabel(
 
   const mw = rp.thermalPower / 1e6;
   const label = `${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`;
-  const fontSize = Math.max(10, Math.min(18, 13 * view.zoom / 60));
+  const fontSize = Math.max(13, Math.min(28, 20 * view.zoom / 60));
   ctx.save();
-  ctx.font = `${fontSize}px monospace`;
-  ctx.fillStyle = '#000';
-  ctx.strokeStyle = '#fff';
-  ctx.lineWidth = 2;
+  ctx.font = `bold ${fontSize}px monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  // Red flare behind the text (two shadowed stroke passes deepen the glow)
+  ctx.shadowColor = 'rgba(255, 45, 0, 0.95)';
+  ctx.shadowBlur = fontSize * 0.9;
+  ctx.strokeStyle = '#e02010';
+  ctx.lineWidth = Math.max(3, fontSize / 5);
   ctx.strokeText(label, 0, y);
+  ctx.strokeText(label, 0, y);
+  // Crisp white text on top
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = '#fff';
   ctx.fillText(label, 0, y);
   ctx.restore();
 }
@@ -1841,9 +1847,19 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
 
   ctx.stroke();
 
-  // Thermal power readout over the core region (core lives on the core
-  // barrel in the new architecture, or on the vessel itself in legacy plants)
-  renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], (barrelTopY + barrelBottomY) / 2, view);
+  // Thermal power readout centered on the ACTIVE FUEL region (the rods sit
+  // low in the barrel, so the barrel midpoint would float above them). Core
+  // data lives on the core barrel in the new architecture, or on the vessel
+  // itself in legacy plants.
+  {
+    const barrelHeightWorld = (barrelBottomY - barrelTopY) / view.zoom;
+    const fuelHeightWorld = coreBarrel?.activeFuelHeight
+      ?? (vessel as any).coreHeight
+      ?? barrelHeightWorld * 0.9;
+    const fuelBottomElevWorld = coreBarrel?.coreBottomElevation ?? barrelHeightWorld * 0.1;
+    const fuelCenterY = barrelBottomY - (fuelBottomElevWorld + fuelHeightWorld / 2) * view.zoom;
+    renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], fuelCenterY, view);
+  }
 }
 
 function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
@@ -4379,6 +4395,35 @@ function findComponentForFlowNode(nodeId: string, plantState: PlantState): Plant
   return undefined;
 }
 
+/**
+ * The design pressure (bar) a given flow node's gauge should measure against.
+ * Handles ratings that don't live on the component's top-level pressureRating:
+ *  - heat exchangers: tube-side vs shell-side nodes have separate ratings
+ *  - core barrels / contained regions with no own rating: inherit the parent
+ * Returns undefined when nothing has a rating (gauge falls back to abs scale).
+ */
+function resolveDesignPressureBar(
+  component: PlantComponent,
+  nodeId: string,
+  plantState: PlantState
+): number | undefined {
+  const c = component as Record<string, any>;
+  if (component.type === 'heatExchanger') {
+    if (nodeId.includes('shell') || nodeId.includes('secondary')) {
+      return c.shellPressureRating ?? c.pressureRating;
+    }
+    return c.tubePressureRating ?? c.pressureRating;
+  }
+  if (c.pressureRating !== undefined) return c.pressureRating;
+  // No own rating (e.g. a core barrel): inherit the container's
+  const containedBy = c.containedBy as string | undefined;
+  if (containedBy) {
+    const parent = plantState.components.get(containedBy) as Record<string, any> | undefined;
+    if (parent?.pressureRating !== undefined) return parent.pressureRating;
+  }
+  return undefined;
+}
+
 export function renderPressureGauge(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
@@ -4426,7 +4471,8 @@ export function renderPressureGauge(
       // For reactor vessel sub-components, offset the X position to separate the two gauges
       if (parentVessel && parentVessel.type === 'reactorVessel') {
         const rv = parentVessel as ReactorVesselComponent;
-        const isInsideBarrel = component.id.includes('-inside');
+        // Core region id: '-inside' suffix (legacy) or the vessel's coreBarrelId (new)
+        const isInsideBarrel = component.id.includes('-inside') || component.id === rv.coreBarrelId;
         const gaugeOffsetX = rv.innerDiameter * view.zoom * gaugeScale * (isInsideBarrel ? -0.15 : 0.15);
         gaugeX = screenBounds.topCenter.x + gaugeOffsetX;
         // Also offset the core gauge down slightly
@@ -4461,7 +4507,16 @@ export function renderPressureGauge(
     // Calculate the angle for the current pressure (arc goes from -135° to +135°, i.e., 270° total)
     const startAngle = -Math.PI * 0.75; // -135°
     const totalArcAngle = Math.PI * 1.5; // 270°
-    const pressureFraction = Math.min(1, Math.max(0, totalPressure / maxPressure));
+
+    // Fill fraction: gauge full scale is 4/3 of the component's DESIGN pressure,
+    // so design pressure reads at 3/4 full and the final quarter (design -> 4/3
+    // design) is a redline over-pressure zone. Without a rating, fall back to the
+    // old absolute 0-220 bar scale.
+    const designBar = resolveDesignPressureBar(component, nodeId, plantState);
+    const REDLINE_START = 0.75; // fraction of the arc where design pressure sits
+    const pressureFraction = (designBar && designBar > 0)
+      ? Math.min(1, Math.max(0, (pressureBar / designBar) * REDLINE_START))
+      : Math.min(1, Math.max(0, totalPressure / maxPressure));
     const currentAngle = startAngle + pressureFraction * totalArcAngle;
 
     // Draw stem from top of component to gauge
@@ -4487,14 +4542,35 @@ export function renderPressureGauge(
     ctx.lineWidth = Math.max(1, 1.5 * gaugeScale);
     ctx.stroke();
 
-    // Draw background arc (dark gray track)
+    // Draw background arc. When the component has a design rating, the normal
+    // band (0 .. design = 0..3/4 of the arc) is dark gray and the last quarter
+    // (design .. 4/3 design) is a dark-red REDLINE zone.
     const arcWidth = Math.max(2, 4 * gaugeScale);
-    ctx.beginPath();
-    ctx.arc(0, 0, gaugeRadius - arcWidth / 2 - 1, startAngle, startAngle + totalArcAngle);
-    ctx.strokeStyle = '#333';
-    ctx.lineWidth = arcWidth;
-    ctx.lineCap = 'round';
-    ctx.stroke();
+    const arcRadius = gaugeRadius - arcWidth / 2 - 1;
+    if (designBar && designBar > 0) {
+      const redlineAngle = startAngle + REDLINE_START * totalArcAngle;
+      // Normal band
+      ctx.beginPath();
+      ctx.arc(0, 0, arcRadius, startAngle, redlineAngle);
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = arcWidth;
+      ctx.lineCap = 'butt';
+      ctx.stroke();
+      // Redline band (dark red)
+      ctx.beginPath();
+      ctx.arc(0, 0, arcRadius, redlineAngle, startAngle + totalArcAngle);
+      ctx.strokeStyle = '#5a1414';
+      ctx.lineWidth = arcWidth;
+      ctx.lineCap = 'butt';
+      ctx.stroke();
+    } else {
+      ctx.beginPath();
+      ctx.arc(0, 0, arcRadius, startAngle, startAngle + totalArcAngle);
+      ctx.strokeStyle = '#333';
+      ctx.lineWidth = arcWidth;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
 
     // Draw colored arc up to current pressure
     // Color transitions based on typical reactor pressure ranges:
@@ -4519,10 +4595,10 @@ export function renderPressureGauge(
       }
 
       ctx.beginPath();
-      ctx.arc(0, 0, gaugeRadius - arcWidth / 2 - 1, startAngle, currentAngle);
+      ctx.arc(0, 0, arcRadius, startAngle, currentAngle);
       ctx.strokeStyle = arcColor;
       ctx.lineWidth = arcWidth;
-      ctx.lineCap = 'round';
+      ctx.lineCap = 'butt';
       ctx.stroke();
     }
 
@@ -4590,7 +4666,8 @@ export function renderThermometers(
     // Mirror the pressure-gauge X offsets for reactor vessel sub-nodes
     if (parentVessel && parentVessel.type === 'reactorVessel') {
       const rv = parentVessel as ReactorVesselComponent;
-      const isInsideBarrel = component.id.includes('-inside');
+      // Core region id: '-inside' suffix (legacy) or the vessel's coreBarrelId (new)
+      const isInsideBarrel = component.id.includes('-inside') || component.id === rv.coreBarrelId;
       anchorX += rv.innerDiameter * view.zoom * scale * (isInsideBarrel ? -0.15 : 0.15);
       if (isInsideBarrel) topY += 10 * scale;
     }
@@ -4655,14 +4732,15 @@ export function renderThermometers(
     ctx.arc(0, tubeBottom + bulbR * 0.6, bulbR, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Numeric value to the left of the tube
-    const fontSize = Math.round(9 * scale);
+    // Numeric value to the left of the tube - floor the size so it stays
+    // legible on small/zoomed-out nodes, with a heavy dark outline for contrast
+    const fontSize = Math.max(11, Math.round(12 * scale));
     ctx.font = `bold ${fontSize}px monospace`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const label = `${Math.round(T_C)}°C`;
-    ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
-    ctx.lineWidth = Math.max(1, 2 * scale);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
+    ctx.lineWidth = Math.max(2.5, 3 * scale);
     ctx.strokeText(label, -tubeW / 2 - 3 * scale, 0);
     ctx.fillStyle = '#fff';
     ctx.fillText(label, -tubeW / 2 - 3 * scale, 0);

@@ -17,6 +17,7 @@ export interface HudActions {
 
 export class GameHud {
   private root: HTMLDivElement | null = null;
+  private collapsed = false;
   private tickerTimeout: number | null = null;
 
   constructor(private actions: HudActions) {}
@@ -36,6 +37,7 @@ export class GameHud {
         <button class="gm-hud-btn gm-hud-primary"></button>
         <button class="gm-hud-btn gm-hud-music" title="Toggle chiptunes">&#9835;</button>
         <button class="gm-hud-btn gm-hud-abandon" title="Abandon this level and return to the title screen">QUIT</button>
+        <button class="gm-hud-btn gm-hud-hide" title="Collapse the HUD to one line (it can cover other panels)">&#9650; HIDE</button>
       </div>
       <div class="gm-hud-goals"></div>
       <div class="gm-hud-ticker"></div>
@@ -44,12 +46,28 @@ export class GameHud {
     document.body.appendChild(el);
     this.root = el;
 
+    // Collapsed state: the HUD shrinks to one line that keeps the essentials
+    // (level, money, primary action) visible without covering other panels.
+    el.querySelector('.gm-hud-hide')?.addEventListener('click', () => this.setCollapsed(!this.collapsed));
+
     el.querySelector('.gm-hud-primary')?.addEventListener('click', () => this.actions.onPrimary());
     el.querySelector('.gm-hud-abandon')?.addEventListener('click', () => this.actions.onAbandon());
     el.querySelector('.gm-hud-music')?.addEventListener('click', (e) => {
       const muted = this.actions.onToggleMusic();
       (e.target as HTMLButtonElement).style.opacity = muted ? '0.4' : '1';
     });
+  }
+
+  private setCollapsed(collapsed: boolean): void {
+    this.collapsed = collapsed;
+    this.root?.classList.toggle('gm-hud-collapsed', collapsed);
+    const btn = this.root?.querySelector('.gm-hud-hide') as HTMLButtonElement | null;
+    if (btn) {
+      btn.innerHTML = collapsed ? '&#9660; SHOW' : '&#9650; HIDE';
+      btn.title = collapsed
+        ? 'Show the full HUD'
+        : 'Collapse the HUD to one line (it can cover other panels)';
+    }
   }
 
   hide(): void {

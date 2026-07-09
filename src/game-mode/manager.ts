@@ -34,6 +34,8 @@ export interface GameHost {
   /** Empty the plant. */
   clearPlant(): void;
   showNotification(message: string, type: 'info' | 'warning' | 'error'): void;
+  /** Re-sync the sim toolbar (e.g. pause/resume button) with the game loop's actual run state. */
+  refreshSimControls?(): void;
 }
 
 export class GameModeManager {
@@ -325,6 +327,9 @@ export class GameModeManager {
     this.eventEngine?.arm(this.firedKinds);
     this.host.setMode('simulation');
     this.host.gameLoop.resume();
+    // setMode synced the pause button to the (paused) state BEFORE this resume,
+    // so refresh it now that the loop is actually running.
+    this.host.refreshSimControls?.();
     this.tunes.stop();
     this.hud.ticker('Plant online. The meter is running - so is the interest.');
   }

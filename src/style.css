@@ -131,9 +131,11 @@ body {
 
 #status-bar {
   position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  /* Inset 1px so a sliver of canvas always sits at the very edge for
+     RTS edge-scroll panning, even under this full-width bar. */
+  bottom: 1px;
+  left: 1px;
+  right: 1px;
   background: rgba(20, 20, 35, 0.95);
   padding: 8px 15px;
   display: flex;
@@ -412,10 +414,13 @@ body {
   border: 1px solid #4a4;
   font-size: 11px;
   font-family: 'Consolas', monospace;
-  width: 280px;
+  /* Grow leftward to fit wide rows (right-anchored), scroll if capped */
+  width: fit-content;
+  min-width: 280px;
+  max-width: 460px;
   max-height: calc(100vh - 100px);
   overflow-y: auto;
-  overflow-x: hidden;
+  overflow-x: auto;
   white-space: nowrap;
 }
 

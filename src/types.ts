@@ -104,7 +104,7 @@ export interface PumpComponent extends ComponentBase {
   speed: number;        // 0-1 (fraction of rated)
   ratedFlow: number;    // kg/s at full speed
   ratedHead: number;    // meters of head
-  orientation?: 'left-right' | 'right-left';  // Outlet direction (default: left-right)
+  orientation?: 'left-right' | 'right-left' | 'bottom-top' | 'top-bottom';  // Inlet→outlet direction (default: left-right)
 }
 
 export interface VesselComponent extends ComponentBase {

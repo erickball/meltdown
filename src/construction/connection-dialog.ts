@@ -138,13 +138,23 @@ export class ConnectionDialog {
     // Check if components are in a contained relationship:
     // 1. One is directly contained by the other (parent-child)
     // 2. Both are contained by the same parent (siblings inside same vessel)
-    // In either case, the connection is just an opening - visual port positions don't reflect physical distance
+    // In either case the connection is a wall opening rather than a run of pipe -
+    // BUT only when the ports are actually close. A component sitting inside a
+    // big containment building is "contained" yet may be 30 m from its sibling;
+    // that must be a real (piped) connection, not a <=1 m opening. Gate the
+    // internal classification on physical proximity.
     const fromContainedBy = this.fromComponent!.containedBy;
     const toContainedBy = this.toComponent!.containedBy;
-    const isContainedConnection =
+    const INTERNAL_MAX_PORT_DISTANCE = 2.0; // m - openings are through a shared wall
+    const containedRelationship =
       fromContainedBy === this.toComponent!.id ||
       toContainedBy === this.fromComponent!.id ||
       (fromContainedBy !== undefined && fromContainedBy === toContainedBy);
+    const isContainedConnection = containedRelationship && portDistance <= INTERNAL_MAX_PORT_DISTANCE;
+    if (containedRelationship && !isContainedConnection) {
+      console.log(`[Connect] contained pair but ports are ${portDistance.toFixed(1)} m apart ` +
+        `(> ${INTERNAL_MAX_PORT_DISTANCE} m) - treating as a piped connection, not an internal opening`);
+    }
 
     // For contained connections, min is 0.1m (wall opening), max is 1m
     // For regular connections, min is the actual 3D distance between ports
@@ -269,7 +279,7 @@ export class ConnectionDialog {
     const lengthGroup = document.createElement('div');
     lengthGroup.className = 'form-group';
     const lengthLabel = document.createElement('label');
-    lengthLabel.textContent = (isContainedConnection ? 'Opening Thickness' : 'Connection Length') + ' (m)';
+    lengthLabel.textContent = (isContainedConnection ? 'Opening Flow-Path Length' : 'Connection Length') + ' (m)';
     lengthLabel.setAttribute('for', 'length');
     lengthGroup.appendChild(lengthLabel);
 
@@ -286,7 +296,7 @@ export class ConnectionDialog {
     lengthHelp.className = 'help-text';
     lengthHelp.id = 'length-help';
     lengthHelp.textContent = isContainedConnection
-      ? 'Wall thickness of opening (max 1m for contained connections)'
+      ? 'Distance the fluid travels through the shared wall/opening between these two regions. Short (≤1 m) - it sets the flow inertia and friction of the internal port, not a length of external pipe.'
       : `Min: ${minLength.toFixed(1)} m (3D port distance)`;
     lengthGroup.appendChild(lengthHelp);
     this.bodyElement.appendChild(lengthGroup);

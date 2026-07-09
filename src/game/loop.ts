@@ -66,7 +66,10 @@ const DEFAULT_CONFIG: GameLoopConfig = {
   minSimSpeed: 0.01,  // Allow 100x slower than real time
 
   autoSlowdownEnabled: true,
-  autoSlowdownThreshold: 0.1, // 10% change per second triggers slowdown
+  // 50% change per second: auto-slow is meant for big events (power
+  // excursions, ruptures), not routine maneuvering - keep in sync with the
+  // #slowdown-threshold slider default in index.html
+  autoSlowdownThreshold: 0.5,
 
   targetFrameRate: 60,
   maxTimestep: 0.5, // 500ms default as requested

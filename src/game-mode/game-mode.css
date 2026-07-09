@@ -337,11 +337,15 @@
 /* ---- Career HUD ---- */
 .gm-hud {
   position: fixed;
-  top: 0;
-  /* Anchored between the left toolbar and the right component-detail panel so
-     the HUD never covers the selected-component info (which lives top-right). */
-  left: 210px;
+  top: 10px; /* gap above the HUD (also keeps the top edge reachable for edge-scroll) */
+  /* Shrink to content, anchored clear of the component-detail panel (right
+     10..~316 when the debug panel is collapsed). The max-width cap keeps the
+     left edge off the toolbar (~10..290) and the MW-to-grid readout (~180..310)
+     even on narrow windows; row1/goals flex-wrap absorb the squeeze. */
+  left: auto;
   right: 320px;
+  width: max-content;
+  max-width: min(880px, calc(100vw - 660px));
   z-index: 900;
   background: rgba(8, 12, 22, 0.94);
   border: 3px double #4a6a9a;
@@ -411,6 +415,25 @@
 .gm-hud-music {
   font-size: 13px;
   padding: 5px 8px;
+}
+
+.gm-hud-hide {
+  font-size: 10px;
+  padding: 5px 7px;
+}
+
+/* Collapsed HUD: one line with the essentials (level, money, primary
+   action, SHOW button); everything else folds away so it can't cover the
+   cost readout / selection panel. */
+.gm-hud-collapsed .gm-hud-phase,
+.gm-hud-collapsed .gm-hud-loan,
+.gm-hud-collapsed .gm-hud-mw,
+.gm-hud-collapsed .gm-hud-music,
+.gm-hud-collapsed .gm-hud-abandon,
+.gm-hud-collapsed .gm-hud-goals,
+.gm-hud-collapsed .gm-hud-ticker,
+.gm-hud-collapsed .gm-hud-hints {
+  display: none;
 }
 
 .gm-hud-goals {
