@@ -11,7 +11,7 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: "list_component_types",
     description:
-      "List buildable component types. With no arguments returns just the type keys and display names (cheap). Pass types=[...] to get the full property schema (property names, units, ranges, defaults, help) for those types. Fetch a type's schema before the first time you add or edit that type in a conversation.",
+      "Get full property schemas (ranges, defaults, choices, help text) for component types. The compact catalog — every type key and its property names with units — is already in your first CONTEXT block, so for routine adds/edits you don't need this tool. Call it (with types=[...]) when you need valid ranges, defaults, or help for unfamiliar properties.",
     input_schema: {
       type: "object",
       properties: {
@@ -114,7 +114,7 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: "edit_component",
     description:
-      "Change properties of an existing component (construction mode only). Provide only the properties you want to change. Returns the updated details or an error.",
+      "Change properties of an existing component (construction mode only). Any property in the parts catalog can be edited, in catalog units; provide only the properties you want to change. Property names that don't exist in the catalog are rejected or flagged as ignored — never report those as changed. Use move_component for position. Returns the updated details or an error.",
     input_schema: {
       type: "object",
       properties: {

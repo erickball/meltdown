@@ -1,6 +1,6 @@
 ﻿import type { JackHost } from './jack-host';
 import type { PlantComponent } from '../types';
-import { buildComponentCatalog } from './jack-catalog';
+import { buildComponentCatalog, isKnownProperty } from './jack-catalog';
 import {
   estimatePlantComponentCost,
   formatCost,
@@ -236,6 +236,16 @@ export function executeJackTool(
       if (!comp) return err(`No component named "${input.component}"`);
       const changes = (input.changes as Record<string, unknown>) ?? {};
       if (Object.keys(changes).length === 0) return err('changes is empty');
+      // updateComponent silently ignores property names it doesn't know, so
+      // catch typos/hallucinated names before reporting success. Use the
+      // union of all schemas (per-type mapping is looser than the dialog's).
+      const unknownKeys = Object.keys(changes).filter((k) => !isKnownProperty(k));
+      if (unknownKeys.length === Object.keys(changes).length) {
+        return err(
+          `None of these are real property names: ${unknownKeys.join(', ')}. ` +
+            'Property names come from the parts catalog (use move_component for position).'
+        );
+      }
       const ok = host.constructionManager.updateComponent(comp.id, changes);
       if (!ok) return err(`updateComponent failed for ${comp.id}`);
       host.refreshCostPanel();
@@ -244,7 +254,17 @@ export function executeJackTool(
           .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
           .join(', ')}`
       );
-      return { ok: true, updated: componentDetails(host, comp) };
+      return {
+        ok: true,
+        ...(unknownKeys.length > 0
+          ? {
+              warning: `These property names don't exist in any schema and were IGNORED: ${unknownKeys.join(
+                ', '
+              )}. Do not report them as changed.`,
+            }
+          : {}),
+        updated: componentDetails(host, comp),
+      };
     }
 
     case 'move_component': {

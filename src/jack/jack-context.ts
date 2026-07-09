@@ -1,5 +1,6 @@
 import type { JackHost, PlantChange } from './jack-host';
 import { buildingFootprint } from './jack-tools-exec';
+import { buildCompactCatalog } from './jack-catalog';
 
 const barFromPa = (pa: number) => (pa / 1e5).toFixed(2);
 const cFromK = (k: number) => (k - 273.15).toFixed(1);
@@ -9,9 +10,23 @@ const m = (v: number) => Number(v.toFixed(1));
  * Build the machine-generated CONTEXT block that rides along with each user
  * message. Kept deliberately compact — Jack has tools for full detail.
  */
-export function buildContextBlock(host: JackHost, changes: PlantChange[]): string {
+export function buildContextBlock(
+  host: JackHost,
+  changes: PlantChange[],
+  includeCatalog = false
+): string {
   const lines: string[] = ['[CONTEXT]'];
   lines.push(`mode: ${host.getMode()}`);
+
+  if (includeCatalog) {
+    // First message of a conversation only: the compact parts catalog stays
+    // in the transcript (and prompt cache) from here on.
+    lines.push(
+      'parts catalog (type "displayName": properties with units — values for ' +
+        'add/edit use these units; list_component_types has ranges/defaults/help):'
+    );
+    lines.push(buildCompactCatalog());
+  }
 
   const selected = host.getSelectedComponentId();
   if (selected) {

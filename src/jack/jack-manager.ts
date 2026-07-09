@@ -219,7 +219,12 @@ export class JackManager {
     // tool_use turn can't poison the next request.
     const checkpoint = this.messages.length;
     const content: ContentBlock[] = [
-      { type: 'text', text: buildContextBlock(this.host, this.changes) },
+      {
+        type: 'text',
+        // First message carries the compact parts catalog; it stays in the
+        // transcript for the rest of the conversation.
+        text: buildContextBlock(this.host, this.changes, this.messages.length === 0),
+      },
       { type: 'text', text: userText },
     ];
     this.messages.push({ role: 'user', content });

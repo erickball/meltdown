@@ -1,6 +1,39 @@
 import { componentDefinitions } from '../construction/component-config';
 
 /**
+ * Compact one-line-per-type catalog (~3KB): property names with units only.
+ * Embedded in the first context block of a conversation so Jack can do
+ * routine add/edit work without a list_component_types round trip; the tool
+ * remains the source for ranges, defaults, and help text.
+ */
+export function buildCompactCatalog(): string {
+  const lines: string[] = [];
+  for (const [key, def] of Object.entries(componentDefinitions)) {
+    const props = def.options
+      .filter((o) => o.type !== 'calculated')
+      .map((o) => (o.unit ? `${o.name}(${o.unit})` : o.name))
+      .join(' ');
+    lines.push(`  ${key} "${def.displayName}": ${props}`);
+  }
+  return lines.join('\n');
+}
+
+/** Every property name that exists in any component schema (for validating
+ *  edit_component keys — updateComponent silently ignores unknown names). */
+let knownPropertyNames: Set<string> | null = null;
+export function isKnownProperty(name: string): boolean {
+  if (!knownPropertyNames) {
+    knownPropertyNames = new Set();
+    for (const def of Object.values(componentDefinitions)) {
+      for (const o of def.options) {
+        if (o.type !== 'calculated') knownPropertyNames.add(o.name);
+      }
+    }
+  }
+  return knownPropertyNames.has(name);
+}
+
+/**
  * Machine-readable component catalog for the list_component_types tool,
  * generated straight from the construction dialog definitions so it can
  * never drift from what the dialog (and createComponent) actually accepts.
