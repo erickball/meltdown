@@ -180,9 +180,11 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
 
       // Set up substep callback for state history recording
-      // This records state after each accepted substep, not just once per frame
-      this.rk45Solver.onSubstepComplete = (state, stepNumber) => {
-        this.stateHistory.recordStep(state, stepNumber);
+      // This records state after each accepted substep, not just once per
+      // frame. The accepted dt rides along into the history's timestep log,
+      // which is what keeps thinned history deterministically replayable.
+      this.rk45Solver.onSubstepComplete = (state, stepNumber, acceptedDt) => {
+        this.stateHistory.recordStep(state, stepNumber, acceptedDt);
       };
     }
 
@@ -350,7 +352,13 @@ export class GameLoop {
   };
 
   /**
-   * Sync neutronics power to thermal node heat generation
+   * Sync neutronics power to thermal node heat generation.
+   *
+   * LEGACY: only the hand-built demo ever had a node literally named
+   * 'fuel'; factory cores are `${coreId}-fuel` and receive reactor power
+   * through HeatGenerationRateOperator (via neutronics.fuelNodeId), so for
+   * every factory plant this is a no-op. Left in place for old saved
+   * states; do not extend it.
    */
   private syncNeutronicsToThermal(): void {
     const fuelNode = this.state.thermalNodes.get('fuel');
@@ -449,11 +457,20 @@ export class GameLoop {
 
     // Check if we've accumulated a full window
     if (this.changeWindowTime >= this.CHANGE_WINDOW) {
-      // Calculate change as fraction of initial value over the window
+      // Calculate change as fraction of initial value over the window.
+      // The power base is floored at 5% of NOMINAL power: during a startup
+      // from low power, fission power rises exponentially through decades,
+      // so a purely relative criterion (dP/P) trips every window and pins
+      // the game at 1x for the whole climb. Below a few % of rated power
+      // nothing thermally interesting is happening yet - the flux can
+      // multiply tenfold without moving a fuel temperature - so changes
+      // are measured against a floor of plant-significant scale instead.
       const basePower = currentPower - this.cumulativePowerChange;
       const baseTemp = currentMaxTemp - this.cumulativeTempChange;
+      const nominal = this.state.neutronics.nominalPower ?? 0;
+      const powerBase = Math.max(basePower, 0.05 * nominal, 1);
 
-      const powerChangeFraction = Math.abs(this.cumulativePowerChange) / (basePower || 1);
+      const powerChangeFraction = Math.abs(this.cumulativePowerChange) / powerBase;
       const tempChangeFraction = Math.abs(this.cumulativeTempChange) / (baseTemp || 1);
 
       const maxChangeFraction = Math.max(powerChangeFraction, tempChangeFraction);
@@ -511,10 +528,16 @@ export class GameLoop {
   }
 
   /**
-   * Get the maximum fuel temperature for monitoring
+   * Get the maximum fuel temperature for monitoring.
+   *
+   * Resolves the neutronics-linked fuel node (factory cores are
+   * `${coreId}-fuel`); the literal 'fuel' id is the legacy hand-built demo
+   * name and matched NOTHING for factory plants, which silently disabled
+   * the fuel-temperature half of auto-slowdown.
    */
   private getMaxFuelTemperature(): number {
-    const fuelNode = this.state.thermalNodes.get('fuel');
+    const fuelId = this.state.neutronics.fuelNodeId ?? 'fuel';
+    const fuelNode = this.state.thermalNodes.get(fuelId);
     return fuelNode?.temperature ?? 0;
   }
 

@@ -1140,8 +1140,13 @@ export class RK45Solver {
   private lastWallTimeLimitLog = 0;
   private lastSanityFailLog = 0;
 
-  // Optional callback invoked after each accepted substep (for state history recording)
-  public onSubstepComplete?: (state: SimulationState, stepNumber: number) => void;
+  // Optional callback invoked after each accepted substep (for state history
+  // recording). acceptedDt is the step size actually taken: recording the dt
+  // sequence is what makes thinned history REPLAYABLE - the operators are
+  // deterministic, so re-integrating from an earlier snapshot with the same
+  // dt values reproduces the trajectory bit-for-bit (the adaptive controller
+  // is the only wall-clock-influenced input, and the log pins it down).
+  public onSubstepComplete?: (state: SimulationState, stepNumber: number, acceptedDt: number) => void;
 
   constructor(config: Partial<RK45Config> = {}) {
     this.config = { ...DEFAULT_RK45_CONFIG, ...config };
@@ -1711,7 +1716,7 @@ export class RK45Solver {
         minDtUsed = Math.min(minDtUsed, stepDt);
 
         // Notify listener of accepted substep (for state history recording)
-        this.onSubstepComplete?.(currentState, this.totalSteps);
+        this.onSubstepComplete?.(currentState, this.totalSteps, stepDt);
 
         // Track error rates for contributor analysis (use the one that limited dt the most)
         lastErrorRates = errorRates;
@@ -1928,10 +1933,11 @@ export class RK45Solver {
     };
 
     // Adjust dt for next step based on combined error
+    const takenDt = this.currentDt; // the dt this step was actually taken with
     this.currentDt = this.computeOptimalDt(effectiveError, this.currentDt);
 
     // Notify listener of accepted substep (for state history recording)
-    this.onSubstepComplete?.(constrainedState, this.totalSteps);
+    this.onSubstepComplete?.(constrainedState, this.totalSteps, takenDt);
 
     return {
       state: constrainedState,

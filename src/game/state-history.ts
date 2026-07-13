@@ -36,13 +36,40 @@ export class StateHistory {
   // -1 means we're at the end (most recent state)
   private currentIndex = -1;
 
+  // ==========================================================================
+  // Accepted-timestep log
+  //
+  // One entry per accepted solver substep, kept even where snapshots get
+  // thinned. Snapshots + this log make the history REPLAYABLE: restore the
+  // nearest earlier snapshot, then re-integrate using exactly these dt values
+  // (bypassing the adaptive controller) to land bit-identically on any
+  // intermediate step - the physics operators are deterministic functions of
+  // (state, dt), and the wall-clock-influenced adaptive dt choice is the only
+  // thing a live run does that a replay can't reproduce on its own.
+  //
+  // stepNumber is the solver's monotonically increasing totalSteps counter
+  // (it does NOT reset on rewind), so a snapshot's stepNumber uniquely
+  // locates its place in this log even across rewind-and-branch histories.
+  //
+  // NOTE: user inputs mutate state BETWEEN steps and are not logged here;
+  // exact replay across an input additionally needs a snapshot taken at the
+  // input (future GameLoop hook). Parallel plain-number arrays keep the log
+  // compact (~24 B/step -> a few MB per gameplay hour).
+  // ==========================================================================
+  private dtLogStep: number[] = [];
+  private dtLogTime: number[] = [];  // sim time AFTER the step
+  private dtLogDt: number[] = [];
+  private static readonly DT_LOG_CAP = 400_000;
+
   /**
    * Record a state snapshot after a successful simulation step.
    *
    * @param state - The simulation state to snapshot
    * @param stepNumber - Total steps taken so far
+   * @param acceptedDt - The dt the solver actually took for this step
+   *   (0 for initial-state recordings; such entries are not logged)
    */
-  recordStep(state: SimulationState, stepNumber: number): void {
+  recordStep(state: SimulationState, stepNumber: number, acceptedDt: number = 0): void {
     // Avoid duplicate recordings
     if (stepNumber === this.lastRecordedStep) {
       return;
@@ -69,6 +96,19 @@ export class StateHistory {
     // Reset to end position
     this.currentIndex = -1;
     this.lastRecordedStep = stepNumber;
+
+    // Timestep log (independent of snapshot retention below)
+    if (acceptedDt > 0) {
+      this.dtLogStep.push(stepNumber);
+      this.dtLogTime.push(state.time);
+      this.dtLogDt.push(acceptedDt);
+      if (this.dtLogStep.length > StateHistory.DT_LOG_CAP) {
+        const drop = StateHistory.DT_LOG_CAP / 4;
+        this.dtLogStep.splice(0, drop);
+        this.dtLogTime.splice(0, drop);
+        this.dtLogDt.splice(0, drop);
+      }
+    }
 
     const simTime = state.time;
     const currentSecond = Math.floor(simTime);
@@ -246,6 +286,31 @@ export class StateHistory {
     this.secondMarkers.clear();
     this.lastRecordedStep = -1;
     this.currentIndex = -1;
+    this.dtLogStep = [];
+    this.dtLogTime = [];
+    this.dtLogDt = [];
+  }
+
+  /**
+   * The accepted timesteps in (fromStep, toStep], for replaying the segment
+   * between two recorded points (see the dt-log comment above). Returns
+   * null if the requested range has aged out of the capped log - the caller
+   * must then fall back to the nearest retained snapshot.
+   */
+  getDtsBetween(fromStep: number, toStep: number): Array<{ step: number; dt: number; simTime: number }> | null {
+    if (this.dtLogStep.length === 0) return fromStep >= toStep ? [] : null;
+    if (fromStep + 1 < this.dtLogStep[0]) return null; // aged out
+    // dtLogStep is monotonic: binary search for the first entry > fromStep
+    let lo = 0, hi = this.dtLogStep.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.dtLogStep[mid] <= fromStep) lo = mid + 1; else hi = mid;
+    }
+    const out: Array<{ step: number; dt: number; simTime: number }> = [];
+    for (let i = lo; i < this.dtLogStep.length && this.dtLogStep[i] <= toStep; i++) {
+      out.push({ step: this.dtLogStep[i], dt: this.dtLogDt[i], simTime: this.dtLogTime[i] });
+    }
+    return out;
   }
 
   /**
