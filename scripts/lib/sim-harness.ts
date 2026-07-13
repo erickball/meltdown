@@ -149,6 +149,18 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
       },
     };
   }
+  // A/B override for the energy-coupled compliance term in the implicit
+  // closure: ENERGY_COMPLIANCE=0 reverts to the mass-only closure.
+  const energyEnv = process.env.ENERGY_COMPLIANCE;
+  if (energyEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        energyCompliance: energyEnv === '1',
+      },
+    };
+  }
   const solver = new RK45Solver(config);
   solver.addRateOperator(new FlowRateOperator());
   solver.addRateOperator(new FlowMomentumRateOperator());

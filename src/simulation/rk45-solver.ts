@@ -1170,6 +1170,13 @@ export class RK45Solver {
   // Semi-implicit pressure solver - runs BEFORE constraints to pre-condition flow rates
   private pressureSolver: PressureSolver | null = null;
 
+  // Per-flow-node total rates from the most recent step ATTEMPT (candidate)
+  // and the most recent ACCEPTED step. The accepted rates feed the implicit
+  // pressure solve's heat-source estimate: total dU/dt minus flow transport
+  // is the wall-heat/work the closure cannot otherwise see.
+  private candidateFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
+  private lastAcceptedFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
+
   // Flag to dynamically enable/disable pressure solver at runtime
   public pressureSolverEnabled: boolean = true;
 
@@ -1450,7 +1457,7 @@ export class RK45Solver {
       const t0 = performance.now();
       const solvedState = cloneSimulationState(state);
       try {
-        this.pressureSolver.solve(solvedState, dt);
+        this.pressureSolver.solve(solvedState, dt, this.lastAcceptedFlowRates);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45] Implicit momentum solve failed, rejecting step: ${message}`);
@@ -1543,6 +1550,11 @@ export class RK45Solver {
       solution5Rates = addRates(solution5Rates, scaleRates(k[i], B5[i]));
     }
     const newState = applyRatesToState(state, solution5Rates, dt);
+
+    // Stash this attempt's per-flow-node total rates; promoted to
+    // lastAcceptedFlowRates only if the step is ACCEPTED. The implicit
+    // pressure solve uses them to estimate each node's non-flow heat source.
+    this.candidateFlowRates = solution5Rates.flowNodes;
 
     // Sanity check final state before returning
     const finalCheck = checkPreConstraintSanity(newState);
@@ -1765,6 +1777,7 @@ export class RK45Solver {
 
         currentState = constrainedState;
         currentState.time += stepDt;
+        this.lastAcceptedFlowRates = this.candidateFlowRates;
         // Irreversible-outcome operators (bursting) see only ACCEPTED states
         currentState = this.applyPostAcceptConstraints(currentState, stepDt);
         remainingTime -= stepDt;
@@ -1960,6 +1973,7 @@ export class RK45Solver {
     }
 
     constrainedState.time += this.currentDt;
+    this.lastAcceptedFlowRates = this.candidateFlowRates;
     // singleStep always accepts - run the irreversible-outcome operators too
     constrainedState = this.applyPostAcceptConstraints(constrainedState, this.currentDt);
 

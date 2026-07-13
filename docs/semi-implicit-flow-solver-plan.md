@@ -260,3 +260,53 @@ Hardening added alongside: non-finite RK45 error estimates are named
 it (NaN dt froze the old controller), and trip the stuck-detector with a
 loud error if persistent. `checkPreConstraintSanity` also rejects non-finite
 neutronics state.
+
+## Addendum: energy-coupled closure (2026-07-13)
+
+The "no implicit treatment of energy" non-goal above was half-right: energy
+is not stiff for the *momentum* modes this plan targeted, but the mass-only
+compliance left the closure blind to nodes whose pressure is a function of
+temperature riding on a tiny inventory (post-dryout two-phase remnants and
+gas spaces, P ≈ P_sat(T) on kilograms of fluid). There each accepted step's
+own enthalpy transport swings T, P answers exponentially, and the flows flip
+sign every step at ANY dt — a discrete relaxation oscillation, not a
+resolved mode (slosh-probe diagnostic, commit b223e92). The fix is the
+energy leg of RELAP's semi-implicit scheme (`energyCompliance`, default on,
+`ENERGY_COMPLIANCE=0` to A/B):
+
+1. **Donor-side enthalpy anomaly.** A flow leaving a node perturbs its
+   pressure by `(dP/dm + (h_drawn − h_node)·dP/dU)·ṁ·dt`, folded into the
+   c-normalized system as a weight `φ = 1 + (h_drawn − h_node)·β·c·dt` on
+   the donor row (β = ∂P/∂U at constant m,V, per-regime: ideal gas
+   P/(T·C_th); two-phase Clausius-Clapeyron with the constant-volume
+   evaporation buffer and NCG partial pressure; blended across the dome
+   edge like the bulk modulus). Pure liquid takes β = 0: its weight
+   correction would be O(0.1%) while β_liq in Pa/J is huge, so the stale
+   source term (point 3) turns into bar-scale RHS jitter on the small
+   feedwater-train nodes — measured 4.7x → 2.8x realtime on the BWR preset
+   with the liquid branch enabled, 6.0x with it excluded.
+
+2. **Equilibrated arrival.** Arriving flows are billed at the RECEIVER's
+   bulk enthalpy (weight 1). Weighting them at donor enthalpy (the "obvious"
+   symmetric scheme) predicts tangent-EOS condensation collapse for cold
+   water entering a hot steam space and feeds it back as more inflow — an
+   artificial implosion channel that measurably held water in a degrading
+   core against the explicit-reference trajectory (cb-1 held 30+ kg where
+   the reference dries to ~6 kg by t≈27 s in melt-test).
+
+3. **Measured heat-source term.** Everything the transport model cannot see
+   (wall/fuel heat, work, arrival excess) enters the RHS as
+   `c·β·q·dt`, with `q = (last accepted step's total dU/dt) − (model
+   transport at current flows)`. Because q is the measured remainder of the
+   SAME model the weights encode, the closure reproduces reality exactly
+   whenever flows are unchanged: zero steady-state bias for every node type
+   by construction. Without q, a heated node reads as steadily
+   depressurizing (its through-flow exports the wall heat as enthalpy) and
+   the solved loop flow biases low — the controlled-PWR plant test failed at
+   2911 kg/s against its >3000 kg/s assertion until q landed.
+
+Validation: slosh probe (melt-test t=188–189.5) goes from ±25 kg/s flows
+flipping sign on 86% of accepted steps at avg dt 17.5 ms to ~±1 kg/s at the
+50 ms tick cap; melt-test early trajectory matches the explicit reference
+family (monotone core dryout); all plant-scenario, flow-physics, and unit
+suites green in both ENERGY_COMPLIANCE and IMPLICIT_MOMENTUM A/B states.

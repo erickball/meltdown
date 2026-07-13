@@ -664,6 +664,24 @@ export interface PressureSolverConfig {
    *  When false, the solver only corrects flows toward mass balance (the
    *  momentum leg stays explicit in RK45) - the legacy half-implicit scheme. */
   implicitMomentum?: boolean;
+  /** Energy-coupled compliance in the implicit closure (the energy leg of
+   *  RELAP's full semi-implicit scheme).
+   *
+   *  A node's pressure response to a flow LEAVING it is
+   *  dP = (dP/dm + (h_drawn - h_node) * dP/dU) * dm, not dP/dm alone: the
+   *  drawn phase carries an enthalpy anomaly (vapor draw = boil-off
+   *  cooling), and for nodes whose pressure is dominated by temperature
+   *  (near-empty two-phase remnants and gas spaces, where P ~ P_sat(T)
+   *  rides on grams of fluid) the energy a step's own transport moves is
+   *  what actually swings the pressure. Without this term the implicit
+   *  solve is blind to that feedback and such nodes flip flow direction
+   *  every accepted step at any dt (discrete relaxation oscillation - the
+   *  post-dryout dt bottleneck). Arriving flows are billed at the
+   *  receiver's enthalpy, with the remainder (wall heat, work, arrival
+   *  excess) fed back as a measured source rate from the last accepted
+   *  step - zero steady-state bias by construction. Only affects
+   *  implicitMomentum mode. */
+  energyCompliance?: boolean;
 }
 
 /** Default configuration for pressure solver */
@@ -675,6 +693,7 @@ export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   // IMPLICIT_MOMENTUM=0 in the test harnesses for water-hammer studies and as
   // the reference implementation. See docs/semi-implicit-flow-solver-plan.md.
   implicitMomentum: true,
+  energyCompliance: true,
 };
 
 // ============================================================================

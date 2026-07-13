@@ -25,6 +25,23 @@
  *   symmetric positive definite, so a direct solve always succeeds - no iteration,
  *   no relaxation factor, no convergence failure.
  *
+ * In implicit-momentum mode the closure is additionally ENERGY-COUPLED (the
+ * energy leg of RELAP's full semi-implicit scheme). A node's pressure
+ * response to a flow LEAVING it is dP = (dP/dm + (h_drawn - h_node)·dP/dU)·dm:
+ * the mass compliance captures same-fluid advection, and the enthalpy
+ * anomaly of the drawn phase (vapor draw = boil-off cooling, liquid drain =
+ * flashing enrichment) rides on dP/dU. For nodes whose pressure is
+ * temperature-dominated (near-empty two-phase remnants, gas spaces:
+ * P ~ P_sat(T) riding on grams of water) that anomaly is the dominant
+ * feedback; without it the implicit solve is blind to the pressure swing its
+ * own flows produce and post-dryout nodes flip flow direction every accepted
+ * step (a discrete relaxation oscillation that pinned dt to milliseconds).
+ * ARRIVING flows are billed at the receiver's own enthalpy, and everything
+ * the transport model cannot see - wall heat, work, and the excess enthalpy
+ * arriving fluid actually deposits - enters as a measured per-node source
+ * rate taken from the last accepted step's total dU/dt, so the closure has
+ * zero bias at steady state by construction (see solveImplicit).
+ *
  * The virtual pressure corrections dP are never written to node state; they only
  * adjust conn.massFlowRate via dm_j = D_j * (dP_from - dP_to). Node pressures stay
  * thermodynamically consistent, computed from (m, U, V) by the constraint operators.
@@ -51,8 +68,21 @@ import {
   numericalBulkModulus,
   saturationPressure,
   distanceToSaturationLine,
+  saturatedLiquidDensity,
+  saturatedVaporDensity,
+  saturatedLiquidEnergy,
+  saturatedVaporEnergy,
+  latentHeat,
+  liquidCv,
+  vaporCv,
 } from '../water-properties';
-import { totalMass as ncgTotalMass } from '../gas-properties';
+import {
+  totalMass as ncgTotalMass,
+  totalMoles as ncgTotalMoles,
+  mixtureCv as ncgMixtureCv,
+  mixtureCp as ncgMixtureCp,
+  R_GAS,
+} from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
 import {
   computeConnectionHydraulics,
@@ -116,8 +146,18 @@ export class PressureSolver {
    *
    * @param state - Simulation state (flow rates modified in place)
    * @param dt - Timestep in seconds
+   * @param lastEnergyRates - Per-flow-node TOTAL dEnergy rates (W) from the
+   *   last accepted step, used by the energy-coupled closure to estimate each
+   *   node's non-flow heat source (wall heat, direct heating, turbine work).
+   *   Without it a heated node looks like it is losing the enthalpy its
+   *   through-flow exports - a spurious steady-state depressurization signal
+   *   that biases the solved loop flow.
    */
-  solve(state: SimulationState, dt: number): void {
+  solve(
+    state: SimulationState,
+    dt: number,
+    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>
+  ): void {
     if (state.flowNodes.size === 0 || !(dt > 0)) return;
 
     // Index the non-boundary nodes. Boundary nodes are fixed-state reservoirs:
@@ -154,7 +194,7 @@ export class PressureSolver {
     }
 
     if (this.config.implicitMomentum) {
-      this.solveImplicit(state, dt, index, nodeList, c, n);
+      this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates);
       return;
     }
 
@@ -248,6 +288,12 @@ export class PressureSolver {
    * the correction-only path, just with ṁ* on the right-hand side instead of
    * ṁ⁰.
    *
+   * With energyCompliance (default), the closure is
+   * Σ±φ_ij·ṁ¹_j + c_i·β_i·q_i·dt = c_i·δP_i, where φ_ij =
+   * 1 + (h_j − h_i)·β_i·c_i·dt on the DONOR node's row (1 on the receiver's),
+   * β_i = ∂P/∂U|_{m,V}, and q_i is the measured unmodeled energy source rate
+   * (see solveNetwork below and the file header).
+   *
    * Backward Euler damps every acoustic mode unconditionally (|amplification|
    * < 1 at all dt) yet D → dt·A/L as dt → 0, recovering explicit physics
    * (water hammer) when the user caps the timestep.
@@ -263,7 +309,8 @@ export class PressureSolver {
     index: Map<string, number>,
     nodeList: FlowNode[],
     c: Float64Array,
-    n: number
+    n: number,
+    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>
   ): void {
     interface ImplicitEntry {
       conn: FlowConnection;
@@ -271,6 +318,8 @@ export class PressureSolver {
       D: number;       // conductance (kg/s per Pa)
       m0: number;      // start-of-step flow (kg/s)
       mStar: number;   // BE-predicted flow before pressure correction (kg/s)
+      hDonor: number;  // specific enthalpy the flow transports (J/kg)
+      donorIsFrom: boolean; // donor side of the connection (by current flow direction)
       iFrom: number;
       iTo: number;
       choke: ChokeLimit | null;
@@ -278,9 +327,54 @@ export class PressureSolver {
       cappedFlow: number;
     }
 
-    // Fixed b contributions from connections that don't participate in the
-    // solve (closed valves / held check valves, whose flows decay to zero).
-    const bFixed = new Float64Array(n);
+    // Energy-coupled compliance: beta_i = dP/dU at constant (m, V) and the
+    // node's bulk specific enthalpy. A flow LEAVING a node changes its
+    // pressure by (dP/dm + (h_donor - h_node)·beta)·ṁ·dt - the mass
+    // compliance c_i handles the same-fluid part, beta_i the enthalpy
+    // anomaly the drawn phase carries on top of it (boil-off cooling when
+    // vapor leaves a near-dry remnant is the canonical case).
+    //
+    // Flows ARRIVING at a node are billed at the RECEIVER's own bulk
+    // enthalpy ("equilibrated arrival", weight 1): the tangent-EOS response
+    // to fluid at foreign enthalpy - e.g. cold water entering a hot steam
+    // space reads as a pressure collapse - over-extrapolates wildly at the
+    // very nodes where beta is large, because the real response includes the
+    // concurrent wall/fuel heat-transfer jump (injected water flashes on hot
+    // structures) that a one-step-stale source estimate cannot see. The
+    // solve then feeds the predicted collapse back as MORE inflow - an
+    // artificial condensation-implosion channel that held water in a
+    // degrading core against the explicit-reference trajectory. The energy
+    // the arriving fluid actually deposits beyond h_node is picked up one
+    // step later through the measured heat-source term q below, which is
+    // computed against this SAME transport model so the closure reproduces
+    // the true dU/dt exactly whenever flows are unchanged - zero
+    // steady-state bias for every node type by construction.
+    const useEnergy = this.config.energyCompliance !== false;
+    const beta = new Float64Array(n);
+    const hNode = new Float64Array(n);
+    if (useEnergy) {
+      for (let i = 0; i < n; i++) {
+        const node = nodeList[i];
+        beta[i] = this.energyComplianceSlope(node);
+        hNode[i] = this.bulkEnthalpy(node);
+        if (!isFinite(beta[i]) || !isFinite(hNode[i])) {
+          throw new Error(
+            `[PressureSolver] Invalid energy compliance for '${node.id}': ` +
+            `dP/dU=${beta[i]} Pa/J, h=${hNode[i]} J/kg (m=${node.fluid.mass} kg, ` +
+            `T=${node.fluid.temperature} K, P=${node.fluid.pressure} Pa, ` +
+            `phase=${node.fluid.phase}, quality=${node.fluid.quality})`
+          );
+        }
+      }
+    }
+
+    // Fixed flow contributions from connections that don't participate in
+    // the solve (closed valves / held check valves, whose flows decay to
+    // zero) - folded into the RHS with the same donor-enthalpy weighting as
+    // live connections.
+    const fixedFlows: Array<{
+      flow: number; hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number;
+    }> = [];
     const entries: ImplicitEntry[] = [];
 
     for (const conn of state.flowConnections) {
@@ -305,8 +399,10 @@ export class PressureSolver {
         conn.massFlowRate = mNew;
         conn.isChoked = false;
         conn.machNumber = 0;
-        if (iFrom >= 0) bFixed[iFrom] -= mNew;
-        if (iTo >= 0) bFixed[iTo] += mNew;
+        if (iFrom >= 0 || iTo >= 0) {
+          const hDonor = useEnergy ? this.donorEnthalpy(h.upstreamNode, h.flowPhase) : 0;
+          fixedFlows.push({ flow: mNew, hDonor, donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo });
+        }
         continue;
       }
 
@@ -358,29 +454,103 @@ export class PressureSolver {
         );
       }
 
+      // Donor-cell enthalpy for the energy-coupled closure: the flowing
+      // phase's specific enthalpy at the hydraulics upstream node (same
+      // donor convention the advection operator applies to the solved flow).
+      const hDonor = useEnergy ? this.donorEnthalpy(h.upstreamNode, h.flowPhase) : 0;
+      if (!isFinite(hDonor)) {
+        throw new Error(
+          `[PressureSolver] Non-finite donor enthalpy for connection '${conn.id}': ` +
+          `donor='${h.upstreamNode.id}', flowPhase=${h.flowPhase}, ` +
+          `m=${h.upstreamNode.fluid.mass} kg, P=${h.upstreamNode.fluid.pressure} Pa`
+        );
+      }
+
       const choke = computeChokeLimit(conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow);
-      entries.push({ conn, h, D, m0, mStar, iFrom, iTo, choke, capped: false, cappedFlow: 0 });
+      entries.push({
+        conn, h, D, m0, mStar, hDonor,
+        donorIsFrom: h.upstreamNode === fromNode,
+        iFrom, iTo, choke, capped: false, cappedFlow: 0,
+      });
     }
 
-    // Assemble and solve (diag(c) + Laplacian(D)) δP = net predicted inflow.
-    // Capped connections contribute as fixed flows with zero conductance.
+    // Unmodeled energy source rate per node (W): wall heat, direct heating,
+    // turbine work, plus whatever arriving fluid deposits beyond the
+    // receiver's bulk enthalpy. Without it, a node in thermal steady state
+    // (heat in = net enthalpy exported by through-flow) reads as steadily
+    // depressurizing and the solve biases flows to "compensate"; a degrading
+    // core's fluid node is the extreme case (fuel reheats the vapor as fast
+    // as outflow removes it). Estimated as (last accepted step's TOTAL
+    // dEnergy) minus (this closure's transport model at the current flows:
+    // outflows at donor enthalpy, inflows at the receiver's bulk enthalpy) -
+    // so the closure's dU matches reality exactly whenever flows are
+    // unchanged. One step stale during transients; zero (behave like the
+    // mass-only closure) when no history exists yet.
+    const q = new Float64Array(n);
+    if (useEnergy && lastEnergyRates) {
+      const transport = new Float64Array(n);
+      const addTransport = (
+        flow: number, hDonor: number, donorIsFrom: boolean, iFrom: number, iTo: number
+      ): void => {
+        // Signed flow: positive = from->to. The donor side loses fluid at
+        // the donor enthalpy; the receiving side gains at its own bulk h.
+        if (iFrom >= 0) {
+          transport[iFrom] -= flow * (donorIsFrom ? hDonor : hNode[iFrom]);
+        }
+        if (iTo >= 0) {
+          transport[iTo] += flow * (donorIsFrom ? hNode[iTo] : hDonor);
+        }
+      };
+      for (const f of fixedFlows) addTransport(f.flow, f.hDonor, f.donorIsFrom, f.iFrom, f.iTo);
+      for (const e of entries) addTransport(e.m0, e.hDonor, e.donorIsFrom, e.iFrom, e.iTo);
+      for (let i = 0; i < n; i++) {
+        const last = lastEnergyRates.get(nodeList[i].id);
+        q[i] = last !== undefined ? last.dEnergy - transport[i] : 0;
+      }
+    }
+
+    // Assemble and solve (diag(c) + weighted Laplacian(D)) δP = net predicted
+    // inflow. Capped connections contribute as fixed flows with zero
+    // conductance. A connection's contribution to its DONOR node's row is
+    // weighted by φ = 1 + (h_donor - h_i)·β_i·c_i·dt, folding the enthalpy
+    // anomaly of the drawn phase into the same c-normalized closure (φ = 1
+    // recovers the pure mass-compliance system; the weight reads the LIVE
+    // c_i so the secant-compliance pass stays consistent on the re-solve).
+    // The receiving node's row keeps weight 1 (equilibrated arrival - see
+    // the transport-model comment above). The heat-source rate enters the
+    // RHS as the equivalent inflow c_i·β_i·q_i·dt. The weighted system is
+    // mildly non-symmetric; partial pivoting handles it, and a genuinely
+    // singular assembly still fails loudly in solveLinearSystem.
+    const phi = (i: number, hDonor: number): number =>
+      i < 0 || !useEnergy ? 1 : 1 + (hDonor - hNode[i]) * beta[i] * c[i] * dt;
     const solveNetwork = (): Float64Array => {
       const M = new Float64Array(n * n);
-      const b = Float64Array.from(bFixed);
-      for (let i = 0; i < n; i++) M[i * n + i] = c[i];
+      const b = new Float64Array(n);
+      for (let i = 0; i < n; i++) {
+        M[i * n + i] = c[i];
+        if (useEnergy) b[i] = c[i] * beta[i] * q[i] * dt;
+      }
+      for (const f of fixedFlows) {
+        const wFrom = f.donorIsFrom ? phi(f.iFrom, f.hDonor) : 1;
+        const wTo = f.donorIsFrom ? 1 : phi(f.iTo, f.hDonor);
+        if (f.iFrom >= 0) b[f.iFrom] -= wFrom * f.flow;
+        if (f.iTo >= 0) b[f.iTo] += wTo * f.flow;
+      }
       for (const e of entries) {
         const flowFixed = e.capped;
         const flow = flowFixed ? e.cappedFlow : e.mStar;
-        if (e.iFrom >= 0) b[e.iFrom] -= flow;
-        if (e.iTo >= 0) b[e.iTo] += flow;
+        const wFrom = e.donorIsFrom ? phi(e.iFrom, e.hDonor) : 1;
+        const wTo = e.donorIsFrom ? 1 : phi(e.iTo, e.hDonor);
+        if (e.iFrom >= 0) b[e.iFrom] -= wFrom * flow;
+        if (e.iTo >= 0) b[e.iTo] += wTo * flow;
         if (flowFixed) continue;
         if (e.iFrom >= 0) {
-          M[e.iFrom * n + e.iFrom] += e.D;
-          if (e.iTo >= 0) M[e.iFrom * n + e.iTo] -= e.D;
+          M[e.iFrom * n + e.iFrom] += wFrom * e.D;
+          if (e.iTo >= 0) M[e.iFrom * n + e.iTo] -= wFrom * e.D;
         }
         if (e.iTo >= 0) {
-          M[e.iTo * n + e.iTo] += e.D;
-          if (e.iFrom >= 0) M[e.iTo * n + e.iFrom] -= e.D;
+          M[e.iTo * n + e.iTo] += wTo * e.D;
+          if (e.iFrom >= 0) M[e.iTo * n + e.iFrom] -= wTo * e.D;
         }
       }
       return solveLinearSystem(M, b, n);
@@ -557,6 +727,130 @@ export class PressureSolver {
     if (blend <= 0) return K_liquid;
     if (blend >= 1) return P_sat;
     return Math.exp((1 - blend) * Math.log(K_liquid) + blend * Math.log(P_sat));
+  }
+
+  /**
+   * Energy compliance β = ∂P/∂U at constant (m, V), in Pa per J.
+   *
+   * This is the pressure response to energy deposited WITHOUT mass change -
+   * the lever arm the energy-coupled closure multiplies by each flow's
+   * enthalpy anomaly. Same regime structure (and dome-edge blending) as
+   * getEffectiveBulkModulus:
+   *
+   * - Vapor / gas space: ideal gas at constant volume, P = (m·R_s + n·R)·T/V
+   *   and U = C_th·T + const, so β = P/(T·C_th) with C_th the total
+   *   constant-volume heat capacity (steam + NCG). Tiny inventory → tiny
+   *   C_th → large β: exactly the near-empty nodes whose P rides on T.
+   * - Two-phase: P = P_sat(T) + n·R·T/V, and dT/dU is set by the effective
+   *   constant-volume heat capacity INCLUDING the evaporation buffer -
+   *   raising T means evaporating dm_v = d(P_sat·V_vap/(R_w·T))/dT into the
+   *   vapor space at u_fg a kilogram (the same energy-balance model the
+   *   FluidState NCG equilibrium iterates on). A node with plenty of liquid
+   *   and vapor space is strongly buffered (β small); a nearly-dry remnant
+   *   has almost nothing left to evaporate per kelvin only when its vapor
+   *   space is small - once dried past the dome it lands in the vapor branch
+   *   above.
+   * - Liquid: thermal expansion against the bulk stiffness,
+   *   (∂P/∂T)_V = K·β_T and dT/dU = 1/(m·c_v). Negative below the ~4 °C
+   *   density maximum - physical, so no floor.
+   */
+  private energyComplianceSlope(node: FlowNode): number {
+    const T = node.fluid.temperature;
+    const P = node.fluid.pressure;
+    const V = node.volume;
+    const m_w = node.fluid.mass;
+    const ncg = node.fluid.ncg;
+    const nMoles = ncg ? ncgTotalMoles(ncg) : 0;
+    const CvGas = nMoles > 0 ? nMoles * ncgMixtureCv(ncg!) : 0; // J/K
+    const phase = node.fluid.phase;
+
+    if (phase !== 'liquid' && phase !== 'two-phase') {
+      const C_th = m_w * vaporCv(T) + CvGas;
+      return P / (T * C_th);
+    }
+
+    // Saturation-table evaluations stay inside [triple point, critical point]
+    const T_s = Math.min(Math.max(T, 273.16), 646.5);
+    const T_hi = Math.min(Math.max(T_s + 0.5, 274.16), 646.5);
+    const T_lo = T_hi - 1;
+
+    // Two-phase branch
+    const dPsat_dT = (saturationPressure(T_hi) - saturationPressure(T_lo)) / (T_hi - T_lo);
+    const x = node.fluid.quality ?? 0;
+    const m_v = m_w * x;
+    const m_l = m_w - m_v;
+    const R_WATER = 461.5; // J/(kg·K)
+    const V_vap = Math.max(0, V - m_l / saturatedLiquidDensity(T_s));
+    const dmv_dT = (dPsat_dT * V_vap) / (R_WATER * T_s) - m_v / T_s;
+    const C_eff =
+      m_l * liquidCv(T_s) + m_v * vaporCv(T_s) + dmv_dT * latentHeat(T_s) + CvGas;
+    if (!(C_eff > 0)) {
+      throw new Error(
+        `[PressureSolver] Non-positive two-phase heat capacity for '${node.id}': ` +
+        `C_eff=${C_eff} J/K (m_l=${m_l}, m_v=${m_v}, dmv_dT=${dmv_dT}, ` +
+        `V_vap=${V_vap}, T=${T} K, x=${x}) - heating a two-phase node must raise its pressure`
+      );
+    }
+    const b_twoPhase = (dPsat_dT + (nMoles * R_GAS) / V) / C_eff;
+
+    // Pure liquid takes NO energy coupling (β = 0). The physical tangent is
+    // the thermal-expansion response K·β_T/(m·c_v), but for liquid the
+    // WEIGHT correction it produces is negligible - β/a = β_T/c_v ~ 2e-7
+    // (kg/J), so φ deviates from 1 by ~0.1% at realistic enthalpy anomalies
+    // while the mass compliance carries the real stiffness - and the SOURCE
+    // term it would scale is destabilizing: β_liq is huge in Pa/J, so the
+    // one-step-stale q (pump work, warm-front transport residue) becomes
+    // bar-scale RHS jitter on small feedwater-train nodes. Measured on the
+    // BWR preset: +70% pressure-sanity rejections, 4.7x -> 2.8x realtime,
+    // for a term that buys liquid nodes nothing. Blend linearly from zero
+    // across the same dome-edge zone as the bulk modulus so a node entering
+    // the dome picks up the two-phase coupling continuously.
+    const u = node.fluid.internalEnergy / m_w;
+    const v = V / m_w;
+    const satDist = distanceToSaturationLine(u, v);
+    const BLEND_DISTANCE = 10; // mL/kg
+    const blend = Math.min(1, Math.max(0, (BLEND_DISTANCE - satDist.distance) / (2 * BLEND_DISTANCE)));
+    return blend * b_twoPhase;
+  }
+
+  /**
+   * Bulk specific enthalpy of a node's whole inventory (water + NCG),
+   * h = (U + P·V) / m_total. The reference against which the energy-coupled
+   * closure measures each flow's enthalpy anomaly: transporting fluid at
+   * exactly this enthalpy is the same-fluid advection the mass compliance
+   * already models, so its anomaly weight is zero.
+   */
+  private bulkEnthalpy(node: FlowNode): number {
+    const m_tot = node.fluid.mass + (node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0);
+    return (node.fluid.internalEnergy + node.fluid.pressure * node.volume) / m_tot;
+  }
+
+  /**
+   * Specific enthalpy a connection transports per kg of mixture flow, from
+   * the donor node's flowing phase - the closure-weight counterpart of the
+   * advection operator's donor-cell upwinding. Separated draws from a
+   * two-phase donor matter: a vapor draw removes h_g (boil-off cooling of
+   * the remnant), a liquid draw removes h_f and leaves the NCG behind.
+   */
+  private donorEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
+    const bulk = this.bulkEnthalpy(node);
+    if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') return bulk;
+
+    const T_s = Math.min(Math.max(node.fluid.temperature, 273.16), 646.5);
+    const P_sat = saturationPressure(T_s);
+    if (flowPhase === 'liquid') {
+      return saturatedLiquidEnergy(T_s) + P_sat / saturatedLiquidDensity(T_s);
+    }
+    // Vapor draw: saturated steam sharing the vapor space with NCG (which
+    // carries its enthalpy at Cp, flow work included)
+    const m_v = node.fluid.mass * (node.fluid.quality ?? 0);
+    const m_g = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+    if (m_v + m_g <= 0) return bulk;
+    const h_g = saturatedVaporEnergy(T_s) + P_sat / saturatedVaporDensity(T_s);
+    const H_gas = node.fluid.ncg
+      ? ncgTotalMoles(node.fluid.ncg) * ncgMixtureCp(node.fluid.ncg) * node.fluid.temperature
+      : 0;
+    return (m_v * h_g + H_gas) / (m_v + m_g);
   }
 
   /**

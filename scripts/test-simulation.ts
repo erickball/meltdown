@@ -85,19 +85,28 @@ console.log(`Created simulation with ${simState.flowNodes.size} flow nodes, ${si
 //   RELTOL            RK45 relative error tolerance
 //   MAXDT             maximum timestep (s)
 //   IMPLICIT_MOMENTUM 1|0 forces the implicit pressure-flow momentum solve on/off
+//   ENERGY_COMPLIANCE 1|0 forces the energy-coupled implicit closure on/off
 const relTol = process.env.RELTOL ? parseFloat(process.env.RELTOL) : undefined;
 const maxDt = process.env.MAXDT ? parseFloat(process.env.MAXDT) : undefined;
 const implicitEnv = process.env.IMPLICIT_MOMENTUM;
+const energyEnv = process.env.ENERGY_COMPLIANCE;
 const quietTolEnv = process.env.QUIET_TOL;
 const solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {};
 if (relTol) solverConfig.relTol = relTol;
 if (maxDt) solverConfig.maxDt = maxDt;
 if (quietTolEnv !== undefined) solverConfig.quietPressureToleranceScale = parseFloat(quietTolEnv);
 if (implicitEnv !== undefined) solverConfig.pressureSolver = { implicitMomentum: implicitEnv === '1' };
+if (energyEnv !== undefined) {
+  solverConfig.pressureSolver = {
+    ...(typeof solverConfig.pressureSolver === 'object' ? solverConfig.pressureSolver : {}),
+    energyCompliance: energyEnv === '1',
+  };
+}
 const solver = new RK45Solver(solverConfig);
 if (relTol) console.log(`[test-simulation] RK45 relTol overridden to ${relTol}`);
 if (maxDt) console.log(`[test-simulation] RK45 maxDt overridden to ${maxDt}s`);
 if (implicitEnv !== undefined) console.log(`[test-simulation] implicit momentum forced ${implicitEnv === '1' ? 'ON' : 'OFF'}`);
+if (energyEnv !== undefined) console.log(`[test-simulation] energy-coupled compliance forced ${energyEnv === '1' ? 'ON' : 'OFF'}`);
 
 // Add rate operators (order matters!)
 solver.addRateOperator(new FlowRateOperator());
