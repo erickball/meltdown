@@ -30,9 +30,25 @@
  *   in the reactivity sum (recriticality of a reflooded debris bed is real
  *   physics but out of scope; flagged in the code there).
  *
+ * EX-VESSEL RELOCATION (vessel breach): the lower head has real melting
+ * data; when the pool's attack melts it (meltFraction > onset), two more
+ * candling flows open with the same law:
+ *   - molten head steel drains into `${coreId}-corium-ex` (the ex-vessel
+ *     debris bed on the containment floor), carrying its mass as
+ *     unoxidized Fe (MCCI oxidation feedstock);
+ *   - the pool itself pours through the growing hole (TAU_POUR ~ minutes -
+ *     a gravity drain, much faster than in-core candling).
+ * The melted-away head fraction doubles as the breach hole size for the
+ * vessel's fluid break (BurstCheckOperator reads it). Concrete attack by
+ * the ex-vessel debris lives in McciRateOperator.
+ *
+ * METAL BOOKKEEPING: relocating clad carries its unoxidized Zr fraction
+ * into the pool's `metal` inventory; the pour moves metal (and any slag)
+ * in proportion to the mass leaving. Fuel-oxide content stays derived
+ * (mass - metal - slag), so composition can't drift from the total.
+ *
  * NOT modeled (tracked on the todo list): flow-channel blockage, molten
- * pool natural-convection focusing, core-concrete interaction after vessel
- * breach.
+ * pool natural-convection focusing.
  */
 
 import { SimulationState } from '../types';
@@ -46,6 +62,9 @@ export class CoriumRelocationRateOperator implements RateOperator {
   private static readonly ONSET = 0.1;
   private static readonly TAU = 600;        // s
   private static readonly RESIDUAL = 0.01;  // fraction of as-built mass
+  /** Pour time constant once the head is open: a gravity drain of a molten
+   *  pool through a growing hole - minutes, not the 10-minute candle. */
+  private static readonly TAU_POUR = 120;   // s
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -55,6 +74,7 @@ export class CoriumRelocationRateOperator implements RateOperator {
       const coreId = coriumId.slice(0, -'-corium'.length);
 
       let totalIn = 0;      // kg/s
+      let zrIn = 0;         // kg/s of unoxidized Zr riding with the clad
       let mixingPower = 0;  // W of sensible heat carried relative to corium T
 
       for (const suffix of ['-fuel', '-clad']) {
@@ -77,6 +97,11 @@ export class CoriumRelocationRateOperator implements RateOperator {
         rates.thermalNodes.set(source.id, srcRates);
 
         totalIn += r;
+        // Relocating clad carries its unoxidized Zr along (the oxidized
+        // fraction is ZrO2 - already spent as an MCCI reductant)
+        if (suffix === '-clad' && source.oxidation) {
+          zrIn += r * Math.max(0, 1 - source.oxidation.oxidizedFraction);
+        }
         mixingPower += r * source.specificHeat * (source.temperature - corium.temperature);
       }
 
@@ -84,6 +109,7 @@ export class CoriumRelocationRateOperator implements RateOperator {
         const corRates: ThermalNodeRates =
           rates.thermalNodes.get(coriumId) || { dTemperature: 0 };
         corRates.dMass = (corRates.dMass ?? 0) + totalIn;
+        if (zrIn > 0) corRates.dMetalZr = (corRates.dMetalZr ?? 0) + zrIn;
         corRates.dTemperature += mixingPower / nodeHeatCapacity(corium);
         rates.thermalNodes.set(coriumId, corRates);
       }
@@ -130,6 +156,72 @@ export class CoriumRelocationRateOperator implements RateOperator {
               flowRates.dEnergy += Q;
               rates.flowNodes.set(vesselId!, flowRates);
             }
+          }
+        }
+      }
+
+      // ----------------------------------------------------------------
+      // Vessel breach: the pool's attack melts the lower head. Molten
+      // head steel candles out with the melt (as unoxidized Fe) and the
+      // pool pours through the growing hole into the ex-vessel debris
+      // bed - the same smooth candling law, with a fast pour time
+      // constant. The melted-away head fraction is also the vessel's
+      // fluid breach size (BurstCheckOperator reads it).
+      // ----------------------------------------------------------------
+      const debris = state.thermalNodes.get(`${coreId}-corium-ex`);
+      const headNode = corium.associatedVesselNode
+        ? state.thermalNodes.get(`${corium.associatedVesselNode}-lowerhead`)
+        : undefined;
+      if (debris && headNode) {
+        const headMelt = meltFraction(headNode);
+        if (headMelt > CoriumRelocationRateOperator.ONSET) {
+          const driver = Math.pow(headMelt - CoriumRelocationRateOperator.ONSET, 2);
+          let poured = 0;      // kg/s arriving at the debris bed
+          let zrFlow = 0, feFlow = 0, slagFlow = 0;
+          let mixPower = 0;    // W of sensible heat relative to debris T
+
+          // Molten head steel drains out with the melt
+          const headM0 = headNode.initialMass ?? headNode.mass;
+          const movableSteel = headNode.mass - CoriumRelocationRateOperator.RESIDUAL * headM0;
+          if (movableSteel > 0) {
+            const rSteel = movableSteel * driver / CoriumRelocationRateOperator.TAU;
+            const headRates = rates.thermalNodes.get(headNode.id) || { dTemperature: 0 };
+            headRates.dMass = (headRates.dMass ?? 0) - rSteel;
+            rates.thermalNodes.set(headNode.id, headRates);
+            poured += rSteel;
+            feFlow += rSteel;
+            mixPower += rSteel * headNode.specificHeat * (headNode.temperature - debris.temperature);
+          }
+
+          // The pool pours through the hole (gravity drain, down to the
+          // seed mass - a fully drained node breaks dT/dt)
+          const movablePool = corium.mass - (corium.initialMass ?? 1);
+          if (movablePool > 0) {
+            const rPour = movablePool * driver / CoriumRelocationRateOperator.TAU_POUR;
+            const zrOut = rPour * (corium.metal?.zr ?? 0) / corium.mass;
+            const feOut = rPour * (corium.metal?.fe ?? 0) / corium.mass;
+            const slagOut = rPour * (corium.slagMass ?? 0) / corium.mass;
+            const corRates = rates.thermalNodes.get(coriumId) || { dTemperature: 0 };
+            corRates.dMass = (corRates.dMass ?? 0) - rPour;
+            if (zrOut > 0) corRates.dMetalZr = (corRates.dMetalZr ?? 0) - zrOut;
+            if (feOut > 0) corRates.dMetalFe = (corRates.dMetalFe ?? 0) - feOut;
+            if (slagOut > 0) corRates.dSlag = (corRates.dSlag ?? 0) - slagOut;
+            rates.thermalNodes.set(coriumId, corRates);
+            poured += rPour;
+            zrFlow += zrOut;
+            feFlow += feOut;
+            slagFlow += slagOut;
+            mixPower += rPour * corium.specificHeat * (corium.temperature - debris.temperature);
+          }
+
+          if (poured > 0) {
+            const debRates = rates.thermalNodes.get(debris.id) || { dTemperature: 0 };
+            debRates.dMass = (debRates.dMass ?? 0) + poured;
+            if (zrFlow > 0) debRates.dMetalZr = (debRates.dMetalZr ?? 0) + zrFlow;
+            if (feFlow > 0) debRates.dMetalFe = (debRates.dMetalFe ?? 0) + feFlow;
+            if (slagFlow > 0) debRates.dSlag = (debRates.dSlag ?? 0) + slagFlow;
+            debRates.dTemperature += mixPower / nodeHeatCapacity(debris);
+            rates.thermalNodes.set(debris.id, debRates);
           }
         }
       }

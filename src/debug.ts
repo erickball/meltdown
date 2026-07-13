@@ -28,6 +28,7 @@ import {
 } from './simulation/gas-properties';
 import { pumpHeadPressure } from './simulation/operators/pump-curve';
 import { meltFraction } from './simulation/operators/rate-operators';
+import { basematErodedDepth } from './simulation/operators/mcci';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -376,6 +377,22 @@ export function updateDebugPanel(
           if (releasedFrac > 0.0001) {
             html += ` <span class="debug-danger" title="Fraction of noble-gas fission-product inventory released from the fuel">FP rel ${(releasedFrac * 100).toFixed(1)}%</span>`;
           }
+        }
+        // Melt pool inventories (corium / ex-vessel debris)
+        if ((id.endsWith('-corium') || id.endsWith('-corium-ex')) && node.mass > 2) {
+          html += ` <span class="debug-warning" title="Melt pool mass">${(node.mass / 1000).toFixed(1)} t</span>`;
+          const metalMass = (node.metal?.zr ?? 0) + (node.metal?.fe ?? 0);
+          if (metalMass > 1) {
+            html += ` <span style="color: #888;" title="Unoxidized metal (Zr/Fe) in the melt - the MCCI reductant that turns concrete steam/CO₂ into H₂/CO">metal ${(metalMass / 1000).toFixed(1)} t</span>`;
+          }
+          if ((node.slagMass ?? 0) > 1) {
+            html += ` <span style="color: #888;" title="Decomposed-concrete slag stirred into the melt by MCCI (dilutes the decay heat)">slag ${((node.slagMass ?? 0) / 1000).toFixed(1)} t</span>`;
+          }
+        }
+        // Basemat erosion (MCCI ablation front)
+        if (id.endsWith('-basemat') && node.initialMass && node.initialMass > node.mass + 1) {
+          const depth = basematErodedDepth(state, id.slice(0, -'-basemat'.length));
+          html += ` <span class="debug-danger" title="Concrete depth eroded by corium attack under the debris pool (structural basemat is ${node.characteristicLength.toFixed(1)} m thick)">eroded ${(depth * 100).toFixed(0)} cm</span>`;
         }
         html += '<br>';
       }
@@ -845,6 +862,9 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
   let fpNobleInFuel = 0;
   let fpVolatileInFuel = 0;
   let relocatedMass = 0;
+  let exVesselMass = 0;
+  let mcciDepth = 0;          // deepest concrete erosion over all buildings (m)
+  let basematThickness = 0;   // structural thickness of that basemat (m)
   for (const [id, node] of state.thermalNodes) {
     if (node.fissionProducts) {
       fuelMass += node.mass;
@@ -859,6 +879,21 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
       fuelMass += node.mass;
       moltenMass += node.mass;
       relocatedMass += node.mass;
+    } else if (id.endsWith('-corium-ex') && node.mass > 2) {
+      // Ex-vessel debris: fuel oxide counts toward core mass; the slag and
+      // steel mixed in do not
+      const oxide = Math.max(0, node.mass - (node.metal?.zr ?? 0) -
+        (node.metal?.fe ?? 0) - (node.slagMass ?? 0));
+      fuelMass += oxide;
+      moltenMass += oxide;
+      exVesselMass += node.mass;
+    } else if (id.endsWith('-basemat')) {
+      const buildingId = id.slice(0, -'-basemat'.length);
+      const depth = basematErodedDepth(state, buildingId);
+      if (depth > mcciDepth) {
+        mcciDepth = depth;
+        basematThickness = node.characteristicLength;
+      }
     }
   }
 
@@ -876,6 +911,14 @@ export function updateCoreDamageIndicator(state: SimulationState): void {
   }
   if (relocatedMass > 0 && fuelMass > 0) {
     lines.push(`☢ CORE SLUMPING: ${((relocatedMass / fuelMass) * 100).toFixed(0)}% relocated to lower head`);
+  }
+  if (exVesselMass > 0) {
+    lines.push(`☢ VESSEL BREACH: ${(exVesselMass / 1000).toFixed(1)} t of corium on the containment floor`);
+  }
+  if (mcciDepth > 0.005) {
+    lines.push(mcciDepth > basematThickness
+      ? `☢ BASEMAT MELT-THROUGH: corium eroded ${mcciDepth.toFixed(2)} m of ${basematThickness.toFixed(1)} m basemat - melt in the ground`
+      : `☢ CONCRETE ATTACK (MCCI): ${(mcciDepth * 100).toFixed(0)} cm of ${basematThickness.toFixed(1)} m basemat eroded`);
   }
   if (fpReleasedFrac > 0.0005) {
     lines.push(`☢ FISSION PRODUCTS ESCAPING FUEL: ${(fpReleasedFrac * 100).toFixed(1)}%`);

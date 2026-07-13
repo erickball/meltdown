@@ -66,6 +66,12 @@ export {
   CoriumRelocationRateOperator,    // molten fuel/clad slumps to the lower head
   relocatedFuelFraction,           // relocated fraction for displays/neutronics
 } from './operators/corium';
+export {
+  McciRateOperator,                // molten core-concrete interaction (ex-vessel)
+  basematErodedDepth,              // eroded basemat depth for displays/melt-through
+  CONCRETE_DENSITY,
+  CONCRETE_ABLATION_T,
+} from './operators/mcci';
 
 // Semi-implicit pressure solver
 export { PressureSolver } from './operators/pressure-solver';

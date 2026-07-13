@@ -42,8 +42,15 @@
  * - dEnergy += R * DELTA_U: the constant-volume reaction energy; heating the
  *   product steam from the reference state is paid out of this release.
  *
- * CO combustion (relevant once core-concrete interaction generates CO) is
- * NOT modeled yet.
+ * CO COMBUSTION (MCCI generates CO): CO + 1/2 O2 -> CO2, 280 kJ/mol CO
+ * (constant volume). CO rides the same rate machinery as H2 - one lambda,
+ * shared O2 budget - with two differences grounded in the chemistry:
+ * - Flammability: the fuels support each other. The lower-limit gate is a
+ *   Le Chatelier sum (xH2/4% + xCO/12.5%), so a mixture lean in both can
+ *   still burn if the sum crosses 1, and MCCI's H2 makes its CO ignitable.
+ * - Rate: CO oxidation (via OH radicals) is distinctly slower than H2 -
+ *   its laminar flame speed is ~1/3 of hydrogen's - so the CO burn rate
+ *   carries that factor.
  */
 
 import { SimulationState } from '../types';
@@ -60,6 +67,12 @@ export class HydrogenCombustionRateOperator implements RateOperator {
 
   /** Constant-volume heat of reaction per mol H2 (vapor product) */
   private static readonly DELTA_U = 240e3;         // J/mol H2
+  /** Constant-volume heat of reaction per mol CO */
+  private static readonly DELTA_U_CO = 280e3;      // J/mol CO
+  /** CO lower flammability limit in air (dry CO ~12.5%) */
+  private static readonly CO_LOWER_LIMIT = 0.125;
+  /** CO burns ~3x slower than H2 (flame-speed ratio, moist CO) */
+  private static readonly CO_RATE_FACTOR = 0.3;
   /** Arrhenius prefactor and activation temperature: inert (<1e-11/s) at
    *  300 K, ~2e-3/s at 600 K, runaway-fast near the ~850 K autoignition
    *  range. */
@@ -79,7 +92,7 @@ export class HydrogenCombustionRateOperator implements RateOperator {
     for (const [id, node] of state.flowNodes) {
       if (node.isBoundary) continue;
       const ncg = node.fluid.ncg;
-      if (!ncg || ncg.H2 <= 1e-9 || ncg.O2 <= 1e-9) continue;
+      if (!ncg || (ncg.H2 <= 1e-9 && ncg.CO <= 1e-9) || ncg.O2 <= 1e-9) continue;
       // Combustion happens in a gas space; a liquid-full node has none
       if (node.fluid.phase === 'liquid') continue;
 
@@ -93,11 +106,16 @@ export class HydrogenCombustionRateOperator implements RateOperator {
       const gasMoles = totalMoles(ncg) + steamMoles;
       if (gasMoles <= 0) continue;
       const xH2 = ncg.H2 / gasMoles;
+      const xCO = ncg.CO / gasMoles;
       const xO2 = ncg.O2 / gasMoles;
       const xSteam = steamMoles / gasMoles;
 
+      // Lower limit as a Le Chatelier sum over both fuels (>1 = flammable);
+      // the normalized width matches the old per-fuel gate (0.01/0.04)
+      const fuelIndex = xH2 / H2_FLAMMABILITY.lowerLimit +
+        xCO / HydrogenCombustionRateOperator.CO_LOWER_LIMIT;
       const g =
-        gateAbove(xH2, H2_FLAMMABILITY.lowerLimit, 0.01) *
+        gateAbove(fuelIndex, 1, 0.25) *
         gateAbove(xO2, 0.05, 0.01) *
         gateAbove(H2_FLAMMABILITY.steamInertingLimit - xSteam, 0, 0.05);
       if (g < 1e-9) continue;
@@ -131,16 +149,28 @@ export class HydrogenCombustionRateOperator implements RateOperator {
       const lambda = Math.min(lambdaMix, lambdaKin) * g;
       if (lambda < 1e-12) continue;
 
-      // Stoichiometric limitation: burn no faster than O2 supply allows
-      const rH2 = Math.min(ncg.H2 * lambda, 2 * ncg.O2 * lambda);
-      if (rH2 <= 0) continue;
+      // Both fuels burn at the shared rate (CO slower - see header), then
+      // scale back together so O2 consumption stays within its own lambda
+      // (the stoichiometric limitation the H2-only version had)
+      let rH2 = ncg.H2 * lambda;
+      let rCO = ncg.CO * lambda * HydrogenCombustionRateOperator.CO_RATE_FACTOR;
+      const o2Demand = (rH2 + rCO) / 2;
+      if (o2Demand > ncg.O2 * lambda) {
+        const scale = ncg.O2 * lambda / o2Demand;
+        rH2 *= scale;
+        rCO *= scale;
+      }
+      if (rH2 <= 0 && rCO <= 0) continue;
 
       const nodeRates = rates.flowNodes.get(id) || { dMass: 0, dEnergy: 0 };
       if (!nodeRates.dNcg) nodeRates.dNcg = emptyGasComposition();
       nodeRates.dNcg.H2 -= rH2;
-      nodeRates.dNcg.O2 -= rH2 / 2;
+      nodeRates.dNcg.CO -= rCO;
+      nodeRates.dNcg.CO2 += rCO;
+      nodeRates.dNcg.O2 -= (rH2 + rCO) / 2;
       nodeRates.dMass += rH2 * HydrogenCombustionRateOperator.H2O_MOLAR_MASS;
-      nodeRates.dEnergy += rH2 * HydrogenCombustionRateOperator.DELTA_U;
+      nodeRates.dEnergy += rH2 * HydrogenCombustionRateOperator.DELTA_U +
+        rCO * HydrogenCombustionRateOperator.DELTA_U_CO;
       rates.flowNodes.set(id, nodeRates);
     }
 
@@ -156,8 +186,8 @@ export class HydrogenCombustionRateOperator implements RateOperator {
   getMaxStableDt(state: SimulationState): number {
     for (const [, node] of state.flowNodes) {
       if (node.isBoundary || !node.fluid.ncg) continue;
-      if (node.fluid.ncg.H2 > 1e-3 && node.fluid.ncg.O2 > 1e-3 &&
-          node.fluid.phase !== 'liquid') {
+      if ((node.fluid.ncg.H2 > 1e-3 || node.fluid.ncg.CO > 1e-3) &&
+          node.fluid.ncg.O2 > 1e-3 && node.fluid.phase !== 'liquid') {
         return 0.1;
       }
     }

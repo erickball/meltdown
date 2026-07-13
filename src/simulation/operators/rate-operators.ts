@@ -142,6 +142,20 @@ export function meltFraction(node: { temperature: number; meltingPoint?: number;
  * heat-capacity method. Every operator that turns watts into dT/dt must
  * use this, not m*cp directly, or melting nodes will skip their plateau.
  */
+/**
+ * Fuel-oxide content (kg) of a corium/debris node: total mass minus the
+ * unoxidized-metal and concrete-slag inventories. DERIVED, never integrated
+ * separately, so composition cannot drift from the total; the floor only
+ * absorbs floating-point residue from the inventory integrations.
+ * Decay heat and fission-product inventory follow this, not raw mass.
+ */
+export function fuelOxideMass(node: {
+  mass: number; metal?: { zr: number; fe: number }; slagMass?: number;
+}): number {
+  return Math.max(0,
+    node.mass - (node.metal?.zr ?? 0) - (node.metal?.fe ?? 0) - (node.slagMass ?? 0));
+}
+
 export function nodeHeatCapacity(node: {
   mass: number; specificHeat: number; temperature: number;
   meltingPoint?: number; latentHeatFusion?: number;
@@ -691,18 +705,31 @@ export class HeatGenerationRateOperator implements RateOperator {
           }
         }
         // Relocated melt keeps its decay heat: split the fuel deposit by
-        // mass between the in-core fuel node and its corium pool (the
-        // corium node exists for rod cores in a vessel; seed mass ~1 kg
-        // makes the split a no-op until relocation actually happens).
-        const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
-        if (corium && corium.mass > 2) {
-          const fuelShare = node.mass / (node.mass + corium.mass);
-          const coriumDeposit = deposit * (1 - fuelShare);
-          deposit *= fuelShare;
-          const corRates = rates.thermalNodes.get(corium.id) || { dTemperature: 0 };
-          corRates.dTemperature += coriumDeposit / nodeHeatCapacity(corium);
-          rates.thermalNodes.set(corium.id, corRates);
+        // FUEL-OXIDE mass over the in-core fuel node, its corium pool, and
+        // the ex-vessel debris bed (seed masses ~1 kg make the split a
+        // no-op until relocation happens). Unoxidized metal and concrete
+        // slag stirred into a melt carry no fission products, so they get
+        // no share - a slag-diluted MCCI pool has a lower specific decay
+        // power, as it should.
+        let oxideTotal = node.mass; // in-core fuel is pure fuel oxide
+        const meltNodes: Array<{ melt: (typeof node); oxide: number }> = [];
+        for (const suffix of ['-corium', '-corium-ex']) {
+          const melt = state.thermalNodes.get(id.replace(/-fuel$/, suffix));
+          if (melt && melt.mass > 2) {
+            const oxide = fuelOxideMass(melt);
+            if (oxide > 0) {
+              meltNodes.push({ melt, oxide });
+              oxideTotal += oxide;
+            }
+          }
         }
+        for (const { melt, oxide } of meltNodes) {
+          const q = deposit * (oxide / oxideTotal);
+          const mRates = rates.thermalNodes.get(melt.id) || { dTemperature: 0 };
+          mRates.dTemperature += q / nodeHeatCapacity(melt);
+          rates.thermalNodes.set(melt.id, mRates);
+        }
+        deposit *= node.mass / oxideTotal;
         const dT = deposit / nodeHeatCapacity(node);
         const fuelRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
         fuelRates.dTemperature += dT;
@@ -3227,40 +3254,70 @@ export class FissionProductReleaseOperator implements RateOperator {
     for (const [id, node] of state.thermalNodes) {
       const fp = node.fissionProducts;
       if (!fp) continue;
-
-      // FP inventory stays booked on the fuel node through relocation (so
-      // per-node initial-inventory fractions keep meaning), but relocated
-      // melt keeps outgassing: the release temperature is the hotter of the
-      // fuel node and its corium pool.
-      let T = node.temperature;
-      const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
-      if (corium && corium.mass > 2) T = Math.max(T, corium.temperature);
-      // Below ~1000 K the Arrhenius rate is < 1e-9/s (nothing in sim
-      // lifetimes) - skip the map churn, not a behavioral threshold
-      if (T < 1000) continue;
       if (fp.nobleGas <= 0 && fp.volatile <= 0) continue;
 
-      const coolantNode = state.flowNodes.get(fp.associatedCoolantNode);
-      if (!coolantNode) continue;
+      // FP inventory stays booked on the fuel node through relocation (so
+      // per-node initial-inventory fractions keep meaning), but physically
+      // it is distributed over the in-core fuel, the in-vessel corium pool,
+      // and the ex-vessel debris bed in proportion to fuel-oxide mass. Each
+      // location outgasses at ITS OWN temperature into the gas space it
+      // actually sits in: fuel and pool into the core coolant, ex-vessel
+      // debris straight into the containment atmosphere.
+      const locations: Array<{ T: number; oxide: number; target: string }> = [
+        { T: node.temperature, oxide: node.mass, target: fp.associatedCoolantNode },
+      ];
+      const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
+      if (corium && corium.mass > 2) {
+        locations.push({
+          T: corium.temperature,
+          oxide: fuelOxideMass(corium),
+          target: fp.associatedCoolantNode,
+        });
+      }
+      const debris = state.thermalNodes.get(id.replace(/-fuel$/, '-corium-ex'));
+      if (debris && debris.mass > 2 && debris.associatedVesselNode) {
+        locations.push({
+          T: debris.temperature,
+          oxide: fuelOxideMass(debris),
+          target: debris.associatedVesselNode,
+        });
+      }
+      const oxideTotal = locations.reduce((s, l) => s + l.oxide, 0);
+      if (oxideTotal <= 0) continue;
 
-      const arrhenius = Math.exp(-FissionProductReleaseOperator.Q_OVER_R / T);
-      const dNoble = -fp.nobleGas * FissionProductReleaseOperator.K0_NOBLE * arrhenius;
-      const dVolatile = -fp.volatile * FissionProductReleaseOperator.K0_VOLATILE * arrhenius;
+      let dNobleTotal = 0;
+      let dVolatileTotal = 0;
+      for (const loc of locations) {
+        // Below ~1000 K the Arrhenius rate is < 1e-9/s (nothing in sim
+        // lifetimes) - skip the map churn, not a behavioral threshold
+        if (loc.T < 1000 || loc.oxide <= 0) continue;
+        const targetNode = state.flowNodes.get(loc.target);
+        if (!targetNode) continue;
 
-      const thermalRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
-      thermalRates.dFpNobleGas = dNoble;
-      thermalRates.dFpVolatile = dVolatile;
-      rates.thermalNodes.set(id, thermalRates);
+        const share = loc.oxide / oxideTotal;
+        const arrhenius = Math.exp(-FissionProductReleaseOperator.Q_OVER_R / loc.T);
+        const dNoble = -fp.nobleGas * share * FissionProductReleaseOperator.K0_NOBLE * arrhenius;
+        const dVolatile = -fp.volatile * share * FissionProductReleaseOperator.K0_VOLATILE * arrhenius;
+        dNobleTotal += dNoble;
+        dVolatileTotal += dVolatile;
 
-      // Releases arrive in the coolant carrying their thermal energy at the
-      // coolant temperature (keeps the NCG energy balance consistent)
-      const coolantRates = rates.flowNodes.get(fp.associatedCoolantNode) || { dMass: 0, dEnergy: 0 };
-      if (!coolantRates.dNcg) coolantRates.dNcg = emptyGasComposition();
-      coolantRates.dNcg.Xe += -dNoble;
-      coolantRates.dNcg.CsI += -dVolatile;
-      const Cv_Xe = 12.47; // J/mol-K, monatomic
-      coolantRates.dEnergy += (-dNoble - dVolatile) * Cv_Xe * coolantNode.fluid.temperature;
-      rates.flowNodes.set(fp.associatedCoolantNode, coolantRates);
+        // Releases arrive carrying their thermal energy at the receiving
+        // node's temperature (keeps the NCG energy balance consistent)
+        const targetRates = rates.flowNodes.get(loc.target) || { dMass: 0, dEnergy: 0 };
+        if (!targetRates.dNcg) targetRates.dNcg = emptyGasComposition();
+        targetRates.dNcg.Xe += -dNoble;
+        targetRates.dNcg.CsI += -dVolatile;
+        const Cv_Xe = 12.47; // J/mol-K, monatomic
+        targetRates.dEnergy += (-dNoble - dVolatile) * Cv_Xe * targetNode.fluid.temperature;
+        rates.flowNodes.set(loc.target, targetRates);
+      }
+
+      if (dNobleTotal < 0 || dVolatileTotal < 0) {
+        const thermalRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+        thermalRates.dFpNobleGas = dNobleTotal;
+        thermalRates.dFpVolatile = dVolatileTotal;
+        rates.thermalNodes.set(id, thermalRates);
+      }
     }
 
     return rates;

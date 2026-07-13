@@ -21,6 +21,8 @@ import {
 } from '../types';
 import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
+import { meltFraction } from './rate-operators';
+import { basematErodedDepth } from './mcci';
 
 /**
  * Deterministic pseudo-random number generator.
@@ -148,6 +150,56 @@ export class BurstCheckOperator implements ConstraintOperator {
               this.initiateBurst(burstState, gaugePressure, newState, config, false);
             }
           }
+        }
+      }
+
+      // Lower-head melt-through: the corium pool has melted the head open
+      // (CoriumRelocationRateOperator is pouring the melt out). Open the
+      // vessel's FLUID break at the bottom too - water/steam drain through
+      // the same hole, whose size follows the melted-away head fraction.
+      if (!burstState.isMeltThrough) {
+        const head = newState.thermalNodes.get(`${burstState.componentId}-lowerhead`);
+        if (head && meltFraction(head) > 0.1) {
+          burstState.isMeltThrough = true;
+          if (!burstState.isBurst) {
+            // Break at the vessel bottom (not the seeded random elevation)
+            burstState.breakElevation = node.elevation;
+            this.initiateBurst(burstState, gaugePressure, newState, config, false);
+          } else {
+            // Already burst elsewhere (creep/overpressure): the head hole
+            // now dominates the drain path - move the break to the bottom
+            burstState.breakElevation = node.elevation;
+            const conn = newState.flowConnections.find(c => c.id === `break-${burstState.nodeId}`);
+            if (conn) conn.fromElevation = 0;
+            if (!newState.pendingEvents) newState.pendingEvents = [];
+            newState.pendingEvents.push({
+              type: 'component-burst',
+              message: `VESSEL BREACH: ${burstState.componentLabel} lower head melted through - ` +
+                `corium relocating to containment floor`,
+              data: { nodeId: burstState.nodeId, componentId: burstState.componentId },
+            });
+            console.log(`[BurstCheck] MELT-THROUGH: ${burstState.componentLabel} lower head at t=${newState.time.toFixed(1)}s`);
+          }
+        }
+      }
+
+      // Basemat melt-through (buildings with an MCCI debris attack): the
+      // ablation front has passed the structural basemat thickness. No gas
+      // break opens - the hole is plugged with melt - but this is the
+      // ground-contamination consequence, reported once.
+      if (!burstState.basematMeltThrough) {
+        const basemat = newState.thermalNodes.get(`${burstState.nodeId}-basemat`);
+        if (basemat && basematErodedDepth(newState, burstState.nodeId) > basemat.characteristicLength) {
+          burstState.basematMeltThrough = true;
+          if (!newState.pendingEvents) newState.pendingEvents = [];
+          newState.pendingEvents.push({
+            type: 'component-burst',
+            message: `BASEMAT MELT-THROUGH: corium has eroded through the ` +
+              `${burstState.componentLabel} basemat (${basemat.characteristicLength.toFixed(1)} m) - ` +
+              `melt entering the ground`,
+            data: { nodeId: burstState.nodeId, componentId: burstState.componentId },
+          });
+          console.log(`[BurstCheck] BASEMAT MELT-THROUGH: ${burstState.componentLabel} at t=${newState.time.toFixed(1)}s`);
         }
       }
 
@@ -294,9 +346,11 @@ export class BurstCheckOperator implements ConstraintOperator {
     const elevationStr = burstState.breakElevation !== undefined
       ? ` at ${burstState.breakElevation.toFixed(1)}m elevation`
       : '';
-    const failureType = burstState.isCreepRupture ? 'creep-ruptured'
+    const failureType = burstState.isMeltThrough ? 'lower head melted through'
+      : burstState.isCreepRupture ? 'creep-ruptured'
       : isCollapse ? 'collapsed' : 'ruptured';
-    const thresholdLabel = burstState.isCreepRupture ? 'creep-weakened'
+    const thresholdLabel = burstState.isMeltThrough ? 'melt-through'
+      : burstState.isCreepRupture ? 'creep-weakened'
       : isCollapse ? 'collapse' : 'burst';
     state.pendingEvents.push({
       type: 'component-burst',
@@ -397,12 +451,26 @@ export class BurstCheckOperator implements ConstraintOperator {
     const thresholdPressure = burstState.isCollapse
       ? burstState.collapsePressure
       : burstState.burstPressure;
-    const newBreakFraction = calculateBreakFraction(
+    let newBreakFraction = calculateBreakFraction(
       pressure,
       thresholdPressure,
       config,
       burstState.breakSizeSeed
     );
+
+    // Melt-through holes grow with the melted-away head fraction, not
+    // just overpressure (a depressurized vessel still drains through the
+    // hole the corium is candling open)
+    if (burstState.isMeltThrough) {
+      const head = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
+      if (head && head.initialMass && head.initialMass > 0) {
+        const headLost = 1 - head.mass / head.initialMass;
+        newBreakFraction = Math.max(
+          newBreakFraction,
+          Math.min(config.maxBreakFraction, headLost)
+        );
+      }
+    }
 
     // Break can only grow, not shrink
     if (newBreakFraction > burstState.currentBreakFraction) {

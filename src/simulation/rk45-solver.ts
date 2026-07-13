@@ -41,6 +41,9 @@ export interface ThermalNodeRates {
   dOxidizedFraction?: number;  // 1/s - rate of cladding oxidation (for cladding nodes only)
   dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
   dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
+  dMetalZr?: number;      // kg/s - unoxidized Zr inventory change (corium/debris nodes)
+  dMetalFe?: number;      // kg/s - unoxidized Fe inventory change (corium/debris nodes)
+  dSlag?: number;         // kg/s - concrete-slag inventory change (MCCI debris)
 }
 
 export interface NeutronicsRates {
@@ -205,6 +208,15 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     if (aRates.dFpVolatile !== undefined || bRates.dFpVolatile !== undefined) {
       combined.dFpVolatile = (aRates.dFpVolatile ?? 0) + (bRates.dFpVolatile ?? 0);
     }
+    if (aRates.dMetalZr !== undefined || bRates.dMetalZr !== undefined) {
+      combined.dMetalZr = (aRates.dMetalZr ?? 0) + (bRates.dMetalZr ?? 0);
+    }
+    if (aRates.dMetalFe !== undefined || bRates.dMetalFe !== undefined) {
+      combined.dMetalFe = (aRates.dMetalFe ?? 0) + (bRates.dMetalFe ?? 0);
+    }
+    if (aRates.dSlag !== undefined || bRates.dSlag !== undefined) {
+      combined.dSlag = (aRates.dSlag ?? 0) + (bRates.dSlag ?? 0);
+    }
     result.thermalNodes.set(id, combined);
   }
 
@@ -288,6 +300,15 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     }
     if (r.dFpVolatile !== undefined) {
       scaled.dFpVolatile = r.dFpVolatile * factor;
+    }
+    if (r.dMetalZr !== undefined) {
+      scaled.dMetalZr = r.dMetalZr * factor;
+    }
+    if (r.dMetalFe !== undefined) {
+      scaled.dMetalFe = r.dMetalFe * factor;
+    }
+    if (r.dSlag !== undefined) {
+      scaled.dSlag = r.dSlag * factor;
     }
     result.thermalNodes.set(id, scaled);
   }
@@ -405,6 +426,19 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
           node.fissionProducts.volatile =
             Math.max(0, node.fissionProducts.volatile + nodeRates.dFpVolatile * dt);
         }
+      }
+      // Corium composition inventories: sources are relocation flows
+      // (proportional to remaining source mass) and MCCI consumption
+      // (proportional to remaining inventory), so like node.mass these
+      // stay non-negative at any stable dt; the floor only absorbs
+      // floating-point residue.
+      if (nodeRates.dMetalZr !== undefined || nodeRates.dMetalFe !== undefined) {
+        if (!node.metal) node.metal = { zr: 0, fe: 0 };
+        node.metal.zr = Math.max(0, node.metal.zr + (nodeRates.dMetalZr ?? 0) * dt);
+        node.metal.fe = Math.max(0, node.metal.fe + (nodeRates.dMetalFe ?? 0) * dt);
+      }
+      if (nodeRates.dSlag !== undefined) {
+        node.slagMass = Math.max(0, (node.slagMass ?? 0) + nodeRates.dSlag * dt);
       }
     }
   }

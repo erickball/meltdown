@@ -1100,6 +1100,7 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     const clone = { ...v };
     if (v.oxidation) clone.oxidation = { ...v.oxidation };
     if (v.fissionProducts) clone.fissionProducts = { ...v.fissionProducts };
+    if (v.metal) clone.metal = { ...v.metal };
     thermalNodes.set(k, clone);
   });
 

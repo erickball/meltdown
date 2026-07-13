@@ -61,10 +61,25 @@ export interface ThermalNode {
   // Limits for damage modeling
   maxTemperature: number;           // K - failure/damage threshold
 
-  // Corium pools: the vessel flow node this pool sits in (set by the
-  // factory). CoriumRelocationRateOperator uses it for mass-scaled quench
-  // and lower-head heat transfer.
+  // Corium pools: the flow node this pool sits in (set by the factory).
+  // For the in-vessel pool that is the reactor vessel; for the ex-vessel
+  // debris bed it is the containment building. CoriumRelocationRateOperator
+  // and McciRateOperator use it for mass-scaled quench, lower-head heat
+  // transfer, and gas release targeting.
   associatedVesselNode?: string;
+
+  // Corium composition bookkeeping (corium/debris nodes only). The node's
+  // total mass is the integrated state; these break it down so chemistry
+  // and decay-heat weighting stay physical:
+  //   metal:    unoxidized metal (kg) carried in with the melt - Zr from
+  //             unreacted cladding, Fe from melted vessel steel. MCCI gas
+  //             (H2O/CO2 from concrete) oxidizes it to H2/CO.
+  //   slagMass: decomposed-concrete oxides (kg) stirred into the melt by
+  //             MCCI. Carries no fission products or decay heat.
+  // Fuel-oxide content is DERIVED: mass - metal - slag (never integrated
+  // separately, so the breakdown cannot drift from the total).
+  metal?: { zr: number; fe: number };
+  slagMass?: number;
 
   // Melting (apparent-heat-capacity method): near meltingPoint the node's
   // effective heat capacity carries a smooth latent-heat bump, so its
@@ -763,6 +778,15 @@ export interface BurstState {
   // read it directly instead.
   wallTemperature?: number;
   isCreepRupture?: boolean;          // True if the failure was creep-driven
+  // True once the vessel lower head has melted through (corium attack).
+  // The break then sits at the vessel bottom and its size follows the
+  // melted-away head fraction rather than overpressure alone.
+  isMeltThrough?: boolean;
+  // Buildings only: the MCCI ablation front has eaten through the basemat
+  // (fired once, from BurstCheckOperator). No gas break is opened - the
+  // hole is plugged with melt - but the event is the "china syndrome"
+  // ground-contamination consequence.
+  basematMeltThrough?: boolean;
 
   // Random seed for deterministic break size variation
   breakSizeSeed: number;

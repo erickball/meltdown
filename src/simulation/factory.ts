@@ -22,6 +22,7 @@ import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
 import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-properties';
 import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
 import { computeReactivityComponents } from './operators/neutronics';
+import { CONCRETE_DENSITY } from './operators/mcci';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -973,6 +974,9 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             maxTemperature: 3200,
             meltingPoint: 2800,
             latentHeatFusion: 270e3,
+            // Unoxidized metal carried in with relocating clad (Zr) - the
+            // MCCI oxidation feedstock once the melt goes ex-vessel
+            metal: { zr: 0, fe: 0 },
           });
 
           state.thermalNodes.set(`${vesselId}-lowerhead`, {
@@ -980,12 +984,19 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             label: `${vesselComp.label || 'Vessel'} lower head`,
             temperature: vesselNode.fluid.temperature,
             mass: headArea * headThickness * 7850,
+            initialMass: headArea * headThickness * 7850,
             specificHeat: 490,        // steel
             thermalConductivity: 40,
             characteristicLength: headThickness,
             surfaceArea: headArea,
             heatGeneration: 0,
-            maxTemperature: 1700,     // steel melting
+            maxTemperature: 1700,
+            // Real melting data: the corium pool can melt through the head
+            // (apparent-heat-capacity plateau; molten steel candles into the
+            // ex-vessel debris and the melted-away fraction is the breach
+            // hole size - see CoriumRelocationRateOperator/BurstCheckOperator)
+            meltingPoint: 1700,       // K - carbon steel
+            latentHeatFusion: 250e3,  // J/kg
           });
 
           // Corium heat transfer (pool -> lower head, pool -> water quench)
@@ -1001,6 +1012,11 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             tubeBottomElevation: 0,
             tubeHeight: headRadius,
           });
+
+          // Ex-vessel debris bed + basemat (for MCCI after vessel breach)
+          // are created in a separate pass, createMcciNodes, AFTER all flow
+          // nodes exist - the containment building's node may not have been
+          // built yet at this point in the component loop.
         }
       }
     }
@@ -1256,6 +1272,11 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   //   'all'            - + all tanks, pipes, pumps, valves
   // Components with dedicated metal nodes (HX, crossVessel, cores) excluded.
   createWallThermalNodes(plantState, state);
+
+  // MCCI pass: ex-vessel debris bed + basemat for cores whose vessel stands
+  // inside a building. Runs after ALL flow nodes exist (the containment may
+  // appear later than the vessel in the component list).
+  createMcciNodes(plantState, state);
 
   // Pipe-inventory lumping pass: flow connections carry no volume of their
   // own, so the fluid that physically sits in the run of pipe a connection
@@ -2997,6 +3018,80 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
   }
   if (created > 0) {
     console.log(`[Factory] Wall thermal nodes: policy '${policy}' created ${created}`);
+  }
+}
+
+/**
+ * Ex-vessel debris bed + basemat nodes for MCCI (one per core in a vessel
+ * inside a building). When the vessel lower head melts through, the
+ * in-vessel corium pool pours into `${coreId}-corium-ex` on the building
+ * floor and attacks the `${buildingId}-basemat` concrete (McciRateOperator).
+ * A vessel standing in open air has no concrete cavity - the melt would
+ * just spread on the ground - so MCCI is disabled with a warning.
+ */
+function createMcciNodes(plantState: PlantState, state: SimulationState): void {
+  const coriumIds: string[] = [];
+  for (const id of state.thermalNodes.keys()) {
+    if (id.endsWith('-corium')) coriumIds.push(id);
+  }
+  for (const coriumId of coriumIds) {
+    const corium = state.thermalNodes.get(coriumId)!;
+    const coreId = coriumId.slice(0, -'-corium'.length);
+    const coreComp = plantState.components.get(coreId);
+    const vesselId = corium.associatedVesselNode;
+    const vesselComp = vesselId ? plantState.components.get(vesselId) : undefined;
+    const buildingId = vesselComp ? (vesselComp as any).containedBy : undefined;
+    const buildingNode = buildingId ? state.flowNodes.get(buildingId) : undefined;
+    const buildingComp = buildingId ? plantState.components.get(buildingId) : undefined;
+    if (!buildingNode || !buildingComp) {
+      console.warn(`[Factory] Vessel ${vesselId}: not inside a building - ` +
+        `ex-vessel debris / MCCI disabled (no concrete cavity to attack)`);
+      continue;
+    }
+
+    const footprint = buildingNode.flowArea; // building floor area (m²)
+    state.thermalNodes.set(`${coreId}-corium-ex`, {
+      id: `${coreId}-corium-ex`,
+      label: `${coreComp?.label || 'Core'} ex-vessel debris`,
+      associatedVesselNode: buildingId,
+      temperature: buildingNode.fluid.temperature,
+      mass: 1, // seed mass; the pour grows it (zero mass breaks dT/dt)
+      initialMass: 1,
+      specificHeat: 500,        // oxide/slag melt scale
+      thermalConductivity: 3,
+      characteristicLength: 0.2,
+      surfaceArea: footprint,   // full-spread footprint (mass-scaled in use)
+      heatGeneration: 0,        // decay-heat share deposited by HeatGeneration
+      maxTemperature: 3200,
+      meltingPoint: 2400,       // corium-concrete mixture solidus scale
+      latentHeatFusion: 300e3,
+      metal: { zr: 0, fe: 0 },
+      slagMass: 0,
+    });
+
+    // The concrete the melt interacts with. Mass covers the basemat PLUS
+    // an equal notional layer of silicate ground below it, so ablation
+    // continues smoothly after melt-through (the event fires when the
+    // eroded depth exceeds characteristicLength = the structural basemat
+    // thickness).
+    if (!state.thermalNodes.has(`${buildingId}-basemat`)) {
+      const basematThickness = (buildingComp as any).basematThickness ?? 3; // m
+      state.thermalNodes.set(`${buildingId}-basemat`, {
+        id: `${buildingId}-basemat`,
+        label: `${buildingComp.label || 'Building'} basemat`,
+        temperature: buildingNode.fluid.temperature,
+        mass: footprint * basematThickness * 2 * CONCRETE_DENSITY,
+        initialMass: footprint * basematThickness * 2 * CONCRETE_DENSITY,
+        specificHeat: 880,       // concrete
+        thermalConductivity: 1.5,
+        characteristicLength: basematThickness,
+        surfaceArea: footprint,
+        heatGeneration: 0,
+        maxTemperature: 1500,
+      });
+    }
+    console.log(`[Factory] MCCI nodes: ${coreId}-corium-ex on ${buildingId} floor ` +
+      `(${footprint.toFixed(0)} m², basemat ${((buildingComp as any).basematThickness ?? 3)} m)`);
   }
 }
 
