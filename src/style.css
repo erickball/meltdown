@@ -602,6 +602,12 @@ body {
   font-size: 11px !important;
 }
 
+/* Career levels can focus the palette on a short parts list; hidden buttons
+   must out-!important the display rule above */
+.component-btn.palette-hidden {
+  display: none !important;
+}
+
 .component-btn.selected {
   background: #3a4a5a !important;
   border-color: #5af !important;

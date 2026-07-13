@@ -2984,11 +2984,12 @@ function init() {
     const filtering = paletteFilterTypes !== null && !paletteShowAll;
     container.querySelectorAll<HTMLButtonElement>('.component-btn').forEach(btn => {
       const t = btn.dataset.component ?? '';
-      btn.style.display = filtering && !paletteFilterTypes!.includes(t) ? 'none' : '';
+      // class, not inline style: .component-btn carries display:block !important
+      btn.classList.toggle('palette-hidden', filtering && !paletteFilterTypes!.includes(t));
     });
     container.querySelectorAll('details').forEach(d => {
       const anyVisible = Array.from(d.querySelectorAll<HTMLButtonElement>('.component-btn'))
-        .some(b => b.style.display !== 'none');
+        .some(b => !b.classList.contains('palette-hidden'));
       (d as HTMLElement).style.display = anyVisible ? '' : 'none';
     });
     let toggle = document.getElementById('palette-filter-toggle') as HTMLButtonElement | null;
