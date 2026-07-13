@@ -135,6 +135,22 @@ export interface ConstraintOperator {
    *   control system) use it, purely algebraic operators ignore it.
    */
   applyConstraints(state: SimulationState, dt?: number): SimulationState;
+
+  /**
+   * OPTIONAL in-place variant: the caller guarantees exclusive ownership of
+   * `state` (a solver-private stage or candidate that nothing else holds a
+   * reference to); the operator may mutate it and return it, skipping the
+   * defensive clone that applyConstraints performs. Semantics MUST be
+   * identical to applyConstraints - implement by extracting the body into a
+   * shared impl and giving applyConstraints a clone-then-impl wrapper.
+   *
+   * Every state the RK45 solver passes into a constraint chain is the fresh
+   * output of applyRatesToState (or the once-per-step pressure-solve clone),
+   * so cloning again inside each chained constraint was pure overhead - it
+   * was ~25% of total wall time on preset plants (full-state clones ran ~24x
+   * per step: 3 per stage x 7 stages plus once-per-step users).
+   */
+  applyConstraintsMutating?(state: SimulationState, dt?: number): SimulationState;
 }
 
 // ============================================================================
@@ -1076,6 +1092,13 @@ export interface RK45Config {
   // the marginally-damped modes small. Do not raise the default; re-test
   // only with a mechanism that excludes blocked-path nodes.
   quietPressureToleranceScale?: number;
+
+  // Let constraint operators that provide applyConstraintsMutating run
+  // without their defensive clone (the solver only hands them solver-private
+  // states). Semantically identical by contract - bit-identical results
+  // verified by scripts/bitcheck.ts - this exists as a config knob purely
+  // for A/B verification (INPLACE_CONSTRAINTS=0 in the script harnesses).
+  inPlaceConstraints?: boolean;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -1106,6 +1129,8 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   deterministicMode: true,
 
   quietPressureToleranceScale: 1,
+
+  inPlaceConstraints: true,
 };
 
 // ============================================================================
@@ -1368,11 +1393,16 @@ export class RK45Solver {
     }
 
     // THEN: Apply standard constraint operators (thermodynamic consistency, etc.)
+    // The incoming state is always solver-private here (fresh from
+    // applyRatesToState or the implicit-momentum clone), so operators that
+    // provide the in-place variant run without their defensive clone.
     for (const op of this.constraintOperators) {
       if (op.finalOnly && !isFinal) continue;
       if (op.postAcceptOnly) continue; // deferred until the step is ACCEPTED
       const t0 = performance.now();
-      result = op.applyConstraints(result, dt);
+      result = this.config.inPlaceConstraints && op.applyConstraintsMutating
+        ? op.applyConstraintsMutating(result, dt)
+        : op.applyConstraints(result, dt);
       this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
     }
 

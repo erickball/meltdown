@@ -1897,8 +1897,17 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
   private static readonly MAX_ICE_FRACTION = 0.5;
 
   applyConstraints(state: SimulationState): SimulationState {
-    const newState = cloneSimulationState(state);
+    return this.applyImpl(cloneSimulationState(state));
+  }
 
+  /** In-place variant: caller owns `state` (see ConstraintOperator docs).
+   *  This runs 7x per step on every stage/candidate - skipping the clone
+   *  here is a large share of the clone-reduction win. */
+  applyConstraintsMutating(state: SimulationState): SimulationState {
+    return this.applyImpl(state);
+  }
+
+  private applyImpl(newState: SimulationState): SimulationState {
     // Update fluid properties (T, P, phase) from (m, U, V)
     for (const [nodeId, flowNode] of newState.flowNodes) {
       // Skip boundary nodes (like atmosphere) - their state is fixed
@@ -1914,7 +1923,7 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         // Find what's flowing in/out of this node
         const flowsIn: string[] = [];
         const flowsOut: string[] = [];
-        for (const conn of state.flowConnections) {
+        for (const conn of newState.flowConnections) {
           if (conn.toNodeId === nodeId && conn.massFlowRate > 0) {
             flowsIn.push(`${conn.fromNodeId}: ${conn.massFlowRate.toFixed(1)} kg/s`);
           }
@@ -2526,8 +2535,15 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
   }
 
   applyConstraints(state: SimulationState): SimulationState {
-    const newState = cloneSimulationState(state);
+    return this.applyImpl(cloneSimulationState(state));
+  }
 
+  /** In-place variant: caller owns `state` (see ConstraintOperator docs). */
+  applyConstraintsMutating(state: SimulationState): SimulationState {
+    return this.applyImpl(state);
+  }
+
+  private applyImpl(newState: SimulationState): SimulationState {
     for (const conn of newState.flowConnections) {
       const fromNode = newState.flowNodes.get(conn.fromNodeId);
       const toNode = newState.flowNodes.get(conn.toNodeId);

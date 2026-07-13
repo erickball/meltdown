@@ -133,6 +133,12 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   if (quietEnv !== undefined) {
     config = { ...config, quietPressureToleranceScale: parseFloat(quietEnv) };
   }
+  // A/B override for in-place constraint application (clone reduction):
+  // INPLACE_CONSTRAINTS=0 restores the clone-per-constraint behavior.
+  const inplaceEnv = process.env.INPLACE_CONSTRAINTS;
+  if (inplaceEnv !== undefined) {
+    config = { ...config, inPlaceConstraints: inplaceEnv === '1' };
+  }
   const env = process.env.IMPLICIT_MOMENTUM;
   if (env !== undefined && config.pressureSolver !== false) {
     config = {

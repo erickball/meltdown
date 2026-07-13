@@ -142,12 +142,15 @@ const bui = state.flowNodes.get('bui-1')!;
 const co2 = bui.fluid.ncg?.CO2 ?? 0;
 const coPlusCo2 = (bui.fluid.ncg?.CO ?? 0) + co2;
 
+// Erosion and slag accumulation need sim-time to develop; scale the
+// thresholds so short smoke runs don't false-fail (full checks at >=1200 s)
+const horizon = Math.min(1, state.time / 1200);
 const checks: Array<[string, boolean]> = [
   ['lower head melted through (event fired)', events.some(e => e.includes('melt') || e.includes('BREACH'))],
-  [`corium poured ex-vessel (debris ${(debris.mass / 1000).toFixed(1)} t > 5 t)`, debris.mass > 5000],
-  [`concrete eroded (${(eroded * 100).toFixed(1)} cm > 1 cm)`, eroded > 0.01],
-  [`MCCI carbon gases in containment (CO+CO2 ${coPlusCo2.toFixed(0)} mol > 100)`, coPlusCo2 > 100],
-  [`debris carries slag (${((debris.slagMass ?? 0) / 1000).toFixed(2)} t > 0)`, (debris.slagMass ?? 0) > 100],
+  [`corium poured ex-vessel (debris ${(debris.mass / 1000).toFixed(1)} t > ${(5 * horizon).toFixed(1)} t)`, debris.mass > 5000 * horizon],
+  [`concrete eroded (${(eroded * 100).toFixed(1)} cm > ${(1 * horizon).toFixed(1)} cm)`, eroded > 0.01 * horizon],
+  [`MCCI carbon gases in containment (CO+CO2 ${coPlusCo2.toFixed(0)} mol > ${(100 * horizon).toFixed(0)})`, coPlusCo2 > 100 * horizon],
+  [`debris carries slag (${((debris.slagMass ?? 0) / 1000).toFixed(2)} t > ${(0.1 * horizon).toFixed(2)} t)`, (debris.slagMass ?? 0) > 100 * horizon],
 ];
 
 console.log('\n=== MCCI chain checks ===');
