@@ -615,14 +615,15 @@ export class ConnectionDialog {
 
     const flowAreaHelp = document.createElement('div');
     flowAreaHelp.className = 'help-text';
-    flowAreaHelp.textContent = `Cross-sectional area (${(currentFlowArea * 1e4).toFixed(1)} cm²)`;
+    const equivDiameter = (area: number) => Math.sqrt(Math.max(area, 0) * 4 / Math.PI);
+    flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(currentFlowArea).toFixed(2)} m)`;
     flowAreaGroup.appendChild(flowAreaHelp);
     this.bodyElement.appendChild(flowAreaGroup);
 
     // Update flow area help when input changes
     flowAreaInput.addEventListener('input', () => {
       const area = parseFloat(flowAreaInput.value) || 0;
-      flowAreaHelp.textContent = `Cross-sectional area (${(area * 1e4).toFixed(1)} cm²)`;
+      flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(area).toFixed(2)} m)`;
     });
 
     // Length field

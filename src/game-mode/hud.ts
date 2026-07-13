@@ -41,6 +41,7 @@ export class GameHud {
       </div>
       <div class="gm-hud-goals"></div>
       <div class="gm-hud-ticker"></div>
+      <div class="gm-hud-events" title="Major events this run. Entries stay until you dismiss them."></div>
       <div class="gm-hud-hints"></div>
     `;
     document.body.appendChild(el);
@@ -145,6 +146,33 @@ export class GameHud {
     el.className = 'gm-hud-ticker' + (alarm ? ' gm-hud-ticker-alarm' : '');
     if (this.tickerTimeout !== null) clearTimeout(this.tickerTimeout);
     this.tickerTimeout = window.setTimeout(() => { el.textContent = ''; }, 8000);
+  }
+
+  /**
+   * Append a line to the persistent major-events log. Unlike the ticker,
+   * entries stay until the player dismisses them (x) - the running record of
+   * bursts, trips, and casualties for the current run.
+   */
+  addEvent(message: string, simTime?: number, alarm = false): void {
+    const el = this.root?.querySelector('.gm-hud-events') as HTMLDivElement | null;
+    if (!el) return;
+    const row = document.createElement('div');
+    row.className = 'gm-event' + (alarm ? ' gm-event-alarm' : '');
+    const stamp = simTime !== undefined
+      ? `<span class="gm-event-time">t=${Math.floor(simTime / 60)}:${String(Math.floor(simTime % 60)).padStart(2, '0')}</span> `
+      : '';
+    row.innerHTML = `${stamp}<span class="gm-event-text"></span><button class="gm-event-x" title="Dismiss">&times;</button>`;
+    (row.querySelector('.gm-event-text') as HTMLElement).textContent = message;
+    row.querySelector('.gm-event-x')?.addEventListener('click', () => row.remove());
+    el.prepend(row);
+    // keep the list from swallowing the screen; old entries scroll away
+    while (el.children.length > 8) el.lastElementChild?.remove();
+  }
+
+  /** Clear the major-events log (new run / new level). */
+  clearEvents(): void {
+    const el = this.root?.querySelector('.gm-hud-events') as HTMLDivElement | null;
+    if (el) el.innerHTML = '';
   }
 
   private set(selector: string, text: string): void {

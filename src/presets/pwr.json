@@ -67,8 +67,7 @@
       "orientation": "left-right",
       "ports": [
         {"id": "pump-1-inlet", "position": {"x": -0.5, "y": 0}, "direction": "in"},
-        {"id": "pump-1-outlet", "position": {"x": 0.5, "y": 0}, "direction": "out"},
-        {"id": "pump-1-outlet2", "position": {"x": 0.3, "y": -0.3}, "direction": "out"}
+        {"id": "pump-1-outlet", "position": {"x": 0.5, "y": 0}, "direction": "out"}
       ],
       "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
@@ -80,9 +79,32 @@
       "heaterCapacity": 1800000,
       "ports": [
         {"id": "pzr-1-bottom", "position": {"x": 0, "y": 5}, "direction": "both"},
-        {"id": "pzr-1-spray", "position": {"x": 0, "y": -5}, "direction": "in"}
+        {"id": "pzr-1-spray", "position": {"x": 0, "y": -5}, "direction": "in"},
+        {"id": "pzr-1-relief", "position": {"x": 0.8, "y": -5}, "direction": "out"}
       ],
       "fluid": {"temperature": 618, "pressure": 15500000, "phase": "two-phase", "quality": 0.05, "flowRate": 0},
+      "nqa1": true, "containedBy": "bui-1"
+    }],
+    ["val-psv-1", {
+      "id": "val-psv-1", "type": "valve", "label": "Pzr Safety Valve", "valveType": "relief",
+      "position": {"x": 47, "y": 67}, "rotation": 0, "elevation": 24,
+      "diameter": 0.15, "opening": 0, "volume": 0.15, "pressureRating": 190,
+      "setpoint": 17100000, "blowdown": 0.06,
+      "ports": [
+        {"id": "val-psv-1-in", "position": {"x": -0.1, "y": 0}, "direction": "in"},
+        {"id": "val-psv-1-out", "position": {"x": 0.1, "y": 0}, "direction": "out"}
+      ],
+      "fluid": {"temperature": 618, "pressure": 15500000, "phase": "vapor", "quality": 1, "flowRate": 0},
+      "nqa1": true, "containedBy": "bui-1"
+    }],
+    ["prt-1", {
+      "id": "prt-1", "type": "tank", "label": "Pressurizer Relief Tank",
+      "position": {"x": 50, "y": 65}, "rotation": 0, "elevation": 0,
+      "width": 3.6, "height": 5, "wallThickness": 0.04, "fillLevel": 0.75, "pressureRating": 7,
+      "ports": [
+        {"id": "prt-1-in", "position": {"x": 0, "y": -2.5}, "direction": "both"}
+      ],
+      "fluid": {"temperature": 320, "pressure": 10500, "phase": "two-phase", "quality": 0.001, "flowRate": 0},
       "nqa1": true, "containedBy": "bui-1"
     }],
     ["turbine-1", {
@@ -159,7 +181,7 @@
     }],
     ["ctl-rods-1", {
       "id": "ctl-rods-1", "type": "controller", "controllerType": "pid", "label": "Rod Control (T-avg)",
-      "position": {"x": 30, "y": 60}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 25, "y": 64}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-temperature", "targetId": "rv-1"},
         "setpoint": 567,
@@ -168,7 +190,7 @@
     }],
     ["ctl-sgp-1", {
       "id": "ctl-sgp-1", "type": "controller", "controllerType": "pid", "label": "SG Pressure (Governor)",
-      "position": {"x": 30, "y": 63}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 25, "y": 70}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-pressure", "targetId": "hx-1-shell"},
         "setpoint": 6000000,
@@ -178,7 +200,7 @@
     }],
     ["ctl-sgl-1", {
       "id": "ctl-sgl-1", "type": "controller", "controllerType": "pid", "label": "SG Level (3-elem FW)",
-      "position": {"x": 30, "y": 66}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 25, "y": 76}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-level", "targetId": "hx-1-shell"},
         "setpoint": 8.5,
@@ -188,7 +210,7 @@
     }],
     ["ctl-hwl-1", {
       "id": "ctl-hwl-1", "type": "controller", "controllerType": "pid", "label": "Hotwell Level (Cond Pump)",
-      "position": {"x": 30, "y": 69}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 30, "y": 64}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-level", "targetId": "condenser-1"},
         "setpoint": 0.5,
@@ -198,7 +220,7 @@
     }],
     ["ctl-pzrh-1", {
       "id": "ctl-pzrh-1", "type": "controller", "controllerType": "pid", "label": "Pzr Pressure (Heaters)",
-      "position": {"x": 30, "y": 72}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 30, "y": 70}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-pressure", "targetId": "pzr-1"},
         "setpoint": 15500000,
@@ -207,7 +229,7 @@
     }],
     ["ctl-pzrs-1", {
       "id": "ctl-pzrs-1", "type": "controller", "controllerType": "pid", "label": "Pzr Pressure (Spray)",
-      "position": {"x": 30, "y": 75}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 30, "y": 76}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-pressure", "targetId": "pzr-1"},
         "setpoint": 15800000,
@@ -242,6 +264,10 @@
     {"fromComponentId": "rv-1", "fromPortId": "rv-1-spray-out", "toComponentId": "val-spray-1", "toPortId": "val-spray-1-in",
      "fromElevation": 11, "toElevation": 0, "flowArea": 0.001, "length": 15},
     {"fromComponentId": "val-spray-1", "fromPortId": "val-spray-1-out", "toComponentId": "pzr-1", "toPortId": "pzr-1-spray",
-     "fromElevation": 0, "toElevation": 9.5, "flowArea": 0.001, "length": 8}
+     "fromElevation": 0, "toElevation": 9.5, "flowArea": 0.001, "length": 8},
+    {"fromComponentId": "pzr-1", "fromPortId": "pzr-1-relief", "toComponentId": "val-psv-1", "toPortId": "val-psv-1-in",
+     "fromElevation": 9.8, "toElevation": 0, "flowArea": 0.018, "length": 2, "fromPhaseTolerance": 0},
+    {"fromComponentId": "val-psv-1", "fromPortId": "val-psv-1-out", "toComponentId": "prt-1", "toPortId": "prt-1-in",
+     "fromElevation": 0, "toElevation": 0.5, "flowArea": 0.018, "length": 12}
   ]
 }

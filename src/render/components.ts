@@ -1180,8 +1180,21 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
 
   // === RUNNING INDICATOR ===
   if (pump.running) {
-    // Green glow around the motor
-    ctx.strokeStyle = COLORS.safe;
+    // Ring color = position on the pump curve, synced from the sim as
+    // opFlowFraction (flow / rated flow, speed-normalized):
+    //   ~0   -> red    (deadhead: no flow, all head)
+    //   ~1   -> green  (near the rated point)
+    //   ~2.2 -> blue   (runout: max flow, no head)
+    // No sim data (construction mode) keeps the plain green ring.
+    const q = (pump as unknown as { opFlowFraction?: number }).opFlowFraction;
+    let ringColor = COLORS.safe;
+    if (q !== undefined && isFinite(q)) {
+      const hue = q <= 1
+        ? 120 * Math.max(0, Math.min(1, q))        // red (0) -> green (120)
+        : 120 + 100 * Math.min(1, (q - 1) / 1.24); // green -> blue (220) toward runout
+      ringColor = `hsl(${hue.toFixed(0)}, 85%, 55%)`;
+    }
+    ctx.strokeStyle = ringColor;
     ctx.lineWidth = 3;
     ctx.strokeRect(-motorWidth / 2 - 3, motorTop - 3, motorWidth + 6, motorHeight + couplingHeight + 6);
 
@@ -4321,6 +4334,34 @@ export function renderFlowConnectionArrows(
     const perspectiveMultiplier = getPortScreenPos ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
 
+    // Flow velocity from the upstream node's bulk density: erosion/vibration
+    // territory earns a pulsing halo around the arrow (orange = high, red =
+    // very high or choked). Thresholds by phase: liquid lines run a few m/s
+    // in practice, steam lines tens of m/s.
+    const upstream = conn.massFlowRate >= 0 ? fromNode : toNode;
+    const rho = upstream.volume > 0 ? upstream.fluid.mass / upstream.volume : 0;
+    const velocity = rho > 0 && conn.flowArea > 0
+      ? Math.abs(conn.massFlowRate) / (rho * conn.flowArea)
+      : 0;
+    const [warnVel, dangerVel] =
+      upstream.fluid.phase === 'liquid' ? [8, 15] :
+      upstream.fluid.phase === 'vapor' ? [60, 120] : [20, 40];
+    const choked = conn.isChoked === true;
+    const overVel = choked || velocity >= warnVel;
+    if (overVel) {
+      const severe = choked || velocity >= dangerVel;
+      const pulse = 0.35 + 0.45 * Math.abs(Math.sin(Date.now() / 200));
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(screenPos.x, screenPos.y, arrowSize * 1.15 + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = severe
+        ? `rgba(255, 60, 40, ${pulse.toFixed(3)})`
+        : `rgba(255, 170, 0, ${pulse.toFixed(3)})`;
+      ctx.lineWidth = 3 * perspectiveMultiplier;
+      ctx.stroke();
+      ctx.restore();
+    }
+
     // Draw arrow
     ctx.save();
     ctx.translate(screenPos.x, screenPos.y);
@@ -4364,6 +4405,14 @@ export function renderFlowConnectionArrows(
     const labelY = screenPos.y - labelOffset;
     ctx.strokeText(label, labelX, labelY);
     ctx.fillText(label, labelX, labelY);
+    // High-velocity connections also print the velocity so the halo is
+    // self-explanatory
+    if (overVel) {
+      const velLabel = choked ? `CHOKED ${velocity.toFixed(0)} m/s` : `${velocity.toFixed(0)} m/s`;
+      ctx.fillStyle = choked || velocity >= dangerVel ? '#c22' : '#a60';
+      ctx.strokeText(velLabel, labelX, labelY + fontSize + 2);
+      ctx.fillText(velLabel, labelX, labelY + fontSize + 2);
+    }
     ctx.restore();
   }
 }
@@ -4599,6 +4648,17 @@ export function renderPressureGauge(
       ctx.strokeStyle = arcColor;
       ctx.lineWidth = arcWidth;
       ctx.lineCap = 'butt';
+      ctx.stroke();
+    }
+
+    // Over design pressure: flash the gauge ring red so the redline can't be
+    // missed even when zoomed out
+    if (designBar && designBar > 0 && pressureBar > designBar) {
+      const pulse = 0.45 + 0.55 * Math.abs(Math.sin(Date.now() / 180));
+      ctx.beginPath();
+      ctx.arc(0, 0, gaugeRadius, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255, 60, 40, ${pulse.toFixed(3)})`;
+      ctx.lineWidth = Math.max(2, 3 * gaugeScale);
       ctx.stroke();
     }
 

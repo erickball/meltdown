@@ -170,4 +170,35 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
       additionalProperties: false,
     },
   },
+  {
+    name: "file_car",
+    description:
+      "File a Corrective Action Report (CAR) - a bug report for the game's developers. Use when the user reports (or you observe) behavior that looks like a defect in the game itself: physics that can't be right, UI that misbehaves, tools that error on valid input, numbers that contradict each other. Not for player mistakes or design questions. Summarize the problem factually; game context (mode, sim time, selection) is attached automatically.",
+    input_schema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "One-line summary of the suspected defect",
+        },
+        description: {
+          type: "string",
+          description:
+            "What happened, what was expected, and how to reproduce it as far as known",
+        },
+        severity: {
+          type: "string",
+          enum: ["low", "medium", "high"],
+          description:
+            "low = cosmetic/annoyance, medium = wrong behavior with a workaround, high = blocks play or corrupts the plant",
+        },
+        component: {
+          type: "string",
+          description: "Optional: the component or subsystem involved",
+        },
+      },
+      required: ["title", "description"],
+      additionalProperties: false,
+    },
+  },
 ];

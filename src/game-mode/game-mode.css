@@ -417,9 +417,19 @@
   padding: 5px 8px;
 }
 
+/* The HIDE/SHOW toggle is pinned to the HUD's upper-right corner so it never
+   wraps to a second row or wanders when the flex row squeezes. Row1 reserves
+   space for it via padding-right. */
 .gm-hud-hide {
   font-size: 10px;
   padding: 5px 7px;
+  position: absolute;
+  top: 6px;
+  right: 8px;
+}
+
+.gm-hud-row1 {
+  padding-right: 72px;
 }
 
 /* Collapsed HUD: one line with the essentials (level, money, primary
@@ -443,6 +453,52 @@
   margin-top: 5px;
   font-size: 12px;
 }
+
+/* Running major-events log: persistent, per-entry dismiss. Stays visible even
+   when the HUD is collapsed so a burst can't vanish unread. */
+.gm-hud-events {
+  margin-top: 4px;
+  max-height: 130px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+.gm-event {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 4px;
+  border-left: 3px solid #4a6a9a;
+  background: rgba(70, 100, 150, 0.12);
+  margin-top: 2px;
+  color: #bcd;
+}
+
+.gm-event-alarm {
+  border-left-color: #ff5544;
+  background: rgba(150, 40, 30, 0.18);
+  color: #fca;
+}
+
+.gm-event-time {
+  color: #789;
+  flex: 0 0 auto;
+}
+
+.gm-event-text { flex: 1 1 auto; }
+
+.gm-event-x {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: #99a;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+}
+
+.gm-event-x:hover { color: #fff; }
 
 .gm-goal {
   color: #aab8cc;

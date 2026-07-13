@@ -301,7 +301,8 @@ export class JackManager {
           let result: unknown;
           this.executingTool = true;
           try {
-            result = executeJackTool(tu.name, tu.input ?? {}, this.host, (d) =>
+            // Most tools are synchronous; file_car returns a promise (network)
+            result = await executeJackTool(tu.name, tu.input ?? {}, this.host, (d) =>
               this.recordChange('jack', d)
             );
           } catch (e) {
@@ -361,6 +362,8 @@ function describeToolCall(tu: ToolUseBlock): string {
       return `🔧 Jack runs pipe from ${i.from} to ${i.to}`;
     case 'delete_component':
       return `🔧 Jack removes ${i.component}`;
+    case 'file_car':
+      return `📋 Jack files a Corrective Action Report: "${i.title}"`;
     default:
       return `🔧 Jack uses ${tu.name}`;
   }

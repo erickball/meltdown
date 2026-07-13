@@ -36,7 +36,16 @@ export interface GameHost {
   showNotification(message: string, type: 'info' | 'warning' | 'error'): void;
   /** Re-sync the sim toolbar (e.g. pause/resume button) with the game loop's actual run state. */
   refreshSimControls?(): void;
+  /**
+   * Focus the construction palette on the given component types (with a
+   * SHOW ALL toggle); null restores the full catalog.
+   */
+  setPaletteFilter?(types: string[] | null): void;
 }
+
+/** Event kinds that count as equipment casualties for 'events' goals. */
+const CASUALTY_KINDS: ReadonlySet<GameEventKind> =
+  new Set(['pump-trip', 'turbine-trip', 'small-loca', 'sgtr']);
 
 export class GameModeManager {
   private phase: GamePhase | null = null;
@@ -63,6 +72,18 @@ export class GameModeManager {
   private firedKinds = new Set<GameEventKind>();
   private lastHudUpdate = 0;
   private titleEl: HTMLDivElement | null = null;
+
+  // 'events' goal: casualties waiting for the plant to recover, and the count
+  // already ridden through. A casualty is survived once power is back above
+  // the goal's threshold at least 30 s (operated time) after it fired.
+  private pendingCasualties: number[] = []; // firedAt (operatedSeconds)
+  private survivedCasualties = 0;
+  // one-shot "you can speed the sim up" hint once the plant runs steady
+  private speedHintShown = false;
+  private steadySince: number | null = null;
+  // pristine design captured at each run start; restored when an outage
+  // begins so runs don't inherit the previous run's final state
+  private designSnapshot: Map<string, unknown> | null = null;
 
   // Post-mortem material: the design as built (so a failed level can be
   // retried from the same design instead of the stock plant) plus run peaks
@@ -188,6 +209,12 @@ export class GameModeManager {
     this.runPeakFuelTemp = 0;
     this.runPeakMWe = 0;
     this.releaseArmed = false;
+    this.pendingCasualties = [];
+    this.survivedCasualties = 0;
+    this.speedHintShown = false;
+    this.steadySince = null;
+    this.designSnapshot = null;
+    this.host.setPaletteFilter?.(level.palette ?? null);
 
     // Load the starting plant. A design override carries the player's own
     // failed layout (retry) or the reference solution (answer key); otherwise
@@ -212,6 +239,7 @@ export class GameModeManager {
     this.hud.show();
     this.hud.setLevel(level.title);
     this.hud.setHints(opts?.hints ?? level.hints);
+    this.hud.clearEvents();
     this.tunes.play('briefing');
     if (opts?.skipBriefing) {
       this.setPhase('construction');
@@ -230,6 +258,7 @@ export class GameModeManager {
     this.hud.hide();
     this.operatorPanel.hide();
     this.closeTitle();
+    this.host.setPaletteFilter?.(null);
     this.level = null;
     this.ledger = null;
     this.eventEngine = null;
@@ -295,7 +324,36 @@ export class GameModeManager {
     }
     this.burstThisRun = [];
     this.eventEngine?.disarm();
+    // An outage is weeks of plant time: restore the design's initial
+    // conditions so the next run doesn't inherit the last run's final state
+    // (tripped pumps, withdrawn rods, hot depressurized fluid...). The
+    // player's outage edits happen on top of the restored design.
+    this.restoreDesignSnapshot();
     this.setPhase('construction');
+  }
+
+  /**
+   * Copy the dynamic (sim-written) fields of the design snapshot back onto
+   * the live plant components. Structure (added/removed components, geometry)
+   * is left alone - only the state the per-frame sim sync overwrites.
+   */
+  private restoreDesignSnapshot(): void {
+    if (!this.designSnapshot) return;
+    const DYNAMIC_FIELDS = [
+      'fluid', 'primaryFluid', 'secondaryFluid', 'inletFluid', 'outletFluid',
+      'running', 'speed', 'opening', 'governorValve', 'controlRodPosition',
+      'fillLevel', 'power',
+    ];
+    for (const [id, snapRaw] of this.designSnapshot) {
+      const comp = this.host.plantState.components.get(id) as Record<string, unknown> | undefined;
+      const snap = snapRaw as Record<string, unknown>;
+      if (!comp) continue;
+      for (const field of DYNAMIC_FIELDS) {
+        if (field in snap) {
+          comp[field] = JSON.parse(JSON.stringify(snap[field]));
+        }
+      }
+    }
   }
 
   // ==========================================================================
@@ -337,6 +395,12 @@ export class GameModeManager {
     this.setPhase('operation');
     this.runHighWater = 0;
     this.burstThisRun = [];
+    // capture the design as it stands at run start (post-outage edits
+    // included) so the NEXT outage can restore these initial conditions
+    this.designSnapshot = new Map(
+      Array.from(this.host.plantState.components.entries())
+        .map(([id, c]) => [id, JSON.parse(JSON.stringify(c))])
+    );
     this.eventEngine?.arm(this.firedKinds);
     this.host.setMode('simulation');
     this.host.gameLoop.resume();
@@ -370,14 +434,17 @@ export class GameModeManager {
 
   onGameEvent(event: GameEvent): void {
     if (!this.active) return;
+    const simTime = this.host.gameLoop.getState()?.time;
     if (event.type === 'component-burst') {
       const componentId = (event.data?.componentId as string) ?? '';
       const comp = this.host.plantState.components.get(componentId);
       this.burstThisRun.push({ id: componentId, label: comp?.label ?? componentId });
       this.hud.ticker(event.message, true);
+      this.hud.addEvent(event.message, simTime, true);
       this.tunes.sfx('alarm');
     } else if (event.type === 'scram') {
       this.hud.ticker(event.message, true);
+      this.hud.addEvent(event.message, simTime, true);
     }
   }
 
@@ -396,7 +463,11 @@ export class GameModeManager {
       // random / scripted trouble
       const due = this.eventEngine?.poll(state.time, electricWatts > 1e6) ?? [];
       for (const kind of due) {
-        this.fireEvent(kind, state);
+        if (!this.fireEvent(kind, state)) {
+          // a scripted guarantee that couldn't bite (e.g. no running pumps):
+          // reschedule instead of consuming its one shot
+          this.eventEngine?.defer(kind, state.time);
+        }
       }
 
       this.updateGoalTracking(electricWatts);
@@ -439,9 +510,10 @@ export class GameModeManager {
 
   private updateGoalTracking(electricWatts: number): void {
     if (!this.level) return;
+    const mwe = electricWatts / 1e6;
     const powerGoal = this.level.goals.find(g => g.kind === 'power');
     if (powerGoal && powerGoal.kind === 'power' && !this.powerHoldDone) {
-      if (electricWatts / 1e6 >= powerGoal.mwe) {
+      if (mwe >= powerGoal.mwe) {
         if (this.powerHoldStart === null) this.powerHoldStart = this.operatedSeconds;
         if (this.operatedSeconds - this.powerHoldStart >= powerGoal.holdSeconds) {
           this.powerHoldDone = true;
@@ -450,6 +522,43 @@ export class GameModeManager {
         }
       } else {
         this.powerHoldStart = null;
+      }
+    }
+
+    // 'events' goal: a casualty is ridden through once the plant is back
+    // above the recovery threshold, at least 30 s after it fired (so an
+    // event the plant shrugs off entirely still requires demonstrating
+    // continued generation, not a same-frame checkmark).
+    const eventsGoal = this.level.goals.find(g => g.kind === 'events');
+    if (eventsGoal && eventsGoal.kind === 'events' && this.pendingCasualties.length > 0) {
+      const threshold = eventsGoal.recoverMwe ?? 150;
+      if (mwe >= threshold) {
+        const recovered = this.pendingCasualties.filter(t => this.operatedSeconds >= t + 30);
+        if (recovered.length > 0) {
+          this.pendingCasualties = this.pendingCasualties.filter(t => this.operatedSeconds < t + 30);
+          this.survivedCasualties += recovered.length;
+          this.hud.ticker(`Casualty ridden through (${this.survivedCasualties}/${eventsGoal.count}). Back on the line.`);
+          this.hud.addEvent(`Recovered: back above ${threshold} MWe (${this.survivedCasualties}/${eventsGoal.count} casualties handled)`, undefined, false);
+          this.tunes.sfx('cash');
+        }
+      }
+    }
+
+    // One-shot hint: once the plant has held >150 MWe steadily for 20
+    // operated seconds at 1x or slower, point at the sim-speed controls.
+    if (!this.speedHintShown) {
+      if (mwe > 150) {
+        this.steadySince ??= this.operatedSeconds;
+        const speed = this.host.gameLoop.getTargetSimSpeed();
+        if (this.operatedSeconds - this.steadySince > 20 && speed <= 1.01) {
+          this.speedHintShown = true;
+          this.host.showNotification(
+            'The plant is running steady. You can fast-forward with the speed controls in the top toolbar (10x / 100x) - objectives count sim time, not wall time.',
+            'info');
+          this.hud.ticker('Tip: plant is steady - crank the sim speed (top toolbar) to deliver MWh faster.');
+        }
+      } else {
+        this.steadySince = null;
       }
     }
   }
@@ -481,6 +590,10 @@ export class GameModeManager {
           const frac = Math.max(0, Math.min(1, this.ledger!.cash / def.dollars));
           return { def, fraction: frac, done: this.ledger!.cash >= def.dollars, readout: `${formatCost(this.ledger!.cash)} / ${formatCost(def.dollars)}` };
         }
+        case 'events': {
+          const frac = Math.min(1, this.survivedCasualties / def.count);
+          return { def, fraction: frac, done: this.survivedCasualties >= def.count, readout: `${this.survivedCasualties} / ${def.count} handled` };
+        }
       }
     });
   }
@@ -489,17 +602,18 @@ export class GameModeManager {
   // Random events
   // ==========================================================================
 
-  private fireEvent(kind: GameEventKind, state: SimulationState): void {
+  /** Returns false if the event couldn't be applied (nothing to break). */
+  private fireEvent(kind: GameEventKind, state: SimulationState): boolean {
+    const scheduledKind = kind;
     if (kind === 'major-surprise') {
       kind = MAJOR_SURPRISES[Math.floor(Math.random() * MAJOR_SURPRISES.length)];
     }
-    this.firedKinds.add(kind);
 
     let description = '';
     switch (kind) {
       case 'pump-trip': {
         const running = [...state.components.pumps.values()].filter(p => p.running && p.effectiveSpeed > 0.05);
-        if (running.length === 0) return;
+        if (running.length === 0) return false;
         const victim = running[Math.floor(Math.random() * running.length)];
         this.host.gameLoop.updateState(s => {
           const p = s.components.pumps.get(victim.id);
@@ -529,7 +643,7 @@ export class GameModeManager {
           }
           return s;
         });
-        if (!found) return;
+        if (!found) return false;
         description = 'Turbine trip! Governor slammed shut. Restore it from the controller (or ride the transient).';
         break;
       }
@@ -539,7 +653,7 @@ export class GameModeManager {
           const node = state.flowNodes.get(b.nodeId);
           return !!node && node.fluid.pressure > 15e5 && !node.isBoundary;
         });
-        if (candidates.length === 0) return;
+        if (candidates.length === 0) return false;
         const victim = candidates[Math.floor(Math.random() * candidates.length)];
         this.host.gameLoop.updateState(s => {
           const b = s.burstStates?.get(victim.nodeId);
@@ -559,7 +673,7 @@ export class GameModeManager {
       }
       case 'sgtr': {
         const tubes = [...(state.burstStates ?? new Map()).values()].filter(b => b.isTubeSide && !b.isBurst);
-        if (tubes.length === 0) { this.fireEvent('small-loca', state); return; }
+        if (tubes.length === 0) { return this.fireEvent('small-loca', state); }
         const victim = tubes[Math.floor(Math.random() * tubes.length)];
         this.host.gameLoop.updateState(s => {
           const b = s.burstStates?.get(victim.nodeId);
@@ -583,13 +697,21 @@ export class GameModeManager {
         description = 'Market crash: power is nearly worthless for a while. A fine time for maintenance.';
         break;
       default:
-        return;
+        return false;
     }
 
+    // only a successfully-applied event burns its scripted slot
+    this.firedKinds.add(scheduledKind);
+    this.firedKinds.add(kind);
+    if (CASUALTY_KINDS.has(kind)) {
+      this.pendingCasualties.push(this.operatedSeconds);
+    }
     this.firedEvents.push({ kind, simTime: state.time, description });
     this.hud.ticker(description, true);
+    this.hud.addEvent(description, state.time, true);
     this.tunes.sfx('alarm');
     this.host.showNotification(description, 'warning');
+    return true;
   }
 
   // ==========================================================================

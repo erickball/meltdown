@@ -95,6 +95,9 @@ export * from './operators';
 export { createSimulationState, createDemoReactor, createSimulationFromPlant, setSimulationRandomSeed } from './factory';
 // Note: createDemoReactor is OBSOLETE - throws error if used
 
+// Running-simulation snapshots (save/load a sim in progress)
+export { serializeSimulationState, deserializeSimulationState } from './serialization';
+
 // Water properties (including debug and profiling functions)
 export {
   setWaterPropsDebug,

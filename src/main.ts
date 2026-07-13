@@ -14,6 +14,8 @@ import {
   // createDemoReactor,
   createSimulationFromPlant,
   setSimulationRandomSeed,
+  serializeSimulationState,
+  deserializeSimulationState,
   SimulationState,
   SolverMetrics,
   setWaterPropsDebug,
@@ -389,8 +391,8 @@ function init() {
     if (event.type === 'scram') {
       showNotification('SCRAM: ' + event.message, 'warning');
     } else if (event.type === 'component-burst') {
-      // LOCA - component rupture event
-      showNotification(event.message, 'error');
+      // LOCA - component rupture event: hold the banner 30 s unless dismissed
+      showNotification(event.message, 'error', 30000);
     } else if (event.type === 'falling-behind') {
       showNotification('Simulation running slower than real time', 'info');
     } else if (event.type === 'simulation-error') {
@@ -1410,17 +1412,18 @@ function init() {
     }
 
     // Find the plant connection that matches these nodes
-    // Node IDs might be component IDs or internal region IDs
-    const plantConn = plantState.connections.find(pc => {
-      // Check if the plant connection matches (in either direction)
-      const fromMatches = pc.fromComponentId === simConn.fromNodeId ||
-        pc.fromComponentId.includes(simConn.fromNodeId) ||
-        simConn.fromNodeId.includes(pc.fromComponentId);
-      const toMatches = pc.toComponentId === simConn.toNodeId ||
-        pc.toComponentId.includes(simConn.toNodeId) ||
-        simConn.toNodeId.includes(pc.toComponentId);
-      return fromMatches && toMatches;
-    });
+    // Node IDs might be component IDs or internal region IDs. Sub-node ids are
+    // formed as "<componentId>-<suffix>", so match on exact id or that prefix
+    // pattern - a bare substring test would cross-wire id families like
+    // "pump-1" / "fw-pump-1" / "cond-pump-1".
+    const idsMatch = (componentId: string, nodeId: string) =>
+      componentId === nodeId ||
+      nodeId.startsWith(componentId + '-') ||
+      componentId.startsWith(nodeId + '-');
+    const plantConn = plantState.connections.find(pc =>
+      idsMatch(pc.fromComponentId, simConn.fromNodeId) &&
+      idsMatch(pc.toComponentId, simConn.toNodeId)
+    );
 
     if (!plantConn) {
       console.error(`[Edit] No plant connection found for sim connection ${simConnId}`);
@@ -1590,6 +1593,10 @@ function init() {
 
     // Migration: ensure pipes have endPosition for proper 3D rendering
     migratePipeEndpoints(plantState);
+
+    // Restore construction-path invariants (port.connectedTo flags, canonical
+    // pump port geometry/orientation) that raw JSON doesn't carry
+    constructionManager.normalizeLoadedPlant();
   }
 
   // Migrate pipes to have endPosition and endElevation for 3D rendering
@@ -1746,16 +1753,49 @@ function init() {
     return names.sort();
   }
 
-  // Save current configuration
+  // Save current configuration. In simulation mode the running simulation
+  // state rides along with the design, so loading resumes mid-run.
   function saveConfiguration(name: string): boolean {
     try {
-      const data = serializePlantState(plantState);
+      const data = serializePlantState(plantState) as Record<string, unknown>;
+      if (currentMode === 'simulation') {
+        const sim = gameLoop.getState();
+        if (sim && sim.flowNodes.size > 0) {
+          data.simState = serializeSimulationState(sim);
+        }
+      }
       const json = JSON.stringify(data);
       localStorage.setItem(STORAGE_PREFIX + name, json);
       return true;
     } catch (e) {
       console.error('[Save] Failed to save configuration:', e);
       return false;
+    }
+  }
+
+  /**
+   * A loaded config carried a running-simulation snapshot: rebuild the sim
+   * from the design (operators, geometry), then swap the saved state in and
+   * leave it paused at the saved time.
+   */
+  function restoreSimStateIfPresent(data: Record<string, unknown>): void {
+    if (!data.simState) return;
+    try {
+      const restored = deserializeSimulationState(data.simState as Record<string, unknown>);
+      setMode('simulation');
+      if (currentMode !== 'simulation') {
+        // career mode vetoed the switch (e.g. not built yet)
+        showNotification('Design loaded; the saved simulation state was skipped (simulation mode unavailable right now).', 'warning');
+        return;
+      }
+      gameLoop.setSimulationState(restored);
+      plantCanvas.setSimState(restored);
+      syncSimulationToVisuals(restored, plantState);
+      updatePauseButton();
+      showNotification(`Simulation restored at t=${restored.time.toFixed(0)} s (paused)`, 'info');
+    } catch (e) {
+      console.error('[Load] Failed to restore simulation state:', e);
+      showNotification(`Design loaded, but restoring the running simulation failed: ${String(e)}`, 'error');
     }
   }
 
@@ -1770,6 +1810,7 @@ function init() {
 
       const data = JSON.parse(json);
       deserializePlantState(data);
+      restoreSimStateIfPresent(data);
       return true;
     } catch (e) {
       console.error('[Load] Failed to load configuration:', e);
@@ -1814,7 +1855,9 @@ function init() {
       <h3 style="margin: 0 0 15px 0; color: #7af;">Save / Load Configuration</h3>
 
       <div style="margin-bottom: 15px;">
-        <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;">Save Current Design</label>
+        <label style="display: block; margin-bottom: 5px; color: #99aacc; font-size: 12px;"
+          title="In simulation mode the running simulation state is saved with the design - loading it resumes at the same moment, paused.">
+          Save Current Design${currentMode === 'simulation' ? ' + Running Simulation' : ''}</label>
         <div style="display: flex; gap: 5px;">
           <input type="text" id="save-name-input" placeholder="Enter name..."
             style="flex: 1; padding: 8px; background: #2a2e38; border: 1px solid #445566;
@@ -2051,6 +2094,7 @@ function init() {
           deserializePlantState(data);
           updateConstructionCostPanel();
           showNotification(`Imported '${file.name}'`, 'info');
+          restoreSimStateIfPresent(data);
           cleanup();
         } catch (err) {
           console.error('[Import] Failed to parse JSON:', err);
@@ -2929,6 +2973,46 @@ function init() {
     });
   }
 
+  // Construction-palette focus for early career levels: show only the
+  // component types the level expects (plus a SHOW ALL toggle so nobody is
+  // ever actually locked out of the catalog).
+  let paletteFilterTypes: string[] | null = null;
+  let paletteShowAll = false;
+  function applyPaletteFilter(): void {
+    const container = document.querySelector('.component-categories') as HTMLElement | null;
+    if (!container) return;
+    const filtering = paletteFilterTypes !== null && !paletteShowAll;
+    container.querySelectorAll<HTMLButtonElement>('.component-btn').forEach(btn => {
+      const t = btn.dataset.component ?? '';
+      btn.style.display = filtering && !paletteFilterTypes!.includes(t) ? 'none' : '';
+    });
+    container.querySelectorAll('details').forEach(d => {
+      const anyVisible = Array.from(d.querySelectorAll<HTMLButtonElement>('.component-btn'))
+        .some(b => b.style.display !== 'none');
+      (d as HTMLElement).style.display = anyVisible ? '' : 'none';
+    });
+    let toggle = document.getElementById('palette-filter-toggle') as HTMLButtonElement | null;
+    if (paletteFilterTypes !== null) {
+      if (!toggle) {
+        toggle = document.createElement('button');
+        toggle.id = 'palette-filter-toggle';
+        toggle.style.cssText = 'width: 100%; margin-bottom: 6px; font-size: 11px; padding: 3px; background: #223a52; color: #9cf; border: 1px solid #456; cursor: pointer;';
+        toggle.addEventListener('click', () => {
+          paletteShowAll = !paletteShowAll;
+          applyPaletteFilter();
+        });
+        container.prepend(toggle);
+      }
+      toggle.style.display = '';
+      toggle.textContent = paletteShowAll ? 'SHOW SUGGESTED PARTS ONLY' : 'SHOW ALL PARTS';
+      toggle.title = paletteShowAll
+        ? 'Back to just the components this job calls for'
+        : 'This level suggests a short parts list; click to browse the full catalog';
+    } else if (toggle) {
+      toggle.style.display = 'none';
+    }
+  }
+
   // Career mode: constructed here so it can close over the plant/save
   // helpers; the title screen below offers CAREER or SANDBOX.
   gameMode = new GameModeManager({
@@ -2945,6 +3029,11 @@ function init() {
     },
     showNotification,
     refreshSimControls: () => updatePauseButton(),
+    setPaletteFilter: (types: string[] | null) => {
+      paletteFilterTypes = types;
+      paletteShowAll = false;
+      applyPaletteFilter();
+    },
   });
 
   // "Atom" Jack: AI contractor chat in the bottom-right corner. Constructed
@@ -3171,6 +3260,18 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       if (pumpState) {
         component.running = pumpState.running;
         component.speed = pumpState.speed;
+        // Operating point on the pump curve for the sprite's color cue:
+        // flow / rated flow, normalized by speed (affinity laws), so
+        // 0 = deadhead, 1 = rated point, ~2.24 = runout.
+        let opFlow: number | undefined;
+        if (pumpState.running && pumpState.effectiveSpeed > 0.01 &&
+            pumpState.connectedFlowPath && pumpState.ratedFlow > 0) {
+          const conn = simState.flowConnections.find(c => c.id === pumpState.connectedFlowPath);
+          if (conn) {
+            opFlow = Math.abs(conn.massFlowRate) / (pumpState.ratedFlow * pumpState.effectiveSpeed);
+          }
+        }
+        (component as unknown as { opFlowFraction?: number }).opFlowFraction = opFlow;
       }
     }
 
@@ -3288,15 +3389,19 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
   }
 }
 
-function showNotification(message: string, type: 'info' | 'warning' | 'error' = 'info'): void {
+function showNotification(message: string, type: 'info' | 'warning' | 'error' = 'info', durationMs?: number): void {
   const prefix = type === 'warning' ? '!' : type === 'error' ? 'X' : 'i';
   console.log('[' + prefix + '] ' + message);
 
+  // Stack below any notifications already showing instead of covering them
+  const existing = document.querySelectorAll('.sim-notification').length;
+
   // Create visible notification element
   const notification = document.createElement('div');
+  notification.className = 'sim-notification';
   notification.style.cssText = `
     position: fixed;
-    top: 20px;
+    top: ${20 + existing * 52}px;
     left: 50%;
     transform: translateX(-50%);
     padding: 12px 24px;
@@ -3368,8 +3473,9 @@ function showNotification(message: string, type: 'info' | 'warning' | 'error' = 
 
   document.body.appendChild(notification);
 
-  // Auto-remove after delay (longer for errors)
-  const duration = type === 'error' ? 5000 : type === 'warning' ? 4000 : 3000;
+  // Auto-remove after delay (longer for errors); callers can override for
+  // events the player must not miss (bursts hold for 30 s unless dismissed)
+  const duration = durationMs ?? (type === 'error' ? 5000 : type === 'warning' ? 4000 : 3000);
   setTimeout(remove, duration);
 }
 

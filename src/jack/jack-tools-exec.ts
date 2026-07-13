@@ -390,7 +390,75 @@ export function executeJackTool(
       return { ok: true, deleted: comp.id };
     }
 
+    case 'file_car':
+      return fileCarReport(input, host, record);
+
     default:
       return err(`Unknown tool: ${name}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Corrective Action Reports (Jack's bug reports), persisted server-side to
+// the Firestore "jack-cars" collection via the fileCar cloud function.
+// ---------------------------------------------------------------------------
+
+const PROD_CAR_ENDPOINT =
+  'https://us-central1-unityriskresearch.cloudfunctions.net/fileCar';
+
+/** Follows the jack-endpoint localStorage override so the emulator works. */
+function carEndpoint(): string {
+  const chat = localStorage.getItem('jack-endpoint');
+  if (chat && chat.includes('jackChat')) return chat.replace('jackChat', 'fileCar');
+  return PROD_CAR_ENDPOINT;
+}
+
+async function fileCarReport(
+  input: Record<string, unknown>,
+  host: JackHost,
+  record: (description: string) => void
+): Promise<unknown> {
+  const title = String(input.title ?? '').slice(0, 300);
+  const description = String(input.description ?? '').slice(0, 8000);
+  if (!title || !description) return err('file_car needs a title and a description');
+  const sim = host.getSimState();
+  const payload = {
+    title,
+    description,
+    severity: input.severity,
+    component: typeof input.component === 'string' ? input.component : undefined,
+    context: {
+      mode: host.getMode(),
+      simTime: sim?.time ?? null,
+      selectedComponent: host.getSelectedComponentId(),
+      componentCount: host.plantState.components.size,
+      userAgent: navigator.userAgent,
+    },
+  };
+  try {
+    const resp = await fetch(carEndpoint(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = (await resp.json()) as { carId?: string };
+    record(`Jack filed CAR ${data.carId ?? '?'}: ${title}`);
+    return { ok: true, carId: data.carId ?? null, note: 'CAR filed with the site office.' };
+  } catch (e) {
+    // Offline / endpoint not deployed: park the report locally so it isn't
+    // lost, and tell the model honestly what happened.
+    try {
+      const key = 'meltdown_pending_cars';
+      const pending = JSON.parse(localStorage.getItem(key) ?? '[]') as unknown[];
+      pending.push({ ...payload, failedAt: new Date().toISOString() });
+      localStorage.setItem(key, JSON.stringify(pending.slice(-20)));
+    } catch { /* storage full - the report is only in the chat log */ }
+    record(`Jack wrote up a CAR (site office unreachable): ${title}`);
+    return {
+      ok: true,
+      carId: null,
+      note: `Couldn't reach the site office (${String(e)}); the report is parked in this browser (localStorage 'meltdown_pending_cars').`,
+    };
   }
 }

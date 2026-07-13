@@ -35,6 +35,19 @@ export class RandomEventEngine {
   }
 
   /**
+   * A scripted event fired but couldn't be applied (e.g. a pump-trip with no
+   * running pumps). Put it back on the schedule a little later instead of
+   * consuming its one shot - scripted events are guarantees, not attempts.
+   */
+  defer(kind: GameEventKind, simTime: number, delaySeconds = 60): void {
+    const slot = this.scriptedAt.find(s => s.kind === kind && s.fired);
+    if (slot) {
+      slot.fired = false;
+      slot.at = simTime + delaySeconds;
+    }
+  }
+
+  /**
    * Poll for due events. Returns the kinds that should fire now (usually 0-1).
    * `generating` gates random events: nothing randomly breaks while the plant
    * is shut down and dark - misery needs an audience.

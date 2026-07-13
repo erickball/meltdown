@@ -26,7 +26,7 @@ import {
   R_GAS,
   mixtureCv,
 } from './simulation/gas-properties';
-import { pumpHeadPressure } from './simulation/operators/pump-curve';
+import { pumpHeadPressure, pumpHeadFraction } from './simulation/operators/pump-curve';
 import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
 
@@ -1199,6 +1199,42 @@ export function updateComponentDetail(
           if (conn) {
             html += `<div class="detail-row"><span class="detail-label">Current Flow:</span><span class="detail-value">${Math.abs(conn.massFlowRate).toFixed(1)} kg/s</span></div>`;
 
+            // Pump curve with the live operating point: head fraction vs
+            // flow fraction at the current speed. Deadhead (left) is red
+            // territory, rated point green, runout (right) blue.
+            if (pumpState.ratedFlow > 0 && pumpState.effectiveSpeed > 0.01) {
+              const s = pumpState.effectiveSpeed;
+              const W = 200, H = 80, PAD = 6;
+              const qMax = 2.4;
+              const hMax = 1.3;
+              const px = (q: number) => PAD + (q / qMax) * (W - 2 * PAD);
+              const py = (h: number) => H - PAD - (h / hMax) * (H - 2 * PAD);
+              const pts: string[] = [];
+              for (let q = 0; q <= qMax + 1e-9; q += 0.08) {
+                const h = pumpHeadFraction(q * pumpState.ratedFlow, pumpState.ratedFlow, s);
+                if (h < 0) break;
+                pts.push(`${px(q).toFixed(1)},${py(h).toFixed(1)}`);
+              }
+              const qNow = Math.abs(conn.massFlowRate) / pumpState.ratedFlow;
+              const hNow = Math.max(0, pumpHeadFraction(Math.abs(conn.massFlowRate), pumpState.ratedFlow, s));
+              const qNorm = qNow / s; // 1 = rated point at this speed
+              const hue = qNorm <= 1
+                ? 120 * Math.max(0, Math.min(1, qNorm))
+                : 120 + 100 * Math.min(1, (qNorm - 1) / 1.24);
+              html += `<div class="detail-row" style="display:block; margin-top:4px;">
+                <svg width="${W}" height="${H}" style="background:#101418; border:1px solid #333; border-radius:3px;"
+                     aria-label="Pump curve with operating point">
+                  <line x1="${px(0)}" y1="${py(0)}" x2="${px(qMax)}" y2="${py(0)}" stroke="#444" stroke-width="1"/>
+                  <line x1="${px(1)}" y1="${py(0)}" x2="${px(1)}" y2="${py(hMax)}" stroke="#2a3a2a" stroke-width="1" stroke-dasharray="3,3"/>
+                  <polyline points="${pts.join(' ')}" fill="none" stroke="#88aaff" stroke-width="1.5"/>
+                  <circle cx="${px(qNow).toFixed(1)}" cy="${py(hNow).toFixed(1)}" r="4" fill="hsl(${hue.toFixed(0)},85%,55%)" stroke="#fff" stroke-width="1"/>
+                  <text x="${px(1)}" y="${H - 1}" fill="#666" font-size="8" text-anchor="middle">rated Q</text>
+                  <text x="${PAD + 2}" y="${py(hMax) + 8}" fill="#666" font-size="8">head</text>
+                </svg>
+                <div style="font-size:9px; color:#888;" title="Where the pump is running on its curve: deadhead (no flow) shades red, near-rated is green, runout (max flow, no head) shades blue. The pump sprite's ring uses the same color.">Operating point: ${(qNorm * 100).toFixed(0)}% of rated flow at this speed</div>
+              </div>`;
+            }
+
             // Get fluid state from upstream node (suction side)
             const upstreamNode = simState.flowNodes.get(conn.fromNodeId);
             if (upstreamNode) {
@@ -1675,10 +1711,13 @@ export function updateComponentDetail(
     if (legacyInsideId) nodeIds.add(legacyInsideId);
     if (legacyOutsideId) nodeIds.add(legacyOutsideId);
   }
-  // For HX, also check for primary/secondary/shell side nodes (only if simulation is running)
+  // For HX, also check for primary/secondary/shell side nodes (only if simulation is running).
+  // Sub-nodes are named "<componentId>-<suffix>"; a bare substring test would
+  // cross-wire id families like "pump-1" / "fw-pump-1" and make the RCP list
+  // the feedwater train's connections.
   if (simState.flowNodes) {
     for (const [nodeId] of simState.flowNodes) {
-      if (nodeId.includes(componentId)) {
+      if (nodeId.startsWith(componentId + '-')) {
         nodeIds.add(nodeId);
       }
     }
@@ -1757,7 +1796,7 @@ export function updateComponentDetail(
           html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
-          html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+          html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
         } else {
           const otherName = isFrom ? toName : fromName;
           const flowingOut = (isFrom && actualFlow >= 0) || (!isFrom && actualFlow < 0);
@@ -1777,7 +1816,7 @@ export function updateComponentDetail(
           html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
-          html += `<br>Area: ${(conn.flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+          html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
         }
       }
       html += '</div>';
@@ -1839,7 +1878,7 @@ export function updateComponentDetail(
           html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
-          html += `<br>Area: ${(flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+          html += `<br>Area: ${parseFloat(flowArea.toFixed(4))} m²</span></div>`;
         } else {
           const otherName = isFrom ? toName : fromName;
           const relElev = isFrom ? conn.fromElevation : conn.toElevation;
@@ -1854,7 +1893,7 @@ export function updateComponentDetail(
           html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
-          html += `<br>Area: ${(flowArea * 1e4).toFixed(1)} cm²</span></div>`;
+          html += `<br>Area: ${parseFloat(flowArea.toFixed(4))} m²</span></div>`;
         }
       }
       html += '</div>';

@@ -117,7 +117,7 @@
     }],
     ["ctl-sgp-1", {
       "id": "ctl-sgp-1", "type": "controller", "controllerType": "pid", "label": "SG Pressure (Governor)",
-      "position": {"x": 30, "y": 63}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 25, "y": 64}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-pressure", "targetId": "hx-1-shell"},
         "setpoint": 6000000,
@@ -127,7 +127,7 @@
     }],
     ["ctl-sgl-1", {
       "id": "ctl-sgl-1", "type": "controller", "controllerType": "pid", "label": "SG Level (3-elem FW)",
-      "position": {"x": 30, "y": 66}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 25, "y": 70}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-level", "targetId": "hx-1-shell"},
         "setpoint": 8.5,
@@ -137,7 +137,7 @@
     }],
     ["ctl-hwl-1", {
       "id": "ctl-hwl-1", "type": "controller", "controllerType": "pid", "label": "Hotwell Level (Cond Pump)",
-      "position": {"x": 30, "y": 69}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 30, "y": 64}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-level", "targetId": "condenser-1"},
         "setpoint": 0.5,
@@ -147,7 +147,7 @@
     }],
     ["ctl-pzrh-1", {
       "id": "ctl-pzrh-1", "type": "controller", "controllerType": "pid", "label": "Pzr Pressure (Heaters)",
-      "position": {"x": 30, "y": 72}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
+      "position": {"x": 30, "y": 70}, "rotation": 0, "elevation": 0, "width": 2, "height": 2, "ports": [],
       "pid": {
         "sensor": {"kind": "node-pressure", "targetId": "pzr-1"},
         "setpoint": 15500000,

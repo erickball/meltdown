@@ -2143,11 +2143,11 @@ export class ConstructionManager {
       case 'right-left':
         return { inlet: { x: 0, y: baseInletY }, outlet: { x: -baseOutletX, y: baseOutletY } };
       case 'bottom-top':
-        // Rotate -90°: (x,y) -> (y, -x)
-        return { inlet: { x: -baseInletY, y: 0 }, outlet: { x: -baseOutletY, y: -baseOutletX } };
+        // Renderer applies ctx.rotate(-PI/2), which maps local (x,y) -> (y, -x)
+        return { inlet: { x: baseInletY, y: 0 }, outlet: { x: baseOutletY, y: -baseOutletX } };
       case 'top-bottom':
-        // Rotate +90°: (x,y) -> (-y, x)
-        return { inlet: { x: baseInletY, y: 0 }, outlet: { x: baseOutletY, y: baseOutletX } };
+        // Renderer applies ctx.rotate(+PI/2), which maps local (x,y) -> (-y, x)
+        return { inlet: { x: -baseInletY, y: 0 }, outlet: { x: -baseOutletY, y: baseOutletX } };
       default: // left-right
         return { inlet: { x: 0, y: baseInletY }, outlet: { x: baseOutletX, y: baseOutletY } };
     }
@@ -2186,6 +2186,33 @@ export class ConstructionManager {
         const port = pump.ports.find(p => p.id === conn.toPortId);
         if (port) conn.toElevation = this.getPortRelativeElevation(pump, port);
       }
+    }
+  }
+
+  /**
+   * Reconcile a plant loaded straight from JSON (presets, levels, saved
+   * configs) with the invariants the interactive construction path maintains:
+   * - both endpoint ports of every connection know they are connected
+   *   (renderers and Jack's free-port search read port.connectedTo)
+   * - pump ports sit on the drawn nozzles for the pump's orientation, and
+   *   the orientation faces the pump's connected partners
+   */
+  normalizeLoadedPlant(): void {
+    const portById = new Map<string, Port>();
+    for (const [, component] of this.plantState.components) {
+      for (const port of component.ports) portById.set(port.id, port);
+    }
+    for (const conn of this.plantState.connections) {
+      const fromPort = portById.get(conn.fromPortId);
+      const toPort = portById.get(conn.toPortId);
+      if (fromPort) fromPort.connectedTo = conn.toPortId;
+      if (toPort) toPort.connectedTo = conn.fromPortId;
+    }
+
+    for (const [, component] of this.plantState.components) {
+      if (component.type !== 'pump' || !(component as any).orientation) continue;
+      this.updatePumpPorts(component);
+      this.autoOrientPump(component.id);
     }
   }
 
@@ -2360,7 +2387,7 @@ export class ConstructionManager {
 
     // If only one side has valid fluid, use that side entirely
     if (!fromFluid && !toFluid) {
-      console.log(`[Pipe Fluid] Neither component has valid fluid, using default`);
+      console.warn(`[Pipe Fluid] FALLBACK: neither ${fromComponent.id} nor ${toComponent.id} has a valid fluid state; auto-pipe defaults to 300K liquid at 1 atm`);
       return defaultFluid;
     }
     if (!fromFluid) {
@@ -2372,7 +2399,25 @@ export class ConstructionManager {
       return { ...fromFluid, flowRate: 0 };
     }
 
-    // Both sides have valid fluid - average specific internal energy (u) and specific volume (v)
+    // Same single phase on both sides: inherit averaged T and P directly so the
+    // pipe starts in pressure equilibrium with its neighbors. The u-v averaging
+    // below runs through saturated correlations, which discards the real pressure
+    // of subcooled/superheated neighbors (a pipe between two 155-bar liquid nodes
+    // would init near saturation pressure, or even two-phase -> water hammer at t=0).
+    if (fromFluid.phase === toFluid.phase && fromFluid.phase !== 'two-phase') {
+      const avgT = (fromFluid.temperature + toFluid.temperature) / 2;
+      const avgP = (fromFluid.pressure + toFluid.pressure) / 2;
+      console.log(`[Pipe Fluid] Both sides ${fromFluid.phase}: inheriting avg T=${avgT.toFixed(0)}K, P=${(avgP / 1e5).toFixed(1)} bar`);
+      return {
+        temperature: avgT,
+        pressure: avgP,
+        phase: fromFluid.phase,
+        quality: fromFluid.phase === 'vapor' ? 1 : 0,
+        flowRate: 0
+      };
+    }
+
+    // Mixed phases - average specific internal energy (u) and specific volume (v)
     // This is thermodynamically correct, as opposed to averaging T and P directly
 
     // Helper to compute u and v from fluid state

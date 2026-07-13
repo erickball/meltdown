@@ -2003,9 +2003,12 @@ export class PlantCanvas {
         const toPort = toComponent.ports.find(p => p.id === connection.toPortId);
 
         if (fromPort && toPort) {
+          const touchesSelection = this.selectedComponentId !== null &&
+            (connection.fromComponentId === this.selectedComponentId ||
+             connection.toComponentId === this.selectedComponentId);
           if (this.isometric.enabled) {
             // Use perspective-aware connection rendering with actual connection elevations
-            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection);
+            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
           } else {
             // Calculate world positions of ports
             const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
@@ -2295,7 +2298,8 @@ export class PlantCanvas {
     fromPort: { position: Point },
     toComponent: PlantComponent,
     toPort: { position: Point },
-    connection: Connection
+    connection: Connection,
+    highlight: boolean = false
   ): void {
     // Get port screen positions (these are visually consistent with component rendering)
     const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
@@ -2453,20 +2457,28 @@ export class PlantCanvas {
 
     // Get fluid color from the source component
     const fluid = (fromComponent as any).fluid;
+    const strokeConnection = () => {
+      ctx.beginPath();
+      ctx.moveTo(adjustedFromScreen.x, adjustedFromScreen.y);
+      // Simple curved connection in screen space
+      const midX = (adjustedFromScreen.x + adjustedToScreen.x) / 2;
+      const midY = (adjustedFromScreen.y + adjustedToScreen.y) / 2;
+      ctx.quadraticCurveTo(midX, adjustedFromScreen.y, midX, midY);
+      ctx.quadraticCurveTo(midX, adjustedToScreen.y, adjustedToScreen.x, adjustedToScreen.y);
+      ctx.stroke();
+    };
+
+    ctx.lineCap = 'round';
+    if (highlight) {
+      // Selected component: draw a bright halo under the connection so every
+      // attached line is unambiguous
+      ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
+      ctx.lineWidth = 8;
+      strokeConnection();
+    }
     ctx.strokeStyle = fluid ? this.getFluidColorForConnection(fluid) : '#667788';
     ctx.lineWidth = 4;
-    ctx.lineCap = 'round';
-
-    ctx.beginPath();
-    ctx.moveTo(adjustedFromScreen.x, adjustedFromScreen.y);
-
-    // Simple curved connection in screen space
-    const midX = (adjustedFromScreen.x + adjustedToScreen.x) / 2;
-    const midY = (adjustedFromScreen.y + adjustedToScreen.y) / 2;
-    ctx.quadraticCurveTo(midX, adjustedFromScreen.y, midX, midY);
-    ctx.quadraticCurveTo(midX, adjustedToScreen.y, adjustedToScreen.x, adjustedToScreen.y);
-
-    ctx.stroke();
+    strokeConnection();
   }
 
   // Get fluid color for connection rendering - uses same coloring as fluid nodes

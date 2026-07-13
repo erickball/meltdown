@@ -18,7 +18,14 @@ export type GamePhase =
 export type GoalDef =
   | { kind: 'energy'; mwh: number; label?: string }
   | { kind: 'power'; mwe: number; holdSeconds: number; label?: string }
-  | { kind: 'cash'; dollars: number; label?: string };
+  | { kind: 'cash'; dollars: number; label?: string }
+  /**
+   * Ride through `count` equipment casualties (pump/turbine trips, LOCAs,
+   * SGTRs): each one counts once the plant is back above `recoverMwe`
+   * (default 150) at least 30 s after it fired. Guarantees the level can't
+   * be coasted before its scripted trouble arrives.
+   */
+  | { kind: 'events'; count: number; recoverMwe?: number; label?: string };
 
 /** Random / scripted event kinds the engine can fire during operation. */
 export type GameEventKind =
@@ -77,6 +84,14 @@ export interface LevelDef {
   goals: GoalDef[];
   /** Level fails if the radiological release severity index reaches this. */
   maxRelease: number;
+
+  /**
+   * Construction-palette focus for early levels: component types (the
+   * data-component ids of the palette buttons) the player is expected to
+   * need. When set, the palette shows only these plus a SHOW ALL toggle.
+   * Omit for the full catalog.
+   */
+  palette?: string[];
 
   events: EventScheduleDef;
 

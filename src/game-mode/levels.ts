@@ -47,9 +47,10 @@ export const LEVELS: LevelDef[] = [
     interestAPR: 0.08,
     goals: [
       { kind: 'power', mwe: 150, holdSeconds: 120, label: 'Reach 150 MWe and hold it' },
-      { kind: 'energy', mwh: 25, label: 'Deliver 25 MWh to the grid' },
+      { kind: 'energy', mwh: 15, label: 'Deliver 15 MWh to the grid' },
     ],
     maxRelease: 1,
+    palette: ['reactor-vessel', 'core', 'pipe', 'valve', 'check-valve'],
     events: { warmupSeconds: Infinity, meanIntervalSeconds: Infinity, pool: [] },
     briefing: [
       { who: 'grubb', mood: 'neutral', text: 'So you\'re the new Chief Engineer. Welcome to Gigawatt Power & Light. Don\'t get comfortable.' },
@@ -59,7 +60,7 @@ export const LEVELS: LevelDef[] = [
       { who: 'grubb', mood: 'neutral', text: 'The old drawings say: vessel about 4 meters across, 12 tall, rated 172 bar. Core around 1000 megawatts thermal, 5 percent enrichment. Or improvise. What could go wrong.' },
       { who: 'grubb', mood: 'angry', text: 'Piping 101, since apparently I have to say it: coolant pump into the vessel downcomer. Core outlet to the steam generator tubes. And connect the pressurizer to the vessel or the whole thing goes BANG.' },
       { who: 'grubb', mood: 'neutral', text: 'No rod controller in the budget - you\'ll drive the control rods yourself, by hand, like your grandfather did. Ease them out. EASE. The turbine governor and feedwater are automatic.' },
-      { who: 'grubb', mood: 'happy', text: 'Get me 150 megawatts and 25 megawatt-hours on the meter. Do that and there\'s a bonus in it. Interest starts the second you press BUILD, so move it.' },
+      { who: 'grubb', mood: 'happy', text: 'Get me 150 megawatts and 15 megawatt-hours on the meter. Do that and there\'s a bonus in it. Interest starts the second you press BUILD, so move it.' },
     ],
     debrief: [
       { who: 'grubb', mood: 'happy', text: 'Would you look at that. The meter\'s spinning forward for a change.' },
@@ -99,23 +100,25 @@ export const LEVELS: LevelDef[] = [
     interestAPR: 0.08,
     goals: [
       { kind: 'energy', mwh: 60, label: 'Deliver 60 MWh' },
-      { kind: 'cash', dollars: 32e6, label: 'Grow the account to $32M' },
+      { kind: 'events', count: 2, recoverMwe: 150, label: 'Ride through 2 equipment casualties' },
     ],
     maxRelease: 1,
+    palette: ['pump', 'valve', 'check-valve', 'relief-valve', 'pipe', 'pid-controller'],
     events: {
-      warmupSeconds: 240,
+      warmupSeconds: 180,
       meanIntervalSeconds: Infinity,
       pool: [],
       scripted: [
-        { kind: 'pump-trip', earliestSeconds: 300, latestSeconds: 600 },
+        { kind: 'pump-trip', earliestSeconds: 210, latestSeconds: 420 },
+        { kind: 'turbine-trip', earliestSeconds: 540, latestSeconds: 840 },
         { kind: 'price-spike', earliestSeconds: 120, latestSeconds: 400 },
       ],
     },
     briefing: [
       { who: 'grubb', mood: 'happy', text: 'Great news! I bought a complete pressurized water reactor at auction. Barely used. The controls are all automatic - it practically runs itself.' },
       { who: 'grubb', mood: 'neutral', text: 'Why was it at auction, you ask? Great question. Nobody asked it at the auction, and I\'m not starting now.' },
-      { who: 'grubb', mood: 'neutral', text: 'Just run the thing. Sixty megawatt-hours on the meter and forty million in the account. The market\'s jumpy this week - sell power when the price is up.' },
-      { who: 'grubb', mood: 'angry', text: 'One more thing. If something trips out there - a pump, whatever - somebody has to WALK OUT and restart it. Click the machine, use the operator panel. That somebody is you.' },
+      { who: 'grubb', mood: 'neutral', text: 'Just keep the thing RUNNING. Sixty megawatt-hours on the meter, and whatever the auction plant throws at you - a tripped pump, a slammed turbine - you ride it out and get back to full power.' },
+      { who: 'grubb', mood: 'angry', text: 'Because something WILL trip out there. And when it does, somebody has to WALK OUT and restart it. Click the machine, use the operator panel. That somebody is you.' },
     ],
     debrief: [
       { who: 'grubb', mood: 'happy', text: 'Smooth as a bond salesman. The auction house called - they want to know if we\'d like another one.' },
@@ -123,15 +126,15 @@ export const LEVELS: LevelDef[] = [
     ],
     hints: [
       'The plant starts itself - watch it climb to full power.',
-      'Select a pump in simulation mode to open the OPERATOR ACTIONS panel.',
-      'Watch the price ticker: a spike is worth chasing with full output.',
+      'When something trips, select it in simulation mode to open the OPERATOR ACTIONS panel and restart it.',
+      'A casualty only counts as "ridden through" once you\'re back above 150 MWe.',
     ],
     reference: {
       design: pwrPreset,
       notes: [
         'GRUBB\'S BINDER: the plant is fine - press BUILD IT and let the controllers take it to full power. Your job starts when something stops.',
         'When a pump trips, click it and press START in the OPERATOR ACTIONS panel. Do it promptly; the core does not enjoy waiting.',
-        'A price spike is free money: hold full output until it fades. Interest never sleeps, so neither should the turbine.',
+        'A slammed turbine governor: click its controller and put it back in AUTO. Then get back above 150 MWe to log the save.',
       ],
       scolding: [
         { who: 'grubb', mood: 'furious', text: 'The plant runs ITSELF. The ONE thing it can\'t do is walk outside and flip its own breaker. That part - the WALKING - is what I pay you for.' },

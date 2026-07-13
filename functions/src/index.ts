@@ -1,4 +1,5 @@
-import { onRequest } from "firebase-functions/v2/https";
+import { onRequest, Request } from "firebase-functions/v2/https";
+import type { Response } from "express";
 import { defineSecret } from "firebase-functions/params";
 import { initializeApp } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
@@ -40,6 +41,25 @@ const ALLOWED_ORIGINS = [
   "https://www.unityriskresearch.com",
 ];
 const LOCALHOST_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+
+function applyCors(req: Request, res: Response): boolean {
+  const origin = req.headers.origin ?? "";
+  if (ALLOWED_ORIGINS.includes(origin) || LOCALHOST_RE.test(origin)) {
+    res.set("Access-Control-Allow-Origin", origin);
+    res.set("Vary", "Origin");
+  }
+  res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.set("Access-Control-Allow-Headers", "Content-Type");
+  if (req.method === "OPTIONS") {
+    res.status(204).send("");
+    return false;
+  }
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "POST only" });
+    return false;
+  }
+  return true;
+}
 
 function usageCostUsd(u: {
   input_tokens: number;
@@ -185,5 +205,40 @@ export const jackChat = onRequest(
       usage: response.usage,
       spentThisMonthUsd: Number((spent + cost).toFixed(4)),
     });
+  }
+);
+
+// Corrective Action Reports: Jack's in-character bug reports, persisted to
+// Firestore ("jack-cars" collection) for review in the Firebase console
+// during development. No auth (same anonymous posture as jackChat); size
+// caps and a per-document shape check keep abuse boring.
+const MAX_CAR_BYTES = 20_000;
+
+export const fileCar = onRequest(
+  { timeoutSeconds: 30, memory: "256MiB", maxInstances: 2, cors: false },
+  async (req, res) => {
+    if (!applyCors(req, res)) return;
+
+    const body = req.body;
+    if (!body || typeof body.title !== "string" || typeof body.description !== "string") {
+      res.status(400).json({ error: "body must include title and description strings" });
+      return;
+    }
+    if (JSON.stringify(body).length > MAX_CAR_BYTES) {
+      res.status(400).json({ error: "report too large" });
+      return;
+    }
+
+    const db = getFirestore();
+    const doc = await db.collection("jack-cars").add({
+      title: String(body.title).slice(0, 300),
+      description: String(body.description).slice(0, 8000),
+      severity: ["low", "medium", "high"].includes(body.severity) ? body.severity : "medium",
+      component: typeof body.component === "string" ? body.component.slice(0, 200) : null,
+      context: typeof body.context === "object" && body.context !== null ? body.context : null,
+      origin: req.headers.origin ?? null,
+      created: FieldValue.serverTimestamp(),
+    });
+    res.json({ ok: true, carId: doc.id });
   }
 );
