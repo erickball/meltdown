@@ -351,6 +351,18 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
       if (node.isBoundary) continue;
 
       node.fluid.mass += nodeRates.dMass * dt;
+      // Water export is proportional to the donor's water content, so the
+      // true solution decays exponentially and never crosses zero - but the
+      // stage arithmetic of an explicit method can land a hair below.
+      // Rounding-scale negatives snap to exactly zero (approved: this is
+      // integration noise, not physics - the microgram bound is far below
+      // any node's meaningful inventory). Larger negatives are left in
+      // place: FluidState evaluates them as a dry gas node so the ERROR
+      // CONTROLLER can judge the step, and checkStateSanity rejects any
+      // CANDIDATE still owing more than rounding scale - loudly.
+      if (node.fluid.mass < 0 && node.fluid.mass > -WATER_MASS_ROUNDOFF) {
+        node.fluid.mass = 0;
+      }
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
 
       // Apply NCG transport rates if present
@@ -516,6 +528,13 @@ export function findNonFiniteRate(rates: StateRates): string {
 
 // Rate limiter for the NaN-rate diagnostic log (wall-clock ms)
 let lastRatesNormNaNLog = 0;
+
+// Rounding-scale bound for water inventory: stage arithmetic on a
+// proportionally-decaying export can land a hair below zero; a microgram is
+// integration noise on any node this simulation models, while anything
+// beyond it in an ACCEPTED candidate is genuine overdraw (rejected loudly
+// in checkStateSanity).
+const WATER_MASS_ROUNDOFF = 1e-6; // kg
 
 /**
  * Compute the L2 norm of rates for error estimation.
@@ -833,6 +852,14 @@ export function checkStateSanity(
     if (!isFinite(newNode.fluid.pressure) || newNode.fluid.pressure < 600) {
       console.warn(`[RK45 Sanity] ${id}: Invalid pressure ${newNode.fluid.pressure}`);
       return 1000; // Definitely reject
+    }
+
+    // Negative water inventory beyond rounding scale: the step genuinely
+    // overdrew the node (rounding-scale negatives were already snapped to
+    // zero in applyRatesToState). Reject loudly - this must stay visible.
+    if (newNode.fluid.mass < -WATER_MASS_ROUNDOFF) {
+      console.warn(`[RK45 Sanity] ${id}: negative water mass ${newNode.fluid.mass.toExponential(2)} kg (overdraw)`);
+      return 1000;
     }
 
     // Check for large pressure change (more than 20% in one step).

@@ -5,6 +5,22 @@ AI:
 -Firebase has my API key.
 
 
+Playtest batch (2026-07-13, from Erick):
+-Game-level connections are weird: the RCP appears connected to the FW check valve and the condenser; the pressurizer spray valve connects to RPV + pressurizer but selecting the pressurizer doesn't show that connection; some pre-made connections are direct even though they're long enough to need a pipe.
+-Level 1: target should be 15 MWh instead of 25 - or add a better way to show users they can speed up the sim. The pressurizer probably needs a relief valve too.
+-Auto-created pipes are supposed to inherit initial pressure from adjacent nodes but sometimes don't - a pipe that initializes two-phase causes water hammer at t=0.
+-Outages should reset initial conditions.
+-HUD should always keep the hide button in the upper-right corner.
+-Early levels should only show the components you might need for that level.
+-Pump sprites orient ~90 degrees off from their connections. A pump visually between source and destination should take the inlet into the suction (near the bottom of the sprite when left-right oriented) and send the outlet out the side toward the destination.
+-Let Jack file Corrective Action Reports (bug reports) that we can review during dev.
+-Flow areas: construction dialogs show m^2 but the sim shows cm^2 - use m^2 everywhere.
+-Allow saving an in-progress simulation.
+-Game levels: make sure all default components are visible (some spawn behind each other).
+-Level 2: guarantee at least one trip (currently possible to coast through doing nothing), and there's no visible electricity price or reason to reduce power - maybe rethink the goal as "keep it running through some equipment failures."
+-Out-of-operating-range indicators: pressure gauge flashes red over design pressure; pipes indicate excessive flow velocity somehow; pumps show their point on the curve when selected plus an always-visible color cue (blue = runout, green = near rated head/flow, shading to red toward deadhead).
+
+
 Display & minor issues:
 -Need a better way of deciding whether a node has separate liquid and vapor spaces, or is mixed. Or has a vapor space and a mixture space. Something about its height to width ratio and flow rate? This affects display but also flow through flowpaths at the top or bottom. (the system we have now incorporates some of this, but the results seem hit-or-miss. Needs work.) Maybe the better option is a legit two-phase level?
 -Clean up the debug display (light pass done: per-frame [Sync] console spam removed; panel itself still busy)
