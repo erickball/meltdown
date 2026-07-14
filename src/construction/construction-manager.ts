@@ -848,6 +848,15 @@ export class ConstructionManager {
         // causing sanity check failures. Starting with liquid is more realistic for startup
         // conditions anyway - the simulation will evolve to steady-state two-phase conditions.
         const T_sat_exhaust = 273.15 + 33;  // ~33°C saturation temp at low condenser pressures
+        // Same rating as the turbine (1.5x inlet): the duct takes the full
+        // startup flow spike (~8 bar measured) and a stuck-open governor
+        // could expose it to inlet pressure. Without a rating it would get
+        // NO burst state (unbreakable), and pipes chained from it would
+        // inherit only the condenser's ~2 bar.
+        const exhaustWallThickness = Math.max(
+          0.01,
+          (turbinePressureRating * 1e5) * (exhaustPipeDiameter / 2) / (172e6 - 0.6 * turbinePressureRating * 1e5)
+        );
         const exhaustPipe: PipeComponent = {
           id: exhaustPipeId,
           type: 'pipe',
@@ -855,8 +864,9 @@ export class ConstructionManager {
           position: { x: exhaustPipeX, y: exhaustPipeY },
           rotation: 0,
           diameter: exhaustPipeDiameter,
-          thickness: 0.01,  // 1cm wall thickness
+          thickness: Math.round(exhaustWallThickness * 1000) / 1000,
           length: exhaustPipeLength,
+          pressureRating: turbinePressureRating,
           ports: exhaustPipePorts,
           fluid: {
             temperature: T_sat_exhaust,  // Saturation temp at exhaust pressure
