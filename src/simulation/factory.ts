@@ -3197,6 +3197,12 @@ function getComponentGeometry(
     return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
   }
 
+  // Core barrels: thin shell inside the vessel; its geometry sets both the
+  // Barlow burst differential and the buckling collapse differential
+  if (component.type === 'coreBarrel' && comp.innerDiameter) {
+    return { diameter: comp.innerDiameter, thickness: comp.thickness ?? comp.barrelThickness ?? 0.05 };
+  }
+
   return null;
 }
 
@@ -3241,9 +3247,25 @@ function initializeBurstStates(
       // complain loudly so the gap gets an explicit rating eventually.
       // Service pressure, not initial pressure: a feedwater pump filled with
       // condensate at 0.05 bar runs at suction + rated head; a check valve
-      // holds whatever its neighbors run at. Core barrels are exempt: the
-      // surrounding vessel is the pressure boundary, not the barrel.
-      if (component.type === 'coreBarrel') continue;
+      // holds whatever its neighbors run at.
+      //
+      // Core barrels are special: the vessel is the full pressure boundary,
+      // but the barrel shell itself can still fail across the core-to-
+      // downcomer differential (its containerId, so gauge is dP across the
+      // shell). Its strength comes from its ACTUAL geometry via Barlow -
+      // normally dP is a couple of bar of flow resistance and the margin is
+      // huge, but a paper-thin barrel, a blocked/isolated barrel, or a steam
+      // explosion in the core can let go. No warning: this is by design,
+      // not a data gap.
+      if (component.type === 'coreBarrel') {
+        const comp = component as any;
+        const t = comp.thickness ?? comp.barrelThickness ?? 0.05;
+        const D = comp.innerDiameter ?? 3;
+        const S = 138e6; // Pa - allowable stress, matches calculateThicknessFromPressure
+        const barlowBar = (2 * S * t) / D / 1e5;
+        if (!(barlowBar > 0)) continue;
+        pressureRating = Math.round(barlowBar * 10) / 10;
+      } else {
       const simNodeId = (component as any).simNodeId || compId;
       const node = state.flowNodes.get(simNodeId);
       if (!node || node.isBoundary) continue;
@@ -3265,6 +3287,7 @@ function initializeBurstStates(
         `UNBREAKABLE. Deriving ${pressureRating} bar (1.5x service pressure) so it can ` +
         `burst like everything else. Give it an explicit rating to silence this.`
       );
+      }
     }
 
     const designPressure = pressureRating * 1e5;  // bar to Pa
