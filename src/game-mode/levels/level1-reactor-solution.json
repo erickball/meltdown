@@ -1,51 +1,285 @@
 {
   "comment": "Reference player build for level 1: a reactor vessel + core exactly as the construction manager would create them from the dialogs (vessel with auto core barrel, fuel properties transferred to the barrel, lattice-derived neutronics from enrichment), plus the three player connections: cold leg (RCP -> downcomer), hot leg (core barrel top -> SG tubes), surge line (downcomer -> pressurizer). barrelTopGap=0.05 (<0.1) so there is no internal top-gap short circuit; the hot leg comes straight off the upper plenum like a real PWR. startCritical=true so the factory solves the rod position for rho=0 at the initial conditions; the player (or the headless operator in scripts/test-game-levels.ts) then eases the rods out to raise power.",
   "components": [
-    ["rv-p", {
-      "id": "rv-p", "type": "reactorVessel", "label": "Reactor Vessel",
-      "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 0,
-      "innerDiameter": 4, "wallThickness": 0.25, "height": 12, "pressureRating": 172,
-      "barrelDiameter": 3.2, "barrelThickness": 0.05, "barrelBottomGap": 1, "barrelTopGap": 0.05,
-      "coreBarrelId": "rv-p-core",
-      "volume": 57.0, "fillLevel": 1.0,
-      "fuelRodVolume": 10.4,
-      "ports": [
-        {"id": "rv-p-inlet-left", "position": {"x": -2, "y": -3}, "direction": "both"},
-        {"id": "rv-p-outlet-right", "position": {"x": 2, "y": -3}, "direction": "both"}
-      ],
-      "fluid": {"temperature": 565, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
-      "nqa1": true, "containedBy": "bui-1"
-    }],
-    ["rv-p-core", {
-      "id": "rv-p-core", "type": "coreBarrel", "label": "Reactor Vessel Core Barrel",
-      "position": {"x": 40, "y": 80}, "rotation": 0, "elevation": 1.834,
-      "innerDiameter": 3.15, "thickness": 0.05, "height": 9.282,
-      "bottomGap": 1, "topGap": 0.05,
-      "volume": 72.3, "fillLevel": 1.0, "isHydraulicOnly": true,
-      "fuelRodCount": 8, "actualFuelRodCount": 40071,
-      "fuelTemperature": 873.15, "fuelMeltingPoint": 3073.15,
-      "controlRodCount": 4, "controlRodPosition": 0.7, "startCritical": true,
-      "activeFuelHeight": 3.66, "coreBottomElevation": 0.5,
-      "rodDiameter": 9.5, "rodPitch": 12.6, "cladThickness": 0.6,
-      "enrichment": 0.05, "fuelMaterial": "UO2",
-      "thermalPower": 1000000000,
-      "initialPower": 50000000,
-      "ports": [
-        {"id": "rv-p-core-bottom", "position": {"x": 0, "y": 0}, "direction": "both"},
-        {"id": "rv-p-core-top", "position": {"x": 0, "y": 0}, "direction": "both"}
-      ],
-      "fluid": {"temperature": 567, "pressure": 15500000, "phase": "liquid", "quality": 0, "flowRate": 0},
-      "nqa1": true, "containedBy": "rv-p"
-    }]
+    [
+      "rv-p",
+      {
+        "id": "rv-p",
+        "type": "reactorVessel",
+        "label": "Reactor Vessel",
+        "position": {
+          "x": 40,
+          "y": 80
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "innerDiameter": 4,
+        "wallThickness": 0.25,
+        "height": 12,
+        "pressureRating": 172,
+        "barrelDiameter": 3.2,
+        "barrelThickness": 0.05,
+        "barrelBottomGap": 1,
+        "barrelTopGap": 0.05,
+        "coreBarrelId": "rv-p-core",
+        "volume": 57,
+        "fillLevel": 1,
+        "fuelRodVolume": 10.4,
+        "ports": [
+          {
+            "id": "rv-p-inlet-left",
+            "position": {
+              "x": -2,
+              "y": -3
+            },
+            "direction": "both"
+          },
+          {
+            "id": "rv-p-outlet-right",
+            "position": {
+              "x": 2,
+              "y": -3
+            },
+            "direction": "both"
+          }
+        ],
+        "fluid": {
+          "temperature": 565,
+          "pressure": 15500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "nqa1": true,
+        "containedBy": "bui-1"
+      }
+    ],
+    [
+      "rv-p-core",
+      {
+        "id": "rv-p-core",
+        "type": "coreBarrel",
+        "label": "Reactor Vessel Core Barrel",
+        "position": {
+          "x": 40,
+          "y": 80
+        },
+        "rotation": 0,
+        "elevation": 1.834,
+        "innerDiameter": 3.15,
+        "thickness": 0.05,
+        "height": 9.282,
+        "bottomGap": 1,
+        "topGap": 0.05,
+        "volume": 72.3,
+        "fillLevel": 1,
+        "isHydraulicOnly": true,
+        "fuelRodCount": 8,
+        "actualFuelRodCount": 40071,
+        "fuelTemperature": 873.15,
+        "fuelMeltingPoint": 3073.15,
+        "controlRodCount": 4,
+        "controlRodPosition": 0.7,
+        "startCritical": true,
+        "activeFuelHeight": 3.66,
+        "coreBottomElevation": 0.5,
+        "rodDiameter": 9.5,
+        "rodPitch": 12.6,
+        "cladThickness": 0.6,
+        "enrichment": 0.05,
+        "fuelMaterial": "UO2",
+        "thermalPower": 1000000000,
+        "initialPower": 50000000,
+        "ports": [
+          {
+            "id": "rv-p-core-bottom",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "rv-p-core-top",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "direction": "both"
+          }
+        ],
+        "fluid": {
+          "temperature": 567,
+          "pressure": 15500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "nqa1": true,
+        "containedBy": "rv-p"
+      }
+    ],
+    [
+      "pipe-pump-1-rv-p",
+      {
+        "id": "pipe-pump-1-rv-p",
+        "type": "pipe",
+        "label": "Pipe: Reactor Coolant Pump to Reactor Vessel",
+        "position": {
+          "x": 47.47,
+          "y": 84.67
+        },
+        "rotation": -2.582993338246232,
+        "diameter": 0.757,
+        "thickness": 0.04,
+        "length": 8.89,
+        "pressureRating": 172,
+        "ports": [
+          {
+            "id": "pipe-pump-1-rv-p-left",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "pipe-pump-1-rv-p-right",
+            "position": {
+              "x": 8.89,
+              "y": 0
+            },
+            "direction": "both"
+          }
+        ],
+        "fluid": {
+          "temperature": 565,
+          "pressure": 15500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "elevation": 0,
+        "endPosition": {
+          "x": 41.91,
+          "y": 81.19
+        },
+        "endElevation": 6,
+        "containedBy": "bui-1",
+        "nqa1": true
+      }
+    ],
+    [
+      "pipe-rv-p-core-hx-1",
+      {
+        "id": "pipe-rv-p-core-hx-1",
+        "type": "pipe",
+        "label": "Pipe: Reactor Vessel Core Barrel to Steam Generator",
+        "position": {
+          "x": 42.13,
+          "y": 79.29
+        },
+        "rotation": -0.3217505543966428,
+        "diameter": 0.798,
+        "thickness": 0.042,
+        "length": 15.36,
+        "pressureRating": 172,
+        "ports": [
+          {
+            "id": "pipe-rv-p-core-hx-1-left",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "pipe-rv-p-core-hx-1-right",
+            "position": {
+              "x": 15.36,
+              "y": 0
+            },
+            "direction": "both"
+          }
+        ],
+        "fluid": {
+          "temperature": 566.5,
+          "pressure": 15500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "elevation": 11.11,
+        "endPosition": {
+          "x": 53.1,
+          "y": 75.63
+        },
+        "endElevation": 1,
+        "containedBy": "bui-1",
+        "nqa1": true
+      }
+    ]
   ],
   "connections": [
-    {"fromComponentId": "rv-p", "fromPortId": "rv-p-inlet-left", "toComponentId": "rv-p-core", "toPortId": "rv-p-core-bottom",
-     "fromElevation": 0.5, "toElevation": 0, "flowArea": 7.79, "length": 1},
-    {"fromComponentId": "pump-1", "fromPortId": "pump-1-outlet", "toComponentId": "rv-p", "toPortId": "rv-p-inlet-left",
-     "fromElevation": 0, "toElevation": 6, "flowArea": 0.45, "length": 8},
-    {"fromComponentId": "rv-p-core", "fromPortId": "rv-p-core-top", "toComponentId": "hx-1", "toPortId": "hx-1-tube-1",
-     "fromElevation": 9.28, "toElevation": 1, "flowArea": 0.5, "length": 10},
-    {"fromComponentId": "rv-p", "fromPortId": "rv-p-outlet-right", "toComponentId": "pzr-1", "toPortId": "pzr-1-bottom",
-     "fromElevation": 9, "toElevation": 0, "flowArea": 0.05, "length": 5}
+    {
+      "fromComponentId": "rv-p",
+      "fromPortId": "rv-p-inlet-left",
+      "toComponentId": "rv-p-core",
+      "toPortId": "rv-p-core-bottom",
+      "fromElevation": 0.5,
+      "toElevation": 0,
+      "flowArea": 7.79,
+      "length": 1
+    },
+    {
+      "fromComponentId": "pump-1",
+      "fromPortId": "pump-1-outlet",
+      "toComponentId": "pipe-pump-1-rv-p",
+      "toPortId": "pipe-pump-1-rv-p-left",
+      "fromElevation": 0,
+      "toElevation": 0.38,
+      "flowArea": 0.45,
+      "length": 4
+    },
+    {
+      "fromComponentId": "pipe-pump-1-rv-p",
+      "fromPortId": "pipe-pump-1-rv-p-right",
+      "toComponentId": "rv-p",
+      "toPortId": "rv-p-inlet-left",
+      "fromElevation": 0.38,
+      "toElevation": 6,
+      "flowArea": 0.45,
+      "length": 4
+    },
+    {
+      "fromComponentId": "rv-p-core",
+      "fromPortId": "rv-p-core-top",
+      "toComponentId": "pipe-rv-p-core-hx-1",
+      "toPortId": "pipe-rv-p-core-hx-1-left",
+      "fromElevation": 9.28,
+      "toElevation": 0.4,
+      "flowArea": 0.5,
+      "length": 5
+    },
+    {
+      "fromComponentId": "pipe-rv-p-core-hx-1",
+      "fromPortId": "pipe-rv-p-core-hx-1-right",
+      "toComponentId": "hx-1",
+      "toPortId": "hx-1-tube-1",
+      "fromElevation": 0.4,
+      "toElevation": 1,
+      "flowArea": 0.5,
+      "length": 5
+    },
+    {
+      "fromComponentId": "rv-p",
+      "fromPortId": "rv-p-outlet-right",
+      "toComponentId": "pzr-1",
+      "toPortId": "pzr-1-bottom",
+      "fromElevation": 9,
+      "toElevation": 0,
+      "flowArea": 0.05,
+      "length": 5
+    }
   ]
 }

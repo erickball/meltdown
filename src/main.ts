@@ -6,6 +6,7 @@ import bwrPresetData from './presets/bwr.json';
 import htgrPresetData from './presets/htgr.json';
 import twoLoopPresetData from './presets/two-loop.json';
 import promptCritPresetData from './presets/prompt-crit.json';
+import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
 import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent } from './types';
@@ -1971,6 +1972,12 @@ function init() {
         label: 'Two-Loop PWR', data: twoLoopPresetData,
         tooltip: 'PWR with two parallel coolant loops sharing one core - watch the loops ' +
           'share load, or idle one and see the asymmetry.',
+      },
+      {
+        label: '4-Loop PWR (W)', data: w4loopPresetData,
+        tooltip: 'Westinghouse-style 4-loop PWR (~3400 MWt / ~1150 MWe) with the full safety ' +
+          'lineup: pressurizer PORV + safety to a relief tank, per-SG feed trains and MSSVs, ' +
+          'turbine-driven aux feedwater, N2 accumulators, and HPI/LPI from the RWST.',
       },
       {
         label: 'Prompt Criticality', data: promptCritPresetData,

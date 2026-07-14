@@ -1805,21 +1805,17 @@ export class TurbineCondenserRateOperator implements RateOperator {
       }
     }
 
-    // Find condensers dynamically
+    // Find condensers dynamically. A condenser is defined by carrying the
+    // condenser properties (heatSinkTemp - set by the factory for condenser
+    // components), NOT by its name: name matching would claim any node whose
+    // label happens to mention "condenser" (e.g. "Pipe: Turbine to Condenser")
+    // and then crash on the missing properties.
     for (const [condenserNodeId, condenserNode] of state.flowNodes) {
-      // Check if this is a condenser node
-      const isCondenser = condenserNode.label?.toLowerCase().includes('condenser') ||
-                          condenserNodeId.includes('condenser');
-
-      if (!isCondenser) continue;
+      if (condenserNode.heatSinkTemp === undefined) continue;
 
       // Steam temperature (saturation temp for condensing steam)
       const T_steam = condenserNode.fluid.temperature;
 
-      // Get condenser properties from flow node
-      if (condenserNode.heatSinkTemp === undefined) {
-        throw new Error(`[TurbineCondenser] Condenser node '${condenserNodeId}' missing heatSinkTemp property`);
-      }
       const T_cw_in = condenserNode.heatSinkTemp;
       const m_cw = condenserNode.coolingWaterFlow ?? 50000; // kg/s default
       const UA = condenserNode.condenserUA ?? 100e6; // W/K default

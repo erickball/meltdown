@@ -34,7 +34,7 @@ import {
   RGB,
   GasColorInfo,
 } from './colors';
-import { evaluateFlammability, FlammabilityStatus } from '../simulation/gas-properties';
+import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 
 /**
  * Calculate wall thickness from pressure rating using ASME pressure vessel formula.
@@ -3092,12 +3092,19 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
     : ['SCRAM'];
   const maxLineLen = Math.max(...titleLines.map(l => l.length), 1);
   // Monospace glyphs are ~0.62em wide; size the font so the longest line fits
-  const titleFontSize = Math.min(h * 0.13, (w * 0.92) / (0.62 * maxLineLen));
+  // the width AND all lines fit the title band above the status panel (a
+  // second line otherwise runs under the panel and reads as cut off)
+  const titleBand = h * 0.24 - h * 0.06; // stripe bottom to panel top, minus breathing room
+  const titleFontSize = Math.min(
+    h * 0.13,
+    (w * 0.92) / (0.62 * maxLineLen),
+    titleBand / (1 + (titleLines.length - 1) * 1.2)
+  );
   ctx.font = `bold ${titleFontSize}px monospace`;
   ctx.fillStyle = isPid ? '#ffcc44' : '#ff4444';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  const titleTop = -h / 2 + stripeHeight + h * 0.09;
+  const titleTop = -h / 2 + stripeHeight + h * 0.05 + titleFontSize * 0.5;
   titleLines.forEach((line, i) => {
     ctx.fillText(line, 0, titleTop + i * titleFontSize * 1.2);
   });
@@ -4336,16 +4343,20 @@ export function renderFlowConnectionArrows(
 
     // Flow velocity from the upstream node's bulk density: erosion/vibration
     // territory earns a pulsing halo around the arrow (orange = high, red =
-    // very high or choked). Thresholds by phase: liquid lines run a few m/s
-    // in practice, steam lines tens of m/s.
+    // very high or choked). Thresholds sit above normal full-power service
+    // (PWR primary legs run 15-18 m/s liquid; main steam ~40-60 m/s) so the
+    // halo means "beyond design practice", not "operating".
     const upstream = conn.massFlowRate >= 0 ? fromNode : toNode;
-    const rho = upstream.volume > 0 ? upstream.fluid.mass / upstream.volume : 0;
+    // bulk density must include NCG mass or gas loops (He plants) divide by ~0
+    const upstreamMass = upstream.fluid.mass +
+      (upstream.fluid.ncg ? ncgTotalMass(upstream.fluid.ncg) : 0);
+    const rho = upstream.volume > 0 ? upstreamMass / upstream.volume : 0;
     const velocity = rho > 0 && conn.flowArea > 0
       ? Math.abs(conn.massFlowRate) / (rho * conn.flowArea)
       : 0;
     const [warnVel, dangerVel] =
-      upstream.fluid.phase === 'liquid' ? [8, 15] :
-      upstream.fluid.phase === 'vapor' ? [60, 120] : [20, 40];
+      upstream.fluid.phase === 'liquid' ? [20, 35] :
+      upstream.fluid.phase === 'vapor' ? [90, 180] : [30, 60];
     const choked = conn.isChoked === true;
     const overVel = choked || velocity >= warnVel;
     if (overVel) {
