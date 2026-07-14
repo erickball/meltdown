@@ -6,6 +6,14 @@ AI:
 
 
 Playtest follow-ups (2026-07-14) - REMAINING:
+-Quasi-steady "junction" treatment for short high-throughput nodes (the real fix for the advective-CFL dt bottleneck; the capacity-sized exhaust ducts are the temporary fix). Plan:
+  1. Criterion: a flow node whose residence time tau = mass/throughput stays below ~5x the target dt (say tau < 250 ms at current flow) is a JUNCTION - it cannot hold meaningful inventory on solver timescales. Evaluate per-step from live state, with hysteresis-free smooth blending (weight w = clamp(tau/tau_ref)) so nodes slide between junction and volume behavior continuously - no mode flips.
+  2. Junction behavior: the node stops integrating its own mass/energy ODEs (dMass/dEnergy forced to whatever balances inflow = outflow); outflow enthalpy = inflow enthalpy (perfect pass-through, zero storage); its pressure stays in the implicit pressure-flow solve as an algebraic unknown (it already solves node pressures - the junction just contributes ~zero compliance instead of dP/dU-based compliance). Momentum/friction of its connections unchanged, so the pipe still has hydraulic resistance and inertia.
+  3. The RK45 massFraction sanity cap must exempt junction-weighted nodes (that cap is exactly the advective CFL being enforced; the junction has no inventory to conserve).
+  4. Phase/NCG: pass composition through by donor flow (the junction carries its upstream mixture); FluidStateConstraintOperator skips full (u,v) state reconstruction for w~1 nodes and takes upstream T/phase directly.
+  5. Bursts/creep still work: burst state reads the algebraic pressure and fluid T like any node.
+  6. Validate: pwr-family presets back to ~3x realtime headless; flow-physics suite + a new regression test (small vapor duct at high flow holds dt >= 30 ms and conserves mass/energy across the junction to machine precision); levels suite unchanged.
+  7. Risks: junction chains (two junctions in series) need the pass-through to compose; a junction that suddenly gains inventory (valve slams downstream) must blend back to volume behavior - the tau-based weight does this automatically as mass accumulates.
 -Pump and valve construction dialogs have no Pressure Rating field: player-built ones get a factory-derived service rating (1.5x initial pressure + pump head, max of neighbors) with a console warning. Fine for now; add explicit dialog fields (with cost impact) when convenient.
 -Steady-state MWe rose with the baked pipes (pwr family now settles ~524 MWe vs ~437, startup MWe spikes bigger too: peaks 1700-2400 MWe through the turbine during the first seconds). All levels/tests pass; worth a look at whether the turbine conversion is too generous and whether the startup spike should be tamed.
 -HTGR now converges ~10% above rated after a damped slosh from the added He loop volume (109% at 300 s, still settling). Cosmetic; retune nominal or accept.

@@ -820,9 +820,14 @@ export class ConstructionManager {
         // This provides a buffer volume for the work extraction process
         const exhaustPipeId = `${id}-exhaust`;
         const exhaustPipeLength = 2 + (ratedPowerMW / 500) * 1;  // 2m base + 1m per 500 MW
-        // Exhaust pipe diameter: realistic sizing for LP exhaust crossover/duct
-        // Even large plants use ~1-2m diameter pipes, not turbine casing size
-        const exhaustPipeDiameter = 0.6 + (ratedPowerMW / 1000) * 0.6;  // 0.6m base + 0.6m per GW (so 1.2m for 1000 MW)
+        // Duct sized for CAPACITY, not looks: at condenser pressure the steam
+        // is so thin that a small duct holds ~20 kg while passing the full
+        // steam flow, and its ~25 ms residence time pins the solver's
+        // advective (Courant) dt cap at a few ms. Real LP exhaust trunks are
+        // enormous for the same physical reason. Target ~0.25 s residence at
+        // rated steam flow (~0.05 m^3 per kg/s, measured on the presets).
+        const exhaustTargetVolume = 0.05 * ratedSteamFlow;
+        const exhaustPipeDiameter = Math.sqrt((4 * exhaustTargetVolume) / (Math.PI * exhaustPipeLength));
 
         // Position the exhaust pipe below the turbine outlet
         const exhaustPipeX = orientation === 'left-right'

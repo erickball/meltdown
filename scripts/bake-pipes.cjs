@@ -231,7 +231,10 @@ for (const spec of FILES) {
     const to = lookup.get(conn.toComponentId);
     if (!from || !to) { newConnections.push(conn); console.log(`  [${spec.path}] missing endpoint for ${conn.fromPortId}->${conn.toPortId}`); continue; }
     const internal = from.containedBy === to.id || to.containedBy === from.id;
-    if (!(area > 0.1 && len > 1) || internal) { newConnections.push(conn); continue; }
+    // idempotency: a connection touching a pipe already IS the piped form -
+    // re-running the script must not split pipe halves into pipes-on-pipes
+    const touchesPipe = from.type === 'pipe' || to.type === 'pipe';
+    if (!(area > 0.1 && len > 1) || internal || touchesPipe) { newConnections.push(conn); continue; }
 
     const fromElev = conn.fromElevation ?? 0;
     const toElev = conn.toElevation ?? 0;
@@ -258,7 +261,19 @@ for (const spec of FILES) {
     const dz = endElevation - startElevation;
     const actual = Math.hypot(endX - startX, endY - startY, dz);
     const pipeLength = Math.max(len, actual);
-    const diameter = Math.round(Math.sqrt((area * 4) / Math.PI) * 1000) / 1000;
+    let diameter = Math.round(Math.sqrt((area * 4) / Math.PI) * 1000) / 1000;
+
+    // Turbine exhaust ducts are sized for capacity, not connection area: at
+    // condenser pressure the steam is so thin that a connection-sized duct
+    // holds ~20 kg while passing the full steam flow - a ~25 ms residence
+    // time that pins the solver's advective (Courant) dt cap at a few ms.
+    // Real LP exhaust trunks are huge for the same reason. Target ~0.25 s
+    // residence at rated steam flow (~0.05 m^3 per kg/s empirically).
+    if (from.type === 'turbine-generator' && from.ratedSteamFlow) {
+      const targetVolume = 0.05 * from.ratedSteamFlow;
+      const capacityDiameter = Math.sqrt((4 * targetVolume) / (Math.PI * pipeLength));
+      diameter = Math.max(diameter, Math.round(capacityDiameter * 100) / 100);
+    }
 
     let pipeId = `pipe-${conn.fromComponentId}-${conn.toComponentId}`;
     while (comps.has(pipeId)) pipeId += 'x';

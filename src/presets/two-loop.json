@@ -1407,8 +1407,8 @@
           "y": 75
         },
         "rotation": 0,
-        "diameter": 0.714,
-        "thickness": 0.013,
+        "diameter": 2.89,
+        "thickness": 0.051,
         "length": 8.38,
         "pressureRating": 60,
         "ports": [
@@ -1662,7 +1662,7 @@
       "toComponentId": "pipe-turbine-1-condenser-1",
       "toPortId": "pipe-turbine-1-condenser-1-left",
       "fromElevation": 0,
-      "toElevation": 0.36,
+      "toElevation": 1.45,
       "flowArea": 0.4,
       "length": 2.5
     },
@@ -1671,7 +1671,7 @@
       "fromPortId": "pipe-turbine-1-condenser-1-right",
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
-      "fromElevation": 0.36,
+      "fromElevation": 1.45,
       "toElevation": 5,
       "flowArea": 0.4,
       "length": 2.5
