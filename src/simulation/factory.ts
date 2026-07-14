@@ -3233,8 +3233,39 @@ function initializeBurstStates(
 
   for (const [compId, component] of plantState.components) {
     // Get pressure rating if component has one
-    const pressureRating = (component as any).pressureRating;
-    if (!pressureRating || pressureRating <= 0) continue;
+    let pressureRating = (component as any).pressureRating;
+    if (!pressureRating || pressureRating <= 0) {
+      // A fluid-holding component with no rating would silently get NO burst
+      // state - an unbreakable component, which violates the model. Derive a
+      // SERVICE rating (1.5x margin, the turbine creator's convention) and
+      // complain loudly so the gap gets an explicit rating eventually.
+      // Service pressure, not initial pressure: a feedwater pump filled with
+      // condensate at 0.05 bar runs at suction + rated head; a check valve
+      // holds whatever its neighbors run at. Core barrels are exempt: the
+      // surrounding vessel is the pressure boundary, not the barrel.
+      if (component.type === 'coreBarrel') continue;
+      const simNodeId = (component as any).simNodeId || compId;
+      const node = state.flowNodes.get(simNodeId);
+      if (!node || node.isBoundary) continue;
+      const comp = component as any;
+      let refPressure = comp.inletFluid?.pressure ?? node.fluid.pressure;
+      if (component.type === 'pump' && comp.ratedHead) {
+        refPressure += 1000 * 9.81 * comp.ratedHead; // conservative liquid head
+      }
+      // static components (valves etc.): must hold the neighbors' pressure too
+      for (const conn of state.flowConnections) {
+        if (conn.fromNodeId !== simNodeId && conn.toNodeId !== simNodeId) continue;
+        const otherId = conn.fromNodeId === simNodeId ? conn.toNodeId : conn.fromNodeId;
+        const other = state.flowNodes.get(otherId);
+        if (other && !other.isBoundary) refPressure = Math.max(refPressure, other.fluid.pressure);
+      }
+      pressureRating = Math.max(6, Math.ceil((1.5 * refPressure / 1e5) / 5) * 5);
+      console.warn(
+        `[Factory] ⚠ '${compId}' (${component.type}) has no pressureRating - it would be ` +
+        `UNBREAKABLE. Deriving ${pressureRating} bar (1.5x service pressure) so it can ` +
+        `burst like everything else. Give it an explicit rating to silence this.`
+      );
+    }
 
     const designPressure = pressureRating * 1e5;  // bar to Pa
     const randomMargin = simulationRandom() * 0.4;     // 0-40%

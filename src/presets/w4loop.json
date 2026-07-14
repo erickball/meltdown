@@ -1083,7 +1083,8 @@
           "quality": 0.9,
           "flowRate": 0
         },
-        "nqa1": false
+        "nqa1": false,
+        "pressureRating": 90
       }
     ],
     [
@@ -1318,7 +1319,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -1457,7 +1459,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -1596,7 +1599,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -1735,7 +1739,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -1851,7 +1856,8 @@
             "direction": "out"
           }
         ],
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 90
       }
     ],
     [
@@ -1896,7 +1902,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 90
       }
     ],
     [
@@ -1941,7 +1948,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 90
       }
     ],
     [
@@ -1986,7 +1994,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 90
       }
     ],
     [
@@ -2031,7 +2040,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 90
       }
     ],
     [
@@ -2118,7 +2128,8 @@
           "flowRate": 0
         },
         "nqa1": true,
-        "containedBy": "bui-1"
+        "containedBy": "bui-1",
+        "pressureRating": 235
       }
     ],
     [
@@ -2205,7 +2216,8 @@
           "flowRate": 0
         },
         "nqa1": true,
-        "containedBy": "bui-1"
+        "containedBy": "bui-1",
+        "pressureRating": 235
       }
     ],
     [
@@ -2292,7 +2304,8 @@
           "flowRate": 0
         },
         "nqa1": true,
-        "containedBy": "bui-1"
+        "containedBy": "bui-1",
+        "pressureRating": 235
       }
     ],
     [
@@ -2379,7 +2392,8 @@
           "flowRate": 0
         },
         "nqa1": true,
-        "containedBy": "bui-1"
+        "containedBy": "bui-1",
+        "pressureRating": 235
       }
     ],
     [
@@ -2512,7 +2526,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 270
       }
     ],
     [
@@ -2604,7 +2619,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 235
       }
     ],
     [

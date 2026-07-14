@@ -304,7 +304,8 @@
         "containedBy": "bui-1",
         "initialNcg": {
           "He": 70
-        }
+        },
+        "pressureRating": 400
       }
     ],
     [
@@ -362,7 +363,8 @@
           "quality": 0.9,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 195
       }
     ],
     [
@@ -457,7 +459,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -503,7 +506,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 100
       }
     ],
     [
@@ -547,7 +551,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 195
       }
     ],
     [

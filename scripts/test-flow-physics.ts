@@ -45,6 +45,9 @@ function makeTank(o: TankOpts): [string, PlantComponent] {
   return [o.id, {
     id: o.id, type: 'tank', label: o.id,
     position: { x: 0, y: 0 }, rotation: 0, elevation: o.elevation ?? 0,
+    // idealized rigs: rated far above anything the tests drive, so burst
+    // physics never interferes with the flow behavior under test
+    pressureRating: 500,
     width, height, wallThickness: 0.05, fillLevel: o.fillLevel,
     ports: [
       { id: `${o.id}-top`, position: { x: 0, y: -height / 2 }, direction: 'both' },
@@ -58,6 +61,7 @@ function makePump(id: string, ratedFlow: number, ratedHead: number): [string, Pl
   return [id, {
     id, type: 'pump', label: id,
     position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
+    pressureRating: 500,
     diameter: 0.3, running: true, speed: 1.0, ratedFlow, ratedHead,
     orientation: 'left-right',
     ports: [
@@ -72,6 +76,7 @@ function makeValve(id: string, opening: number, valveType: string = 'gate'): [st
   return [id, {
     id, type: 'valve', label: id, valveType,
     position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
+    pressureRating: 500,
     diameter: 0.1, opening,
     ports: [
       { id: `${id}-in`, position: { x: -0.1, y: 0 }, direction: 'in' },

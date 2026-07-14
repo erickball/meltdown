@@ -280,7 +280,8 @@
           "quality": 0.9,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 110
       }
     ],
     [
@@ -467,7 +468,8 @@
           "quality": 0,
           "flowRate": 0
         },
-        "nqa1": true
+        "nqa1": true,
+        "pressureRating": 240
       }
     ],
     [
