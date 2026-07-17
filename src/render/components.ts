@@ -47,6 +47,39 @@ import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } f
  *
  * Returns minimum 2mm wall thickness.
  */
+/**
+ * Visual height of a component in world metres: the vertical extent the
+ * renderer actually draws. Connection elevations are stored relative to the
+ * component bottom, and renderers anchor connection endpoints by comparing
+ * the stored elevation against (height/2 - port.position.y) using THIS
+ * height — so every place that stores, defaults, or compares connection
+ * elevations must use this same function. A second height convention
+ * anywhere else will detach connection lines from the drawn nozzles.
+ *
+ * Pumps and valves are drawn larger than their nominal diameter, which is
+ * why their visual height is not a plain property lookup.
+ */
+export function getComponentVisualHeight(component: PlantComponent): number {
+  switch (component.type) {
+    case 'pump': {
+      // Matches renderPump: scale = diameter * 1.3; the drawing spans 2.2
+      // scale units (motor 0.9 + coupling 0.15 + casing 0.5 + suction
+      // nozzle 0.35, centred at local y=0, plus 0.3 of inlet pipe below)
+      const d = (component as PumpComponent).diameter || 0.3;
+      return d * 1.3 * 2.2;
+    }
+    case 'valve':
+      // The bounding height the renderer anchors the valve drawing with
+      // (2x diameter leaves room for the stem/actuator above the body)
+      return ((component as ValveComponent).diameter || 0.2) * 2;
+    case 'pipe':
+      return (component as PipeComponent).diameter || 0.3;
+    default:
+      if ('height' in component) return (component as { height: number }).height;
+      return 2;
+  }
+}
+
 export function calculateWallThicknessFromPressure(pressureBar: number, innerDiameterM: number): number {
   const P = pressureBar * 1e5; // bar to Pa
   const R = innerDiameterM / 2; // radius in meters
@@ -848,7 +881,7 @@ export function renderComponent(
       renderSwitchyard(ctx, component as SwitchyardComponent, view, plantState, worldToScreenFn);
       break;
     case 'building':
-      renderBuilding(ctx, component as BuildingComponent, view, isSimulating, worldToScreenFn);
+      renderBuilding(ctx, component as BuildingComponent, view, isSimulating, worldToScreenFn, isSelected);
       break;
     case 'crossVessel':
       renderCrossVessel(ctx, component as CrossVesselComponent, view, isSimulating, worldToScreenFn);
@@ -856,7 +889,11 @@ export function renderComponent(
   }
 
   // Draw selection highlight
-  if (isSelected) {
+  // Cylindrical buildings in perspective mode draw their own highlight along
+  // the wall band inside renderBuilding (the generic box would sit on the floor).
+  const drawsOwnHighlight = component.type === 'building' &&
+    (component as BuildingComponent).shape === 'cylinder' && !!worldToScreenFn;
+  if (isSelected && !drawsOwnHighlight) {
     ctx.strokeStyle = COLORS.selectionHighlight;
     ctx.lineWidth = 3;
     const bounds = getComponentBounds(component, view);
@@ -4883,7 +4920,7 @@ function buildingWallColor(building: BuildingComponent): { r: number; g: number;
  * centroid of projected bounding-box corners, which drifts as the
  * (nonlinear) perspective projection changes with view angle.
  */
-function projectCircleToEllipse(
+export function projectCircleToEllipse(
   worldToScreenFn: WorldToScreenFn,
   pos: Point,
   r: number,
@@ -4953,7 +4990,8 @@ function renderBuilding(
   building: BuildingComponent,
   view: ViewState,
   isSimulating: boolean = false,
-  worldToScreenFn?: WorldToScreenFn
+  worldToScreenFn?: WorldToScreenFn,
+  isSelected: boolean = false
 ): void {
   // Get dimensions
   const faceWidth = building.shape === 'cylinder' ? (building.diameter || 40) : (building.width || 40);
@@ -5064,6 +5102,15 @@ function renderBuilding(
       ctx.beginPath();
       ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI * 2);
       ctx.stroke();
+
+      // Selection highlight traces the wall band (the clickable region),
+      // not the footprint - the floor ellipse is deliberately excluded.
+      if (isSelected) {
+        ctx.strokeStyle = COLORS.selectionHighlight;
+        ctx.lineWidth = 3;
+        shellPath();
+        ctx.stroke();
+      }
     } else {
       // Project corners at ground level (elevation = 0) for footprint
       const frontLeft = worldToScreenFn({ x: pos.x - halfW, y: pos.y - halfD }, 0);

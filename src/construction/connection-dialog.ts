@@ -1,6 +1,7 @@
 // Connection configuration dialog for creating connections between components
 
 import { PlantComponent, Port, Connection } from '../types';
+import { getComponentVisualHeight } from '../render/components';
 
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
@@ -205,6 +206,7 @@ export class ConnectionDialog {
     };
 
     // Create from-elevation field with absolute elevation display
+    const roundElev = (v: number) => Math.round(v * 1000) / 1000;
     const fromElevGroup = document.createElement('div');
     fromElevGroup.className = 'form-group';
     const fromElevLabel = document.createElement('label');
@@ -215,16 +217,26 @@ export class ConnectionDialog {
     const fromElevInput = document.createElement('input');
     fromElevInput.type = 'number';
     fromElevInput.id = 'from-elevation';
-    fromElevInput.value = String(fromElevation);
-    fromElevInput.min = '0';
-    fromElevInput.max = String(fromHeight);
+    fromElevInput.value = String(roundElev(fromElevation));
+    // The exact port elevation can sit slightly outside [0, height]
+    // (e.g. a pump suction flange below the bounding box) - widen the
+    // allowed range so the default value is always valid
+    fromElevInput.min = String(Math.min(0, roundElev(fromElevation)));
+    fromElevInput.max = String(Math.max(fromHeight, roundElev(fromElevation)));
     fromElevInput.step = '0.1';
+    const fromIsPump = this.fromComponent!.type === 'pump';
+    if (fromIsPump) {
+      fromElevInput.readOnly = true;
+      fromElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+    }
     fromElevGroup.appendChild(fromElevInput);
 
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
     fromElevHelp.id = 'from-elevation-help';
-    fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`;
+    fromElevHelp.textContent = fromIsPump
+      ? `Fixed at the pump nozzle | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`
+      : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`;
     fromElevGroup.appendChild(fromElevHelp);
     this.bodyElement.appendChild(fromElevGroup);
 
@@ -239,16 +251,23 @@ export class ConnectionDialog {
     const toElevInput = document.createElement('input');
     toElevInput.type = 'number';
     toElevInput.id = 'to-elevation';
-    toElevInput.value = String(toElevation);
-    toElevInput.min = '0';
-    toElevInput.max = String(toHeight);
+    toElevInput.value = String(roundElev(toElevation));
+    toElevInput.min = String(Math.min(0, roundElev(toElevation)));
+    toElevInput.max = String(Math.max(toHeight, roundElev(toElevation)));
     toElevInput.step = '0.1';
+    const toIsPump = this.toComponent!.type === 'pump';
+    if (toIsPump) {
+      toElevInput.readOnly = true;
+      toElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+    }
     toElevGroup.appendChild(toElevInput);
 
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
     toElevHelp.id = 'to-elevation-help';
-    toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`;
+    toElevHelp.textContent = toIsPump
+      ? `Fixed at the pump nozzle | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`
+      : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`;
     toElevGroup.appendChild(toElevHelp);
     this.bodyElement.appendChild(toElevGroup);
 
@@ -376,36 +395,17 @@ export class ConnectionDialog {
   }
 
   private getComponentHeight(component: PlantComponent): number {
-    // Get height based on component type
-    if ('height' in component) {
-      return component.height;
-    }
-    // Default heights for components without explicit height
-    switch (component.type) {
-      case 'pump': return 1;
-      case 'valve': return 0.5;
-      case 'pipe': return 0.3;
-      default: return 2;
-    }
+    // Must match the renderer's height convention — see getComponentVisualHeight
+    return getComponentVisualHeight(component);
   }
 
   private getPortElevation(_component: PlantComponent, port: Port, componentHeight: number): number {
-    // Calculate elevation based on port position
-    // Port positions are relative to component center
-    const portY = port.position.y;
-
-    // If port is at top (negative y), return full height
-    if (portY < -componentHeight / 4) {
-      return componentHeight;
-    }
-    // If port is at bottom (positive y), return 0
-    else if (portY > componentHeight / 4) {
-      return 0;
-    }
-    // Otherwise (side ports), return middle
-    else {
-      return componentHeight / 2;
-    }
+    // Exact elevation of the drawn port above the component bottom.
+    // This is the same formula the renderer uses to anchor connection
+    // endpoints, so defaulting to it puts the connection line exactly on
+    // the drawn nozzle. (Can be negative for ports drawn below the
+    // component's bounding box, e.g. a pump's suction flange.)
+    return componentHeight / 2 - port.position.y;
   }
 
   private handleConfirm() {
@@ -552,14 +552,24 @@ export class ConnectionDialog {
     fromElevInput.type = 'number';
     fromElevInput.id = 'from-elevation';
     fromElevInput.value = String(currentFromElev);
-    fromElevInput.min = '0';
-    fromElevInput.max = String(fromHeight);
+    // Widen the range so stored values slightly outside [0, height]
+    // (e.g. a pump suction flange below the bounding box) remain valid
+    fromElevInput.min = String(Math.min(0, currentFromElev));
+    fromElevInput.max = String(Math.max(fromHeight, currentFromElev));
     fromElevInput.step = '0.1';
+    const fromIsPump = fromComponent.type === 'pump';
+    if (fromIsPump) {
+      fromElevInput.readOnly = true;
+      fromElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+    }
     fromElevGroup.appendChild(fromElevInput);
 
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
-    fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + currentFromElev).toFixed(1)} m`;
+    const fromElevHelpText = (relElev: number) => fromIsPump
+      ? `Fixed at the pump nozzle | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`
+      : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`;
+    fromElevHelp.textContent = fromElevHelpText(currentFromElev);
     fromElevGroup.appendChild(fromElevHelp);
     this.bodyElement.appendChild(fromElevGroup);
 
@@ -575,25 +585,33 @@ export class ConnectionDialog {
     toElevInput.type = 'number';
     toElevInput.id = 'to-elevation';
     toElevInput.value = String(currentToElev);
-    toElevInput.min = '0';
-    toElevInput.max = String(toHeight);
+    toElevInput.min = String(Math.min(0, currentToElev));
+    toElevInput.max = String(Math.max(toHeight, currentToElev));
     toElevInput.step = '0.1';
+    const toIsPump = toComponent.type === 'pump';
+    if (toIsPump) {
+      toElevInput.readOnly = true;
+      toElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+    }
     toElevGroup.appendChild(toElevInput);
 
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
-    toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + currentToElev).toFixed(1)} m`;
+    const toElevHelpText = (relElev: number) => toIsPump
+      ? `Fixed at the pump nozzle | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`
+      : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`;
+    toElevHelp.textContent = toElevHelpText(currentToElev);
     toElevGroup.appendChild(toElevHelp);
     this.bodyElement.appendChild(toElevGroup);
 
     // Update absolute elevation displays when inputs change
     fromElevInput.addEventListener('input', () => {
       const fromRelElev = parseFloat(fromElevInput.value) || 0;
-      fromElevHelp.textContent = `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromRelElev).toFixed(1)} m`;
+      fromElevHelp.textContent = fromElevHelpText(fromRelElev);
     });
     toElevInput.addEventListener('input', () => {
       const toRelElev = parseFloat(toElevInput.value) || 0;
-      toElevHelp.textContent = `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toRelElev).toFixed(1)} m`;
+      toElevHelp.textContent = toElevHelpText(toRelElev);
     });
 
     // Flow area field

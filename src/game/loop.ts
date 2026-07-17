@@ -322,7 +322,7 @@ export class GameLoop {
           this.emitEvent({
             type: 'falling-behind',
             time: this.state.time,
-            message: `Simulation falling behind real time (ratio: ${result.metrics.realTimeRatio.toFixed(2)})`,
+            message: `Simulation running slower than the requested ${this.simSpeed}x speed (actual: ${result.metrics.realTimeRatio.toFixed(2)}x)`,
             data: { ratio: result.metrics.realTimeRatio },
           });
         }

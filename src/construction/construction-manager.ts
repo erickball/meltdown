@@ -24,6 +24,7 @@ import {
   ExtractionPort
 } from '../types';
 import { ComponentConfig } from './component-config';
+import { getComponentVisualHeight } from '../render/components';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -1881,6 +1882,15 @@ export class ConstructionManager {
       endElevation: endElevation
     };
 
+    // A pipe between two components that share a container runs inside that
+    // container too: a break must release into the container's atmosphere
+    // (not the environment) and gauge pressure is relative to the container.
+    const commonContainer = this.findCommonContainer(fromComponent, toComponent);
+    if (commonContainer) {
+      pipe.containedBy = commonContainer;
+      console.log(`[Construction] Auto-pipe '${pipeId}' is contained by '${commonContainer}'`);
+    }
+
     this.plantState.components.set(pipeId, pipe);
 
     // Pipe is small (height ≈ diameter), connection is at center
@@ -1895,6 +1905,38 @@ export class ConstructionManager {
 
     console.log(`[Construction] Created pipe '${pipeId}' with diameter ${diameter.toFixed(3)}m between components`);
     return true;
+  }
+
+  /**
+   * The innermost component that contains both endpoints of a new pipe, if
+   * any. Each endpoint's containment chain includes the endpoint itself, so
+   * a pipe from a vessel's port to a component nested inside that vessel is
+   * correctly placed inside the vessel. Since containment forms a tree, the
+   * first element of one chain found in the other is the innermost common
+   * container.
+   */
+  private findCommonContainer(
+    a: Record<string, any>,
+    b: Record<string, any>
+  ): string | undefined {
+    const chainOf = (c: Record<string, any>): string[] => {
+      const chain: string[] = [c.id];
+      const seen = new Set<string>(chain);
+      let cur: Record<string, any> | undefined = c;
+      while (cur?.containedBy && !seen.has(cur.containedBy)) {
+        chain.push(cur.containedBy);
+        seen.add(cur.containedBy);
+        cur = this.plantState.components.get(cur.containedBy) as Record<string, any> | undefined;
+      }
+      return chain;
+    };
+    const bChain = new Set(chainOf(b));
+    for (const id of chainOf(a)) {
+      // A pipe between two ports of the same component is not inside it
+      if (id === a.id && id === b.id) continue;
+      if (bChain.has(id)) return id;
+    }
+    return undefined;
   }
 
   /**
@@ -1961,8 +2003,15 @@ export class ConstructionManager {
 
     // Calculate relative elevations if not provided
     // Relative elevation = height above component bottom
-    const calcFromElev = fromElevation ?? this.getPortRelativeElevation(fromComponent, fromPort);
-    const calcToElev = toElevation ?? this.getPortRelativeElevation(toComponent, toPort);
+    // Pump nozzle elevations are physical features of the pump, so pump-side
+    // elevations always come from the port geometry regardless of what the
+    // caller passed (see refreshPumpConnectionElevations)
+    const calcFromElev = fromComponent.type === 'pump'
+      ? this.getPortRelativeElevation(fromComponent, fromPort)
+      : fromElevation ?? this.getPortRelativeElevation(fromComponent, fromPort);
+    const calcToElev = toComponent.type === 'pump'
+      ? this.getPortRelativeElevation(toComponent, toPort)
+      : toElevation ?? this.getPortRelativeElevation(toComponent, toPort);
 
     // Special handling for cross-vessel annulus connections
     // The cross-vessel must physically touch what it connects to:
@@ -2565,16 +2614,11 @@ export class ConstructionManager {
   }
 
   private getComponentHeight(component: PlantComponent): number {
-    if ('height' in component) {
-      return (component as any).height;
-    }
-    // Default heights for components without explicit height
-    switch (component.type) {
-      case 'pump': return 1;
-      case 'valve': return 0.5;
-      case 'pipe': return (component as PipeComponent).diameter || 0.3;
-      default: return 2;
-    }
+    // Must match the renderer's height convention exactly — connection
+    // elevations computed here are compared against the drawn port
+    // positions when rendering, and any disagreement visually detaches
+    // connection lines from the component's nozzles.
+    return getComponentVisualHeight(component);
   }
 
   private getComponentFillLevel(component: PlantComponent): number {

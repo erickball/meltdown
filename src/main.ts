@@ -285,6 +285,9 @@ function init() {
   // Initialize canvas renderer
   const plantCanvas = new PlantCanvas(canvas, plantState);
 
+  // Debug handle for headless test scripts (see also __debugCursor)
+  (window as any).__meltdownDebug = { plantCanvas, plantState };
+
   // Initialize debug panel
   initDebugPanel();
 
@@ -353,6 +356,9 @@ function init() {
       // Core damage / radiological release banner
       updateCoreDamageIndicator(state);
 
+      // Persistent performance bubble: solver slower than the requested speed
+      updateSlowSimBubble(metrics, gameLoop.getTargetSimSpeed());
+
       // Update component detail panel if something is selected
       if (selectedComponentId) {
         updateComponentDetail(selectedComponentId, plantState, state);
@@ -394,8 +400,6 @@ function init() {
     } else if (event.type === 'component-burst') {
       // LOCA - component rupture event: hold the banner 30 s unless dismissed
       showNotification(event.message, 'error', 30000);
-    } else if (event.type === 'falling-behind') {
-      showNotification('Simulation running slower than real time', 'info');
     } else if (event.type === 'simulation-error') {
       // Show error dialog for simulation errors
       showErrorDialog('Simulation Error', event.message);
@@ -553,20 +557,43 @@ function init() {
       if (rodValueDisplay) {
         rodValueDisplay.textContent = insertionPercent + '%';
       }
-      // Update simulation state
+      // If the plant has a rod controller (rod drive), the slider commands
+      // its manual SETPOINT and the rods travel there at the drive's rate
+      // limit. Writing the position directly would fight the drive: it
+      // steps the rods back toward its own manualOutput every solver step,
+      // and the per-frame slider sync then snaps the slider back - fastest
+      // at high sim speeds. Only a plant with no rod drive at all gets the
+      // instantaneous position write.
+      let hasRodController = false;
       gameLoop.updateState((state) => {
-        state.neutronics.controlRodPosition = withdrawalPosition;
+        const controllers = state.components.controllers;
+        if (controllers) {
+          for (const [, ctl] of controllers) {
+            if (ctl.actuator.kind !== 'control-rods') continue;
+            hasRodController = true;
+            if (ctl.mode === 'manual') {
+              ctl.manualOutput = withdrawalPosition;
+            }
+          }
+        }
+        if (!hasRodController) {
+          state.neutronics.controlRodPosition = withdrawalPosition;
+        }
         return state;
       });
-      // Update visual components with control rods (visual also uses withdrawal position internally)
-      for (const [, comp] of plantState.components) {
-        // Vessels have controlRodCount directly
-        if (comp.type === 'vessel' && (comp as any).controlRodCount) {
-          (comp as any).controlRodPosition = withdrawalPosition;
-        }
-        // Core barrels have control rod properties
-        if (comp.type === 'coreBarrel' && (comp as any).controlRodCount) {
-          (comp as any).controlRodPosition = withdrawalPosition;
+      // Update visual components with control rods (visual also uses
+      // withdrawal position internally). With a rod drive the rods have not
+      // moved yet - the per-frame sync tracks them as they travel.
+      if (!hasRodController) {
+        for (const [, comp] of plantState.components) {
+          // Vessels have controlRodCount directly
+          if (comp.type === 'vessel' && (comp as any).controlRodCount) {
+            (comp as any).controlRodPosition = withdrawalPosition;
+          }
+          // Core barrels have control rod properties
+          if (comp.type === 'coreBarrel' && (comp as any).controlRodCount) {
+            (comp as any).controlRodPosition = withdrawalPosition;
+          }
         }
       }
     });
@@ -2328,8 +2355,10 @@ function init() {
     return null;
   }
 
-  // Canvas mouse move handler for visual feedback and dragging
-  canvas.addEventListener('mousemove', (e) => {
+  // Canvas pointer move handler for visual feedback and dragging
+  // (pointer events cover mouse and touch; see PlantCanvas.setupEventListeners)
+  canvas.addEventListener('pointermove', (e) => {
+    if (!e.isPrimary) return; // second finger of a pinch
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
@@ -2461,8 +2490,26 @@ function init() {
     }
   });
 
-  // Mouse down handler for starting drag in move mode
-  canvas.addEventListener('mousedown', (e) => {
+  // Pointer down handler for starting drag in move mode
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!e.isPrimary) {
+      // Second finger down = pinch gesture: abandon any in-progress component
+      // drag and put the component back where it started.
+      if (isDraggingComponent && movingComponent && movePreDrag) {
+        movingComponent.position.x = movePreDrag.x;
+        movingComponent.position.y = movePreDrag.y;
+        const pipe = movingComponent as PipeComponent;
+        if (pipe.endPosition && movePreDrag.endX !== undefined && movePreDrag.endY !== undefined) {
+          pipe.endPosition.x = movePreDrag.endX;
+          pipe.endPosition.y = movePreDrag.endY;
+        }
+      }
+      movingComponent = null;
+      isDraggingComponent = false;
+      moveLocked = false;
+      movePreDrag = null;
+      return;
+    }
     if (currentMode !== 'construction') return;
     if (constructionSubMode !== 'move') return;
 
@@ -2535,15 +2582,16 @@ function init() {
     }
   });
 
-  // Hide port tooltip when mouse leaves canvas
-  canvas.addEventListener('mouseleave', () => {
+  // Hide port tooltip when the pointer leaves the canvas
+  canvas.addEventListener('pointerleave', () => {
     if (portTooltip) {
       portTooltip.classList.remove('visible');
     }
   });
 
-  // Mouse up handler for ending drag in move mode
-  canvas.addEventListener('mouseup', (e) => {
+  // Pointer up handler for ending drag in move mode
+  canvas.addEventListener('pointerup', (e) => {
+    if (!e.isPrimary) return;
     if (isDraggingComponent && movingComponent) {
       // A press-and-release without movement is a click: select instead of move
       const upRect = canvas.getBoundingClientRect();
@@ -3315,6 +3363,9 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     // only: manual writes would be overwritten on the next solver step.
     let rodControllerId: string | null = null;
     let anyRodController = false;
+    // Commanded setpoint of a manual-mode rod drive (rods may still be
+    // traveling toward it at the drive rate limit)
+    let manualRodCommand: number | undefined;
     const controllers = simState.components.controllers;
     if (controllers) {
       for (const [, ctl] of controllers) {
@@ -3324,8 +3375,10 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           rodControllerId = ctl.id;
           break;
         }
+        manualRodCommand ??= ctl.manualOutput;
       }
     }
+    const hasManualRodCtl = anyRodController && rodControllerId === null;
     const scrammed = simState.neutronics.scrammed;
 
     // Manual/auto toggle is only offered when a rod controller exists
@@ -3349,20 +3402,33 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
       const ctlComponent = plantState.components.get(rodControllerId);
       const ctlName = (ctlComponent?.label as string | undefined) ?? rodControllerId;
       rodSlider.title = `Rod position is driven by "${ctlName}" (auto mode); the slider shows the actual position`;
+    } else if (hasManualRodCtl) {
+      rodSlider.title = 'Commands the rod drive setpoint (0% = withdrawn, 100% = inserted); '
+        + 'the rods travel there at the drive rate limit';
     } else {
       rodSlider.title = 'Manual control rod insertion (0% = withdrawn, 100% = inserted)';
     }
 
-    const insertionPercent = Math.round((1 - rodPosition) * 100);
+    // With a manual rod drive the slider represents the COMMANDED setpoint;
+    // tracking the traveling actual position would yank the command out of
+    // the user's hands (worst at high sim speed, where the rods move many
+    // sim-seconds per rendered frame). Everywhere else it shows the actual.
+    const commanded = !scrammed && hasManualRodCtl ? (manualRodCommand ?? rodPosition) : rodPosition;
+    const commandedPercent = Math.round((1 - commanded) * 100);
+    const actualPercent = Math.round((1 - rodPosition) * 100);
     const currentSliderValue = parseInt(rodSlider.value);
     // When the slider is a passive indicator, track the sim exactly; the
     // 1% deadband only exists to avoid fighting active user input
     const deadband = rodSlider.disabled ? 0 : 1;
-    if (Math.abs(currentSliderValue - insertionPercent) > deadband) {
-      rodSlider.value = String(insertionPercent);
-      if (rodValueDisplay) {
-        rodValueDisplay.textContent = insertionPercent + '%';
-      }
+    if (Math.abs(currentSliderValue - commandedPercent) > deadband) {
+      rodSlider.value = String(commandedPercent);
+    }
+    if (rodValueDisplay) {
+      // Show the traveling actual position next to the command until they meet
+      const text = actualPercent !== commandedPercent
+        ? `${commandedPercent}% (rods at ${actualPercent}%)`
+        : `${commandedPercent}%`;
+      if (rodValueDisplay.textContent !== text) rodValueDisplay.textContent = text;
     }
   }
 
@@ -3485,6 +3551,99 @@ function showNotification(message: string, type: 'info' | 'warning' | 'error' = 
   // events the player must not miss (bursts hold for 30 s unless dismissed)
   const duration = durationMs ?? (type === 'error' ? 5000 : type === 'warning' ? 4000 : 3000);
   setTimeout(remove, duration);
+}
+
+// ============================================================================
+// Persistent "running slower than requested" bubble
+// ============================================================================
+// One bubble that appears while the solver can't keep up with the REQUESTED
+// sim speed (which may still be faster than real time - e.g. 1.6x when the
+// player asked for 2x), updates its readout in place, and disappears on
+// recovery. Unlike showNotification pop-ups it never stacks or re-fires.
+// Dismissing it hides it until the next distinct slowdown episode.
+let slowSimBubble: HTMLDivElement | null = null;
+let slowSimBubbleText: HTMLSpanElement | null = null;
+let slowSimBubbleDismissed = false;
+let slowSimLastBehindMs = -Infinity;
+
+function updateSlowSimBubble(metrics: SolverMetrics, targetSpeed: number): void {
+  // isFallingBehind is a per-frame verdict that can flicker under marginal
+  // load; hold the bubble for 2 s past the last "behind" frame so it doesn't
+  // blink (UI smoothing only - the metric itself is untouched).
+  const nowMs = performance.now();
+  if (metrics.isFallingBehind) slowSimLastBehindMs = nowMs;
+  if (nowMs - slowSimLastBehindMs > 2000) {
+    slowSimBubbleDismissed = false;
+    if (slowSimBubble) {
+      slowSimBubble.remove();
+      slowSimBubble = null;
+      slowSimBubbleText = null;
+    }
+    return;
+  }
+  if (slowSimBubbleDismissed) return;
+
+  if (!slowSimBubble) {
+    slowSimBubble = document.createElement('div');
+    slowSimBubble.className = 'sim-notification';
+    slowSimBubble.title = 'The physics solver cannot keep up with the requested '
+      + 'simulation speed on this machine. Nothing is wrong with the simulation - '
+      + 'sim time just advances more slowly than the speed setting asks for. '
+      + 'Lower the sim speed setting to make the readout honest, or ignore this.';
+    slowSimBubble.style.cssText = `
+      position: fixed;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 18px;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 13px;
+      z-index: 1999;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+      max-width: 80%;
+      text-align: center;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: #1a3a5a;
+      border: 1px solid #4488aa;
+      color: #d0e8ff;
+      opacity: 0.9;
+    `;
+
+    slowSimBubbleText = document.createElement('span');
+    slowSimBubbleText.style.flex = '1';
+    slowSimBubble.appendChild(slowSimBubbleText);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Dismiss until the next slowdown';
+    closeBtn.style.cssText = `
+      background: transparent;
+      border: none;
+      color: inherit;
+      font-size: 18px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0 2px;
+      opacity: 0.7;
+    `;
+    closeBtn.addEventListener('click', () => {
+      slowSimBubbleDismissed = true;
+      slowSimBubble?.remove();
+      slowSimBubble = null;
+      slowSimBubbleText = null;
+    });
+    slowSimBubble.appendChild(closeBtn);
+    document.body.appendChild(slowSimBubble);
+  }
+
+  const fmt = (x: number) => x >= 10 ? x.toFixed(0) : x >= 1 ? x.toFixed(1) : x.toFixed(2);
+  if (slowSimBubbleText && metrics.isFallingBehind) {
+    slowSimBubbleText.textContent =
+      `Simulation running at ${fmt(metrics.realTimeRatio)}x (requested ${fmt(targetSpeed)}x)`;
+  }
 }
 
 // Show a dialog asking if user wants to place component inside a container

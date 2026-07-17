@@ -22,6 +22,9 @@ body {
   height: 100%;
   display: block;
   background: #0f0f1a;
+  /* Canvas gestures (tap, drag, pinch) are handled by our pointer-event
+     handlers; without this the browser claims them for page pan/zoom. */
+  touch-action: none;
 }
 
 .port-tooltip {

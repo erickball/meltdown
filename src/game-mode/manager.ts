@@ -78,9 +78,12 @@ export class GameModeManager {
   // the goal's threshold at least 30 s (operated time) after it fired.
   private pendingCasualties: number[] = []; // firedAt (operatedSeconds)
   private survivedCasualties = 0;
-  // one-shot "you can speed the sim up" hint once the plant runs steady
+  // one-shot "you can speed the sim up" hint once the plant runs steady:
+  // every major parameter (thermal power, grid power, and user inputs like
+  // rod position, pump setpoints, valve positions) within 10% over a rolling
+  // 10 s window. Samples are (operatedSeconds, flattened parameter map).
   private speedHintShown = false;
-  private steadySince: number | null = null;
+  private steadySamples: Array<{ t: number; params: Map<string, number> }> = [];
   // pristine design captured at each run start; restored when an outage
   // begins so runs don't inherit the previous run's final state
   private designSnapshot: Map<string, unknown> | null = null;
@@ -212,7 +215,7 @@ export class GameModeManager {
     this.pendingCasualties = [];
     this.survivedCasualties = 0;
     this.speedHintShown = false;
-    this.steadySince = null;
+    this.steadySamples = [];
     this.designSnapshot = null;
     this.host.setPaletteFilter?.(level.palette ?? null);
 
@@ -470,7 +473,7 @@ export class GameModeManager {
         }
       }
 
-      this.updateGoalTracking(electricWatts);
+      this.updateGoalTracking(electricWatts, state);
       this.operatorPanel.tick(state);
 
       // Track run peaks for the post-mortem diagnostics summary
@@ -508,7 +511,7 @@ export class GameModeManager {
   // Goals
   // ==========================================================================
 
-  private updateGoalTracking(electricWatts: number): void {
+  private updateGoalTracking(electricWatts: number, state: SimulationState): void {
     if (!this.level) return;
     const mwe = electricWatts / 1e6;
     const powerGoal = this.level.goals.find(g => g.kind === 'power');
@@ -544,13 +547,15 @@ export class GameModeManager {
       }
     }
 
-    // One-shot hint: once the plant has held >150 MWe steadily for 20
-    // operated seconds at 1x or slower, point at the sim-speed controls.
+    // One-shot hint: once the plant is genuinely steady - >150 MWe with every
+    // major parameter (thermal power, grid power, rod position, pump
+    // setpoints, valve positions) within 10% over a rolling 10 s window at 1x
+    // or slower - point at the sim-speed controls.
     if (!this.speedHintShown) {
       if (mwe > 150) {
-        this.steadySince ??= this.operatedSeconds;
+        this.recordSteadySample(state, mwe);
         const speed = this.host.gameLoop.getTargetSimSpeed();
-        if (this.operatedSeconds - this.steadySince > 20 && speed <= 1.01) {
+        if (speed <= 1.01 && this.steadyWindowSettled()) {
           this.speedHintShown = true;
           this.host.showNotification(
             'The plant is running steady. You can fast-forward with the speed controls in the top toolbar (10x / 100x) - objectives count sim time, not wall time.',
@@ -558,9 +563,71 @@ export class GameModeManager {
           this.hud.ticker('Tip: plant is steady - crank the sim speed (top toolbar) to deliver MWh faster.');
         }
       } else {
-        this.steadySince = null;
+        this.steadySamples = [];
       }
     }
+  }
+
+  /** Window (s) and per-parameter tolerance for the speed-hint steadiness check. */
+  private static readonly STEADY_WINDOW_S = 10;
+  private static readonly STEADY_TOL = 0.10;
+
+  /**
+   * Sample the parameters the speed-hint steadiness check watches (throttled
+   * to 4 Hz of operated time). Powers are compared relative to their window
+   * maximum; 0-1 user inputs (rods, pump speed setpoints, valve positions)
+   * are compared as fractions of full travel.
+   */
+  private recordSteadySample(state: SimulationState, mwe: number): void {
+    const t = this.operatedSeconds;
+    const last = this.steadySamples[this.steadySamples.length - 1];
+    if (last && t - last.t < 0.25) return;
+
+    const params = new Map<string, number>();
+    params.set('thermal', state.neutronics.power);
+    params.set('mwe', mwe);
+    params.set('rod', state.neutronics.controlRodPosition);
+    for (const [id, pump] of state.components.pumps) {
+      params.set(`pump:${id}`, pump.running ? pump.speed : 0);
+    }
+    for (const [id, valve] of state.components.valves) {
+      params.set(`valve:${id}`, valve.position);
+    }
+    this.steadySamples.push({ t, params });
+
+    // Keep exactly one sample at/before the window edge so the span check
+    // knows the window has full coverage.
+    const cutoff = t - GameModeManager.STEADY_WINDOW_S;
+    while (this.steadySamples.length >= 2 && this.steadySamples[1].t <= cutoff) {
+      this.steadySamples.shift();
+    }
+  }
+
+  /** True once every watched parameter stayed within 10% over the last 10 s. */
+  private steadyWindowSettled(): boolean {
+    const samples = this.steadySamples;
+    if (samples.length < 2) return false;
+    const now = samples[samples.length - 1].t;
+    if (now - samples[0].t < GameModeManager.STEADY_WINDOW_S) return false;
+
+    const keys = new Set<string>();
+    for (const s of samples) for (const k of s.params.keys()) keys.add(k);
+    for (const key of keys) {
+      let min = Infinity;
+      let max = -Infinity;
+      for (const s of samples) {
+        const v = s.params.get(key);
+        // A component appeared or disappeared mid-window (build/burst) -
+        // that is itself a change, so not steady.
+        if (v === undefined) return false;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      const span = max - min;
+      const scale = key === 'thermal' || key === 'mwe' ? Math.abs(max) : 1;
+      if (span > GameModeManager.STEADY_TOL * scale) return false;
+    }
+    return true;
   }
 
   private goalProgress(): GoalProgress[] {

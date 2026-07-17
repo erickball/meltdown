@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, getComponentVisualHeight, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, projectCircleToEllipse } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -88,22 +88,22 @@ export class PlantCanvas {
   }
 
   private setupEventListeners(): void {
-    // Mouse events
-    this.canvas.addEventListener('mousedown', this.handleMouseDown.bind(this));
-    this.canvas.addEventListener('mousemove', this.handleMouseMove.bind(this));
-    this.canvas.addEventListener('mouseup', this.handleMouseUp.bind(this));
-    this.canvas.addEventListener('mouseleave', this.handleMouseUp.bind(this));
+    // Pointer events unify mouse, touch, and pen. A mouse produces the same
+    // stream it always did (pointerType 'mouse'); touch gets tap-to-click,
+    // one-finger drag, and two-finger pinch zoom. The canvas has
+    // touch-action: none (style.css) so the browser hands us raw gestures
+    // instead of scrolling/zooming the page.
+    this.canvas.addEventListener('pointerdown', this.handlePointerDown.bind(this));
+    this.canvas.addEventListener('pointermove', this.handlePointerMove.bind(this));
+    this.canvas.addEventListener('pointerup', this.handlePointerUp.bind(this));
+    this.canvas.addEventListener('pointercancel', this.handlePointerUp.bind(this));
+    this.canvas.addEventListener('pointerleave', this.handlePointerUp.bind(this));
     this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
 
     // Track whether the cursor is over the open canvas (vs a UI panel, which
     // overlaps the canvas and steals the pointer) - gates edge-scroll panning.
-    this.canvas.addEventListener('mouseenter', () => { this.mouseOverCanvas = true; });
-    this.canvas.addEventListener('mouseleave', () => { this.mouseOverCanvas = false; });
-
-    // Touch events for mobile
-    this.canvas.addEventListener('touchstart', this.handleTouchStart.bind(this));
-    this.canvas.addEventListener('touchmove', this.handleTouchMove.bind(this));
-    this.canvas.addEventListener('touchend', this.handleTouchEnd.bind(this));
+    this.canvas.addEventListener('pointerenter', () => { this.mouseOverCanvas = true; });
+    this.canvas.addEventListener('pointerleave', () => { this.mouseOverCanvas = false; });
 
     // Keyboard events for arrow key elevation control
     window.addEventListener('keydown', this.handleKeyDown.bind(this));
@@ -137,10 +137,33 @@ export class PlantCanvas {
     }
   }
 
-  private handleMouseDown(e: MouseEvent): void {
+  // Active pointers currently pressed on the canvas, by pointerId.
+  // Two simultaneous touch points = pinch zoom.
+  private activePointers: Map<number, Point> = new Map();
+
+  private handlePointerDown(e: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+    this.activePointers.set(e.pointerId, { x, y });
+
+    // Capture touch pointers so a drag keeps tracking when the finger crosses
+    // an overlapping panel or the canvas edge. Mouse keeps its hover/leave
+    // semantics (leaving the canvas ends the drag, as before).
+    if (e.pointerType !== 'mouse') {
+      this.canvas.setPointerCapture(e.pointerId);
+    }
+
+    if (this.activePointers.size === 2) {
+      // Second finger down: this is a pinch, not a drag
+      this.isDragging = false;
+      this.isMovingComponent = false;
+      const [t1, t2] = Array.from(this.activePointers.values());
+      this.lastPinchDist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+      this.lastPinchCenter = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
+      return;
+    }
+    if (this.activePointers.size > 2 || !e.isPrimary) return;
 
     // If ports are shown (connect mode), check if clicking on a port first
     // If so, don't select the component - let the port click handler deal with it
@@ -177,10 +200,19 @@ export class PlantCanvas {
     }
   }
 
-  private handleMouseMove(e: MouseEvent): void {
+  private handlePointerMove(e: PointerEvent): void {
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+
+    if (this.activePointers.has(e.pointerId)) {
+      this.activePointers.set(e.pointerId, { x, y });
+    }
+    if (this.activePointers.size >= 2) {
+      this.handlePinch();
+      return;
+    }
+    if (!e.isPrimary) return;
 
     // Remember screen position (edge-scroll keeps panning while the cursor is
     // held still at the edge, when no further mousemove events fire)
@@ -247,9 +279,18 @@ export class PlantCanvas {
     }
   }
 
-  private handleMouseUp(_e: MouseEvent): void {
-    this.isDragging = false;
-    this.isMovingComponent = false;
+  private handlePointerUp(e: PointerEvent): void {
+    // Also serves pointercancel and pointerleave. For a mouse simply crossing
+    // onto an overlapping panel (pointerleave, no press tracked), the deletes
+    // are no-ops and the drag flags were already false.
+    this.activePointers.delete(e.pointerId);
+    if (this.activePointers.size < 2) {
+      this.lastPinchDist = 0;
+    }
+    if (this.activePointers.size === 0) {
+      this.isDragging = false;
+      this.isMovingComponent = false;
+    }
   }
 
   private handleWheel(e: WheelEvent): void {
@@ -292,86 +333,35 @@ export class PlantCanvas {
     }
   }
 
-  // Touch handling
-  private lastTouchDist: number = 0;
-  private lastTouchCenter: Point = { x: 0, y: 0 };
+  // Pinch-zoom state (two active touch pointers)
+  private lastPinchDist: number = 0;
+  private lastPinchCenter: Point = { x: 0, y: 0 };
 
-  private handleTouchStart(e: TouchEvent): void {
-    e.preventDefault();
-    if (e.touches.length === 1) {
-      const touch = e.touches[0];
-      const rect = this.canvas.getBoundingClientRect();
-      this.isDragging = true;
-      this.dragStart = {
-        x: touch.clientX - rect.left,
-        y: touch.clientY - rect.top,
-      };
-    } else if (e.touches.length === 2) {
-      // Pinch zoom start
-      const rect = this.canvas.getBoundingClientRect();
-      const t1 = { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
-      const t2 = { x: e.touches[1].clientX - rect.left, y: e.touches[1].clientY - rect.top };
-      this.lastTouchDist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
-      this.lastTouchCenter = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
-    }
-  }
+  private handlePinch(): void {
+    const [t1, t2] = Array.from(this.activePointers.values());
+    const dist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
+    const center = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
 
-  private handleTouchMove(e: TouchEvent): void {
-    e.preventDefault();
-    const rect = this.canvas.getBoundingClientRect();
+    if (this.lastPinchDist > 0) {
+      const zoomFactor = dist / this.lastPinchDist;
+      const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
 
-    if (e.touches.length === 1 && this.isDragging) {
-      const touch = e.touches[0];
-      const x = touch.clientX - rect.left;
-      const y = touch.clientY - rect.top;
-      const dx = x - this.dragStart.x;
-      const dy = y - this.dragStart.y;
+      // Zoom toward center
+      const worldX = (center.x - this.view.offsetX) / this.view.zoom;
+      const worldY = (center.y - this.view.offsetY) / this.view.zoom;
 
-      if (this.isometric.enabled) {
-        this.view.offsetX += dx;
-        this.cameraDepth -= dy; // Negate: drag down = move forward
-      } else {
-        this.view.offsetX += dx;
-        this.view.offsetY += dy;
-      }
+      this.view.zoom = newZoom;
+      this.view.offsetX = center.x - worldX * newZoom;
+      this.view.offsetY = center.y - worldY * newZoom;
 
+      // Also pan by the center's motion
+      this.view.offsetX += center.x - this.lastPinchCenter.x;
+      this.view.offsetY += center.y - this.lastPinchCenter.y;
       this.clampView();
-      this.dragStart = { x, y };
-    } else if (e.touches.length === 2) {
-      // Pinch zoom
-      const t1 = { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
-      const t2 = { x: e.touches[1].clientX - rect.left, y: e.touches[1].clientY - rect.top };
-      const dist = Math.hypot(t2.x - t1.x, t2.y - t1.y);
-      const center = { x: (t1.x + t2.x) / 2, y: (t1.y + t2.y) / 2 };
-
-      if (this.lastTouchDist > 0) {
-        const zoomFactor = dist / this.lastTouchDist;
-        const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
-
-        // Zoom toward center
-        const worldX = (center.x - this.view.offsetX) / this.view.zoom;
-        const worldY = (center.y - this.view.offsetY) / this.view.zoom;
-
-        this.view.zoom = newZoom;
-        this.view.offsetX = center.x - worldX * newZoom;
-        this.view.offsetY = center.y - worldY * newZoom;
-      }
-
-      // Also pan
-      this.view.offsetX += center.x - this.lastTouchCenter.x;
-      this.view.offsetY += center.y - this.lastTouchCenter.y;
-      this.clampView();
-
-      this.lastTouchDist = dist;
-      this.lastTouchCenter = center;
     }
-  }
 
-  private handleTouchEnd(e: TouchEvent): void {
-    if (e.touches.length === 0) {
-      this.isDragging = false;
-      this.lastTouchDist = 0;
-    }
+    this.lastPinchDist = dist;
+    this.lastPinchCenter = center;
   }
 
   public getComponentAtScreen(screenPos: Point): PlantComponent | null {
@@ -445,6 +435,44 @@ export class PlantCanvas {
       const bldgHeight = bldg.height || 50;
       const bldgHalfW = bldgWidth / 2;
       const bldgHalfD = bldgDepth / 2;
+
+      // Cylindrical buildings: hit-test the rendered wall band (side walls +
+      // roof), using the same projected-ellipse geometry as renderBuilding.
+      // The floor (base ellipse interior) is NOT part of the hit region, so
+      // clicks there fall through to components inside the building.
+      if (bldg.shape === 'cylinder') {
+        const centerProj = this.worldToScreenPerspective(component.position, 0);
+        if (centerProj.scale <= 0) return false;
+
+        const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
+        const base = projectCircleToEllipse(worldToScreenFn, component.position, bldgHalfW, 0);
+        const top = projectCircleToEllipse(worldToScreenFn, component.position, bldgHalfW, bldgHeight);
+        if (base.rx <= 0 || base.ry <= 0) return false;
+
+        // A projected ellipse can degenerate to a flat line (ry clamped to 0
+        // when the front rim projects above the back rim at close range);
+        // renderBuilding draws it that way too, so treat it as zero-area.
+        const inEllipse = (e: { cx: number; cy: number; rx: number; ry: number }): boolean => {
+          if (e.rx <= 0 || e.ry <= 0) return false;
+          const dx = (screenPos.x - e.cx) / e.rx;
+          const dy = (screenPos.y - e.cy) / e.ry;
+          return dx * dx + dy * dy <= 1;
+        };
+
+        // Roof: the top rim ellipse
+        if (inEllipse(top)) return true;
+
+        // Side walls: the quad between the two ellipses' horizontal diameters,
+        // minus the upper half of the base ellipse (the shell path closes
+        // along the base's back arc, leaving the floor exposed)
+        const inWallQuad = this.isPointInQuad(screenPos, [
+          { x: base.cx - base.rx, y: base.cy },
+          { x: top.cx - top.rx, y: top.cy },
+          { x: top.cx + top.rx, y: top.cy },
+          { x: base.cx + base.rx, y: base.cy },
+        ]);
+        return inWallQuad && !inEllipse(base);
+      }
 
       // Back wall is at position.y + halfD (farther from camera)
       const backY = component.position.y + bldgHalfD;
@@ -2083,15 +2111,16 @@ export class PlantCanvas {
         return { width: (component as any).width, height: (component as any).height };
       case 'pipe':
         return { width: (component as any).length, height: (component as any).diameter };
-      case 'pump':
+      case 'pump': {
         // Pump is drawn much larger than its diameter
-        // Scale factor is diameter * 1.3, total height is scale * 2.2 (motor + coupling + casing + nozzle + inlet)
-        // Width includes volute bulge and outlet pipe
+        // Height comes from the shared visual-height helper so connection
+        // elevations (stored against the same convention) stay anchored to
+        // the drawn nozzles. Width includes volute bulge and outlet pipe.
         const pumpD = (component as any).diameter || 0.3;
         const pumpScale = pumpD * 1.3;
-        const pumpHeight = pumpScale * 2.2;  // Full height including inlet pipe
         const pumpWidth = pumpScale * 1.5;   // Casing + volute + outlet
-        return { width: pumpWidth, height: pumpHeight };
+        return { width: pumpWidth, height: getComponentVisualHeight(component) };
+      }
       case 'vessel':
         const vesselR = (component as any).innerDiameter / 2 + (component as any).wallThickness;
         return { width: vesselR * 2, height: (component as any).height };
@@ -2104,7 +2133,7 @@ export class PlantCanvas {
         return { width: cbR * 2, height: (component as any).height };
       case 'valve':
         const valveD = (component as any).diameter || 0.2;
-        return { width: valveD * 2, height: valveD * 2 };
+        return { width: valveD * 2, height: getComponentVisualHeight(component) };
       case 'heatExchanger':
         return { width: (component as any).width, height: (component as any).height };
       case 'turbine-generator':
