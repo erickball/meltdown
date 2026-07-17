@@ -915,7 +915,7 @@
             "targetId": "rv-1"
           },
           "setpoint": 567,
-          "powerLimit": 1,
+          "powerLimit": 0.97,
           "actuator": {
             "kind": "control-rods",
             "targetId": "",
