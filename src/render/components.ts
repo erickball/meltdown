@@ -1667,69 +1667,78 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
       ?? barrelHeightWorld * 0.1;
     const coreTop = barrelBottomY - coreBottomElevWorld * view.zoom - coreHeightPx;
 
-    // Calculate grid dimensions based on rod pitch
-    const rodPitchMm = (coreBarrel as any)?.rodPitch ?? (vessel as any).rodPitch ?? 12.6;
-    const rodPitchWorld = rodPitchMm / 1000; // Convert mm to m
-    const rodPitchPx = rodPitchWorld * view.zoom;
+    const fuelForm = coreBarrel?.fuelForm ?? (vessel as any).fuelForm ?? 'rods';
+    let rodWidthPx = Math.max(4, coreRadiusPx * 0.05);
 
-    // Rod diameter (typically ~9.5mm for PWR fuel rods)
-    const rodDiameterMm = (coreBarrel as any)?.rodDiameter ?? (vessel as any).rodDiameter ?? 9.5;
-    const rodDiameterWorld = rodDiameterMm / 1000;
+    if (fuelForm === 'pebbles') {
+      // Packed bed of graphite TRISO pebbles - no rod lattice to draw
+      const pebbleDiameterWorld = (coreBarrel?.pebbleDiameter ?? 60) / 1000;
+      renderPebbleBed(ctx, coreRadiusPx, coreTop, coreHeightPx, fuelColor, pebbleDiameterWorld, view.zoom);
+    } else {
+      // Calculate grid dimensions based on rod pitch
+      const rodPitchMm = (coreBarrel as any)?.rodPitch ?? (vessel as any).rodPitch ?? 12.6;
+      const rodPitchWorld = rodPitchMm / 1000; // Convert mm to m
+      const rodPitchPx = rodPitchWorld * view.zoom;
 
-    // Calculate the ratio of rod diameter to pitch (typically ~0.75)
-    const rodToPitchRatio = rodDiameterWorld / rodPitchWorld;
+      // Rod diameter (typically ~9.5mm for PWR fuel rods)
+      const rodDiameterMm = (coreBarrel as any)?.rodDiameter ?? (vessel as any).rodDiameter ?? 9.5;
+      const rodDiameterWorld = rodDiameterMm / 1000;
 
-    // For visibility: rods need to be at least 4px wide with at least 2px gap between them
-    const minRodWidthPx = 4;
-    const minGapPx = 2;
-    const minPitchPx = minRodWidthPx + minGapPx;
+      // Calculate the ratio of rod diameter to pitch (typically ~0.75)
+      const rodToPitchRatio = rodDiameterWorld / rodPitchWorld;
 
-    // Calculate skip factor to ensure minimum pitch
-    let skipFactor = 1;
-    if (rodPitchPx < minPitchPx) {
-      skipFactor = Math.ceil(minPitchPx / rodPitchPx);
-    }
+      // For visibility: rods need to be at least 4px wide with at least 2px gap between them
+      const minRodWidthPx = 4;
+      const minGapPx = 2;
+      const minPitchPx = minRodWidthPx + minGapPx;
 
-    // Effective display pitch (in pixels)
-    const displayPitchPx = rodPitchPx * skipFactor;
-
-    // Rod width maintains the ratio to pitch, but ensure minimum gap
-    // Gap = pitch - rod width, so rod width = pitch * ratio
-    // But we also need gap >= minGapPx, so rod width <= pitch - minGapPx
-    const proportionalRodWidth = displayPitchPx * rodToPitchRatio;
-    const maxRodWidthForGap = displayPitchPx - minGapPx;
-    const rodWidthPx = Math.min(proportionalRodWidth, maxRodWidthForGap);
-
-    // How many rods we'll actually display across the diameter
-    const displayPitchWorld = rodPitchWorld * skipFactor;
-    const displayRodsAcross = Math.floor(coreDiameterWorld / displayPitchWorld);
-
-    // Generate symmetrical rod positions within circular boundary
-    const rodPositions: number[] = [];
-    const halfGrid = displayRodsAcross / 2;
-
-    for (let col = 0; col < displayRodsAcross; col++) {
-      // X position in pixels (centered)
-      const xOffset = (col - halfGrid + 0.5) * displayPitchPx;
-
-      // Check if this position is within the circular core boundary
-      const xWorld = (col - halfGrid + 0.5) * displayPitchWorld;
-      const distFromCenter = Math.abs(xWorld);
-
-      if (distFromCenter < coreDiameterWorld / 2 - displayPitchWorld * 0.3) {
-        rodPositions.push(xOffset);
+      // Calculate skip factor to ensure minimum pitch
+      let skipFactor = 1;
+      if (rodPitchPx < minPitchPx) {
+        skipFactor = Math.ceil(minPitchPx / rodPitchPx);
       }
-    }
 
-    // Draw each fuel rod as a vertical bar
-    for (const rodX of rodPositions) {
-      // Fuel rod cladding
-      ctx.fillStyle = COLORS.steelDark;
-      ctx.fillRect(rodX - rodWidthPx / 2 - 1, coreTop, rodWidthPx + 2, coreHeightPx);
+      // Effective display pitch (in pixels)
+      const displayPitchPx = rodPitchPx * skipFactor;
 
-      // Fuel pellet
-      ctx.fillStyle = fuelColor;
-      ctx.fillRect(rodX - rodWidthPx / 2, coreTop + 1, rodWidthPx, coreHeightPx - 2);
+      // Rod width maintains the ratio to pitch, but ensure minimum gap
+      // Gap = pitch - rod width, so rod width = pitch * ratio
+      // But we also need gap >= minGapPx, so rod width <= pitch - minGapPx
+      const proportionalRodWidth = displayPitchPx * rodToPitchRatio;
+      const maxRodWidthForGap = displayPitchPx - minGapPx;
+      rodWidthPx = Math.min(proportionalRodWidth, maxRodWidthForGap);
+
+      // How many rods we'll actually display across the diameter
+      const displayPitchWorld = rodPitchWorld * skipFactor;
+      const displayRodsAcross = Math.floor(coreDiameterWorld / displayPitchWorld);
+
+      // Generate symmetrical rod positions within circular boundary
+      const rodPositions: number[] = [];
+      const halfGrid = displayRodsAcross / 2;
+
+      for (let col = 0; col < displayRodsAcross; col++) {
+        // X position in pixels (centered)
+        const xOffset = (col - halfGrid + 0.5) * displayPitchPx;
+
+        // Check if this position is within the circular core boundary
+        const xWorld = (col - halfGrid + 0.5) * displayPitchWorld;
+        const distFromCenter = Math.abs(xWorld);
+
+        if (distFromCenter < coreDiameterWorld / 2 - displayPitchWorld * 0.3) {
+          rodPositions.push(xOffset);
+        }
+      }
+
+      // Draw each fuel rod as a vertical bar
+      for (const rodX of rodPositions) {
+        // Fuel rod cladding
+        ctx.fillStyle = COLORS.steelDark;
+        ctx.fillRect(rodX - rodWidthPx / 2 - 1, coreTop, rodWidthPx + 2, coreHeightPx);
+
+        // Fuel pellet
+        ctx.fillStyle = fuelColor;
+        ctx.fillRect(rodX - rodWidthPx / 2, coreTop + 1, rodWidthPx, coreHeightPx - 2);
+      }
     }
 
     // Draw control rods (always full length, extend above core when withdrawn)
@@ -1745,12 +1754,24 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
       const rodTop = coreTop - rodTopOffset;
       const controlRodWidth = rodWidthPx * 1.2; // Control rods slightly wider than fuel rods
 
-      // Place control rods evenly across the core width
-      // Use symmetrical positions
-      const controlRodSpacing = (coreRadiusPx * 2 * 0.8) / (controlRodCount + 1);
+      // Rod x-positions: pebble-bed rods run in side-reflector channels at the
+      // core periphery (they never enter the bed); rod-lattice banks spread
+      // evenly across the core width.
+      const crPositions: number[] = [];
+      if (fuelForm === 'pebbles') {
+        for (let i = 0; i < controlRodCount; i++) {
+          const side = i % 2 === 0 ? -1 : 1;
+          const pair = Math.floor(i / 2);
+          crPositions.push(side * (coreRadiusPx * 0.92 - pair * controlRodWidth * 2.5));
+        }
+      } else {
+        const controlRodSpacing = (coreRadiusPx * 2 * 0.8) / (controlRodCount + 1);
+        for (let i = 0; i < controlRodCount; i++) {
+          crPositions.push(-coreRadiusPx * 0.8 + controlRodSpacing * (i + 1));
+        }
+      }
 
-      for (let i = 0; i < controlRodCount; i++) {
-        const crX = -coreRadiusPx * 0.8 + controlRodSpacing * (i + 1);
+      for (const crX of crPositions) {
 
         ctx.fillStyle = '#333';
         ctx.fillRect(crX - controlRodWidth / 2 - 1, rodTop, controlRodWidth + 2, controlRodLength);
@@ -1910,6 +1931,65 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
     const fuelCenterY = barrelBottomY - (fuelBottomElevWorld + fuelHeightWorld / 2) * view.zoom;
     renderCorePowerLabel(ctx, [vessel.coreBarrelId, vessel.id], fuelCenterY, view);
   }
+}
+
+/**
+ * Draw a packed bed of fuel pebbles (graphite spheres with dispersed TRISO
+ * kernels) filling the active core region. Pebbles use the same temperature
+ * color as rod pellets with a dark graphite rim. The drawing is
+ * representative, not 1:1: pebbles are floored at a visible pixel size and
+ * thinned so a full core stays cheap to draw at any zoom.
+ */
+function renderPebbleBed(
+  ctx: CanvasRenderingContext2D,
+  coreRadiusPx: number,
+  coreTop: number,
+  coreHeightPx: number,
+  fuelColor: string,
+  pebbleDiameterWorld: number,
+  zoom: number
+): void {
+  const areaPx = coreRadiusPx * 2 * coreHeightPx;
+  if (areaPx <= 0) return;
+  const minDiameterPx = 5;
+  const maxPebblesDrawn = 1200;
+  const dPx = Math.max(
+    pebbleDiameterWorld * zoom,
+    minDiameterPx,
+    Math.sqrt(areaPx / (maxPebblesDrawn * 0.866))
+  );
+  const r = dPx / 2;
+  const rowHeight = dPx * 0.866; // hex close packing
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(-coreRadiusPx, coreTop, coreRadiusPx * 2, coreHeightPx);
+  ctx.clip();
+
+  ctx.fillStyle = fuelColor;
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+
+  let row = 0;
+  for (let cy = coreTop + r; cy < coreTop + coreHeightPx + r; cy += rowHeight, row++) {
+    const xStart = -coreRadiusPx + (row % 2 === 1 ? r : 0);
+    let col = 0;
+    for (let cx = xStart + r; cx < coreRadiusPx + r; cx += dPx, col++) {
+      // Deterministic per-pebble jitter so the bed looks poured, not gridded,
+      // and doesn't shimmer between frames
+      const h1 = Math.sin(row * 127.1 + col * 311.7) * 43758.5453;
+      const h2 = Math.sin(row * 269.5 + col * 183.3) * 28001.8384;
+      const jx = ((h1 - Math.floor(h1)) - 0.5) * r * 0.6;
+      const jy = ((h2 - Math.floor(h2)) - 0.5) * r * 0.4;
+
+      ctx.beginPath();
+      ctx.arc(cx + jx, cy + jy, r * 0.95, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
 }
 
 function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
