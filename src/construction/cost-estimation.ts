@@ -309,19 +309,24 @@ export function estimatePumpCost(props: {
   ratedFlow: number;        // kg/s
   ratedHead: number;        // m
   pumpType: 'centrifugal' | 'positive';
+  pressureRating?: number;  // bar - casing design pressure
   nqa1: boolean;
 }): CostEstimate {
   // Hydraulic power in kW
   const hydraulicPower = (props.ratedFlow * 9.81 * props.ratedHead) / 1000;
 
   // Base cost scales with power^0.7 (economy of scale)
-  // Calibrated: 100 kW pump ≈ $50,000
+  // Calibrated: 100 kW pump ≈ $50,000 at the 150 bar reference casing class
   const baseCost = 5000 * Math.pow(hydraulicPower, 0.7);
 
   // Positive displacement pumps cost ~1.5x more
   const typeMultiplier = props.pumpType === 'positive' ? 1.5 : 1.0;
 
-  const equipmentCost = baseCost * typeMultiplier;
+  // Casing pressure class: wall mass grows with design pressure, but machining
+  // and internals keep a low-pressure casing from becoming free
+  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+
+  const equipmentCost = baseCost * typeMultiplier * pressureMultiplier;
 
   // Installation
   const installationCost = equipmentCost * INSTALLATION_MULTIPLIERS.pump;
@@ -341,6 +346,7 @@ export function estimatePumpCost(props: {
     total: subtotal + nqa1Premium,
     breakdown: {
       hydraulicPower,
+      pressureMultiplier,
     },
   };
 }
@@ -361,6 +367,7 @@ export function estimatePumpCost(props: {
 export function estimateValveCost(props: {
   diameter: number;         // m
   valveType: 'gate' | 'globe' | 'ball' | 'butterfly' | 'check' | 'relief' | 'porv';
+  pressureRating?: number;  // bar - body design pressure
   nqa1: boolean;
 }): CostEstimate {
   // Base costs for 300mm valve
@@ -383,7 +390,11 @@ export function estimateValveCost(props: {
   const referenceSize = 0.3; // 300mm reference
   const sizeMultiplier = Math.pow(props.diameter / referenceSize, 2.5);
 
-  const equipmentCost = baseCost * sizeMultiplier;
+  // Pressure class: body wall mass grows with design pressure, with a
+  // machining/trim floor so low-pressure valves don't become free
+  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+
+  const equipmentCost = baseCost * sizeMultiplier * pressureMultiplier;
 
   // Installation
   const installationCost = equipmentCost * INSTALLATION_MULTIPLIERS.valve;
@@ -400,6 +411,7 @@ export function estimateValveCost(props: {
     total: subtotal + nqa1Premium,
     breakdown: {
       sizeMultiplier,
+      pressureMultiplier,
     },
   };
 }
@@ -539,6 +551,7 @@ export function estimateTurbineDrivenPumpCost(props: {
   ratedPumpFlow: number;    // kg/s
   ratedHead: number;        // m
   stages: number;
+  pressureRating?: number;  // bar - pump casing design pressure
   nqa1: boolean;
 }): CostEstimate {
   // Small steam turbine cost
@@ -547,8 +560,9 @@ export function estimateTurbineDrivenPumpCost(props: {
   // Small steam turbines: ~$1000/kW (much higher than large ones)
   const turbineCost = shaftPower * 1000;
 
-  // Pump cost (same as regular pump)
-  const pumpCost = 5000 * Math.pow(shaftPower, 0.7);
+  // Pump cost (same as regular pump, including the casing pressure class)
+  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  const pumpCost = 5000 * Math.pow(shaftPower, 0.7) * pressureMultiplier;
 
   const equipmentCost = turbineCost + pumpCost;
 
@@ -971,6 +985,7 @@ export function estimateComponentCost(
         ratedFlow: props.ratedFlow || 1000,
         ratedHead: props.ratedHead || 100,
         pumpType: props.type || 'centrifugal',
+        pressureRating: props.pressureRating,
         nqa1,
       });
 
@@ -981,6 +996,7 @@ export function estimateComponentCost(
       return estimateValveCost({
         diameter: props.diameter || 0.3,
         valveType: props.type || props.valveType || 'gate',
+        pressureRating: props.pressureRating,
         nqa1,
       });
 
@@ -1010,6 +1026,7 @@ export function estimateComponentCost(
         ratedPumpFlow: props.ratedPumpFlow || 50,
         ratedHead: props.ratedHead || 500,
         stages: props.stages || 1,
+        pressureRating: props.pressureRating,
         nqa1,
       });
 

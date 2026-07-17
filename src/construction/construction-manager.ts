@@ -418,6 +418,7 @@ export class ConstructionManager {
           diameter: props.diameter,
           opening: props.initialPosition / 100,
           valveType: props.type || 'gate',
+          pressureRating: props.pressureRating,
           ports: bidirectionalPorts,
           fluid: valveFluid
         };
@@ -440,6 +441,7 @@ export class ConstructionManager {
           diameter: props.diameter,
           opening: 0,  // Starts closed, opens based on ΔP
           valveType: 'check',
+          pressureRating: props.pressureRating,
           crackingPressure: (props.crackingPressure || 0.1) * 1e5,  // bar to Pa
           ports: directionalPorts,
           fluid: defaultFluid
@@ -461,6 +463,7 @@ export class ConstructionManager {
           diameter: props.diameter,
           opening: 0,  // Starts closed, opens at setpoint
           valveType: 'relief',
+          pressureRating: props.pressureRating,
           setpoint: (props.setpoint || 170) * 1e5,  // bar to Pa
           blowdown: (props.blowdown || 5) / 100,    // % to fraction
           capacity: props.capacity || 100,          // kg/s
@@ -484,6 +487,7 @@ export class ConstructionManager {
           diameter: props.diameter,
           opening: props.initialPosition === 'open' ? 1 : 0,
           valveType: 'porv',
+          pressureRating: props.pressureRating,
           setpoint: (props.setpoint || 165) * 1e5,  // bar to Pa
           blowdown: (props.blowdown || 3) / 100,    // % to fraction
           capacity: props.capacity || 50,           // kg/s
@@ -541,6 +545,7 @@ export class ConstructionManager {
           speed: props.speed / 3600,  // Convert RPM to fraction
           ratedFlow: props.ratedFlow,
           ratedHead: props.ratedHead,
+          pressureRating: props.pressureRating,
           ports: pumpPorts,
           fluid: pumpFluid
         };
@@ -945,6 +950,7 @@ export class ConstructionManager {
           orientation,
           stages: props.stages || 1,
           running: true,
+          pressureRating: props.pressureRating,
           // Turbine properties
           ratedSteamFlow,
           turbineEfficiency: eta_t,
@@ -1109,6 +1115,8 @@ export class ConstructionManager {
             speed: 0.5,
             ratedFlow: 100,
             ratedHead: 200,
+            // Condensate service: near-vacuum suction + 200 m shutoff head, ~25 bar class
+            pressureRating: 25,
             ports: pumpPorts,
             fluid: {
               temperature: props.coolingWaterTemp + 273.15 + 10,

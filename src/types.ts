@@ -105,6 +105,7 @@ export interface PumpComponent extends ComponentBase {
   ratedFlow: number;    // kg/s at full speed
   ratedHead: number;    // meters of head
   orientation?: 'left-right' | 'right-left' | 'bottom-top' | 'top-bottom';  // Inlet→outlet direction (default: left-right)
+  pressureRating?: number;  // Casing design pressure (bar) - sets burst point and cost
 }
 
 export interface VesselComponent extends ComponentBase {
@@ -130,6 +131,7 @@ export interface ValveComponent extends ComponentBase {
   diameter: number;
   opening: number;      // 0 = closed, 1 = fully open
   valveType: 'gate' | 'globe' | 'ball' | 'butterfly' | 'check' | 'relief' | 'porv';
+  pressureRating?: number;    // Body design pressure (bar) - sets burst point and cost
   // Check valve properties
   crackingPressure?: number;  // Pa - minimum ΔP to open (check valves)
   // Relief valve / PORV properties
@@ -256,6 +258,7 @@ export interface TurbineDrivenPumpComponent extends ComponentBase {
   ratedPumpFlow: number;  // Rated pump flow in kg/s
   ratedHead: number;      // Pump head in meters
   pumpEfficiency: number; // Pump efficiency (0-1)
+  pressureRating?: number; // Casing design pressure (bar) - sets burst point and cost
 }
 
 export interface CondenserComponent extends ComponentBase {

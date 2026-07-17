@@ -330,6 +330,7 @@ export const componentDefinitions: Record<string, {
         { value: 'butterfly', label: 'Butterfly Valve' }
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest pressure the valve will see in service.' },
       { name: 'initialPosition', type: 'number', label: 'Initial Position', default: 100, min: 0, max: 100, step: 5, unit: '%', help: '0% = closed, 100% = open' },
       { name: 'matchUpstream', type: 'checkbox', label: 'Match upstream conditions', default: true, help: 'Automatically set initial P/T from connected upstream component' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 10, min: 0.01, max: 250, step: 0.1, unit: 'bar', dependsOn: { field: 'matchUpstream', value: false } },
@@ -366,6 +367,7 @@ export const componentDefinitions: Record<string, {
         { value: 'tilting-disc', label: 'Tilting Disc' }
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest (usually downstream) pressure the valve holds.' },
       { name: 'crackingPressure', type: 'number', label: 'Cracking Pressure', default: 0.1, min: 0.01, max: 5, step: 0.01, unit: 'bar', help: 'Minimum ΔP to open valve' },
       // Cv calculated from diameter and check valve type
       { name: 'cv', type: 'calculated', label: 'Flow Coefficient (Cv)', default: 0,
@@ -392,6 +394,7 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'Relief Valve' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.15, min: 0.025, max: 0.5, step: 0.025, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the set pressure. Burst point and cost follow the rating.' },
       { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 5, min: 1, max: 20, step: 1, unit: '%', help: 'Pressure drop before reseating (% of setpoint)' },
       // Capacity calculated using critical (choked) flow for steam
@@ -420,6 +423,7 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'PORV' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.1, min: 0.025, max: 0.3, step: 0.025, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the auto-open pressure. Burst point and cost follow the rating.' },
       { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 3, min: 1, max: 10, step: 1, unit: '%', help: 'Pressure drop before auto-reseating (% of setpoint)' },
       { name: 'initialPosition', type: 'select', label: 'Initial State', default: 'auto', options: [
@@ -461,6 +465,7 @@ export const componentDefinitions: Record<string, {
       ]},
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 1000, step: 10, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
       { name: 'speed', type: 'number', label: 'Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM' },
       { name: 'efficiency', type: 'number', label: 'Efficiency', default: 85, min: 50, max: 95, step: 5, unit: '%' },
       { name: 'npshRequired', type: 'number', label: 'NPSH Required', default: 5, min: 1, max: 30, step: 1, unit: 'm' },
@@ -697,6 +702,7 @@ export const componentDefinitions: Record<string, {
       // Pump properties
       { name: 'ratedPumpFlow', type: 'number', label: 'Rated Pump Flow', default: 50, min: 10, max: 500, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 500, min: 50, max: 2000, step: 50, unit: 'm' },
+      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Pump casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
       { name: 'pumpEfficiency', type: 'number', label: 'Pump Efficiency', default: 75, min: 50, max: 90, step: 5, unit: '%' },
       // Turbine properties
       { name: 'inletPressure', type: 'number', label: 'Steam Inlet Pressure', default: 60, min: 5, max: 100, step: 5, unit: 'bar' },
