@@ -1768,7 +1768,8 @@ export class ConstructionManager {
     flowArea: number,
     length: number,
     fromElevation: number,
-    toElevation: number
+    toElevation: number,
+    pressureRating?: number  // bar - from the connection dialog's line spec; overrides the endpoint-derived default
   ): boolean {
     // Create an intermediate pipe component
     const pipeId = this.generateComponentId('pipe');
@@ -1869,8 +1870,11 @@ export class ConstructionManager {
     // primary 172 bar, not the 100 bar shell rating).
     const fromPressureRating = this.effectivePressureRating(fromComponent, fromPortId);
     const toPressureRating = this.effectivePressureRating(toComponent, toPortId);
-    const pipePressureRating = Math.max(fromPressureRating, toPressureRating) || 155; // Default 155 bar if neither has rating
-    console.log(`[Construction] Auto-pipe rating: max(${fromPressureRating}, ${toPressureRating}) = ${pipePressureRating} bar`);
+    const pipePressureRating = pressureRating ??
+      (Math.max(fromPressureRating, toPressureRating) || 155); // Default 155 bar if neither has rating
+    console.log(`[Construction] Auto-pipe rating: ${pressureRating !== undefined
+      ? `${pipePressureRating} bar (from line spec)`
+      : `max(${fromPressureRating}, ${toPressureRating}) = ${pipePressureRating} bar`}`);
 
     const pipe: PipeComponent = {
       id: pipeId,

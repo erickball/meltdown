@@ -2915,7 +2915,8 @@ function init() {
                     config.flowArea,
                     config.length,
                     config.fromElevation,
-                    config.toElevation
+                    config.toElevation,
+                    config.pressureRating
                   );
                 } else {
                   success = constructionManager.createConnection(

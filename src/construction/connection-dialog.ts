@@ -2,6 +2,7 @@
 
 import { PlantComponent, Port, Connection } from '../types';
 import { getComponentVisualHeight } from '../render/components';
+import { PIPE_SPECS, findMatchingPipeSpec, pipeSpecFlowArea } from './component-presets';
 
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
@@ -13,6 +14,7 @@ export interface ConnectionConfig {
   flowArea: number;       // Cross-sectional area in m²
   length: number;         // Connection length in m
   createPipe: boolean;    // Whether to create an intermediate pipe
+  pressureRating?: number; // bar - design pressure for the auto-created pipe (from the selected line spec)
 }
 
 // Result of editing an existing connection
@@ -271,6 +273,43 @@ export class ConnectionDialog {
     toElevGroup.appendChild(toElevHelp);
     this.bodyElement.appendChild(toElevGroup);
 
+    // Line spec selector - standardized pipe diameters & pressure ratings.
+    // Contained connections are wall openings, not runs of pipe, so they
+    // keep the freeform flow area instead.
+    let specSelect: HTMLSelectElement | null = null;
+    let specDesc: HTMLElement | null = null;
+    let ratingGroup: HTMLElement | null = null;
+    let ratingInput: HTMLInputElement | null = null;
+    if (!isContainedConnection) {
+      const specGroup = document.createElement('div');
+      specGroup.className = 'form-group';
+      const specLabel = document.createElement('label');
+      specLabel.textContent = 'Line Specification';
+      specLabel.setAttribute('for', 'pipe-spec');
+      specGroup.appendChild(specLabel);
+
+      specSelect = document.createElement('select');
+      specSelect.id = 'pipe-spec';
+      specSelect.title = 'Standardized line sizes with pressure ratings. Pick the service that matches this connection, or Custom to enter the flow area directly.';
+      for (const spec of PIPE_SPECS) {
+        const opt = document.createElement('option');
+        opt.value = spec.id;
+        opt.textContent = spec.label;
+        if (spec.id === 'spec-10in') opt.selected = true; // same area as the old 0.05 m² default
+        specSelect.appendChild(opt);
+      }
+      const customOpt = document.createElement('option');
+      customOpt.value = 'custom';
+      customOpt.textContent = 'Custom — enter flow area and rating';
+      specSelect.appendChild(customOpt);
+      specGroup.appendChild(specSelect);
+
+      specDesc = document.createElement('div');
+      specDesc.className = 'help-text';
+      specGroup.appendChild(specDesc);
+      this.bodyElement.appendChild(specGroup);
+    }
+
     // Create flow area field
     const flowAreaGroup = document.createElement('div');
     flowAreaGroup.className = 'form-group';
@@ -293,6 +332,32 @@ export class ConnectionDialog {
     flowAreaHelp.textContent = 'Cross-sectional area of connection';
     flowAreaGroup.appendChild(flowAreaHelp);
     this.bodyElement.appendChild(flowAreaGroup);
+
+    // Pressure rating field - only shown for the Custom line spec (standard
+    // specs carry their own rating)
+    if (!isContainedConnection) {
+      ratingGroup = document.createElement('div');
+      ratingGroup.className = 'form-group';
+      const ratingLabel = document.createElement('label');
+      ratingLabel.textContent = 'Pressure Rating (bar)';
+      ratingLabel.setAttribute('for', 'pipe-pressure-rating');
+      ratingGroup.appendChild(ratingLabel);
+
+      ratingInput = document.createElement('input');
+      ratingInput.type = 'number';
+      ratingInput.id = 'pipe-pressure-rating';
+      ratingInput.value = '155';
+      ratingInput.min = '1';
+      ratingInput.max = '600';
+      ratingInput.step = '5';
+      ratingGroup.appendChild(ratingInput);
+
+      const ratingHelp = document.createElement('div');
+      ratingHelp.className = 'help-text';
+      ratingHelp.textContent = 'Design pressure of the pipe created for this connection - its burst point and cost follow this rating';
+      ratingGroup.appendChild(ratingHelp);
+      this.bodyElement.appendChild(ratingGroup);
+    }
 
     // Create length field
     const lengthGroup = document.createElement('div');
@@ -381,7 +446,9 @@ export class ConnectionDialog {
 
       if (willCreatePipe) {
         const diameter = Math.sqrt(area * 4 / Math.PI);
-        pipeStatus.innerHTML = `✓ A pipe will be created (diameter: ${diameter.toFixed(3)} m)`;
+        const rating = ratingInput ? parseFloat(ratingInput.value) : NaN;
+        const ratingNote = Number.isFinite(rating) ? `, rated ${rating} bar` : '';
+        pipeStatus.innerHTML = `✓ A pipe will be created (diameter: ${diameter.toFixed(3)} m${ratingNote})`;
         pipeStatus.style.color = '#4a4';
       } else {
         pipeStatus.innerHTML = 'Direct connection (no pipe needed)';
@@ -391,7 +458,33 @@ export class ConnectionDialog {
 
     flowAreaInput.addEventListener('input', updatePipeStatus);
     lengthInput.addEventListener('input', updatePipeStatus);
-    updatePipeStatus();
+
+    // Apply the selected line spec: fill in the flow area and rating, and only
+    // allow direct edits when Custom is selected
+    const applySpec = () => {
+      if (!specSelect) return;
+      const spec = PIPE_SPECS.find(s => s.id === specSelect!.value);
+      if (spec) {
+        flowAreaInput.value = pipeSpecFlowArea(spec).toFixed(4);
+        flowAreaInput.readOnly = true;
+        flowAreaHelp.textContent = `Set by the line spec (${spec.diameter} m inner diameter)`;
+        if (ratingInput) ratingInput.value = String(spec.pressureRating);
+        if (ratingGroup) ratingGroup.style.display = 'none';
+        if (specDesc) specDesc.textContent = `${spec.description}`;
+      } else {
+        flowAreaInput.readOnly = false;
+        flowAreaHelp.textContent = 'Cross-sectional area of connection';
+        if (ratingGroup) ratingGroup.style.display = '';
+        if (specDesc) specDesc.textContent = 'Custom line - set the flow area and pressure rating yourself.';
+      }
+      updatePipeStatus();
+    };
+    if (specSelect) {
+      specSelect.addEventListener('change', applySpec);
+      applySpec();
+    } else {
+      updatePipeStatus();
+    }
   }
 
   private getComponentHeight(component: PlantComponent): number {
@@ -431,6 +524,22 @@ export class ConnectionDialog {
       // Create mode - return full config
       if (!this.fromComponent || !this.toComponent || !this.fromPort || !this.toPort) return;
 
+      // Pressure rating for the auto-created pipe: from the selected line
+      // spec, or the rating field when Custom is selected. Contained
+      // connections have no spec selector and get no rating override.
+      let pressureRating: number | undefined;
+      const specSel = document.getElementById('pipe-spec') as HTMLSelectElement | null;
+      if (specSel) {
+        const spec = PIPE_SPECS.find(s => s.id === specSel.value);
+        if (spec) {
+          pressureRating = spec.pressureRating;
+        } else {
+          const ratingEl = document.getElementById('pipe-pressure-rating') as HTMLInputElement | null;
+          const v = ratingEl ? parseFloat(ratingEl.value) : NaN;
+          if (Number.isFinite(v)) pressureRating = v;
+        }
+      }
+
       const config: ConnectionConfig = {
         fromComponent: this.fromComponent,
         toComponent: this.toComponent,
@@ -440,7 +549,8 @@ export class ConnectionDialog {
         toElevation,
         flowArea,
         length,
-        createPipe: flowArea > 0.1 && length > 1
+        createPipe: flowArea > 0.1 && length > 1,
+        pressureRating
       };
 
       if (this.currentCallback) {
@@ -614,6 +724,40 @@ export class ConnectionDialog {
       toElevHelp.textContent = toElevHelpText(toRelElev);
     });
 
+    // Line spec quick-fill: picking a standard size fills the flow area below.
+    // (The pressure rating of an already-created pipe is edited on the pipe
+    // component itself, so the spec here only drives the area.)
+    const specGroup = document.createElement('div');
+    specGroup.className = 'form-group';
+    const specLabel = document.createElement('label');
+    specLabel.textContent = 'Line Specification';
+    specLabel.setAttribute('for', 'pipe-spec-edit');
+    specGroup.appendChild(specLabel);
+
+    const specSelect = document.createElement('select');
+    specSelect.id = 'pipe-spec-edit';
+    specSelect.title = 'Standardized line sizes. Picking one sets the flow area; edit the pipe component itself to change an existing pipe\'s pressure rating.';
+    const matchedSpec = findMatchingPipeSpec(currentFlowArea);
+    for (const spec of PIPE_SPECS) {
+      const opt = document.createElement('option');
+      opt.value = spec.id;
+      opt.textContent = spec.label;
+      if (matchedSpec && spec.id === matchedSpec.id) opt.selected = true;
+      specSelect.appendChild(opt);
+    }
+    const customOpt = document.createElement('option');
+    customOpt.value = 'custom';
+    customOpt.textContent = 'Custom — enter flow area directly';
+    if (!matchedSpec) customOpt.selected = true;
+    specSelect.appendChild(customOpt);
+    specGroup.appendChild(specSelect);
+
+    const specDesc = document.createElement('div');
+    specDesc.className = 'help-text';
+    specDesc.textContent = matchedSpec ? matchedSpec.description : '';
+    specGroup.appendChild(specDesc);
+    this.bodyElement.appendChild(specGroup);
+
     // Flow area field
     const flowAreaGroup = document.createElement('div');
     flowAreaGroup.className = 'form-group';
@@ -638,10 +782,24 @@ export class ConnectionDialog {
     flowAreaGroup.appendChild(flowAreaHelp);
     this.bodyElement.appendChild(flowAreaGroup);
 
-    // Update flow area help when input changes
+    // Update flow area help when input changes; a manual edit means the value
+    // no longer comes from the selected spec
     flowAreaInput.addEventListener('input', () => {
       const area = parseFloat(flowAreaInput.value) || 0;
       flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(area).toFixed(2)} m)`;
+      const stillMatches = findMatchingPipeSpec(area);
+      specSelect.value = stillMatches ? stillMatches.id : 'custom';
+      specDesc.textContent = stillMatches ? stillMatches.description : '';
+    });
+
+    // Picking a spec fills the flow area
+    specSelect.addEventListener('change', () => {
+      const spec = PIPE_SPECS.find(s => s.id === specSelect.value);
+      specDesc.textContent = spec ? spec.description : '';
+      if (spec) {
+        flowAreaInput.value = pipeSpecFlowArea(spec).toFixed(4);
+        flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(pipeSpecFlowArea(spec)).toFixed(2)} m)`;
+      }
     });
 
     // Length field

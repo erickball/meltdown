@@ -5,6 +5,13 @@ import { estimateComponentCost, formatCost } from './cost-estimation';
 import { ALL_GAS_SPECIES, GAS_PROPERTIES, type GasSpecies } from '../simulation/gas-properties';
 import { deriveControlRodWorth, type LatticeParams } from '../simulation/lattice';
 import { corePebbleGeometry } from '../simulation/factory';
+import {
+  ComponentPreset,
+  getPresetsForType,
+  hasPresetSupport,
+  saveCustomPreset,
+  deleteCustomPreset
+} from './component-presets';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -128,7 +135,7 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'Tank' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Height of tank bottom above ground level' },
-      { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 1000, step: 0.1, unit: 'm³' },
+      { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 5000, step: 0.1, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 0.1, max: 600, step: 10, unit: 'bar', help: 'Must be at least enough to hold the hydrostatic head of water' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
@@ -207,7 +214,7 @@ export const componentDefinitions: Record<string, {
       { name: 'barrelDiameter', type: 'number', label: 'Core Barrel Dia (mid-wall)', default: 3.4, min: 1.5, max: 6, step: 0.1, unit: 'm', help: 'Diameter to center of barrel wall' },
       { name: 'barrelThickness', type: 'number', label: 'Barrel Wall Thickness', default: 0.05, min: 0.002, max: 0.3, step: 0.01, unit: 'm', help: 'Typical ~0.05 m. Thin barrels are allowed; they just carry less thermal mass and less strength.' },
       { name: 'barrelBottomGap', type: 'number', label: 'Barrel Bottom Gap', default: 1.0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from lower head to barrel bottom' },
-      { name: 'barrelTopGap', type: 'number', label: 'Barrel Top Gap', default: 0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from upper head to barrel top' },
+      { name: 'barrelTopGap', type: 'number', label: 'Barrel Top Gap', default: 0, min: 0, max: 8, step: 0.1, unit: 'm', help: 'Distance from upper head to barrel top. Integral (SMR-style) vessels use a tall gap as an internal steam space.' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 100, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 155, min: 0.01, max: 221, step: 5, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 290, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
@@ -464,7 +471,7 @@ export const componentDefinitions: Record<string, {
         { value: 'top-bottom', label: 'Inlet Top → Outlet Bottom' }
       ]},
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
-      { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 1000, step: 10, unit: 'm' },
+      { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 2000, step: 10, unit: 'm', help: 'Charging/HPSI service needs ~1300-1600 m to overcome full primary pressure' },
       { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
       { name: 'speed', type: 'number', label: 'Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM' },
       { name: 'efficiency', type: 'number', label: 'Efficiency', default: 85, min: 50, max: 95, step: 5, unit: '%' },
@@ -1090,6 +1097,11 @@ export class ComponentDialog {
   private currentPosition: { x: number; y: number } = { x: 0, y: 0 };
   private availableCores: Array<{ id: string; label: string }> = [];
   private availableGenerators: Array<{ id: string; label: string }> = [];
+  // Preset (equipment design) state for the create dialog
+  private isCreateMode: boolean = false;
+  private currentPresetId: string | null = null;
+  private currentDefaultName?: string;
+  private currentAvailableCoresForCreate?: Array<{ id: string; label: string }>;
   // Plant-derived choice lists for options with dynamicOptions (keyed by list
   // name, e.g. 'flowNodes', 'valves'). Set via setDynamicChoices before show().
   private dynamicChoices: Record<string, Array<{ id: string; label: string }>> = {};
@@ -1160,8 +1172,15 @@ export class ComponentDialog {
     // Set title
     this.titleElement.textContent = `Configure ${definition.displayName}`;
 
+    // Preset state: default to the first standard design for this type (if any)
+    this.isCreateMode = true;
+    this.currentDefaultName = defaultName;
+    this.currentAvailableCoresForCreate = availableCores;
+    const presets = getPresetsForType(componentType);
+    this.currentPresetId = presets.length > 0 ? presets[0].id : null;
+
     // Build form (pass available cores for controller dropdowns, and optional default name)
-    this.buildForm(definition.options, availableCores, defaultName);
+    this.rebuildCreateForm();
 
     // Show dialog
     this.dialog.style.display = 'flex';
@@ -1173,12 +1192,37 @@ export class ComponentDialog {
     }
   }
 
+  /**
+   * (Re)build the create-mode form: type defaults overridden by the currently
+   * selected preset design. Called on open and whenever the design dropdown
+   * changes - rebuilding the whole form keeps every behavior (two-phase
+   * coupling, NCG panels, dependsOn visibility, calculated fields) consistent
+   * with the new values for free.
+   */
+  private rebuildCreateForm() {
+    const definition = componentDefinitions[this.currentType];
+    if (!definition) return;
+    const preset = getPresetsForType(this.currentType).find(p => p.id === this.currentPresetId) ?? null;
+    const options = preset
+      ? definition.options.map(o =>
+          (o.type !== 'calculated' && o.name in preset.properties)
+            ? { ...o, default: preset.properties[o.name] }
+            : o)
+      : definition.options;
+    this.buildForm(options, this.currentAvailableCoresForCreate, this.currentDefaultName);
+  }
+
   private buildForm(options: ComponentOption[], availableCores?: Array<{ id: string; label: string }>, defaultName?: string) {
     this.bodyElement.innerHTML = '';
 
     // Separate calculated options from input options
     const inputOptions = options.filter(o => o.type !== 'calculated');
     const calculatedOptions = options.filter(o => o.type === 'calculated');
+
+    // Equipment design picker (presets) - create mode only
+    if (this.isCreateMode && hasPresetSupport(this.currentType)) {
+      this.bodyElement.appendChild(this.createDesignSection(options));
+    }
 
     // Override default name if provided
     if (defaultName) {
@@ -1498,6 +1542,8 @@ export class ComponentDialog {
     // Add event listeners to all inputs to update calculated fields and price
     const allInputs = inputContainer.querySelectorAll('input, select');
     allInputs.forEach(input => {
+      // The design-picker's own controls are not part of the component config
+      if ((input as HTMLElement).closest('.design-section')) return;
       input.addEventListener('input', () => {
         updateCalculatedFields();
         updatePriceEstimate();
@@ -1506,6 +1552,16 @@ export class ComponentDialog {
         updateCalculatedFields();
         updatePriceEstimate();
       });
+      // Flag the selected design as modified when any config field (except the
+      // instance name) is edited, so the user knows they've departed from it
+      if (input.id !== 'option-name') {
+        const markModified = () => {
+          const note = document.getElementById('design-modified-note');
+          if (note) note.style.display = '';
+        };
+        input.addEventListener('input', markModified);
+        input.addEventListener('change', markModified);
+      }
     });
 
     // Initial calculations
@@ -1514,6 +1570,131 @@ export class ComponentDialog {
 
     // Set up two-phase P/T coupling if this component has phase selection
     this.setupTwoPhaseCouplng();
+  }
+
+  /**
+   * Build the "Equipment Design" picker shown at the top of the create
+   * dialog: a dropdown of standard designs for this component type (plus the
+   * user's saved designs), a description of what the selected design is for,
+   * and controls to save the current settings as a new custom design.
+   */
+  private createDesignSection(options: ComponentOption[]): HTMLElement {
+    const presets = getPresetsForType(this.currentType);
+    const builtin = presets.filter(p => !p.custom);
+    const custom = presets.filter(p => p.custom);
+    const selected = presets.find(p => p.id === this.currentPresetId) ?? null;
+
+    const section = document.createElement('div');
+    section.className = 'design-section form-group';
+    section.style.cssText = 'background: #232b3a; padding: 10px 12px; border-radius: 6px; border: 1px solid #3a4a6a; margin-bottom: 15px;';
+
+    const label = document.createElement('div');
+    label.style.cssText = 'color: #7af; font-size: 12px; margin-bottom: 6px;';
+    label.textContent = 'Equipment Design';
+    section.appendChild(label);
+
+    // Design dropdown
+    const select = document.createElement('select');
+    select.id = 'design-preset-select';
+    select.title = 'Pick a standard design to fill in all the fields below, then adjust anything you like';
+    select.style.cssText = 'width: 100%;';
+
+    const addGroup = (groupLabel: string, items: ComponentPreset[]) => {
+      if (items.length === 0) return;
+      const group = document.createElement('optgroup');
+      group.label = groupLabel;
+      items.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p.id;
+        opt.textContent = p.name;
+        if (p.id === this.currentPresetId) opt.selected = true;
+        group.appendChild(opt);
+      });
+      select.appendChild(group);
+    };
+    addGroup('Standard designs', builtin);
+    addGroup('My saved designs', custom);
+
+    const genericOpt = document.createElement('option');
+    genericOpt.value = '';
+    genericOpt.textContent = 'Generic — start from type defaults';
+    if (!this.currentPresetId) genericOpt.selected = true;
+    select.appendChild(genericOpt);
+
+    select.addEventListener('change', () => {
+      this.currentPresetId = select.value || null;
+      this.rebuildCreateForm();
+    });
+    section.appendChild(select);
+
+    // Description of the selected design
+    const desc = document.createElement('div');
+    desc.style.cssText = 'font-size: 11px; color: #99aacc; margin-top: 6px; line-height: 1.4;';
+    desc.textContent = selected
+      ? selected.description || 'Saved custom design.'
+      : 'Generic starting point - all fields at their type defaults.';
+    section.appendChild(desc);
+
+    // "Modified" note - hidden until the user edits a config field
+    const modifiedNote = document.createElement('div');
+    modifiedNote.id = 'design-modified-note';
+    modifiedNote.style.cssText = 'display: none; font-size: 11px; color: #da5; margin-top: 6px;';
+    modifiedNote.textContent = '✎ Modified from the selected design - save it below to reuse these settings later.';
+    section.appendChild(modifiedNote);
+
+    // Save-as-custom-design row
+    const saveRow = document.createElement('div');
+    saveRow.style.cssText = 'display: flex; gap: 6px; margin-top: 8px; align-items: center;';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.id = 'design-save-name';
+    nameInput.placeholder = selected ? `${selected.name} (modified)` : 'Name for this design';
+    nameInput.title = 'Save the current settings as a reusable design (stored in this browser)';
+    nameInput.autocomplete = 'off';
+    nameInput.style.cssText = 'flex: 1; min-width: 0; font-size: 11px;';
+    saveRow.appendChild(nameInput);
+
+    const saveBtn = document.createElement('button');
+    saveBtn.type = 'button';
+    saveBtn.textContent = 'Save design';
+    saveBtn.title = 'Save the current settings as a custom design you can pick from this list later';
+    saveBtn.style.cssText = 'background: #3a4a5a; color: #adf; border: 1px solid #4a6a8a; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; white-space: nowrap;';
+    saveBtn.addEventListener('click', () => {
+      const name = nameInput.value.trim() || nameInput.placeholder;
+      const properties = this.getCurrentProperties(options);
+      delete properties.name; // instance name is not part of the design
+      const preset: ComponentPreset = {
+        id: `custom-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+        type: this.currentType,
+        name,
+        description: `Custom ${componentDefinitions[this.currentType].displayName.toLowerCase()} design saved ${new Date().toLocaleDateString()}.`,
+        properties,
+        custom: true,
+      };
+      saveCustomPreset(preset);
+      this.currentPresetId = preset.id;
+      this.rebuildCreateForm();
+    });
+    saveRow.appendChild(saveBtn);
+
+    // Delete button, only for a selected custom design
+    if (selected?.custom) {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.type = 'button';
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.title = 'Delete this saved design (components already placed with it are unaffected)';
+      deleteBtn.style.cssText = 'background: #3a2a2a; color: #faa; border: 1px solid #6a4a4a; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;';
+      deleteBtn.addEventListener('click', () => {
+        deleteCustomPreset(selected.id);
+        this.currentPresetId = null;
+        this.rebuildCreateForm();
+      });
+      saveRow.appendChild(deleteBtn);
+    }
+
+    section.appendChild(saveRow);
+    return section;
   }
 
   /**
@@ -2136,6 +2317,7 @@ export class ComponentDialog {
 
     this.currentType = componentType;
     this.currentPosition = component.position || { x: 0, y: 0 };
+    this.isCreateMode = false; // no design picker when editing an existing component
     this.availableCores = availableCores || [];
     this.availableGenerators = availableGenerators || [];
     this.currentCallback = (config) => {
