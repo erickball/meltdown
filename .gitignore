@@ -10,6 +10,7 @@ dist/
 # Temporary test/debug scripts
 *.cjs
 *.py
+*.cache
 nul
 temp-*.ts
 test-results.txt
