@@ -1,6 +1,6 @@
 # "Atom" Jack — AI contractor assistant
 
-Jack is the Sonnet-powered head of operations at Atom Enterprises. He lives in
+Jack is the Opus-powered head of operations at Atom Enterprises. He lives in
 the bottom-right corner of the screen (hard hat says JACK) with an always-
 visible "Ask Jack..." entry field next to his head; focusing it (or clicking
 him) expands the conversation panel, which opens with a scripted intro (no API
@@ -16,10 +16,10 @@ browser (src/jack/)                    Firebase (functions/)
 │ JackManager (UI + loop)  │  POST    │ jackChat (Cloud Function v2) │
 │ jack-context (CONTEXT    │ ───────► │  - holds ANTHROPIC_API_KEY   │
 │   block per user msg)    │          │    (Secret Manager)          │
-│ jack-tools-exec (runs    │ ◄─────── │  - claude-sonnet-5, tools +  │
+│ jack-tools-exec (runs    │ ◄─────── │  - claude-opus-5, tools +    │
 │   Jack's tool calls on   │  content │    character prompt (cached  │
 │   ConstructionManager)   │          │    prefix, server-side)      │
-└──────────────────────────┘          │  - $10/mo cap via Firestore  │
+└──────────────────────────┘          │  - $25/mo cap via Firestore  │
                                       │    ledger jack-usage/YYYY-MM │
                                       └──────────────────────────────┘
 ```
@@ -35,7 +35,7 @@ browser (src/jack/)                    Firebase (functions/)
   ConstructionManager mutators).
 - **Budget**: the function reads `jack-usage/{YYYY-MM}` before each call and
   refuses (HTTP 429, in-character message) once the month's cost reaches
-  $10, computed at claude-sonnet-5 list prices including cache reads/writes.
+  $25, computed at claude-opus-5 list prices including cache reads/writes.
   Concurrent requests can overshoot by ~one request; acceptable slop.
 - **Integration**: one `new JackManager({...})` host object in `main.ts`
   `init()` (next to `GameModeManager`), same host-object pattern as career

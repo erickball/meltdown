@@ -11,22 +11,23 @@ initializeApp();
 
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
-const MODEL = "claude-sonnet-5";
+const MODEL = "claude-opus-5";
 // Generous cap: adaptive thinking counts against max_tokens, and starving it
 // truncates the reply mid-tool-loop with no visible text. Output is only
 // billed as used.
 const MAX_OUTPUT_TOKENS = 8000;
 
 // Hard monthly spend ceiling for the whole app, in USD.
-const MONTHLY_BUDGET_USD = 10;
+const MONTHLY_BUDGET_USD = 25;
 
-// claude-sonnet-5 list prices, USD per million tokens. Intro pricing
-// (through 2026-08-31) is lower; using list prices keeps the cap conservative.
+// claude-opus-5 list prices, USD per million tokens. Cache write is 1.25x the
+// base input rate (5-minute TTL) and cache read is 0.1x, per Anthropic's
+// prompt-caching pricing.
 const PRICE = {
-  input: 3.0,
-  output: 15.0,
-  cacheWrite: 3.75,
-  cacheRead: 0.3,
+  input: 5.0,
+  output: 25.0,
+  cacheWrite: 6.25,
+  cacheRead: 0.5,
 };
 
 // Request sanity limits — the budget cap is the real backstop, these just
@@ -127,7 +128,7 @@ export const jackChat = onRequest(
     const usageRef = db.collection("jack-usage").doc(monthKey());
 
     // Budget gate. Read-then-call-then-increment means concurrent requests
-    // can overshoot by a request or two — acceptable slop against a $10 cap.
+    // can overshoot by a request or two — acceptable slop against a $25 cap.
     const snap = await usageRef.get();
     const spent: number = snap.exists ? (snap.data()!.costUsd ?? 0) : 0;
     if (spent >= MONTHLY_BUDGET_USD) {

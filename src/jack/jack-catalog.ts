@@ -1,4 +1,28 @@
 import { componentDefinitions } from '../construction/component-config';
+import { mapComponentTypeToDefinition } from '../construction/cost-estimation';
+
+/**
+ * The catalog type key for a live component. A component's stored `type`
+ * (e.g. 'reactorVessel', 'coreBarrel', 'controller') is internal and often
+ * differs from the catalog/add_component key ('reactor-vessel', 'core',
+ * 'pid-controller'); this resolves the key the way the edit dialog and cost
+ * estimator do. Returns the raw type if there's no mapping.
+ */
+export function catalogKeyForComponent(component: { type: string }): string {
+  return mapComponentTypeToDefinition(component.type, component as Record<string, any>);
+}
+
+/**
+ * Editable property names for a specific live component (the option names of
+ * its resolved catalog type). Used to catch cross-type property mistakes —
+ * e.g. `setpoint` on a pump — that pass the global isKnownProperty union but
+ * are silently ignored by updateComponent. Empty set if the type is unknown.
+ */
+export function editablePropertyNames(component: { type: string }): Set<string> {
+  const def = componentDefinitions[catalogKeyForComponent(component)];
+  if (!def) return new Set();
+  return new Set(def.options.filter((o) => o.type !== 'calculated').map((o) => o.name));
+}
 
 /**
  * Compact one-line-per-type catalog (~3KB): property names with units only.

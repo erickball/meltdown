@@ -1252,7 +1252,7 @@ export function calculateTotalPlantCost(
 /**
  * Map component type from PlantComponent to cost estimation key
  */
-function mapComponentTypeToDefinition(type: string, component?: Record<string, any>): string {
+export function mapComponentTypeToDefinition(type: string, component?: Record<string, any>): string {
   // Special case: controller can be scram or pid
   if (type === 'controller' && component) {
     return component.controllerType === 'pid' ? 'pid-controller' : 'scram-controller';

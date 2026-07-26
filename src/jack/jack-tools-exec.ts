@@ -1,6 +1,11 @@
 ﻿import type { JackHost } from './jack-host';
 import type { PlantComponent } from '../types';
-import { buildComponentCatalog, isKnownProperty } from './jack-catalog';
+import {
+  buildComponentCatalog,
+  isKnownProperty,
+  editablePropertyNames,
+  catalogKeyForComponent,
+} from './jack-catalog';
 import {
   estimatePlantComponentCost,
   formatCost,
@@ -235,30 +240,50 @@ export function executeJackTool(
       const comp = resolveComponent(host, String(input.component ?? ''));
       if (!comp) return err(`No component named "${input.component}"`);
       const changes = (input.changes as Record<string, unknown>) ?? {};
-      if (Object.keys(changes).length === 0) return err('changes is empty');
-      // updateComponent silently ignores property names it doesn't know, so
-      // catch typos/hallucinated names before reporting success. Use the
-      // union of all schemas (per-type mapping is looser than the dialog's).
-      const unknownKeys = Object.keys(changes).filter((k) => !isKnownProperty(k));
-      if (unknownKeys.length === Object.keys(changes).length) {
+      const changeKeys = Object.keys(changes);
+      if (changeKeys.length === 0) return err('changes is empty');
+      // updateComponent silently ignores properties it doesn't apply, so catch
+      // both typos and CROSS-TYPE mistakes (a real property from a different
+      // component type, e.g. `setpoint` on a pump) before reporting success.
+      // Validate against THIS component's editable schema when we can resolve
+      // it; fall back to the global union otherwise. GENERIC_EDIT_KEYS are the
+      // properties updateComponent applies to any component type, so they're
+      // valid even when absent from a given type's dialog schema.
+      const GENERIC_EDIT_KEYS = new Set([
+        'name', 'elevation', 'height', 'diameter', 'length', 'pressureRating', 'volume',
+      ]);
+      const editable = editablePropertyNames(comp);
+      const canValidateType = editable.size > 0;
+      const appliesToThis = (k: string) =>
+        GENERIC_EDIT_KEYS.has(k) ||
+        (canValidateType ? editable.has(k) : isKnownProperty(k));
+      const ignoredKeys = changeKeys.filter((k) => !appliesToThis(k));
+      if (ignoredKeys.length === changeKeys.length) {
+        const key = catalogKeyForComponent(comp);
+        const props = canValidateType
+          ? `Editable properties of ${comp.label ?? comp.id} (a "${key}"): ${[...editable].join(', ')}.`
+          : 'Property names come from the parts catalog.';
         return err(
-          `None of these are real property names: ${unknownKeys.join(', ')}. ` +
-            'Property names come from the parts catalog (use move_component for position).'
+          `None of these properties apply to ${comp.label ?? comp.id}: ${ignoredKeys.join(', ')}. ` +
+            `${props} (Use move_component for position.)`
         );
       }
       const ok = host.constructionManager.updateComponent(comp.id, changes);
       if (!ok) return err(`updateComponent failed for ${comp.id}`);
       host.refreshCostPanel();
+      const appliedKeys = changeKeys.filter((k) => appliesToThis(k));
       record(
-        `Jack edited ${comp.id}: set ${Object.entries(changes)
-          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+        `Jack edited ${comp.id}: set ${appliedKeys
+          .map((k) => `${k}=${JSON.stringify(changes[k])}`)
           .join(', ')}`
       );
       return {
         ok: true,
-        ...(unknownKeys.length > 0
+        ...(ignoredKeys.length > 0
           ? {
-              warning: `These property names don't exist in any schema and were IGNORED: ${unknownKeys.join(
+              warning: `These properties don't exist on a "${catalogKeyForComponent(
+                comp
+              )}" and were IGNORED: ${ignoredKeys.join(
                 ', '
               )}. Do not report them as changed.`,
             }

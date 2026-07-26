@@ -1,6 +1,6 @@
 import type { JackHost, PlantChange } from './jack-host';
 import { buildingFootprint } from './jack-tools-exec';
-import { buildCompactCatalog } from './jack-catalog';
+import { buildCompactCatalog, catalogKeyForComponent } from './jack-catalog';
 
 const barFromPa = (pa: number) => (pa / 1e5).toFixed(2);
 const cFromK = (k: number) => (k - 273.15).toFixed(1);
@@ -42,10 +42,15 @@ export function buildContextBlock(
   const comps = [...host.plantState.components.values()];
   lines.push(
     `plant: ${comps.length} components (positions are plan-view meters; ` +
-      'a component is inside a building when its position is within the footprint)'
+      'a component is inside a building when its position is within the footprint). ' +
+      'Type shown as [storedType→catalogKey] when they differ; use the catalogKey ' +
+      'for add_component/list_component_types (e.g. reactorVessel→reactor-vessel, ' +
+      'coreBarrel→core).'
   );
   for (const c of comps) {
-    let line = `  ${c.id} [${c.type}]`;
+    const catKey = catalogKeyForComponent(c as any);
+    const typeTag = catKey !== c.type ? `${c.type}→${catKey}` : c.type;
+    let line = `  ${c.id} [${typeTag}]`;
     if (c.label && c.label !== c.id) line += ` "${c.label}"`;
     line += ` @(${m(c.position.x)},${m(c.position.y)})`;
     if (c.elevation !== undefined && c.elevation !== 0) line += ` elev=${c.elevation}m`;
