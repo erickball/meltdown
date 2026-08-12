@@ -7,6 +7,13 @@ dist/
 .claude/
 .vscode/
 
+# Secrets / credentials (never commit)
+.env
+.env.*
+*.secret.local
+.secret.local
+functions/.secret.local
+
 # Temporary test/debug scripts
 *.cjs
 *.py
