@@ -16,7 +16,7 @@ functions/.secret.local
 
 # Temporary test/debug scripts
 *.cjs
-*.py
+temp-*.py
 *.cache
 nul
 temp-*.ts
@@ -42,6 +42,10 @@ scripts/*.json
 scripts/*.csv
 scripts/*.npz
 
-# Generated water property data in public folder
-public/saturation_dome_iapws.json
-public/uv_grid_data_v13_filtered.json
+# ...except the water property chain, which the simulation cannot start without.
+# The dome and v5 grid are inputs to build-uv-grid-v13.py; v13 is the input to
+# filter-uv-grid-v13.py. Intermediate grids v2-v12 stay ignored.
+!scripts/saturation_dome_iapws.json
+!scripts/uv_grid_data_v5.json
+!scripts/uv_grid_data_v13.json
+!scripts/uv_grid_data_v13_filtered.json
