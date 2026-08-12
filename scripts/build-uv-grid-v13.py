@@ -11,7 +11,7 @@ import numpy as np
 import json
 from iapws import IAPWS97
 from pathlib import Path
-from scipy.optimize import root
+from scipy.optimize import root, brentq
 from scipy.interpolate import LinearNDInterpolator, interp1d
 import time
 
@@ -103,7 +103,108 @@ def get_initial_guess(u, v, region):
         return 700.0, 30.0
 
 
-def find_TP_from_uv(u_target, v_target, region, max_attempts=8):
+R_WATER_KJ = 0.4615  # kJ/(kg*K); with v in m3/kg gives P in kPa
+
+
+def solve_vapor_uv(u_target, v_target):
+    """Inverse (u, v) -> (T, P) for superheated vapour, as two nested 1-D
+    monotone root finds instead of one 2-D solve.
+
+    The generic 2-D 'hybr' solve is badly conditioned out here: T ~ 700 and
+    P ~ 0.002 MPa differ by five orders of magnitude, and its first trust-region
+    step routinely drives P negative, where the objective returns a 1e10 wall
+    and the search stalls. That is what left ~50% of the dilute vapour targets
+    unsolved (v > 5 m3/kg), and a half-empty grid is what forced the runtime
+    interpolator onto its degenerate fallbacks.
+
+    Both directions here are monotone, so brentq cannot fail to converge:
+      inner: v(T, P) strictly decreases in P  -> P such that v = v_target
+      outer: u(T, P(T)) strictly increases in T -> T such that u = u_target
+    """
+    def P_for_T(T):
+        # Ideal gas is within ~0.1% out here, so it brackets tightly
+        P0 = R_WATER_KJ * T / v_target / 1000.0  # MPa
+        lo, hi = P0 * 0.5, P0 * 2.0
+        try:
+            f_lo = IAPWS97(T=T, P=lo).v - v_target
+            f_hi = IAPWS97(T=T, P=hi).v - v_target
+        except Exception:
+            return None
+        tries = 0
+        while f_lo * f_hi > 0 and tries < 12:
+            lo *= 0.5
+            hi *= 2.0
+            if lo < 1e-9 or hi > 100:
+                return None
+            try:
+                f_lo = IAPWS97(T=T, P=lo).v - v_target
+                f_hi = IAPWS97(T=T, P=hi).v - v_target
+            except Exception:
+                return None
+            tries += 1
+        if f_lo * f_hi > 0:
+            return None
+        try:
+            return brentq(lambda P: IAPWS97(T=T, P=P).v - v_target,
+                          lo, hi, xtol=1e-14, rtol=8.9e-16, maxiter=200)
+        except Exception:
+            return None
+
+    def u_err(T):
+        P = P_for_T(T)
+        if P is None:
+            return None
+        try:
+            return IAPWS97(T=T, P=P).u - u_target
+        except Exception:
+            return None
+
+    # Bracket T. Seed from the ideal-gas caloric inversion and expand.
+    T_seed = min(max(273.16 + (u_target - 2375.0) / 1.5, 280.0), 1080.0)
+    T_lo = T_hi = None
+    f_lo = f_hi = None
+    for dT in [0, 25, 50, 100, 200, 400, 800]:
+        for T in ({T_seed - dT, T_seed + dT} if dT else {T_seed}):
+            if not (273.17 <= T <= 1095):
+                continue
+            e = u_err(T)
+            if e is None:
+                continue
+            if e < 0 and (T_lo is None or T > T_lo):
+                T_lo, f_lo = T, e
+            if e > 0 and (T_hi is None or T < T_hi):
+                T_hi, f_hi = T, e
+        if T_lo is not None and T_hi is not None and T_lo < T_hi:
+            break
+    if T_lo is None or T_hi is None or T_lo >= T_hi:
+        return None
+
+    try:
+        T = brentq(lambda t: (u_err(t) if u_err(t) is not None else 1e10),
+                   T_lo, T_hi, xtol=1e-10, rtol=8.9e-16, maxiter=200)
+    except Exception:
+        return None
+
+    P = P_for_T(T)
+    if P is None:
+        return None
+    try:
+        w = IAPWS97(T=T, P=P)
+    except Exception:
+        return None
+    if w.u is None or w.v is None:
+        return None
+    if abs(w.u - u_target) < 0.1 and abs(w.v - v_target) / v_target < 1e-5:
+        return {'T_K': float(T), 'T_C': float(T - 273.15), 'P_MPa': float(P)}
+    return None
+
+
+def find_TP_from_uv(u_target, v_target, region, max_attempts=11):
+    if region == 'vapor':
+        got = solve_vapor_uv(u_target, v_target)
+        if got is not None:
+            return got
+
     def objective(x):
         T, P = x
         if T < 273.16 or T > 1100 or P < 1e-6 or P > 100:
@@ -130,7 +231,22 @@ def find_TP_from_uv(u_target, v_target, region, max_attempts=8):
             (T_init - 20, P_init),
         ]
     elif region == 'vapor':
+        # Ideal-gas seed. Superheated steam at these volumes is very nearly
+        # ideal (Z within ~0.1% below a bar), so P = R*T/v and a caloric
+        # inversion for T give a guess that is already almost the answer.
+        # Without it the fixed P guesses (0.1 - 1 MPa) are 5-50x too high at
+        # v > 10 m3/kg and 'hybr' walks off; that is what left a sparse patch
+        # in the grid around v ~ 15-30 m3/kg, u ~ 2.9-3.15 MJ/kg, where the
+        # runtime interpolator then had too few points to fit and returned a
+        # locally CONSTANT surface.
+        R_WATER = 0.4615  # kJ/(kg*K) -> gives P in MPa with v in m3/kg
+        T_ideal = 273.16 + (u_target - 2375.0) / 1.5   # u in kJ/kg, cv ~1.5 kJ/kg-K
+        T_ideal = min(max(T_ideal, 280.0), 1090.0)
+        P_ideal = R_WATER * T_ideal / v_target
         guesses += [
+            (T_ideal, P_ideal),
+            (T_ideal, P_ideal * 1.05),
+            (T_init, P_ideal),
             (T_init + 50, P_init),
             (T_init - 50, P_init),
             (T_init, P_init * 2),
@@ -244,7 +360,12 @@ for i in range(8):
 print("\nSuperheated vapor targets:")
 n_before = len(targets)
 
-for v in np.logspace(np.log10(v_crit), np.log10(100), 50):
+# v runs out to 210 m3/kg: the saturated-vapour line itself reaches
+# v_g = 206 m3/kg at the triple point, so stopping the grid at 100 left the
+# most dilute half-decade of the vapour region with no data at all, and the
+# runtime had to seam from grid to ideal gas in the middle of it (that seam
+# was a ~12% jump in P and ~18 K in T around v ~ 200).
+for v in np.logspace(np.log10(v_crit), np.log10(210), 56):
     u_g_min = u_g_from_v(v)
     if np.isnan(u_g_min):
         u_g_min = 2400

@@ -214,6 +214,13 @@ export interface HeatExchangerComponent extends ComponentBase {
   shellPressureRating?: number;  // Shell-side design pressure (bar)
   plenumLength?: number;         // Length of tube-side plenums (semi-ellipsoid) in meters
   tubeOD?: number;               // Tube outer diameter in meters
+  // Initial non-condensible fill, partial pressures in bar. `initialNcg` fills
+  // the TUBE side, `shellInitialNcg` the SHELL side - a gas-cooled plant can
+  // put its coolant on either side (helium in the tubes with water in the
+  // shell, as in the HTGR preset, or water in the tubes with helium in the
+  // shell, as in a Xe-100-style helical once-through SG).
+  initialNcg?: { [species: string]: number };
+  shellInitialNcg?: { [species: string]: number };
 }
 
 export interface ExtractionPort {

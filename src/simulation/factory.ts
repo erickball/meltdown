@@ -2626,11 +2626,16 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
   const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
   const quality = hx.shellFluid?.quality || hx.secondaryFluid?.quality || 0.5;
+  // Gas-cooled primaries can sit on EITHER side of the bundle. `shellInitialNcg`
+  // (partial pressures in bar) fills the shell the same way `initialNcg` fills
+  // the tubes, so a helical once-through SG can run helium outside the tubes
+  // with water/steam inside them.
+  const shellNcg: NcgPartialPressures | undefined = hx.shellInitialNcg;
 
   return {
     id: `${component.id}-shell`,
     label: `${component.label || 'HX'} Shell`,
-    fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume),
+    fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume, shellNcg),
     volume: shellVolume,
     hydraulicDiameter: 0.1,
     flowArea: 5,
