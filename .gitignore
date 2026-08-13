@@ -49,3 +49,4 @@ scripts/*.npz
 !scripts/uv_grid_data_v5.json
 !scripts/uv_grid_data_v13.json
 !scripts/uv_grid_data_v13_filtered.json
+.firebase/hosting.ZGlzdA.cache
