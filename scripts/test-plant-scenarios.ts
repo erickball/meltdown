@@ -185,8 +185,19 @@ function h2VesselPlant(h2Bar: number, airBar: number, tempK: number, steamFill: 
 }
 
 test('Hydrogen deflagration: hot flammable mixture burns, spikes pressure, conserves books', () => {
-  // ~12% H2 in air at 620 K: kinetics self-ignite within a couple of minutes
-  const sim = buildSim(h2VesselPlant(0.14, 1.0, 620, 0), []);
+  // ~12% H2 in air, above the second explosion limit so it autoignites.
+  //
+  // This case used to run at 620 K, on the premise that "kinetics self-ignite
+  // within a couple of minutes". They don't, and shouldn't: hydrogen's
+  // autoignition temperature in air is ~773-853 K, and the chain-branching
+  // criterion now in HydrogenCombustionRateOperator puts the crossover at
+  // 854 K in dry air at 1 atm (measured value) - rising to ~950 K for the ~20%
+  // steam this vessel carries. A 620 K mixture is genuinely inert until
+  // something lights it, which is precisely why containments are fitted with
+  // igniters and recombiners. Ignition sources are modelled separately (hot
+  // surfaces, the running-pump placeholder); this test is about what a real
+  // deflagration DOES once started, so run it over the threshold.
+  const sim = buildSim(h2VesselPlant(0.14, 1.0, 1020, 0), []);
   const node0 = sim.state.flowNodes.get('ves')!;
   const h2_0 = node0.fluid.ncg!.H2;
   const o2_0 = node0.fluid.ncg!.O2;
@@ -194,9 +205,13 @@ test('Hydrogen deflagration: hot flammable mixture burns, spikes pressure, conse
   const p0 = node0.fluid.pressure;
   assert(h2_0 > 50, `test setup should charge a real H2 inventory, got ${h2_0.toFixed(1)} mol`);
 
+  const t0 = node0.fluid.temperature;
   let maxP = p0;
+  let maxT = t0;
   run(sim, 240, 0.05, s => {
-    maxP = Math.max(maxP, s.flowNodes.get('ves')!.fluid.pressure);
+    const n = s.flowNodes.get('ves')!;
+    maxP = Math.max(maxP, n.fluid.pressure);
+    maxT = Math.max(maxT, n.fluid.temperature);
   });
   const node1 = sim.state.flowNodes.get('ves')!;
 
@@ -211,9 +226,17 @@ test('Hydrogen deflagration: hot flammable mixture burns, spikes pressure, conse
   const massGain = node1.fluid.mass - m0;
   assertBetween(massGain / (h2Burned * 0.018), 0.95, 1.05, 'burned H2 should appear as product water');
 
-  // Deflagration pressure spike: well above initial, well below detonation
-  // scale (AICC for this mixture is roughly 4-5x initial absolute pressure)
-  assert(maxP > 2 * p0, `burn should spike pressure (peak ${(maxP / 1e5).toFixed(2)} vs initial ${(p0 / 1e5).toFixed(2)} bar)`);
+  // Deflagration signature. Temperature rise is the direct measure and it is
+  // unambiguous: ~+840 K here, versus a fraction of a kelvin for the lean case
+  // below. Pressure rise is asserted too but at a lower ratio than the 2x this
+  // used when the case started at 620 K - the SAME energy release rides on a
+  // higher base temperature, so P/P0 is inherently smaller from a hot start
+  // (measured 1.73x from 1020 K, against roughly 2.4x from 620 K). Nothing
+  // about the burn got weaker; the yardstick moved.
+  assert(maxT - t0 > 500,
+    `deflagration should spike temperature (peak ${maxT.toFixed(0)} K vs initial ${t0.toFixed(0)} K)`);
+  assert(maxP > 1.5 * p0,
+    `burn should spike pressure (peak ${(maxP / 1e5).toFixed(2)} vs initial ${(p0 / 1e5).toFixed(2)} bar)`);
   assertStateSane(sim.state);
 });
 
@@ -227,16 +250,14 @@ test('Hydrogen combustion respects flammability limits (lean and steam-inerted)'
   // mixture at 620 K still oxidises slowly, and asserting a fixed inventory
   // bound measures that slow rate rather than the runaway.
   //
-  // The bound used to be >98% remaining, which only held because the vessel
-  // initialized 22 K COLD: it was declared at 620 K but createFluidState's
-  // (T,P) -> (m,U) conversion for a gas+steam node derived 597.5 K on the
-  // first evaluation, and Arrhenius kinetics are exponential in T. With the
-  // round-trip fixed (see scripts/probe-ncg-roundtrip.ts) the node holds
-  // 620 K and burns 4.0% in 120 s instead of 1.9%.
+  // With the chain-branching criterion this is now inert for a reason that is
+  // not about the LFL at all: 620 K is far below the second explosion limit
+  // (854 K dry, ~950 K at this vessel's steam fraction), so every H atom is
+  // quenched by H + O2 + M -> HO2 + M in microseconds and the radical pool
+  // cannot grow. Zero burn, on any timescale - not "slow".
   //
-  // So assert the thing the test is actually for: the inventory stays largely
-  // intact AND there is no deflagration pressure spike (measured: +0.9% over
-  // 120 s, purely thermal, versus >100% for the real burn).
+  // Assert both the inventory and the absence of a pressure spike, so the test
+  // distinguishes "did not deflagrate" from "deflagrated slowly".
   const lean = buildSim(h2VesselPlant(0.02, 1.0, 620, 0), []);
   const leanH2_0 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
   const leanP0 = lean.state.flowNodes.get('ves')!.fluid.pressure;
@@ -245,8 +266,8 @@ test('Hydrogen combustion respects flammability limits (lean and steam-inerted)'
     leanMaxP = Math.max(leanMaxP, s.flowNodes.get('ves')!.fluid.pressure);
   });
   const leanH2_1 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
-  assert(leanH2_1 > 0.90 * leanH2_0,
-    `lean mixture must not deflagrate (${leanH2_0.toFixed(1)} -> ${leanH2_1.toFixed(1)} mol)`);
+  assert(leanH2_1 > 0.99 * leanH2_0,
+    `lean mixture must not burn (${leanH2_0.toFixed(1)} -> ${leanH2_1.toFixed(1)} mol)`);
   assert(leanMaxP < 1.2 * leanP0,
     `lean mixture must not spike pressure (peak ${(leanMaxP / 1e5).toFixed(3)} vs ` +
     `initial ${(leanP0 / 1e5).toFixed(3)} bar)`);
