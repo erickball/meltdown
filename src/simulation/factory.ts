@@ -24,6 +24,7 @@ import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattic
 import { computeReactivityComponents } from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { resolveMaterial } from './materials';
+import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -871,9 +872,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         // Kernels are dispersed in the matrix: the conduction path is the
         // pebble interior, r/(5k) average-to-surface for a heat-generating
         // sphere. Pebbles run nearly isothermal - the walk-away-safe part.
-        // No Zr in a pebble core, so no cladding-oxidation tracking
-        // (graphite air-ingress oxidation is a separate, unmodeled
-        // phenomenon).
+        // No Zr in a pebble core, so no cladding-oxidation tracking - but
+        // the matrix graphite itself burns in air and gasifies in steam
+        // (GraphiteOxidationRateOperator). A pebble is the reacting piece,
+        // so its own radius sets the in-pore diffusion length.
+        const matrixNode = state.thermalNodes.get(`${id}-clad`);
+        if (matrixNode) {
+          matrixNode.graphiteOxidation = {
+            burnoff: 0,
+            initialCarbonMass: matrixNode.mass,
+            grade: 'A3-3',
+            externalArea: pebbleGeo!.bedSurfaceArea,
+            // V/A of a sphere = d/6
+            characteristicLength: pebbleGeo!.pebbleDiameter / 6,
+            associatedGasNode: coolantFlowNodeId,
+          };
+        }
         const hKernelToSurface = (5 * 25) / (pebbleGeo!.pebbleDiameter / 2);
         state.thermalConnections.push({
           id: `conduction-${id}-fuel-clad`,
@@ -1273,6 +1287,10 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   //   'all'            - + all tanks, pipes, pumps, valves
   // Components with dedicated metal nodes (HX, crossVessel, cores) excluded.
   createWallThermalNodes(plantState, state);
+
+  // Graphite reflectors. Runs after the wall pass because the reflector
+  // radiates to the vessel wall node, which does not exist until then.
+  createReflectorThermalNodes(plantState, state);
 
   // MCCI pass: ex-vessel debris bed + basemat for cores whose vessel stands
   // inside a building. Runs after ALL flow nodes exist (the containment may
@@ -2198,6 +2216,50 @@ export function corePebbleGeometry(component: PlantComponent) {
 }
 
 /**
+ * Graphite reflector geometry: the shell between the active core cylinder
+ * and a cylinder grown by `reflectorThickness` in every direction, so one
+ * number covers the side, top and bottom reflectors together.
+ *
+ * The reflector is not just neutronics. It is a large graphite thermal mass
+ * (hundreds of tonnes on a pebble bed - comparable to the fuel itself) and
+ * it is the conduction path that carries decay heat from the core out to
+ * the vessel wall when all forced cooling is gone. Without it the core has
+ * nowhere to send heat but the coolant.
+ */
+export function coreReflectorGeometry(component: PlantComponent) {
+  const vessel = component as any;
+  const thickness = vessel.reflectorThickness ?? 0;
+  const coreDiameter = vessel.innerDiameter ?? 3.1;
+  const activeHeight = vessel.activeFuelHeight ?? vessel.height ?? 4; // m
+  const coreRadius = coreDiameter / 2;
+  const outerRadius = coreRadius + thickness;
+  const outerHeight = activeHeight + 2 * thickness;
+
+  const volume = Math.max(0,
+    Math.PI * outerRadius * outerRadius * outerHeight -
+    Math.PI * coreRadius * coreRadius * activeHeight);
+
+  // Inner face: the cylindrical side the bed touches, plus the top and
+  // bottom faces. Outer face: the corresponding surfaces of the grown
+  // cylinder, which is what radiates to the vessel wall.
+  const innerArea = 2 * Math.PI * coreRadius * activeHeight +
+    2 * Math.PI * coreRadius * coreRadius;
+  const outerArea = 2 * Math.PI * outerRadius * outerHeight +
+    2 * Math.PI * outerRadius * outerRadius;
+
+  // Volume-mean radius of the annulus - where the lumped node's temperature
+  // effectively sits, and therefore the endpoint of the inner-half
+  // conduction path from the core-facing surface.
+  const midRadius = Math.sqrt((coreRadius * coreRadius + outerRadius * outerRadius) / 2);
+
+  return {
+    thickness, coreRadius, outerRadius, activeHeight, outerHeight,
+    volume, mass: volume * NBG_18.density,
+    innerArea, outerArea, midRadius,
+  };
+}
+
+/**
  * Create thermal nodes for a reactor core. Fuel and cladding masses, areas,
  * and conduction lengths all come from the rod geometry rather than fixed
  * PWR constants, so small cores carry proportionally small thermal inertia.
@@ -2233,8 +2295,15 @@ function createThermalNodesFromCore(component: PlantComponent): ThermalNode[] {
       label: `${component.label || 'Core'} Pebble Graphite`,
       temperature: vessel.fluid?.temperature ?? 700,
       mass: geo.graphiteMass,
-      specificHeat: 1000,          // graphite, averaged over 600-1600 K
-      thermalConductivity: 25,
+      // Graphite cp is strongly temperature-dependent (710 J/kg-K cold,
+      // ~1760 at 1000 K, ~2020 at 2000 K). The pebble matrix IS the passive
+      // heat sink that makes a bed walk-away safe, so it uses the same
+      // correlation as the reflector rather than a flat average; the
+      // constant below is only a fallback for consumers that ignore the
+      // model.
+      specificHeat: 1700,
+      specificHeatModel: 'graphite',
+      thermalConductivity: A3_3.k300,
       characteristicLength: geo.pebbleDiameter / 2,
       surfaceArea: geo.bedSurfaceArea,
       heatGeneration: 0,
@@ -2951,6 +3020,195 @@ function wallNodePolicy(): 'none' | 'rpv-bui' | 'thick' | 'all' {
   // vessel creep reads real metal. The wider tiers ('thick', 'all') tripled
   // the node count for no visible physics change in the same transients.
   return 'rpv-bui';
+}
+
+/**
+ * Graphite reflector thermal nodes and the passive heat path they carry.
+ *
+ * The reflector is not just a neutron economy device. On a pebble bed it is
+ * a few hundred tonnes of graphite - comparable to the fuel - and it is the
+ * only route decay heat has out of the core once the coolant stops moving.
+ * The chain wired here is
+ *
+ *   fuel -> pebble graphite -> [packed bed: conduction + T^3 radiation]
+ *        -> reflector -> [gray-body radiation across the downcomer]
+ *        -> vessel wall -> (existing) convection to containment
+ *
+ * which is the mechanism behind gas-reactor walk-away safety. Every link is
+ * temperature-dependent and evaluated live, so the path strengthens by
+ * itself as the core heats up - nothing is switched on.
+ *
+ * Runs as a post-pass so the vessel wall node it radiates to already exists.
+ */
+function createReflectorThermalNodes(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    const coreComp = component as any;
+    const hasFuel = coreComp.fuelRodCount > 0;
+    const isCore = hasFuel && (
+      component.type === 'coreBarrel' ||
+      component.type === 'reactorVessel' ||
+      component.type === 'vessel');
+    if (!isCore) continue;
+
+    const thickness = coreComp.reflectorThickness ?? 0;
+    if (thickness <= 0) continue;
+
+    const reflectorId = `${id}-reflector`;
+    if (state.thermalNodes.has(reflectorId)) continue;
+
+    // Same coolant resolution as the core's own convection wiring: a core
+    // barrel is its own coolant volume, a legacy reactor vessel points at
+    // its inside-barrel node.
+    const coolantFlowNodeId = component.type === 'reactorVessel'
+      ? ((component as any).insideBarrelId || id)
+      : id;
+    const coolantNode = state.flowNodes.get(coolantFlowNodeId);
+
+    const refGeo = coreReflectorGeometry(component);
+    const isPebbleBed = coreComp.fuelForm === 'pebbles';
+    const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5;
+
+    state.thermalNodes.set(reflectorId, {
+      id: reflectorId,
+      label: `${component.label || 'Core'} Reflector`,
+      temperature: coolantNode?.fluid.temperature ?? 700,
+      mass: refGeo.mass,
+      // Graphite cp runs 710 -> 2020 J/kg-K across the range this node
+      // actually visits, so it uses the temperature-dependent model; the
+      // constant is only a fallback for consumers that ignore the model.
+      specificHeat: 1700,
+      specificHeatModel: 'graphite',
+      thermalConductivity: NBG_18.k300,
+      characteristicLength: refGeo.thickness,
+      surfaceArea: refGeo.innerArea,
+      heatGeneration: 0,
+      // Graphite does not melt - it sublimes near 3900 K and holds its
+      // strength well past steel's limit. Oxidation, not temperature, is
+      // what destroys a reflector.
+      maxTemperature: 3000,
+      // The reflector burns too, but as a thick block rather than a sphere:
+      // its half-thickness is the diffusion length, so it stays
+      // reaction-controlled to far higher temperature than the pebbles and
+      // is attacked essentially only on its exposed faces.
+      graphiteOxidation: {
+        burnoff: 0,
+        initialCarbonMass: refGeo.mass,
+        grade: 'NBG-18',
+        externalArea: refGeo.innerArea,
+        characteristicLength: refGeo.thickness / 2,
+        associatedGasNode: coolantFlowNodeId,
+      },
+    });
+
+    if (isPebbleBed) {
+      const pebbleGeo = corePebbleGeometry(component);
+      // Core-to-reflector conduction across the packed bed. The shape factor
+      // 8*pi*H is the average-to-surface conductance of a uniformly heated
+      // cylinder (T_avg - T_surf = Q/(8*pi*k*H)); the series term is the
+      // reflector's own inner half, from its face to its mean radius.
+      state.thermalConnections.push({
+        id: `conduction-${id}-bed-reflector`,
+        fromNodeId: `${id}-clad`,
+        toNodeId: reflectorId,
+        conductance: 0, // the bed IS the path - no parallel solid link
+        packedBed: {
+          gasNodeId: coolantFlowNodeId,
+          voidFraction: 0.39,          // random close packing of spheres
+          particleDiameter: pebbleGeo.pebbleDiameter,
+          emissivity: A3_3.emissivity,
+          solidK300: A3_3.k300,
+          shapeFactor: 8 * Math.PI * refGeo.activeHeight,
+          seriesShapeFactor:
+            (2 * Math.PI * refGeo.activeHeight) /
+            Math.log(refGeo.midRadius / refGeo.coreRadius),
+          seriesK300: NBG_18.k300,
+        },
+      });
+    }
+
+    // Inner face sees the core coolant directly.
+    state.convectionConnections.push({
+      id: `convection-${reflectorId}-inner`,
+      thermalNodeId: reflectorId,
+      flowNodeId: coolantFlowNodeId,
+      surfaceArea: refGeo.innerArea,
+      characteristicDiameter: 2 * refGeo.coreRadius,
+      tubeBottomElevation: coreBottomElevation,
+      tubeHeight: refGeo.activeHeight,
+    });
+
+    // Outer face: convection to whatever fills the downcomer, plus
+    // gray-body radiation to the vessel wall. The radiation term is the one
+    // that keeps working after the blowers stop.
+    const outerId = (component as any).containedBy;
+    const outerNode = outerId ? state.flowNodes.get(outerId) : undefined;
+    if (!outerNode) {
+      console.warn(
+        `[Factory] Core ${id}: reflector has no containing flow node ` +
+        `(containedBy='${outerId}') - its outer face is adiabatic, so decay ` +
+        `heat has no route to the vessel wall.`
+      );
+      continue;
+    }
+
+    state.convectionConnections.push({
+      id: `convection-${reflectorId}-outer`,
+      thermalNodeId: reflectorId,
+      flowNodeId: outerId,
+      surfaceArea: refGeo.outerArea,
+      characteristicDiameter: 2 * refGeo.outerRadius,
+    });
+
+    const wallId = `${outerId}-wall`;
+    if (!state.thermalNodes.has(wallId)) {
+      console.warn(
+        `[Factory] Core ${id}: reflector has no vessel wall node ('${wallId}') to ` +
+        `radiate to - the passive decay-heat path stops at the reflector. ` +
+        `Check the wall-node policy.`
+      );
+      continue;
+    }
+
+    // Concentric gray surfaces: A_in / (1/e_in + (r_in/r_out)(1/e_out - 1)).
+    const vesselComp = plantState.components.get(outerId) as any;
+    const vesselRadius = (vesselComp?.innerDiameter ?? 2.2 * refGeo.outerRadius) / 2;
+
+    // The reflector occupies the annulus between the active core and the
+    // containing vessel, so it has to fit there. Before this node existed
+    // reflectorThickness was pure neutronics with no geometric consequence,
+    // so a plant can carry a thickness that does not physically fit.
+    if (refGeo.outerRadius > vesselRadius) {
+      console.error(
+        `[Factory] GEOMETRY CONFLICT: core '${id}' has a ${refGeo.thickness.toFixed(2)} m ` +
+        `reflector around a ${(2 * refGeo.coreRadius).toFixed(2)} m core, giving an outer ` +
+        `diameter of ${(2 * refGeo.outerRadius).toFixed(2)} m - but it sits inside ` +
+        `'${outerId}', whose inner diameter is only ${(2 * vesselRadius).toFixed(2)} m. ` +
+        `The reflector does not fit. Its mass and heat path are still built as specified, ` +
+        `so the vessel now contains more graphite than it has room for, and the ` +
+        `reflector-to-wall radiation area is wrong. Fix by widening '${outerId}' to at ` +
+        `least ${(2 * refGeo.outerRadius).toFixed(2)} m inner diameter, shrinking the core, ` +
+        `or thinning the reflector.`
+      );
+    }
+    const eWall = 0.8; // oxidised steel
+    const exchangeArea = refGeo.outerArea / (
+      1 / NBG_18.emissivity +
+      (refGeo.outerRadius / vesselRadius) * (1 / eWall - 1)
+    );
+    state.thermalConnections.push({
+      id: `radiation-${reflectorId}-wall`,
+      fromNodeId: reflectorId,
+      toNodeId: wallId,
+      conductance: 0, // gas in between - radiation only
+      radiationCoeff: exchangeArea,
+    });
+
+    console.log(
+      `[Factory] Reflector '${reflectorId}': ${(refGeo.mass / 1000).toFixed(1)} t of ` +
+      `${NBG_18.name} graphite, ${refGeo.thickness.toFixed(2)} m thick, ` +
+      `radiating ${exchangeArea.toFixed(1)} m2 (effective) to ${wallId}`
+    );
+  }
 }
 
 function createWallThermalNodes(plantState: PlantState, state: SimulationState): void {

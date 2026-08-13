@@ -37,6 +37,13 @@ import {
 } from '../gas-properties';
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
 import {
+  graphiteSpecificHeat,
+  graphiteThermalConductivity,
+  bedEffectiveConductivity,
+  SIGMA_SB,
+  NBG_18,
+} from '../graphite';
+import {
   calculateSeparation,
   calculateLiquidLevelWithObstructions,
   findCheckValveForConnection,
@@ -159,9 +166,16 @@ export function fuelOxideMass(node: {
 
 export function nodeHeatCapacity(node: {
   mass: number; specificHeat: number; temperature: number;
+  specificHeatModel?: 'graphite';
   meltingPoint?: number; latentHeatFusion?: number;
 }): number {
-  let C = node.mass * node.specificHeat;
+  // A named cp model replaces the constant: graphite's cp nearly triples
+  // between cold and 2000 K, and a lumped graphite node exists precisely
+  // for its heat capacity.
+  const cp = node.specificHeatModel === 'graphite'
+    ? graphiteSpecificHeat(node.temperature)
+    : node.specificHeat;
+  let C = node.mass * cp;
   if (node.meltingPoint && node.latentHeatFusion) {
     const z = (node.temperature - node.meltingPoint) / MELT_WIDTH;
     const s = 1 / (1 + Math.exp(-1.7 * z));
@@ -187,8 +201,69 @@ export class ConductionRateOperator implements RateOperator {
 
       if (!node1 || !node2) continue;
 
+      // Solid conduction, plus (optionally) a packed bed whose effective
+      // conductivity is recomputed from the live gas and temperature, plus
+      // gray-body radiation across a gap. All three are parallel paths
+      // between the same pair of nodes and simply add.
+      let conductance = conn.conductance;
+
+      if (conn.packedBed) {
+        const bed = conn.packedBed;
+        const gasNode = state.flowNodes.get(bed.gasNodeId);
+        // A packed bed's conduction depends on what fills its voids, so
+        // there is no defensible default here. Guessing air would quietly
+        // set the wrong conductivity on the one heat path that decides
+        // whether a gas reactor survives a loss of flow.
+        if (!gasNode) {
+          throw new Error(
+            `[Conduction] Packed-bed connection '${conn.id}' names gas node ` +
+            `'${bed.gasNodeId}', which does not exist. The bed's effective ` +
+            `conductivity depends on the gas filling its voids and cannot be ` +
+            `evaluated without it.`
+          );
+        }
+        if (!gasNode.fluid.ncg) {
+          throw new Error(
+            `[Conduction] Packed-bed connection '${conn.id}': flow node ` +
+            `'${bed.gasNodeId}' carries no non-condensable gas inventory, so the ` +
+            `bed's void conductivity is undefined. A packed bed is only wired for ` +
+            `gas-cooled cores - a water-filled bed would need the water ` +
+            `conductivity path instead.`
+          );
+        }
+        // Mean of the two node temperatures drives the bed's radiative and
+        // solid conductivities - the bed physically spans between them.
+        const T_bed = 0.5 * (node1.temperature + node2.temperature);
+        const kGas = mixtureThermalConductivity(gasNode.fluid.ncg, T_bed);
+        const kSolid = graphiteThermalConductivity(T_bed, {
+          ...NBG_18, k300: bed.solidK300,
+        });
+        const kEff = bedEffectiveConductivity(
+          kGas, kSolid, bed.voidFraction, T_bed,
+          bed.particleDiameter, bed.emissivity,
+        );
+        // Bed resistance in series with the receiving structure's own
+        // conduction path, if one was supplied.
+        const seriesR = bed.seriesShapeFactor
+          ? 1 / (graphiteThermalConductivity(T_bed, {
+              ...NBG_18, k300: bed.seriesK300 ?? NBG_18.k300,
+            }) * bed.seriesShapeFactor)
+          : 0;
+        conductance += 1 / (1 / (kEff * bed.shapeFactor) + seriesR);
+      }
+
+      if (conn.radiationCoeff) {
+        // Linearise onto the same conductance so the sign and the
+        // accumulation below stay shared. T1^4-T2^4 = (T1-T2)(T1+T2)(T1^2+T2^2),
+        // so the (T1-T2) factor divides out exactly - no division by dT, and
+        // no singularity when the two nodes are at the same temperature.
+        const T1 = node1.temperature, T2 = node2.temperature;
+        conductance += SIGMA_SB * conn.radiationCoeff *
+          (T1 + T2) * (T1 * T1 + T2 * T2);
+      }
+
       // Heat flow from node1 to node2 (W)
-      const Q = conn.conductance * (node1.temperature - node2.temperature);
+      const Q = conductance * (node1.temperature - node2.temperature);
 
       // Temperature rate: dT/dt = Q / C_eff (latent-heat plateau included)
       const dT1 = -Q / nodeHeatCapacity(node1);

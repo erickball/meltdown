@@ -10,6 +10,33 @@
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import { computeReactivityComponents } from './operators/neutronics.js';
+import {
+  graphiteSpecificHeat,
+  bedStagnantConductivity,
+  bedRadiativeConductivity,
+  bedEffectiveConductivity,
+  intrinsicOxidationRateConstant,
+  internalSurfacePerVolume,
+  characteristicPoreRadius,
+  thieleEffectiveness,
+  burnoffSurfaceFactor,
+  reactionHeatPerCarbon,
+  coFraction,
+  oxidantPerCarbon,
+  oxidantInhibition,
+  oxidantRateConstant,
+  NBG_18,
+  A3_3,
+} from './graphite.js';
+import { cloneSimulationState } from './solver.js';
+import { coreReflectorGeometry } from './factory.js';
+import {
+  binaryDiffusivity,
+  diffusivityInMixture,
+  knudsenDiffusivity,
+  effectivePoreDiffusivity,
+  createGasComposition,
+} from './gas-properties.js';
 import type { NeutronicsState } from './types.js';
 
 // Test result tracking
@@ -365,6 +392,383 @@ test('water lattices unchanged by solid-moderation extension (regression)', () =
     Math.abs(d.fuelTempCoeff - ref.fuelTempCoeff) < 1e-15,
     'zero solid moderator / zero reflector must be identical to the water-only path');
 });
+
+// ============================================================================
+// Graphite properties and packed-bed conduction
+// ============================================================================
+category('Graphite');
+
+test('graphite cp tracks the Butland-Maddison anchors from 300 to 2000 K', () => {
+  // The correlation is the reason the reflector node carries a cp MODEL and
+  // not a constant: it nearly triples across the range an accident visits.
+  const c300 = graphiteSpecificHeat(300);
+  const c1000 = graphiteSpecificHeat(1000);
+  const c2000 = graphiteSpecificHeat(2000);
+  assert(Math.abs(c300 - 712) < 15, `cp(300 K) should be ~712 J/kg-K, got ${c300.toFixed(0)}`);
+  assert(Math.abs(c1000 - 1759) < 25, `cp(1000 K) should be ~1759 J/kg-K, got ${c1000.toFixed(0)}`);
+  assert(Math.abs(c2000 - 2021) < 30, `cp(2000 K) should be ~2021 J/kg-K, got ${c2000.toFixed(0)}`);
+  assert(c300 < c1000 && c1000 < c2000, 'graphite cp must rise monotonically over this range');
+});
+
+test('packed bed conducts far worse than its own particles (point contacts)', () => {
+  // Helium-filled pebble bed at 1000 K. Solid graphite is ~40 W/m-K but the
+  // spheres only touch at points, so the stagnant bed lands near 1-4 W/m-K.
+  const kHe = 0.3;
+  const kStag = bedStagnantConductivity(kHe, 40, 0.39);
+  assert(kStag > 1 && kStag < 5,
+    `stagnant He pebble bed should be ~1-5 W/m-K, got ${kStag.toFixed(2)}`);
+  assert(kStag < 40 / 5,
+    `bed conductivity (${kStag.toFixed(2)}) must be far below the solid's 40 W/m-K`);
+});
+
+test('bed radiation takes over as it heats: k_eff strengthens with T^3', () => {
+  const k = (T: number) => bedEffectiveConductivity(0.3, 40, 0.39, T, 0.06, 0.85);
+  const cold = k(600), hot = k(1200);
+  // Doubling T multiplies the radiative term by 8, so the total climbs
+  // steeply - this is the physics that makes a pebble bed walk-away safe.
+  assert(hot > 3 * cold,
+    `k_eff should climb steeply with temperature: 600 K -> ${cold.toFixed(2)}, 1200 K -> ${hot.toFixed(2)} W/m-K`);
+  assert(hot > 8 && hot < 30,
+    `pebble bed at 1200 K should be ~10-20 W/m-K, got ${hot.toFixed(2)}`);
+});
+
+test('Zehner-Schlunder refuses a bed whose gas out-conducts its particles', () => {
+  // The closed form goes singular then negative below kappa = B. Silently
+  // returning a negative conductivity would drive heat the wrong way, so it
+  // must throw rather than produce a plausible-looking number.
+  let threw = false;
+  try {
+    bedStagnantConductivity(30, 25, 0.39); // kappa < 1, far below B
+  } catch (e) {
+    threw = true;
+    assert(/Zehner-Schlunder/.test(String(e)), 'error should name the correlation');
+  }
+  assert(threw, 'out-of-range kappa must throw, not return a fallback');
+});
+
+test('bed with no gas still conducts by radiation alone', () => {
+  // Depressurisation must degrade the bed continuously onto the radiative
+  // limit, not step or divide by zero.
+  const kRad = bedRadiativeConductivity(1200, 0.06, 0.85);
+  const kThin = bedEffectiveConductivity(1e-4, 40, 0.39, 1200, 0.06, 0.85);
+  assert(kRad > 5, `radiative conductivity at 1200 K should be ~10 W/m-K, got ${kRad.toFixed(2)}`);
+  assert(Number.isFinite(kThin) && kThin > kRad * 0.95,
+    `a gas-free bed must fall back onto radiation smoothly, got ${kThin.toFixed(3)}`);
+});
+
+test('reflector geometry: annulus mass and containment of the core', () => {
+  // 3.1 m core, 9 m tall, 0.8 m reflector - the HTGR preset's proportions.
+  const geo = coreReflectorGeometry({
+    id: 'c', type: 'coreBarrel', innerDiameter: 3.1, activeFuelHeight: 9,
+    reflectorThickness: 0.8,
+  } as any);
+  assert(Math.abs(geo.mass / 1000 - 214.6) < 2,
+    `reflector should be ~215 t of graphite, got ${(geo.mass / 1000).toFixed(1)} t`);
+  assert(geo.outerRadius > geo.coreRadius && geo.midRadius > geo.coreRadius &&
+    geo.midRadius < geo.outerRadius,
+    'mean radius must lie inside the annulus');
+  // Top and bottom reflectors are included, so the volume must exceed a
+  // bare side annulus.
+  const sideOnly = Math.PI * (geo.outerRadius ** 2 - geo.coreRadius ** 2) * 9;
+  assert(geo.volume > sideOnly,
+    'reflector volume must include the axial top/bottom slabs, not just the side');
+});
+
+test('zero reflector thickness produces no reflector mass (regression)', () => {
+  const geo = coreReflectorGeometry({
+    id: 'c', type: 'coreBarrel', innerDiameter: 3.1, activeFuelHeight: 9,
+    reflectorThickness: 0,
+  } as any);
+  assert(geo.volume === 0 && geo.mass === 0,
+    'a core with no reflector must build no reflector geometry');
+});
+
+// ============================================================================
+// Graphite oxidation kinetics
+// ============================================================================
+category('Graphite oxidation');
+
+/**
+ * Reproduce the published area-normalised rate from the calibrated
+ * intrinsic constant. This is the round trip that proves the inversion in
+ * intrinsicOxidationRateConstant is self-consistent: published rate ->
+ * intrinsic k_s -> back to the specimen's rate.
+ */
+function specimenRate(grade: typeof NBG_18, T: number): number {
+  const P = 101325, xO2 = 0.21, M_C = 0.012011;
+  const k_s = intrinsicOxidationRateConstant(grade, T);
+  const S_v = internalSurfacePerVolume(grade);
+  const L_c = grade.oxidationSpecimenSize / 6;
+  const C_O2 = (xO2 * P) / (8.31446 * T);
+  const D_bulk = 0.21e-4 * Math.pow(T / 300, 1.75);
+  const r = characteristicPoreRadius(grade);
+  const D_kn = (2 / 3) * r * Math.sqrt((8 * 8.31446 * T) / (Math.PI * 0.032));
+  const D_eff = Math.pow(grade.porosity, 1.5) / (1 / D_bulk + 1 / D_kn);
+  const eta = thieleEffectiveness(L_c * Math.sqrt((S_v * k_s) / D_eff));
+  return eta * S_v * k_s * C_O2 * L_c * M_C; // kg/(m2.s)
+}
+
+function publishedRate(grade: typeof NBG_18, T: number): number {
+  return grade.oxidationAPublished *
+    Math.exp(-grade.oxidationEa / (8.31446 * T)) * (1e-3 / 3600);
+}
+
+test('calibration reproduces the published NBG-18 rate at the anchor', () => {
+  const model = specimenRate(NBG_18, 873);
+  const paper = publishedRate(NBG_18, 873);
+  assert(Math.abs(model / paper - 1) < 0.01,
+    `at 873 K the model should return the measured rate: model ${model.toExponential(3)} ` +
+    `vs published ${paper.toExponential(3)} kg/m2-s (ratio ${(model / paper).toFixed(4)})`);
+});
+
+test('derived pore radius lands where porosimetry puts it', () => {
+  // Derived from pore volume and BET area, not assumed. Medium-grain
+  // NBG-18 should come out a few microns; superfine IG-110-like matrix
+  // graphite must come out narrower.
+  const rNbg = characteristicPoreRadius(NBG_18);
+  const rFine = characteristicPoreRadius(A3_3);
+  assert(rNbg * 1e6 > 1 && rNbg * 1e6 < 4,
+    `NBG-18 characteristic pore radius should be 1-4 um, got ${(rNbg * 1e6).toFixed(2)}`);
+  assert(rFine < rNbg,
+    `finer-grained matrix graphite must have narrower pores: ${(rFine * 1e6).toFixed(2)} ` +
+    `vs ${(rNbg * 1e6).toFixed(2)} um`);
+});
+
+test('pore diffusion bends the Arrhenius line down as temperature rises', () => {
+  // The source calls 873-1023 K the kinetic regime and fits ONE straight
+  // Arrhenius line through it. A mechanistic model must start falling below
+  // that line near the top of the range as eta drops - the curvature the
+  // straight-line fit averages over.
+  const lo = specimenRate(NBG_18, 873) / publishedRate(NBG_18, 873);
+  const hi = specimenRate(NBG_18, 1023) / publishedRate(NBG_18, 1023);
+  assert(hi < lo * 0.95,
+    `model/published should fall with temperature as pore diffusion bites: ` +
+    `${lo.toFixed(3)} at 873 K vs ${hi.toFixed(3)} at 1023 K`);
+  assert(hi > 0.3,
+    `but the kinetic regime should still be mostly reaction-controlled, got ${hi.toFixed(3)}`);
+});
+
+test('apparent activation energy halves under in-pore diffusion control', () => {
+  // The signature of Zone II, and the check that the model is mechanistic
+  // rather than fitted: we never wrote a factor of two anywhere.
+  const R = 8.31446;
+  // Deep in pore-diffusion control the effectiveness factor is ~1/phi, so
+  // the observed rate goes as sqrt(k) and the slope halves.
+  const T1 = 1500, T2 = 1700;
+  const rate = (T: number) => {
+    const k_s = intrinsicOxidationRateConstant(NBG_18, T);
+    const S_v = internalSurfacePerVolume(NBG_18);
+    const L_c = 0.05; // a thick block, deep in Zone II
+    const D_bulk = 0.21e-4 * Math.pow(T / 300, 1.75);
+    const r = characteristicPoreRadius(NBG_18);
+    const D_kn = (2 / 3) * r * Math.sqrt((8 * R * T) / (Math.PI * 0.032));
+    const D_eff = Math.pow(NBG_18.porosity, 1.5) / (1 / D_bulk + 1 / D_kn);
+    const phi = L_c * Math.sqrt((S_v * k_s) / D_eff);
+    assert(phi > 10, `expected deep pore-diffusion control, got phi=${phi.toFixed(1)} at ${T} K`);
+    return thieleEffectiveness(phi) * S_v * k_s * L_c;
+  };
+  const EaApparent = R * Math.log(rate(T2) / rate(T1)) / (1 / T1 - 1 / T2);
+  const ratio = EaApparent / NBG_18.oxidationEa;
+  assert(Math.abs(ratio - 0.5) < 0.06,
+    `apparent Ea should be half the intrinsic value in Zone II, got ratio ${ratio.toFixed(3)}`);
+});
+
+test('medium-grain NBG-18 resists oxidation better than fine-grain matrix', () => {
+  // Less internal area per gram and larger pores. This is the qualitative
+  // result that matters in an air ingress: the pebbles burn before the
+  // reflector does.
+  const T = 900;
+  const nbg = intrinsicOxidationRateConstant(NBG_18, T) * internalSurfacePerVolume(NBG_18);
+  const fine = intrinsicOxidationRateConstant(A3_3, T) * internalSurfacePerVolume(A3_3);
+  assert(fine > nbg,
+    `fine-grain matrix should oxidise faster per unit volume at ${T} K: ` +
+    `${fine.toExponential(2)} vs ${nbg.toExponential(2)} 1/s`);
+});
+
+test('Thiele effectiveness is smooth and correct in both limits', () => {
+  assert(Math.abs(thieleEffectiveness(0) - 1) < 1e-12, 'eta(0) must be exactly 1');
+  assert(Math.abs(thieleEffectiveness(1e-9) - 1) < 1e-12, 'eta must not blow up near zero');
+  assert(Math.abs(thieleEffectiveness(100) - 0.01) < 1e-6,
+    'eta -> 1/phi for large phi');
+  // Monotone decreasing, no kinks across the series/closed-form crossover
+  let prev = thieleEffectiveness(1e-8);
+  for (const phi of [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 0.01, 0.1, 1, 10]) {
+    const cur = thieleEffectiveness(phi);
+    assert(cur < prev && cur > 0, `eta must decrease monotonically, broke at phi=${phi}`);
+    prev = cur;
+  }
+});
+
+test('burn-off opens pores before it consumes them', () => {
+  // Random pore model: internal surface RISES at first (closed porosity
+  // opens up, so a partly-burnt block is more reactive than a fresh one),
+  // then collapses to zero as the pore walls merge.
+  const s0 = burnoffSurfaceFactor(0);
+  const sMid = burnoffSurfaceFactor(0.3);
+  const sLate = burnoffSurfaceFactor(0.95);
+  assert(Math.abs(s0 - 1) < 1e-12, `virgin surface factor must be 1, got ${s0}`);
+  assert(sMid > s0, `surface should rise early: ${sMid.toFixed(3)} vs ${s0.toFixed(3)}`);
+  assert(sLate < sMid, `surface must collapse late: ${sLate.toFixed(3)} vs ${sMid.toFixed(3)}`);
+  assert(burnoffSurfaceFactor(1) === 0, 'fully consumed graphite has no surface');
+  // Approaching total burn-off must stay finite - the expression is 0*inf
+  // at the endpoint and would otherwise produce NaN and poison the solver.
+  for (const x of [0.999, 0.99999, 1 - 1e-12]) {
+    const s = burnoffSurfaceFactor(x);
+    assert(Number.isFinite(s) && s >= 0, `surface factor must stay finite at X=${x}, got ${s}`);
+  }
+});
+
+test('air oxidation is exothermic, steam and CO2 gasification are not', () => {
+  // The single most important qualitative fact in the model: an air ingress
+  // is a fire that can sustain itself, a steam ingress is a gasification
+  // the core has to pay for out of its own heat.
+  for (const T of [800, 1200, 1600]) {
+    assert(reactionHeatPerCarbon('O2', T) > 0, `C+O2 must release heat at ${T} K`);
+    assert(reactionHeatPerCarbon('H2O', T) < 0, `C+H2O must absorb heat at ${T} K`);
+    assert(reactionHeatPerCarbon('CO2', T) < 0, `C+CO2 must absorb heat at ${T} K`);
+  }
+  // Hot graphite makes CO instead of CO2 and so keeps far less of the heat.
+  assert(reactionHeatPerCarbon('O2', 1600) < 0.4 * reactionHeatPerCarbon('O2', 600),
+    'CO-dominated combustion at high T must release much less surface heat');
+});
+
+test('CO fraction rises with temperature and stays a fraction', () => {
+  const cold = coFraction(600), hot = coFraction(1800);
+  assert(cold > 0 && cold < 1 && hot > 0 && hot < 1, 'CO fraction must stay in (0,1)');
+  assert(hot > 0.9 && cold < 0.2,
+    `Arthur split should run from mostly CO2 cold (${cold.toFixed(2)}) to mostly CO hot (${hot.toFixed(2)})`);
+  // Oxygen demand falls as CO takes over: 1 mol O2 per C for pure CO2, 1/2 for pure CO
+  assert(oxidantPerCarbon('O2', 600) > oxidantPerCarbon('O2', 1800),
+    'CO-dominated burning must consume less oxygen per carbon');
+  assert(oxidantPerCarbon('H2O', 1200) === 1, 'steam gasification is one-to-one');
+});
+
+test('hydrogen inhibits steam gasification but nothing else', () => {
+  const clean = oxidantInhibition('H2O', 0);
+  const inhibited = oxidantInhibition('H2O', 1000); // 1 kPa H2
+  assert(Math.abs(clean - 1) < 1e-12, 'no hydrogen means no inhibition');
+  assert(inhibited < 0.6 && inhibited > 0.4,
+    `1 kPa H2 should roughly halve the steam rate, got factor ${inhibited.toFixed(3)}`);
+  assert(oxidantInhibition('O2', 1000) === 1, 'hydrogen must not inhibit oxygen attack');
+  assert(oxidantInhibition('CO2', 1000) === 1, 'hydrogen must not inhibit the Boudouard reaction');
+});
+
+test('steam and CO2 need far more heat than oxygen to attack graphite', () => {
+  // Air oxidation matters from ~600 K; gasification only above ~1200 K.
+  // This ordering is what makes air ingress and steam ingress qualitatively
+  // different accidents.
+  const at = (ox: 'O2' | 'H2O' | 'CO2', T: number) => oxidantRateConstant(NBG_18, ox, T);
+  assert(at('O2', 800) > 1e3 * at('H2O', 800),
+    'at 800 K oxygen must dominate steam by orders of magnitude');
+  assert(at('H2O', 1600) / at('H2O', 800) > at('O2', 1600) / at('O2', 800),
+    'steam has the steeper activation energy, so it must catch up as things heat');
+  assert(at('H2O', 1200) > at('CO2', 1200),
+    'steam gasification should outrun the Boudouard reaction');
+});
+
+test('graphiteOxidation survives a state clone (conservation regression)', () => {
+  // RK45 integrates burnoff in place, so this nested object MUST be deep
+  // cloned. When it was not, every stage of a step advanced the same
+  // object: the graphite burned six times faster than the carbon that
+  // actually reached the gas, silently breaking the atom balance.
+  const state = {
+    thermalNodes: new Map([['g', {
+      id: 'g', label: 'g', temperature: 1000, mass: 100, specificHeat: 1700,
+      thermalConductivity: 25, characteristicLength: 0.01, surfaceArea: 1,
+      heatGeneration: 0, maxTemperature: 3000,
+      graphiteOxidation: {
+        burnoff: 0.1, initialCarbonMass: 100, grade: 'A3-3' as const,
+        externalArea: 1, characteristicLength: 0.01, associatedGasNode: 'gas',
+      },
+    }]]),
+    flowNodes: new Map(), flowConnections: [], thermalConnections: [],
+    convectionConnections: [], components: { pumps: new Map(), valves: new Map() },
+    neutronics: {}, time: 0,
+  } as any;
+  const copy = cloneSimulationState(state);
+  copy.thermalNodes.get('g')!.graphiteOxidation!.burnoff = 0.9;
+  assert(state.thermalNodes.get('g')!.graphiteOxidation!.burnoff === 0.1,
+    'mutating the clone must not touch the original - graphiteOxidation is integrated state');
+});
+
+// ============================================================================
+// Molecular diffusion (oxidant transport)
+// ============================================================================
+category('Diffusion');
+
+test('Fuller reproduces the measured O2-N2 diffusivity at 300 K, 1 bar', () => {
+  // The standard textbook anchor: 0.21 cm2/s. If this drifts, every
+  // diffusion-limited rate downstream is wrong by the same factor.
+  const D = binaryDiffusivity('O2', 'N2', 300, 1e5);
+  assert(Math.abs(D - 0.21e-4) < 0.02e-4,
+    `O2-N2 at 300 K/1 bar should be ~0.21 cm2/s, got ${(D * 1e4).toFixed(3)}`);
+});
+
+test('diffusivity scales as T^1.75 and 1/P', () => {
+  const base = binaryDiffusivity('O2', 'He', 500, 1e5);
+  const hot = binaryDiffusivity('O2', 'He', 1000, 1e5);
+  const squeezed = binaryDiffusivity('O2', 'He', 500, 7e5);
+  assert(Math.abs(hot / base - Math.pow(2, 1.75)) < 0.02,
+    `doubling T should raise D by 2^1.75 = 3.36x, got ${(hot / base).toFixed(3)}`);
+  assert(Math.abs(squeezed * 7 / base - 1) < 1e-9,
+    `7x the pressure should give 1/7 the diffusivity, got ${(base / squeezed).toFixed(3)}x`);
+});
+
+test('light gases diffuse faster than heavy ones', () => {
+  const inHe = binaryDiffusivity('O2', 'He', 800, 1e5);
+  const inXe = binaryDiffusivity('O2', 'Xe', 800, 1e5);
+  assert(inHe > 3 * inXe,
+    `O2 should diffuse much faster through helium (${(inHe * 1e4).toFixed(2)}) than xenon (${(inXe * 1e4).toFixed(2)} cm2/s)`);
+});
+
+test('Blanc mixture diffusivity lies between its binary limits', () => {
+  const comp = createGasComposition({ He: 50, N2: 50 });
+  const mix = diffusivityInMixture('O2', comp, 0, 800, 1e5);
+  const inHe = binaryDiffusivity('O2', 'He', 800, 1e5);
+  const inN2 = binaryDiffusivity('O2', 'N2', 800, 1e5);
+  assert(mix > inN2 && mix < inHe,
+    `half-helium mixture (${(mix * 1e4).toFixed(3)}) must sit between pure N2 ` +
+    `(${(inN2 * 1e4).toFixed(3)}) and pure He (${(inHe * 1e4).toFixed(3)} cm2/s)`);
+});
+
+test('steam counts as a diffusion partner', () => {
+  const comp = createGasComposition({ He: 100 });
+  const dry = diffusivityInMixture('O2', comp, 0, 800, 1e5);
+  const wet = diffusivityInMixture('O2', comp, 100, 800, 1e5);
+  assert(wet < dry,
+    `adding steam should slow O2 diffusion (dry ${(dry * 1e4).toFixed(3)}, wet ${(wet * 1e4).toFixed(3)} cm2/s)`);
+});
+
+test('pure-species mixture falls back on self-diffusion, not a divide by zero', () => {
+  const D = diffusivityInMixture('O2', createGasComposition({ O2: 100 }), 0, 800, 1e5);
+  assert(Number.isFinite(D) && D > 0,
+    `pure O2 must still yield a finite self-diffusivity, got ${D}`);
+});
+
+test('Knudsen diffusion is pressure-independent and caps the low-pressure limit', () => {
+  // Bulk diffusion runs as 1/P, so it would grow without bound as a vessel
+  // empties. The Knudsen resistance in series is what stops that - and it
+  // does so smoothly, with no imposed ceiling.
+  const dK = knudsenDiffusivity(1e-6, 1000, 0.032);
+  const atPressure = effectivePoreDiffusivity(
+    binaryDiffusivity('O2', 'He', 1000, 70e5), dK, 0.19);
+  const depressurised = effectivePoreDiffusivity(
+    binaryDiffusivity('O2', 'He', 1000, 1e3), dK, 0.19);
+  assert(depressurised > 10 * atPressure,
+    'depressurising must speed pore diffusion substantially');
+  assert(depressurised < Math.pow(0.19, 1.5) * dK * 1.001,
+    `Knudsen must cap the low-pressure limit at eps^1.5 * D_K = ` +
+    `${(Math.pow(0.19, 1.5) * dK).toExponential(2)}, got ${depressurised.toExponential(2)}`);
+});
+
+test('binary diffusivity refuses zero temperature or pressure', () => {
+  let threw = 0;
+  try { binaryDiffusivity('O2', 'He', 0, 1e5); } catch { threw++; }
+  try { binaryDiffusivity('O2', 'He', 800, 0); } catch { threw++; }
+  assert(threw === 2, 'both degenerate cases must throw rather than return Infinity');
+});
+
+category('Neutronics (lattice)');
 
 test('fatter rods self-shield: weaker Doppler per kelvin (at fixed moderation)', () => {
   // Hold the moderation ratio constant by trading rod count against rod
