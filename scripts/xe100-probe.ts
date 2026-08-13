@@ -52,7 +52,7 @@ function line(state: SimulationState) {
   const shell = state.flowNodes.get('hx-1-shell')!;
   console.log(
     `${state.time.toFixed(1).padStart(8)} ` +
-    `${flow(state, 'pipe-pumpdisch', 'rv-1').toFixed(1).padStart(9)} ` +
+    `${flow(state, "pipe-pumpdisch", "rv-1").toFixed(1).padStart(9)} ` +
     `${T(state, 'rv-1').toFixed(1).padStart(9)} ` +
     `${T(state, 'cb-1').toFixed(1).padStart(10)} ` +
     `${P(state, 'cb-1').toFixed(2).padStart(11)} ` +
@@ -92,6 +92,34 @@ for (let t = 0; t < seconds; t += 1) {
   if (Math.round(t) % reportEvery === 0) line(sim.state);
 }
 line(sim.state);
+
+// Where did the helium go?
+console.log('\nHelium inventory by node (mol):');
+let heTotal = 0;
+for (const [id, n] of sim.state.flowNodes) {
+  const he = n.fluid.ncg?.He ?? 0;
+  if (he > 1e-6) {
+    console.log(`  ${id.padEnd(18)} ${he.toFixed(1).padStart(12)}  ` +
+      `P=${(n.fluid.pressure / 1e5).toFixed(3).padStart(9)}bar  T=${(n.fluid.temperature - 273.15).toFixed(1)}C` +
+      (n.isBoundary ? '   [BOUNDARY]' : ''));
+  }
+  if (!n.isBoundary) heTotal += he;
+}
+console.log(`  total (non-boundary): ${heTotal.toFixed(1)} mol`);
+const env = sim.state.environmentalRelease;
+if (env) console.log(`  environmentalRelease He: ${(env.He ?? 0).toFixed(1)} mol`);
+
+console.log('\nFlows (kg/s):');
+for (const c of sim.state.flowConnections) {
+  if (Math.abs(c.massFlowRate) > 1e-9) {
+    console.log(`  ${c.id.padEnd(38)} ${c.massFlowRate.toFixed(4).padStart(12)}`);
+  }
+}
+
+console.log('\nBurst states:');
+for (const [id, b] of sim.state.burstStates ?? []) {
+  if (b.isBurst) console.log(`  BURST: ${id} (${b.componentLabel}) at ${(b.burstPressure / 1e5).toFixed(1)} bar, frac=${b.currentBreakFraction.toFixed(3)}`);
+}
 
 // Solver health
 const stats = sim.solver.getMetrics();

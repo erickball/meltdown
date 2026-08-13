@@ -188,7 +188,7 @@
         "width": 3.6,
         "height": 14,
         "hxType": "helical",
-        "tubeCount": 2000,
+        "tubeCount": 5000,
         "pressureRating": 90,
         "tubePressureRating": 200,
         "shellPressureRating": 90,
@@ -604,53 +604,6 @@
       }
     ],
     [
-      "pipe-hotduct",
-      {
-        "id": "pipe-hotduct",
-        "type": "pipe",
-        "label": "Hot Gas Duct",
-        "position": {
-          "x": 46,
-          "y": 70
-        },
-        "rotation": 0,
-        "elevation": 12,
-        "diameter": 1.2,
-        "length": 8,
-        "ports": [
-          {
-            "id": "pipe-hotduct-left",
-            "position": {
-              "x": -4,
-              "y": 0
-            },
-            "direction": "both"
-          },
-          {
-            "id": "pipe-hotduct-right",
-            "position": {
-              "x": 4,
-              "y": 0
-            },
-            "direction": "both"
-          }
-        ],
-        "fluid": {
-          "temperature": 1023,
-          "pressure": 700,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "nqa1": true,
-        "containedBy": "bui-1",
-        "pressureRating": 200,
-        "initialNcg": {
-          "He": 60
-        }
-      }
-    ],
-    [
       "pipe-coldleg",
       {
         "id": "pipe-coldleg",
@@ -789,6 +742,84 @@
       }
     ],
     [
+      "cv-1",
+      {
+        "id": "cv-1",
+        "type": "crossVessel",
+        "label": "Coaxial Gas Duct",
+        "position": {
+          "x": 46,
+          "y": 80
+        },
+        "rotation": 0,
+        "elevation": 6,
+        "outerDiameter": 1.8,
+        "wallThickness": 0.06,
+        "length": 7,
+        "innerDiameter": 1,
+        "innerWallThickness": 0.02,
+        "pressureRating": 90,
+        "targetComponentId": "hx-1",
+        "orientation": "horizontal",
+        "ports": [
+          {
+            "id": "cv-1-inner-in",
+            "position": {
+              "x": -3.5,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "cv-1-inner-out",
+            "position": {
+              "x": 3.5,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "cv-1-annulus-1",
+            "position": {
+              "x": -3.5,
+              "y": 0.4
+            },
+            "direction": "both"
+          },
+          {
+            "id": "cv-1-annulus-2",
+            "position": {
+              "x": 3.5,
+              "y": 0.4
+            },
+            "direction": "both"
+          }
+        ],
+        "fluid": {
+          "temperature": 1023,
+          "pressure": 700,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "annulusFluid": {
+          "temperature": 533,
+          "pressure": 700,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "initialNcg": {
+          "He": 60
+        },
+        "annulusInitialNcg": {
+          "He": 60
+        },
+        "nqa1": true,
+        "containedBy": "bui-1"
+      }
+    ],
+    [
       "ctl-rods-1",
       {
         "id": "ctl-rods-1",
@@ -859,7 +890,7 @@
         "id": "ctl-fw-1",
         "type": "controller",
         "controllerType": "pid",
-        "label": "Feedwater (Steam Temperature)",
+        "label": "Feedwater Flow",
         "position": {
           "x": 20,
           "y": 74
@@ -871,11 +902,10 @@
         "ports": [],
         "pid": {
           "sensor": {
-            "kind": "node-temperature",
-            "targetId": "hx-1-tube"
+            "kind": "connection-flow",
+            "targetId": "flow-val-fwcv-1-hx-1"
           },
-          "setpoint": 700,
-          "invert": true,
+          "setpoint": 77,
           "actuator": {
             "kind": "pump-speed",
             "targetId": "fw-pump-1",
@@ -935,33 +965,44 @@
     {
       "fromComponentId": "cb-1",
       "fromPortId": "cb-1-outlet",
-      "toComponentId": "pipe-hotduct",
-      "toPortId": "pipe-hotduct-left",
+      "toComponentId": "cv-1",
+      "toPortId": "cv-1-inner-in",
       "fromElevation": 11,
-      "toElevation": 0.6,
-      "flowArea": 1.1,
+      "toElevation": 0,
+      "flowArea": 0.78,
       "length": 4,
       "resistanceCoeff": 1.5
     },
     {
-      "fromComponentId": "pipe-hotduct",
-      "fromPortId": "pipe-hotduct-right",
+      "fromComponentId": "cv-1",
+      "fromPortId": "cv-1-inner-out",
       "toComponentId": "hx-1",
       "toPortId": "hx-1-shell-1",
-      "fromElevation": 0.6,
+      "fromElevation": 0,
       "toElevation": 13,
-      "flowArea": 1.1,
+      "flowArea": 0.78,
       "length": 4,
       "resistanceCoeff": 1.5
     },
     {
       "fromComponentId": "hx-1",
       "fromPortId": "hx-1-shell-2",
+      "toComponentId": "cv-1",
+      "toPortId": "cv-1-annulus-2",
+      "fromElevation": 1,
+      "toElevation": 0,
+      "flowArea": 1,
+      "length": 3,
+      "resistanceCoeff": 1.5
+    },
+    {
+      "fromComponentId": "cv-1",
+      "fromPortId": "cv-1-annulus-1",
       "toComponentId": "pipe-coldleg",
       "toPortId": "pipe-coldleg-left",
-      "fromElevation": 1,
+      "fromElevation": 0,
       "toElevation": 0.6,
-      "flowArea": 1.1,
+      "flowArea": 1,
       "length": 3,
       "resistanceCoeff": 1.5
     },

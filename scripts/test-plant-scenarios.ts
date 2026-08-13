@@ -218,13 +218,38 @@ test('Hydrogen deflagration: hot flammable mixture burns, spikes pressure, conse
 });
 
 test('Hydrogen combustion respects flammability limits (lean and steam-inerted)', () => {
-  // Lean: ~2% H2 (below the 4% LFL) at the same hot temperature
+  // Lean: ~2% H2 (below the 4% LFL) at the same hot temperature.
+  //
+  // What must NOT happen is a DEFLAGRATION - the runaway the operator models
+  // as thermal feedback (see the test above: H2 essentially gone, pressure
+  // spiked past 2x). The model has no hard LFL cutoff by design; its
+  // flammability envelope is a smooth composition factor, so a sub-limit
+  // mixture at 620 K still oxidises slowly, and asserting a fixed inventory
+  // bound measures that slow rate rather than the runaway.
+  //
+  // The bound used to be >98% remaining, which only held because the vessel
+  // initialized 22 K COLD: it was declared at 620 K but createFluidState's
+  // (T,P) -> (m,U) conversion for a gas+steam node derived 597.5 K on the
+  // first evaluation, and Arrhenius kinetics are exponential in T. With the
+  // round-trip fixed (see scripts/probe-ncg-roundtrip.ts) the node holds
+  // 620 K and burns 4.0% in 120 s instead of 1.9%.
+  //
+  // So assert the thing the test is actually for: the inventory stays largely
+  // intact AND there is no deflagration pressure spike (measured: +0.9% over
+  // 120 s, purely thermal, versus >100% for the real burn).
   const lean = buildSim(h2VesselPlant(0.02, 1.0, 620, 0), []);
   const leanH2_0 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
-  run(lean, 120, 0.05);
+  const leanP0 = lean.state.flowNodes.get('ves')!.fluid.pressure;
+  let leanMaxP = leanP0;
+  run(lean, 120, 0.05, s => {
+    leanMaxP = Math.max(leanMaxP, s.flowNodes.get('ves')!.fluid.pressure);
+  });
   const leanH2_1 = lean.state.flowNodes.get('ves')!.fluid.ncg!.H2;
-  assert(leanH2_1 > 0.98 * leanH2_0,
-    `lean mixture must not burn (${leanH2_0.toFixed(1)} -> ${leanH2_1.toFixed(1)} mol)`);
+  assert(leanH2_1 > 0.90 * leanH2_0,
+    `lean mixture must not deflagrate (${leanH2_0.toFixed(1)} -> ${leanH2_1.toFixed(1)} mol)`);
+  assert(leanMaxP < 1.2 * leanP0,
+    `lean mixture must not spike pressure (peak ${(leanMaxP / 1e5).toFixed(3)} vs ` +
+    `initial ${(leanP0 / 1e5).toFixed(3)} bar)`);
 
   // Steam-inerted: plenty of H2 and O2 but the vapor space is mostly steam
   // (two-phase node at 8 bar; steam partial pressure dominates the gas space)

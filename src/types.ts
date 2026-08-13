@@ -431,6 +431,12 @@ export interface CrossVesselComponent extends ComponentBase {
   // Rendering/orientation
   orientation: 'horizontal' | 'angled';  // How the cross-vessel extends from parent
   angle?: number;             // degrees from horizontal (for angled orientation)
+  // Initial non-condensible fill, partial pressures in bar. A gas-cooled plant
+  // runs this as a coaxial duct: hot gas down the inner pipe (`initialNcg`),
+  // cold return in the annulus (`annulusInitialNcg`) keeping the pressure
+  // boundary cold.
+  initialNcg?: { [species: string]: number };
+  annulusInitialNcg?: { [species: string]: number };
 }
 
 export type PlantComponent =

@@ -29,6 +29,7 @@ const P_STEAM = 165e5;          // Pa - once-through SG outlet
 const T_STEAM = 838;            // K (565 C) main steam
 const T_FEED = 473;             // K (200 C) feedwater
 const P_COND = 7000;            // Pa
+const FEED_FLOW = 77;           // kg/s - design feedwater = design steam flow
 
 // Trace steam pressure in the helium spaces. `fluid.pressure` on a gas node is
 // the STEAM partial pressure; the helium is added on top of it from
@@ -120,7 +121,13 @@ add('cb-1', {
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
   position: { x: 56, y: 74 }, rotation: 0, elevation: 0,
-  width: 3.6, height: 14, hxType: 'helical', tubeCount: 2000,
+  // Area sizing: helium is a poor convector at the shell-side velocities this
+  // model produces (rho ~ 3 kg/m3 at 60 bar / 960 K through the factory's
+  // 5 m2 shell flow area gives ~11 m/s, Re ~ 7e4, h ~ 450 W/m2-K). Removing
+  // 200 MW across an LMTD of ~111 K needs UA ~ 1.8 MW/K, so ~4000 m2 of tube
+  // surface - about 5000 tubes of 19 mm over the 13 m bundle. Real helical
+  // once-through SGs are indeed built from a large number of parallel tubes.
+  width: 3.6, height: 14, hxType: 'helical', tubeCount: 5000,
   pressureRating: 90,          // shell (helium) design pressure
   tubePressureRating: 200,     // tube (water) design pressure
   shellPressureRating: 90,
@@ -259,9 +266,7 @@ function pipe(id: string, label: string, x: number, y: number, elevation: number
   add(id, c);
 }
 
-// Hot gas duct: core outlet -> SG shell inlet
-pipe('pipe-hotduct', 'Hot Gas Duct', 46, 70, 12, 1.2, 8, T_CORE_OUT, P_TRACE_STEAM, 'vapor', HE);
-// Cold return: SG shell outlet -> circulator
+// Cold return: SG annulus outlet -> circulator
 pipe('pipe-coldleg', 'Cold Gas Duct', 52, 86, 1, 1.2, 5, T_SG_HE_OUT, P_TRACE_STEAM, 'vapor', HE);
 // Circulator discharge -> vessel downcomer
 pipe('pipe-pumpdisch', 'Circulator Discharge', 41, 84, 1, 1.1, 5, T_SG_HE_OUT, P_TRACE_STEAM, 'vapor', HE);
@@ -269,6 +274,36 @@ pipe('pipe-pumpdisch', 'Circulator Discharge', 41, 84, 1, 1.1, 5, T_SG_HE_OUT, P
 // ~2500x less dense than the main steam, so the same mass flow needs a huge
 // duct (and enough residence time not to trip the throughput sanity check).
 pipe('pipe-exhaust', 'Turbine Exhaust', 78, 82, 1, 2.6, 6, 312, P_COND, 'vapor');
+
+// ---------------------------------------------------------------------------
+// Coaxial hot gas duct (cross-vessel)
+// ---------------------------------------------------------------------------
+// This is NOT cosmetic. A bare steel duct carrying 750 C helium at 60 bar
+// creep-ruptures in about a minute in this model (creepRuptureTime at 1023 K
+// gives ~109 s even at a stress ratio of 0.2) - and that is correct: real
+// HTGRs never expose the pressure boundary to core-outlet temperature. Hot
+// helium runs down the insulated INNER pipe while the cold return fills the
+// ANNULUS, so the outer wall - the actual pressure boundary - sits at core
+// inlet temperature. Exactly the HTR-PM / Xe-100 arrangement.
+add('cv-1', {
+  type: 'crossVessel', label: 'Coaxial Gas Duct',
+  position: { x: 46, y: 80 }, rotation: 0, elevation: 6,
+  outerDiameter: 1.8, wallThickness: 0.06, length: 7,
+  innerDiameter: 1.0, innerWallThickness: 0.02,
+  pressureRating: 90,
+  targetComponentId: 'hx-1', orientation: 'horizontal',
+  ports: ports([
+    ['cv-1-inner-in', -3.5, 0],
+    ['cv-1-inner-out', 3.5, 0],
+    ['cv-1-annulus-1', -3.5, 0.4],
+    ['cv-1-annulus-2', 3.5, 0.4],
+  ]),
+  fluid: heFluid(T_CORE_OUT),          // inner pipe: hot leg
+  annulusFluid: heFluid(T_SG_HE_OUT),  // annulus: cold return
+  initialNcg: HE,
+  annulusInitialNcg: HE,
+  nqa1: true, containedBy: 'bui-1',
+});
 
 // ---------------------------------------------------------------------------
 // Controls
@@ -299,10 +334,16 @@ controller('ctl-msp-1', 'Main Steam Pressure (Governor)', 20, 67, {
   actuator: { kind: 'governor-valve', targetId: 'turbine-1', min: 0.02, max: 1, rateLimit: 0.05 },
 });
 
-controller('ctl-fw-1', 'Feedwater (Steam Temperature)', 20, 74, {
-  sensor: { kind: 'node-temperature', targetId: 'hx-1-tube' },
-  setpoint: 700,
-  invert: true,
+// A once-through SG has no water level, so the thing that has to be held is
+// the MASS BALANCE: whatever leaves as steam must arrive as feed, or the
+// bundle either floods toward saturation or dries out. Controlling feed on
+// tube temperature instead (the textbook steam-temperature trim) is a trap at
+// startup - the bundle begins cold and full, the controller reads "too cold",
+// throttles feed to minimum, and the plant never reaches the power where the
+// temperature signal means anything.
+controller('ctl-fw-1', 'Feedwater Flow', 20, 74, {
+  sensor: { kind: 'connection-flow', targetId: 'flow-val-fwcv-1-hx-1' },
+  setpoint: FEED_FLOW,
   actuator: { kind: 'pump-speed', targetId: 'fw-pump-1', min: 0.05, max: 1, rateLimit: 0.05 },
 });
 
@@ -319,14 +360,16 @@ controller('ctl-hwl-1', 'Hotwell Level (Cond Pump)', 30, 60, {
 // Vessel downcomer -> core inlet (bottom), up through the pebble bed
 connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-inlet',
   { fromElevation: 0.8, toElevation: 0, flowArea: 4.5, length: 1.5, resistanceCoeff: 3 });
-// Core outlet (top) -> hot duct -> SG shell top
-connect('cb-1', 'cb-1-outlet', 'pipe-hotduct', 'pipe-hotduct-left',
-  { fromElevation: 11, toElevation: 0.6, flowArea: 1.1, length: 4, resistanceCoeff: 1.5 });
-connect('pipe-hotduct', 'pipe-hotduct-right', 'hx-1', 'hx-1-shell-1',
-  { fromElevation: 0.6, toElevation: 13, flowArea: 1.1, length: 4, resistanceCoeff: 1.5 });
-// SG shell bottom -> cold duct -> circulator
-connect('hx-1', 'hx-1-shell-2', 'pipe-coldleg', 'pipe-coldleg-left',
-  { fromElevation: 1, toElevation: 0.6, flowArea: 1.1, length: 3, resistanceCoeff: 1.5 });
+// Core outlet (top) -> coaxial duct INNER pipe -> SG shell top (hot helium)
+connect('cb-1', 'cb-1-outlet', 'cv-1', 'cv-1-inner-in',
+  { fromElevation: 11, toElevation: 0, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
+connect('cv-1', 'cv-1-inner-out', 'hx-1', 'hx-1-shell-1',
+  { fromElevation: 0, toElevation: 13, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
+// SG shell bottom -> coaxial duct ANNULUS -> cold duct -> circulator
+connect('hx-1', 'hx-1-shell-2', 'cv-1', 'cv-1-annulus-2',
+  { fromElevation: 1, toElevation: 0, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
+connect('cv-1', 'cv-1-annulus-1', 'pipe-coldleg', 'pipe-coldleg-left',
+  { fromElevation: 0, toElevation: 0.6, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 connect('pipe-coldleg', 'pipe-coldleg-right', 'pump-1', 'pump-1-inlet',
   { fromElevation: 0.6, toElevation: 0, flowArea: 1.1, length: 3, resistanceCoeff: 1.5 });
 // Circulator -> vessel downcomer

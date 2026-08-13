@@ -1981,9 +1981,18 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const pressure = Math.max(cv.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
       const temp = cv.fluid?.temperature || 593; // ~320°C typical hot leg
 
+      // Gas-cooled plants run a coaxial hot duct - hot gas down the middle,
+      // cold return in the annulus, pressure boundary at the COLD temperature.
+      // Honour a vapor-phase spec and an NCG fill the same way the HX tube
+      // side does (`initialNcg`, partial pressures in bar).
+      const innerPhase = cv.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+      const innerNcg: NcgPartialPressures | undefined = cv.initialNcg;
       let fluid: FluidState;
-      console.log(`[Factory] CrossVessel ${component.id}: creating inner pipe LIQUID state at ${pressure/1e5} bar, ${temp}K`);
-      fluid = createFluidState(temp, pressure, 'liquid', 0, innerVolume);
+      console.log(`[Factory] CrossVessel ${component.id}: creating inner pipe ` +
+        `${innerPhase.toUpperCase()} state at ${pressure / 1e5} bar, ${temp}K` +
+        (innerNcg ? ` + NCG` : ''));
+      fluid = createFluidState(temp, pressure, innerPhase, innerPhase === 'vapor' ? 1 : 0,
+        innerVolume, innerNcg);
 
       // Return inner pipe node; annulus is created separately
       return {
@@ -2667,10 +2676,16 @@ function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
   const hydraulicDiameter = 2 * (outerInnerRadius - innerOuterRadius);
   const flowArea = Math.PI * (outerInnerRadius * outerInnerRadius - innerOuterRadius * innerOuterRadius);
 
+  // See the inner-pipe case: a coaxial gas duct puts cold return gas in the
+  // annulus, so this side needs the same vapor/NCG support.
+  const annulusPhase = cv.annulusFluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+  const annulusNcg: NcgPartialPressures | undefined = cv.annulusInitialNcg;
+
   return {
     id: `${component.id}-annulus`,
     label: `${component.label || 'Cross-Vessel'} Annulus`,
-    fluid: createFluidState(annulusTemp, annulusPressure, 'liquid', 0, annulusVolume),
+    fluid: createFluidState(annulusTemp, annulusPressure, annulusPhase,
+      annulusPhase === 'vapor' ? 1 : 0, annulusVolume, annulusNcg),
     volume: annulusVolume,
     hydraulicDiameter,
     flowArea,
