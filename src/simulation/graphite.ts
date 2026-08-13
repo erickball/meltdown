@@ -384,6 +384,190 @@ export function intrinsicOxidationRateConstant(grade: GraphiteGrade, T_K: number
 /** Universal gas constant (J/mol-K) - local copy to keep this module standalone */
 const R_GAS_GRAPHITE = 8.31446;
 
+/** The three gases that attack graphite. */
+export type GraphiteOxidant = 'O2' | 'H2O' | 'CO2';
+
+/**
+ * Intrinsic activation energies (J/mol) for the three attacking gases.
+ *
+ * O2 is measured for our grades. The other two are not, and the ordering is
+ * what matters most: steam and CO2 need far more thermal help than oxygen,
+ * which is why an air ingress is a fire and a steam ingress is a slow
+ * gasification.
+ */
+const OXIDANT_ACTIVATION_ENERGY: Record<GraphiteOxidant, number> = {
+  // Per-grade, from thermogravimetry - see GraphiteGrade.oxidationEa.
+  O2: NaN,
+  // Wang & Sun, IG-110 in steam, 850-1100 C: the apparent activation energy
+  // falls from 318.6 to 148.9 kJ/mol as temperature rises. That is the
+  // intrinsic value and its own halving under pore-diffusion control - the
+  // same Zone I -> Zone II signature this model produces from eta, which is
+  // a satisfying independent confirmation. We take the 318.6 as intrinsic
+  // and let eta generate the fall on its own.
+  H2O: 318.6e3,
+  // Boudouard. No measurement to hand; this sits mid-range of the values
+  // usually quoted for nuclear graphite (300-360 kJ/mol). ESTIMATE.
+  CO2: 330e3,
+};
+
+/**
+ * Relative intrinsic reactivity at 1073 K (800 C) and equal oxidant
+ * concentration, normalised to CO2 = 1.
+ *
+ * ESTIMATE, and the least certain numbers in this file. The ~1e5 : 3 : 1
+ * ordering for O2 : H2O : CO2 is the classic result from Walker, Rusinko &
+ * Austin, "Gas Reactions of Carbon" (Advances in Catalysis 11, 1959), which
+ * is the standard reference for carbon gasification. The magnitudes here
+ * are order-of-magnitude anchors, not measurements: they set how much
+ * hotter graphite must be before steam or CO2 matter, and the qualitative
+ * conclusion (oxygen dominates wherever it is present; steam only bites
+ * above ~900 C) is robust to being wrong by a factor of a few.
+ */
+const OXIDANT_RELATIVE_REACTIVITY: Record<GraphiteOxidant, number> = {
+  O2: 1e5,
+  H2O: 3,
+  CO2: 1,
+};
+
+/** Temperature the relative reactivities above are referenced to (K) */
+const REACTIVITY_ANCHOR_T = 1073;
+
+/**
+ * Intrinsic surface rate constant (m/s) for any of the three oxidants,
+ * referenced to internal (BET) area and first order in oxidant
+ * concentration.
+ *
+ * O2 comes straight from the calibrated measurement. Steam and CO2 are
+ * pinned to it at the anchor temperature through the relative-reactivity
+ * ratio, then carried to other temperatures by their OWN activation
+ * energies - so the ratio between the three reactions changes with
+ * temperature the way it physically should, rather than being frozen.
+ */
+export function oxidantRateConstant(
+  grade: GraphiteGrade,
+  oxidant: GraphiteOxidant,
+  T_K: number,
+): number {
+  if (oxidant === 'O2') return intrinsicOxidationRateConstant(grade, T_K);
+
+  const kO2Anchor = intrinsicOxidationRateConstant(grade, REACTIVITY_ANCHOR_T);
+  const kAnchor = kO2Anchor *
+    (OXIDANT_RELATIVE_REACTIVITY[oxidant] / OXIDANT_RELATIVE_REACTIVITY.O2);
+
+  const Ea = OXIDANT_ACTIVATION_ENERGY[oxidant];
+  return kAnchor * Math.exp(-(Ea / R_GAS_GRAPHITE) * (1 / T_K - 1 / REACTIVITY_ANCHOR_T));
+}
+
+/**
+ * Fraction of carbon leaving as CO rather than CO2 when oxygen is the
+ * attacker (Arthur, 1951): CO/CO2 = 10^3.4 exp(-51.9 kJ/mol / RT).
+ *
+ * This matters more than it looks. CO2 releases 393.5 kJ per mole of carbon
+ * at the surface, CO only 110.5 - so hot graphite dumps barely a quarter of
+ * the heat into itself and sends the rest downstream as flammable CO, which
+ * the combustion operator can then burn in the gas space wherever it next
+ * meets oxygen. The split is a smooth Arrhenius ratio, so nothing switches.
+ */
+export function coFraction(T_K: number): number {
+  const ratio = Math.pow(10, 3.4) * Math.exp(-51.9e3 / (R_GAS_GRAPHITE * T_K));
+  return ratio / (1 + ratio);
+}
+
+/**
+ * Heat released per mole of carbon consumed (J/mol), positive = exothermic.
+ *
+ * The sign difference between the three reactions is the single most
+ * important qualitative fact in this whole model:
+ *
+ *   C + O2  -> CO/CO2   +110 to +394 kJ/mol   EXOthermic - can self-sustain
+ *   C + H2O -> CO + H2  -131 kJ/mol           ENDOthermic - cannot run away
+ *   C + CO2 -> 2 CO     -172 kJ/mol           ENDOthermic - cannot run away
+ *
+ * An air ingress is therefore a fire, and a steam ingress is a slow
+ * gasification limited by whatever heat the core can supply. Neither
+ * behaviour is special-cased anywhere - it falls out of these signs.
+ */
+export function reactionHeatPerCarbon(oxidant: GraphiteOxidant, T_K: number): number {
+  switch (oxidant) {
+    case 'O2': {
+      const f = coFraction(T_K);
+      return f * 110.5e3 + (1 - f) * 393.5e3;
+    }
+    case 'H2O': return -131.3e3;
+    case 'CO2': return -172.5e3;
+  }
+}
+
+/**
+ * Moles of oxidant consumed per mole of carbon. Oxygen is the only one that
+ * is not one-to-one, because the CO/CO2 split changes how much O it takes.
+ */
+export function oxidantPerCarbon(oxidant: GraphiteOxidant, T_K: number): number {
+  if (oxidant !== 'O2') return 1;
+  // f mol CO + (1-f) mol CO2 per C needs (2-f)/2 mol O2.
+  return (2 - coFraction(T_K)) / 2;
+}
+
+/**
+ * Langmuir-Hinshelwood inhibition of the steam reaction by its own hydrogen
+ * product: rate is divided by (1 + K p_H2).
+ *
+ * This is a real mechanism, not a fudge - hydrogen back-reacts with the
+ * surface oxygen complex and blocks sites. It matters because it makes
+ * steam gasification self-limiting: the H2 it produces slows it down. Wang
+ * & Sun observed the inhibition saturating above ~1 kPa H2, which sets K.
+ *
+ * Returns 1 (no inhibition) for the other two oxidants.
+ */
+export function oxidantInhibition(
+  oxidant: GraphiteOxidant,
+  hydrogenPartialPressure: number,
+): number {
+  if (oxidant !== 'H2O') return 1;
+  const K_H2 = 1e-3; // 1/Pa - half the rate at ~1 kPa H2
+  return 1 / (1 + K_H2 * Math.max(0, hydrogenPartialPressure));
+}
+
+/**
+ * Random-pore (Bhatia-Perlmutter) structural parameter. Controls how much
+ * the internal surface grows as pores open before they merge and collapse.
+ * ESTIMATE - typical fitted values for chars and graphites run 1-20; 3 is a
+ * mid-range choice for a low-porosity graphite.
+ */
+export const RANDOM_PORE_PSI = 3;
+
+/**
+ * Internal surface area at burn-off X, relative to the virgin value
+ * (Bhatia-Perlmutter random pore model):
+ *
+ *   S(X)/S0 = (1-X) sqrt(1 - psi ln(1-X))
+ *
+ * The surface RISES at first - oxidation opens closed porosity and exposes
+ * new area, so a partly-burnt block is more reactive than a fresh one -
+ * then falls to zero as the pore walls merge and the solid is consumed.
+ * Both limits are smooth, and because the reaction rate is proportional to
+ * this factor, X = 1 is an asymptotically approached fixed point rather
+ * than something the integrator can run through.
+ */
+export function burnoffSurfaceFactor(burnoff: number): number {
+  const remaining = 1 - burnoff;
+  // No carbon left means no surface and no reaction. This is the exact
+  // physical statement, not a threshold: the expression below is 0 * inf
+  // at remaining = 0 and needs the limit taken explicitly.
+  if (remaining <= 0) return 0;
+  return remaining * Math.sqrt(1 - RANDOM_PORE_PSI * Math.log(remaining));
+}
+
+/**
+ * Porosity at burn-off X. Every kilogram of carbon removed becomes void, so
+ * porosity climbs towards 1 as the block is consumed - which raises the
+ * effective diffusivity and lets oxidant reach deeper, a real positive
+ * feedback on the way to burnout.
+ */
+export function burnoffPorosity(porosity0: number, burnoff: number): number {
+  return porosity0 + (1 - porosity0) * Math.min(1, Math.max(0, burnoff));
+}
+
 /**
  * Effectiveness factor of the calibration specimen at the anchor condition,
  * used to close the loop in intrinsicOxidationRateConstant. Kept separate

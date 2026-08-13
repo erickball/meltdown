@@ -39,6 +39,7 @@ export interface ThermalNodeRates {
   dTemperature: number;  // K/s - rate of temperature change (for solids)
   dMass?: number;        // kg/s - mass relocation between solid nodes (corium)
   dOxidizedFraction?: number;  // 1/s - rate of cladding oxidation (for cladding nodes only)
+  dGraphiteBurnoff?: number;   // 1/s - rate of graphite consumption by oxidation
   dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
   dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
   dMetalZr?: number;      // kg/s - unoxidized Zr inventory change (corium/debris nodes)
@@ -217,6 +218,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     if (aRates.dOxidizedFraction !== undefined || bRates.dOxidizedFraction !== undefined) {
       combined.dOxidizedFraction = (aRates.dOxidizedFraction ?? 0) + (bRates.dOxidizedFraction ?? 0);
     }
+    if (aRates.dGraphiteBurnoff !== undefined || bRates.dGraphiteBurnoff !== undefined) {
+      combined.dGraphiteBurnoff = (aRates.dGraphiteBurnoff ?? 0) + (bRates.dGraphiteBurnoff ?? 0);
+    }
     // Combine fission-product release rates if either has them
     if (aRates.dFpNobleGas !== undefined || bRates.dFpNobleGas !== undefined) {
       combined.dFpNobleGas = (aRates.dFpNobleGas ?? 0) + (bRates.dFpNobleGas ?? 0);
@@ -310,6 +314,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     // Scale oxidation rate if present
     if (r.dOxidizedFraction !== undefined) {
       scaled.dOxidizedFraction = r.dOxidizedFraction * factor;
+    }
+    if (r.dGraphiteBurnoff !== undefined) {
+      scaled.dGraphiteBurnoff = r.dGraphiteBurnoff * factor;
     }
     if (r.dFpNobleGas !== undefined) {
       scaled.dFpNobleGas = r.dFpNobleGas * factor;
@@ -443,6 +450,19 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         node.oxidation.oxidizedFraction += nodeRates.dOxidizedFraction * dt;
         // Clamp to [0, 1]
         node.oxidation.oxidizedFraction = Math.max(0, Math.min(1, node.oxidation.oxidizedFraction));
+      }
+      // Graphite burn-off. The rate is proportional to the remaining
+      // internal surface, which goes to zero as burnoff -> 1, so 1 is an
+      // asymptotically approached fixed point rather than a wall the
+      // integrator can hit. The bound below only absorbs the float residue
+      // of a step that lands exactly on it - without it, log(1 - burnoff)
+      // in the random pore model would go to -Infinity.
+      if (nodeRates.dGraphiteBurnoff !== undefined && node.graphiteOxidation) {
+        const g = node.graphiteOxidation;
+        g.burnoff = Math.max(0, Math.min(1, g.burnoff + nodeRates.dGraphiteBurnoff * dt));
+        // Node mass follows burn-off exactly - carbon that left as CO/CO2
+        // is no longer there to hold heat.
+        node.mass = g.initialCarbonMass * (1 - g.burnoff);
       }
       // Apply fission-product release (inventory can only fall, floor at 0)
       if (node.fissionProducts) {

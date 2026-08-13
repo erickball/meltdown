@@ -1095,12 +1095,18 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
   // Clone thermal nodes - use forEach instead of Array.from().map()
   const thermalNodes = new Map<string, typeof state.thermalNodes extends Map<string, infer V> ? V : never>();
   state.thermalNodes.forEach((v, k) => {
-    // oxidation/fissionProducts are mutable nested objects (integrated by
-    // RK45) - deep clone them
+    // oxidation/fissionProducts/metal/graphiteOxidation are mutable nested
+    // objects that RK45 INTEGRATES - they must be deep cloned. Miss one and
+    // it is silently shared across every stage clone of a step, so its
+    // integrated quantity advances once per stage instead of once per step
+    // (and never rolls back on a rejected step). That shows up as a
+    // conservation violation, not a crash: the graphite kept burning while
+    // only a sixth of the carbon reached the gas.
     const clone = { ...v };
     if (v.oxidation) clone.oxidation = { ...v.oxidation };
     if (v.fissionProducts) clone.fissionProducts = { ...v.fissionProducts };
     if (v.metal) clone.metal = { ...v.metal };
+    if (v.graphiteOxidation) clone.graphiteOxidation = { ...v.graphiteOxidation };
     thermalNodes.set(k, clone);
   });
 

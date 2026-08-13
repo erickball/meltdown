@@ -115,6 +115,26 @@ export interface ThermalNode {
     totalZrMass: number;            // kg - total Zr mass available for oxidation
     associatedCoolantNode: string;  // FlowNode ID where H₂ is released
   };
+
+  /**
+   * Graphite oxidation state (graphite nodes: pebble matrix, reflector).
+   *
+   *   C + O2  -> CO/CO2   exothermic - an air ingress is a FIRE
+   *   C + H2O -> CO + H2  endothermic - a steam ingress is slow gasification
+   *   C + CO2 -> 2 CO     endothermic
+   *
+   * Burn-off is the integrated state; the internal surface area and
+   * porosity are DERIVED from it (random pore model), so structure cannot
+   * drift from the mass that has actually been consumed.
+   */
+  graphiteOxidation?: {
+    burnoff: number;                // 0-1 - fraction of original carbon consumed
+    initialCarbonMass: number;      // kg - as-built graphite mass
+    grade: 'NBG-18' | 'A3-3';       // which grade's kinetics and structure
+    externalArea: number;           // m² - geometric surface exposed to gas
+    characteristicLength: number;   // m - V/A_ext of the piece (pebble or block)
+    associatedGasNode: string;      // FlowNode ID supplying oxidant, receiving products
+  };
 }
 
 // ============================================================================

@@ -19,9 +19,16 @@ import {
   internalSurfacePerVolume,
   characteristicPoreRadius,
   thieleEffectiveness,
+  burnoffSurfaceFactor,
+  reactionHeatPerCarbon,
+  coFraction,
+  oxidantPerCarbon,
+  oxidantInhibition,
+  oxidantRateConstant,
   NBG_18,
   A3_3,
 } from './graphite.js';
+import { cloneSimulationState } from './solver.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
   binaryDiffusivity,
@@ -590,6 +597,98 @@ test('Thiele effectiveness is smooth and correct in both limits', () => {
     assert(cur < prev && cur > 0, `eta must decrease monotonically, broke at phi=${phi}`);
     prev = cur;
   }
+});
+
+test('burn-off opens pores before it consumes them', () => {
+  // Random pore model: internal surface RISES at first (closed porosity
+  // opens up, so a partly-burnt block is more reactive than a fresh one),
+  // then collapses to zero as the pore walls merge.
+  const s0 = burnoffSurfaceFactor(0);
+  const sMid = burnoffSurfaceFactor(0.3);
+  const sLate = burnoffSurfaceFactor(0.95);
+  assert(Math.abs(s0 - 1) < 1e-12, `virgin surface factor must be 1, got ${s0}`);
+  assert(sMid > s0, `surface should rise early: ${sMid.toFixed(3)} vs ${s0.toFixed(3)}`);
+  assert(sLate < sMid, `surface must collapse late: ${sLate.toFixed(3)} vs ${sMid.toFixed(3)}`);
+  assert(burnoffSurfaceFactor(1) === 0, 'fully consumed graphite has no surface');
+  // Approaching total burn-off must stay finite - the expression is 0*inf
+  // at the endpoint and would otherwise produce NaN and poison the solver.
+  for (const x of [0.999, 0.99999, 1 - 1e-12]) {
+    const s = burnoffSurfaceFactor(x);
+    assert(Number.isFinite(s) && s >= 0, `surface factor must stay finite at X=${x}, got ${s}`);
+  }
+});
+
+test('air oxidation is exothermic, steam and CO2 gasification are not', () => {
+  // The single most important qualitative fact in the model: an air ingress
+  // is a fire that can sustain itself, a steam ingress is a gasification
+  // the core has to pay for out of its own heat.
+  for (const T of [800, 1200, 1600]) {
+    assert(reactionHeatPerCarbon('O2', T) > 0, `C+O2 must release heat at ${T} K`);
+    assert(reactionHeatPerCarbon('H2O', T) < 0, `C+H2O must absorb heat at ${T} K`);
+    assert(reactionHeatPerCarbon('CO2', T) < 0, `C+CO2 must absorb heat at ${T} K`);
+  }
+  // Hot graphite makes CO instead of CO2 and so keeps far less of the heat.
+  assert(reactionHeatPerCarbon('O2', 1600) < 0.4 * reactionHeatPerCarbon('O2', 600),
+    'CO-dominated combustion at high T must release much less surface heat');
+});
+
+test('CO fraction rises with temperature and stays a fraction', () => {
+  const cold = coFraction(600), hot = coFraction(1800);
+  assert(cold > 0 && cold < 1 && hot > 0 && hot < 1, 'CO fraction must stay in (0,1)');
+  assert(hot > 0.9 && cold < 0.2,
+    `Arthur split should run from mostly CO2 cold (${cold.toFixed(2)}) to mostly CO hot (${hot.toFixed(2)})`);
+  // Oxygen demand falls as CO takes over: 1 mol O2 per C for pure CO2, 1/2 for pure CO
+  assert(oxidantPerCarbon('O2', 600) > oxidantPerCarbon('O2', 1800),
+    'CO-dominated burning must consume less oxygen per carbon');
+  assert(oxidantPerCarbon('H2O', 1200) === 1, 'steam gasification is one-to-one');
+});
+
+test('hydrogen inhibits steam gasification but nothing else', () => {
+  const clean = oxidantInhibition('H2O', 0);
+  const inhibited = oxidantInhibition('H2O', 1000); // 1 kPa H2
+  assert(Math.abs(clean - 1) < 1e-12, 'no hydrogen means no inhibition');
+  assert(inhibited < 0.6 && inhibited > 0.4,
+    `1 kPa H2 should roughly halve the steam rate, got factor ${inhibited.toFixed(3)}`);
+  assert(oxidantInhibition('O2', 1000) === 1, 'hydrogen must not inhibit oxygen attack');
+  assert(oxidantInhibition('CO2', 1000) === 1, 'hydrogen must not inhibit the Boudouard reaction');
+});
+
+test('steam and CO2 need far more heat than oxygen to attack graphite', () => {
+  // Air oxidation matters from ~600 K; gasification only above ~1200 K.
+  // This ordering is what makes air ingress and steam ingress qualitatively
+  // different accidents.
+  const at = (ox: 'O2' | 'H2O' | 'CO2', T: number) => oxidantRateConstant(NBG_18, ox, T);
+  assert(at('O2', 800) > 1e3 * at('H2O', 800),
+    'at 800 K oxygen must dominate steam by orders of magnitude');
+  assert(at('H2O', 1600) / at('H2O', 800) > at('O2', 1600) / at('O2', 800),
+    'steam has the steeper activation energy, so it must catch up as things heat');
+  assert(at('H2O', 1200) > at('CO2', 1200),
+    'steam gasification should outrun the Boudouard reaction');
+});
+
+test('graphiteOxidation survives a state clone (conservation regression)', () => {
+  // RK45 integrates burnoff in place, so this nested object MUST be deep
+  // cloned. When it was not, every stage of a step advanced the same
+  // object: the graphite burned six times faster than the carbon that
+  // actually reached the gas, silently breaking the atom balance.
+  const state = {
+    thermalNodes: new Map([['g', {
+      id: 'g', label: 'g', temperature: 1000, mass: 100, specificHeat: 1700,
+      thermalConductivity: 25, characteristicLength: 0.01, surfaceArea: 1,
+      heatGeneration: 0, maxTemperature: 3000,
+      graphiteOxidation: {
+        burnoff: 0.1, initialCarbonMass: 100, grade: 'A3-3' as const,
+        externalArea: 1, characteristicLength: 0.01, associatedGasNode: 'gas',
+      },
+    }]]),
+    flowNodes: new Map(), flowConnections: [], thermalConnections: [],
+    convectionConnections: [], components: { pumps: new Map(), valves: new Map() },
+    neutronics: {}, time: 0,
+  } as any;
+  const copy = cloneSimulationState(state);
+  copy.thermalNodes.get('g')!.graphiteOxidation!.burnoff = 0.9;
+  assert(state.thermalNodes.get('g')!.graphiteOxidation!.burnoff === 0.1,
+    'mutating the clone must not touch the original - graphiteOxidation is integrated state');
 });
 
 // ============================================================================

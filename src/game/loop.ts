@@ -21,6 +21,7 @@ import {
   ConductionRateOperator,
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
+  GraphiteOxidationRateOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -163,6 +164,7 @@ export class GameLoop {
       this.rk45Solver.addRateOperator(new ConductionRateOperator());
       this.rk45Solver.addRateOperator(new ConvectionRateOperator());
       this.rk45Solver.addRateOperator(new CladdingOxidationRateOperator()); // Zr-steam oxidation + H2 generation
+      this.rk45Solver.addRateOperator(new GraphiteOxidationRateOperator()); // graphite air/steam attack -> CO, H2, heat
       this.rk45Solver.addRateOperator(new HydrogenCombustionRateOperator()); // H2 deflagration when flammable + ignited
       this.rk45Solver.addRateOperator(new CoriumRelocationRateOperator()); // molten fuel/clad slumps to the lower head
       this.rk45Solver.addRateOperator(new McciRateOperator()); // ex-vessel corium attacks the concrete basemat

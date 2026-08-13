@@ -871,9 +871,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         // Kernels are dispersed in the matrix: the conduction path is the
         // pebble interior, r/(5k) average-to-surface for a heat-generating
         // sphere. Pebbles run nearly isothermal - the walk-away-safe part.
-        // No Zr in a pebble core, so no cladding-oxidation tracking
-        // (graphite air-ingress oxidation is a separate, unmodeled
-        // phenomenon).
+        // No Zr in a pebble core, so no cladding-oxidation tracking - but
+        // the matrix graphite itself burns in air and gasifies in steam
+        // (GraphiteOxidationRateOperator). A pebble is the reacting piece,
+        // so its own radius sets the in-pore diffusion length.
+        const matrixNode = state.thermalNodes.get(`${id}-clad`);
+        if (matrixNode) {
+          matrixNode.graphiteOxidation = {
+            burnoff: 0,
+            initialCarbonMass: matrixNode.mass,
+            grade: 'A3-3',
+            externalArea: pebbleGeo!.bedSurfaceArea,
+            // V/A of a sphere = d/6
+            characteristicLength: pebbleGeo!.pebbleDiameter / 6,
+            associatedGasNode: coolantFlowNodeId,
+          };
+        }
         const hKernelToSurface = (5 * 25) / (pebbleGeo!.pebbleDiameter / 2);
         state.thermalConnections.push({
           id: `conduction-${id}-fuel-clad`,
@@ -3002,6 +3015,18 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
       // strength well past steel's limit. Oxidation, not temperature, is
       // what destroys a reflector.
       maxTemperature: 3000,
+      // The reflector burns too, but as a thick block rather than a sphere:
+      // its half-thickness is the diffusion length, so it stays
+      // reaction-controlled to far higher temperature than the pebbles and
+      // is attacked essentially only on its exposed faces.
+      graphiteOxidation: {
+        burnoff: 0,
+        initialCarbonMass: refGeo.mass,
+        grade: 'NBG-18',
+        externalArea: refGeo.innerArea,
+        characteristicLength: refGeo.thickness / 2,
+        associatedGasNode: coolantFlowNodeId,
+      },
     });
 
     if (isPebbleBed) {
