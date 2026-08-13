@@ -23,6 +23,7 @@ import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-propertie
 import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
 import { computeReactivityComponents } from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
+import { resolveMaterial } from './materials';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
@@ -1729,8 +1730,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
           tubeTemp, tubePressure, tubePhase, tubePhase === 'vapor' ? 1 : 0, tubeVolume, hx.initialNcg
         ),
         volume: tubeVolume,
-        hydraulicDiameter: 0.02,
-        flowArea: 2,
+        // Tube-side geometry from the actual bundle, not constants. flowArea
+        // sets the velocity the convection correlation sees (Re, and h via
+        // Nu ~ Re^0.8), so a fixed 2 m² made every bundle - 200 tubes or 5000 -
+        // behave identically. Bore is OD minus two wall thicknesses; the wall
+        // comes from the tube-side rating the same way the burst model sizes it.
+        hydraulicDiameter: hxTubeBore(hx, tubeOD),
+        flowArea: hx.tubeCount * Math.PI * Math.pow(hxTubeBore(hx, tubeOD) / 2, 2),
         height: hx.height,
         elevation,
       };
@@ -2641,16 +2647,61 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   // with water/steam inside them.
   const shellNcg: NcgPartialPressures | undefined = hx.shellInitialNcg;
 
+  // Shell-side geometry from the bundle, not constants. The free-flow area is
+  // the shell cross-section minus what the tubes block, and the hydraulic
+  // diameter is the standard 4*A_free/P_wetted over the tube bundle plus the
+  // shell wall.
+  //
+  // This matters more than it looks: flowArea sets the velocity the convection
+  // correlation sees, and h ~ Re^0.8 ~ v^0.8. A hard-coded 5 m² gave a 1 m
+  // exchanger and a 6 m one identical shell-side velocity, so shell-side h did
+  // not respond to the bundle at all - which is invisible for a water-side
+  // boiler (its h is enormous and the tube side dominates) but decisive for a
+  // gas-cooled shell, where helium's h is the limiting resistance.
+  const shellDiameter = hx.width || 3;
+  const tubeOD = hx.tubeOD || 0.02;
+  const tubeCount = hx.tubeCount || 1000;
+  const shellArea = Math.PI * Math.pow(shellDiameter / 2, 2);
+  const tubeBlockage = tubeCount * Math.PI * Math.pow(tubeOD / 2, 2);
+  // Guard the pathological case of a bundle specified denser than its shell:
+  // fail loudly rather than hand the solver a negative or zero flow area.
+  if (tubeBlockage >= 0.9 * shellArea) {
+    throw new Error(
+      `[Factory] Heat exchanger '${component.id}': ${tubeCount} tubes of ${(tubeOD * 1000).toFixed(1)} mm ` +
+      `block ${(100 * tubeBlockage / shellArea).toFixed(0)}% of a ${shellDiameter.toFixed(2)} m shell. ` +
+      `There is no room for shell-side flow - reduce tubeCount/tubeOD or widen the shell.`
+    );
+  }
+  const shellFlowArea = shellArea - tubeBlockage;
+  const wettedPerimeter = tubeCount * Math.PI * tubeOD + Math.PI * shellDiameter;
+  const shellHydraulicDiameter = (4 * shellFlowArea) / wettedPerimeter;
+
   return {
     id: `${component.id}-shell`,
     label: `${component.label || 'HX'} Shell`,
     fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume, shellNcg),
     volume: shellVolume,
-    hydraulicDiameter: 0.1,
-    flowArea: 5,
+    hydraulicDiameter: shellHydraulicDiameter,
+    flowArea: shellFlowArea,
     height: hx.height,
     elevation,
   };
+}
+
+/** Tube bore (m): OD minus two wall thicknesses, the wall sized from the
+ *  tube-side pressure rating exactly as the burst model sizes it. */
+function hxTubeBore(hx: any, tubeOD: number): number {
+  const rating = hx.tubePressureRating || hx.pressureRating || 100;
+  const wall = calculateThicknessFromPressure(rating, tubeOD);
+  const bore = tubeOD - 2 * wall;
+  if (!(bore > 0)) {
+    throw new Error(
+      `[Factory] Heat exchanger '${hx.id}': a ${(tubeOD * 1000).toFixed(1)} mm tube rated ` +
+      `${rating} bar needs ${(wall * 1000).toFixed(1)} mm of wall, leaving no bore. ` +
+      `Use a larger tubeOD or a lower tubePressureRating.`
+    );
+  }
+  return bore;
 }
 
 /**
@@ -3313,6 +3364,8 @@ function initializeBurstStates(
     const designPressure = pressureRating * 1e5;  // bar to Pa
     const randomMargin = simulationRandom() * 0.4;     // 0-40%
     const burstPressure = designPressure * (1 + randomMargin);
+    // Structural material sets the creep-rupture correlation (materials.ts)
+    const material = resolveMaterial((component as any).material);
 
     // Special handling for heat exchangers (tube + shell sides)
     if (component.type === 'heatExchanger') {
@@ -3335,6 +3388,7 @@ function initializeBurstStates(
           burstPressure,
           collapsePressure: shellCollapsePressure,
           randomMargin,
+          material,
           isBurst: false,
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,
@@ -3366,6 +3420,7 @@ function initializeBurstStates(
           burstPressure: tubeBurstPressure,
           collapsePressure: tubeCollapsePressure,
           randomMargin: tubeRandomMargin,
+          material,
           isBurst: false,
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,
@@ -3395,6 +3450,7 @@ function initializeBurstStates(
         burstPressure,
         collapsePressure,
         randomMargin,
+        material,
         isBurst: false,
         currentBreakFraction: 0,
         breakSizeSeed: simulationRandom() * 10000,

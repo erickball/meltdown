@@ -121,13 +121,18 @@ add('cb-1', {
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
   position: { x: 56, y: 74 }, rotation: 0, elevation: 0,
-  // Area sizing: helium is a poor convector at the shell-side velocities this
-  // model produces (rho ~ 3 kg/m3 at 60 bar / 960 K through the factory's
-  // 5 m2 shell flow area gives ~11 m/s, Re ~ 7e4, h ~ 450 W/m2-K). Removing
-  // 200 MW across an LMTD of ~111 K needs UA ~ 1.8 MW/K, so ~4000 m2 of tube
-  // surface - about 5000 tubes of 19 mm over the 13 m bundle. Real helical
-  // once-through SGs are indeed built from a large number of parallel tubes.
-  width: 3.6, height: 14, hxType: 'helical', tubeCount: 5000,
+  // Bundle sizing. Shell-side helium is the limiting resistance, and its h
+  // follows the free-flow velocity (h ~ Re^0.8), so the shell has to be TIGHT
+  // around the bundle, not merely large. A 2.3 m shell with 5000 x 19 mm tubes
+  // is ~34% blockage - dense but normal for a helical coil - leaving ~2.7 m2
+  // of free area, ~19 m/s of helium, and h ~ 1000 W/m2-K over ~3900 m2 of
+  // surface. That covers the ~1.8 MW/K needed to move 200 MW across an LMTD
+  // of ~111 K.
+  //
+  // Tubes are Alloy 800H: at 60 bar and SG temperatures low-alloy steel would
+  // creep-rupture, and 800H is what real helical HTGR steam generators use.
+  width: 2.3, height: 14, hxType: 'helical', tubeCount: 5000,
+  material: 'alloy-800h',
   pressureRating: 90,          // shell (helium) design pressure
   tubePressureRating: 200,     // tube (water) design pressure
   shellPressureRating: 90,
@@ -291,6 +296,10 @@ add('cv-1', {
   outerDiameter: 1.8, wallThickness: 0.06, length: 7,
   innerDiameter: 1.0, innerWallThickness: 0.02,
   pressureRating: 90,
+  // Alloy 800H. Even with the cold return in the annulus keeping the pressure
+  // boundary near core-inlet temperature, the inner liner sees 750 C - and the
+  // outer wall still runs ~460 C, where low-alloy steel is marginal.
+  material: 'alloy-800h',
   targetComponentId: 'hx-1', orientation: 'horizontal',
   ports: ports([
     ['cv-1-inner-in', -3.5, 0],

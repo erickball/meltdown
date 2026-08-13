@@ -69,6 +69,12 @@ export interface ComponentBase {
   // A component inside another only bursts when (inner pressure - container pressure) > burst rating.
   // This means a pipe inside a pressurized containment can withstand higher absolute pressure.
   containedBy?: string;
+  // Structural material of the pressure boundary. Drives creep-rupture life:
+  // 'low-alloy-steel' (default), 'stainless-304', 'alloy-800h'. A hot gas duct
+  // or helical SG tube bundle in a gas reactor wants 'alloy-800h' - the same
+  // part in low-alloy steel ruptures in minutes at core-outlet temperature.
+  // See src/simulation/materials.ts.
+  material?: string;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState

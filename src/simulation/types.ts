@@ -8,6 +8,7 @@
 
 import type { GasComposition } from './gas-properties';
 import type { LatticeParams } from './lattice';
+import type { StructuralMaterial } from './materials';
 
 // ============================================================================
 // Fluid Properties
@@ -784,6 +785,11 @@ export interface BurstState {
   // For HX tube-side: track shell node for differential pressure
   isTubeSide?: boolean;
   shellNodeId?: string;
+
+  // Structural material of the pressure boundary. Sets the Larson-Miller
+  // creep constants (see materials.ts): the same duct at 750 C lasts minutes
+  // in low-alloy steel and days in Alloy 800H. Undefined = low-alloy steel.
+  material?: StructuralMaterial;
 
   // Cumulative creep damage (time-fraction rule): dD/dt = 1/t_rupture(σ,T)
   // with t_rupture from a Larson-Miller correlation on the stress ratio
