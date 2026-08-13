@@ -10,6 +10,13 @@
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import { computeReactivityComponents } from './operators/neutronics.js';
+import {
+  graphiteSpecificHeat,
+  bedStagnantConductivity,
+  bedRadiativeConductivity,
+  bedEffectiveConductivity,
+} from './graphite.js';
+import { coreReflectorGeometry } from './factory.js';
 import type { NeutronicsState } from './types.js';
 
 // Test result tracking
@@ -365,6 +372,98 @@ test('water lattices unchanged by solid-moderation extension (regression)', () =
     Math.abs(d.fuelTempCoeff - ref.fuelTempCoeff) < 1e-15,
     'zero solid moderator / zero reflector must be identical to the water-only path');
 });
+
+// ============================================================================
+// Graphite properties and packed-bed conduction
+// ============================================================================
+category('Graphite');
+
+test('graphite cp tracks the Butland-Maddison anchors from 300 to 2000 K', () => {
+  // The correlation is the reason the reflector node carries a cp MODEL and
+  // not a constant: it nearly triples across the range an accident visits.
+  const c300 = graphiteSpecificHeat(300);
+  const c1000 = graphiteSpecificHeat(1000);
+  const c2000 = graphiteSpecificHeat(2000);
+  assert(Math.abs(c300 - 712) < 15, `cp(300 K) should be ~712 J/kg-K, got ${c300.toFixed(0)}`);
+  assert(Math.abs(c1000 - 1759) < 25, `cp(1000 K) should be ~1759 J/kg-K, got ${c1000.toFixed(0)}`);
+  assert(Math.abs(c2000 - 2021) < 30, `cp(2000 K) should be ~2021 J/kg-K, got ${c2000.toFixed(0)}`);
+  assert(c300 < c1000 && c1000 < c2000, 'graphite cp must rise monotonically over this range');
+});
+
+test('packed bed conducts far worse than its own particles (point contacts)', () => {
+  // Helium-filled pebble bed at 1000 K. Solid graphite is ~40 W/m-K but the
+  // spheres only touch at points, so the stagnant bed lands near 1-4 W/m-K.
+  const kHe = 0.3;
+  const kStag = bedStagnantConductivity(kHe, 40, 0.39);
+  assert(kStag > 1 && kStag < 5,
+    `stagnant He pebble bed should be ~1-5 W/m-K, got ${kStag.toFixed(2)}`);
+  assert(kStag < 40 / 5,
+    `bed conductivity (${kStag.toFixed(2)}) must be far below the solid's 40 W/m-K`);
+});
+
+test('bed radiation takes over as it heats: k_eff strengthens with T^3', () => {
+  const k = (T: number) => bedEffectiveConductivity(0.3, 40, 0.39, T, 0.06, 0.85);
+  const cold = k(600), hot = k(1200);
+  // Doubling T multiplies the radiative term by 8, so the total climbs
+  // steeply - this is the physics that makes a pebble bed walk-away safe.
+  assert(hot > 3 * cold,
+    `k_eff should climb steeply with temperature: 600 K -> ${cold.toFixed(2)}, 1200 K -> ${hot.toFixed(2)} W/m-K`);
+  assert(hot > 8 && hot < 30,
+    `pebble bed at 1200 K should be ~10-20 W/m-K, got ${hot.toFixed(2)}`);
+});
+
+test('Zehner-Schlunder refuses a bed whose gas out-conducts its particles', () => {
+  // The closed form goes singular then negative below kappa = B. Silently
+  // returning a negative conductivity would drive heat the wrong way, so it
+  // must throw rather than produce a plausible-looking number.
+  let threw = false;
+  try {
+    bedStagnantConductivity(30, 25, 0.39); // kappa < 1, far below B
+  } catch (e) {
+    threw = true;
+    assert(/Zehner-Schlunder/.test(String(e)), 'error should name the correlation');
+  }
+  assert(threw, 'out-of-range kappa must throw, not return a fallback');
+});
+
+test('bed with no gas still conducts by radiation alone', () => {
+  // Depressurisation must degrade the bed continuously onto the radiative
+  // limit, not step or divide by zero.
+  const kRad = bedRadiativeConductivity(1200, 0.06, 0.85);
+  const kThin = bedEffectiveConductivity(1e-4, 40, 0.39, 1200, 0.06, 0.85);
+  assert(kRad > 5, `radiative conductivity at 1200 K should be ~10 W/m-K, got ${kRad.toFixed(2)}`);
+  assert(Number.isFinite(kThin) && kThin > kRad * 0.95,
+    `a gas-free bed must fall back onto radiation smoothly, got ${kThin.toFixed(3)}`);
+});
+
+test('reflector geometry: annulus mass and containment of the core', () => {
+  // 3.1 m core, 9 m tall, 0.8 m reflector - the HTGR preset's proportions.
+  const geo = coreReflectorGeometry({
+    id: 'c', type: 'coreBarrel', innerDiameter: 3.1, activeFuelHeight: 9,
+    reflectorThickness: 0.8,
+  } as any);
+  assert(Math.abs(geo.mass / 1000 - 214.6) < 2,
+    `reflector should be ~215 t of graphite, got ${(geo.mass / 1000).toFixed(1)} t`);
+  assert(geo.outerRadius > geo.coreRadius && geo.midRadius > geo.coreRadius &&
+    geo.midRadius < geo.outerRadius,
+    'mean radius must lie inside the annulus');
+  // Top and bottom reflectors are included, so the volume must exceed a
+  // bare side annulus.
+  const sideOnly = Math.PI * (geo.outerRadius ** 2 - geo.coreRadius ** 2) * 9;
+  assert(geo.volume > sideOnly,
+    'reflector volume must include the axial top/bottom slabs, not just the side');
+});
+
+test('zero reflector thickness produces no reflector mass (regression)', () => {
+  const geo = coreReflectorGeometry({
+    id: 'c', type: 'coreBarrel', innerDiameter: 3.1, activeFuelHeight: 9,
+    reflectorThickness: 0,
+  } as any);
+  assert(geo.volume === 0 && geo.mass === 0,
+    'a core with no reflector must build no reflector geometry');
+});
+
+category('Neutronics (lattice)');
 
 test('fatter rods self-shield: weaker Doppler per kelvin (at fixed moderation)', () => {
   // Hold the moderation ratio constant by trading rod count against rod

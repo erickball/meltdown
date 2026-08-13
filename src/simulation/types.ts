@@ -48,7 +48,15 @@ export interface ThermalNode {
   // (fuel/clad -> corium). Lets neutronics and displays reason about the
   // relocated fraction without new integrated state.
   initialMass?: number;             // kg
-  specificHeat: number;             // J/kg-K (can be temperature-dependent later)
+  specificHeat: number;             // J/kg-K (used when specificHeatModel is absent)
+  /**
+   * Named temperature-dependent specific-heat model. When set, it replaces
+   * the constant `specificHeat` in nodeHeatCapacity. Graphite needs this:
+   * its cp runs from ~710 J/kg-K cold to ~2020 at 2000 K, so a constant
+   * value would misstate a reflector's thermal inertia by nearly 2x across
+   * an accident - and thermal inertia is the whole point of that node.
+   */
+  specificHeatModel?: 'graphite';
   thermalConductivity: number;      // W/m-K
 
   // Geometry (for conduction calculations)
@@ -201,6 +209,64 @@ export interface ThermalConnection {
 
   // Conduction parameters
   conductance: number;              // W/K - k*A/L for this connection
+
+  // --------------------------------------------------------------------
+  // Optional temperature-dependent heat paths. Both are plain data (no
+  // closures) so they survive save/load, and both ADD to `conductance`
+  // rather than replacing it - a connection may carry solid conduction,
+  // gap radiation, and a packed bed at once.
+  // --------------------------------------------------------------------
+
+  /**
+   * Gray-body radiation across a gap (m2): Q += sigma * radiationCoeff *
+   * (T_from^4 - T_to^4). The coefficient folds the radiating area and the
+   * gray-body exchange factor together, so a connection across a
+   * concentric annulus supplies A_inner / (1/e_in + (r_in/r_out)(1/e_out - 1)).
+   *
+   * This is what carries decay heat across the gas gap between a hot
+   * reflector and the vessel wall once flow has stopped - above ~800 K it
+   * beats natural convection outright, and it is the reason a gas reactor
+   * can shed decay heat with every pump dead.
+   */
+  radiationCoeff?: number;
+
+  /**
+   * Conduction through a packed bed of spheres, whose effective
+   * conductivity depends strongly on temperature (radiation across the
+   * voids, ~T^3) and on the gas filling it. Recomputed every step from the
+   * live gas composition, so depressurising a pebble bed continuously
+   * degrades its conduction instead of stepping.
+   */
+  packedBed?: {
+    /** Flow node whose gas fills the bed voids */
+    gasNodeId: string;
+    /** Void fraction (-), ~0.39 for randomly packed spheres */
+    voidFraction: number;
+    /** Sphere diameter (m) - sets the radiative mean free path */
+    particleDiameter: number;
+    /** Particle surface emissivity (-) */
+    emissivity: number;
+    /** Particle material conductivity at 300 K (W/m-K) */
+    solidK300: number;
+    /**
+     * Shape factor (m) converting effective conductivity to conductance:
+     * conductance = k_eff * shapeFactor. For the average-to-surface path
+     * of a uniformly heated cylinder of height H this is 8*pi*H.
+     */
+    shapeFactor: number;
+    /**
+     * Solid conduction in series with the bed - the receiving structure's
+     * own half-thickness, which the bed must push heat through before it
+     * reaches that node's mean temperature. Shape factor in metres
+     * (conductance = k(T) * seriesShapeFactor); for an annulus of height H
+     * from r_in to r_mid that is 2*pi*H/ln(r_mid/r_in). Kept live rather
+     * than pre-evaluated because it is a fifth of the total resistance in a
+     * pebble-bed reflector path, not a rounding error.
+     */
+    seriesShapeFactor?: number;
+    /** 300 K conductivity of that series path (W/m-K) */
+    seriesK300?: number;
+  };
 }
 
 export interface ConvectionConnection {
