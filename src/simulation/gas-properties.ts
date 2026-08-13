@@ -255,6 +255,165 @@ export function mixtureViscosity(comp: GasComposition, T_K: number): number {
 export const R_GAS = 8.31446;
 
 // ============================================================================
+// Molecular Diffusion
+// ============================================================================
+
+/**
+ * A diffusing species: any non-condensable, or steam. Steam is not a
+ * GasSpecies (water is tracked as a fluid, not an NCG) but it is an oxidant
+ * and a diffusing partner, so the diffusion routines accept it by name.
+ */
+export type DiffusingSpecies = GasSpecies | 'H2O';
+
+/**
+ * Fuller-Schettler-Giddings diffusion volumes (dimensionless), the standard
+ * tabulated values from Fuller et al. (1966).
+ *
+ * These characterise how much space a molecule sweeps out as it diffuses.
+ * They are what let us compute binary diffusivity from first principles
+ * instead of tabulating every pair - which matters here because gas-cooled
+ * reactor accidents mix helium, air, steam, CO and CO2 in proportions no
+ * lookup table would anticipate.
+ */
+export const FULLER_DIFFUSION_VOLUMES: Record<DiffusingSpecies, number> = {
+  He:  2.67,
+  H2:  6.12,
+  H2O: 13.1,
+  O2:  16.3,
+  Ar:  16.2,
+  CO:  18.0,
+  N2:  18.5,
+  CO2: 26.9,
+  Xe:  32.7,
+  // Fuller tabulates iodine (29.8) but not caesium. This is an estimate
+  // from the alkali's size and is the one entry here that is not a
+  // published value. CsI is modelled as a depositing aerosol, not a
+  // diffusing reactant, so nothing currently depends on it - if something
+  // ever does, replace this with a measured value first.
+  CsI: 70,
+};
+
+/** Molecular weight (kg/mol) of any diffusing species, steam included. */
+export function speciesMolecularWeight(species: DiffusingSpecies): number {
+  return species === 'H2O' ? 0.018015 : GAS_PROPERTIES[species].molecularWeight;
+}
+
+/**
+ * Binary gas diffusivity (m²/s) from the Fuller correlation.
+ *
+ *   D_AB = 1.43e-7 T^1.75 / (P M_AB^0.5 (v_A^1/3 + v_B^1/3)^2)
+ *
+ * with T in K, P in bar, M_AB = 2/(1/M_A + 1/M_B) in g/mol. Accurate to
+ * ~5-10% across the range reactor accidents visit.
+ *
+ * Two dependencies matter physically. D ~ T^1.75 means diffusion-limited
+ * chemistry accelerates as things heat up; D ~ 1/P means it accelerates as
+ * a vessel depressurises. Both fall out of the correlation rather than
+ * being asserted, which is why a depressurised hot core is the worst case
+ * for oxidation without anything special-casing that condition.
+ */
+export function binaryDiffusivity(
+  a: DiffusingSpecies,
+  b: DiffusingSpecies,
+  T_K: number,
+  P_Pa: number,
+): number {
+  if (!(T_K > 0) || !(P_Pa > 0)) {
+    throw new Error(
+      `[GasProperties] binaryDiffusivity(${a}, ${b}) needs a positive temperature ` +
+      `and pressure, got T=${T_K} K, P=${P_Pa} Pa. Diffusivity diverges as either ` +
+      `goes to zero, so there is no meaningful value to return here.`
+    );
+  }
+  const M_a = speciesMolecularWeight(a) * 1000; // g/mol
+  const M_b = speciesMolecularWeight(b) * 1000;
+  const M_ab = 2 / (1 / M_a + 1 / M_b);
+  const vSum = Math.pow(FULLER_DIFFUSION_VOLUMES[a], 1 / 3) +
+    Math.pow(FULLER_DIFFUSION_VOLUMES[b], 1 / 3);
+  const P_bar = P_Pa / 1e5;
+  // 0.00143 cm²/s in the original units; 1e-4 converts cm²/s to m²/s.
+  return 1e-4 * (0.00143 * Math.pow(T_K, 1.75)) /
+    (P_bar * Math.sqrt(M_ab) * vSum * vSum);
+}
+
+/**
+ * Diffusivity of one species through a multicomponent mixture (m²/s), by
+ * Blanc's law: the mixture resistance is the mole-fraction-weighted sum of
+ * the binary resistances.
+ *
+ * @param species     the diffusing species
+ * @param comp        non-condensable inventory (mol)
+ * @param steamMoles  steam in the same volume (mol) - a real diffusion
+ *                    partner, and the other graphite oxidant
+ */
+export function diffusivityInMixture(
+  species: DiffusingSpecies,
+  comp: GasComposition,
+  steamMoles: number,
+  T_K: number,
+  P_Pa: number,
+): number {
+  const partners: Array<[DiffusingSpecies, number]> = [];
+  for (const s of ALL_GAS_SPECIES) {
+    if (s !== species && (comp[s] ?? 0) > 0) partners.push([s, comp[s] ?? 0]);
+  }
+  if (species !== 'H2O' && steamMoles > 0) partners.push(['H2O', steamMoles]);
+
+  const partnerTotal = partners.reduce((sum, [, n]) => sum + n, 0);
+  if (partnerTotal <= 0) {
+    // Nothing to diffuse THROUGH but itself. Self-diffusion is the correct
+    // physical limit here, not an error: a bed filled with pure oxygen
+    // still transports oxygen, just by self-diffusion.
+    return binaryDiffusivity(species, species, T_K, P_Pa);
+  }
+
+  let resistance = 0;
+  for (const [s, n] of partners) {
+    resistance += (n / partnerTotal) / binaryDiffusivity(species, s, T_K, P_Pa);
+  }
+  return 1 / resistance;
+}
+
+/**
+ * Knudsen diffusivity (m²/s) inside a pore of radius r.
+ *
+ *   D_K = (2/3) r sqrt(8RT/(pi M))
+ *
+ * When the pore is narrower than the mean free path, molecules collide with
+ * the walls more often than with each other and transport stops depending
+ * on pressure at all. This is why a depressurised graphite block does not
+ * simply oxidise proportionally faster forever: bulk diffusion rises as 1/P
+ * until the Knudsen limit takes over and caps it - a ceiling that emerges
+ * from the two resistances in series rather than from any imposed limit.
+ */
+export function knudsenDiffusivity(
+  poreRadius: number,
+  T_K: number,
+  molecularWeight: number,
+): number {
+  return (2 / 3) * poreRadius *
+    Math.sqrt((8 * R_GAS * T_K) / (Math.PI * molecularWeight));
+}
+
+/**
+ * Effective diffusivity through a porous solid (m²/s).
+ *
+ * Bosanquet puts bulk and Knudsen diffusion in series (the slower one
+ * dominates, smoothly), and the Bruggeman relation D_eff = eps^1.5 D_pore
+ * supplies the tortuosity correction without a fitted parameter - the pore
+ * network is longer and narrower than a straight channel, and porosity
+ * alone sets how much.
+ */
+export function effectivePoreDiffusivity(
+  bulkDiffusivity: number,
+  knudsenDiff: number,
+  porosity: number,
+): number {
+  const poreD = 1 / (1 / bulkDiffusivity + 1 / knudsenDiff);
+  return Math.pow(porosity, 1.5) * poreD;
+}
+
+// ============================================================================
 // Gas Composition Calculations
 // ============================================================================
 
