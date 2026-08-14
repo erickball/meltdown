@@ -908,6 +908,19 @@ export interface BurstState {
   isTubeSide?: boolean;
   shellNodeId?: string;
 
+  // Any OTHER boundary nested inside `shellNodeId` rather than facing
+  // containment - a coaxial duct's inner liner sits in its annulus exactly the
+  // way tubes sit in a shell. Gauge pressure is the differential across this
+  // wall and a rupture discharges into the outer node, same as tubes; it is a
+  // separate flag only so that "pick a tube to rupture" stays about tubes.
+  isNestedBoundary?: boolean;
+
+  // Metal thermal node whose temperature drives creep for THIS boundary.
+  // Needed wherever one component owns more than one pressure boundary at
+  // different temperatures - a coaxial duct's 750 C inner liner and its
+  // annulus-cooled outer shell cannot share `${componentId}-wall`.
+  wallNodeId?: string;
+
   // Structural material of the pressure boundary. Sets the Larson-Miller
   // creep constants (see materials.ts): the same duct at 750 C lasts minutes
   // in low-alloy steel and days in Alloy 800H. Undefined = low-alloy steel.

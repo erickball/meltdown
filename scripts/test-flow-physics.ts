@@ -90,6 +90,7 @@ interface ConnOpts {
   from: string; to: string;
   flowArea?: number; length?: number;
   fromElevation?: number; toElevation?: number;
+  resistanceCoeff?: number;
 }
 
 function makeConn(o: ConnOpts): PlantConnection {
@@ -98,6 +99,7 @@ function makeConn(o: ConnOpts): PlantConnection {
     toComponentId: o.to, toPortId: `${o.to}-in`,
     flowArea: o.flowArea ?? 0.02, length: o.length ?? 2,
     fromElevation: o.fromElevation ?? 0.1, toElevation: o.toElevation ?? 0.1,
+    ...(o.resistanceCoeff !== undefined ? { resistanceCoeff: o.resistanceCoeff } : {}),
   } as unknown as PlantConnection;
 }
 
@@ -130,6 +132,13 @@ function chokedFlowBound(state: SimulationState, nodeId: string, flowArea: numbe
 // bound, (c) NOT increase when downstream pressure is 10x lower - the defining
 // property of choking. A linearized implicit flow update that ignores the
 // sonic cap would blow straight past (b) and fail (c).
+//
+// resistanceCoeff must be low enough that the SONIC bound is what limits the
+// flow. At the factory default (K=5) this rig settles at Ma~0.5, friction-
+// limited and nowhere near sonic - it only ever looked choked back when the
+// flag was raised on the pressure ratio alone rather than on the cap actually
+// binding, so the assertions below were passing on a connection that was not
+// choked at all. K=1 is a sharp orifice discharging into a plenum.
 
 function chokedRig(downstreamTempK: number) {
   const A = 0.002;
@@ -138,7 +147,7 @@ function chokedRig(downstreamTempK: number) {
       makeTank({ id: 'hp', temperature: 549, pressure: 6e6, fillLevel: 0, volume: 10 }),
       makeTank({ id: 'lp', temperature: downstreamTempK, pressure: 1e5, fillLevel: 0, volume: 500 }),
     ],
-    [makeConn({ from: 'hp', to: 'lp', flowArea: A, length: 1 })]
+    [makeConn({ from: 'hp', to: 'lp', flowArea: A, length: 1, resistanceCoeff: 1 })]
   );
   run(sim, 2.0);
   return { sim, A };

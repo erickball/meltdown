@@ -8,7 +8,7 @@
  * Each operator returns StateRates describing dm/dt, dU/dt, dT/dt, etc.
  */
 
-import { SimulationState, FlowNode, FlowConnection, ConvectionConnection } from '../types';
+import { SimulationState, FlowNode, ConvectionConnection } from '../types';
 import {
   RateOperator,
   ConstraintOperator,
@@ -31,11 +31,7 @@ import {
   mixtureThermalConductivity,
   mixtureViscosity,
   averageMolecularWeight,
-  ncgSoundSpeed,
-  steamNcgSoundSpeed,
-  R_GAS,
 } from '../gas-properties';
-import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
 import {
   graphiteSpecificHeat,
   graphiteThermalConductivity,
@@ -49,7 +45,10 @@ import {
   findCheckValveForConnection,
   computeConnectionHydraulics,
   computeChokeLimit,
+  connectionRestriction,
+  momentumFlowPhase,
   approxVaporDensity,
+  nodeBulkDensity,
   CLOSED_FLOW_DECAY_TAU,
 } from './connection-hydraulics';
 
@@ -2609,20 +2608,22 @@ export class FlowMomentumRateOperator implements RateOperator {
       let isChoked = false;
       let machNumber = 0;
 
-      const choke = computeChokeLimit(conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow);
+      const choke = computeChokeLimit(
+        conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow, h.throatArea);
       if (choke) {
         const m_dot_choked = choke.m_dot_choked;
+        const currentFlowSign = currentFlow >= 0 ? 1 : -1;
+
+        // Mach at the THROAT (the restriction is what goes sonic, not the bore)
+        machNumber = Math.abs(currentFlow) / (h.rho_flow * h.throatArea * choke.soundSpeed);
 
         if (choke.chokedByRatio) {
-          isChoked = true;
-          machNumber = 1.0;
-
           // Limit current flow to choked value
-          const currentFlowSign = currentFlow >= 0 ? 1 : -1;
           const targetFlow = currentFlowSign * m_dot_choked;
 
           if (Math.abs(currentFlow) >= m_dot_choked) {
             // At or above choked - bring flow back to choked value
+            isChoked = true;
             const tau = 0.05; // Fast response (50ms)
             dMassFlowRate = (targetFlow - currentFlow) / tau;
           } else if (dMassFlowRate * currentFlowSign > 0) {
@@ -2631,23 +2632,21 @@ export class FlowMomentumRateOperator implements RateOperator {
             const futureFlow = currentFlow + dMassFlowRate * dt_estimate;
             if (Math.abs(futureFlow) > m_dot_choked) {
               // Would exceed choked - limit to reach choked exactly
+              isChoked = true;
               dMassFlowRate = (targetFlow - currentFlow) / dt_estimate;
             }
           }
         } else {
-          // Not choked by pressure ratio - calculate Mach number
-          machNumber = Math.abs(h.v) / choke.soundSpeed;
-
           // Even if not choked by pressure ratio, don't let flow exceed sonic
           if (Math.abs(currentFlow) > m_dot_choked * 0.95) {
             // Approaching sonic - apply soft limiting
-            const currentFlowSign = currentFlow >= 0 ? 1 : -1;
             const targetFlow = currentFlowSign * m_dot_choked * 0.95;
             const tau = 0.1;
             const limitingRate = (targetFlow - currentFlow) / tau;
 
             // Only apply if it would reduce magnitude of acceleration
             if (dMassFlowRate * currentFlowSign > limitingRate * currentFlowSign) {
+              isChoked = true;
               dMassFlowRate = limitingRate;
             }
           }
@@ -2714,141 +2713,62 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
       const toNode = state.flowNodes.get(conn.toNodeId);
       if (!fromNode || !toNode) continue;
 
-      // Determine upstream node based on current flow direction
+      // The momentum step that applied (or declined) the sonic cap is the
+      // authority on choking: it judged the bound against the very state it
+      // capped from. The implicit solver runs on the real state and leaves its
+      // verdict in conn.debug, so adopt it. Re-deriving here instead compares a
+      // start-of-step cap against an end-of-step bound and disagrees by a few
+      // tenths of a percent - enough to blink the flag on and off every step on
+      // a connection that is sitting exactly on its ceiling.
+      if (conn.debug) {
+        conn.isChoked = conn.debug.isChoked ?? false;
+        conn.machNumber = conn.debug.machNumber ?? 0;
+        continue;
+      }
+
+      // No verdict recorded (explicit momentum path - it runs on RK stage
+      // clones that are discarded), so re-derive from the accepted state.
       const currentFlow = conn.massFlowRate;
       const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
       const downstreamNode = currentFlow >= 0 ? toNode : fromNode;
+      const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
+      const upstreamTolerance = currentFlow >= 0 ? conn.fromPhaseTolerance : conn.toPhaseTolerance;
 
-      // Determine flow phase
-      const flowPhase = this.getFlowPhase(upstreamNode, conn, currentFlow >= 0);
-
-      // Skip liquid - doesn't choke
+      // Phase and density come from the SAME helpers the momentum operators
+      // use. This operator used to carry its own copies, which drifted: it
+      // could report a vapor line choked while the momentum equation was
+      // pushing liquid down it.
+      const flowPhase = momentumFlowPhase(upstreamNode, upstreamElevation, upstreamTolerance);
       if (flowPhase === 'liquid') {
         conn.isChoked = false;
         conn.machNumber = 0;
         continue;
       }
-
-      // Get flow properties
       const rho_flow = flowPhase === 'vapor'
-        ? this.getVaporDensity(upstreamNode)
-        : upstreamNode.fluid.mass / upstreamNode.volume;
-      const A = conn.flowArea || 0.1;
-      const v = Math.abs(currentFlow) / (rho_flow * A);
+        ? approxVaporDensity(upstreamNode)
+        : nodeBulkDensity(upstreamNode);
 
-      // Calculate sound speed
-      const c = this.getSoundSpeed(upstreamNode, flowPhase);
+      const { throatArea } = connectionRestriction(state, conn, toNode);
+      const choke = computeChokeLimit(
+        conn, upstreamNode, downstreamNode, flowPhase, rho_flow, throatArea);
+      if (!choke) {
+        conn.isChoked = false;
+        conn.machNumber = 0;
+        continue;
+      }
 
-      // Calculate Mach number
-      conn.machNumber = v / c;
+      // Mach at the throat, which is what actually goes sonic
+      conn.machNumber = Math.abs(currentFlow) / (rho_flow * throatArea * choke.soundSpeed);
 
-      // Check pressure ratio for choked flow
-      const critRatio = this.getCriticalPressureRatio(upstreamNode, flowPhase);
-      const P_up = upstreamNode.fluid.pressure;
-      const P_down = downstreamNode.fluid.pressure;
-      const actualRatio = P_down / P_up;
-
-      conn.isChoked = critRatio > 0 && actualRatio < critRatio;
+      // Choked means the sonic mass-flux bound is what the flow is up against.
+      // A subcritical pressure ratio is necessary but NOT sufficient: judged on
+      // the ratio alone, every turbine inlet reads choked forever (its
+      // downstream node floats at condenser pressure) while passing Mach 0.05.
+      const bound = choke.chokedByRatio ? choke.m_dot_choked : 0.95 * choke.m_dot_choked;
+      conn.isChoked = Math.abs(currentFlow) >= bound;
     }
 
     return state;
-  }
-
-  private getFlowPhase(node: FlowNode, conn: FlowConnection, isFromNode: boolean): 'liquid' | 'vapor' | 'mixture' {
-    if (node.fluid.phase !== 'two-phase') {
-      return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
-    }
-
-    // For two-phase, check connection elevation
-    const connElev = isFromNode ? conn.fromElevation : conn.toElevation;
-    const nodeHeight = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    if (connElev === undefined) {
-      return 'mixture';
-    }
-
-    // Calculate liquid level
-    const quality = node.fluid.quality ?? 0;
-    const rho_liquid = this.getLiquidDensity(node);
-    const liquidMass = node.fluid.mass * (1 - quality);
-    const liquidVolume = liquidMass / rho_liquid;
-    const liquidLevel = liquidVolume / (node.volume / nodeHeight);
-
-    if (connElev < liquidLevel - 0.1) return 'liquid';
-    if (connElev > liquidLevel + 0.1) return 'vapor';
-    return 'mixture';
-  }
-
-  private getLiquidDensity(node: FlowNode): number {
-    const T_C = node.fluid.temperature - 273.15;
-    if (T_C < 100) return 1000 - 0.08 * T_C;
-    if (T_C < 300) return 958 - 1.3 * (T_C - 100);
-    return Math.max(400, 700 - 2.5 * (T_C - 300));
-  }
-
-  private getVaporDensity(node: FlowNode): number {
-    const P = node.fluid.pressure;
-    const T = node.fluid.temperature;
-    return Math.max(0.1, P * 0.018 / (8.314 * T));
-  }
-
-  private getSoundSpeed(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    if (flowPhase === 'liquid') return 1500;
-
-    const fluid = node.fluid;
-    const T = fluid.temperature;
-    const ncgMoles = fluid.ncg ? totalMoles(fluid.ncg) : 0;
-
-    if (ncgMoles > 0 && node.volume > 0) {
-      const P_ncg = ncgMoles * R_GAS * T / node.volume;
-      const P_steam = Math.max(0, fluid.pressure - P_ncg);
-      const steamMoles = P_steam * node.volume / (R_GAS * T);
-
-      if (steamMoles < ncgMoles * 0.02) {
-        return ncgSoundSpeed(fluid.ncg!, T);
-      }
-      return steamNcgSoundSpeed(fluid.ncg!, steamMoles, T);
-    }
-
-    // Pure steam
-    const quality = fluid.phase === 'two-phase' ? (fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
-    const rho = flowPhase === 'vapor'
-      ? this.getVaporDensity(node)
-      : fluid.mass / node.volume;
-
-    const waterState: WaterState = {
-      temperature: T,
-      pressure: fluid.pressure,
-      density: rho,
-      phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
-      quality,
-      specificEnergy: fluid.internalEnergy / fluid.mass,
-    };
-
-    return soundSpeed(waterState);
-  }
-
-  private getCriticalPressureRatio(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    if (flowPhase === 'liquid') return 0;
-
-    const ncgMoles = node.fluid.ncg ? totalMoles(node.fluid.ncg) : 0;
-    if (ncgMoles > 0) return 0.53;
-
-    const quality = node.fluid.phase === 'two-phase' ? (node.fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
-    const rho = flowPhase === 'vapor'
-      ? this.getVaporDensity(node)
-      : node.fluid.mass / node.volume;
-
-    const waterState: WaterState = {
-      temperature: node.fluid.temperature,
-      pressure: node.fluid.pressure,
-      density: rho,
-      phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
-      quality,
-      specificEnergy: node.fluid.internalEnergy / node.fluid.mass,
-    };
-
-    return criticalPressureRatio(waterState);
   }
 
   reset(): void {}

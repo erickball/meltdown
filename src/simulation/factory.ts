@@ -3328,6 +3328,62 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
       continue;
     }
 
+    // Cross-vessels own TWO metal boundaries. `${id}-wall` (built with the
+    // flow nodes) is the INNER LINER, which separates the hot inner pipe from
+    // the annulus and holds only their small differential. The pressure
+    // boundary against the outside is the OUTER SHELL - the thing the annulus
+    // exists to keep cool - and it had no thermal node at all, so the annulus
+    // had no metal to creep. Same gap the HX shell had above, same fix.
+    if (component.type === 'crossVessel' && !state.thermalNodes.has(`${id}-shell-wall`)) {
+      const annulusFlow = state.flowNodes.get(`${id}-annulus`);
+      if (annulusFlow) {
+        const outerD = comp.outerDiameter;
+        const shellThick = comp.wallThickness;
+        // Wetted (inner) face is what convects; the metal volume is the true
+        // annulus pi*(Ro^2-Ri^2)*L, not area*thickness on the OUTER diameter
+        // (that overstates a thick-walled duct by ~2t/D - 3.4% at 60 mm on
+        // 1.8 m). ~2.6 t/m of steel here, which is simply what heavy-wall
+        // large-bore pipe weighs.
+        const Ro = outerD / 2;
+        const Ri = Ro - shellThick;
+        const shellArea = 2 * Math.PI * Ri * comp.length;
+        const shellVolume = Math.PI * (Ro * Ro - Ri * Ri) * comp.length;
+        state.thermalNodes.set(`${id}-shell-wall`, {
+          id: `${id}-shell-wall`,
+          label: `${component.label || id} outer shell`,
+          temperature: annulusFlow.fluid.temperature,
+          mass: shellVolume * 7850,
+          specificHeat: 490,
+          thermalConductivity: 40,
+          characteristicLength: shellThick,
+          surfaceArea: shellArea,
+          heatGeneration: 0,
+          maxTemperature: 1700,
+        });
+        // Inner face on the cold return in the annulus
+        state.convectionConnections.push({
+          id: `convection-${id}-shell-wall`,
+          thermalNodeId: `${id}-shell-wall`,
+          flowNodeId: `${id}-annulus`,
+          surfaceArea: shellArea,
+          characteristicDiameter: outerD,
+        });
+        // Outer face on whatever the duct runs through
+        const cvContainer = component.containedBy;
+        if (cvContainer && state.flowNodes.has(cvContainer)) {
+          state.convectionConnections.push({
+            id: `convection-${id}-shell-wall-outer`,
+            thermalNodeId: `${id}-shell-wall`,
+            flowNodeId: cvContainer,
+            surfaceArea: shellArea,
+            characteristicDiameter: outerD,
+          });
+        }
+        created++;
+      }
+      continue;
+    }
+
     const flowNode = state.flowNodes.get(id);
     if (!flowNode || flowNode.isBoundary) continue;
     if (state.thermalNodes.has(`${id}-wall`)) continue; // crossVessel etc.
@@ -3792,6 +3848,92 @@ function initializeBurstStates(
           breakSizeSeed: simulationRandom() * 10000,
           isTubeSide: true,
           shellNodeId,  // Tube bursts go to shell (gauge pressure comparison)
+        });
+      }
+      continue;
+    }
+
+    // Cross-vessels are two nested pressure boundaries, exactly like an HX's
+    // shell and tubes, and need the same split. Previously only the inner pipe
+    // got a burst state (via the generic simNodeId path) and the ANNULUS got
+    // none at all - an unbreakable node holding full system pressure.
+    //
+    // Which boundary holds what matters as much as the split. The OUTER SHELL
+    // is the boundary against containment and takes the full gauge; the INNER
+    // LINER is submerged in the annulus and only ever sees the small
+    // inner-to-annulus differential, so its load is that difference, not
+    // system pressure. Rating it against containment (the old behavior) put a
+    // 750 C liner under ~74 bar of imaginary hoop stress. Its strength comes
+    // from its own Barlow geometry rather than the component's rating, which
+    // describes the shell - the same treatment core barrels get, and for the
+    // same reason: a thin inner shell CAN fail across its differential (or
+    // buckle inward if the annulus is over-pressurized), just not at the
+    // pressure boundary's rating.
+    if (component.type === 'crossVessel') {
+      const cv = component as any;
+      const annulusNodeId = `${compId}-annulus`;
+      const innerNodeId = `${compId}-inner`;
+
+      // Containment linkage, which the generic path below would otherwise do:
+      // the shell breaks out into whatever the duct runs through, the liner
+      // breaks into the annulus around it.
+      const annulusNode = state.flowNodes.get(annulusNodeId);
+      const innerNode = state.flowNodes.get(innerNodeId);
+      if (annulusNode && component.containedBy) {
+        const containerComp = plantState.components.get(component.containedBy);
+        const containerNodeId = containerComp
+          ? ((containerComp as any).simNodeId || component.containedBy)
+          : undefined;
+        if (containerNodeId && state.flowNodes.has(containerNodeId)) {
+          annulusNode.containerId = containerNodeId;
+        }
+      }
+      if (innerNode && annulusNode) innerNode.containerId = annulusNodeId;
+
+      // Outer shell: the pressure boundary. Rating, geometry and creep metal
+      // all describe the shell, which the cold annulus keeps near core-inlet
+      // temperature.
+      if (state.flowNodes.has(annulusNodeId)) {
+        state.burstStates.set(annulusNodeId, {
+          nodeId: annulusNodeId,
+          componentId: compId,
+          componentLabel: `${component.label || 'Cross-Vessel'} (outer shell)`,
+          designPressure,
+          burstPressure,
+          collapsePressure: calculateCollapsePressure(
+            cv.outerDiameter, cv.wallThickness, randomMargin),
+          randomMargin,
+          material,
+          isBurst: false,
+          currentBreakFraction: 0,
+          breakSizeSeed: simulationRandom() * 10000,
+          wallNodeId: `${compId}-shell-wall`,
+        });
+      }
+
+      // Inner liner: differential boundary against the annulus, running at
+      // hot-leg temperature. Barlow from its own wall.
+      if (state.flowNodes.has(innerNodeId)) {
+        const S = 138e6; // Pa allowable stress, matches calculateThicknessFromPressure
+        const linerBar = (2 * S * cv.innerWallThickness) / cv.innerDiameter / 1e5;
+        const linerMargin = simulationRandom() * 0.4;
+        const linerDesign = linerBar * 1e5;
+        state.burstStates.set(innerNodeId, {
+          nodeId: innerNodeId,
+          componentId: compId,
+          componentLabel: `${component.label || 'Cross-Vessel'} (inner liner)`,
+          designPressure: linerDesign,
+          burstPressure: linerDesign * (1 + linerMargin),
+          collapsePressure: calculateCollapsePressure(
+            cv.innerDiameter, cv.innerWallThickness, linerMargin),
+          randomMargin: linerMargin,
+          material,
+          isBurst: false,
+          currentBreakFraction: 0,
+          breakSizeSeed: simulationRandom() * 10000,
+          isNestedBoundary: true,
+          shellNodeId: annulusNodeId,  // gauge is inner-vs-annulus
+          wallNodeId: `${compId}-wall`,
         });
       }
       continue;

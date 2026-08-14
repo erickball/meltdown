@@ -240,6 +240,16 @@ export class BurstCheckOperator implements ConstraintOperator {
     state: SimulationState,
     dt: number
   ): number {
+    // Explicit metal node for this boundary (a component with more than one
+    // pressure boundary names its own, e.g. a coaxial duct's inner liner and
+    // outer shell, which run hundreds of K apart)
+    if (burstState.wallNodeId) {
+      const metal = state.thermalNodes.get(burstState.wallNodeId);
+      if (metal) {
+        burstState.wallTemperature = metal.temperature;
+        return metal.temperature;
+      }
+    }
     if (burstState.isTubeSide) {
       const tubeMetal = state.thermalNodes.get(`${burstState.componentId}-tubes`);
       if (tubeMetal) {
@@ -287,8 +297,9 @@ export class BurstCheckOperator implements ConstraintOperator {
   ): number {
     const absolutePressure = node.fluid.pressure;
 
-    // For HX tube side, compare to shell pressure (tube is "inside" the shell)
-    if (burstState.isTubeSide && burstState.shellNodeId) {
+    // Nested boundary (HX tube inside its shell, duct liner inside its
+    // annulus): the load is the differential, not the pressure vs containment
+    if ((burstState.isTubeSide || burstState.isNestedBoundary) && burstState.shellNodeId) {
       const shell = state.flowNodes.get(burstState.shellNodeId);
       if (shell) {
         return absolutePressure - shell.fluid.pressure;
@@ -395,8 +406,9 @@ export class BurstCheckOperator implements ConstraintOperator {
 
     // Determine discharge target - always the container
     let targetNodeId: string;
-    if (burstState.isTubeSide && burstState.shellNodeId) {
-      // Tube rupture goes to shell side (the "container" for tubes)
+    if ((burstState.isTubeSide || burstState.isNestedBoundary) && burstState.shellNodeId) {
+      // A nested boundary discharges into the volume around it, not to
+      // containment: tubes into the shell, a duct liner into its annulus
       targetNodeId = burstState.shellNodeId;
     } else if (node.containerId) {
       // Contained component breaks to container

@@ -395,10 +395,24 @@ export class PressureSolver {
         h.governorClosed ||
         (h.checkValve !== undefined && h.dP_driving < h.crackingPressure);
       if (closed) {
-        const mNew = conn.massFlowRate / (1 + dt / CLOSED_FLOW_DECAY_TAU);
+        const mPrev = conn.massFlowRate;
+        const mNew = mPrev / (1 + dt / CLOSED_FLOW_DECAY_TAU);
         conn.massFlowRate = mNew;
         conn.isChoked = false;
         conn.machNumber = 0;
+        // Stamp the verdict here too - ChokedFlowDisplayOperator adopts
+        // conn.debug when present, so leaving the previous step's record in
+        // place would keep a shut valve flagged choked from before it closed.
+        conn.debug = {
+          flowPhase: h.flowPhase,
+          rho_flow: h.rho_flow,
+          dP_driving: h.dP_driving,
+          dP_friction: h.dP_friction,
+          dP_net: h.dP_driving + h.dP_friction,
+          dMassFlowRate: (mNew - mPrev) / dt,
+          isChoked: false,
+          machNumber: 0,
+        };
         if (iFrom >= 0 || iTo >= 0) {
           const hDonor = useEnergy ? this.donorEnthalpy(h.upstreamNode, h.flowPhase) : 0;
           fixedFlows.push({ flow: mNew, hDonor, donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo });
@@ -466,7 +480,8 @@ export class PressureSolver {
         );
       }
 
-      const choke = computeChokeLimit(conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow);
+      const choke = computeChokeLimit(
+        conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow, h.throatArea);
       entries.push({
         conn, h, D, m0, mStar, hDonor,
         donorIsFrom: h.upstreamNode === fromNode,
@@ -640,10 +655,16 @@ export class PressureSolver {
     for (const e of entries) {
       const m1 = flowOf(e);
       e.conn.massFlowRate = m1;
-      const isChoked = e.choke !== null && e.choke.chokedByRatio;
+      // Choked means the sonic bound is what set the flow - which is exactly
+      // the cap the solve applied. A subcritical pressure ratio alone is NOT
+      // choking: it is necessary but not sufficient, and on its own it would
+      // brand every turbine inlet (downstream node floats at condenser
+      // pressure) permanently choked at Mach 0.05.
+      const isChoked = e.capped;
       e.conn.isChoked = isChoked;
+      // Throat Mach: the restriction is what goes sonic, not the full bore.
       e.conn.machNumber = e.choke
-        ? (isChoked ? 1.0 : Math.min(1, Math.abs(m1 / (e.h.rho_flow * e.h.A)) / e.choke.soundSpeed))
+        ? Math.abs(m1 / (e.h.rho_flow * e.h.throatArea)) / e.choke.soundSpeed
         : 0;
       e.conn.debug = {
         flowPhase: e.h.flowPhase,

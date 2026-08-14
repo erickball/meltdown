@@ -561,6 +561,8 @@ export const CLOSED_FLOW_DECAY_TAU = 0.1;
 
 export interface ConnectionHydraulics {
   A: number;                 // flow area (m²)
+  /** A reduced by valve/governor position - the area choking sees (m²) */
+  throatArea: number;
   L: number;                 // pipe length (m)
   flowPhase: 'liquid' | 'vapor' | 'mixture';
   rho_flow: number;          // density of the phase actually flowing (kg/m³)
@@ -593,6 +595,62 @@ export interface ConnectionHydraulics {
   downstreamNode: FlowNode;
 }
 
+export interface ConnectionRestriction {
+  valveOpenFraction: number;  // in-line valve position (1 = no valve)
+  governorPosition: number;   // turbine governor position (1 = none/wide open)
+  openFraction: number;       // valveOpenFraction · governorPosition, floored
+  throatArea: number;         // geometric area reduced by openFraction (m²)
+  valveClosed: boolean;
+  governorClosed: boolean;
+}
+
+/**
+ * Resolve how far a connection is throttled, and the throat area that follows.
+ *
+ * The throat area is NOT a second model bolted onto the friction one - it is
+ * the area the friction model already implies. With K_eff = K_base/frac² the
+ * steady momentum balance gives
+ *     ṁ = A·√(2ρΔP/K_eff) = (A·frac)·√(2ρΔP/K_base),
+ * i.e. a connection throttled to `frac` passes exactly what a full-bore one of
+ * area A·frac would. Choking has to be evaluated on that same area: judging the
+ * sonic bound on the full bore while friction acts on A·frac describes a throat
+ * the rest of the momentum equation does not believe in, and the sonic limit
+ * then sits a factor 1/frac too high - so a nearly shut valve, the one place
+ * choking is physically certain, could never reach it.
+ *
+ * The 0.01 floor is the pre-existing one from the K-factor path, kept here so
+ * both uses stay exactly consistent at the shut limit.
+ */
+export function connectionRestriction(
+  state: SimulationState,
+  conn: FlowConnection,
+  toNode: FlowNode
+): ConnectionRestriction {
+  let valveOpenFraction = 1.0;
+  for (const [, valve] of state.components.valves) {
+    if (valve.connectedFlowPath === conn.id) {
+      valveOpenFraction = valve.position;
+    }
+  }
+
+  const governorValve = toNode.governorValve;
+  const governorPosition = governorValve !== undefined && governorValve < 1.0
+    ? governorValve
+    : 1.0;
+
+  const openFraction = Math.max(0.01, valveOpenFraction) * Math.max(0.01, governorPosition);
+  const A = conn.flowArea || 0.1;
+
+  return {
+    valveOpenFraction,
+    governorPosition,
+    openFraction,
+    throatArea: A * openFraction,
+    valveClosed: valveOpenFraction < 0.01,
+    governorClosed: governorValve !== undefined && governorValve < 0.01,
+  };
+}
+
 export interface ChokeLimit {
   soundSpeed: number;     // m/s at upstream conditions
   m_dot_choked: number;   // kg/s sonic bound incl. discharge coefficient
@@ -604,19 +662,22 @@ export interface ChokeLimit {
 /**
  * Compute the choking limit for a connection, or null when the flowing phase
  * is liquid (which does not choke).
+ *
+ * `throatArea` is the restricted area from connectionRestriction, not the bare
+ * bore - a throttled valve chokes at its own throat.
  */
 export function computeChokeLimit(
   conn: FlowConnection,
   upstreamNode: FlowNode,
   downstreamNode: FlowNode,
   flowPhase: 'liquid' | 'vapor' | 'mixture',
-  rho_flow: number
+  rho_flow: number,
+  throatArea: number
 ): ChokeLimit | null {
   if (flowPhase === 'liquid') return null;
 
-  const A = conn.flowArea || 0.1;
   const c = nodeSoundSpeed(upstreamNode, flowPhase);
-  const m_dot_sonic = rho_flow * A * c;
+  const m_dot_sonic = rho_flow * throatArea * c;
 
   // Apply discharge coefficient for restrictions
   const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
@@ -746,14 +807,8 @@ export function computeConnectionHydraulics(
 
   // === Resistances ===
 
-  // Valve position affects resistance
-  let valveOpenFraction = 1.0;
-  for (const [, valve] of state.components.valves) {
-    if (valve.connectedFlowPath === conn.id) {
-      valveOpenFraction = valve.position;
-    }
-  }
-  const valveClosed = valveOpenFraction < 0.01;
+  const restriction = connectionRestriction(state, conn, toNode);
+  const { valveClosed, governorClosed, throatArea } = restriction;
 
   // Check if there's a running pump on this connection (outlet or inlet side)
   let pumpOnOutlet: { running: boolean; effectiveSpeed: number } | undefined;
@@ -769,16 +824,9 @@ export function computeConnectionHydraulics(
 
   // Resistance coefficient (K-factor)
   const K_base = conn.resistanceCoeff || 10;
-  // Valve increases resistance as it closes: K_eff = K_base / position²
-  let K_common = K_base / Math.pow(Math.max(0.01, valveOpenFraction), 2);
-
-  // Governor valve on turbines affects inlet flow resistance
-  const governorValve = toNode.governorValve;
-  const governorClosed = governorValve !== undefined && governorValve < 0.01;
-  if (governorValve !== undefined && governorValve < 1.0) {
-    const gvPosition = Math.max(0.01, governorValve);
-    K_common = K_common / Math.pow(gvPosition, 2);
-  }
+  // Throttling increases resistance as the throat shuts: K_eff = K_base/frac²
+  // (see connectionRestriction - the same fraction defines the throat area)
+  let K_common = K_base / (restriction.openFraction * restriction.openFraction);
 
   // Running pumps have very high resistance to reverse flow through the pump -
   // the impeller physically blocks backflow. This term is structural per
@@ -811,7 +859,7 @@ export function computeConnectionHydraulics(
   const frictionQuadReverse = (K_common + K_reverseExtra) / quadDenom;
 
   return {
-    A, L, flowPhase, rho_flow, v,
+    A, throatArea, L, flowPhase, rho_flow, v,
     dP_pressure, dP_gravity, dP_pump, dP_driving, dP_friction,
     K_eff, resistanceSlope,
     frictionQuadForward, frictionQuadReverse,
