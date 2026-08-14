@@ -44,7 +44,7 @@ function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
     'stm(kg/s)  T_stm(C)  P_stm(bar)  m_evap(kg)  m_sh(kg)   Pwr(MW)    gv  fwspd  ' +
-    'T_shell(C)'
+    'Tev_sh(C)  Tinner  Tannul  Tcoldpipe'
   );
 }
 
@@ -64,7 +64,10 @@ function line(state: SimulationState) {
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
     `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
     `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +
-    `${(shell.fluid.temperature - 273.15).toFixed(1).padStart(10)}`
+    `${(shell.fluid.temperature - 273.15).toFixed(1).padStart(9)} ` +
+    `${T(state, 'cv-1-inner').toFixed(0).padStart(7)} ` +
+    `${T(state, 'cv-1-annulus').toFixed(0).padStart(7)} ` +
+    `${T(state, 'pipe-coldleg').toFixed(0).padStart(9)}`
   );
 }
 

@@ -179,7 +179,7 @@ add('hx-ev-1', {
 add('hx-sh-1', {
   type: 'heatExchanger', label: 'SG Superheater',
   position: { x: 56, y: 68 }, rotation: 0, elevation: 10,
-  width: 3.4, height: 5, hxType: 'helical', tubeCount: 5000,
+  width: 2.6, height: 5, hxType: 'helical', tubeCount: 5000,
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
   plenumLength: 0.8, tubeOD: 0.019,
@@ -189,10 +189,12 @@ add('hx-sh-1', {
     ['hx-sh-1-shell-1', -1.5, -2],   // hot helium in (from coaxial duct)
     ['hx-sh-1-shell-2', 1.5, 2],     // helium out (to evaporator)
   ]),
-  // Same sizing logic as the evaporator: steam temperature is the OUTCOME of
-  // UA_sh. 70 MW at (663 C mean He - T_steam) needs UA = 0.71 MW/K for
-  // T_steam = 565 C; the 1.9 m shell gave 3.1 MW/K, whose equilibrium steam
-  // runs 640 C - into the creep range for no reason but oversizing.
+  // Sizing note, corrected twice: these lumped nodes are well-mixed, so each
+  // sits at its OUTLET temperature, and the working Delta-T is outlet-vs-
+  // outlet - He leaving the SH (~590 C at design duty) against steam leaving
+  // it (565 C), tens of K, NOT the ~100 K a mean-vs-mean picture suggests.
+  // Superheat therefore needs MORE UA than mean-based sizing says: at
+  // UA ~2 MW/K the equilibrium steam runs ~535 C at full flow, close enough.
   //
   // Tube side STARTS superheated at the design point: vapor at 165 bar/838 K.
   // Initialized two-phase it could only ever deliver saturated steam.
@@ -325,7 +327,27 @@ add('cond-pump-1', {
 add('fw-pump-1', {
   type: 'pump', label: 'Feedwater Pump',
   position: { x: 60, y: 92 }, rotation: 0, elevation: 0,
-  diameter: 0.4, running: true, speed: 0.96,
+  // Speed picks the pump-curve balance pressure: the passive-feed equilibrium
+  // sits where delivery(P) = generation(P), and delivery follows the head
+  // curve. 0.96 balanced at 56 bar; 0.90 puts the same balance at ~165 bar
+  // for ~70 kg/s of generation (1.25 s^2 - 0.25 q^2 = P/(rho g H_rated)).
+  // 0.88, not 0.90: speed is also the INVENTORY knob. With the governor
+  // pinning 165 bar, delivery-at-165 sets where the evaporator froth level
+  // settles; at 0.90 it sat just above the steam takeoff and wet carryover
+  // kept the superheater flooded (saturated 350 C steam forever). 0.88
+  // delivers ~75 kg/s at 165 bar - still design flow - with the froth below
+  // the takeoff so the superheater can dry out and superheat.
+  // 0.90 - the SATURATED branch, on purpose. At a given pressure the passive
+  // pump fixes delivery, and the boiler has two self-consistent states:
+  // saturated steam at duty/2.1 MJ/kg (~75 kg/s here) or superheated at
+  // duty/2.9 (~50 kg/s). Speeds that select the superheated branch (0.82-
+  // 0.85 with the current SG) sit right at the dry/wet boundary and
+  // relaxation-oscillate: slow refill -> dry-out -> blowdown -> refill, a
+  // ~300 s limit cycle that never damps. 0.90 lands the plant dead-stable at
+  // 165.0 bar / ~75 kg/s of saturated steam. Superheated-at-design needs the
+  // duty the two-lump SG cannot deliver (economizer + downcomer-preheat
+  // fixes) so the dry margin is wide enough to hold - documented follow-up.
+  diameter: 0.4, running: true, speed: 0.90,
   ratedFlow: 80, ratedHead: 2100, orientation: 'right-left',
   ports: ports([['fw-pump-1-inlet', 0.3, 0, 'in'], ['fw-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: T_FEED, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },
@@ -446,18 +468,20 @@ controller('ctl-rods-1', 'Rod Control (Core Outlet T)', 20, 60, {
 //     secondary to 27 bar saturated.
 // Bounded authority (gv 0.15-0.7, feed speed 0.3-1.0) plus 0.01/s slew means
 // neither loop can do any of that faster than the physics can push back.
-controller('ctl-msp-1', 'Steam Flow (Governor)', 20, 67, {
-  sensor: { kind: 'connection-flow', targetId: 'flow-hx-sh-1-turbine-1' },
-  setpoint: FEED_FLOW,
-  aggressiveness: 2,
-  // min 0.02 rather than a protective floor: with the steam dump guarding
-  // the bottled state, a closed governor is no longer a trap, and the low
-  // min is what lets the closed START ramp gently under the slew limit.
-  // max 0.45: just above the design opening (~0.38). The flow setpoint can
-  // become unreachable when the boiler under-generates, and an unbounded
-  // governor chasing it rails open and blows the secondary down (27 bar
-  // saturated, in tuning). Capped near design, "railed" IS the design point.
-  actuator: { kind: 'governor-valve', targetId: 'turbine-1', min: 0.02, max: 0.45, rateLimit: 0.01 },
+controller('ctl-msp-1', 'Steam Pressure (Governor)', 20, 67, {
+  // Pressure-holding governor, take two. The original attempt at this
+  // pairing died in a dry-side death spiral: at low pressure it closed, and
+  // a DRY boiler could not raise pressure no matter how bottled, so the
+  // primary lost its heat sink and burst. What broke the spiral is the
+  // PASSIVE feed pump: at low pressure the pump over-delivers strongly (head
+  // margin), refloods the boiler, and generation resumes - so "close and let
+  // pressure build" now always works. High pressure -> open (invert), low ->
+  // close; the steam dump and primary safety valve guard the corners.
+  sensor: { kind: 'node-pressure', targetId: 'hx-sh-1-tube' },
+  setpoint: P_STEAM,
+  invert: true,
+  aggressiveness: 0.5,
+  actuator: { kind: 'governor-valve', targetId: 'turbine-1', min: 0.05, max: 0.45, rateLimit: 0.01 },
 });
 
 // Feed holds the evaporator LEVEL (plus steam-flow feedforward for the fast

@@ -284,7 +284,7 @@
         },
         "rotation": 0,
         "elevation": 10,
-        "width": 3.4,
+        "width": 2.6,
         "height": 5,
         "hxType": "helical",
         "tubeCount": 5000,
@@ -716,7 +716,7 @@
         "elevation": 0,
         "diameter": 0.4,
         "running": true,
-        "speed": 0.96,
+        "speed": 0.9,
         "ratedFlow": 80,
         "ratedHead": 2100,
         "orientation": "right-left",
@@ -1005,7 +1005,7 @@
         "id": "ctl-msp-1",
         "type": "controller",
         "controllerType": "pid",
-        "label": "Steam Flow (Governor)",
+        "label": "Steam Pressure (Governor)",
         "position": {
           "x": 20,
           "y": 67
@@ -1017,15 +1017,16 @@
         "ports": [],
         "pid": {
           "sensor": {
-            "kind": "connection-flow",
-            "targetId": "flow-hx-sh-1-turbine-1"
+            "kind": "node-pressure",
+            "targetId": "hx-sh-1-tube"
           },
-          "setpoint": 77,
-          "aggressiveness": 2,
+          "setpoint": 16500000,
+          "invert": true,
+          "aggressiveness": 0.5,
           "actuator": {
             "kind": "governor-valve",
             "targetId": "turbine-1",
-            "min": 0.02,
+            "min": 0.05,
             "max": 0.45,
             "rateLimit": 0.01
           }
