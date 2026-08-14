@@ -364,11 +364,16 @@ add('cv-1', {
   // outer wall still runs ~460 C, where low-alloy steel is marginal.
   material: 'alloy-800h',
   targetComponentId: 'hx-1', orientation: 'horizontal',
+  // Port local y: 0 is the duct centerline (inner pipe); the annulus band
+  // spans 0.52-0.84 from the centerline (inner pipe outer wall to shell inner
+  // wall), so 0.65 puts the annulus nozzles mid-band. Connection elevations
+  // below follow the renderer's convention (height above component bottom =
+  // outerDiameter/2 - port y) so the drawn lines anchor on these nozzles.
   ports: ports([
     ['cv-1-inner-in', -3.5, 0],
     ['cv-1-inner-out', 3.5, 0],
-    ['cv-1-annulus-1', -3.5, 0.4],
-    ['cv-1-annulus-2', 3.5, 0.4],
+    ['cv-1-annulus-1', -3.5, 0.65],
+    ['cv-1-annulus-2', 3.5, 0.65],
   ]),
   fluid: heFluid(T_CORE_OUT),          // inner pipe: hot leg
   annulusFluid: heFluid(T_SG_HE_OUT),  // annulus: cold return
@@ -476,9 +481,9 @@ connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-inlet',
 // Core outlet (top of barrel) -> down the outlet plenum -> coaxial duct
 // INNER pipe (low on the RPV) -> SG bundle shell top
 connect('cb-1', 'cb-1-outlet', 'cv-1', 'cv-1-inner-in',
-  { fromElevation: 11, toElevation: 0, flowArea: 0.78, length: 8, resistanceCoeff: 1.5 });
+  { fromElevation: 11, toElevation: 0.9, flowArea: 0.78, length: 8, resistanceCoeff: 1.5 });
 connect('cv-1', 'cv-1-inner-out', 'hx-1', 'hx-1-shell-1',
-  { fromElevation: 0, toElevation: 13, flowArea: 0.78, length: 3, resistanceCoeff: 1.5 });
+  { fromElevation: 0.9, toElevation: 13, flowArea: 0.78, length: 3, resistanceCoeff: 1.5 });
 // Bundle shell bottom -> SG vessel space: an open internal discharge, so the
 // pressure vessel only ever holds ~260 C gas
 connect('hx-1', 'hx-1-shell-2', 'tank-sg-1', 'tank-sg-in',
@@ -489,9 +494,9 @@ connect('hx-1', 'hx-1-shell-2', 'tank-sg-1', 'tank-sg-in',
 connect('tank-sg-1', 'tank-sg-top', 'pump-1', 'pump-1-inlet',
   { fromElevation: 15.5, toElevation: 0, flowArea: 0.6, length: 2, resistanceCoeff: 1 });
 connect('pump-1', 'pump-1-outlet', 'cv-1', 'cv-1-annulus-2',
-  { fromElevation: 0, toElevation: 0.4, flowArea: 1.0, length: 2, resistanceCoeff: 1 });
+  { fromElevation: 0, toElevation: 0.25, flowArea: 1.0, length: 2, resistanceCoeff: 1 });
 connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
-  { fromElevation: 0.4, toElevation: 5, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
+  { fromElevation: 0.25, toElevation: 5, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 
 // ---------------------------------------------------------------------------
 // Secondary loop connections (water/steam)

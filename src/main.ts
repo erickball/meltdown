@@ -10,7 +10,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, Fluid } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -3192,27 +3192,60 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
 
     // Handle heat exchangers specially - they have primary and secondary sides
     if (component.type === 'heatExchanger') {
-      // Primary side: try simNodeId, then {id}-primary
+      // Primary side (tube bundle): try simNodeId, then {id}-primary, then {id}-tube
       const primaryNodeId = (component as { simNodeId?: string }).simNodeId || `${component.id}-primary`;
-      const primaryNode = simState.flowNodes.get(primaryNodeId);
+      const primaryNode = simState.flowNodes.get(primaryNodeId)
+        ?? simState.flowNodes.get(`${component.id}-tube`);
       if (primaryNode && component.primaryFluid) {
         component.primaryFluid.temperature = primaryNode.fluid.temperature;
         component.primaryFluid.pressure = primaryNode.fluid.pressure;
         component.primaryFluid.phase = primaryNode.fluid.phase;
         component.primaryFluid.quality = primaryNode.fluid.quality;
         component.primaryFluid.separation = primaryNode.separation;
+        // NCG and volume are what let the renderer show a gas fill (e.g. helium)
+        // instead of defaulting to steam-white
+        component.primaryFluid.ncg = primaryNode.fluid.ncg;
+        component.primaryFluid.volume = primaryNode.volume;
       }
 
-      // Secondary side: try {id}-secondary
-      const secondaryNode = simState.flowNodes.get(`${component.id}-secondary`);
+      // Secondary side (shell): try {id}-secondary, then {id}-shell
+      const secondaryNode = simState.flowNodes.get(`${component.id}-secondary`)
+        ?? simState.flowNodes.get(`${component.id}-shell`);
       if (secondaryNode && component.secondaryFluid) {
         component.secondaryFluid.temperature = secondaryNode.fluid.temperature;
         component.secondaryFluid.pressure = secondaryNode.fluid.pressure;
         component.secondaryFluid.phase = secondaryNode.fluid.phase;
         component.secondaryFluid.quality = secondaryNode.fluid.quality;
         component.secondaryFluid.separation = secondaryNode.separation;
+        component.secondaryFluid.ncg = secondaryNode.fluid.ncg;
+        component.secondaryFluid.volume = secondaryNode.volume;
       }
       continue;
+    }
+
+    // Cross-vessels carry a second display fluid for the annulus, backed by
+    // its own flow node ({id}-annulus); the inner pipe (component.fluid)
+    // syncs through the generic path below via simNodeId
+    if (component.type === 'crossVessel') {
+      const annulusNode = simState.flowNodes.get(`${component.id}-annulus`);
+      const cv = component as unknown as { annulusFluid?: Fluid };
+      if (annulusNode) {
+        if (!cv.annulusFluid) {
+          cv.annulusFluid = {
+            temperature: annulusNode.fluid.temperature,
+            pressure: annulusNode.fluid.pressure,
+            phase: annulusNode.fluid.phase,
+            flowRate: 0,
+          };
+        }
+        cv.annulusFluid.temperature = annulusNode.fluid.temperature;
+        cv.annulusFluid.pressure = annulusNode.fluid.pressure;
+        cv.annulusFluid.phase = annulusNode.fluid.phase;
+        cv.annulusFluid.quality = annulusNode.fluid.quality;
+        cv.annulusFluid.separation = annulusNode.separation;
+        cv.annulusFluid.ncg = annulusNode.fluid.ncg;
+        cv.annulusFluid.volume = annulusNode.volume;
+      }
     }
 
     // For vessels with fuel, sync fuel temperature

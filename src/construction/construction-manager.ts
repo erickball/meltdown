@@ -2293,6 +2293,51 @@ export class ConstructionManager {
       this.updatePumpPorts(component);
       this.autoOrientPump(component.id);
     }
+
+    // Gas-fill display state: interactively built components get display
+    // moles + volume stamped on their fluid at creation (see the initialNcg
+    // handling in createComponent), but preset/saved JSON only carries the
+    // bar-partial-pressure specs - so a loaded helium plant rendered its gas
+    // spaces steam-white until the simulation's first sync. Mirror the
+    // creation-time conversion here. The factory builds simulation ICs from
+    // the bar specs directly and the sim sync overwrites these fields from
+    // live nodes, so this is display-only.
+    for (const [, component] of this.plantState.components) {
+      const c = component as any;
+      this.applyNcgDisplayFill(c.fluid, c.initialNcg);
+      this.applyNcgDisplayFill(c.annulusFluid, c.annulusInitialNcg);
+      this.applyNcgDisplayFill(c.secondaryFluid, c.shellInitialNcg);
+      this.applyNcgDisplayFill(c.shellFluid, c.shellInitialNcg);
+    }
+  }
+
+  /**
+   * Convert a bar-partial-pressure NCG spec to display moles on a fluid, the
+   * same n = P·V/(R·T) conversion createComponent applies for interactively
+   * built components. The renderer recovers P_ncg = nRT/V with the same V it
+   * finds on the fluid, so any consistent positive volume yields the correct
+   * color; we use the fluid's own volume if set, else 1 m³. Fluids that
+   * already carry moles (live sync data, or saves that captured it) are left
+   * untouched.
+   */
+  private applyNcgDisplayFill(
+    fluid: Fluid | undefined,
+    spec: Record<string, number> | undefined
+  ): void {
+    if (!fluid || !spec || fluid.ncg) return;
+    if (!Object.values(spec).some(p => p > 0)) return;
+    const V = fluid.volume && fluid.volume > 0 ? fluid.volume : 1; // m³
+    const R = 8.314; // J/(mol·K)
+    const T = fluid.temperature || 300; // K
+    const ncg = emptyGasComposition();
+    for (const species of ALL_GAS_SPECIES) {
+      const P_bar = spec[species];
+      if (P_bar && P_bar > 0) {
+        ncg[species as GasSpecies] = (P_bar * 1e5 * V) / (R * T);
+      }
+    }
+    fluid.ncg = ncg;
+    fluid.volume = V;
   }
 
   /**

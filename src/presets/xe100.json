@@ -749,7 +749,7 @@
             "id": "cv-1-annulus-1",
             "position": {
               "x": -3.5,
-              "y": 0.4
+              "y": 0.65
             },
             "direction": "both"
           },
@@ -757,7 +757,7 @@
             "id": "cv-1-annulus-2",
             "position": {
               "x": 3.5,
-              "y": 0.4
+              "y": 0.65
             },
             "direction": "both"
           }
@@ -904,7 +904,7 @@
       "toComponentId": "cv-1",
       "toPortId": "cv-1-inner-in",
       "fromElevation": 11,
-      "toElevation": 0,
+      "toElevation": 0.9,
       "flowArea": 0.78,
       "length": 8,
       "resistanceCoeff": 1.5
@@ -914,7 +914,7 @@
       "fromPortId": "cv-1-inner-out",
       "toComponentId": "hx-1",
       "toPortId": "hx-1-shell-1",
-      "fromElevation": 0,
+      "fromElevation": 0.9,
       "toElevation": 13,
       "flowArea": 0.78,
       "length": 3,
@@ -948,7 +948,7 @@
       "toComponentId": "cv-1",
       "toPortId": "cv-1-annulus-2",
       "fromElevation": 0,
-      "toElevation": 0.4,
+      "toElevation": 0.25,
       "flowArea": 1,
       "length": 2,
       "resistanceCoeff": 1
@@ -958,7 +958,7 @@
       "fromPortId": "cv-1-annulus-1",
       "toComponentId": "rv-1",
       "toPortId": "rv-1-cold-leg",
-      "fromElevation": 0.4,
+      "fromElevation": 0.25,
       "toElevation": 5,
       "flowArea": 1,
       "length": 3,

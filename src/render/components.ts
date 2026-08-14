@@ -765,7 +765,7 @@ function renderFluidWithNcg(
   }
 
   // Render NCG mixed-gas display in vapor space
-  const ncgViz = getNcgVisualization(fluid.ncg);
+  const ncgViz = getNcgVisualization(fluid.ncg, fluid.temperature);
   if (!ncgViz || ncgFrac <= 0.01) return;
 
   // NCG is only visible in vapor space

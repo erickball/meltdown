@@ -235,7 +235,7 @@ export function getFluidColor(fluid: Fluid): string {
       }
 
       if (ncgFraction > 0.001) {
-        const ncgColor = getNcgColor(fluid.ncg);
+        const ncgColor = getNcgColor(fluid.ncg, T);
         blended = lerpRGB(blended, ncgColor, ncgFraction);
         if (debugFluidColor && debugFluidColorCount < 25) {
           console.log(`  -> blending with ncgColor: r=${ncgColor.r}, g=${ncgColor.g}, b=${ncgColor.b}, result: r=${blended.r.toFixed(0)}, g=${blended.g.toFixed(0)}, b=${blended.b.toFixed(0)}`);
@@ -270,7 +270,7 @@ export function getFluidColor(fluid: Fluid): string {
 
       if (ncgFraction > 0.001) {  // Only blend if NCG is significant (> 0.1%)
         // Get NCG color by blending component colors
-        const ncgColor = getNcgColor(fluid.ncg);
+        const ncgColor = getNcgColor(fluid.ncg, T);
 
         // Blend steam and NCG colors
         const blended = lerpRGB(steamColor, ncgColor, ncgFraction);
@@ -292,9 +292,41 @@ export function getFluidColor(fluid: Fluid): string {
 }
 
 /**
+ * Temperature-shaded gas display colors. Species listed here shift shade
+ * with gas temperature; everything else keeps its tabulated GAS_PROPERTIES
+ * color. Helium runs from a darker purple when cold to a bright violet when
+ * hot, spanning the gas-cooled-reactor operating range (the ramp saturates
+ * at its endpoints - the ~260 C cold leg sits near the dark end, the ~750 C
+ * hot leg near the bright end).
+ */
+const GAS_TEMP_RAMPS: Partial<Record<GasSpecies, { cold: RGB; hot: RGB; T_cold: number; T_hot: number }>> = {
+  He: {
+    cold: { r: 150, g: 96, b: 165 },   // darker purple
+    hot: { r: 208, g: 130, b: 255 },   // bright violet
+    T_cold: 450,   // K
+    T_hot: 1050,   // K
+  },
+};
+
+/**
+ * Display color for a single gas species, shaded by temperature where a
+ * ramp is defined. Without a temperature (legends, static swatches) the
+ * tabulated base color is returned.
+ */
+export function getGasDisplayColor(species: GasSpecies, temperature?: number): RGB {
+  const ramp = GAS_TEMP_RAMPS[species];
+  if (ramp && temperature !== undefined) {
+    // lerp() clamps t to [0, 1], so the ramp saturates outside its range
+    const t = (temperature - ramp.T_cold) / (ramp.T_hot - ramp.T_cold);
+    return lerpRGB(ramp.cold, ramp.hot, t);
+  }
+  return hexToRGBColor(GAS_PROPERTIES[species].color);
+}
+
+/**
  * Get the color for an NCG mixture based on composition.
  */
-function getNcgColor(ncg: GasComposition): RGB {
+function getNcgColor(ncg: GasComposition, temperature?: number): RGB {
   const total = totalMoles(ncg);
   if (total <= 0) return { r: 128, g: 128, b: 128 };  // Default gray
 
@@ -304,12 +336,10 @@ function getNcgColor(ncg: GasComposition): RGB {
     const fraction = ncg[species] / total;
     if (fraction <= 0) continue;
 
-    const color = GAS_PROPERTIES[species].color;
-    // Parse hex color #RRGGBB
-    const parsed = parseInt(color.slice(1), 16);
-    r += ((parsed >> 16) & 0xFF) * fraction;
-    g += ((parsed >> 8) & 0xFF) * fraction;
-    b += (parsed & 0xFF) * fraction;
+    const color = getGasDisplayColor(species, temperature);
+    r += color.r * fraction;
+    g += color.g * fraction;
+    b += color.b * fraction;
   }
 
   return { r: Math.round(r), g: Math.round(g), b: Math.round(b) };
@@ -520,7 +550,7 @@ export interface GasColorInfo {
   fraction: number;  // mole fraction
 }
 
-export function getGasColorInfo(comp: GasComposition): GasColorInfo[] {
+export function getGasColorInfo(comp: GasComposition, temperature?: number): GasColorInfo[] {
   const total = totalMoles(comp);
   if (total <= 0) return [];
 
@@ -601,7 +631,7 @@ export function getGasColorInfo(comp: GasComposition): GasColorInfo[] {
     if (moles > 0) {
       result.push({
         species,
-        color: hexToRGBColor(GAS_PROPERTIES[species].color),
+        color: getGasDisplayColor(species, temperature),
         fraction: moles / total,
       });
     }
@@ -617,7 +647,7 @@ export function getGasColorInfo(comp: GasComposition): GasColorInfo[] {
  * Get the blended color for a gas mixture (used for air or simple display).
  * Returns mole-fraction weighted average of component colors.
  */
-export function getBlendedGasColor(comp: GasComposition): RGB {
+export function getBlendedGasColor(comp: GasComposition, temperature?: number): RGB {
   const total = totalMoles(comp);
   if (total <= 0) return { r: 128, g: 128, b: 128 };
 
@@ -627,7 +657,7 @@ export function getBlendedGasColor(comp: GasComposition): RGB {
     const fraction = comp[species] / total;
     if (fraction <= 0) continue;
 
-    const color = hexToRGBColor(GAS_PROPERTIES[species].color);
+    const color = getGasDisplayColor(species, temperature);
     r += color.r * fraction;
     g += color.g * fraction;
     b += color.b * fraction;
@@ -655,7 +685,7 @@ export interface NcgVisualization {
   totalMoles: number;
 }
 
-export function getNcgVisualization(ncg: GasComposition | undefined): NcgVisualization | null {
+export function getNcgVisualization(ncg: GasComposition | undefined, temperature?: number): NcgVisualization | null {
   if (!ncg) return null;
 
   const total = totalMoles(ncg);
@@ -665,8 +695,8 @@ export function getNcgVisualization(ncg: GasComposition | undefined): NcgVisuali
 
   return {
     isAir,
-    blendedColor: isAir ? getAirColor() : getBlendedGasColor(ncg),
-    gasColors: getGasColorInfo(ncg),
+    blendedColor: isAir ? getAirColor() : getBlendedGasColor(ncg, temperature),
+    gasColors: getGasColorInfo(ncg, temperature),
     totalMoles: total,
   };
 }
@@ -722,13 +752,14 @@ export function renderColorLegend(
     { label: 'Air', color: rgbToString(getAirColor()) },
   ];
 
-  // Add all gas species
+  // Add all gas species; temperature-ramped species (helium) get a
+  // cold->hot gradient swatch so the legend matches what's on screen
   for (const species of ALL_GAS_SPECIES) {
     const props = GAS_PROPERTIES[species];
-    items.push({
-      label: props.formula,
-      color: props.color,
-    });
+    const ramp = GAS_TEMP_RAMPS[species];
+    items.push(ramp
+      ? { label: props.formula, gradient: [ramp.cold, ramp.hot] }
+      : { label: props.formula, color: props.color });
   }
 
   // Calculate total width needed
