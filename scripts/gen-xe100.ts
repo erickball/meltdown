@@ -117,91 +117,40 @@ add('cb-1', {
 // ---------------------------------------------------------------------------
 // Steam generator: HELIUM IN THE SHELL, WATER IN THE TUBES
 // ---------------------------------------------------------------------------
-// The once-through helical SG is modelled as TWO exchangers in series -
-// evaporator below, superheater above - because a single lumped node pair
-// cannot represent a counterflow boiler whose steam OUTLET (565 C) is hotter
-// than its helium OUTLET (260 C): with one mean temperature per side, heat
-// would have to flow from 505 C mean helium into 565 C steam, i.e. backward.
-// Splitting at the dryout point gives both sections honest forward gradients:
-//
-//   superheater:  He 750 -> 575 C  vs steam 351 -> 565 C   (~70 MW)
-//   evaporator:   He 575 -> 248 C  vs feed/boiling at 351 C (~131 MW)
-//
-// Same 5000-tube bundle continues through both; this is discretization of one
-// physical component, not two plants.
+// ONE helical once-through SG with the moving-boundary tube model
+// (docs/otsg-moving-boundary-design.md). The subcooled / boiling / superheat
+// sections live INSIDE the tube node and their boundaries track the phase
+// boundaries, so this single component does what the interim evaporator +
+// superheater pair approximated - including the counterflow temperature
+// cross a lumped pair structurally cannot represent, and without the
+// saturated-vs-superheated branch dichotomy that forced shipping saturated
+// steam (superheat is now a continuous section length, not a whole-lump
+// wet/dry state).
 //
 // Tubes are Alloy 800H: at 60 bar and SG temperatures low-alloy steel would
 // creep-rupture, and 800H is what real helical HTGR steam generators use.
-
-// Evaporator: feedwater in, saturated steam out. Carries most of the duty and
-// most of the water inventory - and the tube-leak path, since a flooded
-// section leaking into the primary is the conservative SGTR.
-add('hx-ev-1', {
-  type: 'heatExchanger', label: 'SG Evaporator',
-  position: { x: 56, y: 78 }, rotation: 0, elevation: 0,
-  // Shell width SETS the design pressure in a lumped model: duty must equal
-  // UA * (T_He_mean - T_sat), so at the design duty (131 MW) and He temps
-  // (575 -> 248 C, mean 412) the equilibrium T_sat is 412 C - duty/UA.
-  // UA = 2.1 MW/K puts T_sat at 350 C, i.e. 165 bar - the design point as
-  // the natural equilibrium, no controller holding it there. The 2.1 m
-  // tight shell gave UA = 4.7 MW/K, whose equilibrium T_sat (379 C) is
-  // SUPERCRITICAL - the plant could never sit at 165 bar no matter what
-  // the controls did. Width 3.0 m slows the helium to ~3.2 m/s and lands
-  // UA where the design point lives.
-  // 3.0 m, and not tighter: narrowing to 2.4 m to chase more duty restricted
-  // the HELIUM path enough to destabilize the primary loop (He flow swinging
-  // 34-74 kg/s, power 30-300 MW). The shell is part of the primary circuit
-  // first and a heat exchanger second.
-  width: 3.0, height: 9, hxType: 'helical', tubeCount: 5000,
+add('hx-1', {
+  type: 'heatExchanger', label: 'Helical Once-Through SG',
+  position: { x: 56, y: 74 }, rotation: 0, elevation: 0,
+  width: 2.8, height: 14, hxType: 'helical', tubeCount: 5000,
+  tubeModel: 'moving-boundary',
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
   plenumLength: 0.8, tubeOD: 0.019,
   ports: ports([
-    ['hx-ev-1-tube-1', -0.6, 4.5],   // feedwater in (bottom)
-    ['hx-ev-1-tube-2', 0.6, -4.5],   // saturated steam out (top)
-    ['hx-ev-1-shell-1', -1.6, -4],   // warm helium in (from superheater)
-    ['hx-ev-1-shell-2', 1.6, 4],     // cold helium out (to circulator)
-    ['hx-ev-1-leak', 1.6, 0],        // tube-side tap for the leak path
+    ['hx-1-tube-1', -0.6, 7],    // feedwater in (bottom)
+    ['hx-1-tube-2', 0.6, -7],    // main steam out (top)
+    ['hx-1-shell-1', -1.8, -6],  // hot helium in (top)
+    ['hx-1-shell-2', 1.8, 6],    // cold helium out (bottom)
+    ['hx-1-leak', 1.8, 0],       // tube-side tap for the leak path
   ]),
-  // Tube side: boiling water at steam pressure
-  tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.12, flowRate: 0 },
-  primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.12, flowRate: 0 },
-  // Shell side: helium between superheater exit and core-inlet temperature
-  shellFluid: { temperature: (848 + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  secondaryFluid: { temperature: (848 + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  shellInitialNcg: HE,
-  nqa1: true, containedBy: 'bui-1',
-});
-
-// Superheater: saturated steam in, 565 C main steam out. Sees the hottest
-// helium; a TIGHT shell (1.9 m around the same bundle) keeps the helium
-// velocity up where h ~ Re^0.8 needs it.
-add('hx-sh-1', {
-  type: 'heatExchanger', label: 'SG Superheater',
-  position: { x: 56, y: 68 }, rotation: 0, elevation: 10,
-  width: 2.6, height: 5, hxType: 'helical', tubeCount: 5000,
-  material: 'alloy-800h',
-  pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
-  plenumLength: 0.8, tubeOD: 0.019,
-  ports: ports([
-    ['hx-sh-1-tube-1', -0.6, 2.5],   // saturated steam in (bottom)
-    ['hx-sh-1-tube-2', 0.6, -2.5],   // main steam out (top)
-    ['hx-sh-1-shell-1', -1.5, -2],   // hot helium in (from coaxial duct)
-    ['hx-sh-1-shell-2', 1.5, 2],     // helium out (to evaporator)
-  ]),
-  // Sizing note, corrected twice: these lumped nodes are well-mixed, so each
-  // sits at its OUTLET temperature, and the working Delta-T is outlet-vs-
-  // outlet - He leaving the SH (~590 C at design duty) against steam leaving
-  // it (565 C), tens of K, NOT the ~100 K a mean-vs-mean picture suggests.
-  // Superheat therefore needs MORE UA than mean-based sizing says: at
-  // UA ~2 MW/K the equilibrium steam runs ~535 C at full flow, close enough.
-  //
-  // Tube side STARTS superheated at the design point: vapor at 165 bar/838 K.
-  // Initialized two-phase it could only ever deliver saturated steam.
-  tubeFluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  primaryFluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  shellFluid: { temperature: (T_CORE_OUT + 848) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  secondaryFluid: { temperature: (T_CORE_OUT + 848) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
+  // Tube side: two-phase at design pressure; the section partition seeds
+  // small subcooled/superheat fractions and self-organizes.
+  tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.10, flowRate: 0 },
+  primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.10, flowRate: 0 },
+  // Shell side: helium spanning core outlet to core inlet
+  shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
+  secondaryFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   shellInitialNcg: HE,
   nqa1: true, containedBy: 'bui-1',
 });
@@ -413,7 +362,7 @@ add('cv-1', {
   // boundary near core-inlet temperature, the inner liner sees 750 C - and the
   // outer wall still runs ~460 C, where low-alloy steel is marginal.
   material: 'alloy-800h',
-  targetComponentId: 'hx-sh-1', orientation: 'horizontal',
+  targetComponentId: 'hx-1', orientation: 'horizontal',
   ports: ports([
     ['cv-1-inner-in', -3.5, 0],
     ['cv-1-inner-out', 3.5, 0],
@@ -477,7 +426,7 @@ controller('ctl-msp-1', 'Steam Pressure (Governor)', 20, 67, {
   // margin), refloods the boiler, and generation resumes - so "close and let
   // pressure build" now always works. High pressure -> open (invert), low ->
   // close; the steam dump and primary safety valve guard the corners.
-  sensor: { kind: 'node-pressure', targetId: 'hx-sh-1-tube' },
+  sensor: { kind: 'node-pressure', targetId: 'hx-1-tube' },
   setpoint: P_STEAM,
   invert: true,
   aggressiveness: 0.5,
@@ -529,13 +478,10 @@ connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-inlet',
 // Core outlet (top) -> coaxial duct INNER pipe -> SG shell top (hot helium)
 connect('cb-1', 'cb-1-outlet', 'cv-1', 'cv-1-inner-in',
   { fromElevation: 11, toElevation: 0, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
-connect('cv-1', 'cv-1-inner-out', 'hx-sh-1', 'hx-sh-1-shell-1',
-  { fromElevation: 0, toElevation: 14, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
-// Superheater shell -> evaporator shell (the helium continues down the bundle)
-connect('hx-sh-1', 'hx-sh-1-shell-2', 'hx-ev-1', 'hx-ev-1-shell-1',
-  { fromElevation: 0.5, toElevation: 8.5, flowArea: 1.4, length: 2, resistanceCoeff: 1 });
-// Evaporator shell bottom -> coaxial duct ANNULUS -> cold duct -> circulator
-connect('hx-ev-1', 'hx-ev-1-shell-2', 'cv-1', 'cv-1-annulus-2',
+connect('cv-1', 'cv-1-inner-out', 'hx-1', 'hx-1-shell-1',
+  { fromElevation: 0, toElevation: 13, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
+// SG shell bottom -> coaxial duct ANNULUS -> cold duct -> circulator
+connect('hx-1', 'hx-1-shell-2', 'cv-1', 'cv-1-annulus-2',
   { fromElevation: 1, toElevation: 0, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 connect('cv-1', 'cv-1-annulus-1', 'pipe-coldleg', 'pipe-coldleg-left',
   { fromElevation: 0, toElevation: 0.6, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
@@ -551,14 +497,8 @@ connect('pipe-pumpdisch', 'pipe-pumpdisch-right', 'rv-1', 'rv-1-cold-leg',
 // Secondary loop connections (water/steam)
 // ---------------------------------------------------------------------------
 // Feedwater into the tube bundle at the bottom
-connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-ev-1', 'hx-ev-1-tube-1',
+connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1',
   { fromElevation: 0, toElevation: 1, flowArea: 0.03, length: 8, resistanceCoeff: 2 });
-// Saturated steam off the top of the evaporator into the superheater bundle.
-// Elevated takeoff + zero phase tolerance so it draws VAPOR from the boiling
-// node rather than carrying liquid over into the superheater.
-connect('hx-ev-1', 'hx-ev-1-tube-2', 'hx-sh-1', 'hx-sh-1-tube-1',
-  { fromElevation: 8.8, toElevation: 0.2, flowArea: 0.05, length: 4, resistanceCoeff: 1.5,
-    fromPhaseTolerance: 0 });
 // Main steam out of the top of the bundle to the turbine.
 // In this model the turbine NODE floats near condenser pressure and the whole
 // throttling drop is taken across its inlet connection, so this area is what
@@ -566,8 +506,11 @@ connect('hx-ev-1', 'hx-ev-1-tube-2', 'hx-sh-1', 'hx-sh-1-tube-1',
 // extraction. Sized for ~77 kg/s at the 165 bar design drop; a once-through
 // bundle has no two-phase pool to pin its pressure, so an oversized inlet
 // simply blows the tube side down to the condenser in seconds.
-connect('hx-sh-1', 'hx-sh-1-tube-2', 'turbine-1', 'inlet',
-  { fromElevation: 4.8, toElevation: 0, flowArea: 0.012, length: 25, resistanceCoeff: 2 });
+// Main steam off the very top of the bundle - the elevated takeoff draws
+// VAPOR, and the OTSG model hands it the superheat section's enthalpy.
+connect('hx-1', 'hx-1-tube-2', 'turbine-1', 'inlet',
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.012, length: 25, resistanceCoeff: 2,
+    fromPhaseTolerance: 0 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
 connect('condenser-1', 'condenser-1-bottom', 'cond-pump-1', 'cond-pump-1-inlet',
@@ -578,8 +521,9 @@ connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fwcv-1', 'val-fwcv-1-in',
   { fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4 });
 
 // Steam dump: off the main steam line, discharging into the condenser
-connect('hx-sh-1', 'hx-sh-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 4.8, toElevation: 0, flowArea: 0.01, length: 4, resistanceCoeff: 2 });
+connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.01, length: 4, resistanceCoeff: 2,
+    fromPhaseTolerance: 0 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.01, length: 10, resistanceCoeff: 2 });
 
@@ -594,10 +538,10 @@ connect('val-prel-1', 'val-prel-1-out', 'bui-1', 'bui-1-north',
 // ---------------------------------------------------------------------------
 // Small flow area: a single severed 19 mm tube is ~2.3e-4 m2 of double-ended
 // area; the valve is sized for that and throttled by `opening`.
-connect('hx-ev-1', 'hx-ev-1-leak', 'val-leak-1', 'val-leak-1-in',
-  { fromElevation: 4, toElevation: 0, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
-connect('val-leak-1', 'val-leak-1-out', 'hx-ev-1', 'hx-ev-1-shell-1',
-  { fromElevation: 0, toElevation: 4, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
+connect('hx-1', 'hx-1-leak', 'val-leak-1', 'val-leak-1-in',
+  { fromElevation: 5, toElevation: 0, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
+connect('val-leak-1', 'val-leak-1-out', 'hx-1', 'hx-1-shell-1',
+  { fromElevation: 0, toElevation: 5, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 const out = { components, connections };

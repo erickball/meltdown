@@ -1547,6 +1547,16 @@ export class FlowRateOperator implements RateOperator {
   }
 
   private getSpecificEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
+    // Moving-boundary OTSG nodes: the sectioned model knows what actually
+    // sits at each end of the bundle. A vapor draw comes from the superheat
+    // section (carrying its superheat - the entire point of the model; the
+    // bulk state would hand back saturated h_g), a liquid draw from the
+    // subcooled section. Mixture draws fall through to the bulk path.
+    if (node.otsg?.lastEval) {
+      if (flowPhase === 'vapor') return node.otsg.lastEval.hSteamOut;
+      if (flowPhase === 'liquid') return node.otsg.lastEval.hLiquidOut;
+    }
+
     const P = node.fluid.pressure;
     const T = node.fluid.temperature;
     const T_C = T - 273.15;

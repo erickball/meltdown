@@ -140,7 +140,7 @@ if (gox) {
 }
 console.log(`  Core gas: ${ncg('cb-1', 'H2').toFixed(1)} mol H2, ${ncg('cb-1', 'CO').toFixed(1)} mol CO, ` +
   `${ncg('cb-1', 'He').toFixed(0)} mol He, ${(st().flowNodes.get('cb-1')!.fluid.mass).toFixed(2)} kg H2O`);
-console.log(`  Primary pressure: ${fP('cb-1').toFixed(1)} bar; SG shell: ${fP('hx-ev-1-shell').toFixed(1)} bar`);
+console.log(`  Primary pressure: ${fP('cb-1').toFixed(1)} bar; SG shell: ${fP('hx-1-shell').toFixed(1)} bar`);
 
 let bursts = 0;
 for (const [id, b] of st().burstStates ?? []) {

@@ -255,6 +255,81 @@ export function evaluateOtsg(
   };
 }
 
+/**
+ * Sectioned evaluation AT a given pressure, with the superheat energy
+ * DERIVED from the node's conserved totals: U3 = U_total - m1 u1bar - m2
+ * u2bar. This is the runtime form: the ordinary (u,v) machinery owns the
+ * node's pressure dynamics (proven robust), and the sections are evaluated
+ * at that pressure for heat transfer, draw enthalpy, and partition motion.
+ * Section geometry normalizes over the sections' own summed volume, so the
+ * small inconsistency between bulk pressure and the strict volume closure
+ * shows up only as a few-percent length rescale, not as a failure mode.
+ * (The strict closure - evaluateOtsg above - remains the reference form and
+ * the v2 upgrade path; see design doc section 3.)
+ */
+export function evaluateOtsgAtP(
+  m1: number,
+  m3: number,
+  massTotal: number,
+  UTotal: number,
+  P: number,
+  uFeedIn: number,
+  geom: OtsgGeometry,
+): OtsgEval {
+  if (!(m1 >= 0 && m3 >= 0)) {
+    throw new Error(`[OTSG] negative partition mass: m1=${m1}, m3=${m3} kg`);
+  }
+  const m2 = massTotal - m1 - m3;
+  if (m2 < -1e-9 * Math.max(1, massTotal)) {
+    throw new Error(`[OTSG] partition exceeds inventory: m1=${m1.toFixed(2)} + m3=${m3.toFixed(2)} ` +
+      `> total=${massTotal.toFixed(2)} kg. The partition rates have outrun the totals.`);
+  }
+  const m2c = Math.max(0, m2);
+
+  const sat = saturationAtP(P);
+  const u1Bar = 0.5 * (Math.min(uFeedIn, sat.u_f) + sat.u_f);
+  const u2Bar = 0.5 * (sat.u_f + sat.u_g);
+  const v1 = m1 > 0 ? subcooledLiquidV(u1Bar) : sat.v_f;
+  const v2 = 0.5 * (sat.v_f + sat.v_g);
+
+  // Superheat energy from the conserved totals. Numerically this is a small
+  // difference of large numbers as m3 -> 0; the h_g floor below absorbs the
+  // residue (a superheat section can never sit below saturated vapor).
+  const U3 = UTotal - m1 * u1Bar - m2c * u2Bar;
+  const u3 = m3 > 0 ? Math.max(U3 / m3, sat.u_g + 1e3) : sat.u_g;
+  const v3 = m3 > 0 ? superheatedV(u3, P) : sat.v_g;
+
+  const h1Bar = u1Bar + P * v1;
+  const h2Bar = 0.5 * (sat.h_f + sat.h_g);
+  const h3Bar = u3 + P * v3;
+
+  const T1 = m1 > 0 ? tempOfSubcooledU(u1Bar) : sat.T;
+  const T3 = m3 > 0 ? calculateState(1, u3, v3).temperature : sat.T;
+
+  const V1 = m1 * v1, V2 = m2c * v2, V3 = m3 * v3;
+  const VT = Math.max(1e-12, V1 + V2 + V3);
+  const mk = (mass: number, vBar: number, V: number, hBar: number, T: number): OtsgSectionEval => ({
+    mass, vBar, volume: V,
+    lengthFrac: V / VT,
+    area: geom.heatArea * (V / VT),
+    hBar, T,
+  });
+
+  const w = m3 / (m3 + 1);
+  const hSteamOut = w * h3Bar + (1 - w) * sat.h_g;
+
+  return {
+    P, sat,
+    sections: [
+      mk(m1, v1, V1, h1Bar, T1),
+      mk(m2c, v2, V2, h2Bar, sat.T),
+      mk(m3, v3, V3, h3Bar, T3),
+    ],
+    hSteamOut,
+    u3,
+  };
+}
+
 /** Invert specific energy to temperature along the saturated-liquid line. */
 export function tempOfSubcooledU(u: number): number {
   let Tlo = 274, Thi = 645;

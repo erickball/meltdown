@@ -43,24 +43,24 @@ function m(state: SimulationState, id: string): number {
 function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
-    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_evap(kg)  m_sh(kg)   Pwr(MW)    gv  fwspd  ' +
+    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  L1/L2/L3+T3(C)          Pwr(MW)    gv  fwspd  ' +
     'Tev_sh(C)  Tinner  Tannul  Tcoldpipe'
   );
 }
 
 function line(state: SimulationState) {
-  const shell = state.flowNodes.get('hx-ev-1-shell')!;
+  const shell = state.flowNodes.get('hx-1-shell')!;
   console.log(
     `${state.time.toFixed(1).padStart(8)} ` +
     `${flow(state, "pipe-pumpdisch", "rv-1").toFixed(1).padStart(9)} ` +
     `${T(state, 'rv-1').toFixed(1).padStart(9)} ` +
     `${T(state, 'cb-1').toFixed(1).padStart(10)} ` +
     `${P(state, 'cb-1').toFixed(2).padStart(11)} ` +
-    `${flow(state, 'hx-sh-1', 'turbine-1').toFixed(1).padStart(10)} ` +
-    `${T(state, 'hx-sh-1-tube').toFixed(1).padStart(9)} ` +
-    `${P(state, 'hx-sh-1-tube').toFixed(1).padStart(11)} ` +
-    `${m(state, 'hx-ev-1-tube').toFixed(0).padStart(11)} ` +
-    `${m(state, 'hx-sh-1-tube').toFixed(0).padStart(9)} ` +
+    `${flow(state, 'hx-1', 'turbine-1').toFixed(1).padStart(10)} ` +
+    `${T(state, 'hx-1-tube').toFixed(1).padStart(9)} ` +
+    `${P(state, 'hx-1-tube').toFixed(1).padStart(11)} ` +
+    `${m(state, 'hx-1-tube').toFixed(0).padStart(11)} ` +
+    `${(() => { const o = (state.flowNodes.get('hx-1-tube') as any)?.otsg?.lastEval; return o ? o.lengthFracs.map((f: number) => f.toFixed(2)).join('/') + ' T3=' + (o.T3 - 273.15).toFixed(0) : '-'; })().padStart(22)} ` +
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
     `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
     `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +
@@ -131,7 +131,7 @@ console.log(`\nsteps=${stats.totalSteps} rejected=${stats.rejectedSteps} ` +
   `(${(100 * stats.rejectedSteps / Math.max(1, stats.totalSteps)).toFixed(0)}%) dt=${(stats.currentDt * 1e3).toFixed(2)}ms`);
 
 // Helium inventory check
-const shell = sim.state.flowNodes.get('hx-ev-1-shell')!;
+const shell = sim.state.flowNodes.get('hx-1-shell')!;
 console.log(`\nSG shell: ${shell.fluid.mass.toFixed(4)} kg water, ` +
   `${totalMoles(shell.fluid.ncg ?? {} as any).toFixed(0)} mol NCG, ` +
   `T=${(shell.fluid.temperature - 273.15).toFixed(1)}C, P=${(shell.fluid.pressure / 1e5).toFixed(3)} bar, ` +

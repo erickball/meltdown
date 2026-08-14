@@ -28,6 +28,8 @@ export interface FlowNodeRates {
   dMass: number;      // kg/s - rate of mass change
   dEnergy: number;    // W - rate of internal energy change
   dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
+  dOtsgM1?: number;       // kg/s - OTSG subcooled-section partition rate
+  dOtsgM3?: number;       // kg/s - OTSG superheated-section partition rate
   dDepositedCsI?: number; // mol/s - CsI aerosol plating out onto this node's surfaces
 }
 
@@ -181,6 +183,12 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
       dEnergy: aRates.dEnergy + bRates.dEnergy,
     };
     // Combine NCG rates if either has them
+    if (aRates.dOtsgM1 !== undefined || bRates.dOtsgM1 !== undefined) {
+      combined.dOtsgM1 = (aRates.dOtsgM1 ?? 0) + (bRates.dOtsgM1 ?? 0);
+    }
+    if (aRates.dOtsgM3 !== undefined || bRates.dOtsgM3 !== undefined) {
+      combined.dOtsgM3 = (aRates.dOtsgM3 ?? 0) + (bRates.dOtsgM3 ?? 0);
+    }
     if (aRates.dNcg || bRates.dNcg) {
       combined.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -286,6 +294,8 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
       dEnergy: r.dEnergy * factor,
     };
     // Scale NCG rates if present
+    if (r.dOtsgM1 !== undefined) scaled.dOtsgM1 = r.dOtsgM1 * factor;
+    if (r.dOtsgM3 !== undefined) scaled.dOtsgM3 = r.dOtsgM3 * factor;
     if (r.dNcg) {
       scaled.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -389,6 +399,27 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
 
       // Apply NCG transport rates if present
+      // OTSG partition: the sections' masses live inside the node's ordinary
+      // conserved totals, so applying the partition can never create or lose
+      // water - it only moves the internal boundaries. Floors absorb float
+      // residue (rates are constructed to vanish as a section empties).
+      if (node.otsg) {
+        if (nodeRates.dOtsgM1 !== undefined) {
+          node.otsg.m1 = Math.max(0, node.otsg.m1 + nodeRates.dOtsgM1 * dt);
+        }
+        if (nodeRates.dOtsgM3 !== undefined) {
+          node.otsg.m3 = Math.max(0, node.otsg.m3 + nodeRates.dOtsgM3 * dt);
+        }
+        // The partition cannot exceed the (independently integrated) total.
+        const tot = node.fluid.mass;
+        const part = node.otsg.m1 + node.otsg.m3;
+        if (part > tot && part > 0) {
+          const scale = Math.max(0, tot) / part;
+          node.otsg.m1 *= scale;
+          node.otsg.m3 *= scale;
+        }
+      }
+
       if (nodeRates.dNcg) {
         // Initialize NCG on node if not present
         if (!node.fluid.ncg) {

@@ -1057,6 +1057,32 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const tubeLengthFactor = hxComp.hxType === 'utube' ? 2.1 : 1.0;
       const tubeLength = tubeLengthFactor * Math.max(1, hxHeight - (hxComp.plenumLength ?? 0.5));
       const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000);
+
+      // Moving-boundary once-through SG (docs/otsg-moving-boundary-design.md):
+      // the tube node carries a sectioned subcooled/boiling/superheat model,
+      // and OtsgRateOperator replaces BOTH bulk convection connections with
+      // the counterflow gas march + per-section wall exchange. Opt-in so
+      // every existing plant is untouched.
+      if (hxComp.tubeModel === 'moving-boundary') {
+        const tubeNode = state.flowNodes.get(`${id}-tube`);
+        if (!tubeNode) {
+          throw new Error(`[Factory] ${id}: tubeModel 'moving-boundary' but no tube node was built`);
+        }
+        // Initial partition: seed modest subcooled and superheat sections and
+        // let the interface dynamics find their real sizes - the partition
+        // self-corrects within tens of seconds because the fluxes depend on
+        // heat and flow, not on this guess.
+        tubeNode.otsg = {
+          m1: 0.2 * tubeNode.fluid.mass,
+          m3: 0.01 * tubeNode.fluid.mass,
+          heatArea: tubeArea,
+          shellNodeId: `${id}-shell`,
+          metalNodeId: `${id}-tubes`,
+        };
+        console.log(`[Factory] ${id}: moving-boundary OTSG tube side ` +
+          `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory)`);
+      } else {
+
       state.convectionConnections.push({
         id: `convection-${id}-tube`,
         thermalNodeId: `${id}-tubes`,
@@ -1073,6 +1099,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
         tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
       });
+      }
     }
 
     // Create thermal node, annulus flow node, and convection connections for cross-vessels

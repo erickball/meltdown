@@ -174,21 +174,22 @@
       }
     ],
     [
-      "hx-ev-1",
+      "hx-1",
       {
-        "id": "hx-ev-1",
+        "id": "hx-1",
         "type": "heatExchanger",
-        "label": "SG Evaporator",
+        "label": "Helical Once-Through SG",
         "position": {
           "x": 56,
-          "y": 78
+          "y": 74
         },
         "rotation": 0,
         "elevation": 0,
-        "width": 3,
-        "height": 9,
+        "width": 2.8,
+        "height": 14,
         "hxType": "helical",
         "tubeCount": 5000,
+        "tubeModel": "moving-boundary",
         "material": "alloy-800h",
         "pressureRating": 90,
         "tubePressureRating": 200,
@@ -197,41 +198,41 @@
         "tubeOD": 0.019,
         "ports": [
           {
-            "id": "hx-ev-1-tube-1",
+            "id": "hx-1-tube-1",
             "position": {
               "x": -0.6,
-              "y": 4.5
+              "y": 7
             },
             "direction": "both"
           },
           {
-            "id": "hx-ev-1-tube-2",
+            "id": "hx-1-tube-2",
             "position": {
               "x": 0.6,
-              "y": -4.5
+              "y": -7
             },
             "direction": "both"
           },
           {
-            "id": "hx-ev-1-shell-1",
+            "id": "hx-1-shell-1",
             "position": {
-              "x": -1.6,
-              "y": -4
+              "x": -1.8,
+              "y": -6
             },
             "direction": "both"
           },
           {
-            "id": "hx-ev-1-shell-2",
+            "id": "hx-1-shell-2",
             "position": {
-              "x": 1.6,
-              "y": 4
+              "x": 1.8,
+              "y": 6
             },
             "direction": "both"
           },
           {
-            "id": "hx-ev-1-leak",
+            "id": "hx-1-leak",
             "position": {
-              "x": 1.6,
+              "x": 1.8,
               "y": 0
             },
             "direction": "both"
@@ -241,116 +242,25 @@
           "temperature": 624,
           "pressure": 16500000,
           "phase": "two-phase",
-          "quality": 0.12,
+          "quality": 0.1,
           "flowRate": 0
         },
         "primaryFluid": {
           "temperature": 624,
           "pressure": 16500000,
           "phase": "two-phase",
-          "quality": 0.12,
+          "quality": 0.1,
           "flowRate": 0
         },
         "shellFluid": {
-          "temperature": 690.5,
+          "temperature": 778,
           "pressure": 700,
           "phase": "vapor",
           "quality": 1,
           "flowRate": 0
         },
         "secondaryFluid": {
-          "temperature": 690.5,
-          "pressure": 700,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "shellInitialNcg": {
-          "He": 60
-        },
-        "nqa1": true,
-        "containedBy": "bui-1"
-      }
-    ],
-    [
-      "hx-sh-1",
-      {
-        "id": "hx-sh-1",
-        "type": "heatExchanger",
-        "label": "SG Superheater",
-        "position": {
-          "x": 56,
-          "y": 68
-        },
-        "rotation": 0,
-        "elevation": 10,
-        "width": 2.6,
-        "height": 5,
-        "hxType": "helical",
-        "tubeCount": 5000,
-        "material": "alloy-800h",
-        "pressureRating": 90,
-        "tubePressureRating": 200,
-        "shellPressureRating": 90,
-        "plenumLength": 0.8,
-        "tubeOD": 0.019,
-        "ports": [
-          {
-            "id": "hx-sh-1-tube-1",
-            "position": {
-              "x": -0.6,
-              "y": 2.5
-            },
-            "direction": "both"
-          },
-          {
-            "id": "hx-sh-1-tube-2",
-            "position": {
-              "x": 0.6,
-              "y": -2.5
-            },
-            "direction": "both"
-          },
-          {
-            "id": "hx-sh-1-shell-1",
-            "position": {
-              "x": -1.5,
-              "y": -2
-            },
-            "direction": "both"
-          },
-          {
-            "id": "hx-sh-1-shell-2",
-            "position": {
-              "x": 1.5,
-              "y": 2
-            },
-            "direction": "both"
-          }
-        ],
-        "tubeFluid": {
-          "temperature": 838,
-          "pressure": 16500000,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "primaryFluid": {
-          "temperature": 838,
-          "pressure": 16500000,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "shellFluid": {
-          "temperature": 935.5,
-          "pressure": 700,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "secondaryFluid": {
-          "temperature": 935.5,
+          "temperature": 778,
           "pressure": 700,
           "phase": "vapor",
           "quality": 1,
@@ -907,7 +817,7 @@
         "innerWallThickness": 0.02,
         "pressureRating": 90,
         "material": "alloy-800h",
-        "targetComponentId": "hx-sh-1",
+        "targetComponentId": "hx-1",
         "orientation": "horizontal",
         "ports": [
           {
@@ -1018,7 +928,7 @@
         "pid": {
           "sensor": {
             "kind": "node-pressure",
-            "targetId": "hx-sh-1-tube"
+            "targetId": "hx-1-tube"
           },
           "setpoint": 16500000,
           "invert": true,
@@ -1093,28 +1003,17 @@
     {
       "fromComponentId": "cv-1",
       "fromPortId": "cv-1-inner-out",
-      "toComponentId": "hx-sh-1",
-      "toPortId": "hx-sh-1-shell-1",
+      "toComponentId": "hx-1",
+      "toPortId": "hx-1-shell-1",
       "fromElevation": 0,
-      "toElevation": 14,
+      "toElevation": 13,
       "flowArea": 0.78,
       "length": 4,
       "resistanceCoeff": 1.5
     },
     {
-      "fromComponentId": "hx-sh-1",
-      "fromPortId": "hx-sh-1-shell-2",
-      "toComponentId": "hx-ev-1",
-      "toPortId": "hx-ev-1-shell-1",
-      "fromElevation": 0.5,
-      "toElevation": 8.5,
-      "flowArea": 1.4,
-      "length": 2,
-      "resistanceCoeff": 1
-    },
-    {
-      "fromComponentId": "hx-ev-1",
-      "fromPortId": "hx-ev-1-shell-2",
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-shell-2",
       "toComponentId": "cv-1",
       "toPortId": "cv-1-annulus-2",
       "fromElevation": 1,
@@ -1170,8 +1069,8 @@
     {
       "fromComponentId": "val-fwcv-1",
       "fromPortId": "val-fwcv-1-out",
-      "toComponentId": "hx-ev-1",
-      "toPortId": "hx-ev-1-tube-1",
+      "toComponentId": "hx-1",
+      "toPortId": "hx-1-tube-1",
       "fromElevation": 0,
       "toElevation": 1,
       "flowArea": 0.03,
@@ -1179,27 +1078,16 @@
       "resistanceCoeff": 2
     },
     {
-      "fromComponentId": "hx-ev-1",
-      "fromPortId": "hx-ev-1-tube-2",
-      "toComponentId": "hx-sh-1",
-      "toPortId": "hx-sh-1-tube-1",
-      "fromElevation": 8.8,
-      "toElevation": 0.2,
-      "flowArea": 0.05,
-      "length": 4,
-      "resistanceCoeff": 1.5,
-      "fromPhaseTolerance": 0
-    },
-    {
-      "fromComponentId": "hx-sh-1",
-      "fromPortId": "hx-sh-1-tube-2",
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2",
       "toComponentId": "turbine-1",
       "toPortId": "inlet",
-      "fromElevation": 4.8,
+      "fromElevation": 13.5,
       "toElevation": 0,
       "flowArea": 0.012,
       "length": 25,
-      "resistanceCoeff": 2
+      "resistanceCoeff": 2,
+      "fromPhaseTolerance": 0
     },
     {
       "fromComponentId": "turbine-1",
@@ -1242,15 +1130,16 @@
       "length": 4
     },
     {
-      "fromComponentId": "hx-sh-1",
-      "fromPortId": "hx-sh-1-tube-2",
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2",
       "toComponentId": "val-msv-1",
       "toPortId": "val-msv-1-in",
-      "fromElevation": 4.8,
+      "fromElevation": 13.5,
       "toElevation": 0,
       "flowArea": 0.01,
       "length": 4,
-      "resistanceCoeff": 2
+      "resistanceCoeff": 2,
+      "fromPhaseTolerance": 0
     },
     {
       "fromComponentId": "val-msv-1",
@@ -1286,11 +1175,11 @@
       "resistanceCoeff": 2
     },
     {
-      "fromComponentId": "hx-ev-1",
-      "fromPortId": "hx-ev-1-leak",
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-leak",
       "toComponentId": "val-leak-1",
       "toPortId": "val-leak-1-in",
-      "fromElevation": 4,
+      "fromElevation": 5,
       "toElevation": 0,
       "flowArea": 0.0003,
       "length": 0.5,
@@ -1299,10 +1188,10 @@
     {
       "fromComponentId": "val-leak-1",
       "fromPortId": "val-leak-1-out",
-      "toComponentId": "hx-ev-1",
-      "toPortId": "hx-ev-1-shell-1",
+      "toComponentId": "hx-1",
+      "toPortId": "hx-1-shell-1",
       "fromElevation": 0,
-      "toElevation": 4,
+      "toElevation": 5,
       "flowArea": 0.0003,
       "length": 0.5,
       "resistanceCoeff": 2

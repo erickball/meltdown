@@ -41,6 +41,7 @@ export {
 export { BurstCheckOperator } from './burst-operator';
 export { HydrogenCombustionRateOperator } from './combustion';
 export { GraphiteOxidationRateOperator, getGraphiteOxidationDiagnostics } from './graphite-oxidation';
+export { OtsgRateOperator } from './otsg-operator';
 export { CoriumRelocationRateOperator, relocatedFuelFraction } from './corium';
 export { McciRateOperator, basematErodedDepth, CONCRETE_DENSITY, CONCRETE_ABLATION_T } from './mcci';
 

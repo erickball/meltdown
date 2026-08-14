@@ -15,6 +15,7 @@ import {
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
   GraphiteOxidationRateOperator,
+  OtsgRateOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -169,6 +170,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addRateOperator(new ConvectionRateOperator());
   solver.addRateOperator(new CladdingOxidationRateOperator());
   solver.addRateOperator(new GraphiteOxidationRateOperator());
+  solver.addRateOperator(new OtsgRateOperator());
   solver.addRateOperator(new HydrogenCombustionRateOperator());
   solver.addRateOperator(new CoriumRelocationRateOperator());
   solver.addRateOperator(new McciRateOperator());

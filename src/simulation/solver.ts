@@ -1118,7 +1118,13 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     if (v.fluid.ncg) {
       clonedFluid.ncg = { ...v.fluid.ncg };
     }
-    flowNodes.set(k, { ...v, fluid: clonedFluid });
+    const clone = { ...v, fluid: clonedFluid };
+    // OTSG partition is INTEGRATED nested state - it must deep-clone or all
+    // six RK stages share one object and the partition advances 6x per step
+    // (the exact bug graphiteOxidation hit; see the solver-clone comment on
+    // thermal nodes).
+    if (v.otsg) clone.otsg = { ...v.otsg, lastEval: v.otsg.lastEval ? { ...v.otsg.lastEval } : undefined };
+    flowNodes.set(k, clone);
   });
 
   // Clone arrays - preallocate for performance
