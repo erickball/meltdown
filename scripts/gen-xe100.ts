@@ -294,8 +294,13 @@ add('fw-pump-1', {
   // section continuously instead of flipping a whole lump dry. Delivery at
   // 165 bar is ~55-60 kg/s, which is the design-duty steam flow at full
   // superheat enthalpy rise.
-  diameter: 0.4, running: true, speed: 0.80,
-  ratedFlow: 80, ratedHead: 2100, orientation: 'right-left',
+  diameter: 0.4, running: true, speed: 0.57,
+  // High rated head + low speed = a STEEP operating curve: delivery varies
+  // only ~60% between 165 and 60 bar of back-pressure instead of 2.3x. The
+  // flat curve was a flood machine - any pressure sag made the pump
+  // over-deliver, cold feed swelled the subcooled section, boiling area
+  // collapsed, generation fell, and the sag deepened.
+  ratedFlow: 80, ratedHead: 6000, orientation: 'right-left',
   ports: ports([['fw-pump-1-inlet', 0.3, 0, 'in'], ['fw-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: T_FEED, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: false, pressureRating: 250,
@@ -519,11 +524,16 @@ connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fwcv-1', 'val-fwcv-1-in',
   { fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4 });
 
 // Steam dump: off the main steam line, discharging into the condenser
+// Dump capacity ~40 kg/s at the setpoint (choked) - about 70% of full
+// steam generation. The 0.01 m2 line passed ~210 kg/s, four times
+// generation, and every lift became a blowdown spiral: P crashed, the
+// pump flooded the boiler 10 t past design, and recovery took half an
+// hour of simulated time.
 connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.01, length: 4, resistanceCoeff: 2,
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.002, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
-  { fromElevation: 0, toElevation: 4, flowArea: 0.01, length: 10, resistanceCoeff: 2 });
+  { fromElevation: 0, toElevation: 4, flowArea: 0.002, length: 10, resistanceCoeff: 2 });
 
 // Primary safety valve: off the vessel dome, discharging into the building
 connect('rv-1', 'rv-1-cold-leg', 'val-prel-1', 'val-prel-1-in',

@@ -1788,14 +1788,22 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
       // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
       // (initialNcg = tube side, partial pressures in bar)
-      const tubePhase = (hx.tubeFluid?.phase ?? hx.primaryFluid?.phase) === 'vapor' ? 'vapor' : 'liquid';
+      // Honor the declared phase INCLUDING two-phase: a once-through boiler
+      // initialized liquid-full instead of at its specified quality starts
+      // ~8 t heavy and has to boil the excess off through a violent
+      // pressure transient before it can reach any operating point.
+      const declaredPhase = hx.tubeFluid?.phase ?? hx.primaryFluid?.phase;
+      const tubePhase = declaredPhase === 'vapor' ? 'vapor'
+        : declaredPhase === 'two-phase' ? 'two-phase' : 'liquid';
+      const tubeQuality = tubePhase === 'vapor' ? 1
+        : tubePhase === 'two-phase' ? (hx.tubeFluid?.quality ?? hx.primaryFluid?.quality ?? 0.1) : 0;
 
       // Return tube-side node, shell-side is created separately
       return {
         id: `${component.id}-tube`,
         label: `${component.label || 'HX'} Tube`,
         fluid: createFluidState(
-          tubeTemp, tubePressure, tubePhase, tubePhase === 'vapor' ? 1 : 0, tubeVolume, hx.initialNcg
+          tubeTemp, tubePressure, tubePhase, tubeQuality, tubeVolume, hx.initialNcg
         ),
         volume: tubeVolume,
         // Tube-side geometry from the actual bundle, not constants. flowArea

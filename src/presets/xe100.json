@@ -626,9 +626,9 @@
         "elevation": 0,
         "diameter": 0.4,
         "running": true,
-        "speed": 0.8,
+        "speed": 0.57,
         "ratedFlow": 80,
-        "ratedHead": 2100,
+        "ratedHead": 6000,
         "orientation": "right-left",
         "ports": [
           {
@@ -1136,7 +1136,7 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.01,
+      "flowArea": 0.002,
       "length": 4,
       "resistanceCoeff": 2,
       "fromPhaseTolerance": 0
@@ -1148,7 +1148,7 @@
       "toPortId": "condenser-1-inlet",
       "fromElevation": 0,
       "toElevation": 4,
-      "flowArea": 0.01,
+      "flowArea": 0.002,
       "length": 10,
       "resistanceCoeff": 2
     },
