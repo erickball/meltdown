@@ -4,6 +4,7 @@ import { PlantCanvas } from './render/canvas';
 import pwrPresetData from './presets/pwr.json';
 import bwrPresetData from './presets/bwr.json';
 import htgrPresetData from './presets/htgr.json';
+import xe100PresetData from './presets/xe100.json';
 import twoLoopPresetData from './presets/two-loop.json';
 import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
@@ -1994,6 +1995,14 @@ function init() {
         tooltip: 'Helium-cooled, graphite-moderated pebble-bed reactor (250 MWt) with a ' +
           'helical steam generator. Losing the helium barely changes reactivity, and the ' +
           'graphite pebbles are a huge passive heat sink.',
+      },
+      {
+        label: 'Xe-100 (HTGR)', data: xe100PresetData,
+        tooltip: 'X-energy Xe-100: 200 MWt helium pebble-bed at 60 bar, 750°C core outlet, ' +
+          'with a coaxial hot gas duct and a helical once-through steam generator modeled with ' +
+          'moving phase boundaries (water in the tubes - an SG tube leak pushes steam INTO the ' +
+          'primary, where hot graphite gasifies it to H₂ and CO). Walk-away safe: trip the ' +
+          'circulator and watch decay heat leave through the reflector.',
       },
       {
         label: 'Two-Loop PWR', data: twoLoopPresetData,

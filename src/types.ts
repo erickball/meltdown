@@ -69,6 +69,12 @@ export interface ComponentBase {
   // A component inside another only bursts when (inner pressure - container pressure) > burst rating.
   // This means a pipe inside a pressurized containment can withstand higher absolute pressure.
   containedBy?: string;
+  // Structural material of the pressure boundary. Drives creep-rupture life:
+  // 'low-alloy-steel' (default), 'stainless-304', 'alloy-800h'. A hot gas duct
+  // or helical SG tube bundle in a gas reactor wants 'alloy-800h' - the same
+  // part in low-alloy steel ruptures in minutes at core-outlet temperature.
+  // See src/simulation/materials.ts.
+  material?: string;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
@@ -214,6 +220,13 @@ export interface HeatExchangerComponent extends ComponentBase {
   shellPressureRating?: number;  // Shell-side design pressure (bar)
   plenumLength?: number;         // Length of tube-side plenums (semi-ellipsoid) in meters
   tubeOD?: number;               // Tube outer diameter in meters
+  // Initial non-condensible fill, partial pressures in bar. `initialNcg` fills
+  // the TUBE side, `shellInitialNcg` the SHELL side - a gas-cooled plant can
+  // put its coolant on either side (helium in the tubes with water in the
+  // shell, as in the HTGR preset, or water in the tubes with helium in the
+  // shell, as in a Xe-100-style helical once-through SG).
+  initialNcg?: { [species: string]: number };
+  shellInitialNcg?: { [species: string]: number };
 }
 
 export interface ExtractionPort {
@@ -424,6 +437,12 @@ export interface CrossVesselComponent extends ComponentBase {
   // Rendering/orientation
   orientation: 'horizontal' | 'angled';  // How the cross-vessel extends from parent
   angle?: number;             // degrees from horizontal (for angled orientation)
+  // Initial non-condensible fill, partial pressures in bar. A gas-cooled plant
+  // runs this as a coaxial duct: hot gas down the inner pipe (`initialNcg`),
+  // cold return in the annulus (`annulusInitialNcg`) keeping the pressure
+  // boundary cold.
+  initialNcg?: { [species: string]: number };
+  annulusInitialNcg?: { [species: string]: number };
 }
 
 export type PlantComponent =

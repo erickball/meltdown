@@ -19,6 +19,7 @@
 import { SimulationState, FlowNode, FluidState, ConvectionConnection, simulationConfig } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
+import { superheatedFromTP } from '../water-inverse';
 import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES, totalMoles, mixtureCv } from '../gas-properties';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
 import { pumpHeadPressure } from './pump-curve';
@@ -1193,14 +1194,35 @@ export function createFluidState(
     // Check if this is superheated steam (P < P_sat at this T)
     const P_sat = Water.saturationPressure(temperature);
     if (pressure < P_sat * 0.99) {
-      // Superheated steam - need to calculate energy differently
-      // u = u_g(T_sat(P)) + Cv * (T - T_sat(P))
-      // where T_sat is saturation temperature at this pressure
-      const T_sat = Water.saturationTemperature(pressure);
-      const u_sat_g = Water.saturatedVaporEnergy(T_sat);
-      const Cv_steam = 1500; // J/kg·K, approximate for steam
-      const superheat = temperature - T_sat;
-      const specificEnergy = u_sat_g + Cv_steam * superheat;
+      // Superheated steam. Invert the steam tables for the (u, v) that
+      // actually reads back as this (T, P) - see water-inverse.ts.
+      //
+      // The old closed form here was ideal-gas density plus
+      //   u = u_g(T_sat(P)) + 1500*(T - T_sat(P))
+      // which is the same crude caloric fit that used to sit in the NCG
+      // mixture solve, and it is wrong by the same kind of margin: a node
+      // declared "6 MPa, 700 K" was built with an energy whose temperature
+      // reads back as 626 K. Every superheated node therefore started with a
+      // ~70 K step that the solver had to absorb in the first milliseconds -
+      // worse at high pressure, where steam is least ideal, which is exactly
+      // where a once-through SG or a main steam line lives.
+      let specificEnergy: number;
+      const inverted = superheatedFromTP(temperature, pressure);
+      if (inverted) {
+        density = 1 / inverted.specificVolume;
+        specificEnergy = inverted.specificEnergy;
+      } else {
+        // Fall back to the closed form, but SAY SO - a silent fallback here
+        // reintroduces the initialization step it exists to avoid.
+        const T_sat = Water.saturationTemperature(pressure);
+        const u_sat_g = Water.saturatedVaporEnergy(T_sat);
+        specificEnergy = u_sat_g + 1500 * (temperature - T_sat);
+        console.warn(
+          `[createFluidState] Could not invert the steam tables for superheated vapour at ` +
+          `T=${temperature.toFixed(1)}K, P=${(pressure / 1e5).toFixed(3)}bar - falling back to the ` +
+          `ideal-gas/linear-cv estimate. This node will start with a temperature step.`
+        );
+      }
 
       const mass = density * volume;
       const internalEnergy = mass * specificEnergy;

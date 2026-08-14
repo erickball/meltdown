@@ -1111,8 +1111,11 @@ function interpolateFromGrid(
   let mP0 = 0, mP1 = 0, mP2 = 0;
   let supportCount = 0;
 
-  // Plain inverse-distance sums (fringe/degenerate fallback = old behavior)
-  let plainWeight = 0, plainT = 0, plainP = 0;
+  // Plain inverse-distance sums (fringe/degenerate fallback = old behavior).
+  // Also track whether the query is actually SURROUNDED by the points feeding
+  // that fallback - see the guard below for why.
+  let plainWeight = 0, plainT = 0, plainP = 0, plainCount = 0;
+  let uBelow = false, uAbove = false, vBelow = false, vAbove = false;
 
   for (const pt of nearby) {
     const x = logV - Math.log10(pt.v);
@@ -1128,6 +1131,9 @@ function interpolateFromGrid(
     plainWeight += plain;
     plainT += plain * pt.T_K;
     plainP += plain * pt.P_MPa;
+    plainCount++;
+    if (pt.u <= u_kJkg) uBelow = true; else uAbove = true;
+    if (pt.v <= v) vBelow = true; else vAbove = true;
 
     const q = Math.sqrt(distSq) / R;
     if (q >= 1) continue;
@@ -1150,6 +1156,27 @@ function interpolateFromGrid(
     mP0 += w * lnP;
     mP1 += w * lnP * x;
     mP2 += w * lnP * y;
+  }
+
+  // Never EXTRAPOLATE the vapor grid in v. Outside the grid's v coverage the
+  // fit degenerates into a staircase: at v = 351 m³/kg (the grid stops at 210)
+  // it returned dT/du ~ 0.1-0.2 K per kJ/kg punctuated by 10-40 K steps, where
+  // the true value is a clean 0.67 - and it even produced pressures below the
+  // grid path's own validity floor. The vapor branch has a physically anchored
+  // ideal-gas extension for exactly this region, so hand off to it.
+  //
+  // Only v is required here, NOT u. The grid's vapor points start AT the
+  // saturated-vapour line, so a state just above the dome legitimately has no
+  // grid points below it in u; demanding u-bracketing would reject the whole
+  // near-saturation band. Extrapolating slightly in u is safe anyway - the MLS
+  // fits a plane and carries the local trend. (The u-bracket does matter for
+  // the degenerate fallback below; see there.)
+  //
+  // Applied to the VAPOR grid only. The liquid grid is dense, has no
+  // equivalent physical extension to fall back on, and its own
+  // saturation-anchored path is tried before it.
+  if (phase === 'vapor' && !(vBelow && vAbove)) {
+    return null;
   }
 
   if (supportCount >= 3) {
@@ -1183,7 +1210,15 @@ function interpolateFromGrid(
     }
   }
 
-  if (plainWeight === 0) {
+  // Degenerate-support fallback. Unlike the MLS fit above, inverse-distance
+  // weighting reproduces a CONSTANT rather than a local trend, so it is only
+  // meaningful as an average of points that genuinely surround the query. Out
+  // on the grid's fringe the search block can hold a single point, and then
+  // this returned that point's T and P for every query in the block: a flat
+  // plateau tens of kJ/kg wide with steps at its edges. dT/du = 0 breaks
+  // anything solving through this surface - the water/NCG energy split
+  // brackets a root in u and cannot find one across a plateau.
+  if (plainWeight === 0 || plainCount < 3 || !uBelow || !uAbove) {
     return null;
   }
 
@@ -1609,8 +1644,14 @@ function superheatedVaporExtrapolation(u: number, v: number): { T: number; P: nu
   const rhs = (u - u_edge) + CV_A * T_edge + 0.5 * CV_B * T_edge * T_edge;
   const T = (-CV_A + Math.sqrt(CV_A * CV_A + 2 * CV_B * rhs)) / CV_B;
 
-  // Pressure at constant volume with compressibility anchored at the edge
-  const Z_edge = (P_edge * v) / (R_WATER * T_edge);
+  // Pressure at constant volume with compressibility anchored at the edge.
+  // Z must be evaluated at the EDGE's own volume, not the query's: the two
+  // coincide inside a logV cell, but in the slack band past the table's last
+  // entry both brackets clamp to that entry, and using the query v there
+  // cancels v out of P = Z·R·T/v entirely - pinning P and T flat across a
+  // whole span of volumes (the same failure the dilute ideal-gas path had).
+  const v_edge = Math.pow(10, lo.logV + t * (hi.logV - lo.logV));
+  const Z_edge = (P_edge * v_edge) / (R_WATER * T_edge);
   const P = Z_edge * R_WATER * T / v;
 
   const now = Date.now();
@@ -1644,12 +1685,19 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
     );
   }
 
-  // Get saturation properties at the boundary (or nearest saturation point)
-  // For v > v_g_max (~206 m³/kg), use triple point as reference
+  // Get saturation properties at the boundary (or nearest saturation point).
+  // `v_ref` is the specific volume OF THE REFERENCE STATE - the saturated
+  // vapour line reaches only v_g ~ 206 m³/kg at the triple point, so for
+  // anything more dilute the reference is the triple point itself and its
+  // own v_g, NOT the query volume. (Using the query volume as the reference
+  // density cancels v out of P = Z·ρ·R·T entirely, which pinned every
+  // dilute-steam node at a constant ~1.4 kPa no matter how little water it
+  // held - the phantom "steam pressure floor" in gas-filled loops.)
   let satProps = findSaturationPropsAtV(v);
+  let v_ref = v;
 
   if (!satProps) {
-    // v is beyond saturation curve (v > 206 m³/kg), use triple point
+    // v is beyond the saturation curve (v > 206 m³/kg): use the triple point
     if (!saturationDome) {
       throw new Error('[WaterProps v4] Saturation dome not loaded in idealGasApproximation');
     }
@@ -1659,6 +1707,7 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
       T_sat: triple.T_K,
       P_sat: triple.P_MPa * 1e6,  // Convert to Pa
     };
+    v_ref = triple.v_g;  // m³/kg at the triple point (~206)
   }
 
   // Check that u is above saturation (superheated)
@@ -1670,14 +1719,24 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
     );
   }
 
-  // Calculate temperature: T = T_sat + (u - u_g) / cv
+  // Temperature from energy: T = T_sat + (u - u_g) / cv.
+  // NOTE: a temperature-dependent cv (the CV_A + CV_B*T form that
+  // superheatedVaporExtrapolation uses) is the better caloric model in
+  // principle, but it makes the seam against the grid's dilute edge WORSE
+  // here (16-23 K vs 6-19 K), because this path anchors at the dome - the
+  // triple point once v > 206 m³/kg - and so extrapolates across ~600 K
+  // rather than from the grid edge a few tens of K away. Left as the flat
+  // fit that actually matches the neighbouring data; see the note in
+  // mixture-properties.ts about the residual seam.
   const T = satProps.T_sat + (u - satProps.u_g) / cv_steam;
 
-  // Calculate compressibility factor Z to match P_sat at the saturation point
-  // At saturation: P_sat = Z * rho_sat * R * T_sat
-  // So: Z = P_sat / (rho_sat * R * T_sat)
-  const rho_sat = 1 / v;  // Use current v as reference density
-  const Z = satProps.P_sat / (rho_sat * R_WATER * satProps.T_sat);
+  // Calculate compressibility factor Z to match P_sat at the reference point
+  // At saturation: P_sat = Z * rho_ref * R * T_sat
+  // So: Z = P_sat / (rho_ref * R * T_sat)
+  // Z ~ 1 out here (0.9997 at the triple point), so this is a real ideal gas:
+  // P falls as 1/v, which is what gives a dilute node a finite dP/dm.
+  const rho_ref = 1 / v_ref;
+  const Z = satProps.P_sat / (rho_ref * R_WATER * satProps.T_sat);
 
   // Calculate pressure using the calibrated Z
   const P = Z * rho * R_WATER * T;
@@ -1993,10 +2052,26 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       }
     }
   } else {
-    // Vapor: use grid interpolation first
-    const gridResult = interpolateFromGrid(u, v, 'vapor');
+    // Vapor. ABOVE the grid's hot edge at this v, the anchored ideal-gas
+    // extension owns the region - test that FIRST, before asking the grid.
+    //
+    // The grid's last cells out here hold 1-2 points, and the MLS fit across
+    // them disagrees with the grid's own hot-edge point by ~25 K. When the
+    // grid was asked first and used whenever it returned anything, the two
+    // models alternated as the query moved: T(u) at v = 20 m³/kg zig-zagged
+    // 725 -> 752 -> 730 -> 760 -> 756 over 60 kJ/kg. Selecting on u_edge(v)
+    // instead makes the branch a single-valued, monotone function of the
+    // state, which is what anything solving through this surface needs (the
+    // water/NCG energy split brackets a root in u). The extension is exactly
+    // continuous with the edge point it is anchored to.
+    const aboveEdge = superheatedVaporExtrapolation(u, v);
+    const gridResult = aboveEdge ? null : interpolateFromGrid(u, v, 'vapor');
 
-    if (gridResult) {
+    if (aboveEdge) {
+      T = aboveEdge.T;
+      P = aboveEdge.P;
+      calculationPath = 'vapor_superheat_extrapolation';
+    } else if (gridResult) {
       T = gridResult.T;
       P = gridResult.P;
       calculationPath = 'vapor_grid';
@@ -2018,13 +2093,9 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       // Anything else means broken mass/energy bookkeeping - fail loudly.
       // ========================================================================
 
-      const superheated = superheatedVaporExtrapolation(u, v);
+      // (extension 1 was already tried above, before the grid)
       const v_g_max = 206;  // m³/kg at triple point
-      if (superheated) {
-        T = superheated.T;
-        P = superheated.P;
-        calculationPath = 'vapor_superheat_extrapolation';
-      } else if (v > v_g_max * 0.5) {
+      if (v > v_g_max * 0.5) {
         // Very low density vapor - use ideal gas approximation
         const idealResult = idealGasApproximation(u, v);
         T = idealResult.T;
@@ -2041,10 +2112,21 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     }
   }
 
-  // Validate results - no clamping, fail if out of range
-  // For ideal gas path (very low density vapor), allow much lower pressures
-  const minPressure = calculationPath === 'vapor_ideal_gas' ? 0.1 : 1000;  // 0.1 Pa for ideal gas, 1000 Pa otherwise
-  if (P < minPressure || P > P_CRIT * 10) {
+  // Validate results - no clamping, fail if out of range.
+  // On the ideal-gas path the only floor is "positive and finite": that path
+  // is reached exactly when the water is too dilute for the tables, and a
+  // dilute species HAS an arbitrarily small partial pressure - trace steam in
+  // a 60 bar helium loop sits in the millipascals. An absolute Pa floor there
+  // makes the trace-water limit unrepresentable, which is the whole regime a
+  // gas-cooled plant lives in.
+  //
+  // Grid/extension paths keep a floor, but the PHYSICAL one: the triple point
+  // (611.657 Pa), below which water cannot be a vapour in equilibrium with
+  // liquid at all. The old 1 kPa value pre-dated the grid reaching
+  // v = 210 m³/kg, where saturation pressures genuinely run down toward
+  // 600-1000 Pa, and it turned those legitimate states into throws.
+  const minPressure = calculationPath === 'vapor_ideal_gas' ? Number.MIN_VALUE : 611.0;
+  if (!(P >= minPressure) || P > P_CRIT * 10) {
     throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
   }
   // Ceiling admits severe-accident superheat (steam near molten fuel). Above
@@ -2053,6 +2135,8 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   if (T < T_TRIPLE || T > 5000) {
     throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);
   }
+
+  lastCalculationPath = calculationPath;
 
   // Debug tracking for pressure jumps
   if (debugNodeId) {
@@ -2223,6 +2307,7 @@ export function getWaterPropsDebugLog(): string[] { return []; }
 let debugNodeId: string | null = null;
 let debugPressureJumpThreshold = 0.5; // Log if pressure changes by more than 50%
 const pressureHistory = new Map<string, { P: number; phase: string; u: number; v: number }>();
+let lastCalculationPath = 'none';
 
 export function setDebugNodeId(nodeId: string | null): void {
   debugNodeId = nodeId;
@@ -2387,6 +2472,13 @@ export function suggestMaxTimestep(_state: WaterState, _volume: number): number 
 }
 
 // Debug exports for testing saturation curve
+/** Which branch calculateState took for the last call - diagnostics only.
+ *  Lets probes see grid vs. hot-edge extension vs. ideal gas without having
+ *  to infer it from the numbers. */
+export function DEBUG_getLastCalculationPath(): string {
+  return lastCalculationPath;
+}
+
 export function DEBUG_getSaturationCurve() {
   return saturationCurve;
 }

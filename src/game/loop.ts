@@ -22,6 +22,7 @@ import {
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
   GraphiteOxidationRateOperator,
+  OtsgRateOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -158,6 +159,7 @@ export class GameLoop {
 
       // Add rate operators (compute derivatives)
       this.rk45Solver.addRateOperator(new FlowMomentumRateOperator()); // Flow momentum (dṁ/dt)
+      this.rk45Solver.addRateOperator(new OtsgRateOperator()); // moving-boundary OTSG - MUST precede FlowRate (draw-enthalpy cache)
       this.rk45Solver.addRateOperator(new FlowRateOperator());          // Mass/energy transport
       this.rk45Solver.addRateOperator(new NeutronicsRateOperator());
       this.rk45Solver.addRateOperator(new HeatGenerationRateOperator());

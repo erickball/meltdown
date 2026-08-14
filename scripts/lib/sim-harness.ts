@@ -15,6 +15,7 @@ import {
   ConvectionRateOperator,
   CladdingOxidationRateOperator,
   GraphiteOxidationRateOperator,
+  OtsgRateOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -163,6 +164,13 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
     };
   }
   const solver = new RK45Solver(config);
+  // OTSG must run FIRST: it writes each moving-boundary node's sectioned
+  // evaluation cache (draw enthalpies), which FlowRateOperator consults in
+  // the SAME stage. RK45 stages evaluate on fresh clones of the accepted
+  // state, so a cache written by a later operator is never seen by an
+  // earlier one - registered after FlowRate, the steam draw would never
+  // carry superheat at all.
+  solver.addRateOperator(new OtsgRateOperator());
   solver.addRateOperator(new FlowRateOperator());
   solver.addRateOperator(new FlowMomentumRateOperator());
   solver.addRateOperator(new ConductionRateOperator());

@@ -23,6 +23,7 @@ import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-propertie
 import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
 import { computeReactivityComponents } from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
+import { resolveMaterial } from './materials';
 import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
@@ -1056,6 +1057,55 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const tubeLengthFactor = hxComp.hxType === 'utube' ? 2.1 : 1.0;
       const tubeLength = tubeLengthFactor * Math.max(1, hxHeight - (hxComp.plenumLength ?? 0.5));
       const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000);
+
+      // Moving-boundary once-through SG (docs/otsg-moving-boundary-design.md):
+      // the tube node carries a sectioned subcooled/boiling/superheat model,
+      // and OtsgRateOperator replaces BOTH bulk convection connections with
+      // the counterflow gas march + per-section wall exchange. Opt-in so
+      // every existing plant is untouched.
+      if (hxComp.tubeModel === 'moving-boundary') {
+        const tubeNode = state.flowNodes.get(`${id}-tube`);
+        if (!tubeNode) {
+          throw new Error(`[Factory] ${id}: tubeModel 'moving-boundary' but no tube node was built`);
+        }
+        // Initial partition: seed modest subcooled and superheat sections and
+        // let the interface dynamics find their real sizes - the partition
+        // self-corrects within tens of seconds because the fluxes depend on
+        // heat and flow, not on this guess.
+        // The metal is split into three FIXED thermal nodes, one per water
+        // section. One shared metal node cannot work: the boiling section's
+        // enormous film coefficient pins it within a few K of T_sat, which
+        // clamps the superheat section's wall to T_sat too - superheat can
+        // then never develop no matter how the water partitions. The masses
+        // are fixed thirds (metal does not move); only each section's AREA
+        // tracks the moving boundaries.
+        const oneMetal = state.thermalNodes.get(`${id}-tubes`);
+        if (!oneMetal) {
+          throw new Error(`[Factory] ${id}: tube metal node missing for moving-boundary split`);
+        }
+        state.thermalNodes.delete(`${id}-tubes`);
+        const metalIds: [string, string, string] = [`${id}-tubes-s1`, `${id}-tubes-s2`, `${id}-tubes-s3`];
+        const metalLabels = ['Economizer', 'Evaporator', 'Superheater'];
+        metalIds.forEach((mid, i) => {
+          state.thermalNodes.set(mid, {
+            ...oneMetal,
+            id: mid,
+            label: `${component.label || id} ${metalLabels[i]} Tubes`,
+            mass: oneMetal.mass / 3,
+            surfaceArea: oneMetal.surfaceArea / 3,
+          });
+        });
+        tubeNode.otsg = {
+          m1: 0.2 * tubeNode.fluid.mass,
+          m3: 0.01 * tubeNode.fluid.mass,
+          heatArea: tubeArea,
+          shellNodeId: `${id}-shell`,
+          metalNodeIds: metalIds,
+        };
+        console.log(`[Factory] ${id}: moving-boundary OTSG tube side ` +
+          `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory)`);
+      } else {
+
       state.convectionConnections.push({
         id: `convection-${id}-tube`,
         thermalNodeId: `${id}-tubes`,
@@ -1072,6 +1122,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
         tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
       });
+      }
     }
 
     // Create thermal node, annulus flow node, and convection connections for cross-vessels
@@ -1737,18 +1788,31 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
       // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
       // (initialNcg = tube side, partial pressures in bar)
-      const tubePhase = (hx.tubeFluid?.phase ?? hx.primaryFluid?.phase) === 'vapor' ? 'vapor' : 'liquid';
+      // Honor the declared phase INCLUDING two-phase: a once-through boiler
+      // initialized liquid-full instead of at its specified quality starts
+      // ~8 t heavy and has to boil the excess off through a violent
+      // pressure transient before it can reach any operating point.
+      const declaredPhase = hx.tubeFluid?.phase ?? hx.primaryFluid?.phase;
+      const tubePhase = declaredPhase === 'vapor' ? 'vapor'
+        : declaredPhase === 'two-phase' ? 'two-phase' : 'liquid';
+      const tubeQuality = tubePhase === 'vapor' ? 1
+        : tubePhase === 'two-phase' ? (hx.tubeFluid?.quality ?? hx.primaryFluid?.quality ?? 0.1) : 0;
 
       // Return tube-side node, shell-side is created separately
       return {
         id: `${component.id}-tube`,
         label: `${component.label || 'HX'} Tube`,
         fluid: createFluidState(
-          tubeTemp, tubePressure, tubePhase, tubePhase === 'vapor' ? 1 : 0, tubeVolume, hx.initialNcg
+          tubeTemp, tubePressure, tubePhase, tubeQuality, tubeVolume, hx.initialNcg
         ),
         volume: tubeVolume,
-        hydraulicDiameter: 0.02,
-        flowArea: 2,
+        // Tube-side geometry from the actual bundle, not constants. flowArea
+        // sets the velocity the convection correlation sees (Re, and h via
+        // Nu ~ Re^0.8), so a fixed 2 m² made every bundle - 200 tubes or 5000 -
+        // behave identically. Bore is OD minus two wall thicknesses; the wall
+        // comes from the tube-side rating the same way the burst model sizes it.
+        hydraulicDiameter: hxTubeBore(hx, tubeOD),
+        flowArea: hx.tubeCount * Math.PI * Math.pow(hxTubeBore(hx, tubeOD) / 2, 2),
         height: hx.height,
         elevation,
       };
@@ -1999,9 +2063,18 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const pressure = Math.max(cv.fluid?.pressure ?? 155e5, MIN_STEAM_PRESSURE_PA);
       const temp = cv.fluid?.temperature || 593; // ~320°C typical hot leg
 
+      // Gas-cooled plants run a coaxial hot duct - hot gas down the middle,
+      // cold return in the annulus, pressure boundary at the COLD temperature.
+      // Honour a vapor-phase spec and an NCG fill the same way the HX tube
+      // side does (`initialNcg`, partial pressures in bar).
+      const innerPhase = cv.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+      const innerNcg: NcgPartialPressures | undefined = cv.initialNcg;
       let fluid: FluidState;
-      console.log(`[Factory] CrossVessel ${component.id}: creating inner pipe LIQUID state at ${pressure/1e5} bar, ${temp}K`);
-      fluid = createFluidState(temp, pressure, 'liquid', 0, innerVolume);
+      console.log(`[Factory] CrossVessel ${component.id}: creating inner pipe ` +
+        `${innerPhase.toUpperCase()} state at ${pressure / 1e5} bar, ${temp}K` +
+        (innerNcg ? ` + NCG` : ''));
+      fluid = createFluidState(temp, pressure, innerPhase, innerPhase === 'vapor' ? 1 : 0,
+        innerVolume, innerNcg);
 
       // Return inner pipe node; annulus is created separately
       return {
@@ -2695,17 +2768,67 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
   const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
   const quality = hx.shellFluid?.quality || hx.secondaryFluid?.quality || 0.5;
+  // Gas-cooled primaries can sit on EITHER side of the bundle. `shellInitialNcg`
+  // (partial pressures in bar) fills the shell the same way `initialNcg` fills
+  // the tubes, so a helical once-through SG can run helium outside the tubes
+  // with water/steam inside them.
+  const shellNcg: NcgPartialPressures | undefined = hx.shellInitialNcg;
+
+  // Shell-side geometry from the bundle, not constants. The free-flow area is
+  // the shell cross-section minus what the tubes block, and the hydraulic
+  // diameter is the standard 4*A_free/P_wetted over the tube bundle plus the
+  // shell wall.
+  //
+  // This matters more than it looks: flowArea sets the velocity the convection
+  // correlation sees, and h ~ Re^0.8 ~ v^0.8. A hard-coded 5 m² gave a 1 m
+  // exchanger and a 6 m one identical shell-side velocity, so shell-side h did
+  // not respond to the bundle at all - which is invisible for a water-side
+  // boiler (its h is enormous and the tube side dominates) but decisive for a
+  // gas-cooled shell, where helium's h is the limiting resistance.
+  const shellDiameter = hx.width || 3;
+  const tubeOD = hx.tubeOD || 0.02;
+  const tubeCount = hx.tubeCount || 1000;
+  const shellArea = Math.PI * Math.pow(shellDiameter / 2, 2);
+  const tubeBlockage = tubeCount * Math.PI * Math.pow(tubeOD / 2, 2);
+  // Guard the pathological case of a bundle specified denser than its shell:
+  // fail loudly rather than hand the solver a negative or zero flow area.
+  if (tubeBlockage >= 0.9 * shellArea) {
+    throw new Error(
+      `[Factory] Heat exchanger '${component.id}': ${tubeCount} tubes of ${(tubeOD * 1000).toFixed(1)} mm ` +
+      `block ${(100 * tubeBlockage / shellArea).toFixed(0)}% of a ${shellDiameter.toFixed(2)} m shell. ` +
+      `There is no room for shell-side flow - reduce tubeCount/tubeOD or widen the shell.`
+    );
+  }
+  const shellFlowArea = shellArea - tubeBlockage;
+  const wettedPerimeter = tubeCount * Math.PI * tubeOD + Math.PI * shellDiameter;
+  const shellHydraulicDiameter = (4 * shellFlowArea) / wettedPerimeter;
 
   return {
     id: `${component.id}-shell`,
     label: `${component.label || 'HX'} Shell`,
-    fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume),
+    fluid: createFluidState(shellTemp, shellPressure, phase, quality, shellVolume, shellNcg),
     volume: shellVolume,
-    hydraulicDiameter: 0.1,
-    flowArea: 5,
+    hydraulicDiameter: shellHydraulicDiameter,
+    flowArea: shellFlowArea,
     height: hx.height,
     elevation,
   };
+}
+
+/** Tube bore (m): OD minus two wall thicknesses, the wall sized from the
+ *  tube-side pressure rating exactly as the burst model sizes it. */
+function hxTubeBore(hx: any, tubeOD: number): number {
+  const rating = hx.tubePressureRating || hx.pressureRating || 100;
+  const wall = calculateThicknessFromPressure(rating, tubeOD);
+  const bore = tubeOD - 2 * wall;
+  if (!(bore > 0)) {
+    throw new Error(
+      `[Factory] Heat exchanger '${hx.id}': a ${(tubeOD * 1000).toFixed(1)} mm tube rated ` +
+      `${rating} bar needs ${(wall * 1000).toFixed(1)} mm of wall, leaving no bore. ` +
+      `Use a larger tubeOD or a lower tubePressureRating.`
+    );
+  }
+  return bore;
 }
 
 /**
@@ -2731,10 +2854,16 @@ function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
   const hydraulicDiameter = 2 * (outerInnerRadius - innerOuterRadius);
   const flowArea = Math.PI * (outerInnerRadius * outerInnerRadius - innerOuterRadius * innerOuterRadius);
 
+  // See the inner-pipe case: a coaxial gas duct puts cold return gas in the
+  // annulus, so this side needs the same vapor/NCG support.
+  const annulusPhase = cv.annulusFluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+  const annulusNcg: NcgPartialPressures | undefined = cv.annulusInitialNcg;
+
   return {
     id: `${component.id}-annulus`,
     label: `${component.label || 'Cross-Vessel'} Annulus`,
-    fluid: createFluidState(annulusTemp, annulusPressure, 'liquid', 0, annulusVolume),
+    fluid: createFluidState(annulusTemp, annulusPressure, annulusPhase,
+      annulusPhase === 'vapor' ? 1 : 0, annulusVolume, annulusNcg),
     volume: annulusVolume,
     hydraulicDiameter,
     flowArea,
@@ -3551,6 +3680,8 @@ function initializeBurstStates(
     const designPressure = pressureRating * 1e5;  // bar to Pa
     const randomMargin = simulationRandom() * 0.4;     // 0-40%
     const burstPressure = designPressure * (1 + randomMargin);
+    // Structural material sets the creep-rupture correlation (materials.ts)
+    const material = resolveMaterial((component as any).material);
 
     // Special handling for heat exchangers (tube + shell sides)
     if (component.type === 'heatExchanger') {
@@ -3573,6 +3704,7 @@ function initializeBurstStates(
           burstPressure,
           collapsePressure: shellCollapsePressure,
           randomMargin,
+          material,
           isBurst: false,
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,
@@ -3604,6 +3736,7 @@ function initializeBurstStates(
           burstPressure: tubeBurstPressure,
           collapsePressure: tubeCollapsePressure,
           randomMargin: tubeRandomMargin,
+          material,
           isBurst: false,
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,
@@ -3633,6 +3766,7 @@ function initializeBurstStates(
         burstPressure,
         collapsePressure,
         randomMargin,
+        material,
         isBurst: false,
         currentBreakFraction: 0,
         breakSizeSeed: simulationRandom() * 10000,

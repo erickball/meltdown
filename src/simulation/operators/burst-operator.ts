@@ -23,6 +23,7 @@ import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
 import { meltFraction } from './rate-operators';
 import { basematErodedDepth } from './mcci';
+import { MATERIALS, DEFAULT_MATERIAL, type StructuralMaterial } from '../materials';
 
 /**
  * Deterministic pseudo-random number generator.
@@ -72,21 +73,28 @@ function calculateBreakFraction(
 // ============================================================================
 // Membrane stress relative to ultimate is the pressure ratio s = P/P_burst
 // (P_burst is where the wall reaches ultimate strength by construction).
-// Larson-Miller for low-alloy steel: LMP = T·(C + log10(t_r[h])) with C=20,
-// and the required LMP at a given stress ratio fit to SA-533B-class data:
-//   LMP_req(s) = 14660 - 6074·log10(s)
-// Anchors: s=0.22 at 811 K ruptures in ~1000 h; s=0.027 at 1273 K in ~6 min.
+// Larson-Miller: LMP = T·(C + log10(t_r[h])), with the required LMP at a given
+// stress ratio LMP_req(s) = A - B·log10(s). (C, A, B) are per-MATERIAL and live
+// in materials.ts - a low-alloy-steel duct and an Alloy 800H duct at the same
+// temperature and stress differ by a factor of thousands in rupture life, which
+// is precisely why gas reactors use 800H for hot ducts and SG tubing.
 // Cold components get astronomically long rupture times - no thresholds.
-const LM_C = 20;
-const LM_A = 14660;
-const LM_B = 6074;
 
-/** Creep rupture time (seconds) at stress ratio s = P/P_burst and wall T (K). */
-export function creepRuptureTime(stressRatio: number, wallTempK: number): number {
+/**
+ * Creep rupture time (seconds) at stress ratio s = P/P_burst and wall T (K),
+ * for the given structural material (default: low-alloy steel, the original
+ * behaviour for every component that does not declare one).
+ */
+export function creepRuptureTime(
+  stressRatio: number,
+  wallTempK: number,
+  material: StructuralMaterial = DEFAULT_MATERIAL
+): number {
   if (stressRatio <= 0) return Infinity;
   if (stressRatio >= 1) return 0;
-  const lmpRequired = LM_A - LM_B * Math.log10(stressRatio);
-  const log10Hours = lmpRequired / wallTempK - LM_C;
+  const m = MATERIALS[material];
+  const lmpRequired = m.lmA - m.lmB * Math.log10(stressRatio);
+  const log10Hours = lmpRequired / wallTempK - m.lmC;
   return Math.pow(10, log10Hours) * 3600;
 }
 
@@ -138,7 +146,8 @@ export class BurstCheckOperator implements ConstraintOperator {
           // Creep damage: a hot pressurized wall fails below its burst
           // pressure given time (SG tube rupture, vessel lower head).
           const wallT = this.updateWallTemperature(node, burstState, newState, dt);
-          const tRupture = creepRuptureTime(gaugePressure / burstState.burstPressure, wallT);
+          const tRupture = creepRuptureTime(
+            gaugePressure / burstState.burstPressure, wallT, burstState.material);
           if (isFinite(tRupture) && tRupture > 0) {
             burstState.creepDamage = (burstState.creepDamage ?? 0) + dt / tRupture;
             if (burstState.creepDamage >= 1) {

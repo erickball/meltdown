@@ -8,6 +8,7 @@
 
 import type { GasComposition } from './gas-properties';
 import type { LatticeParams } from './lattice';
+import type { StructuralMaterial } from './materials';
 
 // ============================================================================
 // Fluid Properties
@@ -207,6 +208,42 @@ export interface FlowNode {
     topElevation: number;           // m - elevation of top of obstruction
     crossSectionalArea: number;     // m² - area occupied by the obstruction
   }>;
+
+  /**
+   * Moving-boundary once-through SG tube side (docs/otsg-moving-boundary-
+   * design.md). Present only on heatExchanger tube nodes built with
+   * tubeModel: 'moving-boundary'.
+   *
+   * Only the PARTITION is new integrated state: m1 (subcooled mass) and m3
+   * (superheated mass). The two-phase mass and the superheat energy are
+   * DERIVED from the node's ordinary mass/energy totals (m2 = mass-m1-m3,
+   * U3 = U_total - m1*u1bar - m2*u2bar), so section inventories can never
+   * drift from the conserved totals - the same cannot-diverge bookkeeping
+   * pattern as corium composition. Pressure stays owned by the ordinary
+   * (u,v) machinery; the sectioned evaluation runs AT that pressure (v1
+   * simplification, noted in the design doc).
+   */
+  otsg?: {
+    m1: number;              // kg - subcooled section (integrated)
+    m3: number;              // kg - superheated section (integrated)
+    heatArea: number;        // m2 - total tube heat-transfer area
+    shellNodeId: string;     // gas-side flow node
+    /** One tube-metal thermal node PER SECTION (fixed masses, moving areas).
+     *  A single shared metal node cannot support superheat: the boiling
+     *  section's film coefficient pins it to T_sat and clamps every wall. */
+    metalNodeIds: [string, string, string];
+    /** Transient cache of the last sectioned evaluation, for the draw-
+     *  enthalpy hook and displays. Derived data - safe to serialize, safe
+     *  to lose. */
+    lastEval?: {
+      P: number;
+      hSteamOut: number;     // J/kg - vapor-draw enthalpy (superheat carried)
+      hLiquidOut: number;    // J/kg - liquid-draw enthalpy (section 1 mean)
+      TSat: number;          // K
+      T3: number;            // K - superheat section temperature
+      lengthFracs: [number, number, number];
+    };
+  };
 
   // Boundary condition flag
   // If true, this node's fluid state is fixed and should not be updated by physics operators
@@ -870,6 +907,11 @@ export interface BurstState {
   // For HX tube-side: track shell node for differential pressure
   isTubeSide?: boolean;
   shellNodeId?: string;
+
+  // Structural material of the pressure boundary. Sets the Larson-Miller
+  // creep constants (see materials.ts): the same duct at 750 C lasts minutes
+  // in low-alloy steel and days in Alloy 800H. Undefined = low-alloy steel.
+  material?: StructuralMaterial;
 
   // Cumulative creep damage (time-fraction rule): dD/dt = 1/t_rupture(σ,T)
   // with t_rupture from a Larson-Miller correlation on the stress ratio

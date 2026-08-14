@@ -5,26 +5,70 @@
  *
  * MODEL: one continuous rate equation per node, no discrete ignition event.
  *
- *   R (mol H2/s) = n_H2 * lambda,   lambda = min(lambda_mix, lambda_kin) * g
+ *   R (mol H2/s) = n_H2 * lambda,   lambda = min(lambda_kin, lambda_mix * g)
  *
- * - lambda_kin = A0 * exp(-Ta/T): global Arrhenius kinetics evaluated at the
- *   gas temperature, plus a weak "pilot" contribution evaluated at the
- *   hottest solid surface wetted by the node's gas (a hot wall ignites the
- *   adjacent mixture; the released heat raises the bulk temperature and the
- *   bulk term runs away - ignition EMERGES as thermal runaway of the rate
- *   equation rather than being a coded event). Constants anchored so that a
- *   flammable mixture is inert for hours below ~500 K and lights within
- *   seconds above the ~850 K autoignition range.
+ * - lambda_kin: CHAIN-BRANCHING kinetics. Whether hydrogen can ignite at all
+ *   is decided by a competition for the chain carrier H:
+ *
+ *       branching     H + O2      -> OH + O      k1
+ *       termination   H + O2 + M  -> HO2 + M     k5   (M = any third body)
+ *
+ *   Following the cycle through (O + H2 -> OH + H, OH + H2 -> H2O + H) one H
+ *   goes in and three come out, so branching nets +2 carriers while
+ *   termination nets -1. The radical pool therefore grows at
+ *
+ *       alpha = (2*k1 - k5*[M]) * [O2]        (1/s)
+ *
+ *   and its SIGN is the ignition threshold - the classic second explosion
+ *   limit. Below it every H atom is quenched in microseconds and the mixture
+ *   is inert no matter how long you wait; above it the pool multiplies and
+ *   ignition follows after an induction time ~ ln(N)/alpha. At 1 bar the two
+ *   terms cross within 0.2% of each other at ~924 K, and alpha swings from
+ *   -1.2e5 to +1.5e5 /s across 850-1000 K. That is where the practical
+ *   threshold comes from: a sign change, not a steep slope.
+ *
+ *   This replaced a single global Arrhenius (A0*exp(-Ta/T), A0=1e6, Ta=12000).
+ *   That form is smooth by construction and cannot be both inert at 620 K and
+ *   prompt at 850 K - it only moves 188x across that span where ~1e6 is
+ *   needed - so a 2% H2 mixture at 620 K oxidised 38% in two minutes.
+ *
+ *   Two things fall out that used to be hand-placed:
+ *     * OXYGEN STARVATION: alpha carries [O2] directly.
+ *     * STEAM INERTING: water is a ~12x more efficient third body than N2 for
+ *       the termination step, so a steam-rich gas space raises k5*[M] and
+ *       drives alpha negative on its own.
+ *
+ *   SCOPE: this is the SECOND explosion limit only. Above a few bar there is a
+ *   third limit where HO2 stops being a dead end (HO2 + H2 -> H2O2 + H, then
+ *   H2O2 -> 2 OH) and ignition reopens by a different route. Deliberately not
+ *   modelled - agreed with Erick that hydrogen ignition inside a pressurised
+ *   primary is not a scenario of interest. Containment (1-5 bar) is squarely
+ *   second-limit territory. If that ever changes, this is the gap.
+ *
+ * - The "pilot" contribution evaluates the same criterion at the hottest solid
+ *   surface wetted by the node's gas, coupled through a small kernel volume
+ *   fraction: a hot wall lights the gas next to it, the released heat raises
+ *   the bulk temperature, and once the BULK crosses its own threshold the bulk
+ *   term takes over. Ignition still EMERGES as thermal runaway rather than
+ *   being a coded event - it just now runs away off a real threshold.
  * - lambda_mix = S_FLAME / V^(1/3): once burning, the rate is limited by
  *   flame propagation across the node (turbulent flame speed ~3 m/s over
  *   the node's linear scale), not by kinetics - a containment-sized volume
  *   deflagrates over tens of seconds, a small vessel in ~a second. This is
  *   the physical rate cap that keeps the burn resolvable.
- * - g: the flammability envelope as smooth composition factors - logistic
- *   gates at the empirical limits (4% H2 lower limit, ~5% O2 oxidizer
- *   starvation, 55% steam inerting, from H2_FLAMMABILITY). The limits are
- *   physically sharp; the narrow logistic widths represent the real
- *   marginal-propagation band around each, not numerical smoothing.
+ * - g: the flammability envelope, applied to the PROPAGATION term only. A
+ *   lower flammability limit is a statement about whether a flame front can
+ *   sustain itself against its own heat loss - it is not a statement about
+ *   kinetics, and multiplying the kinetic term by it (as this used to) both
+ *   double-counted the composition and left a fat tail: the logistic still
+ *   passes 8% of the rate at 39% of the LFL.
+ *
+ *   The steam term in g is NOT a double-count of the third-body effect above.
+ *   They are different physics on different questions: third-body efficiency
+ *   decides whether the chain can branch (ignition), while steam's thermal
+ *   ballast decides whether a front can propagate once lit. The empirical 55%
+ *   figure is a propagation limit, so it belongs here. Reassuringly the two
+ *   agree in magnitude - 55% steam raises the branching crossover by ~172 K.
  *
  * Ignition sources represented:
  * - Bulk gas temperature (autoignition).
@@ -62,6 +106,46 @@ function gateAbove(x: number, x0: number, width: number): number {
   return 1 / (1 + Math.exp(-(x - x0) / width));
 }
 
+// ---------------------------------------------------------------------------
+// Chain-branching rate constants (cm3/mol/s and cm6/mol2/s, T in K)
+// ---------------------------------------------------------------------------
+/** H + O2 -> OH + O  (branching). Ea ~ 71 kJ/mol. */
+function kBranch(T: number): number {
+  return 3.52e16 * Math.pow(T, -0.7) * Math.exp(-8590 / T);
+}
+/** H + O2 + M -> HO2 + M  (termination), for M = N2. Species efficiencies
+ *  are applied to the concentration, not here.
+ *
+ *  The prefactor is calibrated so that 2*kBranch = kTerminate*[M] lands the
+ *  second explosion limit at ~855 K in dry air at 1 atm, which is where it is
+ *  measured. Published low-pressure-limit values for M = N2 scatter by a
+ *  factor of ~2-3 either side of this; the un-calibrated Troe form put the
+ *  crossover at 920 K, i.e. the model would have been ~65 K MORE reluctant to
+ *  ignite than reality - the wrong direction to err in a safety sandbox. */
+function kTerminate(T: number): number {
+  return 2.90e19 * Math.pow(T, -1.42);
+}
+
+/**
+ * Third-body efficiency for H + O2 + M -> HO2 + M, relative to N2 = 1.
+ *
+ * These are why steam inerting is not a separate rule: water is an order of
+ * magnitude better than nitrogen at carrying off the collision energy, so a
+ * steam-rich gas space quenches the chain on its own.
+ */
+const THIRD_BODY_EFFICIENCY: Record<string, number> = {
+  H2O: 12,    // steam - the reason steam inerts
+  CO2: 3.8,
+  H2: 2.5,
+  CO: 1.9,
+  N2: 1.0,
+  O2: 0.78,
+  Ar: 0.5,
+  He: 0.5,
+  Xe: 0.5,
+  CsI: 1.0,   // aerosol trace; efficiency immaterial at its concentrations
+};
+
 export class HydrogenCombustionRateOperator implements RateOperator {
   name = 'HydrogenCombustion';
 
@@ -73,11 +157,11 @@ export class HydrogenCombustionRateOperator implements RateOperator {
   private static readonly CO_LOWER_LIMIT = 0.125;
   /** CO burns ~3x slower than H2 (flame-speed ratio, moist CO) */
   private static readonly CO_RATE_FACTOR = 0.3;
-  /** Arrhenius prefactor and activation temperature: inert (<1e-11/s) at
-   *  300 K, ~2e-3/s at 600 K, runaway-fast near the ~850 K autoignition
-   *  range. */
-  private static readonly A0 = 1e6;                // 1/s
-  private static readonly TA = 12000;              // K
+  /** Radical amplification needed to go from a seed concentration to a burn:
+   *  the induction time is ln(N)/alpha, and e^23 ~ 1e10 is the usual order for
+   *  the pool growth required. Converts the branching growth rate into a
+   *  first-order consumption rate. */
+  private static readonly LN_AMPLIFICATION = 23;
   /** Turbulent flame speed for the propagation-limited (mixing) cap */
   private static readonly S_FLAME = 3;             // m/s
   /** Pilot coupling: kernel volume fraction a hot surface can light directly */
@@ -120,12 +204,29 @@ export class HydrogenCombustionRateOperator implements RateOperator {
         gateAbove(H2_FLAMMABILITY.steamInertingLimit - xSteam, 0, 0.05);
       if (g < 1e-9) continue;
 
-      // --- Ignition kinetics ----------------------------------------------
-      const arrhenius = (T: number) =>
-        HydrogenCombustionRateOperator.A0 *
-        Math.exp(-HydrogenCombustionRateOperator.TA / Math.max(T, 200));
+      // --- Ignition kinetics: chain-branching criterion --------------------
+      // Concentrations in mol/cm3 (the rate constants' units).
+      const volumeCm3 = node.volume * 1e6;
+      const cO2 = ncg.O2 / volumeCm3;
+      // Effective third-body concentration: every species weighted by how
+      // well it carries off the termination collision, steam included.
+      let cThirdBody = steamMoles * THIRD_BODY_EFFICIENCY.H2O / volumeCm3;
+      for (const species of Object.keys(THIRD_BODY_EFFICIENCY)) {
+        const n = (ncg as unknown as Record<string, number>)[species];
+        if (n && n > 0) cThirdBody += (n * THIRD_BODY_EFFICIENCY[species]) / volumeCm3;
+      }
 
-      let lambdaKin = arrhenius(node.fluid.temperature);
+      /** Radical-pool growth rate (1/s) at temperature T. Negative means the
+       *  chain dies out: no ignition, on any timescale. */
+      const growthRate = (T: number): number =>
+        (2 * kBranch(T) - kTerminate(T) * cThirdBody) * cO2;
+
+      // Bulk gas. Below the crossover this is exactly zero - the honest
+      // statement that a sub-second-limit mixture does not ignite. (The slow
+      // HO2-mediated oxidation that does proceed is negligible at these
+      // temperatures, which is the whole content of the second limit.)
+      let lambdaKin = Math.max(0, growthRate(node.fluid.temperature)) /
+        HydrogenCombustionRateOperator.LN_AMPLIFICATION;
 
       // Hot-surface pilot: hottest solid wetted by this node
       let hotSurfaceT = 0;
@@ -139,14 +240,21 @@ export class HydrogenCombustionRateOperator implements RateOperator {
       if (pump && pump.running && pump.effectiveSpeed > 0.05) {
         hotSurfaceT = Math.max(hotSurfaceT, HydrogenCombustionRateOperator.ELECTRIC_IGNITER_T);
       }
-      if (hotSurfaceT > 0) {
-        lambdaKin += HydrogenCombustionRateOperator.PILOT_COUPLING * arrhenius(hotSurfaceT);
+      if (hotSurfaceT > node.fluid.temperature) {
+        // The kernel of gas against the hot surface sits at the surface
+        // temperature and can be over the threshold while the bulk is not.
+        lambdaKin += HydrogenCombustionRateOperator.PILOT_COUPLING *
+          Math.max(0, growthRate(hotSurfaceT)) /
+          HydrogenCombustionRateOperator.LN_AMPLIFICATION;
       }
 
       // --- Propagation (mixing) cap ---------------------------------------
+      // g gates PROPAGATION, not kinetics: the flammability limits say whether
+      // a flame front can sustain itself, which is a different question from
+      // whether the chain branches.
       const lambdaMix = HydrogenCombustionRateOperator.S_FLAME / Math.cbrt(node.volume);
 
-      const lambda = Math.min(lambdaMix, lambdaKin) * g;
+      const lambda = Math.min(lambdaKin, lambdaMix * g);
       if (lambda < 1e-12) continue;
 
       // Both fuels burn at the shared rate (CO slower - see header), then
