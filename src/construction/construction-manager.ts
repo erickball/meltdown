@@ -659,6 +659,9 @@ export class ConstructionManager {
           width: isVertical ? shellDiam : shellLen,
           height: isVertical ? shellLen : shellDiam,
           hxType: hxType,
+          // Moving-boundary once-through boiler model (opt-in; see
+          // docs/otsg-moving-boundary-design.md)
+          ...(props.tubeModel === 'moving-boundary' ? { tubeModel: 'moving-boundary' } : {}),
           primaryFluid: {
             ...defaultFluid,
             pressure: tubePressureRating * 100000

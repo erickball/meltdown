@@ -519,6 +519,14 @@ export const componentDefinitions: Record<string, {
         { value: 'straight', label: 'Straight Tube' },
         { value: 'helical', label: 'Helical Coil' }
       ]},
+      { name: 'tubeModel', type: 'select', label: 'Tube-Side Model', default: 'lumped', options: [
+        { value: 'lumped', label: 'Lumped (single node)' },
+        { value: 'moving-boundary', label: 'Once-through boiler (moving boundary)' },
+      ], help: 'Once-through boiler splits the tube side into subcooled / boiling / ' +
+        'superheated sections whose boundaries move with the phase boundaries, so one ' +
+        'component can turn feedwater into superheated steam against a counterflow hot ' +
+        'stream. Use for OTSGs (helical HTGR steam generators); leave Lumped for ' +
+        'condensers, feedwater heaters, and flooded U-tube SGs.' },
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'vertical', options: [
         { value: 'vertical', label: 'Vertical' },
         { value: 'horizontal', label: 'Horizontal' }
