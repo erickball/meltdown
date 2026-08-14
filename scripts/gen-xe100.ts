@@ -146,8 +146,8 @@ add('hx-1', {
   ]),
   // Tube side: two-phase at design pressure; the section partition seeds
   // small subcooled/superheat fractions and self-organizes.
-  tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.10, flowRate: 0 },
-  primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.10, flowRate: 0 },
+  tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
+  primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   // Shell side: helium spanning core outlet to core inlet
   shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   secondaryFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
@@ -205,7 +205,10 @@ add('val-msv-1', {
   valveType: 'relief',
   position: { x: 66, y: 68 }, rotation: 0, elevation: 12,
   diameter: 0.12, opening: 0, volume: 0.1,
-  pressureRating: 250, setpoint: 195e5, blowdown: 0.03,
+  // 175 bar: must catch the boil-off pressure spike well before ~190, where
+  // superheated-steam property evaluation approaches the (u,v) grid's dome-
+  // top fringe and the tables (rightly) refuse to extrapolate.
+  pressureRating: 250, setpoint: 175e5, blowdown: 0.03,
   ports: ports([['val-msv-1-in', -0.1, 0, 'in'], ['val-msv-1-out', 0.1, 0, 'out']]),
   fluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   nqa1: false,
@@ -286,17 +289,12 @@ add('fw-pump-1', {
   // kept the superheater flooded (saturated 350 C steam forever). 0.88
   // delivers ~75 kg/s at 165 bar - still design flow - with the froth below
   // the takeoff so the superheater can dry out and superheat.
-  // 0.90 - the SATURATED branch, on purpose. At a given pressure the passive
-  // pump fixes delivery, and the boiler has two self-consistent states:
-  // saturated steam at duty/2.1 MJ/kg (~75 kg/s here) or superheated at
-  // duty/2.9 (~50 kg/s). Speeds that select the superheated branch (0.82-
-  // 0.85 with the current SG) sit right at the dry/wet boundary and
-  // relaxation-oscillate: slow refill -> dry-out -> blowdown -> refill, a
-  // ~300 s limit cycle that never damps. 0.90 lands the plant dead-stable at
-  // 165.0 bar / ~75 kg/s of saturated steam. Superheated-at-design needs the
-  // duty the two-lump SG cannot deliver (economizer + downcomer-preheat
-  // fixes) so the dry margin is wide enough to hold - documented follow-up.
-  diameter: 0.4, running: true, speed: 0.90,
+  // 0.84: with the moving-boundary OTSG the old saturated-vs-superheated
+  // branch dichotomy is gone - lower delivery just grows the superheat
+  // section continuously instead of flipping a whole lump dry. Delivery at
+  // 165 bar is ~55-60 kg/s, which is the design-duty steam flow at full
+  // superheat enthalpy rise.
+  diameter: 0.4, running: true, speed: 0.80,
   ratedFlow: 80, ratedHead: 2100, orientation: 'right-left',
   ports: ports([['fw-pump-1-inlet', 0.3, 0, 'in'], ['fw-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: T_FEED, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },

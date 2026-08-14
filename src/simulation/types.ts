@@ -228,7 +228,10 @@ export interface FlowNode {
     m3: number;              // kg - superheated section (integrated)
     heatArea: number;        // m2 - total tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
-    metalNodeId: string;     // tube-metal thermal node
+    /** One tube-metal thermal node PER SECTION (fixed masses, moving areas).
+     *  A single shared metal node cannot support superheat: the boiling
+     *  section's film coefficient pins it to T_sat and clamps every wall. */
+    metalNodeIds: [string, string, string];
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */

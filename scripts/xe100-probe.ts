@@ -43,7 +43,7 @@ function m(state: SimulationState, id: string): number {
 function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
-    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  L1/L2/L3+T3(C)          Pwr(MW)    gv  fwspd  ' +
+    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  m1/m3+T3(C)             Pwr(MW)    gv  fwspd  ' +
     'Tev_sh(C)  Tinner  Tannul  Tcoldpipe'
   );
 }
@@ -60,7 +60,7 @@ function line(state: SimulationState) {
     `${T(state, 'hx-1-tube').toFixed(1).padStart(9)} ` +
     `${P(state, 'hx-1-tube').toFixed(1).padStart(11)} ` +
     `${m(state, 'hx-1-tube').toFixed(0).padStart(11)} ` +
-    `${(() => { const o = (state.flowNodes.get('hx-1-tube') as any)?.otsg?.lastEval; return o ? o.lengthFracs.map((f: number) => f.toFixed(2)).join('/') + ' T3=' + (o.T3 - 273.15).toFixed(0) : '-'; })().padStart(22)} ` +
+    `${(() => { const o = (state.flowNodes.get('hx-1-tube') as any)?.otsg; if (!o) return '-'; const t = o.lastEval ? ' T3=' + (o.lastEval.T3 - 273.15).toFixed(0) : ''; return o.m1.toFixed(0) + '/' + o.m3.toFixed(1) + t; })().padStart(22)} ` +
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
     `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
     `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +

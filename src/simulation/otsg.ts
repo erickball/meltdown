@@ -101,13 +101,19 @@ export function superheatedV(u: number, P: number): number {
   // vapor volume is the exact lower bracket - guaranteed inside the property
   // grid's vapor region, unlike any fixed constant (a constant either strays
   // into the compressed-liquid fringe at high P or wastes bracket at low P).
-  const vg = saturationAtP(P).v_g;
+  const satP = saturationAtP(P);
+  const vg = satP.v_g;
+  // Degenerate near-saturation case: a nascent superheat section sits within
+  // property-interpolation noise of the saturated-vapor line, where the
+  // bracket has zero width. Its volume IS v_g there (to second order), so
+  // return it directly - this is the smooth limit, not a fallback.
+  if (u <= satP.u_g + 5e3) return vg;
   // Upper bracket scales with v_g so near-vacuum pressures (v_g ~ 200 m3/kg)
   // stay bracketed when the closure solver probes them.
   let lnLo = Math.log(vg * (1 + 1e-9)), lnHi = Math.log(Math.max(50, vg * 200));
   const pOf = (lnV: number) => calculateState(1, u, Math.exp(lnV)).pressure;
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
-  if (!(pLo >= P && pHi <= P)) {
+  if (!(pLo >= P * (1 - 1e-6) && pHi <= P)) {
     throw new Error(`[OTSG] superheatedV: P=${(P / 1e5).toFixed(2)} bar not bracketed at ` +
       `u=${(u / 1e3).toFixed(0)} kJ/kg (P(${Math.exp(lnLo).toExponential(1)})=${(pLo / 1e5).toFixed(2)}, ` +
       `P(${Math.exp(lnHi).toExponential(1)})=${(pHi / 1e5).toFixed(2)} bar). ` +
@@ -287,7 +293,16 @@ export function evaluateOtsgAtP(
   const m2c = Math.max(0, m2);
 
   const sat = saturationAtP(P);
-  const u1Bar = 0.5 * (Math.min(uFeedIn, sat.u_f) + sat.u_f);
+  // The subcooled profile closure divides by (h_f - hBar1) in the interface
+  // flux, so its parameter must stay inside the closure's valid domain: cap
+  // the effective feed energy ~25 kJ/kg (~6 K) below saturation. This is a
+  // width WITHIN an assumed profile shape - the same standing the melt
+  // logistic's width has - not a clamp on any conserved quantity: when the
+  // real feed runs hotter (a heat-soaked feed line during a pressure
+  // transient), the section simply drains via the now-large W12, which is
+  // the physically right outcome for saturated feed.
+  const uFeedEff = Math.min(uFeedIn, sat.u_f - 25e3);
+  const u1Bar = 0.5 * (uFeedEff + sat.u_f);
   const u2Bar = 0.5 * (sat.u_f + sat.u_g);
   const v1 = m1 > 0 ? subcooledLiquidV(u1Bar) : sat.v_f;
   const v2 = 0.5 * (sat.v_f + sat.v_g);

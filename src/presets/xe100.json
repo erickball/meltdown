@@ -242,14 +242,14 @@
           "temperature": 624,
           "pressure": 16500000,
           "phase": "two-phase",
-          "quality": 0.1,
+          "quality": 0.22,
           "flowRate": 0
         },
         "primaryFluid": {
           "temperature": 624,
           "pressure": 16500000,
           "phase": "two-phase",
-          "quality": 0.1,
+          "quality": 0.22,
           "flowRate": 0
         },
         "shellFluid": {
@@ -387,7 +387,7 @@
         "opening": 0,
         "volume": 0.1,
         "pressureRating": 250,
-        "setpoint": 19500000,
+        "setpoint": 17500000,
         "blowdown": 0.03,
         "ports": [
           {
@@ -626,7 +626,7 @@
         "elevation": 0,
         "diameter": 0.4,
         "running": true,
-        "speed": 0.9,
+        "speed": 0.8,
         "ratedFlow": 80,
         "ratedHead": 2100,
         "orientation": "right-left",

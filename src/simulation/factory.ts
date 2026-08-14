@@ -1072,12 +1072,35 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         // let the interface dynamics find their real sizes - the partition
         // self-corrects within tens of seconds because the fluxes depend on
         // heat and flow, not on this guess.
+        // The metal is split into three FIXED thermal nodes, one per water
+        // section. One shared metal node cannot work: the boiling section's
+        // enormous film coefficient pins it within a few K of T_sat, which
+        // clamps the superheat section's wall to T_sat too - superheat can
+        // then never develop no matter how the water partitions. The masses
+        // are fixed thirds (metal does not move); only each section's AREA
+        // tracks the moving boundaries.
+        const oneMetal = state.thermalNodes.get(`${id}-tubes`);
+        if (!oneMetal) {
+          throw new Error(`[Factory] ${id}: tube metal node missing for moving-boundary split`);
+        }
+        state.thermalNodes.delete(`${id}-tubes`);
+        const metalIds: [string, string, string] = [`${id}-tubes-s1`, `${id}-tubes-s2`, `${id}-tubes-s3`];
+        const metalLabels = ['Economizer', 'Evaporator', 'Superheater'];
+        metalIds.forEach((mid, i) => {
+          state.thermalNodes.set(mid, {
+            ...oneMetal,
+            id: mid,
+            label: `${component.label || id} ${metalLabels[i]} Tubes`,
+            mass: oneMetal.mass / 3,
+            surfaceArea: oneMetal.surfaceArea / 3,
+          });
+        });
         tubeNode.otsg = {
           m1: 0.2 * tubeNode.fluid.mass,
           m3: 0.01 * tubeNode.fluid.mass,
           heatArea: tubeArea,
           shellNodeId: `${id}-shell`,
-          metalNodeId: `${id}-tubes`,
+          metalNodeIds: metalIds,
         };
         console.log(`[Factory] ${id}: moving-boundary OTSG tube side ` +
           `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory)`);

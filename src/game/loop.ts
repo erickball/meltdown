@@ -159,6 +159,7 @@ export class GameLoop {
 
       // Add rate operators (compute derivatives)
       this.rk45Solver.addRateOperator(new FlowMomentumRateOperator()); // Flow momentum (dṁ/dt)
+      this.rk45Solver.addRateOperator(new OtsgRateOperator()); // moving-boundary OTSG - MUST precede FlowRate (draw-enthalpy cache)
       this.rk45Solver.addRateOperator(new FlowRateOperator());          // Mass/energy transport
       this.rk45Solver.addRateOperator(new NeutronicsRateOperator());
       this.rk45Solver.addRateOperator(new HeatGenerationRateOperator());
@@ -166,7 +167,6 @@ export class GameLoop {
       this.rk45Solver.addRateOperator(new ConvectionRateOperator());
       this.rk45Solver.addRateOperator(new CladdingOxidationRateOperator()); // Zr-steam oxidation + H2 generation
       this.rk45Solver.addRateOperator(new GraphiteOxidationRateOperator()); // graphite air/steam attack -> CO, H2, heat
-      this.rk45Solver.addRateOperator(new OtsgRateOperator()); // moving-boundary once-through SG sections
       this.rk45Solver.addRateOperator(new HydrogenCombustionRateOperator()); // H2 deflagration when flammable + ignited
       this.rk45Solver.addRateOperator(new CoriumRelocationRateOperator()); // molten fuel/clad slumps to the lower head
       this.rk45Solver.addRateOperator(new McciRateOperator()); // ex-vessel corium attacks the concrete basemat

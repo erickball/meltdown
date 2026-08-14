@@ -66,13 +66,14 @@ export class OtsgRateOperator implements RateOperator {
       const cfg = node.otsg;
       if (!cfg) continue;
 
-      const metal = state.thermalNodes.get(cfg.metalNodeId);
+      const metals = cfg.metalNodeIds.map(mid => state.thermalNodes.get(mid));
       const shell = state.flowNodes.get(cfg.shellNodeId);
-      if (!metal || !shell) {
-        throw new Error(`[OTSG] node '${id}' references metal '${cfg.metalNodeId}' / ` +
-          `shell '${cfg.shellNodeId}' but ${!metal ? 'the metal node' : 'the shell node'} ` +
+      if (metals.some(m => !m) || !shell) {
+        throw new Error(`[OTSG] node '${id}' references metal nodes ` +
+          `[${cfg.metalNodeIds.join(', ')}] / shell '${cfg.shellNodeId}' but one of them ` +
           `does not exist.`);
       }
+      const [metal1, metal2, metal3] = metals as [any, any, any];
 
       // ----------------------------------------------------------------
       // Classify attached connection flows by carried phase
@@ -91,13 +92,25 @@ export class OtsgRateOperator implements RateOperator {
         if (w > 0) {
           if (phase === 'vapor') { WVaporIn += w; }
           else {
-            WFeed += w;
             // Feed enthalpy from the donor node: subcooled liquid at its
             // temperature (u_f(T) + P v_f(T) - compressibility negligible)
             const donor = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
             const Td = donor?.fluid.temperature ?? 473;
             const hIn = saturatedLiquidEnergy(Td) + node.fluid.pressure / saturatedLiquidDensity(Td);
-            hFeedNum += w * hIn;
+            // Liquid inflow feeds the SUBCOOLED section only to the extent it
+            // is actually subcooled: water within ~12 K of saturation flashes
+            // into the boiling region essentially on entry, so it routes to
+            // section 2 (whose mass is derived - no bookkeeping). The 50
+            // kJ/kg ramp is a smoothing width, not a threshold: routing
+            // varies continuously with subcooling, and a transiently
+            // near-saturated stream (leak backflow, recirculation) can no
+            // longer poison the subcooled section's mean-enthalpy closure -
+            // which is exactly how this line's absence killed a run.
+            const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
+              node.fluid.pressure / saturatedLiquidDensity(node.fluid.temperature);
+            const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
+            WFeed += w * wSub;
+            hFeedNum += w * wSub * hIn;
           }
         } else if (w < 0) {
           if (phase === 'vapor') WSteamOut += -w;
@@ -149,14 +162,16 @@ export class OtsgRateOperator implements RateOperator {
           if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
         }
       }
-      // Counterflow: gas physically meets the superheat section first
+      // Counterflow: gas physically meets the superheat section first, and
+      // each section has its OWN metal - one shared wall cannot superheat
+      // (boiling pins it to T_sat and clamps every other section's wall).
       const march = marchCounterflowGas(
         TGasIn,
         this.gasMcp(shell, state),
         [
-          { hA: hGas * ev.sections[2].area, TWall: metal.temperature },
-          { hA: hGas * ev.sections[1].area, TWall: metal.temperature },
-          { hA: hGas * ev.sections[0].area, TWall: metal.temperature },
+          { hA: hGas * ev.sections[2].area, TWall: metal3.temperature },
+          { hA: hGas * ev.sections[1].area, TWall: metal2.temperature },
+          { hA: hGas * ev.sections[0].area, TWall: metal1.temperature },
         ],
       );
       const QGasTotal = march.Q[0] + march.Q[1] + march.Q[2];
@@ -164,7 +179,6 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
-      const TM = metal.temperature;
       const cpLiquid = 5000;
       // Section 1: feed stream entering at its own temperature
       const TFeedIn = WFeed > 0 ? tempOfLiquidH(hFeed) : ev.sections[0].T;
@@ -172,11 +186,12 @@ export class OtsgRateOperator implements RateOperator {
         H_TUBE_LIQUID * ev.sections[0].area,
         H_TUBE_NATURAL * ev.sections[0].area,
         WFeed * cpLiquid,
-        TFeedIn, ev.sections[0].T, TM,
+        TFeedIn, ev.sections[0].T, metal1.temperature,
       );
       // Section 2: boiling at T_sat - huge film coefficient, pure standing form
-      const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (TM - ev.sat.T);
-      // Section 3: steam entering at saturation, heated toward the wall
+      const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (metal2.temperature - ev.sat.T);
+      // Section 3: steam entering at saturation, heated toward its own wall -
+      // which the boiling section can no longer clamp.
       const cpSteam = ev.sections[2].mass > 0 && ev.sections[2].T > ev.sat.T + 1
         ? Math.max(2000, (ev.sections[2].hBar - ev.sat.h_g) / (ev.sections[2].T - ev.sat.T))
         : 3000;
@@ -185,7 +200,7 @@ export class OtsgRateOperator implements RateOperator {
         H_TUBE_STEAM * ev.sections[2].area,
         H_TUBE_NATURAL * ev.sections[2].area,
         W23Guess * cpSteam,
-        ev.sat.T, ev.sections[2].T, TM,
+        ev.sat.T, ev.sections[2].T, metal3.temperature,
       );
       const QWaterTotal = Q1 + Q2 + Q3;
 
@@ -213,9 +228,18 @@ export class OtsgRateOperator implements RateOperator {
       shellRates.dEnergy -= QGasTotal;
       rates.flowNodes.set(cfg.shellNodeId, shellRates);
 
-      const metalRates = rates.thermalNodes.get(cfg.metalNodeId) ?? { dTemperature: 0 };
-      metalRates.dTemperature += (QGasTotal - QWaterTotal) / nodeHeatCapacity(metal);
-      rates.thermalNodes.set(cfg.metalNodeId, metalRates);
+      // Each section's metal balances its own gas-in vs water-out; axial
+      // conduction along the bundle is negligible against either.
+      const perMetal: Array<[string, any, number, number]> = [
+        [cfg.metalNodeIds[0], metal1, march.Q[2], Q1],
+        [cfg.metalNodeIds[1], metal2, march.Q[1], Q2],
+        [cfg.metalNodeIds[2], metal3, march.Q[0], Q3],
+      ];
+      for (const [mid, m, qIn, qOut] of perMetal) {
+        const mr = rates.thermalNodes.get(mid) ?? { dTemperature: 0 };
+        mr.dTemperature += (qIn - qOut) / nodeHeatCapacity(m);
+        rates.thermalNodes.set(mid, mr);
+      }
     }
 
     return rates;
