@@ -217,13 +217,13 @@ add('val-msv-1', {
 // The primary pressure boundary needs overpressure protection like any other:
 // a stalled SG with the reactor at temperature ran the helium from 60 to 91
 // bar in tuning and burst the vessel. Real HTGRs carry safety valves venting
-// to the reactor building. Set at 75 bar (design 60, vessel rating 90) with a
-// margin note: at the current off-design operating point the helium runs
-// 64-67 bar hot, and a 70-bar setpoint sat inside the ordinary transient
-// band - the valve lifted during normal operation and quietly vented helium
-// to the building. Safety valves belong above the operating excursion band
-// and at or below the boundary rating. Original text continues: with a
-// tight 3% blowdown - helium is expensive, so reseat promptly.
+// to the reactor building. Set at 75 bar (design 60, vessel rating 90) with
+// a tight 3% blowdown - helium is expensive, so reseat promptly. 75, not
+// 70: at the current off-design operating point the helium runs 64-67 bar
+// hot, and a 70-bar setpoint sat inside the ordinary transient band - the
+// valve lifted during normal operation and quietly vented helium to the
+// building. Safety valves belong above the operating excursion band and at
+// or below the boundary rating.
 add('val-prel-1', {
   type: 'valve', label: 'Primary Safety Valve',
   valveType: 'relief',
