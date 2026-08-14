@@ -371,7 +371,20 @@ export class ControlSystemOperator implements ConstraintOperator {
       case 'node-temperature': {
         const node = this.getNode(state, targetId, ctl.id, 'sensor');
         const cEff = 5000; // J/kg-K, liquid water scale
-        return 1 / (node.fluid.mass * cEff);
+        // Heater actuators are in watts: dT/dt = Q/(m*c).
+        if (heater) return 1 / (node.fluid.mass * cEff);
+        // Flow actuators are in kg/s, so the kg must be converted to watts
+        // before dividing by the node's heat capacity - without this the
+        // computed kp comes out ~6 orders of magnitude too hot and the PI
+        // degenerates into a slew-limited bang-bang driven by the error
+        // DERIVATIVE (feed slams to full while the steam is still 170 K too
+        // cold, merely because it is warming). A kg of injected stream moves
+        // the node's energy by an enthalpy-difference scale ~2 MJ/kg
+        // (feedwater into superheated steam: sensible + latent). A factor-2
+        // error here only shifts lambda, which the SIMC margins absorb -
+        // the same tolerance the node-pressure template leans on.
+        const H_SCALE = 2e6; // J/kg
+        return H_SCALE / (node.fluid.mass * cEff);
       }
       case 'connection-flow':
         // Flow responds within a step under the implicit momentum solve -

@@ -43,8 +43,8 @@ function m(state: SimulationState, id: string): number {
 function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
-    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_evap(kg)   Pwr(MW)  ' +
-    'shell_H2O(kg)  T_shell(C)  x_shell'
+    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_evap(kg)  m_sh(kg)   Pwr(MW)    gv  fwspd  ' +
+    'T_shell(C)'
   );
 }
 
@@ -60,10 +60,11 @@ function line(state: SimulationState) {
     `${T(state, 'hx-sh-1-tube').toFixed(1).padStart(9)} ` +
     `${P(state, 'hx-sh-1-tube').toFixed(1).padStart(11)} ` +
     `${m(state, 'hx-ev-1-tube').toFixed(0).padStart(11)} ` +
+    `${m(state, 'hx-sh-1-tube').toFixed(0).padStart(9)} ` +
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
-    `${shell.fluid.mass.toFixed(4).padStart(14)} ` +
-    `${(shell.fluid.temperature - 273.15).toFixed(1).padStart(11)} ` +
-    `${(shell.fluid.quality ?? 0).toFixed(4).padStart(8)}`
+    `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
+    `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +
+    `${(shell.fluid.temperature - 273.15).toFixed(1).padStart(10)}`
   );
 }
 

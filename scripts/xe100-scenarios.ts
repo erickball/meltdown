@@ -101,6 +101,21 @@ if (scenario === 'lofc') {
   pump.running = false;
   console.log(`--- Circulator tripped at t=${st().time.toFixed(0)} s (no scram) ---`);
 } else {
+  // Turbine trip first: the bottled secondary pressurizes toward the steam
+  // dump setpoint, so the tube sees full boiler pressure against 58-bar
+  // helium when it lets go. (At the plant's settled state the tube side runs
+  // NEAR primary pressure, so an at-power rupture would mostly just swap a
+  // little gas - trip-then-rupture is the sequence that drives real water
+  // ingress, and turbine trip + SGTR is a bona fide compound accident.)
+  const gov = st().components.controllers?.get
+    ? st().components.controllers.get('ctl-msp-1')
+    : undefined;
+  if (gov) { (gov as any).mode = 'manual'; (gov as any).manualOutput = 0.02; }
+  const turbNode = st().flowNodes.get('turbine-1');
+  if (turbNode) turbNode.governorValve = 0.02;
+  console.log(`--- Turbine tripped at t=${st().time.toFixed(0)} s; boiler bottling up ---`);
+  advance(150);
+  line();
   const v = st().components.valves.get('val-leak-1');
   if (!v) throw new Error('val-leak-1 not found');
   v.position = 1.0;
