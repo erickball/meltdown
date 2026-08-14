@@ -44,7 +44,7 @@ function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
     'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  m1/m3+T3(C)             Pwr(MW)    gv  fwspd  ' +
-    'Tev_sh(C)  Tinner  Tannul  Tcoldpipe'
+    'Tev_sh(C)  Tinner  Tannul  T_sgvessel'
   );
 }
 
@@ -52,7 +52,7 @@ function line(state: SimulationState) {
   const shell = state.flowNodes.get('hx-1-shell')!;
   console.log(
     `${state.time.toFixed(1).padStart(8)} ` +
-    `${flow(state, "pipe-pumpdisch", "rv-1").toFixed(1).padStart(9)} ` +
+    `${flow(state, "cv-1", "rv-1").toFixed(1).padStart(9)} ` +
     `${T(state, 'rv-1').toFixed(1).padStart(9)} ` +
     `${T(state, 'cb-1').toFixed(1).padStart(10)} ` +
     `${P(state, 'cb-1').toFixed(2).padStart(11)} ` +
@@ -67,7 +67,7 @@ function line(state: SimulationState) {
     `${(shell.fluid.temperature - 273.15).toFixed(1).padStart(9)} ` +
     `${T(state, 'cv-1-inner').toFixed(0).padStart(7)} ` +
     `${T(state, 'cv-1-annulus').toFixed(0).padStart(7)} ` +
-    `${T(state, 'pipe-coldleg').toFixed(0).padStart(9)}`
+    `${T(state, 'tank-sg-1').toFixed(0).padStart(9)}`
   );
 }
 

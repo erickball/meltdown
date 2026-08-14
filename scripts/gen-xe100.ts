@@ -115,23 +115,46 @@ add('cb-1', {
 });
 
 // ---------------------------------------------------------------------------
-// Steam generator: HELIUM IN THE SHELL, WATER IN THE TUBES
+// Steam generator vessel and bundle: the real HTGR arrangement
 // ---------------------------------------------------------------------------
+// The OTSG bundle sits INSIDE its own pressure vessel (a tank), which is what
+// makes the creep story honest without any special casing: the 750 C helium
+// enters the bundle shell through the coaxial duct's inner pipe, flows DOWN
+// the tube bundle giving up its heat, and exits the shell bottom at ~260 C
+// into the surrounding vessel space - so the SG pressure boundary (the tank
+// wall) only ever touches cold gas, exactly like the real design. The
+// circulator sits on the vessel dome, draws from the vessel space, and
+// discharges into the coaxial duct's ANNULUS back to the RPV - no exposed
+// cold piping at all, matching HTR-PM/Xe-100 (and removing the two
+// scaffolding pipes the old layout needed).
+//
+// Elevations: the SG vessel sits in a below-grade cavity (top at +6 m)
+// beside the 20 m RPV, so the cross-duct runs horizontally from low on the
+// RPV to the TOP of the SG vessel, and the whole heat sink sits below the
+// core - which is also why LOFC natural circulation is weak and conduction/
+// radiation carry the decay heat, as in the real plant.
+add('tank-sg-1', {
+  type: 'tank', label: 'SG Vessel',
+  position: { x: 56, y: 74 }, rotation: 0, elevation: -10,
+  width: 4.2, height: 16, wallThickness: 0.15, pressureRating: 90,
+  fillLevel: 0,
+  ports: ports([
+    ['tank-sg-top', 0, -8],     // circulator suction (dome)
+    ['tank-sg-in', 1.8, 6],     // bundle discharge into the vessel space
+  ]),
+  fluid: heFluid(T_CORE_IN),
+  nqa1: true, containedBy: 'bui-1', initialNcg: HE,
+});
+
 // ONE helical once-through SG with the moving-boundary tube model
-// (docs/otsg-moving-boundary-design.md). The subcooled / boiling / superheat
-// sections live INSIDE the tube node and their boundaries track the phase
-// boundaries, so this single component does what the interim evaporator +
-// superheater pair approximated - including the counterflow temperature
-// cross a lumped pair structurally cannot represent, and without the
-// saturated-vs-superheated branch dichotomy that forced shipping saturated
-// steam (superheat is now a continuous section length, not a whole-lump
-// wet/dry state).
+// (docs/otsg-moving-boundary-design.md): subcooled / boiling / superheat
+// sections whose boundaries track the phase boundaries.
 //
 // Tubes are Alloy 800H: at 60 bar and SG temperatures low-alloy steel would
 // creep-rupture, and 800H is what real helical HTGR steam generators use.
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
-  position: { x: 56, y: 74 }, rotation: 0, elevation: 0,
+  position: { x: 56, y: 74 }, rotation: 0, elevation: -9,
   width: 2.8, height: 14, hxType: 'helical', tubeCount: 5000,
   tubeModel: 'moving-boundary',
   material: 'alloy-800h',
@@ -140,30 +163,27 @@ add('hx-1', {
   ports: ports([
     ['hx-1-tube-1', -0.6, 7],    // feedwater in (bottom)
     ['hx-1-tube-2', 0.6, -7],    // main steam out (top)
-    ['hx-1-shell-1', -1.8, -6],  // hot helium in (top)
-    ['hx-1-shell-2', 1.8, 6],    // cold helium out (bottom)
+    ['hx-1-shell-1', -1.8, -6],  // hot helium in (top, from the duct)
+    ['hx-1-shell-2', 1.8, 6],    // cold helium out (bottom, to vessel space)
     ['hx-1-leak', 1.8, 0],       // tube-side tap for the leak path
   ]),
-  // Tube side: two-phase at design pressure; the section partition seeds
-  // small subcooled/superheat fractions and self-organizes.
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
-  // Shell side: helium spanning core outlet to core inlet
   shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   secondaryFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   shellInitialNcg: HE,
-  nqa1: true, containedBy: 'bui-1',
+  nqa1: true, containedBy: 'tank-sg-1',
 });
 
 // ---------------------------------------------------------------------------
-// Helium circulator (mounted on the cold return from the SG)
+// Helium circulator: on the SG vessel dome, per the real arrangement
 // ---------------------------------------------------------------------------
 // Head is rho*g*H with the NCG density included, so a gas circulator needs a
-// very large "head" in metres to make a modest pressure rise: helium at 60 bar
-// / 533 K is only ~5.4 kg/m3, so 1.4 bar takes ~2600 m.
+// very large "head" in metres to make a modest pressure rise: helium at 60
+// bar / 533 K is only ~5.4 kg/m3, so 1.4 bar takes ~2600 m.
 add('pump-1', {
   type: 'pump', label: 'He Circulator',
-  position: { x: 47, y: 84 }, rotation: 0, elevation: 0,
+  position: { x: 56, y: 66 }, rotation: 0, elevation: 6.3,
   diameter: 0.9, running: true, speed: 1,
   ratedFlow: 80, ratedHead: 2600, orientation: 'left-right',
   ports: ports([['pump-1-inlet', -0.5, 0, 'in'], ['pump-1-outlet', 0.5, 0, 'out']]),
@@ -172,42 +192,19 @@ add('pump-1', {
 });
 
 // ---------------------------------------------------------------------------
-// SG tube leak path: tube side -> shell side, normally shut
-// ---------------------------------------------------------------------------
-// A real tube leak is a crack in a tube wall, so it connects the two SG nodes
-// directly. Modelling it as a tiny normally-closed valve keeps it a generic
-// building block: the scenario just drives `opening` to admit steam into the
-// helium.
-add('val-leak-1', {
-  type: 'valve', label: 'SG Tube Leak',
-  valveType: 'gate',
-  position: { x: 60, y: 74 }, rotation: 0, elevation: 7,
-  // The 20 mm diameter sets the LEAK AREA; the explicit volume keeps the
-  // valve's own node integrable. A crack has no real volume - the node is a
-  // modelling artifact - and without this it holds well under a litre, runs
-  // dry in one step of 165-bar flashing flow, and diverges the solver.
-  diameter: 0.02, opening: 0, volume: 0.3,
-  ports: ports([['val-leak-1-in', -0.1, 0, 'in'], ['val-leak-1-out', 0.1, 0, 'out']]),
-  fluid: { temperature: 640, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  nqa1: true, containedBy: 'bui-1', pressureRating: 200,
-});
-
-// ---------------------------------------------------------------------------
 // Steam dump valve: main steam -> condenser (turbine bypass duty)
 // ---------------------------------------------------------------------------
-// With the governor shut (turbine run-up, trips) the boiler is bottled while
-// the helium keeps delivering 130+ MW, so main-steam pressure climbs. Real
-// plants carry main-steam safety valves and a condenser steam dump for
-// exactly this; ours lifts at 180 bar (design 165, tubes rated 200) and
-// reseats at 3% blowdown.
+// With the governor shut the boiler is bottled while the helium keeps
+// delivering heat, so main-steam pressure climbs. Lifts at 175 bar: it must
+// catch the boil-off spike well before ~190, where superheated-steam
+// property evaluation approaches the (u,v) grid's dome-top fringe. Sized
+// ~40 kg/s choked (~70% of generation) - a real dump capacity; the original
+// 0.01 m2 line passed 210 kg/s and every lift was a blowdown spiral.
 add('val-msv-1', {
   type: 'valve', label: 'Steam Dump / MSSV',
   valveType: 'relief',
   position: { x: 66, y: 68 }, rotation: 0, elevation: 12,
   diameter: 0.12, opening: 0, volume: 0.1,
-  // 175 bar: must catch the boil-off pressure spike well before ~190, where
-  // superheated-steam property evaluation approaches the (u,v) grid's dome-
-  // top fringe and the tables (rightly) refuse to extrapolate.
   pressureRating: 250, setpoint: 175e5, blowdown: 0.03,
   ports: ports([['val-msv-1-in', -0.1, 0, 'in'], ['val-msv-1-out', 0.1, 0, 'out']]),
   fluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
@@ -334,10 +331,6 @@ function pipe(id: string, label: string, x: number, y: number, elevation: number
   add(id, c);
 }
 
-// Cold return: SG annulus outlet -> circulator
-pipe('pipe-coldleg', 'Cold Gas Duct', 52, 86, 1, 1.2, 5, T_SG_HE_OUT, P_TRACE_STEAM, 'vapor', HE);
-// Circulator discharge -> vessel downcomer
-pipe('pipe-pumpdisch', 'Circulator Discharge', 41, 84, 1, 1.1, 5, T_SG_HE_OUT, P_TRACE_STEAM, 'vapor', HE);
 // NO turbine-exhaust pipe: at 0.07 bar a duct of any plausible size holds
 // only a few kg of vapor while 77 kg/s pass through it, so it pins the whole
 // plant's timestep via the throughput sanity check (it was the single biggest
@@ -357,7 +350,7 @@ pipe('pipe-pumpdisch', 'Circulator Discharge', 41, 84, 1, 1.1, 5, T_SG_HE_OUT, P
 // inlet temperature. Exactly the HTR-PM / Xe-100 arrangement.
 add('cv-1', {
   type: 'crossVessel', label: 'Coaxial Gas Duct',
-  position: { x: 46, y: 80 }, rotation: 0, elevation: 6,
+  position: { x: 46, y: 80 }, rotation: 0, elevation: 5,
   outerDiameter: 1.8, wallThickness: 0.06, length: 7,
   innerDiameter: 1.0, innerWallThickness: 0.02,
   pressureRating: 90,
@@ -469,32 +462,31 @@ controller('ctl-hwl-1', 'Hotwell Level (Cond Pump)', 30, 60, {
 // ---------------------------------------------------------------------------
 // Primary loop connections (helium)
 // ---------------------------------------------------------------------------
-// Vessel downcomer -> core inlet (bottom), up through the pebble bed
-// The pebble bed IS the loop's dominant flow resistance. Coolant threads the
-// packing voids: free area ~ 0.39 * pi * 1.2^2 = 1.76 m2, and the Ergun drop
-// through 8.9 m of 60 mm spheres is ~0.5-1 bar at design flow - which is why
-// real HTGR circulators are 4 MW machines. K = 550 on the void free-area
-// reproduces that; without it the loop ran 2x design flow and the cold leg
-// equilibrated 190 C hot.
+// Vessel downcomer -> core inlet (bottom), up through the pebble bed.
+// The pebble bed IS the loop's dominant flow resistance (Ergun ~0.5-1 bar
+// through 8.9 m of 60 mm spheres at design flow; K = 550 on the void
+// free-area ~1.76 m2 reproduces it).
 connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-inlet',
   { fromElevation: 0.8, toElevation: 0, flowArea: 1.76, length: 8.9, resistanceCoeff: 550 });
-// Core outlet (top) -> coaxial duct INNER pipe -> SG shell top (hot helium)
+// Core outlet (top of barrel) -> down the outlet plenum -> coaxial duct
+// INNER pipe (low on the RPV) -> SG bundle shell top
 connect('cb-1', 'cb-1-outlet', 'cv-1', 'cv-1-inner-in',
-  { fromElevation: 11, toElevation: 0, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
+  { fromElevation: 11, toElevation: 0, flowArea: 0.78, length: 8, resistanceCoeff: 1.5 });
 connect('cv-1', 'cv-1-inner-out', 'hx-1', 'hx-1-shell-1',
-  { fromElevation: 0, toElevation: 13, flowArea: 0.78, length: 4, resistanceCoeff: 1.5 });
-// SG shell bottom -> coaxial duct ANNULUS -> cold duct -> circulator
-connect('hx-1', 'hx-1-shell-2', 'cv-1', 'cv-1-annulus-2',
-  { fromElevation: 1, toElevation: 0, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
-connect('cv-1', 'cv-1-annulus-1', 'pipe-coldleg', 'pipe-coldleg-left',
-  { fromElevation: 0, toElevation: 0.6, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
-connect('pipe-coldleg', 'pipe-coldleg-right', 'pump-1', 'pump-1-inlet',
-  { fromElevation: 0.6, toElevation: 0, flowArea: 1.1, length: 3, resistanceCoeff: 1.5 });
-// Circulator -> vessel downcomer
-connect('pump-1', 'pump-1-outlet', 'pipe-pumpdisch', 'pipe-pumpdisch-left',
-  { fromElevation: 0, toElevation: 0.55, flowArea: 0.95, length: 3, resistanceCoeff: 1.5 });
-connect('pipe-pumpdisch', 'pipe-pumpdisch-right', 'rv-1', 'rv-1-cold-leg',
-  { fromElevation: 0.55, toElevation: 14, flowArea: 0.95, length: 3, resistanceCoeff: 1.5 });
+  { fromElevation: 0, toElevation: 13, flowArea: 0.78, length: 3, resistanceCoeff: 1.5 });
+// Bundle shell bottom -> SG vessel space: an open internal discharge, so the
+// pressure vessel only ever holds ~260 C gas
+connect('hx-1', 'hx-1-shell-2', 'tank-sg-1', 'tank-sg-in',
+  { fromElevation: 1, toElevation: 2, flowArea: 2.0, length: 2, resistanceCoeff: 0.5 });
+// Vessel space -> circulator (dome suction) -> coaxial duct ANNULUS -> RPV
+// downcomer, entering LOW on the vessel (the duct elevation). The annulus is
+// now DOWNSTREAM of the circulator, as in the real plant.
+connect('tank-sg-1', 'tank-sg-top', 'pump-1', 'pump-1-inlet',
+  { fromElevation: 15.5, toElevation: 0, flowArea: 0.6, length: 2, resistanceCoeff: 1 });
+connect('pump-1', 'pump-1-outlet', 'cv-1', 'cv-1-annulus-2',
+  { fromElevation: 0, toElevation: 0.4, flowArea: 1.0, length: 2, resistanceCoeff: 1 });
+connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
+  { fromElevation: 0.4, toElevation: 5, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 
 // ---------------------------------------------------------------------------
 // Secondary loop connections (water/steam)

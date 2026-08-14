@@ -57,7 +57,7 @@ const fP = (id: string) => (st().flowNodes.get(id)?.fluid.pressure ?? NaN) / 1e5
 const tT = (id: string) => (st().thermalNodes.get(id)?.temperature ?? NaN) - 273.15;
 const ncg = (id: string, sp: string) => (st().flowNodes.get(id)?.fluid.ncg as any)?.[sp] ?? 0;
 const heFlow = () => {
-  const c = st().flowConnections.find(x => x.id === 'flow-pipe-pumpdisch-rv-1');
+  const c = st().flowConnections.find(x => x.id === 'flow-cv-1-rv-1');
   return c ? c.massFlowRate : NaN;
 };
 

@@ -3278,6 +3278,56 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
   let created = 0;
   for (const [id, component] of plantState.components) {
     const comp = component as any;
+
+    // Heat exchangers have no flow node under their bare id (they build
+    // `-tube` and `-shell`), so the generic lookup below never reaches
+    // them - which historically left every SG shell with NO wall node and
+    // therefore no creep or thermal-mass representation at all. The shell
+    // is a primary pressure boundary; it gets a wall under EVERY policy,
+    // like reactor vessels. Inner face sees the shell-side gas, outer face
+    // the containing volume (an SG pressure vessel, containment air, ...).
+    if (component.type === 'heatExchanger' && !state.thermalNodes.has(`${id}-wall`)) {
+      const shellFlow = state.flowNodes.get(`${id}-shell`);
+      if (shellFlow) {
+        const dia = Math.min(comp.width ?? 2.5, comp.height ?? 8);
+        const len = Math.max(comp.width ?? 2.5, comp.height ?? 8);
+        const hxArea = Math.PI * dia * len + 2 * Math.PI * (dia / 2) * (dia / 2);
+        const hxThick = calculateThicknessFromPressure(
+          comp.shellPressureRating ?? comp.pressureRating ?? 20, dia);
+        state.thermalNodes.set(`${id}-wall`, {
+          id: `${id}-wall`,
+          label: `${component.label || id} shell`,
+          temperature: shellFlow.fluid.temperature,
+          mass: hxArea * hxThick * 7850,
+          specificHeat: 490,
+          thermalConductivity: 40,
+          characteristicLength: hxThick,
+          surfaceArea: hxArea,
+          heatGeneration: 0,
+          maxTemperature: 1700,
+        });
+        state.convectionConnections.push({
+          id: `convection-${id}-wall`,
+          thermalNodeId: `${id}-wall`,
+          flowNodeId: `${id}-shell`,
+          surfaceArea: hxArea,
+          characteristicDiameter: dia,
+        });
+        const hxContainer = component.containedBy;
+        if (hxContainer && state.flowNodes.has(hxContainer)) {
+          state.convectionConnections.push({
+            id: `convection-${id}-wall-outer`,
+            thermalNodeId: `${id}-wall`,
+            flowNodeId: hxContainer,
+            surfaceArea: hxArea,
+            characteristicDiameter: dia,
+          });
+        }
+        created++;
+      }
+      continue;
+    }
+
     const flowNode = state.flowNodes.get(id);
     if (!flowNode || flowNode.isBoundary) continue;
     if (state.thermalNodes.has(`${id}-wall`)) continue; // crossVessel etc.
