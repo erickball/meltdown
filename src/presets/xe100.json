@@ -437,7 +437,7 @@
         "opening": 0,
         "volume": 0.1,
         "pressureRating": 120,
-        "setpoint": 7000000,
+        "setpoint": 7500000,
         "blowdown": 0.03,
         "ports": [
           {
