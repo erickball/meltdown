@@ -31,6 +31,16 @@ import {
 import { cloneSimulationState } from './solver.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
+  saturationAtP,
+  subcooledLiquidV,
+  superheatedV,
+  evaluateOtsg,
+  otsgRates,
+  transitStandingQ,
+  marchCounterflowGas,
+} from './otsg.js';
+import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
+import {
   binaryDiffusivity,
   diffusivityInMixture,
   knudsenDiffusivity,
@@ -396,6 +406,134 @@ test('water lattices unchanged by solid-moderation extension (regression)', () =
 // ============================================================================
 // Graphite properties and packed-bed conduction
 // ============================================================================
+// ============================================================================
+// OTSG moving-boundary core
+// ============================================================================
+category('OTSG core');
+
+const OTSG_GEOM = { tubeVolume: 25, tubeLength: 18, heatArea: 5000 };
+// Feed at 200 C: u along the saturated-liquid line
+const U_FEED = saturatedLiquidEnergy(473);
+const H_FEED = U_FEED + 165e5 / saturatedLiquidDensity(473);
+
+/** Build a section state that occupies exactly V_tube at pressure P*. */
+function otsgStateAtP(Pstar: number, f1: number, f2: number, u3Superheat: number) {
+  const sat = saturationAtP(Pstar);
+  const v1 = subcooledLiquidV(0.5 * (U_FEED + sat.u_f));
+  const v2 = 0.5 * (sat.v_f + sat.v_g);
+  const u3 = sat.u_g + u3Superheat;
+  const v3 = superheatedV(u3, Pstar);
+  const V1 = OTSG_GEOM.tubeVolume * f1, V2 = OTSG_GEOM.tubeVolume * f2;
+  const V3 = OTSG_GEOM.tubeVolume - V1 - V2;
+  const m3 = V3 / v3;
+  return { state: { m1: V1 / v1, m2: V2 / v2, m3, U3: m3 * u3 }, sat };
+}
+
+test('pressure closure round-trips a constructed 165-bar state', () => {
+  const { state } = otsgStateAtP(165e5, 0.3, 0.5, 150e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  assert(Math.abs(ev.P / 165e5 - 1) < 1e-3,
+    `closure should recover 165 bar, got ${(ev.P / 1e5).toFixed(2)}`);
+  // Sections in their regimes: T1 < Tsat, T2 = Tsat, T3 > Tsat
+  assert(ev.sections[0].T < ev.sat.T - 1, 'subcooled section must sit below T_sat');
+  assert(Math.abs(ev.sections[1].T - ev.sat.T) < 0.1, 'two-phase section must sit at T_sat');
+  assert(ev.sections[2].T > ev.sat.T + 1, 'superheated section must sit above T_sat');
+  // Geometry partitions
+  const fSum = ev.sections[0].lengthFrac + ev.sections[1].lengthFrac + ev.sections[2].lengthFrac;
+  assert(Math.abs(fSum - 1) < 1e-9, 'section length fractions must sum to 1');
+});
+
+test('interface fluxes reduce to through-flow at steady state', () => {
+  const { state } = otsgStateAtP(165e5, 0.3, 0.5, 150e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const W = 77;
+  const Q1 = W * (ev.sat.h_f - H_FEED);
+  const Q2 = W * (ev.sat.h_g - ev.sat.h_f);
+  const Q3 = W * (ev.hSteamOut - ev.sat.h_g);
+  const r = otsgRates(ev, W, H_FEED, W, Q1, Q2, Q3);
+  assert(Math.abs(r.W12 - W) < 1e-6 && Math.abs(r.W23 - W) < 1e-6,
+    `steady state must carry W through both interfaces: W12=${r.W12.toFixed(3)}, W23=${r.W23.toFixed(3)}`);
+  assert(Math.abs(r.dm1) < 1e-6 && Math.abs(r.dm2) < 1e-6 && Math.abs(r.dm3) < 1e-6,
+    'steady state must hold all section masses');
+  assert(Math.abs(r.dU3) < 1,
+    `steady state must hold U3, got dU3=${r.dU3.toExponential(2)} W`);
+});
+
+test('section energy bookkeeping is exact (no leaked enthalpy)', () => {
+  // Total energy rate must equal boundary fluxes + heat, for an arbitrary
+  // off-steady operating point, with each section's P dV work included.
+  const { state } = otsgStateAtP(165e5, 0.35, 0.45, 120e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const WIn = 60, WOut = 82, Q1 = 55e6, Q2 = 70e6, Q3 = 12e6;
+  const r = otsgRates(ev, WIn, H_FEED, WOut, Q1, Q2, Q3);
+  const u1Bar = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
+  const u2Bar = ev.sections[1].hBar - ev.P * ev.sections[1].vBar;
+  const dUtotal = u1Bar * r.dm1 + u2Bar * r.dm2 + r.dU3;
+  const dVtotal = ev.sections[0].vBar * r.dm1 + ev.sections[1].vBar * r.dm2 + ev.sections[2].vBar * r.dm3;
+  const balance = WIn * H_FEED - WOut * ev.hSteamOut + Q1 + Q2 + Q3 - ev.P * dVtotal;
+  assert(Math.abs(dUtotal - balance) < Math.abs(balance) * 1e-9 + 1,
+    `energy must close exactly: dU_total=${dUtotal.toExponential(6)} vs balance=${balance.toExponential(6)}`);
+  assert(Math.abs(r.dm1 + r.dm2 + r.dm3 - (WIn - WOut)) < 1e-9,
+    'mass must close exactly');
+});
+
+test('cold feed with no heat pushes the boiling boundary up, not down', () => {
+  const { state } = otsgStateAtP(100e5, 0.3, 0.5, 100e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const r = otsgRates(ev, 50, H_FEED, 0, 0, 0, 0);
+  assert(r.W12 < 0, `unheated cold feed must recede the boundary (W12 negative), got ${r.W12.toFixed(1)}`);
+  assert(r.dm1 > 50, 'subcooled section must grow by feed plus swept-over mass');
+});
+
+test('empty superheat section: smooth pass-through, no singularities', () => {
+  const { state } = otsgStateAtP(165e5, 0.35, 0.65, 100e3);
+  const s = { ...state, m3: 0, U3: 0 };
+  const ev = evaluateOtsg(s, OTSG_GEOM, U_FEED);
+  assert(Number.isFinite(ev.P) && Number.isFinite(ev.hSteamOut),
+    'evaluation must stay finite with an empty superheat section');
+  assert(Math.abs(ev.hSteamOut - ev.sat.h_g) < 1,
+    `empty superheat section must draw at h_g, got ${(ev.hSteamOut / 1e3).toFixed(0)} kJ/kg`);
+  assert(ev.sections[2].area === 0, 'empty section must have zero heat area');
+  // Boiling with a draw: the section is born continuously
+  const r = otsgRates(ev, 50, H_FEED, 40,
+    50 * (ev.sat.h_f - H_FEED), 55e6, 0);
+  assert(Number.isFinite(r.dm3) && Number.isFinite(r.dU3), 'rates must stay finite at m3=0');
+  assert((r.dm3 > 0) === (r.W23 > 40), 'section grows exactly when boil-off exceeds the draw');
+});
+
+test('transit + standing branches: both limits, no blend function', () => {
+  // High flow: transit dominates and is driven by INLET temperature
+  const qHigh = transitStandingQ(4e6, 5e4, 4e5, 500, 560, 600);
+  const qHighIdeal = (1 - Math.exp(-10)) * 4e5 * 100 + 5e4 * 40;
+  assert(Math.abs(qHigh - qHighIdeal) < 1,
+    'high-flow limit must be the epsilon-mcp transit form');
+  // Zero flow: ONLY the standing branch survives - a bottled boiler still heats
+  const qZero = transitStandingQ(4e6, 5e4, 0, 500, 560, 600);
+  assert(Math.abs(qZero - 5e4 * 40) < 1e-6,
+    `bottled case must reduce to natural convection on bulk dT, got ${qZero.toExponential(3)}`);
+  // Transit branch never exceeds carrying capacity
+  const qCap = transitStandingQ(1e9, 0, 1e4, 300, 300, 800);
+  assert(qCap <= 1e4 * 500 + 1e-6, 'transit heat must cap at mcp * (T_wall - T_in)');
+});
+
+test('counterflow gas march: hottest gas meets the superheater first', () => {
+  const sections = [
+    { hA: 2e5, TWall: 838 },  // superheater wall
+    { hA: 8e5, TWall: 623 },  // boiling wall
+    { hA: 3e5, TWall: 540 },  // subcooled wall
+  ];
+  const m = marchCounterflowGas(1023, 0.4e6, sections);
+  assert(m.Q[0] > 0 && m.Q[1] > 0 && m.Q[2] > 0, 'all sections must receive heat');
+  assert(m.TGasOut < 1023 && m.TGasOut > 540, 'gas outlet must land between inlet and coldest wall');
+  const energyCheck = 0.4e6 * (1023 - m.TGasOut);
+  const qSum = m.Q[0] + m.Q[1] + m.Q[2];
+  assert(Math.abs(qSum - energyCheck) < 1,
+    'marched heat must equal the gas enthalpy change exactly');
+  // Empty section passes through untouched
+  const m2 = marchCounterflowGas(1023, 0.4e6, [sections[0], { hA: 0, TWall: 623 }, sections[2]]);
+  assert(m2.Q[1] === 0 && Number.isFinite(m2.TGasOut), 'zero-area section must cost nothing');
+});
+
 category('Graphite');
 
 test('graphite cp tracks the Butland-Maddison anchors from 300 to 2000 K', () => {
