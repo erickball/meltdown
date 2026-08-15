@@ -579,6 +579,59 @@ export function steamNcgSoundSpeed(ncg: GasComposition, steamMoles: number, T_K:
   return Math.sqrt(gamma_mix * R_GAS * T_K / M_mix);
 }
 
+/**
+ * Isentropic critical (choked) mass flux, as a fraction of rho_0 * c_0.
+ *
+ * A sonic throat does NOT pass rho_0 * c_0. The gas accelerating to Mach 1 has
+ * already expanded and cooled, so the throat carries
+ *   rho_throat / rho_0 = (2/(gamma+1))^(1/(gamma-1))
+ *   c_throat   / c_0   = sqrt(2/(gamma+1))
+ * and therefore
+ *   G_crit / (rho_0 * c_0) = (2/(gamma+1))^((gamma+1)/(2*(gamma-1))).
+ *
+ * That is 0.5625 for helium, 0.578 for diatomic gases, ~0.60 for steam - so
+ * treating stagnation density times stagnation sound speed AS the sonic bound
+ * overstates every choked discharge by ~1.7x. Equivalent form, handy when a
+ * critical pressure ratio r is already in hand:
+ *   G_crit / (rho_0 c_0) = r * sqrt((gamma+1)/2).
+ */
+export function criticalFluxFactorForGamma(gamma: number): number {
+  return Math.pow(2 / (gamma + 1), (gamma + 1) / (2 * (gamma - 1)));
+}
+
+/** Critical mass flux factor for a pure NCG mixture. */
+export function ncgCriticalFluxFactor(comp: GasComposition): number {
+  if (totalMoles(comp) <= 0) return criticalFluxFactorForGamma(1.4);
+  return criticalFluxFactorForGamma(mixtureGamma(comp));
+}
+
+/**
+ * Critical mass flux factor for a steam + NCG mixture. Uses the same
+ * mole-weighted mixture gamma as steamNcgSoundSpeed, so the flux factor and
+ * the sound speed always describe the same gas.
+ */
+export function steamNcgCriticalFluxFactor(
+  ncg: GasComposition, steamMoles: number, T_K: number
+): number {
+  const ncgMoles = totalMoles(ncg);
+  const totalMol = ncgMoles + steamMoles;
+  if (totalMol <= 0) return criticalFluxFactorForGamma(1.33);
+
+  const T_ratio = Math.min(1, Math.max(0, (T_K - 373) / (647 - 373)));
+  const gamma_steam = 1.33 - 0.20 * T_ratio;
+  const cp_steam = 37;
+  const cv_steam = cp_steam / gamma_steam;
+
+  const steamFrac = steamMoles / totalMol;
+  const ncgFrac = ncgMoles / totalMol;
+  const cp_ncg = ncgMoles > 0 ? mixtureCp(ncg) : 29;
+  const cv_ncg = ncgMoles > 0 ? mixtureCv(ncg) : 21;
+
+  const cp_mix = steamFrac * cp_steam + ncgFrac * cp_ncg;
+  const cv_mix = steamFrac * cv_steam + ncgFrac * cv_ncg;
+  return criticalFluxFactorForGamma(cp_mix / cv_mix);
+}
+
 // ============================================================================
 // Ideal Gas Law Calculations
 // ============================================================================

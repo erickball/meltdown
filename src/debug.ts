@@ -620,14 +620,22 @@ export function updateDebugPanel(
         html += ` <span style="color: #f66; font-size: 9px;">[BREAK]</span>`;
       }
 
-      // Mark choked flow (read from debug object since rate operators work on cloned state)
+      // Mark choked flow (read from debug object since rate operators work on cloned state).
+      // machNumber is the THROAT Mach, i.e. the flow as a fraction of critical,
+      // so a choked connection reads exactly 1.00 - it is not the bulk velocity
+      // in the pipe, which on a throttled line is far lower.
       const isChoked = conn.debug?.isChoked ?? conn.isChoked;
       const machNumber = conn.debug?.machNumber ?? conn.machNumber;
       if (isChoked) {
-        html += ` <span style="color: #f90; font-size: 9px; font-weight: bold;">[CHOKED Ma=${(machNumber ?? 1).toFixed(2)}]</span>`;
+        html += ` <span style="color: #f90; font-size: 9px; font-weight: bold;" ` +
+          `title="Throat is sonic: flow is at the critical mass flux and no longer responds to downstream pressure. ` +
+          `Ma is measured AT THE THROAT (flow / critical flow), not the bulk pipe velocity.">` +
+          `[CHOKED Ma=${(machNumber ?? 1).toFixed(2)}]</span>`;
       } else if (machNumber !== undefined && machNumber > 0.3) {
-        // Show Mach number for high-speed vapor flow even if not choked
-        html += ` <span style="color: #cc8; font-size: 9px;">Ma=${machNumber.toFixed(2)}</span>`;
+        // Show throat Mach for high-speed vapor flow even if not choked
+        html += ` <span style="color: #cc8; font-size: 9px;" ` +
+          `title="Throat Mach number: flow as a fraction of the critical (choked) mass flow. Reaches 1.00 when the throat goes sonic.">` +
+          `Ma=${machNumber.toFixed(2)}</span>`;
       }
 
       html += '<br>';

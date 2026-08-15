@@ -2614,8 +2614,9 @@ export class FlowMomentumRateOperator implements RateOperator {
         const m_dot_choked = choke.m_dot_choked;
         const currentFlowSign = currentFlow >= 0 ? 1 : -1;
 
-        // Mach at the THROAT (the restriction is what goes sonic, not the bore)
-        machNumber = Math.abs(currentFlow) / (h.rho_flow * h.throatArea * choke.soundSpeed);
+        // Throat Mach as the fraction of critical flow - exactly 1 at the
+        // sonic limit (see the note in pressure-solver.ts)
+        machNumber = m_dot_choked > 0 ? Math.abs(currentFlow) / m_dot_choked : 0;
 
         if (choke.chokedByRatio) {
           // Limit current flow to choked value
@@ -2757,8 +2758,10 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
         continue;
       }
 
-      // Mach at the throat, which is what actually goes sonic
-      conn.machNumber = Math.abs(currentFlow) / (rho_flow * throatArea * choke.soundSpeed);
+      // Throat Mach as the fraction of critical flow (see pressure-solver.ts)
+      conn.machNumber = choke.m_dot_choked > 0
+        ? Math.abs(currentFlow) / choke.m_dot_choked
+        : 0;
 
       // Choked means the sonic mass-flux bound is what the flow is up against.
       // A subcritical pressure ratio is necessary but NOT sufficient: judged on

@@ -3053,6 +3053,14 @@ function createFlowConnectionFromPlantConnection(
     // a real design lever - the default 5 costs a PWR primary loop ~30% of
     // its rated flow), default 5.
     resistanceCoeff: (connection as any).resistanceCoeff ?? 5,
+    // Vena-contracta discharge coefficient for choked flow. Only burst-created
+    // break connections used to be able to set this, so an ordinary connection
+    // could never be told it was a sharp orifice (0.61) or a smooth nozzle
+    // (~1.0) - it silently got the 0.85 default. Left undefined here so
+    // computeChokeLimit's own default still applies when unspecified.
+    ...((connection as any).breakDischargeCoeff !== undefined
+      ? { breakDischargeCoeff: (connection as any).breakDischargeCoeff }
+      : {}),
     // Initial flow (kg/s): lets a preset start with its loops already
     // circulating instead of slamming from zero, which matters for cores
     // whose reactivity feedback depends on the flow-dependent void state.

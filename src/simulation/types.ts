@@ -406,7 +406,11 @@ export interface FlowConnection {
 
   // Choked flow state (computed by flow operator)
   isChoked?: boolean;               // True if flow is limited by sonic velocity
-  machNumber?: number;              // Mach number (velocity / sound speed)
+  /** Throat Mach number, as the fraction of critical (choked) mass flow.
+   *  Exactly 1 at the sonic limit. Normalizing on the critical flux rather
+   *  than on stagnation density is what makes that true - a genuinely sonic
+   *  throat carries only ~0.56-0.6 of rho_stagnation * c_stagnation. */
+  machNumber?: number;
 
   // === Debug fields (populated by momentum operator for display) ===
   // These are for debugging only and may not always be present
@@ -418,7 +422,7 @@ export interface FlowConnection {
     dP_net: number;                 // Pa - net accelerating pressure
     dMassFlowRate: number;          // kg/s² - acceleration rate
     isChoked?: boolean;             // True if flow is choked (sonic velocity)
-    machNumber?: number;            // Mach number (v/c)
+    machNumber?: number;            // throat Mach = ṁ / ṁ_choked (1 at sonic)
   };
 }
 

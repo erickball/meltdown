@@ -133,7 +133,11 @@ if (enabled('steady')) {
     assertBetween(nodePressure(state, 'hx-1-shell'), 55e5, 65e5, 'SG pressure on setpoint');
 
     // All four loops circulating symmetrically
-    const flows = [1, 2, 3, 4].map(i => flowRate(state, `pump-${i}`, 'rv-1'));
+    // Cold legs run through baked pipe components (pump-N -> pipe-pump-N-rv-1
+    // -> rv-1), so loop flow is measured on the pipe's discharge. The old
+    // direct pump-N -> rv-1 lookup stopped existing when the preset's pipes
+    // were baked in, and threw before either scenario reached any physics.
+    const flows = [1, 2, 3, 4].map(i => flowRate(state, `pipe-pump-${i}-rv-1`, 'rv-1'));
     for (const q of flows) assert(q > 3000, `each loop should circulate strongly, got ${q.toFixed(0)} kg/s`);
     const spread = (Math.max(...flows) - Math.min(...flows)) / Math.max(...flows);
     assert(spread < 0.1, `loops should share symmetrically (spread ${(spread * 100).toFixed(1)}%)`);
@@ -262,7 +266,7 @@ if (enabled('sbo')) {
       maxAfwSpeed = Math.max(maxAfwSpeed, sim.state.components.pumps.get('afw-td-1')!.effectiveSpeed);
       if (sim.state.time - lastLog >= 60) {
         lastLog = sim.state.time;
-        const loops = [1, 2, 3, 4].map(i => flowRate(sim.state, `pump-${i}`, 'rv-1').toFixed(0)).join('/');
+        const loops = [1, 2, 3, 4].map(i => flowRate(sim.state, `pipe-pump-${i}-rv-1`, 'rv-1').toFixed(0)).join('/');
         console.log(`  [sbo t=${sim.state.time.toFixed(0)}s] ` +
           `loops=${loops}kg/s core=${flowRate(sim.state, 'rv-1', 'cb-1').toFixed(0)}kg/s ` +
           `SG_P=${(nodePressure(sim.state, 'hx-1-shell') / 1e5).toFixed(1)}bar ` +

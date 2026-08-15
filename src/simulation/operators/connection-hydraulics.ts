@@ -24,6 +24,8 @@ import {
   totalMass as ncgTotalMass,
   ncgSoundSpeed,
   steamNcgSoundSpeed,
+  ncgCriticalFluxFactor,
+  steamNcgCriticalFluxFactor,
   R_GAS,
 } from '../gas-properties';
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
@@ -552,6 +554,48 @@ export function nodeCriticalPressureRatio(node: FlowNode, flowPhase: 'liquid' | 
   return criticalPressureRatio(waterState);
 }
 
+/**
+ * Isentropic critical mass flux at this node, as a fraction of rho times c
+ * evaluated
+ * at STAGNATION conditions - i.e. the correction that turns "upstream density
+ * times upstream sound speed" into the flux a sonic throat actually passes
+ * (~0.56-0.6). See criticalFluxFactorForGamma.
+ */
+export function nodeCriticalFluxFactor(
+  node: FlowNode,
+  flowPhase: 'liquid' | 'vapor' | 'mixture'
+): number {
+  if (flowPhase === 'liquid') return 1; // never used - liquid does not choke
+
+  const fluid = node.fluid;
+  const ncg = fluid.ncg;
+  const ncgMoles = ncg ? totalMoles(ncg) : 0;
+
+  if (ncgMoles > 0 && node.volume > 0) {
+    const T = fluid.temperature;
+    const P_ncg = (ncgMoles * R_GAS * T) / node.volume;
+    const P_steam = Math.max(0, fluid.pressure - P_ncg);
+    const steamMoles = (P_steam * node.volume) / (R_GAS * T);
+    if (steamMoles < ncgMoles * 0.02) return ncgCriticalFluxFactor(ncg!);
+    return steamNcgCriticalFluxFactor(ncg!, steamMoles, T);
+  }
+
+  // Pure steam/water: same effective gamma correlation the critical pressure
+  // ratio uses, via the identity G_crit / (rho_0 c_0) = r * sqrt((g+1)/2).
+  // Exact on the single-phase vapor branch, where r comes from that very
+  // gamma. On the TWO-PHASE branch r is an empirical blend on quality rather
+  // than an ideal-gas result, so the identity is only nominal there and can
+  // read a couple percent above 1 for cold, low-quality mixtures - harmless,
+  // because that same branch holds r near 0.95 and choking essentially never
+  // engages. Genuine two-phase critical flow wants HEM/Moody, which this
+  // model does not have.
+  const r = nodeCriticalPressureRatio(node, flowPhase);
+  if (!(r > 0)) return 1;
+  const T_ratio = Math.min(1, Math.max(0, (fluid.temperature - 373) / (647 - 373)));
+  const gamma = 1.33 - 0.20 * T_ratio;
+  return r * Math.sqrt((gamma + 1) / 2);
+}
+
 // ============================================================================
 // Full connection hydraulics
 // ============================================================================
@@ -677,9 +721,17 @@ export function computeChokeLimit(
   if (flowPhase === 'liquid') return null;
 
   const c = nodeSoundSpeed(upstreamNode, flowPhase);
-  const m_dot_sonic = rho_flow * throatArea * c;
+  // Critical mass flux at the THROAT, not at stagnation. The gas reaching
+  // Mach 1 has already expanded and cooled, so it carries only ~0.56-0.60 of
+  // rho_0*c_0; using rho_0*c_0 as the sonic bound overstates every choked
+  // discharge by ~1.7x (measured 1.52x on the analytic helium blowdown, where
+  // the exact factor is 0.5625). See scripts/test-blowdown.ts.
+  const fluxFactor = nodeCriticalFluxFactor(upstreamNode, flowPhase);
+  const m_dot_sonic = fluxFactor * rho_flow * throatArea * c;
 
-  // Apply discharge coefficient for restrictions
+  // Geometric discharge coefficient (vena contracta), now genuinely just
+  // geometry: the compressibility that these numbers used to stand in for is
+  // carried by fluxFactor above.
   const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
   const m_dot_choked = dischargeCoeff * m_dot_sonic;
 

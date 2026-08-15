@@ -662,9 +662,13 @@ export class PressureSolver {
       // pressure) permanently choked at Mach 0.05.
       const isChoked = e.capped;
       e.conn.isChoked = isChoked;
-      // Throat Mach: the restriction is what goes sonic, not the full bore.
-      e.conn.machNumber = e.choke
-        ? Math.abs(m1 / (e.h.rho_flow * e.h.throatArea)) / e.choke.soundSpeed
+      // Throat Mach as the fraction of critical flow. Dividing ṁ by
+      // rho_STAGNATION*A instead would report ~0.5 on a line that is genuinely
+      // sonic, because the gas at the throat has expanded: the correct
+      // normalization is the critical flux itself, and ṁ/ṁ_choked is exactly
+      // the throat Mach number at the sonic limit.
+      e.conn.machNumber = e.choke && e.choke.m_dot_choked > 0
+        ? Math.abs(m1) / e.choke.m_dot_choked
         : 0;
       e.conn.debug = {
         flowPhase: e.h.flowPhase,
