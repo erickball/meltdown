@@ -102,19 +102,45 @@ export function saturationAtP(P: number): SaturationProps {
  * one, which is why it never looked wrong at high pressure. The series form
  * takes over there because the closed form is 0/0.
  */
-export function boilingMeanQuality(v_f: number, v_g: number): number {
+export function boilingMeanQuality(v_f: number, v_g: number, xOut = 1): number {
+  return (boilingMeanVolume(v_f, v_g, xOut) - v_f) / (v_g - v_f);
+}
+
+/**
+ * MASS-averaged specific volume of a boiling section whose quality runs from
+ * 0 at its inlet to `xOut` at its outlet.
+ *
+ * `xOut` is the piece the original closure was missing. A linear profile
+ * reaching saturated vapour - xOut = 1 - is only what happens when there is
+ * a SUPERHEAT SECTION downstream to receive dry steam. A flooded bundle has
+ * nowhere to hand it to, so its boiling section ends part-way up the dome,
+ * and insisting on the full-range average then demands more vapour than the
+ * node holds (the arithmetic that falls out is a negative superheat mass).
+ *
+ * Integrating dm = A dz / v(z) with v linear in z over [0, xOut]:
+ *
+ *     v-bar = xOut * dv / ln(1 + xOut * dv / v_f)
+ *
+ * which is the logarithmic mean of v_f and v(xOut), and reduces to the
+ * familiar full-range form at xOut = 1. As xOut -> 0 it tends to v_f: a
+ * section that barely boils is liquid, as it must be.
+ */
+export function boilingMeanVolume(v_f: number, v_g: number, xOut = 1): number {
   const dv = v_g - v_f;
   if (!(dv > 0) || !(v_f > 0)) {
-    throw new Error(`[OTSG] boilingMeanQuality: saturation volumes are not ordered ` +
+    throw new Error(`[OTSG] boilingMeanVolume: saturation volumes are not ordered ` +
       `(v_f=${v_f}, v_g=${v_g} m3/kg) - the dome has collapsed or the state is not two-phase`);
   }
-  const ratio = dv / v_f;
-  // Within a thousandth of the critical point the phases are indistinguishable
-  // and 1/L - v_f/dv is the difference of two large, nearly equal numbers.
-  // The expansion of ln(1+r) gives x-bar -> 1/2 - r/12 + O(r^2).
-  if (ratio < 1e-3) return 0.5 - ratio / 12;
-  const L = Math.log(v_g / v_f);
-  return 1 / L - v_f / dv;
+  if (!(xOut >= 0 && xOut <= 1)) {
+    throw new Error(`[OTSG] boilingMeanVolume: outlet quality ${xOut} is outside [0, 1] - ` +
+      `a boiling section runs from saturated liquid to at most saturated vapour`);
+  }
+  const r = xOut * dv / v_f;
+  // Series limit: ln(1+r) -> r - r^2/2 + r^3/3, so v-bar -> v_f (1 + r/2).
+  // This covers both a barely-boiling section and the critical point, where
+  // the phases converge and the closed form is 0/0.
+  if (r < 1e-6) return v_f * (1 + r / 2);
+  return xOut * dv / Math.log1p(r);
 }
 
 // ---------------------------------------------------------------------------

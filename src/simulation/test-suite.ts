@@ -38,6 +38,7 @@ import {
   evaluateOtsg,
   otsgRates,
   boilingMeanQuality,
+  boilingMeanVolume,
   transitStandingQ,
   marchCounterflowGas,
 } from './otsg.js';
@@ -1043,6 +1044,56 @@ test('lattice reactivity path survives full voiding without NaN', () => {
   });
   assert(isFinite(voided.total) && voided.total < -0.5,
     `voided core must be finite and deeply subcritical, got ${voided.total}`);
+});
+
+// ============================================================================
+// OTSG boiling-section closure
+// ============================================================================
+
+test('boiling section mass-averages its quality, not its length', () => {
+  // At 165 bar the phases differ ~5x in density, so the mass sits well down
+  // the dome: the mass-averaged quality is 0.37 where the length average is
+  // 0.5. At 1 bar the ratio is ~1700x and it falls to ~0.13.
+  const at = (P: number) => {
+    const sat = saturationAtP(P);
+    return boilingMeanQuality(sat.v_f, sat.v_g);
+  };
+  assertClose(at(165e5), 0.371, 0.02, 'mass-averaged quality at 165 bar');
+  assert(at(1e5) < 0.2, `mass-averaged quality at 1 bar should be well under 0.2, got ${at(1e5).toFixed(3)}`);
+  // Falling pressure spreads the phases further apart, so the mass crowds
+  // further toward the liquid end
+  assert(at(1e5) < at(50e5) && at(50e5) < at(165e5), 'mean quality must fall with pressure');
+});
+
+test('mean quality tends to one half as the phases converge', () => {
+  // Near the critical point liquid and vapour have the same density, so
+  // there is no mass weighting left to do and the length average is right.
+  // This is why assuming 1/2 never looked wrong at PWR pressures.
+  const x = boilingMeanQuality(0.003, 0.003 * (1 + 1e-7));
+  assertClose(x, 0.5, 1e-3, 'mean quality at the critical limit');
+});
+
+test('a boiling section that stops short of dry steam is wetter still', () => {
+  const sat = saturationAtP(165e5);
+  const full = boilingMeanQuality(sat.v_f, sat.v_g, 1);
+  const half = boilingMeanQuality(sat.v_f, sat.v_g, 0.5);
+  const tiny = boilingMeanQuality(sat.v_f, sat.v_g, 0.01);
+  assert(half < full, `stopping at x=0.5 must be wetter than reaching dry steam (${half.toFixed(3)} vs ${full.toFixed(3)})`);
+  assert(tiny < half, `barely boiling must be wetter still (${tiny.toFixed(4)})`);
+  // ...and a section that barely boils is liquid
+  assertClose(boilingMeanVolume(sat.v_f, sat.v_g, 0), sat.v_f, 1e-9 * sat.v_f,
+    'a section with no boiling occupies the saturated-liquid volume');
+});
+
+test('mean volume and mean quality are the same statement', () => {
+  const sat = saturationAtP(80e5);
+  for (const xOut of [0.1, 0.4, 0.75, 1]) {
+    const v = boilingMeanVolume(sat.v_f, sat.v_g, xOut);
+    const x = boilingMeanQuality(sat.v_f, sat.v_g, xOut);
+    assertClose(sat.v_f + x * (sat.v_g - sat.v_f), v, 1e-12,
+      `v_f + x-bar*dv must reproduce v-bar at xOut=${xOut}`);
+    assert(v > sat.v_f && v <= sat.v_g, `v-bar must lie inside the dome at xOut=${xOut}`);
+  }
 });
 
 // ============================================================================
