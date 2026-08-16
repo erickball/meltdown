@@ -44,6 +44,7 @@ import {
   GasSpecies
 } from '../simulation/gas-properties';
 import { PidControllerConfig } from '../types';
+import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -124,6 +125,102 @@ export function buildPidConfigFromProps(props: Record<string, any>): PidControll
     invert: props.invert || undefined,
     powerLimit: actuatorKind === 'control-rods' ? (props.powerLimitPct ?? 100) / 100 : undefined,
   };
+}
+
+/**
+ * Every port of a heat exchanger, tube side and shell side.
+ *
+ * Physical considerations:
+ * - U-tube vertical: tube sheet at bottom, so both tube nozzles sit on the
+ *   bottom plenum; shell nozzles on the side and on the U-bend bulge
+ * - Straight/helical vertical: tube sheets at both ends, so the tube side
+ *   runs bottom to top; shell on the sides
+ * - Horizontal: the same logic rotated 90 degrees
+ *
+ * With more than one tube bundle in the shell, each bundle gets its OWN pair
+ * of tube nozzles, spaced across the shell in the same slots the renderer
+ * draws the bundles into, so a nozzle always sits on the bundle it opens
+ * into. The first bundle keeps the unsuffixed port IDs a single-bundle
+ * exchanger has always had (see hxBundleSuffix), so adding a bundle never
+ * invalidates a connection already drawn into the original one.
+ */
+export function heatExchangerPorts(opts: {
+  id: string;
+  isVertical: boolean;
+  hxType: string;
+  shellDiameter: number;
+  shellLength: number;
+  plenumLength: number;
+  bundleCount: number;
+}): Port[] {
+  const { id, isVertical, hxType, shellDiameter, shellLength, plenumLength } = opts;
+  const bundleCount = Math.max(1, Math.round(opts.bundleCount));
+  const halfW = (isVertical ? shellDiameter : shellLength) / 2;
+  const halfH = (isVertical ? shellLength : shellDiameter) / 2;
+  // Heat exchangers are passive - flow direction is determined by physics.
+  // Port names indicate typical flow direction but all are bidirectional.
+  const bulgeRadius = shellDiameter / 2; // Semi-circular bulge matching shell diameter
+
+  // Center of bundle b across the shell's transverse dimension, and the half
+  // width of the slot it occupies (which is what spaces a U-tube's two plenum
+  // nozzles inside its own slot).
+  const transverseHalf = isVertical ? halfW : halfH;
+  const slotHalf = transverseHalf / bundleCount;
+  const bundleCenter = (b: number) => -transverseHalf + (2 * b + 1) * slotHalf;
+  // U-tube nozzle offset: ±30% of the shell half-width for a single bundle
+  // (unchanged), ±60% of the slot half-width once bundles subdivide it.
+  const uTubeOffset = bundleCount > 1 ? slotHalf * 0.6 : transverseHalf * 0.3;
+
+  const ports: Port[] = [];
+  for (let b = 0; b < bundleCount; b++) {
+    const c = bundleCenter(b);
+    const sfx = hxBundleSuffix(b);
+    if (isVertical) {
+      if (hxType === 'utube') {
+        ports.push(
+          { id: `${id}-tube-1${sfx}`, position: { x: c - uTubeOffset, y: halfH + plenumLength }, direction: 'both' },
+          { id: `${id}-tube-2${sfx}`, position: { x: c + uTubeOffset, y: halfH + plenumLength }, direction: 'both' },
+        );
+      } else {
+        ports.push(
+          { id: `${id}-tube-bottom${sfx}`, position: { x: c, y: halfH + plenumLength }, direction: 'both' },
+          { id: `${id}-tube-top${sfx}`, position: { x: c, y: -halfH - plenumLength }, direction: 'both' },
+        );
+      }
+    } else {
+      if (hxType === 'utube') {
+        ports.push(
+          { id: `${id}-tube-1${sfx}`, position: { x: -halfW - plenumLength, y: c - uTubeOffset }, direction: 'both' },
+          { id: `${id}-tube-2${sfx}`, position: { x: -halfW - plenumLength, y: c + uTubeOffset }, direction: 'both' },
+        );
+      } else {
+        ports.push(
+          { id: `${id}-tube-left${sfx}`, position: { x: -halfW - plenumLength, y: c }, direction: 'both' },
+          { id: `${id}-tube-right${sfx}`, position: { x: halfW + plenumLength, y: c }, direction: 'both' },
+        );
+      }
+    }
+  }
+
+  // Shell-side ports: one pair for the whole shell, wherever the bundles sit
+  if (isVertical) {
+    ports.push(
+      { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
+      hxType === 'utube'
+        ? { id: `${id}-shell-2`, position: { x: 0, y: -halfH - bulgeRadius }, direction: 'both' }  // Top center of bulge
+        : { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'both' },
+    );
+  } else {
+    ports.push(
+      hxType === 'utube'
+        ? { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: halfH }, direction: 'both' }
+        : { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
+      hxType === 'utube'
+        ? { id: `${id}-shell-2`, position: { x: halfW + bulgeRadius, y: 0 }, direction: 'both' }  // Right center of bulge
+        : { id: `${id}-shell-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' },
+    );
+  }
+  return ports;
 }
 
 export class ConstructionManager {
@@ -593,61 +690,12 @@ export class ConstructionManager {
         const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
         const shellSideVolume = Math.max(0, shellVolume - Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * tubeCount);
 
-        // Calculate port positions based on HX type and orientation
-        // Physical considerations:
-        // - U-tube vertical: tube sheet at bottom, so tube inlet/outlet at bottom; shell inlet/outlet on sides
-        // - Straight vertical: tube sheets at both ends, so tube in at bottom, out at top; shell on sides
-        // - Helical vertical: similar to straight tube
-        // - Horizontal: rotate the logic 90 degrees
-        const displayWidth = isVertical ? shellDiam : shellLen;
-        const displayHeight = isVertical ? shellLen : shellDiam;
-        const halfW = displayWidth / 2;
-        const halfH = displayHeight / 2;
-
-        let hxPorts: Port[];
-
-        // Heat exchangers are passive - flow direction is determined by physics
-        // Port names indicate typical flow direction but all are bidirectional
-        // For U-tube: shell-2 is at top center (on the rounded bulge)
-        const bulgeRadius = shellDiam / 2; // Semi-circular bulge matching shell diameter
-        if (isVertical) {
-          if (hxType === 'utube') {
-            // U-tube vertical: tube connections at bottom (plenum), shell-1 on side, shell-2 at top center
-            hxPorts = [
-              { id: `${id}-tube-1`, position: { x: -halfW * 0.3, y: halfH + plenumLen }, direction: 'both' },
-              { id: `${id}-tube-2`, position: { x: halfW * 0.3, y: halfH + plenumLen }, direction: 'both' },
-              { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: 0, y: -halfH - bulgeRadius }, direction: 'both' } // Top center of bulge
-            ];
-          } else {
-            // Straight or helical vertical: tube at top/bottom; shell on sides
-            hxPorts = [
-              { id: `${id}-tube-bottom`, position: { x: 0, y: halfH + plenumLen }, direction: 'both' },
-              { id: `${id}-tube-top`, position: { x: 0, y: -halfH - plenumLen }, direction: 'both' },
-              { id: `${id}-shell-1`, position: { x: -halfW, y: halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: halfW, y: -halfH * 0.3 }, direction: 'both' }
-            ];
-          }
-        } else {
-          // Horizontal orientation
-          if (hxType === 'utube') {
-            // U-tube horizontal: tube connections at left (plenum), shell-1 on bottom, shell-2 at right center
-            hxPorts = [
-              { id: `${id}-tube-1`, position: { x: -halfW - plenumLen, y: -halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-tube-2`, position: { x: -halfW - plenumLen, y: halfH * 0.3 }, direction: 'both' },
-              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: halfH }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: halfW + bulgeRadius, y: 0 }, direction: 'both' } // Right center of bulge
-            ];
-          } else {
-            // Straight or helical horizontal: tube at left/right; shell on top/bottom
-            hxPorts = [
-              { id: `${id}-tube-left`, position: { x: -halfW - plenumLen, y: 0 }, direction: 'both' },
-              { id: `${id}-tube-right`, position: { x: halfW + plenumLen, y: 0 }, direction: 'both' },
-              { id: `${id}-shell-1`, position: { x: -halfW * 0.3, y: -halfH }, direction: 'both' },
-              { id: `${id}-shell-2`, position: { x: halfW * 0.3, y: halfH }, direction: 'both' }
-            ];
-          }
-        }
+        const bundleCount = Math.max(1, Math.round(props.bundleCount || 1));
+        const hxPorts = heatExchangerPorts({
+          id, isVertical, hxType,
+          shellDiameter: shellDiam, shellLength: shellLen,
+          plenumLength: plenumLen, bundleCount,
+        });
 
         const hx: HeatExchangerComponent = {
           id,
@@ -661,7 +709,8 @@ export class ConstructionManager {
           hxType: hxType,
           // Moving-boundary once-through boiler model (opt-in; see
           // docs/otsg-moving-boundary-design.md)
-          ...(props.tubeModel === 'moving-boundary' ? { tubeModel: 'moving-boundary' } : {}),
+          ...(props.tubeModel === 'moving-boundary' ? { tubeModel: 'moving-boundary' as const } : {}),
+          ...(bundleCount > 1 ? { bundleCount } : {}),
           primaryFluid: {
             ...defaultFluid,
             pressure: tubePressureRating * 100000
@@ -2752,6 +2801,54 @@ export class ConstructionManager {
   }
 
   /**
+   * Change how many tube bundles a heat exchanger's shell holds.
+   *
+   * Rebuilds the tube-side nozzles: each bundle needs its own pair, and the
+   * existing ones move as the bundles resize into narrower slots. The first
+   * bundle keeps its port IDs, so connections already drawn into it survive
+   * untouched; connections into bundles that no longer exist are dropped,
+   * because a connection to a missing port cannot be built into a flow path.
+   */
+  private setHeatExchangerBundleCount(hx: HeatExchangerComponent, bundleCount: number): void {
+    const isVertical = (hx.height ?? 0) >= (hx.width ?? 0);
+    const shellDiameter = isVertical ? hx.width : hx.height;
+    const shellLength = isVertical ? hx.height : hx.width;
+    const oldConnections = new Map(hx.ports.map(p => [p.id, p.connectedTo]));
+
+    hx.bundleCount = bundleCount > 1 ? bundleCount : undefined;
+    hx.ports = heatExchangerPorts({
+      id: hx.id, isVertical, hxType: hx.hxType || 'utube',
+      shellDiameter, shellLength,
+      plenumLength: hx.plenumLength ?? 0.8,
+      bundleCount,
+    });
+    // Carry each surviving port's connection over to its rebuilt twin
+    for (const port of hx.ports) {
+      const previous = oldConnections.get(port.id);
+      if (previous) port.connectedTo = previous;
+    }
+
+    const live = new Set(hx.ports.map(p => p.id));
+    const orphaned = this.plantState.connections.filter(conn =>
+      (conn.fromComponentId === hx.id && !live.has(conn.fromPortId)) ||
+      (conn.toComponentId === hx.id && !live.has(conn.toPortId))
+    );
+    for (const conn of orphaned) {
+      const otherId = conn.fromComponentId === hx.id ? conn.toComponentId : conn.fromComponentId;
+      const otherPortId = conn.fromComponentId === hx.id ? conn.toPortId : conn.fromPortId;
+      const otherPort = this.plantState.components.get(otherId)?.ports.find(p => p.id === otherPortId);
+      if (otherPort) otherPort.connectedTo = undefined;
+    }
+    if (orphaned.length > 0) {
+      this.plantState.connections = this.plantState.connections.filter(c => !orphaned.includes(c));
+      console.warn(`[Construction] ${hx.id}: now ${bundleCount} tube bundle(s) - removed ` +
+        `${orphaned.length} connection(s) to bundles that no longer exist`);
+    }
+    console.log(`[Construction] ${hx.id}: ${bundleCount} tube bundle(s), ` +
+      `${hx.ports.length} ports`);
+  }
+
+  /**
    * Delete a specific connection
    */
   deleteConnection(fromComponentId: string, toComponentId: string): boolean {
@@ -3021,6 +3118,12 @@ export class ConstructionManager {
     }
     if (properties.tubeOD !== undefined) {
       component.tubeOD = properties.tubeOD / 1000; // mm to m
+    }
+    if (properties.bundleCount !== undefined && component.type === 'heatExchanger') {
+      const newCount = Math.max(1, Math.round(properties.bundleCount));
+      if (newCount !== hxBundleCount(component as { bundleCount?: number })) {
+        this.setHeatExchangerBundleCount(component as HeatExchangerComponent, newCount);
+      }
     }
 
     // Condenser specific

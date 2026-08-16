@@ -212,8 +212,17 @@ export interface HeatExchangerComponent extends ComponentBase {
   width: number;
   height: number;
   hxType?: 'utube' | 'straight' | 'helical';  // Heat exchanger tube configuration
+  tubeModel?: 'lumped' | 'moving-boundary';   // Tube-side model (see docs/otsg-moving-boundary-design.md)
+  /** Number of independent tube bundles sharing this shell (default 1). Each
+   *  bundle is its own flow path with its own pair of ports, its own tube
+   *  metal, and - for moving-boundary tubes - its own moving partition; they
+   *  share the shell-side fluid and split the shell flow between them. */
+  bundleCount?: number;
   primaryFluid?: Fluid;
   secondaryFluid?: Fluid;
+  /** Per-bundle tube-side fluid for rendering, index 0 = bundle 1. Present
+   *  only when bundleCount > 1; primaryFluid stays the first bundle. */
+  bundleFluids?: Fluid[];
   tubeCount: number;
   pressureRating?: number;       // Shell-side design pressure (bar) - used to calculate shell wall thickness
   tubePressureRating?: number;   // Tube-side design pressure (bar) - used to calculate tube wall thickness

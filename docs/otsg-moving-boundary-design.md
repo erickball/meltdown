@@ -157,6 +157,32 @@ clamp.
   one). The evap/SH split, its sizing lore, and the branch-selection pump
   trims all become obsolete.
 
+## 7a. Several bundles in one shell
+
+`bundleCount` puts N independent tube bundles inside a single shell. Each
+bundle is a complete copy of everything above — its own flow node, its own
+tube metal (three section nodes when the tube model is moving-boundary), its
+own partition, its own burst boundary — and its own pair of connection
+points, so a shell can feed two separate steam headers or take feedwater from
+two trains. What they share is the shell fluid.
+
+The split is a SUBDIVISION, not a resizing. `tubeCount` remains the
+exchanger's total, and tube volume, flow area, heat area and metal mass are
+divided evenly between the bundles, so the shell holds the same tubing
+whatever the bundle count. Each bundle then sees `gasShare = 1/N` of the
+shell stream: equal bundles occupy equal shares of the shell's free-flow
+area, so they pass equal shares of its mass flow at the same velocity. The
+gas film coefficient is therefore unchanged and only the carrying capacity
+`mdot*cp` each bundle marches against is divided; the duties sum back onto
+the shell node. scripts/test-hx-bundles.ts runs the same boiler as 1 bundle
+and as 2 and holds them to the same trajectory.
+
+Naming (src/simulation/hx-bundles.ts): the FIRST bundle keeps every name a
+single-bundle exchanger has always had (`id-tube`, `id-tubes`, ports
+`id-tube-top` …); bundles 2..N suffix `-b{n}`. That asymmetry is deliberate —
+adding a bundle to an existing exchanger must not rename anything, or drawn
+connections and saved plants would break.
+
 ## 8. Test plan
 
 1. Unit: volume-closure solve round-trips (P recovered from constructed

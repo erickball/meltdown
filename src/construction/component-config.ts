@@ -527,6 +527,13 @@ export const componentDefinitions: Record<string, {
         'component can turn feedwater into superheated steam against a counterflow hot ' +
         'stream. Use for OTSGs (helical HTGR steam generators); leave Lumped for ' +
         'condensers, feedwater heaters, and flooded U-tube SGs.' },
+      { name: 'bundleCount', type: 'number', label: 'Tube Bundles', default: 1, min: 1, max: 8, step: 1,
+        help: 'Independent tube bundles sharing one shell. Each bundle gets its own pair of ' +
+          'tube-side connection points (top and bottom for straight/helical, both on the ' +
+          'plenum for U-tube), its own tube metal, and its own boiling partition, and takes ' +
+          'an equal share of the shell flow. The tube count below is the TOTAL and is split ' +
+          'evenly between bundles, so adding bundles subdivides the exchanger rather than ' +
+          'enlarging it. Use this for an OTSG whose bundles feed separate steam headers.' },
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'vertical', options: [
         { value: 'vertical', label: 'Vertical' },
         { value: 'horizontal', label: 'Horizontal' }

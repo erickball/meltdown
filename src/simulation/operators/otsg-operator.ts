@@ -165,9 +165,13 @@ export class OtsgRateOperator implements RateOperator {
       // Counterflow: gas physically meets the superheat section first, and
       // each section has its OWN metal - one shared wall cannot superheat
       // (boiling pins it to T_sat and clamps every other section's wall).
+      // Parallel bundles in one shell each take their share of the gas
+      // stream (equal areas -> equal flows), so each marches against its own
+      // mdot*cp. Their duties then sum onto the shell node below, which is
+      // the same total the single-bundle case delivers.
       const march = marchCounterflowGas(
         TGasIn,
-        this.gasMcp(shell, state),
+        this.gasMcp(shell, state) * (cfg.gasShare ?? 1),
         [
           { hA: hGas * ev.sections[2].area, TWall: metal3.temperature },
           { hA: hGas * ev.sections[1].area, TWall: metal2.temperature },

@@ -27,6 +27,7 @@ import {
   mixtureCv,
 } from './simulation/gas-properties';
 import { pumpHeadPressure, pumpHeadFraction } from './simulation/operators/pump-curve';
+import { hxBundleCount, hxTubeNodeIds } from './simulation/hx-bundles';
 import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
 
@@ -1566,15 +1567,33 @@ export function updateComponentDetail(
       }
     }
 
-    if (tubeNode) {
+    // One section per tube bundle: separate bundles are separate flow paths
+    // and can be in completely different states (one boiling, one drained),
+    // so showing only the first would hide half the exchanger.
+    const bundleCount = hxBundleCount(component as { bundleCount?: number });
+    const bundleNodes = bundleCount > 1
+      ? hxTubeNodeIds(componentId, bundleCount).map(id => simState.flowNodes.get(id))
+      : [tubeNode];
+    bundleNodes.forEach((node, b) => {
+      if (!node) return;
+      const title = bundleCount > 1 ? `Primary (Tube Bundle ${b + 1})` : 'Primary (Tube Side)';
       html += '<div class="detail-section">';
-      html += '<div class="detail-section-title">Primary (Tube Side)</div>';
-      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(tubeNode.fluid.temperature - 273).toFixed(0)} C</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(tubeNode.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(tubeNode.fluid.pressure, (component.tubePressureRating ?? component.pressureRating) as number | undefined)}</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${tubeNode.fluid.phase}</span></div>`;
-      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${tubeNode.fluid.mass.toFixed(0)} kg</span></div>`;
+      html += `<div class="detail-section-title">${title}</div>`;
+      html += `<div class="detail-row"><span class="detail-label">Temperature:</span><span class="detail-value">${(node.fluid.temperature - 273).toFixed(0)} C</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Pressure:</span><span class="detail-value">${(node.fluid.pressure / 1e5).toFixed(2)} bar${designPressureNote(node.fluid.pressure, (component.tubePressureRating ?? component.pressureRating) as number | undefined)}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Phase:</span><span class="detail-value">${node.fluid.phase}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Mass:</span><span class="detail-value">${node.fluid.mass.toFixed(0)} kg</span></div>`;
+      // Moving-boundary boilers: where the phase boundaries currently sit
+      const ev = node.otsg?.lastEval;
+      if (ev) {
+        const pct = ev.lengthFracs.map(f => (100 * f).toFixed(0));
+        html += `<div class="detail-row"><span class="detail-label" title="Fraction of the tube length that is subcooled water / boiling / superheated steam">Sections:</span>` +
+          `<span class="detail-value">${pct[0]}% / ${pct[1]}% / ${pct[2]}%</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label" title="Steam outlet temperature; superheat is the margin above saturation">Steam out:</span>` +
+          `<span class="detail-value">${(ev.T3 - 273).toFixed(0)} C (+${Math.max(0, ev.T3 - ev.TSat).toFixed(0)} K SH)</span></div>`;
+      }
       html += '</div>';
-    }
+    });
 
     if (shellNode) {
       html += '<div class="detail-section">';

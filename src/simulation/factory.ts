@@ -28,6 +28,8 @@ import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
+import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId } from './hx-bundles';
+import { assignFlowConnectionIds } from './connection-ids';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -1038,12 +1040,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
 
     // Create thermal nodes and shell-side flow node for heat exchangers
     if (component.type === 'heatExchanger') {
-      const hxThermalNode = createHeatExchangerThermalNode(component);
-      state.thermalNodes.set(hxThermalNode.id, hxThermalNode);
-
       // Create shell-side flow node for heat exchanger
       const shellNode = createHeatExchangerShellNode(component);
       state.flowNodes.set(shellNode.id, shellNode);
+
+      // Bundles beyond the first: the first one came out of the flow-node pass
+      // above (and owns simNodeId), the rest are built here. Each is a fully
+      // independent tube-side flow path sharing this shell.
+      const nBundles = hxBundleCount(component as any);
+      for (let b = 1; b < nBundles; b++) {
+        const bundleNode = createHeatExchangerTubeNode(component, b);
+        state.flowNodes.set(bundleNode.id, bundleNode);
+      }
+      for (let b = 0; b < nBundles; b++) {
+        const metal = createHeatExchangerThermalNode(component, b);
+        state.thermalNodes.set(metal.id, metal);
+      }
 
       // Create convection connections for tube and shell sides
       // The HX creates two flow nodes: id-tube and id-shell
@@ -1056,72 +1068,87 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const tubeOD = hxComp.tubeOD || 0.022; // m
       const tubeLengthFactor = hxComp.hxType === 'utube' ? 2.1 : 1.0;
       const tubeLength = tubeLengthFactor * Math.max(1, hxHeight - (hxComp.plenumLength ?? 0.5));
-      const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000);
+      // Per-bundle share of the tubing. The tube count is the exchanger total,
+      // so N bundles each carry 1/N of the area, the metal and the shell flow.
+      const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000) / nBundles;
 
-      // Moving-boundary once-through SG (docs/otsg-moving-boundary-design.md):
-      // the tube node carries a sectioned subcooled/boiling/superheat model,
-      // and OtsgRateOperator replaces BOTH bulk convection connections with
-      // the counterflow gas march + per-section wall exchange. Opt-in so
-      // every existing plant is untouched.
-      if (hxComp.tubeModel === 'moving-boundary') {
-        const tubeNode = state.flowNodes.get(`${id}-tube`);
-        if (!tubeNode) {
-          throw new Error(`[Factory] ${id}: tubeModel 'moving-boundary' but no tube node was built`);
-        }
-        // Initial partition: seed modest subcooled and superheat sections and
-        // let the interface dynamics find their real sizes - the partition
-        // self-corrects within tens of seconds because the fluxes depend on
-        // heat and flow, not on this guess.
-        // The metal is split into three FIXED thermal nodes, one per water
-        // section. One shared metal node cannot work: the boiling section's
-        // enormous film coefficient pins it within a few K of T_sat, which
-        // clamps the superheat section's wall to T_sat too - superheat can
-        // then never develop no matter how the water partitions. The masses
-        // are fixed thirds (metal does not move); only each section's AREA
-        // tracks the moving boundaries.
-        const oneMetal = state.thermalNodes.get(`${id}-tubes`);
-        if (!oneMetal) {
-          throw new Error(`[Factory] ${id}: tube metal node missing for moving-boundary split`);
-        }
-        state.thermalNodes.delete(`${id}-tubes`);
-        const metalIds: [string, string, string] = [`${id}-tubes-s1`, `${id}-tubes-s2`, `${id}-tubes-s3`];
-        const metalLabels = ['Economizer', 'Evaporator', 'Superheater'];
-        metalIds.forEach((mid, i) => {
-          state.thermalNodes.set(mid, {
-            ...oneMetal,
-            id: mid,
-            label: `${component.label || id} ${metalLabels[i]} Tubes`,
-            mass: oneMetal.mass / 3,
-            surfaceArea: oneMetal.surfaceArea / 3,
+      for (let b = 0; b < nBundles; b++) {
+        const tubeNodeId = hxTubeNodeId(id, b);
+        const metalId = hxTubeMetalId(id, b);
+
+        // Moving-boundary once-through SG (docs/otsg-moving-boundary-design.md):
+        // the tube node carries a sectioned subcooled/boiling/superheat model,
+        // and OtsgRateOperator replaces BOTH bulk convection connections with
+        // the counterflow gas march + per-section wall exchange. Opt-in so
+        // every existing plant is untouched.
+        if (hxComp.tubeModel === 'moving-boundary') {
+          const tubeNode = state.flowNodes.get(tubeNodeId);
+          if (!tubeNode) {
+            throw new Error(`[Factory] ${id}: tubeModel 'moving-boundary' but no tube node was built`);
+          }
+          // Initial partition: seed modest subcooled and superheat sections and
+          // let the interface dynamics find their real sizes - the partition
+          // self-corrects within tens of seconds because the fluxes depend on
+          // heat and flow, not on this guess.
+          // The metal is split into three FIXED thermal nodes, one per water
+          // section. One shared metal node cannot work: the boiling section's
+          // enormous film coefficient pins it within a few K of T_sat, which
+          // clamps the superheat section's wall to T_sat too - superheat can
+          // then never develop no matter how the water partitions. The masses
+          // are fixed thirds (metal does not move); only each section's AREA
+          // tracks the moving boundaries.
+          const oneMetal = state.thermalNodes.get(metalId);
+          if (!oneMetal) {
+            throw new Error(`[Factory] ${id}: tube metal node missing for moving-boundary split`);
+          }
+          state.thermalNodes.delete(metalId);
+          const metalIds: [string, string, string] = [`${metalId}-s1`, `${metalId}-s2`, `${metalId}-s3`];
+          const metalLabels = ['Economizer', 'Evaporator', 'Superheater'];
+          const bundleTag = nBundles > 1 ? ` Bundle ${b + 1}` : '';
+          metalIds.forEach((mid, i) => {
+            state.thermalNodes.set(mid, {
+              ...oneMetal,
+              id: mid,
+              label: `${component.label || id}${bundleTag} ${metalLabels[i]} Tubes`,
+              mass: oneMetal.mass / 3,
+              surfaceArea: oneMetal.surfaceArea / 3,
+            });
           });
-        });
-        tubeNode.otsg = {
-          m1: 0.2 * tubeNode.fluid.mass,
-          m3: 0.01 * tubeNode.fluid.mass,
-          heatArea: tubeArea,
-          shellNodeId: `${id}-shell`,
-          metalNodeIds: metalIds,
-        };
-        console.log(`[Factory] ${id}: moving-boundary OTSG tube side ` +
-          `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory)`);
-      } else {
+          tubeNode.otsg = {
+            m1: 0.2 * tubeNode.fluid.mass,
+            m3: 0.01 * tubeNode.fluid.mass,
+            heatArea: tubeArea,
+            shellNodeId: `${id}-shell`,
+            metalNodeIds: metalIds,
+            // Parallel bundles split the shell stream between them. Equal
+            // bundles occupy equal shares of the shell's free-flow area and so
+            // pass equal shares of its mass flow - the gas velocity (and with it
+            // the film coefficient) is the same for each, only the carrying
+            // capacity mdot*cp each bundle marches against is divided.
+            gasShare: 1 / nBundles,
+          };
+          console.log(`[Factory] ${tubeNodeId}: moving-boundary OTSG tube side ` +
+            `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory` +
+            `${nBundles > 1 ? `, ${(100 / nBundles).toFixed(0)}% of the shell flow` : ''})`);
+        } else {
 
-      state.convectionConnections.push({
-        id: `convection-${id}-tube`,
-        thermalNodeId: `${id}-tubes`,
-        flowNodeId: `${id}-tube`,
-        surfaceArea: tubeArea * 0.9, // inner surface slightly smaller than OD surface
-        characteristicDiameter: tubeOD,
-      });
-      state.convectionConnections.push({
-        id: `convection-${id}-shell`,
-        thermalNodeId: `${id}-tubes`,
-        flowNodeId: `${id}-shell`,
-        surfaceArea: tubeArea,
-        characteristicDiameter: tubeOD,
-        tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
-        tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
-      });
+        state.convectionConnections.push({
+          id: `convection-${tubeNodeId}`,
+          thermalNodeId: metalId,
+          flowNodeId: tubeNodeId,
+          surfaceArea: tubeArea * 0.9, // inner surface slightly smaller than OD surface
+          characteristicDiameter: tubeOD,
+        });
+        state.convectionConnections.push({
+          id: `convection-${metalId}-shell`,
+          thermalNodeId: metalId,
+          flowNodeId: `${id}-shell`,
+          surfaceArea: tubeArea,
+          characteristicDiameter: tubeOD,
+          tubeBottomElevation: 0.3, // m - tubes start slightly above shell bottom
+          tubeHeight: hxHeight - 0.6, // m - tubes extend through most of shell height
+        });
+        }
       }
     }
 
@@ -1249,10 +1276,22 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     }
   }
 
-  // Second pass: Create flow connections from plant connections
+  // Second pass: Create flow connections from plant connections.
+  // Names come from assignFlowConnectionIds so that two connections joining
+  // the same pair of components - a feedwater header feeding two tube bundles
+  // of one exchanger - cannot end up sharing one id and aliasing every lookup
+  // that resolves a connection by id (pumps, valves, controllers).
+  const connectionIds = assignFlowConnectionIds(plantState.connections);
+  let connectionIndex = -1;
   for (const connection of plantState.connections) {
+    connectionIndex++;
     const flowConnection = createFlowConnectionFromPlantConnection(connection, plantState);
     if (flowConnection) {
+      if (flowConnection.id !== connectionIds[connectionIndex]) {
+        console.log(`[Factory] '${flowConnection.id}' is taken by another connection between ` +
+          `the same components - naming this one '${connectionIds[connectionIndex]}'`);
+        flowConnection.id = connectionIds[connectionIndex];
+      }
       state.flowConnections.push(flowConnection);
 
       // Link pump to its OUTLET flow connection (where pump is the FROM component)
@@ -1775,48 +1814,11 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
-    case 'heatExchanger': {
-      const hx = component as any;
-      // Heat exchangers create TWO flow nodes - tube side and shell side
-      // Tube volume scales with tube count/size, not a fixed constant - otherwise a HX
-      // sized for a small or large plant would have identical (and often unrealistically
-      // tiny) primary-side inventory, which starves residence time and destabilizes the solver.
-      const tubeOD = hx.tubeOD || 0.02;                 // m
-      const tubeEffectiveLength = hx.hxType === 'straight' ? (hx.height || 10) : 2 * (hx.height || 10); // u-tube/helical go up and back down
-      const tubeVolume = Math.max(1, hx.tubeCount * Math.PI * Math.pow(tubeOD / 2, 2) * tubeEffectiveLength);
-      const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
-      const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
-      // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
-      // (initialNcg = tube side, partial pressures in bar)
-      // Honor the declared phase INCLUDING two-phase: a once-through boiler
-      // initialized liquid-full instead of at its specified quality starts
-      // ~8 t heavy and has to boil the excess off through a violent
-      // pressure transient before it can reach any operating point.
-      const declaredPhase = hx.tubeFluid?.phase ?? hx.primaryFluid?.phase;
-      const tubePhase = declaredPhase === 'vapor' ? 'vapor'
-        : declaredPhase === 'two-phase' ? 'two-phase' : 'liquid';
-      const tubeQuality = tubePhase === 'vapor' ? 1
-        : tubePhase === 'two-phase' ? (hx.tubeFluid?.quality ?? hx.primaryFluid?.quality ?? 0.1) : 0;
-
-      // Return tube-side node, shell-side is created separately
-      return {
-        id: `${component.id}-tube`,
-        label: `${component.label || 'HX'} Tube`,
-        fluid: createFluidState(
-          tubeTemp, tubePressure, tubePhase, tubeQuality, tubeVolume, hx.initialNcg
-        ),
-        volume: tubeVolume,
-        // Tube-side geometry from the actual bundle, not constants. flowArea
-        // sets the velocity the convection correlation sees (Re, and h via
-        // Nu ~ Re^0.8), so a fixed 2 m² made every bundle - 200 tubes or 5000 -
-        // behave identically. Bore is OD minus two wall thicknesses; the wall
-        // comes from the tube-side rating the same way the burst model sizes it.
-        hydraulicDiameter: hxTubeBore(hx, tubeOD),
-        flowArea: hx.tubeCount * Math.PI * Math.pow(hxTubeBore(hx, tubeOD) / 2, 2),
-        height: hx.height,
-        elevation,
-      };
-    }
+    case 'heatExchanger':
+      // Heat exchangers create a shell-side node plus one node PER TUBE BUNDLE.
+      // The first bundle comes back here (it is the node the component's
+      // simNodeId points at); the rest are built alongside the shell node.
+      return createHeatExchangerTubeNode(component, 0);
 
     case 'turbine-generator': {
       const turbineGen = component as any;
@@ -2738,20 +2740,78 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
 /**
  * Create thermal node for heat exchanger tubes
  */
-function createHeatExchangerThermalNode(component: PlantComponent): ThermalNode {
+/** Tube-metal thermal node for bundle `b` (0-based). The exchanger's metal is
+ *  split evenly between its bundles, like the tubing it represents. */
+function createHeatExchangerThermalNode(component: PlantComponent, b: number): ThermalNode {
   const hx = component as any;
+  const nBundles = hxBundleCount(hx);
 
   return {
-    id: `${component.id}-tubes`,
-    label: `${component.label || 'HX'} Tubes`,
+    id: hxTubeMetalId(component.id, b),
+    label: nBundles > 1
+      ? `${component.label || 'HX'} Bundle ${b + 1} Tubes`
+      : `${component.label || 'HX'} Tubes`,
     temperature: 570,
-    mass: 50000,
+    mass: 50000 / nBundles,
     specificHeat: 500,
     thermalConductivity: 20,
     characteristicLength: 0.001,
-    surfaceArea: (hx.tubeCount || 1000) * 0.5,
+    surfaceArea: (hx.tubeCount || 1000) * 0.5 / nBundles,
     heatGeneration: 0,
     maxTemperature: 900,
+  };
+}
+
+/**
+ * Create the tube-side flow node for bundle `b` (0-based) of a heat exchanger.
+ *
+ * The exchanger's tube count, tube volume and flow area are TOTALS split
+ * evenly between bundles, so adding bundles subdivides the exchanger instead
+ * of enlarging it - the shell holds the same amount of tubing either way, and
+ * the shell-side blockage check (below) stays consistent with it.
+ */
+function createHeatExchangerTubeNode(component: PlantComponent, b: number): FlowNode {
+  const hx = component as any;
+  const elevation = hx.elevation || 0;
+  const nBundles = hxBundleCount(hx);
+  // Tube volume scales with tube count/size, not a fixed constant - otherwise a HX
+  // sized for a small or large plant would have identical (and often unrealistically
+  // tiny) primary-side inventory, which starves residence time and destabilizes the solver.
+  const tubeOD = hx.tubeOD || 0.02;                 // m
+  const tubeEffectiveLength = hx.hxType === 'straight' ? (hx.height || 10) : 2 * (hx.height || 10); // u-tube/helical go up and back down
+  const tubeVolume = Math.max(1, hx.tubeCount * Math.PI * Math.pow(tubeOD / 2, 2) * tubeEffectiveLength) / nBundles;
+  const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
+  const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
+  // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
+  // (initialNcg = tube side, partial pressures in bar)
+  // Honor the declared phase INCLUDING two-phase: a once-through boiler
+  // initialized liquid-full instead of at its specified quality starts
+  // ~8 t heavy and has to boil the excess off through a violent
+  // pressure transient before it can reach any operating point.
+  const declaredPhase = hx.tubeFluid?.phase ?? hx.primaryFluid?.phase;
+  const tubePhase = declaredPhase === 'vapor' ? 'vapor'
+    : declaredPhase === 'two-phase' ? 'two-phase' : 'liquid';
+  const tubeQuality = tubePhase === 'vapor' ? 1
+    : tubePhase === 'two-phase' ? (hx.tubeFluid?.quality ?? hx.primaryFluid?.quality ?? 0.1) : 0;
+
+  return {
+    id: hxTubeNodeId(component.id, b),
+    label: nBundles > 1
+      ? `${component.label || 'HX'} Tube Bundle ${b + 1}`
+      : `${component.label || 'HX'} Tube`,
+    fluid: createFluidState(
+      tubeTemp, tubePressure, tubePhase, tubeQuality, tubeVolume, hx.initialNcg
+    ),
+    volume: tubeVolume,
+    // Tube-side geometry from the actual bundle, not constants. flowArea
+    // sets the velocity the convection correlation sees (Re, and h via
+    // Nu ~ Re^0.8), so a fixed 2 m² made every bundle - 200 tubes or 5000 -
+    // behave identically. Bore is OD minus two wall thicknesses; the wall
+    // comes from the tube-side rating the same way the burst model sizes it.
+    hydraulicDiameter: hxTubeBore(hx, tubeOD),
+    flowArea: (hx.tubeCount / nBundles) * Math.PI * Math.pow(hxTubeBore(hx, tubeOD) / 2, 2),
+    height: hx.height,
+    elevation,
   };
 }
 
@@ -2909,6 +2969,24 @@ function createTurbineExtractionNodes(component: PlantComponent): FlowNode[] {
 }
 
 /**
+ * Tube-side flow node a heat-exchanger tube port opens into. Multi-bundle
+ * exchangers suffix their tube ports with `-b{n}`; an unsuffixed port is the
+ * first bundle, which is also every single-bundle exchanger's only node.
+ */
+function hxTubePortNodeId(component: PlantComponent, portId: string): string {
+  const count = hxBundleCount(component as any);
+  const b = hxBundleIndexFromPortId(portId);
+  if (b >= count) {
+    throw new Error(
+      `[Factory] Heat exchanger '${component.id}': port '${portId}' names tube bundle ` +
+      `${b + 1}, but the exchanger only has ${count}. The connection was made against a ` +
+      `different bundle count - re-place the connection or restore the bundle count.`
+    );
+  }
+  return hxTubeNodeId(component.id, b);
+}
+
+/**
  * Create a flow connection from a plant connection
  */
 function createFlowConnectionFromPlantConnection(
@@ -2927,17 +3005,18 @@ function createFlowConnectionFromPlantConnection(
   let fromNodeId = connection.fromComponentId;
   let toNodeId = connection.toComponentId;
 
-  // Handle heat exchanger port mappings
+  // Handle heat exchanger port mappings. Tube ports of a multi-bundle
+  // exchanger carry a `-b{n}` suffix naming which bundle they open into.
   if (fromComponent.type === 'heatExchanger') {
     if (connection.fromPortId.includes('tube')) {
-      fromNodeId = `${connection.fromComponentId}-tube`;
+      fromNodeId = hxTubePortNodeId(fromComponent, connection.fromPortId);
     } else if (connection.fromPortId.includes('shell')) {
       fromNodeId = `${connection.fromComponentId}-shell`;
     }
   }
   if (toComponent.type === 'heatExchanger') {
     if (connection.toPortId.includes('tube')) {
-      toNodeId = `${connection.toComponentId}-tube`;
+      toNodeId = hxTubePortNodeId(toComponent, connection.toPortId);
     } else if (connection.toPortId.includes('shell')) {
       toNodeId = `${connection.toComponentId}-shell`;
     }
@@ -3829,28 +3908,46 @@ function initializeBurstStates(
         }
       }
 
-      // Tube side burst state (uses gauge pressure vs shell)
-      const tubeNodeId = `${compId}-tube`;
+      // Tube side burst state (uses gauge pressure vs shell) - one per bundle,
+      // each with its own margin and its own metal, so bundles fail
+      // independently the way separate tube bundles physically do.
       const tubePressureRating = hx.tubePressureRating || hx.pressureRating || pressureRating;
       const tubeDesignPressure = tubePressureRating * 1e5;
-      const tubeRandomMargin = simulationRandom() * 0.4;
-      const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
 
       // For HX tubes, use tubeOD or default to 19mm (3/4" standard)
       const tubeOD = hx.tubeOD || 0.019;
-      const tubeThickness = calculateThicknessFromPressure(tubePressureRating, tubeOD);
-      const tubeCollapsePressure = calculateCollapsePressure(tubeOD, tubeThickness, tubeRandomMargin);
+      const nBundles = hxBundleCount(hx);
 
-      if (state.flowNodes.has(tubeNodeId)) {
+      for (let b = 0; b < nBundles; b++) {
+        const tubeNodeId = hxTubeNodeId(compId, b);
+        if (!state.flowNodes.has(tubeNodeId)) continue;
+        const tubeRandomMargin = simulationRandom() * 0.4;
+        const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
+        const tubeThickness = calculateThicknessFromPressure(tubePressureRating, tubeOD);
+        const tubeCollapsePressure = calculateCollapsePressure(tubeOD, tubeThickness, tubeRandomMargin);
+        // Name this bundle's metal explicitly. The generic `${id}-tubes`
+        // fallback in the burst operator cannot pick the right one when there
+        // are several - and finds nothing at all for a moving-boundary bundle,
+        // whose metal is split into economizer/evaporator/superheater nodes.
+        // Of those three the superheater runs hottest - it faces the incoming
+        // hot stream and has no boiling to hold it near T_sat - so it is the
+        // section that governs creep rupture.
+        const metalId = hxTubeMetalId(compId, b);
+        const wallNodeId = state.thermalNodes.has(metalId) ? metalId
+          : state.thermalNodes.has(`${metalId}-s3`) ? `${metalId}-s3`
+          : undefined;
         state.burstStates.set(tubeNodeId, {
           nodeId: tubeNodeId,
           componentId: compId,
-          componentLabel: `${component.label || 'HX'} (tubes)`,
+          componentLabel: nBundles > 1
+            ? `${component.label || 'HX'} (bundle ${b + 1} tubes)`
+            : `${component.label || 'HX'} (tubes)`,
           designPressure: tubeDesignPressure,
           burstPressure: tubeBurstPressure,
           collapsePressure: tubeCollapsePressure,
           randomMargin: tubeRandomMargin,
           material,
+          wallNodeId,
           isBurst: false,
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,

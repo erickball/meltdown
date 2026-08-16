@@ -28,6 +28,9 @@ import {
   preloadWaterProperties,
   setSeparationDebug,
   getTurbineCondenserState,
+  hxBundleCount,
+  hxTubeNodeIds,
+  assignFlowConnectionIds,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -132,10 +135,17 @@ function getPidDynamicChoices(plantState: PlantState): Record<string, Array<{ id
       case 'reactorVessel':
         flowNodes.push({ id, label: `${label} (downcomer)` });
         break;
-      case 'heatExchanger':
-        flowNodes.push({ id: `${id}-tube`, label: `${label} (tube/primary)` });
+      case 'heatExchanger': {
+        const nBundles = hxBundleCount(comp as any);
+        hxTubeNodeIds(id, nBundles).forEach((nodeId, b) => {
+          flowNodes.push({
+            id: nodeId,
+            label: nBundles > 1 ? `${label} (tube bundle ${b + 1})` : `${label} (tube/primary)`,
+          });
+        });
         flowNodes.push({ id: `${id}-shell`, label: `${label} (shell/secondary)` });
         break;
+      }
       case 'valve':
         valves.push({ id, label });
         break;
@@ -148,16 +158,22 @@ function getPidDynamicChoices(plantState: PlantState): Record<string, Array<{ id
     }
   }
 
-  for (const conn of plantState.connections.values()) {
+  // Ids from the factory's own naming rule, so a second connection between
+  // the same pair of components (two bundles of one heat exchanger fed from
+  // one header) is offered under the id it will actually have.
+  const connectionIds = assignFlowConnectionIds(plantState.connections);
+  plantState.connections.forEach((conn, i) => {
     const fromComp = plantState.components.get(conn.fromComponentId);
     const toComp = plantState.components.get(conn.toComponentId);
     const fromLabel = fromComp?.label || conn.fromComponentId;
     const toLabel = toComp?.label || conn.toComponentId;
     flowConnections.push({
-      id: `flow-${conn.fromComponentId}-${conn.toComponentId}`,
-      label: `${fromLabel} → ${toLabel}`,
+      id: connectionIds[i],
+      label: `${fromLabel} → ${toLabel}` +
+        (connectionIds[i] === `flow-${conn.fromComponentId}-${conn.toComponentId}`
+          ? '' : ` (${getPortTypeLabel(conn.fromPortId, conn.fromComponentId)})`),
     });
-  }
+  });
 
   return { flowNodes, valves, pumps, turbines, flowConnections };
 }
@@ -168,9 +184,19 @@ function getPidDynamicChoices(plantState: PlantState): Record<string, Array<{ id
  */
 function getPortTypeLabel(portId: string, componentId: string): string {
   // Remove the component ID prefix to get the port suffix
-  const suffix = portId.startsWith(componentId + '-')
+  let suffix = portId.startsWith(componentId + '-')
     ? portId.slice(componentId.length + 1)
     : portId;
+
+  // Multi-bundle heat exchangers suffix their tube ports with the bundle they
+  // open into ("tube-top-b2"); name the bundle rather than leaving "B2" on
+  // the end of the label.
+  let bundleNote = '';
+  const bundleMatch = /^(.*)-b(\d+)$/.exec(suffix);
+  if (bundleMatch) {
+    suffix = bundleMatch[1];
+    bundleNote = ` (Bundle ${bundleMatch[2]})`;
+  }
 
   // Map common suffixes to readable labels
   // Only use "Inlet"/"Outlet" for ports that actually have directional function (pumps, turbines, etc.)
@@ -213,7 +239,7 @@ function getPortTypeLabel(portId: string, componentId: string): string {
     'outlet-right': 'Right',
   };
 
-  return typeMap[suffix] || suffix.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  return (typeMap[suffix] || suffix.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase())) + bundleNote;
 }
 
 
@@ -3206,6 +3232,29 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // instead of defaulting to steam-white
         component.primaryFluid.ncg = primaryNode.fluid.ncg;
         component.primaryFluid.volume = primaryNode.volume;
+      }
+
+      // Extra tube bundles: each is its own flow path and can be in a
+      // completely different state from the first (one boiling, one drained),
+      // so the renderer gets each bundle's own fluid rather than painting the
+      // whole shell with bundle 1's.
+      const bundleCount = hxBundleCount(component as any);
+      if (bundleCount > 1) {
+        const fluids = component.bundleFluids && component.bundleFluids.length === bundleCount
+          ? component.bundleFluids
+          : (component.bundleFluids = hxTubeNodeIds(component.id, bundleCount).map(
+              () => ({ ...(component.primaryFluid ?? { temperature: 300, pressure: 1e5, phase: 'liquid' as const, quality: 0, flowRate: 0 }) })));
+        hxTubeNodeIds(component.id, bundleCount).forEach((nodeId, b) => {
+          const bundleNode = simState.flowNodes.get(nodeId);
+          if (!bundleNode) return;
+          fluids[b].temperature = bundleNode.fluid.temperature;
+          fluids[b].pressure = bundleNode.fluid.pressure;
+          fluids[b].phase = bundleNode.fluid.phase;
+          fluids[b].quality = bundleNode.fluid.quality;
+          fluids[b].separation = bundleNode.separation;
+          fluids[b].ncg = bundleNode.fluid.ncg;
+          fluids[b].volume = bundleNode.volume;
+        });
       }
 
       // Secondary side (shell): try {id}-secondary, then {id}-shell

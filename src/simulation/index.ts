@@ -95,6 +95,20 @@ export * from './operators';
 export { createSimulationState, createDemoReactor, createSimulationFromPlant, setSimulationRandomSeed } from './factory';
 // Note: createDemoReactor is OBSOLETE - throws error if used
 
+// Flow-connection naming (shared by the factory and the renderer's reverse map)
+export { baseFlowConnectionId, assignFlowConnectionIds } from './connection-ids';
+
+// Heat-exchanger tube-bundle naming (shared by the factory, renderer and UI)
+export {
+  hxBundleCount,
+  hxBundleSuffix,
+  hxTubeNodeId,
+  hxTubeMetalId,
+  hxTubeNodeIds,
+  isHxTubeNodeId,
+  hxBundleIndexFromPortId,
+} from './hx-bundles';
+
 // Running-simulation snapshots (save/load a sim in progress)
 export { serializeSimulationState, deserializeSimulationState } from './serialization';
 

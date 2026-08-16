@@ -21,7 +21,7 @@ import {
   PlantState,
   Connection,
 } from '../types';
-import { SimulationState, getTurbineCondenserState, getReactorPowerState } from '../simulation';
+import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds } from '../simulation';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -2334,86 +2334,105 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const visualTubeCount = Math.min(Math.max(hx.tubeCount || 5, 1), 10);
   const tubeSheetThickness = 5;
 
-  // Primary fluid color - use pixelated pattern for two-phase
-  const primaryColor = hx.primaryFluid ? getFluidColor(hx.primaryFluid) : '#111';
-  const primaryPattern = createTwoPhasePattern(ctx, hx.primaryFluid, 3);
-  const primaryFill: string | CanvasPattern = primaryPattern || primaryColor;
+  // Tube bundles sharing this shell. Each is drawn into its own slot across
+  // the shell - the same slots the construction manager put its ports in, so
+  // a bundle's nozzles land on the bundle they belong to - and each carries
+  // its own tube-side fluid (main.ts syncs bundleFluids from the sim).
+  const nBundles = hxBundleCount(hx);
+  const tubesPerBundle = Math.max(2, Math.floor(visualTubeCount / nBundles));
+  const bundleFluid = (b: number): Fluid | undefined => hx.bundleFluids?.[b] ?? hx.primaryFluid;
+  const bundleColorOf = (b: number): string => {
+    const f = bundleFluid(b);
+    return f ? getFluidColor(f) : '#111';
+  };
+  const bundleFillOf = (b: number): string | CanvasPattern =>
+    createTwoPhasePattern(ctx, bundleFluid(b), 3) || bundleColorOf(b);
+
+  // Primary fluid color - use pixelated pattern for two-phase.
+  // Reassigned per bundle as the loops below walk across the shell.
+  let primaryColor = bundleColorOf(0);
+  let primaryFill: string | CanvasPattern = bundleFillOf(0);
 
   if (isHorizontal) {
-    // HORIZONTAL ORIENTATION: tubes run left-to-right
-    const tubeSpacing = innerH / (visualTubeCount + 1);
+    // HORIZONTAL ORIENTATION: tubes run left-to-right, bundles stack vertically
+    const slotH = innerH / nBundles;
+    const tubeSpacing = slotH / (tubesPerBundle + 1);
     const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
     // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
     const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
-    for (let i = 0; i < visualTubeCount; i++) {
-      const y = innerTop + tubeSpacing * (i + 1);
+    for (let b = 0; b < nBundles; b++) {
+      primaryColor = bundleColorOf(b);
+      primaryFill = bundleFillOf(b);
+      for (let i = 0; i < tubesPerBundle; i++) {
+        const y = innerTop + b * slotH + tubeSpacing * (i + 1);
 
-      if (hxType === 'straight') {
-        // Straight tubes - go all the way through horizontally
-        ctx.fillStyle = COLORS.steel;
-        ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
+        if (hxType === 'straight') {
+          // Straight tubes - go all the way through horizontally
+          ctx.fillStyle = COLORS.steel;
+          ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
 
-        ctx.fillStyle = primaryFill;
-        ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
-      } else if (hxType === 'helical') {
-        // Helical coil - draw as a wavy/zigzag pattern horizontally
-        ctx.strokeStyle = COLORS.steel;
-        ctx.lineWidth = (tubeRadius + tubeWall) * 2;
-        ctx.beginPath();
-        const waveAmplitude = tubeSpacing * 0.3;
-        const waveFreq = 8;
-        for (let j = 0; j <= waveFreq; j++) {
-          const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
-          const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-          if (j === 0) {
-            ctx.moveTo(xPos, y + yOffset);
-          } else {
-            ctx.lineTo(xPos, y + yOffset);
+          ctx.fillStyle = primaryFill;
+          ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
+        } else if (hxType === 'helical') {
+          // Helical coil - draw as a wavy/zigzag pattern horizontally
+          ctx.strokeStyle = COLORS.steel;
+          ctx.lineWidth = (tubeRadius + tubeWall) * 2;
+          ctx.beginPath();
+          const waveAmplitude = tubeSpacing * 0.3;
+          const waveFreq = 8;
+          for (let j = 0; j <= waveFreq; j++) {
+            const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
+            const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+            if (j === 0) {
+              ctx.moveTo(xPos, y + yOffset);
+            } else {
+              ctx.lineTo(xPos, y + yOffset);
+            }
           }
-        }
-        ctx.stroke();
+          ctx.stroke();
 
-        // Inner helical (primary fluid)
-        ctx.strokeStyle = primaryColor;
-        ctx.lineWidth = tubeRadius * 2;
-        ctx.beginPath();
-        for (let j = 0; j <= waveFreq; j++) {
-          const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
-          const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-          if (j === 0) {
-            ctx.moveTo(xPos, y + yOffset);
-          } else {
-            ctx.lineTo(xPos, y + yOffset);
+          // Inner helical (primary fluid)
+          ctx.strokeStyle = primaryColor;
+          ctx.lineWidth = tubeRadius * 2;
+          ctx.beginPath();
+          for (let j = 0; j <= waveFreq; j++) {
+            const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
+            const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+            if (j === 0) {
+              ctx.moveTo(xPos, y + yOffset);
+            } else {
+              ctx.lineTo(xPos, y + yOffset);
+            }
           }
+          ctx.stroke();
+        } else {
+          // U-tube - tubes with U-bends at the right end
+          // Position U-bend center where tubes meet the bulge arc
+          const uBendX = innerLeft + innerW - tubeRadius - tubeWall;
+
+          // Draw tube steel (outer wall) - extend into bulge area
+          ctx.fillStyle = COLORS.steel;
+          ctx.beginPath();
+          // Start at left plenum
+          ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
+          // Rectangle to U-bend
+          ctx.lineTo(uBendX, y - tubeRadius - tubeWall);
+          ctx.arc(uBendX, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
+          ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius + tubeWall);
+          ctx.closePath();
+          ctx.fill();
+
+          // Draw tube interior (fluid)
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
+          ctx.lineTo(uBendX, y - tubeRadius);
+          ctx.arc(uBendX, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
+          ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius);
+          ctx.closePath();
+          ctx.fill();
         }
-        ctx.stroke();
-      } else {
-        // U-tube - tubes with U-bends at the right end
-        // Position U-bend center where tubes meet the bulge arc
-        const uBendX = innerLeft + innerW - tubeRadius - tubeWall;
-
-        // Draw tube steel (outer wall) - extend into bulge area
-        ctx.fillStyle = COLORS.steel;
-        ctx.beginPath();
-        // Start at left plenum
-        ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
-        // Rectangle to U-bend
-        ctx.lineTo(uBendX, y - tubeRadius - tubeWall);
-        ctx.arc(uBendX, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
-        ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius + tubeWall);
-        ctx.closePath();
-        ctx.fill();
-
-        // Draw tube interior (fluid)
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
-        ctx.lineTo(uBendX, y - tubeRadius);
-        ctx.arc(uBendX, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
-        ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius);
-        ctx.closePath();
-        ctx.fill();
       }
     }
 
@@ -2424,80 +2443,85 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
       ctx.fillRect(innerLeft + innerW - tubeSheetThickness, innerTop, tubeSheetThickness, innerH);
     }
   } else {
-    // VERTICAL ORIENTATION: tubes run bottom-to-top
-    const tubeSpacing = innerW / (visualTubeCount + 1);
+    // VERTICAL ORIENTATION: tubes run bottom-to-top, bundles side by side
+    const slotW = innerW / nBundles;
+    const tubeSpacing = slotW / (tubesPerBundle + 1);
     const tubeRadius = Math.max(Math.min(tubeSpacing * 0.25, 6), 2);
     // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
     const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
-    for (let i = 0; i < visualTubeCount; i++) {
-      const x = innerLeft + tubeSpacing * (i + 1);
+    for (let b = 0; b < nBundles; b++) {
+      primaryColor = bundleColorOf(b);
+      primaryFill = bundleFillOf(b);
+      for (let i = 0; i < tubesPerBundle; i++) {
+        const x = innerLeft + b * slotW + tubeSpacing * (i + 1);
 
-      if (hxType === 'straight') {
-        // Straight tubes - go all the way through vertically with tube sheets at both ends
-        ctx.fillStyle = COLORS.steel;
-        ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
+        if (hxType === 'straight') {
+          // Straight tubes - go all the way through vertically with tube sheets at both ends
+          ctx.fillStyle = COLORS.steel;
+          ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
 
-        ctx.fillStyle = primaryFill;
-        ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
-      } else if (hxType === 'helical') {
-        // Helical coil - draw as a wavy/zigzag pattern to suggest coiled tubes
-        ctx.strokeStyle = COLORS.steel;
-        ctx.lineWidth = (tubeRadius + tubeWall) * 2;
-        ctx.beginPath();
-        const waveAmplitude = tubeSpacing * 0.3;
-        const waveFreq = 8; // Number of waves along the height
-        for (let j = 0; j <= waveFreq; j++) {
-          const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
-          const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-          if (j === 0) {
-            ctx.moveTo(x + xOffset, yPos);
-          } else {
-            ctx.lineTo(x + xOffset, yPos);
+          ctx.fillStyle = primaryFill;
+          ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
+        } else if (hxType === 'helical') {
+          // Helical coil - draw as a wavy/zigzag pattern to suggest coiled tubes
+          ctx.strokeStyle = COLORS.steel;
+          ctx.lineWidth = (tubeRadius + tubeWall) * 2;
+          ctx.beginPath();
+          const waveAmplitude = tubeSpacing * 0.3;
+          const waveFreq = 8; // Number of waves along the height
+          for (let j = 0; j <= waveFreq; j++) {
+            const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
+            const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+            if (j === 0) {
+              ctx.moveTo(x + xOffset, yPos);
+            } else {
+              ctx.lineTo(x + xOffset, yPos);
+            }
           }
-        }
-        ctx.stroke();
+          ctx.stroke();
 
-        // Inner helical (primary fluid)
-        ctx.strokeStyle = primaryColor;
-        ctx.lineWidth = tubeRadius * 2;
-        ctx.beginPath();
-        for (let j = 0; j <= waveFreq; j++) {
-          const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
-          const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-          if (j === 0) {
-            ctx.moveTo(x + xOffset, yPos);
-          } else {
-            ctx.lineTo(x + xOffset, yPos);
+          // Inner helical (primary fluid)
+          ctx.strokeStyle = primaryColor;
+          ctx.lineWidth = tubeRadius * 2;
+          ctx.beginPath();
+          for (let j = 0; j <= waveFreq; j++) {
+            const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
+            const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+            if (j === 0) {
+              ctx.moveTo(x + xOffset, yPos);
+            } else {
+              ctx.lineTo(x + xOffset, yPos);
+            }
           }
+          ctx.stroke();
+        } else {
+          // U-tube - tubes with tube sheet at BOTTOM and U-bends at TOP (standard SG configuration)
+          // Position U-bend center where tubes meet the bulge arc
+          const uBendY = innerTop + tubeRadius + tubeWall;
+
+          // Draw tube steel (outer wall) - extend into bulge area
+          ctx.fillStyle = COLORS.steel;
+          ctx.beginPath();
+          // Start with semicircle at top
+          ctx.arc(x, uBendY, tubeRadius + tubeWall, Math.PI, 0);
+          // Rectangle down to tube sheet
+          ctx.lineTo(x + tubeRadius + tubeWall, innerTop + innerH - tubeSheetThickness);
+          ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius + tubeWall, 0, Math.PI);
+          ctx.lineTo(x - tubeRadius - tubeWall, uBendY);
+          ctx.closePath();
+          ctx.fill();
+
+          // Draw tube interior (fluid)
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.arc(x, uBendY, tubeRadius, Math.PI, 0);
+          ctx.lineTo(x + tubeRadius, innerTop + innerH - tubeSheetThickness);
+          ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius, 0, Math.PI);
+          ctx.lineTo(x - tubeRadius, uBendY);
+          ctx.closePath();
+          ctx.fill();
         }
-        ctx.stroke();
-      } else {
-        // U-tube - tubes with tube sheet at BOTTOM and U-bends at TOP (standard SG configuration)
-        // Position U-bend center where tubes meet the bulge arc
-        const uBendY = innerTop + tubeRadius + tubeWall;
-
-        // Draw tube steel (outer wall) - extend into bulge area
-        ctx.fillStyle = COLORS.steel;
-        ctx.beginPath();
-        // Start with semicircle at top
-        ctx.arc(x, uBendY, tubeRadius + tubeWall, Math.PI, 0);
-        // Rectangle down to tube sheet
-        ctx.lineTo(x + tubeRadius + tubeWall, innerTop + innerH - tubeSheetThickness);
-        ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius + tubeWall, 0, Math.PI);
-        ctx.lineTo(x - tubeRadius - tubeWall, uBendY);
-        ctx.closePath();
-        ctx.fill();
-
-        // Draw tube interior (fluid)
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.arc(x, uBendY, tubeRadius, Math.PI, 0);
-        ctx.lineTo(x + tubeRadius, innerTop + innerH - tubeSheetThickness);
-        ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius, 0, Math.PI);
-        ctx.lineTo(x - tubeRadius, uBendY);
-        ctx.closePath();
-        ctx.fill();
       }
     }
 
@@ -2523,158 +2547,173 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     const plenumHighlight = COLORS.steelHighlight;
     const dividerThickness = 3; // Pixels for divider plate
 
-    if (isHorizontal) {
-      // Horizontal HX: plenums are vertical semi-ellipsoids at left (and right for straight tubes)
-      const plenumRadiusY = h / 2; // Match shell diameter
+    // One header per bundle, centered on the bundle's slot and only as wide
+    // as that slot - so a two-bundle exchanger shows two separate headers
+    // with the nozzles of each sitting on their own.
+    for (let b = 0; b < nBundles; b++) {
+      primaryFill = bundleFillOf(b);
 
-      if (hxType === 'utube') {
-        // U-tube: single plenum at left, divided in half by a divider plate
-        // Draw plenum cap (semi-ellipse extending to the left)
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.fill();
+      if (isHorizontal) {
+        // Horizontal HX: plenums are vertical semi-ellipsoids at left (and right for straight tubes)
+        const plenumRadiusY = h / 2 / nBundles;   // Match this bundle's share of the shell
+        const cy = -h / 2 + (2 * b + 1) * plenumRadiusY;
+        // Canvas throws on a negative radius, and a many-bundle exchanger's
+        // header can be thinner than the wall it is drawn with
+        const plenumInnerY = Math.max(1, plenumRadiusY - wallPx);
 
-        // Fill top half of plenum with primary fluid using clip
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(-w / 2 - plenumLength - 1, -plenumRadiusY, plenumLength + 2, plenumRadiusY - dividerThickness / 2);
-        ctx.clip();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.fill();
-        ctx.restore();
+        if (hxType === 'utube') {
+          // U-tube: single plenum at left, divided in half by a divider plate
+          // Draw plenum cap (semi-ellipse extending to the left)
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.fill();
 
-        // Fill bottom half of plenum with primary fluid using clip
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(-w / 2 - plenumLength - 1, dividerThickness / 2, plenumLength + 2, plenumRadiusY);
-        ctx.clip();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.fill();
-        ctx.restore();
+          // Fill top half of plenum with primary fluid using clip
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-w / 2 - plenumLength - 1, cy - plenumRadiusY, plenumLength + 2, plenumRadiusY - dividerThickness / 2);
+          ctx.clip();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.fill();
+          ctx.restore();
 
-        // Draw divider plate on top of fluid
-        ctx.fillStyle = COLORS.steelDark;
-        ctx.fillRect(-w / 2 - plenumLength + wallPx, -dividerThickness / 2, plenumLength - wallPx, dividerThickness);
+          // Fill bottom half of plenum with primary fluid using clip
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-w / 2 - plenumLength - 1, cy + dividerThickness / 2, plenumLength + 2, plenumRadiusY);
+          ctx.clip();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.fill();
+          ctx.restore();
 
-        // Plenum outline
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.stroke();
+          // Draw divider plate on top of fluid
+          ctx.fillStyle = COLORS.steelDark;
+          ctx.fillRect(-w / 2 - plenumLength + wallPx, cy - dividerThickness / 2, plenumLength - wallPx, dividerThickness);
+
+          // Plenum outline
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.stroke();
+        } else {
+          // Straight/helical: plenums at both ends
+          // Left plenum (bulges to the left)
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.fill();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.fill();
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.stroke();
+
+          // Right plenum (bulges to the right)
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
+          ctx.fill();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, false);
+          ctx.fill();
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
+          ctx.stroke();
+        }
       } else {
-        // Straight/helical: plenums at both ends
-        // Left plenum (bulges to the left)
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.fill();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.fill();
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(-w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
-        ctx.stroke();
+        // Vertical HX: plenums are horizontal semi-ellipsoids at bottom (and top for straight tubes)
+        const plenumRadiusX = w / 2 / nBundles;   // Match this bundle's share of the shell
+        const cx = -w / 2 + (2 * b + 1) * plenumRadiusX;
+        // Canvas throws on a negative radius, and a many-bundle exchanger's
+        // header can be thinner than the wall it is drawn with
+        const plenumInnerX = Math.max(1, plenumRadiusX - wallPx);
 
-        // Right plenum (bulges to the right)
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
-        ctx.fill();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(w / 2, 0, plenumLength - wallPx, plenumRadiusY - wallPx, 0, -Math.PI / 2, Math.PI / 2, false);
-        ctx.fill();
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(w / 2, 0, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
-        ctx.stroke();
-      }
-    } else {
-      // Vertical HX: plenums are horizontal semi-ellipsoids at bottom (and top for straight tubes)
-      const plenumRadiusX = w / 2; // Match shell diameter
+        if (hxType === 'utube') {
+          // U-tube: single plenum at bottom, divided in half by a divider plate
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+          ctx.fill();
 
-      if (hxType === 'utube') {
-        // U-tube: single plenum at bottom, divided in half by a divider plate
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
-        ctx.fill();
+          // Fill right half of plenum with primary fluid using clip
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(cx + dividerThickness / 2, h / 2 - 1, plenumRadiusX, plenumLength + 2);
+          ctx.clip();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
+          ctx.fill();
+          ctx.restore();
 
-        // Fill right half of plenum with primary fluid using clip
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(dividerThickness / 2, h / 2 - 1, plenumRadiusX, plenumLength + 2);
-        ctx.clip();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
-        ctx.fill();
-        ctx.restore();
+          // Fill left half of plenum with primary fluid using clip
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(cx - plenumRadiusX, h / 2 - 1, plenumRadiusX - dividerThickness / 2, plenumLength + 2);
+          ctx.clip();
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
+          ctx.fill();
+          ctx.restore();
 
-        // Fill left half of plenum with primary fluid using clip
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(-plenumRadiusX, h / 2 - 1, plenumRadiusX - dividerThickness / 2, plenumLength + 2);
-        ctx.clip();
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - wallPx, 0, 0, Math.PI, false);
-        ctx.fill();
-        ctx.restore();
+          // Draw divider plate on top of fluid
+          ctx.fillStyle = COLORS.steelDark;
+          ctx.fillRect(cx - dividerThickness / 2, h / 2, dividerThickness, plenumLength - wallPx);
 
-        // Draw divider plate on top of fluid
-        ctx.fillStyle = COLORS.steelDark;
-        ctx.fillRect(-dividerThickness / 2, h / 2, dividerThickness, plenumLength - wallPx);
+          // Plenum outline
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+          ctx.stroke();
+        } else {
+          // Straight/helical: plenums at both ends
+          // Bottom plenum
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+          ctx.fill();
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
+          ctx.stroke();
+          // Fill with primary fluid
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - 2, 0, 0, Math.PI, false);
+          ctx.fill();
 
-        // Plenum outline
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
-        ctx.stroke();
-      } else {
-        // Straight/helical: plenums at both ends
-        // Bottom plenum
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
-        ctx.fill();
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
-        ctx.stroke();
-        // Fill with primary fluid
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(0, h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, 0, Math.PI, false);
-        ctx.fill();
-
-        // Top plenum
-        ctx.fillStyle = plenumColor;
-        ctx.beginPath();
-        ctx.ellipse(0, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
-        ctx.fill();
-        ctx.strokeStyle = plenumHighlight;
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.ellipse(0, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
-        ctx.stroke();
-        // Fill with primary fluid
-        ctx.fillStyle = primaryFill;
-        ctx.beginPath();
-        ctx.ellipse(0, -h / 2, plenumRadiusX - wallPx, plenumLength - 2, 0, Math.PI, 0, false);
-        ctx.fill();
+          // Top plenum
+          ctx.fillStyle = plenumColor;
+          ctx.beginPath();
+          ctx.ellipse(cx, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
+          ctx.fill();
+          ctx.strokeStyle = plenumHighlight;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.ellipse(cx, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
+          ctx.stroke();
+          // Fill with primary fluid
+          ctx.fillStyle = primaryFill;
+          ctx.beginPath();
+          ctx.ellipse(cx, -h / 2, plenumInnerX, plenumLength - 2, 0, Math.PI, 0, false);
+          ctx.fill();
+        }
       }
     }
   }
@@ -4144,15 +4183,11 @@ function getFlowConnectionPosition(
   let toComponent: PlantComponent | undefined;
 
   if (conn.id && conn.id.startsWith('flow-')) {
-    // Try to find a matching plant connection
-    // Handle component IDs that may contain dashes by checking all connections
-    for (const pc of plantState.connections) {
-      if (conn.id === `flow-${pc.fromComponentId}-${pc.toComponentId}`) {
-        plantConnection = pc;
-        fromComponent = plantState.components.get(pc.fromComponentId);
-        toComponent = plantState.components.get(pc.toComponentId);
-        break;
-      }
+    const pc = findPlantConnectionForFlowId(conn.id, plantState);
+    if (pc) {
+      plantConnection = pc;
+      fromComponent = plantState.components.get(pc.fromComponentId);
+      toComponent = plantState.components.get(pc.toComponentId);
     }
   }
 
@@ -4208,8 +4243,9 @@ function getFlowConnectionPosition(
       component = comp;
       break;
     }
-    // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
-    if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+    // For heat exchangers: node ID is "{componentId}-tube" (or "-tube-b2" for a
+    // second bundle) or "{componentId}-shell"
+    if (nodeId.startsWith(compId + '-') && (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell'))) {
       component = comp;
       break;
     }
@@ -4374,8 +4410,8 @@ export function renderFlowConnectionArrows(
     let arrowScale = 1;
 
     if (conn.id && conn.id.startsWith('flow-')) {
-      for (const pc of plantState.connections) {
-        if (conn.id === `flow-${pc.fromComponentId}-${pc.toComponentId}`) {
+      const pc = findPlantConnectionForFlowId(conn.id, plantState);
+      if (pc) {
           const fromComponent = plantState.components.get(pc.fromComponentId);
           const toComponent = plantState.components.get(pc.toComponentId);
 
@@ -4419,8 +4455,6 @@ export function renderFlowConnectionArrows(
               }
             }
           }
-          break;
-        }
       }
     }
 
@@ -4554,6 +4588,27 @@ export function renderFlowConnectionArrows(
  * Each gauge is attached to the top-center of its component with a thin black stem
  */
 /**
+ * The plant connection a simulation flow connection was built from.
+ *
+ * Names come from the factory's own rule (assignFlowConnectionIds), so two
+ * connections between the same pair of components - a feedwater header
+ * feeding two tube bundles of one exchanger - map back to the right one
+ * instead of both resolving to whichever appears first. Cached against the
+ * connection list, which only changes when the plant is edited.
+ */
+let flowIdCache: { connections: readonly Connection[]; ids: string[] } | undefined;
+function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
+  if (flowIdCache?.connections !== plantState.connections) {
+    flowIdCache = {
+      connections: plantState.connections,
+      ids: assignFlowConnectionIds(plantState.connections),
+    };
+  }
+  const idx = flowIdCache.ids.indexOf(flowId);
+  return idx >= 0 ? plantState.connections[idx] : undefined;
+}
+
+/**
  * Find the visual component corresponding to a flow node.
  * Matches by simNodeId, heat-exchanger tube/shell suffix, or direct ID.
  */
@@ -4562,8 +4617,9 @@ function findComponentForFlowNode(nodeId: string, plantState: PlantState): Plant
     const simNodeId = (comp as { simNodeId?: string }).simNodeId;
     // Exact simNodeId match
     if (simNodeId === nodeId) return comp;
-    // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
-    if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+    // For heat exchangers: node ID is "{componentId}-tube" (or "-tube-b2" for a
+    // second bundle) or "{componentId}-shell"
+    if (nodeId.startsWith(compId + '-') && (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell'))) {
       return comp;
     }
     // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
@@ -5405,8 +5461,9 @@ export function renderBurstOverlays(
         component = comp;
         break;
       }
-      // For heat exchangers: node ID is "{componentId}-tube" or "{componentId}-shell"
-      if (nodeId.startsWith(compId + '-') && (nodeId.endsWith('-tube') || nodeId.endsWith('-shell'))) {
+      // For heat exchangers: node ID is "{componentId}-tube" (or "-tube-b2" for a
+    // second bundle) or "{componentId}-shell"
+      if (nodeId.startsWith(compId + '-') && (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell'))) {
         component = comp;
         break;
       }

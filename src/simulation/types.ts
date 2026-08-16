@@ -226,8 +226,14 @@ export interface FlowNode {
   otsg?: {
     m1: number;              // kg - subcooled section (integrated)
     m3: number;              // kg - superheated section (integrated)
-    heatArea: number;        // m2 - total tube heat-transfer area
+    heatArea: number;        // m2 - this bundle's tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
+    /** Fraction of the shell stream this bundle sees (1 when it is the only
+     *  bundle in the shell). Parallel bundles occupy equal shares of the
+     *  shell's free-flow area, so they pass equal shares of its mass flow at
+     *  the same velocity: the gas film coefficient is unchanged, only the
+     *  carrying capacity mdot*cp each bundle marches against is divided. */
+    gasShare?: number;
     /** One tube-metal thermal node PER SECTION (fixed masses, moving areas).
      *  A single shared metal node cannot support superheat: the boiling
      *  section's film coefficient pins it to T_sat and clamps every wall. */
