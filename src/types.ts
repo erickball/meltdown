@@ -223,6 +223,18 @@ export interface HeatExchangerComponent extends ComponentBase {
   /** Per-bundle tube-side fluid for rendering, index 0 = bundle 1. Present
    *  only when bundleCount > 1; primaryFluid stays the first bundle. */
   bundleFluids?: Fluid[];
+  /**
+   * Marks this exchanger's SHELL as a turbine bleed point: a feedwater
+   * heater. Steam piped into the shell is treated as having expanded through
+   * the turbine's stages down to the shell's pressure, so it arrives with
+   * the work already taken out of it (partly-expanded steam, not throttled
+   * live steam) and that work counts toward the machine's output.
+   *
+   * `pressure` is the design bleed pressure - the shell's initial condition
+   * and the sanity check; the work actually credited follows the shell's own
+   * pressure, so the accounting can never disagree with the physics.
+   */
+  extractionSource?: { turbineId: string; pressure: number };
   tubeCount: number;
   pressureRating?: number;       // Shell-side design pressure (bar) - used to calculate shell wall thickness
   tubePressureRating?: number;   // Tube-side design pressure (bar) - used to calculate tube wall thickness

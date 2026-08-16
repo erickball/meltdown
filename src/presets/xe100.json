@@ -239,6 +239,7 @@
         "hxType": "helical",
         "tubeCount": 5000,
         "tubeModel": "moving-boundary",
+        "bundleCount": 2,
         "material": "alloy-800h",
         "pressureRating": 90,
         "tubePressureRating": 200,
@@ -258,6 +259,22 @@
             "id": "hx-1-tube-2",
             "position": {
               "x": 0.6,
+              "y": -7
+            },
+            "direction": "both"
+          },
+          {
+            "id": "hx-1-tube-1-b2",
+            "position": {
+              "x": -0.2,
+              "y": 7
+            },
+            "direction": "both"
+          },
+          {
+            "id": "hx-1-tube-2-b2",
+            "position": {
+              "x": 0.2,
               "y": -7
             },
             "direction": "both"
@@ -469,6 +486,51 @@
         "initialNcg": {
           "He": 60
         }
+      }
+    ],
+    [
+      "val-leak-1",
+      {
+        "id": "val-leak-1",
+        "type": "valve",
+        "label": "SG Tube Leak",
+        "valveType": "gate",
+        "position": {
+          "x": 60,
+          "y": 74
+        },
+        "rotation": 0,
+        "elevation": 7,
+        "diameter": 0.02,
+        "opening": 0,
+        "ports": [
+          {
+            "id": "val-leak-1-in",
+            "position": {
+              "x": -0.1,
+              "y": 0
+            },
+            "direction": "in"
+          },
+          {
+            "id": "val-leak-1-out",
+            "position": {
+              "x": 0.1,
+              "y": 0
+            },
+            "direction": "out"
+          }
+        ],
+        "fluid": {
+          "temperature": 640,
+          "pressure": 16500000,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "nqa1": true,
+        "containedBy": "bui-1",
+        "pressureRating": 200
       }
     ],
     [
@@ -851,39 +913,6 @@
           }
         }
       }
-    ],
-    [
-      "ctl-hwl-1",
-      {
-        "id": "ctl-hwl-1",
-        "type": "controller",
-        "controllerType": "pid",
-        "label": "Hotwell Level (Cond Pump)",
-        "position": {
-          "x": 30,
-          "y": 60
-        },
-        "rotation": 0,
-        "elevation": 0,
-        "width": 2.5,
-        "height": 2.5,
-        "ports": [],
-        "pid": {
-          "sensor": {
-            "kind": "node-level",
-            "targetId": "condenser-1"
-          },
-          "setpoint": 0.8,
-          "invert": true,
-          "actuator": {
-            "kind": "pump-speed",
-            "targetId": "cond-pump-1",
-            "min": 0.05,
-            "max": 1,
-            "rateLimit": 0.1
-          }
-        }
-      }
     ]
   ],
   "connections": [
@@ -971,7 +1000,18 @@
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0,
       "toElevation": 1,
-      "flowArea": 0.03,
+      "flowArea": 0.015,
+      "length": 8,
+      "resistanceCoeff": 2
+    },
+    {
+      "fromComponentId": "val-fwcv-1",
+      "fromPortId": "val-fwcv-1-out",
+      "toComponentId": "hx-1",
+      "toPortId": "hx-1-tube-1-b2",
+      "fromElevation": 0,
+      "toElevation": 1,
+      "flowArea": 0.015,
       "length": 8,
       "resistanceCoeff": 2
     },
@@ -982,7 +1022,19 @@
       "toPortId": "inlet",
       "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.012,
+      "flowArea": 0.006,
+      "length": 25,
+      "resistanceCoeff": 2,
+      "fromPhaseTolerance": 0
+    },
+    {
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2-b2",
+      "toComponentId": "turbine-1",
+      "toPortId": "inlet",
+      "fromElevation": 13.5,
+      "toElevation": 0,
+      "flowArea": 0.006,
       "length": 25,
       "resistanceCoeff": 2,
       "fromPhaseTolerance": 0
@@ -1034,7 +1086,19 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.002,
+      "flowArea": 0.001,
+      "length": 4,
+      "resistanceCoeff": 2,
+      "fromPhaseTolerance": 0
+    },
+    {
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2-b2",
+      "toComponentId": "val-msv-1",
+      "toPortId": "val-msv-1-in",
+      "fromElevation": 13.5,
+      "toElevation": 0,
+      "flowArea": 0.001,
       "length": 4,
       "resistanceCoeff": 2,
       "fromPhaseTolerance": 0

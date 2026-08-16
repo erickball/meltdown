@@ -259,6 +259,19 @@ export interface FlowNode {
   // Turbine extraction port properties (only for extraction nodes)
   extractionPressure?: number;        // Pa - target extraction pressure for this port
   parentTurbineId?: string;           // ID of the parent turbine component
+
+  /**
+   * Turbine SWALLOWING CAPACITY: the steam flow the machine's first-stage
+   * nozzles can pass at their design inlet conditions (kg/s), and the inlet
+   * pressure that rating belongs to (Pa).
+   *
+   * A turbine is a fixed set of choked nozzles, not an open pipe - it cannot
+   * pass whatever a connection offers it. Without this the momentum solver's
+   * startup transients (thousands of kg/s for a step or two) came back out of
+   * the expansion as multi-gigawatt power readings.
+   */
+  ratedSteamFlow?: number;
+  designInletPressure?: number;
 }
 
 // ============================================================================
@@ -618,7 +631,19 @@ export type ControllerSensorKind =
   | 'node-pressure'     // flow node pressure (Pa)
   | 'node-temperature'  // flow node temperature (K)
   | 'connection-flow'   // mass flow rate of a flow connection (kg/s)
-  | 'reactor-power';    // neutronics power as fraction of nominal (0-1+)
+  | 'reactor-power'     // neutronics power as fraction of nominal (0-1+)
+  /**
+   * Fraction of a moving-boundary boiler's tube length that is superheated
+   * steam (0-1). This is the feedwater variable a once-through SG actually
+   * has: it is 0 when the bundle is flooded, approaches 1 as it dries out,
+   * moves monotonically with feed flow, and every value in between is
+   * reachable at any power - which is what distinguishes it from level (a
+   * once-through boiler has none), from outlet temperature (pinned at T_sat
+   * whenever the bundle is wet, so the setpoint is unreachable exactly when
+   * the controller most needs to act) and from pressure (whose response to
+   * feed changes sign between the flooded and dry sides).
+   */
+  | 'otsg-superheat-fraction';
 
 export type ControllerActuatorKind =
   | 'valve-position'    // ValveState.position (0-1)

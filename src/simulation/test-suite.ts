@@ -29,6 +29,7 @@ import {
   A3_3,
 } from './graphite.js';
 import { cloneSimulationState } from './solver.js';
+import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
   saturationAtP,
@@ -36,6 +37,7 @@ import {
   superheatedV,
   evaluateOtsg,
   otsgRates,
+  boilingMeanQuality,
   transitStandingQ,
   marchCounterflowGas,
 } from './otsg.js';
@@ -420,7 +422,11 @@ const H_FEED = U_FEED + 165e5 / saturatedLiquidDensity(473);
 function otsgStateAtP(Pstar: number, f1: number, f2: number, u3Superheat: number) {
   const sat = saturationAtP(Pstar);
   const v1 = subcooledLiquidV(0.5 * (U_FEED + sat.u_f));
-  const v2 = 0.5 * (sat.v_f + sat.v_g);
+  // The boiling section's MASS-averaged specific volume - the same closure the
+  // model uses, so this fixture really does occupy V_tube (building it with an
+  // arithmetic mean instead put 20% more mass in the section than fits, and
+  // the pressure closure duly recovered the wrong pressure)
+  const v2 = sat.v_f + boilingMeanQuality(sat.v_f, sat.v_g) * (sat.v_g - sat.v_f);
   const u3 = sat.u_g + u3Superheat;
   const v3 = superheatedV(u3, Pstar);
   const V1 = OTSG_GEOM.tubeVolume * f1, V2 = OTSG_GEOM.tubeVolume * f2;
@@ -1037,6 +1043,75 @@ test('lattice reactivity path survives full voiding without NaN', () => {
   });
   assert(isFinite(voided.total) && voided.total < -0.5,
     `voided core must be finite and deeply subcritical, got ${voided.total}`);
+});
+
+// ============================================================================
+// Turbine Expansion
+// ============================================================================
+// Anchored on published steam-table expansions. These are the numbers that
+// decide a plant's electrical output and its thermal efficiency, so they are
+// worth pinning to the tables rather than to our own past behaviour.
+
+test('full expansion matches the steam tables: work and exhaust quality', () => {
+  // 165 bar / 565 C (h = 3465 kJ/kg) expanded isentropically to 0.05 bar.
+  // Tables: 1481 kJ/kg available, exhaust quality 0.762.
+  const inlet = stateAtPh(165e5, 3465e3);
+  const r = expandStage(inlet, 0.05e5, 1.0);
+  const work = (inlet.h - r.hIdeal) / 1e3;
+  assert(Math.abs(work - 1481) < 40,
+    `available work ${work.toFixed(0)} kJ/kg vs table 1481`);
+  assert(r.outlet.phase === 'two-phase' && Math.abs(r.outlet.quality - 0.762) < 0.03,
+    `exhaust quality ${r.outlet.quality.toFixed(3)} vs table 0.762`);
+});
+
+test('expansion inside the dome matches the tables too', () => {
+  // 3 bar wet steam at h = 2500 kJ/kg to 0.05 bar: tables give 537 kJ/kg
+  // and quality 0.753. This is the branch a polytropic P*v^n line gets
+  // worst, and the branch every low-pressure stage lives in.
+  const r = expandStage(stateAtPh(3e5, 2500e3), 0.05e5, 1.0);
+  const work = (2500e3 - r.hIdeal) / 1e3;
+  assert(Math.abs(work - 537) < 25, `wet expansion work ${work.toFixed(0)} kJ/kg vs table 537`);
+  assert(Math.abs(r.outlet.quality - 0.753) < 0.03,
+    `wet exhaust quality ${r.outlet.quality.toFixed(3)} vs table 0.753`);
+});
+
+test('a bleed stage lands where the tables put it', () => {
+  // 165 bar / 565 C to a 25 bar extraction: s = 6.51 puts the ideal end
+  // state at ~268 C and h ~ 2930 kJ/kg, still superheated
+  const r = expandStage(stateAtPh(165e5, 3465e3), 25e5, 1.0);
+  assert(Math.abs(r.hIdeal / 1e3 - 2930) < 40,
+    `bleed enthalpy ${(r.hIdeal / 1e3).toFixed(0)} kJ/kg vs table 2930`);
+  assert(r.outlet.phase === 'vapor' && Math.abs(r.outlet.T - 273.15 - 268) < 20,
+    `bleed temperature ${(r.outlet.T - 273.15).toFixed(0)} C vs table 268`);
+});
+
+test('machine efficiency moves the end state the standard way', () => {
+  const inlet = stateAtPh(165e5, 3465e3);
+  const ideal = expandStage(inlet, 0.05e5, 1.0);
+  const real = expandStage(inlet, 0.05e5, 0.87);
+  assert(Math.abs(real.work / (inlet.h - ideal.hIdeal) - 0.87) < 1e-6,
+    `eta=0.87 must deliver 87% of the available work, got ${(real.work / (inlet.h - ideal.hIdeal)).toFixed(4)}`);
+  assert(real.outlet.quality > ideal.outlet.quality,
+    `a real expansion ends DRIER than an ideal one (${real.outlet.quality.toFixed(3)} vs ${ideal.outlet.quality.toFixed(3)})`);
+});
+
+test('expansion never gains energy, at any pressure ratio', () => {
+  // The memo caches the DROP rather than the end enthalpy precisely so that
+  // a neighbouring inlet's cached result cannot come back above h1 on a
+  // stage whose whole drop is smaller than the cache's quantization.
+  const inlet = stateAtPh(10.1e5, 2628e3);
+  for (const P2 of [10.06e5, 10e5, 9e5, 5e5, 1e5, 0.05e5]) {
+    const r = expandStage(inlet, P2, 0.87);
+    assert(r.hIdeal <= inlet.h * (1 + 1e-9) && r.work >= 0,
+      `expansion to ${(P2 / 1e5).toFixed(2)} bar gained energy: ` +
+      `${(inlet.h / 1e3).toFixed(1)} -> ${(r.hIdeal / 1e3).toFixed(1)} kJ/kg`);
+  }
+});
+
+test('no expansion available: zero work, state unchanged', () => {
+  const inlet = stateAtPh(10e5, 2800e3);
+  const r = expandStage(inlet, 20e5, 0.87);
+  assert(r.work === 0 && r.outlet === inlet, 'a stage cannot compress its way to power');
 });
 
 // ============================================================================

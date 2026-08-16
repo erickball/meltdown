@@ -31,7 +31,8 @@
 import { SimulationState, ControllerState, FlowNode } from '../types';
 import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
-import { saturationPressure } from '../water-properties';
+import { saturationPressure, saturatedLiquidEnergy } from '../water-properties';
+import { evaluateOtsgAtP } from '../otsg';
 import {
   approxLiquidDensity,
   calculateLiquidLevelWithObstructions,
@@ -45,6 +46,10 @@ const LAMBDA_DEFAULTS: Record<string, number> = {
   'node-pressure': 15,
   'node-temperature': 60,
   'connection-flow': 5,
+  // A boiler's section boundaries move on its inventory time constant -
+  // minutes, not seconds - and feed changes reach them through the whole
+  // tube length, so this loop wants to be slow.
+  'otsg-superheat-fraction': 90,
 };
 
 /** Rod controller proportional bands: full rod speed at this much error,
@@ -310,9 +315,58 @@ export class ControlSystemOperator implements ConstraintOperator {
         }
         return n.power / n.nominalPower;
       }
+      case 'otsg-superheat-fraction': {
+        const node = this.getNode(state, targetId, ctl.id, 'sensor');
+        const cfg = node.otsg;
+        if (!cfg) {
+          throw new Error(
+            `[ControlSystem] '${ctl.id}': otsg-superheat-fraction sensor on '${targetId}', ` +
+            `which is not a moving-boundary boiler tube node (no otsg state). Point it at a ` +
+            `heat exchanger built with tubeModel 'moving-boundary'.`
+          );
+        }
+        // Evaluate the sections HERE rather than reading otsg.lastEval. That
+        // cache is written by the rate operator onto the solver's per-stage
+        // clones, so it never reaches the accepted state a controller runs
+        // on - a sensor reading it sees undefined forever and the loop sits
+        // frozen at its setpoint, which is exactly how this one first failed.
+        // The partition itself (m1, m3) and the node's totals ARE integrated
+        // state, so the evaluation can simply be redone from them.
+        const ev = evaluateOtsgAtP(
+          cfg.m1, cfg.m3, node.fluid.mass, node.fluid.internalEnergy,
+          node.fluid.pressure, this.otsgFeedEnergy(state, node),
+          { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
+        );
+        return ev.sections[2].lengthFrac;
+      }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': unknown sensor kind '${kind}'`);
     }
+  }
+
+  /**
+   * Specific energy of the feedwater entering a boiler tube node (J/kg).
+   *
+   * The sectioned evaluation needs it to place the subcooled section's mean.
+   * With no feed flowing there is nothing to average, so this reports the
+   * closure's own ceiling - saturated liquid less the 25 kJ/kg the profile
+   * needs to stay inside its valid domain - which is the value
+   * evaluateOtsgAtP would cap any hotter feed to anyway.
+   */
+  private otsgFeedEnergy(state: SimulationState, node: FlowNode): number {
+    let flow = 0, energyNum = 0;
+    for (const conn of state.flowConnections) {
+      const into = conn.toNodeId === node.id ? conn.massFlowRate
+        : conn.fromNodeId === node.id ? -conn.massFlowRate : 0;
+      if (into <= 0 || conn.currentFlowPhase === 'vapor') continue;
+      const donor = state.flowNodes.get(
+        conn.toNodeId === node.id ? conn.fromNodeId : conn.toNodeId);
+      if (!donor) continue;
+      flow += into;
+      energyNum += into * saturatedLiquidEnergy(donor.fluid.temperature);
+    }
+    const uSatCeiling = saturatedLiquidEnergy(node.fluid.temperature) - 25e3;
+    return flow > 0 ? Math.min(energyNum / flow, uSatCeiling) : uSatCeiling;
   }
 
   private readConnectionFlow(state: SimulationState, connId: string, ctlId: string): number {
@@ -391,6 +445,15 @@ export class ControlSystemOperator implements ConstraintOperator {
         // treat as a fast integrator with a 1-second effective inertia so the
         // PI is a smooth tracker rather than a deadbeat controller.
         return 1;
+      case 'otsg-superheat-fraction': {
+        // A kilogram of feed the boiler is not evaporating accumulates as
+        // liquid, and at fixed tube volume that liquid displaces steam - so
+        // the boundaries move at d(fraction)/dt = W * v_liquid / V_tube. The
+        // gain is a property of the bundle, not a constant: a big bundle
+        // swallows the same excess feed with a proportionally smaller shift.
+        const node = this.getNode(state, targetId, ctl.id, 'sensor');
+        return 1 / (approxLiquidDensity(node) * node.volume);
+      }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': no gain template for sensor kind '${kind}'`);
     }

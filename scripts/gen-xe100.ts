@@ -150,22 +150,33 @@ add('tank-sg-1', {
 // (docs/otsg-moving-boundary-design.md): subcooled / boiling / superheat
 // sections whose boundaries track the phase boundaries.
 //
+// TWO tube bundles share the shell, as in the real machine: a Xe-100 SG is
+// built from helical bundle assemblies stacked around the central riser, each
+// with its own feedwater inlet header and its own steam outlet header, and
+// they see one common helium stream. `bundleCount` gives each bundle its own
+// flow path, tube metal and moving partition; tubeCount stays the SG total
+// and is split between them, so the shell holds the same 5000 tubes either
+// way. A tube leak (the SGTR scenario) is a defect in ONE bundle, which the
+// split now represents honestly - the leak tap stays on bundle 1.
+//
 // Tubes are Alloy 800H: at 60 bar and SG temperatures low-alloy steel would
 // creep-rupture, and 800H is what real helical HTGR steam generators use.
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
   position: { x: 56, y: 74 }, rotation: 0, elevation: -9,
   width: 2.8, height: 14, hxType: 'helical', tubeCount: 5000,
-  tubeModel: 'moving-boundary',
+  tubeModel: 'moving-boundary', bundleCount: 2,
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
   plenumLength: 0.8, tubeOD: 0.019,
   ports: ports([
-    ['hx-1-tube-1', -0.6, 7],    // feedwater in (bottom)
-    ['hx-1-tube-2', 0.6, -7],    // main steam out (top)
-    ['hx-1-shell-1', -1.8, -6],  // hot helium in (top, from the duct)
-    ['hx-1-shell-2', 1.8, 6],    // cold helium out (bottom, to vessel space)
-    ['hx-1-leak', 1.8, 0],       // tube-side tap for the leak path
+    ['hx-1-tube-1', -0.6, 7],       // bundle 1 feedwater in (bottom)
+    ['hx-1-tube-2', 0.6, -7],       // bundle 1 main steam out (top)
+    ['hx-1-tube-1-b2', -0.2, 7],    // bundle 2 feedwater in (bottom)
+    ['hx-1-tube-2-b2', 0.2, -7],    // bundle 2 main steam out (top)
+    ['hx-1-shell-1', -1.8, -6],     // hot helium in (top, from the duct)
+    ['hx-1-shell-2', 1.8, 6],       // cold helium out (bottom, to vessel space)
+    ['hx-1-leak', 1.8, 0],          // bundle 1 tube-side tap for the leak path
   ]),
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
@@ -236,6 +247,25 @@ add('val-prel-1', {
 });
 
 // ---------------------------------------------------------------------------
+// SG tube leak valve: the SGTR scenario's fault injector
+// ---------------------------------------------------------------------------
+// Normally shut; scripts/xe100-scenarios.ts sgtr opens it to rupture a tube
+// from the bundle-1 tap into the helium shell. It is a component, not just a
+// pair of connections: the SG-vessel rebuild (75ee0cb) dropped the valve but
+// kept the two connections that reference it, so the factory silently
+// discarded both as dangling and the SGTR scenario has been unable to run
+// since - it threw 'val-leak-1 not found' before it could inject anything.
+add('val-leak-1', {
+  type: 'valve', label: 'SG Tube Leak',
+  valveType: 'gate',
+  position: { x: 60, y: 74 }, rotation: 0, elevation: 7,
+  diameter: 0.02, opening: 0,
+  ports: ports([['val-leak-1-in', -0.1, 0, 'in'], ['val-leak-1-out', 0.1, 0, 'out']]),
+  fluid: { temperature: 640, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
+  nqa1: true, containedBy: 'bui-1', pressureRating: 200,
+});
+
+// ---------------------------------------------------------------------------
 // Secondary: turbine, condenser, condensate + feed pumps
 // ---------------------------------------------------------------------------
 add('turbine-1', {
@@ -256,6 +286,7 @@ add('turbine-1', {
   inletFluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   nqa1: false,
 });
+
 
 add('condenser-1', {
   type: 'condenser', label: 'Condenser',
@@ -462,12 +493,21 @@ controller('ctl-msp-1', 'Steam Pressure (Governor)', 20, 67, {
 // wherever generation balances the draw, and every path around the loop is
 // negative feedback through the pump curve.
 
-controller('ctl-hwl-1', 'Hotwell Level (Cond Pump)', 30, 60, {
-  sensor: { kind: 'node-level', targetId: 'condenser-1' },
-  setpoint: 0.8,
-  invert: true,
-  actuator: { kind: 'pump-speed', targetId: 'cond-pump-1', min: 0.05, max: 1, rateLimit: 0.1 },
-});
+// NO hotwell level controller - it was starving the plant. Its 0.80 setpoint
+// needed 115 t of water in a 144 m3 condenser shell when the whole secondary
+// only holds 51 t, so it was unreachable by construction, and the loop
+// answered by driving the condensate pump to its 0.05 minimum. That collapsed
+// the FEED PUMP's suction from 16 bar to 0.02 bar and flashed it two-phase -
+// the feed pump was pumping steam - after which feed delivery went erratic,
+// the boiler flooded to 23 t, steam pressure sagged, and the governor railed
+// shut trying to raise it. Every symptom of the oscillation traced back here.
+//
+// The condensate pump now runs at fixed speed and its own curve regulates,
+// which is the same passive argument the feed pump's design rests on: it
+// cannot wind up, cannot rail, and cannot starve what is downstream of it.
+
+
+
 
 // ---------------------------------------------------------------------------
 // Primary loop connections (helium)
@@ -501,9 +541,13 @@ connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
 // ---------------------------------------------------------------------------
 // Secondary loop connections (water/steam)
 // ---------------------------------------------------------------------------
-// Feedwater into the tube bundle at the bottom
+// Feedwater into the tube bundles at the bottom. The feed header splits to
+// both bundles, each line carrying half the flow area so the SG sees the same
+// total feed resistance as it did with one bundle.
 connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1',
-  { fromElevation: 0, toElevation: 1, flowArea: 0.03, length: 8, resistanceCoeff: 2 });
+  { fromElevation: 0, toElevation: 1, flowArea: 0.015, length: 8, resistanceCoeff: 2 });
+connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1-b2',
+  { fromElevation: 0, toElevation: 1, flowArea: 0.015, length: 8, resistanceCoeff: 2 });
 // Main steam out of the top of the bundle to the turbine.
 // In this model the turbine NODE floats near condenser pressure and the whole
 // throttling drop is taken across its inlet connection, so this area is what
@@ -513,8 +557,13 @@ connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1',
 // simply blows the tube side down to the condenser in seconds.
 // Main steam off the very top of the bundle - the elevated takeoff draws
 // VAPOR, and the OTSG model hands it the superheat section's enthalpy.
+// Both bundles discharge into the same main steam line, each through half the
+// area, so the two in parallel present the throttle the single bundle did.
 connect('hx-1', 'hx-1-tube-2', 'turbine-1', 'inlet',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.012, length: 25, resistanceCoeff: 2,
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+    fromPhaseTolerance: 0 });
+connect('hx-1', 'hx-1-tube-2-b2', 'turbine-1', 'inlet',
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
@@ -531,8 +580,14 @@ connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fwcv-1', 'val-fwcv-1-in',
 // generation, and every lift became a blowdown spiral: P crashed, the
 // pump flooded the boiler 10 t past design, and recovery took half an
 // hour of simulated time.
+// One dump valve on the common header, but a tap off EACH bundle: the tube
+// side is a pressure boundary per bundle, and with the governor shut a bundle
+// whose only outlet is the throttled turbine line has no relief path at all.
 connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.002, length: 4, resistanceCoeff: 2,
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.001, length: 4, resistanceCoeff: 2,
+    fromPhaseTolerance: 0 });
+connect('hx-1', 'hx-1-tube-2-b2', 'val-msv-1', 'val-msv-1-in',
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.001, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.002, length: 10, resistanceCoeff: 2 });

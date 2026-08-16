@@ -1042,6 +1042,26 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
     if (component.type === 'heatExchanger') {
       // Create shell-side flow node for heat exchanger
       const shellNode = createHeatExchangerShellNode(component);
+      // A feedwater heater's shell IS a turbine bleed point: tagging it here
+      // is what lets the expansion operator take the stage work out of the
+      // steam as it arrives, so the heater sees partly-expanded steam. The
+      // alternative - a free-standing extraction node between the machine and
+      // the heater - is a stiff few-cubic-metre buffer with seconds of
+      // residence time that swings hundreds of degrees as the heater's demand
+      // moves, and it buys nothing physically.
+      const extraction = (component as any).extractionSource;
+      if (extraction) {
+        if (!plantState.components.has(extraction.turbineId)) {
+          throw new Error(
+            `[Factory] '${id}': extractionSource names turbine '${extraction.turbineId}', ` +
+            `which is not in the plant.`
+          );
+        }
+        shellNode.parentTurbineId = extraction.turbineId;
+        shellNode.extractionPressure = extraction.pressure;
+        console.log(`[Factory] ${shellNode.id}: feedwater-heater shell bled from ` +
+          `'${extraction.turbineId}' at ${(extraction.pressure / 1e5).toFixed(1)} bar design`);
+      }
       state.flowNodes.set(shellNode.id, shellNode);
 
       // Bundles beyond the first: the first one came out of the flow-node pass
@@ -1114,9 +1134,24 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
               surfaceArea: oneMetal.surfaceArea / 3,
             });
           });
+          // Seed the partition CONSISTENTLY with the node's own bulk state.
+          // A two-phase start is entirely boiling section: with m2 = mass the
+          // volume closure returns exactly the bulk quality and the energy
+          // residual exactly the bulk energy, so the sectioned model and the
+          // (u,v) machinery agree to the last joule at t=0. A liquid start is
+          // all subcooled and a vapour start all superheat, for the same
+          // reason.
+          //
+          // The old seed - 20% subcooled and 1% superheat whatever the node
+          // held - was inconsistent by construction: it asked 1% of the mass
+          // to carry the entire energy residual, which made the superheat
+          // section absurdly hot and claim several times the volume it had.
+          // Empty sections are born asymptotically here (see the otsg module
+          // header), so starting one at zero costs nothing.
+          const startPhase = tubeNode.fluid.phase;
           tubeNode.otsg = {
-            m1: 0.2 * tubeNode.fluid.mass,
-            m3: 0.01 * tubeNode.fluid.mass,
+            m1: startPhase === 'liquid' ? tubeNode.fluid.mass : 0,
+            m3: startPhase === 'vapor' ? tubeNode.fluid.mass : 0,
             heatArea: tubeArea,
             shellNodeId: `${id}-shell`,
             metalNodeIds: metalIds,
@@ -1841,6 +1876,13 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         height: 0,  // Turbines are well-mixed
         elevation,
         governorValve,
+        // Swallowing capacity: what the first-stage nozzles pass at design
+        // inlet conditions. The expansion operator needs it because a turbine
+        // is a fixed set of choked nozzles - handing it whatever flow a
+        // connection transient offers turned momentary spikes into
+        // multi-gigawatt power readings.
+        ratedSteamFlow: turbineGen.ratedSteamFlow,
+        designInletPressure: pressure,
       };
     }
 

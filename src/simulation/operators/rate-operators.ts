@@ -1728,6 +1728,7 @@ export class FlowRateOperator implements RateOperator {
 // ============================================================================
 
 import { updateTurbineCondenserState } from './turbine-condenser';
+import { stateAtPh, expandStage } from '../turbine-expansion';
 
 export class TurbineCondenserRateOperator implements RateOperator {
   name = 'TurbineCondenser';
@@ -1735,6 +1736,24 @@ export class TurbineCondenserRateOperator implements RateOperator {
   private turbineEfficiency = 0.87;
   private loggedOnce = false;
   private c_p_water = 4186; // J/kg-K for cooling water
+
+  /**
+   * Specific enthalpy of the steam a donor node hands to the turbine.
+   *
+   * A moving-boundary boiler knows what is actually at its steam takeoff -
+   * the superheat section's state, not the bundle's (much colder) bulk
+   * average - and that is the enthalpy the flow machinery advects down the
+   * connection, so the expansion has to start from the same number or the
+   * turbine's energy books and the boiler's disagree.
+   */
+  private donorSteamEnthalpy(donor: FlowNode, flowPhase?: string): number {
+    if (donor.otsg?.lastEval && flowPhase !== 'liquid') {
+      return donor.otsg.lastEval.hSteamOut;
+    }
+    const u = donor.fluid.internalEnergy / Math.max(1e-9, donor.fluid.mass);
+    const v = donor.volume / Math.max(1e-9, donor.fluid.mass);
+    return u + donor.fluid.pressure * v;
+  }
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -1764,18 +1783,41 @@ export class TurbineCondenserRateOperator implements RateOperator {
       if (!isTurbine) continue;
       if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
 
-      // Find flow INTO the turbine
+      // Find flow INTO the turbine, and the steam header it comes from.
+      //
+      // The expansion has to start from the state of the steam ENTERING the
+      // machine - the header upstream of the throttle - not from the turbine
+      // node's own state. The turbine node sits at exhaust conditions by
+      // construction (it receives header enthalpy and has its work taken out
+      // of it), so expanding "from" it threw away the entire pressure drop
+      // the machine is there to use: in the Xe-100 preset the node sat at
+      // 0.109 bar against a 165 bar boiler.
       let inletMassFlow = 0;
+      let inletP = 0;
+      let inletEnthalpyNum = 0;
       let outletNodeId: string | null = null;
 
       for (const conn of state.flowConnections) {
         // Flow into turbine
         if (conn.toNodeId === turbineNodeId && conn.massFlowRate > 0) {
           inletMassFlow += conn.massFlowRate;
+          const donor = state.flowNodes.get(conn.fromNodeId);
+          if (donor) {
+            // Same enthalpy the flow machinery advects down this connection,
+            // so a moving-boundary boiler hands over its superheat instead of
+            // its (much colder) bulk state
+            inletEnthalpyNum += conn.massFlowRate *
+              this.donorSteamEnthalpy(donor, conn.currentFlowPhase);
+            inletP = Math.max(inletP, donor.fluid.pressure);
+          }
         }
-        // Flow out of turbine main outlet (to condenser)
+        // Flow out of the turbine's main exhaust. Extraction nodes are fed
+        // from the header, not from here, but a plant is free to wire one
+        // either way and mistaking a bleed for the exhaust would set the
+        // expansion's back-pressure to the bleed's.
         if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
-          outletNodeId = conn.toNodeId;
+          const sink = state.flowNodes.get(conn.toNodeId);
+          if (sink && !sink.parentTurbineId) outletNodeId = conn.toNodeId;
         }
       }
 
@@ -1787,15 +1829,12 @@ export class TurbineCondenserRateOperator implements RateOperator {
       // Skip if inlet is liquid
       if (turbineNode.fluid.phase === 'liquid') continue;
 
-      const P_in = turbineNode.fluid.pressure;
+      const P_in = inletP;
       const P_out = outletNode.fluid.pressure;
 
       if (P_in <= P_out) continue;
 
-      // Compute inlet enthalpy
-      const u_in = turbineNode.fluid.internalEnergy / turbineNode.fluid.mass;
-      const v_in = turbineNode.volume / turbineNode.fluid.mass;
-      const h_in = u_in + P_in * v_in;
+      const h_in = inletEnthalpyNum / inletMassFlow;
 
       // Find all extraction nodes belonging to this turbine
       const extractionNodes: Array<{
@@ -1807,20 +1846,31 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       for (const [nodeId, node] of state.flowNodes) {
         if (node.parentTurbineId === turbineNodeId && node.extractionPressure) {
-          // Find extraction flow (flow leaving this extraction node)
+          // The bleed rate is what ENTERS the extraction line, not what
+          // leaves it. Steam is worked on by the stages above the bleed
+          // point on its way IN; charging the work to the outflow instead
+          // meant a heater that stopped taking steam - a flooded shell, a
+          // shut drain - left its extraction line accumulating unexpanded
+          // live steam, which then arrived at the heater hundreds of
+          // degrees too hot the moment flow resumed.
           let extractionFlow = 0;
           for (const conn of state.flowConnections) {
-            if (conn.fromNodeId === nodeId && conn.massFlowRate > 0) {
+            if (conn.toNodeId === nodeId && conn.massFlowRate > 0) {
               extractionFlow += conn.massFlowRate;
+            } else if (conn.fromNodeId === nodeId && conn.massFlowRate < 0) {
+              extractionFlow -= conn.massFlowRate;
             }
           }
-          // Check valve behavior: extraction flow cannot be negative
-          extractionFlow = Math.max(0, extractionFlow);
 
           extractionNodes.push({
             nodeId,
             node,
-            pressure: node.extractionPressure,
+            // The stage pressure is where the bleed point ACTUALLY sits, not
+            // the design value it was configured with. A feedwater heater's
+            // shell pressure is set by how fast it condenses; crediting work
+            // down to a nameplate pressure the shell has drifted away from is
+            // how the energy books and the physics come apart.
+            pressure: node.fluid.pressure,
             extractionFlow,
           });
         }
@@ -1829,64 +1879,80 @@ export class TurbineCondenserRateOperator implements RateOperator {
       // Sort extraction nodes by pressure (high to low) - expansion order
       extractionNodes.sort((a, b) => b.pressure - a.pressure);
 
-      // Calculate staged expansion with extraction
-      let remainingFlow = inletMassFlow;
-      let h_current = h_in;
-      let P_current = P_in;
+      // Staged expansion. Extraction steam is tapped from the header in the
+      // plant graph (this turbine is one node, so there is no intermediate
+      // point to tap), but it physically passes through every stage above its
+      // own pressure - so the machine's throughput is the exhaust flow PLUS
+      // the bleeds, and each bleed drops out after the stage it leaves at.
+      // Only bleeds that sit strictly inside the machine's own pressure range
+      // are stages of it; one above the header or below the exhaust is a line
+      // the plant has wired somewhere else and is none of this expansion's
+      // business.
+      const bleeds = extractionNodes.filter(e => e.pressure < P_in && e.pressure > P_out);
+
+      let inletState = stateAtPh(P_in, h_in);
+
+      let offeredFlow = inletMassFlow;
+      for (const e of bleeds) offeredFlow += e.extractionFlow;
+
+      // A turbine is a fixed set of choked nozzles, and Stodola's cone law
+      // says what they pass: proportional to inlet pressure, falling with the
+      // square root of inlet temperature. Steam offered beyond that cannot
+      // enter the blading, so it does no work - it passes through and lands
+      // in the condenser carrying its own enthalpy.
+      //
+      // Without this bound the momentum solver's startup transients (which
+      // briefly push thousands of kg/s through the inlet connection) came
+      // back out of the expansion as 7-22 GW power readings. `swallowFrac` is
+      // the share of every stream the machine can actually work on, and it is
+      // applied to the power AND to each stream's energy debit, so the books
+      // stay closed whichever way the flow solver behaves.
+      let swallowFrac = 1;
+      if (turbineNode.ratedSteamFlow && turbineNode.ratedSteamFlow > 0 && offeredFlow > 0) {
+        const Pdesign = turbineNode.designInletPressure || P_in;
+        const swallow = turbineNode.ratedSteamFlow * (P_in / Pdesign) *
+          Math.sqrt(Water.saturationTemperature(Pdesign) / Math.max(1, inletState.T));
+        swallowFrac = Math.min(1, swallow / offeredFlow);
+      }
+
+      let stageFlow = offeredFlow * swallowFrac;
       let turbinePower = 0;
+      // Cumulative work per kilogram down to each stage outlet, so each
+      // stream can be charged for exactly the stages it passed through.
+      const workToStage = new Map<string, number>();
+      let cumulativeWork = 0;
 
-      // Process each extraction stage
-      for (const extraction of extractionNodes) {
-        const P_ext = extraction.pressure;
+      const stages: Array<{ nodeId: string; pressure: number; extractionFlow: number }> = [
+        ...bleeds,
+        { nodeId: turbineNodeId, pressure: P_out, extractionFlow: 0 },
+      ];
 
-        // Skip if extraction pressure is higher than current pressure
-        if (P_ext >= P_current) continue;
-
-        // Isentropic expansion to extraction pressure
-        const pressureRatio = P_ext / P_current;
-        const h_ext_ideal = h_current * Math.pow(pressureRatio, 0.3);
-        const h_ext = h_current - this.turbineEfficiency * (h_current - h_ext_ideal);
-
-        // Power from this expansion segment (all flow expands through this stage)
-        const segmentPower = remainingFlow * (h_current - h_ext);
-        turbinePower += segmentPower;
-
-        // Update extraction node energy rate
-        // The extraction flow exits at h_ext enthalpy
-        // We need to ensure the extraction node has the right energy content
-        const extRates = rates.flowNodes.get(extraction.nodeId);
-        if (extRates && extraction.extractionFlow > 0) {
-          // Energy carried by extraction flow
-          // This is handled by flow advection, but we need to ensure
-          // the extraction node reflects the correct enthalpy
-          // The extraction node's fluid state should equilibrate to h_ext
-        }
-
-        // Reduce remaining flow by extraction amount
-        remainingFlow -= extraction.extractionFlow;
-        remainingFlow = Math.max(0, remainingFlow);
-
-        // Update state for next stage
-        h_current = h_ext;
-        P_current = P_ext;
+      for (const stage of stages) {
+        const result = expandStage(inletState, stage.pressure, this.turbineEfficiency);
+        turbinePower += stageFlow * result.work;
+        cumulativeWork += result.work;
+        workToStage.set(stage.nodeId, cumulativeWork);
+        // Whatever is bled off here leaves the machine at this stage's outlet
+        stageFlow = Math.max(0, stageFlow - stage.extractionFlow * swallowFrac);
+        inletState = result.outlet;
       }
-
-      // Final expansion to exhaust pressure
-      if (remainingFlow > 0 && P_out < P_current) {
-        const pressureRatio = P_out / P_current;
-        const h_out_ideal = h_current * Math.pow(pressureRatio, 0.3);
-        const h_out = h_current - this.turbineEfficiency * (h_current - h_out_ideal);
-        const exhaustPower = remainingFlow * (h_current - h_out);
-        turbinePower += exhaustPower;
-      }
+      const workOnThroughFlow = cumulativeWork;
 
       totalTurbinePower += turbinePower;
 
-      // Remove energy from the TURBINE node (where work is extracted)
-      // The flow operator will then advect the reduced-enthalpy steam downstream
+      // Remove the work from the nodes that hold the steam it was taken from.
+      // Each of those nodes received HEADER enthalpy by advection, so taking
+      // the stage work back out is what lands it at the right state - the
+      // exhaust for the through-flow, the bleed conditions for an extraction.
       const turbineRates = rates.flowNodes.get(turbineNodeId);
       if (turbineRates) {
-        turbineRates.dEnergy -= turbinePower;
+        turbineRates.dEnergy -= inletMassFlow * swallowFrac * workOnThroughFlow;
+      }
+      for (const e of bleeds) {
+        if (e.extractionFlow <= 0) continue;
+        const extRates = rates.flowNodes.get(e.nodeId);
+        const work = workToStage.get(e.nodeId) ?? 0;
+        if (extRates) extRates.dEnergy -= e.extractionFlow * swallowFrac * work;
       }
     }
 
