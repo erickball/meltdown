@@ -28,7 +28,8 @@ import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
-import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId } from './hx-bundles';
+import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
+  hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
@@ -1086,8 +1087,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       // The old 0.5 m²/tube constant underestimated a 13 m U-tube ~3x, which
       // (together with node-scale h) silently capped SG capacity.
       const tubeOD = hxComp.tubeOD || 0.022; // m
-      const tubeLengthFactor = hxComp.hxType === 'utube' ? 2.1 : 1.0;
-      const tubeLength = tubeLengthFactor * Math.max(1, hxHeight - (hxComp.plenumLength ?? 0.5));
+      const tubeLength = hxTubeLength(hxComp);
       // Per-bundle share of the tubing. The tube count is the exchanger total,
       // so N bundles each carry 1/N of the area, the metal and the shell flow.
       const tubeArea = Math.PI * tubeOD * tubeLength * (hxComp.tubeCount || 1000) / nBundles;
@@ -1323,6 +1323,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
           `the same components - naming this one '${connectionIds[connectionIndex]}'`);
         flowConnection.id = connectionIds[connectionIndex];
       }
+      addHeatExchangerTubeFriction(flowConnection, connection, plantState);
       state.flowConnections.push(flowConnection);
 
       // Link pump to its OUTLET flow connection (where pump is the FROM component)
@@ -3027,6 +3028,59 @@ function hxTubePortNodeId(component: PlantComponent, portId: string): string {
 /**
  * Create a flow connection from a plant connection
  */
+
+/**
+ * Charge a connection for the tube-side friction of any heat exchanger it
+ * feeds or drains.
+ *
+ * The hydraulic model carries ONE resistance per connection - a K factor -
+ * and `length` feeds inertia, not friction. So a heat exchanger's tubing
+ * contributed nothing at all: a bundle was hydraulically a point, and its
+ * pressure drop was whatever K the plant author happened to type on the pipes
+ * either side. That matters beyond the loop's operating point, because tube
+ * friction is what stops two parallel bundles from swapping flow.
+ *
+ * Darcy over the bundle, referred to THIS connection's flow area (the K
+ * convention is dP = K rho v^2/2 with v measured in the connection):
+ *
+ *     K_add = f (L/d) (A_conn / A_tubes)^2 / 2
+ *
+ * halved because the inlet and the outlet each carry one, and the bundle sits
+ * between them. f = 0.02 is the usual smooth-tube turbulent value; a constant
+ * is the same approximation every other K in this model makes, and the
+ * velocity it would otherwise track swings by two orders of magnitude between
+ * the liquid end of a boiler tube and the steam end anyway.
+ */
+function addHeatExchangerTubeFriction(
+  flowConnection: { flowArea: number; resistanceCoeff: number },
+  connection: Connection,
+  plantState: PlantState,
+): void {
+  const DARCY_F = 0.02;
+  for (const endId of [connection.fromComponentId, connection.toComponentId]) {
+    const comp = plantState.components.get(endId) as any;
+    if (!comp || comp.type !== 'heatExchanger') continue;
+    // Shell-side connections see the shell, not the tubes.
+    const portId = endId === connection.fromComponentId
+      ? connection.fromPortId : connection.toPortId;
+    if (!portId?.includes('-tube')) continue;
+
+    const nBundles = hxBundleCount(comp);
+    const tubeOD = comp.tubeOD || 0.022;
+    // Wall is not modelled per tube; 12% of OD is the usual thin-wall ratio
+    // for boiler tubing at these pressures.
+    const tubeID = hxTubeInnerDiameter(tubeOD);
+    const tubeLength = hxTubeLength(comp);
+    const tubesPerBundle = Math.max(1, (comp.tubeCount || 1000) / nBundles);
+    const aTubes = tubesPerBundle * Math.PI * tubeID * tubeID / 4;
+    if (!(aTubes > 0) || !(flowConnection.flowArea > 0)) continue;
+
+    const areaRatio = flowConnection.flowArea / aTubes;
+    const kAdd = 0.5 * DARCY_F * (tubeLength / tubeID) * areaRatio * areaRatio;
+    flowConnection.resistanceCoeff += kAdd;
+  }
+}
+
 function createFlowConnectionFromPlantConnection(
   connection: Connection,
   plantState: PlantState

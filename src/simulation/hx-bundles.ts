@@ -58,3 +58,30 @@ export function hxBundleIndexFromPortId(portId: string): number {
   const m = /-b(\d+)$/.exec(portId);
   return m ? Math.max(0, parseInt(m[1], 10) - 1) : 0;
 }
+
+/**
+ * Per-tube length as a multiple of the bundle's height: a U-tube runs up,
+ * around and back down; a straight tube runs once.
+ *
+ * HELICAL IS KNOWN WRONG at 1.0 and is left there deliberately. A helical
+ * coil is the whole point of a helix - real once-through coils run 3-8x the
+ * shell height - so both the heat area and the tube friction are understated
+ * for every helical exchanger in the plant library. Raising it changes the
+ * duty of every HTGR-style SG built so far, which is a calibration decision
+ * rather than a bug fix, so it wants deciding rather than sneaking in.
+ */
+export function hxTubeLengthFactor(hxType: string | undefined): number {
+  return hxType === 'utube' ? 2.1 : 1.0;
+}
+
+/** Tube inner diameter (m). The wall is not modelled per tube; 12% of OD is
+ *  the usual thin-wall ratio for boiler tubing at these pressures. */
+export function hxTubeInnerDiameter(tubeOD: number | undefined): number {
+  return (tubeOD || 0.022) * 0.88;
+}
+
+/** Length of one tube through the bundle (m). */
+export function hxTubeLength(hx: { hxType?: string; height?: number; plenumLength?: number }): number {
+  return hxTubeLengthFactor(hx.hxType) *
+    Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
+}
