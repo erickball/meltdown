@@ -39,6 +39,14 @@ import {
   calculateLiquidLevelWithObstructions,
 } from './connection-hydraulics';
 
+/**
+ * Seconds between controller scans. A real DCS scans its loops at 0.1-1 s;
+ * this sits in the middle and is comfortably faster than the fastest lambda
+ * below (5 s for flow), so the loop still resolves its own dynamics.
+ * Per-controller override: `scanPeriod`.
+ */
+const DEFAULT_SCAN_PERIOD = 0.5;
+
 /** Default closed-loop time constants per sensor kind (s), before the
  *  aggressiveness scaling. Chosen like DCS commissioning defaults: slow
  *  enough to be robust to the k' estimate being off by 2-3x. */
@@ -72,7 +80,17 @@ const ROD_BANDS: Record<string, { band: number; deadband: number }> = {
 
 export class ControlSystemOperator implements ConstraintOperator {
   name = 'ControlSystem';
-  finalOnly = true;
+  /**
+   * ACCEPTED states only, not candidates. A PI in velocity form carries its
+   * integral in lastOutput and differentiates against lastError, so stepping
+   * it on a candidate that is then rejected rewinds both - and the next
+   * attempt measures its increment against an error from the discarded
+   * branch. In a plant that rejects four steps in five (the Xe-100 does), a
+   * loop asked to raise its output against a sustained +20 kg/s error simply
+   * sat there while its computed output oscillated around it. A real DCS
+   * scans the plant state it actually has, which is this one.
+   */
+  postAcceptOnly = true;
 
   applyConstraints(state: SimulationState, dt?: number): SimulationState {
     const controllers = state.components.controllers;
@@ -105,7 +123,22 @@ export class ControlSystemOperator implements ConstraintOperator {
 
     if (controllers) {
       for (const [, ctl] of newState.components.controllers) {
-        this.updateController(newState, ctl, dt);
+        // A loop SCANS - it does not run at solver cadence. The velocity form
+        // increments by kp*(error - lastError), which measures the change
+        // since the last update, so running it every accepted step makes that
+        // term the step-to-step JITTER of the measurement. The solver takes
+        // hundreds of steps a second in a lively plant, so that noise walks
+        // the output around by kp*sigma*sqrt(N) while the integral, which
+        // grows as ki*error*t, is left orders of magnitude behind: the
+        // Xe-100's feed loop sat still against a sustained +20 kg/s error
+        // because the P term was re-rolling the dice 100 times a second.
+        //
+        // Real DCS loops scan on a fixed period for exactly this reason, and
+        // the lambda tuning below is already written in seconds against one.
+        const since = state.time - (ctl.lastScanTime ?? -Infinity);
+        if (since < (ctl.scanPeriod ?? DEFAULT_SCAN_PERIOD)) continue;
+        ctl.lastScanTime = state.time;
+        this.updateController(newState, ctl, Number.isFinite(since) ? since : dt);
       }
     }
     return newState;

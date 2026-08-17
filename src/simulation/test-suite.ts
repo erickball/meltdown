@@ -1664,6 +1664,58 @@ test('an expression made only of constants is refused - nothing to follow', () =
     `a constant-only measurement must be refused, got: ${message || '(no error)'}`);
 });
 
+test('a loop scans on its own period, not on the solver step', () => {
+  // The velocity form increments by kp*(error - lastError), so running it
+  // every accepted step makes that term the step-to-step JITTER of the
+  // measurement rather than its change over a control interval. A lively
+  // plant takes hundreds of steps a second, and that noise walks the output
+  // around far faster than the integral can move it.
+  const op = new ControlSystemOperator();
+  const build = (scanPeriod?: number) => {
+    const ctl = {
+      id: 'ctl-x', label: 'x', mode: 'auto',
+      sensor: { kind: 'connection-flow', targetId: 'feed' },
+      setpoint: 25, scanPeriod,
+      actuator: { kind: 'pump-speed', targetId: 'p1', min: 0, max: 1, rateLimit: 100 },
+      aggressiveness: 1, lastOutput: 0.5, lastError: 0,
+    } as unknown as ControllerState;
+    const state = {
+      time: 0, flowNodes: new Map(), thermalNodes: new Map(),
+      thermalConnections: [], convectionConnections: [], radiationConnections: [],
+      flowConnections: [{ id: 'feed', fromNodeId: 'a', toNodeId: 'b', massFlowRate: 5 }],
+      components: {
+        controllers: new Map([['ctl-x', ctl]]),
+        pumps: new Map([['p1', { id: 'p1', speed: 0.5, effectiveSpeed: 0.5, ratedFlow: 80,
+                                 running: true, connectedFlowPath: 'feed' }]]),
+        valves: new Map(),
+      },
+      neutronics: { nominalPower: 0 },
+    } as unknown as SimulationState;
+    return state;
+  };
+
+  // Ten solver steps inside one scan period: exactly one update.
+  let s = build(0.5);
+  let updates = 0;
+  for (let i = 0; i < 10; i++) {
+    const before = s.components.controllers.get('ctl-x')!.lastScanTime;
+    s.time = i * 0.02;
+    s = op.applyConstraints(s, 0.02)!;
+    if (s.components.controllers.get('ctl-x')!.lastScanTime !== before) updates++;
+  }
+  assertClose(updates, 1, 0, `one scan period should give one update, got ${updates}`);
+
+  // Past the period, it scans again - and the increment uses the ELAPSED
+  // scan time, so the integral advances by the interval rather than by a
+  // solver step.
+  s.time = 0.6;
+  s = op.applyConstraints(s, 0.02)!;
+  const ctl = s.components.controllers.get('ctl-x')!;
+  assertClose(ctl.lastScanTime ?? -1, 0.6, 1e-9, 'the scan is stamped at the time it ran');
+  assert(ctl.lastOutput > 0.5,
+    `a +20 kg/s error must raise the command, got ${ctl.lastOutput.toFixed(4)}`);
+});
+
 test('anything that displays a controller can survive an expression', () => {
   // A setpoint is no longer necessarily a number and a sensor no longer
   // necessarily a leaf. `sp.toFixed(1)` on an expression is a TypeError, and

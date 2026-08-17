@@ -444,7 +444,9 @@ function tempOfLiquidH(h: number): number {
  */
 export class OtsgLedgerCheckOperator implements ConstraintOperator {
   name = 'OtsgLedgerCheck';
-  finalOnly = true;
+  /** ACCEPTED states only - reporting on a candidate the solver then rejects
+   *  is the crying-wolf this check exists to avoid. */
+  postAcceptOnly = true;
 
   /** K - how far above the hottest wall a superheat section has to land before
    *  it is reported. Compression heating in a fast pressurization is worth

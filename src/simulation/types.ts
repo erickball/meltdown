@@ -698,6 +698,12 @@ export interface ControllerState {
    *  cascade, or a programmed setpoint. */
   setpoint: number | ControllerSignal;
 
+  /** Seconds between scans of this loop (default 0.5). A controller is a
+   *  sampled device, not a continuous one; see ControlSystemOperator. */
+  scanPeriod?: number;
+  /** Sim time of the last scan - internal to the operator. */
+  lastScanTime?: number;
+
   /** Optional feedforward measurement (three-element control): commanded
    *  flow starts from this measured flow, PI only trims the residual.
    *  The canonical use is feedwater = steam flow + level trim. */

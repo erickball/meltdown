@@ -114,8 +114,15 @@ export interface ConstraintOperator {
    * Only apply this operator to end-of-step candidate states, not to
    * intermediate RK stages. NOTE: a "final" application still happens BEFORE
    * the accept/reject decision - the candidate can be discarded afterward.
-   * Operators that only need per-accepted-step sampling (controllers) belong
-   * here; operators with IRREVERSIBLE side effects belong in postAcceptOnly.
+   *
+   * That makes this the wrong home for anything that CARRIES STATE ACROSS
+   * STEPS. A controller here is stepped on candidates that are then thrown
+   * away, so its integral is repeatedly rewound and its velocity-form
+   * increment is measured against a lastError from a discarded branch: in a
+   * plant rejecting most of its steps, the loop cannot accumulate at all.
+   * Stateful samplers and anything with irreversible side effects belong in
+   * postAcceptOnly. What is left for this flag is stateless per-step
+   * derivation (display fields, steady-state bookkeeping).
    */
   finalOnly?: boolean;
 

@@ -60,8 +60,9 @@ function line(state: SimulationState) {
     readSetpoint(s: SimulationState, c: unknown): number;
   };
   const fw = ctl
-    ? { pv: op.readSensor(state, ctl), sp: op.readSetpoint(state, ctl), out: ctl.lastOutput }
-    : { pv: NaN, sp: NaN, out: NaN };
+    ? { pv: op.readSensor(state, ctl), sp: op.readSetpoint(state, ctl),
+        out: ctl.lastOutput, err: ctl.lastError }
+    : { pv: NaN, sp: NaN, out: NaN, err: NaN };
   if (!pumpOut || !fwhTube || !fwhShell || !sg) return;
 
   console.log(
@@ -95,6 +96,10 @@ function line(state: SimulationState) {
     // What the feedwater loop itself thinks: its measurement, its setpoint,
     // and the command it is writing.
     `${fw.pv.toFixed(1).padStart(6)} ${fw.sp.toFixed(1).padStart(6)} ` +
+    // err_now is what the sample sees; err_ctl is what the controller itself
+    // last acted on. They differ when the loop's inputs move faster than the
+    // sample does - which is the whole question here.
+    `${(fw.sp - fw.pv).toFixed(1).padStart(7)} ${fw.err.toFixed(1).padStart(7)} ` +
     `${fw.out.toFixed(2).padStart(5)}`
   );
 }
@@ -104,7 +109,7 @@ console.log('valve shuts when it goes negative. "fwh tube" is the feedwater insi
 console.log('heater - it leaving the liquid phase means the feed line is flashing.\n');
 console.log(
   '    t  W_pump  W_toSG  W_stm  split  bleed |  P_pump    P_SG      dP |  P_fwh  T_fwh      phase   m_fwh |' +
-  ' P_shl  T_shl  m_shl | speed bleed |  SG phase   m_sg  lvl_sg  drain     x_s drainV |  fw_pv  fw_sp  cmd');
+  ' P_shl  T_shl  m_shl | speed bleed |  SG phase   m_sg  lvl_sg  drain     x_s drainV |  fw_pv  fw_sp err_now err_ctl  cmd');
 line(sim.state);
 for (let t = 0; t < seconds; t++) {
   try {
