@@ -1073,14 +1073,91 @@
             "targetId": "fwh-1-tube"
           },
           "setpoint": 473,
-          "invert": true,
-          "aggressiveness": 0.4,
+          "aggressiveness": 1.0,
           "actuator": {
             "kind": "valve-position",
             "targetId": "val-bleed-1",
             "min": 0,
-            "max": 0.35,
+            "max": 0.3,
             "rateLimit": 0.02
+          }
+        }
+      }
+    ],
+    [
+      "val-fwhdr-1",
+      {
+        "id": "val-fwhdr-1",
+        "type": "valve",
+        "label": "FWH Drain Valve",
+        "valveType": "gate",
+        "position": {
+          "x": 68,
+          "y": 103
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "diameter": 0.1,
+        "opening": 0.3,
+        "fluid": {
+          "temperature": 497,
+          "pressure": 2500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "nqa1": false,
+        "pressureRating": 60,
+        "ports": [
+          {
+            "id": "val-fwhdr-1-in",
+            "position": {
+              "x": -0.5,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "val-fwhdr-1-out",
+            "position": {
+              "x": 0.5,
+              "y": 0
+            },
+            "direction": "both"
+          }
+        ]
+      }
+    ],
+    [
+      "ctl-fwhlvl-1",
+      {
+        "id": "ctl-fwhlvl-1",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "FWH Shell Level",
+        "position": {
+          "x": 20,
+          "y": 88
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "node-level",
+            "targetId": "fwh-1-shell"
+          },
+          "setpoint": 0.3,
+          "invert": true,
+          "aggressiveness": 1.5,
+          "actuator": {
+            "kind": "valve-position",
+            "targetId": "val-fwhdr-1",
+            "min": 0.02,
+            "max": 1.0,
+            "rateLimit": 0.05
           }
         }
       }
@@ -1173,7 +1250,7 @@
       "toElevation": 1,
       "flowArea": 0.015,
       "length": 8,
-      "resistanceCoeff": 2
+      "resistanceCoeff": 600
     },
     {
       "fromComponentId": "val-fwcv-1",
@@ -1184,7 +1261,7 @@
       "toElevation": 1,
       "flowArea": 0.015,
       "length": 8,
-      "resistanceCoeff": 2
+      "resistanceCoeff": 600
     },
     {
       "fromComponentId": "hx-1",
@@ -1347,7 +1424,7 @@
       "toPortId": "val-bleed-1-in",
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.004,
+      "flowArea": 0.0008,
       "length": 20,
       "resistanceCoeff": 6
     },
@@ -1358,20 +1435,31 @@
       "toPortId": "fwh-1-shell-1",
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.004,
+      "flowArea": 0.0008,
       "length": 6,
       "resistanceCoeff": 2
     },
     {
       "fromComponentId": "fwh-1",
       "fromPortId": "fwh-1-shell-2",
+      "toComponentId": "val-fwhdr-1",
+      "toPortId": "val-fwhdr-1-in",
+      "fromElevation": 0,
+      "toElevation": 3,
+      "flowArea": 0.01,
+      "length": 8,
+      "resistanceCoeff": 4
+    },
+    {
+      "fromComponentId": "val-fwhdr-1",
+      "fromPortId": "val-fwhdr-1-out",
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
       "fromElevation": 0,
       "toElevation": 3,
-      "flowArea": 0.006,
+      "flowArea": 0.01,
       "length": 8,
-      "resistanceCoeff": 40
+      "resistanceCoeff": 8
     }
   ]
 }
