@@ -28,7 +28,7 @@
  *   a controller silently doing nothing is the worst failure mode.
  */
 
-import { SimulationState, ControllerState, FlowNode } from '../types';
+import { SimulationState, ControllerState, ControllerSignal, ControllerSensorKind, FlowNode } from '../types';
 import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
 import { saturationPressure, saturatedLiquidEnergy } from '../water-properties';
@@ -161,9 +161,10 @@ export class ControlSystemOperator implements ConstraintOperator {
     }
 
     const pv = this.readSensor(state, ctl);
+    const setpoint = this.readSetpoint(state, ctl);
     // Positive error must always demand MORE output; invert flags
     // reverse-acting loops (spray on pressure, steam valve on upstream P).
-    const error = ctl.invert ? pv - ctl.setpoint : ctl.setpoint - pv;
+    const error = ctl.invert ? pv - setpoint : setpoint - pv;
 
     let output: number;
     if (ctl.mode === 'manual') {
@@ -178,7 +179,7 @@ export class ControlSystemOperator implements ConstraintOperator {
         kp = ctl.gains.kp;
         ki = ctl.gains.ki;
       } else {
-        const lambda = (LAMBDA_DEFAULTS[ctl.sensor.kind] ?? 30) / Math.max(0.1, ctl.aggressiveness || 1);
+        const lambda = (LAMBDA_DEFAULTS[this.sensorKindOf(ctl)] ?? 30) / Math.max(0.1, ctl.aggressiveness || 1);
         const kPrime = this.processIntegratingGain(state, ctl);
         // SIMC for an integrating process: Kc = 1/(k'·λ), Ti = 4λ
         const kpFlow = 1 / (kPrime * lambda);
@@ -234,15 +235,16 @@ export class ControlSystemOperator implements ConstraintOperator {
       return;
     }
 
-    const bands = ROD_BANDS[ctl.sensor.kind];
+    const bands = ROD_BANDS[this.sensorKindOf(ctl)];
     if (!bands) {
       throw new Error(
         `[ControlSystem] '${ctl.id}': control-rods actuator has no proportional band for ` +
-        `sensor kind '${ctl.sensor.kind}' (supported: ${Object.keys(ROD_BANDS).join(', ')})`
+        `sensor kind '${this.sensorKindOf(ctl)}' (supported: ${Object.keys(ROD_BANDS).join(', ')})`
       );
     }
     const pv = this.readSensor(state, ctl);
-    const error = ctl.invert ? pv - ctl.setpoint : ctl.setpoint - pv;
+    const setpoint = this.readSetpoint(state, ctl);
+    const error = ctl.invert ? pv - setpoint : setpoint - pv;
 
     // Lead (rate) compensation, as in a real rod controller's lead-lag: act
     // on the PROJECTED error ~40 s ahead. Against the loop's transport delay,
@@ -296,8 +298,109 @@ export class ControlSystemOperator implements ConstraintOperator {
   // Sensors
   // ==========================================================================
 
+  /**
+   * Evaluate a measurement expression (see ControllerSignal).
+   *
+   * Every operator is total over its inputs except `ratio`, which is the one
+   * that can be handed a divisor the plant legitimately makes zero - a steam
+   * flow at startup, a level in an empty vessel. It throws rather than
+   * returning an infinity that would arrive at the PI as a NaN two lines
+   * later and freeze the loop silently. A ratio belongs on the SETPOINT,
+   * where the denominator is a constant.
+   */
+  private evaluateSignal(
+    state: SimulationState, sig: ControllerSignal, ctl: ControllerState
+  ): number {
+    const op = (sig as { op?: string }).op ?? 'signal';
+    switch (op) {
+      case 'signal': {
+        const leaf = sig as { kind: ControllerSensorKind; targetId: string };
+        return this.readSignalKind(state, leaf.kind, leaf.targetId, ctl);
+      }
+      case 'const':
+        return (sig as { value: number }).value;
+      case 'scale': {
+        const n = sig as { input: ControllerSignal; factor: number; offset?: number };
+        return this.evaluateSignal(state, n.input, ctl) * n.factor + (n.offset ?? 0);
+      }
+      default: {
+        const n = sig as { op: string; inputs: ControllerSignal[] };
+        if (!Array.isArray(n.inputs) || n.inputs.length === 0) {
+          throw new Error(`[ControlSystem] '${ctl.id}': '${op}' has no inputs`);
+        }
+        const v = n.inputs.map(i => this.evaluateSignal(state, i, ctl));
+        switch (op) {
+          case 'sum': return v.reduce((a, b) => a + b, 0);
+          case 'diff': return v.slice(1).reduce((a, b) => a - b, v[0]);
+          case 'product': return v.reduce((a, b) => a * b, 1);
+          case 'min': return Math.min(...v);
+          case 'max': return Math.max(...v);
+          case 'ratio': {
+            let r = v[0];
+            for (const d of v.slice(1)) {
+              if (Math.abs(d) < 1e-12) {
+                throw new Error(
+                  `[ControlSystem] '${ctl.id}': ratio divides by ${d} - a measurement the ` +
+                  `plant can legitimately zero (a shut steam line, an empty vessel) does not ` +
+                  `belong under a divisor. Put the ratio on the setpoint instead, where the ` +
+                  `denominator is a constant.`);
+              }
+              r /= d;
+            }
+            return r;
+          }
+          default:
+            throw new Error(`[ControlSystem] '${ctl.id}': unknown sensor operator '${op}'`);
+        }
+      }
+    }
+  }
+
+  /**
+   * The signal an expression is TUNED against: its first leaf, in written
+   * order. Lambda and the process gain are per sensor kind, and a composite
+   * has no single kind - so the convention is that the first signal named is
+   * the one the loop is really about (the trim in a three-element scheme, the
+   * level in a level/flow cascade). Anything exotic enough for that to be
+   * wrong should carry explicit `gains`.
+   */
+  private primaryLeaf(sig: ControllerSignal): { kind: ControllerSensorKind; targetId: string } | null {
+    const op = (sig as { op?: string }).op ?? 'signal';
+    if (op === 'signal') return sig as { kind: ControllerSensorKind; targetId: string };
+    if (op === 'const') return null;
+    if (op === 'scale') return this.primaryLeaf((sig as { input: ControllerSignal }).input);
+    for (const i of (sig as { inputs: ControllerSignal[] }).inputs ?? []) {
+      const leaf = this.primaryLeaf(i);
+      if (leaf) return leaf;
+    }
+    return null;
+  }
+
+  /** The measurement's tuning kind, or a loud error if it has no signal in it. */
+  private sensorKindOf(ctl: ControllerState): ControllerSensorKind {
+    const leaf = this.primaryLeaf(ctl.sensor);
+    if (!leaf) {
+      throw new Error(
+        `[ControlSystem] '${ctl.id}': the measurement is made only of constants - ` +
+        `there is nothing for the loop to follow.`);
+    }
+    return leaf.kind;
+  }
+
+  /** The setpoint, whether written as a number or as an expression. */
+  private readSetpoint(state: SimulationState, ctl: ControllerState): number {
+    return typeof ctl.setpoint === 'number'
+      ? ctl.setpoint
+      : this.evaluateSignal(state, ctl.setpoint, ctl);
+  }
+
   private readSensor(state: SimulationState, ctl: ControllerState): number {
-    const { kind, targetId } = ctl.sensor;
+    return this.evaluateSignal(state, ctl.sensor, ctl);
+  }
+
+  private readSignalKind(
+    state: SimulationState, kind: ControllerSensorKind, targetId: string, ctl: ControllerState
+  ): number {
     switch (kind) {
       case 'node-level': {
         const node = this.getNode(state, targetId, ctl.id, 'sensor');
@@ -398,7 +501,8 @@ export class ControlSystemOperator implements ConstraintOperator {
    * (kg/s of net flow, or W for heater actuators). Read from the live state.
    */
   private processIntegratingGain(state: SimulationState, ctl: ControllerState): number {
-    const { kind, targetId } = ctl.sensor;
+    // Tuned against the measurement's primary signal - see primaryLeaf.
+    const { kind, targetId } = this.primaryLeaf(ctl.sensor) ?? { kind: 'node-level' as const, targetId: '' };
     const heater = ctl.actuator.kind === 'heater-power';
 
     switch (kind) {

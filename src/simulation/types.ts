@@ -658,19 +658,45 @@ export type ControllerActuatorKind =
  * (see ControlSystemOperator) unless manually overridden. Controllers are
  * DEVICES, not physics: they may saturate, rate-limit, and dead-band.
  */
+/**
+ * One measurement: a plant signal, a constant, or an arithmetic combination of
+ * them. A controller's MEASUREMENT and its SETPOINT are both expressions, so
+ * the loops a plant actually needs can be written down instead of hard-coded:
+ *
+ *   feed follows steam    pv = feed flow,  sp = {scale: steam flow, by: 1.02}
+ *   two-out-of-three      pv = {op:'max', inputs: [tA, tB, tC]}
+ *   differential level    pv = {op:'diff', inputs: [upstream, downstream]}
+ *   margin to saturation  pv = {op:'diff', inputs: [T_sat_signal, T_node]}
+ *
+ * Putting the ratio on the SETPOINT rather than the measurement is deliberate:
+ * a feed/steam ratio as a measurement divides by a steam flow that is legally
+ * zero at startup, while a setpoint that scales with steam flow is finite
+ * everywhere and is what a real ratio station computes.
+ */
+export type ControllerSignal =
+  /** A plant measurement - the leaf of every expression. */
+  | { op?: 'signal'; kind: ControllerSensorKind; targetId: string }
+  /** A fixed number, in the units of whatever it is combined with. */
+  | { op: 'const'; value: number }
+  /** a*factor + offset - unit conversion, bias, ratio stations. */
+  | { op: 'scale'; input: ControllerSignal; factor: number; offset?: number }
+  /** Sum, first-minus-the-rest, product, first-over-the-rest, extrema. */
+  | { op: 'sum' | 'diff' | 'product' | 'ratio' | 'min' | 'max'; inputs: ControllerSignal[] };
+
 export interface ControllerState {
   id: string;
   label: string;
   /** 'auto' = closed loop; 'manual' = hold manualOutput (bumpless transfer back) */
   mode: 'auto' | 'manual';
 
-  sensor: {
-    kind: ControllerSensorKind;
-    /** flow node id, connection id, or '' for reactor-power */
-    targetId: string;
-  };
-  /** Setpoint in the sensor's SI units (reactor-power: fraction of nominal) */
-  setpoint: number;
+  /** What the loop measures. A bare {kind, targetId} is one signal - the shape
+   *  every existing preset uses - and anything else is an expression over
+   *  signals (see ControllerSignal). */
+  sensor: ControllerSignal;
+  /** Setpoint in the measurement's SI units (reactor-power: fraction of
+   *  nominal). An expression here tracks another measurement - ratio,
+   *  cascade, or a programmed setpoint. */
+  setpoint: number | ControllerSignal;
 
   /** Optional feedforward measurement (three-element control): commanded
    *  flow starts from this measured flow, PI only trims the residual.

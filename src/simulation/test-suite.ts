@@ -10,6 +10,7 @@
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import { computeReactivityComponents } from './operators/neutronics.js';
+import { ControlSystemOperator } from './operators/control-system.js';
 import {
   graphiteSpecificHeat,
   bedStagnantConductivity,
@@ -57,7 +58,7 @@ import {
   createGasComposition,
   mixtureCv,
 } from './gas-properties.js';
-import type { NeutronicsState, FlowNode } from './types.js';
+import type { NeutronicsState, FlowNode, SimulationState, ControllerState } from './types.js';
 
 // Test result tracking
 interface TestResult {
@@ -1493,6 +1494,133 @@ test('no expansion available: zero work, state unchanged', () => {
 // ============================================================================
 
 console.log('Running Meltdown Simulation Test Suite...\n');
+
+// ============================================================================
+// Controller measurement expressions
+// ============================================================================
+// A controller's measurement AND its setpoint are expressions over plant
+// signals, so the loops a plant needs can be written down rather than
+// hard-coded. These pin the arithmetic, the back-compatible shape every
+// existing preset uses, and the one operator that is allowed to refuse.
+
+category('Controller signals');
+
+/** Minimal state carrying two connections and a node the tests can read. */
+function signalRig(): SimulationState {
+  const state = {
+    time: 0,
+    flowNodes: new Map(),
+    flowConnections: [
+      { id: 'flow-a', fromNodeId: 'x', toNodeId: 'y', massFlowRate: 40 },
+      { id: 'flow-b', fromNodeId: 'y', toNodeId: 'z', massFlowRate: 25 },
+    ],
+    thermalNodes: new Map(),
+    components: { controllers: new Map(), pumps: new Map(), valves: new Map() },
+    neutronics: {},
+  } as unknown as SimulationState;
+  state.flowNodes.set('vessel', {
+    id: 'vessel', volume: 10, height: 4,
+    fluid: { mass: 5000, internalEnergy: 5e9, temperature: 500, pressure: 70e5, phase: 'two-phase', quality: 0.1 },
+  } as unknown as never);
+  return state;
+}
+
+function evalSignal(sensor: unknown, setpoint: unknown = 0): { pv: number; sp: number } {
+  const op = new ControlSystemOperator();
+  const state = signalRig();
+  const ctl = {
+    id: 'ctl-test', label: 'test', mode: 'auto',
+    sensor, setpoint,
+    actuator: { kind: 'valve-position', targetId: 'v', min: 0, max: 1, rateLimit: 1 },
+    lastOutput: 0, lastError: 0, aggressiveness: 1,
+  } as unknown as ControllerState;
+  return {
+    pv: (op as unknown as { readSensor(s: SimulationState, c: ControllerState): number })
+      .readSensor(state, ctl),
+    sp: (op as unknown as { readSetpoint(s: SimulationState, c: ControllerState): number })
+      .readSetpoint(state, ctl),
+  };
+}
+
+test('a bare {kind, targetId} is still one signal', () => {
+  // Every preset written before expressions existed uses this shape.
+  const { pv } = evalSignal({ kind: 'connection-flow', targetId: 'flow-a' });
+  assertClose(pv, 40, 1e-9, 'legacy sensor shape must read straight through');
+});
+
+test('signals combine: sum, difference, product, extrema, scale', () => {
+  const a = { kind: 'connection-flow', targetId: 'flow-a' };   // 40
+  const b = { kind: 'connection-flow', targetId: 'flow-b' };   // 25
+  assertClose(evalSignal({ op: 'sum', inputs: [a, b] }).pv, 65, 1e-9, 'sum');
+  assertClose(evalSignal({ op: 'diff', inputs: [a, b] }).pv, 15, 1e-9, 'difference');
+  assertClose(evalSignal({ op: 'product', inputs: [a, b] }).pv, 1000, 1e-9, 'product');
+  assertClose(evalSignal({ op: 'min', inputs: [a, b] }).pv, 25, 1e-9, 'min');
+  assertClose(evalSignal({ op: 'max', inputs: [a, b] }).pv, 40, 1e-9, 'max');
+  assertClose(evalSignal({ op: 'scale', input: a, factor: 0.5, offset: 3 }).pv, 23, 1e-9, 'scale');
+  assertClose(evalSignal({ op: 'const', value: 7 }).pv, 7, 1e-9, 'constant');
+  // Nesting: the three-element feedwater shape, level trim on a flow error
+  const threeElement = { op: 'sum', inputs: [
+    { op: 'diff', inputs: [b, a] },
+    { op: 'scale', input: { kind: 'node-level', targetId: 'vessel' }, factor: 100 },
+  ]};
+  const { pv } = evalSignal(threeElement);
+  assert(Number.isFinite(pv), `a nested expression must evaluate, got ${pv}`);
+});
+
+test('the setpoint is an expression too - that is what ratio control is', () => {
+  // Feed follows steam: measure the feed, aim at 1.02x the steam flow. The
+  // ratio lives on the SETPOINT, so a shut steam line gives a setpoint of
+  // zero rather than a division by it.
+  const { pv, sp } = evalSignal(
+    { kind: 'connection-flow', targetId: 'flow-a' },
+    { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-b' }, factor: 1.02 },
+  );
+  assertClose(pv, 40, 1e-9, 'measurement is the feed flow');
+  assertClose(sp, 25.5, 1e-9, 'setpoint tracks the steam flow');
+});
+
+test('a ratio refuses a zero divisor instead of handing the PI an infinity', () => {
+  let message = '';
+  try {
+    evalSignal({ op: 'ratio', inputs: [
+      { kind: 'connection-flow', targetId: 'flow-a' },
+      { op: 'const', value: 0 },
+    ]});
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('[ControlSystem]') && message.includes('ratio'),
+    `a zero divisor must be refused explicitly, got: ${message || '(no error)'}`);
+});
+
+test('an expression made only of constants is refused - nothing to follow', () => {
+  const op = new ControlSystemOperator();
+  let message = '';
+  try {
+    (op as unknown as { sensorKindOf(c: ControllerState): string }).sensorKindOf(
+      { id: 'ctl-x', sensor: { op: 'sum', inputs: [{ op: 'const', value: 1 }] } } as unknown as ControllerState);
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('only of constants'),
+    `a constant-only measurement must be refused, got: ${message || '(no error)'}`);
+});
+
+test('tuning follows the first signal named', () => {
+  // Lambda and the process gain are per sensor kind and a composite has no
+  // single kind, so the convention is the first leaf in written order.
+  const op = new ControlSystemOperator();
+  const kindOf = (sensor: unknown) =>
+    (op as unknown as { sensorKindOf(c: ControllerState): string })
+      .sensorKindOf({ id: 'c', sensor } as unknown as ControllerState);
+  assertClose(kindOf({ op: 'sum', inputs: [
+    { kind: 'node-level', targetId: 'vessel' },
+    { kind: 'connection-flow', targetId: 'flow-a' },
+  ]}) === 'node-level' ? 1 : 0, 1, 0, 'first leaf wins');
+  assertClose(kindOf({ op: 'scale', factor: 2,
+    input: { kind: 'connection-flow', targetId: 'flow-a' } }) === 'connection-flow' ? 1 : 0,
+    1, 0, 'scale is transparent to tuning');
+});
 
 // Group results by category
 const byCategory = new Map<string, TestResult[]>();
