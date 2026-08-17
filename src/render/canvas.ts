@@ -61,6 +61,15 @@ export class PlantCanvas {
   private elevationArrowTargets: Array<{
     componentId: string; delta: number; x: number; y: number; radius: number;
   }> = [];
+  /**
+   * While the pointer rests on a component's arrows, its buttons hold the
+   * position they had when the pointer arrived. Without this the buttons ride
+   * the component they are moving: one click lifts it, the pair slides up
+   * with it, and the second click at the same spot lands on the DOWN arrow
+   * and undoes the first. The latch lets you click a stack of steps without
+   * chasing the button, and releases the moment the pointer leaves.
+   */
+  private elevationArrowLatch: { componentId: string; x: number; y: number } | null = null;
   /** Metres one arrow click moves a component. */
   public static readonly ELEVATION_STEP_M = 0.5;
 
@@ -2661,12 +2670,25 @@ export class PlantCanvas {
     this.elevationArrowTargets = [];
     if (!this.showElevationArrows || !this.isometric.enabled) return;
 
-    const R = 11;        // arrow button radius, px
-    const GAP = 6;       // px between the component edge and the buttons
+    const R = 7;         // arrow button radius, px
+    const GAP = 4;       // px between the component edge and the buttons
     const { verticalScale } = this.getViewTransform();
     // Read the canvas box ONCE - a getBoundingClientRect per component per
     // frame forces a layout on every one of them
     const rect = this.canvas.getBoundingClientRect();
+
+    // The box the pointer must stay inside to keep a cluster latched. Slack
+    // beyond the buttons themselves so a small wobble does not release it.
+    const SLACK = 6;
+    const pointerInCluster = (ax: number, ay: number): boolean =>
+      Math.abs(this.lastMouseScreen.x - ax) <= R + SLACK &&
+      Math.abs(this.lastMouseScreen.y - ay) <= 2 * R + 1 + SLACK;
+
+    // Release a latch the pointer has wandered away from
+    if (this.elevationArrowLatch &&
+        !pointerInCluster(this.elevationArrowLatch.x, this.elevationArrowLatch.y)) {
+      this.elevationArrowLatch = null;
+    }
 
     for (const component of components) {
       if (component.type === 'building' || component.type === 'switchyard') continue;
@@ -2700,7 +2722,15 @@ export class PlantCanvas {
         continue;
       }
 
-      const x = anchorX + GAP + R;
+      let x = anchorX + GAP + R;
+      if (this.elevationArrowLatch?.componentId === component.id) {
+        // Held still under the pointer (see elevationArrowLatch)
+        x = this.elevationArrowLatch.x;
+        anchorY = this.elevationArrowLatch.y;
+      } else if (!this.elevationArrowLatch && pointerInCluster(anchorX + GAP + R, anchorY)) {
+        this.elevationArrowLatch = { componentId: component.id, x, y: anchorY };
+      }
+
       for (const [delta, cy] of [
         [PlantCanvas.ELEVATION_STEP_M, anchorY - R - 1],
         [-PlantCanvas.ELEVATION_STEP_M, anchorY + R + 1],
@@ -2718,8 +2748,10 @@ export class PlantCanvas {
         ctx.lineWidth = 1;
         ctx.stroke();
 
-        // Triangle, pointing the way the click moves the component
-        const t = R * 0.48;
+        // Triangle, pointing the way the click moves the component. Slightly
+        // fatter relative to the button than a larger glyph would need, so it
+        // still reads as an arrow at this size.
+        const t = R * 0.55;
         const dir = delta > 0 ? -1 : 1;   // screen Y is inverted
         ctx.beginPath();
         ctx.moveTo(x, cy + dir * t);
@@ -3138,7 +3170,10 @@ export class PlantCanvas {
    */
   public setElevationArrowsVisible(visible: boolean): void {
     this.showElevationArrows = visible;
-    if (!visible) this.elevationArrowTargets = [];
+    if (!visible) {
+      this.elevationArrowTargets = [];
+      this.elevationArrowLatch = null;
+    }
   }
 
   /**

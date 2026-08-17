@@ -300,13 +300,38 @@ function renderZoneWithQuality(
 }
 
 /**
+ * Cells on a side of a speckle pattern tile. An 8-cell tile repeated up a
+ * 300 px tube read as wallpaper - the same little constellation stacked
+ * twenty times over. 24 cells makes the repeat long enough that the eye
+ * stops finding it.
+ */
+const TWO_PHASE_TILE_CELLS = 24;
+
+/**
+ * Speckle tiles, keyed by everything that changes their content. Rebuilding
+ * a 24x24 tile every frame for every band of every bundle is 576 fills each;
+ * they only actually change when the second ticks over (getTimeSeed) or the
+ * fluid does, so build once and reuse. The CanvasPattern itself is made per
+ * call - that part is cheap, and it keeps the tile independent of which
+ * context asks for it.
+ */
+const twoPhaseTileCache = new Map<string, HTMLCanvasElement>();
+let twoPhaseTileCacheSeed = -1;
+
+/**
  * Create a CanvasPattern for two-phase fluid rendering.
  * Returns the pattern or null if the fluid is not two-phase.
+ *
+ * `variant` picks an independent speckle: two regions showing the same
+ * quality would otherwise get byte-identical noise, so a boiler's bands and
+ * its parallel bundles all wore the same constellation and looked stamped
+ * rather than boiling. Pass a distinct number per region.
  */
 function createTwoPhasePattern(
   ctx: CanvasRenderingContext2D,
   fluid: Fluid | undefined,
-  pixelSize: number = 4
+  pixelSize: number = 4,
+  variant: number = 0
 ): CanvasPattern | null {
   if (!fluid || fluid.phase !== 'two-phase' || fluid.quality === undefined) {
     return null;
@@ -316,27 +341,40 @@ function createTwoPhasePattern(
   const liquidColor = getFluidColorRGB(fluid, false); // liquid
   const vaporColor = { r: 255, g: 255, b: 255 }; // steam is white
 
-  // Create an offscreen canvas for the pattern
-  const patternSize = pixelSize * 8; // 8x8 pixel pattern
-  const patternCanvas = document.createElement('canvas');
-  patternCanvas.width = patternSize;
-  patternCanvas.height = patternSize;
-  const patternCtx = patternCanvas.getContext('2d')!;
-
   const timeSeed = getTimeSeed();
-  const cols = patternSize / pixelSize;
-  const rows = patternSize / pixelSize;
+  if (timeSeed !== twoPhaseTileCacheSeed) {
+    // The speckle animates once a second; drop last second's tiles rather
+    // than letting one entry per second accumulate forever
+    twoPhaseTileCache.clear();
+    twoPhaseTileCacheSeed = timeSeed;
+  }
 
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const seed = row * 1000 + col + Math.floor(quality * 100) * 10000 + timeSeed * 7919;
-      const rand = seededRandom(seed);
-      const isVapor = rand < quality;
+  const qBucket = Math.floor(quality * 100);
+  const key = `${pixelSize}|${qBucket}|${variant}|${liquidColor.r},${liquidColor.g},${liquidColor.b}`;
+  let patternCanvas = twoPhaseTileCache.get(key);
 
-      const color = isVapor ? vaporColor : liquidColor;
-      patternCtx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
-      patternCtx.fillRect(col * pixelSize, row * pixelSize, pixelSize, pixelSize);
+  if (!patternCanvas) {
+    const cells = TWO_PHASE_TILE_CELLS;
+    const patternSize = pixelSize * cells;
+    patternCanvas = document.createElement('canvas');
+    patternCanvas.width = patternSize;
+    patternCanvas.height = patternSize;
+    const patternCtx = patternCanvas.getContext('2d')!;
+
+    for (let row = 0; row < cells; row++) {
+      for (let col = 0; col < cells; col++) {
+        // The variant term has to be large and coprime-ish with the row/col
+        // strides, or neighbouring variants just shift the same sequence
+        const seed = row * 1000 + col + qBucket * 10000
+          + timeSeed * 7919 + variant * 104729;
+        const isVapor = seededRandom(seed) < quality;
+
+        const color = isVapor ? vaporColor : liquidColor;
+        patternCtx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`;
+        patternCtx.fillRect(col * pixelSize, row * pixelSize, pixelSize, pixelSize);
+      }
     }
+    twoPhaseTileCache.set(key, patternCanvas);
   }
 
   return ctx.createPattern(patternCanvas, 'repeat');
@@ -2336,10 +2374,18 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const nBundles = hxBundleCount(hx);
   const tubesPerBundle = Math.max(2, Math.floor(visualTubeCount / nBundles));
   const bundleFluid = (b: number): Fluid | undefined => hx.bundleFluids?.[b] ?? hx.primaryFluid;
-  // Pixelated liquid/vapor speckle for a two-phase fluid, flat colour otherwise
-  const fillFor = (f: Fluid | undefined): string | CanvasPattern =>
-    createTwoPhasePattern(ctx, f, 3) || (f ? getFluidColor(f) : '#111');
-  const bundleFillOf = (b: number): string | CanvasPattern => fillFor(bundleFluid(b));
+  /**
+   * Pixelated liquid/vapor speckle for a two-phase fluid, flat colour
+   * otherwise. `variant` gives each region its own noise so a band does not
+   * wear the same constellation as the band or bundle beside it - see
+   * createTwoPhasePattern. Regions are numbered bundle-major with room for
+   * the three phase bands plus the bundle's own bulk fill.
+   */
+  const REGIONS_PER_BUNDLE = 4;
+  const fillFor = (f: Fluid | undefined, variant: number): string | CanvasPattern =>
+    createTwoPhasePattern(ctx, f, 3, variant) || (f ? getFluidColor(f) : '#111');
+  const bundleFillOf = (b: number): string | CanvasPattern =>
+    fillFor(bundleFluid(b), b * REGIONS_PER_BUNDLE + 3);
 
   // Tube-side fill, reassigned per bundle as the plenum loop below walks
   // across the shell (the tube loops paint through paintBundleInterior)
@@ -2393,7 +2439,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
         ctx.rect(-w * 2, Math.min(a, z), w * 4, Math.abs(z - a));
       }
       ctx.clip();
-      paint(fillFor(section.fluids[s]));
+      paint(fillFor(section.fluids[s], b * REGIONS_PER_BUNDLE + s));
       ctx.restore();
       start = end;
     }
