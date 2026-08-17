@@ -95,7 +95,7 @@ console.log(`outlet quality is the single remaining freedom and the volume claim
 
 // A quasi-static dry-down at 165 bar. Each row is a genuine tube state: the
 // inventory and the tube volume fix v, and u comes from the property surface
-// at that v and pressure - the chord inside the dome, the isobar outside it.
+// at that v and pressure - the tie line inside the dome, the isobar outside.
 // Nothing here is integrated except m1, so the boundaries are wherever the
 // tube's own contents put them.
 function uAtPv(v: number): number {

@@ -449,7 +449,9 @@ export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): num
  * and a superheat section under one structural rule: a boiling section only
  * stops short of dry steam when there is nothing downstream to hand it to.
  * In (u,v) space at this pressure the boiling section is a point on the dome
- * chord and the superheat section a point on the vapor isobar, and the rest
+ * TIE LINE - the straight segment every two-phase state at this pressure
+ * lies on, from saturated liquid to saturated vapour - and the superheat
+ * section a point on the vapor isobar beyond it, and the rest
  * has to be their mass-weighted mixture. Three cases, and they join
  * continuously:
  *
@@ -463,7 +465,7 @@ export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): num
  *       it is where a two-phase bulk lands exactly: a homogeneous mixture
  *       decomposes into (boiling section + saturated vapor) with the same
  *       mass split whether you ask volume or energy, because both parts sit
- *       on the same chord.
+ *       on the same tie line.
  *   (B) beyond that - genuine superheat: m3 and u3 solve the volume AND the
  *       energy together, with the section's own (u3, v3) required to evaluate
  *       at P. One bisection on m3; u3 and v3 follow from the two constraints,

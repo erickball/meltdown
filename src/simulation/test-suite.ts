@@ -1164,7 +1164,7 @@ test('a two-phase bundle dries out rather than superheating', () => {
   // 80% quality: most of the tube is dry steam, but there is no energy left
   // to superheat it - the vapour region sits at saturation. Volume AND energy
   // both close here, because a homogeneous mixture and its (boiling section +
-  // saturated vapour) decomposition sit on the same chord.
+  // saturated vapour) decomposition sit on the same saturation tie line.
   const P = 80e5;
   const sat = saturationAtP(P);
   const x = 0.8;
@@ -1359,7 +1359,7 @@ test('a pressure change moves the economizer, not its energy', () => {
     ev.sections[0].mass * (ev.sections[0].hBar - ev.P * ev.sections[0].vBar);
 
   // A genuine tube state at each pressure: the inventory and the volume fix v,
-  // and u sits on the dome chord there.
+  // and u sits on the saturation tie line there.
   const at = (P: number) => {
     const sat = saturationAtP(P);
     const x = (geom.tubeVolume / mass - sat.v_f) / (sat.v_g - sat.v_f);

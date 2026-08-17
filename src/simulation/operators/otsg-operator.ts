@@ -92,7 +92,8 @@ export function tubeWaterState(node: FlowNode): { pressure: number; energy: numb
   // stored pressure belongs to totals the node no longer has. The sections
   // are far more sensitive to that than a bulk node is: the closure places
   // saturation boundaries with it, and a pressure 7 bar stale against its own
-  // (u,v) puts the state below the dome chord, where no partition exists and
+  // (u,v) puts the state below the saturation TIE LINE, where no partition
+  // exists and
   // the closure rightly refuses. That is what a feedwater heater's surge
   // first surfaced.
   const mix = solveMixtureState(
