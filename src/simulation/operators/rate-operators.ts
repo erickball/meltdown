@@ -1865,12 +1865,23 @@ export class TurbineCondenserRateOperator implements RateOperator {
           extractionNodes.push({
             nodeId,
             node,
-            // The stage pressure is where the bleed point ACTUALLY sits, not
-            // the design value it was configured with. A feedwater heater's
-            // shell pressure is set by how fast it condenses; crediting work
-            // down to a nameplate pressure the shell has drifted away from is
-            // how the energy books and the physics come apart.
-            pressure: node.fluid.pressure,
+            // Where the bleed point ACTUALLY sits, but no lower than the port
+            // the machine was built with. A heater's shell pressure is set by
+            // how fast it condenses, and crediting work down to a nameplate
+            // the shell has drifted ABOVE is how the energy books and the
+            // physics come apart - so a backed-up shell still gets the work
+            // its own pressure allows, which is less.
+            //
+            // Below the port, though, the machine has nothing left to expand
+            // through: the steam leaves the blading at the port's pressure and
+            // the extraction line THROTTLES the rest of the way. Throttling is
+            // isenthalpic - it does no work - so charging the difference as
+            // stage work invents energy out of the heater. And it is a
+            // runaway, not an offset: a shell that sags gets charged more work
+            // per kilogram, which cools it further, which sags it more. That
+            // is what collapsed the Xe-100 feedwater heater from 44 bar to 1.5
+            // in eight seconds and let the 165-bar header blow through it.
+            pressure: Math.max(node.fluid.pressure, node.extractionPressure ?? 0),
             extractionFlow,
           });
         }

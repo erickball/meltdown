@@ -50,6 +50,9 @@ function line(state: SimulationState) {
   const pump = state.components.pumps.get('fw-pump-1');
   const cv = state.components.valves.get('val-fwcv-1');
   const bv = state.components.valves.get('val-bleed-1');
+  const dv = state.components.valves.get('val-fwhdr-1');
+  const drain = conn(state, 'flow-fwh-1-val-fwhdr-1');
+  const sgPhase = state.flowNodes.get('hx-1-tube')?.fluid.phase ?? '?';
   if (!pumpOut || !fwhTube || !fwhShell || !sg) return;
 
   console.log(
@@ -70,8 +73,14 @@ function line(state: SimulationState) {
     `${C(fwhShell.fluid.temperature).toFixed(0).padStart(6)} ` +
     `${fwhShell.fluid.mass.toFixed(0).padStart(6)} | ` +
     `${(pump?.speed ?? NaN).toFixed(2).padStart(5)} ` +
-    `${(cv?.position ?? NaN).toFixed(2).padStart(5)} ` +
-    `${(bv?.position ?? NaN).toFixed(2).padStart(5)}`
+    `${(bv?.position ?? NaN).toFixed(2).padStart(5)} | ` +
+    // What the shell is actually being handed, and what it is losing: the
+    // bleed's DONOR state (a flooded SG hands its 'steam' port water), the
+    // drain, and the shell's own quality.
+    `${sgPhase.padStart(10)} ` +
+    `${(drain?.massFlowRate ?? NaN).toFixed(1).padStart(6)} ` +
+    `${(fwhShell.fluid.quality ?? NaN).toFixed(3).padStart(6)} ` +
+    `${(dv?.position ?? NaN).toFixed(2).padStart(5)}`
   );
 }
 
@@ -80,7 +89,7 @@ console.log('valve shuts when it goes negative. "fwh tube" is the feedwater insi
 console.log('heater - it leaving the liquid phase means the feed line is flashing.\n');
 console.log(
   '    t  W_pump  W_toSG  W_stm  split  bleed |  P_pump    P_SG      dP |  P_fwh  T_fwh      phase   m_fwh |' +
-  ' P_shl  T_shl  m_shl | speed  fwcv bleed');
+  ' P_shl  T_shl  m_shl | speed bleed |  SG phase  drain     x_s drainV');
 line(sim.state);
 for (let t = 0; t < seconds; t++) {
   try {
