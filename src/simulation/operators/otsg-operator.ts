@@ -153,6 +153,43 @@ export function classifyOtsgFlows(
   };
 }
 
+
+/**
+ * Wall-to-water duty for each section (W into the water), by the parallel
+ * transit + standing branches of design doc section 5. Exported so a probe
+ * can ask what the operator is actually doing to a bundle without
+ * re-deriving it - a re-derivation that drifts is how the section display
+ * came to read far healthier than the physics.
+ */
+export function otsgWaterSideDuties(
+  ev: OtsgEval, flows: OtsgFlows, metalTemps: [number, number, number],
+): { Q1: number; Q2: number; Q3: number; TFeedIn: number } {
+  const cpLiquid = 5000;
+  // Section 1: feed stream entering at its own temperature
+  const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.hFeed) : ev.sections[0].T;
+  const Q1 = transitStandingQ(
+    H_TUBE_LIQUID * ev.sections[0].area,
+    H_TUBE_NATURAL * ev.sections[0].area,
+    flows.WFeed * cpLiquid,
+    TFeedIn, ev.sections[0].T, metalTemps[0],
+  );
+  // Section 2: boiling at T_sat - huge film coefficient, pure standing form
+  const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (metalTemps[1] - ev.sat.T);
+  // Section 3: steam entering at saturation, heated toward its own wall -
+  // which the boiling section can no longer clamp.
+  const cpSteam = ev.sections[2].mass > 0 && ev.sections[2].T > ev.sat.T + 1
+    ? Math.max(2000, (ev.sections[2].hBar - ev.sat.h_g) / (ev.sections[2].T - ev.sat.T))
+    : 3000;
+  const W23Guess = Math.max(0, flows.WSteamOut); // transit rate scale for the steam pass
+  const Q3 = transitStandingQ(
+    H_TUBE_STEAM * ev.sections[2].area,
+    H_TUBE_NATURAL * ev.sections[2].area,
+    W23Guess * cpSteam,
+    ev.sat.T, ev.sections[2].T, metalTemps[2],
+  );
+  return { Q1, Q2, Q3, TFeedIn };
+}
+
 export class OtsgRateOperator implements RateOperator {
   name = 'OTSG';
 
@@ -181,8 +218,8 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Classify attached connection flows by carried phase
       // ----------------------------------------------------------------
-      const { WFeed, hFeed, uFeed, WSteamOut, WLiquidOut } =
-        classifyOtsgFlows(state, id, node, water.pressure);
+      const flows = classifyOtsgFlows(state, id, node, water.pressure);
+      const { WFeed, hFeed, uFeed, WSteamOut, WLiquidOut } = flows;
 
       // ----------------------------------------------------------------
       // Sectioned evaluation at the water's own pressure
@@ -247,29 +284,8 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
-      const cpLiquid = 5000;
-      // Section 1: feed stream entering at its own temperature
-      const TFeedIn = WFeed > 0 ? tempOfLiquidH(hFeed) : ev.sections[0].T;
-      const Q1 = transitStandingQ(
-        H_TUBE_LIQUID * ev.sections[0].area,
-        H_TUBE_NATURAL * ev.sections[0].area,
-        WFeed * cpLiquid,
-        TFeedIn, ev.sections[0].T, metal1.temperature,
-      );
-      // Section 2: boiling at T_sat - huge film coefficient, pure standing form
-      const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (metal2.temperature - ev.sat.T);
-      // Section 3: steam entering at saturation, heated toward its own wall -
-      // which the boiling section can no longer clamp.
-      const cpSteam = ev.sections[2].mass > 0 && ev.sections[2].T > ev.sat.T + 1
-        ? Math.max(2000, (ev.sections[2].hBar - ev.sat.h_g) / (ev.sections[2].T - ev.sat.T))
-        : 3000;
-      const W23Guess = Math.max(0, WSteamOut); // transit rate scale for the steam pass
-      const Q3 = transitStandingQ(
-        H_TUBE_STEAM * ev.sections[2].area,
-        H_TUBE_NATURAL * ev.sections[2].area,
-        W23Guess * cpSteam,
-        ev.sat.T, ev.sections[2].T, metal3.temperature,
-      );
+      const { Q1, Q2, Q3 } = otsgWaterSideDuties(ev, flows,
+        [metal1.temperature, metal2.temperature, metal3.temperature]);
       const QWaterTotal = Q1 + Q2 + Q3;
 
       // ----------------------------------------------------------------
