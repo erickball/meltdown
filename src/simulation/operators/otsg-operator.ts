@@ -8,15 +8,14 @@
  *
  *   shell gas --[counterflow march, section by section]--> tube metal
  *   tube metal --[transit + standing branches, per section]--> water sections
- *   water sections --[interface fluxes at h_f / h_g]--> partition motion
  *
  * The node's ordinary (mass, energy) totals stay owned by the existing flow
- * machinery - this operator adds only the wall heat and the ONE partition
- * rate dU1 (the subcooled section's energy balance), plus the matching energy
- * changes on the shell node and metal. Where the boiling section ends, and
- * whether there is a superheat section at all, is solved from the totals and
- * the tube volume inside evaluateOtsgAtP, so no bookkeeping here can disagree
- * with conservation OR with the room the tubes actually have.
+ * machinery - this operator adds ONLY the wall heat, plus the matching energy
+ * changes on the shell node and metal. The partition itself is not integrated
+ * at all: it is solved from the totals on every evaluation, with the
+ * superheat section pinned by its own metal (evaluateOtsgAtP), so no
+ * bookkeeping here can disagree with conservation, with the room the tubes
+ * actually have, or with the walls doing the heating.
  *
  * External flows and the partition: connection flows are classified by the
  * phase they are actually carrying (currentFlowPhase, set by the momentum
@@ -30,10 +29,10 @@ import { SimulationState, FlowNode } from '../types';
 import { RateOperator, ConstraintOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
   evaluateOtsgAtP,
-  otsgRates,
   transitStandingQ,
   marchCounterflowGas,
   OtsgEval,
+  OtsgWallPin,
 } from '../otsg';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from '../water-properties';
 import { nodeHeatCapacity } from './rate-operators';
@@ -166,6 +165,58 @@ export function classifyOtsgFlows(
 }
 
 
+/** cp scale for the wall pin's NTU (J/kg-K). The pin only needs the RATIO
+ *  hA/(W cp) to know how closely a transiting stream approaches its wall, so
+ *  a correlation-grade constant is the right fidelity - the same role the
+ *  duty calculation's cpSteam default plays. */
+const CP_STEAM_PIN = 3000;
+
+/** The wall pin for a bundle's superheat section - the one piece of closure
+ *  information the totals cannot supply (see evaluateOtsgAtP). Built from the
+ *  bundle's own metal and its steam draw. */
+export function otsgWallPin(
+  state: SimulationState, node: FlowNode, flows: OtsgFlows,
+): OtsgWallPin {
+  const cfg = node.otsg!;
+  const metal3 = state.thermalNodes.get(cfg.metalNodeIds[2]);
+  if (!metal3) {
+    throw new Error(`[OTSG] node '${node.id}': superheat metal node ` +
+      `'${cfg.metalNodeIds[2]}' does not exist.`);
+  }
+  return {
+    TWall3: metal3.temperature,
+    hA3Full: H_TUBE_STEAM * cfg.heatArea,
+    WCp3: Math.max(0, flows.WSteamOut) * CP_STEAM_PIN,
+  };
+}
+
+/**
+ * The one-stop sectioned evaluation of a bundle: water's own state, flows
+ * classified by carried phase, wall pin from its own metal, partition from
+ * the totals. EVERY consumer - the rate operator, sensors, checks, probes -
+ * goes through here, because a diagnostic that re-derives any of these
+ * ingredients differently will quietly disagree with the physics (the
+ * section display once read far healthier than the operator by using the
+ * feed-energy ceiling instead of the classified feed).
+ */
+export function evaluateOtsgSections(
+  state: SimulationState, id: string, node: FlowNode,
+): { ev: OtsgEval; flows: OtsgFlows; water: { pressure: number; energy: number } } {
+  const cfg = node.otsg;
+  if (!cfg) {
+    throw new Error(`[OTSG] node '${id}' has no otsg state - it is not a ` +
+      `moving-boundary boiler tube node.`);
+  }
+  const water = tubeWaterState(node);
+  const flows = classifyOtsgFlows(state, id, node, water.pressure);
+  const ev = evaluateOtsgAtP(
+    node.fluid.mass, water.energy, water.pressure, flows.uFeed,
+    { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
+    otsgWallPin(state, node, flows),
+  );
+  return { ev, flows, water };
+}
+
 /**
  * Wall-to-water duty for each section (W into the water), by the parallel
  * transit + standing branches of design doc section 5. Exported so a probe
@@ -229,25 +280,11 @@ export class OtsgRateOperator implements RateOperator {
       // The sections are a description of the WATER, so they run at the
       // water's own partial pressure and account for the water's own share of
       // the node energy - identical to the stored totals unless gas has got
-      // into the tubes (see tubeWaterState).
-      const water = tubeWaterState(node);
-
-      // ----------------------------------------------------------------
-      // Classify attached connection flows by carried phase
-      // ----------------------------------------------------------------
-      const flows = classifyOtsgFlows(state, id, node, water.pressure);
-      const { WFeed, hFeed, uFeed, WSteamOut, WLiquidOut } = flows;
-
-      // ----------------------------------------------------------------
-      // Sectioned evaluation at the water's own pressure
-      // ----------------------------------------------------------------
-      const ev: OtsgEval = evaluateOtsgAtP(
-        cfg.U1, node.fluid.mass,
-        water.energy,
-        water.pressure,
-        uFeed,
-        { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-      );
+      // into the tubes (see tubeWaterState). Flows are classified by the
+      // phase they actually carry, and the partition is solved from the
+      // node's totals with this bundle's own metal as the superheat pin -
+      // one shared path for operator, sensors, checks and probes.
+      const { ev, flows } = evaluateOtsgSections(state, id, node);
 
       // Cache for the draw-enthalpy hook and displays (derived data)
       cfg.lastEval = {
@@ -312,29 +349,12 @@ export class OtsgRateOperator implements RateOperator {
       const QWaterTotal = Q1 + Q2 + Q3;
 
       // ----------------------------------------------------------------
-      // Partition rates from the interface fluxes
-      // ----------------------------------------------------------------
-      // Only the SUBCOOLED section is integrated, and it is integrated as an
-      // ENERGY. Where the boiling section ends - and whether there is a
-      // superheat section at all - is solved from the node's totals inside
-      // evaluateOtsgAtP, so W23 is now a diagnostic rather than a state
-      // derivative: the steam draw and any vapor backflow move the totals,
-      // and the partition follows them.
-      const r = otsgRates(ev, WFeed, hFeed, WSteamOut, Q1, Q2, Q3);
-      // A liquid draw takes water out of section 1 at that section's own mean
-      // enthalpy, weighted so an emptying section never steps its own rate.
-      const m1Now = ev.sections[0].mass;
-      const w1 = m1Now / (m1Now + 1);
-      const WLiqOut = w1 * WLiquidOut;
-      const dU1 = r.dU1 - WLiqOut * ev.sections[0].hBar
-        + ev.P * (WLiqOut * ev.sections[0].vBar);   // P dV of the mass it takes with it
-
-      // ----------------------------------------------------------------
-      // Emit rates
+      // Emit rates. The partition itself has no rates any more - it is
+      // solved from the totals on every evaluation - so the wall heat on the
+      // node's ordinary energy balance is the only thing this side emits.
       // ----------------------------------------------------------------
       const nodeRates = rates.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
       nodeRates.dEnergy += QWaterTotal;
-      nodeRates.dOtsgU1 = (nodeRates.dOtsgU1 ?? 0) + dU1;
       rates.flowNodes.set(id, nodeRates);
 
       const shellRates = rates.flowNodes.get(cfg.shellNodeId) ?? { dMass: 0, dEnergy: 0 };
@@ -420,27 +440,21 @@ function tempOfLiquidH(h: number): number {
 }
 
 /**
- * Is the economizer still describing water that is actually in the tube?
+ * Is the steam section hotter than anything that could have heated it?
  *
- * The closure's arithmetic never looks at the wall. It subtracts the
- * economizer's claimed energy from the node and hands the remainder to the
- * steam, so an economizer that has drifted away from the tube's real contents
- * comes back as steam hotter than anything heating it. The tube's own totals
- * cannot catch that - a tube of cold water plus hot steam and a tube of
- * lukewarm mush have the same mass, energy and volume, which is precisely why
- * the sectioned model has to carry the extra information in the first place.
+ * With the partition solved from the node's totals and pinned by the wall,
+ * steam hotter than every surface around it can only appear through the
+ * closure's UNPINNED regimes - the post-depressurization transient where a
+ * subcooled slug sits directly under flash-heated vapor. That state is
+ * physical for a while and relaxes through Q3 running backwards; one that
+ * PERSISTS means either the upstream physics is genuinely pumping energy in
+ * (worth seeing) or a regime is stuck (a bug). Report, never clamp: the
+ * number is the size of whatever is going on, and this is where it is
+ * visible.
  *
- * The WALL can catch it. Nothing in a boiler tube gets hotter than the hottest
- * surface heating it except by compression, and a boiler's compression heating
- * is tens of kelvin in a fast transient, never hundreds. So this reports the
- * excess rather than clamping it: the number IS the size of the bookkeeping
- * error, and this is the only place it is visible.
- *
- * It runs as a finalOnly constraint - on ACCEPTED states only. The rate
- * operator is called on every RK stage, including trial states the solver
- * goes on to reject, and those routinely swing far harder than the trajectory
- * the plant actually follows; a guard that cried wolf on them would be worse
- * than no guard.
+ * Runs postAcceptOnly - trial stages routinely swing far harder than the
+ * trajectory the plant actually follows, and a guard that cries wolf on them
+ * is worse than no guard.
  */
 export class OtsgLedgerCheckOperator implements ConstraintOperator {
   name = 'OtsgLedgerCheck';
@@ -450,8 +464,8 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
 
   /** K - how far above the hottest wall a superheat section has to land before
    *  it is reported. Compression heating in a fast pressurization is worth
-   *  tens of kelvin, so this sits above that and well below the hundreds a
-   *  drifted ledger produces. A reporting width only: no rate depends on it. */
+   *  tens of kelvin, so this sits above that. A reporting width only: no
+   *  rate depends on it. */
   private static readonly REPORT_MARGIN = 50;
   /** Once per 10 s of SIM time per bundle - keyed on sim time, not wall time,
    *  so a replay reports identically. */
@@ -462,12 +476,7 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
     for (const [id, node] of state.flowNodes) {
       const cfg = node.otsg;
       if (!cfg) continue;
-      const water = tubeWaterState(node);
-      const flows = classifyOtsgFlows(state, id, node, water.pressure);
-      const ev = evaluateOtsgAtP(
-        cfg.U1, node.fluid.mass, water.energy, water.pressure, flows.uFeed,
-        { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-      );
+      const { ev, water } = evaluateOtsgSections(state, id, node);
 
       // The hottest surface this water can see: its own tube metal, or the gas
       // arriving at the shell.
@@ -486,15 +495,15 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
       console.error(
         `[OTSG] ${id}: the steam section is ${excess.toFixed(0)} K ABOVE the hottest surface ` +
         `heating it (${(ev.sections[2].T - 273.15).toFixed(0)} C vs ` +
-        `${(TWallMax - 273.15).toFixed(0)} C) at t=${state.time.toFixed(1)} s. Nothing in the ` +
-        `tube can do that, so the economizer's energy ledger has drifted from the water ` +
-        `actually in there: it claims ${(cfg.U1 / 1e9).toFixed(2)} GJ - ` +
-        `${ev.sections[0].mass.toFixed(0)} kg at ${(ev.sections[0].T - 273.15).toFixed(0)} C, ` +
-        `fed at ${(flows.uFeed / 1e3).toFixed(0)} kJ/kg - out of the node's ` +
-        `${node.fluid.mass.toFixed(0)} kg, leaving ${ev.sections[2].mass.toFixed(0)} kg of ` +
-        `steam to carry the rest. Node: ${(water.pressure / 1e5).toFixed(1)} bar, ` +
+        `${(TWallMax - 273.15).toFixed(0)} C) at t=${state.time.toFixed(1)} s, and has been ` +
+        `for longer than a depressurization transient explains. The partition is solved from ` +
+        `the node's totals, so this cannot be ledger drift any more - either the totals ` +
+        `really do hold this much energy (upstream physics) or the closure's unpinned regime ` +
+        `is stuck. Node: ${(water.pressure / 1e5).toFixed(1)} bar, ` +
+        `${node.fluid.mass.toFixed(0)} kg, ` +
         `u=${(water.energy / node.fluid.mass / 1e3).toFixed(0)} kJ/kg, ` +
         `v=${(node.volume / node.fluid.mass).toFixed(5)} m3/kg, ${node.fluid.phase}; ` +
+        `sections ${ev.sections.map(x => x.mass.toFixed(0)).join('/')} kg, ` +
         `closure took the '${ev.regime}' branch.`
       );
     }

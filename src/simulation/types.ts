@@ -214,18 +214,16 @@ export interface FlowNode {
    * design.md). Present only on heatExchanger tube nodes built with
    * tubeModel: 'moving-boundary'.
    *
-   * Only ONE partition variable is new integrated state: U1, the ENERGY of
-   * the subcooled section, whose boundary is set by the feed's history and
-   * whose mass follows as U1/u1bar. The boiling/superheat split below it is
-   * SOLVED from the node's own mass, energy and tube volume on every
-   * evaluation (evaluateOtsgAtP), so section inventories can neither drift
-   * from the conserved totals nor claim more room than the tubes have.
-   * Pressure stays owned by the ordinary (u,v) machinery; the sectioned
-   * evaluation runs AT that pressure - at the WATER's partial pressure when
-   * gas shares the tubes (v1 simplification, design doc).
+   * NOTHING here is integrated state: the whole partition is SOLVED from the
+   * node's own mass, energy and tube volume on every evaluation
+   * (evaluateOtsgAtP), with the superheat section pinned by its own metal
+   * temperature - so section inventories can neither drift from the
+   * conserved totals, claim more room than the tubes have, nor run hotter
+   * than the walls heating them. Pressure stays owned by the ordinary (u,v)
+   * machinery; the sectioned evaluation runs AT that pressure - at the
+   * WATER's partial pressure when gas shares the tubes (design doc).
    */
   otsg?: {
-    U1: number;              // J - subcooled section energy (integrated)
     heatArea: number;        // m2 - this bundle's tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
     /** Fraction of the shell stream this bundle sees (1 when it is the only

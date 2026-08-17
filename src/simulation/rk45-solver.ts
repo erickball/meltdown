@@ -28,7 +28,6 @@ export interface FlowNodeRates {
   dMass: number;      // kg/s - rate of mass change
   dEnergy: number;    // W - rate of internal energy change
   dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
-  dOtsgU1?: number;       // W - OTSG subcooled-section energy rate (its partition state)
   dDepositedCsI?: number; // mol/s - CsI aerosol plating out onto this node's surfaces
 }
 
@@ -189,9 +188,6 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
       dEnergy: aRates.dEnergy + bRates.dEnergy,
     };
     // Combine NCG rates if either has them
-    if (aRates.dOtsgU1 !== undefined || bRates.dOtsgU1 !== undefined) {
-      combined.dOtsgU1 = (aRates.dOtsgU1 ?? 0) + (bRates.dOtsgU1 ?? 0);
-    }
     if (aRates.dNcg || bRates.dNcg) {
       combined.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -297,7 +293,6 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
       dEnergy: r.dEnergy * factor,
     };
     // Scale NCG rates if present
-    if (r.dOtsgU1 !== undefined) scaled.dOtsgU1 = r.dOtsgU1 * factor;
     if (r.dNcg) {
       scaled.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -399,19 +394,6 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         node.fluid.mass = 0;
       }
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
-
-      // OTSG partition: the subcooled section's energy lives inside the
-      // node's ordinary conserved totals, so moving it can never create or
-      // lose energy - it only moves the internal boundary. The floor absorbs
-      // float residue (the rate is constructed to vanish as the section
-      // empties); the ceiling is the physical statement that one section
-      // cannot hold more energy than the whole node does.
-      if (node.otsg && nodeRates.dOtsgU1 !== undefined) {
-        node.otsg.U1 = Math.min(
-          Math.max(0, node.fluid.internalEnergy),
-          Math.max(0, node.otsg.U1 + nodeRates.dOtsgU1 * dt),
-        );
-      }
 
       if (nodeRates.dNcg) {
         // Initialize NCG on node if not present
@@ -623,20 +605,7 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
         const relEnergyRate = r.dEnergy / Math.abs(node.fluid.internalEnergy);
         sumSq += relEnergyRate * relEnergyRate;
         count++;
-      }
-      // OTSG partition: the economizer's energy is integrated state like any
-      // other, and until it was in here the step size was chosen without ever
-      // asking how fast the phase boundary was moving - a bundle drying out
-      // could sprint its boundary across the tube inside one step the totals
-      // were perfectly happy with. Measured against the NODE's energy, not
-      // the section's: a joule misplaced matters the same wherever it lands,
-      // and the denominator cannot vanish as the section dies.
-      if (r.dOtsgU1 !== undefined && Math.abs(node.fluid.internalEnergy) > 0) {
-        const relU1Rate = r.dOtsgU1 / Math.abs(node.fluid.internalEnergy);
-        sumSq += relU1Rate * relU1Rate;
-        count++;
-      }
-    }
+      }    }
   }
 
   // Flow connections - track momentum (flow rate) changes
@@ -745,20 +714,6 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
             type: 'energy',
             contribution: relEnergyRate,
             description: `${powerMW > 0 ? '+' : ''}${powerMW.toFixed(2)} MW`
-          });
-        }
-      }
-
-      // OTSG phase boundary (see computeRatesNorm) - named separately so a
-      // step limited by a sprinting economizer says so
-      if (r.dOtsgU1 !== undefined && Math.abs(node.fluid.internalEnergy) > 0) {
-        const relU1Rate = Math.abs(r.dOtsgU1 / node.fluid.internalEnergy);
-        if (relU1Rate > 1e-8) {
-          contributions.push({
-            nodeId: id,
-            type: 'energy',
-            contribution: relU1Rate,
-            description: `economizer ${r.dOtsgU1 > 0 ? '+' : ''}${(r.dOtsgU1 / 1e6).toFixed(2)} MW`
           });
         }
       }

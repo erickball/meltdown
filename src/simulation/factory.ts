@@ -1135,20 +1135,11 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
               surfaceArea: oneMetal.surfaceArea / 3,
             });
           });
-          // Seed the ONE integrated partition variable - the subcooled
-          // section's ENERGY - consistently with the node's own bulk state: a
-          // liquid start is all subcooled section, so it holds the node's
-          // whole energy; anything else starts with none. Where the boiling
-          // section ends - and whether the tube carries dry steam - is solved
-          // from the totals at the first evaluation, so a two-phase or vapour
-          // start needs no seed at all and the sectioned model agrees with the
-          // (u,v) machinery to the last joule at t=0.
-          //
-          // Empty sections are born asymptotically here (see the otsg module
-          // header), so starting one at zero costs nothing.
-          const startPhase = tubeNode.fluid.phase;
+          // The partition needs no seed: it is solved from the node's own
+          // totals at the first evaluation (and every one after), so the
+          // sectioned model agrees with the (u,v) machinery to the last
+          // joule at t=0 whatever phase the tube starts in.
           tubeNode.otsg = {
-            U1: startPhase === 'liquid' ? tubeNode.fluid.internalEnergy : 0,
             heatArea: tubeArea,
             shellNodeId: `${id}-shell`,
             metalNodeIds: metalIds,

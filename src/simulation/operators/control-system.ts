@@ -31,9 +31,8 @@
 import { SimulationState, ControllerState, ControllerSignal, ControllerSensorKind, FlowNode } from '../types';
 import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
-import { saturationPressure, saturatedLiquidEnergy } from '../water-properties';
-import { evaluateOtsgAtP } from '../otsg';
-import { tubeWaterState } from './otsg-operator';
+import { saturationPressure } from '../water-properties';
+import { evaluateOtsgSections } from './otsg-operator';
 import {
   approxLiquidDensity,
   calculateLiquidLevelWithObstructions,
@@ -467,47 +466,15 @@ export class ControlSystemOperator implements ConstraintOperator {
         // clones, so it never reaches the accepted state a controller runs
         // on - a sensor reading it sees undefined forever and the loop sits
         // frozen at its setpoint, which is exactly how this one first failed.
-        // The subcooled section's energy U1 and the node's totals ARE
-        // integrated state, so the evaluation can be redone from them - at the
-        // WATER's own pressure and energy, which is all the sections describe
-        // (tubeWaterState; identical to the stored totals with no gas about).
-        const water = tubeWaterState(node);
-        const ev = evaluateOtsgAtP(
-          cfg.U1, node.fluid.mass, water.energy,
-          water.pressure, this.otsgFeedEnergy(state, node),
-          { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-        );
-        return ev.sections[2].lengthFrac;
+        // The partition is solved from the node's totals, so the shared
+        // evaluation path can simply be rerun on the accepted state.
+        return evaluateOtsgSections(state, targetId, node).ev.sections[2].lengthFrac;
       }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': unknown sensor kind '${kind}'`);
     }
   }
 
-  /**
-   * Specific energy of the feedwater entering a boiler tube node (J/kg).
-   *
-   * The sectioned evaluation needs it to place the subcooled section's mean.
-   * With no feed flowing there is nothing to average, so this reports the
-   * closure's own ceiling - saturated liquid less the 25 kJ/kg the profile
-   * needs to stay inside its valid domain - which is the value
-   * evaluateOtsgAtP would cap any hotter feed to anyway.
-   */
-  private otsgFeedEnergy(state: SimulationState, node: FlowNode): number {
-    let flow = 0, energyNum = 0;
-    for (const conn of state.flowConnections) {
-      const into = conn.toNodeId === node.id ? conn.massFlowRate
-        : conn.fromNodeId === node.id ? -conn.massFlowRate : 0;
-      if (into <= 0 || conn.currentFlowPhase === 'vapor') continue;
-      const donor = state.flowNodes.get(
-        conn.toNodeId === node.id ? conn.fromNodeId : conn.toNodeId);
-      if (!donor) continue;
-      flow += into;
-      energyNum += into * saturatedLiquidEnergy(donor.fluid.temperature);
-    }
-    const uSatCeiling = saturatedLiquidEnergy(node.fluid.temperature) - 25e3;
-    return flow > 0 ? Math.min(energyNum / flow, uSatCeiling) : uSatCeiling;
-  }
 
   private readConnectionFlow(state: SimulationState, connId: string, ctlId: string): number {
     const conn = state.flowConnections.find(c => c.id === connId);
