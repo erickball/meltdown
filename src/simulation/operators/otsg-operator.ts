@@ -172,6 +172,10 @@ export function otsgWaterSideDuties(
     H_TUBE_NATURAL * ev.sections[0].area,
     flows.WFeed * cpLiquid,
     TFeedIn, ev.sections[0].T, metalTemps[0],
+    // The economizer's wall ramps from the feed temperature to saturation
+    // along its length; capping its water at the section-AVERAGE wall is what
+    // left the Xe-100 economizer with no length that ends it.
+    'ramping',
   );
   // Section 2: boiling at T_sat - huge film coefficient, pure standing form
   const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (metalTemps[1] - ev.sat.T);
@@ -186,6 +190,7 @@ export function otsgWaterSideDuties(
     H_TUBE_NATURAL * ev.sections[2].area,
     W23Guess * cpSteam,
     ev.sat.T, ev.sections[2].T, metalTemps[2],
+    'ramping',   // same for the superheater: saturation in, gas-hot out
   );
   return { Q1, Q2, Q3, TFeedIn };
 }
@@ -273,9 +278,15 @@ export class OtsgRateOperator implements RateOperator {
         TGasIn,
         this.gasMcp(shell, state) * (cfg.gasShare ?? 1),
         [
-          { hA: hGas * ev.sections[2].area, TWall: metal3.temperature },
-          { hA: hGas * ev.sections[1].area, TWall: metal2.temperature },
-          { hA: hGas * ev.sections[0].area, TWall: metal1.temperature },
+          // The gas sees the same walls the water does, so it approaches each
+          // one by that wall's own profile: ramping under the superheater and
+          // the economizer, isothermal under the boiling section, whose wall
+          // its water pins at T_sat end to end. Composed across the metal,
+          // the two ramping half-steps give the standard counterflow result
+          // with the wall as a series resistance (see WallProfile).
+          { hA: hGas * ev.sections[2].area, TWall: metal3.temperature, wall: 'ramping' as const },
+          { hA: hGas * ev.sections[1].area, TWall: metal2.temperature, wall: 'isothermal' as const },
+          { hA: hGas * ev.sections[0].area, TWall: metal1.temperature, wall: 'ramping' as const },
         ],
       );
       const QGasTotal = march.Q[0] + march.Q[1] + march.Q[2];

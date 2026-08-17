@@ -44,6 +44,7 @@ import {
   subcooledSectionMean,
   P_CRITICAL,
   transitStandingQ,
+  streamApproach,
   marchCounterflowGas,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
@@ -529,6 +530,34 @@ test('transit + standing branches: both limits, no blend function', () => {
   // Transit branch never exceeds carrying capacity
   const qCap = transitStandingQ(1e9, 0, 1e4, 300, 300, 800);
   assert(qCap <= 1e4 * 500 + 1e-6, 'transit heat must cap at mcp * (T_wall - T_in)');
+});
+
+test('a ramping wall lets its stream pass the section average; an isothermal one does not', () => {
+  // Small area: both profiles must reduce to hA*dT - the wall's shape cannot
+  // matter when the stream barely notices it.
+  assertClose(streamApproach(0.01, 'isothermal'), 0.00995, 1e-4, 'small-NTU isothermal');
+  assertClose(streamApproach(0.01, 'ramping'), 0.00995, 1e-4, 'small-NTU ramping');
+  // Large area: an isothermal wall can only bring the stream TO itself, a
+  // ramping one brings the stream's MEAN to itself, so its outlet passes it.
+  assert(streamApproach(50, 'isothermal') < 1.001, 'isothermal approach cannot exceed 1');
+  assertClose(streamApproach(50, 'ramping'), 2 * 50 / 52, 1e-9, 'ramping approach tends to 2');
+
+  // Composed across a wall, two ramping half-steps must give the standard
+  // counterflow series result - this is what makes the economizer's outlet
+  // reachable at all, and what keeps it bounded by the gas.
+  const hAg = 110e3, hAw = 1100e3, Cg = 213e3, Cw = 145e3;
+  const TgIn = 628, TwIn = 312;
+  // Metal where the two half-steps balance (its steady state)
+  const Kg = streamApproach(hAg / Cg, 'ramping') * Cg;
+  const Kw = streamApproach(hAw / Cw, 'ramping') * Cw;
+  const Tm = (Kg * TgIn + Kw * TwIn) / (Kg + Kw);
+  const Qg = Kg * (TgIn - Tm), Qw = Kw * (Tm - TwIn);
+  assertClose(Qg / 1e6, Qw / 1e6, 1e-9, 'the metal passes what it takes');
+  const series = (TgIn - TwIn) / (1 / hAg + 1 / hAw + 1 / (2 * Cg) + 1 / (2 * Cw));
+  assertClose(Qw / 1e6, series / 1e6, 1e-9 * series / 1e6,
+    'two ramping half-steps must compose to the counterflow series result');
+  assert(TwIn + Qw / Cw < TgIn,
+    'and the water outlet must stay under the gas inlet, whatever the wall says');
 });
 
 test('counterflow gas march: hottest gas meets the superheater first', () => {

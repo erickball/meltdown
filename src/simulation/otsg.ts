@@ -771,16 +771,63 @@ export function otsgRates(
 // ---------------------------------------------------------------------------
 
 /**
+ * Does this section's wall hold ONE temperature along its length, or does it
+ * ramp with the stream?
+ *
+ * A boiling section's wall really is isothermal: the water under it is at
+ * T_sat from end to end and its film coefficient is enormous, so the wall
+ * cannot depart far from T_sat anywhere. A stream flowing under it approaches
+ * that fixed wall exponentially - eps = 1 - e^(-NTU) is exact.
+ *
+ * An economizer or superheater in COUNTERFLOW is the opposite. Its wall runs
+ * from near the feed temperature at the cold end to near saturation at the
+ * hot end, tracking both streams, so the local driving difference is roughly
+ * uniform and the right integral is hA times the difference of the two MEANS.
+ * Solving that against the stream's own mean (T_bar = T_in + Q/2mcp) gives
+ *
+ *     Q = hA (T_wall_mean - T_in) / (1 + NTU/2) = mcp (T_wall - T_in) * theta
+ *     theta = 2 NTU / (2 + NTU)
+ *
+ * which is the small-area limit hA*dT at NTU -> 0, exactly like the
+ * exponential form, but tends to 2 rather than 1 as the area grows: the
+ * stream's MEAN reaches the section-average wall, so its OUTLET passes it.
+ * That is not a licence to exceed the heat source - two of these back to back
+ * (gas -> wall, wall -> water) compose to
+ *
+ *     Q = (T_gas_in - T_water_in) / (1/hA_g + 1/hA_w + 1/2C_g + 1/2C_w)
+ *
+ * the standard counterflow result with the wall as a series resistance, which
+ * is bounded by the capacity rates. The exponential form cannot express this:
+ * with one wall temperature per section it caps the water's outlet at the
+ * section-AVERAGE wall, so a counterflow economizer whose average wall sits
+ * below saturation can never bring its water to h_f - its boundary then has
+ * no length that ends it, and it grows until it owns the whole node. That is
+ * exactly what the Xe-100 bundle did (section-1 wall 184 K below T_sat, Q1
+ * stuck at 0.36 of the duty that would hold the boundary still).
+ */
+export type WallProfile = 'isothermal' | 'ramping';
+
+/**
+ * Fraction of a stream's carrying capacity that a passage actually uses:
+ * Q = theta(NTU) * mcp * (T_wall - T_in). See WallProfile for the derivation.
+ */
+export function streamApproach(NTU: number, wall: WallProfile): number {
+  if (!(NTU > 0)) return 0;
+  return wall === 'isothermal' ? 1 - Math.exp(-NTU) : 2 * NTU / (2 + NTU);
+}
+
+/**
  * Wall-to-stream heat rate as two parallel branches (design doc section 5):
  *
- *   Q = eps * mcp * (T_wall - T_in)      transit branch, eps = 1 - e^(-NTU)
- *     + hA_nat * (T_wall - T_bulk)       standing branch
+ *   Q = theta * mcp * (T_wall - T_in)     transit branch
+ *     + hA_nat * (T_wall - T_bulk)        standing branch
  *
- * The transit branch's conductance eps*mcp is identically hA*theta(NTU) -
- * the "theta blend" and this parallel form are the same algebra - and it is
- * capped at the stream's carrying capacity mcp by construction. The standing
- * branch never turns off, so a bottled boiler still heats. Dominance follows
- * from mcp vs hA_nat; there is no interpolation function anywhere.
+ * The transit branch's conductance theta*mcp is identically hA times an
+ * approach factor - the "theta blend" and this parallel form are the same
+ * algebra - and it is bounded by the stream's carrying capacity by
+ * construction. The standing branch never turns off, so a bottled boiler
+ * still heats. Dominance follows from mcp vs hA_nat; there is no
+ * interpolation function anywhere.
  */
 export function transitStandingQ(
   hAForced: number,   // W/K - forced-convection conductance of the passage
@@ -789,9 +836,10 @@ export function transitStandingQ(
   TIn: number,        // K - stream inlet temperature
   TBulk: number,      // K - standing inventory temperature
   TWall: number,      // K
+  wall: WallProfile = 'isothermal',
 ): number {
   const transit = mcp > 0
-    ? (1 - Math.exp(-hAForced / mcp)) * mcp * (TWall - TIn)
+    ? streamApproach(hAForced / mcp, wall) * mcp * (TWall - TIn)
     : 0;
   return transit + hANat * (TWall - TBulk);
 }
@@ -799,14 +847,17 @@ export function transitStandingQ(
 export interface GasMarchSection {
   hA: number;      // W/K - gas-side conductance of this section
   TWall: number;   // K   - wall temperature this section's gas sees
+  /** Isothermal under a boiling section, ramping under an economizer or a
+   *  superheater - see WallProfile. Defaults to isothermal. */
+  wall?: WallProfile;
 }
 
 /**
  * March a quasi-steady gas stream through sections in ITS flow order (for
- * counterflow, that is superheater first). Each section is an exponential
- * approach to its wall temperature; the outlet of one is the inlet of the
- * next. Returns heat given up TO each wall (positive = gas heats wall) and
- * the final gas outlet temperature. Zero-area sections pass through
+ * counterflow, that is superheater first). Each section approaches its wall
+ * by that wall's own profile (see WallProfile); the outlet of one is the
+ * inlet of the next. Returns heat given up TO each wall (positive = gas heats
+ * wall) and the final gas outlet temperature. Zero-area sections pass through
  * untouched - the empty-section limit costs nothing.
  */
 export function marchCounterflowGas(
@@ -818,8 +869,7 @@ export function marchCounterflowGas(
   let T = TGasIn;
   for (const s of sections) {
     if (mcpGas <= 0 || s.hA <= 0) { Q.push(0); continue; }
-    const eps = 1 - Math.exp(-s.hA / mcpGas);
-    const q = eps * mcpGas * (T - s.TWall);
+    const q = streamApproach(s.hA / mcpGas, s.wall ?? 'isothermal') * mcpGas * (T - s.TWall);
     Q.push(q);
     T = T - q / mcpGas;
   }
