@@ -269,6 +269,10 @@ export interface OtsgEval {
    *  anything downstream to hand dry steam to; below 1 only for a flooded
    *  bundle whose boiling section IS the top of the tube. */
   x2Out: number;
+  /** Which of the closure's cases produced this split - see evaluateOtsgAtP.
+   *  'flooded' (no dry steam), 'dryout' (dry steam at saturation), 'superheat'
+   *  (volume and energy both enforced), 'supercritical' (no dome at all). */
+  regime: 'flooded' | 'dryout' | 'superheat' | 'supercritical';
 }
 
 const P_MIN = 700;      // Pa - just above the triple point
@@ -371,6 +375,7 @@ export function evaluateOtsg(
     // The reference closure carries m3 as state, so its boiling section
     // always has somewhere to hand dry steam to.
     x2Out: 1,
+    regime: m3 > 0 ? 'superheat' : 'dryout',
   };
 }
 
@@ -515,6 +520,7 @@ export function evaluateOtsgAtP(
   let m3 = 0;               // kg  - superheat (or dry saturated vapor) section
   let u3 = sat.u_g;         // J/kg
   let v3 = sat.v_g;         // m3/kg
+  let regime: OtsgEval['regime'] = 'dryout';
 
   if (mR > 0 && P >= P_CRITICAL) {
     // SUPERCRITICAL: there is no dome, so there is nothing to boil and no
@@ -527,12 +533,14 @@ export function evaluateOtsgAtP(
     m3 = mR;
     u3 = URest / mR;
     v3 = VRest / mR;
+    regime = 'supercritical';
   } else if (mR > 0) {
     const vRest = VRest / mR;
     if (vRest <= vBarFull) {
       // (A) Flooded: no room for dry steam, so the boiling section is the top
       // of the tube and ends wherever the volume says it does.
       x2Out = boilingOutletQuality(sat.v_f, sat.v_g, vRest);
+      regime = 'flooded';
     } else {
       // Energy the rest carries above an all-boiling description of itself.
       // Every kilogram promoted out of the boiling section into dry vapor
@@ -558,6 +566,7 @@ export function evaluateOtsgAtP(
         // m3Vol <= m3Sat <= m_rest, so section 2 keeps a non-negative mass and
         // the leftover energy is the part with nowhere to sit.
         m3 = m3Vol;
+        regime = 'dryout';
       } else if (!(E > 0)) {
         // No energy for dry steam at all, yet the volume demands some: the
         // rest is at once more voluminous than a boiling section and colder
@@ -618,6 +627,7 @@ export function evaluateOtsgAtP(
         }
         u3 = u2Full + E / m3;
         v3 = (VRest - (mR - m3) * vBarFull) / m3;
+        regime = 'superheat';
       }
     }
   }
@@ -664,6 +674,7 @@ export function evaluateOtsgAtP(
     hSteamOut,
     u3,
     x2Out,
+    regime,
   };
 }
 

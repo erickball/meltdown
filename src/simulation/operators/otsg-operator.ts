@@ -81,12 +81,23 @@ const H_TUBE_NATURAL = 250;
  * tube: the two conventions match.
  */
 export function tubeWaterState(node: FlowNode): { pressure: number; energy: number } {
-  const ncg = node.fluid.ncg;
-  if (!ncg || totalMoles(ncg) <= 0) {
+  // An empty node has no state to solve - the closure handles it by having
+  // nothing to partition.
+  if (!(node.fluid.mass > 0)) {
     return { pressure: node.fluid.pressure, energy: node.fluid.internalEnergy };
   }
+  // Solve the state FRESH rather than reading fluid.pressure. That field is
+  // written by FluidStateConstraintOperator, which runs on accepted states
+  // only, while mass and energy move on every RK stage - so mid-step the
+  // stored pressure belongs to totals the node no longer has. The sections
+  // are far more sensitive to that than a bulk node is: the closure places
+  // saturation boundaries with it, and a pressure 7 bar stale against its own
+  // (u,v) puts the state below the dome chord, where no partition exists and
+  // the closure rightly refuses. That is what a feedwater heater's surge
+  // first surfaced.
   const mix = solveMixtureState(
-    node.fluid.mass, node.fluid.internalEnergy, node.volume, ncg, node.fluid.temperature);
+    node.fluid.mass, node.fluid.internalEnergy, node.volume,
+    node.fluid.ncg, node.fluid.temperature);
   return { pressure: mix.steamPressure, energy: mix.waterEnergy };
 }
 
@@ -478,7 +489,10 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
         `${ev.sections[0].mass.toFixed(0)} kg at ${(ev.sections[0].T - 273.15).toFixed(0)} C, ` +
         `fed at ${(flows.uFeed / 1e3).toFixed(0)} kJ/kg - out of the node's ` +
         `${node.fluid.mass.toFixed(0)} kg, leaving ${ev.sections[2].mass.toFixed(0)} kg of ` +
-        `steam to carry the rest. W12 drains it; if this persists, that flux is the suspect.`
+        `steam to carry the rest. Node: ${(water.pressure / 1e5).toFixed(1)} bar, ` +
+        `u=${(water.energy / node.fluid.mass / 1e3).toFixed(0)} kJ/kg, ` +
+        `v=${(node.volume / node.fluid.mass).toFixed(5)} m3/kg, ${node.fluid.phase}; ` +
+        `closure took the '${ev.regime}' branch.`
       );
     }
     return state;
