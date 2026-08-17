@@ -33,6 +33,7 @@ import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
 import { saturationPressure, saturatedLiquidEnergy } from '../water-properties';
 import { evaluateOtsgAtP } from '../otsg';
+import { tubeWaterState } from './otsg-operator';
 import {
   approxLiquidDensity,
   calculateLiquidLevelWithObstructions,
@@ -330,11 +331,14 @@ export class ControlSystemOperator implements ConstraintOperator {
         // clones, so it never reaches the accepted state a controller runs
         // on - a sensor reading it sees undefined forever and the loop sits
         // frozen at its setpoint, which is exactly how this one first failed.
-        // The partition itself (m1, m3) and the node's totals ARE integrated
-        // state, so the evaluation can simply be redone from them.
+        // The subcooled section's energy U1 and the node's totals ARE
+        // integrated state, so the evaluation can be redone from them - at the
+        // WATER's own pressure and energy, which is all the sections describe
+        // (tubeWaterState; identical to the stored totals with no gas about).
+        const water = tubeWaterState(node);
         const ev = evaluateOtsgAtP(
-          cfg.m1, cfg.m3, node.fluid.mass, node.fluid.internalEnergy,
-          node.fluid.pressure, this.otsgFeedEnergy(state, node),
+          cfg.U1, node.fluid.mass, water.energy,
+          water.pressure, this.otsgFeedEnergy(state, node),
           { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
         );
         return ev.sections[2].lengthFrac;

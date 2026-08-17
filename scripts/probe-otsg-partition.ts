@@ -1,93 +1,153 @@
 /**
- * Where the moving-boundary partition comes apart.
+ * The moving-boundary partition, solved from the node's own totals.
  *
- * The Xe-100 bundle reaches states like m1 = 16.5 t subcooled, m3 = 5.0 t
- * "superheated", m2 = 0.5 t boiling, in a 20 m3 tube volume. 5 t of
- * superheated steam at 165 bar needs at LEAST 5000 * v_g = 49 m3 - more than
- * twice the whole bundle - so that partition cannot exist. This probe shows
- * how the model gets there and why nothing complains.
+ * This probe used to document the failure: with m3 integrated alongside the
+ * totals, the Xe-100 bundle reached states like m1 = 16.5 t subcooled,
+ * m3 = 5.0 t "superheated", m2 = 0.5 t boiling in a 20 m3 tube - and 5 t of
+ * superheated steam at 165 bar needs at least 5000 * v_g = 49 m3, more than
+ * twice the whole bundle. Nothing complained, because the reported section
+ * LENGTHS are normalized over the sections' own summed volume.
+ *
+ * evaluateOtsgAtP now solves the boiling/superheat split from the node's
+ * mass, energy and tube volume, so that partition can no longer be asked for:
+ * the only thing handed in is the economizer's ENERGY, and what comes back
+ * always fits. This probe shows the three regimes it lands in, checks the
+ * closure on each, and ends on what is still soft about the economizer.
  *
  * Run: npx tsx scripts/probe-otsg-partition.ts
  */
 
-import { evaluateOtsgAtP, otsgRates } from '../src/simulation/otsg';
 import {
-  saturationTemperature, saturatedVaporDensity, saturatedLiquidDensity,
-  saturatedLiquidEnergy, saturatedVaporEnergy,
-} from '../src/simulation/water-properties';
+  evaluateOtsgAtP, otsgRates, saturationAtP, subcooledSectionMean,
+} from '../src/simulation/otsg';
+import { calculateState } from '../src/simulation/water-properties';
 
 const P = 165e5;
 const V_TUBE = 19.8;            // m3 - one Xe-100 bundle
 const AREA = 1970;              // m2
-const T_sat = saturationTemperature(P);
-const v_g = 1 / saturatedVaporDensity(T_sat);
-const v_f = 1 / saturatedLiquidDensity(T_sat);
-const u_f = saturatedLiquidEnergy(T_sat);
-const u_g = saturatedVaporEnergy(T_sat);
+const GEOM = { tubeVolume: V_TUBE, tubeLength: 1, heatArea: AREA };
+const sat = saturationAtP(P);
 
-console.log(`\nAt ${(P / 1e5).toFixed(0)} bar: T_sat=${(T_sat - 273.15).toFixed(0)} C, ` +
-  `v_f=${v_f.toFixed(5)}, v_g=${v_g.toFixed(5)} m3/kg`);
-console.log(`A ${V_TUBE} m3 bundle can hold at most ${(V_TUBE / v_g).toFixed(0)} kg of steam ` +
-  `(saturated vapour, the densest superheat there is)`);
-console.log(`...and at most ${(V_TUBE / v_f).toFixed(0)} kg of saturated liquid.\n`);
+console.log(`\nAt ${(P / 1e5).toFixed(0)} bar: T_sat=${(sat.T - 273.15).toFixed(0)} C, ` +
+  `v_f=${sat.v_f.toFixed(5)}, v_g=${sat.v_g.toFixed(5)} m3/kg`);
+console.log(`A ${V_TUBE} m3 bundle holds at most ${(V_TUBE / sat.v_g).toFixed(0)} kg of ` +
+  `saturated steam and ${(V_TUBE / sat.v_f).toFixed(0)} kg of saturated liquid.\n`);
 
-// Reproduce the plant's state: a flooded bundle with a large partition
-const massTotal = 11000;        // kg - the measured per-bundle inventory
-const uMean = u_f * 0.98;       // essentially saturated liquid
-const UTotal = massTotal * uMean;
-const uFeed = u_f - 100e3;
+const uFeed = sat.u_f - 400e3;
 
-console.log(`Bundle holding ${massTotal} kg at ~saturated liquid:`);
-console.log(`  as pure liquid that is ${(massTotal * v_f).toFixed(1)} m3 ` +
-  `of the ${V_TUBE} m3 available\n`);
+/** The probe talks in economizer MASS; the state is its energy (m1 = U1/u1bar). */
+const U1of = (m1: number) => m1 * subcooledSectionMean(uFeed, sat);
 
-console.log('  m1(kg)   m3(kg) |    V1     V2     V3   sum(m3)  vs tube  | length fractions');
-for (const [m1, m3] of [[2000, 50], [4000, 200], [6000, 800], [8000, 2000], [8500, 2500]]) {
-  const ev = evaluateOtsgAtP(m1, m3, massTotal, UTotal, P, uFeed,
-    { tubeVolume: V_TUBE, tubeLength: 1, heatArea: AREA });
+function show(label: string, m1: number, mass: number, U: number) {
+  const ev = evaluateOtsgAtP(U1of(m1), mass, U, P, uFeed, GEOM);
   const V = ev.sections.map(s => s.volume);
   const sum = V[0] + V[1] + V[2];
+  const uSections = ev.sections.reduce((s, x) => s + x.mass * (x.hBar - P * x.vBar), 0);
   console.log(
-    `  ${m1.toString().padStart(6)} ${m3.toString().padStart(8)} | ` +
-    `${V[0].toFixed(1).padStart(5)} ${V[1].toFixed(1).padStart(6)} ${V[2].toFixed(1).padStart(6)} ` +
-    `${sum.toFixed(1).padStart(9)} ${(sum / V_TUBE).toFixed(2).padStart(7)}x | ` +
-    ev.sections.map(s => (100 * s.lengthFrac).toFixed(0).padStart(3) + '%').join(' ')
+    `  ${label.padEnd(26)} ${ev.sections.map(s => s.mass.toFixed(0).padStart(6)).join(' ')} | ` +
+    `${V.map(x => x.toFixed(1).padStart(5)).join(' ')} ${sum.toFixed(2).padStart(7)} ` +
+    `${(sum / V_TUBE).toFixed(3).padStart(6)}x | ` +
+    `${ev.x2Out.toFixed(2).padStart(4)} ${(ev.u3 / 1e3).toFixed(0).padStart(5)} ` +
+    `${(ev.sections[2].T - 273.15).toFixed(0).padStart(5)} | ` +
+    `${((uSections / U - 1) * 100).toFixed(2).padStart(6)}%`
   );
 }
 
-console.log(`\nThe sections' volumes sum to several times the tube volume, and the length`);
-console.log(`fractions still come out looking reasonable - evaluateOtsgAtP normalizes them`);
-console.log(`over the sections' OWN summed volume, so an impossible partition is rescaled`);
-console.log(`into a plausible-looking answer instead of being rejected.\n`);
-
-// Now show the mechanism that drives m3 up there: a bottled boiler
-console.log('A bottled boiler (heat in, no steam draw) - what the partition rates do:\n');
-console.log('     t(s)     m1      m2      m3   |    W12    W23  | m3 vs the volume limit');
-let m1 = 2000, m3 = 50;
-const Q1 = 5e6, Q2 = 60e6, Q3 = 2e6;   // W - a bundle taking ~67 MW
-const dt = 1;
-for (let t = 0; t <= 600; t++) {
-  const ev = evaluateOtsgAtP(m1, m3, massTotal, UTotal, P, uFeed,
-    { tubeVolume: V_TUBE, tubeLength: 1, heatArea: AREA });
-  // Feed matches nothing, draw is nearly shut - the railed-governor case
-  const r = otsgRates(ev, 5, u_f - 100e3 + P * v_f, 0.5, Q1, Q2, Q3);
-  if (t % 100 === 0) {
-    const limit = V_TUBE / v_g;
-    console.log(
-      `  ${t.toString().padStart(7)} ${m1.toFixed(0).padStart(6)} ` +
-      `${(massTotal - m1 - m3).toFixed(0).padStart(7)} ${m3.toFixed(0).padStart(7)} | ` +
-      `${r.W12.toFixed(1).padStart(6)} ${r.W23.toFixed(1).padStart(6)} | ` +
-      `${(m3 / limit).toFixed(2)}x of the ${limit.toFixed(0)} kg that fits`
-    );
-  }
-  m1 = Math.max(0, m1 + r.dm1 * dt);
-  m3 = Math.max(0, m3 + r.dm3 * dt);
-  if (m1 + m3 > massTotal) {           // the solver's only guard
-    const scale = massTotal / (m1 + m3);
-    m1 *= scale; m3 *= scale;
-  }
+console.log('  state                          m1     m2     m3 |    V1    V2    V3   sum  vs tube ' +
+  '| xOut    u3    T3 | dU');
+// A flooded bundle: 11 t of near-saturated water. There is no room for dry
+// steam, so the boiling section simply ends low on the dome.
+for (const m1 of [0, 2000, 6000, 8500]) {
+  show(`flooded, m1=${m1}`, m1, 11000, 11000 * sat.u_f * 0.98);
 }
-console.log(`\nThe only constraint the integrator applies is m1 + m3 <= total MASS`);
-console.log(`(rk45-solver.ts). Nothing anywhere asks whether the sections fit in the`);
-console.log(`tube's VOLUME, so with the steam draw shut the evaporator keeps converting`);
-console.log(`inventory into a superheat section that has nowhere to be.\n`);
+// The same bundle boiled down. The inventory and the tube volume fix the bulk
+// quality between them, so these are genuine 165-bar states, not made-up ones:
+// x = (V/m - v_f)/(v_g - v_f).
+for (const mass of [4000, 3000, 2400]) {
+  const x = (V_TUBE / mass - sat.v_f) / (sat.v_g - sat.v_f);
+  const u = sat.u_f + x * (sat.u_g - sat.u_f);
+  show(`boiled to x=${x.toFixed(2)}, ${mass} kg`, 500, mass, mass * u);
+}
+// Genuinely dry: the tube's own (u,v) is superheated steam, so the pressure
+// comes from the property surface rather than from the saturation line.
+{
+  const mass = 1500;
+  const v = V_TUBE / mass;
+  const st = calculateState(1, sat.u_g + 350e3, v);
+  console.log(`\n  (dry case bulk state: ${st.phase} at ${(st.pressure / 1e5).toFixed(0)} bar, ` +
+    `${(st.temperature - 273.15).toFixed(0)} C - shown at ITS pressure)`);
+  const evDry = evaluateOtsgAtP(0, mass, mass * (sat.u_g + 350e3), st.pressure, uFeed,
+    GEOM);
+  const sumDry = evDry.sections.reduce((s, x) => s + x.volume, 0);
+  console.log(`  ${'dry, 1500 kg superheated'.padEnd(26)} ` +
+    `${evDry.sections.map(s => s.mass.toFixed(0).padStart(6)).join(' ')} | ` +
+    `${evDry.sections.map(s => s.volume.toFixed(1).padStart(5)).join(' ')} ` +
+    `${sumDry.toFixed(2).padStart(7)} ${(sumDry / V_TUBE).toFixed(3).padStart(6)}x | ` +
+    `${evDry.x2Out.toFixed(2).padStart(4)} ${(evDry.u3 / 1e3).toFixed(0).padStart(5)} ` +
+    `${(evDry.sections[2].T - 273.15).toFixed(0).padStart(5)} |`);
+}
+
+console.log(`\n"sum vs tube" is 1.000x everywhere - the volume constraint is what SETS the`);
+console.log(`partition now, so it cannot be violated. dU is the energy the section states`);
+console.log(`fail to account for: zero once there is dry steam (both constraints are`);
+console.log(`enforced), and non-zero only for a flooded bundle, where the boiling section's`);
+console.log(`outlet quality is the single remaining freedom and the volume claims it.\n`);
+
+// A quasi-static dry-down at 165 bar. Each row is a genuine tube state: the
+// inventory and the tube volume fix v, and u comes from the property surface
+// at that v and pressure - the chord inside the dome, the isobar outside it.
+// Nothing here is integrated except m1, so the boundaries are wherever the
+// tube's own contents put them.
+function uAtPv(v: number): number {
+  if (v <= sat.v_g) return sat.u_f + (v - sat.v_f) / (sat.v_g - sat.v_f) * (sat.u_g - sat.u_f);
+  let lo = sat.u_g, hi = 4.0e6;
+  for (let i = 0; i < 60; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (calculateState(1, mid, v).pressure > P) lo = mid; else hi = mid;
+  }
+  return 0.5 * (lo + hi);
+}
+
+console.log('A quasi-static dry-down at 165 bar, economizer holding a fifth of the water.');
+console.log('Only the economizer energy is integrated; every other boundary is read');
+console.log('off the tube itself:\n');
+console.log('   inventory     m1     m2     m3 | lengths L1/L2/L3 | xOut  T3(C) |    W12    W23');
+for (const mass of [11000, 9000, 7000, 5000, 4000, 3000, 2400]) {
+  const m1 = 0.2 * mass;
+  const u = uAtPv(V_TUBE / mass);
+  const ev = evaluateOtsgAtP(U1of(m1), mass, mass * u, P, uFeed, GEOM);
+  // A fixed 67 MW duty split the way the sections' areas split it
+  const Q = 67e6;
+  const [a1, a2, a3] = ev.sections.map(s => s.area / AREA);
+  const r = otsgRates(ev, 48, uFeed + P * sat.v_f, 48, Q * a1, Q * a2, Q * a3);
+  console.log(
+    `  ${mass.toString().padStart(9)} ${ev.sections.map(s => s.mass.toFixed(0).padStart(6)).join(' ')} | ` +
+    `${ev.sections.map(s => (100 * s.lengthFrac).toFixed(0).padStart(5) + '%').join(' ')} | ` +
+    `${ev.x2Out.toFixed(2).padStart(4)} ${(ev.sections[2].T - 273.15).toFixed(0).padStart(6)} | ` +
+    `${r.W12.toFixed(1).padStart(6)} ${r.W23.toFixed(1).padStart(6)}`
+  );
+}
+
+// What is left over. The economizer's energy is integrated from real flows -
+// feed in, boil-off at h_f, wall heat - so no pressure change can re-value it
+// and hand the difference to the vapour. But nothing ties it to the TOTALS,
+// so an economizer that outlives the water it describes still reads as an
+// absurd superheat temperature: the energy it claims comes off the node, and
+// whatever is left has to be somewhere.
+{
+  const mass = 1800, m1 = 400;              // a dry tube still claiming 400 kg of liquid
+  const ev = evaluateOtsgAtP(U1of(m1), mass, mass * uAtPv(V_TUBE / mass), P, uFeed, GEOM);
+  console.log(`\n  stale economizer: ${m1} kg of "liquid" in a tube holding ${mass} kg of ` +
+    `dry steam -> T3 = ${(ev.sections[2].T - 273.15).toFixed(0)} C`);
+  const rStale = otsgRates(ev, 0, uFeed + P * sat.v_f, 48,
+    67e6 * ev.sections[0].area / AREA, 67e6 * ev.sections[1].area / AREA,
+    67e6 * ev.sections[2].area / AREA);
+  console.log(`  (the interface flux W12 = ${rStale.W12.toFixed(0)} kg/s drains it in ` +
+    `${(m1 / Math.max(1e-9, rStale.W12)).toFixed(0)} s - the dynamics do fix it, but ` +
+    `nothing bounds it within a step)`);
+}
+
+console.log(`\nThe superheater appears because the tube's own inventory and energy leave room`);
+console.log(`for it, not because W23 pushed mass into it. W23 still says where the dry-steam`);
+console.log(`boundary is TRYING to move - it drives nothing now, and nothing can accumulate`);
+console.log(`into a section that has nowhere to be.\n`);

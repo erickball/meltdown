@@ -13,6 +13,9 @@ import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
 import { totalMoles } from '../src/simulation/gas-properties';
+import { evaluateOtsgAtP } from '../src/simulation/otsg';
+import { tubeWaterState, classifyOtsgFlows } from '../src/simulation/operators/otsg-operator';
+import { saturatedLiquidEnergy } from '../src/simulation/water-properties';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PRESET = path.join(HERE, '..', 'src', 'presets', 'xe100.json');
@@ -40,10 +43,33 @@ function m(state: SimulationState, id: string): number {
   return state.flowNodes.get(id)?.fluid.mass ?? NaN;
 }
 
+/**
+ * The tube side's section split. Only m1 is integrated state - the boiling /
+ * superheat split is solved from the node's totals - so ask for it the same
+ * way the operator does rather than reading otsg.lastEval, which is written
+ * on the solver's per-stage clones and never reaches the accepted state.
+ */
+function otsgSections(state: SimulationState, id: string): string {
+  const node = state.flowNodes.get(id);
+  const cfg = node?.otsg;
+  if (!node || !cfg) return '-';
+  // Use the operator's OWN feed classification. Reading the feed-energy
+  // ceiling instead (what this did first) put the economizer's mean 800 kJ/kg
+  // too high and the display read far healthier than the physics.
+  const water = tubeWaterState(node);
+  const flows = classifyOtsgFlows(state, id, node, water.pressure);
+  const ev = evaluateOtsgAtP(
+    cfg.U1, node.fluid.mass, water.energy, water.pressure, flows.uFeed,
+    { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
+  );
+  const L = ev.sections.map(s => (100 * s.lengthFrac).toFixed(0)).join('/');
+  return `${ev.sections[0].mass.toFixed(0)} ${L} T3=${(ev.sections[2].T - 273.15).toFixed(0)}`;
+}
+
 function header() {
   console.log(
     '    t(s)  He(kg/s)  Tcore_in  Tcore_out   P_he(bar)  ' +
-    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  m1/m3+T3(C)             Pwr(MW)    gv  fwspd  ' +
+    'stm(kg/s)  T_stm(C)  P_stm(bar)  m_tube(kg)  m1 L1/L2/L3 T3(C)         Pwr(MW)    gv  fwspd  ' +
     'Tev_sh(C)  Tinner  Tannul  T_sgvessel'
   );
 }
@@ -60,7 +86,7 @@ function line(state: SimulationState) {
     `${T(state, 'hx-1-tube').toFixed(1).padStart(9)} ` +
     `${P(state, 'hx-1-tube').toFixed(1).padStart(11)} ` +
     `${m(state, 'hx-1-tube').toFixed(0).padStart(11)} ` +
-    `${(() => { const o = (state.flowNodes.get('hx-1-tube') as any)?.otsg; if (!o) return '-'; const t = o.lastEval ? ' T3=' + (o.lastEval.T3 - 273.15).toFixed(0) : ''; return o.m1.toFixed(0) + '/' + o.m3.toFixed(1) + t; })().padStart(22)} ` +
+    `${otsgSections(state, 'hx-1-tube').padStart(26)} ` +
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
     `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
     `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +

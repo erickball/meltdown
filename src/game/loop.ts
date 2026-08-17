@@ -23,6 +23,7 @@ import {
   CladdingOxidationRateOperator,
   GraphiteOxidationRateOperator,
   OtsgRateOperator,
+  OtsgLedgerCheckOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -182,6 +183,7 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
       this.rk45Solver.addConstraintOperator(new ChokedFlowDisplayOperator()); // Sets conn.isChoked for debug display
       this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
+      this.rk45Solver.addConstraintOperator(new OtsgLedgerCheckOperator()); // OTSG economizer ledger vs the wall (finalOnly)
 
       // Set up substep callback for state history recording
       // This records state after each accepted substep, not just once per

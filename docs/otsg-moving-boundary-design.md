@@ -67,6 +67,77 @@ Everything else is DERIVED, in keeping with house style:
   A_i = A_total·L_i/L. A section with zero mass has zero length, zero area,
   zero everything — see §6.
 
+### 3a. What the plant actually runs (`evaluateOtsgAtP`)
+
+The closure above is the reference form (`evaluateOtsg`, exercised by the unit
+tests). In the plant the node's ordinary (mass, energy) totals and its (u,v)
+pressure stay exactly where they are — that machinery is proven — and the
+sectioned model is the fine structure it lumps together, recovered at that
+pressure. Which means the section states are not free to be anything: they
+have to add back up to the node.
+
+Exactly **one descriptor is integrated** there — the subcooled section's
+ENERGY U_1, with its mass following as m_1 = U_1/ū_1. The rest of the
+partition is *solved*:
+
+    m_2 + m_3 = M − m_1                              (mass)
+    m_2·v̄_2 + m_3·v_3 = V_tube − m_1·v_1             (volume)
+    m_2·ū_2 + m_3·u_3 = U − U_1                      (energy)
+
+with the boiling section's mean state a single-parameter family in its OUTLET
+QUALITY (§ `boilingMeanVolume`), and one structural rule: *a boiling section
+stops short of dry steam only when there is nothing downstream to hand it to.*
+That gives three regimes — flooded (m_3 = 0, outlet quality from the volume),
+dryout (x_out = 1, u_3 = u_g, m_3 from the volume), superheat (x_out = 1,
+(m_3, u_3) from volume and energy together) — which join continuously at the
+states where the descriptions coincide.
+
+Integrating m_3 as well over-specifies the model by one, and the failure is
+not cosmetic: an m_3 accumulated from W_23 does not know what volume it is
+being asked to fit into, and the Xe-100 bundle reached partitions claiming
+2.6× the tube volume while the reported LENGTHS still looked plausible,
+because they normalize over the sections' own summed volume. With the split
+solved, W_23 becomes a diagnostic — it says where the dry-steam boundary is
+trying to move; where it *is* comes from the tube's contents.
+
+Two things the sections are evaluated *on*, rather than the node's stored
+numbers:
+
+- **The water's own pressure and energy.** `fluid.pressure` is the Dalton
+  TOTAL and `fluid.internalEnergy` includes the gas, so a bundle with helium
+  in it would have the model hunting for a dome the water is nowhere near
+  (`tubeWaterState` splits them; with no gas it is the stored state).
+- **Above P_crit there is no dome at all.** `saturationAtP` anchors on the top
+  of the dome instead of extrapolating the table past it, and the closure
+  reports one fluid: the cold end (m_1, whose boundary is now the
+  pseudo-critical point) and the hot end, no boiling section between them.
+  Nothing steps as a boiler is pushed through the critical pressure and back.
+
+**Why the subcooled section is carried as an energy, not a mass.** Under the
+profile closure the two are the same information — m_1 = U_1/ū_1 — but ū_1 is
+an *assumption* that moves with saturation, so every pressure change re-values
+the section. Integrating the mass makes the section's ENERGY jump with ū_1,
+and since the leftovers are a residual, the jump lands on the vapour's
+temperature, which nothing bounds. Integrating the energy makes its MASS jump
+instead, and mass lands in m_2/m_3, which the closure re-solves against the
+tube volume anyway. The slack has to go somewhere; this puts it in the
+bounded descriptor. U_1 then moves only through real flows:
+
+    dU_1/dt = W_in·h_in − W_12·h_f + Q_1 − P·v_1·dm_1/dt
+
+so every joule the economizer reports came in through the feed, the boundary,
+or the wall.
+
+What is still soft: nothing ties U_1 to the totals. An economizer that
+outlives the water it describes still reads as an absurd superheat
+temperature, because the energy it claims comes off the node and whatever is
+left has to be somewhere. The interface flux drains it (tens of seconds in
+the case `scripts/probe-otsg-partition.ts` builds), and thermodynamics alone
+cannot do better: the totals bound the subcooled section from BELOW (a node
+colder than saturated liquid must contain some) but never from above, because
+superheat is unbounded. Only the dynamics can, which is what integrating the
+energy is for.
+
 ## 4. Interface conditions
 
 Interfaces sit at saturation by definition:

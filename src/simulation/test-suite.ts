@@ -36,21 +36,27 @@ import {
   subcooledLiquidV,
   superheatedV,
   evaluateOtsg,
+  evaluateOtsgAtP,
   otsgRates,
   boilingMeanQuality,
   boilingMeanVolume,
+  boilingOutletQuality,
+  subcooledSectionMean,
+  P_CRITICAL,
   transitStandingQ,
   marchCounterflowGas,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
+import { tubeWaterState } from './operators/otsg-operator.js';
 import {
   binaryDiffusivity,
   diffusivityInMixture,
   knudsenDiffusivity,
   effectivePoreDiffusivity,
   createGasComposition,
+  mixtureCv,
 } from './gas-properties.js';
-import type { NeutronicsState } from './types.js';
+import type { NeutronicsState, FlowNode } from './types.js';
 
 // Test result tracking
 interface TestResult {
@@ -464,6 +470,8 @@ test('interface fluxes reduce to through-flow at steady state', () => {
     'steady state must hold all section masses');
   assert(Math.abs(r.dU3) < 1,
     `steady state must hold U3, got dU3=${r.dU3.toExponential(2)} W`);
+  assert(Math.abs(r.dU1) < 1,
+    `steady state must hold U1 too, got dU1=${r.dU1.toExponential(2)} W`);
 });
 
 test('section energy bookkeeping is exact (no leaked enthalpy)', () => {
@@ -1050,6 +1058,8 @@ test('lattice reactivity path survives full voiding without NaN', () => {
 // OTSG boiling-section closure
 // ============================================================================
 
+category('OTSG closure');
+
 test('boiling section mass-averages its quality, not its length', () => {
   // At 165 bar the phases differ ~5x in density, so the mass sits well down
   // the dome: the mass-averaged quality is 0.37 where the length average is
@@ -1083,6 +1093,290 @@ test('a boiling section that stops short of dry steam is wetter still', () => {
   // ...and a section that barely boils is liquid
   assertClose(boilingMeanVolume(sat.v_f, sat.v_g, 0), sat.v_f, 1e-9 * sat.v_f,
     'a section with no boiling occupies the saturated-liquid volume');
+});
+
+// ============================================================================
+// OTSG partition solved from the node's totals
+// ============================================================================
+// evaluateOtsgAtP takes only m1 as integrated state and SOLVES the boiling /
+// superheat split from the node's mass, energy and tube volume. These tests
+// pin the three regimes, their joins, and the constraint that used to be
+// unenforced: the sections have to fit in the tube.
+
+const PART_GEOM = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+/** Total section volume - the quantity an integrated m3 used to violate. */
+function sectionVolume(ev: { sections: Array<{ volume: number }> }): number {
+  return ev.sections[0].volume + ev.sections[1].volume + ev.sections[2].volume;
+}
+/** Total section energy, reconstructed from what the evaluation reports. */
+function sectionEnergy(ev: { P: number; sections: Array<{ mass: number; hBar: number; vBar: number }> }): number {
+  return ev.sections.reduce((s, sec) => s + sec.mass * (sec.hBar - ev.P * sec.vBar), 0);
+}
+
+test('flooded bundle: the boiling section stops short of dry steam', () => {
+  // 2% quality at 80 bar - water packed into the tubes with nowhere for steam
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const x = 0.02;
+  const v = sat.v_f + x * (sat.v_g - sat.v_f);
+  const u = sat.u_f + x * (sat.u_g - sat.u_f);
+  const mass = PART_GEOM.tubeVolume / v;
+  const ev = evaluateOtsgAtP(0, mass, mass * u, P, sat.u_f - 300e3, PART_GEOM);
+  assert(ev.sections[2].mass === 0,
+    `a flooded bundle has no dry steam, got m3=${ev.sections[2].mass.toFixed(1)} kg`);
+  assert(ev.x2Out > 0 && ev.x2Out < 0.1,
+    `the boiling section must end low on the dome, got xOut=${ev.x2Out.toFixed(3)}`);
+  assertClose(sectionVolume(ev), PART_GEOM.tubeVolume, 1e-6 * PART_GEOM.tubeVolume,
+    'the sections must occupy exactly the tube volume');
+  assertClose(ev.hSteamOut, sat.h_g, 1, 'with no dry steam the draw is at h_g');
+});
+
+test('a two-phase bundle dries out rather than superheating', () => {
+  // 80% quality: most of the tube is dry steam, but there is no energy left
+  // to superheat it - the vapour region sits at saturation. Volume AND energy
+  // both close here, because a homogeneous mixture and its (boiling section +
+  // saturated vapour) decomposition sit on the same chord.
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const x = 0.8;
+  const v = sat.v_f + x * (sat.v_g - sat.v_f);
+  const u = sat.u_f + x * (sat.u_g - sat.u_f);
+  const mass = PART_GEOM.tubeVolume / v;
+  const ev = evaluateOtsgAtP(0, mass, mass * u, P, sat.u_f - 300e3, PART_GEOM);
+  assert(ev.sections[2].mass > 0.5 * mass,
+    `most of an 80%-quality bundle is dry steam, got ${(100 * ev.sections[2].mass / mass).toFixed(0)}%`);
+  assertClose(ev.u3 / 1e3, sat.u_g / 1e3, 1e-6, 'the vapour region is at saturation, not superheated');
+  assertClose(ev.sections[2].T, sat.T, 1e-9, 'so it is at T_sat');
+  assertClose(sectionVolume(ev), PART_GEOM.tubeVolume, 1e-9 * PART_GEOM.tubeVolume, 'volume closes');
+  assertClose(sectionEnergy(ev) / 1e9, mass * u / 1e9, 1e-9 * mass * u / 1e9, 'energy closes too');
+});
+
+test('a dry bundle is all superheat, at its own bulk state', () => {
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const u = sat.u_g + 400e3;
+  const v = superheatedV(u, P);
+  const mass = PART_GEOM.tubeVolume / v;
+  const ev = evaluateOtsgAtP(0, mass, mass * u, P, sat.u_f - 300e3, PART_GEOM);
+  assert(ev.sections[2].mass > 0.99 * mass,
+    `a superheated bundle is all superheat section, got ${(100 * ev.sections[2].mass / mass).toFixed(1)}%`);
+  assertClose(ev.u3 / 1e3, u / 1e3, 2, 'at the bulk specific energy');
+  assert(ev.sections[2].T > sat.T + 50, 'and well above T_sat');
+});
+
+test('a constructed three-section state round-trips through the solve', () => {
+  // Build the totals FROM a known partition, then check the solve recovers it.
+  // This is the superheat regime, where volume and energy are both enforced.
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const uFeed = sat.u_f - 400e3;
+  const u1Bar = subcooledSectionMean(uFeed, sat);
+  const v1 = subcooledLiquidV(u1Bar);
+  const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
+  const x2 = boilingMeanQuality(sat.v_f, sat.v_g, 1);
+  const u2 = sat.u_f + x2 * (sat.u_g - sat.u_f);
+  const u3 = sat.u_g + 250e3;
+  const v3 = superheatedV(u3, P);
+  const m1 = 4000, m2 = 900, m3 = 120;
+  const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
+  const ev = evaluateOtsgAtP(
+    m1 * u1Bar, m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, P, uFeed, geom);
+  assertClose(ev.sections[2].mass, m3, 1e-3 * m3, 'superheat mass recovered');
+  assertClose(ev.sections[1].mass, m2, 1e-3 * m2, 'boiling mass recovered');
+  assertClose(ev.u3 / 1e3, u3 / 1e3, 2, 'superheat specific energy recovered');
+  assertClose(ev.x2Out, 1, 1e-9, 'with superheat downstream the boiling section reaches dry steam');
+  assertClose(sectionVolume(ev), geom.tubeVolume, 1e-6 * geom.tubeVolume, 'volume closes');
+  assertClose(sectionEnergy(ev) / 1e9, (m1 * u1Bar + m2 * u2 + m3 * u3) / 1e9,
+    1e-6 * (m1 * u1Bar + m2 * u2 + m3 * u3) / 1e9, 'energy closes');
+});
+
+test('nothing steps as a bundle floods, dries out and superheats', () => {
+  // Heat a bottled bundle from wet to superheated, taking its pressure from
+  // its own (u,v) exactly as the operator does. That sweep crosses both
+  // regime joins - flooded -> dryout -> superheat - and the joins are the
+  // states where the two descriptions coincide, so every reported quantity
+  // must cross them smoothly.
+  const sat80 = saturationAtP(80e5);
+  const v = PART_GEOM.tubeVolume / 1600;    // 1600 kg in the tubes
+  const mass = PART_GEOM.tubeVolume / v;
+  const uLo = sat80.u_f * 0.9, uHi = sat80.u_g + 400e3;
+  const N = 400;
+  let prev: { m3: number; h: number; f3: number } | null = null;
+  let maxJumpM3 = 0, maxJumpH = 0, maxJumpF = 0;
+  for (let i = 0; i <= N; i++) {
+    const u = uLo + (uHi - uLo) * i / N;
+    const P = calculateState(1, u, v).pressure;
+    const sat = saturationAtP(P);
+    const ev = evaluateOtsgAtP(0, mass, mass * u, P, sat.u_f - 300e3, PART_GEOM);
+    assertClose(sectionVolume(ev), PART_GEOM.tubeVolume, 1e-6 * PART_GEOM.tubeVolume,
+      `volume must close at u=${(u / 1e3).toFixed(0)} kJ/kg`);
+    const cur = { m3: ev.sections[2].mass, h: ev.hSteamOut, f3: ev.sections[2].lengthFrac };
+    if (prev) {
+      maxJumpM3 = Math.max(maxJumpM3, Math.abs(cur.m3 - prev.m3) / mass);
+      maxJumpH = Math.max(maxJumpH, Math.abs(cur.h - prev.h));
+      maxJumpF = Math.max(maxJumpF, Math.abs(cur.f3 - prev.f3));
+    }
+    prev = cur;
+  }
+  assert(maxJumpM3 < 0.02, `superheat mass stepped ${(100 * maxJumpM3).toFixed(1)}% of inventory in one increment`);
+  assert(maxJumpH < 40e3, `draw enthalpy stepped ${(maxJumpH / 1e3).toFixed(0)} kJ/kg in one increment`);
+  assert(maxJumpF < 0.03, `superheat length fraction stepped ${(100 * maxJumpF).toFixed(1)} points in one increment`);
+});
+
+test('the sections fit the tube whatever the partition is asked to hold', () => {
+  // The failure this rework exists to kill: an integrated m3 let the sections
+  // claim 2.6x the tube volume. Solved from the totals they cannot.
+  const P = 120e5;
+  const sat = saturationAtP(P);
+  const uFeed = sat.u_f - 350e3;
+  const mass = 8000;
+  for (const m1frac of [0, 0.2, 0.5, 0.8]) {
+    for (const x of [0.005, 0.1, 0.5, 0.9, 0.999]) {
+      const u = sat.u_f + x * (sat.u_g - sat.u_f);
+      const ev = evaluateOtsgAtP(
+        mass * m1frac * subcooledSectionMean(uFeed, sat), mass, mass * u, P, uFeed, PART_GEOM);
+      const V = sectionVolume(ev);
+      assert(V <= PART_GEOM.tubeVolume * (1 + 1e-6),
+        `m1=${(100 * m1frac).toFixed(0)}% of ${mass} kg at x=${x}: sections claim ` +
+        `${V.toFixed(1)} m3 of a ${PART_GEOM.tubeVolume} m3 tube`);
+      assert(ev.sections[1].mass >= 0 && ev.sections[2].mass >= 0,
+        'no section may hold negative mass');
+      assertClose(ev.sections[0].mass + ev.sections[1].mass + ev.sections[2].mass, mass,
+        1e-9 * mass, 'the partition must account for the whole inventory');
+    }
+  }
+});
+
+test('above the critical pressure the tube is one fluid, not three sections', () => {
+  // 300 bar: no dome, nothing to boil. The saturation bundle must anchor on
+  // the top of the dome (the pseudo-critical point) rather than extrapolate
+  // the table - left alone, saturationTemperature happily returns 679 K at
+  // 300 bar for a phase boundary that does not exist.
+  const sat = saturationAtP(300e5);
+  const domeTop = saturationAtP(P_CRITICAL);
+  assertClose(sat.T, domeTop.T, 1e-9, 'supercritical saturation anchors at the dome top');
+  assert(sat.T < 648, `and does not extrapolate past it, got ${sat.T.toFixed(1)} K`);
+
+  const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+  const u = 2.2e6;                       // supercritical water, ~390 C at 253 bar
+  const mass = 5000;
+  const P = calculateState(1, u, geom.tubeVolume / mass).pressure;
+  assert(P > P_CRITICAL, `fixture must be supercritical, got ${(P / 1e5).toFixed(0)} bar`);
+  const uFeedSc = sat.u_f - 500e3;
+  const ev = evaluateOtsgAtP(
+    600 * subcooledSectionMean(uFeedSc, sat), mass, mass * u, P, uFeedSc, geom);
+  assert(ev.sections[1].mass === 0, 'there is no boiling section above the critical pressure');
+  assertClose(ev.sections[0].mass + ev.sections[2].mass, mass, 1e-9 * mass,
+    'the cold end and the hot end account for the whole inventory');
+  const V = ev.sections.reduce((s, sec) => s + sec.volume, 0);
+  assertClose(V, geom.tubeVolume, 1e-6 * geom.tubeVolume, 'volume still closes');
+  assert(ev.sections[2].T > 273 && ev.sections[2].T < 1200,
+    `the hot end must take a real temperature from the property surface, got ${ev.sections[2].T.toFixed(0)} K`);
+});
+
+test('gas in the tubes: the sections run on the water, not the mixture', () => {
+  // Helium leaking into a bundle raises the node's pressure and energy without
+  // being water. Handed the TOTALS the sectioned model looks for a dome the
+  // water is nowhere near; handed the water's own partial pressure and energy
+  // it returns exactly what it would with no gas present.
+  const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+  const mass = 1600;
+  const v = geom.tubeVolume / mass;
+  const Pw = 80e5;
+  const satW = saturationAtP(Pw);
+  const x = (v - satW.v_f) / (satW.v_g - satW.v_f);
+  const uW = satW.u_f + x * (satW.u_g - satW.u_f);   // a genuine 80-bar state
+  const pure = calculateState(mass, mass * uW, geom.tubeVolume);
+
+  const he = createGasComposition({ He: 4000 });      // mol
+  const gasEnergy = 4000 * mixtureCv(he) * pure.temperature;
+  const gasPressure = (4000 * 8.31446 * pure.temperature) / geom.tubeVolume;
+  const node = {
+    id: 'tube', volume: geom.tubeVolume,
+    fluid: {
+      mass, internalEnergy: mass * uW + gasEnergy,
+      temperature: pure.temperature, pressure: pure.pressure + gasPressure,
+      phase: pure.phase, quality: pure.quality, ncg: he,
+    },
+  } as unknown as FlowNode;
+
+  const water = tubeWaterState(node);
+  assertClose(water.pressure / 1e5, pure.pressure / 1e5, 0.05 * pure.pressure / 1e5,
+    'the water partial pressure must come back out of the mixture');
+  assertClose(water.energy / 1e9, mass * uW / 1e9, 0.01 * mass * uW / 1e9,
+    'as must the water energy');
+
+  const withGas = evaluateOtsgAtP(0, mass, water.energy, water.pressure, satW.u_f - 300e3, geom);
+  const noGas = evaluateOtsgAtP(0, mass, mass * uW, pure.pressure, satW.u_f - 300e3, geom);
+  assertClose(withGas.sections[2].mass, noGas.sections[2].mass, 0.02 * mass,
+    'the same water must partition the same way whether or not helium shares the tube');
+  assertClose(withGas.sections[2].lengthFrac, noGas.sections[2].lengthFrac, 0.02,
+    'and the section lengths must agree');
+});
+
+test('a pressure change moves the economizer, not its energy', () => {
+  // This is what carrying the subcooled section as an ENERGY buys. Its mean
+  // u1bar is a profile assumption that moves with saturation, so every
+  // pressure change re-values the section. Carrying the MASS made that
+  // re-valuation land on the leftovers - and since the leftovers are a
+  // residual, on the vapour's temperature, which nothing bounds. Carrying the
+  // energy makes it land on the section's mass instead, which the closure
+  // re-solves against the tube volume anyway.
+  const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+  const mass = 4000;
+  const U1 = 1.2e9;                       // J in the economizer
+  const uFeedLow = 700e3;
+  const energyIn = (ev: { P: number; sections: Array<{ mass: number; hBar: number; vBar: number }> }) =>
+    ev.sections[0].mass * (ev.sections[0].hBar - ev.P * ev.sections[0].vBar);
+
+  // A genuine tube state at each pressure: the inventory and the volume fix v,
+  // and u sits on the dome chord there.
+  const at = (P: number) => {
+    const sat = saturationAtP(P);
+    const x = (geom.tubeVolume / mass - sat.v_f) / (sat.v_g - sat.v_f);
+    const u = sat.u_f + x * (sat.u_g - sat.u_f);
+    return evaluateOtsgAtP(U1, mass, mass * u, P, uFeedLow, geom);
+  };
+  const evLo = at(80e5);
+  const evHi = at(120e5);
+  assertClose(energyIn(evLo) / 1e9, U1 / 1e9, 1e-9, 'section 1 holds exactly its state at 80 bar');
+  assertClose(energyIn(evHi) / 1e9, U1 / 1e9, 1e-9, 'and exactly the same at 120 bar');
+  assert(evHi.sections[0].mass < evLo.sections[0].mass * 0.98,
+    `the MASS is what moves: ${evLo.sections[0].mass.toFixed(0)} -> ` +
+    `${evHi.sections[0].mass.toFixed(0)} kg as saturation rises`);
+});
+
+test('an impossible leftover is refused loudly, not fudged', () => {
+  // A rest that is at once more voluminous than dry steam and colder than
+  // boiling water is not water at this pressure: no boiling section and no
+  // vapour region can add up to it. The runtime never asks for one (it passes
+  // the node's OWN pressure, which is a function of these very totals), so
+  // this is the anti-robustness backstop - it must complain rather than
+  // invent a section.
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const mass = 1600;
+  const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };   // v = 0.0125, x_v ~ 0.5
+  const u = sat.u_f + 0.29 * (sat.u_g - sat.u_f);                   // but the energy of x = 0.29
+  let message = '';
+  try {
+    evaluateOtsgAtP(0, mass, mass * u, P, sat.u_f - 300e3, geom);
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('[OTSG]') && message.includes('disagree'),
+    `an unrepresentable leftover must throw an explanatory [OTSG] error, got: ${message || '(no error)'}`);
+});
+
+test('boiling outlet quality inverts the mean-volume closure', () => {
+  const sat = saturationAtP(60e5);
+  for (const xOut of [0.02, 0.25, 0.6, 1]) {
+    const v = boilingMeanVolume(sat.v_f, sat.v_g, xOut);
+    assertClose(boilingOutletQuality(sat.v_f, sat.v_g, v), xOut, 1e-9,
+      `inverting v-bar must return xOut=${xOut}`);
+  }
+  assertClose(boilingOutletQuality(sat.v_f, sat.v_g, sat.v_f * 0.5), 0, 1e-12,
+    'liquid denser than saturation is not boiling at all');
 });
 
 test('mean volume and mean quality are the same statement', () => {

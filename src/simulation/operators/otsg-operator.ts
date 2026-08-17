@@ -11,23 +11,23 @@
  *   water sections --[interface fluxes at h_f / h_g]--> partition motion
  *
  * The node's ordinary (mass, energy) totals stay owned by the existing flow
- * machinery - this operator adds only the wall heat and the PARTITION rates
- * (dm1, dm3), plus the matching energy changes on the shell node and metal.
- * Section 2's mass and the superheat energy are derived from totals, so no
- * bookkeeping here can ever disagree with conservation.
+ * machinery - this operator adds only the wall heat and the ONE partition
+ * rate dU1 (the subcooled section's energy balance), plus the matching energy
+ * changes on the shell node and metal. Where the boiling section ends, and
+ * whether there is a superheat section at all, is solved from the totals and
+ * the tube volume inside evaluateOtsgAtP, so no bookkeeping here can disagree
+ * with conservation OR with the room the tubes actually have.
  *
  * External flows and the partition: connection flows are classified by the
  * phase they are actually carrying (currentFlowPhase, set by the momentum
- * solve): liquid inflow is feed into section 1; vapor outflow is the steam
- * draw from section 3; mixture flows (e.g. a mid-bundle tube leak) touch
- * section 2, whose mass is derived - so they need no partition bookkeeping
- * at all. Draws from an emptying section blend smoothly to the neighbor
- * (same m/(m+1) weight as the draw enthalpy), so a section's death never
- * steps any rate.
+ * solve): liquid inflow is feed into section 1; every other flow - the steam
+ * draw, vapor backflow, a mid-bundle mixture leak - moves only the totals,
+ * and the solved partition follows. Liquid draws leave section 1 weighted by
+ * m1/(m1+1), so an emptying subcooled section never steps its own rate.
  */
 
 import { SimulationState, FlowNode } from '../types';
-import { RateOperator, StateRates, createZeroRates } from '../rk45-solver';
+import { RateOperator, ConstraintOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
   evaluateOtsgAtP,
   otsgRates,
@@ -45,6 +45,7 @@ import {
   averageMolecularWeight,
 } from '../gas-properties';
 import { approxVaporDensity } from './connection-hydraulics';
+import { solveMixtureState } from '../mixture-properties';
 
 /** Tube-side film coefficients (W/m2-K). The gas shell is the limiting
  *  resistance by an order of magnitude, so correlation-grade constants are
@@ -55,6 +56,102 @@ const H_TUBE_STEAM = 1200;
 /** Natural-convection floor for the standing branch (W/m2-K) - what keeps a
  *  bottled boiler heating. */
 const H_TUBE_NATURAL = 250;
+
+/**
+ * The WATER's own state inside a tube node: its partial pressure and its
+ * share of the node's internal energy.
+ *
+ * A flow node's `fluid.pressure` is the TOTAL pressure and `internalEnergy`
+ * the TOTAL energy - steam plus any non-condensible gas sharing the volume
+ * (Dalton, see mixture-properties.ts). Handing those to the sectioned model
+ * asks it to place saturation boundaries at a pressure the water is not at
+ * and to account for energy the water does not hold: helium leaking into a
+ * depressurized bundle would have the model looking for a dome at, say, 60
+ * bar around water that is really at 5, and the closure would rightly report
+ * that the totals and the pressure disagree about what phase the tube is in.
+ *
+ * The water sub-problem is exactly the pure-water problem at its own partial
+ * pressure - that is the whole point of the Dalton split - so this hands the
+ * sections the water's half of it. With no gas present the mixture solve
+ * short-circuits to the stored state, so this costs nothing in the ordinary
+ * case.
+ *
+ * The gas is treated as sharing the whole tube volume (mixture-properties'
+ * standing simplification), so the section volumes still close over the full
+ * tube: the two conventions match.
+ */
+export function tubeWaterState(node: FlowNode): { pressure: number; energy: number } {
+  const ncg = node.fluid.ncg;
+  if (!ncg || totalMoles(ncg) <= 0) {
+    return { pressure: node.fluid.pressure, energy: node.fluid.internalEnergy };
+  }
+  const mix = solveMixtureState(
+    node.fluid.mass, node.fluid.internalEnergy, node.volume, ncg, node.fluid.temperature);
+  return { pressure: mix.steamPressure, energy: mix.waterEnergy };
+}
+
+
+/** What the attached connections are doing to a tube node, in the terms the
+ *  sectioned model needs. Shared so the ledger check (which runs on ACCEPTED
+ *  states) sees exactly what the rate operator saw. */
+export interface OtsgFlows {
+  WFeed: number;       // kg/s of liquid inflow routed to the subcooled section
+  hFeed: number;       // J/kg - its mean enthalpy
+  uFeed: number;       // J/kg - the same, as internal energy
+  WSteamOut: number;   // kg/s vapor drawn from section 3
+  WLiquidOut: number;  // kg/s liquid drawn from section 1
+}
+
+export function classifyOtsgFlows(
+  state: SimulationState, id: string, node: FlowNode, waterPressure: number,
+): OtsgFlows {
+  let WFeed = 0, hFeedNum = 0;
+  let WSteamOut = 0, WLiquidOut = 0;
+  for (const conn of state.flowConnections) {
+    const isFrom = conn.fromNodeId === id;
+    const isTo = conn.toNodeId === id;
+    if (!isFrom && !isTo) continue;
+    // Signed flow INTO this node
+    const w = isTo ? conn.massFlowRate : -conn.massFlowRate;
+    const phase = conn.currentFlowPhase ?? 'liquid';
+    if (w > 0) {
+      // Vapor inflow (backflow from a steam header) needs no bookkeeping:
+      // it lands in the node's totals and the solved partition picks it up as
+      // vapor region on the next evaluation.
+      if (phase !== 'vapor') {
+        // Feed enthalpy from the donor node: subcooled liquid at its
+        // temperature (u_f(T) + P v_f(T) - compressibility negligible)
+        const donor = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
+        const Td = donor?.fluid.temperature ?? 473;
+        const hIn = saturatedLiquidEnergy(Td) + waterPressure / saturatedLiquidDensity(Td);
+        // Liquid inflow feeds the SUBCOOLED section only to the extent it is
+        // actually subcooled: water within ~12 K of saturation flashes into
+        // the boiling region essentially on entry, so it routes to section 2
+        // (whose mass is derived - no bookkeeping). The 50 kJ/kg ramp is a
+        // smoothing width, not a threshold: routing varies continuously with
+        // subcooling, and a transiently near-saturated stream (leak backflow,
+        // recirculation) can no longer poison the subcooled section's
+        // mean-enthalpy closure - which is exactly how this line's absence
+        // killed a run.
+        const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
+          waterPressure / saturatedLiquidDensity(node.fluid.temperature);
+        const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
+        WFeed += w * wSub;
+        hFeedNum += w * wSub * hIn;
+      }
+    } else if (w < 0) {
+      if (phase === 'vapor') WSteamOut += -w;
+      else if (phase === 'liquid') WLiquidOut += -w;
+      // mixture draws come from section 2: derived mass, no bookkeeping
+    }
+  }
+  const hFeed = WFeed > 0 ? hFeedNum / WFeed : saturatedLiquidEnergy(473);
+  return {
+    WFeed, hFeed,
+    uFeed: hFeed - waterPressure * 0.0012,   // u = h - Pv, liquid v ~ 1.2 L/kg
+    WSteamOut, WLiquidOut,
+  };
+}
 
 export class OtsgRateOperator implements RateOperator {
   name = 'OTSG';
@@ -75,59 +172,25 @@ export class OtsgRateOperator implements RateOperator {
       }
       const [metal1, metal2, metal3] = metals as [any, any, any];
 
+      // The sections are a description of the WATER, so they run at the
+      // water's own partial pressure and account for the water's own share of
+      // the node energy - identical to the stored totals unless gas has got
+      // into the tubes (see tubeWaterState).
+      const water = tubeWaterState(node);
+
       // ----------------------------------------------------------------
       // Classify attached connection flows by carried phase
       // ----------------------------------------------------------------
-      let WFeed = 0, hFeedNum = 0;        // liquid inflow -> section 1
-      let WSteamOut = 0;                   // vapor outflow <- section 3
-      let WLiquidOut = 0;                  // liquid outflow <- section 1
-      let WVaporIn = 0;                    // vapor inflow -> section 3 (backflow)
-      for (const conn of state.flowConnections) {
-        const isFrom = conn.fromNodeId === id;
-        const isTo = conn.toNodeId === id;
-        if (!isFrom && !isTo) continue;
-        // Signed flow INTO this node
-        const w = isTo ? conn.massFlowRate : -conn.massFlowRate;
-        const phase = conn.currentFlowPhase ?? 'liquid';
-        if (w > 0) {
-          if (phase === 'vapor') { WVaporIn += w; }
-          else {
-            // Feed enthalpy from the donor node: subcooled liquid at its
-            // temperature (u_f(T) + P v_f(T) - compressibility negligible)
-            const donor = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
-            const Td = donor?.fluid.temperature ?? 473;
-            const hIn = saturatedLiquidEnergy(Td) + node.fluid.pressure / saturatedLiquidDensity(Td);
-            // Liquid inflow feeds the SUBCOOLED section only to the extent it
-            // is actually subcooled: water within ~12 K of saturation flashes
-            // into the boiling region essentially on entry, so it routes to
-            // section 2 (whose mass is derived - no bookkeeping). The 50
-            // kJ/kg ramp is a smoothing width, not a threshold: routing
-            // varies continuously with subcooling, and a transiently
-            // near-saturated stream (leak backflow, recirculation) can no
-            // longer poison the subcooled section's mean-enthalpy closure -
-            // which is exactly how this line's absence killed a run.
-            const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
-              node.fluid.pressure / saturatedLiquidDensity(node.fluid.temperature);
-            const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
-            WFeed += w * wSub;
-            hFeedNum += w * wSub * hIn;
-          }
-        } else if (w < 0) {
-          if (phase === 'vapor') WSteamOut += -w;
-          else if (phase === 'liquid') WLiquidOut += -w;
-          // mixture draws come from section 2: derived mass, no bookkeeping
-        }
-      }
-      const hFeed = WFeed > 0 ? hFeedNum / WFeed : saturatedLiquidEnergy(473);
-      const uFeed = hFeed - node.fluid.pressure * 0.0012; // u = h - Pv, liquid v ~ 1.2 L/kg
+      const { WFeed, hFeed, uFeed, WSteamOut, WLiquidOut } =
+        classifyOtsgFlows(state, id, node, water.pressure);
 
       // ----------------------------------------------------------------
-      // Sectioned evaluation at the node's bulk pressure
+      // Sectioned evaluation at the water's own pressure
       // ----------------------------------------------------------------
       const ev: OtsgEval = evaluateOtsgAtP(
-        cfg.m1, cfg.m3, node.fluid.mass,
-        node.fluid.internalEnergy,
-        node.fluid.pressure,
+        cfg.U1, node.fluid.mass,
+        water.energy,
+        water.pressure,
         uFeed,
         { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
       );
@@ -180,6 +243,7 @@ export class OtsgRateOperator implements RateOperator {
       );
       const QGasTotal = march.Q[0] + march.Q[1] + march.Q[2];
 
+
       // ----------------------------------------------------------------
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
@@ -211,21 +275,27 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Partition rates from the interface fluxes
       // ----------------------------------------------------------------
+      // Only the SUBCOOLED section is integrated, and it is integrated as an
+      // ENERGY. Where the boiling section ends - and whether there is a
+      // superheat section at all - is solved from the node's totals inside
+      // evaluateOtsgAtP, so W23 is now a diagnostic rather than a state
+      // derivative: the steam draw and any vapor backflow move the totals,
+      // and the partition follows them.
       const r = otsgRates(ev, WFeed, hFeed, WSteamOut, Q1, Q2, Q3);
-      // Draws from emptying sections shift smoothly onto their neighbor
-      // (same weight as the draw-enthalpy blend)
-      const w3 = cfg.m3 / (cfg.m3 + 1);
-      const w1 = cfg.m1 / (cfg.m1 + 1);
-      const dm1 = WFeed - r.W12 - w1 * WLiquidOut;
-      const dm3 = r.W23 - w3 * WSteamOut + WVaporIn;
+      // A liquid draw takes water out of section 1 at that section's own mean
+      // enthalpy, weighted so an emptying section never steps its own rate.
+      const m1Now = ev.sections[0].mass;
+      const w1 = m1Now / (m1Now + 1);
+      const WLiqOut = w1 * WLiquidOut;
+      const dU1 = r.dU1 - WLiqOut * ev.sections[0].hBar
+        + ev.P * (WLiqOut * ev.sections[0].vBar);   // P dV of the mass it takes with it
 
       // ----------------------------------------------------------------
       // Emit rates
       // ----------------------------------------------------------------
       const nodeRates = rates.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
       nodeRates.dEnergy += QWaterTotal;
-      nodeRates.dOtsgM1 = (nodeRates.dOtsgM1 ?? 0) + dm1;
-      nodeRates.dOtsgM3 = (nodeRates.dOtsgM3 ?? 0) + dm3;
+      nodeRates.dOtsgU1 = (nodeRates.dOtsgU1 ?? 0) + dU1;
       rates.flowNodes.set(id, nodeRates);
 
       const shellRates = rates.flowNodes.get(cfg.shellNodeId) ?? { dMass: 0, dEnergy: 0 };
@@ -308,4 +378,82 @@ function tempOfLiquidH(h: number): number {
     if (Thi - Tlo < 0.01) break;
   }
   return 0.5 * (Tlo + Thi);
+}
+
+/**
+ * Is the economizer still describing water that is actually in the tube?
+ *
+ * The closure's arithmetic never looks at the wall. It subtracts the
+ * economizer's claimed energy from the node and hands the remainder to the
+ * steam, so an economizer that has drifted away from the tube's real contents
+ * comes back as steam hotter than anything heating it. The tube's own totals
+ * cannot catch that - a tube of cold water plus hot steam and a tube of
+ * lukewarm mush have the same mass, energy and volume, which is precisely why
+ * the sectioned model has to carry the extra information in the first place.
+ *
+ * The WALL can catch it. Nothing in a boiler tube gets hotter than the hottest
+ * surface heating it except by compression, and a boiler's compression heating
+ * is tens of kelvin in a fast transient, never hundreds. So this reports the
+ * excess rather than clamping it: the number IS the size of the bookkeeping
+ * error, and this is the only place it is visible.
+ *
+ * It runs as a finalOnly constraint - on ACCEPTED states only. The rate
+ * operator is called on every RK stage, including trial states the solver
+ * goes on to reject, and those routinely swing far harder than the trajectory
+ * the plant actually follows; a guard that cried wolf on them would be worse
+ * than no guard.
+ */
+export class OtsgLedgerCheckOperator implements ConstraintOperator {
+  name = 'OtsgLedgerCheck';
+  finalOnly = true;
+
+  /** K - how far above the hottest wall a superheat section has to land before
+   *  it is reported. Compression heating in a fast pressurization is worth
+   *  tens of kelvin, so this sits above that and well below the hundreds a
+   *  drifted ledger produces. A reporting width only: no rate depends on it. */
+  private static readonly REPORT_MARGIN = 50;
+  /** Once per 10 s of SIM time per bundle - keyed on sim time, not wall time,
+   *  so a replay reports identically. */
+  private static readonly QUIET_SECONDS = 10;
+  private lastReport = new Map<string, number>();
+
+  applyConstraints(state: SimulationState): SimulationState {
+    for (const [id, node] of state.flowNodes) {
+      const cfg = node.otsg;
+      if (!cfg) continue;
+      const water = tubeWaterState(node);
+      const flows = classifyOtsgFlows(state, id, node, water.pressure);
+      const ev = evaluateOtsgAtP(
+        cfg.U1, node.fluid.mass, water.energy, water.pressure, flows.uFeed,
+        { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
+      );
+
+      // The hottest surface this water can see: its own tube metal, or the gas
+      // arriving at the shell.
+      let TWallMax = state.flowNodes.get(cfg.shellNodeId)?.fluid.temperature ?? 0;
+      for (const mid of cfg.metalNodeIds) {
+        const m = state.thermalNodes.get(mid);
+        if (m && m.temperature > TWallMax) TWallMax = m.temperature;
+      }
+
+      const excess = ev.sections[2].T - TWallMax;
+      if (!(excess > OtsgLedgerCheckOperator.REPORT_MARGIN)) continue;
+      const last = this.lastReport.get(id);
+      if (last !== undefined && state.time - last < OtsgLedgerCheckOperator.QUIET_SECONDS) continue;
+      this.lastReport.set(id, state.time);
+
+      console.error(
+        `[OTSG] ${id}: the steam section is ${excess.toFixed(0)} K ABOVE the hottest surface ` +
+        `heating it (${(ev.sections[2].T - 273.15).toFixed(0)} C vs ` +
+        `${(TWallMax - 273.15).toFixed(0)} C) at t=${state.time.toFixed(1)} s. Nothing in the ` +
+        `tube can do that, so the economizer's energy ledger has drifted from the water ` +
+        `actually in there: it claims ${(cfg.U1 / 1e9).toFixed(2)} GJ - ` +
+        `${ev.sections[0].mass.toFixed(0)} kg at ${(ev.sections[0].T - 273.15).toFixed(0)} C, ` +
+        `fed at ${(flows.uFeed / 1e3).toFixed(0)} kJ/kg - out of the node's ` +
+        `${node.fluid.mass.toFixed(0)} kg, leaving ${ev.sections[2].mass.toFixed(0)} kg of ` +
+        `steam to carry the rest. W12 drains it; if this persists, that flux is the suspect.`
+      );
+    }
+    return state;
+  }
 }

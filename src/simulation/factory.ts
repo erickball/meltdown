@@ -1134,24 +1134,20 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
               surfaceArea: oneMetal.surfaceArea / 3,
             });
           });
-          // Seed the partition CONSISTENTLY with the node's own bulk state.
-          // A two-phase start is entirely boiling section: with m2 = mass the
-          // volume closure returns exactly the bulk quality and the energy
-          // residual exactly the bulk energy, so the sectioned model and the
-          // (u,v) machinery agree to the last joule at t=0. A liquid start is
-          // all subcooled and a vapour start all superheat, for the same
-          // reason.
+          // Seed the ONE integrated partition variable - the subcooled
+          // section's ENERGY - consistently with the node's own bulk state: a
+          // liquid start is all subcooled section, so it holds the node's
+          // whole energy; anything else starts with none. Where the boiling
+          // section ends - and whether the tube carries dry steam - is solved
+          // from the totals at the first evaluation, so a two-phase or vapour
+          // start needs no seed at all and the sectioned model agrees with the
+          // (u,v) machinery to the last joule at t=0.
           //
-          // The old seed - 20% subcooled and 1% superheat whatever the node
-          // held - was inconsistent by construction: it asked 1% of the mass
-          // to carry the entire energy residual, which made the superheat
-          // section absurdly hot and claim several times the volume it had.
           // Empty sections are born asymptotically here (see the otsg module
           // header), so starting one at zero costs nothing.
           const startPhase = tubeNode.fluid.phase;
           tubeNode.otsg = {
-            m1: startPhase === 'liquid' ? tubeNode.fluid.mass : 0,
-            m3: startPhase === 'vapor' ? tubeNode.fluid.mass : 0,
+            U1: startPhase === 'liquid' ? tubeNode.fluid.internalEnergy : 0,
             heatArea: tubeArea,
             shellNodeId: `${id}-shell`,
             metalNodeIds: metalIds,

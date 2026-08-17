@@ -9,13 +9,23 @@
  * temperatures that cannot express a counterflow cross, and phase-spanning
  * lumps that pin the whole exchanger at T_sat.
  *
- * STATE (integrated by the caller): section masses m1, m2, m3 and the
- * superheat section energy U3. Everything else is DERIVED here:
+ * STATE. The reference closure (evaluateOtsg) integrates section masses m1,
+ * m2, m3 and the superheat energy U3 and solves pressure from the volume.
+ * The RUNTIME closure (evaluateOtsgAtP) is the one the plant uses: the node's
+ * ordinary (mass, energy) totals and its (u,v) pressure stay where they are,
+ * ONE descriptor is integrated - the subcooled section's energy U1 - and the
+ * boiling/superheat split is SOLVED from the totals and the tube volume. See
+ * that function for why m3 cannot be integrated too, and why the subcooled
+ * section is carried as an energy rather than a mass. Everything else is
+ * DERIVED here:
  *  - the subcooled and two-phase section mean states come from linear
  *    profile assumptions (mean enthalpy midway between the section's inlet
- *    and its saturation boundary; mean quality 1/2) - the standard
+ *    and its saturation boundary; quality linear along the boiling section,
+ *    MASS-averaged over that profile - see boilingMeanQuality) - the standard
  *    moving-boundary closure;
- *  - pressure comes from the volume constraint sum(m_i v_i) = V_tube;
+ *  - pressure comes from the volume constraint sum(m_i v_i) = V_tube in the
+ *    reference closure; in the runtime one that constraint sets the split
+ *    instead, and pressure comes from the node;
  *  - section lengths/areas are proportional to section volumes;
  *  - the interface mass fluxes W12 (at h_f) and W23 (at h_g) follow from
  *    the section energy balances with the profiles held - derived in the
@@ -54,8 +64,20 @@ export interface SaturationProps {
   h_g: number;
 }
 
+/** Pa - the critical pressure. Above it water has no phase boundary at all,
+ *  which the sectioned model has to say out loud rather than extrapolate
+ *  through (see saturationAtP and evaluateOtsgAtP). */
+export const P_CRITICAL = 22.064e6;
+
 export function saturationAtP(P: number): SaturationProps {
-  const T = saturationTemperature(P);
+  // Above the critical pressure there IS no saturation state. Left to itself
+  // saturationTemperature extrapolates its table straight past the dome and
+  // returns temperatures like 679 K at 300 bar, while the u/v lookups quietly
+  // saturate at the dome's top point - a phase boundary that does not exist,
+  // at a temperature that does not either. Anchor on the top of the dome
+  // instead: that IS the pseudo-critical point a supercritical boiler
+  // transitions through, and evaluateOtsgAtP stops splitting phases there.
+  const T = saturationTemperature(Math.min(P, P_CRITICAL));
   const u_f = saturatedLiquidEnergy(T);
   const u_g = saturatedVaporEnergy(T);
   const v_f = 1 / saturatedLiquidDensity(T);
@@ -243,6 +265,10 @@ export interface OtsgEval {
    *  two so an emptying section does not step the draw enthalpy. */
   hSteamOut: number;
   u3: number;        // superheat specific energy actually used (J/kg)
+  /** Quality the boiling section reaches at its OUTLET. 1 whenever there is
+   *  anything downstream to hand dry steam to; below 1 only for a flooded
+   *  bundle whose boiling section IS the top of the tube. */
+  x2Out: number;
 }
 
 const P_MIN = 700;      // Pa - just above the triple point
@@ -342,105 +368,279 @@ export function evaluateOtsg(
     ],
     hSteamOut,
     u3: fin.u3,
+    // The reference closure carries m3 as state, so its boiling section
+    // always has somewhere to hand dry steam to.
+    x2Out: 1,
   };
 }
 
 /**
- * Sectioned evaluation AT a given pressure, with the superheat energy
- * DERIVED from the node's conserved totals: U3 = U_total - m1 u1bar - m2
- * u2bar. This is the runtime form: the ordinary (u,v) machinery owns the
- * node's pressure dynamics (proven robust), and the sections are evaluated
- * at that pressure for heat transfer, draw enthalpy, and partition motion.
- * Section geometry normalizes over the sections' own summed volume, so the
- * small inconsistency between bulk pressure and the strict volume closure
- * shows up only as a few-percent length rescale, not as a failure mode.
- * (The strict closure - evaluateOtsg above - remains the reference form and
- * the v2 upgrade path; see design doc section 3.)
+ * Outlet quality of a boiling section that has to occupy a given mean
+ * specific volume. boilingMeanVolume rises monotonically with xOut from v_f
+ * (a section that never boils) to v-bar(1) (one that reaches dry steam), so
+ * this inverse is a clean bisection. Volumes outside that span return the
+ * endpoint - they are not a boiling section at all.
+ */
+export function boilingOutletQuality(v_f: number, v_g: number, vBar: number): number {
+  if (vBar <= v_f) return 0;
+  if (vBar >= boilingMeanVolume(v_f, v_g, 1)) return 1;
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 60; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (boilingMeanVolume(v_f, v_g, mid) < vBar) lo = mid; else hi = mid;
+    if (hi - lo < 1e-12) break;
+  }
+  return 0.5 * (lo + hi);
+}
+
+/** J/kg - the top of the property grid's vapor coverage (2000 C steam sits at
+ *  ~6.3 MJ/kg). A superheat section is searched for up to here; needing more
+ *  than this means the node's totals do not describe water. */
+const U3_CEILING = 6.0e6;
+
+/**
+ * Mean specific internal energy of the subcooled section: the linear
+ * enthalpy profile's midpoint between the feed and saturation.
+ *
+ * The feed energy is capped ~25 kJ/kg (~6 K) below saturation because the
+ * interface flux divides by (h_f - hBar1) and the closure has to stay inside
+ * its valid domain. That is a width WITHIN an assumed profile shape - the
+ * same standing the melt logistic's width has - not a clamp on any conserved
+ * quantity: when the real feed runs hotter (a heat-soaked feed line during a
+ * pressure transient), the section simply drains via the now-large W12, which
+ * is the physically right outcome for saturated feed.
+ */
+export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): number {
+  return 0.5 * (Math.min(uFeedIn, sat.u_f - 25e3) + sat.u_f);
+}
+
+/**
+ * Sectioned evaluation AT a given pressure, with the PARTITION SOLVED from
+ * the node's own conserved totals - mass, energy and the tube volume - rather
+ * than integrated alongside them.
+ *
+ * This is the runtime form: the ordinary (u,v) machinery owns the node's
+ * pressure dynamics (proven robust), and the sections are the fine structure
+ * that machinery lumps together, recovered here at that pressure for heat
+ * transfer, draw enthalpy and partition motion.
+ *
+ * WHY THE SUPERHEAT MASS IS NOT INTEGRATED. The tube side carries four
+ * descriptors - the subcooled section, the boiling section's outlet quality,
+ * m3 and u3 - against three totals, so integrating the superheat section as
+ * well as the subcooled one over-specifies the model by one. That is not a
+ * tidiness complaint: an m3 accumulated from the interface fluxes has no idea
+ * what volume it is being asked to fit into, and the Xe-100 bundle duly
+ * reached partitions whose sections claimed 2.6x the tube volume while the
+ * reported lengths still looked plausible (they normalize over the sections'
+ * OWN summed volume).
+ *
+ * The ONE dynamic descriptor left is the subcooled section, and it is its
+ * ENERGY U1 that is integrated - see below for why the energy and not the
+ * mass. Its boundary is set by the feed's history, not by the totals.
+ *
+ * THE CLOSURE. Take out the subcooled section (m1 = U1/u1Bar at its profile
+ * mean) and
+ * what is left - m_rest, V_rest, U_rest - is shared between a boiling section
+ * and a superheat section under one structural rule: a boiling section only
+ * stops short of dry steam when there is nothing downstream to hand it to.
+ * In (u,v) space at this pressure the boiling section is a point on the dome
+ * chord and the superheat section a point on the vapor isobar, and the rest
+ * has to be their mass-weighted mixture. Three cases, and they join
+ * continuously:
+ *
+ *   (A) v_rest <= v-bar(1)  - flooded. No dry steam anywhere: m3 = 0 and the
+ *       boiling section's OUTLET QUALITY takes whatever value makes the
+ *       volume close. Near-saturated water packed into the tubes comes back
+ *       at ~1% quality, not the 37% a profile average insists on.
+ *   (T) enough volume for dry steam but not enough energy to superheat it:
+ *       the boiling section reaches x = 1 and hands over to a saturated-VAPOR
+ *       region, u3 = u_g, whose mass closes the volume. This is dryout, and
+ *       it is where a two-phase bulk lands exactly: a homogeneous mixture
+ *       decomposes into (boiling section + saturated vapor) with the same
+ *       mass split whether you ask volume or energy, because both parts sit
+ *       on the same chord.
+ *   (B) beyond that - genuine superheat: m3 and u3 solve the volume AND the
+ *       energy together, with the section's own (u3, v3) required to evaluate
+ *       at P. One bisection on m3; u3 and v3 follow from the two constraints,
+ *       so each iterate costs a single property evaluation.
+ *
+ * Case A gives up the energy constraint (one descriptor, two totals) and case
+ * T gives it up as well; both are regimes where the leftover energy has
+ * nowhere to sit but the wall. Case B satisfies everything. The regime
+ * boundaries are exactly the states where the two descriptions coincide, so
+ * nothing steps as a bundle floods or dries out.
  */
 export function evaluateOtsgAtP(
-  m1: number,
-  m3: number,
+  U1: number,
   massTotal: number,
   UTotal: number,
   P: number,
   uFeedIn: number,
   geom: OtsgGeometry,
 ): OtsgEval {
-  if (!(m1 >= 0 && m3 >= 0)) {
-    throw new Error(`[OTSG] negative partition mass: m1=${m1}, m3=${m3} kg`);
+  if (!Number.isFinite(U1)) {
+    throw new Error(`[OTSG] subcooled section energy is not a number: U1=${U1} J`);
   }
-  const m2 = massTotal - m1 - m3;
-  if (m2 < -1e-9 * Math.max(1, massTotal)) {
-    throw new Error(`[OTSG] partition exceeds inventory: m1=${m1.toFixed(2)} + m3=${m3.toFixed(2)} ` +
-      `> total=${massTotal.toFixed(2)} kg. The partition rates have outrun the totals.`);
-  }
-  const m2c = Math.max(0, m2);
-
   const sat = saturationAtP(P);
-  // The subcooled profile closure divides by (h_f - hBar1) in the interface
-  // flux, so its parameter must stay inside the closure's valid domain: cap
-  // the effective feed energy ~25 kJ/kg (~6 K) below saturation. This is a
-  // width WITHIN an assumed profile shape - the same standing the melt
-  // logistic's width has - not a clamp on any conserved quantity: when the
-  // real feed runs hotter (a heat-soaked feed line during a pressure
-  // transient), the section simply drains via the now-large W12, which is
-  // the physically right outcome for saturated feed.
-  const uFeedEff = Math.min(uFeedIn, sat.u_f - 25e3);
-  const u1Bar = 0.5 * (uFeedEff + sat.u_f);
+  const u1Bar = subcooledSectionMean(uFeedIn, sat);
+  // The economizer's MASS follows from the energy it holds. Both descriptions
+  // carry the same information under the profile closure - m1 = U1/u1Bar -
+  // but which one is integrated decides where the slack goes when u1Bar moves
+  // (a pressure transient moves it every step). Integrating the mass makes
+  // the section's ENERGY jump with u1Bar, and since the leftovers are a
+  // residual, that jump lands on the vapour's temperature, which nothing
+  // bounds. Integrating the energy instead makes its MASS jump, and mass
+  // lands in m2/m3 - which the closure re-solves anyway, against the tube
+  // volume. The slack has to go somewhere; this puts it in the bounded
+  // descriptor rather than the unbounded one.
+  //
+  // The section cannot hold more water than the node has. When that bites,
+  // the leftovers are empty and the energy above what m1 can carry is the
+  // part with nowhere to sit - the same slack case A and T already have.
+  const m1 = Math.min(Math.max(0, U1) / u1Bar, Math.max(0, massTotal));
   const v1 = m1 > 0 ? subcooledLiquidV(u1Bar) : sat.v_f;
 
-  // The boiling section's mean quality is SOLVED, not assumed.
-  //
-  // The bundle's mass, energy and volume are all known, and the sections have
-  // to account for every one of them: m2 is the mass residual, U3 is the
-  // energy residual, and the remaining freedom - how wet the boiling section
-  // is - is exactly what makes the VOLUMES add up to the tube. Assuming a
-  // value for it instead (the linear profile's mass-average, or the 1/2 this
-  // model used before) leaves the volume constraint unenforced, and the
-  // sections then claimed over twice the tube volume in ordinary operation
-  // while the reported section lengths still looked plausible, because they
-  // are normalized over the sections' own summed volume.
-  //
-  // Reading it off the constraint also makes the model say the right thing
-  // about a flooded bundle: near-saturated water packed into the tubes comes
-  // back as a boiling section at ~1% quality, not the 37% a profile average
-  // would insist on regardless of how much water is actually in there.
-  //
-  // v3 depends on u3, which depends on U3, which depends on the mean quality
-  // - so this is a fixed point. It converges in a couple of passes because
-  // the superheat volume responds only weakly to the boiling section's state.
-  // The boiling section's mean state, mass-weighted over its linear quality
-  // profile (see boilingMeanQuality). Volume, energy and enthalpy all follow
-  // from the ONE mean quality, so they cannot disagree with each other.
-  //
-  // NOTE: this still does not enforce the VOLUME constraint - the sections
-  // can collectively want more room than the tube has, because the partition
-  // (m1, m3) is integrated from the interface fluxes without reference to the
-  // totals. Solving the mean quality FROM the volume instead was tried and is
-  // the right answer, but it cannot stand on its own: with a nearly empty
-  // superheat section the leftover energy divided by a few kilograms lands
-  // off the property surface, and no quality satisfies both constraints. That
-  // needs the partition itself derived from conservation - the design doc's
-  // strict closure - rather than integrated alongside it.
-  const x2Bar = boilingMeanQuality(sat.v_f, sat.v_g);
-  const u2Bar = sat.u_f + x2Bar * (sat.u_g - sat.u_f);
-  const v2 = sat.v_f + x2Bar * (sat.v_g - sat.v_f);
+  // What the boiling and superheat sections have to account for between them
+  const mR = massTotal - m1;
+  const VRest = geom.tubeVolume - m1 * v1;
+  const URest = UTotal - m1 * u1Bar;
 
-  // Superheat energy from the conserved totals. Numerically this is a small
-  // difference of large numbers as m3 -> 0; the h_g floor below absorbs the
-  // residue (a superheat section can never sit below saturated vapor).
-  const U3 = UTotal - m1 * u1Bar - m2c * u2Bar;
-  const u3 = m3 > 0 ? Math.max(U3 / m3, sat.u_g + 1e3) : sat.u_g;
-  const v3 = m3 > 0 ? superheatedV(u3, P) : sat.v_g;
+  // The boiling section as it runs whenever there IS something downstream:
+  // quality 0 -> 1, mass-averaged over its linear profile (boilingMeanQuality)
+  const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
+  const x2Full = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
+  const u2Full = sat.u_f + x2Full * (sat.u_g - sat.u_f);
+
+  let x2Out = 1;            // boiling section's outlet quality
+  let m3 = 0;               // kg  - superheat (or dry saturated vapor) section
+  let u3 = sat.u_g;         // J/kg
+  let v3 = sat.v_g;         // m3/kg
+
+  if (mR > 0 && P >= P_CRITICAL) {
+    // SUPERCRITICAL: there is no dome, so there is nothing to boil and no
+    // second phase to hold anything. The tube is one fluid, and the split the
+    // rest of this function makes has no meaning - the leftovers ARE the hot
+    // section, at their own (u, v). Section 1 survives as the cold END of
+    // that fluid (its boundary is now the pseudo-critical point, which is
+    // what sat carries above P_crit), so nothing steps as a boiler is pushed
+    // through the critical pressure and back.
+    m3 = mR;
+    u3 = URest / mR;
+    v3 = VRest / mR;
+  } else if (mR > 0) {
+    const vRest = VRest / mR;
+    if (vRest <= vBarFull) {
+      // (A) Flooded: no room for dry steam, so the boiling section is the top
+      // of the tube and ends wherever the volume says it does.
+      x2Out = boilingOutletQuality(sat.v_f, sat.v_g, vRest);
+    } else {
+      // Energy the rest carries above an all-boiling description of itself.
+      // Every kilogram promoted out of the boiling section into dry vapor
+      // costs (u_g - u2Full), so E fixes how much vapor the energy can pay
+      // for; the volume fixes how much the tube has room for.
+      const E = URest - mR * u2Full;
+      const m3Sat = Math.min(mR, Math.max(0, E / (sat.u_g - u2Full)));
+      const m3Vol = (VRest - mR * vBarFull) / (sat.v_g - vBarFull);
+      // Every way of failing to describe the leftovers is the same failure:
+      // this (mass, energy, volume) triple is not water at this pressure. The
+      // runtime cannot ask for one - it passes the node's OWN pressure, which
+      // is a function of these very totals - so this is the backstop, and it
+      // says what it saw rather than inventing a section.
+      const unrepresentable = (why: string) => new Error(
+        `[OTSG] the node's leftovers cannot be a boiling section plus dry steam at ` +
+        `${(P / 1e5).toFixed(2)} bar: ${mR.toFixed(1)} kg carrying ` +
+        `${(URest / mR / 1e3).toFixed(0)} kJ/kg in ${VRest.toFixed(3)} m3 ` +
+        `(v=${(VRest / mR).toFixed(4)} m3/kg, needing ${m3Vol.toFixed(1)} kg of vapor to fill it). ` +
+        `${why} The node's totals and its pressure disagree about what phase it is in.`);
+      if (m3Vol <= m3Sat) {
+        // (T) Dryout: the volume fills before the energy runs out, so the
+        // vapor region sits at saturation and its mass is the volume's to set.
+        // m3Vol <= m3Sat <= m_rest, so section 2 keeps a non-negative mass and
+        // the leftover energy is the part with nowhere to sit.
+        m3 = m3Vol;
+      } else if (!(E > 0)) {
+        // No energy for dry steam at all, yet the volume demands some: the
+        // rest is at once more voluminous than a boiling section and colder
+        // than one.
+        throw unrepresentable(`It carries less than the ${(u2Full / 1e3).toFixed(0)} kJ/kg a ` +
+          `boiling section alone would hold, so no vapor region can be paid for.`);
+      } else {
+        // (B) Superheat. Solve for m3 with BOTH constraints imposed:
+        //   energy:  u3 = u2Full + E/m3
+        //   volume:  v3 = (V_rest - (m_rest - m3) v-bar(1)) / m3
+        // and require that state to evaluate at P. One property call per
+        // iterate - the section's own (u3, v3) is already pinned by the two
+        // constraints, so nothing has to be inverted along the isobar.
+        //
+        // WHICH ROOT. Coming down from the dryout end, less superheat mass
+        // means a hotter, thinner section, and the pressure that pair implies
+        // first rises above P and then - once the section is hot enough that
+        // its volume outruns its energy - falls back through P again. That
+        // far crossing is a sliver of 1500 C steam sitting on top of boiling
+        // water: arithmetically a solution, physically not the state a bundle
+        // is ever in, and not continuous with the dryout case next door. So
+        // walk DOWN from m3Sat and take the first bracket found.
+        const residual = (mm: number) => {
+          const uu = u2Full + E / mm;
+          const vv = (VRest - (mR - mm) * vBarFull) / mm;
+          return calculateState(1, uu, vv).pressure - P;
+        };
+        // Property-surface noise scale: at the dryout join and in the
+        // all-superheat case the root sits exactly ON m3Sat, where the
+        // residual is a difference of two evaluations of the same state.
+        const rTol = 1e-6 * P;
+        let hi = m3Sat, rHi = residual(hi);
+        if (rHi >= -rTol) {
+          // The upper end IS the answer: either the whole rest is superheated
+          // (m3Sat = m_rest, nothing left to boil) or it sits on the dryout
+          // boundary. Both are the edge of the feasible set, not a cap on
+          // anything conserved.
+          m3 = m3Sat;
+        } else {
+          const m3Floor = E / (U3_CEILING - u2Full);
+          let lo = hi, rLo = rHi;
+          while (rLo < 0 && lo > m3Floor) {
+            hi = lo;
+            lo = Math.max(m3Floor, 0.5 * lo);
+            rLo = residual(lo);
+          }
+          if (!(rLo > 0)) {
+            throw unrepresentable(`Filling it would need vapor beyond ` +
+              `${(U3_CEILING / 1e6).toFixed(1)} MJ/kg, which still lands at ` +
+              `${((rLo + P) / 1e5).toFixed(2)} bar.`);
+          }
+          for (let i = 0; i < 60; i++) {
+            const mid = 0.5 * (lo + hi);
+            if (residual(mid) > 0) lo = mid; else hi = mid;
+            if (hi - lo < 1e-12 * m3Sat) break;
+          }
+          m3 = 0.5 * (lo + hi);
+        }
+        u3 = u2Full + E / m3;
+        v3 = (VRest - (mR - m3) * vBarFull) / m3;
+      }
+    }
+  }
+
+  // One mean quality sets the boiling section's volume, energy and enthalpy
+  // together, so they cannot disagree with each other.
+  const x2Bar = boilingMeanQuality(sat.v_f, sat.v_g, x2Out);
+  const v2 = sat.v_f + x2Bar * (sat.v_g - sat.v_f);
+  const m2 = mR - m3;
 
   const h1Bar = u1Bar + P * v1;
   const h2Bar = sat.h_f + x2Bar * (sat.h_g - sat.h_f);
   const h3Bar = u3 + P * v3;
 
   const T1 = m1 > 0 ? tempOfSubcooledU(u1Bar) : sat.T;
-  const T3 = m3 > 0 ? calculateState(1, u3, v3).temperature : sat.T;
+  // A dry-saturated vapor region (case T) is at T_sat by definition; a
+  // genuinely superheated one - and any supercritical fluid, which has no
+  // saturation temperature to fall back on - needs the property surface.
+  const T3 = m3 > 0 && (u3 > sat.u_g || P >= P_CRITICAL)
+    ? calculateState(1, u3, v3).temperature
+    : sat.T;
 
-  const V1 = m1 * v1, V2 = m2c * v2, V3 = m3 * v3;
+  const V1 = m1 * v1, V2 = m2 * v2, V3 = m3 * v3;
   const VT = Math.max(1e-12, V1 + V2 + V3);
   const mk = (mass: number, vBar: number, V: number, hBar: number, T: number): OtsgSectionEval => ({
     mass, vBar, volume: V,
@@ -449,18 +649,21 @@ export function evaluateOtsgAtP(
     hBar, T,
   });
 
-  const w = m3 / (m3 + 1);
-  const hSteamOut = w * h3Bar + (1 - w) * sat.h_g;
+  // No blend needed on the draw enthalpy any more: a vanishing superheat
+  // section now vanishes through saturation (case T), where h3Bar IS h_g, so
+  // the draw is continuous by construction rather than by smoothing.
+  const hSteamOut = m3 > 0 ? h3Bar : sat.h_g;
 
   return {
     P, sat,
     sections: [
       mk(m1, v1, V1, h1Bar, T1),
-      mk(m2c, v2, V2, h2Bar, sat.T),
+      mk(m2, v2, V2, h2Bar, sat.T),
       mk(m3, v3, V3, h3Bar, T3),
     ],
     hSteamOut,
     u3,
+    x2Out,
   };
 }
 
@@ -484,6 +687,7 @@ export interface OtsgRates {
   dm1: number;  // kg/s
   dm2: number;
   dm3: number;
+  dU1: number;  // W  - subcooled section energy (the runtime closure's state)
   dU3: number;  // W
   W12: number;  // kg/s crossing at h_f (positive = 1 -> 2)
   W23: number;  // kg/s crossing at h_g (positive = 2 -> 3)
@@ -535,6 +739,15 @@ export function otsgRates(
   const W12 = (Q1 - WIn * (hBar1 - hIn)) / d1;
   const W23 = (Q2 - W12 * (hBar2 - sat.h_f)) / d2;
 
+  // Subcooled section: the ordinary open-system balance. Feed enters at its
+  // own enthalpy, mass leaves across the boundary at h_f, the wall adds Q1,
+  // and the moving boundary does P dV work. This is the runtime closure's
+  // integrated state - every joule it reports came in through one of these
+  // three terms, so the leftovers cannot inherit energy the wall never
+  // delivered. (Its MASS follows: m1 = U1/u1Bar - see evaluateOtsgAtP.)
+  const dm1 = WIn - W12;
+  const dU1 = WIn * hIn - W12 * sat.h_f + Q1 - ev.P * (dm1 * ev.sections[0].vBar);
+
   // Superheat section: free energy state, ordinary open-system balance.
   // Outflow leaves at the section's own enthalpy (or its h_g nascent state
   // when empty - ev.hSteamOut blends the two).
@@ -543,9 +756,10 @@ export function otsgRates(
     - ev.P * (dm3 * ev.sections[2].vBar);
 
   return {
-    dm1: WIn - W12,
+    dm1,
     dm2: W12 - W23,
     dm3,
+    dU1,
     dU3,
     W12,
     W23,
