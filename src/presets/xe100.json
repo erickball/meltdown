@@ -1161,6 +1161,65 @@
           }
         }
       }
+    ],
+    [
+      "ctl-fw-1",
+      {
+        "id": "ctl-fw-1",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "Feedwater (3-element)",
+        "position": {
+          "x": 20,
+          "y": 81
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "connection-flow",
+            "targetId": "flow-fw-pump-1-fwh-1"
+          },
+          "setpoint": {
+            "op": "sum",
+            "inputs": [
+              {
+                "op": "sum",
+                "inputs": [
+                  {
+                    "kind": "connection-flow",
+                    "targetId": "flow-hx-1-turbine-1"
+                  },
+                  {
+                    "kind": "connection-flow",
+                    "targetId": "flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet"
+                  }
+                ]
+              },
+              {
+                "op": "scale",
+                "factor": -5.0,
+                "offset": 20.0,
+                "input": {
+                  "kind": "node-level",
+                  "targetId": "hx-1-tube"
+                }
+              }
+            ]
+          },
+          "aggressiveness": 1.0,
+          "actuator": {
+            "kind": "pump-speed",
+            "targetId": "fw-pump-1",
+            "min": 0.05,
+            "max": 1.0,
+            "rateLimit": 0.05
+          }
+        }
+      }
     ]
   ],
   "connections": [
