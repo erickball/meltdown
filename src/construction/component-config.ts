@@ -524,7 +524,10 @@ export const componentDefinitions: Record<string, {
         'superheated sections whose boundaries move with the phase boundaries, so one ' +
         'component can turn feedwater into superheated steam against a counterflow hot ' +
         'stream. Use for OTSGs (helical HTGR steam generators); leave Lumped for ' +
-        'condensers, feedwater heaters, and flooded U-tube SGs.' },
+        'condensers, feedwater heaters, and flooded U-tube SGs. The tubes are drawn in ' +
+        'those three bands, in flow order from the feed end: blue subcooled water, ' +
+        'speckled liquid/steam where it is boiling, then white superheated steam. ' +
+        'A band you cannot see has no length - a flooded boiler is all speckle.' },
       { name: 'bundleCount', type: 'number', label: 'Tube Bundles', default: 1, min: 1, max: 8, step: 1,
         help: 'Independent tube bundles sharing one shell. Each bundle gets its own pair of ' +
           'tube-side connection points (top and bottom for straight/helical, both on the ' +

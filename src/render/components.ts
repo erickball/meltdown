@@ -2336,17 +2336,68 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const nBundles = hxBundleCount(hx);
   const tubesPerBundle = Math.max(2, Math.floor(visualTubeCount / nBundles));
   const bundleFluid = (b: number): Fluid | undefined => hx.bundleFluids?.[b] ?? hx.primaryFluid;
-  const bundleColorOf = (b: number): string => {
-    const f = bundleFluid(b);
-    return f ? getFluidColor(f) : '#111';
-  };
-  const bundleFillOf = (b: number): string | CanvasPattern =>
-    createTwoPhasePattern(ctx, bundleFluid(b), 3) || bundleColorOf(b);
+  // Pixelated liquid/vapor speckle for a two-phase fluid, flat colour otherwise
+  const fillFor = (f: Fluid | undefined): string | CanvasPattern =>
+    createTwoPhasePattern(ctx, f, 3) || (f ? getFluidColor(f) : '#111');
+  const bundleFillOf = (b: number): string | CanvasPattern => fillFor(bundleFluid(b));
 
-  // Primary fluid color - use pixelated pattern for two-phase.
-  // Reassigned per bundle as the loops below walk across the shell.
-  let primaryColor = bundleColorOf(0);
+  // Tube-side fill, reassigned per bundle as the plenum loop below walks
+  // across the shell (the tube loops paint through paintBundleInterior)
   let primaryFill: string | CanvasPattern = bundleFillOf(0);
+
+  /**
+   * Paint one bundle's tube interiors.
+   *
+   * A moving-boundary bundle is painted in BANDS along the flow axis -
+   * subcooled, boiling, superheated - so a once-through boiler shows where it
+   * is actually boiling instead of averaging the whole tube into one tepid
+   * colour. Each band is a clip rectangle spanning its length fraction; the
+   * caller's `paint` just redraws the same tube interiors it always did, and
+   * the clip decides which slice of them survives. Anything without a
+   * partition (lumped tubes, plain exchangers) paints once, as before.
+   *
+   * Flow runs left-to-right in a horizontal shell and BOTTOM-TO-TOP in a
+   * vertical one (feed at the tube sheet, steam off the top), which is the
+   * direction the bundle's ports are laid out in. `inletEnd`/`outletEnd` are
+   * that axis's screen coordinates for the ends of the DRAWN tube run, not
+   * the shell - band boundaries have to land on the tubes themselves.
+   */
+  const paintBundleInterior = (
+    b: number,
+    inletEnd: number,
+    outletEnd: number,
+    paint: (fill: string | CanvasPattern) => void
+  ): void => {
+    const section = hx.tubeSections?.[b];
+    if (!section) {
+      paint(bundleFillOf(b));
+      return;
+    }
+    const span = outletEnd - inletEnd;
+    let start = 0;
+    for (let s = 0; s < 3; s++) {
+      const frac = section.lengthFracs[s];
+      // Skip a section that does not exist (a flooded boiler has no superheat
+      // band); a hairline clip would just alias against its neighbours
+      if (!(frac > 1e-3)) { start += frac; continue; }
+      const end = start + frac;
+      // Half a pixel of overlap on each side, so neighbouring bands do not
+      // leave a seam of bare steel between them
+      const a = inletEnd + span * start - Math.sign(span) * 0.5;
+      const z = inletEnd + span * end + Math.sign(span) * 0.5;
+      ctx.save();
+      ctx.beginPath();
+      if (isHorizontal) {
+        ctx.rect(Math.min(a, z), -h * 2, Math.abs(z - a), h * 4);
+      } else {
+        ctx.rect(-w * 2, Math.min(a, z), w * 4, Math.abs(z - a));
+      }
+      ctx.clip();
+      paint(fillFor(section.fluids[s]));
+      ctx.restore();
+      start = end;
+    }
+  };
 
   if (isHorizontal) {
     // HORIZONTAL ORIENTATION: tubes run left-to-right, bundles stack vertically
@@ -2356,79 +2407,82 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
     const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
-    for (let b = 0; b < nBundles; b++) {
-      primaryColor = bundleColorOf(b);
-      primaryFill = bundleFillOf(b);
-      for (let i = 0; i < tubesPerBundle; i++) {
-        const y = innerTop + b * slotH + tubeSpacing * (i + 1);
+    // Wavy path shared by the helical steel and fluid strokes, so the two
+    // always trace the same coil
+    const helicalPathH = (y: number, waveAmplitude: number, waveFreq: number) => {
+      ctx.beginPath();
+      for (let j = 0; j <= waveFreq; j++) {
+        const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
+        const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+        if (j === 0) ctx.moveTo(xPos, y + yOffset);
+        else ctx.lineTo(xPos, y + yOffset);
+      }
+    };
+    const waveAmplitude = tubeSpacing * 0.3;
+    const waveFreq = 8;
+    const uBendX = innerLeft + innerW - tubeRadius - tubeWall;
 
+    // Ends of the drawn tube run along the flow axis, per tube style - feed
+    // enters at the left tube sheet in every case
+    const tubeInletX = innerLeft + tubeSheetThickness;
+    const tubeOutletX =
+      hxType === 'straight' ? innerLeft + innerW - tubeSheetThickness
+      : hxType === 'helical' ? innerLeft + innerW - 10
+      : uBendX;
+
+    for (let b = 0; b < nBundles; b++) {
+      const tubeY = (i: number) => innerTop + b * slotH + tubeSpacing * (i + 1);
+
+      // Steel first, for every tube in the bundle, then the interiors - the
+      // interior pass runs once per phase section under a clip, and it must
+      // not be painted over by a later tube's wall
+      for (let i = 0; i < tubesPerBundle; i++) {
+        const y = tubeY(i);
         if (hxType === 'straight') {
-          // Straight tubes - go all the way through horizontally
           ctx.fillStyle = COLORS.steel;
           ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
-
-          ctx.fillStyle = primaryFill;
-          ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
         } else if (hxType === 'helical') {
-          // Helical coil - draw as a wavy/zigzag pattern horizontally
           ctx.strokeStyle = COLORS.steel;
           ctx.lineWidth = (tubeRadius + tubeWall) * 2;
-          ctx.beginPath();
-          const waveAmplitude = tubeSpacing * 0.3;
-          const waveFreq = 8;
-          for (let j = 0; j <= waveFreq; j++) {
-            const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
-            const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-            if (j === 0) {
-              ctx.moveTo(xPos, y + yOffset);
-            } else {
-              ctx.lineTo(xPos, y + yOffset);
-            }
-          }
-          ctx.stroke();
-
-          // Inner helical (primary fluid)
-          ctx.strokeStyle = primaryColor;
-          ctx.lineWidth = tubeRadius * 2;
-          ctx.beginPath();
-          for (let j = 0; j <= waveFreq; j++) {
-            const xPos = innerLeft + tubeSheetThickness + (innerW - tubeSheetThickness - 10) * (j / waveFreq);
-            const yOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-            if (j === 0) {
-              ctx.moveTo(xPos, y + yOffset);
-            } else {
-              ctx.lineTo(xPos, y + yOffset);
-            }
-          }
+          helicalPathH(y, waveAmplitude, waveFreq);
           ctx.stroke();
         } else {
-          // U-tube - tubes with U-bends at the right end
-          // Position U-bend center where tubes meet the bulge arc
-          const uBendX = innerLeft + innerW - tubeRadius - tubeWall;
-
-          // Draw tube steel (outer wall) - extend into bulge area
+          // U-tube - tubes with U-bends at the right end. Bend center sits
+          // where the tubes meet the bulge arc.
           ctx.fillStyle = COLORS.steel;
           ctx.beginPath();
-          // Start at left plenum
           ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
-          // Rectangle to U-bend
           ctx.lineTo(uBendX, y - tubeRadius - tubeWall);
           ctx.arc(uBendX, y, tubeRadius + tubeWall, -Math.PI / 2, Math.PI / 2);
           ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius + tubeWall);
           ctx.closePath();
           ctx.fill();
-
-          // Draw tube interior (fluid)
-          ctx.fillStyle = primaryFill;
-          ctx.beginPath();
-          ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
-          ctx.lineTo(uBendX, y - tubeRadius);
-          ctx.arc(uBendX, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
-          ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius);
-          ctx.closePath();
-          ctx.fill();
         }
       }
+
+      paintBundleInterior(b, tubeInletX, tubeOutletX, (fill) => {
+        for (let i = 0; i < tubesPerBundle; i++) {
+          const y = tubeY(i);
+          if (hxType === 'straight') {
+            ctx.fillStyle = fill;
+            ctx.fillRect(innerLeft + tubeSheetThickness + tubeWall, y - tubeRadius, innerW - tubeSheetThickness * 2 - tubeWall * 2, tubeRadius * 2);
+          } else if (hxType === 'helical') {
+            ctx.strokeStyle = fill;
+            ctx.lineWidth = tubeRadius * 2;
+            helicalPathH(y, waveAmplitude, waveFreq);
+            ctx.stroke();
+          } else {
+            ctx.fillStyle = fill;
+            ctx.beginPath();
+            ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius, Math.PI / 2, -Math.PI / 2);
+            ctx.lineTo(uBendX, y - tubeRadius);
+            ctx.arc(uBendX, y, tubeRadius, -Math.PI / 2, Math.PI / 2);
+            ctx.lineTo(innerLeft + tubeSheetThickness, y + tubeRadius);
+            ctx.closePath();
+            ctx.fill();
+          }
+        }
+      });
     }
 
     // Draw tube sheet(s) - vertical for horizontal orientation
@@ -2445,79 +2499,82 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     // Scale tube wall thickness proportionally with tube radius (roughly 20% of radius)
     const tubeWall = Math.max(tubeRadius * 0.25, 1);
 
-    for (let b = 0; b < nBundles; b++) {
-      primaryColor = bundleColorOf(b);
-      primaryFill = bundleFillOf(b);
-      for (let i = 0; i < tubesPerBundle; i++) {
-        const x = innerLeft + b * slotW + tubeSpacing * (i + 1);
+    // Wavy path shared by the helical steel and fluid strokes, so the two
+    // always trace the same coil
+    const helicalPathV = (x: number, waveAmplitude: number, waveFreq: number) => {
+      ctx.beginPath();
+      for (let j = 0; j <= waveFreq; j++) {
+        const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
+        const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
+        if (j === 0) ctx.moveTo(x + xOffset, yPos);
+        else ctx.lineTo(x + xOffset, yPos);
+      }
+    };
+    const waveAmplitude = tubeSpacing * 0.3;
+    const waveFreq = 8; // Number of waves along the height
 
+    // U-tube: tube sheet at the BOTTOM, U-bends at the TOP (standard SG
+    // configuration). The bend center sits where the tubes meet the bulge.
+    const uBendY = innerTop + tubeRadius + tubeWall;
+    // Ends of the drawn tube run along the flow axis. Feed enters at the
+    // bottom tube sheet and steam leaves at the top, so the inlet end is the
+    // LARGER screen Y - paintBundleInterior handles the reversed axis.
+    const tubeInletY = innerTop + innerH - tubeSheetThickness;
+    const tubeOutletY =
+      hxType === 'straight' ? innerTop + tubeSheetThickness
+      : hxType === 'helical' ? innerTop + tubeSheetThickness
+      : uBendY;
+
+    for (let b = 0; b < nBundles; b++) {
+      const tubeX = (i: number) => innerLeft + b * slotW + tubeSpacing * (i + 1);
+
+      const uTubePathV = (x: number, r: number) => {
+        ctx.beginPath();
+        ctx.arc(x, uBendY, r, Math.PI, 0);
+        ctx.lineTo(x + r, innerTop + innerH - tubeSheetThickness);
+        ctx.arc(x, innerTop + innerH - tubeSheetThickness, r, 0, Math.PI);
+        ctx.lineTo(x - r, uBendY);
+        ctx.closePath();
+      };
+
+      // Steel for every tube in the bundle first; the interiors follow in
+      // their own pass, once per phase section under a clip, and must not be
+      // painted over by a later tube's wall
+      for (let i = 0; i < tubesPerBundle; i++) {
+        const x = tubeX(i);
         if (hxType === 'straight') {
-          // Straight tubes - go all the way through vertically with tube sheets at both ends
           ctx.fillStyle = COLORS.steel;
           ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
-
-          ctx.fillStyle = primaryFill;
-          ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
         } else if (hxType === 'helical') {
-          // Helical coil - draw as a wavy/zigzag pattern to suggest coiled tubes
           ctx.strokeStyle = COLORS.steel;
           ctx.lineWidth = (tubeRadius + tubeWall) * 2;
-          ctx.beginPath();
-          const waveAmplitude = tubeSpacing * 0.3;
-          const waveFreq = 8; // Number of waves along the height
-          for (let j = 0; j <= waveFreq; j++) {
-            const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
-            const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-            if (j === 0) {
-              ctx.moveTo(x + xOffset, yPos);
-            } else {
-              ctx.lineTo(x + xOffset, yPos);
-            }
-          }
-          ctx.stroke();
-
-          // Inner helical (primary fluid)
-          ctx.strokeStyle = primaryColor;
-          ctx.lineWidth = tubeRadius * 2;
-          ctx.beginPath();
-          for (let j = 0; j <= waveFreq; j++) {
-            const yPos = innerTop + tubeSheetThickness + (innerH - tubeSheetThickness - 10) * (j / waveFreq);
-            const xOffset = (j % 2 === 0) ? -waveAmplitude : waveAmplitude;
-            if (j === 0) {
-              ctx.moveTo(x + xOffset, yPos);
-            } else {
-              ctx.lineTo(x + xOffset, yPos);
-            }
-          }
+          helicalPathV(x, waveAmplitude, waveFreq);
           ctx.stroke();
         } else {
-          // U-tube - tubes with tube sheet at BOTTOM and U-bends at TOP (standard SG configuration)
-          // Position U-bend center where tubes meet the bulge arc
-          const uBendY = innerTop + tubeRadius + tubeWall;
-
-          // Draw tube steel (outer wall) - extend into bulge area
           ctx.fillStyle = COLORS.steel;
-          ctx.beginPath();
-          // Start with semicircle at top
-          ctx.arc(x, uBendY, tubeRadius + tubeWall, Math.PI, 0);
-          // Rectangle down to tube sheet
-          ctx.lineTo(x + tubeRadius + tubeWall, innerTop + innerH - tubeSheetThickness);
-          ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius + tubeWall, 0, Math.PI);
-          ctx.lineTo(x - tubeRadius - tubeWall, uBendY);
-          ctx.closePath();
-          ctx.fill();
-
-          // Draw tube interior (fluid)
-          ctx.fillStyle = primaryFill;
-          ctx.beginPath();
-          ctx.arc(x, uBendY, tubeRadius, Math.PI, 0);
-          ctx.lineTo(x + tubeRadius, innerTop + innerH - tubeSheetThickness);
-          ctx.arc(x, innerTop + innerH - tubeSheetThickness, tubeRadius, 0, Math.PI);
-          ctx.lineTo(x - tubeRadius, uBendY);
-          ctx.closePath();
+          uTubePathV(x, tubeRadius + tubeWall);
           ctx.fill();
         }
       }
+
+      paintBundleInterior(b, tubeInletY, tubeOutletY, (fill) => {
+        for (let i = 0; i < tubesPerBundle; i++) {
+          const x = tubeX(i);
+          if (hxType === 'straight') {
+            ctx.fillStyle = fill;
+            ctx.fillRect(x - tubeRadius, innerTop + tubeSheetThickness + tubeWall, tubeRadius * 2, innerH - tubeSheetThickness * 2 - tubeWall * 2);
+          } else if (hxType === 'helical') {
+            ctx.strokeStyle = fill;
+            ctx.lineWidth = tubeRadius * 2;
+            helicalPathV(x, waveAmplitude, waveFreq);
+            ctx.stroke();
+          } else {
+            ctx.fillStyle = fill;
+            uTubePathV(x, tubeRadius);
+            ctx.fill();
+          }
+        }
+      });
     }
 
     // Draw tube sheet(s) - horizontal for vertical orientation

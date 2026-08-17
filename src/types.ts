@@ -228,6 +228,17 @@ export interface HeatExchangerComponent extends ComponentBase {
    *  only when bundleCount > 1; primaryFluid stays the first bundle. */
   bundleFluids?: Fluid[];
   /**
+   * Per-bundle moving-boundary tube partition, for painting each tube run in
+   * its subcooled / boiling / superheated bands instead of one averaged
+   * colour. Display-only, resynced from the simulation every frame; absent
+   * for lumped tubes. `fluids` are in flow order from the inlet, and
+   * `lengthFracs` sum to 1 (a section that does not exist has fraction 0).
+   */
+  tubeSections?: Array<{
+    lengthFracs: [number, number, number];
+    fluids: [Fluid, Fluid, Fluid];
+  }>;
+  /**
    * Marks this exchanger's SHELL as a turbine bleed point: a feedwater
    * heater. Steam piped into the shell is treated as having expanded through
    * the turbine's stages down to the shell's pressure, so it arrives with

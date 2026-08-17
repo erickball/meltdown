@@ -54,6 +54,16 @@ export class PlantCanvas {
   // Construction mode - shows grid and component outlines at ground level
   private constructionMode: boolean = true;
 
+  // Elevation nudge arrows (move mode). `elevationArrowTargets` is rebuilt
+  // every frame by the drawing pass, so hit testing can only ever hit an
+  // arrow that is actually on screen where the player sees it.
+  private showElevationArrows: boolean = false;
+  private elevationArrowTargets: Array<{
+    componentId: string; delta: number; x: number; y: number; radius: number;
+  }> = [];
+  /** Metres one arrow click moves a component. */
+  public static readonly ELEVATION_STEP_M = 0.5;
+
   // Placement preview state
   private placementPreview: {
     componentType: string;
@@ -561,9 +571,13 @@ export class PlantCanvas {
         );
 
         if (startScreen.scale > 0 && endScreen.scale > 0) {
-          // Calculate pipe visual thickness
+          // Calculate pipe visual thickness, with a minimum grab width so a
+          // small-bore line is still clickable (drawing is unaffected)
           const avgScale = (startScreen.scale + endScreen.scale) / 2;
-          const visualThickness = halfH * avgScale * 50; // Match rendering zoom
+          const visualThickness = Math.max(
+            halfH * avgScale * 50, // Match rendering zoom
+            PlantCanvas.MIN_CLICK_TARGET_PX / 2
+          );
 
           // Calculate perpendicular offset for pipe width
           const dx = endScreen.pos.x - startScreen.pos.x;
@@ -617,11 +631,17 @@ export class PlantCanvas {
         x: cx + sx * rc - sy * rs,
         y: cy + sx * rs + sy * rc,
       });
+      // Grow the hit box - not the drawing - to a minimum target. A 0.1 m
+      // relief valve projects to two or three pixels and was effectively
+      // unclickable, and worse on a touchscreen.
+      const minHalf = PlantCanvas.MIN_CLICK_TARGET_PX / 2;
+      const hitHalfW = Math.max(visualHalfW, minHalf);
+      const hitHalfH = Math.max(centerVisualHalfH, minHalf);
       visualQuad = [
-        corner(-visualHalfW, -centerVisualHalfH),  // top-left
-        corner(visualHalfW, -centerVisualHalfH),   // top-right
-        corner(visualHalfW, centerVisualHalfH),    // bottom-right
-        corner(-visualHalfW, centerVisualHalfH),   // bottom-left
+        corner(-hitHalfW, -hitHalfH),  // top-left
+        corner(hitHalfW, -hitHalfH),   // top-right
+        corner(hitHalfW, hitHalfH),    // bottom-right
+        corner(-hitHalfW, hitHalfH),   // bottom-left
       ];
     }
 
@@ -1021,6 +1041,22 @@ export class PlantCanvas {
     const localX = dx * cos - dy * sin;
     const localY = dx * sin + dy * cos;
 
+    if (this.isInComponentShape(localX, localY, component)) return true;
+
+    // Minimum hit box, the 2D twin of the isometric one: a component smaller
+    // than the click target is caught by a padded box around it instead. In
+    // world metres here, since this path tests in world coordinates.
+    const minHalf = PlantCanvas.MIN_CLICK_TARGET_PX / 2 / this.view.zoom;
+    const size = this.getComponentSize(component);
+    const boxLeft = component.type === 'pipe' ? 0 : -size.width / 2;
+    const boxRight = component.type === 'pipe' ? size.width : size.width / 2;
+    return localX >= Math.min(boxLeft, boxRight - minHalf * 2) - minHalf
+      && localX <= Math.max(boxRight, boxLeft + minHalf * 2) + minHalf
+      && Math.abs(localY) <= Math.max(size.height / 2, minHalf);
+  }
+
+  /** The component's own drawn shape, in its local coordinates (metres). */
+  private isInComponentShape(localX: number, localY: number, component: PlantComponent): boolean {
     // Check bounds based on component type
     switch (component.type) {
       case 'tank':
@@ -1086,6 +1122,16 @@ export class PlantCanvas {
   private readonly CAMERA_HEIGHT = 50;
   private readonly PERSPECTIVE_X_SCALE = 50;
   private readonly ELEVATION_SCALE = 50;
+
+  /**
+   * Smallest square (screen px) any component's hit box is allowed to be.
+   * Valves, orifices and small-bore pipes are drawn at their real size, which
+   * at plant scale is a few pixels; without a floor they are impossible to
+   * click and hopeless to tap. Only hit testing grows - nothing is drawn any
+   * larger. Kept modest so neighbouring fittings do not steal each other's
+   * clicks; the depth/containment sort still decides ties.
+   */
+  private static readonly MIN_CLICK_TARGET_PX = 24;
 
   // View angle in degrees from horizontal (20 = looking forward, 70 = looking down)
   // Controls both zoom (higher = further away) and vertical compression (higher = more top-down)
@@ -2068,6 +2114,10 @@ export class PlantCanvas {
       }
     }
 
+    // Elevation nudge arrows go above everything so they are never buried
+    // under a component in front of the one they belong to
+    this.renderElevationArrows(ctx, sortedComponents);
+
     // Draw port indicators if enabled
     if (this.showPorts) {
       this.renderPortIndicators(ctx);
@@ -2594,6 +2644,96 @@ export class PlantCanvas {
   }
 
   /**
+   * Draw a stacked up/down arrow pair beside every movable component, and
+   * record where they landed so clicks can find them.
+   *
+   * Elevation is otherwise only reachable through the component's edit
+   * dialog, which is a poor fit for the thing you most often want to do while
+   * arranging a plant: raise this by half a metre and look at it. Arrows are
+   * sized in SCREEN pixels rather than world metres so they stay usable on a
+   * small valve and at any zoom.
+   *
+   * Buildings and switchyards are skipped: both are drawn from the ground
+   * plane up regardless of their elevation field, so an arrow would do
+   * nothing visible.
+   */
+  private renderElevationArrows(ctx: CanvasRenderingContext2D, components: PlantComponent[]): void {
+    this.elevationArrowTargets = [];
+    if (!this.showElevationArrows || !this.isometric.enabled) return;
+
+    const R = 11;        // arrow button radius, px
+    const GAP = 6;       // px between the component edge and the buttons
+    const { verticalScale } = this.getViewTransform();
+    // Read the canvas box ONCE - a getBoundingClientRect per component per
+    // frame forces a layout on every one of them
+    const rect = this.canvas.getBoundingClientRect();
+
+    for (const component of components) {
+      if (component.type === 'building' || component.type === 'switchyard') continue;
+
+      // Anchor: the right edge of the component at its visual mid-height -
+      // the same projection hit testing uses, so arrows track the drawing
+      let anchorX: number;
+      let anchorY: number;
+      if (component.type === 'pipe') {
+        const pipe = component as import('../types').PipeComponent;
+        if (!pipe.endPosition) continue;
+        const a = this.worldToScreenPerspective(pipe.position, pipe.elevation ?? 0);
+        const b = this.worldToScreenPerspective(pipe.endPosition, pipe.endElevation ?? pipe.elevation ?? 0);
+        if (a.scale <= 0 || b.scale <= 0) continue;
+        anchorX = Math.max(a.pos.x, b.pos.x);
+        anchorY = (a.pos.y + b.pos.y) / 2;
+      } else {
+        const elevation = getComponentElevation(component);
+        const centerScreen = this.worldToScreenPerspective(component.position, elevation);
+        if (centerScreen.scale <= 0) continue;
+        const size = this.getComponentSize(component);
+        const centerZoom = centerScreen.scale * 50;
+        const halfW = Math.max((size.width / 2) * centerZoom, PlantCanvas.MIN_CLICK_TARGET_PX / 2);
+        const halfH = (size.height / 2) * centerZoom * verticalScale;
+        anchorX = centerScreen.pos.x + halfW;
+        anchorY = centerScreen.pos.y - halfH;
+      }
+
+      // Off-screen components would pile their arrows on the border
+      if (anchorX < -50 || anchorX > rect.width + 50 || anchorY < -50 || anchorY > rect.height + 50) {
+        continue;
+      }
+
+      const x = anchorX + GAP + R;
+      for (const [delta, cy] of [
+        [PlantCanvas.ELEVATION_STEP_M, anchorY - R - 1],
+        [-PlantCanvas.ELEVATION_STEP_M, anchorY + R + 1],
+      ] as const) {
+        this.elevationArrowTargets.push({
+          componentId: component.id, delta, x, y: cy, radius: R,
+        });
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, cy, R, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(28, 32, 38, 0.82)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(220, 228, 240, 0.85)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        // Triangle, pointing the way the click moves the component
+        const t = R * 0.48;
+        const dir = delta > 0 ? -1 : 1;   // screen Y is inverted
+        ctx.beginPath();
+        ctx.moveTo(x, cy + dir * t);
+        ctx.lineTo(x - t, cy - dir * t * 0.8);
+        ctx.lineTo(x + t, cy - dir * t * 0.8);
+        ctx.closePath();
+        ctx.fillStyle = '#e8eef8';
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  /**
    * Shade the part of a component that sits below grade with translucent
    * soil, so a basement condenser or a buried sump reads as buried instead
    * of as floating in front of everything at ground level.
@@ -2989,6 +3129,31 @@ export class PlantCanvas {
 
   public setConstructionMode(enabled: boolean): void {
     this.constructionMode = enabled;
+  }
+
+  /**
+   * Show the per-component elevation nudge arrows (move mode only). They are
+   * drawn as a final overlay and hit-tested through
+   * getElevationArrowAtScreen.
+   */
+  public setElevationArrowsVisible(visible: boolean): void {
+    this.showElevationArrows = visible;
+    if (!visible) this.elevationArrowTargets = [];
+  }
+
+  /**
+   * The elevation arrow under a screen point, if any. Reads the targets the
+   * last frame laid down, so the clickable spot is exactly the drawn one;
+   * later entries are on top, so scan backwards.
+   */
+  public getElevationArrowAtScreen(screenPos: Point): { componentId: string; delta: number } | null {
+    for (let i = this.elevationArrowTargets.length - 1; i >= 0; i--) {
+      const t = this.elevationArrowTargets[i];
+      if (Math.hypot(screenPos.x - t.x, screenPos.y - t.y) <= t.radius) {
+        return { componentId: t.componentId, delta: t.delta };
+      }
+    }
+    return null;
   }
 
   public setView(view: Partial<ViewState>): void {

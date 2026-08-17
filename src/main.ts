@@ -10,7 +10,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, Fluid } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -31,6 +31,7 @@ import {
   hxBundleCount,
   hxTubeNodeIds,
   assignFlowConnectionIds,
+  evaluateOtsgSections,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -2373,6 +2374,125 @@ function init() {
   // Pre-drag snapshot so a cancelled containment change can be reverted
   let movePreDrag: { x: number; y: number; endX?: number; endY?: number; containedBy?: string } | null = null;
 
+  /**
+   * The components riding along with the one being dragged: everything
+   * transitively inside it. Each keeps the offset it had from the dragged
+   * component when the drag began, so the whole assembly translates rigidly
+   * and the offsets cannot accumulate drift over a long drag; the pre-drag
+   * absolute positions are kept alongside for the revert paths.
+   */
+  interface MoveFollower {
+    comp: PlantComponent;
+    dx: number; dy: number;
+    endDx?: number; endDy?: number;
+    preX: number; preY: number;
+    preEndX?: number; preEndY?: number;
+  }
+  let moveFollowers: MoveFollower[] = [];
+
+  /**
+   * Everything transitively contained by `id`. Containment nests - a core
+   * barrel inside a reactor vessel inside a building - so this walks the
+   * whole tree rather than one level, and guards against a cycle in saved
+   * data rather than hanging on it.
+   */
+  function containedDescendants(id: string): PlantComponent[] {
+    const out: PlantComponent[] = [];
+    const seen = new Set<string>([id]);
+    const queue = [id];
+    while (queue.length > 0) {
+      const parent = queue.shift()!;
+      for (const [childId, child] of plantState.components) {
+        if ((child as any).containedBy !== parent || seen.has(childId)) continue;
+        seen.add(childId);
+        out.push(child);
+        queue.push(childId);
+      }
+    }
+    return out;
+  }
+
+  /** Snapshot the passengers of a drag about to start. */
+  function collectMoveFollowers(container: PlantComponent): MoveFollower[] {
+    return containedDescendants(container.id).map(comp => {
+      const end = (comp as PipeComponent).endPosition;
+      return {
+        comp,
+        dx: comp.position.x - container.position.x,
+        dy: comp.position.y - container.position.y,
+        endDx: end ? end.x - container.position.x : undefined,
+        endDy: end ? end.y - container.position.y : undefined,
+        preX: comp.position.x,
+        preY: comp.position.y,
+        preEndX: end?.x,
+        preEndY: end?.y,
+      };
+    });
+  }
+
+  /** Put every passenger back at its stored offset from the container. */
+  function applyMoveFollowers(container: PlantComponent): void {
+    for (const f of moveFollowers) {
+      f.comp.position.x = container.position.x + f.dx;
+      f.comp.position.y = container.position.y + f.dy;
+      const end = (f.comp as PipeComponent).endPosition;
+      if (end && f.endDx !== undefined && f.endDy !== undefined) {
+        end.x = container.position.x + f.endDx;
+        end.y = container.position.y + f.endDy;
+      }
+    }
+  }
+
+  /**
+   * Nudge a component's elevation by one arrow click, carrying everything
+   * inside it so an assembly keeps its internal geometry - raising a vessel
+   * must not leave its core barrel behind at the old height.
+   *
+   * Rounded to the millimetre only to keep repeated 0.5 m steps from
+   * accumulating float dust in the readout; the value is not snapped to a
+   * grid, so a component that started at 6.3 m steps to 6.8, not 6.5.
+   */
+  function nudgeElevation(componentId: string, delta: number): void {
+    const target = plantState.components.get(componentId);
+    if (!target) return;
+    const tidy = (v: number) => Math.round(v * 1000) / 1000;
+
+    for (const comp of [target, ...containedDescendants(componentId)]) {
+      const c = comp as any;
+      c.elevation = tidy((c.elevation ?? 0) + delta);
+      const pipe = comp as PipeComponent;
+      if (pipe.type === 'pipe' && pipe.endElevation !== undefined) {
+        // Translate the pipe, do not tilt it
+        pipe.endElevation = tidy(pipe.endElevation + delta);
+      }
+    }
+
+    if (selectedComponentId) {
+      updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
+    }
+    updateConstructionCostPanel();
+  }
+
+  /** Undo a drag: the component itself and everything that rode with it. */
+  function revertMove(moved: PlantComponent, preDrag: { x: number; y: number; endX?: number; endY?: number }): void {
+    moved.position.x = preDrag.x;
+    moved.position.y = preDrag.y;
+    const pipe = moved as PipeComponent;
+    if (pipe.endPosition && preDrag.endX !== undefined && preDrag.endY !== undefined) {
+      pipe.endPosition.x = preDrag.endX;
+      pipe.endPosition.y = preDrag.endY;
+    }
+    for (const f of moveFollowers) {
+      f.comp.position.x = f.preX;
+      f.comp.position.y = f.preY;
+      const end = (f.comp as PipeComponent).endPosition;
+      if (end && f.preEndX !== undefined && f.preEndY !== undefined) {
+        end.x = f.preEndX;
+        end.y = f.preEndY;
+      }
+    }
+  }
+
   // Find the building whose footprint contains a world position (or null).
   function findContainingBuilding(worldPos: { x: number; y: number }): PlantComponent | null {
     for (const [, comp] of plantState.components) {
@@ -2498,11 +2618,19 @@ function init() {
           movingComponent.position.x = worldClick.x - moveStartOffset.x;
           movingComponent.position.y = worldClick.y - moveStartOffset.y;
         }
+        // Anything inside the component rides along. Dragging one END of a
+        // pipe reshapes it rather than translating it, so passengers stay put
+        // in that case (a pipe contains nothing anyway).
+        if (movingComponent.type !== 'pipe' || pipeDragMode === 'both') {
+          applyMoveFollowers(movingComponent);
+        }
         // Update component detail panel to show new position immediately
         if (selectedComponentId) {
           updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
         }
         canvas.style.cursor = 'grabbing';
+      } else if (plantCanvas.getElevationArrowAtScreen({ x, y })) {
+        canvas.style.cursor = 'pointer';
       } else {
         // Not dragging - show move cursor on hover
         const hoveredComponent = plantCanvas.getComponentAtScreen({ x, y });
@@ -2531,18 +2659,13 @@ function init() {
       // Second finger down = pinch gesture: abandon any in-progress component
       // drag and put the component back where it started.
       if (isDraggingComponent && movingComponent && movePreDrag) {
-        movingComponent.position.x = movePreDrag.x;
-        movingComponent.position.y = movePreDrag.y;
-        const pipe = movingComponent as PipeComponent;
-        if (pipe.endPosition && movePreDrag.endX !== undefined && movePreDrag.endY !== undefined) {
-          pipe.endPosition.x = movePreDrag.endX;
-          pipe.endPosition.y = movePreDrag.endY;
-        }
+        revertMove(movingComponent, movePreDrag);
       }
       movingComponent = null;
       isDraggingComponent = false;
       moveLocked = false;
       movePreDrag = null;
+      moveFollowers = [];
       return;
     }
     if (currentMode !== 'construction') return;
@@ -2551,6 +2674,15 @@ function init() {
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
+
+    // Elevation arrows sit on top of everything and are checked first, so a
+    // click on one nudges height instead of starting a plan-position drag
+    const arrow = plantCanvas.getElevationArrowAtScreen({ x, y });
+    if (arrow) {
+      nudgeElevation(arrow.componentId, arrow.delta);
+      e.preventDefault();
+      return;
+    }
 
     // If a component was armed via its "Move" button, that specific component
     // is grabbed wherever the user clicks (this is how buildings move).
@@ -2575,6 +2707,7 @@ function init() {
         endY: (component as PipeComponent).endPosition?.y,
         containedBy: (component as any).containedBy,
       };
+      moveFollowers = collectMoveFollowers(component);
 
       // Calculate offset from component position to click point
       const worldClick = plantCanvas.getWorldPositionFromScreen({ x, y });
@@ -2658,8 +2791,14 @@ function init() {
         // A real move: if it crossed a building boundary, confirm the
         // containment change (and revert the move if the player cancels).
         maybeConfirmContainmentChange(moved, preDrag);
-        showNotification(`Moved ${moved.label || moved.id}`, 'info');
+        const carried = moveFollowers.length;
+        showNotification(
+          `Moved ${moved.label || moved.id}` +
+          (carried > 0 ? ` and ${carried} component${carried === 1 ? '' : 's'} inside it` : ''),
+          'info'
+        );
       }
+      moveFollowers = [];
 
       // Check what's under cursor now
       const rect = canvas.getBoundingClientRect();
@@ -2703,14 +2842,8 @@ function init() {
       else delete (moved as any).containedBy;
       updateConstructionCostPanel();
     } else {
-      // Revert the move entirely
-      moved.position.x = preDrag.x;
-      moved.position.y = preDrag.y;
-      const pipe = moved as PipeComponent;
-      if (pipe.endPosition && preDrag.endX !== undefined && preDrag.endY !== undefined) {
-        pipe.endPosition.x = preDrag.endX;
-        pipe.endPosition.y = preDrag.endY;
-      }
+      // Revert the move entirely - the component and its passengers
+      revertMove(moved, preDrag);
     }
     if (selectedComponentId) {
       updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
@@ -3000,6 +3133,9 @@ function init() {
     // of a click-and-drag; selection happens on mouseup without movement)
     plantCanvas.setMoveMode(mode === 'move');
 
+    // Move mode also offers elevation: drag for plan position, arrows for height
+    plantCanvas.setElevationArrowsVisible(mode === 'move');
+
     // Update UI visibility
     if (connectionInfo) {
       connectionInfo.style.display = mode === 'connect' ? 'block' : 'none';
@@ -3018,6 +3154,7 @@ function init() {
       movingComponent = null;
       moveStartOffset = { x: 0, y: 0 };
       isDraggingComponent = false;
+      moveFollowers = [];
       canvas.style.cursor = 'default';
     }
 
@@ -3210,6 +3347,50 @@ function init() {
 // Components already warned about missing sim nodes (warn once, not per frame)
 const warnedMissingSimNodes = new Set<string>();
 
+/**
+ * Give a moving-boundary exchanger's bundles their subcooled / boiling /
+ * superheated split, so the renderer can paint each tube run in bands rather
+ * than one averaged colour that shows a boiling tube as tepid water.
+ *
+ * The partition is RE-EVALUATED here rather than read from otsg.lastEval:
+ * that cache is written by the rate operator onto the solver's per-stage
+ * clones and never reaches the accepted state this sync sees, which is the
+ * same trap the superheat-fraction sensor fell into. The partition is solved
+ * from the node's own totals, so rerunning the shared evaluation on the
+ * accepted state is exact, not an approximation.
+ */
+function syncOtsgTubeSections(simState: SimulationState, hx: HeatExchangerComponent): void {
+  const bundleCount = hxBundleCount(hx as any);
+  const nodeIds = hxTubeNodeIds(hx.id, bundleCount);
+  const sections: NonNullable<HeatExchangerComponent['tubeSections']> = [];
+
+  for (const nodeId of nodeIds) {
+    const node = simState.flowNodes.get(nodeId);
+    if (!node?.otsg) continue;
+    const { ev } = evaluateOtsgSections(simState, nodeId, node);
+    const P = ev.P;
+    // Mean quality of the boiling band, from its own mean enthalpy - what
+    // sets the liquid/vapor speckle density the pattern renderer draws
+    const span = ev.sat.h_g - ev.sat.h_f;
+    const xBar = span > 0
+      ? Math.max(0, Math.min(1, (ev.sections[1].hBar - ev.sat.h_f) / span))
+      : 0.5;
+    sections.push({
+      lengthFracs: [
+        ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac,
+      ],
+      fluids: [
+        { temperature: ev.sections[0].T, pressure: P, phase: 'liquid', quality: 0, flowRate: 0 },
+        { temperature: ev.sat.T, pressure: P, phase: 'two-phase', quality: xBar, flowRate: 0 },
+        { temperature: ev.sections[2].T, pressure: P, phase: 'vapor', quality: 1, flowRate: 0 },
+      ],
+    });
+  }
+
+  if (sections.length > 0) hx.tubeSections = sections;
+  else delete hx.tubeSections;
+}
+
 function syncSimulationToVisuals(simState: SimulationState, plantState: PlantState): void {
   // Sync all components to their simulation nodes
   // Uses simNodeId if set, otherwise falls back to component.id
@@ -3256,6 +3437,8 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           fluids[b].volume = bundleNode.volume;
         });
       }
+
+      syncOtsgTubeSections(simState, component);
 
       // Secondary side (shell): try {id}-secondary, then {id}-shell
       const secondaryNode = simState.flowNodes.get(`${component.id}-secondary`)
