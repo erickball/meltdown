@@ -1,6 +1,6 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, getComponentVisualHeight, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, projectCircleToEllipse } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, getComponentVisualHeight, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -1950,6 +1950,7 @@ export class PlantCanvas {
               }
 
               ctx.restore();
+              this.renderBelowGradeOverlay(ctx, component);
               continue; // Skip the normal rendering path
             }
           }
@@ -2019,6 +2020,11 @@ export class PlantCanvas {
       }
 
       ctx.restore();
+
+      // Bury the part of this component that sits below grade. Done inside
+      // the depth-sorted loop so a component nearer the camera still draws
+      // over the soil of one behind it.
+      this.renderBelowGradeOverlay(ctx, component);
     }
 
     // Draw connections (on top of components so labels are visible)
@@ -2041,9 +2047,24 @@ export class PlantCanvas {
             // Calculate world positions of ports
             const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
             const toWorld = this.getPortWorldPosition(toComponent, toPort);
-            renderConnection(ctx, fromWorld, toWorld, fromComponent.fluid, this.view);
+            renderConnection(ctx, fromWorld, toWorld,
+              this.getConnectionFluid(connection, fromComponent), this.view);
           }
         }
+      }
+    }
+
+    // Restore each building's near footprint wall on top of its contents, so
+    // equipment inside a building reads as inside it (see the function's
+    // comment) rather than standing in front of the shell.
+    if (this.isometric.enabled) {
+      for (const component of sortedComponents) {
+        if (component.type !== 'building') continue;
+        renderBuildingFrontEdge(
+          ctx,
+          component as import('../types').BuildingComponent,
+          (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
+        );
       }
     }
 
@@ -2484,8 +2505,7 @@ export class PlantCanvas {
       };
     }
 
-    // Get fluid color from the source component
-    const fluid = (fromComponent as any).fluid;
+    const fluid = this.getConnectionFluid(connection, fromComponent);
     const strokeConnection = () => {
       ctx.beginPath();
       ctx.moveTo(adjustedFromScreen.x, adjustedFromScreen.y);
@@ -2517,6 +2537,149 @@ export class PlantCanvas {
     // Use the standard fluid color function for consistency with node rendering
     // This ensures connections match the color of their source fluid
     return getFluidColor(fluid);
+  }
+
+  /**
+   * The fluid a connection is actually carrying, for line coloring.
+   *
+   * The obvious source - the "from" component's own `fluid` - is wrong for
+   * every component that holds more than one fluid or none at all: a heat
+   * exchanger keeps primaryFluid/secondaryFluid, a pump and a turbine keep
+   * inlet/outlet fluids, and several components carry no display fluid at
+   * all, which left their lines painted the "unknown fluid" slate gray even
+   * when they were full of steam. Read the donor flow node of the matching
+   * simulation connection instead, which is per-port and always populated.
+   *
+   * Falls back to the component fluid before the simulation exists (i.e. in
+   * construction mode).
+   */
+  private getConnectionFluid(
+    connection: Connection,
+    fromComponent: PlantComponent
+  ): Fluid | undefined {
+    const componentFluid = (fromComponent as any).fluid as Fluid | undefined;
+    if (!this.simState) return componentFluid;
+
+    const flowId = flowConnectionIdForPlantConnection(connection, this.plantState);
+    if (!flowId) return componentFluid;
+    const flow = this.simState.flowConnections.find(f => f.id === flowId);
+    if (!flow) return componentFluid;
+
+    // Donor node: what is flowing through the line right now. Stagnant lines
+    // (massFlowRate 0) show the upstream node, matching the drawn direction.
+    const donorId = flow.massFlowRate >= 0 ? flow.fromNodeId : flow.toNodeId;
+    const donor = this.simState.flowNodes.get(donorId);
+    if (!donor) return componentFluid;
+
+    // getFluidColor needs the node volume to recover NCG partial pressure
+    const fluid: Fluid = {
+      ...donor.fluid,
+      volume: donor.volume,
+      flowRate: flow.massFlowRate,
+    };
+
+    // A separated two-phase node feeds liquid from a bottom nozzle and vapor
+    // from a top one; the flow operator already decided which. Paint the line
+    // that phase rather than the node's bulk mixture color.
+    if (fluid.phase === 'two-phase') {
+      if (flow.currentFlowPhase === 'liquid') {
+        fluid.phase = 'liquid';
+        fluid.quality = 0;
+      } else if (flow.currentFlowPhase === 'vapor') {
+        fluid.phase = 'vapor';
+        fluid.quality = 1;
+      }
+    }
+    return fluid;
+  }
+
+  /**
+   * Shade the part of a component that sits below grade with translucent
+   * soil, so a basement condenser or a buried sump reads as buried instead
+   * of as floating in front of everything at ground level.
+   *
+   * The soil quad runs from the projected grade line down to the projected
+   * bottom of the component, across its own screen width only - the shading
+   * must not spill onto neighbours, whose grade line sits elsewhere on
+   * screen (screen Y alone does not determine depth in this projection).
+   */
+  private renderBelowGradeOverlay(ctx: CanvasRenderingContext2D, component: PlantComponent): void {
+    if (!this.isometric.enabled) return;
+    // Buildings and switchyards are drawn from the ground plane up regardless
+    // of their elevation field, so there is nothing of them below grade
+    if (component.type === 'building' || component.type === 'switchyard') return;
+
+    // Corners of the soil quad, left edge first. Each is a screen X plus the
+    // screen Y of grade and of the component's underside at that point.
+    let corners: Array<{ x: number; groundY: number; bottomY: number }>;
+
+    if (component.type === 'pipe') {
+      // Pipes are drawn between their two projected endpoints, so each end
+      // gets its own grade line - a pipe sloping into a basement is cut where
+      // it actually crosses grade.
+      const pipe = component as import('../types').PipeComponent;
+      if (!pipe.endPosition) return;
+      const halfD = pipe.diameter / 2;
+      const ends: Array<{ world: Point; elev: number }> = [
+        { world: pipe.position, elev: (pipe.elevation ?? 0) - halfD },
+        { world: pipe.endPosition, elev: (pipe.endElevation ?? pipe.elevation ?? 0) - halfD },
+      ];
+      if (ends.every(e => e.elev >= 0)) return;
+
+      const projected = ends.map(e => ({
+        ground: this.worldToScreenPerspective(e.world, 0),
+        bottom: this.worldToScreenPerspective(e.world, Math.min(0, e.elev)),
+      }));
+      if (projected.some(p => p.ground.scale <= 0 || p.bottom.scale <= 0)) return;
+
+      // Widen by the pipe radius so the drawn barrel is fully buried
+      const pad = halfD * projected[0].ground.scale * this.PERSPECTIVE_X_SCALE;
+      const dir = Math.sign(projected[1].ground.pos.x - projected[0].ground.pos.x) || 1;
+      corners = projected.map((p, i) => ({
+        x: p.ground.pos.x + (i === 0 ? -dir : dir) * pad,
+        groundY: p.ground.pos.y,
+        bottomY: p.bottom.pos.y,
+      }));
+    } else {
+      // Everything else is drawn centred on the projection of its own
+      // position, bottom sitting at its elevation - so grade and the
+      // underside must come from that same projection, not from the corners,
+      // or the soil line lands somewhere the component was never drawn.
+      const elevation = getComponentElevation(component);
+      if (elevation >= 0) return;
+
+      const ground = this.worldToScreenPerspective(component.position, 0);
+      const bottom = this.worldToScreenPerspective(component.position, elevation);
+      if (ground.scale <= 0 || bottom.scale <= 0) return;
+
+      const size = this.getComponentSize(component);
+      const centerZoom = bottom.scale * 50; // matches the render loop
+      const halfWidthPx = (size.width / 2) * centerZoom + 4;
+      corners = [
+        { x: bottom.pos.x - halfWidthPx, groundY: ground.pos.y, bottomY: bottom.pos.y },
+        { x: bottom.pos.x + halfWidthPx, groundY: ground.pos.y, bottomY: bottom.pos.y },
+      ];
+    }
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].groundY);
+    ctx.lineTo(corners[1].x, corners[1].groundY);
+    ctx.lineTo(corners[1].x, corners[1].bottomY);
+    ctx.lineTo(corners[0].x, corners[0].bottomY);
+    ctx.closePath();
+    // Desert soil, matching the near end of the ground gradient but darker
+    ctx.fillStyle = 'rgba(150, 130, 92, 0.72)';
+    ctx.fill();
+
+    // Grade line, where the soil cuts the component
+    ctx.beginPath();
+    ctx.moveTo(corners[0].x, corners[0].groundY);
+    ctx.lineTo(corners[1].x, corners[1].groundY);
+    ctx.strokeStyle = 'rgba(110, 92, 60, 0.9)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.restore();
   }
 
   // Calculate connection screen endpoints accounting for elevation offsets

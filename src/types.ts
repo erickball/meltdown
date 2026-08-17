@@ -110,7 +110,11 @@ export interface PumpComponent extends ComponentBase {
   speed: number;        // 0-1 (fraction of rated)
   ratedFlow: number;    // kg/s at full speed
   ratedHead: number;    // meters of head
-  orientation?: 'left-right' | 'right-left' | 'bottom-top' | 'top-bottom';  // Inlet→outlet direction (default: left-right)
+  // Which side the discharge nozzle faces. Suction is always below and the
+  // motor always on top - the pump is never laid on its side. (Legacy saves
+  // may carry 'bottom-top'/'top-bottom'; normalizeLoadedPlant folds those
+  // into the two upright orientations on load.)
+  orientation?: 'left-right' | 'right-left';  // default: left-right
   pressureRating?: number;  // Casing design pressure (bar) - sets burst point and cost
 }
 

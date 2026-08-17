@@ -2239,8 +2239,7 @@ export class ConstructionManager {
    * port geometry, matching the transforms the renderer applies:
    * - left-right: inlet bottom, outlet right (default)
    * - right-left: inlet bottom, outlet left (mirrored X)
-   * - bottom-top: inlet left, outlet up (rotated -90°)
-   * - top-bottom: inlet right, outlet down (rotated +90°)
+   * The pump always stands upright; there are no sideways orientations.
    */
   private pumpPortPositions(
     diameter: number,
@@ -2270,15 +2269,23 @@ export class ConstructionManager {
     switch (orientation) {
       case 'right-left':
         return { inlet: { x: 0, y: baseInletY }, outlet: { x: -baseOutletX, y: baseOutletY } };
-      case 'bottom-top':
-        // Renderer applies ctx.rotate(-PI/2), which maps local (x,y) -> (y, -x)
-        return { inlet: { x: baseInletY, y: 0 }, outlet: { x: baseOutletY, y: -baseOutletX } };
-      case 'top-bottom':
-        // Renderer applies ctx.rotate(+PI/2), which maps local (x,y) -> (-y, x)
-        return { inlet: { x: -baseInletY, y: 0 }, outlet: { x: -baseOutletY, y: baseOutletX } };
       default: // left-right
         return { inlet: { x: 0, y: baseInletY }, outlet: { x: baseOutletX, y: baseOutletY } };
     }
+  }
+
+  /** The orientations a pump may hold. Sideways layouts were removed. */
+  private static readonly PUMP_ORIENTATIONS = ['left-right', 'right-left'] as const;
+
+  /**
+   * Fold a legacy sideways orientation onto the upright orientation whose
+   * discharge points the same way (bottom-top rotated the volute to the
+   * right, top-bottom to the left). Anything unrecognized becomes the
+   * default. Returns null when the value is already valid.
+   */
+  private static legacyPumpOrientation(orientation: string): string | null {
+    if ((ConstructionManager.PUMP_ORIENTATIONS as readonly string[]).includes(orientation)) return null;
+    return orientation === 'top-bottom' ? 'right-left' : 'left-right';
   }
 
   /**
@@ -2339,6 +2346,13 @@ export class ConstructionManager {
 
     for (const [, component] of this.plantState.components) {
       if (component.type !== 'pump' || !(component as any).orientation) continue;
+      // Saves from before sideways pumps were dropped stand them back up
+      const orientation = (component as any).orientation as string;
+      const upright = ConstructionManager.legacyPumpOrientation(orientation);
+      if (upright !== null) {
+        (component as any).orientation = upright;
+        console.log(`[Construction] Pump '${component.id}': legacy orientation '${orientation}' → '${upright}'`);
+      }
       this.updatePumpPorts(component);
       this.autoOrientPump(component.id);
     }
@@ -2357,6 +2371,44 @@ export class ConstructionManager {
       this.applyNcgDisplayFill(c.annulusFluid, c.annulusInitialNcg);
       this.applyNcgDisplayFill(c.secondaryFluid, c.shellInitialNcg);
       this.applyNcgDisplayFill(c.shellFluid, c.shellInitialNcg);
+    }
+
+    this.checkBuildingContainment();
+  }
+
+  /**
+   * Complain about components that claim to be inside a building but whose
+   * plan position falls outside its footprint. The renderer draws them where
+   * their coordinates say, so they appear standing outside the building they
+   * are simulated as being inside - and nothing else catches it, because
+   * containment is a stored field rather than a derived one.
+   */
+  private checkBuildingContainment(): void {
+    for (const [id, component] of this.plantState.components) {
+      const containerId = component.containedBy;
+      if (!containerId) continue;
+      const building = this.plantState.components.get(containerId) as Record<string, any> | undefined;
+      if (!building || building.type !== 'building') continue;
+
+      const halfW = building.shape === 'cylinder'
+        ? (building.diameter || 40) / 2 : (building.width || 40) / 2;
+      const halfD = building.shape === 'cylinder'
+        ? (building.diameter || 40) / 2 : (building.length || 40) / 2;
+      const dx = component.position.x - building.position.x;
+      const dy = component.position.y - building.position.y;
+      const inside = building.shape === 'cylinder'
+        ? (dx * dx) / (halfW * halfW) + (dy * dy) / (halfD * halfD) <= 1
+        : Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
+      if (inside) continue;
+
+      console.error(
+        `[Construction] '${id}' (${component.label || component.type}) is marked contained by ` +
+        `building '${containerId}' but sits OUTSIDE its footprint: position ` +
+        `(${component.position.x}, ${component.position.y}) vs building ` +
+        `(${building.position.x}, ${building.position.y}) ${building.shape || 'cylinder'} ` +
+        `${halfW * 2}x${halfD * 2} m. It will be drawn outside the building it is simulated inside - ` +
+        `move it into the footprint or clear its containedBy.`
+      );
     }
   }
 
@@ -2465,16 +2517,19 @@ export class ConstructionManager {
     };
 
     const current = (pump as any).orientation as string;
-    let best = current;
-    let bestScore = score(current);
-    for (const candidate of ['left-right', 'right-left', 'bottom-top', 'top-bottom']) {
+    // A legacy sideways orientation is not a candidate to keep, so it never
+    // gets the tie-breaking advantage the current orientation otherwise has.
+    const keepable = ConstructionManager.legacyPumpOrientation(current) === null;
+    let best = keepable ? current : '';
+    let bestScore = keepable ? score(current) : Infinity;
+    for (const candidate of ConstructionManager.PUMP_ORIENTATIONS) {
       const s = score(candidate);
       if (s < bestScore - 1e-9) {
         best = candidate;
         bestScore = s;
       }
     }
-    if (best === current) return false;
+    if (best === current || !best) return false;
 
     (pump as any).orientation = best;
     this.updatePumpPorts(pump);

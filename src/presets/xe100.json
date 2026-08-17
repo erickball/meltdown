@@ -877,15 +877,6 @@
         "elevation": 0,
         "diameter": 0.1,
         "opening": 0,
-        "fluid": {
-          "temperature": 700,
-          "pressure": 2500000,
-          "phase": "vapor",
-          "quality": 1,
-          "flowRate": 0
-        },
-        "nqa1": false,
-        "pressureRating": 200,
         "ports": [
           {
             "id": "val-bleed-1-in",
@@ -903,7 +894,16 @@
             },
             "direction": "both"
           }
-        ]
+        ],
+        "fluid": {
+          "temperature": 700,
+          "pressure": 2500000,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "nqa1": false,
+        "pressureRating": 200
       }
     ],
     [
@@ -1073,7 +1073,7 @@
             "targetId": "fwh-1-tube"
           },
           "setpoint": 473,
-          "aggressiveness": 1.0,
+          "aggressiveness": 1,
           "actuator": {
             "kind": "valve-position",
             "targetId": "val-bleed-1",
@@ -1099,15 +1099,6 @@
         "elevation": 0,
         "diameter": 0.1,
         "opening": 0.3,
-        "fluid": {
-          "temperature": 497,
-          "pressure": 2500000,
-          "phase": "liquid",
-          "quality": 0,
-          "flowRate": 0
-        },
-        "nqa1": false,
-        "pressureRating": 60,
         "ports": [
           {
             "id": "val-fwhdr-1-in",
@@ -1125,7 +1116,16 @@
             },
             "direction": "both"
           }
-        ]
+        ],
+        "fluid": {
+          "temperature": 497,
+          "pressure": 2500000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "nqa1": false,
+        "pressureRating": 60
       }
     ],
     [
@@ -1149,14 +1149,14 @@
             "kind": "node-level",
             "targetId": "fwh-1-shell"
           },
-          "setpoint": 2.0,
+          "setpoint": 2,
           "invert": true,
           "aggressiveness": 1.5,
           "actuator": {
             "kind": "valve-position",
             "targetId": "val-fwhdr-1",
             "min": 0.02,
-            "max": 1.0,
+            "max": 1,
             "rateLimit": 0.05
           }
         }
@@ -1201,8 +1201,8 @@
               },
               {
                 "op": "scale",
-                "factor": -5.0,
-                "offset": 20.0,
+                "factor": -5,
+                "offset": 20,
                 "input": {
                   "kind": "node-level",
                   "targetId": "hx-1-tube"
@@ -1210,12 +1210,12 @@
               }
             ]
           },
-          "aggressiveness": 1.0,
+          "aggressiveness": 1,
           "actuator": {
             "kind": "pump-speed",
             "targetId": "fw-pump-1",
             "min": 0.05,
-            "max": 1.0,
+            "max": 1,
             "rateLimit": 0.05
           }
         }

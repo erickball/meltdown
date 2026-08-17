@@ -1033,22 +1033,16 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
   const d = pump.diameter * view.zoom;
   const scale = d * 1.3; // 30% bigger overall
 
-  // Handle orientation:
-  // - left-right: vertical pump, inlet bottom, outlet right (default)
-  // - right-left: vertical pump, inlet bottom, outlet left (mirror horizontally)
-  // - bottom-top: horizontal pump, inlet left, outlet right (rotate -90°)
-  // - top-bottom: horizontal pump, inlet right, outlet left (rotate +90°)
+  // Handle orientation. The pump always stands upright (suction below, motor
+  // on top); orientation only picks which side the discharge faces:
+  // - left-right: inlet bottom, outlet right (default)
+  // - right-left: inlet bottom, outlet left (mirror horizontally)
   const orientation = (pump as any).orientation || 'left-right';
 
   ctx.save();
 
-  // Apply transform based on orientation
   if (orientation === 'right-left') {
     ctx.scale(-1, 1);  // Mirror horizontally
-  } else if (orientation === 'bottom-top') {
-    ctx.rotate(-Math.PI / 2);  // Rotate -90° (motor on right)
-  } else if (orientation === 'top-bottom') {
-    ctx.rotate(Math.PI / 2);  // Rotate +90° (motor on left)
   }
   // left-right: no transform needed
 
@@ -3949,26 +3943,12 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
       const pumpScale = component.diameter * view.zoom * 1.3; // 30% bigger
       const pumpBodyHeight = pumpScale * (0.9 + 0.15 + 0.5 + 0.35); // motor + coupling + casing + nozzle = 1.9
       const pumpInletPipe = pumpScale * 0.3; // inlet pipe below nozzle
-      const pumpTotalHeight = pumpBodyHeight + pumpInletPipe; // = 2.2 * scale
       const pumpBodyWidth = pumpScale * 0.75; // casing width
       const pumpVoluteBulge = pumpScale * 0.18;
       const pumpOutletPipe = pumpScale * 0.45;
-      // Account for orientation
+      // Pumps always stand upright; orientation only mirrors the discharge side
       const pumpOrientation = (component as any).orientation || 'left-right';
-      const isHorizontal = pumpOrientation === 'bottom-top' || pumpOrientation === 'top-bottom';
-
-      if (isHorizontal) {
-        // For horizontal orientations, swap width and height
-        const hWidth = pumpTotalHeight;  // vertical height becomes horizontal width
-        const hHeight = pumpBodyWidth + pumpVoluteBulge + pumpOutletPipe;  // horizontal extent becomes height
-        return {
-          x: -hWidth / 2 - 5,
-          y: -hHeight / 2 - 5,
-          width: hWidth + 10,
-          height: hHeight + 10,
-        };
-      } else {
-        // Vertical orientations (left-right, right-left)
+      {
         // The pump is drawn centered on pumpBodyHeight, with inlet pipe extending below
         // So top is at -pumpBodyHeight/2, bottom is at pumpBodyHeight/2 + pumpInletPipe
         const pumpOutletOnLeft = pumpOrientation === 'right-left';
@@ -4323,25 +4303,13 @@ function getFlowConnectionPosition(
     const pump = component as any;
     const r = (pump.diameter || 1) / 2 + 0.3;
     const orientation = pump.orientation || 'left-right';
-    // Account for pump orientation:
+    // Account for pump orientation (always upright, discharge to one side):
     // left-right: inlet bottom, outlet right
     // right-left: inlet bottom, outlet left (mirrored)
-    // bottom-top: inlet left, outlet right (rotated -90°)
-    // top-bottom: inlet right, outlet left (rotated +90°)
     if (orientation === 'right-left') {
-      // Vertical pump, outlet on left
       offset = isFrom ? { x: -r, y: 0 } : { x: 0, y: r };  // from=outlet(left), to=inlet(bottom)
       angle = isFrom ? Math.PI : Math.PI / 2;
-    } else if (orientation === 'bottom-top') {
-      // Horizontal pump, inlet on left, outlet on right
-      offset = isFrom ? { x: 0, y: -r } : { x: 0, y: r };  // from=outlet(top), to=inlet(bottom)
-      angle = isFrom ? -Math.PI / 2 : Math.PI / 2;
-    } else if (orientation === 'top-bottom') {
-      // Horizontal pump, inlet on right, outlet on left
-      offset = isFrom ? { x: 0, y: r } : { x: 0, y: -r };  // from=outlet(bottom), to=inlet(top)
-      angle = isFrom ? Math.PI / 2 : -Math.PI / 2;
     } else {
-      // left-right: vertical pump, outlet on right
       offset = isFrom ? { x: r, y: 0 } : { x: 0, y: r };  // from=outlet(right), to=inlet(bottom)
       angle = isFrom ? 0 : Math.PI / 2;
     }
@@ -4611,14 +4579,29 @@ export function renderFlowConnectionArrows(
  * connection list, which only changes when the plant is edited.
  */
 let flowIdCache: { connections: readonly Connection[]; ids: string[] } | undefined;
-function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
+
+function flowConnectionIds(plantState: PlantState): string[] {
   if (flowIdCache?.connections !== plantState.connections) {
     flowIdCache = {
       connections: plantState.connections,
       ids: assignFlowConnectionIds(plantState.connections),
     };
   }
-  const idx = flowIdCache.ids.indexOf(flowId);
+  return flowIdCache.ids;
+}
+
+/** The simulation flow connection id a plant connection was built into. */
+export function flowConnectionIdForPlantConnection(
+  connection: Connection,
+  plantState: PlantState
+): string | undefined {
+  const ids = flowConnectionIds(plantState);
+  const idx = plantState.connections.indexOf(connection);
+  return idx >= 0 ? ids[idx] : undefined;
+}
+
+function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
+  const idx = flowConnectionIds(plantState).indexOf(flowId);
   return idx >= 0 ? plantState.connections[idx] : undefined;
 }
 
@@ -5065,6 +5048,24 @@ function buildingWallColor(building: BuildingComponent): { r: number; g: number;
 }
 
 /**
+ * Wall thickness (m) a building actually renders with: the pressure rating
+ * drives it whenever one is set, otherwise the stored thickness.
+ * Rectangular buildings need thicker walls than cylindrical ones for the
+ * same pressure.
+ */
+function buildingWallThicknessM(building: BuildingComponent): number {
+  const shape = building.shape || 'cylinder';
+  const innerDim = shape === 'cylinder'
+    ? (building.diameter || 40)
+    : Math.max(building.width || 40, building.length || 40);
+  if (building.pressureRating !== undefined && building.pressureRating > 0) {
+    return calculateBuildingWallThickness(
+      building.pressureRating, innerDim, building.steelFraction || 0.1, shape);
+  }
+  return building.wallThickness || 0.5;
+}
+
+/**
  * Project the circle of radius r around pos at the given elevation to a
  * screen-space ellipse. Uses the TRUE center and axis endpoints - never a
  * centroid of projected bounding-box corners, which drifts as the
@@ -5135,6 +5136,63 @@ export function renderBuildingFloor(
   ctx.restore();
 }
 
+/**
+ * The near (camera-side) run of a building's footprint wall, drawn as a
+ * final pass on top of everything inside it.
+ *
+ * The wall band renderBuilding draws is the FAR half of the shell, so
+ * equipment inside a building always paints over the building - which reads
+ * as "the equipment is standing in front of the building", especially for
+ * anything below grade whose buried half hangs under the floor ellipse.
+ * Restoring the near edge on top puts the equipment back inside the wall.
+ */
+export function renderBuildingFrontEdge(
+  ctx: CanvasRenderingContext2D,
+  building: BuildingComponent,
+  worldToScreenFn: WorldToScreenFn
+): void {
+  const wall = buildingWallColor(building);
+  const thicknessM = buildingWallThicknessM(building);
+  const pos = building.position;
+
+  ctx.save();
+  const dpr = window.devicePixelRatio || 1;
+  ctx.resetTransform();
+  ctx.scale(dpr, dpr);
+  ctx.strokeStyle = `rgb(${wall.r}, ${wall.g}, ${wall.b})`;
+  ctx.lineCap = 'butt';
+
+  if (building.shape === 'cylinder') {
+    const r = (building.diameter || 40) / 2;
+    const base = projectCircleToEllipse(worldToScreenFn, pos, r, 0);
+    if (base.rx > 0 && base.ry > 0) {
+      // px per metre from the projection itself, so the drawn wall keeps its
+      // real thickness at any zoom or camera distance
+      ctx.lineWidth = Math.max(2, thicknessM * (base.rx / r));
+      ctx.beginPath();
+      // 0..PI clockwise sweeps through +y, the half of the base ellipse
+      // nearest the camera
+      ctx.ellipse(base.cx, base.cy, base.rx, base.ry, 0, 0, Math.PI, false);
+      ctx.stroke();
+    }
+  } else {
+    const halfW = (building.width || 40) / 2;
+    const halfD = (building.length || 40) / 2;
+    const frontLeft = worldToScreenFn({ x: pos.x - halfW, y: pos.y - halfD }, 0);
+    const frontRight = worldToScreenFn({ x: pos.x + halfW, y: pos.y - halfD }, 0);
+    if (frontLeft.scale > 0 && frontRight.scale > 0) {
+      const pxPerM = Math.abs(frontRight.pos.x - frontLeft.pos.x) / (halfW * 2);
+      ctx.lineWidth = Math.max(2, thicknessM * pxPerM);
+      ctx.beginPath();
+      ctx.moveTo(frontLeft.pos.x, frontLeft.pos.y);
+      ctx.lineTo(frontRight.pos.x, frontRight.pos.y);
+      ctx.stroke();
+    }
+  }
+
+  ctx.restore();
+}
+
 function renderBuilding(
   ctx: CanvasRenderingContext2D,
   building: BuildingComponent,
@@ -5160,15 +5218,7 @@ function renderBuilding(
   const wallColorStr = `rgb(${wallColor.r}, ${wallColor.g}, ${wallColor.b})`;
   const wallHighlightStr = `rgb(${Math.min(255, wallColor.r + 30)}, ${Math.min(255, wallColor.g + 30)}, ${Math.min(255, wallColor.b + 30)})`;
 
-  // Calculate wall thickness from pressure rating and steel fraction
-  // Rectangular buildings need thicker walls than cylindrical for the same pressure
-  const innerDim = building.shape === 'cylinder' ? (building.diameter || 40) : Math.max(building.width || 40, building.length || 40);
-  const buildingShape = building.shape || 'cylinder';
-  let wallThicknessM = building.wallThickness || 0.5;
-  if (building.pressureRating !== undefined && building.pressureRating > 0) {
-    wallThicknessM = calculateBuildingWallThickness(building.pressureRating, innerDim, steelFrac, buildingShape);
-  }
-  const wallPx = Math.max(2, wallThicknessM * view.zoom);
+  const wallPx = Math.max(2, buildingWallThicknessM(building) * view.zoom);
 
   // In isometric mode with perspective, use worldToScreenFn to properly position
   // the back wall in world-Y space (farther away = higher on screen, smaller)

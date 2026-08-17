@@ -464,11 +464,9 @@ export const componentDefinitions: Record<string, {
         { value: 'centrifugal', label: 'Centrifugal' },
         { value: 'positive', label: 'Positive Displacement' }
       ]},
-      { name: 'orientation', type: 'select', label: 'Flow Direction', default: 'left-right', help: 'Re-picked automatically whenever you connect the pump (it turns to face whatever it is connected to). Edit it here afterward to override.', options: [
-        { value: 'left-right', label: 'Inlet Left → Outlet Right' },
-        { value: 'right-left', label: 'Inlet Right → Outlet Left' },
-        { value: 'bottom-top', label: 'Inlet Bottom → Outlet Top' },
-        { value: 'top-bottom', label: 'Inlet Top → Outlet Bottom' }
+      { name: 'orientation', type: 'select', label: 'Flow Direction', default: 'left-right', help: 'Which side the discharge nozzle faces. The pump always stands upright (suction below, motor on top) - real vertical process pumps are not laid on their side. Re-picked automatically whenever you connect the pump (it turns to face whatever it is connected to); edit it here afterward to override.', options: [
+        { value: 'left-right', label: 'Discharge Right (suction below)' },
+        { value: 'right-left', label: 'Discharge Left (suction below)' }
       ]},
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 2000, step: 10, unit: 'm', help: 'Charging/HPSI service needs ~1300-1600 m to overcome full primary pressure' },
