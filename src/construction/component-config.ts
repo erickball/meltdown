@@ -2788,15 +2788,21 @@ export class ComponentDialog {
       const pid = component.pid;
       const sKind = pid.sensor?.kind;
       const aKind = pid.actuator?.kind;
+      // This panel edits ONE signal against ONE number. A controller whose
+      // measurement or setpoint is an expression cannot be represented here,
+      // so its fields read blank rather than NaN - and the panel must not
+      // offer to overwrite what it cannot show. (The expression editor is the
+      // piece that replaces this; until then, edit those in the preset.)
+      const sp = typeof pid.setpoint === 'number' ? pid.setpoint : undefined;
       switch (optionName) {
         case 'sensorKind': return sKind;
         case 'sensorNode':
         case 'sensorConnection': return pid.sensor?.targetId ?? '';
-        case 'setpointLevel': if (sKind === 'node-level') return pid.setpoint; break;
-        case 'setpointPressure': if (sKind === 'node-pressure') return pid.setpoint / 1e5; break;
-        case 'setpointTemperature': if (sKind === 'node-temperature') return pid.setpoint - 273.15; break;
-        case 'setpointFlow': if (sKind === 'connection-flow') return pid.setpoint; break;
-        case 'setpointPower': if (sKind === 'reactor-power') return pid.setpoint * 100; break;
+        case 'setpointLevel': if (sKind === 'node-level') return sp; break;
+        case 'setpointPressure': if (sKind === 'node-pressure') return sp === undefined ? undefined : sp / 1e5; break;
+        case 'setpointTemperature': if (sKind === 'node-temperature') return sp === undefined ? undefined : sp - 273.15; break;
+        case 'setpointFlow': if (sKind === 'connection-flow') return sp; break;
+        case 'setpointPower': if (sKind === 'reactor-power') return sp === undefined ? undefined : sp * 100; break;
         case 'actuatorKind': return aKind;
         case 'actuatorValve':
         case 'actuatorPump':

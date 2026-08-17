@@ -27,6 +27,8 @@ import {
   mixtureCv,
 } from './simulation/gas-properties';
 import { pumpHeadPressure, pumpHeadFraction } from './simulation/operators/pump-curve';
+import { describeControllerSignal, primaryControllerSignal } from './simulation/operators/control-system';
+import type { ControllerSignal } from './simulation/types';
 import { hxBundleCount, hxTubeNodeIds } from './simulation/hx-bundles';
 import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
@@ -1409,8 +1411,8 @@ export function updateComponentDetail(
       const controllerType = component.controllerType as string | undefined;
       if (controllerType === 'pid') {
         const pid = component.pid as {
-          sensor: { kind: string; targetId: string };
-          setpoint: number;
+          sensor: ControllerSignal;
+          setpoint: number | ControllerSignal;
           actuator: { kind: string; targetId: string; min?: number; max?: number; rateLimit?: number };
           feedforward?: { kind: string; targetId: string };
           mode?: string;
@@ -1426,9 +1428,15 @@ export function updateComponentDetail(
             'reactor-power': sp => `${(sp * 100).toFixed(0)}% nominal`,
             'connection-flow': sp => `${sp.toFixed(1)} kg/s`,
           };
-          const spText = (spUnits[pid.sensor.kind] ?? ((sp: number) => `${sp}`))(pid.setpoint);
+          // A setpoint may be an EXPRESSION now (ratio stations, cascades), and
+          // a measurement may be a composite - so units only apply when both
+          // are plain, and otherwise the expression itself is the display.
+          const leaf = primaryControllerSignal(pid.sensor);
+          const spText = typeof pid.setpoint === 'number'
+            ? (spUnits[leaf?.kind ?? ''] ?? ((sp: number) => `${sp}`))(pid.setpoint)
+            : describeControllerSignal(pid.setpoint);
           html += `<div class="detail-row"><span class="detail-label">Mode:</span><span class="detail-value" style="color: ${pid.mode === 'manual' ? '#fa4' : '#7f7'};">${pid.mode === 'manual' ? 'Manual' : 'Auto'}</span></div>`;
-          html += `<div class="detail-row"><span class="detail-label">Sensor:</span><span class="detail-value">${pid.sensor.kind}${pid.sensor.targetId ? ` @ ${pid.sensor.targetId}` : ''}</span></div>`;
+          html += `<div class="detail-row"><span class="detail-label">Sensor:</span><span class="detail-value">${describeControllerSignal(pid.sensor)}</span></div>`;
           html += `<div class="detail-row"><span class="detail-label">Setpoint:</span><span class="detail-value">${spText}</span></div>`;
           html += `<div class="detail-row"><span class="detail-label">Actuator:</span><span class="detail-value">${pid.actuator.kind}${pid.actuator.targetId ? ` @ ${pid.actuator.targetId}` : ''}</span></div>`;
           if (pid.feedforward) {

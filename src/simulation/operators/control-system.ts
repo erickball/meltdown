@@ -651,6 +651,54 @@ export class ControlSystemOperator implements ConstraintOperator {
  * obstructions. Vapor nodes read 0; liquid-full nodes read the node height.
  * Shared with the steady-state detector and (later) UI display.
  */
+/**
+ * A measurement expression as readable text, for logs and for the UI.
+ *
+ * Anything that displays a controller has to cope with a setpoint that is no
+ * longer necessarily a number and a sensor that is no longer necessarily a
+ * leaf - `${sp.toFixed(1)} kg/s` on an expression is a TypeError, and in a
+ * render loop that takes the whole frame down with it.
+ */
+export function describeControllerSignal(sig: ControllerSignal | number | undefined): string {
+  if (sig === undefined) return '-';
+  if (typeof sig === 'number') return String(sig);
+  const op = (sig as { op?: string }).op ?? 'signal';
+  switch (op) {
+    case 'signal': {
+      const leaf = sig as { kind: string; targetId: string };
+      return leaf.targetId ? `${leaf.kind}(${leaf.targetId})` : leaf.kind;
+    }
+    case 'const':
+      return String((sig as { value: number }).value);
+    case 'scale': {
+      const n = sig as { input: ControllerSignal; factor: number; offset?: number };
+      const body = `${n.factor}x ${describeControllerSignal(n.input)}`;
+      return n.offset ? `(${body} ${n.offset > 0 ? '+' : '-'} ${Math.abs(n.offset)})` : body;
+    }
+    default: {
+      const n = sig as { inputs?: ControllerSignal[] };
+      return `${op}(${(n.inputs ?? []).map(describeControllerSignal).join(', ')})`;
+    }
+  }
+}
+
+/** The signal a measurement is really about - its first leaf. Exported for
+ *  displays that want to label a composite by what it follows. */
+export function primaryControllerSignal(
+  sig: ControllerSignal | undefined
+): { kind: ControllerSensorKind; targetId: string } | undefined {
+  if (!sig) return undefined;
+  const op = (sig as { op?: string }).op ?? 'signal';
+  if (op === 'signal') return sig as { kind: ControllerSensorKind; targetId: string };
+  if (op === 'const') return undefined;
+  if (op === 'scale') return primaryControllerSignal((sig as { input: ControllerSignal }).input);
+  for (const i of (sig as { inputs?: ControllerSignal[] }).inputs ?? []) {
+    const leaf = primaryControllerSignal(i);
+    if (leaf) return leaf;
+  }
+  return undefined;
+}
+
 export function nodeLiquidLevel(node: FlowNode): number {
   const phase = node.fluid.phase;
   if (phase === 'vapor') return 0;

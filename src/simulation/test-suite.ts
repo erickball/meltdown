@@ -10,7 +10,8 @@
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import { computeReactivityComponents } from './operators/neutronics.js';
-import { ControlSystemOperator } from './operators/control-system.js';
+import { ControlSystemOperator, describeControllerSignal,
+  primaryControllerSignal } from './operators/control-system.js';
 import {
   graphiteSpecificHeat,
   bedStagnantConductivity,
@@ -1661,6 +1662,26 @@ test('an expression made only of constants is refused - nothing to follow', () =
   }
   assert(message.includes('only of constants'),
     `a constant-only measurement must be refused, got: ${message || '(no error)'}`);
+});
+
+test('anything that displays a controller can survive an expression', () => {
+  // A setpoint is no longer necessarily a number and a sensor no longer
+  // necessarily a leaf. `sp.toFixed(1)` on an expression is a TypeError, and
+  // in a render loop that takes the whole frame with it - which is exactly
+  // what the Xe-100's three-element loop did to the GUI.
+  assertClose(describeControllerSignal(42).length > 0 ? 1 : 0, 1, 0, 'a plain number describes');
+  const expr = { op: 'sum' as const, inputs: [
+    { kind: 'connection-flow' as const, targetId: 'flow-a' },
+    { op: 'scale' as const, factor: -5, offset: 20,
+      input: { kind: 'node-level' as const, targetId: 'vessel' } },
+  ]};
+  const text = describeControllerSignal(expr);
+  assert(text.includes('sum') && text.includes('flow-a') && text.includes('vessel'),
+    `an expression must describe itself readably, got '${text}'`);
+  assert(primaryControllerSignal(expr)?.kind === 'connection-flow',
+    'and report the signal it follows');
+  assertClose(describeControllerSignal(undefined) === '-' ? 1 : 0, 1, 0,
+    'a missing signal must not throw either');
 });
 
 test('tuning follows the first signal named', () => {

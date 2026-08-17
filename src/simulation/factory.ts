@@ -28,6 +28,7 @@ import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
+import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
@@ -1591,14 +1592,9 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       lastOutput: initialOutput,
       lastError: 0,
     });
-    const describe = (sig: any): string =>
-      sig?.op && sig.op !== 'signal'
-        ? `${sig.op}(${(sig.inputs ?? [sig.input]).map(describe).join(', ')})`
-        : sig?.op === 'const' ? String(sig.value)
-        : `${sig?.kind}(${sig?.targetId})`;
-    console.log(`[Factory] PID controller '${id}': ${describe(pid.sensor)} -> ` +
-      `${pid.actuator.kind}(${pid.actuator.targetId}), setpoint=` +
-      `${typeof pid.setpoint === 'number' ? pid.setpoint : describe(pid.setpoint)}`);
+    console.log(`[Factory] PID controller '${id}': ${describeControllerSignal(pid.sensor)} -> ` +
+      `${pid.actuator.kind}(${pid.actuator.targetId}), ` +
+      `setpoint=${describeControllerSignal(pid.setpoint)}`);
   }
 
   // Add atmosphere node for LOCA scenarios

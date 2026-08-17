@@ -35,6 +35,7 @@ import {
   GasColorInfo,
 } from './colors';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
+import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
 
 /**
  * Calculate wall thickness from pressure rating using ASME pressure vessel formula.
@@ -3192,10 +3193,23 @@ function controllerTitleLines(controller: ControllerComponent): string[] {
   return [label];
 }
 
-/** Format a PID setpoint with units appropriate to the sensor kind. */
+/**
+ * Format a PID setpoint for the cabinet face.
+ *
+ * A setpoint may be an EXPRESSION now - a ratio station, a cascade - and a
+ * measurement may be a composite, so neither the units nor `.toFixed` can be
+ * assumed. Getting that wrong here is not a cosmetic bug: this runs inside
+ * the canvas render loop, so the TypeError took the whole frame down and left
+ * the plant drawn as bare outlines with a dead camera.
+ */
 function formatPidSetpoint(pid: NonNullable<ControllerComponent['pid']>): string {
   const sp = pid.setpoint;
-  switch (pid.sensor.kind) {
+  if (typeof sp !== 'number') {
+    // The cabinet has room for a label, not an algebra lesson.
+    const text = describeControllerSignal(sp);
+    return text.length > 20 ? `${text.slice(0, 19)}…` : text;
+  }
+  switch (primaryControllerSignal(pid.sensor)?.kind) {
     case 'node-pressure': return `${(sp / 1e6).toFixed(2)} MPa`;
     case 'node-temperature': return `${sp.toFixed(0)} K`;
     case 'node-level': return `${sp.toFixed(2)} m`;
