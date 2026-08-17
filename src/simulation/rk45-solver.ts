@@ -588,6 +588,7 @@ export function findNonFiniteRate(rates: StateRates): string {
 
 // Rate limiter for the NaN-rate diagnostic log (wall-clock ms)
 let lastRatesNormNaNLog = 0;
+let lastStageRefusalLog = 0;
 
 // Rounding-scale bound for water inventory: stage arithmetic on a
 // proportionally-decaying export can land a hair below zero; a microgram is
@@ -1401,15 +1402,42 @@ export class RK45Solver {
     const carryNeutronicsDiagnostics = constrainedState !== state;
 
     const implicitMomentum = this.implicitMomentumActive();
-    for (const op of this.rateOperators) {
-      // The implicit pressure-flow solve owns connection momentum: skip the
-      // explicit momentum operator entirely. Its absence also removes flow
-      // momentum from the RK45 error estimate (no rates -> no contribution).
-      if (op.providesFlowMomentum && implicitMomentum) continue;
-      const t0 = performance.now();
-      const opRates = op.computeRates(constrainedState);
-      this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
-      totalRates = addRates(totalRates, opRates);
+    // A rate operator handed a TRIAL state may legitimately refuse it. RK
+    // stages routinely reach out into states the plant never occupies -
+    // that is what the error controller is for - and a model that checks its
+    // own domain (the OTSG closure asking the steam tables about a sliver of
+    // vapour carrying a whole node's energy) will say so. Refusing a trial
+    // state means "this step was too big", not "the physics is broken", and
+    // it is the same thing the constraint operators above are already allowed
+    // to say: reject the stage, let dt shrink, try again. If the state is
+    // genuinely broken rather than merely overshot, shrinking will not help
+    // and the solver's stuck-at-minimum-dt check still fails the run - after
+    // it has established that, rather than on the first trial evaluation.
+    let failingOp = '';
+    try {
+      for (const op of this.rateOperators) {
+        // The implicit pressure-flow solve owns connection momentum: skip the
+        // explicit momentum operator entirely. Its absence also removes flow
+        // momentum from the RK45 error estimate (no rates -> no contribution).
+        if (op.providesFlowMomentum && implicitMomentum) continue;
+        failingOp = op.name;
+        const t0 = performance.now();
+        const opRates = op.computeRates(constrainedState);
+        this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
+        totalRates = addRates(totalRates, opRates);
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // Throttled: a stage refusal is a normal part of finding the step size,
+      // and a plant that hits one usually hits it on every retry until dt is
+      // small enough. The first is the informative one.
+      const now = performance.now();
+      if (now - lastStageRefusalLog > 1000) {
+        console.warn(`[RK45 computeRates] Rate operator '${failingOp}' refused this stage, ` +
+          `rejecting it: ${message}`);
+        lastStageRefusalLog = now;
+      }
+      return null;
     }
 
     if (carryNeutronicsDiagnostics) {

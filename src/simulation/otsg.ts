@@ -489,6 +489,32 @@ export function evaluateOtsgAtP(
     throw new Error(`[OTSG] subcooled section energy is not a number: U1=${U1} J`);
   }
   const sat = saturationAtP(P);
+  /**
+   * The property surface, asked with this closure's name on it.
+   *
+   * The states here are TRIALS - a partition being searched for, not a plant
+   * state - and when the economizer has claimed most of the node's mass the
+   * leftovers are a sliver carrying all of its energy, which lands off the
+   * surface. Left bare, that arrives as "[WaterProps] Temperature out of
+   * range: T=5180 K" with nothing to say which bundle asked or what it was
+   * trying: it reads as the plant diverging, while every node in the plant is
+   * sitting at a sane temperature. The limits stay the property surface's own
+   * - refusing anything it would still extrapolate through would change which
+   * partitions exist, not just how the failure reads.
+   */
+  const probe = (u: number, v: number, what: string) => {
+    try {
+      return calculateState(1, u, v);
+    } catch (e) {
+      throw new Error(
+        `[OTSG] the ${what} the partition needs is off the property surface: ` +
+        `${(u / 1e6).toFixed(1)} MJ/kg at ${v.toFixed(4)} m3/kg, ` +
+        `${(P / 1e5).toFixed(1)} bar. The node holds ${massTotal.toFixed(0)} kg with ` +
+        `${(UTotal / 1e9).toFixed(2)} GJ in ${geom.tubeVolume.toFixed(1)} m3, and the ` +
+        `economizer claims ${(U1 / 1e9).toFixed(2)} GJ of that - too much of it, if the ` +
+        `rest has to look like this. (${e instanceof Error ? e.message : String(e)})`);
+    }
+  };
   const u1Bar = subcooledSectionMean(uFeedIn, sat);
   // The economizer's MASS follows from the energy it holds. Both descriptions
   // carry the same information under the profile closure - m1 = U1/u1Bar -
@@ -594,7 +620,7 @@ export function evaluateOtsgAtP(
         const residual = (mm: number) => {
           const uu = u2Full + E / mm;
           const vv = (VRest - (mR - mm) * vBarFull) / mm;
-          return calculateState(1, uu, vv).pressure - P;
+          return probe(uu, vv, 'dry-steam state').pressure - P;
         };
         // Property-surface noise scale: at the dryout join and in the
         // all-superheat case the root sits exactly ON m3Sat, where the
@@ -649,7 +675,7 @@ export function evaluateOtsgAtP(
   // genuinely superheated one - and any supercritical fluid, which has no
   // saturation temperature to fall back on - needs the property surface.
   const T3 = m3 > 0 && (u3 > sat.u_g || P >= P_CRITICAL)
-    ? calculateState(1, u3, v3).temperature
+    ? probe(u3, v3, 'steam section').temperature
     : sat.T;
 
   const V1 = m1 * v1, V2 = m2 * v2, V3 = m3 * v3;

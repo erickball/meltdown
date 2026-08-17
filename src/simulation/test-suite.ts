@@ -1400,6 +1400,31 @@ test('an impossible leftover is refused loudly, not fudged', () => {
     `an unrepresentable leftover must throw an explanatory [OTSG] error, got: ${message || '(no error)'}`);
 });
 
+test('a sliver of leftovers carrying the whole node is refused by name', () => {
+  // The economizer ledger claiming most of the mass leaves a sliver to hold
+  // the node's energy, and the trial state at the dryout end then runs off
+  // the property surface. Evaluating it anyway produced a bare
+  // "[WaterProps] Temperature out of range: T=5180 K" from inside the render
+  // loop - an error naming neither the bundle nor what asked, while every
+  // node in the plant sat at a sane temperature. It must name itself.
+  const P = 165e5;
+  const sat = saturationAtP(P);
+  const geom = { tubeVolume: 11, tubeLength: 1, heatArea: 2000 };
+  const uFeed = sat.u_f - 400e3;
+  const m1 = 880;                       // of 1000 kg - a stale economizer
+  const U1 = m1 * subcooledSectionMean(uFeed, sat);
+  let message = '';
+  try {
+    evaluateOtsgAtP(U1, 1000, U1 + 1.9e9, P, uFeed, geom);
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('[OTSG]'),
+    `the closure must name itself, not leak a property-table error: ${message || '(none)'}`);
+  assert(message.includes('economizer') && message.includes('GJ'),
+    `and say what the node was holding and what the economizer claimed: ${message}`);
+});
+
 test('boiling outlet quality inverts the mean-volume closure', () => {
   const sat = saturationAtP(60e5);
   for (const xOut of [0.02, 0.25, 0.6, 1]) {
