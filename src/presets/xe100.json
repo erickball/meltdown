@@ -770,6 +770,143 @@
       }
     ],
     [
+      "fwh-1",
+      {
+        "id": "fwh-1",
+        "type": "heatExchanger",
+        "label": "HP Feedwater Heater",
+        "position": {
+          "x": 63,
+          "y": 99
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 1.8,
+        "height": 7,
+        "hxType": "utube",
+        "tubeCount": 900,
+        "tubeModel": "lumped",
+        "material": "low-alloy-steel",
+        "pressureRating": 40,
+        "tubePressureRating": 250,
+        "shellPressureRating": 40,
+        "plenumLength": 0.5,
+        "tubeOD": 0.019,
+        "extractionSource": {
+          "turbineId": "turbine-1",
+          "pressure": 2500000
+        },
+        "tubeFluid": {
+          "temperature": 490,
+          "pressure": 17000000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "primaryFluid": {
+          "temperature": 490,
+          "pressure": 17000000,
+          "phase": "liquid",
+          "quality": 0,
+          "flowRate": 0
+        },
+        "shellFluid": {
+          "temperature": 497,
+          "pressure": 2500000,
+          "phase": "two-phase",
+          "quality": 0.5,
+          "flowRate": 0
+        },
+        "secondaryFluid": {
+          "temperature": 497,
+          "pressure": 2500000,
+          "phase": "two-phase",
+          "quality": 0.5,
+          "flowRate": 0
+        },
+        "fillLevel": 0.3,
+        "ports": [
+          {
+            "id": "fwh-1-tube-1",
+            "position": {
+              "x": -0.5,
+              "y": 3.5
+            },
+            "direction": "both"
+          },
+          {
+            "id": "fwh-1-tube-2",
+            "position": {
+              "x": 0.5,
+              "y": -3.5
+            },
+            "direction": "both"
+          },
+          {
+            "id": "fwh-1-shell-1",
+            "position": {
+              "x": -1.1,
+              "y": -3
+            },
+            "direction": "both"
+          },
+          {
+            "id": "fwh-1-shell-2",
+            "position": {
+              "x": 1.1,
+              "y": 3
+            },
+            "direction": "both"
+          }
+        ],
+        "nqa1": false
+      }
+    ],
+    [
+      "val-bleed-1",
+      {
+        "id": "val-bleed-1",
+        "type": "valve",
+        "label": "FWH Extraction Valve",
+        "valveType": "gate",
+        "position": {
+          "x": 70,
+          "y": 99
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "diameter": 0.1,
+        "opening": 0,
+        "fluid": {
+          "temperature": 700,
+          "pressure": 2500000,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "nqa1": false,
+        "pressureRating": 200,
+        "ports": [
+          {
+            "id": "val-bleed-1-in",
+            "position": {
+              "x": -0.5,
+              "y": 0
+            },
+            "direction": "both"
+          },
+          {
+            "id": "val-bleed-1-out",
+            "position": {
+              "x": 0.5,
+              "y": 0
+            },
+            "direction": "both"
+          }
+        ]
+      }
+    ],
+    [
       "cv-1",
       {
         "id": "cv-1",
@@ -910,6 +1047,40 @@
             "min": 0.05,
             "max": 0.45,
             "rateLimit": 0.01
+          }
+        }
+      }
+    ],
+    [
+      "ctl-fwh-1",
+      {
+        "id": "ctl-fwh-1",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "FW Heater Outlet Temp",
+        "position": {
+          "x": 20,
+          "y": 74
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "node-temperature",
+            "targetId": "fwh-1-tube"
+          },
+          "setpoint": 473,
+          "invert": true,
+          "aggressiveness": 0.4,
+          "actuator": {
+            "kind": "valve-position",
+            "targetId": "val-bleed-1",
+            "min": 0,
+            "max": 0.35,
+            "rateLimit": 0.02
           }
         }
       }
@@ -1072,8 +1243,8 @@
     {
       "fromComponentId": "fw-pump-1",
       "fromPortId": "fw-pump-1-outlet",
-      "toComponentId": "val-fwcv-1",
-      "toPortId": "val-fwcv-1-in",
+      "toComponentId": "fwh-1",
+      "toPortId": "fwh-1-tube-1",
       "fromElevation": 0,
       "toElevation": 0,
       "flowArea": 0.05,
@@ -1157,6 +1328,50 @@
       "flowArea": 0.0003,
       "length": 0.5,
       "resistanceCoeff": 2
+    },
+    {
+      "fromComponentId": "fwh-1",
+      "fromPortId": "fwh-1-tube-2",
+      "toComponentId": "val-fwcv-1",
+      "toPortId": "val-fwcv-1-in",
+      "fromElevation": 0,
+      "toElevation": 0,
+      "flowArea": 0.05,
+      "length": 4,
+      "resistanceCoeff": 2
+    },
+    {
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2",
+      "toComponentId": "val-bleed-1",
+      "toPortId": "val-bleed-1-in",
+      "fromElevation": 0,
+      "toElevation": 0,
+      "flowArea": 0.004,
+      "length": 20,
+      "resistanceCoeff": 6
+    },
+    {
+      "fromComponentId": "val-bleed-1",
+      "fromPortId": "val-bleed-1-out",
+      "toComponentId": "fwh-1",
+      "toPortId": "fwh-1-shell-1",
+      "fromElevation": 0,
+      "toElevation": 0,
+      "flowArea": 0.004,
+      "length": 6,
+      "resistanceCoeff": 2
+    },
+    {
+      "fromComponentId": "fwh-1",
+      "fromPortId": "fwh-1-shell-2",
+      "toComponentId": "condenser-1",
+      "toPortId": "condenser-1-inlet",
+      "fromElevation": 0,
+      "toElevation": 3,
+      "flowArea": 0.006,
+      "length": 8,
+      "resistanceCoeff": 40
     }
   ]
 }
