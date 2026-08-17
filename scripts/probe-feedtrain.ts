@@ -19,6 +19,7 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
+import { nodeLiquidLevel, ControlSystemOperator } from '../src/simulation/operators/control-system';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const seconds = parseFloat(process.argv[2] || '120');
@@ -53,6 +54,14 @@ function line(state: SimulationState) {
   const dv = state.components.valves.get('val-fwhdr-1');
   const drain = conn(state, 'flow-fwh-1-val-fwhdr-1');
   const sgPhase = state.flowNodes.get('hx-1-tube')?.fluid.phase ?? '?';
+  const ctl = state.components.controllers?.get('ctl-fw-1');
+  const op = new ControlSystemOperator() as unknown as {
+    readSensor(s: SimulationState, c: unknown): number;
+    readSetpoint(s: SimulationState, c: unknown): number;
+  };
+  const fw = ctl
+    ? { pv: op.readSensor(state, ctl), sp: op.readSetpoint(state, ctl), out: ctl.lastOutput }
+    : { pv: NaN, sp: NaN, out: NaN };
   if (!pumpOut || !fwhTube || !fwhShell || !sg) return;
 
   console.log(
@@ -78,9 +87,15 @@ function line(state: SimulationState) {
     // bleed's DONOR state (a flooded SG hands its 'steam' port water), the
     // drain, and the shell's own quality.
     `${sgPhase.padStart(10)} ` +
+    `${sg.fluid.mass.toFixed(0).padStart(6)} ` +
+    `${nodeLiquidLevel(sg).toFixed(3).padStart(6)} ` +
     `${(drain?.massFlowRate ?? NaN).toFixed(1).padStart(6)} ` +
     `${(fwhShell.fluid.quality ?? NaN).toFixed(3).padStart(6)} ` +
-    `${(dv?.position ?? NaN).toFixed(2).padStart(5)}`
+    `${(dv?.position ?? NaN).toFixed(2).padStart(5)} | ` +
+    // What the feedwater loop itself thinks: its measurement, its setpoint,
+    // and the command it is writing.
+    `${fw.pv.toFixed(1).padStart(6)} ${fw.sp.toFixed(1).padStart(6)} ` +
+    `${fw.out.toFixed(2).padStart(5)}`
   );
 }
 
@@ -89,7 +104,7 @@ console.log('valve shuts when it goes negative. "fwh tube" is the feedwater insi
 console.log('heater - it leaving the liquid phase means the feed line is flashing.\n');
 console.log(
   '    t  W_pump  W_toSG  W_stm  split  bleed |  P_pump    P_SG      dP |  P_fwh  T_fwh      phase   m_fwh |' +
-  ' P_shl  T_shl  m_shl | speed bleed |  SG phase  drain     x_s drainV');
+  ' P_shl  T_shl  m_shl | speed bleed |  SG phase   m_sg  lvl_sg  drain     x_s drainV |  fw_pv  fw_sp  cmd');
 line(sim.state);
 for (let t = 0; t < seconds; t++) {
   try {

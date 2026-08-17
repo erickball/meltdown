@@ -30,6 +30,7 @@ import {
   A3_3,
 } from './graphite.js';
 import { cloneSimulationState } from './solver.js';
+import { hxTubeLengthFactor, helicalLengthFactor, hxTubeLength } from './hx-bundles.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
@@ -1494,6 +1495,62 @@ test('no expansion available: zero work, state unchanged', () => {
 // ============================================================================
 
 console.log('Running Meltdown Simulation Test Suite...\n');
+
+// ============================================================================
+// Helical bundle geometry
+// ============================================================================
+// A helical coil's length is set by packing: the bundle has to fill the
+// annulus between the central riser and the shell wall, so tube count and
+// tube length are the same design decision made twice.
+
+category('Helical geometry');
+
+const COIL = { hxType: 'helical', width: 2.8, height: 14, plenumLength: 0.8, tubeOD: 0.019 };
+
+test('fewer tubes means longer ones - the same surface either way', () => {
+  // A = 4 phi V_annulus / d is independent of how you cut the tubing up, so
+  // tube count buys velocity and pressure drop, not area. That IS the trade.
+  const areaOf = (tubeCount: number) => {
+    const hx = { ...COIL, tubeCount };
+    return Math.PI * COIL.tubeOD * hxTubeLength(hx) * tubeCount;
+  };
+  assertClose(areaOf(300) / areaOf(1000), 1, 1e-9, 'surface must not depend on tube count');
+  const f300 = helicalLengthFactor({ ...COIL, tubeCount: 300 });
+  const f1000 = helicalLengthFactor({ ...COIL, tubeCount: 1000 });
+  assertClose(f300 / f1000, 1000 / 300, 1e-9, 'the factor scales as 1/N');
+  assert(f300 > 8 && f300 < 16,
+    `a 300-tube coil in a 2.8 m shell should wind ~12x, got ${f300.toFixed(1)}`);
+});
+
+test('a coil that cannot fit is refused, not silently wound tighter', () => {
+  let message = '';
+  try {
+    hxTubeLengthFactor({ ...COIL, tubeCount: 5000 });   // the old Xe-100 number
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('cannot fit'),
+    `5000 tubes do not fit a 2.8 m shell and must be refused, got: ${message || '(none)'}`);
+});
+
+test('a hand-set factor is honoured up to the packing limit', () => {
+  const derived = helicalLengthFactor({ ...COIL, tubeCount: 300 });
+  assertClose(hxTubeLengthFactor({ ...COIL, tubeCount: 300, tubeLengthFactor: derived * 2 }),
+    derived * 2, 1e-9, 'a denser winding inside the limit is the design decision');
+  let message = '';
+  try {
+    hxTubeLengthFactor({ ...COIL, tubeCount: 300, tubeLengthFactor: derived * 4 });
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('does not fit'),
+    `winding past the packing limit must be refused, got: ${message || '(none)'}`);
+});
+
+test('straight and U-tube bundles are unaffected by the coil derivation', () => {
+  assertClose(hxTubeLengthFactor({ ...COIL, hxType: 'straight', tubeCount: 5000 }), 1, 1e-9, 'straight');
+  assertClose(hxTubeLengthFactor({ ...COIL, hxType: 'utube', tubeCount: 5000 }), 2.1, 1e-9, 'U-tube');
+});
 
 // ============================================================================
 // Controller measurement expressions

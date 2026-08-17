@@ -237,7 +237,7 @@
         "width": 2.8,
         "height": 14,
         "hxType": "helical",
-        "tubeCount": 5000,
+        "tubeCount": 300,
         "tubeModel": "moving-boundary",
         "bundleCount": 2,
         "material": "alloy-800h",
@@ -1149,7 +1149,7 @@
             "kind": "node-level",
             "targetId": "fwh-1-shell"
           },
-          "setpoint": 0.3,
+          "setpoint": 2.0,
           "invert": true,
           "aggressiveness": 1.5,
           "actuator": {

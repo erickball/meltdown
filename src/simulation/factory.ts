@@ -1568,7 +1568,10 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       id,
       label: component.label || id,
       mode: pid.mode ?? 'auto',
-      sensor: { kind: pid.sensor.kind, targetId: pid.sensor.targetId },
+      // Passed through whole, not rebuilt field by field: a measurement can be
+      // an EXPRESSION over signals (see ControllerSignal), and picking out
+      // kind/targetId would silently flatten one to a sensor pointing nowhere.
+      sensor: pid.sensor,
       setpoint: pid.setpoint,
       feedforward: pid.feedforward
         ? { kind: pid.feedforward.kind, targetId: pid.feedforward.targetId }
@@ -1588,8 +1591,14 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       lastOutput: initialOutput,
       lastError: 0,
     });
-    console.log(`[Factory] PID controller '${id}': ${pid.sensor.kind}(${pid.sensor.targetId}) -> ` +
-      `${pid.actuator.kind}(${pid.actuator.targetId}), setpoint=${pid.setpoint}`);
+    const describe = (sig: any): string =>
+      sig?.op && sig.op !== 'signal'
+        ? `${sig.op}(${(sig.inputs ?? [sig.input]).map(describe).join(', ')})`
+        : sig?.op === 'const' ? String(sig.value)
+        : `${sig?.kind}(${sig?.targetId})`;
+    console.log(`[Factory] PID controller '${id}': ${describe(pid.sensor)} -> ` +
+      `${pid.actuator.kind}(${pid.actuator.targetId}), setpoint=` +
+      `${typeof pid.setpoint === 'number' ? pid.setpoint : describe(pid.setpoint)}`);
   }
 
   // Add atmosphere node for LOCA scenarios

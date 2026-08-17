@@ -61,17 +61,97 @@ export function hxBundleIndexFromPortId(portId: string): number {
 
 /**
  * Per-tube length as a multiple of the bundle's height: a U-tube runs up,
- * around and back down; a straight tube runs once.
+ * around and back down; a straight tube runs once; a helical coil winds, and
+ * how far it winds is geometry, not a guess.
  *
- * HELICAL IS KNOWN WRONG at 1.0 and is left there deliberately. A helical
- * coil is the whole point of a helix - real once-through coils run 3-8x the
- * shell height - so both the heat area and the tube friction are understated
- * for every helical exchanger in the plant library. Raising it changes the
- * duty of every HTGR-style SG built so far, which is a calibration decision
- * rather than a bug fix, so it wants deciding rather than sneaking in.
+ * A helix of radius r and pitch P has length sqrt(1 + (2 pi r / P)^2) per unit
+ * of axial rise, so the factor is set by how tightly the coil is wound - and
+ * what sets THAT is packing. The bundle has to fit in the annulus between the
+ * central riser and the shell wall, and the tubes it contains occupy
+ *
+ *     N * lambda * H * (pi/4) d^2   of   phi * pi (r_out^2 - r_in^2) * H
+ *
+ * so lambda = 4 phi (r_out^2 - r_in^2) / (N d^2). Fewer tubes in the same
+ * shell means each one has to be longer to fill it - which is exactly the
+ * trade a designer makes, and why tube count and tube length cannot be set
+ * independently.
+ *
+ * phi = 0.2 is the volumetric packing of a GAS-side helical bundle: the tubes
+ * take a fifth of the annulus and the rest is flow path, because a gas side
+ * that packs tighter cannot pass its flow without eating the whole pressure
+ * budget. (A liquid-side bundle packs 2-3x tighter, which is why this is a
+ * helical-specific number.) For a 2.8 m shell with 300 tubes of 19 mm it
+ * gives ~12, or ~170 m of tube - the right order for a 200 MW helical SG,
+ * whose surface has to come out near 3000 m2.
  */
-export function hxTubeLengthFactor(hxType: string | undefined): number {
-  return hxType === 'utube' ? 2.1 : 1.0;
+const HELICAL_PACKING = 0.20;
+/** The tightest a bundle could be wound before tubes touch - the fit limit a
+ *  hand-set factor is checked against. */
+const HELICAL_PACKING_MAX = 0.55;
+/** The coil annulus as fractions of the shell radius: a central riser inside,
+ *  a clearance outside. */
+const COIL_R_IN = 0.30, COIL_R_OUT = 0.95;
+
+export interface HxTubeGeometry {
+  hxType?: string;
+  width?: number;
+  height?: number;
+  plenumLength?: number;
+  tubeOD?: number;
+  tubeCount?: number;
+  /** Hand-set length factor, overriding the packing derivation. Refused if
+   *  the tubes would not physically fit. */
+  tubeLengthFactor?: number;
+}
+
+/** Coil annulus cross-section (m2) available to the tubes. */
+function coilAnnulusArea(hx: HxTubeGeometry): number {
+  const R = (hx.width ?? 3) / 2;
+  return Math.PI * ((COIL_R_OUT * R) ** 2 - (COIL_R_IN * R) ** 2);
+}
+
+/** The length factor a helical bundle's own geometry implies. */
+export function helicalLengthFactor(hx: HxTubeGeometry): number {
+  const d = hx.tubeOD || 0.022;
+  const n = Math.max(1, hx.tubeCount || 1000);
+  const tubeCrossSection = Math.PI * d * d / 4;
+  return HELICAL_PACKING * coilAnnulusArea(hx) / (n * tubeCrossSection);
+}
+
+export function hxTubeLengthFactor(hx: HxTubeGeometry | string | undefined): number {
+  // Callers that only have the type keep the simple behaviour.
+  if (typeof hx === 'string' || hx === undefined) {
+    return hx === 'utube' ? 2.1 : 1.0;
+  }
+  const derived = hx.hxType === 'utube' ? 2.1
+    : hx.hxType === 'helical' ? helicalLengthFactor(hx)
+    : 1.0;
+  const manual = hx.tubeLengthFactor;
+  if (manual === undefined) {
+    if (derived < 1) {
+      throw new Error(
+        `[HX] ${hx.tubeCount} tubes of ${((hx.tubeOD || 0.022) * 1e3).toFixed(0)} mm cannot fit ` +
+        `a ${(hx.width ?? 3).toFixed(1)} m shell: even wound flat they need ` +
+        `${(1 / derived).toFixed(1)}x the annulus there is. Fewer tubes, or a wider shell.`);
+    }
+    return derived;
+  }
+  // A hand-set factor is honoured as long as the tubes fit. Winding tighter
+  // than the derivation means packing denser, and there is a limit.
+  const maxFactor = derived * (HELICAL_PACKING_MAX / HELICAL_PACKING);
+  if (!(manual >= 1)) {
+    throw new Error(
+      `[HX] tubeLengthFactor ${manual} is below 1 - a tube cannot be shorter than the ` +
+      `bundle it runs through.`);
+  }
+  if (hx.hxType === 'helical' && manual > maxFactor) {
+    throw new Error(
+      `[HX] tubeLengthFactor ${manual.toFixed(1)} does not fit: ${hx.tubeCount} tubes that long ` +
+      `would pack ${(HELICAL_PACKING * manual / derived * 100).toFixed(0)}% of the coil annulus, ` +
+      `past the ${(HELICAL_PACKING_MAX * 100).toFixed(0)}% where tubes touch. The most that fits ` +
+      `is ${maxFactor.toFixed(1)}.`);
+  }
+  return manual;
 }
 
 /** Tube inner diameter (m). The wall is not modelled per tube; 12% of OD is
@@ -81,7 +161,7 @@ export function hxTubeInnerDiameter(tubeOD: number | undefined): number {
 }
 
 /** Length of one tube through the bundle (m). */
-export function hxTubeLength(hx: { hxType?: string; height?: number; plenumLength?: number }): number {
-  return hxTubeLengthFactor(hx.hxType) *
+export function hxTubeLength(hx: HxTubeGeometry): number {
+  return hxTubeLengthFactor(hx) *
     Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
 }
