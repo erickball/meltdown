@@ -24,6 +24,7 @@ import {
   GraphiteOxidationRateOperator,
   OtsgRateOperator,
   OtsgLedgerCheckOperator,
+  OtsgPartitionConstraintOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -179,6 +180,7 @@ export class GameLoop {
 
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
+      this.rk45Solver.addConstraintOperator(new OtsgPartitionConstraintOperator()); // boiler tubes: partition-owned pressure overwrites the uniform read
       this.rk45Solver.addConstraintOperator(new BurstCheckOperator()); // Check for component ruptures
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
       this.rk45Solver.addConstraintOperator(new ChokedFlowDisplayOperator()); // Sets conn.isChoked for debug display

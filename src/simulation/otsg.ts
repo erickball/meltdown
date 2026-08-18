@@ -11,7 +11,7 @@
  *
  * STATE. The reference closure (evaluateOtsg) integrates section masses m1,
  * m2, m3 and the superheat energy U3 and solves pressure from the volume.
- * The RUNTIME closure (evaluateOtsgAtP) is the one the plant uses: the node's
+ * The RUNTIME closure (evaluateOtsgPartition) is the one the plant uses: the node's
  * ordinary (mass, energy) totals and its (u,v) pressure stay where they are,
  * and the WHOLE partition is SOLVED from them - no partition state is
  * integrated at all. The one degree of freedom the totals cannot supply (a
@@ -178,8 +178,11 @@ export function boilingMeanVolume(v_f: number, v_g: number, xOut = 1): number {
  * pressure response of a boiler lives in its vapor.
  */
 export function subcooledLiquidV(u: number): number {
-  // Secant on T over the saturated-liquid energy curve
-  let Tlo = 274, Thi = 645;
+  // Secant on T over the saturated-liquid energy curve. The bracket runs to
+  // the dome top itself: stopping at 645 K left a 2-K gap under the
+  // critical point, and near-critical flooded probes (u ~ 1.9 MJ/kg) landed
+  // in it and were refused as "not subcooled" when they plainly are.
+  let Tlo = 274, Thi = 647.09;
   const ulo = saturatedLiquidEnergy(Tlo), uhi = saturatedLiquidEnergy(Thi);
   if (u <= ulo) return 1 / saturatedLiquidDensity(274);
   if (u >= uhi) {
@@ -421,138 +424,128 @@ export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): num
 }
 
 /**
- * Sectioned evaluation AT a given pressure, with the WHOLE partition solved
- * from the node's own conserved totals - mass, energy and the tube volume.
- * Nothing about the partition is integrated any more.
+ * The RUNTIME closure: partition AND pressure solved together from the
+ * node's conserved totals, the economizer's integrated energy, and the wall.
  *
- * WHY NOTHING IS INTEGRATED. The tube side carries four descriptors - the
- * subcooled section, the boiling section's outlet quality, m3 and u3 -
- * against three totals, so closing the model needs exactly ONE piece of
- * information beyond the totals. Every attempt to carry that piece as
- * integrated state has failed the same way: an integrated m3 accumulated
- * interface fluxes with no idea what volume it had to fit (sections claiming
- * 2.6x the tube), and an integrated U1 found its own flux equilibrium with no
- * channel back to the totals, so the mismatch landed on the one unbounded
- * descriptor - the vapor - as steam far hotter than anything heating it
- * (329-bar leftovers inside a 160-bar node, sustained for hundreds of
- * seconds, was the measured failure).
+ * WHY PRESSURE IS SOLVED HERE. A boiler tube holds cold feed at one end and
+ * superheated steam at the other, and both sit BELOW the saturation tie line
+ * in (u, v) - the subcooled slug by its energy deficit, the steam because
+ * the vapor isobar's du/dv runs at about half the tie line's slope. Blend
+ * them into one (u, v) pair and the uniform EOS reads the mixture as
+ * low-pressure two-phase: a partition built at 80 bar comes back at 53. That
+ * bias is not a detail - the flow solver, the relief valves and the
+ * governor were all steering on it. So the tube's pressure is the one the
+ * PARTITION needs to pack its sections into the tube volume,
  *
- * THE WALL IS THE MISSING CLOSURE. Thermodynamics cannot supply the fourth
- * equation - a tube of cold slug plus hot steam and a tube of lukewarm mush
- * have identical totals - but heat transfer can: at the quasi-steady state
- * the sections describe, the superheat section's temperature is set by its
- * own approach to its own wall,
+ *     m1 v1(P) + m2 v2(P) + m3 v3(P) = V_tube
  *
- *     T3 = T_sat + theta_mean * (T_wall3 - T_sat),
- *     theta_mean = hA3 / (2 W cp + hA3)
+ * exactly as the reference closure (evaluateOtsg) always computed it - and
+ * OtsgPartitionConstraintOperator publishes it as the node's pressure.
  *
- * (the mean-stream form of the same theta = 2NTU/(2+NTU) machinery the duty
- * calculation uses; theta_mean -> 1 for a stagnant section, which is the
- * standing-branch equilibrium, and -> 0 for a vanishing one, which is
- * saturation - the dryout state - so both limits are already the right
- * physics). With u3 pinned there, the three section masses solve LINEARLY
- * from mass, volume and energy, and no bookkeeping exists that could drift:
- * steam cannot leave hotter than its own metal, and every kilogram and joule
- * the partition claims is a kilogram and joule the node actually holds.
+ * THE FOUR DESCRIPTORS AND WHERE EACH COMES FROM. Against the node's two
+ * conserved totals the tube carries four unknowns; each gets its value from
+ * the physics that actually sets it:
+ *   - the ECONOMIZER from its integrated MASS m1: how much cold water is
+ *     in the tube is genuine dynamics - the history of feed that has not yet
+ *     boiled - with the transit-balance rate (otsgRates) as its update. Its
+ *     ENERGY is priced at the profile mean u1(P), so a falling pressure
+ *     reprices the slug colder and hands the difference to the vapor side
+ *     of the books: the flash a depressurized slug really undergoes;
+ *   - the BOILING OUTLET from the structural rule (dry steam only when
+ *     there is somewhere to hand it, else the energy says where it stops);
+ *   - the SUPERHEAT MASS from the energy total;
+ *   - the SUPERHEAT ENERGY from the WALL: the steam's approach to its own
+ *     metal, T3 = Tsat + theta_mean (T_wall3 - Tsat) with
+ *     theta_mean = hA3/(2 W cp + hA3) - the mean-stream form of the duty
+ *     calculation's own theta machinery. A stagnant section soaks to its
+ *     metal; a strongly drawn one barely leaves saturation; a cold wall
+ *     pins it AT saturation, which is dryout. The steam physically cannot
+ *     leave hotter than the metal heating it, which is the property no
+ *     integrated vapor state could deliver (measured failure: 329-bar
+ *     steam inside what the uniform EOS called a 160-bar node, held for
+ *     hundreds of seconds by a drifted ledger).
  *
- * The boundary's dynamics are not lost - they moved into the metal, whose
- * thermal inertia is real integrated state. A cold wall pins T3 at
- * saturation; as the metal soaks, the pin rises and the partition follows.
+ * At a given pressure everything is CLOSED FORM - mass and energy split the
+ * leftovers in every regime - so the pressure search is one safeguarded
+ * 1-D root find on the volume residual, warm-started from the node's last
+ * published pressure. Regimes join continuously at their seams (each switch
+ * happens exactly where the two descriptions coincide):
  *
- * THE LATTICE. The pinned solve can return a negative mass, and each sign
- * says exactly which section the totals cannot support; the regimes join
- * continuously at the zero crossings:
+ *   m3 < 0  - flooded: no dry steam; the boiling section's mean quality
+ *             comes from the energy (and below zero quality the leftovers
+ *             are simply cooler-than-saturated liquid - a cold-filled tube
+ *             needs no special case, subcooledLiquidV is continuous with
+ *             the dome at x = 0);
+ *   m2 < 0  - the totals carry more energy than wall-limited steam can
+ *             hold: u3 unpins upward and the leftovers are one superheated
+ *             region (the post-depressurization transient; Q3 then runs
+ *             backwards and relaxes it, and there is no ledger to hold it
+ *             there);
+ *   above P_MAX - no sub-critical pressure can pack the inventory: the
+ *             dome is gone, the tube is one supercritical fluid at its own
+ *             uniform (u, v), whose EOS has no tie line to be biased by.
  *
- *   m3 < 0 - flooded. No room for dry steam: m3 = 0 and the boiling
- *       section's outlet quality joins the solve instead of u3. Volume AND
- *       energy both enforced (the pair is linear in (m2, m2*x2bar)). If even
- *       a zero-quality boiling section is too hot for the totals, the tube
- *       is one lump of subcooled liquid and the sections say so.
- *   m1 < 0 - no economizer. The totals cannot host a feed-profile slug at
- *       all (hot feed, or a tube gone mostly steam). The whole inventory is
- *       shared between boiling and vapor by the volume-and-energy rules
- *       below - restSplit - which is the old closure's leftover logic with
- *       nothing subtracted from it.
- *   m2 < 0 - no boiling section: a subcooled slug directly under steam
- *       hotter than the wall pin allows. Real for a while after a sudden
- *       depressurization (the vapor flashes hot while the slug lags), so u3
- *       unpins and solves from the totals with the economizer point as
- *       anchor; Q3 then runs backwards (steam heating its own wall), which
- *       is the physical channel that relaxes the state back into the
- *       lattice's interior. Bounded by the totals - there is no ledger to
- *       hold the state there.
- *
- * restSplit keeps the old three cases (flooded / dryout / superheat walk)
- * for the no-economizer inventory, including the walk-down root choice - see
- * its comment for why the FIRST bracket from the dryout end is the physical
- * root.
+ * THE LEDGER AND ITS LEASH. m1 is the one integrated descriptor left, and
+ * it is watched, not trusted: the integrator floors it at zero and ceilings
+ * it at the node's own mass; the closure caps the claim at the inventory
+ * (draws that removed slug water the ledger never saw leave - reported by
+ * OtsgLedgerCheckOperator); and because u3 is pinned, a drifting claim can
+ * no longer hide in phantom steam - it shows up as the pressure and the
+ * sections visibly disagreeing with the plant around them.
  */
 
 /** How the superheat section's wall pins its temperature - see
- *  evaluateOtsgAtP. Built by the operator (and every diagnostic) from the
- *  bundle's own metal and flows via otsgWallPin in otsg-operator.ts. */
+ *  evaluateOtsgPartition. Built by the operator (and every diagnostic) from
+ *  the bundle's own metal and flows via otsgWallPin in otsg-operator.ts. */
 export interface OtsgWallPin {
   TWall3: number;   // K   - the superheat section's metal temperature
   hA3Full: number;  // W/K - steam-film conductance if section 3 owned the whole bundle
   WCp3: number;     // W/K - steam draw's carrying capacity (W_steam * cp)
 }
 
-export function evaluateOtsgAtP(
+export function evaluateOtsgPartition(
   massTotal: number,
   UTotal: number,
-  P: number,
+  m1Ledger: number,
   uFeedIn: number,
   geom: OtsgGeometry,
   pin: OtsgWallPin,
+  PStart?: number,
 ): OtsgEval {
-  const sat = saturationAtP(P);
-  /**
-   * The property surface, asked with this closure's name on it.
-   *
-   * The states probed here are TRIALS - a partition being searched for, not
-   * a plant state - and a node whose totals are extreme (an RK stage mid-
-   * rejection, a tube flashing empty) can push them off the surface. Left
-   * bare that arrives as "[WaterProps] Temperature out of range" with
-   * nothing to say which bundle asked or what it was trying; it reads as the
-   * plant diverging while every node sits at a sane temperature.
-   */
+  if (!Number.isFinite(m1Ledger) || m1Ledger < 0) {
+    throw new Error(`[OTSG] economizer ledger is not a physical mass: m1=${m1Ledger} kg`);
+  }
+  const V = geom.tubeVolume;
+
   const probe = (u: number, v: number, what: string) => {
     try {
       return calculateState(1, u, v);
     } catch (e) {
       throw new Error(
         `[OTSG] the ${what} the partition needs is off the property surface: ` +
-        `${(u / 1e6).toFixed(1)} MJ/kg at ${v.toFixed(4)} m3/kg, ` +
-        `${(P / 1e5).toFixed(1)} bar. The node holds ${massTotal.toFixed(0)} kg with ` +
-        `${(UTotal / 1e9).toFixed(2)} GJ in ${geom.tubeVolume.toFixed(1)} m3. ` +
+        `${(u / 1e6).toFixed(1)} MJ/kg at ${v.toFixed(4)} m3/kg. The node holds ` +
+        `${massTotal.toFixed(0)} kg with ${(UTotal / 1e9).toFixed(2)} GJ in ` +
+        `${V.toFixed(1)} m3, the economizer claims ${m1Ledger.toFixed(0)} kg. ` +
         `(${e instanceof Error ? e.message : String(e)})`);
     }
   };
 
-  const V = geom.tubeVolume;
+  // Assemble the final evaluation from a solved configuration.
   const finish = (
+    P: number, sat: SaturationProps,
     m1: number, u1: number, v1: number,
-    m2: number, x2Out: number,
+    m2: number, x2Bar: number, v2: number,
     m3: number, u3: number, v3: number,
     regime: OtsgEval['regime'],
   ): OtsgEval => {
-    // One mean quality sets the boiling section's volume, energy and
-    // enthalpy together, so they cannot disagree with each other.
-    const x2Bar = boilingMeanQuality(sat.v_f, sat.v_g, x2Out);
-    const v2 = sat.v_f + x2Bar * (sat.v_g - sat.v_f);
-
     const h1Bar = u1 + P * v1;
-    const h2Bar = sat.h_f + x2Bar * (sat.h_g - sat.h_f);
+    const h2Bar = (sat.u_f + x2Bar * (sat.u_g - sat.u_f)) + P * v2;
     const h3Bar = u3 + P * v3;
-
     const T1 = m1 > 0 ? tempOfSubcooledU(Math.min(u1, sat.u_f)) : sat.T;
-    // A dry-saturated vapor region is at T_sat by definition; genuine
-    // superheat - and any supercritical fluid, which has no saturation
-    // temperature to fall back on - needs the property surface.
+    const T2 = m2 > 0 && x2Bar < 0 ? tempOfSubcooledU(Math.min(sat.u_f, sat.u_f + x2Bar * (sat.u_g - sat.u_f))) : sat.T;
     const T3 = m3 > 0 && (u3 > sat.u_g + 1e3 || P >= P_CRITICAL)
       ? probe(u3, v3, 'steam section').temperature
       : sat.T;
-
     const V1 = m1 * v1, V2 = m2 * v2, V3 = m3 * v3;
     const VT = Math.max(1e-12, V1 + V2 + V3);
     const mk = (mass: number, vBar: number, Vs: number, hBar: number, T: number): OtsgSectionEval => ({
@@ -561,324 +554,320 @@ export function evaluateOtsgAtP(
       area: geom.heatArea * (Vs / VT),
       hBar, T,
     });
-
-    // The draw leaves from the section's OUTLET, not its mean - but the
-    // outlet only sits at 2 h_bar - h_g (linear profile from an h_g inlet)
-    // when a boiling section actually FEEDS this one at saturation. A tube
-    // that is all steam has no such inlet - its profile starts at the feed -
-    // and near the critical point that difference is ~1 MJ/kg, so the inlet
-    // assumption fades with the boiling section's own presence (the same
-    // asymptotic birth every section uses). An emptying superheat section
-    // vanishes through saturation, where the outlet IS h_g - continuous by
-    // construction.
+    // Outlet quality from the mean (monotone inversion, no property calls).
+    // A flooded section that is subcooled on average never boils at all.
+    let x2Out = 1;
+    if (m3 <= 0) {
+      const xb = Math.max(0, x2Bar);
+      const xbMax = boilingMeanQuality(sat.v_f, sat.v_g, 1);
+      if (xb >= xbMax) x2Out = 1;
+      else {
+        let lo = 0, hi = 1;
+        for (let i = 0; i < 50; i++) {
+          const xm = 0.5 * (lo + hi);
+          if (boilingMeanQuality(sat.v_f, sat.v_g, xm) < xb) lo = xm; else hi = xm;
+          if (hi - lo < 1e-12) break;
+        }
+        x2Out = 0.5 * (lo + hi);
+      }
+    }
+    // The draw leaves from the section's OUTLET - but the linear profile's
+    // outlet (2 h_bar - h_g) only exists when a boiling section actually
+    // FEEDS this one at saturation, so the inlet assumption fades with the
+    // boiling section's own presence. A supercritical pass has no h_g inlet
+    // at all (its inlet is the feed) and draws at its mean.
     const w2 = m2 / (m2 + 1);
     const hSteamOut = m3 <= 0 ? sat.h_g
       : regime === 'supercritical' ? h3Bar
       : Math.max(sat.h_g, h3Bar + w2 * (h3Bar - sat.h_g));
-
     return {
       P, sat,
       sections: [
         mk(m1, v1, V1, h1Bar, T1),
-        mk(m2, v2, V2, h2Bar, sat.T),
+        mk(m2, v2, V2, h2Bar, T2),
         mk(m3, v3, V3, h3Bar, T3),
       ],
       hSteamOut, u3, x2Out, regime,
     };
   };
 
-  // Empty tube: nothing to partition. The first gram entering restores the
-  // sections; every area is zero so every rate is too.
+  // Empty tube: nothing to partition and no pressure of its own.
   if (!(massTotal > 0)) {
-    return finish(0, sat.u_f, sat.v_f, 0, 1, 0, sat.u_g, sat.v_g, 'dryout');
+    const P = PStart ?? 1e5;
+    const sat = saturationAtP(P);
+    return finish(P, sat, 0, sat.u_f, sat.v_f, 0, 1, sat.v_f, 0, sat.u_g, sat.v_g, 'dryout');
   }
 
-  // SUPERCRITICAL: there is no dome, so there is no phase boundary to
-  // partition across. The tube is ONE fluid at its own (u, v); it appears as
-  // the hot section so the gas march sees a single ramping pass, and the
-  // cold/hot structure a supercritical boiler does have lives in the wall
-  // temperatures, not in a phase split that no longer exists.
-  if (P >= P_CRITICAL) {
-    return finish(0, sat.u_f, sat.v_f, 0, 1,
+  // One-fluid states short-circuit the pressure walk entirely. A tube of
+  // pure liquid or supercritical fluid has no dome to partition across, and
+  // both sides' uniform EOS is unbiased (no tie line to blend across) - it
+  // IS the pressure. The walk would also be degenerate for liquid: the
+  // closure neglects liquid compressibility, so an all-liquid volume
+  // residual is flat in P and never crosses zero.
+  const bulk = probe(UTotal / massTotal, V / massTotal, 'bulk state');
+  if (bulk.pressure >= P_CRITICAL) {
+    // Dense supercritical fluid can come back labelled 'liquid' by the
+    // property tables; the pressure is the discriminator that matters.
+    const sat = saturationAtP(P_CRITICAL);
+    return finish(bulk.pressure, sat, 0, sat.u_f, sat.v_f, 0, 1, sat.v_f,
       massTotal, UTotal / massTotal, V / massTotal, 'supercritical');
   }
-
-  const u1 = subcooledSectionMean(uFeedIn, sat);
-  const v1 = subcooledLiquidV(Math.min(u1, sat.u_f));
-
-  // The boiling section as it runs whenever there IS something downstream:
-  // quality 0 -> 1, mass-averaged over its linear profile.
-  const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
-  const x2BarFull = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
-  const u2Full = sat.u_f + x2BarFull * (sat.u_g - sat.u_f);
-
-  // ----------------------------------------------------------------
-  // The wall pin: the superheat section's (u3, v3) at its approach
-  // temperature. theta depends on the section's area, which depends on the
-  // masses being solved, so the two iterate to a joint fixed point - theta
-  // is a mild function of L3 (hA/(2Wcp+hA)) and this converges in a few
-  // rounds from any start.
-  // ----------------------------------------------------------------
-  const u3AtT = (Tt: number, uGuess: number): { u3: number; v3: number } => {
-    // Bisection on u3 over the section temperature, which rises
-    // monotonically with u3 along the isobar, finished with one linear
-    // interpolation so the pin varies SMOOTHLY with its target - a bisection
-    // cut off at a fixed width would quantize u3, and that noise would land
-    // straight in the section masses the RK error controller watches. The
-    // volume tolerance is loose (1e-4 in ln v): the masses close the volume
-    // EXACTLY over whatever v3 this returns, so the tolerance shapes the pin
-    // by hundredths of a kelvin, not the books by anything.
-    const TOf = (u: number) => probe(u, superheatedV(u, P, 1e-4), 'pinned steam state').temperature;
-    let uLo = sat.u_g, TLo = sat.T;
-    let uHi = Math.max(uGuess, sat.u_g + 10e3);
-    let THi = TOf(uHi);
-    while (THi < Tt && uHi < U3_CEILING) {
-      uLo = uHi; TLo = THi;
-      uHi = Math.min(U3_CEILING, uHi + 2 * (uHi - sat.u_g));
-      THi = TOf(uHi);
-    }
-    if (THi < Tt) {
-      throw new Error(`[OTSG] the wall pin asks for steam at ${(Tt - 273.15).toFixed(0)} C ` +
-        `and ${(P / 1e5).toFixed(1)} bar, past the ${(U3_CEILING / 1e6).toFixed(1)} MJ/kg ` +
-        `where the steam tables end. The wall temperature driving it ` +
-        `(${(pin.TWall3 - 273.15).toFixed(0)} C) is not one a boiler tube survives.`);
-    }
-    for (let i = 0; i < 20; i++) {
-      if (uHi - uLo < 5e3) break;
-      const um = 0.5 * (uLo + uHi);
-      const Tm = TOf(um);
-      if (Tm < Tt) { uLo = um; TLo = Tm; } else { uHi = um; THi = Tm; }
-    }
-    const u3 = THi > TLo ? uLo + (uHi - uLo) * (Tt - TLo) / (THi - TLo) : uLo;
-    return { u3, v3: superheatedV(u3, P, 1e-4) };
-  };
-
-  const solve3 = (u3: number, v3: number): [number, number, number] => {
-    // Cramer on [1 1 1; v1 v2F v3; u1 u2F u3] [m1 m2 m3]' = [m V U]'
-    const det =
-      (vBarFull * u3 - v3 * u2Full)
-      - (v1 * u3 - v3 * u1)
-      + (v1 * u2Full - vBarFull * u1);
-    const d1 = massTotal * (vBarFull * u3 - v3 * u2Full) - (V * u3 - v3 * UTotal) + (V * u2Full - vBarFull * UTotal);
-    const d2 = (V * u3 - v3 * UTotal) - massTotal * (v1 * u3 - v3 * u1) + (v1 * UTotal - V * u1);
-    const d3 = (vBarFull * UTotal - V * u2Full) - (v1 * UTotal - V * u1) + massTotal * (v1 * u2Full - vBarFull * u1);
-    const out: [number, number, number] = [d1 / det, d2 / det, d3 / det];
-    if (!out.every(Number.isFinite)) {
-      throw new Error(`[OTSG] the pinned partition solve is degenerate: section states ` +
-        `(${(u1 / 1e3).toFixed(0)}, ${(u2Full / 1e3).toFixed(0)}, ${(u3 / 1e3).toFixed(0)}) kJ/kg ` +
-        `at ${(P / 1e5).toFixed(2)} bar are collinear in (u, v). ` +
-        `m=${massTotal.toFixed(1)} kg, V=${V.toFixed(3)} m3, U=${(UTotal / 1e9).toFixed(3)} GJ.`);
-    }
-    return out;
-  };
-
-  let u3 = sat.u_g, v3 = sat.v_g;
-  let T3target = sat.T;
-  let m1 = 0, m2 = 0, m3 = 0;
-  let L3 = Math.max(0, Math.min(1, (V - massTotal * sat.v_f) / V));
-  for (let iter = 0; iter < 6; iter++) {
-    const hA3 = pin.hA3Full * L3;
-    const thetaMean = hA3 > 0 ? hA3 / (2 * pin.WCp3 + hA3) : 0;
-    T3target = sat.T + thetaMean * Math.max(0, pin.TWall3 - sat.T);
-    if (T3target > sat.T + 0.1) {
-      ({ u3, v3 } = u3AtT(T3target, u3 > sat.u_g ? u3 : sat.u_g + 2500 * (T3target - sat.T)));
-    } else {
-      u3 = sat.u_g; v3 = sat.v_g;
-    }
-    [m1, m2, m3] = solve3(u3, v3);
-    const L3New = Math.max(0, Math.min(1, (m3 * v3) / V));
-    const done = Math.abs(L3New - L3) < 1e-3;
-    L3 = L3New;
-    if (done) break;
-  }
-
-  if (m1 >= 0 && m2 >= 0 && m3 >= 0) {
-    return finish(m1, u1, v1, m2, 1, m3, u3, v3,
-      T3target > sat.T + 0.1 ? 'superheat' : 'dryout');
+  if (bulk.phase === 'liquid') {
+    const sat = saturationAtP(bulk.pressure);
+    return finish(bulk.pressure, sat,
+      massTotal, UTotal / massTotal, V / massTotal, 0, 0, sat.v_f, 0, sat.u_g, sat.v_g, 'flooded');
   }
 
   // ----------------------------------------------------------------
-  // restSplit: share an inventory (mR, VR, UR) between a boiling section and
-  // a vapor region with NO subcooled slug - the old closure's leftover
-  // logic, applied to whatever the branches below hand it.
+  // The partition at one pressure - closed form given the pin's u3.
   // ----------------------------------------------------------------
-  const restSplit = (mR: number, VR: number, UR: number): OtsgEval => {
-    const vRest = VR / mR;
-    if (vRest <= vBarFull) {
-      // (A) Flooded: no room for dry steam; the boiling section is the whole
-      // inventory and ends wherever the volume says it does. On a two-phase
-      // node this is exact in energy too - the totals sit on the tie line.
-      const x2Out = boilingOutletQuality(sat.v_f, sat.v_g, vRest);
-      return finish(0, u1, v1, mR, x2Out, 0, sat.u_g, sat.v_g, 'flooded');
-    }
-    // Energy above an all-boiling description of this inventory pays for
-    // vapor at (u_g - u2Full) a kilogram; the volume says how much vapor
-    // there is room for.
-    const E = UR - mR * u2Full;
-    const m3Sat = Math.min(mR, Math.max(0, E / (sat.u_g - u2Full)));
-    const m3Vol = (VR - mR * vBarFull) / (sat.v_g - vBarFull);
-    const unrepresentable = (why: string) => new Error(
-      `[OTSG] the inventory cannot be a boiling section plus dry steam at ` +
-      `${(P / 1e5).toFixed(2)} bar: ${mR.toFixed(1)} kg carrying ` +
-      `${(UR / mR / 1e3).toFixed(0)} kJ/kg in ${VR.toFixed(3)} m3 ` +
-      `(v=${(VR / mR).toFixed(4)} m3/kg, needing ${m3Vol.toFixed(1)} kg of vapor to fill it). ` +
-      `${why} The node's totals and its pressure disagree about what phase it is in.`);
-    if (m3Vol <= m3Sat) {
-      // (T) Dryout: the volume fills before the energy runs out; the vapor
-      // region sits at saturation and its mass is the volume's to set.
-      return finish(0, u1, v1, mR - m3Vol, 1, m3Vol, sat.u_g, sat.v_g, 'dryout');
-    }
-    if (!(E > 0)) {
-      throw unrepresentable(`It carries less than the ${(u2Full / 1e3).toFixed(0)} kJ/kg a ` +
-        `boiling section alone would hold, so no vapor region can be paid for.`);
-    }
-    // (B) Superheat with the boiling profile as anchor: m3 and u3 from
-    // volume + energy, the state required to evaluate at P. Walk DOWN from
-    // the dryout end and take the FIRST bracket: further down there is a
-    // second, arithmetic root - a sliver of absurdly hot steam over boiling
-    // water - that is not continuous with the dryout case next door.
-    const res = walkSuperheat(mR, VR, UR, u2Full, vBarFull, m3Sat);
-    return finish(0, u1, v1, mR - res.m3, 1, res.m3, res.u3, res.v3, 'superheat');
-  };
-
-  const walkSuperheat = (
-    mR: number, VR: number, UR: number,
-    uAnchor: number, vAnchor: number, m3Start: number,
-  ): { m3: number; u3: number; v3: number } => {
-    const residual = (mm: number) => {
-      const uu = uAnchor + (UR - mR * uAnchor) / mm;
-      const vv = (VR - (mR - mm) * vAnchor) / mm;
-      return probe(uu, vv, 'dry-steam state').pressure - P;
-    };
-    // Property-surface noise scale: at the dryout join the root sits exactly
-    // ON m3Start, where the residual is a difference of two evaluations of
-    // the same state.
-    const rTol = 1e-6 * P;
-    let hi = m3Start;
-    const rHi = residual(hi);
-    if (rHi >= -rTol) {
-      // The upper end IS the answer: the whole inventory is vapor (nothing
-      // left to boil) or it sits on the dryout boundary.
-      const m3 = m3Start;
-      const u3w = uAnchor + (UR - mR * uAnchor) / m3;
-      return { m3, u3: u3w, v3: (VR - (mR - m3) * vAnchor) / m3 };
-    }
-    const E = UR - mR * uAnchor;
-    const m3Floor = E / (U3_CEILING - uAnchor);
-    let lo = hi, rLo = rHi;
-    while (rLo < 0 && lo > m3Floor) {
-      hi = lo;
-      lo = Math.max(m3Floor, 0.5 * lo);
-      rLo = residual(lo);
-    }
-    if (!(rLo > 0)) {
-      throw new Error(
-        `[OTSG] the inventory cannot be vapor over its anchor at ${(P / 1e5).toFixed(2)} bar: ` +
-        `${mR.toFixed(1)} kg carrying ${(UR / mR / 1e3).toFixed(0)} kJ/kg in ${VR.toFixed(3)} m3 - ` +
-        `filling the volume would need steam beyond ${(U3_CEILING / 1e6).toFixed(1)} MJ/kg, ` +
-        `which still lands at ${((rLo + P) / 1e5).toFixed(2)} bar. ` +
-        `The node's totals and its pressure disagree about what phase it is in.`);
-    }
-    for (let i = 0; i < 60; i++) {
-      const mid = 0.5 * (lo + hi);
-      if (residual(mid) > 0) lo = mid; else hi = mid;
-      if (hi - lo < 1e-12 * m3Start) break;
-    }
-    const m3 = 0.5 * (lo + hi);
-    return {
-      m3,
-      u3: uAnchor + (UR - mR * uAnchor) / m3,
-      v3: (VR - (mR - m3) * vAnchor) / m3,
-    };
-  };
-
-  if (m1 < 0) {
-    // No economizer: the totals cannot host a feed-profile slug at all.
-    return restSplit(massTotal, V, UTotal);
+  interface AtP {
+    sat: SaturationProps;
+    m1: number; u1: number; v1: number;
+    m2: number; x2Bar: number; v2: number;
+    m3: number; u3: number; v3: number;
+    Vsum: number;
+    regime: OtsgEval['regime'];
   }
-
-  if (m3 < 0) {
-    // Flooded, with the economizer in the solve: m3 = 0 and the boiling
-    // section's outlet quality replaces u3 as the third unknown. Both
-    // remaining equations are linear in (a, b) = (m2, m2 * x2bar):
-    //   a (v_f - v1) + b (v_g - v_f) = V - m v1
-    //   a (u_f - u1) + b (u_g - u_f) = U - m u1
-    const a11 = sat.v_f - v1, a12 = sat.v_g - sat.v_f, r1 = V - massTotal * v1;
-    const a21 = sat.u_f - u1, a22 = sat.u_g - sat.u_f, r2 = UTotal - massTotal * u1;
-    const det = a11 * a22 - a12 * a21;
-    const a = (r1 * a22 - a12 * r2) / det;
-    const b = (a11 * r2 - r1 * a21) / det;
-    if (a > massTotal) {
-      // Even a zero-mass economizer leaves the tube too voluminous for its
-      // energy as boiling water - the no-economizer split owns this.
-      return restSplit(massTotal, V, UTotal);
-    }
-    if (b < 0 || a <= 0) {
-      // Colder than a zero-quality boiling section could make it: the tube
-      // is ONE lump of subcooled liquid, and the sections say exactly that -
-      // its own (u, v), no profile claim. The property surface must agree it
-      // IS liquid: totals that route here without being liquid are a
-      // totals-vs-pressure disagreement, and inventing a liquid section from
-      // them would hide it.
-      const lump = probe(UTotal / massTotal, V / massTotal, 'all-liquid lump');
-      if (lump.phase !== 'liquid') {
-        throw new Error(`[OTSG] the inventory is colder than boiling water yet is not ` +
-          `liquid: ${massTotal.toFixed(1)} kg carrying ` +
-          `${(UTotal / massTotal / 1e3).toFixed(0)} kJ/kg in ${V.toFixed(3)} m3 reads as ` +
-          `'${lump.phase}' at ${(lump.pressure / 1e5).toFixed(2)} bar, against the ` +
-          `${(P / 1e5).toFixed(2)} bar it was partitioned at. ` +
-          `The node's totals and its pressure disagree about what phase it is in.`);
+  // The pin's exact placement needs the section's own conductance (theta
+  // depends on L3) and a property inversion, both too heavy for the inner
+  // pressure iterations - so the OUTER loop carries the pin as an energy
+  // OFFSET above saturation (du3 = u3 - u_g) and a length fraction, and
+  // refreshes both against the property surface after each pressure solve.
+  let du3 = 0;
+  let L3 = Math.max(0, Math.min(1, 1 - (massTotal * 0.0015) / V));
+  const atP = (P: number): AtP => {
+    const sat = saturationAtP(P);
+    const u1 = subcooledSectionMean(uFeedIn, sat);
+    const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
+    // The slug ledger is a MASS, priced at the profile mean u1(P) - so a
+    // falling pressure reprices the same slug COLDER and the energy
+    // difference flows to the vapor side of the books by construction,
+    // which is exactly the flash a depressurized slug undergoes. (The
+    // energy-ledger variant could not express that: as u_f fell, the same
+    // joules claimed MORE mass than the tube held, and a blowdown walked
+    // it into a partition no pressure could pack.) The cap at the node's
+    // inventory bites only when draws have removed slug water the ledger
+    // never saw leave - which the drift watch reports.
+    const m1 = Math.min(m1Ledger, massTotal);
+    const mR = massTotal - m1;
+    const UR = UTotal - m1 * u1;
+    const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
+    const x2BarFull = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
+    const u2Full = sat.u_f + x2BarFull * (sat.u_g - sat.u_f);
+    if (mR <= Math.max(1e-12, UR / U3_CEILING)) {
+      // The leftovers cannot carry the leftover energy below the table
+      // ceiling (a sliver holding everything, or nothing holding
+      // something). The truthful monotone signal is that this pressure is
+      // far too low: the slug is over-priced here, and more pressure
+      // reprices it hotter. Continuous with the sliver sentinel below.
+      if (UR > 1e-6 * Math.max(1, UTotal)) {
+        return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
       }
-      return finish(massTotal, UTotal / massTotal, V / massTotal, 0, 0, 0, sat.u_g, sat.v_g, 'flooded');
+      return { sat, m1, u1, v1, m2: 0, x2Bar: 0, v2: sat.v_f, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1, regime: 'flooded' };
     }
-    if (!Number.isFinite(a) || !Number.isFinite(b)) {
-      throw new Error(`[OTSG] the flooded partition solve is degenerate at ` +
-        `${(P / 1e5).toFixed(2)} bar: m=${massTotal.toFixed(1)} kg, V=${V.toFixed(3)} m3, ` +
-        `U=${(UTotal / 1e9).toFixed(3)} GJ.`);
+    const u3 = sat.u_g + du3;
+    // Superheat mass from the energy total: every kilogram promoted from
+    // the full boiling profile to pinned steam costs (u3 - u2Full).
+    const m3 = du3 > 1e-9 ? (UR - mR * u2Full) / (u3 - u2Full)
+      : (UR - mR * u2Full) / (sat.u_g - u2Full);   // dryout pin: vapor at u_g
+    if (m3 <= 0) {
+      // Flooded: the mean quality is the energy's to set, and below zero it
+      // is simply liquid cooler than saturation - continuous at x2Bar = 0.
+      const uBar2 = UR / mR;
+      const x2Bar = (uBar2 - sat.u_f) / (sat.u_g - sat.u_f);
+      const v2 = x2Bar >= 0
+        ? sat.v_f + x2Bar * (sat.v_g - sat.v_f)
+        : subcooledLiquidV(uBar2);
+      return { sat, m1, u1, v1, m2: mR, x2Bar, v2, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1 + mR * v2, regime: 'flooded' };
     }
-    const x2Bar = b / a;
-    const x2BarMax = boilingMeanQuality(sat.v_f, sat.v_g, 1);
-    // The pinned solve said m3 < 0, so the flooded quality must land at or
-    // below the full profile; the band above it is the seam's own numeric
-    // width (the pin iterates to ~1e-3 in L3), anything past that is a hole.
-    if (x2Bar > x2BarMax * (1 + 1e-3)) {
-      throw new Error(`[OTSG] flooded solve wants mean quality ${x2Bar.toFixed(3)} beyond the ` +
-        `full profile's ${x2BarMax.toFixed(3)} while the pinned solve refused a vapor region - ` +
-        `these cannot both be true, so the closure's regime lattice has a hole. ` +
-        `m=${massTotal.toFixed(1)} kg, V=${V.toFixed(3)} m3, U=${(UTotal / 1e9).toFixed(3)} GJ, ` +
-        `P=${(P / 1e5).toFixed(2)} bar.`);
+    if (m3 >= mR) {
+      // More energy than wall-limited steam can hold: u3 unpins upward and
+      // the leftovers are one superheated region (or the seam itself).
+      const u3Free = UR / mR;
+      if (u3Free > U3_CEILING) {
+        // A sliver carrying energy past the steam tables. While the root
+        // find is PROBING a pressure far below the root, the ledger's mass
+        // claim swells (u1 falls with P) and squeezes the leftovers into
+        // exactly this - and the truthful monotone answer is that such a
+        // sliver would need unbounded volume: the residual says "P is far
+        // too low" and the search moves on. If the SOLVED pressure lands
+        // here, the volume never closes and the loud no-pressure error
+        // reports it.
+        return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
+      }
+      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-4) : sat.v_g;
+      return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat' };
     }
-    // Invert the mass-mean quality for the outlet quality (monotone, no
-    // property calls).
-    let xLo = 0, xHi = 1;
-    for (let i = 0; i < 50; i++) {
-      const xm = 0.5 * (xLo + xHi);
-      if (boilingMeanQuality(sat.v_f, sat.v_g, xm) < x2Bar) xLo = xm; else xHi = xm;
-      if (xHi - xLo < 1e-12) break;
-    }
-    return finish(massTotal - a, u1, v1, a, 0.5 * (xLo + xHi), 0, sat.u_g, sat.v_g, 'flooded');
-  }
+    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-4) : sat.v_g;
+    const m2 = mR - m3;
+    return {
+      sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
+      Vsum: m1 * v1 + m2 * vBarFull + m3 * v3,
+      regime: du3 > 1e-9 ? 'superheat' : 'dryout',
+    };
+  };
 
-  // m2 < 0: a subcooled slug directly under steam hotter than the wall pin
-  // allows - the post-depressurization transient. u3 unpins and solves from
-  // the totals with the economizer point as anchor; the walk's domain edge
-  // (all vapor, nothing subcooled) hands over to the no-economizer split.
-  {
-    const m3g = (UTotal - massTotal * u1) / (sat.u_g - u1);
-    const m3Start = Math.min(massTotal, Math.max(0, m3g));
-    if (!(m3Start > 0)) {
-      // No energy for any vapor over a subcooled slug - the pinned solve's
-      // m2 < 0 must then have been the flooded side's business.
-      return restSplit(massTotal, V, UTotal);
+  // ----------------------------------------------------------------
+  // Pressure from the volume constraint: safeguarded root find on ln P,
+  // warm-started from the node's last published pressure. V(P) falls with
+  // P (every section shrinks), so the bracket is clean.
+  // ----------------------------------------------------------------
+  const solveP = (): { P: number; fin: AtP } | 'supercritical' | null => {
+    const resid = (lnP: number) => atP(Math.exp(lnP)).Vsum - V;
+    // Bracket by expanding OUTWARD from a physical starting point - the
+    // node's last published pressure, or failing that the uniform-EOS read
+    // (biased low, but the same order as the root). Probing the global
+    // [triple point, near-critical] ends instead walks the partition through
+    // corners no boiler is near: at 700 Pa the profile mean collapses and
+    // the ledger claim goes degenerate, and at 215 bar a mid-pressure
+    // vapor state lands in the near-critical property hole.
+    let PSeed = PStart;
+    if (!(PSeed && PSeed > P_MIN && PSeed < 0.998 * P_CRITICAL)) {
+      PSeed = Math.min(0.997 * P_CRITICAL, Math.max(P_MIN * 1.001, bulk.pressure));
     }
-    const res = walkSuperheat(massTotal, V, UTotal, u1, v1, m3Start);
-    return finish(massTotal - res.m3, u1, v1, 0, 1, res.m3, res.u3, res.v3, 'superheat');
+    let a = Math.log(PSeed), ra = resid(a);
+    let b = a, rb = ra;
+    // The cap sits just under the critical point: a tube being packed full
+    // legitimately runs its pressure through the 215-220 bar band (that is
+    // what lifts its relief valves), and cutting the walk at the reference
+    // closure's conservative 215 misread a 217-bar overfill as
+    // supercritical.
+    const lnMin = Math.log(P_MIN), lnMax = Math.log(0.998 * P_CRITICAL);
+    // Steps grow geometrically from 2%: a seed already at the root flips the
+    // sign within a step or two and the search never strays toward the
+    // brackets' far corners (a near-critical overshoot from a converged seed
+    // was landing probes in the v4 grid's near-critical hole).
+    let step = 0.02;
+    if (ra > 0) {
+      // Volume too big: pressure must rise. Walk b up until the sign flips.
+      for (let i = 0; i < 60 && rb > 0; i++) {
+        if (b >= lnMax) return 'supercritical';   // even ~215 bar cannot pack it
+        a = b; ra = rb;
+        b = Math.min(lnMax, b + step);
+        step = Math.min(0.5, step * 2);
+        rb = resid(b);
+      }
+      if (rb > 0) return 'supercritical';
+    } else {
+      // Volume too small: pressure must fall. Walk a down until it flips.
+      for (let i = 0; i < 60 && ra < 0; i++) {
+        if (a <= lnMin) return null;              // emptier than the triple point allows
+        b = a; rb = ra;
+        a = Math.max(lnMin, a - step);
+        step = Math.min(0.5, step * 2);
+        ra = resid(a);
+      }
+      if (ra < 0) return null;
+    }
+    for (let i = 0; i < 80; i++) {
+      if (b - a < 1e-10) break;
+      let lnM: number;
+      const denom = rb - ra;
+      if (i % 2 === 0 && Math.abs(denom) > 0) {
+        lnM = a - ra * (b - a) / denom;    // secant through the bracket
+        if (!(lnM > a && lnM < b)) lnM = 0.5 * (a + b);
+      } else {
+        lnM = 0.5 * (a + b);
+      }
+      const rM = resid(lnM);
+      if (rM > 0) { a = lnM; ra = rM; } else { b = lnM; rb = rM; }
+    }
+    const lnP = 0.5 * (a + b);
+    return { P: Math.exp(lnP), fin: atP(Math.exp(lnP)) };
+  };
+
+  // Outer pin refinement: refresh (du3, L3) against the property surface at
+  // the solved pressure, and re-solve until both are consistent. theta is a
+  // mild function of L3 and du3 shifts the volume only through v3, so this
+  // settles in a couple of rounds.
+  let result: { P: number; fin: AtP } | null = null;
+  let lastT3target = -1;
+  for (let outer = 0; outer < 5; outer++) {
+    const solved = solveP();
+    if (solved === 'supercritical') {
+      // The walk topped out just under the critical point - yet the bulk
+      // state reads sub-critical two-phase (the one-fluid cases were
+      // dispatched before the walk). No configuration of these books is
+      // water: the ledger claims a slug the tube's totals cannot host at
+      // ANY pressure under the dome's top. Say so.
+      throw new Error(`[OTSG] the partition needs more than ${(0.998 * P_CRITICAL / 1e5).toFixed(0)} bar ` +
+        `to pack while the totals read two-phase at ${(bulk.pressure / 1e5).toFixed(1)} bar: ` +
+        `${massTotal.toFixed(1)} kg carrying ${(UTotal / massTotal / 1e3).toFixed(0)} kJ/kg in ` +
+        `${V.toFixed(2)} m3 with an economizer claim of ${m1Ledger.toFixed(0)} kg. ` +
+        `The ledger and the node's totals disagree about what is in the tube.`);
+    }
+    if (solved === null) {
+      throw new Error(`[OTSG] no pressure above the triple point packs this inventory into ` +
+        `the tube: ${massTotal.toFixed(1)} kg carrying ${(UTotal / massTotal / 1e3).toFixed(0)} kJ/kg ` +
+        `in ${V.toFixed(2)} m3 (economizer claim ${m1Ledger.toFixed(0)} kg). ` +
+        `The tube is emptier than saturated steam at vacuum.`);
+    }
+    result = solved;
+    const { P, fin } = solved;
+    // Refresh the pin at the solved pressure.
+    const L3New = Math.max(0, Math.min(1, (fin.m3 * fin.v3) / V));
+    const hA3 = pin.hA3Full * L3New;
+    const thetaMean = hA3 > 0 ? hA3 / (2 * pin.WCp3 + hA3) : 0;
+    const T3target = fin.sat.T + thetaMean * Math.max(0, pin.TWall3 - fin.sat.T);
+    let du3New = 0;
+    if (T3target > fin.sat.T + 0.1) {
+      // The inversion costs ~a hundred property calls; when the target has
+      // moved less than the pin's own fidelity since the last round, the
+      // carried offset is already the answer.
+      if (result && Math.abs(T3target - lastT3target) < 0.25 && du3 > 0) {
+        du3New = du3;
+      } else {
+        const u3Pin = u3AtTemperature(T3target, P, fin.sat, probe,
+          fin.u3 > fin.sat.u_g ? fin.u3 : fin.sat.u_g + 2500 * (T3target - fin.sat.T), pin.TWall3);
+        du3New = u3Pin - fin.sat.u_g;
+      }
+    }
+    lastT3target = T3target;
+    const settled = Math.abs(du3New - du3) < 2e3 && Math.abs(L3New - L3) < 1e-3;
+    du3 = du3New;
+    L3 = L3New;
+    if (settled) break;
   }
+  const { P, fin } = result!;
+  return finish(P, fin.sat, fin.m1, fin.u1, fin.v1, fin.m2, fin.x2Bar, fin.v2,
+    fin.m3, fin.u3, fin.v3, fin.regime);
+}
+
+/** Invert the section temperature to u3 along the P-isobar - bisection with
+ *  one final interpolation so the pin varies smoothly with its target. */
+function u3AtTemperature(
+  Tt: number, P: number, sat: SaturationProps,
+  probe: (u: number, v: number, what: string) => { temperature: number },
+  uGuess: number, TWall3: number,
+): number {
+  const TOf = (u: number) => probe(u, superheatedV(u, P, 1e-4), 'pinned steam state').temperature;
+  let uLo = sat.u_g, TLo = sat.T;
+  let uHi = Math.max(uGuess, sat.u_g + 10e3);
+  let THi = TOf(uHi);
+  while (THi < Tt && uHi < U3_CEILING) {
+    uLo = uHi; TLo = THi;
+    uHi = Math.min(U3_CEILING, uHi + 2 * (uHi - sat.u_g));
+    THi = TOf(uHi);
+  }
+  if (THi < Tt) {
+    throw new Error(`[OTSG] the wall pin asks for steam at ${(Tt - 273.15).toFixed(0)} C ` +
+      `and ${(P / 1e5).toFixed(1)} bar, past the ${(U3_CEILING / 1e6).toFixed(1)} MJ/kg ` +
+      `where the steam tables end. The wall temperature driving it ` +
+      `(${(TWall3 - 273.15).toFixed(0)} C) is not one a boiler tube survives.`);
+  }
+  for (let i = 0; i < 20; i++) {
+    if (uHi - uLo < 5e3) break;
+    const um = 0.5 * (uLo + uHi);
+    const Tm = TOf(um);
+    if (Tm < Tt) { uLo = um; TLo = Tm; } else { uHi = um; THi = Tm; }
+  }
+  return THi > TLo ? uLo + (uHi - uLo) * (Tt - TLo) / (THi - TLo) : uLo;
 }
 
 /** Invert specific energy to temperature along the saturated-liquid line. */
 export function tempOfSubcooledU(u: number): number {
-  let Tlo = 274, Thi = 645;
+  let Tlo = 274, Thi = 647.09;   // to the dome top - see subcooledLiquidV
   if (u <= saturatedLiquidEnergy(Tlo)) return Tlo;
   for (let i = 0; i < 60; i++) {
     const Tm = 0.5 * (Tlo + Thi);

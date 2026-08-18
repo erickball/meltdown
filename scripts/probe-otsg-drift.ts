@@ -14,8 +14,8 @@ import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
-import { evaluateOtsgAtP, otsgRates, subcooledSectionMean, saturationAtP } from '../src/simulation/otsg';
-import { tubeWaterState, classifyOtsgFlows, otsgWaterSideDuties } from '../src/simulation/operators/otsg-operator';
+import { otsgRates } from '../src/simulation/otsg';
+import { evaluateOtsgSections, tubeWaterState, otsgWaterSideDuties } from '../src/simulation/operators/otsg-operator';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PRESET = path.join(HERE, '..', 'src', 'presets', 'xe100.json');
@@ -23,22 +23,19 @@ const seconds = parseFloat(process.argv[2] || '400');
 
 const sim = buildSimFromFile(PRESET);
 const ID = 'hx-1-tube';
+const ID2 = 'hx-1-tube-b2';
 
 function line(state: SimulationState) {
   const node = state.flowNodes.get(ID)!;
   const cfg = node.otsg!;
   const water = tubeWaterState(node);
-  const flows = classifyOtsgFlows(state, ID, node, water.pressure);
   let evStr = '(eval refused)';
   let ratesStr = '';
   try {
-    const ev = evaluateOtsgAtP(
-      cfg.U1, node.fluid.mass, water.energy, water.pressure, flows.uFeed,
-      { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-    );
+    const { ev, flows } = evaluateOtsgSections(state, ID, node);
     const m1 = ev.sections[0].mass;
     const mLeft = node.fluid.mass - m1;
-    const ULeft = water.energy - cfg.U1;
+    const ULeft = water.energy - m1 * (ev.sections[0].hBar - ev.P * ev.sections[0].vBar);
     const VLeft = node.volume - m1 * ev.sections[0].vBar;
     evStr =
       `m1=${m1.toFixed(1).padStart(6)} ` +
@@ -62,16 +59,25 @@ function line(state: SimulationState) {
   } catch (e) {
     evStr = `(eval refused: ${e instanceof Error ? e.message.slice(0, 80) : e})`;
   }
-  const sat = saturationAtP(water.pressure);
   console.log(
     `${state.time.toFixed(1).padStart(7)} ` +
-    `P=${(water.pressure / 1e5).toFixed(1).padStart(6)} ` +
+    `P=${(node.fluid.pressure / 1e5).toFixed(1).padStart(6)} ` +
+    `Pu=${(water.pressure / 1e5).toFixed(1).padStart(6)} ` +
     `m=${node.fluid.mass.toFixed(1).padStart(6)} ` +
     `U=${(water.energy / 1e9).toFixed(3).padStart(6)} ` +
-    `U1=${(cfg.U1 / 1e9).toFixed(3).padStart(6)} ` +
-    `u1b=${(subcooledSectionMean(flows.uFeed, sat) / 1e3).toFixed(0).padStart(4)} ` +
+    `m1L=${cfg.m1.toFixed(0).padStart(5)} ` +
     `${evStr}  ${ratesStr}`
   );
+}
+
+function line2(state: SimulationState) {
+  const b2 = state.flowNodes.get(ID2);
+  if (!b2) return;
+  const conns = state.flowConnections
+    .filter(c => c.fromNodeId === ID || c.toNodeId === ID)
+    .map(c => `${c.toNodeId === ID ? '<-' : '->'}${(c.toNodeId === ID ? c.fromNodeId : c.toNodeId).slice(0, 12)}:${c.massFlowRate.toFixed(1)},${c.currentFlowPhase ?? '?'}`)
+    .join(' ');
+  console.log(`        b2: m=${b2.fluid.mass.toFixed(1)} P=${(b2.fluid.pressure / 1e5).toFixed(1)} m1L=${b2.otsg!.m1.toFixed(0)}  b1 conns: ${conns}`);
 }
 
 line(sim.state);
@@ -83,4 +89,5 @@ for (let t = 0; t < seconds; t += 1) {
     break;
   }
   line(sim.state);
+  line2(sim.state);
 }

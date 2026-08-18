@@ -1135,11 +1135,14 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
               surfaceArea: oneMetal.surfaceArea / 3,
             });
           });
-          // The partition needs no seed: it is solved from the node's own
-          // totals at the first evaluation (and every one after), so the
-          // sectioned model agrees with the (u,v) machinery to the last
-          // joule at t=0 whatever phase the tube starts in.
+          // Seed the ONE integrated partition variable - the subcooled
+          // section's MASS - consistently with the node's own bulk state: a
+          // liquid start is all subcooled section, so it holds the node's
+          // whole inventory; anything else starts with none. The rest of
+          // the partition (and the node's pressure) is solved from the
+          // totals at the first evaluation, so every start is consistent.
           tubeNode.otsg = {
+            m1: tubeNode.fluid.phase === 'liquid' ? tubeNode.fluid.mass : 0,
             heatArea: tubeArea,
             shellNodeId: `${id}-shell`,
             metalNodeIds: metalIds,

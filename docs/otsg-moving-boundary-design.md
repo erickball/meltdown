@@ -67,76 +67,95 @@ Everything else is DERIVED, in keeping with house style:
   A_i = A_total·L_i/L. A section with zero mass has zero length, zero area,
   zero everything — see §6.
 
-### 3a. What the plant actually runs (`evaluateOtsgAtP`)
+### 3a. What the plant actually runs (`evaluateOtsgPartition`)
 
-The closure above is the reference form (`evaluateOtsg`, exercised by the unit
-tests). In the plant the node's ordinary (mass, energy) totals and its (u,v)
-pressure stay exactly where they are — that machinery is proven — and the
-sectioned model is the fine structure it lumps together, recovered at that
-pressure. Which means the section states are not free to be anything: they
-have to add back up to the node.
+The closure above is the reference form (`evaluateOtsg`, exercised by the
+unit tests). The plant's form solves the partition AND the tube's pressure
+together from the node's conserved totals, one integrated boundary variable,
+and the wall.
 
-Exactly **one descriptor is integrated** there — the subcooled section's
-ENERGY U_1, with its mass following as m_1 = U_1/ū_1. The rest of the
-partition is *solved*:
+**Why the pressure is solved here.** A boiler tube holds cold slug at one end
+and superheated steam at the other, and both sit BELOW the saturation tie
+line in (u,v) — the slug by its energy deficit, the steam because the vapour
+isobar's du/dv runs at about half the tie line's slope. Blend them into one
+(u,v) pair and the uniform EOS reads low-pressure two-phase mush: a partition
+built at 80 bar reads back at 53. The flow solver, the relief valves and the
+governor were all steering on that fiction. So the tube's pressure is the one
+the partition needs to pack its sections into the tube volume — the same
+volume constraint the reference closure always solved — and
+`OtsgPartitionConstraintOperator` publishes it (plus any NCG partial) as the
+node's `fluid.pressure` on every stage, along with the partition's
+mass-weighted temperature and vapour fraction.
 
-    m_2 + m_3 = M − m_1                              (mass)
-    m_2·v̄_2 + m_3·v_3 = V_tube − m_1·v_1             (volume)
-    m_2·ū_2 + m_3·u_3 = U − U_1                      (energy)
+**The four descriptors and where each comes from.** Against the node's two
+conserved totals the tube carries four unknowns; each gets its value from the
+physics that actually sets it:
 
-with the boiling section's mean state a single-parameter family in its OUTLET
-QUALITY (§ `boilingMeanVolume`), and one structural rule: *a boiling section
-stops short of dry steam only when there is nothing downstream to hand it to.*
-That gives three regimes — flooded (m_3 = 0, outlet quality from the volume),
-dryout (x_out = 1, u_3 = u_g, m_3 from the volume), superheat (x_out = 1,
-(m_3, u_3) from volume and energy together) — which join continuously at the
-states where the descriptions coincide.
+- the **economizer** from its integrated MASS m₁ — how much cold feed is in
+  the tube is genuine dynamics (the history of feed that has not yet boiled),
+  with the transit balance as its rate:
 
-Integrating m_3 as well over-specifies the model by one, and the failure is
-not cosmetic: an m_3 accumulated from W_23 does not know what volume it is
-being asked to fit into, and the Xe-100 bundle reached partitions claiming
-2.6× the tube volume while the reported LENGTHS still looked plausible,
-because they normalize over the sections' own summed volume. With the split
-solved, W_23 becomes a diagnostic — it says where the dry-steam boundary is
-trying to move; where it *is* comes from the tube's contents.
+      dm₁/dt = W_in − W₁₂ − (liquid draws)
+
+  Its ENERGY is priced at the profile mean ū₁(P), so a falling pressure
+  reprices the slug colder and hands the difference to the vapour side of the
+  books — which is exactly the flash a depressurized slug undergoes. (The
+  energy-ledger variant could not express that: as u_f fell, the same joules
+  claimed more mass than the tube held, and a blowdown walked it into a
+  partition no pressure could pack.)
+- the **boiling outlet quality** from the structural rule: dry steam only
+  when there is somewhere to hand it; when flooded, the energy says where
+  boiling stops (below zero mean quality the leftovers are simply liquid
+  cooler than saturation — a cold-filled tube needs no special case).
+- the **superheat mass** from the energy total.
+- the **superheat energy** from the WALL: the steam's approach to its own
+  metal,
+
+      T₃ = T_sat + θ̄·(T_wall3 − T_sat),   θ̄ = hA₃ / (2·W·cp + hA₃)
+
+  the mean-stream form of the duty calculation's own θ machinery. A stagnant
+  section soaks to its metal, a strongly drawn one barely leaves saturation,
+  and a cold wall pins it AT saturation — which is dryout. Steam physically
+  cannot leave hotter than the metal heating it, which is the property no
+  integrated vapour state could deliver (measured failure: 329-bar steam
+  inside what the uniform EOS called a 160-bar node, held for hundreds of
+  seconds by a drifted energy ledger).
+
+At a given pressure everything is closed form — mass and energy split the
+leftovers in every regime — so the pressure search is one safeguarded 1-D
+root find on the volume residual, warm-started from the node's last published
+pressure. Regime switches branch on the SIGN of a solved mass and join
+continuously at the states where the descriptions coincide. When the totals
+carry more energy than wall-limited steam can hold (a slug directly under
+flash-heated vapour, real for a while after a depressurization), u₃ unpins
+upward and Q₃ runs backwards — the physical channel that relaxes the state,
+with no ledger to hold it there. When no sub-critical pressure packs the
+inventory, the dome is gone: one supercritical fluid at its own uniform
+(u,v), whose EOS has no tie line to be biased by.
 
 Two things the sections are evaluated *on*, rather than the node's stored
 numbers:
 
-- **The water's own pressure and energy.** `fluid.pressure` is the Dalton
-  TOTAL and `fluid.internalEnergy` includes the gas, so a bundle with helium
-  in it would have the model hunting for a dome the water is nowhere near
-  (`tubeWaterState` splits them; with no gas it is the stored state).
-- **Above P_crit there is no dome at all.** `saturationAtP` anchors on the top
-  of the dome instead of extrapolating the table past it, and the closure
-  reports one fluid: the cold end (m_1, whose boundary is now the
-  pseudo-critical point) and the hot end, no boiling section between them.
-  Nothing steps as a boiler is pushed through the critical pressure and back.
+- **The water's own share.** `fluid.internalEnergy` includes any NCG
+  (`tubeWaterState` splits them; with no gas it is the stored state), and the
+  published pressure adds the gas partial back on top.
+- **The draw enthalpies.** A vapour draw leaves from the superheat section's
+  OUTLET (2·h̄₃ − h_g under the linear profile, fading to the mean as the
+  boiling section that feeds it vanishes), a liquid draw from the subcooled
+  section's mean. The cache every consumer reads (`otsg.lastEval`) is
+  refreshed by the partition constraint on every state — the pressure
+  solver's donor-enthalpy path included. Pricing a vapour draw at the bulk
+  instead leaves the vapour's energy behind in the node (measured: 93 kg
+  drawn at 1.46 MJ/kg where the superheat section held ~3), and the books
+  inflate until no pressure can pack them.
 
-**Why the subcooled section is carried as an energy, not a mass.** Under the
-profile closure the two are the same information — m_1 = U_1/ū_1 — but ū_1 is
-an *assumption* that moves with saturation, so every pressure change re-values
-the section. Integrating the mass makes the section's ENERGY jump with ū_1,
-and since the leftovers are a residual, the jump lands on the vapour's
-temperature, which nothing bounds. Integrating the energy makes its MASS jump
-instead, and mass lands in m_2/m_3, which the closure re-solves against the
-tube volume anyway. The slack has to go somewhere; this puts it in the
-bounded descriptor. U_1 then moves only through real flows:
-
-    dU_1/dt = W_in·h_in − W_12·h_f + Q_1 − P·v_1·dm_1/dt
-
-so every joule the economizer reports came in through the feed, the boundary,
-or the wall.
-
-What is still soft: nothing ties U_1 to the totals. An economizer that
-outlives the water it describes still reads as an absurd superheat
-temperature, because the energy it claims comes off the node and whatever is
-left has to be somewhere. The interface flux drains it (tens of seconds in
-the case `scripts/probe-otsg-partition.ts` builds), and thermodynamics alone
-cannot do better: the totals bound the subcooled section from BELOW (a node
-colder than saturated liquid must contain some) but never from above, because
-superheat is unbounded. Only the dynamics can, which is what integrating the
-energy is for.
+**The ledger and its leash.** m₁ is watched, not trusted: the integrator
+floors it at zero and ceilings it at the node's own mass; the closure caps
+the claim at the inventory; and because u₃ is pinned, a drifting claim can no
+longer hide in phantom steam — it shows up as the pressure and the sections
+visibly disagreeing with the plant around them, which
+`OtsgLedgerCheckOperator` reports (steam over every wall that persists, or a
+claim swallowing the whole inventory).
 
 ## 4. Interface conditions
 

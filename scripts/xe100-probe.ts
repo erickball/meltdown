@@ -13,8 +13,7 @@ import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
 import { totalMoles } from '../src/simulation/gas-properties';
-import { evaluateOtsgAtP } from '../src/simulation/otsg';
-import { tubeWaterState, classifyOtsgFlows } from '../src/simulation/operators/otsg-operator';
+import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
 import { saturatedLiquidEnergy } from '../src/simulation/water-properties';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -56,12 +55,7 @@ function otsgSections(state: SimulationState, id: string): string {
   // Use the operator's OWN feed classification. Reading the feed-energy
   // ceiling instead (what this did first) put the economizer's mean 800 kJ/kg
   // too high and the display read far healthier than the physics.
-  const water = tubeWaterState(node);
-  const flows = classifyOtsgFlows(state, id, node, water.pressure);
-  const ev = evaluateOtsgAtP(
-    cfg.U1, node.fluid.mass, water.energy, water.pressure, flows.uFeed,
-    { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-  );
+  const { ev } = evaluateOtsgSections(state, id, node);
   const L = ev.sections.map(s => (100 * s.lengthFrac).toFixed(0)).join('/');
   return `${ev.sections[0].mass.toFixed(0)} ${L} T3=${(ev.sections[2].T - 273.15).toFixed(0)}`;
 }

@@ -214,16 +214,23 @@ export interface FlowNode {
    * design.md). Present only on heatExchanger tube nodes built with
    * tubeModel: 'moving-boundary'.
    *
-   * NOTHING here is integrated state: the whole partition is SOLVED from the
-   * node's own mass, energy and tube volume on every evaluation
-   * (evaluateOtsgAtP), with the superheat section pinned by its own metal
-   * temperature - so section inventories can neither drift from the
-   * conserved totals, claim more room than the tubes have, nor run hotter
-   * than the walls heating them. Pressure stays owned by the ordinary (u,v)
-   * machinery; the sectioned evaluation runs AT that pressure - at the
-   * WATER's partial pressure when gas shares the tubes (design doc).
+   * ONE partition variable is integrated state: m1, the MASS of the
+   * subcooled section - how much cold feed is in the tube is genuine
+   * dynamics (the history of feed that has not yet boiled), updated by its
+   * transit balance. Its energy is priced at the profile mean u1(P), so a
+   * pressure drop reprices the slug colder and hands the difference to the
+   * vapor side of the books - the flash a depressurized slug undergoes.
+   * Everything else is SOLVED on every evaluation
+   * (evaluateOtsgPartition): the boiling/superheat split from the node's
+   * mass and energy, the superheat energy from the WALL (the steam's
+   * approach to its own metal), and the node's PRESSURE from the volume
+   * constraint - the sections have to pack into the tube. That pressure is
+   * published as the node's fluid.pressure (OtsgPartitionConstraintOperator):
+   * the uniform (u,v) read of a tube holding cold slug and hot steam is
+   * biased tens of bar low, and the flow solver was steering on it.
    */
   otsg?: {
+    m1: number;              // kg - subcooled section mass (integrated)
     heatArea: number;        // m2 - this bundle's tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
     /** Fraction of the shell stream this bundle sees (1 when it is the only
@@ -239,8 +246,26 @@ export interface FlowNode {
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */
+    /** Derived cache: the full partition evaluation for exactly these
+     *  (mass, energy, m1) inputs, written by OtsgPartitionConstraintOperator
+     *  and reused by the rate operator and sensors on the same state. The
+     *  key fields say which inputs it was solved for - a consumer whose
+     *  state has moved re-solves. Never serialized intent; harmless if it
+     *  is. */
+    partitionCache?: {
+      forMass: number;
+      forEnergy: number;
+      forM1: number;
+      ev: unknown;
+    };
     lastEval?: {
       P: number;
+      /** Pa per kg - the partition pressure's response to added mass, from a
+       *  finite-difference re-solve. The pressure solver's compliance for
+       *  this node comes from HERE: the generic rho*V/K linearization prices
+       *  a packing boiler as soft mush and admits inflow the partition
+       *  answers with tens of bar. */
+      dPdm: number;
       hSteamOut: number;     // J/kg - vapor-draw enthalpy (superheat carried)
       hLiquidOut: number;    // J/kg - liquid-draw enthalpy (section 1 mean)
       TSat: number;          // K

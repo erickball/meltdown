@@ -20,7 +20,7 @@
 
 import { buildSim, run, test, assert, assertBetween, report, Sim } from './lib/sim-harness';
 import { hxTubeNodeIds, hxBundleSuffix } from '../src/simulation';
-import { evaluateOtsgAtP } from '../src/simulation/otsg';
+import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
 import { saturatedLiquidEnergy } from '../src/simulation/water-properties';
 import type { PlantComponent, PlantConnection } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
@@ -178,6 +178,41 @@ function settledRig(bundles: number): SimulationState {
   return state;
 }
 
+// OTSG_TRACE=1: run the 1-bundle rig in slices and print the tube's ledger
+// against its totals - the drift watch, standalone. Exits before the tests.
+if (process.env.OTSG_TRACE) {
+  const sim = rig(1);
+  const id = hxTubeNodeIds('hx', 1)[0];
+  for (let t = 0; t < RUN_SECONDS; t += 0.5) {
+    try {
+      run(sim, 0.5, 0.02);
+    } catch (e) {
+      console.error(`THREW at t=${sim.state.time.toFixed(1)}: ${(e as Error).message.slice(0, 200)}`);
+      break;
+    }
+    const node = sim.state.flowNodes.get(id)!;
+    const cfg = node.otsg!;
+    try {
+      const { ev } = evaluateOtsgSections(sim.state, id, node);
+      const [s1, s2, s3] = ev.sections;
+      console.error(
+        `t=${sim.state.time.toFixed(0).padStart(4)} m=${node.fluid.mass.toFixed(1).padStart(6)} ` +
+        `U=${(node.fluid.internalEnergy / 1e6).toFixed(1).padStart(6)}MJ ` +
+        `m1L=${cfg.m1.toFixed(0).padStart(5)} ` +
+        `P=${(node.fluid.pressure / 1e5).toFixed(1).padStart(6)}bar ` +
+        `m=[${s1.mass.toFixed(1)},${s2.mass.toFixed(1)},${s3.mass.toFixed(1)}] ` +
+        `u3=${(ev.u3 / 1e3).toFixed(0)} x=${(node.fluid.quality ?? -1).toFixed(3)} ${ev.regime} ` +
+        sim.state.flowConnections.filter(c => c.fromNodeId === id || c.toNodeId === id)
+          .map(c => `${c.toNodeId === id ? '<-' : '->'}${c.toNodeId === id ? c.fromNodeId : c.toNodeId}:` +
+            `${c.massFlowRate.toFixed(1)}kg/s,${c.currentFlowPhase ?? '?'}`).join(' ') +
+        ` hOut=${cfg.lastEval ? (cfg.lastEval.hSteamOut / 1e3).toFixed(0) : 'NONE'}`);
+    } catch (e) {
+      console.error(`t=${sim.state.time.toFixed(0)} EVAL THROWS: ${(e as Error).message.slice(0, 160)}`);
+    }
+  }
+  process.exit(0);
+}
+
 const tubeNodes = (state: SimulationState, bundles: number) =>
   hxTubeNodeIds('hx', bundles).map(id => {
     const node = state.flowNodes.get(id);
@@ -248,14 +283,9 @@ test('Parallel feed lines to two bundles get distinct connection ids', () => {
 test('Every bundle fits its tube, takes feed and delivers steam', () => {
   const state = settledRig(2);
   for (const node of tubeNodes(state, 2)) {
-    // Only m1 is integrated state; the boiling/superheat split is solved from
-    // the node's totals, so ask for it the same way the operator does.
-    const cfg = node.otsg!;
-    const ev = evaluateOtsgAtP(
-      cfg.U1, node.fluid.mass, node.fluid.internalEnergy, node.fluid.pressure,
-      saturatedLiquidEnergy(T_FEED),
-      { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
-    );
+    // Ask for the partition the one way everything does - the shared
+    // evaluation path, wall pin and solved pressure included.
+    const { ev } = evaluateOtsgSections(state, node.id, node);
     const [m1, m2, m3] = ev.sections.map(s => s.mass);
     const where = `${node.id} m=[${m1.toFixed(0)}, ${m2.toFixed(0)}, ${m3.toFixed(0)}] kg`;
     // The invariant the solved partition buys: whatever the split, it fits.
@@ -354,8 +384,8 @@ test('Identical bundles run identically', () => {
     `bundle pressures (${(a.fluid.pressure / 1e5).toFixed(1)} vs ${(b.fluid.pressure / 1e5).toFixed(1)} bar)`);
   assertBetween(b.fluid.mass / a.fluid.mass, 0.95, 1.05,
     `bundle inventories (${a.fluid.mass.toFixed(0)} vs ${b.fluid.mass.toFixed(0)} kg)`);
-  assertBetween(b.otsg!.U1 / a.otsg!.U1, 0.95, 1.05,
-    `subcooled sections (${(a.otsg!.U1 / 1e6).toFixed(0)} vs ${(b.otsg!.U1 / 1e6).toFixed(0)} MJ)`);
+  assertBetween((b.otsg!.m1 + 1) / (a.otsg!.m1 + 1), 0.95, 1.05,
+    `subcooled sections (${a.otsg!.m1.toFixed(0)} vs ${b.otsg!.m1.toFixed(0)} kg)`);
 });
 
 report('Multi-Bundle Heat Exchanger Suite');

@@ -17,6 +17,7 @@ import {
   GraphiteOxidationRateOperator,
   OtsgRateOperator,
   OtsgLedgerCheckOperator,
+  OtsgPartitionConstraintOperator,
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
@@ -188,6 +189,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addRateOperator(new PumpSpeedRateOperator());
   solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
   solver.addConstraintOperator(new FluidStateConstraintOperator());
+  solver.addConstraintOperator(new OtsgPartitionConstraintOperator());
   solver.addConstraintOperator(new BurstCheckOperator());
   solver.addConstraintOperator(new ChokedFlowDisplayOperator());
   // Sampled process controllers act last, on the accepted state (finalOnly)

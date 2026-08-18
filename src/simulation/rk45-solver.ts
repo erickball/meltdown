@@ -28,6 +28,7 @@ export interface FlowNodeRates {
   dMass: number;      // kg/s - rate of mass change
   dEnergy: number;    // W - rate of internal energy change
   dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
+  dOtsgM1?: number;       // kg/s - OTSG subcooled-section mass rate (its partition state)
   dDepositedCsI?: number; // mol/s - CsI aerosol plating out onto this node's surfaces
 }
 
@@ -188,6 +189,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
       dEnergy: aRates.dEnergy + bRates.dEnergy,
     };
     // Combine NCG rates if either has them
+    if (aRates.dOtsgM1 !== undefined || bRates.dOtsgM1 !== undefined) {
+      combined.dOtsgM1 = (aRates.dOtsgM1 ?? 0) + (bRates.dOtsgM1 ?? 0);
+    }
     if (aRates.dNcg || bRates.dNcg) {
       combined.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -293,6 +297,7 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
       dEnergy: r.dEnergy * factor,
     };
     // Scale NCG rates if present
+    if (r.dOtsgM1 !== undefined) scaled.dOtsgM1 = r.dOtsgM1 * factor;
     if (r.dNcg) {
       scaled.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -394,6 +399,19 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         node.fluid.mass = 0;
       }
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
+
+      // OTSG partition: the subcooled section's mass lives inside the
+      // node's ordinary conserved totals, so moving it can never create or
+      // lose anything - it only moves the internal boundary. The floor
+      // absorbs float residue (the rate is constructed to vanish as the
+      // section empties); the ceiling is the physical statement that one
+      // section cannot hold more water than the whole node does.
+      if (node.otsg && nodeRates.dOtsgM1 !== undefined) {
+        node.otsg.m1 = Math.min(
+          Math.max(0, node.fluid.mass),
+          Math.max(0, node.otsg.m1 + nodeRates.dOtsgM1 * dt),
+        );
+      }
 
       if (nodeRates.dNcg) {
         // Initialize NCG on node if not present
@@ -605,7 +623,18 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
         const relEnergyRate = r.dEnergy / Math.abs(node.fluid.internalEnergy);
         sumSq += relEnergyRate * relEnergyRate;
         count++;
-      }    }
+      }
+      // OTSG partition: the economizer's mass is integrated state like any
+      // other, and until it was in here the step size was chosen without ever
+      // asking how fast the phase boundary was moving. Measured against the
+      // NODE's mass: a kilogram misplaced matters the same wherever it
+      // lands, and the denominator cannot vanish as the section dies.
+      if (r.dOtsgM1 !== undefined && node.fluid.mass > 0) {
+        const relM1Rate = r.dOtsgM1 / node.fluid.mass;
+        sumSq += relM1Rate * relM1Rate;
+        count++;
+      }
+    }
   }
 
   // Flow connections - track momentum (flow rate) changes
@@ -714,6 +743,20 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
             type: 'energy',
             contribution: relEnergyRate,
             description: `${powerMW > 0 ? '+' : ''}${powerMW.toFixed(2)} MW`
+          });
+        }
+      }
+
+      // OTSG phase boundary (see computeRatesNorm) - named separately so a
+      // step limited by a sprinting economizer says so
+      if (r.dOtsgM1 !== undefined && node.fluid.mass > 0) {
+        const relM1Rate = Math.abs(r.dOtsgM1 / node.fluid.mass);
+        if (relM1Rate > 1e-8) {
+          contributions.push({
+            nodeId: id,
+            type: 'mass',
+            contribution: relM1Rate,
+            description: `economizer ${r.dOtsgM1 > 0 ? '+' : ''}${r.dOtsgM1.toFixed(2)} kg/s`
           });
         }
       }

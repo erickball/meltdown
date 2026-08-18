@@ -191,6 +191,19 @@ export class PressureSolver {
         );
       }
       c[i] = (rho * node.volume) / (K * dt);
+      // Moving-boundary boiler tubes publish their own dP/dm - the pressure
+      // there is the partition's volume-packing solution, and a tube being
+      // stuffed full stiffens LONG before the uniform mush read would (the
+      // generic linearization admitted 150 kg of feed into a tube whose
+      // honest pressure was answering with +40 bar). Take the stiffer of
+      // the two: the partition can also be SOFTER than the mush read in
+      // vapor-rich states, and softening the solve is never what a
+      // compliance correction is for.
+      const otsgDPdm = node.otsg?.lastEval?.dPdm;
+      if (otsgDPdm && otsgDPdm > 0) {
+        const cPart = 1 / (otsgDPdm * dt);
+        if (cPart < c[i]) c[i] = cPart;
+      }
     }
 
     if (this.config.implicitMomentum) {
@@ -858,6 +871,16 @@ export class PressureSolver {
    * the remnant), a liquid draw removes h_f and leaves the NCG behind.
    */
   private donorEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
+    // Moving-boundary boiler tubes know what actually sits at each end of
+    // the bundle: a vapor draw carries the SUPERHEAT section's enthalpy (the
+    // entire point of the model - the bulk of a slug-heavy tube is ~2x too
+    // cheap and leaves the vapor's energy behind in the node), a liquid draw
+    // the subcooled section's. The cache is refreshed on every state by
+    // OtsgPartitionConstraintOperator.
+    if (node.otsg?.lastEval) {
+      if (flowPhase === 'vapor') return node.otsg.lastEval.hSteamOut;
+      if (flowPhase === 'liquid') return node.otsg.lastEval.hLiquidOut;
+    }
     const bulk = this.bulkEnthalpy(node);
     if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') return bulk;
 
