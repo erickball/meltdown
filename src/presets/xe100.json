@@ -554,7 +554,7 @@
         "ratedPower": 80000000,
         "ratedSteamFlow": 77,
         "efficiency": 0.87,
-        "governorValve": 0.02,
+        "governorValve": 0.25,
         "generatorEfficiency": 0.98,
         "ports": [
           {
@@ -691,7 +691,7 @@
         "elevation": 0,
         "diameter": 0.4,
         "running": true,
-        "speed": 0.57,
+        "speed": 0.5,
         "ratedFlow": 80,
         "ratedHead": 6000,
         "orientation": "right-left",
@@ -1201,8 +1201,8 @@
               },
               {
                 "op": "scale",
-                "factor": -5,
-                "offset": 20,
+                "factor": -1,
+                "offset": 4,
                 "input": {
                   "kind": "node-level",
                   "targetId": "hx-1-tube"
@@ -1210,11 +1210,11 @@
               }
             ]
           },
-          "aggressiveness": 1,
+          "aggressiveness": 2.5,
           "actuator": {
             "kind": "pump-speed",
             "targetId": "fw-pump-1",
-            "min": 0.05,
+            "min": 0.4,
             "max": 1,
             "rateLimit": 0.05
           }
@@ -1393,7 +1393,7 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.001,
+      "flowArea": 0.0015,
       "length": 4,
       "resistanceCoeff": 2,
       "fromPhaseTolerance": 0
@@ -1405,7 +1405,7 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.001,
+      "flowArea": 0.0015,
       "length": 4,
       "resistanceCoeff": 2,
       "fromPhaseTolerance": 0

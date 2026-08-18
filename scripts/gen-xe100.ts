@@ -281,14 +281,15 @@ add('turbine-1', {
   width: 10, height: 3, orientation: 'left-right', stages: 1,
   running: true, power: 0,
   ratedPower: 80e6, ratedSteamFlow: 77, efficiency: 0.87,
-  // Governor starts CLOSED and the slew-limited flow controller runs the
-  // turbine up over ~40 s. Starting open is the shock that wrecked every
-  // control scheme in tuning: at t=0 the loop flows are all zero, so the
-  // superheater sees its full steam draw before its helium heat input has
-  // developed, quenches 250 K in the first second, and the whole secondary
-  // falls into a flooded recovery it takes hundreds of seconds to escape.
-  // Real plants roll turbines gradually for the same class of reason.
-  governorValve: 0.02, generatorEfficiency: 0.98,
+  // Governor starts at 25%, not closed and not full. Starting fully open
+  // was the shock that wrecked the old lumped closure's control schemes
+  // (full draw quenched the superheater 250 K in a second); starting at 2%
+  // was its overcorrection, and under the partition's honest pressure it
+  // bottles ~150 MW of boil-off behind a 40 kg/s dump valve while the
+  // turbine takes 40 s to roll - the boiler compresses toward water-solid
+  // by t=7. 25% draws ~20 kg/s from the first second, and the pressure
+  // loop rolls it up from there.
+  governorValve: 0.25, generatorEfficiency: 0.98,
   ports: ports([['inlet', -7, 0, 'in'], ['outlet', 7, 0, 'out']]),
   inletFluid: { temperature: T_STEAM, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   nqa1: false,
@@ -334,7 +335,22 @@ add('fw-pump-1', {
   // section continuously instead of flipping a whole lump dry. Delivery at
   // 165 bar is ~55-60 kg/s, which is the design-duty steam flow at full
   // superheat enthalpy rise.
-  diameter: 0.4, running: true, speed: 0.57,
+  // 0.46 INITIAL, not the 0.57 operating point: 0.57's shutoff head beats
+  // the boiler's honest 165 bar with every loop flow still zero, so the
+  // pump slammed 70 kg/s of cold feed into the tubes in the first second,
+  // the partition pressure dipped as the slug swallowed the vapor space,
+  // and the deeper dip drew harder - 530 kg in the boiler by t=6 and a
+  // 200-bar recovery that takes 40 s. 0.46 starts the pump AT the deadhead
+  // cliff for 165 bar (shutoff crosses it at ~0.47): essentially no flow at
+  // t=0, but the loop has gradient from the first scan as the governor
+  // rolls the turbine. Starting far below the cliff (0.30 was tried)
+  // starves the boiler to 40 kg while the turbine drains the tubes; starting
+  // exactly AT it (0.46) leaves the boiler feedless for the first ~12 s of
+  // full primary heat, and the 211-bar spike that builds sets the governor
+  // and the relief cycling hard enough to ring the whole secondary. 0.50
+  // delivers a trickle (~10-15 kg/s) from the first second - enough to keep
+  // the boil-off fed without the old 70 kg/s slam.
+  diameter: 0.4, running: true, speed: 0.50,
   // High rated head + low speed = a STEEP operating curve: delivery varies
   // only ~60% between 165 and 60 bar of back-pressure instead of 2.3x. The
   // flat curve was a flood machine - any pressure sag made the pump
@@ -562,8 +578,13 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 // pinned at T_sat; bare level trim fights shrink-swell. Three-element evades
 // all three because the dominant term is FEEDFORWARD - match the steam
 // leaving, summed over both bundles - and level only trims around it
-// (-5 kg/s per metre off the 4 m target, i.e. the +20 offset). The pump
-// curve's droop is still underneath as the fallback if the loop saturates.
+// (-1 kg/s per metre off the 4 m target: the node is 14 m tall, and the
+// first trim - scaled 5x for a level that could never span 14 m - opened at
+// -8 kg/s and later railed at +16 of standing overfeed; metres, not
+// fractions, THIRD bite). Aggressiveness 4: the auto-tune lambda of 30 s
+// gave Ti = 120 s, and against 40 kg/s errors the loop moved ~0.001/s -
+// what looked reverse-signed was merely glacial. The pump curve's droop is
+// still underneath as the fallback if the loop saturates.
 controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-fwh-1' },
   setpoint: {
@@ -577,13 +598,22 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
         ],
       },
       {
-        op: 'scale', factor: -5.0, offset: 20.0,
+        op: 'scale', factor: -1.0, offset: 4.0,
         input: { kind: 'node-level', targetId: 'hx-1-tube' },
       },
     ],
   },
-  aggressiveness: 1.0,
-  actuator: { kind: 'pump-speed', targetId: 'fw-pump-1', min: 0.05, max: 1.0, rateLimit: 0.05 },
+  // 2.5, not the 4.0 the bench retune used: against the startup's
+  // governor/relief cycling the hotter loop swung feed 0 -> 40 kg/s and the
+  // swings themselves cornered the boiler's books. 2.5 still turns the old
+  // 120 s integral time into ~50 s, without chasing every relief pop.
+  aggressiveness: 2.5,
+  // min 0.40, not 0.05: below the ~0.47 deadhead the pump moves no water at
+  // boiler pressure, so everything under the cliff is one dead actuator
+  // band - and a loop that dives into it needs seconds of ramp just to get
+  // its gradient back while the boiler drains. 0.40 keeps the low end just
+  // under the cliff: still nearly zero flow, never out of authority.
+  actuator: { kind: 'pump-speed', targetId: 'fw-pump-1', min: 0.40, max: 1.0, rateLimit: 0.05 },
 });
 
 // NO hotwell level controller - it was starving the plant. Its 0.80 setpoint
@@ -682,11 +712,15 @@ connect('fw-pump-1', 'fw-pump-1-outlet', 'fwh-1', 'fwh-1-tube-1',
 // One dump valve on the common header, but a tap off EACH bundle: the tube
 // side is a pressure boundary per bundle, and with the governor shut a bundle
 // whose only outlet is the throttled turbine line has no relief path at all.
+// 0.0015 m2 per tap (~60 kg/s total choked), up from 0.001 (~40): with the
+// partition publishing honest pressures the startup boil-off is real steam
+// that has to leave through SOMETHING while the turbine rolls, and 40 kg/s
+// of dump against ~150 MW of duty let the boiler compress to the dome top.
 connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.001, length: 4, resistanceCoeff: 2,
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('hx-1', 'hx-1-tube-2-b2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.001, length: 4, resistanceCoeff: 2,
+  { fromElevation: 13.5, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.002, length: 10, resistanceCoeff: 2 });
