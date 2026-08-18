@@ -80,6 +80,17 @@ function line2(state: SimulationState) {
   console.log(`        b2: m=${b2.fluid.mass.toFixed(1)} P=${(b2.fluid.pressure / 1e5).toFixed(1)} m1L=${b2.otsg!.m1.toFixed(0)}  b1 conns: ${conns}`);
 }
 
+// Ceiling watch: the property surface now EVALUATES dense states beyond the
+// IF97 boundary so transients can transit them - but no accepted plant state
+// should LIVE up there. Track the worst accepted pressure per node.
+const maxP = new Map<string, number>();
+function scanPressures(state: SimulationState) {
+  for (const [id, n] of state.flowNodes) {
+    if (n.isBoundary) continue;
+    if ((n.fluid.pressure ?? 0) > (maxP.get(id) ?? 0)) maxP.set(id, n.fluid.pressure);
+  }
+}
+
 line(sim.state);
 for (let t = 0; t < seconds; t += 1) {
   try {
@@ -90,4 +101,11 @@ for (let t = 0; t < seconds; t += 1) {
   }
   line(sim.state);
   line2(sim.state);
+  scanPressures(sim.state);
 }
+console.log('Worst accepted pressures (nodes over 25 MPa):');
+let any = false;
+for (const [id, P] of [...maxP.entries()].sort((a, b) => b[1] - a[1])) {
+  if (P > 25e6) { console.log(`  ${id}: ${(P / 1e5).toFixed(0)} bar`); any = true; }
+}
+if (!any) console.log('  none - every sampled node stayed under 250 bar');

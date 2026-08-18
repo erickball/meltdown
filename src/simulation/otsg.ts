@@ -220,6 +220,14 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10): number {
   const pOf = (lnV: number) => calculateState(1, u, Math.exp(lnV)).pressure;
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
   if (!(pLo >= P * (1 - 1e-6) && pHi <= P)) {
+    // Near the critical point the isobars run almost flat in v, so the
+    // saturation-table v_g and the property grid's own pressure there
+    // disagree by up to a percent or two of P - and a state a few tens of
+    // kJ/kg above u_g then has no bracket even though it IS just-saturated
+    // vapor. Within that table-consistency band the answer is v_g itself
+    // (the same limit the u <= u_g + 5 kJ/kg early-exit already takes).
+    // Below the band the state genuinely is not vapor at this pressure.
+    if (pLo >= P * 0.98 && pLo < P) return vg;
     throw new Error(`[OTSG] superheatedV: P=${(P / 1e5).toFixed(2)} bar not bracketed at ` +
       `u=${(u / 1e3).toFixed(0)} kJ/kg (P(${Math.exp(lnLo).toExponential(1)})=${(pLo / 1e5).toFixed(2)}, ` +
       `P(${Math.exp(lnHi).toExponential(1)})=${(pHi / 1e5).toFixed(2)} bar). ` +

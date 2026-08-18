@@ -2047,7 +2047,25 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
           P = gridResult.P;
           calculationPath = 'supercritical_grid_liquid';
         } else {
-          throw new Error(`[WaterProps v4] Liquid/supercritical interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
+          // Dense AND hotter than the grid's hot edge at this v: past the
+          // IF97 region-3 boundary (the near-critical columns now run to
+          // 100 MPa), where no grid data can exist. The same anchored
+          // hot-edge extension the vapor branch uses (approved) covers it -
+          // continuous with the edge point, monotone in u - so a small
+          // throughput node chasing a hot inlet can TRANSIT this corner and
+          // solver trial stages can be evaluated and rejected, instead of
+          // every stage dying and the run being declared divergent. No
+          // ACCEPTED plant state belongs out here (equivalent pressures
+          // over 1000 bar); the pressure ceiling watch below reports any
+          // that persist. (Edit approved by user 2026-08-18.)
+          const denseHot = superheatedVaporExtrapolation(u, v);
+          if (denseHot) {
+            T = denseHot.T;
+            P = denseHot.P;
+            calculationPath = 'supercritical_hot_edge_extrapolation';
+          } else {
+            throw new Error(`[WaterProps v4] Liquid/supercritical interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
+          }
         }
       }
     }
