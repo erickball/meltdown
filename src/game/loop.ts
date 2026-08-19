@@ -1182,6 +1182,32 @@ export class GameLoop {
     return this.stateHistory.getPositionStep();
   }
 
+  /** Rewind history in persistable form (see StateHistory.exportForSave). */
+  exportHistory(): ReturnType<StateHistory['exportForSave']> {
+    return this.stateHistory.exportForSave();
+  }
+
+  /**
+   * Restore a saved rewind history after the saved sim state has been
+   * adopted (setSimulationState resets the solver and clears history, so
+   * this must run after it). Realigns the solver's step counter past the
+   * imported head - step numbers order the history and must never repeat -
+   * and, if the save was made while rewound, re-establishes that position.
+   */
+  importHistory(data: ReturnType<StateHistory['exportForSave']>): void {
+    this.stateHistory.importFromSave(data);
+    const head = this.stateHistory.headStep();
+    this.rk45Solver?.resumeStepCounter(head);
+    this.lastSnapshotStep = head;
+    const headStates = this.stateHistory.statesInRange();
+    const headTime = headStates.length > 0 ? headStates[headStates.length - 1].time : 0;
+    if (Math.abs(headTime - this.state.time) > 1e-6) {
+      // Saved while positioned in the past: the live state sits mid-history
+      const step = this.stateHistory.stepForTime(this.state.time);
+      this.stateHistory.setPosition(step, this.state.time);
+    }
+  }
+
   /**
    * Read-only history states for plotting/analysis (Jack's tools), oldest
    * first, with the live state appended when it is newer than the last

@@ -430,7 +430,7 @@ export function executeJackTool(
       return execQueryHistory(input, host.getHistoryStates);
 
     case 'plot_history':
-      return execPlotHistory(input, host.getHistoryStates, record);
+      return execPlotHistory(input, host.getHistoryStates, record, host.getSimState()?.time);
 
     case 'file_car':
       return fileCarReport(input, host, record);

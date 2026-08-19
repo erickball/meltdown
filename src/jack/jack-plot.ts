@@ -26,12 +26,52 @@ export interface PlotPanelSpec {
   logRight?: boolean;
   series: RenderSeries[];
   annotations: Array<{ time: number; label: string }>;
+  /**
+   * Current sim position. When it sits before the end of the plotted range
+   * (the user rewound), a "now" marker is drawn there - the chart keeps
+   * showing the full recorded history instead of truncating to the past.
+   */
+  nowTime?: number;
+  /** Called when the user closes the panel (× button or closeAllPlots) */
+  onClose?: () => void;
 }
 
 const PANEL_W = 640;
-const CANVAS_H = 330;
+const PANEL_H = 396; // header + legend + default chart area
 
 let panelCascade = 0;
+
+// Last spec per open panel, so a resize can redraw without re-sampling
+const panelSpecs = new Map<string, PlotPanelSpec>();
+const panelObservers = new Map<string, ResizeObserver>();
+
+/** Is a figure's panel currently open (and not just minimized)? */
+export function isPlotOpen(figureId: string): boolean {
+  return document.getElementById(`jack-plot-${figureId}`) !== null;
+}
+
+/** Is the panel minimized? Live refresh skips redrawing collapsed charts. */
+export function isPlotMinimized(figureId: string): boolean {
+  const panel = document.getElementById(`jack-plot-${figureId}`);
+  return !!panel && panel.dataset.minimized === '1';
+}
+
+/** Close every open plot panel (fires each panel's onClose). */
+export function closeAllPlots(): void {
+  for (const figureId of [...panelSpecs.keys()]) {
+    closePanel(figureId);
+  }
+}
+
+function closePanel(figureId: string): void {
+  const panel = document.getElementById(`jack-plot-${figureId}`);
+  panelObservers.get(figureId)?.disconnect();
+  panelObservers.delete(figureId);
+  const spec = panelSpecs.get(figureId);
+  panelSpecs.delete(figureId);
+  panel?.remove();
+  spec?.onClose?.();
+}
 
 /** Create or update the floating panel for a figure and draw the chart. */
 export function showPlotPanel(spec: PlotPanelSpec): void {
@@ -43,53 +83,102 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     const offset = (panelCascade++ % 5) * 28;
     panel.style.cssText = `
       position: fixed; right: ${80 + offset}px; bottom: ${90 + offset}px;
-      width: ${PANEL_W}px; z-index: 900;
+      width: ${PANEL_W}px; height: ${PANEL_H}px; z-index: 900;
       background: #1a1e24; border: 1px solid #445566; border-radius: 8px;
       box-shadow: 0 4px 20px rgba(0,0,0,0.5); color: #d0d8e0;
       font-family: 'Consolas', monospace; user-select: none;
+      display: flex; flex-direction: column;
+      resize: both; overflow: hidden;
+      min-width: 320px; min-height: 160px;
     `;
 
     const header = document.createElement('div');
     header.className = 'jack-plot-header';
     header.title =
       'Plotted from the simulation history (about one point per frame recently, ' +
-      'sparser further back). Drag to move; × to close.';
+      'sparser further back). Drag to move; resize from the bottom-right corner; ' +
+      '– to minimize; × to close.';
     header.style.cssText = `
       display: flex; justify-content: space-between; align-items: center;
       padding: 6px 10px; cursor: move; border-bottom: 1px solid #334455;
+      flex: 0 0 auto;
     `;
     const titleEl = document.createElement('span');
     titleEl.className = 'jack-plot-title';
     titleEl.style.cssText = 'font-size: 12px; color: #7af; font-weight: bold;';
-    const closeBtn = document.createElement('button');
-    closeBtn.textContent = '×';
-    closeBtn.title = 'Close this chart';
-    closeBtn.style.cssText = `
+    const buttons = document.createElement('span');
+    buttons.style.cssText = 'display: inline-flex; gap: 6px;';
+    const btnCss = `
       background: none; border: none; color: #99aacc; cursor: pointer;
       font-size: 16px; line-height: 1; padding: 0 2px;
     `;
-    closeBtn.addEventListener('click', () => panel!.remove());
+    const minBtn = document.createElement('button');
+    minBtn.className = 'jack-plot-min';
+    minBtn.textContent = '–';
+    minBtn.title = 'Minimize to the title bar (chart keeps updating in the background)';
+    minBtn.style.cssText = btnCss;
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = '×';
+    closeBtn.title = 'Close this chart';
+    closeBtn.style.cssText = btnCss;
+    closeBtn.addEventListener('click', () => closePanel(spec.figureId));
+    buttons.appendChild(minBtn);
+    buttons.appendChild(closeBtn);
     header.appendChild(titleEl);
-    header.appendChild(closeBtn);
+    header.appendChild(buttons);
     panel.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'jack-plot-body';
+    body.style.cssText = 'display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0;';
 
     const legend = document.createElement('div');
     legend.className = 'jack-plot-legend';
     legend.style.cssText = `
       display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 5px 10px 0 10px;
-      font-size: 11px;
+      font-size: 11px; flex: 0 0 auto;
     `;
-    panel.appendChild(legend);
+    body.appendChild(legend);
 
+    const canvasBox = document.createElement('div');
+    canvasBox.className = 'jack-plot-canvas-box';
+    canvasBox.style.cssText = 'flex: 1 1 auto; min-height: 0; padding: 2px 4px 4px 4px;';
     const canvas = document.createElement('canvas');
     canvas.className = 'jack-plot-canvas';
-    canvas.style.cssText = `display: block; width: 100%; height: ${CANVAS_H}px; padding: 2px 4px 4px 4px; box-sizing: border-box;`;
-    panel.appendChild(canvas);
+    canvas.style.cssText = 'display: block; width: 100%; height: 100%;';
+    canvasBox.appendChild(canvas);
+    body.appendChild(canvasBox);
+    panel.appendChild(body);
+
+    // Minimize: collapse to the title bar, remember the expanded size
+    minBtn.addEventListener('click', () => {
+      const p = panel!;
+      if (p.dataset.minimized === '1') {
+        delete p.dataset.minimized;
+        body.style.display = 'flex';
+        p.style.height = p.dataset.expandedHeight || `${PANEL_H}px`;
+        p.style.minHeight = '160px';
+        p.style.resize = 'both';
+        minBtn.textContent = '–';
+        minBtn.title = 'Minimize to the title bar (chart keeps updating in the background)';
+        const s = panelSpecs.get(spec.figureId);
+        if (s) drawChart(canvas, s);
+      } else {
+        p.dataset.expandedHeight = p.style.height;
+        p.dataset.minimized = '1';
+        body.style.display = 'none';
+        p.style.height = 'auto';
+        p.style.minHeight = '0'; // the expanded min-height would hold it open
+        p.style.resize = 'none';
+        minBtn.textContent = '+';
+        minBtn.title = 'Restore the chart';
+      }
+    });
 
     // Drag by the header
     let dragFrom: { x: number; y: number; left: number; top: number } | null = null;
     header.addEventListener('pointerdown', (e) => {
-      if (e.target === closeBtn) return;
+      if (e.target === closeBtn || e.target === minBtn) return;
       const rect = panel!.getBoundingClientRect();
       // Switch from right/bottom to left/top anchoring on first drag
       panel!.style.left = `${rect.left}px`;
@@ -106,9 +195,25 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     });
     header.addEventListener('pointerup', () => { dragFrom = null; });
 
+    // Redraw at the new size when the user resizes the panel (coalesced to
+    // one draw per animation frame)
+    let resizeQueued = false;
+    const observer = new ResizeObserver(() => {
+      if (resizeQueued) return;
+      resizeQueued = true;
+      requestAnimationFrame(() => {
+        resizeQueued = false;
+        const s = panelSpecs.get(spec.figureId);
+        if (s && panel!.dataset.minimized !== '1') drawChart(canvas, s);
+      });
+    });
+    observer.observe(canvasBox);
+    panelObservers.set(spec.figureId, observer);
+
     document.body.appendChild(panel);
   }
 
+  panelSpecs.set(spec.figureId, spec);
   (panel.querySelector('.jack-plot-title') as HTMLSpanElement).textContent = spec.title;
 
   const legend = panel.querySelector('.jack-plot-legend') as HTMLDivElement;
@@ -125,7 +230,9 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     legend.appendChild(item);
   }
 
-  drawChart(panel.querySelector('.jack-plot-canvas') as HTMLCanvasElement, spec);
+  if (panel.dataset.minimized !== '1') {
+    drawChart(panel.querySelector('.jack-plot-canvas') as HTMLCanvasElement, spec);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -229,7 +336,8 @@ function buildAxis(
 
 function drawChart(canvas: HTMLCanvasElement, spec: PlotPanelSpec): void {
   const cssW = canvas.clientWidth || PANEL_W - 8;
-  const cssH = CANVAS_H - 6;
+  const cssH = canvas.clientHeight || 320;
+  if (cssW < 40 || cssH < 40) return; // collapsed mid-resize; observer will redraw
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(cssW * dpr);
   canvas.height = Math.round(cssH * dpr);
@@ -346,6 +454,33 @@ function drawChart(canvas: HTMLCanvasElement, spec: PlotPanelSpec): void {
     ctx.textBaseline = 'middle';
     ctx.fillText(spec.yLabelRight, 0, 0);
     ctx.restore();
+  }
+
+  // "Now" marker: only when the position is meaningfully before the end of
+  // the plotted range - at the live head it would just underline the right
+  // edge. Distinct from annotations (solid, accent-colored, flagged "now").
+  if (
+    spec.nowTime !== undefined &&
+    spec.nowTime >= tMin &&
+    spec.nowTime < tMax - (tMax - tMin) * 0.002
+  ) {
+    const x = toX(spec.nowTime);
+    ctx.strokeStyle = '#77aaff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, plotT);
+    ctx.lineTo(x, plotB);
+    ctx.stroke();
+    ctx.fillStyle = '#77aaff';
+    ctx.beginPath();
+    ctx.moveTo(x - 5, plotT);
+    ctx.lineTo(x + 5, plotT);
+    ctx.lineTo(x, plotT + 7);
+    ctx.closePath();
+    ctx.fill();
+    ctx.textAlign = x > (plotL + plotR) / 2 ? 'right' : 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('now', x + (x > (plotL + plotR) / 2 ? -8 : 8), plotT + 2);
   }
 
   // Annotation lines

@@ -12,7 +12,13 @@
  */
 
 import type { SimulationState } from '../simulation/types';
-import { showPlotPanel, type RenderSeries, type PlotPanelSpec } from './jack-plot';
+import {
+  showPlotPanel,
+  isPlotOpen,
+  isPlotMinimized,
+  type RenderSeries,
+  type PlotPanelSpec,
+} from './jack-plot';
 
 export interface HistorySample {
   time: number;
@@ -260,11 +266,85 @@ const SERIES_COLORS = [
   '#76b7b2', '#edc948', '#ff9da7', '#9c755f', '#bab0ac',
 ];
 
+// ---------------------------------------------------------------------------
+// Open-plot registry: every open figure keeps its request input, so plots
+// can refresh live while the sim runs (open-ended time range only) and be
+// saved/restored with a configuration.
+// ---------------------------------------------------------------------------
+
+const openPlotInputs = new Map<string, Record<string, unknown>>();
+const livePlotIds = new Set<string>();
+const liveLastTime = new Map<string, number>();
+
+const noopRecord = (): void => {};
+
+/**
+ * Redraw open-ended plots against the latest history. Called from the
+ * per-frame update path (throttled by the caller); skips minimized panels
+ * and anything that hasn't gained at least 0.1 s of new sim time.
+ */
+export function refreshLivePlots(
+  getHistory: (tMin: number, tMax: number) => HistorySample[],
+  nowTime: number
+): void {
+  for (const figureId of [...livePlotIds]) {
+    if (!isPlotOpen(figureId)) {
+      // Panel was closed without telling us (shouldn't happen; be tidy)
+      livePlotIds.delete(figureId);
+      openPlotInputs.delete(figureId);
+      liveLastTime.delete(figureId);
+      continue;
+    }
+    if (isPlotMinimized(figureId)) continue;
+    // Redraw on ANY position change - forward, or backward through a
+    // rewind (which moves the "now" marker, not the plotted range)
+    const last = liveLastTime.get(figureId) ?? -Infinity;
+    if (Math.abs(nowTime - last) < 1e-9) continue;
+    const input = openPlotInputs.get(figureId);
+    if (!input) continue;
+    try {
+      execPlotHistory(input, getHistory, noopRecord, nowTime);
+    } catch (e) {
+      // Fail loudly once, then stop refreshing this figure rather than
+      // spamming an error every quarter second
+      console.error(`[JackPlot] Live refresh of "${figureId}" failed; freezing it:`, e);
+      livePlotIds.delete(figureId);
+    }
+  }
+}
+
+/** The open panels' plot requests, for persisting with a saved config. */
+export function getOpenPlotInputs(): Array<Record<string, unknown>> {
+  return [...openPlotInputs.values()].map((input) => ({ ...input }));
+}
+
+/** Re-create saved plot panels against the (restored) history. */
+export function restorePlots(
+  inputs: unknown,
+  getHistory: (tMin: number, tMax: number) => HistorySample[],
+  nowTime?: number
+): number {
+  if (!Array.isArray(inputs)) return 0;
+  let restored = 0;
+  for (const input of inputs) {
+    if (!input || typeof input !== 'object') continue;
+    try {
+      const result = execPlotHistory(input as Record<string, unknown>, getHistory, noopRecord, nowTime) as { ok?: boolean };
+      if (result.ok) restored++;
+      else console.warn('[JackPlot] Saved plot could not be restored:', result);
+    } catch (e) {
+      console.warn('[JackPlot] Saved plot could not be restored:', e);
+    }
+  }
+  return restored;
+}
+
 /** plot_history: render a chart panel for the user; returns a summary. */
 export function execPlotHistory(
   input: Record<string, unknown>,
   getHistory: (tMin: number, tMax: number) => HistorySample[],
-  record: (description: string) => void
+  record: (description: string) => void,
+  nowTime?: number
 ): unknown {
   const rawSeries = Array.isArray(input.series) ? (input.series as Record<string, unknown>[]) : [];
   if (rawSeries.length === 0) {
@@ -335,9 +415,24 @@ export function execPlotHistory(
     logRight: input.logY2 === true,
     series: render,
     annotations,
+    // Frozen exhibits (explicit tMaxS) never show a marker - it would go
+    // stale the moment the position moved and nothing would redraw it
+    nowTime: typeof input.tMaxS === 'number' ? undefined : nowTime,
+    onClose: () => {
+      openPlotInputs.delete(figureId);
+      livePlotIds.delete(figureId);
+      liveLastTime.delete(figureId);
+    },
   };
   showPlotPanel(spec);
   record(`Jack plotted "${title}" (${render.length} series, ${samples.length} points)`);
+
+  // Register for live refresh and save/restore. A plot with an explicit end
+  // time is a finished exhibit; an open-ended one keeps tracking the sim.
+  openPlotInputs.set(figureId, { ...input, figureId });
+  liveLastTime.set(figureId, nowTime ?? samples[samples.length - 1].time);
+  if (typeof input.tMaxS === 'number') livePlotIds.delete(figureId);
+  else livePlotIds.add(figureId);
 
   return {
     ok: true,
