@@ -40,6 +40,7 @@ import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
 import { JackManager } from './jack/jack-manager';
+import { executeJackTool } from './jack/jack-tools-exec';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -578,6 +579,14 @@ function init() {
   const rodSlider = document.getElementById('rod-position') as HTMLInputElement;
   const rodValueDisplay = document.getElementById('rod-position-value');
   if (rodSlider) {
+    // Flag an in-progress drag so the per-frame sim writeback (which snaps
+    // the thumb to the commanded position) leaves the thumb alone while the
+    // user holds it. On long frames the sim moves several percent between
+    // syncs, and without this the writeback yanks the slider mid-drag.
+    rodSlider.addEventListener('pointerdown', () => { rodSlider.dataset.dragging = '1'; });
+    const endRodDrag = () => { delete rodSlider.dataset.dragging; };
+    window.addEventListener('pointerup', endRodDrag);
+    window.addEventListener('pointercancel', endRodDrag);
     rodSlider.addEventListener('input', () => {
       const insertionPercent = parseInt(rodSlider.value);
       const withdrawalPosition = 1 - insertionPercent / 100; // Convert to simulation scale
@@ -717,15 +726,18 @@ function init() {
   const historyDialogCancel = document.getElementById('history-dialog-cancel');
   const historyDialogClose = document.querySelector('.history-dialog-close');
 
-  // Refresh all displays after restoring a state from history
+  // Refresh all displays after restoring/replaying a state from history -
+  // everything the per-frame update path touches that derives from state:
+  // visuals (incl. burst overlays via setSimState), debug pane, detail
+  // panel, MW readout, core-damage banner, time display
   function refreshDisplayAfterRestore(): void {
     const state = gameLoop.getState();
     const historyInfo = gameLoop.getHistoryInfo();
 
-    // Sync simulation to visual components
+    // Sync simulation to visual components (valve/pump/rod positions, fluid)
     syncSimulationToVisuals(state, plantState);
 
-    // Update canvas
+    // Update canvas - burst overlays and gauges read state.burstStates etc.
     plantCanvas.setSimState(state);
 
     // Update time display - use step number from history, not solver
@@ -737,6 +749,20 @@ function init() {
     // Update debug panel
     updateDebugPanel(state, gameLoop.getSolverMetrics(), gameLoop.getPressureSolverStatus());
 
+    // Core damage / radiological release banner tracks the restored state
+    updateCoreDamageIndicator(state);
+
+    // MW readout: a replay re-runs the turbine operator, so its live report
+    // matches the replayed state; a pure snapshot restore leaves the last
+    // computed value, which the next step corrects
+    const mwValueEl = document.getElementById('mw-value');
+    if (mwValueEl) {
+      const tcState = getTurbineCondenserState();
+      const totalMW = tcState.turbinePower / 1e6;
+      mwValueEl.textContent = totalMW.toFixed(1) + ' MW';
+      mwValueEl.style.color = totalMW <= 0 ? '#888' : totalMW < 100 ? '#ff4' : '#4f4';
+    }
+
     // Update component detail panel if something is selected
     if (selectedComponentId) {
       updateComponentDetail(selectedComponentId, plantState, state);
@@ -746,25 +772,78 @@ function init() {
     updateHistoryInfo();
   }
 
-  if (backStepBtn) {
-    backStepBtn.addEventListener('click', () => {
-      const success = gameLoop.stepBack();
-      if (success) {
+  // Seek and report; surfaces replay determinism errors instead of dying
+  function seekAndRefresh(run: () => number | null, atLimitMsg: string): void {
+    try {
+      const time = run();
+      if (time !== null) {
         refreshDisplayAfterRestore();
       } else {
-        showNotification('Already at beginning of history', 'warning');
+        showNotification(atLimitMsg, 'warning');
       }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      showNotification('Replay error: ' + msg.substring(0, 120), 'error', 15000);
+      console.error(error);
+    }
+  }
+
+  // << / >>: back/forward one second, landing on round-number seconds
+  // (the state at the step that first crossed the integer-second boundary)
+  if (backStepBtn) {
+    backStepBtn.addEventListener('click', () => {
+      const t = gameLoop.getState().time;
+      if (t <= 1e-6) {
+        showNotification('Already at beginning of history', 'warning');
+        return;
+      }
+      const target = Math.max(0, Math.ceil(t - 1e-6) - 1);
+      seekAndRefresh(() => {
+        let landed = gameLoop.seekToTime(target);
+        // Seeks land on the step just PAST the round second, so sitting at
+        // e.g. 5.003s makes "back to 5" a no-op - go one more second back
+        if (landed !== null && landed >= t - 1e-9 && target > 0) {
+          landed = gameLoop.seekToTime(target - 1);
+        }
+        return landed;
+      }, 'Already at beginning of history');
     });
   }
 
   if (forwardStepBtn) {
     forwardStepBtn.addEventListener('click', () => {
-      const success = gameLoop.stepForward();
-      if (success) {
-        refreshDisplayAfterRestore();
-      } else {
-        showNotification('Already at end of history', 'warning');
+      const t = gameLoop.getState().time;
+      const target = Math.floor(t + 1e-6) + 1;
+      seekAndRefresh(() => {
+        const landed = gameLoop.seekToTime(target);
+        // seekToTime clamps to the newest recorded state; landing where we
+        // already are means there is no future to seek into
+        return landed !== null && landed > t + 1e-9 ? landed : null;
+      }, 'Already at end of history');
+    });
+  }
+
+  // ‹ / ›: exactly one solver step back/forward, replayed from history
+  const replayBackBtn = document.getElementById('replay-back-btn');
+  const replayForwardBtn = document.getElementById('replay-forward-btn');
+  if (replayBackBtn) {
+    replayBackBtn.addEventListener('click', () => {
+      const prev = gameLoop.adjacentStep(gameLoop.getPositionStep(), -1);
+      if (prev === null) {
+        showNotification('Already at beginning of history', 'warning');
+        return;
       }
+      seekAndRefresh(() => gameLoop.seekToStep(prev), 'Already at beginning of history');
+    });
+  }
+  if (replayForwardBtn) {
+    replayForwardBtn.addEventListener('click', () => {
+      const next = gameLoop.adjacentStep(gameLoop.getPositionStep(), 1);
+      if (next === null) {
+        showNotification('Already at end of history - use Run 1 Step to advance', 'warning');
+        return;
+      }
+      seekAndRefresh(() => gameLoop.seekToStep(next), 'Already at end of history');
     });
   }
 
@@ -884,13 +963,9 @@ function init() {
         return;
       }
 
-      const restoredTime = gameLoop.restoreToTime(targetTime);
-      if (restoredTime !== null) {
-        refreshDisplayAfterRestore();
-        closeHistoryDialog();
-      } else {
-        showNotification('No snapshot found near that time', 'warning');
-      }
+      // Step-exact: restores the nearest snapshot and replays logged dts
+      seekAndRefresh(() => gameLoop.seekToTime(targetTime), 'No history found near that time');
+      closeHistoryDialog();
     });
   }
 
@@ -1351,6 +1426,7 @@ function init() {
     componentDialog.showEdit(component as Record<string, any>, (properties) => {
       if (properties) {
         constructionManager.updateComponent(componentId, properties);
+
         // If editing a controller, update the game loop scram setpoints
         if (component.type === 'controller') {
           gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
@@ -3267,14 +3343,19 @@ function init() {
 
   // "Atom" Jack: AI contractor chat in the bottom-right corner. Constructed
   // here (like career mode) so its host closures can reach init()'s state.
-  new JackManager({
+  const jackHost = {
     plantState,
     constructionManager,
     getSimState: () => gameLoop.getState(),
+    getHistoryStates: (tMin: number, tMax: number) => gameLoop.getHistoryStates(tMin, tMax),
     getMode: () => currentMode,
     getSelectedComponentId: () => selectedComponentId,
     refreshCostPanel: () => updateConstructionCostPanel(),
-  });
+  };
+  new JackManager(jackHost);
+  // Headless-test hook: run one of Jack's tools directly (no LLM round trip)
+  (window as any).__meltdownDebug.jackTool = (name: string, input: Record<string, unknown>) =>
+    executeJackTool(name, input, jackHost, () => {});
 
   // Start in construction mode
   setMode('construction');
@@ -3693,9 +3774,12 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     const actualPercent = Math.round((1 - rodPosition) * 100);
     const currentSliderValue = parseInt(rodSlider.value);
     // When the slider is a passive indicator, track the sim exactly; the
-    // 1% deadband only exists to avoid fighting active user input
+    // 1% deadband only exists to avoid fighting active user input, and a
+    // drag in progress (pointer held on the thumb) suppresses the writeback
+    // entirely - see the pointerdown/pointerup handlers where the slider is
+    // wired up.
     const deadband = rodSlider.disabled ? 0 : 1;
-    if (Math.abs(currentSliderValue - commandedPercent) > deadband) {
+    if (rodSlider.dataset.dragging !== '1' && Math.abs(currentSliderValue - commandedPercent) > deadband) {
       rodSlider.value = String(commandedPercent);
     }
     if (rodValueDisplay) {

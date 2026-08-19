@@ -10,6 +10,11 @@ import {
   estimatePlantComponentCost,
   formatCost,
 } from '../construction/cost-estimation';
+import {
+  execListStatePaths,
+  execQueryHistory,
+  execPlotHistory,
+} from './jack-history';
 
 const barFromPa = (pa: number) => Number((pa / 1e5).toFixed(3));
 const cFromK = (k: number) => Number((k - 273.15).toFixed(2));
@@ -414,6 +419,18 @@ export function executeJackTool(
       record(`Jack deleted ${comp.type} "${label}" (${comp.id})`);
       return { ok: true, deleted: comp.id };
     }
+
+    case 'list_state_paths': {
+      const sim = host.getSimState();
+      if (!sim) return err('No simulation has been run yet.');
+      return execListStatePaths(input, sim);
+    }
+
+    case 'query_history':
+      return execQueryHistory(input, host.getHistoryStates);
+
+    case 'plot_history':
+      return execPlotHistory(input, host.getHistoryStates, record);
 
     case 'file_car':
       return fileCarReport(input, host, record);

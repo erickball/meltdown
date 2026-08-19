@@ -25,8 +25,8 @@
           <hr />
           <h3>Simulation</h3>
           <div class="history-controls" style="margin-bottom: 5px;">
-            <button id="back-step-btn" class="sim-btn" title="Back one step in history">⏮</button>
-            <button id="forward-step-btn" class="sim-btn" title="Forward one step in history">⏭</button>
+            <button id="back-step-btn" class="sim-btn" title="Back 1 second (to the previous round second)">⏮</button>
+            <button id="forward-step-btn" class="sim-btn" title="Forward 1 second (to the next round second)">⏭</button>
             <button id="pause-btn" class="sim-btn">▶ Resume</button>
           </div>
           <div class="history-controls" style="margin-bottom: 5px;">
@@ -87,6 +87,8 @@
             <summary style="cursor: pointer; color: #7af;">Advanced Solver Settings</summary>
             <div class="solver-settings" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
               <div style="margin-bottom: 8px;">
+                <button id="replay-back-btn" class="sim-btn" title="Back one solver step (replayed exactly from history)">&lsaquo;</button>
+                <button id="replay-forward-btn" class="sim-btn" title="Forward one solver step (replayed exactly from history)">&rsaquo;</button>
                 <button id="run-one-step-btn" class="sim-btn" title="Advance the simulation by exactly one solver step">Run 1 Step</button>
               </div>
               <div class="timestep-control" style="margin-bottom: 8px;">

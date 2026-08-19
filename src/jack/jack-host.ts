@@ -12,6 +12,11 @@ export interface JackHost {
   constructionManager: ConstructionManager;
   /** Latest simulation state, or null if the sim hasn't been built yet */
   getSimState: () => SimulationState | null;
+  /**
+   * Recorded history states in a sim-time range, oldest first (for Jack's
+   * query/plot tools). READ-ONLY: these are the live history snapshots.
+   */
+  getHistoryStates: (tMin: number, tMax: number) => Array<{ time: number; state: SimulationState }>;
   getMode: () => 'construction' | 'simulation';
   getSelectedComponentId: () => string | null;
   /** Refresh the construction cost panel after Jack edits the plant */
