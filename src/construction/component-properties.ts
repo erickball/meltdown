@@ -12,6 +12,25 @@
 // updateComponent - nowhere else.
 
 /**
+ * Components whose connection elevations are pinned to their port geometry.
+ *
+ * Pumps and valves are small fittings whose nozzles are physical features
+ * of the component: a line attached to one can only attach AT the nozzle,
+ * so the stored connection elevation always comes from the port (height/2
+ * − port.y) rather than from user input or preset data. A free elevation
+ * here lets the data claim, e.g., a 3 m attachment on a 0.2 m valve —
+ * which both draws the connection line in midair and puts a phantom
+ * gravity head across the fitting in the simulation.
+ *
+ * Tall components (tanks, vessels, heat exchangers) keep free elevations:
+ * their ports are generic and a connection can genuinely enter anywhere
+ * on the shell.
+ */
+export function hasPinnedPortElevations(component: Record<string, any>): boolean {
+  return component.type === 'pump' || component.type === 'valve';
+}
+
+/**
  * Volume of a tank/pressurizer (type 'tank') as the simulation will see it:
  * an explicit stored volume wins (preset plants may carry one), otherwise the
  * drawn cylinder. Matches simulation/factory.ts's tank node creation exactly.

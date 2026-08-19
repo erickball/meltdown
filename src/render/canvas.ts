@@ -2500,6 +2500,11 @@ export class PlantCanvas {
     connection: Connection,
     highlight: boolean = false
   ): void {
+    // Vessel side ports draw on the edge facing the partner (mirroring
+    // only changes the lateral offset, never the y the elevation math uses)
+    fromPort = this.portForConnectionDrawing(fromComponent, fromPort, toComponent, toPort);
+    toPort = this.portForConnectionDrawing(toComponent, toPort, fromComponent, fromPort);
+
     // Get port screen positions (these are visually consistent with component rendering)
     const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
     const toPortScreen = this.getPortScreenPosition(toComponent, toPort);
@@ -2582,11 +2587,6 @@ export class PlantCanvas {
 
     if (fromScreen.scale <= 0 || toScreen.scale <= 0) return;
 
-    // Check for internal connections (one component contained by the other, or siblings in the same container)
-    // For these, we want the outer endpoint to stop partway inside, not at the edge
-    const fromContainedBy = (fromComponent as any).containedBy;
-    const toContainedBy = (toComponent as any).containedBy;
-
     let adjustedFromScreen = fromScreen.pos;
     let adjustedToScreen = toScreen.pos;
 
@@ -2616,42 +2616,11 @@ export class PlantCanvas {
         };
       }
     }
-    // If fromComponent is contained by toComponent, adjust the "to" endpoint
-    // to stop partway between the inner (from) edge and the outer (to) edge
-    else if (fromContainedBy === toComponent.id) {
-      // Move the "to" endpoint only 10% of the way from "from" to "to"
-      // This places it just barely past the inner component edge
-      const t = 0.1;
-      adjustedToScreen = {
-        x: fromScreen.pos.x + t * (toScreen.pos.x - fromScreen.pos.x),
-        y: fromScreen.pos.y + t * (toScreen.pos.y - fromScreen.pos.y)
-      };
-    }
-    // If toComponent is contained by fromComponent, adjust the "from" endpoint
-    else if (toContainedBy === fromComponent.id) {
-      // Move the "from" endpoint only 10% of the way from "to" to "from"
-      const t = 0.1;
-      adjustedFromScreen = {
-        x: toScreen.pos.x + t * (fromScreen.pos.x - toScreen.pos.x),
-        y: toScreen.pos.y + t * (fromScreen.pos.y - toScreen.pos.y)
-      };
-    }
-    // If both components are contained by the same parent (siblings inside a reactor vessel, etc.)
-    // Draw a short connection between them - adjust both endpoints toward the midpoint
-    else if (fromContainedBy && fromContainedBy === toContainedBy) {
-      // Both are inside the same container - draw connection mostly in the middle
-      // Move each endpoint 40% toward the midpoint
-      const t = 0.4;
-      const midX = (fromScreen.pos.x + toScreen.pos.x) / 2;
-      const midY = (fromScreen.pos.y + toScreen.pos.y) / 2;
-      adjustedFromScreen = {
-        x: fromScreen.pos.x + t * (midX - fromScreen.pos.x),
-        y: fromScreen.pos.y + t * (midY - fromScreen.pos.y)
-      };
-      adjustedToScreen = {
-        x: toScreen.pos.x + t * (midX - toScreen.pos.x),
-        y: toScreen.pos.y + t * (midY - toScreen.pos.y)
-      };
+    else {
+      const adjusted = this.adjustEndpointsForContainment(
+        fromComponent, toComponent, fromScreen.pos, toScreen.pos);
+      adjustedFromScreen = adjusted.from;
+      adjustedToScreen = adjusted.to;
     }
 
     const fluid = this.getConnectionFluid(connection, fromComponent);
@@ -2944,6 +2913,132 @@ export class PlantCanvas {
     ctx.restore();
   }
 
+  /**
+   * The port to draw a connection endpoint at. Side ports on wide vessels
+   * are logical attachment points, not fixed nozzles: a vessel whose inlet
+   * port is stored on the left still takes a line arriving from the right
+   * on its right wall - drawing it to the far port makes the line cross
+   * the whole vessel silhouette. Mirror the port's lateral offset when the
+   * partner sits on the other side of the vessel.
+   *
+   * Only vessels/tanks mirror: pump nozzles and valve ports are physical
+   * drawn features, heat-exchanger port sides distinguish tube from shell
+   * plenums, and pipes carry exact endpoints.
+   */
+  private portForConnectionDrawing(
+    component: PlantComponent,
+    port: { position: Point },
+    partner: PlantComponent,
+    partnerPort: { position: Point }
+  ): { position: Point } {
+    if (component.type !== 'vessel' && component.type !== 'reactorVessel' && component.type !== 'tank') {
+      return port;
+    }
+    if (port.position.x === 0) return port;
+
+    const elevation = getComponentElevation(component);
+    const centerScreen = this.worldToScreenPerspective(
+      { x: component.position.x, y: component.position.y }, elevation);
+    if (centerScreen.scale <= 0) return port;
+
+    // Where the line comes from: the pipe's actual end for pipes, the
+    // partner's center otherwise (a partner's own mirroring never looks
+    // back at this port, so there is no circularity)
+    let partnerX: number;
+    if (partner.type === 'pipe') {
+      const ps = this.getPortScreenPosition(partner, partnerPort);
+      if (!ps) return port;
+      partnerX = ps.x;
+    } else {
+      const pScreen = this.worldToScreenPerspective(
+        { x: partner.position.x, y: partner.position.y }, getComponentElevation(partner));
+      if (pScreen.scale <= 0) return port;
+      partnerX = pScreen.pos.x;
+    }
+
+    // Screen-space lateral offsets of the stored and mirrored port under
+    // the component's (screen-space) rotation
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+    const drawnDx = port.position.x * cos - port.position.y * sin;
+    const mirroredDx = -port.position.x * cos - port.position.y * sin;
+    const partnerDx = partnerX - centerScreen.pos.x;
+
+    // Mirror only when the stored port faces away from the partner AND the
+    // mirrored port actually faces toward it (a rotated component can have
+    // both pointing the same way - leave those alone)
+    if (partnerDx === 0 ||
+        Math.sign(drawnDx) === Math.sign(partnerDx) ||
+        Math.sign(mirroredDx) !== Math.sign(partnerDx)) {
+      return port;
+    }
+    return { position: { x: -port.position.x, y: port.position.y } };
+  }
+
+  /**
+   * Pull connection endpoints inward for connections that cross a
+   * containment boundary, so internal plumbing reads as a short stub
+   * instead of a full line through the container's wall:
+   * - component connected to its own container: the container-side endpoint
+   *   stops just past the inner component's edge
+   * - siblings nested inside the same VESSEL (core barrel internals, etc.):
+   *   both endpoints move toward the midpoint
+   *
+   * Siblings that merely share a BUILDING are exempt: a building is a room,
+   * not a vessel - real piping runs between the components, so the line
+   * must reach the ports. (The pull used to apply there too, which left
+   * connection lines ending in midair near small components like valves.)
+   */
+  private adjustEndpointsForContainment(
+    fromComponent: PlantComponent,
+    toComponent: PlantComponent,
+    fromScreen: Point,
+    toScreen: Point
+  ): { from: Point; to: Point } {
+    const fromContainedBy = (fromComponent as any).containedBy;
+    const toContainedBy = (toComponent as any).containedBy;
+
+    if (fromContainedBy === toComponent.id) {
+      const t = 0.1;
+      return {
+        from: fromScreen,
+        to: {
+          x: fromScreen.x + t * (toScreen.x - fromScreen.x),
+          y: fromScreen.y + t * (toScreen.y - fromScreen.y)
+        }
+      };
+    }
+    if (toContainedBy === fromComponent.id) {
+      const t = 0.1;
+      return {
+        from: {
+          x: toScreen.x + t * (fromScreen.x - toScreen.x),
+          y: toScreen.y + t * (fromScreen.y - toScreen.y)
+        },
+        to: toScreen
+      };
+    }
+    if (fromContainedBy && fromContainedBy === toContainedBy) {
+      const container = this.plantState.components.get(fromContainedBy);
+      if (container && container.type !== 'building') {
+        const t = 0.4;
+        const midX = (fromScreen.x + toScreen.x) / 2;
+        const midY = (fromScreen.y + toScreen.y) / 2;
+        return {
+          from: {
+            x: fromScreen.x + t * (midX - fromScreen.x),
+            y: fromScreen.y + t * (midY - fromScreen.y)
+          },
+          to: {
+            x: toScreen.x + t * (midX - toScreen.x),
+            y: toScreen.y + t * (midY - toScreen.y)
+          }
+        };
+      }
+    }
+    return { from: fromScreen, to: toScreen };
+  }
+
   // Calculate connection screen endpoints accounting for elevation offsets
   // This matches the logic in renderConnectionPerspective for consistency
   private getConnectionScreenEndpoints(
@@ -2952,9 +3047,14 @@ export class PlantCanvas {
     connection: Connection
   ): ConnectionScreenEndpoints | null {
     // Find ports
-    const fromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
-    const toPort = toComponent.ports?.find(p => p.id === connection.toPortId);
-    if (!fromPort || !toPort) return null;
+    const storedFromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
+    const storedToPort = toComponent.ports?.find(p => p.id === connection.toPortId);
+    if (!storedFromPort || !storedToPort) return null;
+
+    // Vessel side ports draw on the edge facing the partner, matching
+    // renderConnectionPerspective
+    const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
+    const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
 
     // Get port screen positions
     const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
@@ -3024,34 +3124,9 @@ export class PlantCanvas {
     let toScreen = { x: toPortScreen.x, y: toPortScreen.y - toElevationOffset };
 
     // Handle internal connections (one component contained by the other, or siblings)
-    const fromContainedBy = (fromComponent as any).containedBy;
-    const toContainedBy = (toComponent as any).containedBy;
-
-    if (fromContainedBy === toComponent.id) {
-      const t = 0.1;
-      toScreen = {
-        x: fromScreen.x + t * (toScreen.x - fromScreen.x),
-        y: fromScreen.y + t * (toScreen.y - fromScreen.y)
-      };
-    } else if (toContainedBy === fromComponent.id) {
-      const t = 0.1;
-      fromScreen = {
-        x: toScreen.x + t * (fromScreen.x - toScreen.x),
-        y: toScreen.y + t * (fromScreen.y - toScreen.y)
-      };
-    } else if (fromContainedBy && fromContainedBy === toContainedBy) {
-      const t = 0.4;
-      const midX = (fromScreen.x + toScreen.x) / 2;
-      const midY = (fromScreen.y + toScreen.y) / 2;
-      fromScreen = {
-        x: fromScreen.x + t * (midX - fromScreen.x),
-        y: fromScreen.y + t * (midY - fromScreen.y)
-      };
-      toScreen = {
-        x: toScreen.x + t * (midX - toScreen.x),
-        y: toScreen.y + t * (midY - toScreen.y)
-      };
-    }
+    const adjusted = this.adjustEndpointsForContainment(fromComponent, toComponent, fromScreen, toScreen);
+    fromScreen = adjusted.from;
+    toScreen = adjusted.to;
 
     // Average scale for arrow sizing
     // The flow arrow code expects scale ~1.0 at normal viewing distance
