@@ -381,78 +381,225 @@ export function approxVaporDensity(node: FlowNode): number {
 }
 
 /**
- * What phase a connection at a given elevation draws from a node - THE
- * shared answer, used by the momentum operators, the pressure solver's
- * choking pass and the rate operator's draw pricing alike (they used to
- * carry two diverging copies, one of which ignored throughput entirely).
+ * What a connection draws from a node, as a composition rather than a bare
+ * label. The node's vertical phase profile has three zones (clarified pool /
+ * froth / clear vapor for tanks; economizer / boiling / superheat for OTSG
+ * partitions); the offtake samples them either at a point (openingHeight
+ * unset or 0) or averaged over its opening [elev - h/2, elev + h/2]. All
+ * strips of the opening share one velocity, so zone AREA fractions weight
+ * densities directly and MASS-flow weights are rho-weighted area fractions -
+ * a level sweeping past a finite opening crossfades the drawn density and
+ * enthalpy instead of stepping.
  *
- * A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
- * economizer / boiling / superheat is the entire sectioned model - so an
- * OTSG node answers from its partition's own boundaries, not the tank
- * separation model.
- *
- * @param node The upstream flow node
- * @param connectionElevation Height of connection above node bottom (m)
- * @param massFlowRate Throughput seen by the separation model (kg/s)
- * @param phaseTolerance Interface tolerance zone (m). 0 = none, undefined = default.
+ * One shared answer for the momentum operators, the pressure solver's
+ * choking pass and the rate operator's draw pricing (they used to carry
+ * diverging copies).
  */
-export function flowPhaseAt(
+export interface DrawComposition {
+  /** Pure label when the whole opening sits in one zone, else 'mixture'. */
+  phase: 'liquid' | 'vapor' | 'mixture';
+  /** Opening-area fractions per zone, sum to 1. */
+  fLiquid: number; fMixture: number; fVapor: number;
+  /** Mass-flow weights per zone (rho-weighted area fractions), sum to 1. */
+  wLiquid: number; wMixture: number; wVapor: number;
+  /** Opening-mean density of what is flowing (momentum/choking density). */
+  rho: number;
+}
+
+export function drawCompositionAt(
   node: FlowNode,
   connectionElevation?: number,
   massFlowRate: number = 0,
   phaseTolerance?: number,
-): 'liquid' | 'vapor' | 'mixture' {
-  if (node.otsg?.lastEval) {
-    const fr = node.otsg.lastEval.lengthFracs;
-    const h = node.height ?? Math.cbrt(node.volume);
-    const frac = Math.max(0, Math.min(1, (connectionElevation ?? h / 2) / h));
-    if (frac >= fr[0] + fr[1]) return 'vapor';
-    if (frac <= fr[0]) return 'liquid';
-    return 'mixture';
-  }
+  openingHeight?: number,
+  out?: DrawComposition,
+  needRho: boolean = true,
+): DrawComposition {
+  // Hot-path notes: callers that consume the result within their own loop
+  // iteration pass a reusable `out` scratch (the rate operator prices every
+  // connection on every RK stage); callers that retain the result across
+  // other work (the momentum path stores it on ConnectionHydraulics for the
+  // pressure solver) omit it and get a fresh object. Enthalpy pricers only
+  // consume the label and mass weights and pass needRho = false, so a pure
+  // draw (the overwhelming majority) costs no density evaluation at all,
+  // exactly like the old label-only model. The helpers live at module level
+  // - closures here would allocate twice per call on the hottest loop.
 
   // Single phase nodes always flow their phase
-  if (node.fluid.phase !== 'two-phase') {
-    return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
+  if (node.fluid.phase !== 'two-phase' && !node.otsg?.lastEval) {
+    return fillPure(node, node.fluid.phase === 'vapor' ? 'vapor' : 'liquid', out, needRho);
   }
-
-  const separation = calculateSeparation(node, massFlowRate);
 
   const nodeHeight = node.height ?? Math.cbrt(node.volume);
   // Connection elevations come from the component's drawing frame and can
   // sit outside the node's own vertical extent (a zero-height valve pot
   // with a port drawn 3 m up); the draw still physically comes from
   // somewhere inside the node.
-  connectionElevation = connectionElevation === undefined
+  const elev = connectionElevation === undefined
     ? nodeHeight / 2
     : Math.max(0, Math.min(nodeHeight, connectionElevation));
 
-  // Partial separation LAYERS the node rather than smearing it: the
-  // separated share of the liquid has clarified into a pool at the bottom
-  // (sep * V_liq), the separated share of the vapor into a clear space at
-  // the top (sep * V_vap), and everything else is froth in between. At
-  // sep = 1 this is a sharp interface, at sep = 0 all froth - continuously.
-  // (The previous form widened a mixture BAND around the interface by up to
-  // 40% of the node height, which let a 7-m heater shell at sep ~ 0.5 price
-  // its bottom drain - physically a clear condensate pool - as x = 0.28
-  // mixture, sending vapor down the drain line.)
-  const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
-  const liquidVolume = Math.min(node.volume,
-    node.fluid.mass * (1 - quality) / approxLiquidDensity(node));
-  const vaporVolume = node.volume - liquidVolume;
-  // Zone boundaries, obstruction-aware: the top of the clarified pool, and
-  // the level the contents would stand at if the clarified vapor alone were
-  // removed (= the bottom of the clear vapor space).
-  const zLiquid = calculateLiquidLevelWithObstructions(node, separation * liquidVolume);
-  const zVapor = calculateLiquidLevelWithObstructions(node, node.volume - separation * vaporVolume);
-  // Interface smear: waves and slosh blur the zone boundaries by ~10 cm; a
-  // connection's explicit phaseTolerance overrides.
-  const tolerance = phaseTolerance !== undefined ? phaseTolerance : 0.1;
+  // Zone boundaries b1 (top of liquid zone) and b2 (bottom of vapor zone),
+  // and for tanks the froth's void profile between them (see below).
+  let b1: number, b2: number;
+  let isOtsg = false;
+  let alphaBar = 0;
+  if (node.otsg?.lastEval) {
+    isOtsg = true;
+    // A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
+    // economizer / boiling / superheat is the entire sectioned model - so an
+    // OTSG node answers from its partition's own boundaries (sharp: the
+    // partition's boundaries carry no interface waves).
+    const fr = node.otsg.lastEval.lengthFracs;
+    b1 = fr[0] * nodeHeight;
+    b2 = (fr[0] + fr[1]) * nodeHeight;
+  } else {
+    const separation = calculateSeparation(node, massFlowRate);
+    // Partial separation LAYERS the node rather than smearing it: the
+    // separated share of the liquid has clarified into a pool at the bottom
+    // (sep * V_liq), the separated share of the vapor into a clear space at
+    // the top (sep * V_vap), and everything else is froth in between. At
+    // sep = 1 this is a sharp interface, at sep = 0 all froth - continuously.
+    const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
+    const liquidVolume = Math.min(node.volume,
+      node.fluid.mass * (1 - quality) / approxLiquidDensity(node));
+    const vaporVolume = node.volume - liquidVolume;
+    const zLiquid = calculateLiquidLevelWithObstructions(node, separation * liquidVolume);
+    const zVapor = calculateLiquidLevelWithObstructions(node, node.volume - separation * vaporVolume);
+    // Interface smear: waves and slosh blur the zone boundaries by ~10 cm; a
+    // connection's explicit phaseTolerance overrides.
+    const tolerance = phaseTolerance !== undefined ? phaseTolerance : 0.1;
+    b1 = zLiquid - tolerance;
+    b2 = zVapor + tolerance;
+    // The froth's mean void equals the node's bulk void: the froth holds the
+    // same (1 - sep) share of each phase, so sep cancels.
+    alphaBar = Math.max(0, Math.min(1, vaporVolume / node.volume));
+  }
 
-  if (connectionElevation < zLiquid - tolerance) return 'liquid';
-  if (connectionElevation > zVapor + tolerance) return 'vapor';
-  return 'mixture';
+  // Opening-area fraction in each zone.
+  const a = openingHeight ?? 0;
+  const lo = Math.max(0, elev - a / 2);
+  const hi = Math.min(nodeHeight, elev + a / 2);
+  let fLiquid: number, fVapor: number;
+  if (hi - lo > 0) {
+    fLiquid = Math.max(0, Math.min(hi, b1) - lo) / (hi - lo);
+    fVapor = Math.max(0, hi - Math.max(lo, b2)) / (hi - lo);
+  } else {
+    // Point sample - the openingHeight-unset limit, preserving the exact
+    // comparison semantics the point model always had.
+    fLiquid = elev < b1 ? 1 : 0;
+    fVapor = elev > b2 ? 1 : 0;
+  }
+  const fMixture = Math.max(0, 1 - fLiquid - fVapor);
+
+  // Pure draws skip straight to the label.
+  if (fMixture === 0 && fVapor === 0) return fillPure(node, 'liquid', out, needRho);
+  if (fMixture === 0 && fLiquid === 0) return fillPure(node, 'vapor', out, needRho);
+
+  if (isOtsg) {
+    // The boiling section is a real zone with its own mean state - the
+    // partition already resolves the axial profile, so its draws price at
+    // the section state ('mixture' falls through to the bulk/section path).
+    if (fLiquid === 0 && fVapor === 0) {
+      return fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
+    }
+    const rhoL = fLiquid > 0 ? approxLiquidDensity(node) : 0;
+    const rhoV = fVapor > 0 ? approxVaporDensity(node) : 0;
+    const rhoM = nodeBulkDensity(node);
+    const rho = fLiquid * rhoL + fMixture * rhoM + fVapor * rhoV;
+    const wLiquid = fLiquid * rhoL / rho;
+    const wVapor = fVapor * rhoV / rho;
+    const wMixture = Math.max(0, 1 - wLiquid - wVapor);
+    return fillComp(out, 'mixture', fLiquid, fMixture, fVapor, wLiquid, wMixture, wVapor, rho);
+  }
+
+  // Tank froth: void fraction ramps across the physical froth span
+  // [zL, zV] as alpha(zeta) = zeta^n with n = 1/alphaBar - 1 - zero at the
+  // pool boundary, one at the clear-vapor boundary, and integrating exactly
+  // to the froth's mean void alphaBar. A froth draw is therefore a
+  // liquid/vapor PAIR of streams split by the local (or opening-averaged)
+  // void, not a flat bulk sample: the drawn density and enthalpy vary
+  // continuously with elevation through the whole node, and the froth's
+  // weight lands on the liquid/vapor prices whose endpoint draws it
+  // matches at the zone boundaries.
+  // The ramp spans the LABEL boundaries [b1, b2] - the physical froth
+  // padded by the interface smear - so a settled tank's tolerance band
+  // reads as the wave-averaged crossfade it represents, and the profile
+  // meets the pure zones exactly where the labels switch. (tol = 0 with a
+  // sharp interface leaves a genuine step: that is what declaring zero
+  // tolerance means.)
+  let alphaAp: number;
+  const span = b2 - b1;
+  if (span > 0) {
+    const sLo = Math.max(lo, Math.min(hi, b1));
+    const sHi = Math.min(hi, Math.max(lo, b2));
+    let zetaA: number, zetaB: number;
+    if (hi - lo > 0 && sHi > sLo) {
+      zetaA = (sLo - b1) / span;
+      zetaB = (sHi - b1) / span;
+    } else {
+      zetaA = zetaB = Math.max(0, Math.min(1, (elev - b1) / span));
+    }
+    if (alphaBar <= 0) alphaAp = 0;
+    else if (alphaBar >= 1) alphaAp = 1;
+    else if (zetaB > zetaA) {
+      // Mean of zeta^n over [zetaA, zetaB]: alphaBar (zetaB^(1/alphaBar) -
+      // zetaA^(1/alphaBar)) / (zetaB - zetaA)  [n + 1 = 1/alphaBar]
+      const inv = 1 / alphaBar;
+      alphaAp = alphaBar * (Math.pow(zetaB, inv) - Math.pow(zetaA, inv)) / (zetaB - zetaA);
+    } else {
+      alphaAp = Math.pow(zetaA, (1 - alphaBar) / alphaBar);
+    }
+  } else {
+    alphaAp = elev > b1 ? 1 : 0;
+  }
+
+  const rhoL = approxLiquidDensity(node);
+  const rhoV = approxVaporDensity(node);
+  const rhoFroth = alphaAp * rhoV + (1 - alphaAp) * rhoL;
+  const rho = fLiquid * rhoL + fMixture * rhoFroth + fVapor * rhoV;
+  const wLiquid = (fLiquid * rhoL + fMixture * (1 - alphaAp) * rhoL) / rho;
+  const wVapor = Math.max(0, 1 - wLiquid);
+  const phase = fMixture > 0 ? 'mixture' : (fVapor > 0 && fLiquid > 0 ? 'mixture' : (fVapor > 0 ? 'vapor' : 'liquid'));
+  return fillComp(out, phase, fLiquid, fMixture, fVapor, wLiquid, 0, wVapor, rho);
 }
+
+function fillComp(
+  out: DrawComposition | undefined,
+  phase: DrawComposition['phase'],
+  fLiquid: number, fMixture: number, fVapor: number,
+  wLiquid: number, wMixture: number, wVapor: number,
+  rho: number,
+): DrawComposition {
+  if (!out) return { phase, fLiquid, fMixture, fVapor, wLiquid, wMixture, wVapor, rho };
+  out.phase = phase;
+  out.fLiquid = fLiquid; out.fMixture = fMixture; out.fVapor = fVapor;
+  out.wLiquid = wLiquid; out.wMixture = wMixture; out.wVapor = wVapor;
+  out.rho = rho;
+  return out;
+}
+
+function fillPure(
+  node: FlowNode, phase: 'liquid' | 'vapor',
+  out: DrawComposition | undefined, needRho: boolean,
+): DrawComposition {
+  const rho = !needRho ? 0
+    : phase === 'liquid' ? approxLiquidDensity(node) : approxVaporDensity(node);
+  return phase === 'liquid'
+    ? fillComp(out, 'liquid', 1, 0, 0, 1, 0, 0, rho)
+    : fillComp(out, 'vapor', 0, 0, 1, 0, 0, 1, rho);
+}
+
+/** Label-only view of drawCompositionAt, for callers that just branch. */
+export function flowPhaseAt(
+  node: FlowNode,
+  connectionElevation?: number,
+  massFlowRate: number = 0,
+  phaseTolerance?: number,
+): 'liquid' | 'vapor' | 'mixture' {
+  return drawCompositionAt(node, connectionElevation, massFlowRate, phaseTolerance).phase;
+}
+
 
 
 /**
@@ -600,6 +747,9 @@ export interface ConnectionHydraulics {
   throatArea: number;
   L: number;                 // pipe length (m)
   flowPhase: 'liquid' | 'vapor' | 'mixture';
+  /** Full draw composition behind flowPhase - enthalpy pricers blend on
+   *  its mass weights so a finite opening crossfades instead of stepping. */
+  drawComp: DrawComposition;
   rho_flow: number;          // density of the phase actually flowing (kg/m³)
   v: number;                 // velocity at current flow (m/s)
   dP_pressure: number;       // hydrostatic-corrected node pressure difference (Pa)
@@ -759,26 +909,19 @@ export function computeConnectionHydraulics(
 
   // For momentum/inertia, use upstream density - that's the fluid actually
   // moving. Bulk density includes NCG mass (a helium loop is all NCG).
-  const rho_from = nodeBulkDensity(fromNode);
-  const rho_to = nodeBulkDensity(toNode);
   const upstreamNode = currentFlow >= 0 ? fromNode : toNode;
   const downstreamNode = currentFlow >= 0 ? toNode : fromNode;
   const upstreamElevation = currentFlow >= 0 ? conn.fromElevation : conn.toElevation;
   const upstreamPhaseTolerance = currentFlow >= 0 ? conn.fromPhaseTolerance : conn.toPhaseTolerance;
-  const rho_upstream = currentFlow >= 0 ? rho_from : rho_to;
 
-  // Determine what phase is flowing based on connection elevation at upstream node
-  const flowPhase = flowPhaseAt(upstreamNode, upstreamElevation, currentFlow, upstreamPhaseTolerance);
+  const upstreamOpeningHeight = currentFlow >= 0 ? conn.fromOpeningHeight : conn.toOpeningHeight;
 
-  // Get density for the flowing phase
-  let rho_flow: number;
-  if (flowPhase === 'liquid') {
-    rho_flow = approxLiquidDensity(upstreamNode);
-  } else if (flowPhase === 'vapor') {
-    rho_flow = approxVaporDensity(upstreamNode);
-  } else {
-    rho_flow = rho_upstream; // mixture - use actual density
-  }
+  // What is flowing, from the shared draw composition (density crossfades
+  // over a finite opening instead of stepping at the zone boundaries).
+  const drawComp = drawCompositionAt(
+    upstreamNode, upstreamElevation, currentFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
+  const flowPhase = drawComp.phase;
+  const rho_flow = drawComp.rho;
 
   // Current velocity - use flow density since that's what's actually moving
   const v = currentFlow / (rho_flow * A);
@@ -902,7 +1045,7 @@ export function computeConnectionHydraulics(
   const frictionQuadReverse = (K_common + K_reverseExtra) / quadDenom;
 
   return {
-    A, throatArea, L, flowPhase, rho_flow, v,
+    A, throatArea, L, flowPhase, drawComp, rho_flow, v,
     dP_pressure, dP_gravity, dP_pump, dP_driving, dP_friction,
     K_eff, resistanceSlope,
     frictionQuadForward, frictionQuadReverse,

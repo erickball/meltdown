@@ -3320,6 +3320,8 @@ function createFlowConnectionFromPlantConnection(
     toElevation: connToElevation,
     fromPhaseTolerance,
     toPhaseTolerance,
+    fromOpeningHeight: connection.fromOpeningHeight,
+    toOpeningHeight: connection.toOpeningHeight,
     // Loss coefficient: user-specifiable per connection (loop hydraulics are
     // a real design lever - the default 5 costs a PWR primary loop ~30% of
     // its rated flow), default 5.
