@@ -124,7 +124,7 @@ export class PlantCanvas {
     this.canvas.addEventListener('pointerenter', () => { this.mouseOverCanvas = true; });
     this.canvas.addEventListener('pointerleave', () => { this.mouseOverCanvas = false; });
 
-    // Keyboard events for arrow key elevation control
+    // Keyboard events for arrow-key panning
     window.addEventListener('keydown', this.handleKeyDown.bind(this));
 
     // Resize
@@ -132,28 +132,39 @@ export class PlantCanvas {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    // Don't steal arrow keys from text fields (e.g. Jack's chat box)
+    // Don't steal arrow keys from text fields (e.g. Jack's chat box) or
+    // focused controls like the view sliders
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
       return;
     }
-    // Only handle arrow keys in isometric mode for elevation control
-    if (!this.isometric.enabled) return;
 
-    const elevationStep = 20; // Pixels per key press
-
+    // Arrow keys pan the view, in the same directions as pushing the mouse
+    // to that screen edge would edge-scroll (key repeat gives continuous
+    // motion). Screen-space step, so a press covers the same fraction of
+    // the view at any zoom.
+    const step = 40; // Pixels per key press
+    let panX = 0;
+    let panY = 0;
     switch (e.key) {
-      case 'ArrowUp':
-        this.view.offsetY -= elevationStep;
-        this.clampView();
-        e.preventDefault();
-        break;
-      case 'ArrowDown':
-        this.view.offsetY += elevationStep;
-        this.clampView();
-        e.preventDefault();
-        break;
+      case 'ArrowLeft': panX = step; break;
+      case 'ArrowRight': panX = -step; break;
+      case 'ArrowUp': panY = step; break;
+      case 'ArrowDown': panY = -step; break;
+      default: return;
     }
+
+    if (this.isometric.enabled) {
+      // Match the drag/edge-pan mapping: horizontal -> offsetX, vertical ->
+      // cameraDepth, divided by zoom so the apparent speed stays constant
+      this.view.offsetX += panX / this.isoZoom;
+      this.cameraDepth -= panY / this.isoZoom;
+    } else {
+      this.view.offsetX += panX;
+      this.view.offsetY += panY;
+    }
+    this.clampView();
+    e.preventDefault();
   }
 
   // Active pointers currently pressed on the canvas, by pointerId.
@@ -1456,7 +1467,8 @@ export class PlantCanvas {
     const rect = this.canvas.getBoundingClientRect();
 
     if (this.isometric.enabled) {
-      // Limit elevation (view.offsetY) - controlled by arrow keys
+      // Limit view.offsetY (vestigial in this mode - the perspective
+      // projection does not read it; arrow keys now pan offsetX/cameraDepth)
       const minOffsetY = rect.height * 0.2;
       const maxOffsetY = rect.height * 1.2;
       this.view.offsetY = Math.max(minOffsetY, Math.min(maxOffsetY, this.view.offsetY));
