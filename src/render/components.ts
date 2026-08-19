@@ -2289,7 +2289,9 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   // For U-tube, add a semi-circular bulge at the U-bend end
   // The bulge center is at the edge of the rectangular shell
   const bulgeRadius = isHorizontal ? h / 2 : w / 2;
-  const innerBulgeRadius = bulgeRadius - wallPx;
+  // Canvas throws on a negative radius: zoomed far out the whole shell can
+  // be thinner on screen than the 2px-floored wall it is drawn with
+  const innerBulgeRadius = Math.max(1, bulgeRadius - wallPx);
 
   // Shell-side fluid dimensions
   const innerW = Math.max(w - wallPx * 2, 10);
@@ -2668,6 +2670,9 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     const plenumColor = COLORS.steel;
     const plenumHighlight = COLORS.steelHighlight;
     const dividerThickness = 3; // Pixels for divider plate
+    // Canvas throws on a negative radius: zoomed far out the plenum can be
+    // shorter on screen than the 2px-floored wall it is drawn with
+    const plenumInnerLen = Math.max(1, plenumLength - wallPx);
 
     // One header per bundle, centered on the bundle's slot and only as wide
     // as that slot - so a two-bundle exchanger shows two separate headers
@@ -2698,7 +2703,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.clip();
           ctx.fillStyle = inletFill;
           ctx.beginPath();
-          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.ellipse(-w / 2, cy, plenumInnerLen, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
           ctx.restore();
 
@@ -2709,13 +2714,13 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.clip();
           ctx.fillStyle = outletFill;
           ctx.beginPath();
-          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.ellipse(-w / 2, cy, plenumInnerLen, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
           ctx.restore();
 
           // Draw divider plate on top of fluid
           ctx.fillStyle = COLORS.steelDark;
-          ctx.fillRect(-w / 2 - plenumLength + wallPx, cy - dividerThickness / 2, plenumLength - wallPx, dividerThickness);
+          ctx.fillRect(-w / 2 - plenumLength + wallPx, cy - dividerThickness / 2, plenumInnerLen, dividerThickness);
 
           // Plenum outline
           ctx.strokeStyle = plenumHighlight;
@@ -2732,7 +2737,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.fill();
           ctx.fillStyle = inletFill;
           ctx.beginPath();
-          ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
+          ctx.ellipse(-w / 2, cy, plenumInnerLen, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
           ctx.strokeStyle = plenumHighlight;
           ctx.lineWidth = 1;
@@ -2747,7 +2752,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.fill();
           ctx.fillStyle = outletFill;
           ctx.beginPath();
-          ctx.ellipse(w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, false);
+          ctx.ellipse(w / 2, cy, plenumInnerLen, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, false);
           ctx.fill();
           ctx.strokeStyle = plenumHighlight;
           ctx.lineWidth = 1;
@@ -2777,7 +2782,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.clip();
           ctx.fillStyle = inletFill;
           ctx.beginPath();
-          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
+          ctx.ellipse(cx, h / 2, plenumInnerX, plenumInnerLen, 0, 0, Math.PI, false);
           ctx.fill();
           ctx.restore();
 
@@ -2788,13 +2793,13 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.clip();
           ctx.fillStyle = outletFill;
           ctx.beginPath();
-          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
+          ctx.ellipse(cx, h / 2, plenumInnerX, plenumInnerLen, 0, 0, Math.PI, false);
           ctx.fill();
           ctx.restore();
 
           // Draw divider plate on top of fluid
           ctx.fillStyle = COLORS.steelDark;
-          ctx.fillRect(cx - dividerThickness / 2, h / 2, dividerThickness, plenumLength - wallPx);
+          ctx.fillRect(cx - dividerThickness / 2, h / 2, dividerThickness, plenumInnerLen);
 
           // Plenum outline
           ctx.strokeStyle = plenumHighlight;
@@ -2817,7 +2822,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           // Fill with the inlet-end fluid (feed enters at the bottom)
           ctx.fillStyle = inletFill;
           ctx.beginPath();
-          ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - 2, 0, 0, Math.PI, false);
+          ctx.ellipse(cx, h / 2, plenumInnerX, Math.max(1, plenumLength - 2), 0, 0, Math.PI, false);
           ctx.fill();
 
           // Top plenum
@@ -2833,7 +2838,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           // Fill with the outlet-end fluid (steam leaves at the top)
           ctx.fillStyle = outletFill;
           ctx.beginPath();
-          ctx.ellipse(cx, -h / 2, plenumInnerX, plenumLength - 2, 0, Math.PI, 0, false);
+          ctx.ellipse(cx, -h / 2, plenumInnerX, Math.max(1, plenumLength - 2), 0, Math.PI, 0, false);
           ctx.fill();
         }
       }
