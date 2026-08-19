@@ -337,11 +337,9 @@ export class PlantCanvas {
           display.textContent = String(this.viewAngle);
         }
       } else {
-        // Plain scroll zooms toward the mouse, same as 2D mode
-        const rect = this.canvas.getBoundingClientRect();
-        const mouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        // Plain scroll zooms about the mid-screen anchor
         const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-        this.applyIsoZoom(this.isoZoom * zoomFactor, mouse);
+        this.applyIsoZoom(this.isoZoom * zoomFactor);
       }
     } else {
       // In 2D mode, scroll wheel zooms
@@ -377,8 +375,8 @@ export class PlantCanvas {
       const zoomFactor = dist / this.lastPinchDist;
 
       if (this.isometric.enabled) {
-        // Pinch zooms the perspective view about the pinch center
-        this.applyIsoZoom(this.isoZoom * zoomFactor, center);
+        // Pinch zooms the perspective view about the mid-screen anchor
+        this.applyIsoZoom(this.isoZoom * zoomFactor);
 
         // Pan by the center's motion, matching the one-finger drag mapping
         // (horizontal -> offsetX, vertical -> cameraDepth), scaled by zoom
@@ -1171,8 +1169,10 @@ export class PlantCanvas {
   private viewAngle: number = 30;
 
   // Magnification of the perspective view, independent of view angle.
-  // Acts like a telephoto zoom: the whole projected picture scales uniformly
-  // about the anchor (screen center X, horizon Y), so the horizon stays put.
+  // A pure screen-space magnification about a fixed anchor (screen center X,
+  // the projection's stretch reference Y, ~55% down the canvas). The camera
+  // itself never moves when zooming, so zoom in/out always round-trips to
+  // exactly the same view.
   private isoZoom: number = 1;
   private static readonly MIN_ISO_ZOOM = 0.2;
   private static readonly MAX_ISO_ZOOM = 5;
@@ -1224,13 +1224,18 @@ export class PlantCanvas {
     }
 
     // Effective distance - adding offset flattens perspective for SCALE only
-    // Higher offset = near and far objects appear more similar in size
+    // Higher offset = near and far objects appear more similar in size.
+    // At view angles below 20° the offset is negative, and geometry closer
+    // than |offset| sits behind the effective focal plane; its projected
+    // scale would flip sign, so cull it exactly like relY < 1
     const effectiveRelY = relY + perspectiveOffset;
+    if (effectiveRelY < 1) {
+      return { pos: { x: -1000, y: -1000 }, scale: 0 };
+    }
 
     // Perspective scale using effective distance (flatter at high angles)
-    // The cap is applied before the zoom so zoom stays a pure magnification
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
-    const cappedScale = Math.min(perspectiveScale, 3) * this.isoZoom;
+    const cappedScale = Math.min(perspectiveScale, 3);
 
     // Apply overall scale (everything smaller when camera is higher)
     const finalScale = cappedScale * overallScale;
@@ -1240,7 +1245,7 @@ export class PlantCanvas {
 
     // Screen Y position - use ACTUAL distance for position, so objects stay in place
     // Then stretch result toward screen center to fill the view
-    const rawScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT * this.isoZoom / relY;
+    const rawScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT / relY;
 
     // Stretch factor: at high angles, the flatter perspective would compress everything
     // toward horizon. We stretch it back toward the screen center to fill the view.
@@ -1251,9 +1256,15 @@ export class PlantCanvas {
 
     // Apply elevation offset (compressed by view angle for looking from above)
     const elevationOffset = elevation * cappedScale * this.ELEVATION_SCALE * verticalScale * overallScale;
-    const screenY = baseScreenY - elevationOffset;
+    const unzoomedY = baseScreenY - elevationOffset;
 
-    return { pos: { x: screenX, y: screenY }, scale: finalScale };
+    // Zoom: uniform screen-space magnification of the finished projection
+    // about the fixed anchor (centerX, screenCenterY). The camera does not
+    // move, so this is exactly invertible and cannot drift the view.
+    const zoomedX = centerX + (screenX - centerX) * this.isoZoom;
+    const zoomedY = screenCenterY + (unzoomedY - screenCenterY) * this.isoZoom;
+
+    return { pos: { x: zoomedX, y: zoomedY }, scale: finalScale * this.isoZoom };
   }
 
   // Inverse perspective projection: convert screen coordinates to world coordinates
@@ -1270,10 +1281,13 @@ export class PlantCanvas {
     const cameraWorldX = -(this.view.offsetX - centerX) / 10;
     const cameraWorldY = -this.cameraDepth / 10;
 
-    // Reverse the stretch transformation first
+    // Un-apply the zoom magnification about its fixed anchor, then reverse
+    // the stretch transformation
     const stretchFactor = 1 + perspectiveOffset * 0.01;
     const screenCenterY = horizonY + groundHeight * 0.4;
-    const rawScreenY = screenCenterY + (screenPos.y - screenCenterY) / stretchFactor;
+    const unzoomedX = centerX + (screenPos.x - centerX) / this.isoZoom;
+    const unzoomedY = screenCenterY + (screenPos.y - screenCenterY) / this.isoZoom;
+    const rawScreenY = screenCenterY + (unzoomedY - screenCenterY) / stretchFactor;
 
     // Now reverse the perspective projection
     const screenYFromHorizon = rawScreenY - horizonY;
@@ -1281,19 +1295,24 @@ export class PlantCanvas {
       return { x: cameraWorldX, y: cameraWorldY + 1000 };
     }
 
-    const relY = groundHeight * this.CAMERA_HEIGHT * this.isoZoom / screenYFromHorizon;
+    const relY = groundHeight * this.CAMERA_HEIGHT / screenYFromHorizon;
 
     if (relY < 1) {
       return { x: cameraWorldX, y: cameraWorldY + 1 };
     }
 
-    // Reverse X projection using effective distance for scale
+    // Reverse X projection using effective distance for scale. Geometry this
+    // close is culled by the forward projection at low view angles (negative
+    // offset), so answer with the same near sentinel it uses
     const effectiveRelY = relY + perspectiveOffset;
+    if (effectiveRelY < 1) {
+      return { x: cameraWorldX, y: cameraWorldY + 1 };
+    }
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
-    const cappedScale = Math.min(perspectiveScale, 3) * this.isoZoom;
+    const cappedScale = Math.min(perspectiveScale, 3);
     const finalScale = cappedScale * overallScale;
 
-    const relX = (screenPos.x - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
+    const relX = (unzoomedX - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
 
     return {
       x: relX + cameraWorldX,
@@ -1302,22 +1321,14 @@ export class PlantCanvas {
   }
 
   /**
-   * Change the isometric zoom while keeping the world point under the given
-   * screen anchor fixed (like 2D zoom-toward-mouse). Works by re-projecting
-   * the anchor before and after the zoom change and shifting the camera by
-   * the world-space difference. If the anchor is above the horizon the
-   * inverse projection returns camera-relative sentinels that cancel out,
-   * so the zoom simply happens about the (center, horizon) anchor.
+   * Change the isometric zoom. Deliberately does NOT move the camera to
+   * chase a zoom-toward-cursor anchor: camera moves here are world-space
+   * (lateral + dolly) and a dolly changes the perspective nonlinearly, so
+   * any compensation fights the magnification and drifts the view. The zoom
+   * is instead a fixed-anchor magnification applied inside the projection.
    */
-  private applyIsoZoom(newZoom: number, anchor: Point): void {
-    const clamped = Math.max(PlantCanvas.MIN_ISO_ZOOM, Math.min(PlantCanvas.MAX_ISO_ZOOM, newZoom));
-    const before = this.screenToWorldPerspective(anchor);
-    this.isoZoom = clamped;
-    const after = this.screenToWorldPerspective(anchor);
-    // World-space camera shift; offsetX/cameraDepth store world meters * 10
-    this.view.offsetX -= (before.x - after.x) * 10;
-    this.cameraDepth -= (before.y - after.y) * 10;
-    this.clampView();
+  private applyIsoZoom(newZoom: number): void {
+    this.isoZoom = Math.max(PlantCanvas.MIN_ISO_ZOOM, Math.min(PlantCanvas.MAX_ISO_ZOOM, newZoom));
     this.syncIsoZoomUI();
   }
 
@@ -3226,10 +3237,9 @@ export class PlantCanvas {
     return this.viewAngle;
   }
 
-  // Set the isometric zoom directly (e.g. from the sidebar slider),
-  // magnifying about the default screen anchor
+  // Set the isometric zoom directly (e.g. from the sidebar slider)
   public setIsoZoom(zoom: number): void {
-    this.applyIsoZoom(zoom, this.defaultZoomAnchor());
+    this.applyIsoZoom(zoom);
   }
 
   public getIsoZoom(): number {
@@ -3272,16 +3282,9 @@ export class PlantCanvas {
     Object.assign(this.view, view);
   }
 
-  // Screen anchor the button/slider zooms magnify about: horizontal center,
-  // 60% down the canvas (comfortably inside the ground region)
-  private defaultZoomAnchor(): Point {
-    const rect = this.canvas.getBoundingClientRect();
-    return { x: rect.width / 2, y: rect.height * 0.6 };
-  }
-
   public zoomIn(): void {
     if (this.isometric.enabled) {
-      this.applyIsoZoom(this.isoZoom * 1.2, this.defaultZoomAnchor());
+      this.applyIsoZoom(this.isoZoom * 1.2);
     } else {
       this.view.zoom = Math.min(200, this.view.zoom * 1.2);
     }
@@ -3289,7 +3292,7 @@ export class PlantCanvas {
 
   public zoomOut(): void {
     if (this.isometric.enabled) {
-      this.applyIsoZoom(this.isoZoom / 1.2, this.defaultZoomAnchor());
+      this.applyIsoZoom(this.isoZoom / 1.2);
     } else {
       this.view.zoom = Math.max(10, this.view.zoom / 1.2);
     }
