@@ -278,8 +278,10 @@ export class PlantCanvas {
         // - Drag left/right moves laterally (offsetX)
         // - Drag up/down moves forward/backward (cameraDepth)
         // Drag down = move forward (negative dy = forward)
-        this.view.offsetX += dx;
-        this.cameraDepth -= dy; // Negate: drag down = move forward
+        // Divide by zoom so the ground tracks the cursor at the same rate
+        // regardless of magnification
+        this.view.offsetX += dx / this.isoZoom;
+        this.cameraDepth -= dy / this.isoZoom; // Negate: drag down = move forward
       } else {
         // In normal 2D mode, drag moves view offset directly
         this.view.offsetX += dx;
@@ -316,20 +318,30 @@ export class PlantCanvas {
     e.preventDefault();
 
     if (this.isometric.enabled) {
-      // In isometric mode, scroll wheel changes view angle
-      // Scroll up = look more from above (increase angle), scroll down = look more forward (decrease angle)
-      const angleStep = 5;
-      this.viewAngle += e.deltaY > 0 ? angleStep : -angleStep;
-      this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
+      if (e.shiftKey || e.ctrlKey) {
+        // Shift/Ctrl + scroll changes view angle (the old plain-scroll behavior)
+        // Scroll up = look more from above, scroll down = look more forward
+        // With Shift held some mice report the wheel as deltaX, so fall back to it
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        const angleStep = 5;
+        this.viewAngle += delta > 0 ? angleStep : -angleStep;
+        this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
 
-      // Update the view angle slider and display to match
-      const slider = document.getElementById('view-elevation') as HTMLInputElement;
-      const display = document.getElementById('view-elevation-value');
-      if (slider) {
-        slider.value = String(this.viewAngle);
-      }
-      if (display) {
-        display.textContent = String(this.viewAngle);
+        // Update the view angle slider and display to match
+        const slider = document.getElementById('view-elevation') as HTMLInputElement;
+        const display = document.getElementById('view-elevation-value');
+        if (slider) {
+          slider.value = String(this.viewAngle);
+        }
+        if (display) {
+          display.textContent = String(this.viewAngle);
+        }
+      } else {
+        // Plain scroll zooms toward the mouse, same as 2D mode
+        const rect = this.canvas.getBoundingClientRect();
+        const mouse = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+        const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+        this.applyIsoZoom(this.isoZoom * zoomFactor, mouse);
       }
     } else {
       // In 2D mode, scroll wheel zooms
@@ -363,20 +375,32 @@ export class PlantCanvas {
 
     if (this.lastPinchDist > 0) {
       const zoomFactor = dist / this.lastPinchDist;
-      const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
 
-      // Zoom toward center
-      const worldX = (center.x - this.view.offsetX) / this.view.zoom;
-      const worldY = (center.y - this.view.offsetY) / this.view.zoom;
+      if (this.isometric.enabled) {
+        // Pinch zooms the perspective view about the pinch center
+        this.applyIsoZoom(this.isoZoom * zoomFactor, center);
 
-      this.view.zoom = newZoom;
-      this.view.offsetX = center.x - worldX * newZoom;
-      this.view.offsetY = center.y - worldY * newZoom;
+        // Pan by the center's motion, matching the one-finger drag mapping
+        // (horizontal -> offsetX, vertical -> cameraDepth), scaled by zoom
+        this.view.offsetX += (center.x - this.lastPinchCenter.x) / this.isoZoom;
+        this.cameraDepth -= (center.y - this.lastPinchCenter.y) / this.isoZoom;
+        this.clampView();
+      } else {
+        const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
 
-      // Also pan by the center's motion
-      this.view.offsetX += center.x - this.lastPinchCenter.x;
-      this.view.offsetY += center.y - this.lastPinchCenter.y;
-      this.clampView();
+        // Zoom toward center
+        const worldX = (center.x - this.view.offsetX) / this.view.zoom;
+        const worldY = (center.y - this.view.offsetY) / this.view.zoom;
+
+        this.view.zoom = newZoom;
+        this.view.offsetX = center.x - worldX * newZoom;
+        this.view.offsetY = center.y - worldY * newZoom;
+
+        // Also pan by the center's motion
+        this.view.offsetX += center.x - this.lastPinchCenter.x;
+        this.view.offsetY += center.y - this.lastPinchCenter.y;
+        this.clampView();
+      }
     }
 
     this.lastPinchDist = dist;
@@ -1143,8 +1167,15 @@ export class PlantCanvas {
   private static readonly MIN_CLICK_TARGET_PX = 24;
 
   // View angle in degrees from horizontal (20 = looking forward, 70 = looking down)
-  // Controls both zoom (higher = further away) and vertical compression (higher = more top-down)
+  // Controls perspective flattening (higher = flatter, more top-down feel)
   private viewAngle: number = 30;
+
+  // Magnification of the perspective view, independent of view angle.
+  // Acts like a telephoto zoom: the whole projected picture scales uniformly
+  // about the anchor (screen center X, horizon Y), so the horizon stays put.
+  private isoZoom: number = 1;
+  private static readonly MIN_ISO_ZOOM = 0.2;
+  private static readonly MAX_ISO_ZOOM = 5;
 
   // Get view transform parameters from view angle
   // Returns parameters that create a proper "elevated camera" effect:
@@ -1197,8 +1228,9 @@ export class PlantCanvas {
     const effectiveRelY = relY + perspectiveOffset;
 
     // Perspective scale using effective distance (flatter at high angles)
+    // The cap is applied before the zoom so zoom stays a pure magnification
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
-    const cappedScale = Math.min(perspectiveScale, 3);
+    const cappedScale = Math.min(perspectiveScale, 3) * this.isoZoom;
 
     // Apply overall scale (everything smaller when camera is higher)
     const finalScale = cappedScale * overallScale;
@@ -1208,7 +1240,7 @@ export class PlantCanvas {
 
     // Screen Y position - use ACTUAL distance for position, so objects stay in place
     // Then stretch result toward screen center to fill the view
-    const rawScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT / relY;
+    const rawScreenY = horizonY + groundHeight * this.CAMERA_HEIGHT * this.isoZoom / relY;
 
     // Stretch factor: at high angles, the flatter perspective would compress everything
     // toward horizon. We stretch it back toward the screen center to fill the view.
@@ -1249,7 +1281,7 @@ export class PlantCanvas {
       return { x: cameraWorldX, y: cameraWorldY + 1000 };
     }
 
-    const relY = groundHeight * this.CAMERA_HEIGHT / screenYFromHorizon;
+    const relY = groundHeight * this.CAMERA_HEIGHT * this.isoZoom / screenYFromHorizon;
 
     if (relY < 1) {
       return { x: cameraWorldX, y: cameraWorldY + 1 };
@@ -1258,7 +1290,7 @@ export class PlantCanvas {
     // Reverse X projection using effective distance for scale
     const effectiveRelY = relY + perspectiveOffset;
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
-    const cappedScale = Math.min(perspectiveScale, 3);
+    const cappedScale = Math.min(perspectiveScale, 3) * this.isoZoom;
     const finalScale = cappedScale * overallScale;
 
     const relX = (screenPos.x - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
@@ -1267,6 +1299,40 @@ export class PlantCanvas {
       x: relX + cameraWorldX,
       y: relY + cameraWorldY
     };
+  }
+
+  /**
+   * Change the isometric zoom while keeping the world point under the given
+   * screen anchor fixed (like 2D zoom-toward-mouse). Works by re-projecting
+   * the anchor before and after the zoom change and shifting the camera by
+   * the world-space difference. If the anchor is above the horizon the
+   * inverse projection returns camera-relative sentinels that cancel out,
+   * so the zoom simply happens about the (center, horizon) anchor.
+   */
+  private applyIsoZoom(newZoom: number, anchor: Point): void {
+    const clamped = Math.max(PlantCanvas.MIN_ISO_ZOOM, Math.min(PlantCanvas.MAX_ISO_ZOOM, newZoom));
+    const before = this.screenToWorldPerspective(anchor);
+    this.isoZoom = clamped;
+    const after = this.screenToWorldPerspective(anchor);
+    // World-space camera shift; offsetX/cameraDepth store world meters * 10
+    this.view.offsetX -= (before.x - after.x) * 10;
+    this.cameraDepth -= (before.y - after.y) * 10;
+    this.clampView();
+    this.syncIsoZoomUI();
+  }
+
+  // Keep the sidebar zoom slider and readout in step with this.isoZoom
+  // (mirrors how the wheel handler updates the view-angle slider)
+  private syncIsoZoomUI(): void {
+    const slider = document.getElementById('view-zoom') as HTMLInputElement | null;
+    const display = document.getElementById('view-zoom-value');
+    if (slider) {
+      // Slider is logarithmic: value = 100 * log10(zoom)
+      slider.value = String(Math.round(100 * Math.log10(this.isoZoom)));
+    }
+    if (display) {
+      display.textContent = String(Math.round(this.isoZoom * 100));
+    }
   }
 
   // Public method to convert screen to world coordinates
@@ -1365,8 +1431,9 @@ export class PlantCanvas {
 
     if (this.isometric.enabled) {
       // Match the drag mapping: horizontal -> offsetX, vertical -> cameraDepth
-      this.view.offsetX += panX;
-      this.cameraDepth -= panY;
+      // (divided by zoom so the apparent pan speed is magnification-independent)
+      this.view.offsetX += panX / this.isoZoom;
+      this.cameraDepth -= panY / this.isoZoom;
     } else {
       this.view.offsetX += panX;
       this.view.offsetY += panY;
@@ -1411,7 +1478,7 @@ export class PlantCanvas {
 
     // Draw background - either grid or isometric ground
     if (this.isometric.enabled) {
-      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle);
+      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
 
       // Draw construction grid on ground plane in construction mode
       if (this.constructionMode) {
@@ -3159,6 +3226,16 @@ export class PlantCanvas {
     return this.viewAngle;
   }
 
+  // Set the isometric zoom directly (e.g. from the sidebar slider),
+  // magnifying about the default screen anchor
+  public setIsoZoom(zoom: number): void {
+    this.applyIsoZoom(zoom, this.defaultZoomAnchor());
+  }
+
+  public getIsoZoom(): number {
+    return this.isoZoom;
+  }
+
   public setConstructionMode(enabled: boolean): void {
     this.constructionMode = enabled;
   }
@@ -3195,12 +3272,27 @@ export class PlantCanvas {
     Object.assign(this.view, view);
   }
 
+  // Screen anchor the button/slider zooms magnify about: horizontal center,
+  // 60% down the canvas (comfortably inside the ground region)
+  private defaultZoomAnchor(): Point {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: rect.width / 2, y: rect.height * 0.6 };
+  }
+
   public zoomIn(): void {
-    this.view.zoom = Math.min(200, this.view.zoom * 1.2);
+    if (this.isometric.enabled) {
+      this.applyIsoZoom(this.isoZoom * 1.2, this.defaultZoomAnchor());
+    } else {
+      this.view.zoom = Math.min(200, this.view.zoom * 1.2);
+    }
   }
 
   public zoomOut(): void {
-    this.view.zoom = Math.max(10, this.view.zoom / 1.2);
+    if (this.isometric.enabled) {
+      this.applyIsoZoom(this.isoZoom / 1.2, this.defaultZoomAnchor());
+    } else {
+      this.view.zoom = Math.max(10, this.view.zoom / 1.2);
+    }
   }
 
   public resetView(): void {
@@ -3210,6 +3302,9 @@ export class PlantCanvas {
       offsetY: rect.height / 2 + 100,
       zoom: 50,
     };
+    this.cameraDepth = 0;
+    this.isoZoom = 1;
+    this.syncIsoZoomUI();
   }
 
   public getSelectedComponentId(): string | null {

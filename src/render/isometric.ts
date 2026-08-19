@@ -97,7 +97,8 @@ export function renderIsometricGround(
   height: number,
   config: IsometricConfig,
   cameraDepth: number = 0,
-  viewAngle: number = 30
+  viewAngle: number = 30,
+  isoZoom: number = 1
 ): void {
   if (!config.enabled) {
     return;
@@ -127,7 +128,7 @@ export function renderIsometricGround(
   ctx.fillRect(0, 0, width, height);
 
   // Draw scattered shrubs/cacti with isometric projection
-  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle);
+  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle, isoZoom);
 
   for (const shrub of shrubPositions) {
     drawDesertShrub(ctx, shrub.x, shrub.y, shrub.size, shrub.type);
@@ -176,7 +177,7 @@ function seededRandom(seed: number): number {
 
 // Generate shrubs on a perspective ground plane with infinite tiling
 // Shrubs are placed at fixed world positions and move with parallax when camera moves
-function generateShrubPositions(view: ViewState, width: number, height: number, cameraDepth: number, viewAngle: number = 30): any[] {
+function generateShrubPositions(view: ViewState, width: number, height: number, cameraDepth: number, viewAngle: number = 30, isoZoom: number = 1): any[] {
   const shrubs: { x: number; y: number; size: number; type: string }[] = [];
 
   // Screen geometry - must match canvas projection
@@ -209,9 +210,11 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
   const stretchFactor = 1 + perspectiveOffset * 0.01;
   const screenCenterY = horizonY + groundHeight * 0.4;
 
-  // Visible range - use different ranges for X and Y for performance
-  const visibleRangeX = 400;
-  const visibleRangeY = 500;
+  // Visible range - use different ranges for X and Y for performance.
+  // Zooming out shows more ground, so the range grows as 1/zoom (the
+  // too-tiny-to-see size cutoff below keeps the actual draw count sane)
+  const visibleRangeX = 400 / isoZoom;
+  const visibleRangeY = 500 / isoZoom;
 
   const startCellX = Math.floor((cameraWorldX - visibleRangeX) / cellSize);
   const endCellX = Math.ceil((cameraWorldX + visibleRangeX) / cellSize);
@@ -241,15 +244,16 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
       const effectiveRelY = relY + perspectiveOffset;
 
       // Perspective projection - must match canvas.ts worldToScreenPerspective()
+      // (zoom multiplies after the cap so it stays a pure magnification)
       const perspectiveScale = CAMERA_HEIGHT / effectiveRelY;
-      const cappedScale = Math.min(perspectiveScale, 3);
+      const cappedScale = Math.min(perspectiveScale, 3) * isoZoom;
       const finalScale = cappedScale * overallScale;
 
       // Screen X position
       const screenX = centerX + relX * finalScale * PERSPECTIVE_X_SCALE;
 
       // Screen Y position - use ACTUAL distance for position, then stretch
-      const rawScreenY = horizonY + groundHeight * CAMERA_HEIGHT / relY;
+      const rawScreenY = horizonY + groundHeight * CAMERA_HEIGHT * isoZoom / relY;
       const screenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor;
 
       // Skip if off-screen
