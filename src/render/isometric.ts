@@ -97,14 +97,20 @@ export function renderIsometricGround(
   height: number,
   config: IsometricConfig,
   cameraDepth: number = 0,
-  viewAngle: number = 30
+  viewAngle: number = 30,
+  isoZoom: number = 1
 ): void {
   if (!config.enabled) {
     return;
   }
 
-  // Fixed horizon at 25% from top (matches canvas projection)
-  const horizonY = height * 0.25;
+  // Zoom-free horizon at 25% from top, and the zoom anchor 40% into the
+  // ground region - both must match the canvas projection. The zoom
+  // magnifies the picture about the anchor, so the horizon the components
+  // are drawn against sits at the anchor-relative, zoom-scaled position.
+  const horizonY0 = height * 0.25;
+  const anchorY = horizonY0 + (height - horizonY0) * 0.4;
+  const horizonY = anchorY + (horizonY0 - anchorY) * isoZoom;
 
   // Desert sand gradient - warm sandy colors
   const gradient = ctx.createLinearGradient(0, horizonY, 0, height);
@@ -127,45 +133,48 @@ export function renderIsometricGround(
   ctx.fillRect(0, 0, width, height);
 
   // Draw scattered shrubs/cacti with isometric projection
-  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle);
+  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle, isoZoom);
 
   for (const shrub of shrubPositions) {
     drawDesertShrub(ctx, shrub.x, shrub.y, shrub.size, shrub.type);
   }
 
-  // Add distant mountains on horizon
+  // Add distant mountains on horizon (peak heights scale with the zoom)
   ctx.fillStyle = 'rgba(150, 140, 120, 0.3)';
   ctx.beginPath();
   ctx.moveTo(0, horizonY);
 
   // Create jagged mountain silhouette
-  const mountainPoints = [
-    { x: width * 0.1, y: horizonY - 40 },
-    { x: width * 0.15, y: horizonY - 60 },
-    { x: width * 0.2, y: horizonY - 45 },
-    { x: width * 0.3, y: horizonY - 70 },
-    { x: width * 0.35, y: horizonY - 55 },
-    { x: width * 0.5, y: horizonY - 80 },
-    { x: width * 0.6, y: horizonY - 50 },
-    { x: width * 0.7, y: horizonY - 65 },
-    { x: width * 0.8, y: horizonY - 40 },
-    { x: width * 0.9, y: horizonY - 55 },
-    { x: width, y: horizonY - 30 }
+  const mountainPeaks = [
+    { x: width * 0.1, h: 40 },
+    { x: width * 0.15, h: 60 },
+    { x: width * 0.2, h: 45 },
+    { x: width * 0.3, h: 70 },
+    { x: width * 0.35, h: 55 },
+    { x: width * 0.5, h: 80 },
+    { x: width * 0.6, h: 50 },
+    { x: width * 0.7, h: 65 },
+    { x: width * 0.8, h: 40 },
+    { x: width * 0.9, h: 55 },
+    { x: width, h: 30 }
   ];
 
-  for (const point of mountainPoints) {
-    ctx.lineTo(point.x, point.y);
+  for (const peak of mountainPeaks) {
+    ctx.lineTo(peak.x, horizonY - peak.h * isoZoom);
   }
   ctx.lineTo(width, horizonY);
   ctx.closePath();
   ctx.fill();
 
-  // Sky gradient
-  const skyGradient = ctx.createLinearGradient(0, 0, 0, horizonY);
-  skyGradient.addColorStop(0, '#a8c8e8');  // Light blue sky
-  skyGradient.addColorStop(1, '#d8e8f0');  // Fade to white at horizon
-  ctx.fillStyle = skyGradient;
-  ctx.fillRect(0, 0, width, horizonY);
+  // Sky gradient (the horizon can be above the top edge when zoomed in far;
+  // then there is simply no sky on screen)
+  if (horizonY > 0) {
+    const skyGradient = ctx.createLinearGradient(0, 0, 0, horizonY);
+    skyGradient.addColorStop(0, '#a8c8e8');  // Light blue sky
+    skyGradient.addColorStop(1, '#d8e8f0');  // Fade to white at horizon
+    ctx.fillStyle = skyGradient;
+    ctx.fillRect(0, 0, width, horizonY);
+  }
 }
 
 // Deterministic random from seed
@@ -176,13 +185,17 @@ function seededRandom(seed: number): number {
 
 // Generate shrubs on a perspective ground plane with infinite tiling
 // Shrubs are placed at fixed world positions and move with parallax when camera moves
-function generateShrubPositions(view: ViewState, width: number, height: number, cameraDepth: number, viewAngle: number = 30): any[] {
+function generateShrubPositions(view: ViewState, width: number, height: number, cameraDepth: number, viewAngle: number = 30, isoZoom: number = 1): any[] {
   const shrubs: { x: number; y: number; size: number; type: string }[] = [];
 
-  // Screen geometry - must match canvas projection
+  // Screen geometry - must match canvas projection. horizonY is the
+  // zoom-free horizon the projection math uses; the zoom is applied at the
+  // end as a magnification about (centerX, screenCenterY), putting the
+  // on-screen horizon at effHorizonY.
   const horizonY = height * 0.25;
   const groundHeight = height - horizonY;
   const centerX = width / 2;
+  const effHorizonY = horizonY + groundHeight * 0.4 * (1 - isoZoom);
 
   // World-space cell size for shrub placement
   const cellSize = 80;
@@ -209,9 +222,11 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
   const stretchFactor = 1 + perspectiveOffset * 0.01;
   const screenCenterY = horizonY + groundHeight * 0.4;
 
-  // Visible range - use different ranges for X and Y for performance
-  const visibleRangeX = 400;
-  const visibleRangeY = 500;
+  // Visible range - use different ranges for X and Y for performance.
+  // Zooming out shows more ground, so the range grows as 1/zoom (the
+  // too-tiny-to-see size cutoff below keeps the actual draw count sane)
+  const visibleRangeX = 400 / isoZoom;
+  const visibleRangeY = 500 / isoZoom;
 
   const startCellX = Math.floor((cameraWorldX - visibleRangeX) / cellSize);
   const endCellX = Math.ceil((cameraWorldX + visibleRangeX) / cellSize);
@@ -237,24 +252,28 @@ function generateShrubPositions(view: ViewState, width: number, height: number, 
       // Skip if behind camera or too far
       if (relY < 1 || relY > visibleRangeY) continue;
 
-      // Effective distance - adding offset flattens perspective for SCALE only
+      // Effective distance - adding offset flattens perspective for SCALE
+      // only. Below 20° the offset is negative and this close geometry is
+      // behind the effective focal plane - cull it (matches canvas.ts)
       const effectiveRelY = relY + perspectiveOffset;
+      if (effectiveRelY < 1) continue;
 
       // Perspective projection - must match canvas.ts worldToScreenPerspective()
       const perspectiveScale = CAMERA_HEIGHT / effectiveRelY;
       const cappedScale = Math.min(perspectiveScale, 3);
-      const finalScale = cappedScale * overallScale;
+      const finalScale = cappedScale * overallScale * isoZoom;
 
-      // Screen X position
+      // Screen X position (zoom magnifies about centerX)
       const screenX = centerX + relX * finalScale * PERSPECTIVE_X_SCALE;
 
-      // Screen Y position - use ACTUAL distance for position, then stretch
+      // Screen Y position - use ACTUAL distance for position, then stretch,
+      // then magnify about the zoom anchor (matches canvas.ts)
       const rawScreenY = horizonY + groundHeight * CAMERA_HEIGHT / relY;
-      const screenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor;
+      const screenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor * isoZoom;
 
       // Skip if off-screen
       if (screenX < -50 || screenX > width + 50) continue;
-      if (screenY < horizonY - 10 || screenY > height + 100) continue;
+      if (screenY < effHorizonY - 10 || screenY > height + 100) continue;
 
       // Size based on distance (perspective) and overall scale
       // baseSize in world units (meters): 0.3 to 0.8 meters for desert shrubs

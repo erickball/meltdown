@@ -2,6 +2,7 @@
 
 import { PlantComponent, Port, Connection } from '../types';
 import { getComponentVisualHeight } from '../render/components';
+import { hasPinnedPortElevations } from './component-properties';
 import { PIPE_SPECS, findMatchingPipeSpec, pipeSpecFlowArea } from './component-presets';
 
 // Shared tooltip for the offtake opening-height inputs (edit form, both ends)
@@ -235,18 +236,18 @@ export class ConnectionDialog {
     fromElevInput.min = String(Math.min(0, roundElev(fromElevation)));
     fromElevInput.max = String(Math.max(fromHeight, roundElev(fromElevation)));
     fromElevInput.step = '0.1';
-    const fromIsPump = this.fromComponent!.type === 'pump';
-    if (fromIsPump) {
+    const fromIsPinned = hasPinnedPortElevations(this.fromComponent!);
+    if (fromIsPinned) {
       fromElevInput.readOnly = true;
-      fromElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+      fromElevInput.title = `${this.fromComponent!.type === 'pump' ? 'Pump nozzle' : 'Valve port'} elevations are fixed by the component geometry and follow it automatically`;
     }
     fromElevGroup.appendChild(fromElevInput);
 
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
     fromElevHelp.id = 'from-elevation-help';
-    fromElevHelp.textContent = fromIsPump
-      ? `Fixed at the pump nozzle | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`
+    fromElevHelp.textContent = fromIsPinned
+      ? `Fixed at the ${this.fromComponent!.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`
       : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`;
     fromElevGroup.appendChild(fromElevHelp);
     this.bodyElement.appendChild(fromElevGroup);
@@ -266,18 +267,18 @@ export class ConnectionDialog {
     toElevInput.min = String(Math.min(0, roundElev(toElevation)));
     toElevInput.max = String(Math.max(toHeight, roundElev(toElevation)));
     toElevInput.step = '0.1';
-    const toIsPump = this.toComponent!.type === 'pump';
-    if (toIsPump) {
+    const toIsPinned = hasPinnedPortElevations(this.toComponent!);
+    if (toIsPinned) {
       toElevInput.readOnly = true;
-      toElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+      toElevInput.title = `${this.toComponent!.type === 'pump' ? 'Pump nozzle' : 'Valve port'} elevations are fixed by the component geometry and follow it automatically`;
     }
     toElevGroup.appendChild(toElevInput);
 
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
     toElevHelp.id = 'to-elevation-help';
-    toElevHelp.textContent = toIsPump
-      ? `Fixed at the pump nozzle | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`
+    toElevHelp.textContent = toIsPinned
+      ? `Fixed at the ${this.toComponent!.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`
       : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`;
     toElevGroup.appendChild(toElevHelp);
     this.bodyElement.appendChild(toElevGroup);
@@ -734,17 +735,17 @@ export class ConnectionDialog {
     fromElevInput.min = String(Math.min(0, currentFromElev));
     fromElevInput.max = String(Math.max(fromHeight, currentFromElev));
     fromElevInput.step = '0.1';
-    const fromIsPump = fromComponent.type === 'pump';
-    if (fromIsPump) {
+    const fromIsPinned = hasPinnedPortElevations(fromComponent);
+    if (fromIsPinned) {
       fromElevInput.readOnly = true;
-      fromElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+      fromElevInput.title = `${fromComponent.type === 'pump' ? 'Pump nozzle' : 'Valve port'} elevations are fixed by the component geometry and follow it automatically`;
     }
     fromElevGroup.appendChild(fromElevInput);
 
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
-    const fromElevHelpText = (relElev: number) => fromIsPump
-      ? `Fixed at the pump nozzle | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`
+    const fromElevHelpText = (relElev: number) => fromIsPinned
+      ? `Fixed at the ${fromComponent.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`
       : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`;
     fromElevHelp.textContent = fromElevHelpText(currentFromElev);
     fromElevGroup.appendChild(fromElevHelp);
@@ -785,17 +786,17 @@ export class ConnectionDialog {
     toElevInput.min = String(Math.min(0, currentToElev));
     toElevInput.max = String(Math.max(toHeight, currentToElev));
     toElevInput.step = '0.1';
-    const toIsPump = toComponent.type === 'pump';
-    if (toIsPump) {
+    const toIsPinned = hasPinnedPortElevations(toComponent);
+    if (toIsPinned) {
       toElevInput.readOnly = true;
-      toElevInput.title = 'Pump nozzle elevations are fixed by the pump geometry and follow the pump automatically';
+      toElevInput.title = `${toComponent.type === 'pump' ? 'Pump nozzle' : 'Valve port'} elevations are fixed by the component geometry and follow it automatically`;
     }
     toElevGroup.appendChild(toElevInput);
 
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
-    const toElevHelpText = (relElev: number) => toIsPump
-      ? `Fixed at the pump nozzle | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`
+    const toElevHelpText = (relElev: number) => toIsPinned
+      ? `Fixed at the ${toComponent.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`
       : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`;
     toElevHelp.textContent = toElevHelpText(currentToElev);
     toElevGroup.appendChild(toElevHelp);

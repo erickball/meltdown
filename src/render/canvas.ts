@@ -124,7 +124,7 @@ export class PlantCanvas {
     this.canvas.addEventListener('pointerenter', () => { this.mouseOverCanvas = true; });
     this.canvas.addEventListener('pointerleave', () => { this.mouseOverCanvas = false; });
 
-    // Keyboard events for arrow key elevation control
+    // Keyboard events for arrow-key panning
     window.addEventListener('keydown', this.handleKeyDown.bind(this));
 
     // Resize
@@ -132,28 +132,39 @@ export class PlantCanvas {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
-    // Don't steal arrow keys from text fields (e.g. Jack's chat box)
+    // Don't steal arrow keys from text fields (e.g. Jack's chat box) or
+    // focused controls like the view sliders
     const target = e.target as HTMLElement | null;
     if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
       return;
     }
-    // Only handle arrow keys in isometric mode for elevation control
-    if (!this.isometric.enabled) return;
 
-    const elevationStep = 20; // Pixels per key press
-
+    // Arrow keys pan the view, in the same directions as pushing the mouse
+    // to that screen edge would edge-scroll (key repeat gives continuous
+    // motion). Screen-space step, so a press covers the same fraction of
+    // the view at any zoom.
+    const step = 40; // Pixels per key press
+    let panX = 0;
+    let panY = 0;
     switch (e.key) {
-      case 'ArrowUp':
-        this.view.offsetY -= elevationStep;
-        this.clampView();
-        e.preventDefault();
-        break;
-      case 'ArrowDown':
-        this.view.offsetY += elevationStep;
-        this.clampView();
-        e.preventDefault();
-        break;
+      case 'ArrowLeft': panX = step; break;
+      case 'ArrowRight': panX = -step; break;
+      case 'ArrowUp': panY = step; break;
+      case 'ArrowDown': panY = -step; break;
+      default: return;
     }
+
+    if (this.isometric.enabled) {
+      // Match the drag/edge-pan mapping: horizontal -> offsetX, vertical ->
+      // cameraDepth, divided by zoom so the apparent speed stays constant
+      this.view.offsetX += panX / this.isoZoom;
+      this.cameraDepth -= panY / this.isoZoom;
+    } else {
+      this.view.offsetX += panX;
+      this.view.offsetY += panY;
+    }
+    this.clampView();
+    e.preventDefault();
   }
 
   // Active pointers currently pressed on the canvas, by pointerId.
@@ -278,8 +289,10 @@ export class PlantCanvas {
         // - Drag left/right moves laterally (offsetX)
         // - Drag up/down moves forward/backward (cameraDepth)
         // Drag down = move forward (negative dy = forward)
-        this.view.offsetX += dx;
-        this.cameraDepth -= dy; // Negate: drag down = move forward
+        // Divide by zoom so the ground tracks the cursor at the same rate
+        // regardless of magnification
+        this.view.offsetX += dx / this.isoZoom;
+        this.cameraDepth -= dy / this.isoZoom; // Negate: drag down = move forward
       } else {
         // In normal 2D mode, drag moves view offset directly
         this.view.offsetX += dx;
@@ -316,20 +329,28 @@ export class PlantCanvas {
     e.preventDefault();
 
     if (this.isometric.enabled) {
-      // In isometric mode, scroll wheel changes view angle
-      // Scroll up = look more from above (increase angle), scroll down = look more forward (decrease angle)
-      const angleStep = 5;
-      this.viewAngle += e.deltaY > 0 ? angleStep : -angleStep;
-      this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
+      if (e.shiftKey || e.ctrlKey) {
+        // Shift/Ctrl + scroll changes view angle (the old plain-scroll behavior)
+        // Scroll up = look more from above, scroll down = look more forward
+        // With Shift held some mice report the wheel as deltaX, so fall back to it
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        const angleStep = 5;
+        this.viewAngle += delta > 0 ? angleStep : -angleStep;
+        this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
 
-      // Update the view angle slider and display to match
-      const slider = document.getElementById('view-elevation') as HTMLInputElement;
-      const display = document.getElementById('view-elevation-value');
-      if (slider) {
-        slider.value = String(this.viewAngle);
-      }
-      if (display) {
-        display.textContent = String(this.viewAngle);
+        // Update the view angle slider and display to match
+        const slider = document.getElementById('view-elevation') as HTMLInputElement;
+        const display = document.getElementById('view-elevation-value');
+        if (slider) {
+          slider.value = String(this.viewAngle);
+        }
+        if (display) {
+          display.textContent = String(this.viewAngle);
+        }
+      } else {
+        // Plain scroll zooms about the mid-screen anchor
+        const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+        this.applyIsoZoom(this.isoZoom * zoomFactor);
       }
     } else {
       // In 2D mode, scroll wheel zooms
@@ -363,20 +384,32 @@ export class PlantCanvas {
 
     if (this.lastPinchDist > 0) {
       const zoomFactor = dist / this.lastPinchDist;
-      const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
 
-      // Zoom toward center
-      const worldX = (center.x - this.view.offsetX) / this.view.zoom;
-      const worldY = (center.y - this.view.offsetY) / this.view.zoom;
+      if (this.isometric.enabled) {
+        // Pinch zooms the perspective view about the mid-screen anchor
+        this.applyIsoZoom(this.isoZoom * zoomFactor);
 
-      this.view.zoom = newZoom;
-      this.view.offsetX = center.x - worldX * newZoom;
-      this.view.offsetY = center.y - worldY * newZoom;
+        // Pan by the center's motion, matching the one-finger drag mapping
+        // (horizontal -> offsetX, vertical -> cameraDepth), scaled by zoom
+        this.view.offsetX += (center.x - this.lastPinchCenter.x) / this.isoZoom;
+        this.cameraDepth -= (center.y - this.lastPinchCenter.y) / this.isoZoom;
+        this.clampView();
+      } else {
+        const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
 
-      // Also pan by the center's motion
-      this.view.offsetX += center.x - this.lastPinchCenter.x;
-      this.view.offsetY += center.y - this.lastPinchCenter.y;
-      this.clampView();
+        // Zoom toward center
+        const worldX = (center.x - this.view.offsetX) / this.view.zoom;
+        const worldY = (center.y - this.view.offsetY) / this.view.zoom;
+
+        this.view.zoom = newZoom;
+        this.view.offsetX = center.x - worldX * newZoom;
+        this.view.offsetY = center.y - worldY * newZoom;
+
+        // Also pan by the center's motion
+        this.view.offsetX += center.x - this.lastPinchCenter.x;
+        this.view.offsetY += center.y - this.lastPinchCenter.y;
+        this.clampView();
+      }
     }
 
     this.lastPinchDist = dist;
@@ -1143,8 +1176,17 @@ export class PlantCanvas {
   private static readonly MIN_CLICK_TARGET_PX = 24;
 
   // View angle in degrees from horizontal (20 = looking forward, 70 = looking down)
-  // Controls both zoom (higher = further away) and vertical compression (higher = more top-down)
+  // Controls perspective flattening (higher = flatter, more top-down feel)
   private viewAngle: number = 30;
+
+  // Magnification of the perspective view, independent of view angle.
+  // A pure screen-space magnification about a fixed anchor (screen center X,
+  // the projection's stretch reference Y, ~55% down the canvas). The camera
+  // itself never moves when zooming, so zoom in/out always round-trips to
+  // exactly the same view.
+  private isoZoom: number = 1;
+  private static readonly MIN_ISO_ZOOM = 0.2;
+  private static readonly MAX_ISO_ZOOM = 5;
 
   // Get view transform parameters from view angle
   // Returns parameters that create a proper "elevated camera" effect:
@@ -1193,8 +1235,14 @@ export class PlantCanvas {
     }
 
     // Effective distance - adding offset flattens perspective for SCALE only
-    // Higher offset = near and far objects appear more similar in size
+    // Higher offset = near and far objects appear more similar in size.
+    // At view angles below 20° the offset is negative, and geometry closer
+    // than |offset| sits behind the effective focal plane; its projected
+    // scale would flip sign, so cull it exactly like relY < 1
     const effectiveRelY = relY + perspectiveOffset;
+    if (effectiveRelY < 1) {
+      return { pos: { x: -1000, y: -1000 }, scale: 0 };
+    }
 
     // Perspective scale using effective distance (flatter at high angles)
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
@@ -1219,9 +1267,15 @@ export class PlantCanvas {
 
     // Apply elevation offset (compressed by view angle for looking from above)
     const elevationOffset = elevation * cappedScale * this.ELEVATION_SCALE * verticalScale * overallScale;
-    const screenY = baseScreenY - elevationOffset;
+    const unzoomedY = baseScreenY - elevationOffset;
 
-    return { pos: { x: screenX, y: screenY }, scale: finalScale };
+    // Zoom: uniform screen-space magnification of the finished projection
+    // about the fixed anchor (centerX, screenCenterY). The camera does not
+    // move, so this is exactly invertible and cannot drift the view.
+    const zoomedX = centerX + (screenX - centerX) * this.isoZoom;
+    const zoomedY = screenCenterY + (unzoomedY - screenCenterY) * this.isoZoom;
+
+    return { pos: { x: zoomedX, y: zoomedY }, scale: finalScale * this.isoZoom };
   }
 
   // Inverse perspective projection: convert screen coordinates to world coordinates
@@ -1238,10 +1292,13 @@ export class PlantCanvas {
     const cameraWorldX = -(this.view.offsetX - centerX) / 10;
     const cameraWorldY = -this.cameraDepth / 10;
 
-    // Reverse the stretch transformation first
+    // Un-apply the zoom magnification about its fixed anchor, then reverse
+    // the stretch transformation
     const stretchFactor = 1 + perspectiveOffset * 0.01;
     const screenCenterY = horizonY + groundHeight * 0.4;
-    const rawScreenY = screenCenterY + (screenPos.y - screenCenterY) / stretchFactor;
+    const unzoomedX = centerX + (screenPos.x - centerX) / this.isoZoom;
+    const unzoomedY = screenCenterY + (screenPos.y - screenCenterY) / this.isoZoom;
+    const rawScreenY = screenCenterY + (unzoomedY - screenCenterY) / stretchFactor;
 
     // Now reverse the perspective projection
     const screenYFromHorizon = rawScreenY - horizonY;
@@ -1255,18 +1312,49 @@ export class PlantCanvas {
       return { x: cameraWorldX, y: cameraWorldY + 1 };
     }
 
-    // Reverse X projection using effective distance for scale
+    // Reverse X projection using effective distance for scale. Geometry this
+    // close is culled by the forward projection at low view angles (negative
+    // offset), so answer with the same near sentinel it uses
     const effectiveRelY = relY + perspectiveOffset;
+    if (effectiveRelY < 1) {
+      return { x: cameraWorldX, y: cameraWorldY + 1 };
+    }
     const perspectiveScale = this.CAMERA_HEIGHT / effectiveRelY;
     const cappedScale = Math.min(perspectiveScale, 3);
     const finalScale = cappedScale * overallScale;
 
-    const relX = (screenPos.x - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
+    const relX = (unzoomedX - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE);
 
     return {
       x: relX + cameraWorldX,
       y: relY + cameraWorldY
     };
+  }
+
+  /**
+   * Change the isometric zoom. Deliberately does NOT move the camera to
+   * chase a zoom-toward-cursor anchor: camera moves here are world-space
+   * (lateral + dolly) and a dolly changes the perspective nonlinearly, so
+   * any compensation fights the magnification and drifts the view. The zoom
+   * is instead a fixed-anchor magnification applied inside the projection.
+   */
+  private applyIsoZoom(newZoom: number): void {
+    this.isoZoom = Math.max(PlantCanvas.MIN_ISO_ZOOM, Math.min(PlantCanvas.MAX_ISO_ZOOM, newZoom));
+    this.syncIsoZoomUI();
+  }
+
+  // Keep the sidebar zoom slider and readout in step with this.isoZoom
+  // (mirrors how the wheel handler updates the view-angle slider)
+  private syncIsoZoomUI(): void {
+    const slider = document.getElementById('view-zoom') as HTMLInputElement | null;
+    const display = document.getElementById('view-zoom-value');
+    if (slider) {
+      // Slider is logarithmic: value = 100 * log10(zoom)
+      slider.value = String(Math.round(100 * Math.log10(this.isoZoom)));
+    }
+    if (display) {
+      display.textContent = String(Math.round(this.isoZoom * 100));
+    }
   }
 
   // Public method to convert screen to world coordinates
@@ -1365,8 +1453,9 @@ export class PlantCanvas {
 
     if (this.isometric.enabled) {
       // Match the drag mapping: horizontal -> offsetX, vertical -> cameraDepth
-      this.view.offsetX += panX;
-      this.cameraDepth -= panY;
+      // (divided by zoom so the apparent pan speed is magnification-independent)
+      this.view.offsetX += panX / this.isoZoom;
+      this.cameraDepth -= panY / this.isoZoom;
     } else {
       this.view.offsetX += panX;
       this.view.offsetY += panY;
@@ -1378,7 +1467,8 @@ export class PlantCanvas {
     const rect = this.canvas.getBoundingClientRect();
 
     if (this.isometric.enabled) {
-      // Limit elevation (view.offsetY) - controlled by arrow keys
+      // Limit view.offsetY (vestigial in this mode - the perspective
+      // projection does not read it; arrow keys now pan offsetX/cameraDepth)
       const minOffsetY = rect.height * 0.2;
       const maxOffsetY = rect.height * 1.2;
       this.view.offsetY = Math.max(minOffsetY, Math.min(maxOffsetY, this.view.offsetY));
@@ -1411,7 +1501,7 @@ export class PlantCanvas {
 
     // Draw background - either grid or isometric ground
     if (this.isometric.enabled) {
-      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle);
+      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
 
       // Draw construction grid on ground plane in construction mode
       if (this.constructionMode) {
@@ -2410,6 +2500,11 @@ export class PlantCanvas {
     connection: Connection,
     highlight: boolean = false
   ): void {
+    // Vessel side ports draw on the edge facing the partner (mirroring
+    // only changes the lateral offset, never the y the elevation math uses)
+    fromPort = this.portForConnectionDrawing(fromComponent, fromPort, toComponent, toPort);
+    toPort = this.portForConnectionDrawing(toComponent, toPort, fromComponent, fromPort);
+
     // Get port screen positions (these are visually consistent with component rendering)
     const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
     const toPortScreen = this.getPortScreenPosition(toComponent, toPort);
@@ -2492,11 +2587,6 @@ export class PlantCanvas {
 
     if (fromScreen.scale <= 0 || toScreen.scale <= 0) return;
 
-    // Check for internal connections (one component contained by the other, or siblings in the same container)
-    // For these, we want the outer endpoint to stop partway inside, not at the edge
-    const fromContainedBy = (fromComponent as any).containedBy;
-    const toContainedBy = (toComponent as any).containedBy;
-
     let adjustedFromScreen = fromScreen.pos;
     let adjustedToScreen = toScreen.pos;
 
@@ -2526,42 +2616,11 @@ export class PlantCanvas {
         };
       }
     }
-    // If fromComponent is contained by toComponent, adjust the "to" endpoint
-    // to stop partway between the inner (from) edge and the outer (to) edge
-    else if (fromContainedBy === toComponent.id) {
-      // Move the "to" endpoint only 10% of the way from "from" to "to"
-      // This places it just barely past the inner component edge
-      const t = 0.1;
-      adjustedToScreen = {
-        x: fromScreen.pos.x + t * (toScreen.pos.x - fromScreen.pos.x),
-        y: fromScreen.pos.y + t * (toScreen.pos.y - fromScreen.pos.y)
-      };
-    }
-    // If toComponent is contained by fromComponent, adjust the "from" endpoint
-    else if (toContainedBy === fromComponent.id) {
-      // Move the "from" endpoint only 10% of the way from "to" to "from"
-      const t = 0.1;
-      adjustedFromScreen = {
-        x: toScreen.pos.x + t * (fromScreen.pos.x - toScreen.pos.x),
-        y: toScreen.pos.y + t * (fromScreen.pos.y - toScreen.pos.y)
-      };
-    }
-    // If both components are contained by the same parent (siblings inside a reactor vessel, etc.)
-    // Draw a short connection between them - adjust both endpoints toward the midpoint
-    else if (fromContainedBy && fromContainedBy === toContainedBy) {
-      // Both are inside the same container - draw connection mostly in the middle
-      // Move each endpoint 40% toward the midpoint
-      const t = 0.4;
-      const midX = (fromScreen.pos.x + toScreen.pos.x) / 2;
-      const midY = (fromScreen.pos.y + toScreen.pos.y) / 2;
-      adjustedFromScreen = {
-        x: fromScreen.pos.x + t * (midX - fromScreen.pos.x),
-        y: fromScreen.pos.y + t * (midY - fromScreen.pos.y)
-      };
-      adjustedToScreen = {
-        x: toScreen.pos.x + t * (midX - toScreen.pos.x),
-        y: toScreen.pos.y + t * (midY - toScreen.pos.y)
-      };
+    else {
+      const adjusted = this.adjustEndpointsForContainment(
+        fromComponent, toComponent, fromScreen.pos, toScreen.pos);
+      adjustedFromScreen = adjusted.from;
+      adjustedToScreen = adjusted.to;
     }
 
     const fluid = this.getConnectionFluid(connection, fromComponent);
@@ -2854,6 +2913,132 @@ export class PlantCanvas {
     ctx.restore();
   }
 
+  /**
+   * The port to draw a connection endpoint at. Side ports on wide vessels
+   * are logical attachment points, not fixed nozzles: a vessel whose inlet
+   * port is stored on the left still takes a line arriving from the right
+   * on its right wall - drawing it to the far port makes the line cross
+   * the whole vessel silhouette. Mirror the port's lateral offset when the
+   * partner sits on the other side of the vessel.
+   *
+   * Only vessels/tanks mirror: pump nozzles and valve ports are physical
+   * drawn features, heat-exchanger port sides distinguish tube from shell
+   * plenums, and pipes carry exact endpoints.
+   */
+  private portForConnectionDrawing(
+    component: PlantComponent,
+    port: { position: Point },
+    partner: PlantComponent,
+    partnerPort: { position: Point }
+  ): { position: Point } {
+    if (component.type !== 'vessel' && component.type !== 'reactorVessel' && component.type !== 'tank') {
+      return port;
+    }
+    if (port.position.x === 0) return port;
+
+    const elevation = getComponentElevation(component);
+    const centerScreen = this.worldToScreenPerspective(
+      { x: component.position.x, y: component.position.y }, elevation);
+    if (centerScreen.scale <= 0) return port;
+
+    // Where the line comes from: the pipe's actual end for pipes, the
+    // partner's center otherwise (a partner's own mirroring never looks
+    // back at this port, so there is no circularity)
+    let partnerX: number;
+    if (partner.type === 'pipe') {
+      const ps = this.getPortScreenPosition(partner, partnerPort);
+      if (!ps) return port;
+      partnerX = ps.x;
+    } else {
+      const pScreen = this.worldToScreenPerspective(
+        { x: partner.position.x, y: partner.position.y }, getComponentElevation(partner));
+      if (pScreen.scale <= 0) return port;
+      partnerX = pScreen.pos.x;
+    }
+
+    // Screen-space lateral offsets of the stored and mirrored port under
+    // the component's (screen-space) rotation
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+    const drawnDx = port.position.x * cos - port.position.y * sin;
+    const mirroredDx = -port.position.x * cos - port.position.y * sin;
+    const partnerDx = partnerX - centerScreen.pos.x;
+
+    // Mirror only when the stored port faces away from the partner AND the
+    // mirrored port actually faces toward it (a rotated component can have
+    // both pointing the same way - leave those alone)
+    if (partnerDx === 0 ||
+        Math.sign(drawnDx) === Math.sign(partnerDx) ||
+        Math.sign(mirroredDx) !== Math.sign(partnerDx)) {
+      return port;
+    }
+    return { position: { x: -port.position.x, y: port.position.y } };
+  }
+
+  /**
+   * Pull connection endpoints inward for connections that cross a
+   * containment boundary, so internal plumbing reads as a short stub
+   * instead of a full line through the container's wall:
+   * - component connected to its own container: the container-side endpoint
+   *   stops just past the inner component's edge
+   * - siblings nested inside the same VESSEL (core barrel internals, etc.):
+   *   both endpoints move toward the midpoint
+   *
+   * Siblings that merely share a BUILDING are exempt: a building is a room,
+   * not a vessel - real piping runs between the components, so the line
+   * must reach the ports. (The pull used to apply there too, which left
+   * connection lines ending in midair near small components like valves.)
+   */
+  private adjustEndpointsForContainment(
+    fromComponent: PlantComponent,
+    toComponent: PlantComponent,
+    fromScreen: Point,
+    toScreen: Point
+  ): { from: Point; to: Point } {
+    const fromContainedBy = (fromComponent as any).containedBy;
+    const toContainedBy = (toComponent as any).containedBy;
+
+    if (fromContainedBy === toComponent.id) {
+      const t = 0.1;
+      return {
+        from: fromScreen,
+        to: {
+          x: fromScreen.x + t * (toScreen.x - fromScreen.x),
+          y: fromScreen.y + t * (toScreen.y - fromScreen.y)
+        }
+      };
+    }
+    if (toContainedBy === fromComponent.id) {
+      const t = 0.1;
+      return {
+        from: {
+          x: toScreen.x + t * (fromScreen.x - toScreen.x),
+          y: toScreen.y + t * (fromScreen.y - toScreen.y)
+        },
+        to: toScreen
+      };
+    }
+    if (fromContainedBy && fromContainedBy === toContainedBy) {
+      const container = this.plantState.components.get(fromContainedBy);
+      if (container && container.type !== 'building') {
+        const t = 0.4;
+        const midX = (fromScreen.x + toScreen.x) / 2;
+        const midY = (fromScreen.y + toScreen.y) / 2;
+        return {
+          from: {
+            x: fromScreen.x + t * (midX - fromScreen.x),
+            y: fromScreen.y + t * (midY - fromScreen.y)
+          },
+          to: {
+            x: toScreen.x + t * (midX - toScreen.x),
+            y: toScreen.y + t * (midY - toScreen.y)
+          }
+        };
+      }
+    }
+    return { from: fromScreen, to: toScreen };
+  }
+
   // Calculate connection screen endpoints accounting for elevation offsets
   // This matches the logic in renderConnectionPerspective for consistency
   private getConnectionScreenEndpoints(
@@ -2862,9 +3047,14 @@ export class PlantCanvas {
     connection: Connection
   ): ConnectionScreenEndpoints | null {
     // Find ports
-    const fromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
-    const toPort = toComponent.ports?.find(p => p.id === connection.toPortId);
-    if (!fromPort || !toPort) return null;
+    const storedFromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
+    const storedToPort = toComponent.ports?.find(p => p.id === connection.toPortId);
+    if (!storedFromPort || !storedToPort) return null;
+
+    // Vessel side ports draw on the edge facing the partner, matching
+    // renderConnectionPerspective
+    const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
+    const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
 
     // Get port screen positions
     const fromPortScreen = this.getPortScreenPosition(fromComponent, fromPort);
@@ -2934,34 +3124,9 @@ export class PlantCanvas {
     let toScreen = { x: toPortScreen.x, y: toPortScreen.y - toElevationOffset };
 
     // Handle internal connections (one component contained by the other, or siblings)
-    const fromContainedBy = (fromComponent as any).containedBy;
-    const toContainedBy = (toComponent as any).containedBy;
-
-    if (fromContainedBy === toComponent.id) {
-      const t = 0.1;
-      toScreen = {
-        x: fromScreen.x + t * (toScreen.x - fromScreen.x),
-        y: fromScreen.y + t * (toScreen.y - fromScreen.y)
-      };
-    } else if (toContainedBy === fromComponent.id) {
-      const t = 0.1;
-      fromScreen = {
-        x: toScreen.x + t * (fromScreen.x - toScreen.x),
-        y: toScreen.y + t * (fromScreen.y - toScreen.y)
-      };
-    } else if (fromContainedBy && fromContainedBy === toContainedBy) {
-      const t = 0.4;
-      const midX = (fromScreen.x + toScreen.x) / 2;
-      const midY = (fromScreen.y + toScreen.y) / 2;
-      fromScreen = {
-        x: fromScreen.x + t * (midX - fromScreen.x),
-        y: fromScreen.y + t * (midY - fromScreen.y)
-      };
-      toScreen = {
-        x: toScreen.x + t * (midX - toScreen.x),
-        y: toScreen.y + t * (midY - toScreen.y)
-      };
-    }
+    const adjusted = this.adjustEndpointsForContainment(fromComponent, toComponent, fromScreen, toScreen);
+    fromScreen = adjusted.from;
+    toScreen = adjusted.to;
 
     // Average scale for arrow sizing
     // The flow arrow code expects scale ~1.0 at normal viewing distance
@@ -3159,6 +3324,15 @@ export class PlantCanvas {
     return this.viewAngle;
   }
 
+  // Set the isometric zoom directly (e.g. from the sidebar slider)
+  public setIsoZoom(zoom: number): void {
+    this.applyIsoZoom(zoom);
+  }
+
+  public getIsoZoom(): number {
+    return this.isoZoom;
+  }
+
   public setConstructionMode(enabled: boolean): void {
     this.constructionMode = enabled;
   }
@@ -3196,11 +3370,19 @@ export class PlantCanvas {
   }
 
   public zoomIn(): void {
-    this.view.zoom = Math.min(200, this.view.zoom * 1.2);
+    if (this.isometric.enabled) {
+      this.applyIsoZoom(this.isoZoom * 1.2);
+    } else {
+      this.view.zoom = Math.min(200, this.view.zoom * 1.2);
+    }
   }
 
   public zoomOut(): void {
-    this.view.zoom = Math.max(10, this.view.zoom / 1.2);
+    if (this.isometric.enabled) {
+      this.applyIsoZoom(this.isoZoom / 1.2);
+    } else {
+      this.view.zoom = Math.max(10, this.view.zoom / 1.2);
+    }
   }
 
   public resetView(): void {
@@ -3210,6 +3392,9 @@ export class PlantCanvas {
       offsetY: rect.height / 2 + 100,
       zoom: 50,
     };
+    this.cameraDepth = 0;
+    this.isoZoom = 1;
+    this.syncIsoZoomUI();
   }
 
   public getSelectedComponentId(): string | null {

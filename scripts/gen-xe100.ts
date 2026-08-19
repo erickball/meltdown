@@ -456,7 +456,7 @@ add('val-bleed-1', {
   // 0.1: measured ~46 kg/s at 0.2 through the twin taps - this meters the
   // ~25 the heater duty needs.
   diameter: 0.1, opening: 0.1,
-  ports: ports([['val-bleed-1-in', -0.5, 0], ['val-bleed-1-out', 0.5, 0]]),
+  ports: ports([['val-bleed-1-in', -0.1, 0], ['val-bleed-1-out', 0.1, 0]]),
   fluid: { temperature: 700, pressure: 165e5, phase: 'vapor', quality: 1, flowRate: 0 },
   nqa1: false, pressureRating: 200,
 });
@@ -611,7 +611,7 @@ add('val-fwhdr-1', {
   valveType: 'gate',
   position: { x: 68, y: 103 }, rotation: 0, elevation: 0,
   diameter: 0.1, opening: 0.3,
-  ports: ports([['val-fwhdr-1-in', -0.5, 0], ['val-fwhdr-1-out', 0.5, 0]]),
+  ports: ports([['val-fwhdr-1-in', -0.1, 0], ['val-fwhdr-1-out', 0.1, 0]]),
   fluid: { temperature: 497, pressure: 25e5, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: false, pressureRating: 60,
 });
@@ -831,11 +831,16 @@ connect('hx-1', 'hx-1-tube-2-b2', 'val-bleed-1', 'val-bleed-1-in',
   { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: 13.5, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
 connect('val-bleed-1', 'val-bleed-1-out', 'fwh-1', 'fwh-1-shell-1',
   { initialFlowPhase: 'vapor', initialFlowRate: 25, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 6, resistanceCoeff: 2 });
-// Shell drain cascades to the condenser
+// Shell drain cascades to the condenser. Valve-side elevations are pinned
+// to the valve port (0.1 m for a 0.1 m valve) - an earlier toElevation of 3
+// claimed a 3 m attachment on a 0.2 m-tall valve, which drew the connection
+// line in midair and put a phantom 3 m gravity head across the valve. The
+// lift into the elevated condenser belongs on the condenser side (its inlet
+// sits 3 m up the shell, 6 m absolute).
 connect('fwh-1', 'fwh-1-shell-2', 'val-fwhdr-1', 'val-fwhdr-1-in',
-  { initialFlowPhase: 'liquid', initialFlowRate: 25, fromElevation: 0, toElevation: 3, flowArea: 0.01, length: 8, resistanceCoeff: 4 });
+  { initialFlowPhase: 'liquid', initialFlowRate: 25, fromElevation: 0, toElevation: 0.1, flowArea: 0.01, length: 8, resistanceCoeff: 4 });
 connect('val-fwhdr-1', 'val-fwhdr-1-out', 'condenser-1', 'condenser-1-inlet',
-  { initialFlowPhase: 'liquid', initialFlowRate: 25, fromElevation: 0, toElevation: 3, flowArea: 0.01, length: 8, resistanceCoeff: 8 });
+  { initialFlowPhase: 'liquid', initialFlowRate: 25, fromElevation: 0.1, toElevation: 3, flowArea: 0.01, length: 8, resistanceCoeff: 8 });
 
 // ---------------------------------------------------------------------------
 const out = { components, connections };

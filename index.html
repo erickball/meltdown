@@ -177,13 +177,6 @@
           <div id="selected-component">No component selected</div>
           <div id="placement-hint" style="display: none;">Click to place</div>
         </div>
-        <hr />
-        <h3>Connections</h3>
-        <button id="connect-mode-btn" class="mode-btn">🔗 Connect Components</button>
-        <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
-          <div id="connection-status">Select first component...</div>
-        </div>
-
         <!-- Save/Load Section -->
         <hr />
         <button id="open-save-load-btn" class="mode-btn">💾 Save / Load</button>
@@ -193,18 +186,30 @@
         <hr />
         <h3>Edit</h3>
         <button id="move-mode" class="mode-btn"
-                title="Drag a component to move it in plan; use the ▲▼ buttons beside it to raise or lower it 0.5 m at a time. Anything inside a component (a core barrel in a vessel, equipment in a building) moves with it. Buildings only move once armed with their own 'Move Building' button.">Move</button>
+                title="Drag a component to move it in plan; use the ▲▼ buttons beside it to raise or lower it 0.5 m at a time. Anything inside a component (a core barrel in a vessel, equipment in a building) moves with it. Buildings only move once armed with their own 'Move Building' button.">Move Components</button>
+        <button id="connect-mode-btn" class="mode-btn">🔗 Connect Components</button>
+        <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
+          <div id="connection-status">Select first component...</div>
+        </div>
         <hr />
         <h3>View</h3>
+        <div style="font-size: 11px; color: #888; margin: 4px 0;">Scroll to zoom</div>
         <button id="toggle-isometric" class="view-btn active">🎛️ 2.5D View</button>
-        <div class="slider-control" style="margin: 8px 0;">
-          <label for="view-elevation" style="font-size: 11px;">View Angle: <span id="view-elevation-value">30</span>°</label>
+        <div class="slider-control" style="margin: 8px 0;"
+             title="Camera angle above horizontal: low = looking across the site, high = looking down from above. Ctrl+scroll on the canvas also adjusts this. Does not change magnification - use Zoom for that.">
+          <label for="view-elevation" style="font-size: 11px;">View Angle (ctrl+scroll wheel): <span id="view-elevation-value">30</span>°</label>
           <input type="range" id="view-elevation" min="10" max="50" value="30" style="width: 100%;" />
+        </div>
+        <div class="slider-control" style="margin: 8px 0;"
+             title="Magnify the 2.5D view without changing the camera angle. Scroll wheel on the canvas also zooms (Ctrl+scroll changes the view angle instead); the Zoom +/- buttons work too.">
+          <label for="view-zoom" style="font-size: 11px;">Zoom: <span id="view-zoom-value">100</span>%</label>
+          <input type="range" id="view-zoom" min="-70" max="70" value="0" style="width: 100%;" />
         </div>
         <button id="zoom-in">Zoom +</button>
         <button id="zoom-out">Zoom -</button>
         <button id="reset-view">Reset View</button>
         <button id="toggle-fullscreen" title="Fill the screen (also keeps the cursor from slipping off the edge while edge-scrolling). Esc or F11 exits.">⛶ Fullscreen</button>
+        <div style="font-size: 11px; color: #888; margin: 6px 0 2px;">Drag or use arrow keys to navigate</div>
         <label style="display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 11px; cursor: pointer;"
                title="Pan the camera by moving the mouse to the edge of the view, like an RTS. Push all the way to the very edge even where a panel is in the way.">
           <input type="checkbox" id="edge-pan-toggle" style="cursor: pointer;" />

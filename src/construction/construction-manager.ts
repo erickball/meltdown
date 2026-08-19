@@ -45,7 +45,7 @@ import {
 } from '../simulation/gas-properties';
 import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
-import { hxIsVertical } from './component-properties';
+import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -1888,20 +1888,14 @@ export class ConstructionManager {
     // Calculate 3D endpoint positions for the pipe
     // In isometric mode, we store both endpoints and project them during rendering
     // Position (x, y) is in the ground plane, elevation is vertical height
-
-    // Start point: from component's world position (use port.x offset for horizontal)
-    const startX = fromComponent.position.x + fromPort.position.x;
-    const startY = fromComponent.position.y;  // Depth (Y in world space)
-
-    // End point: to component's world position
-    const endX = toComponent.position.x + toPort.position.x;
-    const endY = toComponent.position.y;
-
-    // Calculate absolute elevations for both endpoints
-    const fromComponentElev = (fromComponent as any).elevation ?? 0;
-    const toComponentElev = (toComponent as any).elevation ?? 0;
-    const startElevation = fromComponentElev + fromElevation;
-    const endElevation = toComponentElev + toElevation;
+    const start = this.pipeAttachmentPoint(fromComponent, fromPort, fromElevation);
+    const end = this.pipeAttachmentPoint(toComponent, toPort, toElevation);
+    const startX = start.x;
+    const startY = start.y;
+    const endX = end.x;
+    const endY = end.y;
+    const startElevation = start.elevation;
+    const endElevation = end.elevation;
 
     // Calculate 3D distance for pipe length
     const dx = endX - startX;
@@ -2087,13 +2081,13 @@ export class ConstructionManager {
 
     // Calculate relative elevations if not provided
     // Relative elevation = height above component bottom
-    // Pump nozzle elevations are physical features of the pump, so pump-side
-    // elevations always come from the port geometry regardless of what the
-    // caller passed (see refreshPumpConnectionElevations)
-    const calcFromElev = fromComponent.type === 'pump'
+    // Pump nozzles and valve ports are physical features of the component,
+    // so those elevations always come from the port geometry regardless of
+    // what the caller passed (see refreshPinnedConnectionElevations)
+    const calcFromElev = hasPinnedPortElevations(fromComponent)
       ? this.getPortRelativeElevation(fromComponent, fromPort)
       : fromElevation ?? this.getPortRelativeElevation(fromComponent, fromPort);
-    const calcToElev = toComponent.type === 'pump'
+    const calcToElev = hasPinnedPortElevations(toComponent)
       ? this.getPortRelativeElevation(toComponent, toPort)
       : toElevation ?? this.getPortRelativeElevation(toComponent, toPort);
 
@@ -2323,24 +2317,44 @@ export class ConstructionManager {
     component.ports[1].position = outlet;
     // Stored connection elevations are derived from port geometry, so any
     // connections already attached to the pump must follow the ports
-    this.refreshPumpConnectionElevations(component);
+    this.refreshPinnedConnectionElevations(component);
   }
 
   /**
-   * Recompute the pump-side stored elevation of every connection attached
-   * to this pump from the current port geometry. Pump nozzle elevations are
-   * physical features of the pump, so they always track the ports.
+   * Recompute this component's side of every attached connection's stored
+   * elevation from the current port geometry. Pump nozzles and valve ports
+   * are physical features of the component (hasPinnedPortElevations), so
+   * they always track the ports. Logs when it materially corrects a stored
+   * value, so inconsistent preset/save data is visible rather than silently
+   * rewritten.
    */
-  private refreshPumpConnectionElevations(pump: PlantComponent): void {
+  private refreshPinnedConnectionElevations(component: PlantComponent): void {
+    const height = this.getComponentHeight(component);
+    const pin = (conn: Connection, side: 'fromElevation' | 'toElevation', portId: string) => {
+      const port = component.ports.find(p => p.id === portId);
+      if (!port) return;
+      const pinned = this.getPortRelativeElevation(component, port);
+      const stored = conn[side];
+      // Values anywhere on the component's body are the legacy "0 or
+      // thereabouts" convention and heal silently, as pumps always have.
+      // A stored attachment OUTSIDE the component's physical extent is bad
+      // data (it drew the connection line in midair and put phantom gravity
+      // head across the fitting) - call it out.
+      const lo = Math.min(0, pinned) - 0.01;
+      const hi = Math.max(height, pinned) + 0.01;
+      if (stored !== undefined && (stored < lo || stored > hi)) {
+        console.warn(
+          `[Construction] ${component.type} '${component.id}' port '${portId}': stored connection ` +
+          `elevation ${stored.toFixed(2)} m is outside the ${height.toFixed(2)} m-tall component - ` +
+          `pinning to the port at ${pinned.toFixed(2)} m. To attach this line higher or lower, ` +
+          `change the ${component.type}'s own elevation instead.`
+        );
+      }
+      conn[side] = pinned;
+    };
     for (const conn of this.plantState.connections) {
-      if (conn.fromComponentId === pump.id) {
-        const port = pump.ports.find(p => p.id === conn.fromPortId);
-        if (port) conn.fromElevation = this.getPortRelativeElevation(pump, port);
-      }
-      if (conn.toComponentId === pump.id) {
-        const port = pump.ports.find(p => p.id === conn.toPortId);
-        if (port) conn.toElevation = this.getPortRelativeElevation(pump, port);
-      }
+      if (conn.fromComponentId === component.id) pin(conn, 'fromElevation', conn.fromPortId);
+      if (conn.toComponentId === component.id) pin(conn, 'toElevation', conn.toPortId);
     }
   }
 
@@ -2375,6 +2389,14 @@ export class ConstructionManager {
       }
       this.updatePumpPorts(component);
       this.autoOrientPump(component.id);
+    }
+
+    // Valve port elevations are pinned like pump nozzles, but presets and
+    // older saves may carry free values (e.g. a 3 m attachment on a 0.2 m
+    // valve) - which draws the connection line in midair and puts a phantom
+    // gravity head across the valve. Self-heal them, loudly.
+    for (const [, component] of this.plantState.components) {
+      if (component.type === 'valve') this.refreshPinnedConnectionElevations(component);
     }
 
     // Gas-fill display state: interactively built components get display
@@ -2562,6 +2584,59 @@ export class ConstructionManager {
    * Port position.y is relative to component center, with negative Y = top.
    * Returns: height above component bottom in meters
    */
+  /**
+   * Where a new auto-pipe should attach to a component, as ground-plane
+   * (x, y) plus absolute elevation - matching where the renderer draws the
+   * port, so the pipe visually meets the connection line's endpoint.
+   *
+   * Non-pipe components are drawn with their local frame rotated in SCREEN
+   * space (canvas.getPortScreenPosition): the rotated local x becomes a
+   * horizontal (world x) offset and the rotated local y reads as height,
+   * never as world depth. Stored connection elevations keep the unrotated
+   * height/2 - port.y convention, so the user's offset from that default is
+   * applied on top of the drawn-port elevation.
+   *
+   * Pipes rotate in the ground plane instead and carry exact 3D endpoint
+   * data, so their ports attach at the stored endpoints (elevation is the
+   * centerline, which is where the renderer puts the pipe's port).
+   */
+  private pipeAttachmentPoint(
+    component: PlantComponent,
+    port: Port,
+    connElevation: number
+  ): { x: number; y: number; elevation: number } {
+    if (component.type === 'pipe') {
+      const pipe = component as PipeComponent;
+      if (pipe.endPosition && pipe.endElevation !== undefined) {
+        const isAtEnd = port.position.x > pipe.length / 2;
+        return isAtEnd
+          ? { x: pipe.endPosition.x, y: pipe.endPosition.y, elevation: pipe.endElevation }
+          : { x: pipe.position.x, y: pipe.position.y, elevation: pipe.elevation ?? 0 };
+      }
+      // Legacy pipe without endpoint data: its rotation IS a ground-plane
+      // angle, so rotate the port offset in the world plane
+      const cos = Math.cos(component.rotation);
+      const sin = Math.sin(component.rotation);
+      return {
+        x: component.position.x + port.position.x * cos - port.position.y * sin,
+        y: component.position.y + port.position.x * sin + port.position.y * cos,
+        elevation: ((component as any).elevation ?? 0) + connElevation,
+      };
+    }
+
+    const cos = Math.cos(component.rotation);
+    const sin = Math.sin(component.rotation);
+    const halfH = this.getComponentHeight(component) / 2;
+    // Screen-space rotation: rotated local y is drawn as height
+    const drawnRelElev = halfH - (port.position.x * sin + port.position.y * cos);
+    const defaultRelElev = halfH - port.position.y;
+    return {
+      x: component.position.x + port.position.x * cos - port.position.y * sin,
+      y: component.position.y,
+      elevation: ((component as any).elevation ?? 0) + drawnRelElev + (connElevation - defaultRelElev),
+    };
+  }
+
   private getPortRelativeElevation(component: PlantComponent, port: Port): number {
     const height = this.getComponentHeight(component);
     // Port y is relative to center: -halfHeight = top, +halfHeight = bottom
@@ -2982,6 +3057,11 @@ export class ConstructionManager {
     }
     if (properties.diameter !== undefined && component.type !== 'tank') {
       component.diameter = properties.diameter;
+      // A valve's pinned connection elevations derive from its visual
+      // height (2x diameter), so they must follow a diameter change
+      if (component.type === 'valve') {
+        this.refreshPinnedConnectionElevations(component as PlantComponent);
+      }
     }
     if (properties.length !== undefined) {
       component.length = properties.length;

@@ -889,7 +889,7 @@
           {
             "id": "val-bleed-1-in",
             "position": {
-              "x": -0.5,
+              "x": -0.1,
               "y": 0
             },
             "direction": "both"
@@ -897,7 +897,7 @@
           {
             "id": "val-bleed-1-out",
             "position": {
-              "x": 0.5,
+              "x": 0.1,
               "y": 0
             },
             "direction": "both"
@@ -1112,7 +1112,7 @@
           {
             "id": "val-fwhdr-1-in",
             "position": {
-              "x": -0.5,
+              "x": -0.1,
               "y": 0
             },
             "direction": "both"
@@ -1120,7 +1120,7 @@
           {
             "id": "val-fwhdr-1-out",
             "position": {
-              "x": 0.5,
+              "x": 0.1,
               "y": 0
             },
             "direction": "both"
@@ -1558,7 +1558,7 @@
       "initialFlowPhase": "liquid",
       "initialFlowRate": 25,
       "fromElevation": 0,
-      "toElevation": 3,
+      "toElevation": 0.1,
       "flowArea": 0.01,
       "length": 8,
       "resistanceCoeff": 4
@@ -1570,7 +1570,7 @@
       "toPortId": "condenser-1-inlet",
       "initialFlowPhase": "liquid",
       "initialFlowRate": 25,
-      "fromElevation": 0,
+      "fromElevation": 0.1,
       "toElevation": 3,
       "flowArea": 0.01,
       "length": 8,

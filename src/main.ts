@@ -1724,6 +1724,17 @@ function init() {
     }
   }
 
+  // View zoom slider (magnifies the 2.5D view independently of view angle).
+  // The slider is logarithmic (value = 100*log10(zoom)) so equal drags feel
+  // like equal zoom ratios; the canvas keeps the readout in sync itself.
+  const viewZoomSlider = document.getElementById('view-zoom') as HTMLInputElement;
+  if (viewZoomSlider) {
+    viewZoomSlider.addEventListener('input', () => {
+      const value = parseInt(viewZoomSlider.value, 10);
+      plantCanvas.setIsoZoom(Math.pow(10, value / 100));
+    });
+  }
+
   // ============================================================================
   // Save/Load Configuration
   // ============================================================================
