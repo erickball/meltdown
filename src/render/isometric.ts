@@ -1,4 +1,5 @@
 import { Point, ViewState, PlantComponent } from '../types';
+import { readoutScale } from './readout-scale';
 
 // Isometric configuration
 export interface IsometricConfig {
@@ -467,7 +468,8 @@ export function renderComponentShadow(
 export function renderElevationLabel(
   ctx: CanvasRenderingContext2D,
   component: PlantComponent,
-  baseOffsetY: number
+  baseOffsetY: number,
+  rawScale: number = 1
 ): void {
   const elevation = getComponentElevation(component);
   if (elevation === 0) return; // Don't show label for ground level
@@ -476,7 +478,7 @@ export function renderElevationLabel(
 
   // Unobtrusive label at the component's visual base showing the absolute
   // elevation of the base above grade
-  ctx.font = '10px monospace';
+  ctx.font = `${10 * readoutScale(rawScale)}px monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.fillStyle = '#000';

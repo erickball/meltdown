@@ -2150,7 +2150,7 @@ export class PlantCanvas {
         if (component.type !== 'pipe') {
           ctx.scale(1, 1 / verticalScale);
         }
-        renderElevationLabel(ctx, component, labelBaseOffsetY);
+        renderElevationLabel(ctx, component, labelBaseOffsetY, projectedZoom / 50);
       } else {
         const screenPos = worldToScreen(component.position, this.view);
         ctx.translate(screenPos.x, screenPos.y);

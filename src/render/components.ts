@@ -35,6 +35,7 @@ import {
   GasColorInfo,
 } from './colors';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
+import { readoutScale } from './readout-scale';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
 
 /**
@@ -1525,7 +1526,7 @@ function renderCorePowerLabel(
 
   const mw = rp.thermalPower / 1e6;
   const label = `${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`;
-  const fontSize = Math.max(13, Math.min(28, 20 * view.zoom / 60));
+  const fontSize = 17 * readoutScale(view.zoom / 50);
   ctx.save();
   ctx.font = `bold ${fontSize}px monospace`;
   ctx.textAlign = 'center';
@@ -1534,7 +1535,7 @@ function renderCorePowerLabel(
   ctx.shadowColor = 'rgba(255, 45, 0, 0.95)';
   ctx.shadowBlur = fontSize * 0.9;
   ctx.strokeStyle = '#e02010';
-  ctx.lineWidth = Math.max(3, fontSize / 5);
+  ctx.lineWidth = fontSize / 5;
   ctx.strokeText(label, 0, y);
   ctx.strokeText(label, 0, y);
   // Crisp white text on top
@@ -2044,7 +2045,7 @@ function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view:
   }
 }
 
-function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
+function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
   // Valve body - bowtie shape for gate valve
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
@@ -2081,12 +2082,12 @@ function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponen
 
   // Opening indicator text
   ctx.fillStyle = '#fff';
-  ctx.font = '10px monospace';
+  ctx.font = `${10 * readoutScale(view.zoom / 50)}px monospace`;
   ctx.textAlign = 'center';
   ctx.fillText(`${Math.round(valve.opening * 100)}%`, 0, -d / 2 - 35);
 }
 
-function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
+function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
   // Check valve body - bowtie shape like standard valve
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
@@ -2165,12 +2166,12 @@ function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, 
 
   // Label
   ctx.fillStyle = '#fff';
-  ctx.font = '9px monospace';
+  ctx.font = `${9 * readoutScale(view.zoom / 50)}px monospace`;
   ctx.textAlign = 'center';
   ctx.fillText('CHK', 0, d / 2 + 12);
 }
 
-function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, _view: ViewState, d: number, bodySize: number): void {
+function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
   // Relief valve / PORV: inlet from bottom, outlet to side, spring on top
   const bodyWidth = bodySize * 0.8;
   const bodyHeight = bodySize * 1.2;
@@ -2257,7 +2258,7 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
 
   // Label with setpoint or state
   ctx.fillStyle = '#fff';
-  ctx.font = '9px monospace';
+  ctx.font = `${9 * readoutScale(view.zoom / 50)}px monospace`;
   ctx.textAlign = 'center';
 
   if (valve.valveType === 'porv') {
@@ -2964,7 +2965,7 @@ function renderTurbineGenerator(ctx: CanvasRenderingContext2D, turbine: TurbineG
   const turbineStats = getTurbineCondenserState();
   const powerMW = turbineStats.turbinePower / 1e6;
   if (powerMW > 0 || turbine.running) {
-    const fontSize = Math.max(8, 10 * view.zoom / 60); // Scale with zoom, min 8px
+    const fontSize = 8.5 * readoutScale(view.zoom / 50);
     ctx.font = `bold ${fontSize}px monospace`;
     ctx.fillStyle = '#1a1a1a'; // Dark text for readability
     ctx.textAlign = 'center';
@@ -3202,7 +3203,7 @@ function renderTurbineDrivenPump(ctx: CanvasRenderingContext2D, tdPump: TurbineD
 
   // Flow indicator if running
   if (tdPump.running && tdPump.pumpFlow > 0) {
-    ctx.font = '9px monospace';
+    ctx.font = `${9 * readoutScale(view.zoom / 50)}px monospace`;
     ctx.fillStyle = '#8cf';
     ctx.textAlign = 'center';
     ctx.fillText(`${tdPump.pumpFlow.toFixed(0)} kg/s`, pumpX, pumpR + inletLength + 18);
@@ -3265,8 +3266,8 @@ function renderCondenser(ctx: CanvasRenderingContext2D, condenser: CondenserComp
   // Heat rejection indicator - get actual heat rejection from simulation state
   const condenserStats = getTurbineCondenserState();
   const heatMW = condenserStats.condenserHeatRejection / 1e6;
-  const fontSize = Math.max(8, 10 * view.zoom / 60); // Scale with zoom, min 8px
-  const smallFontSize = Math.max(6, 8 * view.zoom / 60);
+  const fontSize = 8.5 * readoutScale(view.zoom / 50);
+  const smallFontSize = 7 * readoutScale(view.zoom / 50);
   ctx.font = `bold ${fontSize}px monospace`;
   ctx.fillStyle = '#1a1a1a'; // Dark text for readability
   ctx.textAlign = 'center';
@@ -3966,8 +3967,9 @@ function renderSwitchyardPerspective(
   }
 
   // Grid label on the right (use back-row y for placement)
+  // Labels/readouts use the shared readout law so they stay legible longer
   const labelPos = project(worldW * 0.35, rowY1);
-  const labelZoom = labelPos.scale * 50;
+  const labelZoom = readoutScale(labelPos.scale) * 50;
   ctx.font = `bold ${worldH * 0.09 * labelZoom}px sans-serif`;
   ctx.fillStyle = '#666';
   ctx.textAlign = 'left';
@@ -3999,7 +4001,7 @@ function renderSwitchyardPerspective(
 
   // Display MW prominently (at front-center)
   const mwPos = project(-worldW * 0.25, rowY2 + worldH * 0.27);
-  const mwZoom = mwPos.scale * 50;
+  const mwZoom = readoutScale(mwPos.scale) * 50;
   ctx.font = `bold ${worldH * 0.14 * mwZoom}px sans-serif`;
   ctx.fillStyle = mwToGrid > 0 ? '#4f4' : '#666';
   ctx.textAlign = 'center';
@@ -4013,7 +4015,7 @@ function renderSwitchyardPerspective(
     'highly-reliable': '#4a4'
   };
   const relPos = project(worldW * 0.05, rowY2 + worldH * 0.27);
-  const relZoom = relPos.scale * 50;
+  const relZoom = readoutScale(relPos.scale) * 50;
   ctx.fillStyle = reliabilityColors[switchyard.reliabilityClass] || '#777';
   ctx.font = `${worldH * 0.05 * relZoom}px sans-serif`;
   ctx.textAlign = 'left';
@@ -4603,7 +4605,7 @@ export function renderFlowConnectionArrows(
     // Scale: 0 kg/s -> 8px, 10000 kg/s -> 80px (sqrt(10000) = 100, so 8 + 100*0.72 = 80)
     const massFlow = Math.min(10000, Math.abs(conn.massFlowRate));
     const baseArrowSize = Math.max(8, 8 + Math.sqrt(massFlow) * 0.72);
-    const perspectiveMultiplier = getPortScreenPos ? Math.max(0.3, Math.min(2.5, arrowScale)) : 1;
+    const perspectiveMultiplier = getPortScreenPos ? readoutScale(arrowScale) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
 
     // Flow velocity from the upstream node's bulk density: erosion/vibration
@@ -4668,11 +4670,11 @@ export function renderFlowConnectionArrows(
 
     // Draw flow rate label
     ctx.save();
-    const fontSize = Math.max(8, Math.min(14, 10 * perspectiveMultiplier));
+    const fontSize = 10 * perspectiveMultiplier;
     ctx.font = `${fontSize}px monospace`;
     ctx.fillStyle = '#000';
     ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * perspectiveMultiplier;
     ctx.textAlign = 'center';
     const label = `${conn.massFlowRate.toFixed(0)} kg/s`;
     // Position label above or below the arrow based on angle
@@ -4748,7 +4750,10 @@ function findComponentForFlowNode(nodeId: string, plantState: PlantState): Plant
     if (simNodeId === nodeId) return comp;
     // For heat exchangers: node ID is "{componentId}-tube" (or "-tube-b2" for a
     // second bundle) or "{componentId}-shell"
-    if (nodeId.startsWith(compId + '-') && (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell'))) {
+    // For cross-vessels: "{componentId}-inner" (hot duct) or "{componentId}-annulus"
+    if (nodeId.startsWith(compId + '-') &&
+        (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell') ||
+         nodeId.endsWith('-inner') || nodeId.endsWith('-annulus'))) {
       return comp;
     }
     // Direct component ID match (for user-constructed plants where simNodeId may equal component ID)
@@ -4820,7 +4825,7 @@ export function renderPressureGauge(
       const screenBounds = getScreenBounds(boundsComponent);
       if (!screenBounds) continue;
 
-      gaugeScale = Math.max(0.3, Math.min(2.5, screenBounds.scale));
+      gaugeScale = readoutScale(screenBounds.scale);
 
       // Buildings are large structures - make their pressure gauge 2x bigger
       if (component.type === 'building') {
@@ -4839,6 +4844,18 @@ export function renderPressureGauge(
         gaugeX = screenBounds.topCenter.x + gaugeOffsetX;
         // Also offset the core gauge down slightly
         if (isInsideBarrel) {
+          topY = screenBounds.topCenter.y + 10 * gaugeScale;
+        }
+      }
+
+      // Cross-vessels carry two flow nodes (inner hot duct + annulus): separate
+      // the clusters along the vessel, annulus toward one end and the inner
+      // duct's toward the other, inner slightly lower (same idea as the RPV)
+      if (component.type === 'crossVessel') {
+        const cv = component as CrossVesselComponent;
+        const isInnerDuct = nodeId.endsWith('-inner');
+        gaugeX = screenBounds.topCenter.x + cv.length * view.zoom * gaugeScale * (isInnerDuct ? 0.15 : -0.15);
+        if (isInnerDuct) {
           topY = screenBounds.topCenter.y + 10 * gaugeScale;
         }
       }
@@ -4887,7 +4904,7 @@ export function renderPressureGauge(
     ctx.moveTo(stemBottomPos.x, stemBottomPos.y);
     ctx.lineTo(gaugePos.x, gaugePos.y + gaugeRadius); // Connect to bottom of gauge
     ctx.strokeStyle = '#111';
-    ctx.lineWidth = Math.max(2, 3 * gaugeScale);
+    ctx.lineWidth = 3 * gaugeScale;
     ctx.stroke();
     ctx.restore();
 
@@ -4901,13 +4918,13 @@ export function renderPressureGauge(
     ctx.fillStyle = 'rgba(20, 22, 28, 0.95)';
     ctx.fill();
     ctx.strokeStyle = '#555';
-    ctx.lineWidth = Math.max(1, 1.5 * gaugeScale);
+    ctx.lineWidth = 1.5 * gaugeScale;
     ctx.stroke();
 
     // Draw background arc. When the component has a design rating, the normal
     // band (0 .. design = 0..3/4 of the arc) is dark gray and the last quarter
     // (design .. 4/3 design) is a dark-red REDLINE zone.
-    const arcWidth = Math.max(2, 4 * gaugeScale);
+    const arcWidth = 4 * gaugeScale;
     const arcRadius = gaugeRadius - arcWidth / 2 - 1;
     if (designBar && designBar > 0) {
       const redlineAngle = startAngle + REDLINE_START * totalArcAngle;
@@ -4971,25 +4988,25 @@ export function renderPressureGauge(
       ctx.beginPath();
       ctx.arc(0, 0, gaugeRadius, 0, Math.PI * 2);
       ctx.strokeStyle = `rgba(255, 60, 40, ${pulse.toFixed(3)})`;
-      ctx.lineWidth = Math.max(2, 3 * gaugeScale);
+      ctx.lineWidth = 3 * gaugeScale;
       ctx.stroke();
     }
 
     // Draw pressure value in center - with 1 decimal place
     // Scale font size with gauge, no minimum so it scales to zero at extreme distances
-    const valueFontSize = Math.round(12 * gaugeScale);
+    const valueFontSize = 12 * gaugeScale;
     ctx.font = `bold ${valueFontSize}px monospace`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     // Draw text outline for crispness
     ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
-    ctx.lineWidth = Math.max(1, 2 * gaugeScale);
+    ctx.lineWidth = 2 * gaugeScale;
     ctx.strokeText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
     ctx.fillStyle = '#fff';
     ctx.fillText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
 
     // Draw "bar" unit below the value
-    const unitFontSize = Math.round(7 * gaugeScale);
+    const unitFontSize = 7 * gaugeScale;
     ctx.font = `${unitFontSize}px monospace`;
     ctx.fillStyle = '#999';
     ctx.fillText('bar', 0, 7 * gaugeScale);
@@ -5016,10 +5033,14 @@ export function renderThermometers(
   if (!getScreenBounds) return;
 
   for (const [nodeId, node] of simState.flowNodes) {
-    if (!node.volume || node.volume < THERMOMETER_MIN_VOLUME) continue;
-
     const component = findComponentForFlowNode(nodeId, plantState);
     if (!component) continue;
+
+    // Cross-vessels always get thermometers on both sections: the inner duct's
+    // volume is small but its temperature is a headline reading (hot-leg /
+    // cold-return split on gas-cooled plants)
+    if (component.type !== 'crossVessel' &&
+        (!node.volume || node.volume < THERMOMETER_MIN_VOLUME)) continue;
 
     // Use parent reactor vessel geometry for contained sub-nodes (same as gauges)
     const containedBy = (component as { containedBy?: string }).containedBy;
@@ -5029,7 +5050,7 @@ export function renderThermometers(
     const screenBounds = getScreenBounds(boundsComponent);
     if (!screenBounds) continue;
 
-    const scale = Math.max(0.3, Math.min(2.5, screenBounds.scale));
+    const scale = readoutScale(screenBounds.scale);
     const stemLengthPx = 25;
     const gaugeRadius = 20 * scale;
 
@@ -5043,6 +5064,14 @@ export function renderThermometers(
       const isInsideBarrel = component.id.includes('-inside') || component.id === rv.coreBarrelId;
       anchorX += rv.innerDiameter * view.zoom * scale * (isInsideBarrel ? -0.15 : 0.15);
       if (isInsideBarrel) topY += 10 * scale;
+    }
+
+    // Mirror the pressure-gauge X offsets for cross-vessel inner/annulus nodes
+    if (component.type === 'crossVessel') {
+      const cv = component as CrossVesselComponent;
+      const isInnerDuct = nodeId.endsWith('-inner');
+      anchorX += cv.length * view.zoom * scale * (isInnerDuct ? 0.15 : -0.15);
+      if (isInnerDuct) topY += 10 * scale;
     }
 
     // Place the thermometer just left of the pressure gauge
@@ -5083,7 +5112,7 @@ export function renderThermometers(
 
     // Tick marks every 100°C
     ctx.strokeStyle = '#333';
-    ctx.lineWidth = Math.max(0.5, scale * 0.8);
+    ctx.lineWidth = scale * 0.8;
     for (let i = 1; i <= 3; i++) {
       const y = tubeBottom - (i / 4) * tubeH;
       ctx.beginPath();
@@ -5099,21 +5128,22 @@ export function renderThermometers(
     ctx.arc(0, tubeTop, tubeW / 2, Math.PI, 0);
     ctx.lineTo(tubeW / 2, tubeBottom);
     ctx.strokeStyle = '#222';
-    ctx.lineWidth = Math.max(0.8, scale);
+    ctx.lineWidth = scale;
     ctx.stroke();
     ctx.beginPath();
     ctx.arc(0, tubeBottom + bulbR * 0.6, bulbR, 0, Math.PI * 2);
     ctx.stroke();
 
-    // Numeric value to the left of the tube - floor the size so it stays
-    // legible on small/zoomed-out nodes, with a heavy dark outline for contrast
-    const fontSize = Math.max(11, Math.round(12 * scale));
+    // Numeric value to the left of the tube, with a heavy dark outline for
+    // contrast. No size floor: readoutScale keeps it legible longer when
+    // zooming out, then lets it taper away like everything else.
+    const fontSize = 12 * scale;
     ctx.font = `bold ${fontSize}px monospace`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const label = `${Math.round(T_C)}°C`;
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
-    ctx.lineWidth = Math.max(2.5, 3 * scale);
+    ctx.lineWidth = 3 * scale;
     ctx.strokeText(label, -tubeW / 2 - 3 * scale, 0);
     ctx.fillStyle = '#fff';
     ctx.fillText(label, -tubeW / 2 - 3 * scale, 0);
@@ -5658,8 +5688,11 @@ export function renderBurstOverlays(
         break;
       }
       // For heat exchangers: node ID is "{componentId}-tube" (or "-tube-b2" for a
-    // second bundle) or "{componentId}-shell"
-      if (nodeId.startsWith(compId + '-') && (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell'))) {
+      // second bundle) or "{componentId}-shell"
+      // For cross-vessels: "{componentId}-inner" or "{componentId}-annulus"
+      if (nodeId.startsWith(compId + '-') &&
+          (isHxTubeNodeId(nodeId) || nodeId.endsWith('-shell') ||
+           nodeId.endsWith('-inner') || nodeId.endsWith('-annulus'))) {
         component = comp;
         break;
       }
@@ -5692,15 +5725,18 @@ export function renderBurstOverlays(
       height = compBounds.height;
     }
 
-    // Draw dashed red warning border around the component
+    // Draw dashed red warning border around the component. The border follows
+    // the component's real screen bounds; stroke/dash/symbol sizes use the
+    // shared readout law so the warning stays visible longer when zoomed out.
+    const rScale = readoutScale(scale);
     ctx.save();
     ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-    ctx.lineWidth = 3 * scale;
-    ctx.setLineDash([8 * scale, 4 * scale]);
+    ctx.lineWidth = 3 * rScale;
+    ctx.setLineDash([8 * rScale, 4 * rScale]);
 
     // screenPos is topCenter (top of component), so the component extends from
     // screenPos.y (top) to screenPos.y + height (bottom)
-    const borderPadding = 5 * scale;
+    const borderPadding = 5 * rScale;
     ctx.strokeRect(
       screenPos.x - width / 2 - borderPadding,
       screenPos.y - borderPadding,  // Start at top
@@ -5737,16 +5773,16 @@ export function renderBurstOverlays(
       }
     }
 
-    renderCrackSymbol(ctx, crackX, crackY, scale * 1.2);
+    renderCrackSymbol(ctx, crackX, crackY, rScale * 1.2);
 
     // Draw break percentage label
     ctx.save();
     ctx.fillStyle = '#ff3333';
-    ctx.font = `bold ${Math.max(10, 12 * scale)}px sans-serif`;
+    ctx.font = `bold ${12 * rScale}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const breakPct = (burstState.currentBreakFraction * 100).toFixed(0);
-    ctx.fillText(`${breakPct}% break`, crackX, crackY + 15 * scale);
+    ctx.fillText(`${breakPct}% break`, crackX, crackY + 15 * rScale);
     ctx.restore();
   }
 }
@@ -5913,20 +5949,21 @@ export function renderBreakConnections(
     }
 
     // Draw flow rate label for break connection
+    const breakScale = readoutScale(view.zoom / 50);
     ctx.save();
     ctx.fillStyle = '#ff3333';
     ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2;
-    ctx.font = 'bold 11px sans-serif';
+    ctx.lineWidth = 2 * breakScale;
+    ctx.font = `bold ${11 * breakScale}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
 
     const flowLabel = `${Math.abs(conn.massFlowRate).toFixed(0)} kg/s`;
-    ctx.strokeText(flowLabel, midX, midY - 15);
-    ctx.fillText(flowLabel, midX, midY - 15);
+    ctx.strokeText(flowLabel, midX, midY - 15 * breakScale);
+    ctx.fillText(flowLabel, midX, midY - 15 * breakScale);
     ctx.restore();
 
     // Draw crack symbol at the break source
-    renderCrackSymbol(ctx, fromScreenPos.x, fromScreenPos.y, view.zoom / 60);
+    renderCrackSymbol(ctx, fromScreenPos.x, fromScreenPos.y, breakScale);
   }
 }
