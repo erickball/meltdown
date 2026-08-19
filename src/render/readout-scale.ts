@@ -14,7 +14,11 @@
  * stays readable longer, but with NO floor: readouts still taper smoothly
  * away to nothing in the far distance.
  */
-export const READOUT_FAR_EXPONENT = 0.5; // 1 = realistic shrink, 0 = never shrinks
+// Tuning notes: typical raw scales in play are ~0.35-0.5 at the default view
+// and ~0.08-0.2 zoomed out to the whole plant; raw >= 1 only when inspecting a
+// component up close. 0.3 keeps a 12px label ~7px at whole-plant distance
+// (the old floors pinned it at 11px; fully realistic would be ~1.5px).
+export const READOUT_FAR_EXPONENT = 0.3; // 1 = realistic shrink, 0 = never shrinks
 export const READOUT_MAX_SCALE = 2.5; // close-up cap (matches the old gauge cap)
 
 export function readoutScale(raw: number): number {
