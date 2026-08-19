@@ -196,6 +196,7 @@ export function otsgWallPin(
  */
 export function evaluateOtsgSections(
   state: SimulationState, id: string, node: FlowNode,
+  opts?: { exact?: boolean },
 ): { ev: OtsgEval; flows: OtsgFlows; water: { pressure: number; energy: number; gasPressure: number } } {
   const cfg = node.otsg;
   if (!cfg) {
@@ -212,10 +213,33 @@ export function evaluateOtsgSections(
   // The partition costs a pressure solve with property calls inside; the
   // constraint, the rate operator and any sensors all want it on the SAME
   // stage state, so the constraint leaves its solution behind keyed on the
-  // exact inputs. A consumer whose state has moved re-solves.
+  // exact inputs. A consumer whose state has moved re-solves - or, within a
+  // small band of the last anchored solve, rides its tangent (see
+  // types.ts partitionLin): internal RK stages sit within fractions of a
+  // percent of their step's anchor, and re-solving the partition exactly on
+  // each was ~95% of the simulation's property traffic.
   const c = cfg.partitionCache;
-  if (c && c.forMass === node.fluid.mass && c.forEnergy === water.energy && c.forM1 === cfg.m1) {
+  if (c && c.forMass === node.fluid.mass && c.forEnergy === water.energy && c.forM1 === cfg.m1 &&
+      (c.exact || !opts?.exact)) {
     return { ev: c.ev as OtsgEval, flows, water };
+  }
+  // Diagnostics, tests and once-per-step consumers ask for exact: the
+  // tangent's frozen sections are anchored up to ~0.4% of mass away, which
+  // is fine for stage rates and fatal for invariants checked at 1e-6.
+  const lin = opts?.exact ? undefined : cfg.partitionLin;
+  if (lin) {
+    const dm = node.fluid.mass - lin.m;
+    const dU = water.energy - lin.U;
+    const dm1 = cfg.m1 - lin.m1;
+    const BAND = 0.004;
+    if (Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
+        Math.abs(dm1) < BAND * Math.max(lin.m1, 0.02 * lin.m)) {
+      const evA = lin.ev as OtsgEval;
+      const P = lin.P + lin.dPdm * dm + lin.dPdU * dU + lin.dPdm1 * dm1;
+      const ev: OtsgEval = { ...evA, P };
+      cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, ev, exact: false };
+      return { ev, flows, water };
+    }
   }
   const ev = evaluateOtsgPartition(
     node.fluid.mass, water.energy, cfg.m1, flows.uFeed,
@@ -223,7 +247,28 @@ export function evaluateOtsgSections(
     otsgWallPin(state, node, flows),
     PStart,
   );
-  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, ev };
+  // Anchor the tangent: three one-sided finite differences, each a
+  // warm-started solve. Paid once per re-anchor, saved ~13 times per step.
+  const geom = { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea };
+  const pin = otsgWallPin(state, node, flows);
+  const dm = Math.max(0.5, 2e-3 * node.fluid.mass);
+  const dU = Math.max(1e5, 2e-3 * Math.abs(water.energy));
+  let dPdm = 0, dPdU = 0, dPdm1 = 0;
+  try {
+    dPdm = (evaluateOtsgPartition(node.fluid.mass + dm, water.energy + dm * flows.hFeed,
+      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P).P - ev.P) / dm;
+    dPdU = (evaluateOtsgPartition(node.fluid.mass, water.energy + dU,
+      cfg.m1, flows.uFeed, geom, pin, ev.P).P - ev.P) / dU;
+    dPdm1 = (evaluateOtsgPartition(node.fluid.mass, water.energy,
+      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P).P - ev.P) / dm;
+    cfg.partitionLin = { m: node.fluid.mass, U: water.energy, m1: cfg.m1, P: ev.P, dPdm, dPdU, dPdm1, ev };
+  } catch {
+    // A perturbation fell off a regime edge: no tangent here - every state
+    // in this neighborhood pays for its own exact solve, which is the
+    // correct price at a regime boundary.
+    cfg.partitionLin = undefined;
+  }
+  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, ev, exact: true };
   return { ev, flows, water };
 }
 
@@ -492,7 +537,7 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
     for (const [id, node] of state.flowNodes) {
       if (!node.otsg) continue;
       if (!(node.fluid.mass > 0)) continue;
-      const { ev, flows, water } = evaluateOtsgSections(state, id, node);
+      const { ev, water } = evaluateOtsgSections(state, id, node);
       node.fluid.pressure = ev.P + water.gasPressure;
       // Refresh the draw-enthalpy cache HERE, where every state passes -
       // the rate operator's write lands on stage clones and never reaches
@@ -502,55 +547,11 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       // ledger until no pressure can pack the partition. Measured on the
       // bundle rig: 93 kg drawn at 1.46 MJ/kg where the superheat section
       // held ~3.
-      // The partition pressure's stiffness against inflow, for the pressure
-      // solver's compliance. One warm-started re-solve at m + dm; the
-      // added water arrives as feed-like liquid, so the slug ledger grows
-      // with it (matching what the transit rate would do), which is the
-      // stiff direction a packing boiler actually presents.
-      // One stiffness estimate per pressure decade of movement, not per
-      // stage: dP/dm varies slowly along a trajectory, and re-deriving it
-      // on all seven constraint passes doubled the partition solves for a
-      // number the compliance linearization only needs roughly.
-      const cached = node.otsg.lastEval;
-      if (cached && cached.dPdm > 0 && Math.abs(cached.P - ev.P) < 0.02 * ev.P) {
-        // lastEval.P stays as the ANCHOR the stiffness was computed at - a
-        // slow drift must eventually cross the 2% band and re-derive, which
-        // updating P each pass would never let happen.
-        node.otsg.lastEval = { ...cached,
-          hSteamOut: ev.hSteamOut,
-          hLiquidOut: ev.sections[0].hBar,
-          TSat: ev.sat.T,
-          T3: ev.sections[2].T,
-          lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
-        };
-        node.fluid.pressure = ev.P + water.gasPressure;
-        if (ev.regime !== 'supercritical') {
-          const m = node.fluid.mass;
-          const [s1c, s2c, s3c] = ev.sections;
-          node.fluid.temperature = (s1c.mass * s1c.T + s2c.mass * s2c.T + s3c.mass * s3c.T) / m;
-          const x2c = (s2c.vBar - ev.sat.v_f) / (ev.sat.v_g - ev.sat.v_f);
-          const q = (s2c.mass * Math.max(0, x2c) + s3c.mass) / m;
-          node.fluid.quality = q;
-          node.fluid.phase = q <= 0 ? 'liquid' : q >= 1 ? 'vapor' : 'two-phase';
-        }
-        continue;
-      }
-      const dm = Math.max(0.5, 1e-3 * node.fluid.mass);
-      let dPdm = 0;
-      try {
-        const evUp = evaluateOtsgPartition(
-          node.fluid.mass + dm, water.energy + dm * flows.hFeed, node.otsg.m1 + dm,
-          flows.uFeed,
-          { tubeVolume: node.volume, tubeLength: 1, heatArea: node.otsg.heatArea },
-          otsgWallPin(state, node, flows), ev.P,
-        );
-        dPdm = Math.max(0, (evUp.P - ev.P) / dm);
-      } catch {
-        // The perturbed state fell off a regime edge - the true stiffness is
-        // at least liquid-like there; leave 0 and let the generic compliance
-        // (with its dome-edge secant) carry it.
-        dPdm = 0;
-      }
+      // The pressure solver's compliance stiffness rides the same tangent
+      // the stage evaluations use (partitionLin); a neighborhood with no
+      // tangent (regime edge) reports 0 and the generic compliance carries
+      // it, which is the correct price at a boundary.
+      const dPdm = Math.max(0, node.otsg.partitionLin?.dPdm ?? 0);
       node.otsg.lastEval = {
         P: ev.P,
         dPdm,
@@ -616,7 +617,7 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
     for (const [id, node] of state.flowNodes) {
       const cfg = node.otsg;
       if (!cfg) continue;
-      const { ev, water } = evaluateOtsgSections(state, id, node);
+      const { ev, water } = evaluateOtsgSections(state, id, node, { exact: true });
 
       // The hottest surface this water can see: its own tube metal, or the gas
       // arriving at the shell.

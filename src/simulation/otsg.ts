@@ -48,6 +48,7 @@ import {
   saturatedVaporEnergy,
   saturatedLiquidDensity,
   saturatedVaporDensity,
+  estimateVaporV,
 } from './water-properties';
 
 // ---------------------------------------------------------------------------
@@ -232,20 +233,50 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number
   // +/-30% bracket around it replaces the full five-decade one and cuts the
   // bisection from ~16 property probes to ~4. Verified by the same sign
   // check as the wide bracket - a stale hint just falls through.
-  if (vHint && vHint > vg) {
-    const lo = Math.max(Math.log(vg * (1 + 1e-9)), Math.log(vHint / 1.3));
-    const hi = Math.min(lnHi, Math.log(vHint * 1.3));
-    if (hi > lo) {
-      const pl = pOf(lo), ph = pOf(hi);
-      if (pl >= P && ph <= P) {
-        let a = lo, b = hi;
-        for (let i = 0; i < 40; i++) {
-          const m = 0.5 * (a + b);
-          if (pOf(m) > P) a = m; else b = m;
-          if (b - a < tolLn) break;
+  // No caller hint? The inverse vapor index estimates v to a few tenths of
+  // a percent in one cheap query; the +/-2% bracket around it is then
+  // verified and polished on the ordinary forward surface exactly like a
+  // caller hint - same converged answer, ~3 probes instead of ~17.
+  let hint = vHint;
+  if (!hint) {
+    const est = estimateVaporV(u, P);
+    if (est && est > vg) hint = est;
+  }
+  if (hint && hint > vg) {
+    // Try a tight bracket around the estimate first (inverse index is good
+    // to a few tenths of a percent; a caller's previous iterate better),
+    // then a loose one; inside a verified bracket, SECANT on ln P vs ln v -
+    // near-affine locally - lands within tolerance in 2-3 probes where
+    // bisection took 13.
+    for (const span of [1.02, 1.3]) {
+      const lo = Math.max(Math.log(vg * (1 + 1e-9)), Math.log(hint / span));
+      const hi = Math.min(lnHi, Math.log(hint * span));
+      if (hi <= lo) continue;
+      let a = lo, b = hi;
+      let ra = pOf(a) - P, rb = pOf(b) - P;
+      if (!(ra >= 0 && rb <= 0)) continue;
+      // Illinois false position: plain regula falsi STALLS on convex
+      // residuals (one endpoint sticks and convergence goes one-sided
+      // linear - measured ~17 probes per call against the intended ~4).
+      // Halving the retained endpoint's residual restores superlinear
+      // convergence with the bracket guarantee intact.
+      let side = 0;
+      for (let i = 0; i < 24; i++) {
+        if (b - a < tolLn) break;
+        let m = ra - rb !== 0 ? a + (b - a) * ra / (ra - rb) : 0.5 * (a + b);
+        if (!(m > a && m < b)) m = 0.5 * (a + b);
+        const rm = pOf(m) - P;
+        if (rm > 0) {
+          a = m; ra = rm;
+          if (side === 1) rb *= 0.5;
+          side = 1;
+        } else {
+          b = m; rb = rm;
+          if (side === -1) ra *= 0.5;
+          side = -1;
         }
-        return Math.exp(0.5 * (a + b));
       }
+      return Math.exp(0.5 * (a + b));
     }
   }
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
@@ -674,7 +705,7 @@ export function evaluateOtsgPartition(
   // refreshes both against the property surface after each pressure solve.
   let du3 = 0;
   let L3 = Math.max(0, Math.min(1, 1 - (massTotal * 0.0015) / V));
-  let v3Hint: number | undefined;
+  let v3Carry: number | undefined;
   const atP = (P: number): AtP => {
     const sat = saturationAtP(P);
     const u1 = subcooledSectionMean(uFeedIn, sat);
@@ -725,7 +756,6 @@ export function evaluateOtsgPartition(
       // the leftovers are one superheated region (or the seam itself).
       const u3Free = UR / mR;
       if (u3Free > U3_CEILING) {
-        v3Hint = undefined;
         // A sliver carrying energy past the steam tables. While the root
         // find is PROBING a pressure far below the root, the ledger's mass
         // claim swells (u1 falls with P) and squeezes the leftovers into
@@ -736,12 +766,12 @@ export function evaluateOtsgPartition(
         // reports it.
         return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
       }
-      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-4, v3Hint) : sat.v_g;
-      v3Hint = v3;
+      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-6, v3Carry) : sat.v_g;
+      if (u3Free > sat.u_g + 1e3) v3Carry = v3;
       return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat' };
     }
-    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-4, v3Hint) : sat.v_g;
-    if (du3 > 1e-9) v3Hint = v3;
+    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-6, v3Carry) : sat.v_g;
+    if (du3 > 1e-9) v3Carry = v3;
     const m2 = mR - m3;
     return {
       sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
@@ -802,18 +832,33 @@ export function evaluateOtsgPartition(
       }
       if (ra < 0) return null;
     }
-    for (let i = 0; i < 80; i++) {
-      if (b - a < 1e-10) break;
-      let lnM: number;
+    // Tolerances are a coherent stack: the vapor inversions inside the
+    // residual run at 1e-6 (cheap with a good hint), so the volume residual
+    // is trustworthy to ~1e-5 V and pressure to ~2e-6 in ln P (~0.03 bar) -
+    // and the exits sit exactly there. Demanding more than the residual's
+    // own noise floor (the original 1e-10) made secant chatter and burn 50+
+    // property probes per solve on precision nothing downstream can see.
+    // Secant leads and bisection only rescues it: the residual is smooth at
+    // this scale and secant lands in 4-8 iterations.
+    const rExit = 1e-5 * V;
+    let side = 0;
+    for (let i = 0; i < 48; i++) {
+      if (b - a < 2e-6) break;
       const denom = rb - ra;
-      if (i % 2 === 0 && Math.abs(denom) > 0) {
-        lnM = a - ra * (b - a) / denom;    // secant through the bracket
-        if (!(lnM > a && lnM < b)) lnM = 0.5 * (a + b);
-      } else {
-        lnM = 0.5 * (a + b);
-      }
+      let lnM = Math.abs(denom) > 0 ? a - ra * (b - a) / denom : 0.5 * (a + b);
+      if (!(lnM > a && lnM < b)) lnM = 0.5 * (a + b);
       const rM = resid(lnM);
-      if (rM > 0) { a = lnM; ra = rM; } else { b = lnM; rb = rM; }
+      // Illinois anti-stall, as in superheatedV: see the comment there.
+      if (rM > 0) {
+        a = lnM; ra = rM;
+        if (side === 1) rb *= 0.5;
+        side = 1;
+      } else {
+        b = lnM; rb = rM;
+        if (side === -1) ra *= 0.5;
+        side = -1;
+      }
+      if (Math.abs(rM) < rExit) { a = lnM; b = lnM; break; }
     }
     const lnP = 0.5 * (a + b);
     return { P: Math.exp(lnP), fin: atP(Math.exp(lnP)) };

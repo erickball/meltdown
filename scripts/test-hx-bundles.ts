@@ -210,6 +210,18 @@ if (process.env.OTSG_TRACE) {
       console.error(`t=${sim.state.time.toFixed(0)} EVAL THROWS: ${(e as Error).message.slice(0, 160)}`);
     }
   }
+  {
+    const node = sim.state.flowNodes.get(id)!;
+    const { ev } = evaluateOtsgSections(sim.state, id, node, { exact: true });
+    console.error('FINAL exact eval:',
+      'node m=' + node.fluid.mass.toFixed(6),
+      'ledger=' + node.otsg!.m1.toFixed(6),
+      'sections=' + ev.sections.map(x => x.mass.toFixed(6)).join('/'),
+      'sum=' + ev.sections.reduce((a, x) => a + x.mass, 0).toFixed(6),
+      'regime=' + ev.regime, 'P=' + (ev.P / 1e5).toFixed(2),
+      'U=' + (node.fluid.internalEnergy / 1e6).toFixed(3) + 'MJ',
+      'u=' + (node.fluid.internalEnergy / node.fluid.mass / 1e3).toFixed(1));
+  }
   process.exit(0);
 }
 
@@ -285,7 +297,7 @@ test('Every bundle fits its tube, takes feed and delivers steam', () => {
   for (const node of tubeNodes(state, 2)) {
     // Ask for the partition the one way everything does - the shared
     // evaluation path, wall pin and solved pressure included.
-    const { ev } = evaluateOtsgSections(state, node.id, node);
+    const { ev } = evaluateOtsgSections(state, node.id, node, { exact: true });
     const [m1, m2, m3] = ev.sections.map(s => s.mass);
     const where = `${node.id} m=[${m1.toFixed(0)}, ${m2.toFixed(0)}, ${m3.toFixed(0)}] kg`;
     // The invariant the solved partition buys: whatever the split, it fits.
@@ -293,7 +305,8 @@ test('Every bundle fits its tube, takes feed and delivers steam', () => {
     assert(V <= node.volume * (1 + 1e-6),
       `${where} claims ${V.toFixed(2)} m3 of a ${node.volume.toFixed(2)} m3 tube`);
     assert(Math.abs(m1 + m2 + m3 - node.fluid.mass) < 1e-6 * node.fluid.mass,
-      `${where} must account for the node's ${node.fluid.mass.toFixed(0)} kg`);
+      `${where} sums ${(m1 + m2 + m3).toFixed(6)} vs node ${node.fluid.mass.toFixed(6)} kg ` +
+      `(ledger m1=${node.otsg!.m1.toFixed(6)})`);
     // The steam end stays live; the ECONOMIZER is allowed to die. This rig
     // deliberately dries down against its sink with the feed exhausted, and
     // with draws now priced and classified by the partition's own

@@ -246,6 +246,21 @@ export interface FlowNode {
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */
+    /** Derived cache: a full partition solve plus its tangent, for reuse
+     *  on nearby states. The RK solver evaluates constraints and rates on
+     *  six internal stages plus the candidate every step; re-solving the
+     *  partition exactly on each (a 1-D pressure root find with property
+     *  calls inside) was ~95% of the whole simulation's property traffic.
+     *  Within a small band of the anchor the pressure moves on its tangent
+     *  and the sections are carried; outside it, or when the anchor is
+     *  stale, the full solve runs and re-anchors - so fast transients pay
+     *  full price and quiet stages pay nothing. */
+    partitionLin?: {
+      m: number; U: number; m1: number;
+      P: number;
+      dPdm: number; dPdU: number; dPdm1: number;
+      ev: unknown;
+    };
     /** Derived cache: the full partition evaluation for exactly these
      *  (mass, energy, m1) inputs, written by OtsgPartitionConstraintOperator
      *  and reused by the rate operator and sensors on the same state. The
@@ -257,6 +272,10 @@ export interface FlowNode {
       forEnergy: number;
       forM1: number;
       ev: unknown;
+      /** false when the entry rode the partitionLin tangent: its sections
+       *  are the anchor's, good for stage rates but not for invariants -
+       *  exact consumers re-solve over it. */
+      exact: boolean;
     };
     lastEval?: {
       P: number;

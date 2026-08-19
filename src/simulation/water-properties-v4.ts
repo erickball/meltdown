@@ -89,6 +89,13 @@ interface GridPoint {
   P_MPa: number;  // MPa
   region: 'compressed_liquid' | 'vapor' | 'supercritical';
   curve?: number; // For liquid curves, which offset curve (0 = closest to saturation)
+  // Precomputed once at index build (perf, approved 2026-08-19): the MLS
+  // interpolation runs millions of times per simulated second, and
+  // recomputing these two transcendentals per point per query was 30-40%
+  // of the entire simulation's CPU. Values are byte-identical to computing
+  // them in place.
+  logV: number;   // log10(v)
+  lnP: number;    // ln(P_MPa)
 }
 
 interface GridData {
@@ -110,8 +117,8 @@ interface SpatialIndex {
   vaporPoints: GridPoint[];
   supercriticalPoints: GridPoint[];
   // Grid cells for fast lookup in (logV, u) space
-  liquidGrid: Map<string, GridPoint[]>;
-  vaporGrid: Map<string, GridPoint[]>;
+  liquidGrid: Map<number, GridPoint[]>;
+  vaporGrid: Map<number, GridPoint[]>;
 }
 
 let spatialIndex: SpatialIndex | null = null;
@@ -901,10 +908,79 @@ function findTwoPhaseState(u: number, v: number): {
 // Spatial Index for Grid Lookup
 // ============================================================================
 
-function getCellKey(logV: number, u_kJkg: number): string {
+// ---------------------------------------------------------------------------
+// Inverse vapor lookup: (u, lnP) -> logV estimate (perf, approved 2026-08-19).
+//
+// Root-finders like otsg.ts's superheatedV invert the forward P(u, v) surface
+// by bisecting calculateState probes - 5-17 MLS interpolations per inversion,
+// millions per simulated second. The grid already holds (u, P, v) for every
+// vapor point, so an inverse-distance estimate over (u, lnP) gives v to a few
+// tenths of a percent in ONE cheap query; the caller then verifies and
+// polishes against the ordinary forward surface, converging to exactly the
+// same answer as before with ~3 probes instead of ~17. This index is an
+// ACCELERATOR only - no result anywhere comes from it directly.
+// ---------------------------------------------------------------------------
+const INV_CELL_U = 100;      // kJ/kg per cell
+const INV_CELL_LNP = 0.35;   // ln(MPa) per cell
+let inverseVaporGrid: Map<number, GridPoint[]> | null = null;
+
+function invCellKey(u_kJkg: number, lnP: number): number {
+  const cx = Math.floor(u_kJkg / INV_CELL_U);
+  const cy = Math.floor(lnP / INV_CELL_LNP);
+  return (cx + 512) * 8192 + (cy + 512);
+}
+
+function buildInverseVaporGrid(): void {
+  inverseVaporGrid = new Map();
+  for (const pt of gridPoints) {
+    if (pt.region === 'compressed_liquid') continue;
+    const key = invCellKey(pt.u, pt.lnP);
+    let cell = inverseVaporGrid.get(key);
+    if (!cell) { cell = []; inverseVaporGrid.set(key, cell); }
+    cell.push(pt);
+  }
+}
+
+/**
+ * Estimate the specific volume of vapor/supercritical water at (u, P), or
+ * null when the neighborhood is empty. Inverse-distance in (u, lnP); the
+ * caller MUST verify against the forward surface - see the header above.
+ */
+export function estimateVaporV(u_Jkg: number, P_Pa: number): number | null {
+  loadDataSync();
+  if (!inverseVaporGrid) buildInverseVaporGrid();
+  const u = u_Jkg / 1000;
+  const lnP = Math.log(P_Pa / 1e6);
+  const bx = Math.floor(u / INV_CELL_U);
+  const by = Math.floor(lnP / INV_CELL_LNP);
+  let wSum = 0, vSum = 0, n = 0;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const cell = inverseVaporGrid!.get((bx + dx + 512) * 8192 + (by + dy + 512));
+      if (!cell) continue;
+      for (let i = 0; i < cell.length; i++) {
+        const pt = cell[i];
+        const du = (u - pt.u) / INV_CELL_U;
+        const dp = (lnP - pt.lnP) / INV_CELL_LNP;
+        const d2 = du * du + dp * dp + 1e-9;
+        const w = 1 / d2;
+        wSum += w;
+        vSum += w * pt.logV;
+        n++;
+      }
+    }
+  }
+  if (n < 3) return null;
+  return Math.pow(10, vSum / wSum);
+}
+
+function getCellKey(logV: number, u_kJkg: number): number {
   const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
   const cellY = Math.floor(u_kJkg / GRID_CELL_SIZE_U);
-  return `${cellX},${cellY}`;
+  // Numeric key: string keys cost an allocation and a string hash per Map
+  // probe, and the neighbor gather does 25 probes per interpolation. The
+  // offsets keep both terms positive for any physical cell index.
+  return (cellX + 512) * 8192 + (cellY + 512);
 }
 
 /**
@@ -959,6 +1035,8 @@ function buildSpatialIndex(): void {
 
   for (const pt of gridPoints) {
     const logV = Math.log10(pt.v);
+    pt.logV = logV;
+    pt.lnP = Math.log(pt.P_MPa);
     const key = getCellKey(logV, pt.u);
 
     if (pt.region === 'compressed_liquid') {
@@ -1024,15 +1102,14 @@ function findNearbyPoints(u: number, v: number, phase: 'liquid' | 'vapor'): Grid
   // out of the candidate set while its taper weight is still nonzero.
   const nearby: GridPoint[] = [];
 
+  const baseX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
+  const baseY = Math.floor(u_kJkg / GRID_CELL_SIZE_U);
   for (let dx = -2; dx <= 2; dx++) {
     for (let dy = -2; dy <= 2; dy++) {
-      const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV) + dx;
-      const cellY = Math.floor(u_kJkg / GRID_CELL_SIZE_U) + dy;
-      const neighborKey = `${cellX},${cellY}`;
-
+      const neighborKey = (baseX + dx + 512) * 8192 + (baseY + dy + 512);
       const cellPoints = grid.get(neighborKey);
       if (cellPoints) {
-        nearby.push(...cellPoints);
+        for (let i = 0; i < cellPoints.length; i++) nearby.push(cellPoints[i]);
       }
     }
   }
@@ -1118,7 +1195,7 @@ function interpolateFromGrid(
   let uBelow = false, uAbove = false, vBelow = false, vAbove = false;
 
   for (const pt of nearby) {
-    const x = logV - Math.log10(pt.v);
+    const x = logV - pt.logV;
     const y = (u_kJkg - pt.u) * U_SCALE;
     const distSq = x * x + y * y;
 
@@ -1141,7 +1218,7 @@ function interpolateFromGrid(
     const oneMinusQ = 1 - q;
     const taper = oneMinusQ * oneMinusQ * oneMinusQ * oneMinusQ * (4 * q + 1);
     const w = taper / (distSq + EPS);
-    const lnP = Math.log(pt.P_MPa);
+    const lnP = pt.lnP;
 
     supportCount++;
     S00 += w;
