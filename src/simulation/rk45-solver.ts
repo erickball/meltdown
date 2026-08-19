@@ -1191,7 +1191,13 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   maxGrowthFactor: 5.0,
 
   maxStepsPerFrame: 1000,
-  maxWallTimeMs: 100,
+  // Per-frame compute budget for the LIVE (non-deterministic) game loop.
+  // This blocks the main thread, so it has to leave room in each ~16.7 ms
+  // animation frame for rendering and queued input events - at the old
+  // 100 ms, typing and slider drags starved whenever the plant ran heavy.
+  // Falling behind the requested sim speed is handled honestly downstream
+  // (auto-slowdown, the [LAGGING] marker); input latency is not.
+  maxWallTimeMs: 30,
 
   // Default to deterministic mode for reproducibility
   // The game loop can override this if needed for UI responsiveness
@@ -1309,6 +1315,10 @@ export class RK45Solver {
     this.totalSteps = 0;
     this.rejectedSteps = 0;
     this.rejectionStats.clear();
+    // A fresh simulation must not inherit the previous plant's cross-step
+    // flow-rates context (it feeds the implicit pressure solve)
+    this.lastAcceptedFlowRates = undefined;
+    this.candidateFlowRates = undefined;
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -2112,6 +2122,64 @@ export class RK45Solver {
       error: effectiveError,
       metrics,
     };
+  }
+
+  // ==========================================================================
+  // Replay support (history seek)
+  //
+  // The dt log in StateHistory pins down the adaptive controller's choices;
+  // everything else in a step is a deterministic function of (state, dt) -
+  // EXCEPT lastAcceptedFlowRates, which feeds the next step's implicit
+  // pressure solve from solver-instance memory. Snapshots therefore carry a
+  // copy of it, and a seek restores it before replaying.
+  // ==========================================================================
+
+  /** Copy of the cross-step flow-rates context, for storing in a snapshot. */
+  getFlowRatesContext(): Map<string, { dMass: number; dEnergy: number }> | undefined {
+    if (!this.lastAcceptedFlowRates) return undefined;
+    const copy = new Map<string, { dMass: number; dEnergy: number }>();
+    for (const [k, v] of this.lastAcceptedFlowRates) copy.set(k, { ...v });
+    return copy;
+  }
+
+  /** Restore the cross-step flow-rates context from a snapshot. */
+  setFlowRatesContext(ctx: Map<string, { dMass: number; dEnergy: number }> | undefined): void {
+    if (!ctx) {
+      this.lastAcceptedFlowRates = undefined;
+      return;
+    }
+    const copy = new Map<string, { dMass: number; dEnergy: number }>();
+    for (const [k, v] of ctx) copy.set(k, { ...v });
+    this.lastAcceptedFlowRates = copy;
+  }
+
+  /**
+   * Re-integrate exactly one previously-accepted step with its logged dt.
+   * Mirrors the accepted branch of advance() - stages, constraints, time
+   * advance, flow-rates handoff, post-accept (burst) operators - but skips
+   * everything adaptive: no error control, no dt update, no totalSteps, no
+   * onSubstepComplete. The step was accepted live, so it is accepted here
+   * unconditionally; a sanity failure means the replay diverged from the
+   * recorded trajectory, which is a determinism bug we must not paper over.
+   */
+  replayStep(state: SimulationState, dt: number): SimulationState {
+    const { newState } = this.step(state, dt);
+
+    const preCheck = checkPreConstraintSanity(newState);
+    if (!preCheck.safe) {
+      throw new Error(
+        `[RK45 replay] Pre-constraint sanity failed replaying an accepted step ` +
+        `(t=${state.time.toFixed(6)}s, dt=${(dt * 1000).toFixed(3)}ms): ${preCheck.reason}. ` +
+        `Replay diverged from the recorded trajectory - the physics is not ` +
+        `deterministic in (state, dt) and this must be fixed, not tolerated.`
+      );
+    }
+
+    let constrainedState = this.applyAllConstraints(newState, dt, true);
+    constrainedState.time += dt;
+    this.lastAcceptedFlowRates = this.candidateFlowRates;
+    constrainedState = this.applyPostAcceptConstraints(constrainedState, dt);
+    return constrainedState;
   }
 
   getMetrics(): { totalSteps: number; rejectedSteps: number; currentDt: number } {

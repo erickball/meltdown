@@ -1041,7 +1041,7 @@ export function estimateComponentCost(
     case 'core':
       return estimateCoreCost({
         thermalPower: props.thermalPower || 3000,
-        fuelRodCount: parseInt(props.fuelRodCount?.replace(/,/g, '') || '50000'),
+        fuelRodCount: parseInt(String(props.fuelRodCount ?? '').replace(/,/g, '')) || 50000,
         height: props.height || 3.66,
         diameter: props.diameter || 3.2,
         // controlRodBanks from the dialog; controlRodCount from stored components

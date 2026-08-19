@@ -1,24 +1,49 @@
 /**
  * State History Manager
  *
- * Stores simulation states for "back up one step" functionality.
+ * Stores simulation states for rewind/seek functionality.
  *
- * Storage strategy:
- * - Keep the last 100 steps (fine-grained recent history)
- * - Keep one snapshot per full second of sim time (coarse long-term history)
- * - Maximum 1000 total snapshots
- * - When over limit, thin out old snapshots intelligently
+ * Capture policy (snapshots + dt log = full replayability):
+ * - A full-state SNAPSHOT is recorded at every frame boundary (after the
+ *   game loop's post-advance mutations: neutronics sync, auto-scram, event
+ *   processing) and immediately after every user input that mutates state.
+ *   Between two consecutive snapshots the trajectory is pure solver steps,
+ *   so any intermediate step is reachable by replaying logged dts from the
+ *   preceding snapshot (see the dt-log comment below).
+ * - Snapshots are NOT taken per solver substep - the dt log covers those.
+ * - Keep one snapshot per full second of sim time (coarse long-term
+ *   history), maximum 1000 total; when over limit, thin old ones.
  */
 
 import { SimulationState } from '../simulation/types';
 import { cloneSimulationState } from '../simulation/solver';
 
-interface StateSnapshot {
+/** What triggered a snapshot - 'input' snapshots supersede the frame
+ *  snapshot at the same step as the replay base (they carry the mutation). */
+export type SnapshotKind = 'initial' | 'frame' | 'input';
+
+/** The solver's cross-step memory: last accepted flow rates feed the next
+ *  step's implicit pressure solve, so exact replay must restore them. */
+export type FlowRatesContext = Map<string, { dMass: number; dEnergy: number }> | undefined;
+
+export interface StateSnapshot {
   state: SimulationState;
   simTime: number;           // Simulation time in seconds
   wallTime: number;          // Wall clock time when captured (performance.now())
   stepNumber: number;        // Total step count when captured
   isSecondMarker: boolean;   // True if this is a per-second snapshot
+  kind: SnapshotKind;
+  flowRates: FlowRatesContext; // Solver context for bit-identical replay
+}
+
+/** A resolved seek: restore `base`, then re-integrate `dts` in order.
+ *  `dts === null` means the dt log for that span has aged out of the cap -
+ *  the caller lands on `base` and reports the approximation loudly. */
+export interface SeekPlan {
+  base: StateSnapshot;
+  baseIndex: number;
+  targetStep: number;
+  dts: Array<{ step: number; dt: number; simTime: number }> | null;
 }
 
 export class StateHistory {
@@ -29,12 +54,15 @@ export class StateHistory {
   // Track which full seconds we have snapshots for
   private secondMarkers = new Set<number>();
 
-  // Last recorded step to avoid duplicates
-  private lastRecordedStep = -1;
-
   // Current position in history (for forward/back navigation without deletion)
   // -1 means we're at the end (most recent state)
   private currentIndex = -1;
+
+  // Step-granular position after a seek. null = at the live head. Unlike
+  // currentIndex this can point BETWEEN snapshots; recording anything new
+  // while positioned in the past truncates everything beyond it (branching).
+  private positionStep: number | null = null;
+  private positionTime = 0;
 
   // ==========================================================================
   // Accepted-timestep log
@@ -62,77 +90,231 @@ export class StateHistory {
   private static readonly DT_LOG_CAP = 400_000;
 
   /**
-   * Record a state snapshot after a successful simulation step.
-   *
-   * @param state - The simulation state to snapshot
-   * @param stepNumber - Total steps taken so far
-   * @param acceptedDt - The dt the solver actually took for this step
-   *   (0 for initial-state recordings; such entries are not logged)
+   * Log one accepted solver step's dt. Called per accepted substep - this is
+   * the cheap per-step record (three numbers), NOT a snapshot. Recording a
+   * new step while positioned in the past branches: everything beyond the
+   * position is discarded first.
    */
-  recordStep(state: SimulationState, stepNumber: number, acceptedDt: number = 0): void {
-    // Avoid duplicate recordings
-    if (stepNumber === this.lastRecordedStep) {
+  recordDt(stepNumber: number, simTimeAfter: number, dt: number): void {
+    if (!(dt > 0)) return;
+    this.branchIfPositioned();
+    this.dtLogStep.push(stepNumber);
+    this.dtLogTime.push(simTimeAfter);
+    this.dtLogDt.push(dt);
+    if (this.dtLogStep.length > StateHistory.DT_LOG_CAP) {
+      const drop = StateHistory.DT_LOG_CAP / 4;
+      this.dtLogStep.splice(0, drop);
+      this.dtLogTime.splice(0, drop);
+      this.dtLogDt.splice(0, drop);
+    }
+  }
+
+  /**
+   * Record a full-state snapshot (frame boundary, user input, or initial
+   * state). Consecutive input snapshots at the same step collapse into the
+   * latest one, so a slider drag doesn't append sixty snapshots per second.
+   */
+  recordSnapshot(
+    state: SimulationState,
+    stepNumber: number,
+    kind: SnapshotKind,
+    flowRates: FlowRatesContext
+  ): void {
+    this.branchIfPositioned();
+    this.currentIndex = -1;
+
+    const simTime = state.time;
+    const last = this.snapshots[this.snapshots.length - 1];
+
+    // Collapse a burst of inputs between steps: replace rather than append.
+    if (kind === 'input' && last && last.kind === 'input' && last.stepNumber === stepNumber) {
+      last.state = cloneSimulationState(state);
+      last.flowRates = flowRates;
+      last.wallTime = performance.now();
       return;
     }
 
-    // If we've navigated back and are now taking a new step,
-    // discard all future states (we're branching off)
-    if (this.currentIndex >= 0 && this.currentIndex < this.snapshots.length - 1) {
-      const removed = this.snapshots.splice(this.currentIndex + 1);
-      // Update second markers for removed snapshots
-      for (const s of removed) {
-        if (s.isSecondMarker) {
-          const second = Math.floor(s.simTime);
-          const stillHasSecond = this.snapshots.some(
-            snap => Math.floor(snap.simTime) === second
-          );
-          if (!stillHasSecond) {
-            this.secondMarkers.delete(second);
-          }
-        }
-      }
-    }
-
-    // Reset to end position
-    this.currentIndex = -1;
-    this.lastRecordedStep = stepNumber;
-
-    // Timestep log (independent of snapshot retention below)
-    if (acceptedDt > 0) {
-      this.dtLogStep.push(stepNumber);
-      this.dtLogTime.push(state.time);
-      this.dtLogDt.push(acceptedDt);
-      if (this.dtLogStep.length > StateHistory.DT_LOG_CAP) {
-        const drop = StateHistory.DT_LOG_CAP / 4;
-        this.dtLogStep.splice(0, drop);
-        this.dtLogTime.splice(0, drop);
-        this.dtLogDt.splice(0, drop);
-      }
-    }
-
-    const simTime = state.time;
     const currentSecond = Math.floor(simTime);
-
-    // Determine if this should be a second marker
     const isSecondMarker = !this.secondMarkers.has(currentSecond);
 
-    // Clone the state
-    const snapshot: StateSnapshot = {
+    this.snapshots.push({
       state: cloneSimulationState(state),
       simTime,
       wallTime: performance.now(),
       stepNumber,
       isSecondMarker,
-    };
-
-    this.snapshots.push(snapshot);
+      kind,
+      flowRates,
+    });
 
     if (isSecondMarker) {
       this.secondMarkers.add(currentSecond);
     }
 
-    // Enforce limits
     this.enforceLimit();
+  }
+
+  /**
+   * Recording anything while positioned in the past means the timeline
+   * branches: snapshots AND dt-log entries beyond the position are gone.
+   * (Without the dt-log truncation the log would go non-monotonic in time
+   * across the branch point and time-based seeks would break.)
+   */
+  private branchIfPositioned(): void {
+    if (this.positionStep === null) return;
+    this.truncateBeyond(this.positionStep);
+    this.positionStep = null;
+  }
+
+  private truncateBeyond(step: number): void {
+    // Snapshots are appended in nondecreasing stepNumber order
+    let firstBeyond = this.snapshots.length;
+    while (firstBeyond > 0 && this.snapshots[firstBeyond - 1].stepNumber > step) firstBeyond--;
+    const removed = this.snapshots.splice(firstBeyond);
+    for (const s of removed) {
+      if (s.isSecondMarker) {
+        const second = Math.floor(s.simTime);
+        const stillHasSecond = this.snapshots.some(
+          snap => Math.floor(snap.simTime) === second
+        );
+        if (!stillHasSecond) {
+          this.secondMarkers.delete(second);
+        }
+      }
+    }
+    while (this.dtLogStep.length > 0 && this.dtLogStep[this.dtLogStep.length - 1] > step) {
+      this.dtLogStep.pop();
+      this.dtLogTime.pop();
+      this.dtLogDt.pop();
+    }
+    this.currentIndex = -1;
+  }
+
+  /**
+   * Read-only view of stored snapshot states within a time range, oldest
+   * first - the data source for plotting/analysis tools. When several
+   * snapshots share a time (frame + input at the same step), the last one
+   * recorded wins. The returned states are the LIVE history objects:
+   * callers must not mutate them.
+   */
+  statesInRange(tMin = -Infinity, tMax = Infinity): Array<{ time: number; state: SimulationState }> {
+    const out: Array<{ time: number; state: SimulationState }> = [];
+    for (const s of this.snapshots) {
+      if (s.simTime < tMin - 1e-9 || s.simTime > tMax + 1e-9) continue;
+      if (out.length > 0 && Math.abs(out[out.length - 1].time - s.simTime) < 1e-9) {
+        out[out.length - 1] = { time: s.simTime, state: s.state };
+      } else {
+        out.push({ time: s.simTime, state: s.state });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Roll the recorded head back to `step`. Used when a frame aborted after
+   * logging accepted steps whose states were lost (the solver threw before
+   * the frame's result was adopted) - the log must not claim steps we
+   * cannot hand back.
+   */
+  discardStepsBeyond(step: number): void {
+    this.truncateBeyond(step);
+  }
+
+  /** The newest recorded step number (live head). */
+  headStep(): number {
+    const lastLogged = this.dtLogStep.length > 0 ? this.dtLogStep[this.dtLogStep.length - 1] : -1;
+    const lastSnap = this.snapshots.length > 0 ? this.snapshots[this.snapshots.length - 1].stepNumber : -1;
+    return Math.max(lastLogged, lastSnap, 0);
+  }
+
+  /** Current step position: the seek position if set, else the live head. */
+  getPositionStep(): number {
+    return this.positionStep ?? this.headStep();
+  }
+
+  /** Set the step-granular position after a seek (null-equivalent at head). */
+  setPosition(step: number, simTime: number): void {
+    if (step >= this.headStep()) {
+      this.positionStep = null;
+      this.currentIndex = -1;
+    } else {
+      this.positionStep = step;
+    }
+    this.positionTime = simTime;
+    // Keep the snapshot-index cursor roughly in sync for the history dialog
+    const idx = this.latestSnapshotIndexAtOrBefore(step);
+    if (idx >= 0 && this.positionStep !== null) this.currentIndex = idx;
+  }
+
+  private latestSnapshotIndexAtOrBefore(step: number): number {
+    for (let i = this.snapshots.length - 1; i >= 0; i--) {
+      if (this.snapshots[i].stepNumber <= step) return i;
+    }
+    return -1;
+  }
+
+  /**
+   * Resolve a seek to `targetStep`: the latest snapshot at or before the
+   * target plus the dts to replay from it. Null if the target precedes all
+   * retained history. `dts: null` means the log span aged out - land on the
+   * base and say so.
+   */
+  planSeek(targetStep: number): SeekPlan | null {
+    const clamped = Math.min(targetStep, this.headStep());
+    const baseIndex = this.latestSnapshotIndexAtOrBefore(clamped);
+    if (baseIndex < 0) return null;
+    const base = this.snapshots[baseIndex];
+    const dts = base.stepNumber === clamped ? [] : this.getDtsBetween(base.stepNumber, clamped);
+    return { base, baseIndex, targetStep: clamped, dts };
+  }
+
+  /**
+   * The step to land on for a time-based seek: the first logged step whose
+   * post-step time reaches `targetTime` (i.e. the step that crossed the
+   * boundary), clamped to the retained range.
+   */
+  stepForTime(targetTime: number): number {
+    const n = this.dtLogTime.length;
+    if (n === 0 || targetTime <= this.dtLogTime[0]) {
+      // Before (or without) any logged step: earliest retained snapshot
+      return this.snapshots.length > 0 ? this.snapshots[0].stepNumber : 0;
+    }
+    if (targetTime > this.dtLogTime[n - 1]) return this.headStep();
+    // Binary search: first index with time >= target (times are monotonic -
+    // branch truncation keeps the log to the current timeline only)
+    let lo = 0, hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.dtLogTime[mid] < targetTime - 1e-9) lo = mid + 1; else hi = mid;
+    }
+    return this.dtLogStep[lo];
+  }
+
+  /** The logged step (or snapshot) immediately before `step`, or null. */
+  prevStep(step: number): number | null {
+    let best: number | null = null;
+    for (let i = this.dtLogStep.length - 1; i >= 0; i--) {
+      if (this.dtLogStep[i] < step) { best = this.dtLogStep[i]; break; }
+    }
+    for (let i = this.snapshots.length - 1; i >= 0; i--) {
+      if (this.snapshots[i].stepNumber < step) {
+        best = best === null ? this.snapshots[i].stepNumber : Math.max(best, this.snapshots[i].stepNumber);
+        break;
+      }
+    }
+    return best;
+  }
+
+  /** The logged step immediately after `step`, or null if at the head. */
+  nextStep(step: number): number | null {
+    // Binary search the dt log for the first entry > step
+    let lo = 0, hi = this.dtLogStep.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.dtLogStep[mid] <= step) lo = mid + 1; else hi = mid;
+    }
+    if (lo < this.dtLogStep.length) return this.dtLogStep[lo];
+    return null;
   }
 
   /**
@@ -157,7 +339,10 @@ export class StateHistory {
 
     // Move back one position
     this.currentIndex = effectiveIndex - 1;
-    return this.snapshots[this.currentIndex];
+    const snap = this.snapshots[this.currentIndex];
+    this.positionStep = snap.stepNumber;
+    this.positionTime = snap.simTime;
+    return snap;
   }
 
   /**
@@ -180,7 +365,10 @@ export class StateHistory {
       this.currentIndex = -1;
     }
 
-    return this.snapshots[this.currentIndex >= 0 ? this.currentIndex : this.snapshots.length - 1];
+    const snap = this.snapshots[this.currentIndex >= 0 ? this.currentIndex : this.snapshots.length - 1];
+    this.positionStep = this.currentIndex >= 0 ? snap.stepNumber : null;
+    this.positionTime = snap.simTime;
+    return snap;
   }
 
   /**
@@ -193,7 +381,10 @@ export class StateHistory {
     }
 
     this.currentIndex = index === this.snapshots.length - 1 ? -1 : index;
-    return this.snapshots[index];
+    const snap = this.snapshots[index];
+    this.positionStep = this.currentIndex >= 0 ? snap.stepNumber : null;
+    this.positionTime = snap.simTime;
+    return snap;
   }
 
   /**
@@ -232,8 +423,17 @@ export class StateHistory {
 
     const targetIndex = this.snapshots.indexOf(snapshot);
     this.currentIndex = targetIndex === this.snapshots.length - 1 ? -1 : targetIndex;
+    this.positionStep = this.currentIndex >= 0 ? snapshot.stepNumber : null;
+    this.positionTime = snapshot.simTime;
 
     return cloneSimulationState(snapshot.state);
+  }
+
+  /** The snapshot the current index points at (for restoring solver context). */
+  snapshotAtCurrentIndex(): StateSnapshot | null {
+    if (this.snapshots.length === 0) return null;
+    const idx = this.currentIndex >= 0 ? this.currentIndex : this.snapshots.length - 1;
+    return this.snapshots[idx];
   }
 
   /**
@@ -260,8 +460,10 @@ export class StateHistory {
       oldestTime: this.snapshots[0].simTime,
       newestTime: this.snapshots[this.snapshots.length - 1].simTime,
       currentIndex: this.currentIndex,
-      currentTime: this.snapshots[effectiveIndex].simTime,
-      currentStepNumber: this.snapshots[effectiveIndex].stepNumber,
+      // A step-granular seek can sit between snapshots - report its exact
+      // position rather than the nearest snapshot's
+      currentTime: this.positionStep !== null ? this.positionTime : this.snapshots[effectiveIndex].simTime,
+      currentStepNumber: this.positionStep !== null ? this.positionStep : this.snapshots[effectiveIndex].stepNumber,
     };
   }
 
@@ -284,8 +486,9 @@ export class StateHistory {
   clear(): void {
     this.snapshots = [];
     this.secondMarkers.clear();
-    this.lastRecordedStep = -1;
     this.currentIndex = -1;
+    this.positionStep = null;
+    this.positionTime = 0;
     this.dtLogStep = [];
     this.dtLogTime = [];
     this.dtLogDt = [];

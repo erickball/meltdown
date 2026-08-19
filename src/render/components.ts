@@ -2387,9 +2387,33 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const bundleFillOf = (b: number): string | CanvasPattern =>
     fillFor(bundleFluid(b), b * REGIONS_PER_BUNDLE + 3);
 
-  // Tube-side fill, reassigned per bundle as the plenum loop below walks
-  // across the shell (the tube loops paint through paintBundleInterior)
-  let primaryFill: string | CanvasPattern = bundleFillOf(0);
+  // Tube-side header fills, reassigned per bundle as the plenum loop below
+  // walks across the shell (the tube loops paint through
+  // paintBundleInterior). A moving-boundary bundle knows what actually sits
+  // at each end of the tube run - the first and last phase sections with any
+  // length - so its headers show that instead of the bundle's bulk average,
+  // which reads two-phase whenever the boiler holds any mixture at all.
+  let inletFill: string | CanvasPattern = bundleFillOf(0);
+  let outletFill: string | CanvasPattern = bundleFillOf(0);
+  const setPlenumFills = (b: number): void => {
+    const section = hx.tubeSections?.[b];
+    let first = -1;
+    let last = -1;
+    if (section) {
+      for (let s = 0; s < 3; s++) {
+        if (section.lengthFracs[s] > 1e-3) {
+          if (first < 0) first = s;
+          last = s;
+        }
+      }
+    }
+    if (!section || first < 0) {
+      inletFill = outletFill = bundleFillOf(b);
+      return;
+    }
+    inletFill = fillFor(section.fluids[first], b * REGIONS_PER_BUNDLE + first);
+    outletFill = fillFor(section.fluids[last], b * REGIONS_PER_BUNDLE + last);
+  };
 
   /**
    * Paint one bundle's tube interiors.
@@ -2649,7 +2673,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     // as that slot - so a two-bundle exchanger shows two separate headers
     // with the nozzles of each sitting on their own.
     for (let b = 0; b < nBundles; b++) {
-      primaryFill = bundleFillOf(b);
+      setPlenumFills(b);
 
       if (isHorizontal) {
         // Horizontal HX: plenums are vertical semi-ellipsoids at left (and right for straight tubes)
@@ -2667,23 +2691,23 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
 
-          // Fill top half of plenum with primary fluid using clip
+          // Fill top (inlet) half of plenum with primary fluid using clip
           ctx.save();
           ctx.beginPath();
           ctx.rect(-w / 2 - plenumLength - 1, cy - plenumRadiusY, plenumLength + 2, plenumRadiusY - dividerThickness / 2);
           ctx.clip();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = inletFill;
           ctx.beginPath();
           ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
           ctx.restore();
 
-          // Fill bottom half of plenum with primary fluid using clip
+          // Fill bottom (outlet) half of plenum with primary fluid using clip
           ctx.save();
           ctx.beginPath();
           ctx.rect(-w / 2 - plenumLength - 1, cy + dividerThickness / 2, plenumLength + 2, plenumRadiusY);
           ctx.clip();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = outletFill;
           ctx.beginPath();
           ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
@@ -2701,12 +2725,12 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.stroke();
         } else {
           // Straight/helical: plenums at both ends
-          // Left plenum (bulges to the left)
+          // Left (inlet) plenum (bulges to the left)
           ctx.fillStyle = plenumColor;
           ctx.beginPath();
           ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = inletFill;
           ctx.beginPath();
           ctx.ellipse(-w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.fill();
@@ -2716,12 +2740,12 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.ellipse(-w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, true);
           ctx.stroke();
 
-          // Right plenum (bulges to the right)
+          // Right (outlet) plenum (bulges to the right)
           ctx.fillStyle = plenumColor;
           ctx.beginPath();
           ctx.ellipse(w / 2, cy, plenumLength, plenumRadiusY, 0, -Math.PI / 2, Math.PI / 2, false);
           ctx.fill();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = outletFill;
           ctx.beginPath();
           ctx.ellipse(w / 2, cy, plenumLength - wallPx, plenumInnerY, 0, -Math.PI / 2, Math.PI / 2, false);
           ctx.fill();
@@ -2746,23 +2770,23 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
           ctx.fill();
 
-          // Fill right half of plenum with primary fluid using clip
+          // Fill right (inlet) half of plenum with primary fluid using clip
           ctx.save();
           ctx.beginPath();
           ctx.rect(cx + dividerThickness / 2, h / 2 - 1, plenumRadiusX, plenumLength + 2);
           ctx.clip();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = inletFill;
           ctx.beginPath();
           ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
           ctx.fill();
           ctx.restore();
 
-          // Fill left half of plenum with primary fluid using clip
+          // Fill left (outlet) half of plenum with primary fluid using clip
           ctx.save();
           ctx.beginPath();
           ctx.rect(cx - plenumRadiusX, h / 2 - 1, plenumRadiusX - dividerThickness / 2, plenumLength + 2);
           ctx.clip();
-          ctx.fillStyle = primaryFill;
+          ctx.fillStyle = outletFill;
           ctx.beginPath();
           ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - wallPx, 0, 0, Math.PI, false);
           ctx.fill();
@@ -2790,8 +2814,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.beginPath();
           ctx.ellipse(cx, h / 2, plenumRadiusX, plenumLength, 0, 0, Math.PI, false);
           ctx.stroke();
-          // Fill with primary fluid
-          ctx.fillStyle = primaryFill;
+          // Fill with the inlet-end fluid (feed enters at the bottom)
+          ctx.fillStyle = inletFill;
           ctx.beginPath();
           ctx.ellipse(cx, h / 2, plenumInnerX, plenumLength - 2, 0, 0, Math.PI, false);
           ctx.fill();
@@ -2806,8 +2830,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
           ctx.beginPath();
           ctx.ellipse(cx, -h / 2, plenumRadiusX, plenumLength, 0, Math.PI, 0, false);
           ctx.stroke();
-          // Fill with primary fluid
-          ctx.fillStyle = primaryFill;
+          // Fill with the outlet-end fluid (steam leaves at the top)
+          ctx.fillStyle = outletFill;
           ctx.beginPath();
           ctx.ellipse(cx, -h / 2, plenumInnerX, plenumLength - 2, 0, Math.PI, 0, false);
           ctx.fill();

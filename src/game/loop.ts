@@ -43,7 +43,8 @@ import {
 } from '../simulation';
 import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
-import { StateHistory } from './state-history';
+import { StateHistory, StateSnapshot } from './state-history';
+import { cloneSimulationState } from '../simulation/solver';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -129,6 +130,10 @@ export class GameLoop {
   // State history for "back up" functionality
   private stateHistory: StateHistory = new StateHistory();
 
+  // Step number of the last frame-boundary snapshot, to skip frames where
+  // no physics ran (paused, zero-dt frames)
+  private lastSnapshotStep = -1;
+
   // Last solver metrics (stored for getSolverMetrics)
   private lastMetrics: SolverMetrics | null = null;
 
@@ -187,12 +192,12 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
       this.rk45Solver.addConstraintOperator(new OtsgLedgerCheckOperator()); // OTSG economizer ledger vs the wall (finalOnly)
 
-      // Set up substep callback for state history recording
-      // This records state after each accepted substep, not just once per
-      // frame. The accepted dt rides along into the history's timestep log,
-      // which is what keeps thinned history deterministically replayable.
+      // Per accepted substep, log only the dt (three numbers) - full-state
+      // snapshots are taken once per frame and on user inputs (see
+      // recordFrameSnapshot / recordInputSnapshot). Snapshots + this dt log
+      // make any intermediate step reachable by deterministic replay.
       this.rk45Solver.onSubstepComplete = (state, stepNumber, acceptedDt) => {
-        this.stateHistory.recordStep(state, stepNumber, acceptedDt);
+        this.stateHistory.recordDt(stepNumber, state.time, acceptedDt);
       };
     }
 
@@ -257,14 +262,16 @@ export class GameLoop {
     this.changeWindowTime = 0;
     this.recentEvents = [];
 
-    // Clear state history on reset and record initial state (step 0)
-    this.stateHistory.clear();
-    this.stateHistory.recordStep(this.state, 0);
-
-    // Reset solver state (timestep, counters, etc.)
+    // Reset solver state (timestep, counters, etc.) BEFORE recording the
+    // initial snapshot so it carries no stale flow-rates context
     if (this.rk45Solver) {
       this.rk45Solver.reset();
     }
+
+    // Clear state history on reset and record initial state (step 0)
+    this.stateHistory.clear();
+    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined);
+    this.lastSnapshotStep = 0;
 
     console.log('[GameLoop] Simulation state reset');
   }
@@ -335,11 +342,20 @@ export class GameLoop {
           });
         }
 
+        // Frame-boundary snapshot AFTER the mutations above - between two of
+        // these the trajectory is pure solver steps, which is what makes the
+        // dt-log replay exact
+        this.recordFrameSnapshot();
+
         // Notify listeners
         this.onStateUpdate?.(this.state, result.metrics);
       } catch (error) {
         // Simulation error - pause and notify user
         this.isPaused = true;
+        // The aborted frame may have logged accepted steps whose states were
+        // lost with the throw - roll the history head back to the state we
+        // actually still hold, so seeks and input snapshots stay consistent
+        this.stateHistory.discardStepsBeyond(Math.max(0, this.lastSnapshotStep));
         const errorMessage = error instanceof Error ? error.message : String(error);
         console.error('[GameLoop] Simulation error:', errorMessage);
 
@@ -596,9 +612,16 @@ export class GameLoop {
     // Clear recent events (prevents stale events from blocking new ones due to time comparison)
     this.recentEvents = [];
 
+    // Reset the solver so step numbering restarts with the new history and
+    // no stale flow-rates context leaks into the new plant's first step
+    if (this.rk45Solver) {
+      this.rk45Solver.reset();
+    }
+
     // Clear state history and record initial state (step 0)
     this.stateHistory.clear();
-    this.stateHistory.recordStep(this.state, 0);
+    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined);
+    this.lastSnapshotStep = 0;
 
     console.log(`[GameLoop] Simulation state updated with ${newState.flowNodes.size} flow nodes`);
   }
@@ -820,7 +843,7 @@ export class GameLoop {
     const result = this.rk45Solver.advance(this.state, dt);
     this.state = result.state;
     this.lastMetrics = result.metrics;
-    // Note: State history recording happens via onSubstepComplete callback
+    // Note: dt-log recording happens via onSubstepComplete callback
 
     // Update fuel heat generation from neutronics
     this.syncNeutronicsToThermal();
@@ -830,6 +853,9 @@ export class GameLoop {
 
     // Process pending events from constraint operators (e.g., burst events)
     this.processPendingEvents();
+
+    // Boundary snapshot after the mutations above (see tick())
+    this.recordFrameSnapshot();
 
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);
@@ -849,7 +875,7 @@ export class GameLoop {
     const result = { state: rk45Result.state, dt: rk45Result.dt, metrics: rk45Result.metrics };
     this.state = result.state;
     this.lastMetrics = result.metrics;
-    // Note: State history recording happens via onSubstepComplete callback
+    // Note: dt-log recording happens via onSubstepComplete callback
 
     // Update fuel heat generation from neutronics
     this.syncNeutronicsToThermal();
@@ -859,6 +885,9 @@ export class GameLoop {
 
     // Process pending events from constraint operators (e.g., burst events)
     this.processPendingEvents();
+
+    // Boundary snapshot after the mutations above (see tick())
+    this.recordFrameSnapshot();
 
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);
@@ -886,6 +915,8 @@ export class GameLoop {
       time: this.state.time,
       message: `SCRAM: ${reason}`,
     });
+    // A manual scram is a user input: snapshot it so replay stays exact
+    this.recordInputSnapshot();
   }
 
   /**
@@ -900,6 +931,7 @@ export class GameLoop {
         time: this.state.time,
         message: 'SCRAM reset - manual rod control enabled',
       });
+      this.recordInputSnapshot();
     }
   }
 
@@ -954,10 +986,14 @@ export class GameLoop {
   }
 
   /**
-   * Update state directly (for UI interactions like valve changes)
+   * Update state directly (for UI interactions like valve changes).
+   * Every mutation through here gets an input snapshot: replay re-integrates
+   * pure solver steps between snapshots, so anything that changes state
+   * outside the solver must leave a snapshot behind it.
    */
   updateState(updater: (state: SimulationState) => SimulationState): void {
     this.state = updater(this.state);
+    this.recordInputSnapshot();
   }
 
   // ============================================================================
@@ -965,7 +1001,48 @@ export class GameLoop {
   // ============================================================================
 
   /**
-   * Navigate back one step in history.
+   * Frame-boundary snapshot, taken after the post-advance mutations
+   * (neutronics sync, auto-scram, event processing). Skipped when no
+   * physics ran since the last one.
+   */
+  private recordFrameSnapshot(): void {
+    if (!this.rk45Solver) return;
+    const step = this.rk45Solver.getMetrics().totalSteps;
+    if (step === this.lastSnapshotStep) return;
+    this.lastSnapshotStep = step;
+    this.stateHistory.recordSnapshot(this.state, step, 'frame', this.rk45Solver.getFlowRatesContext());
+  }
+
+  /** Snapshot after a user input mutated state between solver steps. */
+  private recordInputSnapshot(): void {
+    if (!this.rk45Solver) return;
+    this.stateHistory.recordSnapshot(
+      this.state,
+      this.stateHistory.getPositionStep(),
+      'input',
+      this.rk45Solver.getFlowRatesContext()
+    );
+  }
+
+  /**
+   * Adopt a restored snapshot as the live state: CLONE it (the live state
+   * gets mutated in place by inputs - handing out the stored object would
+   * corrupt history), restore the solver's cross-step flow-rates context,
+   * and reset the adaptive timestep to a safe value.
+   */
+  private adoptSnapshot(snapshot: StateSnapshot): void {
+    this.state = cloneSimulationState(snapshot.state);
+    if (this.rk45Solver) {
+      this.rk45Solver.setFlowRatesContext(snapshot.flowRates);
+      (this.rk45Solver as any).currentDt = Math.min(
+        0.001,
+        (this.rk45Solver as any).config.maxDt
+      );
+    }
+  }
+
+  /**
+   * Navigate back one snapshot in history.
    * Does NOT delete future states - they remain available.
    * Returns true if successful, false if already at the beginning.
    */
@@ -975,23 +1052,13 @@ export class GameLoop {
       console.log('[GameLoop] No history to step back to');
       return false;
     }
-
-    this.state = snapshot.state;
+    this.adoptSnapshot(snapshot);
     console.log(`[GameLoop] Navigated back to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
-
-    // Reset solver adaptive timestep to a safe value
-    if (this.rk45Solver) {
-      (this.rk45Solver as any).currentDt = Math.min(
-        0.001,
-        (this.rk45Solver as any).config.maxDt
-      );
-    }
-
     return true;
   }
 
   /**
-   * Navigate forward one step in history.
+   * Navigate forward one snapshot in history.
    * Returns true if successful, false if already at the end.
    */
   stepForward(): boolean {
@@ -1000,18 +1067,8 @@ export class GameLoop {
       console.log('[GameLoop] Already at end of history');
       return false;
     }
-
-    this.state = snapshot.state;
+    this.adoptSnapshot(snapshot);
     console.log(`[GameLoop] Navigated forward to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
-
-    // Reset solver adaptive timestep to a safe value
-    if (this.rk45Solver) {
-      (this.rk45Solver as any).currentDt = Math.min(
-        0.001,
-        (this.rk45Solver as any).config.maxDt
-      );
-    }
-
     return true;
   }
 
@@ -1025,23 +1082,14 @@ export class GameLoop {
       console.log('[GameLoop] Invalid history index');
       return null;
     }
-
-    this.state = snapshot.state;
+    this.adoptSnapshot(snapshot);
     console.log(`[GameLoop] Navigated to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
-
-    // Reset solver adaptive timestep to a safe value
-    if (this.rk45Solver) {
-      (this.rk45Solver as any).currentDt = Math.min(
-        0.001,
-        (this.rk45Solver as any).config.maxDt
-      );
-    }
-
     return snapshot.simTime;
   }
 
   /**
-   * Restore to the state closest to a given simulation time.
+   * Restore to the snapshot closest to a given simulation time (no replay -
+   * see seekToTime for the step-exact version).
    * Returns the actual time restored to, or null if no history.
    */
   restoreToTime(targetTime: number): number | null {
@@ -1051,18 +1099,106 @@ export class GameLoop {
       return null;
     }
 
-    this.state = restoredState;
-    console.log(`[GameLoop] Navigated to t=${restoredState.time.toFixed(3)}s (requested ${targetTime.toFixed(3)}s)`);
-
-    // Reset solver adaptive timestep to a safe value
+    this.state = restoredState;  // already a clone
+    const snapshot = this.stateHistory.snapshotAtCurrentIndex();
     if (this.rk45Solver) {
+      this.rk45Solver.setFlowRatesContext(snapshot?.flowRates);
       (this.rk45Solver as any).currentDt = Math.min(
         0.001,
         (this.rk45Solver as any).config.maxDt
       );
     }
-
+    console.log(`[GameLoop] Navigated to t=${restoredState.time.toFixed(3)}s (requested ${targetTime.toFixed(3)}s)`);
     return restoredState.time;
+  }
+
+  // ============================================================================
+  // Replay-seek: step-exact navigation
+  //
+  // Restores the latest snapshot at or before the target step, then
+  // re-integrates the logged dts to land exactly on the target. Snapshots
+  // are taken at every frame boundary and user input, so the replayed span
+  // is pure solver steps and the result is bit-identical to the live run.
+  // ============================================================================
+
+  /**
+   * Seek to an exact solver step. Returns the sim time landed on, or null
+   * if the step precedes all retained history. Throws (loudly) if replay
+   * diverges from the recorded trajectory - that is a determinism bug.
+   */
+  seekToStep(targetStep: number): number | null {
+    if (!this.rk45Solver) return null;
+    const plan = this.stateHistory.planSeek(targetStep);
+    if (!plan) return null;
+
+    let state = cloneSimulationState(plan.base.state);
+    this.rk45Solver.setFlowRatesContext(plan.base.flowRates);
+
+    let landedStep = plan.base.stepNumber;
+    if (plan.dts === null) {
+      // The dt log for this span aged out of its cap - land on the snapshot
+      // and say so instead of silently pretending it was exact
+      console.warn(
+        `[GameLoop] Seek to step ${plan.targetStep}: dt log aged out; ` +
+        `landing on nearest snapshot at t=${plan.base.simTime.toFixed(3)}s (step ${plan.base.stepNumber})`
+      );
+    } else {
+      for (const entry of plan.dts) {
+        state = this.rk45Solver.replayStep(state, entry.dt);
+        if (Math.abs(state.time - entry.simTime) > 1e-6) {
+          throw new Error(
+            `[GameLoop] Replay drift at step ${entry.step}: replayed t=${state.time}, ` +
+            `recorded t=${entry.simTime}. The physics is not reproducing the recorded ` +
+            `trajectory - this is a determinism bug that must be fixed.`
+          );
+        }
+        landedStep = entry.step;
+      }
+    }
+
+    // Events queued by replayed burst checks were already emitted when they
+    // happened live - drop them instead of re-notifying
+    state.pendingEvents = [];
+
+    this.state = state;
+    this.stateHistory.setPosition(landedStep, state.time);
+    (this.rk45Solver as any).currentDt = Math.min(
+      0.001,
+      (this.rk45Solver as any).config.maxDt
+    );
+    return state.time;
+  }
+
+  /**
+   * Seek to the step whose post-step time first reaches targetTime
+   * (clamped to retained history). Returns the sim time landed on.
+   */
+  seekToTime(targetTime: number): number | null {
+    return this.seekToStep(this.stateHistory.stepForTime(targetTime));
+  }
+
+  /** Current step-granular position (seek position, or the live head). */
+  getPositionStep(): number {
+    return this.stateHistory.getPositionStep();
+  }
+
+  /**
+   * Read-only history states for plotting/analysis (Jack's tools), oldest
+   * first, with the live state appended when it is newer than the last
+   * snapshot. Callers must NOT mutate the returned states.
+   */
+  getHistoryStates(tMin = -Infinity, tMax = Infinity): Array<{ time: number; state: SimulationState }> {
+    const out = this.stateHistory.statesInRange(tMin, tMax);
+    const t = this.state.time;
+    if (t >= tMin && t <= tMax && (out.length === 0 || t > out[out.length - 1].time + 1e-9)) {
+      out.push({ time: t, state: this.state });
+    }
+    return out;
+  }
+
+  /** The recorded step just before/after `step`, for single-step buttons. */
+  adjacentStep(step: number, direction: -1 | 1): number | null {
+    return direction < 0 ? this.stateHistory.prevStep(step) : this.stateHistory.nextStep(step);
   }
 
   /**
