@@ -1607,11 +1607,15 @@ function init() {
         plantConn.toElevation = result.toElevation;
         plantConn.flowArea = result.flowArea;
         plantConn.length = result.length;
+        plantConn.fromOpeningHeight = result.fromOpeningHeight;
+        plantConn.toOpeningHeight = result.toOpeningHeight;
 
         // Also update the simulation connection directly for immediate effect
         simConn.flowArea = result.flowArea;
         simConn.fromElevation = result.fromElevation;
         simConn.toElevation = result.toElevation;
+        simConn.fromOpeningHeight = result.fromOpeningHeight;
+        simConn.toOpeningHeight = result.toOpeningHeight;
         // Note: length affects inertance which is calculated at simulation start,
         // so changing it during simulation won't have full effect until restart
 
@@ -1655,6 +1659,8 @@ function init() {
         plantConn.toElevation = result.toElevation;
         plantConn.flowArea = result.flowArea;
         plantConn.length = result.length;
+        plantConn.fromOpeningHeight = result.fromOpeningHeight;
+        plantConn.toOpeningHeight = result.toOpeningHeight;
 
 
         // Refresh the component detail panel
