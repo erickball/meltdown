@@ -35,7 +35,7 @@ import {
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
-import { ComponentDialog, ComponentConfig, componentDefinitions } from './construction/component-config';
+import { ComponentDialog, ComponentConfig, componentDefinitions, auditComponentEditSync } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
@@ -1426,6 +1426,23 @@ function init() {
     componentDialog.showEdit(component as Record<string, any>, (properties) => {
       if (properties) {
         constructionManager.updateComponent(componentId, properties);
+
+        // Round-trip audit: re-read every dialog field from the updated model
+        // and fail LOUDLY if anything the user submitted didn't stick. Every
+        // hit here is a write-path/read-path disagreement (a bug), or a
+        // model-side adjustment the user must know about.
+        const mismatches = auditComponentEditSync(component as Record<string, any>, properties);
+        if (mismatches.length > 0) {
+          console.error(`[EditSync] Dialog edit of ${componentId} did not round-trip - ` +
+            `these fields differ between what was submitted and what the model now holds:`, mismatches);
+          const detail = mismatches
+            .map(m => `${m.label}: entered ${JSON.stringify(m.submitted)}, model has ${JSON.stringify(m.actual)}`)
+            .join('; ');
+          showNotification(
+            `⚠ Edit of "${component.label || componentId}" did not fully apply - ${detail}. ` +
+            `This is a dialog/model sync bug - please report it.`,
+            'error', 15000);
+        }
 
         // If editing a controller, update the game loop scram setpoints
         if (component.type === 'controller') {

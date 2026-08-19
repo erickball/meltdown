@@ -310,6 +310,31 @@ export class ConnectionDialog {
       this.bodyElement.appendChild(specGroup);
     }
 
+    // Diameter field - the friendlier way to size the line. Coupled to the
+    // flow area below via A = π d²/4: editing either recalculates the other.
+    const diameterGroup = document.createElement('div');
+    diameterGroup.className = 'form-group';
+    const diameterLabel = document.createElement('label');
+    diameterLabel.textContent = 'Inner Diameter (m)';
+    diameterLabel.setAttribute('for', 'connection-diameter');
+    diameterGroup.appendChild(diameterLabel);
+
+    const diameterInput = document.createElement('input');
+    diameterInput.type = 'number';
+    diameterInput.id = 'connection-diameter';
+    diameterInput.title = 'Editing the diameter recalculates the flow area, and vice versa';
+    diameterInput.value = '0.2523'; // same bore as the 0.05 m² default area
+    diameterInput.min = '0.03';
+    diameterInput.max = '3.6';
+    diameterInput.step = '0.005';
+    diameterGroup.appendChild(diameterInput);
+
+    const diameterHelp = document.createElement('div');
+    diameterHelp.className = 'help-text';
+    diameterHelp.textContent = 'Coupled to the flow area below (A = π d²/4)';
+    diameterGroup.appendChild(diameterHelp);
+    this.bodyElement.appendChild(diameterGroup);
+
     // Create flow area field
     const flowAreaGroup = document.createElement('div');
     flowAreaGroup.className = 'form-group';
@@ -459,24 +484,49 @@ export class ConnectionDialog {
     flowAreaInput.addEventListener('input', updatePipeStatus);
     lengthInput.addEventListener('input', updatePipeStatus);
 
-    // Apply the selected line spec: fill in the flow area and rating, and only
-    // allow direct edits when Custom is selected
+    // Bidirectional diameter <-> flow area coupling (A = π d²/4)
+    const syncDiameterFromArea = () => {
+      const area = parseFloat(flowAreaInput.value);
+      if (area > 0) diameterInput.value = String(+Math.sqrt(4 * area / Math.PI).toPrecision(4));
+    };
+    let areaDiameterSyncing = false;
+    diameterInput.addEventListener('input', () => {
+      if (areaDiameterSyncing) return;
+      const d = parseFloat(diameterInput.value);
+      if (d > 0) {
+        areaDiameterSyncing = true;
+        flowAreaInput.value = String(+(Math.PI * d * d / 4).toPrecision(4));
+        flowAreaInput.dispatchEvent(new Event('input')); // pipe status etc.
+        areaDiameterSyncing = false;
+      }
+    });
+    flowAreaInput.addEventListener('input', () => {
+      if (!areaDiameterSyncing) syncDiameterFromArea();
+    });
+
+    // Apply the selected line spec: fill in the diameter/flow area and
+    // rating, and only allow direct edits when Custom is selected
     const applySpec = () => {
       if (!specSelect) return;
       const spec = PIPE_SPECS.find(s => s.id === specSelect!.value);
       if (spec) {
         flowAreaInput.value = pipeSpecFlowArea(spec).toFixed(4);
         flowAreaInput.readOnly = true;
+        diameterInput.readOnly = true;
         flowAreaHelp.textContent = `Set by the line spec (${spec.diameter} m inner diameter)`;
+        diameterHelp.textContent = 'Set by the line spec';
         if (ratingInput) ratingInput.value = String(spec.pressureRating);
         if (ratingGroup) ratingGroup.style.display = 'none';
         if (specDesc) specDesc.textContent = `${spec.description}`;
       } else {
         flowAreaInput.readOnly = false;
+        diameterInput.readOnly = false;
         flowAreaHelp.textContent = 'Cross-sectional area of connection';
+        diameterHelp.textContent = 'Coupled to the flow area below (A = π d²/4)';
         if (ratingGroup) ratingGroup.style.display = '';
-        if (specDesc) specDesc.textContent = 'Custom line - set the flow area and pressure rating yourself.';
+        if (specDesc) specDesc.textContent = 'Custom line - set the diameter (or flow area) and pressure rating yourself.';
       }
+      syncDiameterFromArea();
       updatePipeStatus();
     };
     if (specSelect) {
@@ -758,6 +808,31 @@ export class ConnectionDialog {
     specGroup.appendChild(specDesc);
     this.bodyElement.appendChild(specGroup);
 
+    // Diameter field - coupled to the flow area below (A = π d²/4)
+    const equivDiameter = (area: number) => Math.sqrt(Math.max(area, 0) * 4 / Math.PI);
+    const diameterGroup = document.createElement('div');
+    diameterGroup.className = 'form-group';
+    const diameterLabel = document.createElement('label');
+    diameterLabel.textContent = 'Inner Diameter (m)';
+    diameterLabel.setAttribute('for', 'connection-diameter');
+    diameterGroup.appendChild(diameterLabel);
+
+    const diameterInput = document.createElement('input');
+    diameterInput.type = 'number';
+    diameterInput.id = 'connection-diameter';
+    diameterInput.title = 'Editing the diameter recalculates the flow area, and vice versa';
+    diameterInput.value = String(+equivDiameter(currentFlowArea).toPrecision(4));
+    diameterInput.min = '0.03';
+    diameterInput.max = '3.6';
+    diameterInput.step = '0.005';
+    diameterGroup.appendChild(diameterInput);
+
+    const diameterHelp = document.createElement('div');
+    diameterHelp.className = 'help-text';
+    diameterHelp.textContent = 'Coupled to the flow area below (A = π d²/4)';
+    diameterGroup.appendChild(diameterHelp);
+    this.bodyElement.appendChild(diameterGroup);
+
     // Flow area field
     const flowAreaGroup = document.createElement('div');
     flowAreaGroup.className = 'form-group';
@@ -777,28 +852,42 @@ export class ConnectionDialog {
 
     const flowAreaHelp = document.createElement('div');
     flowAreaHelp.className = 'help-text';
-    const equivDiameter = (area: number) => Math.sqrt(Math.max(area, 0) * 4 / Math.PI);
-    flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(currentFlowArea).toFixed(2)} m)`;
+    flowAreaHelp.textContent = 'Cross-sectional area of connection';
     flowAreaGroup.appendChild(flowAreaHelp);
     this.bodyElement.appendChild(flowAreaGroup);
 
-    // Update flow area help when input changes; a manual edit means the value
-    // no longer comes from the selected spec
-    flowAreaInput.addEventListener('input', () => {
-      const area = parseFloat(flowAreaInput.value) || 0;
-      flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(area).toFixed(2)} m)`;
+    // A manual edit of either coupled field means the value no longer comes
+    // from the selected spec - keep the pair and the spec dropdown in sync
+    const syncSpecFromArea = (area: number) => {
       const stillMatches = findMatchingPipeSpec(area);
       specSelect.value = stillMatches ? stillMatches.id : 'custom';
       specDesc.textContent = stillMatches ? stillMatches.description : '';
+    };
+    let areaDiameterSyncing = false;
+    flowAreaInput.addEventListener('input', () => {
+      const area = parseFloat(flowAreaInput.value) || 0;
+      if (!areaDiameterSyncing && area > 0) {
+        diameterInput.value = String(+equivDiameter(area).toPrecision(4));
+      }
+      syncSpecFromArea(area);
+    });
+    diameterInput.addEventListener('input', () => {
+      const d = parseFloat(diameterInput.value);
+      if (d > 0) {
+        areaDiameterSyncing = true;
+        flowAreaInput.value = String(+(Math.PI * d * d / 4).toPrecision(4));
+        flowAreaInput.dispatchEvent(new Event('input'));
+        areaDiameterSyncing = false;
+      }
     });
 
-    // Picking a spec fills the flow area
+    // Picking a spec fills the diameter and flow area
     specSelect.addEventListener('change', () => {
       const spec = PIPE_SPECS.find(s => s.id === specSelect.value);
       specDesc.textContent = spec ? spec.description : '';
       if (spec) {
         flowAreaInput.value = pipeSpecFlowArea(spec).toFixed(4);
-        flowAreaHelp.textContent = `Cross-sectional area (equivalent diameter ${equivDiameter(pipeSpecFlowArea(spec)).toFixed(2)} m)`;
+        diameterInput.value = String(+equivDiameter(pipeSpecFlowArea(spec)).toPrecision(4));
       }
     });
 

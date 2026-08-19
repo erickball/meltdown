@@ -45,6 +45,7 @@ import {
 } from '../simulation/gas-properties';
 import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
+import { hxIsVertical } from './component-properties';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -427,6 +428,10 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, pressurizer);
         (pressurizer as any).nqa1 = props.nqa1 ?? true;
+        // Heater bank capacity in W (the simulation node reads heaterCapacity;
+        // heaters start off until a controller or the operator drives them)
+        (pressurizer as any).heaterCapacity = (props.heaterPower ?? 2) * 1e6;
+        (pressurizer as any).sprayFlow = props.sprayFlow ?? 50; // kg/s
         if (props.initialNcg) {
           (pressurizer as any).initialNcg = props.initialNcg;
         }
@@ -487,6 +492,7 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, pipe);
         (pipe as any).nqa1 = props.nqa1 ?? false;
+        (pipe as any).roughness = props.roughness ?? 0.0001; // m
         if (props.initialNcg) {
           (pipe as any).initialNcg = props.initialNcg;
         }
@@ -546,6 +552,9 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, checkValve);
         (checkValve as any).nqa1 = props.nqa1 ?? false;
+        // valveType stays 'check' (selects behavior + dialog); the
+        // swing/lift/tilting-disc flavor is stored separately
+        (checkValve as any).checkValveType = props.type || 'swing';
         break;
       }
 
@@ -649,6 +658,10 @@ export class ConstructionManager {
         // Store orientation and matchUpstream for factory to use
         (pump as any).orientation = orientation;
         (pump as any).matchUpstream = matchUpstream;
+        // Dialog-visible ratings not otherwise used by the drawn shape
+        (pump as any).pumpType = props.type || 'centrifugal';
+        (pump as any).efficiency = (props.efficiency ?? 85) / 100; // % to 0-1
+        (pump as any).npshRequired = props.npshRequired ?? 5; // m
 
         this.plantState.components.set(id, pump);
         (pump as any).nqa1 = props.nqa1 ?? false;
@@ -731,6 +744,9 @@ export class ConstructionManager {
         // Store pressure ratings for wall thickness calculations
         (hx as any).tubePressureRating = tubePressureRating;
         (hx as any).shellPressureRating = shellPressureRating;
+        // Explicit orientation (width/height encode it too, but ambiguously
+        // for squat shells - see hxIsVertical)
+        (hx as any).orientation = isVertical ? 'vertical' : 'horizontal';
 
         // Store additional properties for simulation (can be accessed via component)
         (hx as any).heatTransferArea = heatTransferArea;
@@ -870,6 +886,9 @@ export class ConstructionManager {
         };
         // Add pressure rating for pipe creation
         (turbineGen as any).pressureRating = turbinePressureRating;
+        // Dialog round-trip: the dialog edits turbineEfficiency; 'efficiency'
+        // is the simulation-facing alias kept in sync by updateComponent
+        (turbineGen as any).turbineEfficiency = eta_t;
 
         this.plantState.components.set(id, turbineGen);
         (turbineGen as any).nqa1 = props.nqa1 ?? false;
@@ -1136,6 +1155,7 @@ export class ConstructionManager {
 
         this.plantState.components.set(id, condenser);
         (condenser as any).nqa1 = props.nqa1 ?? false;
+        (condenser as any).includesPump = !!props.includesPump;
         if (props.initialNcg) {
           (condenser as any).initialNcg = props.initialNcg;
         }
@@ -2865,7 +2885,7 @@ export class ConstructionManager {
    * because a connection to a missing port cannot be built into a flow path.
    */
   private setHeatExchangerBundleCount(hx: HeatExchangerComponent, bundleCount: number): void {
-    const isVertical = (hx.height ?? 0) >= (hx.width ?? 0);
+    const isVertical = hxIsVertical(hx as unknown as Record<string, any>);
     const shellDiameter = isVertical ? hx.width : hx.height;
     const shellLength = isVertical ? hx.height : hx.width;
     const oldConnections = new Map(hx.ports.map(p => [p.id, p.connectedTo]));
@@ -2960,7 +2980,7 @@ export class ConstructionManager {
     if (properties.height !== undefined) {
       component.height = properties.height;
     }
-    if (properties.diameter !== undefined) {
+    if (properties.diameter !== undefined && component.type !== 'tank') {
       component.diameter = properties.diameter;
     }
     if (properties.length !== undefined) {
@@ -2973,12 +2993,40 @@ export class ConstructionManager {
         component.type !== 'heatExchanger' && component.type !== 'reactorVessel') {
       component.pressureRating = properties.pressureRating;
     }
-    if (properties.volume !== undefined) {
-      // For tanks, calculate width from volume and height
-      if (component.type === 'tank' && component.height) {
-        const radius = Math.sqrt(properties.volume / (Math.PI * component.height));
-        component.width = radius * 2;
+    // Tank/pressurizer geometry: the drawn width (= diameter) and height are
+    // the single source of truth; the simulation derives the cylinder volume
+    // from them. Volume is authoritative when submitted (the dialog keeps the
+    // diameter field consistent with it); a stray stored 'volume' from a
+    // loaded preset would silently override the drawn geometry in the
+    // simulation, so it is removed once the user edits the geometry here.
+    if (component.type === 'tank' && component.fuelRodCount === undefined) {
+      if (properties.volume !== undefined && component.height) {
+        component.width = 2 * Math.sqrt(properties.volume / (Math.PI * component.height));
+        delete component.volume;
+      } else if (properties.diameter !== undefined) {
+        component.width = properties.diameter;
+        delete component.volume;
       }
+    }
+    // Condenser geometry: square footprint, V = width² × height
+    if (component.type === 'condenser' && properties.volume !== undefined && component.height) {
+      component.width = Math.sqrt(properties.volume / component.height);
+      delete component.volume;
+    }
+    // Pressurizer heaters: dialog edits MW, simulation reads heaterCapacity in W
+    if (properties.heaterPower !== undefined) {
+      component.heaterCapacity = properties.heaterPower * 1e6;
+    }
+    if (properties.sprayFlow !== undefined) {
+      component.sprayFlow = properties.sprayFlow;
+    }
+    if (properties.roughness !== undefined) {
+      component.roughness = properties.roughness;
+    }
+    // matchUpstream (valves, pumps): factory overrides initial P/T from the
+    // upstream node when set
+    if (properties.matchUpstream !== undefined) {
+      component.matchUpstream = properties.matchUpstream;
     }
 
     // Pipe-specific endpoint properties
@@ -3026,12 +3074,29 @@ export class ConstructionManager {
       }
     }
 
-    // Valve-specific properties
+    // Valve-specific properties. Check valves keep valveType === 'check'
+    // (that's what selects their behavior and dialog) - their swing/lift/
+    // tilting-disc flavor is stored separately. Relief valves and PORVs have
+    // no type selector at all; writing the generic 'type' into valveType for
+    // them would silently turn them into ordinary valves.
     if (properties.type !== undefined && component.type === 'valve') {
-      component.valveType = properties.type;
+      if (component.valveType === 'check') {
+        component.checkValveType = properties.type;
+      } else if (component.valveType !== 'relief' && component.valveType !== 'porv') {
+        component.valveType = properties.type;
+      }
     }
     if (properties.initialPosition !== undefined && component.type === 'valve') {
-      component.opening = properties.initialPosition / 100; // % to 0-1
+      if (component.valveType === 'porv') {
+        // PORV initial state is a select: 'auto' | 'open' | 'closed'
+        component.controlMode = properties.initialPosition;
+        component.opening = properties.initialPosition === 'open' ? 1 : 0;
+      } else {
+        component.opening = properties.initialPosition / 100; // % to 0-1
+      }
+    }
+    if (properties.hasBlockValve !== undefined && component.type === 'valve') {
+      component.hasBlockValve = properties.hasBlockValve;
     }
 
     // Relief valve / PORV specific
@@ -3063,6 +3128,20 @@ export class ConstructionManager {
     }
     if (properties.initialState !== undefined && component.type === 'pump') {
       component.running = properties.initialState === 'on';
+    }
+    if (component.type === 'pump') {
+      if (properties.type !== undefined) {
+        component.pumpType = properties.type; // centrifugal / positive displacement
+      }
+      if (properties.speed !== undefined) {
+        component.speed = properties.speed / 3600; // RPM to fraction of 3600
+      }
+      if (properties.efficiency !== undefined) {
+        component.efficiency = properties.efficiency / 100; // % to 0-1
+      }
+      if (properties.npshRequired !== undefined) {
+        component.npshRequired = properties.npshRequired;
+      }
     }
     if (properties.orientation !== undefined && component.type === 'pump') {
       // Store orientation - rendering handles transforms internally
@@ -3149,34 +3228,74 @@ export class ConstructionManager {
       component.realTubeCount = properties.tubeCount;
       component.tubeCount = Math.min(properties.tubeCount, 10);
     }
-    if (properties.shellDiameter !== undefined) {
-      component.width = properties.shellDiameter;
-    }
-    if (properties.shellLength !== undefined) {
-      component.height = properties.shellLength;
-    }
-    if (properties.hxType !== undefined) {
-      component.hxType = properties.hxType;
-    }
-    if (properties.plenumLength !== undefined) {
-      // Cap plenum length to shell radius (use width for vertical, height for horizontal orientation)
-      const shellDiam = component.width < component.height ? component.width : component.height;
-      const maxPlenumLen = shellDiam / 2;
-      component.plenumLength = Math.min(properties.plenumLength, maxPlenumLen);
-    }
-    if (properties.tubePressure !== undefined) {
-      component.tubePressureRating = properties.tubePressure;
-    }
-    if (properties.shellPressure !== undefined) {
-      component.shellPressureRating = properties.shellPressure;
-      component.pressureRating = properties.shellPressure; // For wall thickness calc
-    }
-    if (properties.tubeOD !== undefined) {
-      component.tubeOD = properties.tubeOD / 1000; // mm to m
-    }
-    if (properties.bundleCount !== undefined && component.type === 'heatExchanger') {
-      const newCount = Math.max(1, Math.round(properties.bundleCount));
-      if (newCount !== hxBundleCount(component as { bundleCount?: number })) {
+    if (component.type === 'heatExchanger') {
+      // Orientation is encoded in which of width/height is the shell
+      // diameter (vertical: width = diameter, height = length; horizontal:
+      // swapped - same convention as setHeatExchangerBundleCount and the
+      // read path in component-properties.ts)
+      const wasVertical = hxIsVertical(component);
+      const oldShellDiam = wasVertical ? component.width : component.height;
+      const oldShellLen = wasVertical ? component.height : component.width;
+      const isVertical = properties.orientation !== undefined
+        ? properties.orientation === 'vertical'
+        : wasVertical;
+      const shellDiam = properties.shellDiameter ?? oldShellDiam;
+      const shellLen = properties.shellLength ?? oldShellLen;
+      component.width = isVertical ? shellDiam : shellLen;
+      component.height = isVertical ? shellLen : shellDiam;
+      component.orientation = isVertical ? 'vertical' : 'horizontal';
+
+      if (properties.hxType !== undefined) {
+        component.hxType = properties.hxType;
+      }
+      if (properties.tubeModel !== undefined) {
+        if (properties.tubeModel === 'moving-boundary') {
+          component.tubeModel = 'moving-boundary';
+        } else {
+          delete component.tubeModel;
+        }
+      }
+      if (properties.plenumLength !== undefined) {
+        // Cap plenum length to shell radius (semi-ellipsoid can't exceed the
+        // diameter it matches)
+        component.plenumLength = Math.min(properties.plenumLength, shellDiam / 2);
+      }
+      if (properties.tubePressure !== undefined) {
+        component.tubePressureRating = properties.tubePressure;
+      }
+      if (properties.shellPressure !== undefined) {
+        component.shellPressureRating = properties.shellPressure;
+        component.pressureRating = properties.shellPressure; // For wall thickness calc
+      }
+      if (properties.tubeOD !== undefined) {
+        component.tubeOD = properties.tubeOD / 1000; // mm to m
+      }
+
+      // Recompute the derived engineering quantities the simulation reads
+      // (same formulas as creation) so an edit actually changes the physics
+      const tubeOD_m = component.tubeOD ?? 0.019;
+      const P_tube = (component.tubePressureRating ?? 150) * 1e5;
+      const tubeThickness_m = Math.max(0.0005, P_tube * (tubeOD_m / 2) / (137e6 - 0.6 * P_tube));
+      const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
+      const tubeCount = component.realTubeCount ?? 3000;
+      const hxType = component.hxType || 'utube';
+      const tubeLength = hxType === 'utube' ? shellLen * 1.8 : shellLen;
+      component.heatTransferArea = Math.PI * tubeOD_m * tubeLength * tubeCount;
+      component.tubeSideVolume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * tubeCount;
+      const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
+      component.shellSideVolume = Math.max(0,
+        shellVolume - Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * tubeCount);
+      component.tubeID = tubeID_m;
+
+      // Rebuild the nozzles when the drawn geometry changed so they stay on
+      // the shell (connections survive by port id)
+      const geometryChanged = shellDiam !== oldShellDiam || shellLen !== oldShellLen ||
+        isVertical !== wasVertical || properties.plenumLength !== undefined ||
+        properties.hxType !== undefined;
+      if (properties.bundleCount !== undefined || geometryChanged) {
+        const newCount = properties.bundleCount !== undefined
+          ? Math.max(1, Math.round(properties.bundleCount))
+          : hxBundleCount(component as { bundleCount?: number });
         this.setHeatExchangerBundleCount(component as HeatExchangerComponent, newCount);
       }
     }
@@ -3193,6 +3312,11 @@ export class ConstructionManager {
     }
     if (properties.operatingPressure !== undefined) {
       component.operatingPressure = properties.operatingPressure * 1e5; // bar to Pa
+    }
+    // Record-keeping only: the condensate pump is created (or not) when the
+    // condenser is first placed; toggling later does not add/remove it
+    if (properties.includesPump !== undefined && component.type === 'condenser') {
+      component.includesPump = properties.includesPump;
     }
 
     // Turbine/turbine-driven-pump specific
@@ -3223,6 +3347,23 @@ export class ConstructionManager {
     }
     if (properties.stages !== undefined) {
       component.stages = properties.stages;
+    }
+    if (properties.ratedPumpFlow !== undefined && component.type === 'turbine-driven-pump') {
+      component.ratedPumpFlow = properties.ratedPumpFlow;
+    }
+    // Turbine-generator / turbine-driven-pump orientation: the port layouts
+    // are mirror-symmetric in x, so flipping orientation mirrors every port
+    if (properties.orientation !== undefined &&
+        (component.type === 'turbine-generator' || component.type === 'turbine-driven-pump') &&
+        properties.orientation !== component.orientation) {
+      component.orientation = properties.orientation;
+      for (const port of component.ports as Port[]) {
+        port.position.x = -port.position.x;
+      }
+    }
+    // Switchyard wiring
+    if (properties.connectedGenerator !== undefined && component.type === 'switchyard') {
+      component.connectedGeneratorId = properties.connectedGenerator || undefined;
     }
 
     // Turbine extraction ports

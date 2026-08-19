@@ -12,6 +12,7 @@ import {
   saveCustomPreset,
   deleteCustomPreset
 } from './component-presets';
+import { readComponentOption, mapComponentTypeToDefinition } from './component-properties';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -122,6 +123,9 @@ export interface ComponentOption {
   // For selects populated at dialog-open time from the current plant
   // (key into the dynamicChoices map passed via setDynamicChoices)
   dynamicOptions?: string;
+  // Excluded from the dialog<->model round-trip audit: the model legitimately
+  // recomputes this field from other inputs (document why at each use)
+  syncExempt?: boolean;
 }
 
 export const componentDefinitions: Record<string, {
@@ -135,8 +139,9 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'Tank' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Height of tank bottom above ground level' },
-      { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 5000, step: 0.1, unit: 'm³' },
-      { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm' },
+      { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 5000, step: 0.1, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 1.78, min: 0.05, max: 60, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical tank. Coupled to volume: editing either one recalculates the other from the height.' },
+      { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm', help: 'Changing height keeps the volume and recalculates the diameter' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 0.1, max: 600, step: 10, unit: 'bar', help: 'Must be at least enough to hold the hydrostatic head of water' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
@@ -176,8 +181,9 @@ export const componentDefinitions: Record<string, {
       { name: 'name', type: 'text', label: 'Name', default: 'Pressurizer' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true },
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 10, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Typically elevated above hot leg' },
-      { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³' },
-      { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm' },
+      { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
+      { name: 'diameter', type: 'number', label: 'Diameter', default: 2.06, min: 0.05, max: 10, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical shell. Coupled to volume: editing either one recalculates the other from the height.' },
+      { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm', help: 'Changing height keeps the volume and recalculates the diameter' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 175, min: 0.1, max: 600, step: 5, unit: 'bar', help: 'PWR pressurizers typically run ~172 bar. Anything goes - wall thickness, cost, and the burst point follow the rating you pick.' },
       { name: 'heaterPower', type: 'number', label: 'Heater Power', default: 2, min: 0, max: 10, step: 0.5, unit: 'MW' },
       { name: 'sprayFlow', type: 'number', label: 'Max Spray Flow', default: 50, min: 0, max: 200, step: 10, unit: 'kg/s' },
@@ -278,7 +284,9 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pipe' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
-      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Calculated from endpoint positions when editing' },
+      // syncExempt: the model recomputes length from the endpoint positions,
+      // so a typed length is only a request, not the stored value
+      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Calculated from endpoint positions when editing', syncExempt: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.5, min: 0.05, max: 2, step: 0.05, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
       // Start endpoint (inlet)
@@ -621,7 +629,7 @@ export const componentDefinitions: Record<string, {
       { name: 'operatingPressure', type: 'number', label: 'Operating Pressure', default: 0.05, min: 0.01, max: 1, step: 0.01, unit: 'bar' },
       { name: 'coolingWaterTemp', type: 'number', label: 'Cooling Water Temp', default: 20, min: 5, max: 40, step: 5, unit: '°C' },
       { name: 'coolingWaterFlow', type: 'number', label: 'Cooling Water Flow', default: 50000, min: 1000, max: 100000, step: 1000, unit: 'kg/s' },
-      { name: 'includesPump', type: 'checkbox', label: 'Include Condensate Pump', default: true, help: 'Automatically includes a condensate pump' },
+      { name: 'includesPump', type: 'checkbox', label: 'Include Condensate Pump', default: true, help: 'Automatically includes a condensate pump (applies when the condenser is first placed; editing later does not add or remove the pump)' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Air ingress or other NCGs in condenser (typically evacuated)' },
       // Calculated fields
       { name: 'width', type: 'calculated', label: 'Width', default: 0, unit: 'm',
@@ -1586,6 +1594,9 @@ export class ComponentDialog {
 
     // Set up two-phase P/T coupling if this component has phase selection
     this.setupTwoPhaseCouplng();
+
+    // Keep volume <-> diameter mutually consistent (tanks, pressurizers)
+    this.setupGeometryCoupling();
   }
 
   /**
@@ -1711,6 +1722,59 @@ export class ComponentDialog {
 
     section.appendChild(saveRow);
     return section;
+  }
+
+  /**
+   * Live coupling between a cylindrical component's volume and diameter
+   * inputs (tanks, pressurizers): editing either recalculates the other via
+   * V = π (d/2)² h, and editing the height keeps the volume while updating
+   * the diameter. The synced value is written at 6 significant digits so the
+   * pair stays consistent well inside the round-trip audit tolerance.
+   * No-op on forms that lack the volume/diameter/height trio.
+   */
+  private setupGeometryCoupling(): void {
+    const volumeInput = document.getElementById('option-volume') as HTMLInputElement | null;
+    const diameterInput = document.getElementById('option-diameter') as HTMLInputElement | null;
+    const heightInput = document.getElementById('option-height') as HTMLInputElement | null;
+    if (!volumeInput || !diameterInput || !heightInput) return;
+    // Only couple real inputs (on some forms 'diameter' is a calculated div)
+    if (volumeInput.tagName !== 'INPUT' || diameterInput.tagName !== 'INPUT') return;
+
+    const fmt = (v: number) => String(+v.toPrecision(6));
+    let syncing = false;
+    // Update the sibling and let its own listeners (price estimate,
+    // calculated column) see the new value
+    const setValue = (input: HTMLInputElement, value: number) => {
+      if (!Number.isFinite(value) || value <= 0) return;
+      syncing = true;
+      input.value = fmt(value);
+      input.dispatchEvent(new Event('input'));
+      syncing = false;
+    };
+
+    const height = () => parseFloat(heightInput.value);
+    const diameterFromVolume = () => {
+      const v = parseFloat(volumeInput.value);
+      const h = height();
+      if (v > 0 && h > 0) setValue(diameterInput, 2 * Math.sqrt(v / (Math.PI * h)));
+    };
+    const volumeFromDiameter = () => {
+      const d = parseFloat(diameterInput.value);
+      const h = height();
+      if (d > 0 && h > 0) setValue(volumeInput, Math.PI * Math.pow(d / 2, 2) * h);
+    };
+
+    volumeInput.addEventListener('input', () => { if (!syncing) diameterFromVolume(); });
+    diameterInput.addEventListener('input', () => { if (!syncing) volumeFromDiameter(); });
+    // Height changes preserve the volume (matches the model's write path)
+    heightInput.addEventListener('input', () => { if (!syncing) diameterFromVolume(); });
+
+    // Initial pass: the volume is authoritative on open (presets and stored
+    // components define volume; the diameter field is derived from it).
+    // Refresh initialValue afterwards so the derived prefill still counts as
+    // untouched for range validation.
+    diameterFromVolume();
+    diameterInput.dataset.initialValue = diameterInput.value;
   }
 
   /**
@@ -2362,59 +2426,10 @@ export class ComponentDialog {
 
   /**
    * Map component type from PlantComponent to definition key
-   * For vessels, detect if it's a core (has fuelRodCount) vs pressurizer
+   * (shared with the sync audit - see component-properties.ts)
    */
   private mapComponentTypeToDefinition(type: string, component?: Record<string, any>): string {
-    // Special case: controller can be scram or pid
-    if (type === 'controller' && component) {
-      return component.controllerType === 'pid' ? 'pid-controller' : 'scram-controller';
-    }
-
-    // Special case: vessel can be either pressurizer or core
-    if (type === 'vessel' && component) {
-      // If it has fuelRodCount or controlRodCount, it's a core
-      if (component.fuelRodCount !== undefined || component.controlRodCount !== undefined) {
-        return 'core';
-      }
-      return 'pressurizer';
-    }
-
-    // Special case: valve can be check-valve, relief-valve, or porv based on valveType
-    if (type === 'valve' && component) {
-      if (component.valveType === 'check') {
-        return 'check-valve';
-      }
-      if (component.valveType === 'relief') {
-        return 'relief-valve';
-      }
-      if (component.valveType === 'porv') {
-        return 'porv';
-      }
-      // Otherwise it's a standard valve (gate, globe, ball, butterfly)
-      return 'valve';
-    }
-
-    const mapping: Record<string, string> = {
-      'tank': 'tank',
-      'vessel': 'pressurizer',
-      'reactorVessel': 'reactor-vessel',
-      'pipe': 'pipe',
-      'valve': 'valve',
-      'check-valve': 'check-valve',
-      'relief-valve': 'relief-valve',
-      'porv': 'porv',
-      'pump': 'pump',
-      'heatExchanger': 'heat-exchanger',
-      'condenser': 'condenser',
-      'turbine-generator': 'turbine-generator',
-      'turbine-driven-pump': 'turbine-driven-pump',
-      'fuelAssembly': 'core',
-      'controller': 'scram-controller',
-      'switchyard': 'switchyard',
-      'building': 'building',
-      'crossVessel': 'cross-vessel'
-    };
-    return mapping[type] || type;
+    return mapComponentTypeToDefinition(type, component);
   }
 
   /**
@@ -2750,6 +2765,9 @@ export class ComponentDialog {
 
     // Set up two-phase P/T coupling if this component has phase selection
     this.setupTwoPhaseCouplng();
+
+    // Keep volume <-> diameter mutually consistent (tanks, pressurizers)
+    this.setupGeometryCoupling();
   }
 
   /**
@@ -2781,168 +2799,99 @@ export class ComponentDialog {
   }
 
   /**
-   * Get existing value from component, handling property name mapping
+   * Get existing value from component, handling property name mapping.
+   * Delegates to the shared read path in component-properties.ts so the
+   * dialog, the cost panel, and the round-trip sync audit all agree.
    */
   private getExistingValue(optionName: string, component: Record<string, any>, defaultValue: any): any {
-    // PID controller fields live in the nested pid config with SI units
-    if (component.controllerType === 'pid' && component.pid) {
-      const pid = component.pid;
-      const sKind = pid.sensor?.kind;
-      const aKind = pid.actuator?.kind;
-      // This panel edits ONE signal against ONE number. A controller whose
-      // measurement or setpoint is an expression cannot be represented here,
-      // so its fields read blank rather than NaN - and the panel must not
-      // offer to overwrite what it cannot show. (The expression editor is the
-      // piece that replaces this; until then, edit those in the preset.)
-      const sp = typeof pid.setpoint === 'number' ? pid.setpoint : undefined;
-      switch (optionName) {
-        case 'sensorKind': return sKind;
-        case 'sensorNode':
-        case 'sensorConnection': return pid.sensor?.targetId ?? '';
-        case 'setpointLevel': if (sKind === 'node-level') return sp; break;
-        case 'setpointPressure': if (sKind === 'node-pressure') return sp === undefined ? undefined : sp / 1e5; break;
-        case 'setpointTemperature': if (sKind === 'node-temperature') return sp === undefined ? undefined : sp - 273.15; break;
-        case 'setpointFlow': if (sKind === 'connection-flow') return sp; break;
-        case 'setpointPower': if (sKind === 'reactor-power') return sp === undefined ? undefined : sp * 100; break;
-        case 'actuatorKind': return aKind;
-        case 'actuatorValve':
-        case 'actuatorPump':
-        case 'actuatorTurbine':
-        case 'actuatorHeaterNode': return pid.actuator?.targetId ?? '';
-        case 'heaterCapacityMW':
-          if (aKind === 'heater-power') return (pid.actuator?.max ?? 2e6) / 1e6;
-          break;
-        case 'invert': return !!pid.invert;
-        case 'aggressiveness': return pid.aggressiveness ?? 1;
-        case 'strokeTime': {
-          const min = pid.actuator?.min ?? 0;
-          const max = pid.actuator?.max ?? 1;
-          const rl = pid.actuator?.rateLimit ?? 0.1;
-          return Math.round((max - min) / Math.max(rl, 1e-12));
-        }
-        case 'powerLimitPct': return (pid.powerLimit ?? 1) * 100;
-        case 'outputMinPct': return (pid.actuator?.min ?? 0) * 100;
-        case 'outputMaxPct': return (pid.actuator?.max ?? 1) * 100;
-      }
-    }
-
-    // Direct property match with unit conversions for pressure values stored in Pa
-    if (component[optionName] !== undefined) {
-      const value = component[optionName];
-      // Convert Pa to bar for pressure fields
-      if (optionName === 'crackingPressure' || optionName === 'setpoint') {
-        return value / 1e5;  // Pa to bar
-      }
-      // Convert W to MW for power fields (turbine ratedPower, core thermalPower, condenser coolingCapacity stored in W)
-      if (optionName === 'ratedPower' || optionName === 'thermalPower' || optionName === 'coolingCapacity') {
-        return value / 1e6;  // W to MW
-      }
-      // Convert K to C for temperature fields stored in K
-      if (optionName === 'coolingWaterTemp') {
-        return value - 273.15;  // K to C
-      }
-      // Convert Pa to bar for pressure fields
-      if (optionName === 'operatingPressure') {
-        return value / 1e5;  // Pa to bar
-      }
-      // Convert 0-1 to % for efficiency, valve, and blowdown fields
-      if (optionName === 'turbineEfficiency' || optionName === 'generatorEfficiency' ||
-          optionName === 'pumpEfficiency' || optionName === 'governorValve' || optionName === 'efficiency' ||
-          optionName === 'blowdown') {
-        return value * 100;  // 0-1 to %
-      }
-      // Convert m to mm for tube OD (stored in meters)
-      if (optionName === 'tubeOD') {
-        return value * 1000;  // m to mm
-      }
-      return value;
-    }
-
-    // Special case: tubeCount should read from realTubeCount for HX components
-    if (optionName === 'tubeCount' && component.realTubeCount !== undefined) {
-      return component.realTubeCount;
-    }
-
-    // Special case: HX shellDiameter/shellLength mapping depends on orientation
-    // For vertical HX: width=diameter, height=length
-    // For horizontal HX: width=length, height=diameter (swapped)
-    if (component.type === 'heatExchanger') {
-      const isHorizontal = component.rotation === 90 || component.rotation === 270;
-      if (optionName === 'shellDiameter') {
-        return isHorizontal ? component.height : component.width;
-      }
-      if (optionName === 'shellLength') {
-        return isHorizontal ? component.width : component.height;
-      }
-    }
-
-    // Map option names to component properties
-    const propertyMappings: Record<string, string[]> = {
-      'name': ['label'],
-      'type': ['valveType', 'hxType', 'pumpType'],
-      'initialPosition': ['opening'],
-      'initialState': ['running'],
-      'initialPressure': ['fluid.pressure'],
-      'initialTemperature': ['fluid.temperature'],
-      'initialPhase': ['fluid.phase'],
-      'initialQuality': ['fluid.quality'],
-      'initialLevel': ['fillLevel'],
-      'ratedFlow': ['ratedFlow'],
-      'ratedHead': ['ratedHead'],
-      'volume': ['volume'],
-      // Pipe endpoint mappings
-      'startX': ['position.x'],
-      'startY': ['position.y'],
-      'endX': ['endPosition.x'],
-      'endY': ['endPosition.y'],
-      // Core-specific mappings
-      'diameter': ['innerDiameter'],
-      'controlRodBanks': ['controlRodCount'],
-      'initialRodPosition': ['controlRodPosition'],
-      // Controller setpoint mappings
-      'connectedCore': ['connectedCoreId'],
-      'highPower': ['setpoints.highPower'],
-      'lowPower': ['setpoints.lowPower'],
-      'highFuelTemp': ['setpoints.highFuelTemp'],
-      'lowCoolantFlow': ['setpoints.lowCoolantFlow'],
-      // Turbine-specific mappings
-      'inletPressure': ['inletFluid.pressure'],
-      'exhaustPressure': ['outletFluid.pressure'],
-      // Building-specific mappings
-      'buildingShape': ['shape'],
-    };
-
-    const mappings = propertyMappings[optionName];
-    if (mappings) {
-      for (const prop of mappings) {
-        if (prop.includes('.')) {
-          // Nested property like 'fluid.pressure'
-          const parts = prop.split('.');
-          let value = component;
-          for (const part of parts) {
-            value = value?.[part];
-          }
-          if (value !== undefined) {
-            // Convert units if needed
-            if (prop === 'fluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
-            if (prop === 'fluid.temperature') return (value as unknown as number) - 273; // K to C
-            if (prop === 'setpoints.highFuelTemp') return (value as unknown as number) * 100; // 0-1 to %
-            if (prop === 'inletFluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
-            if (prop === 'outletFluid.pressure') return (value as unknown as number) / 1e5; // Pa to bar
-            return value;
-          }
-        } else if (component[prop] !== undefined) {
-          // Handle special conversions
-          if (prop === 'opening') return component[prop] * 100; // 0-1 to %
-          if (prop === 'running') return component[prop] ? 'on' : 'off';
-          if (prop === 'fillLevel') return component[prop] * 100; // 0-1 to %
-          // Same convention everywhere: 0 = fully inserted, 1 = fully withdrawn
-          if (prop === 'controlRodPosition') return component[prop] * 100;
-          return component[prop];
-        }
-      }
-    }
-
-    return defaultValue;
+    return readComponentOption(optionName, component, defaultValue);
   }
+}
+
+/**
+ * One dialog field that did not survive the round trip through the model.
+ */
+export interface SyncMismatch {
+  name: string;
+  label: string;
+  submitted: any;
+  actual: any;
+}
+
+/** Normalize an NCG object for comparison: drop zero/undefined species. */
+function normalizeNcg(value: any): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (value && typeof value === 'object') {
+    for (const key of Object.keys(value).sort()) {
+      const v = value[key];
+      if (typeof v === 'number' && v > 0) out[key] = v;
+    }
+  }
+  return out;
+}
+
+function optionValuesMatch(option: ComponentOption, submitted: any, actual: any): boolean {
+  if (option.type === 'number') {
+    const a = Number(submitted);
+    const b = Number(actual);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return !Number.isFinite(a) && !Number.isFinite(b);
+    // Relative 1e-4: loose enough for display-precision rounding of coupled
+    // fields (volume<->diameter sync at 6 significant digits), tight enough
+    // to catch every unit-conversion or offset bug (K vs °C, Pa vs bar, %).
+    return Math.abs(a - b) <= Math.max(1e-9, 1e-4 * Math.max(Math.abs(a), Math.abs(b)));
+  }
+  if (option.type === 'checkbox') {
+    return Boolean(submitted) === Boolean(actual);
+  }
+  if (option.type === 'ncg') {
+    return JSON.stringify(normalizeNcg(submitted)) === JSON.stringify(normalizeNcg(actual));
+  }
+  return String(submitted ?? '') === String(actual ?? '');
+}
+
+/**
+ * Round-trip audit: after an edit has been applied to the model, re-read
+ * every dialog option from the component and compare it against what the
+ * dialog submitted. Any surviving difference means the write path
+ * (ConstructionManager.updateComponent) and the read path
+ * (readComponentOption) disagree - i.e. the edit silently didn't stick, or
+ * would reopen showing something else. Callers should surface mismatches
+ * LOUDLY (anti-robustness principle): every entry returned here is a bug or
+ * an intentional model-side adjustment the user must be told about.
+ *
+ * Fields hidden by dependsOn at the submitted values are skipped (their
+ * values are not meant to be applied), as are options marked syncExempt
+ * (documented one-way fields, e.g. pipe length which is recomputed from the
+ * endpoints).
+ */
+export function auditComponentEditSync(
+  component: Record<string, any>,
+  submitted: Record<string, any>
+): SyncMismatch[] {
+  const definitionKey = mapComponentTypeToDefinition(component.type, component);
+  const definition = componentDefinitions[definitionKey];
+  if (!definition) return [];
+
+  const mismatches: SyncMismatch[] = [];
+  for (const option of definition.options) {
+    if (option.type === 'calculated' || option.syncExempt) continue;
+    const sub = submitted[option.name];
+    if (sub === undefined) continue;
+
+    // Skip fields that were hidden by dependsOn - their values are inert
+    if (option.dependsOn) {
+      const controlling = submitted[option.dependsOn.field];
+      const dep = option.dependsOn.value;
+      const active = Array.isArray(dep)
+        ? dep.some(v => String(v) === String(controlling))
+        : String(dep) === String(controlling);
+      if (!active) continue;
+    }
+
+    const actual = readComponentOption(option.name, component, option.default);
+    if (!optionValuesMatch(option, sub, actual)) {
+      mismatches.push({ name: option.name, label: option.label, submitted: sub, actual });
+    }
+  }
+  return mismatches;
 }

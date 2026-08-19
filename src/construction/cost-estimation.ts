@@ -1208,11 +1208,26 @@ export function estimatePlantComponentCost(
   if (costType === 'turbine-generator') {
     costProps.ratedPower = costProps.ratedPower / 1e6;
   }
+  if (costType === 'tank' || costType === 'pressurizer') {
+    // Tanks store drawn geometry, not volume - derive the cylinder volume the
+    // estimator expects (an explicit stored volume from a preset wins)
+    costProps.volume = component.volume ??
+      Math.PI * Math.pow((component.width ?? 0) / 2, 2) * (component.height ?? 0);
+    if (component.heaterCapacity !== undefined) {
+      costProps.heaterPower = component.heaterCapacity / 1e6; // W to MW
+    }
+  }
   if (costType === 'condenser') {
     costProps.coolingCapacity = costProps.coolingCapacity / 1e6;
+    // Square footprint: V = width² × height (condensers never store volume)
+    costProps.volume = (component.width ?? 0) * (component.width ?? 0) * (component.height ?? 0);
   }
   if (costType === 'heat-exchanger') {
-    const isHorizontal = component.rotation === 90 || component.rotation === 270;
+    // Orientation: explicit field on newer components, aspect ratio on older
+    // ones (matches hxIsVertical in component-properties.ts)
+    const isHorizontal = component.orientation !== undefined
+      ? component.orientation === 'horizontal'
+      : (component.height ?? 0) < (component.width ?? 0);
     costProps.shellDiameter = isHorizontal ? component.height : component.width;
     costProps.shellLength = isHorizontal ? component.width : component.height;
     if (component.tubeOD) {
