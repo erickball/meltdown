@@ -191,6 +191,51 @@ export class StateHistory {
   }
 
   /**
+   * Everything needed to persist the rewind history with a saved game.
+   * Returned by reference - the caller hands it to IndexedDB, which
+   * structured-clones it (Maps included), so no JSON round trip is needed.
+   */
+  exportForSave(): {
+    snapshots: StateSnapshot[];
+    dtLogStep: number[];
+    dtLogTime: number[];
+    dtLogDt: number[];
+  } {
+    return {
+      snapshots: this.snapshots,
+      dtLogStep: this.dtLogStep,
+      dtLogTime: this.dtLogTime,
+      dtLogDt: this.dtLogDt,
+    };
+  }
+
+  /**
+   * Replace this history with a previously exported one (loading a save).
+   * Rebuilds the second-marker index; position resets to the live head.
+   */
+  importFromSave(data: {
+    snapshots: StateSnapshot[];
+    dtLogStep: number[];
+    dtLogTime: number[];
+    dtLogDt: number[];
+  }): void {
+    if (!Array.isArray(data.snapshots) || !Array.isArray(data.dtLogStep)) {
+      throw new Error('[StateHistory] Malformed saved history - refusing to import');
+    }
+    this.snapshots = data.snapshots;
+    this.dtLogStep = data.dtLogStep;
+    this.dtLogTime = data.dtLogTime;
+    this.dtLogDt = data.dtLogDt;
+    this.secondMarkers.clear();
+    for (const s of this.snapshots) {
+      if (s.isSecondMarker) this.secondMarkers.add(Math.floor(s.simTime));
+    }
+    this.currentIndex = -1;
+    this.positionStep = null;
+    this.positionTime = this.snapshots.length > 0 ? this.snapshots[this.snapshots.length - 1].simTime : 0;
+  }
+
+  /**
    * Read-only view of stored snapshot states within a time range, oldest
    * first - the data source for plotting/analysis tools. When several
    * snapshots share a time (frame + input at the same step), the last one

@@ -38,7 +38,7 @@ The app has two modes, switched with the buttons at the top of the toolbar: "ðŸ”
 The simulation records its history, and you can analyze and chart it:
 - list_state_paths explores the raw state tree (all values raw SI: Pa, K, kg, W, kg/s). Common paths: flowNodes.<nodeId>.fluid.pressure / .temperature / .mass / .quality, flowConnections.<connId>.massFlowRate, neutronics.power, thermalNodes.<id>.temperature, burstStates.<nodeId>.isBurst. A component's nodeId is usually its component id; heat exchangers have <id>-tube and <id>-shell.
 - query_history samples time series for your own analysis (the user doesn't see it).
-- plot_history draws the user a real chart panel. Convert to friendly units with each series' scale/offset (bar: scale 1e-5; degC: offset -273.15; MW: scale 1e-6) and label the axes with those units. Use the right-hand axis when magnitudes differ wildly; add annotation lines for events like a scram or rupture when you know their times.
+- plot_history draws the user a real chart panel (movable, resizable, minimizable; saved and restored with their configurations). Convert to friendly units with each series' scale/offset (bar: scale 1e-5; degC: offset -273.15; MW: scale 1e-6) and label the axes with those units. Use the right-hand axis when magnitudes differ wildly; add annotation lines for events like a scram or rupture when you know their times. A plot without tMaxS stays live and keeps extending while the sim runs; set tMaxS to freeze a finished exhibit.
 
 Offer a plot whenever the user asks about a trend, a transient, or "what just happened" - one good chart beats three paragraphs. History resolution is about one point per frame recently and sparser further back, so very fast transients may look coarse.
 

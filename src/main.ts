@@ -41,6 +41,9 @@ import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './cons
 import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
 import { JackManager } from './jack/jack-manager';
 import { executeJackTool } from './jack/jack-tools-exec';
+import { refreshLivePlots, getOpenPlotInputs, restorePlots } from './jack/jack-history';
+import { closeAllPlots } from './jack/jack-plot';
+import { saveHistoryRecord, loadHistoryRecord, deleteHistoryRecord } from './game/history-store';
 
 // Throttle debug panel updates to reduce flickering
 const DEBUG_UPDATE_INTERVAL_MS = 250; // Update ~4 times per second
@@ -408,6 +411,9 @@ function init() {
         }
       }
 
+      // Redraw Jack's open-ended plot panels against the latest history
+      refreshLivePlots((a, b) => gameLoop.getHistoryStates(a, b), state.time);
+
       lastDebugUpdate = now;
     }
 
@@ -767,6 +773,10 @@ function init() {
     if (selectedComponentId) {
       updateComponentDetail(selectedComponentId, plantState, state);
     }
+
+    // Live plot panels track the seek position too (they redraw whenever
+    // the current time moved backwards or gained more than 0.1 s)
+    refreshLivePlots((a, b) => gameLoop.getHistoryStates(a, b), state.time);
 
     // Update history info
     updateHistoryInfo();
@@ -1597,11 +1607,15 @@ function init() {
         plantConn.toElevation = result.toElevation;
         plantConn.flowArea = result.flowArea;
         plantConn.length = result.length;
+        plantConn.fromOpeningHeight = result.fromOpeningHeight;
+        plantConn.toOpeningHeight = result.toOpeningHeight;
 
         // Also update the simulation connection directly for immediate effect
         simConn.flowArea = result.flowArea;
         simConn.fromElevation = result.fromElevation;
         simConn.toElevation = result.toElevation;
+        simConn.fromOpeningHeight = result.fromOpeningHeight;
+        simConn.toOpeningHeight = result.toOpeningHeight;
         // Note: length affects inertance which is calculated at simulation start,
         // so changing it during simulation won't have full effect until restart
 
@@ -1645,6 +1659,8 @@ function init() {
         plantConn.toElevation = result.toElevation;
         plantConn.flowArea = result.flowArea;
         plantConn.length = result.length;
+        plantConn.fromOpeningHeight = result.fromOpeningHeight;
+        plantConn.toOpeningHeight = result.toOpeningHeight;
 
 
         // Refresh the component detail panel
@@ -1914,18 +1930,42 @@ function init() {
   }
 
   // Save current configuration. In simulation mode the running simulation
-  // state rides along with the design, so loading resumes mid-run.
+  // state rides along with the design (localStorage), Jack's open plot
+  // panels ride as their small request specs, and the rewind history goes
+  // to IndexedDB - it runs to tens of MB, far past the localStorage quota.
   function saveConfiguration(name: string): boolean {
     try {
       const data = serializePlantState(plantState) as Record<string, unknown>;
+      let saveHistory = false;
       if (currentMode === 'simulation') {
         const sim = gameLoop.getState();
         if (sim && sim.flowNodes.size > 0) {
           data.simState = serializeSimulationState(sim);
+          saveHistory = true;
         }
       }
+      const plots = getOpenPlotInputs();
+      if (plots.length > 0) data.jackPlots = plots;
       const json = JSON.stringify(data);
       localStorage.setItem(STORAGE_PREFIX + name, json);
+
+      if (saveHistory) {
+        const record = {
+          version: 1 as const,
+          savedAt: new Date().toISOString(),
+          simTime: gameLoop.getState().time,
+          history: gameLoop.exportHistory(),
+        };
+        saveHistoryRecord(name, record)
+          .then(() => console.log(`[Save] Rewind history for '${name}' stored in IndexedDB`))
+          .catch((e) => {
+            console.error('[Save] Failed to store rewind history:', e);
+            showNotification(
+              `Saved '${name}', but storing the rewind history failed (${String(e)}). ` +
+              `Loading this save will resume without step-back history.`,
+              'warning', 10000);
+          });
+      }
       return true;
     } catch (e) {
       console.error('[Save] Failed to save configuration:', e);
@@ -1952,6 +1992,9 @@ function init() {
       plantCanvas.setSimState(restored);
       syncSimulationToVisuals(restored, plantState);
       updatePauseButton();
+      // The per-frame update path is idle while paused - refresh the time
+      // display, debug pane, etc. against the restored state explicitly
+      refreshDisplayAfterRestore();
       showNotification(`Simulation restored at t=${restored.time.toFixed(0)} s (paused)`, 'info');
     } catch (e) {
       console.error('[Load] Failed to restore simulation state:', e);
@@ -1969,8 +2012,40 @@ function init() {
       }
 
       const data = JSON.parse(json);
+      closeAllPlots(); // old panels reference the previous plant's history
       deserializePlantState(data);
       restoreSimStateIfPresent(data);
+
+      // Rewind history + Jack's plot panels come back asynchronously
+      // (IndexedDB); plots wait for the history so they draw the full past
+      if (data.simState) {
+        loadHistoryRecord(name)
+          .then((record) => {
+            if (record && record.version === 1) {
+              gameLoop.importHistory(record.history as ReturnType<typeof gameLoop.exportHistory>);
+              updateHistoryInfo();
+              console.log(`[Load] Rewind history restored (${gameLoop.getHistoryInfo().count} snapshots)`);
+            } else if (record) {
+              console.warn(`[Load] Saved history for '${name}' has unknown version - skipped`);
+            }
+          })
+          .catch((e) => {
+            console.error('[Load] Failed to restore rewind history:', e);
+            showNotification(
+              `Loaded '${name}', but restoring the rewind history failed (${String(e)}).`,
+              'warning', 10000);
+          })
+          .finally(() => {
+            if (data.jackPlots) {
+              const n = restorePlots(
+                data.jackPlots,
+                (a, b) => gameLoop.getHistoryStates(a, b),
+                gameLoop.getState().time
+              );
+              if (n > 0) console.log(`[Load] Restored ${n} plot panel(s)`);
+            }
+          });
+      }
       return true;
     } catch (e) {
       console.error('[Load] Failed to load configuration:', e);
@@ -1978,10 +2053,12 @@ function init() {
     }
   }
 
-  // Delete configuration by name
+  // Delete configuration by name (and its IndexedDB history record)
   function deleteConfiguration(name: string): boolean {
     try {
       localStorage.removeItem(STORAGE_PREFIX + name);
+      deleteHistoryRecord(name).catch((e) =>
+        console.warn('[Delete] Failed to delete stored history:', e));
       return true;
     } catch (e) {
       console.error('[Delete] Failed to delete configuration:', e);

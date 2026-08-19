@@ -2134,6 +2134,15 @@ export class RK45Solver {
   // copy of it, and a seek restores it before replaying.
   // ==========================================================================
 
+  /**
+   * Fast-forward the step counter to at least `n`. Used after importing a
+   * saved history whose step numbers must stay ahead of new live steps -
+   * step numbers are the history's ordering key and must never repeat.
+   */
+  resumeStepCounter(n: number): void {
+    this.totalSteps = Math.max(this.totalSteps, n);
+  }
+
   /** Copy of the cross-step flow-rates context, for storing in a snapshot. */
   getFlowRatesContext(): Map<string, { dMass: number; dEnergy: number }> | undefined {
     if (!this.lastAcceptedFlowRates) return undefined;

@@ -519,6 +519,10 @@ export interface Connection {
   // always draw pure liquid or vapor. If not specified, uses default based on separation.
   fromPhaseTolerance?: number;  // m - tolerance at from component connection
   toPhaseTolerance?: number;    // m - tolerance at to component connection
+  // Vertical extent of the offtake opening (m) - draws average the phase
+  // profile over the opening instead of sampling a point. 0/unset = point.
+  fromOpeningHeight?: number;   // m - opening height at from component
+  toOpeningHeight?: number;     // m - opening height at to component
   // Flow parameters (optional, used when creating simulation)
   flowArea?: number;       // m² - cross-sectional area
   length?: number;         // m - connection length

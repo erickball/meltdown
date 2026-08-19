@@ -5,6 +5,13 @@ import { getComponentVisualHeight } from '../render/components';
 import { hasPinnedPortElevations } from './component-properties';
 import { PIPE_SPECS, findMatchingPipeSpec, pipeSpecFlowArea } from './component-presets';
 
+// Shared tooltip for the offtake opening-height inputs (edit form, both ends)
+const OPENING_HEIGHT_TIP =
+  "Vertical size of the offtake opening at this end. The draw averages the " +
+  "vessel's liquid / froth / vapor profile over this span, so a moving level " +
+  "hands off between phases gradually instead of stepping. Empty or 0 samples " +
+  "a single point at the connection elevation.";
+
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
   toComponent: PlantComponent;
@@ -24,6 +31,8 @@ export interface ConnectionEditResult {
   toElevation: number;
   flowArea: number;
   length: number;
+  fromOpeningHeight?: number;  // m - offtake opening height; undefined = point sample
+  toOpeningHeight?: number;    // m
 }
 
 export class ConnectionDialog {
@@ -561,13 +570,21 @@ export class ConnectionDialog {
     this.dialog.style.display = 'none';
 
     if (this.isEditMode) {
-      // Edit mode - return just the edited values
+      // Edit mode - return just the edited values. Opening heights: empty
+      // or 0 means "point sample" and is stored as undefined.
+      const parseOpening = (id: string): number | undefined => {
+        const el = document.getElementById(id) as HTMLInputElement | null;
+        const v = el ? parseFloat(el.value) : NaN;
+        return Number.isFinite(v) && v > 0 ? v : undefined;
+      };
       if (this.currentEditCallback) {
         this.currentEditCallback({
           fromElevation,
           toElevation,
           flowArea,
-          length
+          length,
+          fromOpeningHeight: parseOpening('from-opening-height'),
+          toOpeningHeight: parseOpening('to-opening-height')
         });
         this.currentEditCallback = null;
       }
@@ -734,6 +751,26 @@ export class ConnectionDialog {
     fromElevGroup.appendChild(fromElevHelp);
     this.bodyElement.appendChild(fromElevGroup);
 
+    // From opening height - how tall the offtake aperture is (draws average
+    // the phase profile over it; see drawCompositionAt)
+    const fromOpenGroup = document.createElement('div');
+    fromOpenGroup.className = 'form-group';
+    const fromOpenLabel = document.createElement('label');
+    fromOpenLabel.textContent = 'From Opening Height (m, 0 = point)';
+    fromOpenLabel.setAttribute('for', 'from-opening-height');
+    fromOpenLabel.title = OPENING_HEIGHT_TIP;
+    fromOpenGroup.appendChild(fromOpenLabel);
+    const fromOpenInput = document.createElement('input');
+    fromOpenInput.type = 'number';
+    fromOpenInput.id = 'from-opening-height';
+    fromOpenInput.value = connection.fromOpeningHeight ? String(connection.fromOpeningHeight) : '';
+    fromOpenInput.placeholder = 'point sample';
+    fromOpenInput.min = '0';
+    fromOpenInput.step = '0.1';
+    fromOpenInput.title = OPENING_HEIGHT_TIP;
+    fromOpenGroup.appendChild(fromOpenInput);
+    this.bodyElement.appendChild(fromOpenGroup);
+
     // To elevation field
     const toElevGroup = document.createElement('div');
     toElevGroup.className = 'form-group';
@@ -764,6 +801,25 @@ export class ConnectionDialog {
     toElevHelp.textContent = toElevHelpText(currentToElev);
     toElevGroup.appendChild(toElevHelp);
     this.bodyElement.appendChild(toElevGroup);
+
+    // To opening height
+    const toOpenGroup = document.createElement('div');
+    toOpenGroup.className = 'form-group';
+    const toOpenLabel = document.createElement('label');
+    toOpenLabel.textContent = 'To Opening Height (m, 0 = point)';
+    toOpenLabel.setAttribute('for', 'to-opening-height');
+    toOpenLabel.title = OPENING_HEIGHT_TIP;
+    toOpenGroup.appendChild(toOpenLabel);
+    const toOpenInput = document.createElement('input');
+    toOpenInput.type = 'number';
+    toOpenInput.id = 'to-opening-height';
+    toOpenInput.value = connection.toOpeningHeight ? String(connection.toOpeningHeight) : '';
+    toOpenInput.placeholder = 'point sample';
+    toOpenInput.min = '0';
+    toOpenInput.step = '0.1';
+    toOpenInput.title = OPENING_HEIGHT_TIP;
+    toOpenGroup.appendChild(toOpenInput);
+    this.bodyElement.appendChild(toOpenGroup);
 
     // Update absolute elevation displays when inputs change
     fromElevInput.addEventListener('input', () => {

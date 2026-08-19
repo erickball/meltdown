@@ -210,7 +210,7 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: "plot_history",
     description:
-      "Draw a line chart of recorded state values over time, in a floating panel the user sees immediately. Fully generic: up to 10 series by dot-path, each with an optional label, left/right axis, and linear transform (plotted = raw*scale + offset - use this for units: Pa to bar scale=1e-5, K to degC offset=-273.15, W to MW scale=1e-6). Optional log axes, time range, and vertical annotation lines (e.g. at a scram or rupture time). Reusing a figureId redraws that panel; a new figureId opens a second chart. Label axes with the DISPLAY units you converted to.",
+      "Draw a line chart of recorded state values over time, in a floating panel the user sees immediately (they can move, resize, and minimize it; it persists with saved configurations). Fully generic: up to 10 series by dot-path, each with an optional label, left/right axis, and linear transform (plotted = raw*scale + offset - use this for units: Pa to bar scale=1e-5, K to degC offset=-273.15, W to MW scale=1e-6). Optional log axes, time range, and vertical annotation lines (e.g. at a scram or rupture time). A plot WITHOUT tMaxS stays LIVE - it keeps extending as the simulation runs, and if the user rewinds it keeps showing the full recorded history with a 'now' marker at their current position; give tMaxS to freeze a finished exhibit. Reusing a figureId redraws that panel; a new figureId opens a second chart. Label axes with the DISPLAY units you converted to.",
     input_schema: {
       type: "object",
       properties: {

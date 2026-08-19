@@ -46,9 +46,9 @@ import {
   computeConnectionHydraulics,
   computeChokeLimit,
   connectionRestriction,
-  flowPhaseAt,
+  drawCompositionAt,
+  DrawComposition,
   approxVaporDensity,
-  nodeBulkDensity,
   CLOSED_FLOW_DECAY_TAU,
 } from './connection-hydraulics';
 
@@ -1215,6 +1215,13 @@ export class NeutronicsRateOperator implements RateOperator {
 let lastEnthalpyDebugLog = 0;
 
 export class FlowRateOperator implements RateOperator {
+  // Reusable scratch for drawCompositionAt on the per-stage pricing loop -
+  // consumed within each iteration, never retained (see the `out` param).
+  private drawScratch: DrawComposition = {
+    phase: 'mixture', fLiquid: 0, fMixture: 1, fVapor: 0,
+    wLiquid: 0, wMixture: 1, wVapor: 0, rho: 0,
+  };
+
   name = 'FluidFlow';
 
   computeRates(state: SimulationState): StateRates {
@@ -1245,6 +1252,7 @@ export class FlowRateOperator implements RateOperator {
       let downstreamId: string;
       let upstreamElevation: number | undefined;
       let upstreamPhaseTolerance: number | undefined;
+      let upstreamOpeningHeight: number | undefined;
 
       if (massFlow >= 0) {
         upstreamNode = fromNode;
@@ -1252,12 +1260,14 @@ export class FlowRateOperator implements RateOperator {
         downstreamId = conn.toNodeId;
         upstreamElevation = conn.fromElevation;
         upstreamPhaseTolerance = conn.fromPhaseTolerance;
+        upstreamOpeningHeight = conn.fromOpeningHeight;
       } else {
         upstreamNode = toNode;
         upstreamId = conn.toNodeId;
         downstreamId = conn.fromNodeId;
         upstreamElevation = conn.toElevation;
         upstreamPhaseTolerance = conn.toPhaseTolerance;
+        upstreamOpeningHeight = conn.toOpeningHeight;
       }
 
       const absMassFlow = Math.abs(massFlow);
@@ -1265,7 +1275,10 @@ export class FlowRateOperator implements RateOperator {
       // Determine what phase is actually flowing based on connection elevation
       // For two-phase nodes, we need to use phase-specific enthalpy
       // Pass mass flow rate so separation calculation can account for turbulence
-      let flowPhase = this.getFlowPhase(upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance);
+      let comp = drawCompositionAt(
+        upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight,
+        this.drawScratch, false);
+      let flowPhase = comp.phase;
 
       // Check if we're trying to draw more of a phase than is available.
       // If the flow rate would drain the phase too quickly, use mixture instead.
@@ -1283,23 +1296,30 @@ export class FlowRateOperator implements RateOperator {
         const totalMass = upstreamNode.fluid.mass;
         const maxDrainRate = 10; // per second - can drain the phase 10x per second max
 
+        let demote = false;
         if (flowPhase === 'vapor') {
           const vaporMass = totalMass * quality;
           // If trying to drain vapor faster than limit, use mixture
-          if (vaporMass < 1e-6 || absMassFlow > maxDrainRate * vaporMass) {
-            flowPhase = 'mixture';
-          }
+          demote = vaporMass < 1e-6 || absMassFlow > maxDrainRate * vaporMass;
         } else if (flowPhase === 'liquid') {
           const liquidMass = totalMass * (1 - quality);
           // If trying to drain liquid faster than limit, use mixture
-          if (liquidMass < 1e-6 || absMassFlow > maxDrainRate * liquidMass) {
-            flowPhase = 'mixture';
-          }
+          demote = liquidMass < 1e-6 || absMassFlow > maxDrainRate * liquidMass;
+        }
+        if (demote) {
+          flowPhase = 'mixture';
+          comp = { phase: 'mixture', fLiquid: 0, fMixture: 1, fVapor: 0,
+            wLiquid: 0, wMixture: 1, wVapor: 0, rho: comp.rho };
         }
       }
 
-      // Get specific enthalpy based on what's actually flowing
-      const h_up = this.getSpecificEnthalpy(upstreamNode, flowPhase);
+      // Specific enthalpy of what's actually flowing: the composition's
+      // mass weights blend the same per-zone prices a pure draw would get,
+      // so a finite opening crossfades where a point sample would step.
+      const h_up =
+        (comp.wLiquid > 0 ? comp.wLiquid * this.getSpecificEnthalpy(upstreamNode, 'liquid') : 0) +
+        (comp.wMixture > 0 ? comp.wMixture * this.getSpecificEnthalpy(upstreamNode, 'mixture') : 0) +
+        (comp.wVapor > 0 ? comp.wVapor * this.getSpecificEnthalpy(upstreamNode, 'vapor') : 0);
 
       // The connection's mass flow is TOTAL mixture flow (the momentum
       // solvers use bulk density including NCG), so when the flowing phase
@@ -1311,16 +1331,24 @@ export class FlowRateOperator implements RateOperator {
       const upNcg = upstreamNode.fluid.ncg;
       let waterShare = 1;
       let gasMassInSpace = 0;
-      if (upNcg && totalMoles(upNcg) > 0 && (flowPhase === 'vapor' || flowPhase === 'mixture')) {
+      if (upNcg && totalMoles(upNcg) > 0 && (comp.wVapor > 0 || comp.wMixture > 0)) {
         gasMassInSpace = ncgTotalMass(upNcg);
         // Steam sharing the flowing space with the gas: the vapor space's
-        // steam for vapor draws from a two-phase node, all water otherwise
-        const steamMassInSpace =
-          flowPhase === 'vapor' && upstreamNode.fluid.phase === 'two-phase'
-            ? upstreamNode.fluid.mass * (upstreamNode.fluid.quality ?? 0)
-            : upstreamNode.fluid.mass;
-        const totalInSpace = gasMassInSpace + steamMassInSpace;
-        waterShare = totalInSpace > 0 ? steamMassInSpace / totalInSpace : 1;
+        // steam for vapor draws from a two-phase node, all water otherwise.
+        // Liquid-zone flow carries no gas (share 1); the zones blend by the
+        // same mass weights as the enthalpy above.
+        const gm = gasMassInSpace;
+        const shareOf = (zone: 'vapor' | 'mixture'): number => {
+          const steamMassInSpace =
+            zone === 'vapor' && upstreamNode.fluid.phase === 'two-phase'
+              ? upstreamNode.fluid.mass * (upstreamNode.fluid.quality ?? 0)
+              : upstreamNode.fluid.mass;
+          const totalInSpace = gm + steamMassInSpace;
+          return totalInSpace > 0 ? steamMassInSpace / totalInSpace : 1;
+        };
+        waterShare = comp.wLiquid
+          + (comp.wMixture > 0 ? comp.wMixture * shareOf('mixture') : 0)
+          + (comp.wVapor > 0 ? comp.wVapor * shareOf('vapor') : 0);
       }
 
       // Water portion: mass flow * specific enthalpy of the flowing phase
@@ -1420,19 +1448,7 @@ export class FlowRateOperator implements RateOperator {
     return rates;
   }
 
-  /**
-   * What phase this connection draws - delegates to the shared
-   * connection-hydraulics flowPhaseAt so the rate pricing, the momentum
-   * operators and the pressure solver's choking pass all see one answer.
-   */
-  private getFlowPhase(
-    node: FlowNode,
-    connectionElevation?: number,
-    massFlowRate: number = 0,
-    phaseTolerance?: number
-  ): 'liquid' | 'vapor' | 'mixture' {
-    return flowPhaseAt(node, connectionElevation, massFlowRate, phaseTolerance);
-  }
+
 
 
   /**
@@ -2751,15 +2767,16 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
       // use. This operator used to carry its own copies, which drifted: it
       // could report a vapor line choked while the momentum equation was
       // pushing liquid down it.
-      const flowPhase = flowPhaseAt(upstreamNode, upstreamElevation, currentFlow, upstreamTolerance);
+      const upstreamOpening = currentFlow >= 0 ? conn.fromOpeningHeight : conn.toOpeningHeight;
+      const comp = drawCompositionAt(
+        upstreamNode, upstreamElevation, currentFlow, upstreamTolerance, upstreamOpening);
+      const flowPhase = comp.phase;
       if (flowPhase === 'liquid') {
         conn.isChoked = false;
         conn.machNumber = 0;
         continue;
       }
-      const rho_flow = flowPhase === 'vapor'
-        ? approxVaporDensity(upstreamNode)
-        : nodeBulkDensity(upstreamNode);
+      const rho_flow = comp.rho;
 
       const { throatArea } = connectionRestriction(state, conn, toNode);
       const choke = computeChokeLimit(

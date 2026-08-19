@@ -435,6 +435,13 @@ export interface FlowConnection {
   fromPhaseTolerance?: number;      // m - tolerance at fromNode connection
   toPhaseTolerance?: number;        // m - tolerance at toNode connection
 
+  // Vertical extent of the offtake opening (m). A draw samples the node's
+  // phase profile averaged over [elevation - h/2, elevation + h/2] instead
+  // of at a point, so a level sweeping past a finite opening crossfades the
+  // drawn density/enthalpy instead of stepping. Unset or 0 = point sample.
+  fromOpeningHeight?: number;       // m - opening height at fromNode
+  toOpeningHeight?: number;         // m - opening height at toNode
+
   // Flow resistance (K-factor for pressure drop)
   resistanceCoeff: number;          // ΔP = K * 0.5 * ρ * v²
 

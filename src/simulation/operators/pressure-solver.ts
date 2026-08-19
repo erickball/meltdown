@@ -88,6 +88,7 @@ import {
   computeConnectionHydraulics,
   computeChokeLimit,
   ConnectionHydraulics,
+  DrawComposition,
   ChokeLimit,
   CLOSED_FLOW_DECAY_TAU,
 } from './connection-hydraulics';
@@ -427,7 +428,7 @@ export class PressureSolver {
           machNumber: 0,
         };
         if (iFrom >= 0 || iTo >= 0) {
-          const hDonor = useEnergy ? this.donorEnthalpy(h.upstreamNode, h.flowPhase) : 0;
+          const hDonor = useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0;
           fixedFlows.push({ flow: mNew, hDonor, donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo });
         }
         continue;
@@ -484,7 +485,7 @@ export class PressureSolver {
       // Donor-cell enthalpy for the energy-coupled closure: the flowing
       // phase's specific enthalpy at the hydraulics upstream node (same
       // donor convention the advection operator applies to the solved flow).
-      const hDonor = useEnergy ? this.donorEnthalpy(h.upstreamNode, h.flowPhase) : 0;
+      const hDonor = useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0;
       if (!isFinite(hDonor)) {
         throw new Error(
           `[PressureSolver] Non-finite donor enthalpy for connection '${conn.id}': ` +
@@ -870,6 +871,14 @@ export class PressureSolver {
    * two-phase donor matter: a vapor draw removes h_g (boil-off cooling of
    * the remnant), a liquid draw removes h_f and leaves the NCG behind.
    */
+  /** Donor enthalpy blended over the draw composition's mass weights -
+   *  a finite opening crossfades between zone prices instead of stepping. */
+  private blendedDonorEnthalpy(node: FlowNode, comp: DrawComposition): number {
+    return (comp.wLiquid > 0 ? comp.wLiquid * this.donorEnthalpy(node, 'liquid') : 0)
+      + (comp.wMixture > 0 ? comp.wMixture * this.donorEnthalpy(node, 'mixture') : 0)
+      + (comp.wVapor > 0 ? comp.wVapor * this.donorEnthalpy(node, 'vapor') : 0);
+  }
+
   private donorEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
     // Moving-boundary boiler tubes know what actually sits at each end of
     // the bundle: a vapor draw carries the SUPERHEAT section's enthalpy (the
