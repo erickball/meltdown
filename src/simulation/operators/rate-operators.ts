@@ -46,7 +46,7 @@ import {
   computeConnectionHydraulics,
   computeChokeLimit,
   connectionRestriction,
-  momentumFlowPhase,
+  flowPhaseAt,
   approxVaporDensity,
   nodeBulkDensity,
   CLOSED_FLOW_DECAY_TAU,
@@ -1421,18 +1421,9 @@ export class FlowRateOperator implements RateOperator {
   }
 
   /**
-   * Determine what phase of fluid is flowing based on connection elevation
-   * relative to liquid level in a two-phase node.
-   *
-   * Uses physics-based separation model: only nodes with sufficient residence
-   * time and low turbulence will have separated phases. The separation factor
-   * determines how much of the flow is phase-specific vs mixture.
-   *
-   * @param node The upstream flow node
-   * @param connectionElevation Height of connection relative to node bottom (m)
-   * @param massFlowRate Mass flow rate through the connection (kg/s)
-   * @param phaseTolerance Tolerance zone around interface (m). 0 = no tolerance, undefined = use default.
-   * @returns The phase of fluid flowing ('liquid', 'vapor', or 'mixture')
+   * What phase this connection draws - delegates to the shared
+   * connection-hydraulics flowPhaseAt so the rate pricing, the momentum
+   * operators and the pressure solver's choking pass all see one answer.
    */
   private getFlowPhase(
     node: FlowNode,
@@ -1440,82 +1431,9 @@ export class FlowRateOperator implements RateOperator {
     massFlowRate: number = 0,
     phaseTolerance?: number
   ): 'liquid' | 'vapor' | 'mixture' {
-    // A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
-    // economizer at the bottom, boiling in the middle, superheat at the top
-    // is the entire sectioned model - so what a connection draws is read off
-    // the partition's own boundaries, not the tank-mixing heuristic below.
-    // The turbulence-based separation factor sees a once-through boiler's
-    // design throughput and calls the node 'fully mixed', which priced every
-    // 3.5 MJ/kg steam draw at 1.6 MJ/kg bulk and held +100 MW of phantom
-    // energy per bundle in the tubes (+60 bar/s, invariant to every valve).
-    if (node.otsg?.lastEval) {
-      const fr = node.otsg.lastEval.lengthFracs;
-      const h = node.height ?? Math.cbrt(node.volume);
-      const frac = Math.max(0, Math.min(1, (connectionElevation ?? h / 2) / h));
-      if (frac >= fr[0] + fr[1]) return 'vapor';
-      if (frac <= fr[0]) return 'liquid';
-      return 'mixture';
-    }
-
-    // Single phase nodes always flow their phase
-    if (node.fluid.phase !== 'two-phase') {
-      return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';
-    }
-
-    // Calculate separation factor (0 = fully mixed, 1 = fully separated)
-    const separation = calculateSeparation(node, massFlowRate);
-
-    // If separation is low, return mixture regardless of elevation
-    if (separation < 0.1) {
-      return 'mixture';
-    }
-
-    // Get node height - use stored value or estimate
-    const nodeHeight = node.height ?? Math.cbrt(node.volume);
-
-    // If no elevation specified, assume mid-height connection (mixture)
-    if (connectionElevation === undefined) {
-      connectionElevation = nodeHeight / 2;
-    }
-
-    // Calculate liquid level from quality and density
-    // For separated two-phase: liquid mass settles at the bottom
-    // liquid_volume = liquid_mass / rho_liquid
-    // liquid_level = calculated from volume accounting for internal obstructions
-    const quality = node.fluid.quality ?? 0.5;
-    const T_C = node.fluid.temperature - 273.15;
-
-    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                       Math.max(400, 700 - 2.5 * (T_C - 300));
-
-    // Calculate liquid mass and volume
-    const liquidMass = node.fluid.mass * (1 - quality);
-    const liquidVolume = liquidMass / rho_liquid;
-
-    // Calculate liquid level accounting for internal obstructions
-    const liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
-
-    // Tolerance zone around the interface
-    // If phaseTolerance is specified (including 0), use it directly
-    // Otherwise use default: wider when separation is low
-    const interfaceTolerance = phaseTolerance !== undefined
-      ? phaseTolerance
-      : 0.1 + (1 - separation) * nodeHeight * 0.4;
-
-    // Connection well below liquid level: draw liquid
-    if (connectionElevation < liquidLevel - interfaceTolerance) {
-      return 'liquid';
-    }
-
-    // Connection well above liquid level: draw vapor
-    if (connectionElevation > liquidLevel + interfaceTolerance) {
-      return 'vapor';
-    }
-
-    // Connection near interface: draw mixture
-    return 'mixture';
+    return flowPhaseAt(node, connectionElevation, massFlowRate, phaseTolerance);
   }
+
 
   /**
    * Get specific enthalpy of the flowing phase.
@@ -2833,7 +2751,7 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
       // use. This operator used to carry its own copies, which drifted: it
       // could report a vapor line choked while the momentum equation was
       // pushing liquid down it.
-      const flowPhase = momentumFlowPhase(upstreamNode, upstreamElevation, upstreamTolerance);
+      const flowPhase = flowPhaseAt(upstreamNode, upstreamElevation, currentFlow, upstreamTolerance);
       if (flowPhase === 'liquid') {
         conn.isChoked = false;
         conn.machNumber = 0;
