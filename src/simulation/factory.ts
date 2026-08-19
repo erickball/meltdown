@@ -26,6 +26,11 @@ import { CONCRETE_DENSITY } from './operators/mcci';
 import { resolveMaterial } from './materials';
 import { NBG_18, A3_3 } from './graphite';
 import { saturationTemperature, saturationPressure } from './water-properties';
+import {
+  saturationAtP, subcooledSectionMean, subcooledLiquidV,
+  boilingMeanVolume, boilingMeanQuality, superheatedStateAtPT,
+  H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM,
+} from './otsg';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
 import { describeControllerSignal } from './operators/control-system';
@@ -1153,6 +1158,91 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             // capacity mdot*cp each bundle marches against is divided.
             gasShare: 1 / nBundles,
           };
+          // Design-point initialization: a preset can hand the bundle its
+          // OPERATING partition - pressure, feed and steam temperatures, and
+          // where the section boundaries sit - and the factory builds the
+          // exact node totals, slug ledger and metal temperatures that
+          // partition implies. The design state cannot be expressed through
+          // the ordinary {pressure, quality} IC: a boiler holding cold slug
+          // under hot steam sits OFF the saturation tie line, and a tie-line
+          // start has to spend its first minutes boiling its way to the
+          // operating point through the whole startup transient.
+          const init = (hxComp as { initialSections?: {
+            pressureBar: number; TFeedK: number; TSteamK: number;
+            L1: number; L3: number; flowKgs: number;
+          } }).initialSections;
+          if (init) {
+            const P = init.pressureBar * 1e5;
+            const sat = saturationAtP(P);
+            const uFeed = Water.saturatedLiquidEnergy(init.TFeedK);
+            const u1b = subcooledSectionMean(uFeed, sat);
+            const v1 = subcooledLiquidV(Math.min(u1b, sat.u_f));
+            const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
+            const x2Bar = boilingMeanQuality(sat.v_f, sat.v_g, 1);
+            const u2Bar = sat.u_f + x2Bar * (sat.u_g - sat.u_f);
+            // The superheat section's MEAN state: its stream runs saturation
+            // -> TSteam, so the mean sits midway under the linear profile.
+            const TMean3 = 0.5 * (sat.T + init.TSteamK);
+            const sh = superheatedStateAtPT(P, TMean3);
+            const V = tubeNode.volume;
+            const L2 = 1 - init.L1 - init.L3;
+            if (!(init.L1 > 0 && init.L3 > 0 && L2 > 0)) {
+              throw new Error(`[Factory] ${id}: initialSections needs three positive ` +
+                `section fractions, got L1=${init.L1}, L2=${L2}, L3=${init.L3}`);
+            }
+            const m1 = (init.L1 * V) / v1;
+            const m2 = (L2 * V) / vBarFull;
+            const m3 = (init.L3 * V) / sh.v;
+            tubeNode.fluid.mass = m1 + m2 + m3;
+            tubeNode.fluid.internalEnergy = m1 * u1b + m2 * u2Bar + m3 * sh.u;
+            tubeNode.fluid.pressure = P;
+            tubeNode.fluid.temperature = sat.T;
+            tubeNode.fluid.phase = 'two-phase';
+            tubeNode.fluid.quality = (m2 * x2Bar + m3) / (m1 + m2 + m3);
+            tubeNode.otsg.m1 = m1;
+            // Metal seeds DERIVED from the design duties through the same
+            // film equations the operator runs - flat guesses are not an
+            // option in either direction: a wall 8 K over saturation where
+            // the boiling duty needs 3.7 delivers DOUBLE the design boil-off
+            // and the pressure spikes off the point within a second, and a
+            // cold metal3 reads below saturation to the superheat pin and
+            // dumps the whole superheat section on the first evaluation.
+            //   economizer: Q1 = w (h_f - h_feed), wall from the ramping
+            //     transit form Q = theta mcp (T_w - T_in);
+            //   evaporator: Q2 = w h_fg across its isothermal film;
+            //   superheater: the wall that makes the PIN reproduce the mean
+            //     steam temperature this partition was built at - partition
+            //     stability first, its duty lands within the model's own
+            //     approximations.
+            const w = init.flowKgs;
+            const hFeed = uFeed + P * 0.0012;
+            const A1 = init.L1 * tubeArea, A2 = L2 * tubeArea, A3 = init.L3 * tubeArea;
+            const CP_LIQ = 5000, CP_STEAM = 3000;
+            const ntu1 = (H_TUBE_LIQUID * A1) / (w * CP_LIQ);
+            const theta1 = 2 * ntu1 / (2 + ntu1);
+            const Q1 = w * (sat.h_f - hFeed);
+            const Tm1 = init.TFeedK + Q1 / (theta1 * w * CP_LIQ);
+            const Q2 = w * (sat.h_g - sat.h_f);
+            const Tm2 = sat.T + Q2 / (H_TUBE_BOILING * A2);
+            const hA3 = H_TUBE_STEAM * A3;
+            const thetaBar3 = hA3 / (2 * w * CP_STEAM + hA3);
+            const Tm3 = sat.T + (TMean3 - sat.T) / thetaBar3;
+            const seeds: [string, number][] = [
+              [metalIds[0], Tm1],
+              [metalIds[1], Tm2],
+              [metalIds[2], Tm3],
+            ];
+            for (const [mid, T] of seeds) {
+              const m = state.thermalNodes.get(mid)!;
+              m.temperature = T;
+            }
+            console.log(`[Factory] ${tubeNodeId}: design-point partition seeded - ` +
+              `${(P / 1e5).toFixed(0)} bar, sections ${m1.toFixed(0)}/${m2.toFixed(0)}/${m3.toFixed(0)} kg ` +
+              `(${(100 * init.L1).toFixed(0)}/${(100 * L2).toFixed(0)}/${(100 * init.L3).toFixed(0)}% by length), ` +
+              `steam to ${(init.TSteamK - 273.15).toFixed(0)} C, walls ` +
+              `${(Tm1 - 273.15).toFixed(0)}/${(Tm2 - 273.15).toFixed(0)}/${(Tm3 - 273.15).toFixed(0)} C ` +
+              `for ${(Q1 / 1e6).toFixed(0)}/${(Q2 / 1e6).toFixed(0)} MW at ${w.toFixed(0)} kg/s`);
+          }
           console.log(`[Factory] ${tubeNodeId}: moving-boundary OTSG tube side ` +
             `(${tubeArea.toFixed(0)} m2, ${tubeNode.fluid.mass.toFixed(0)} kg initial inventory` +
             `${nBundles > 1 ? `, ${(100 / nBundles).toFixed(0)}% of the shell flow` : ''})`);
@@ -1579,6 +1669,10 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         rateLimit: pid.actuator.rateLimit ?? 0.1,
       },
       aggressiveness: pid.aggressiveness ?? 1,
+      // Loop cadence is plant engineering, not solver detail: a once-through
+      // boiler's pressure loop needs ~0.1 s scans (Benson-class EHC) while a
+      // tank level can idle at seconds - so the preset gets to say.
+      scanPeriod: pid.scanPeriod,
       powerLimit: pid.powerLimit,
       invert: pid.invert,
       gains: pid.gains ? { ...pid.gains } : undefined,
@@ -2784,12 +2878,19 @@ function createHeatExchangerThermalNode(component: PlantComponent, b: number): T
   const hx = component as any;
   const nBundles = hxBundleCount(hx);
 
+  // The metal starts BETWEEN its two fluids, not at a fixed 570 K: tube
+  // walls live at the film-weighted mean of what they separate, and a
+  // hardcoded seed made every exchanger open with a thermal shock scaled by
+  // 50 t of metal - the feedwater heater's (474-K water, 570-K 'seed') was
+  // a 500 MW torch that blew the feed train to 270 bar in half a second.
+  const seedTubeT = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
+  const seedShellT = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || seedTubeT;
   return {
     id: hxTubeMetalId(component.id, b),
     label: nBundles > 1
       ? `${component.label || 'HX'} Bundle ${b + 1} Tubes`
       : `${component.label || 'HX'} Tubes`,
-    temperature: 570,
+    temperature: 0.5 * (seedTubeT + seedShellT),
     mass: 50000 / nBundles,
     specificHeat: 500,
     thermalConductivity: 20,
@@ -3235,6 +3336,12 @@ function createFlowConnectionFromPlantConnection(
     // circulating instead of slamming from zero, which matters for cores
     // whose reactivity feedback depends on the flow-dependent void state.
     massFlowRate: (connection as any).initialFlowRate ?? 0,
+    // Seeded flows need their PHASE seeded too: the draw-enthalpy hooks key
+    // on currentFlowPhase, and an unset phase prices a 3.5 MJ/kg steam draw
+    // at 1.6 MJ/kg bulk mush - ~100 MW of phantom retained energy per
+    // boiler bundle, +60 bar/s, on the very first steps of a design-point
+    // start before the hydraulics classify the lines.
+    currentFlowPhase: (connection as any).initialFlowPhase,
     inertance: length / flowArea,
   };
 }

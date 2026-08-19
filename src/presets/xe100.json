@@ -240,6 +240,14 @@
         "tubeCount": 300,
         "tubeModel": "moving-boundary",
         "bundleCount": 2,
+        "initialSections": {
+          "pressureBar": 165,
+          "TFeedK": 473,
+          "TSteamK": 838,
+          "L1": 0.25,
+          "L3": 0.35,
+          "flowKgs": 38.5
+        },
         "material": "alloy-800h",
         "pressureRating": 90,
         "tubePressureRating": 200,
@@ -575,8 +583,8 @@
           }
         ],
         "inletFluid": {
-          "temperature": 838,
-          "pressure": 16500000,
+          "temperature": 315,
+          "pressure": 9000,
           "phase": "vapor",
           "quality": 1,
           "flowRate": 0
@@ -691,7 +699,7 @@
         "elevation": 0,
         "diameter": 0.4,
         "running": true,
-        "speed": 0.5,
+        "speed": 0.665,
         "ratedFlow": 80,
         "ratedHead": 6000,
         "orientation": "right-left",
@@ -738,7 +746,7 @@
         "rotation": 0,
         "elevation": 0,
         "diameter": 0.2,
-        "opening": 0,
+        "opening": 1,
         "crackingPressure": 10000,
         "ports": [
           {
@@ -760,7 +768,7 @@
         ],
         "fluid": {
           "temperature": 473,
-          "pressure": 16500000,
+          "pressure": 18600000,
           "phase": "liquid",
           "quality": 0,
           "flowRate": 0
@@ -797,31 +805,31 @@
           "pressure": 2500000
         },
         "tubeFluid": {
-          "temperature": 490,
-          "pressure": 17000000,
+          "temperature": 474,
+          "pressure": 18800000,
           "phase": "liquid",
           "quality": 0,
           "flowRate": 0
         },
         "primaryFluid": {
-          "temperature": 490,
-          "pressure": 17000000,
+          "temperature": 474,
+          "pressure": 18800000,
           "phase": "liquid",
           "quality": 0,
           "flowRate": 0
         },
         "shellFluid": {
-          "temperature": 497,
-          "pressure": 2500000,
+          "temperature": 477,
+          "pressure": 1630000,
           "phase": "two-phase",
-          "quality": 0.5,
+          "quality": 0.25,
           "flowRate": 0
         },
         "secondaryFluid": {
-          "temperature": 497,
-          "pressure": 2500000,
+          "temperature": 477,
+          "pressure": 1630000,
           "phase": "two-phase",
-          "quality": 0.5,
+          "quality": 0.25,
           "flowRate": 0
         },
         "fillLevel": 0.3,
@@ -876,7 +884,7 @@
         "rotation": 0,
         "elevation": 0,
         "diameter": 0.1,
-        "opening": 0,
+        "opening": 0.1,
         "ports": [
           {
             "id": "val-bleed-1-in",
@@ -897,7 +905,7 @@
         ],
         "fluid": {
           "temperature": 700,
-          "pressure": 2500000,
+          "pressure": 16500000,
           "phase": "vapor",
           "quality": 1,
           "flowRate": 0
@@ -1040,13 +1048,14 @@
           },
           "setpoint": 16500000,
           "invert": true,
-          "aggressiveness": 0.5,
+          "aggressiveness": 2,
+          "scanPeriod": 0.1,
           "actuator": {
             "kind": "governor-valve",
             "targetId": "turbine-1",
             "min": 0.05,
             "max": 0.45,
-            "rateLimit": 0.01
+            "rateLimit": 0.25
           }
         }
       }
@@ -1078,7 +1087,7 @@
             "kind": "valve-position",
             "targetId": "val-bleed-1",
             "min": 0,
-            "max": 0.3,
+            "max": 0.8,
             "rateLimit": 0.02
           }
         }
@@ -1211,6 +1220,7 @@
             ]
           },
           "aggressiveness": 2.5,
+          "scanPeriod": 0.25,
           "actuator": {
             "kind": "pump-speed",
             "targetId": "fw-pump-1",
@@ -1228,6 +1238,7 @@
       "fromPortId": "rv-1-core-in",
       "toComponentId": "cb-1",
       "toPortId": "cb-1-inlet",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.8,
       "toElevation": 0,
       "flowArea": 1.76,
@@ -1239,6 +1250,7 @@
       "fromPortId": "cb-1-outlet",
       "toComponentId": "cv-1",
       "toPortId": "cv-1-inner-in",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 11,
       "toElevation": 0.9,
       "flowArea": 0.78,
@@ -1250,6 +1262,7 @@
       "fromPortId": "cv-1-inner-out",
       "toComponentId": "hx-1",
       "toPortId": "hx-1-shell-1",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.9,
       "toElevation": 13,
       "flowArea": 0.78,
@@ -1261,6 +1274,7 @@
       "fromPortId": "hx-1-shell-2",
       "toComponentId": "tank-sg-1",
       "toPortId": "tank-sg-in",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 1,
       "toElevation": 2,
       "flowArea": 2,
@@ -1272,6 +1286,7 @@
       "fromPortId": "tank-sg-top",
       "toComponentId": "pump-1",
       "toPortId": "pump-1-inlet",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 15.5,
       "toElevation": 0,
       "flowArea": 0.6,
@@ -1283,6 +1298,7 @@
       "fromPortId": "pump-1-outlet",
       "toComponentId": "cv-1",
       "toPortId": "cv-1-annulus-2",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 0,
       "toElevation": 0.25,
       "flowArea": 1,
@@ -1294,6 +1310,7 @@
       "fromPortId": "cv-1-annulus-1",
       "toComponentId": "rv-1",
       "toPortId": "rv-1-cold-leg",
+      "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.25,
       "toElevation": 5,
       "flowArea": 1,
@@ -1305,6 +1322,8 @@
       "fromPortId": "val-fwcv-1-out",
       "toComponentId": "hx-1",
       "toPortId": "hx-1-tube-1",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 1,
       "flowArea": 0.015,
@@ -1316,6 +1335,8 @@
       "fromPortId": "val-fwcv-1-out",
       "toComponentId": "hx-1",
       "toPortId": "hx-1-tube-1-b2",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 1,
       "flowArea": 0.015,
@@ -1327,6 +1348,8 @@
       "fromPortId": "hx-1-tube-2",
       "toComponentId": "turbine-1",
       "toPortId": "inlet",
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 38.5,
       "fromElevation": 13.5,
       "toElevation": 0,
       "flowArea": 0.006,
@@ -1339,6 +1362,8 @@
       "fromPortId": "hx-1-tube-2-b2",
       "toComponentId": "turbine-1",
       "toPortId": "inlet",
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 38.5,
       "fromElevation": 13.5,
       "toElevation": 0,
       "flowArea": 0.006,
@@ -1351,6 +1376,8 @@
       "fromPortId": "outlet",
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 52,
       "fromElevation": 0,
       "toElevation": 4,
       "flowArea": 0.5,
@@ -1361,6 +1388,8 @@
       "fromPortId": "condenser-1-bottom",
       "toComponentId": "cond-pump-1",
       "toPortId": "cond-pump-1-inlet",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 77,
       "fromElevation": 0.1,
       "toElevation": 0,
       "flowArea": 0.2,
@@ -1371,6 +1400,8 @@
       "fromPortId": "cond-pump-1-outlet",
       "toComponentId": "fw-pump-1",
       "toPortId": "fw-pump-1-inlet",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
       "flowArea": 0.05,
@@ -1381,6 +1412,8 @@
       "fromPortId": "fw-pump-1-outlet",
       "toComponentId": "fwh-1",
       "toPortId": "fwh-1-tube-1",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
       "flowArea": 0.05,
@@ -1470,6 +1503,8 @@
       "fromPortId": "fwh-1-tube-2",
       "toComponentId": "val-fwcv-1",
       "toPortId": "val-fwcv-1-in",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
       "flowArea": 0.05,
@@ -1481,9 +1516,24 @@
       "fromPortId": "hx-1-tube-2",
       "toComponentId": "val-bleed-1",
       "toPortId": "val-bleed-1-in",
-      "fromElevation": 0,
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 12.5,
+      "fromElevation": 13.5,
       "toElevation": 0,
-      "flowArea": 0.0008,
+      "flowArea": 0.002,
+      "length": 20,
+      "resistanceCoeff": 6
+    },
+    {
+      "fromComponentId": "hx-1",
+      "fromPortId": "hx-1-tube-2-b2",
+      "toComponentId": "val-bleed-1",
+      "toPortId": "val-bleed-1-in",
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 12.5,
+      "fromElevation": 13.5,
+      "toElevation": 0,
+      "flowArea": 0.002,
       "length": 20,
       "resistanceCoeff": 6
     },
@@ -1492,9 +1542,11 @@
       "fromPortId": "val-bleed-1-out",
       "toComponentId": "fwh-1",
       "toPortId": "fwh-1-shell-1",
+      "initialFlowPhase": "vapor",
+      "initialFlowRate": 25,
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.0008,
+      "flowArea": 0.004,
       "length": 6,
       "resistanceCoeff": 2
     },
@@ -1503,6 +1555,8 @@
       "fromPortId": "fwh-1-shell-2",
       "toComponentId": "val-fwhdr-1",
       "toPortId": "val-fwhdr-1-in",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 25,
       "fromElevation": 0,
       "toElevation": 3,
       "flowArea": 0.01,
@@ -1514,6 +1568,8 @@
       "fromPortId": "val-fwhdr-1-out",
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
+      "initialFlowPhase": "liquid",
+      "initialFlowRate": 25,
       "fromElevation": 0,
       "toElevation": 3,
       "flowArea": 0.01,

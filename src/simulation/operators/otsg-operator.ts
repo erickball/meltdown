@@ -47,15 +47,9 @@ import {
 import { approxVaporDensity } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
 
-/** Tube-side film coefficients (W/m2-K). The gas shell is the limiting
- *  resistance by an order of magnitude, so correlation-grade constants are
- *  adequate here; each is the standard scale for its regime. */
-const H_TUBE_LIQUID = 4000;
-const H_TUBE_BOILING = 25000;
-const H_TUBE_STEAM = 1200;
-/** Natural-convection floor for the standing branch (W/m2-K) - what keeps a
- *  bottled boiler heating. */
-const H_TUBE_NATURAL = 250;
+// Tube-side film coefficients live in otsg.ts so the factory's design-point
+// seeding and this operator's duties use the same numbers by construction.
+import { H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM, H_TUBE_NATURAL } from '../otsg';
 
 /**
  * The WATER's own state inside a tube node: its partial pressure and its
@@ -513,6 +507,34 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       // added water arrives as feed-like liquid, so the slug ledger grows
       // with it (matching what the transit rate would do), which is the
       // stiff direction a packing boiler actually presents.
+      // One stiffness estimate per pressure decade of movement, not per
+      // stage: dP/dm varies slowly along a trajectory, and re-deriving it
+      // on all seven constraint passes doubled the partition solves for a
+      // number the compliance linearization only needs roughly.
+      const cached = node.otsg.lastEval;
+      if (cached && cached.dPdm > 0 && Math.abs(cached.P - ev.P) < 0.02 * ev.P) {
+        // lastEval.P stays as the ANCHOR the stiffness was computed at - a
+        // slow drift must eventually cross the 2% band and re-derive, which
+        // updating P each pass would never let happen.
+        node.otsg.lastEval = { ...cached,
+          hSteamOut: ev.hSteamOut,
+          hLiquidOut: ev.sections[0].hBar,
+          TSat: ev.sat.T,
+          T3: ev.sections[2].T,
+          lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
+        };
+        node.fluid.pressure = ev.P + water.gasPressure;
+        if (ev.regime !== 'supercritical') {
+          const m = node.fluid.mass;
+          const [s1c, s2c, s3c] = ev.sections;
+          node.fluid.temperature = (s1c.mass * s1c.T + s2c.mass * s2c.T + s3c.mass * s3c.T) / m;
+          const x2c = (s2c.vBar - ev.sat.v_f) / (ev.sat.v_g - ev.sat.v_f);
+          const q = (s2c.mass * Math.max(0, x2c) + s3c.mass) / m;
+          node.fluid.quality = q;
+          node.fluid.phase = q <= 0 ? 'liquid' : q >= 1 ? 'vapor' : 'two-phase';
+        }
+        continue;
+      }
       const dm = Math.max(0.5, 1e-3 * node.fluid.mass);
       let dPdm = 0;
       try {

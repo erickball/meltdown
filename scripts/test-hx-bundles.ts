@@ -294,13 +294,14 @@ test('Every bundle fits its tube, takes feed and delivers steam', () => {
       `${where} claims ${V.toFixed(2)} m3 of a ${node.volume.toFixed(2)} m3 tube`);
     assert(Math.abs(m1 + m2 + m3 - node.fluid.mass) < 1e-6 * node.fluid.mass,
       `${where} must account for the node's ${node.fluid.mass.toFixed(0)} kg`);
-    // Feed end and steam end both live. The EVAPORATOR is not asserted here:
-    // this rig dries down with a large integrated m1, and once the subcooled
-    // section's liquid plus the remaining volume can only be filled at vapour
-    // density there is no room for a two-phase region at all - the partition
-    // reports that instead of inventing volume for it, which is the whole
-    // point of solving it from the totals.
-    assert(m1 > 0 && m3 > 0, `${where}: bundle must run an economizer and carry steam`);
+    // The steam end stays live; the ECONOMIZER is allowed to die. This rig
+    // deliberately dries down against its sink with the feed exhausted, and
+    // with draws now priced and classified by the partition's own
+    // stratification (getFlowPhase) the tube drains honestly - a boiler
+    // with no feed ends with no subcooled slug at all, which is the
+    // physical endpoint, not a defect. (The old closure froze a large m1
+    // ledger through the blowdown, and this assert used to codify that.)
+    assert(m1 >= 0 && m3 > 0, `${where}: bundle must still carry steam`);
     // Both ends must be CONNECTED and carrying - but not judged on the sign
     // of one instant. A coil-geometry tube side holds tens of kilograms and
     // its flows oscillate through zero, so an instantaneous read tests which

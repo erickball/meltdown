@@ -1440,6 +1440,23 @@ export class FlowRateOperator implements RateOperator {
     massFlowRate: number = 0,
     phaseTolerance?: number
   ): 'liquid' | 'vapor' | 'mixture' {
+    // A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
+    // economizer at the bottom, boiling in the middle, superheat at the top
+    // is the entire sectioned model - so what a connection draws is read off
+    // the partition's own boundaries, not the tank-mixing heuristic below.
+    // The turbulence-based separation factor sees a once-through boiler's
+    // design throughput and calls the node 'fully mixed', which priced every
+    // 3.5 MJ/kg steam draw at 1.6 MJ/kg bulk and held +100 MW of phantom
+    // energy per bundle in the tubes (+60 bar/s, invariant to every valve).
+    if (node.otsg?.lastEval) {
+      const fr = node.otsg.lastEval.lengthFracs;
+      const h = node.height ?? Math.cbrt(node.volume);
+      const frac = Math.max(0, Math.min(1, (connectionElevation ?? h / 2) / h));
+      if (frac >= fr[0] + fr[1]) return 'vapor';
+      if (frac <= fr[0]) return 'liquid';
+      return 'mixture';
+    }
+
     // Single phase nodes always flow their phase
     if (node.fluid.phase !== 'two-phase') {
       return node.fluid.phase === 'vapor' ? 'vapor' : 'liquid';

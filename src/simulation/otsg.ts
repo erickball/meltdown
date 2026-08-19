@@ -54,6 +54,16 @@ import {
 // Saturation bundle
 // ---------------------------------------------------------------------------
 
+/** Tube-side film coefficients (W/m2-K). The gas shell is the limiting
+ *  resistance by an order of magnitude, so correlation-grade constants are
+ *  adequate; each is the standard scale for its regime. Live here (pure
+ *  module) so the factory's design-point seeding and the operator's duty
+ *  calculation use the SAME numbers by construction. */
+export const H_TUBE_LIQUID = 4000;
+export const H_TUBE_BOILING = 25000;
+export const H_TUBE_STEAM = 1200;
+export const H_TUBE_NATURAL = 250;
+
 export interface SaturationProps {
   P: number;      // Pa
   T: number;      // K
@@ -202,7 +212,7 @@ export function subcooledLiquidV(u: number): number {
  * Bisection on ln(v) - P falls monotonically with v at fixed u in the vapor
  * region, and the bracket is generous.
  */
-export function superheatedV(u: number, P: number, tolLn = 1e-10): number {
+export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number): number {
   // Superheated vapor at pressure P always has v > v_g(P), so the saturated-
   // vapor volume is the exact lower bracket - guaranteed inside the property
   // grid's vapor region, unlike any fixed constant (a constant either strays
@@ -218,6 +228,26 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10): number {
   // stay bracketed when the closure solver probes them.
   let lnLo = Math.log(vg * (1 + 1e-9)), lnHi = Math.log(Math.max(50, vg * 200));
   const pOf = (lnV: number) => calculateState(1, u, Math.exp(lnV)).pressure;
+  // A caller iterating nearby states can hand back its previous answer: a
+  // +/-30% bracket around it replaces the full five-decade one and cuts the
+  // bisection from ~16 property probes to ~4. Verified by the same sign
+  // check as the wide bracket - a stale hint just falls through.
+  if (vHint && vHint > vg) {
+    const lo = Math.max(Math.log(vg * (1 + 1e-9)), Math.log(vHint / 1.3));
+    const hi = Math.min(lnHi, Math.log(vHint * 1.3));
+    if (hi > lo) {
+      const pl = pOf(lo), ph = pOf(hi);
+      if (pl >= P && ph <= P) {
+        let a = lo, b = hi;
+        for (let i = 0; i < 40; i++) {
+          const m = 0.5 * (a + b);
+          if (pOf(m) > P) a = m; else b = m;
+          if (b - a < tolLn) break;
+        }
+        return Math.exp(0.5 * (a + b));
+      }
+    }
+  }
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
   if (!(pLo >= P * (1 - 1e-6) && pHi <= P)) {
     // Near the critical point the isobars run almost flat in v, so the
@@ -644,6 +674,7 @@ export function evaluateOtsgPartition(
   // refreshes both against the property surface after each pressure solve.
   let du3 = 0;
   let L3 = Math.max(0, Math.min(1, 1 - (massTotal * 0.0015) / V));
+  let v3Hint: number | undefined;
   const atP = (P: number): AtP => {
     const sat = saturationAtP(P);
     const u1 = subcooledSectionMean(uFeedIn, sat);
@@ -694,6 +725,7 @@ export function evaluateOtsgPartition(
       // the leftovers are one superheated region (or the seam itself).
       const u3Free = UR / mR;
       if (u3Free > U3_CEILING) {
+        v3Hint = undefined;
         // A sliver carrying energy past the steam tables. While the root
         // find is PROBING a pressure far below the root, the ledger's mass
         // claim swells (u1 falls with P) and squeezes the leftovers into
@@ -704,10 +736,12 @@ export function evaluateOtsgPartition(
         // reports it.
         return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
       }
-      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-4) : sat.v_g;
+      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-4, v3Hint) : sat.v_g;
+      v3Hint = v3;
       return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat' };
     }
-    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-4) : sat.v_g;
+    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-4, v3Hint) : sat.v_g;
+    if (du3 > 1e-9) v3Hint = v3;
     const m2 = mR - m3;
     return {
       sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
@@ -838,8 +872,35 @@ export function evaluateOtsgPartition(
     if (settled) break;
   }
   const { P, fin } = result!;
+  // Volume is the HARD constraint: the linear branches close it exactly by
+  // construction, and the vapor branch closes it here - superheatedV's loose
+  // tolerance (1e-4 in ln v, a speed choice) otherwise leaves its slack in
+  // the section volumes, where the fits-the-tube invariant lives. Moving the
+  // slack onto v3 puts it in pressure-consistency noise instead, where the
+  // root-finder already owns it.
+  let v3 = fin.v3;
+  if (fin.m3 > 1e-12) {
+    v3 = (V - fin.m1 * fin.v1 - fin.m2 * fin.v2) / fin.m3;
+  }
   return finish(P, fin.sat, fin.m1, fin.u1, fin.v1, fin.m2, fin.x2Bar, fin.v2,
-    fin.m3, fin.u3, fin.v3, fin.regime);
+    fin.m3, fin.u3, v3, fin.regime);
+}
+
+/**
+ * Superheated state at (P, T) - the (u, v) pair on the P-isobar whose
+ * temperature is T. Used by the wall pin and by design-point initialization
+ * (a preset that says "the superheater runs saturation -> 565 C" needs the
+ * mean state of that span to seed the node's totals).
+ */
+export function superheatedStateAtPT(P: number, T: number): { u: number; v: number } {
+  const sat = saturationAtP(P);
+  if (!(T > sat.T)) {
+    return { u: sat.u_g, v: sat.v_g };
+  }
+  const probe = (u: number, v: number) => calculateState(1, u, v);
+  const u = u3AtTemperature(T, P, sat,
+    (uu, vv) => probe(uu, vv), sat.u_g + 2500 * (T - sat.T), T);
+  return { u, v: superheatedV(u, P, 1e-4) };
 }
 
 /** Invert the section temperature to u3 along the P-isobar - bisection with
@@ -849,7 +910,12 @@ function u3AtTemperature(
   probe: (u: number, v: number, what: string) => { temperature: number },
   uGuess: number, TWall3: number,
 ): number {
-  const TOf = (u: number) => probe(u, superheatedV(u, P, 1e-4), 'pinned steam state').temperature;
+  let vT: number | undefined;
+  const TOf = (u: number) => {
+    const v = superheatedV(u, P, 1e-4, vT);
+    vT = v;
+    return probe(u, v, 'pinned steam state').temperature;
+  };
   let uLo = sat.u_g, TLo = sat.T;
   let uHi = Math.max(uGuess, sat.u_g + 10e3);
   let THi = TOf(uHi);
