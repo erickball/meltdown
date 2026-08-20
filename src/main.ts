@@ -2430,11 +2430,54 @@ function init() {
       plantCanvas.setConstructionMode(true);
       plantCanvas.setMoveMode(constructionSubMode === 'move');
 
-      // Pause simulation
+      // Pause simulation. Refresh the button even though it is hidden here:
+      // it is the label the user meets on the way back into simulation mode,
+      // and init() paints it before the first pause() ever runs.
       gameLoop.pause();
+      updatePauseButton();
 
     } else {
-      // Simulation mode
+      // Simulation mode.
+      //
+      // Build the simulation BEFORE touching any UI. The factory throws on a
+      // design it cannot wire (an unmappable port, a leak path that names no
+      // flow node), and a throw part-way through the switch used to leave the
+      // worst possible state: simulation controls on screen, the pause button
+      // still showing whatever it last said, and the game loop quietly running
+      // the PREVIOUS state - so the clock advanced while the plant on screen
+      // never moved. Nothing below commits until the state exists.
+      let newSimState: SimulationState;
+      let resumed = false;
+      try {
+        // Set random seed for deterministic mode
+        const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
+        setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
+        // Always create simulation state from current plant configuration
+        // (even if empty - this replaces the demo plant with an empty simulation)
+        newSimState = createSimulationFromPlant(plantState);
+
+        // Returning from a construction visit: resume the saved live state for
+        // everything the user did not edit (edited/added components keep their
+        // fresh factory initialization from the edited ICs)
+        resumed = resumeSnapshot !== null;
+        if (resumeSnapshot) {
+          const notes = transplantSimulationState(newSimState, resumeSnapshot, plantState);
+          console.log(`[Resume] ${notes.join('; ')}`);
+          showNotification(`Simulation ${notes[0]}${notes.length > 1 ? ` (${notes.slice(1).join('; ')})` : ''}`, 'info', 8000);
+          resumeSnapshot = null;
+        }
+      } catch (error) {
+        // Stay in construction mode - the design is not simulatable yet, and
+        // half a mode switch is worse than none.
+        currentMode = previousMode;
+        const message = error instanceof Error ? error.message : String(error);
+        console.error('[Simulation] Failed to build the simulation from this plant:', error);
+        showErrorDialog(
+          'Cannot start the simulation',
+          `The plant could not be turned into a simulation, so we are staying in construction mode.\n\n${message}`);
+        return;
+      }
+
       modeConstructionBtn?.classList.remove('active');
       modeSimulationBtn?.classList.add('active');
 
@@ -2461,25 +2504,17 @@ function init() {
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
       if (placementHintDiv) placementHintDiv.style.display = 'none';
 
-      // Always create simulation state from current plant configuration
-      // (even if empty - this replaces the demo plant with an empty simulation)
-      // Set random seed for deterministic mode
-      const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
-      setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
-      const newSimState = createSimulationFromPlant(plantState);
-
-      // Returning from a construction visit: resume the saved live state for
-      // everything the user did not edit (edited/added components keep their
-      // fresh factory initialization from the edited ICs)
-      const resumed = resumeSnapshot !== null;
-      if (resumeSnapshot) {
-        const notes = transplantSimulationState(newSimState, resumeSnapshot, plantState);
-        console.log(`[Resume] ${notes.join('; ')}`);
-        showNotification(`Simulation ${notes[0]}${notes.length > 1 ? ` (${notes.slice(1).join('; ')})` : ''}`, 'info', 8000);
-        resumeSnapshot = null;
-      }
-
       gameLoop.setSimulationState(newSimState);
+
+      // Start paused so the user can look the plant over (and step through)
+      // before time starts moving; career mode resumes explicitly when the
+      // plant goes online. Settle the run state and its button BEFORE the
+      // display work below, so that if any of it throws the loop is at least
+      // stopped and the button is not inviting a click that says "pause" and
+      // does the opposite.
+      gameLoop.pause();
+      updatePauseButton();
+
       plantCanvas.setSimState(newSimState);
 
       // Sync simulation state back to plant components for correct rendering
@@ -2530,14 +2565,6 @@ function init() {
       if (plantState.components.size > 0) {
       } else {
       }
-
-      // Start paused so the user can look the plant over (and step through)
-      // before time starts moving; career mode resumes explicitly when the
-      // plant goes online
-      gameLoop.pause();
-
-      // Update pause button to reflect actual paused state
-      updatePauseButton();
 
       // A resumed sim starts at the saved time, not t=0 - refresh the time
       // display and everything else the paused per-frame path won't touch
