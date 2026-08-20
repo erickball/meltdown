@@ -2451,6 +2451,20 @@ function init() {
       // This is needed before simulation starts so components display correctly
       syncSimulationToVisuals(newSimState, plantState);
 
+      // Boron is a no-op without water to carry it: collapse the slider when
+      // the core starts dry (gas-cooled or voided). Purely a UI default - the
+      // user can expand it, and the physics works either way.
+      const boronDetails = document.getElementById('boron-details') as HTMLDetailsElement | null;
+      if (boronDetails) {
+        const coolantNode = newSimState.neutronics.coolantNodeId
+          ? newSimState.flowNodes.get(newSimState.neutronics.coolantNodeId)
+          : undefined;
+        const waterDensity = coolantNode && coolantNode.volume > 0
+          ? coolantNode.fluid.mass / coolantNode.volume
+          : 0;
+        boronDetails.open = waterDensity >= 10; // kg/m³ - trace steam is ~0.01-1
+      }
+
       // Immediately update debug panel to show new configuration
       const currentState = gameLoop.getState();
       const emptyMetrics: SolverMetrics = {

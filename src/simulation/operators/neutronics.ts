@@ -29,6 +29,13 @@ import { latticeKeff } from '../lattice';
 // the textbook PWR value; components may override via boronWorthPerPpm.
 export const BORON_WORTH_PER_PPM = -8e-5;
 
+// Water density at which the textbook per-ppm worth is defined (PWR operating
+// conditions). The boron term always normalizes by THIS, not by the core's
+// anchored reference density: a gas-cooled core anchors its reference at the
+// trace-steam density (~0.01 kg/m³), and normalizing by that would hand a
+// later-flooded core hundreds of times the physical worth.
+export const BORON_REF_WATER_DENSITY = 750; // kg/m³
+
 // ============================================================================
 // Shared reactivity computation (used by NeutronicsOperator,
 // NeutronicsRateOperator, and the factory's t=0 initialization)
@@ -77,7 +84,7 @@ export function computeReactivityComponents(
   const boronPpm = n.boronPpm ?? 0;
   const rhoBoron = boronPpm !== 0
     ? (n.boronWorthPerPpm ?? BORON_WORTH_PER_PPM) * boronPpm *
-      (inp.coolantDensity / Math.max(1, n.refCoolantDensity))
+      (inp.coolantDensity / BORON_REF_WATER_DENSITY)
     : 0;
 
   // Relocated (slumped) fuel has left the moderated critical geometry:
