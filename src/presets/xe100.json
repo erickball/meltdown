@@ -304,7 +304,7 @@
             "direction": "both"
           },
           {
-            "id": "hx-1-leak",
+            "id": "hx-1-tube-leak",
             "position": {
               "x": 1.8,
               "y": 0
@@ -885,6 +885,7 @@
         "elevation": 0,
         "diameter": 0.1,
         "opening": 0.1,
+        "volume": 0.1,
         "ports": [
           {
             "id": "val-bleed-1-in",
@@ -1478,7 +1479,7 @@
     },
     {
       "fromComponentId": "hx-1",
-      "fromPortId": "hx-1-leak",
+      "fromPortId": "hx-1-tube-leak",
       "toComponentId": "val-leak-1",
       "toPortId": "val-leak-1-in",
       "fromElevation": 5,

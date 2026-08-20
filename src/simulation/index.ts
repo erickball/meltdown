@@ -21,6 +21,7 @@ export {
   RK45Solver,
   createZeroRates,
   addRates,
+  accumulateRates,
   scaleRates,
   applyRatesToState,
   checkPreConstraintSanity,

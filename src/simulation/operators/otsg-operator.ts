@@ -617,7 +617,18 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
     for (const [id, node] of state.flowNodes) {
       const cfg = node.otsg;
       if (!cfg) continue;
-      const { ev, water } = evaluateOtsgSections(state, id, node, { exact: true });
+      // NOT { exact: true }. This watch asks whether the ledger the physics
+      // is running has drifted, so it has to read the evaluation the physics
+      // actually used - the one OtsgPartitionConstraintOperator just cached
+      // for this very accepted state. Asking for `exact` re-solved the
+      // partition AND re-anchored its tangent (four warm-started solves per
+      // bundle) on every accepted step, purely to feed a diagnostic: on the
+      // Xe-100 that was 49% of total simulation wall time. It also judged the
+      // physics against numbers the physics never saw, which is the quiet
+      // disagreement the single-entry-point rule above exists to prevent.
+      // Both tests below are gross - a 50 K margin and a 99.5% claim - while
+      // the tangent band is 0.4% of mass, orders of magnitude inside them.
+      const { ev, water } = evaluateOtsgSections(state, id, node);
 
       // The hottest surface this water can see: its own tube metal, or the gas
       // arriving at the shell.

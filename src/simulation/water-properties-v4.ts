@@ -119,6 +119,14 @@ interface SpatialIndex {
   // Grid cells for fast lookup in (logV, u) space
   liquidGrid: Map<number, GridPoint[]>;
   vaporGrid: Map<number, GridPoint[]>;
+  // PRE-GATHERED 5x5 neighborhoods, keyed the same way. findNearbyPoints
+  // wants the union of a cell's 5x5 block on every single property query;
+  // the grid is immutable once loaded, so that union is a constant of the
+  // data, not of the query. Building it here turns the per-query cost from
+  // 25 Map probes plus a fresh array into ONE probe returning a shared,
+  // never-mutated array. Interpolation was 35% of all simulation CPU.
+  liquidBlocks: Map<number, GridPoint[]>;
+  vaporBlocks: Map<number, GridPoint[]>;
 }
 
 let spatialIndex: SpatialIndex | null = null;
@@ -1031,6 +1039,8 @@ function buildSpatialIndex(): void {
     supercriticalPoints: [],
     liquidGrid: new Map(),
     vaporGrid: new Map(),
+    liquidBlocks: new Map(),
+    vaporBlocks: new Map(),
   };
 
   for (const pt of gridPoints) {
@@ -1063,6 +1073,43 @@ function buildSpatialIndex(): void {
     }
   }
 
+  // Pre-gather each cell's 5x5 block, for every cell whose block is
+  // non-empty - that is the occupied set DILATED by 2, because a query can
+  // legitimately land in an empty cell whose neighbors hold points. Built in
+  // exactly the dx/dy order findNearbyPoints used, so the candidate list is
+  // point-for-point and order-for-order what it always was: the MLS sums
+  // accumulate in this order and the near-coincident-point early return
+  // takes the first match, so order is part of the answer, not a detail.
+  for (const [grid, blocks] of [
+    [spatialIndex.liquidGrid, spatialIndex.liquidBlocks] as const,
+    [spatialIndex.vaporGrid, spatialIndex.vaporBlocks] as const,
+  ]) {
+    const wanted = new Set<number>();
+    for (const key of grid.keys()) {
+      const cellX = Math.floor(key / 8192) - 512;
+      const cellY = (key % 8192) - 512;
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          wanted.add((cellX + dx + 512) * 8192 + (cellY + dy + 512));
+        }
+      }
+    }
+    for (const key of wanted) {
+      const cellX = Math.floor(key / 8192) - 512;
+      const cellY = (key % 8192) - 512;
+      const gathered: GridPoint[] = [];
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          const cellPoints = grid.get((cellX + dx + 512) * 8192 + (cellY + dy + 512));
+          if (cellPoints) {
+            for (let i = 0; i < cellPoints.length; i++) gathered.push(cellPoints[i]);
+          }
+        }
+      }
+      if (gathered.length > 0) blocks.set(key, gathered);
+    }
+  }
+
   console.log(`[WaterProps v4] Spatial index built: ${spatialIndex.liquidPoints.length} liquid, ` +
     `${spatialIndex.vaporPoints.length} vapor, ${spatialIndex.supercriticalPoints.length} supercritical`);
 
@@ -1088,33 +1135,21 @@ function buildSpatialIndex(): void {
  * Find nearby grid points for interpolation.
  * Uses spatial index for efficient lookup.
  */
+const NO_POINTS: GridPoint[] = [];
+
 function findNearbyPoints(u: number, v: number, phase: 'liquid' | 'vapor'): GridPoint[] {
-  if (!spatialIndex) return [];
+  if (!spatialIndex) return NO_POINTS;
 
-  const logV = Math.log10(v);
-  const u_kJkg = u / 1000;
-
-  const grid = phase === 'liquid' ? spatialIndex.liquidGrid : spatialIndex.vaporGrid;
-
-  // Get points from the current cell and a 5x5 block of neighbors. The block
-  // must fully cover the smooth-taper support radius used by
-  // interpolateFromGrid (2 cells), so that a grid point can never pop in or
-  // out of the candidate set while its taper weight is still nonzero.
-  const nearby: GridPoint[] = [];
-
-  const baseX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
-  const baseY = Math.floor(u_kJkg / GRID_CELL_SIZE_U);
-  for (let dx = -2; dx <= 2; dx++) {
-    for (let dy = -2; dy <= 2; dy++) {
-      const neighborKey = (baseX + dx + 512) * 8192 + (baseY + dy + 512);
-      const cellPoints = grid.get(neighborKey);
-      if (cellPoints) {
-        for (let i = 0; i < cellPoints.length; i++) nearby.push(cellPoints[i]);
-      }
-    }
-  }
-
-  return nearby;
+  // The 5x5 block around this cell - covering the smooth-taper support radius
+  // of 2 cells, so a grid point can never pop in or out of the candidate set
+  // while its taper weight is still nonzero - was pre-gathered when the index
+  // was built (see buildSpatialIndex). Same points, same order; the only
+  // thing that changed is that the gather no longer happens per query.
+  //
+  // The returned array is SHARED and must never be mutated by a caller.
+  const blocks = phase === 'liquid' ? spatialIndex.liquidBlocks : spatialIndex.vaporBlocks;
+  const key = getCellKey(Math.log10(v), u / 1000);
+  return blocks.get(key) ?? NO_POINTS;
 }
 
 /**

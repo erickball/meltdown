@@ -186,7 +186,11 @@ add('hx-1', {
     ['hx-1-tube-2-b2', 0.2, -7],    // bundle 2 main steam out (top)
     ['hx-1-shell-1', -1.8, -6],     // hot helium in (top, from the duct)
     ['hx-1-shell-2', 1.8, 6],       // cold helium out (bottom, to vessel space)
-    ['hx-1-leak', 1.8, 0],          // bundle 1 tube-side tap for the leak path
+    // Must contain '-tube' (and carry no '-b{n}' suffix): that is how the
+    // factory routes a heat-exchanger port to bundle 1's tube node. Named
+    // 'hx-1-leak' it resolved to the bare component id 'hx-1', which is not
+    // a flow node at all - the leak's tube-side end was inert.
+    ['hx-1-tube-leak', 1.8, 0],     // bundle 1 tube-side tap for the leak path
   ]),
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
@@ -456,6 +460,18 @@ add('val-bleed-1', {
   // 0.1: measured ~46 kg/s at 0.2 through the twin taps - this meters the
   // ~25 the heater duty needs.
   diameter: 0.1, opening: 0.1,
+  // The extraction LINE's inventory. This valve is the only node that
+  // represents that line: the 2 x 20 m taps (0.002 m2) and the 6 m outlet
+  // (0.004 m2) hold 0.104 m3, and the factory's lumping pass credits a
+  // small node only HALF of each adjacent connection - the other halves go
+  // to the SG bundle and the heater shell, which are enormous and swallow
+  // them. That left a 0.01 m3 valve body (the factory floor for a 0.1 m
+  // valve) plus 0.052 m3 to pass ~60 kg/s of steam: it turned over a
+  // quarter of its own inventory per step, and the throughput sanity guard
+  // rejected 22k steps over a 300 s run - 78% of ALL rejections in the
+  // preset. Holding the line's full volume is both the physical reading and
+  // the same lumping val-leak-1 already carries explicitly.
+  volume: 0.1,
   ports: ports([['val-bleed-1-in', -0.1, 0], ['val-bleed-1-out', 0.1, 0]]),
   fluid: { temperature: 700, pressure: 165e5, phase: 'vapor', quality: 1, flowRate: 0 },
   nqa1: false, pressureRating: 200,
@@ -802,7 +818,7 @@ connect('val-prel-1', 'val-prel-1-out', 'bui-1', 'bui-1-north',
 // ---------------------------------------------------------------------------
 // Small flow area: a single severed 19 mm tube is ~2.3e-4 m2 of double-ended
 // area; the valve is sized for that and throttled by `opening`.
-connect('hx-1', 'hx-1-leak', 'val-leak-1', 'val-leak-1-in',
+connect('hx-1', 'hx-1-tube-leak', 'val-leak-1', 'val-leak-1-in',
   { fromElevation: 5, toElevation: 0, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
 connect('val-leak-1', 'val-leak-1-out', 'hx-1', 'hx-1-shell-1',
   { fromElevation: 0, toElevation: 5, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });

@@ -288,6 +288,101 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
   return result;
 }
 
+/**
+ * target += source * factor, IN PLACE.
+ *
+ * Arithmetically identical to `addRates(target, scaleRates(source, factor))`,
+ * which is what every accumulation site used to call. That pair allocated two
+ * complete StateRates - four Maps, an object per node, per connection and per
+ * pump - plus three Sets for the key unions, and it did so ~140 times per
+ * step (once per rate operator per stage, plus the Butcher-tableau sums). The
+ * i-th entry was rebuilt (N-i) times on the way to the total. Accumulating in
+ * place allocates each entry once and then adds into it: on the Xe-100 that
+ * was ~9% of wall in addRates itself plus the GC it fed.
+ *
+ * The addition ORDER is unchanged - ((0 + k0*a) + k1*b) + ... - so results
+ * stay bit-identical, which the replay-seek suite checks directly.
+ *
+ * `source` is only ever read, and nothing it owns is aliased into `target`:
+ * the Butcher sums accumulate over the stage derivatives k[], which later
+ * stages read again.
+ */
+export function accumulateRates(target: StateRates, source: StateRates, factor = 1): void {
+  for (const [id, r] of source.flowNodes) {
+    let t = target.flowNodes.get(id);
+    if (!t) {
+      t = { dMass: 0, dEnergy: 0 };
+      target.flowNodes.set(id, t);
+    }
+    t.dMass += r.dMass * factor;
+    t.dEnergy += r.dEnergy * factor;
+    if (r.dOtsgM1 !== undefined) t.dOtsgM1 = (t.dOtsgM1 ?? 0) + r.dOtsgM1 * factor;
+    if (r.dDepositedCsI !== undefined) {
+      t.dDepositedCsI = (t.dDepositedCsI ?? 0) + r.dDepositedCsI * factor;
+    }
+    if (r.dNcg) {
+      if (!t.dNcg) t.dNcg = emptyGasComposition();
+      for (const species of ALL_GAS_SPECIES) {
+        t.dNcg[species] += r.dNcg[species] * factor;
+      }
+    }
+  }
+
+  for (const [id, r] of source.flowConnections) {
+    const t = target.flowConnections.get(id);
+    if (t) t.dMassFlowRate += r.dMassFlowRate * factor;
+    else target.flowConnections.set(id, { dMassFlowRate: r.dMassFlowRate * factor });
+  }
+
+  for (const [id, r] of source.thermalNodes) {
+    let t = target.thermalNodes.get(id);
+    if (!t) {
+      t = { dTemperature: 0 };
+      target.thermalNodes.set(id, t);
+    }
+    t.dTemperature += r.dTemperature * factor;
+    if (r.dMass !== undefined) t.dMass = (t.dMass ?? 0) + r.dMass * factor;
+    if (r.dOxidizedFraction !== undefined) {
+      t.dOxidizedFraction = (t.dOxidizedFraction ?? 0) + r.dOxidizedFraction * factor;
+    }
+    if (r.dGraphiteBurnoff !== undefined) {
+      t.dGraphiteBurnoff = (t.dGraphiteBurnoff ?? 0) + r.dGraphiteBurnoff * factor;
+    }
+    if (r.dFpNobleGas !== undefined) t.dFpNobleGas = (t.dFpNobleGas ?? 0) + r.dFpNobleGas * factor;
+    if (r.dFpVolatile !== undefined) t.dFpVolatile = (t.dFpVolatile ?? 0) + r.dFpVolatile * factor;
+    if (r.dMetalZr !== undefined) t.dMetalZr = (t.dMetalZr ?? 0) + r.dMetalZr * factor;
+    if (r.dMetalFe !== undefined) t.dMetalFe = (t.dMetalFe ?? 0) + r.dMetalFe * factor;
+    if (r.dSlag !== undefined) t.dSlag = (t.dSlag ?? 0) + r.dSlag * factor;
+  }
+
+  target.neutronics.dPower += source.neutronics.dPower * factor;
+  target.neutronics.dPrecursorConcentration +=
+    source.neutronics.dPrecursorConcentration * factor;
+  if (source.neutronics.dDecayHeatPools) {
+    const src = source.neutronics.dDecayHeatPools;
+    let pools = target.neutronics.dDecayHeatPools;
+    if (!pools) {
+      pools = [];
+      target.neutronics.dDecayHeatPools = pools;
+    }
+    for (let i = 0; i < src.length; i++) pools[i] = (pools[i] ?? 0) + src[i] * factor;
+  }
+
+  for (const [id, r] of source.pumps) {
+    const t = target.pumps.get(id);
+    if (t) t.dEffectiveSpeed += r.dEffectiveSpeed * factor;
+    else target.pumps.set(id, { dEffectiveSpeed: r.dEffectiveSpeed * factor });
+  }
+
+  if (source.environmentalRelease) {
+    if (!target.environmentalRelease) target.environmentalRelease = emptyGasComposition();
+    for (const species of ALL_GAS_SPECIES) {
+      target.environmentalRelease[species] +=
+        (source.environmentalRelease[species] ?? 0) * factor;
+    }
+  }
+}
+
 export function scaleRates(rates: StateRates, factor: number): StateRates {
   const result = createZeroRates();
 
@@ -1432,7 +1527,7 @@ export class RK45Solver {
         const t0 = performance.now();
         const opRates = op.computeRates(constrainedState);
         this.operatorTimes.set(op.name, (this.operatorTimes.get(op.name) || 0) + (performance.now() - t0));
-        totalRates = addRates(totalRates, opRates);
+        accumulateRates(totalRates, opRates);
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -1592,9 +1687,9 @@ export class RK45Solver {
     // k2 through k7
     for (let i = 1; i <= 6; i++) {
       // y_stage = y + dt * sum(A[i][j] * k[j])
-      let stageRates = createZeroRates();
+      const stageRates = createZeroRates();
       for (let j = 0; j < i; j++) {
-        stageRates = addRates(stageRates, scaleRates(k[j], A[i][j]));
+        accumulateRates(stageRates, k[j], A[i][j]);
       }
       const stageState = applyRatesToState(state, stageRates, dt);
 
@@ -1651,9 +1746,9 @@ export class RK45Solver {
     }
 
     // Compute 5th order solution: y5 = y + dt * sum(B5[i] * k[i])
-    let solution5Rates = createZeroRates();
+    const solution5Rates = createZeroRates();
     for (let i = 0; i < 7; i++) {
-      solution5Rates = addRates(solution5Rates, scaleRates(k[i], B5[i]));
+      accumulateRates(solution5Rates, k[i], B5[i]);
     }
     const newState = applyRatesToState(state, solution5Rates, dt);
 
@@ -1683,9 +1778,9 @@ export class RK45Solver {
     }
 
     // Compute error estimate: err = dt * sum(E[i] * k[i])
-    let errorRates = createZeroRates();
+    const errorRates = createZeroRates();
     for (let i = 0; i < 7; i++) {
-      errorRates = addRates(errorRates, scaleRates(k[i], E[i]));
+      accumulateRates(errorRates, k[i], E[i]);
     }
 
     // Compute error norm
@@ -1753,25 +1848,51 @@ export class RK45Solver {
     let lastErrorRates: StateRates = createZeroRates();
     let lastAcceptedState: SimulationState = state;
 
+    // DETERMINISTIC MODE TAKES NO WALL-CLOCK BREAK.
+    //
+    // It used to yield at 500 ms like the interactive path, and that quietly
+    // made the mode a lie: a tick that could not be finished inside the budget
+    // returned having advanced LESS than the dt it was asked for, so the
+    // trajectory depended on how fast the machine was. Two runs of the same
+    // headless preset on the same commit landed at t=29.92 s and t=30.00 s
+    // with different states, and any optimization looked like a physics change
+    // because it let more substeps fit in the budget. Reproducibility is the
+    // entire point of the mode - replay, regression baselines and A/B
+    // measurement all rest on it - so here the loop runs until the requested
+    // time is covered, however long that takes.
+    //
+    // This cannot spin forever: a state that genuinely will not integrate
+    // drives dt to minDt, and the consecutive-rejection guard below throws
+    // after MAX_REJECTS_AT_MIN_DT. What it CAN do is take a long time on a
+    // legitimately stiff tick, which is the honest outcome and is reported.
+    const deterministic = this.config.deterministicMode;
     while (remainingTime > 1e-10) {
-      // Check limits
-      // In deterministic mode, we still yield periodically for UI updates (500ms)
-      // but we don't skip steps - the simulation will continue next frame
-      const maxWallTime = this.config.deterministicMode ? 500 : this.config.maxWallTimeMs;
-      const maxSteps = this.config.deterministicMode ? Infinity : this.config.maxStepsPerFrame;
+      // Interactive mode still yields, so the UI keeps its frame rate: there,
+      // falling behind real time is the intended behavior.
+      const maxSteps = deterministic ? Infinity : this.config.maxStepsPerFrame;
 
       if (stepsThisFrame >= maxSteps) {
         console.warn(`[RK45] Hit max steps per frame (${this.config.maxStepsPerFrame})`);
         break;
       }
       const now = performance.now();
-      if (now - frameStart > maxWallTime) {
+      if (!deterministic && now - frameStart > this.config.maxWallTimeMs) {
         // Rate limit this warning to once per second
         if (now - this.lastWallTimeLimitLog > 1000) {
-          console.warn(`[RK45] Hit wall time limit (${maxWallTime}ms)`);
+          console.warn(`[RK45] Hit wall time limit (${this.config.maxWallTimeMs}ms)`);
           this.lastWallTimeLimitLog = now;
         }
         break;
+      }
+      if (deterministic && now - frameStart > 10000 &&
+          now - this.lastWallTimeLimitLog > 10000) {
+        // Not a limit - just proof of life, so a stiff tick is visible rather
+        // than looking like a hang.
+        console.warn(`[RK45] Deterministic tick still running after ` +
+          `${((now - frameStart) / 1000).toFixed(0)}s: ${stepsThisFrame} steps, ` +
+          `${(remainingTime * 1e3).toFixed(3)}ms of ${(requestedDt * 1e3).toFixed(1)}ms left, ` +
+          `dt=${(this.currentDt * 1e6).toFixed(2)}us`);
+        this.lastWallTimeLimitLog = now;
       }
 
       // Don't overshoot remaining time, and honor any operator's declared
