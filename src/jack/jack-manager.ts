@@ -137,8 +137,10 @@ export class JackManager {
         </div>
         <div id="jack-portrait" title="&quot;Atom&quot; Jack, head of operations at Atom Enterprises — your EPC contractor. He can explain, troubleshoot, and modify your plant.">
           ${jackPortraitSvg()}
+          <button id="jack-hide" title="Hide Jack — a small button will remain to bring him back">×</button>
         </div>
-      </div>`;
+      </div>
+      <button id="jack-restore" title="Show Jack">Jack</button>`;
     document.getElementById('app')!.appendChild(this.container);
 
     this.panel = this.container.querySelector('#jack-panel')!;
@@ -152,6 +154,15 @@ export class JackManager {
     this.container
       .querySelector('#jack-close')!
       .addEventListener('click', () => this.togglePanel(false));
+    this.container.querySelector('#jack-hide')!.addEventListener('click', (e) => {
+      // The button sits on the portrait, whose click toggles the chat panel
+      e.stopPropagation();
+      this.setMinimized(true);
+    });
+    this.container
+      .querySelector('#jack-restore')!
+      .addEventListener('click', () => this.setMinimized(false));
+    if (localStorage.getItem('jack-hidden') === '1') this.setMinimized(true);
     this.input.addEventListener('focus', () => this.togglePanel(true));
     this.sendBtn.addEventListener('click', () => this.handleSend());
     this.input.addEventListener('keydown', (e) => {
@@ -163,6 +174,13 @@ export class JackManager {
         this.handleSend();
       }
     });
+  }
+
+  private setMinimized(min: boolean): void {
+    this.container.classList.toggle('minimized', min);
+    // Lets the right-edge panels reclaim the bottom space while Jack is away
+    document.getElementById('app')!.classList.toggle('jack-hidden', min);
+    localStorage.setItem('jack-hidden', min ? '1' : '0');
   }
 
   private togglePanel(open?: boolean): void {

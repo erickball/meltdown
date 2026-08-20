@@ -315,7 +315,9 @@ body {
   font-size: 11px;
   font-family: 'Consolas', monospace;
   width: 440px;
-  max-height: calc(100vh - 100px);
+  /* Leave room at the bottom for the Ask Jack box (96px portrait + 36px
+     status-bar offset ≈ 132px) */
+  max-height: calc(100vh - 160px);
   overflow-y: auto;
   overflow-x: hidden;
   white-space: nowrap;
@@ -360,6 +362,13 @@ body {
 #app.debug-collapsed #component-detail {
   right: 10px;
   top: 52px;
+}
+
+/* With Jack hidden entirely (only his restore chip remains), the right-edge
+   panels can reclaim the bottom of the screen */
+#app.jack-hidden #debug-panel,
+#app.jack-hidden #component-detail {
+  max-height: calc(100vh - 100px);
 }
 
 .debug-section {
@@ -421,7 +430,9 @@ body {
   width: fit-content;
   min-width: 280px;
   max-width: 460px;
-  max-height: calc(100vh - 100px);
+  /* Leave room at the bottom for the Ask Jack box (96px portrait + 36px
+     status-bar offset ≈ 132px) */
+  max-height: calc(100vh - 160px);
   overflow-y: auto;
   overflow-x: auto;
   white-space: nowrap;

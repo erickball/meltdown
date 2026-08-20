@@ -20,6 +20,7 @@
 }
 
 #jack-portrait {
+  position: relative;
   cursor: pointer;
   line-height: 0;
   filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.6));
@@ -27,6 +28,54 @@
 }
 #jack-portrait:hover {
   transform: scale(1.05);
+}
+
+/* Small × on the portrait: hides the whole Jack UI */
+#jack-hide {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(16, 20, 31, 0.9);
+  border: 1px solid #666;
+  color: #aaa;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+}
+#jack-hide:hover {
+  opacity: 1;
+  color: #fff;
+  border-color: #e8b840;
+}
+
+/* Chip left behind when Jack is hidden; click to bring him back */
+#jack-restore {
+  display: none;
+  background: rgba(16, 20, 31, 0.95);
+  border: 1px solid #e8b840;
+  border-radius: 14px;
+  color: #e8b840;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+#jack-restore:hover {
+  color: #fff;
+}
+
+#jack-container.minimized #jack-panel,
+#jack-container.minimized #jack-bottom-row {
+  display: none;
+}
+#jack-container.minimized #jack-restore {
+  display: block;
 }
 
 #jack-entry {
