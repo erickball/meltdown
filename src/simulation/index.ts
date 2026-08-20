@@ -98,6 +98,13 @@ export { createSimulationState, createDemoReactor, createSimulationFromPlant, se
 // Flow-connection naming (shared by the factory and the renderer's reverse map)
 export { baseFlowConnectionId, assignFlowConnectionIds } from './connection-ids';
 
+// Mode-switch resume: write-back of live state into initial conditions,
+// edit-detection snapshots, and state transplant on re-entry
+export {
+  writeSimulationStateToPlant, captureResumeSnapshot, transplantSimulationState,
+} from './resume';
+export type { ResumeSnapshot } from './resume';
+
 // Heat-exchanger tube-bundle naming (shared by the factory, renderer and UI)
 export {
   hxBundleCount,

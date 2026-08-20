@@ -1956,10 +1956,30 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Governor valve position: 0 = closed, 1 = open
       const governorValve = turbineGen.governorValve ?? 1.0;
 
+      // Design point for the swallowing bound (Stodola cone law) is its own
+      // sticky property, frozen at the FIRST simulation build from the
+      // initial inlet pressure. Mode-switch resumes write LIVE conditions
+      // into inletFluid, so deriving the design point from it fresh each
+      // build would let a trip or transient silently re-rate the machine.
+      // Stamped on the component so saves keep it; editable in the dialog
+      // (0/absent = re-freeze at the next simulation start).
+      if (!(turbineGen.designInletPressure > 0)) {
+        turbineGen.designInletPressure = pressure;
+      }
+
+      // Honor a declared phase/quality: the write-back stores the live
+      // state, so an EDITED turbine resumes holding the wet or superheated
+      // steam it actually contained instead of casing-full design steam
+      const declaredPhase = turbineGen.inletFluid?.phase;
+      const tgPhase = declaredPhase === 'two-phase' ? 'two-phase'
+        : declaredPhase === 'liquid' ? 'liquid' : 'vapor';
+      const tgQuality = tgPhase === 'two-phase' ? (turbineGen.inletFluid?.quality ?? 1)
+        : tgPhase === 'vapor' ? 1 : 0;
+
       return {
         id: component.id,
         label: component.label || 'Turbine-Generator',
-        fluid: createFluidState(temp, pressure, 'vapor', 0, volume),
+        fluid: createFluidState(temp, pressure, tgPhase, tgQuality, volume),
         volume,
         hydraulicDiameter: 0.5,
         flowArea: 0.2,
@@ -1972,7 +1992,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         // connection transient offers turned momentary spikes into
         // multi-gigawatt power readings.
         ratedSteamFlow: turbineGen.ratedSteamFlow,
-        designInletPressure: pressure,
+        designInletPressure: turbineGen.designInletPressure,
       };
     }
 
@@ -1981,11 +2001,18 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       const volume = 2;
       const temp = tdPump.inletFluid?.temperature || saturationTemperature(5.5e6);
       const pressure = tdPump.inletFluid?.pressure || 5.5e6;
+      // Same phase/quality honor as the turbine-generator: inletFluid is
+      // live state after a mode-switch write-back (the drive's sizing lives
+      // in ratedSteamFlow, not here)
+      const tdPhase = tdPump.inletFluid?.phase === 'two-phase' ? 'two-phase'
+        : tdPump.inletFluid?.phase === 'liquid' ? 'liquid' : 'vapor';
+      const tdQuality = tdPhase === 'two-phase' ? (tdPump.inletFluid?.quality ?? 1)
+        : tdPhase === 'vapor' ? 1 : 0;
 
       return {
         id: component.id,
         label: component.label || 'TD Pump',
-        fluid: createFluidState(temp, pressure, 'vapor', 0, volume),
+        fluid: createFluidState(temp, pressure, tdPhase, tdQuality, volume),
         volume,
         hydraulicDiameter: 0.2,
         flowArea: 0.05,
@@ -2966,7 +2993,9 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
   const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
   const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
-  const quality = hx.shellFluid?.quality || hx.secondaryFluid?.quality || 0.5;
+  // ?? not ||: a saturated-liquid shell legitimately has quality 0, and the
+  // || chain silently replaced it with the half-steam default on rebuild
+  const quality = hx.shellFluid?.quality ?? hx.secondaryFluid?.quality ?? 0.5;
   // Gas-cooled primaries can sit on EITHER side of the bundle. `shellInitialNcg`
   // (partial pressures in bar) fills the shell the same way `initialNcg` fills
   // the tubes, so a helical once-through SG can run helium outside the tubes
@@ -4050,7 +4079,10 @@ function initializeBurstStates(
       const node = state.flowNodes.get(simNodeId);
       if (!node || node.isBoundary) continue;
       const comp = component as any;
-      let refPressure = comp.inletFluid?.pressure ?? node.fluid.pressure;
+      // Turbines rate their casing for the DESIGN inlet, not whatever live
+      // pressure the write-back left in inletFluid (a tripped turbine at
+      // condenser pressure must not rebuild with a condenser-rated casing)
+      let refPressure = comp.designInletPressure ?? comp.inletFluid?.pressure ?? node.fluid.pressure;
       if (component.type === 'pump' && comp.ratedHead) {
         refPressure += 1000 * 9.81 * comp.ratedHead; // conservative liquid head
       }

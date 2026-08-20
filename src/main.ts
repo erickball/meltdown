@@ -32,6 +32,10 @@ import {
   hxTubeNodeIds,
   assignFlowConnectionIds,
   evaluateOtsgSections,
+  writeSimulationStateToPlant,
+  captureResumeSnapshot,
+  transplantSimulationState,
+  ResumeSnapshot,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -1267,6 +1271,10 @@ function init() {
 
   let currentMode: 'construction' | 'simulation' = 'construction';
   let constructionSubMode: 'place' | 'connect' | 'move' = 'place';
+  // Live sim state saved on entering construction mode, so returning to
+  // simulation mode resumes it (edited components re-initialize instead).
+  // Cleared whenever a different plant is loaded.
+  let resumeSnapshot: ResumeSnapshot | null = null;
   let selectedComponentType: string | null = null;
   const componentDialog = new ComponentDialog();
   const connectionDialog = new ConnectionDialog();
@@ -1751,6 +1759,8 @@ function init() {
 
   // Deserialize JSON object back to PlantState
   function deserializePlantState(data: any): void {
+    // A different plant invalidates any saved mode-switch resume state
+    resumeSnapshot = null;
     plantState.components.clear();
     plantState.connections = [];
 
@@ -2381,9 +2391,22 @@ function init() {
     if (gameMode && !gameMode.beforeModeSwitch(mode)) {
       return;
     }
+    const previousMode = currentMode;
     currentMode = mode;
 
     if (mode === 'construction') {
+      // Leaving simulation mode: write the live state back into the
+      // components' initial conditions (so edit dialogs show current
+      // conditions) and save the state so re-entering simulation mode
+      // resumes it - except for components the user edits meanwhile
+      if (previousMode === 'simulation') {
+        const liveState = gameLoop.getState();
+        if (liveState && liveState.flowNodes.size > 0) {
+          writeSimulationStateToPlant(liveState, plantState);
+          resumeSnapshot = captureResumeSnapshot(liveState, plantState);
+        }
+      }
+
       // Construction mode
       modeConstructionBtn?.classList.add('active');
       modeSimulationBtn?.classList.remove('active');
@@ -2437,6 +2460,18 @@ function init() {
       const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
       setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
       const newSimState = createSimulationFromPlant(plantState);
+
+      // Returning from a construction visit: resume the saved live state for
+      // everything the user did not edit (edited/added components keep their
+      // fresh factory initialization from the edited ICs)
+      const resumed = resumeSnapshot !== null;
+      if (resumeSnapshot) {
+        const notes = transplantSimulationState(newSimState, resumeSnapshot, plantState);
+        console.log(`[Resume] ${notes.join('; ')}`);
+        showNotification(`Simulation ${notes[0]}${notes.length > 1 ? ` (${notes.slice(1).join('; ')})` : ''}`, 'info', 8000);
+        resumeSnapshot = null;
+      }
+
       gameLoop.setSimulationState(newSimState);
       plantCanvas.setSimState(newSimState);
 
@@ -2482,6 +2517,10 @@ function init() {
 
       // Update pause button to reflect actual paused state
       updatePauseButton();
+
+      // A resumed sim starts at the saved time, not t=0 - refresh the time
+      // display and everything else the paused per-frame path won't touch
+      if (resumed) refreshDisplayAfterRestore();
 
     }
   }
