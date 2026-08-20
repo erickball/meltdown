@@ -252,7 +252,8 @@ export function readComponentOption(optionName: string, component: Record<string
   if (component[optionName] !== undefined) {
     const value = component[optionName];
     // Convert Pa to bar for pressure fields
-    if (optionName === 'crackingPressure' || optionName === 'setpoint') {
+    if (optionName === 'crackingPressure' || optionName === 'setpoint' ||
+        optionName === 'designInletPressure') {
       return value / 1e5;  // Pa to bar
     }
     // Convert W to MW for power fields (turbine ratedPower, core thermalPower, condenser coolingCapacity stored in W)

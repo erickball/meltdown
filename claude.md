@@ -8,6 +8,15 @@ After any substantive changes to the code, run npm test to see if it still works
 You can run specific scenario tests like this to see console output: npx tsx scripts/test-simulation.ts scripts/tankburst.json 100000 0.01
 Style note: please avoid starting a response by telling me I'm right, unless I specifically ask whether I'm right. This is a pet peeve of mine.
 
+## GIT WORKFLOW (handle this autonomously - the user does not want to do branch management)
+Multiple Claude sessions often run in this repo at the same time, sharing this working tree. Manage all branching, merging, and pushing yourself, without being asked:
+- For any task that edits code, do NOT edit the shared tree directly. Create a git worktree with a fresh feature branch (EnterWorktree) and work there. This is what keeps parallel sessions from trampling each other.
+- Stage files explicitly by name. Never use `git add -A` or `git add .` (another session's stray files may be present).
+- When the work is complete and `npm test` passes: merge the latest master into your branch, re-run tests if the merge touched anything, then merge the branch into master and push to origin. The goal is that master (the source of the deployed version) always accumulates every finished feature/fix from every session. Do not leave finished work stranded on a feature branch or unpushed.
+- Resolve merge conflicts yourself. Only ask the user if a resolution genuinely requires a judgment call about intended behavior.
+- This applies to work YOU complete. Do not auto-merge pre-existing experimental branches (game-mode, atom-jack, xe100, iso-zoom, ...) - those are parked deliberately.
+- After merging, clean up: remove your worktree and delete the merged feature branch.
+
 ## WATER PROPERTIES NOTES
 - Our saturated steam table data goes all the way from the triple point to the critical point.
 - It is critical to determine phase PURELY by comparing whether a node's (energy, volume) pair is inside the saturation dome in (u,v) space. Any thresholds, approximations, or special case rules will cause problems down the line.
