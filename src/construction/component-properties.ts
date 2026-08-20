@@ -239,11 +239,14 @@ export function readComponentOption(optionName: string, component: Record<string
   }
 
   // Turbine extractions are stored as an extractionPorts array (Pa, sorted
-  // by pressure descending); the dialog edits them as three bar fields
+  // by pressure descending); the dialog edits them as three bar fields.
+  // Look up by slot id, not array index - the array order is pressure order,
+  // and the slots need not be entered highest-first
   if (optionName === 'extraction1Pressure' || optionName === 'extraction2Pressure' || optionName === 'extraction3Pressure') {
     if (component.extractionPorts !== undefined || component.type === 'turbine-generator') {
-      const idx = Number(optionName.charAt('extraction'.length)) - 1;
-      const port = component.extractionPorts?.[idx];
+      const slot = optionName.charAt('extraction'.length);
+      const port = (component.extractionPorts as { id: string; pressure: number }[] | undefined)
+        ?.find(p => p.id === `extraction-${slot}`);
       return port ? port.pressure / 1e5 : 0; // Pa to bar, 0 = disabled
     }
   }

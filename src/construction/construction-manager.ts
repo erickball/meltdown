@@ -781,19 +781,23 @@ export class ConstructionManager {
 
         const orientation = props.orientation || 'left-right';
 
-        // Build extraction ports array from config
+        // Build extraction ports array from config. Any positive pressure is
+        // accepted: the staged expansion only credits bleeds strictly inside
+        // the machine's live (P_out, P_in) range, so an out-of-range setting
+        // is inert rather than invalid, and rejecting it here silently is how
+        // extraction settings used to vanish without a trace.
         const extractionPorts: ExtractionPort[] = [];
         const ext1Press = (props.extraction1Pressure || 0) * 1e5;  // bar to Pa
         const ext2Press = (props.extraction2Pressure || 0) * 1e5;
         const ext3Press = (props.extraction3Pressure || 0) * 1e5;
 
-        if (ext1Press > 0 && ext1Press < P_in) {
+        if (ext1Press > 0) {
           extractionPorts.push({ id: 'extraction-1', pressure: ext1Press });
         }
-        if (ext2Press > 0 && ext2Press < P_in) {
+        if (ext2Press > 0) {
           extractionPorts.push({ id: 'extraction-2', pressure: ext2Press });
         }
-        if (ext3Press > 0 && ext3Press < P_in) {
+        if (ext3Press > 0) {
           extractionPorts.push({ id: 'extraction-3', pressure: ext3Press });
         }
 
@@ -826,23 +830,6 @@ export class ConstructionManager {
             direction: 'out'
           }
         ];
-
-        // Add extraction ports - positioned along turbine body, bottom side
-        const numExtractions = extractionPorts.length;
-        for (let i = 0; i < numExtractions; i++) {
-          const ext = extractionPorts[i];
-          // Position evenly between 25% and 75% of turbine length
-          const xFraction = 0.25 + (0.5 * i / Math.max(1, numExtractions - 1));
-          const xPos = orientation === 'left-right'
-            ? -turbineLength / 2 + turbineLength * (numExtractions === 1 ? 0.5 : xFraction)
-            : turbineLength / 2 - turbineLength * (numExtractions === 1 ? 0.5 : xFraction);
-
-          turbineGenPorts.push({
-            id: `${id}-${ext.id}`,
-            position: { x: xPos, y: exhaustDiameter / 2 },  // Bottom of turbine
-            direction: 'out'
-          });
-        }
 
         // Pressure rating is 1.5x inlet pressure (provides margin for transients)
         const turbinePressureRating = (props.inletPressure || 60) * 1.5;
@@ -891,6 +878,7 @@ export class ConstructionManager {
         (turbineGen as any).turbineEfficiency = eta_t;
 
         this.plantState.components.set(id, turbineGen);
+        this.syncTurbineExtractionPortObjects(turbineGen);
         (turbineGen as any).nqa1 = props.nqa1 ?? false;
 
         // Create exhaust pipe (like condensers come with pumps, turbines come with exhaust pipes)
@@ -3038,6 +3026,45 @@ export class ConstructionManager {
   /**
    * Update component properties from edited values
    */
+  /**
+   * Rebuild a turbine-generator's connectable extraction Port objects from
+   * its extractionPorts array (single source of truth). Slot ids
+   * (extraction-1/2/3) are stable across edits, so an existing connection
+   * survives as long as its slot keeps a nonzero pressure; positions are
+   * respread evenly along the bottom of the casing (the array is
+   * pressure-sorted, so the highest-pressure bleed sits closest to the
+   * inlet). Used at creation and by updateComponent, which is what lets an
+   * extraction added AFTER the turbine was built become a real,
+   * connectable port.
+   */
+  private syncTurbineExtractionPortObjects(turbine: Record<string, any>): void {
+    const ports = turbine.ports as Port[];
+    const extractions = (turbine.extractionPorts ?? []) as ExtractionPort[];
+    const isExtractionPort = (p: Port) => p.id.includes('-extraction-');
+
+    const oldPorts = new Map(ports.filter(isExtractionPort).map(p => [p.id, p]));
+    turbine.ports = ports.filter(p => !isExtractionPort(p));
+
+    // Casing length is stored as width, exhaust diameter as height
+    const length = turbine.width;
+    const n = extractions.length;
+    extractions.forEach((ext, i) => {
+      // Spread evenly between 25% and 75% of the casing, inlet side first
+      const xFraction = n === 1 ? 0.5 : 0.25 + (0.5 * i) / (n - 1);
+      const xPos = turbine.orientation === 'right-left'
+        ? length / 2 - length * xFraction
+        : -length / 2 + length * xFraction;
+      const portId = `${turbine.id}-${ext.id}`;
+      const old = oldPorts.get(portId);
+      turbine.ports.push({
+        id: portId,
+        position: { x: xPos, y: turbine.height / 2 },  // Bottom of turbine
+        direction: 'out',
+        ...(old?.connectedTo ? { connectedTo: old.connectedTo } : {}),
+      });
+    });
+  }
+
   updateComponent(componentId: string, properties: Record<string, any>): boolean {
     const component = this.plantState.components.get(componentId) as Record<string, any>;
     if (!component) {
@@ -3456,35 +3483,47 @@ export class ConstructionManager {
       component.connectedGeneratorId = properties.connectedGenerator || undefined;
     }
 
-    // Turbine extraction ports. Extractions are design features, so they are
-    // validated against the DESIGN inlet pressure - inletFluid holds the live
-    // condition after a simulation has run, and a tripped turbine must not
-    // silently drop its extraction ports on edit.
-    if (component.type === 'turbine-generator') {
-      const P_in = component.designInletPressure || component.inletFluid?.pressure || 60e5;
+    // Turbine extraction ports. A slot the edit doesn't mention keeps its
+    // current pressure, so a partial edit (Jack's tool sends only the fields
+    // it changes) can't wipe the other slots. No pressure-range validation
+    // here: the staged expansion only credits bleeds strictly inside the
+    // machine's live (P_out, P_in) range, so an out-of-range setting is
+    // inert, not invalid - and validating against a stale post-trip inlet
+    // pressure is how extraction edits used to vanish without a trace.
+    if (component.type === 'turbine-generator' &&
+        (properties.extraction1Pressure !== undefined ||
+         properties.extraction2Pressure !== undefined ||
+         properties.extraction3Pressure !== undefined)) {
+      const currentPressure = (slotId: string): number =>
+        (component.extractionPorts as ExtractionPort[] | undefined)
+          ?.find(p => p.id === slotId)?.pressure ?? 0;
+
       const extractionPorts: ExtractionPort[] = [];
-
-      const ext1Press = (properties.extraction1Pressure ?? 0) * 1e5;
-      const ext2Press = (properties.extraction2Pressure ?? 0) * 1e5;
-      const ext3Press = (properties.extraction3Pressure ?? 0) * 1e5;
-
-      if (ext1Press > 0 && ext1Press < P_in) {
-        extractionPorts.push({ id: 'extraction-1', pressure: ext1Press });
+      for (const slot of [1, 2, 3]) {
+        const slotId = `extraction-${slot}`;
+        const edited = properties[`extraction${slot}Pressure`];
+        const pressure = edited !== undefined ? Number(edited) * 1e5 : currentPressure(slotId);
+        if (pressure > 0) {
+          extractionPorts.push({ id: slotId, pressure });
+        }
       }
-      if (ext2Press > 0 && ext2Press < P_in) {
-        extractionPorts.push({ id: 'extraction-2', pressure: ext2Press });
-      }
-      if (ext3Press > 0 && ext3Press < P_in) {
-        extractionPorts.push({ id: 'extraction-3', pressure: ext3Press });
-      }
-
-      // Sort by pressure descending
+      // Sort by pressure descending (highest first, closest to the inlet)
       extractionPorts.sort((a, b) => b.pressure - a.pressure);
-      component.extractionPorts = extractionPorts.length > 0 ? extractionPorts : undefined;
 
-      // Note: Port positions are set at component creation time and would need
-      // component recreation to change. Users should recreate the turbine if
-      // they want to change extraction port count.
+      // A slot being zeroed may still have piping on its port - refuse
+      // loudly rather than silently orphan the connection
+      const keptPortIds = new Set(extractionPorts.map(e => `${component.id}-${e.id}`));
+      const orphaned = (component.ports as Port[]).find(p =>
+        p.id.includes('-extraction-') && !keptPortIds.has(p.id) && p.connectedTo);
+      if (orphaned) {
+        console.error(
+          `[Construction] Cannot remove extraction port ${orphaned.id}: it is still ` +
+          `connected to ${orphaned.connectedTo}. Delete that connection first.`);
+        return false;
+      }
+
+      component.extractionPorts = extractionPorts.length > 0 ? extractionPorts : undefined;
+      this.syncTurbineExtractionPortObjects(component);
     }
 
     // Core-specific properties

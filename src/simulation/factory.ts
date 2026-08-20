@@ -1691,6 +1691,23 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   // Initialize burst states for pressurized components
   initializeBurstStates(plantState, state);
 
+  // Every flow connection must reference nodes that exist. The solvers all
+  // skip connections with missing endpoints, so a bad node id doesn't crash -
+  // it produces a line that silently carries nothing (this is exactly how
+  // construction-built turbine exhausts were inert for months). Fail loudly
+  // instead.
+  for (const conn of state.flowConnections) {
+    for (const nodeId of [conn.fromNodeId, conn.toNodeId]) {
+      if (!state.flowNodes.has(nodeId)) {
+        throw new Error(
+          `[Factory] Flow connection '${conn.id}' references node '${nodeId}', which does ` +
+          `not exist. This means a plant connection was mapped to the wrong flow node - ` +
+          `the line would silently carry no flow.`
+        );
+      }
+    }
+  }
+
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 
   return state;
@@ -3272,19 +3289,31 @@ function createFlowConnectionFromPlantConnection(
     }
   }
 
-  // Handle turbine-generator extraction port mappings
-  // Extraction ports connect as: turbine-id-extraction-id (e.g., turbine-gen-1-extraction-1)
-  if (fromComponent.type === 'turbine-generator') {
-    // Check if this is an extraction port (not inlet or outlet)
-    if (connection.fromPortId !== 'inlet' && connection.fromPortId !== 'outlet') {
-      fromNodeId = `${connection.fromComponentId}-${connection.fromPortId}`;
+  // Handle turbine-generator port mappings. Port ids come in two formats -
+  // presets use bare names ('inlet', 'extraction-1') while construction-built
+  // plants prefix the component id ('turbine-1-inlet') - and matching only
+  // the bare form is how every construction-built turbine's exhaust and
+  // extraction lines used to silently map to nonexistent flow nodes. Inlet
+  // and outlet open into the machine's own node; each extraction port has
+  // its own flow node named `${componentId}-extraction-N` (see
+  // createTurbineExtractionNodes).
+  const turbinePortNodeId = (componentId: string, portId: string): string | null => {
+    if (portId === 'inlet' || portId === 'outlet' ||
+        portId.endsWith('-inlet') || portId.endsWith('-outlet')) {
+      return null;  // main turbine node
     }
+    const extraction = portId.match(/extraction-\d+$/);
+    if (extraction) return `${componentId}-${extraction[0]}`;
+    throw new Error(
+      `[Factory] Turbine '${componentId}': cannot map port '${portId}' to a flow node. ` +
+      `Expected inlet, outlet, or extraction-N.`
+    );
+  };
+  if (fromComponent.type === 'turbine-generator') {
+    fromNodeId = turbinePortNodeId(connection.fromComponentId, connection.fromPortId) ?? fromNodeId;
   }
   if (toComponent.type === 'turbine-generator') {
-    // Check if this is an extraction port (not inlet or outlet)
-    if (connection.toPortId !== 'inlet' && connection.toPortId !== 'outlet') {
-      toNodeId = `${connection.toComponentId}-${connection.toPortId}`;
-    }
+    toNodeId = turbinePortNodeId(connection.toComponentId, connection.toPortId) ?? toNodeId;
   }
 
   const fromElevation = (fromComponent as any).elevation || 0;
