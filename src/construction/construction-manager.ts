@@ -3406,6 +3406,16 @@ export class ConstructionManager {
     if (properties.inletPressure !== undefined && component.inletFluid) {
       component.inletFluid.pressure = properties.inletPressure * 1e5; // bar to Pa
     }
+    // Design point for the turbine's swallowing capacity - sticky, separate
+    // from the (live) inlet condition. 0 = clear it, so the factory freezes
+    // it again at the next simulation start.
+    if (properties.designInletPressure !== undefined && component.type === 'turbine-generator') {
+      if (properties.designInletPressure > 0) {
+        component.designInletPressure = properties.designInletPressure * 1e5; // bar to Pa
+      } else {
+        delete component.designInletPressure;
+      }
+    }
     if (properties.exhaustPressure !== undefined && component.outletFluid) {
       component.outletFluid.pressure = properties.exhaustPressure * 1e5; // bar to Pa
     }
@@ -3446,9 +3456,12 @@ export class ConstructionManager {
       component.connectedGeneratorId = properties.connectedGenerator || undefined;
     }
 
-    // Turbine extraction ports
+    // Turbine extraction ports. Extractions are design features, so they are
+    // validated against the DESIGN inlet pressure - inletFluid holds the live
+    // condition after a simulation has run, and a tripped turbine must not
+    // silently drop its extraction ports on edit.
     if (component.type === 'turbine-generator') {
-      const P_in = component.inletFluid?.pressure || 60e5;
+      const P_in = component.designInletPressure || component.inletFluid?.pressure || 60e5;
       const extractionPorts: ExtractionPort[] = [];
 
       const ext1Press = (properties.extraction1Pressure ?? 0) * 1e5;
