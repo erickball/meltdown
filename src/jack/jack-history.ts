@@ -276,6 +276,12 @@ const openPlotInputs = new Map<string, Record<string, unknown>>();
 const livePlotIds = new Set<string>();
 const liveLastTime = new Map<string, number>();
 
+// User zoom windows (from wheel/drag on the chart) and the full time extent
+// each figure had before zooming - so zooming out past it snaps back to auto.
+// View state is per-panel and ephemeral: not persisted with a saved config.
+const plotViews = new Map<string, { t0: number; t1: number }>();
+const plotFullRange = new Map<string, { t0: number; t1: number }>();
+
 const noopRecord = (): void => {};
 
 /**
@@ -303,7 +309,7 @@ export function refreshLivePlots(
     const input = openPlotInputs.get(figureId);
     if (!input) continue;
     try {
-      execPlotHistory(input, getHistory, noopRecord, nowTime);
+      execPlotHistory(input, getHistory, noopRecord, nowTime, true);
     } catch (e) {
       // Fail loudly once, then stop refreshing this figure rather than
       // spamming an error every quarter second
@@ -339,22 +345,40 @@ export function restorePlots(
   return restored;
 }
 
-/** plot_history: render a chart panel for the user; returns a summary. */
+/**
+ * plot_history: render a chart panel for the user; returns a summary.
+ *
+ * preserveView keeps the user's zoom window on the figure (live refreshes
+ * and zoom interactions set it); a fresh plot request from Jack replaces
+ * the view, so the user sees the range Jack asked for.
+ */
 export function execPlotHistory(
   input: Record<string, unknown>,
   getHistory: (tMin: number, tMax: number) => HistorySample[],
   record: (description: string) => void,
-  nowTime?: number
+  nowTime?: number,
+  preserveView = false
 ): unknown {
   const rawSeries = Array.isArray(input.series) ? (input.series as Record<string, unknown>[]) : [];
   if (rawSeries.length === 0) {
     return err('series is required: an array of { path, label?, axis?, scale?, offset? }');
   }
   if (rawSeries.length > 10) return err('At most 10 series per plot.');
+  const figureId = typeof input.figureId === 'string' && input.figureId ? input.figureId : 'jack-plot';
+  if (!preserveView) {
+    plotViews.delete(figureId);
+    plotFullRange.delete(figureId);
+  }
+  const view = plotViews.get(figureId);
   const { tMin, tMax } = parseRange(input);
-  const all = getHistory(tMin, tMax);
+  // A zoom window samples the history at its own (finer) resolution; the
+  // user may also pan outside the range Jack originally requested.
+  const all = view ? getHistory(view.t0, view.t1) : getHistory(tMin, tMax);
   if (all.length < 2) {
     return err('Not enough recorded history in that range - run the simulation first.');
+  }
+  if (!view) {
+    plotFullRange.set(figureId, { t0: all[0].time, t1: all[all.length - 1].time });
   }
   const maxPoints = Math.min(Math.max(Number(input.maxPoints) || 400, 10), 2000);
   const samples = decimate(all, maxPoints);
@@ -403,7 +427,6 @@ export function execPlotHistory(
         .slice(0, 12)
     : [];
 
-  const figureId = typeof input.figureId === 'string' && input.figureId ? input.figureId : 'jack-plot';
   const title = typeof input.title === 'string' && input.title ? input.title : 'Plant history';
   const spec: PlotPanelSpec = {
     figureId,
@@ -418,10 +441,33 @@ export function execPlotHistory(
     // Frozen exhibits (explicit tMaxS) never show a marker - it would go
     // stale the moment the position moved and nothing would redraw it
     nowTime: typeof input.tMaxS === 'number' ? undefined : nowTime,
+    viewRange: view ?? null,
+    fullRange: plotFullRange.get(figureId),
+    onViewChange: (range) => {
+      const prev = plotViews.get(figureId);
+      if (range) plotViews.set(figureId, range);
+      else plotViews.delete(figureId);
+      const result = execPlotHistory(
+        openPlotInputs.get(figureId) ?? input,
+        getHistory,
+        noopRecord,
+        liveLastTime.get(figureId),
+        true
+      ) as { ok?: boolean };
+      // A window with under two samples (zoomed past the recording's
+      // resolution, or panned off the data) can't be drawn - put the view
+      // back so the display and the stored window stay in agreement.
+      if (!result.ok) {
+        if (prev) plotViews.set(figureId, prev);
+        else plotViews.delete(figureId);
+      }
+    },
     onClose: () => {
       openPlotInputs.delete(figureId);
       livePlotIds.delete(figureId);
       liveLastTime.delete(figureId);
+      plotViews.delete(figureId);
+      plotFullRange.delete(figureId);
     },
   };
   showPlotPanel(spec);

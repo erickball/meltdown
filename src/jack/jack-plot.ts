@@ -32,6 +32,23 @@ export interface PlotPanelSpec {
    * showing the full recorded history instead of truncating to the past.
    */
   nowTime?: number;
+  /**
+   * The user's zoom window on the time axis (sim seconds), or null/absent
+   * for the auto range. The provider passes the active window back on every
+   * redraw so live refreshes keep the zoom.
+   */
+  viewRange?: { t0: number; t1: number } | null;
+  /**
+   * Time extent of the full (unzoomed) plot, remembered by the provider.
+   * Zooming out to cover this extent resets to the auto range - the zoomed
+   * spec's own series only span the window, so they can't tell us.
+   */
+  fullRange?: { t0: number; t1: number };
+  /**
+   * The user zoomed or panned (null = reset to auto range). The provider
+   * re-samples the history for the new window and re-shows the panel.
+   */
+  onViewChange?: (range: { t0: number; t1: number } | null) => void;
   /** Called when the user closes the panel (× button or closeAllPlots) */
   onClose?: () => void;
 }
@@ -44,6 +61,17 @@ let panelCascade = 0;
 // Last spec per open panel, so a resize can redraw without re-sampling
 const panelSpecs = new Map<string, PlotPanelSpec>();
 const panelObservers = new Map<string, ResizeObserver>();
+
+// Plot-area geometry and time window from the last draw, so pointer
+// interactions can map pixels back to sim time
+interface PlotGeom { plotL: number; plotR: number; tMin: number; tMax: number }
+const panelGeoms = new Map<string, PlotGeom>();
+
+/** Last-drawn time window of a figure, for tests and debugging. */
+export function getPlotDrawnWindow(figureId: string): { tMin: number; tMax: number } | null {
+  const g = panelGeoms.get(figureId);
+  return g ? { tMin: g.tMin, tMax: g.tMax } : null;
+}
 
 /** Is a figure's panel currently open (and not just minimized)? */
 export function isPlotOpen(figureId: string): boolean {
@@ -69,8 +97,38 @@ function closePanel(figureId: string): void {
   panelObservers.delete(figureId);
   const spec = panelSpecs.get(figureId);
   panelSpecs.delete(figureId);
+  panelGeoms.delete(figureId);
   panel?.remove();
+  removeDockChip(figureId);
   spec?.onClose?.();
+}
+
+// ---------------------------------------------------------------------------
+// Minimized-plot dock: a chip strip centered above the status bar, so
+// minimized charts land in one predictable place instead of collapsing in
+// place (where they hid behind whatever shared that corner).
+// ---------------------------------------------------------------------------
+
+function getDock(): HTMLDivElement {
+  let dock = document.getElementById('jack-plot-dock') as HTMLDivElement | null;
+  if (!dock) {
+    dock = document.createElement('div');
+    dock.id = 'jack-plot-dock';
+    dock.style.cssText = `
+      position: fixed; bottom: 42px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; z-index: 901; flex-wrap: wrap;
+      justify-content: center; max-width: 60vw;
+    `;
+    document.body.appendChild(dock);
+  }
+  return dock;
+}
+
+function removeDockChip(figureId: string): void {
+  const chip = document.getElementById(`jack-plot-chip-${figureId}`);
+  const dock = chip?.parentElement;
+  chip?.remove();
+  if (dock && dock.childElementCount === 0) dock.remove();
 }
 
 /** Create or update the floating panel for a figure and draw the chart. */
@@ -97,7 +155,8 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     header.title =
       'Plotted from the simulation history (about one point per frame recently, ' +
       'sparser further back). Drag to move; resize from the bottom-right corner; ' +
-      '– to minimize; × to close.';
+      '– minimizes to a chip at the bottom of the screen; × closes. ' +
+      'Scroll on the chart to zoom in time; double-click it to reset.';
     header.style.cssText = `
       display: flex; justify-content: space-between; align-items: center;
       padding: 6px 10px; cursor: move; border-bottom: 1px solid #334455;
@@ -115,7 +174,9 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     const minBtn = document.createElement('button');
     minBtn.className = 'jack-plot-min';
     minBtn.textContent = '–';
-    minBtn.title = 'Minimize to the title bar (chart keeps updating in the background)';
+    minBtn.title =
+      'Minimize to a chip at the bottom of the screen (the chart keeps ' +
+      'recording; click the chip to bring it back)';
     minBtn.style.cssText = btnCss;
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '×';
@@ -146,33 +207,107 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
     const canvas = document.createElement('canvas');
     canvas.className = 'jack-plot-canvas';
     canvas.style.cssText = 'display: block; width: 100%; height: 100%;';
+    canvas.title =
+      'Scroll to zoom the time axis (about the cursor), drag to pan when ' +
+      'zoomed, double-click to reset. Y axes autoscale to the visible window, ' +
+      'and zooming re-samples the history at finer resolution.';
     canvasBox.appendChild(canvas);
     body.appendChild(canvasBox);
     panel.appendChild(body);
 
-    // Minimize: collapse to the title bar, remember the expanded size
+    // --- Zoom & pan on the time axis ------------------------------------
+    // View changes are coalesced to one per animation frame: each one makes
+    // the provider re-sample the history, which is too heavy for raw
+    // pointermove/wheel event rates.
+    let pendingView: { t0: number; t1: number } | null | undefined;
+    const queueViewChange = (range: { t0: number; t1: number } | null) => {
+      const alreadyQueued = pendingView !== undefined;
+      pendingView = range;
+      if (alreadyQueued) return;
+      requestAnimationFrame(() => {
+        const range2 = pendingView;
+        pendingView = undefined;
+        if (range2 !== undefined) {
+          panelSpecs.get(spec.figureId)?.onViewChange?.(range2);
+        }
+      });
+    };
+
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        const s = panelSpecs.get(spec.figureId);
+        const g = panelGeoms.get(spec.figureId);
+        if (!s?.onViewChange || !g) return;
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const frac = Math.min(
+          1,
+          Math.max(0, (e.clientX - rect.left - g.plotL) / (g.plotR - g.plotL))
+        );
+        const tAnchor = g.tMin + frac * (g.tMax - g.tMin);
+        const factor = Math.exp(e.deltaY * 0.0015); // deltaY > 0 zooms out
+        const t0 = tAnchor - (tAnchor - g.tMin) * factor;
+        const t1 = tAnchor + (g.tMax - tAnchor) * factor;
+        if (!(t1 > t0)) return;
+        // Zooming out to (or past) the full extent returns to the auto range
+        const full = s.fullRange;
+        if (full && t1 - t0 >= full.t1 - full.t0) queueViewChange(null);
+        else queueViewChange({ t0, t1 });
+      },
+      { passive: false }
+    );
+
+    let panFrom: { x: number; t0: number; t1: number } | null = null;
+    canvas.addEventListener('pointerdown', (e) => {
+      const s = panelSpecs.get(spec.figureId);
+      if (!s?.viewRange || !s.onViewChange) return; // nothing to pan at auto range
+      panFrom = { x: e.clientX, t0: s.viewRange.t0, t1: s.viewRange.t1 };
+      canvas.setPointerCapture(e.pointerId);
+      canvas.style.cursor = 'grabbing';
+    });
+    canvas.addEventListener('pointermove', (e) => {
+      if (!panFrom) return;
+      const g = panelGeoms.get(spec.figureId);
+      if (!g) return;
+      const dt = ((e.clientX - panFrom.x) / (g.plotR - g.plotL)) * (panFrom.t1 - panFrom.t0);
+      queueViewChange({ t0: panFrom.t0 - dt, t1: panFrom.t1 - dt });
+    });
+    const endPan = () => {
+      panFrom = null;
+      const s = panelSpecs.get(spec.figureId);
+      canvas.style.cursor = s?.viewRange ? 'grab' : 'default';
+    };
+    canvas.addEventListener('pointerup', endPan);
+    canvas.addEventListener('pointercancel', endPan);
+    canvas.addEventListener('dblclick', () => queueViewChange(null));
+
+    // Minimize: hide the panel and park a labeled chip in the bottom dock;
+    // clicking the chip restores the panel right where it was
     minBtn.addEventListener('click', () => {
       const p = panel!;
-      if (p.dataset.minimized === '1') {
+      p.dataset.minimized = '1';
+      p.style.display = 'none';
+      const chip = document.createElement('button');
+      chip.id = `jack-plot-chip-${spec.figureId}`;
+      chip.title = 'Restore this chart (it kept recording while minimized)';
+      chip.style.cssText = `
+        background: #1a1e24; border: 1px solid #445566; border-radius: 6px;
+        color: #7af; font-family: 'Consolas', monospace; font-size: 12px;
+        padding: 4px 12px; cursor: pointer; white-space: nowrap;
+        box-shadow: 0 2px 10px rgba(0,0,0,0.5); max-width: 240px;
+        overflow: hidden; text-overflow: ellipsis;
+      `;
+      chip.textContent =
+        '📈 ' + (panelSpecs.get(spec.figureId)?.title ?? spec.title);
+      chip.addEventListener('click', () => {
+        removeDockChip(spec.figureId);
         delete p.dataset.minimized;
-        body.style.display = 'flex';
-        p.style.height = p.dataset.expandedHeight || `${PANEL_H}px`;
-        p.style.minHeight = '160px';
-        p.style.resize = 'both';
-        minBtn.textContent = '–';
-        minBtn.title = 'Minimize to the title bar (chart keeps updating in the background)';
+        p.style.display = 'flex';
         const s = panelSpecs.get(spec.figureId);
         if (s) drawChart(canvas, s);
-      } else {
-        p.dataset.expandedHeight = p.style.height;
-        p.dataset.minimized = '1';
-        body.style.display = 'none';
-        p.style.height = 'auto';
-        p.style.minHeight = '0'; // the expanded min-height would hold it open
-        p.style.resize = 'none';
-        minBtn.textContent = '+';
-        minBtn.title = 'Restore the chart';
-      }
+      });
+      getDock().appendChild(chip);
     });
 
     // Drag by the header
@@ -215,6 +350,8 @@ export function showPlotPanel(spec: PlotPanelSpec): void {
 
   panelSpecs.set(spec.figureId, spec);
   (panel.querySelector('.jack-plot-title') as HTMLSpanElement).textContent = spec.title;
+  const chip = document.getElementById(`jack-plot-chip-${spec.figureId}`);
+  if (chip) chip.textContent = '📈 ' + spec.title;
 
   const legend = panel.querySelector('.jack-plot-legend') as HTMLDivElement;
   legend.innerHTML = '';
@@ -355,23 +492,36 @@ function drawChart(canvas: HTMLCanvasElement, spec: PlotPanelSpec): void {
   const plotT = mTop;
   const plotB = cssH - mBot;
 
-  // Time extent across all series
+  // Time extent: the user's zoom window if set, else the data extent
   let tMin = Infinity;
   let tMax = -Infinity;
-  for (const s of spec.series) {
-    if (s.xs.length > 0) {
-      tMin = Math.min(tMin, s.xs[0]);
-      tMax = Math.max(tMax, s.xs[s.xs.length - 1]);
+  if (spec.viewRange) {
+    tMin = spec.viewRange.t0;
+    tMax = spec.viewRange.t1;
+  } else {
+    for (const s of spec.series) {
+      if (s.xs.length > 0) {
+        tMin = Math.min(tMin, s.xs[0]);
+        tMax = Math.max(tMax, s.xs[s.xs.length - 1]);
+      }
     }
   }
   if (!(tMax > tMin)) { tMax = tMin + 1; }
   const toX = (t: number) => plotL + ((t - tMin) / (tMax - tMin)) * (plotR - plotL);
+  panelGeoms.set(spec.figureId, { plotL, plotR, tMin, tMax });
+  canvas.style.cursor = spec.viewRange ? 'grab' : 'default';
 
+  // Y axes autoscale to the points inside the visible time window
   const leftVals: number[] = [];
   const rightVals: number[] = [];
   for (const s of spec.series) {
     const bucket = s.axis === 'right' ? rightVals : leftVals;
-    for (const v of s.ys) if (v !== null && Number.isFinite(v)) bucket.push(v);
+    for (let i = 0; i < s.ys.length; i++) {
+      const v = s.ys[i];
+      if (v === null || !Number.isFinite(v)) continue;
+      if (s.xs[i] < tMin || s.xs[i] > tMax) continue;
+      bucket.push(v);
+    }
   }
   const leftAxis = buildAxis(leftVals, !!spec.logLeft, plotT, plotB);
   const rightAxis = hasRight ? buildAxis(rightVals, !!spec.logRight, plotT, plotB) : null;
@@ -454,6 +604,14 @@ function drawChart(canvas: HTMLCanvasElement, spec: PlotPanelSpec): void {
     ctx.textBaseline = 'middle';
     ctx.fillText(spec.yLabelRight, 0, 0);
     ctx.restore();
+  }
+
+  // Zoom indicator: remind the user how to get back to the auto range
+  if (spec.viewRange) {
+    ctx.fillStyle = 'rgba(153, 170, 204, 0.55)';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText('zoomed · double-click to reset', plotR - 4, plotT + 2);
   }
 
   // "Now" marker: only when the position is meaningfully before the end of

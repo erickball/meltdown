@@ -42,7 +42,7 @@ import { estimatePlantComponentCost, formatCost } from './construction/cost-esti
 import { JackManager } from './jack/jack-manager';
 import { executeJackTool } from './jack/jack-tools-exec';
 import { refreshLivePlots, getOpenPlotInputs, restorePlots } from './jack/jack-history';
-import { closeAllPlots } from './jack/jack-plot';
+import { closeAllPlots, getPlotDrawnWindow } from './jack/jack-plot';
 import { saveHistoryRecord, loadHistoryRecord, deleteHistoryRecord } from './game/history-store';
 
 // Throttle debug panel updates to reduce flickering
@@ -3482,6 +3482,7 @@ function init() {
   // Headless-test hook: run one of Jack's tools directly (no LLM round trip)
   (window as any).__meltdownDebug.jackTool = (name: string, input: Record<string, unknown>) =>
     executeJackTool(name, input, jackHost, () => {});
+  (window as any).__meltdownDebug.getPlotDrawnWindow = getPlotDrawnWindow;
 
   // Start in construction mode
   setMode('construction');
