@@ -59,7 +59,7 @@
             <div class="slider-labels"><span>Out</span><span>In</span></div>
           </div>
           <div class="slider-control" style="margin-top: 8px;"
-               title="Soluble boron in the coolant (CVCS boration/dilution). Slews toward the target at ~0.5 ppm/s. Boron worth rides on the water actually in the core, so at high concentration voiding can add reactivity (positive-MTC failure mode).">
+               title="Soluble boron in the coolant (CVCS boration/dilution). Slews toward the target at ~0.5 ppm/s. Boron worth rides on the water actually in the core: with no water there (gas-cooled or voided core) it does nothing, and it takes effect automatically if water floods in later. At high concentration, voiding expels absorber with the moderator, so boiling can ADD reactivity (positive-MTC failure mode).">
             <label for="boron-target">Boron: <span id="boron-value">0 ppm</span></label>
             <input type="range" id="boron-target" min="0" max="3000" value="0" step="10" />
             <div class="slider-labels"><span>0</span><span>3000 ppm</span></div>
@@ -182,7 +182,8 @@
         <button id="open-save-load-btn" class="mode-btn">💾 Save / Load</button>
         </div>
 
-        <!-- Common controls for both modes -->
+        <!-- Edit tools (construction mode only - hidden while simulating) -->
+        <div id="edit-section">
         <hr />
         <h3>Edit</h3>
         <button id="move-mode" class="mode-btn"
@@ -190,6 +191,7 @@
         <button id="connect-mode-btn" class="mode-btn">🔗 Connect Components</button>
         <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
           <div id="connection-status">Select first component...</div>
+        </div>
         </div>
         <hr />
         <h3>View</h3>

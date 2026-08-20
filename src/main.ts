@@ -2383,6 +2383,8 @@ function init() {
     }
     currentMode = mode;
 
+    const editSection = document.getElementById('edit-section');
+
     if (mode === 'construction') {
       // Construction mode
       modeConstructionBtn?.classList.add('active');
@@ -2391,6 +2393,7 @@ function init() {
       // Hide simulation controls, show construction controls
       if (simControls) simControls.style.display = 'none';
       if (constructionControls) constructionControls.style.display = 'block';
+      if (editSection) editSection.style.display = 'block';
       if (constructionCostPanel) {
         constructionCostPanel.style.display = 'block';
         updateConstructionCostPanel();
@@ -2412,10 +2415,14 @@ function init() {
       modeConstructionBtn?.classList.remove('active');
       modeSimulationBtn?.classList.add('active');
 
-      // Show simulation controls, hide construction controls
+      // Show simulation controls, hide construction controls and edit tools
       if (simControls) simControls.style.display = 'block';
       if (constructionControls) constructionControls.style.display = 'none';
       if (constructionCostPanel) constructionCostPanel.style.display = 'none';
+      if (editSection) editSection.style.display = 'none';
+      // Leave connect/move mode so the canvas doesn't stay in a sub-mode
+      // whose buttons are now hidden
+      setConstructionSubMode('place');
 
       // Show MW to grid panel in simulation mode
       const mwPanel = document.getElementById('mw-to-grid-panel');
