@@ -305,8 +305,31 @@ export class GameLoop {
     }
 
     if (!this.isPaused && frameDt > 0) {
-      // Calculate simulation time to advance
-      const simDt = frameDt * this.simSpeed;
+      // Simulation time to advance, from a frame interval capped at the frame
+      // period we are targeting.
+      //
+      // THE CAP IS WHAT KEEPS THIS LOOP FROM DRIVING ITSELF. requestAnimationFrame
+      // cannot fire the next frame until tick() returns, so an uncapped frameDt is
+      // *this frame's own compute time*: the loop would ask frame n+1 for exactly
+      // as much simulation time as serving frame n cost in wall time. Below 1x
+      // realtime that is a positive feedback - each request bigger than the last,
+      // geometrically. Measured on the Xe-100 with deterministic mode on (which
+      // takes no wall-clock break, so nothing else bounds a tick): the request
+      // climbed 0.67 -> 3.9 -> 11.2 -> 15.5 s of simulation per frame, one frame
+      // blocking the tab for ~10 s, before settling into a permanent ~5 fps. Above
+      // 1x speed it has no fixed point at all and diverges until the tab stops
+      // answering. The interactive path's 30 ms solver budget masked this by
+      // capping the cost instead; deterministic mode has no such budget.
+      //
+      // Capping the INPUT breaks the feedback at its source, for both paths: a
+      // frame that ran long asks for no more than a frame's worth of simulation,
+      // and the time we could not serve is dropped rather than re-requested. On a
+      // display slower than targetFrameRate the simulation therefore runs below
+      // the requested speed - the same falling-behind it already reports, and
+      // reports honestly, because the real-time ratio below still divides by the
+      // true wall interval.
+      const servedDt = Math.min(frameDt, 1 / this.config.targetFrameRate);
+      const simDt = servedDt * this.simSpeed;
 
       try {
         // Advance physics using the configured solver
@@ -315,6 +338,18 @@ export class GameLoop {
         }
         const result = this.rk45Solver.advance(this.state, simDt, frameDt * 1000);
         this.state = result.state;
+
+        // Time the cap threw away is time we fell behind, and the solver cannot
+        // see it: it finished everything we asked for, so its own falling-behind
+        // test (unserved remainder) reads clean. Without this correction the cap
+        // would make a slow plant look on-schedule - the ratio would still say
+        // 0.08x while nothing flagged it. Same 10% slack the solver's test uses,
+        // so a 60 Hz display jittering either side of the period is not an alarm.
+        const droppedDt = frameDt - servedDt;
+        if (droppedDt > servedDt * 0.1) {
+          result.metrics.isFallingBehind = true;
+        }
+
         this.lastMetrics = result.metrics;
         // Note: State history recording happens via onSubstepComplete callback
 

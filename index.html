@@ -124,7 +124,7 @@
                 </label>
               </div>
               <div style="margin-top: 8px;">
-                <label style="font-size: 11px;" title="When enabled, the solver will complete all steps regardless of wall time. This makes results reproducible but may cause UI freezes if timesteps become very small.">
+                <label style="font-size: 11px;" title="Every frame is integrated to completion instead of yielding after 30 ms, so the trajectory depends only on the timesteps taken and not on how fast your machine is. The cost is frame rate: one long blocking computation per frame. On a heavy plant expect a few frames per second and the simulation running well below the speed you asked for - it is working, just not repainting often. Leave it off for normal play; turn it on when you need a run you can reproduce.">
                   <input type="checkbox" id="deterministic-mode" />
                   Deterministic mode
                 </label>
