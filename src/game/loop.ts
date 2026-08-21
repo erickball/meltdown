@@ -319,30 +319,37 @@ export class GameLoop {
     }
 
     if (!this.isPaused && frameDt > 0) {
-      // Simulation time to advance, from a frame interval capped at the frame
-      // period we are targeting.
+      // Simulation time to advance. In deterministic mode the frame interval is
+      // capped first; on the interactive path it is used as measured.
       //
       // THE CAP IS WHAT KEEPS THIS LOOP FROM DRIVING ITSELF. requestAnimationFrame
       // cannot fire the next frame until tick() returns, so an uncapped frameDt is
-      // *this frame's own compute time*: the loop would ask frame n+1 for exactly
-      // as much simulation time as serving frame n cost in wall time. Below 1x
-      // realtime that is a positive feedback - each request bigger than the last,
-      // geometrically. Measured on the Xe-100 with deterministic mode on (which
-      // takes no wall-clock break, so nothing else bounds a tick): the request
-      // climbed 0.67 -> 3.9 -> 11.2 -> 15.5 s of simulation per frame, one frame
-      // blocking the tab for ~10 s, before settling into a permanent ~5 fps. Above
-      // 1x speed it has no fixed point at all and diverges until the tab stops
-      // answering. The interactive path's 30 ms solver budget masked this by
-      // capping the cost instead; deterministic mode has no such budget.
+      // *this frame's own compute time*: the loop asks frame n+1 for exactly as
+      // much simulation time as serving frame n cost in wall time. Below 1x
+      // realtime that is positive feedback - each request bigger than the last,
+      // geometrically. Measured on the Xe-100 at 1x: the request climbed 0.67 ->
+      // 3.9 -> 11.2 -> 15.5 s of simulation per frame, one frame blocking the tab
+      // for ~10 s, before settling at the fixed point where a frame's compute
+      // equals a frame's simulation. Above 1x there is no fixed point and it
+      // diverges until the tab stops answering.
       //
-      // Capping the INPUT breaks the feedback at its source, for both paths: a
-      // frame that ran long asks for no more than a frame's worth of simulation,
-      // and the time we could not serve is dropped rather than re-requested. On a
-      // display slower than targetFrameRate the simulation therefore runs below
-      // the requested speed - the same falling-behind it already reports, and
-      // reports honestly, because the real-time ratio below still divides by the
-      // true wall interval.
-      const servedDt = Math.min(frameDt, 1 / this.config.targetFrameRate);
+      // ONLY DETERMINISTIC MODE NEEDS THE CAP. The interactive path already has a
+      // governor: advance() yields at maxWallTimeMs, so what a frame COSTS is
+      // bounded however much it was asked for, and the excess request is dropped
+      // rather than fed back. Capping its request too was measurably worse - the
+      // solver returned with budget unspent, so the frame's fixed render/UI cost
+      // bought less simulation (PWR: 0.53x at 22 fps became 0.43x at 27 fps).
+      // Deterministic mode takes no such break, by design, which leaves the
+      // feedback with nothing damping it.
+      //
+      // The cap is that same budget: one frame's worth of work, as this solver
+      // defines it. Time the cap drops is dropped, not re-requested - so the
+      // simulation runs slow rather than running away, which is reported below.
+      const deterministic = this.rk45Solver?.getDeterministicMode() ?? false;
+      const frameBudget = this.rk45Solver
+        ? this.rk45Solver.getMaxWallTimeMs() / 1000
+        : 1 / this.config.targetFrameRate;
+      const servedDt = deterministic ? Math.min(frameDt, frameBudget) : frameDt;
       const simDt = servedDt * this.simSpeed;
 
       // Count the REAL interval, not the capped one: this is wall time the
@@ -360,11 +367,13 @@ export class GameLoop {
         this.recordSpeedSample();
 
         // Time the cap threw away is time we fell behind, and the solver cannot
-        // see it: it finished everything we asked for, so its own falling-behind
-        // test (unserved remainder) reads clean. Without this correction the cap
-        // would make a slow plant look on-schedule - the ratio would still say
-        // 0.08x while nothing flagged it. Same 10% slack the solver's test uses,
-        // so a 60 Hz display jittering either side of the period is not an alarm.
+        // see it: in deterministic mode it finished everything we asked for, so
+        // its own falling-behind test (unserved remainder) reads clean. Without
+        // this correction a plant at 0.07x would look on-schedule while the ratio
+        // beside it said 0.07x. Same 10% slack the solver's test uses, so a frame
+        // that lands a hair over the budget is not an alarm. Nothing is dropped on
+        // the interactive path, where servedDt is the measured interval, so this
+        // is inert there.
         const droppedDt = frameDt - servedDt;
         if (droppedDt > servedDt * 0.1) {
           result.metrics.isFallingBehind = true;
