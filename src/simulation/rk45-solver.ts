@@ -1448,6 +1448,17 @@ export class RK45Solver {
   }
 
   /**
+   * Wall-clock budget one advance() call allows itself before yielding, in ms.
+   * Deterministic mode ignores it (that is the whole difference), but callers
+   * still need the number: it is this solver's definition of "one frame's
+   * worth of work", and the game loop sizes its deterministic-mode request
+   * from it so the two cannot drift apart.
+   */
+  getMaxWallTimeMs(): number {
+    return this.config.maxWallTimeMs;
+  }
+
+  /**
    * Compute total rates from all rate operators
    *
    * IMPORTANT: We must apply constraints BEFORE computing rates to ensure
