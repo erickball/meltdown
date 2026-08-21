@@ -347,22 +347,9 @@ function init() {
       timeDisplay.textContent = `Time: ${state.time.toFixed(3)}s (${metrics.totalSteps} steps)`;
     }
 
-    // Update speed display
-    const speedDisplay = document.getElementById('sim-speed');
-    if (speedDisplay) {
-      const speed = gameLoop.getSimSpeed();
-      const target = gameLoop.getTargetSimSpeed();
-      speedDisplay.textContent = 'Speed: ' + speed.toFixed(1) + 'x';
-      if (speed < target - 0.001) {
-        speedDisplay.textContent += ` (auto-slow from ${target.toFixed(0)}x)`;
-      }
-      if (metrics.isFallingBehind) {
-        speedDisplay.style.color = '#ff4444';
-        speedDisplay.textContent += ' [LAGGING]';
-      } else {
-        speedDisplay.style.color = '#aaa';
-      }
-    }
+    // Wall clock and achieved speed
+    updateWallTimeDisplay();
+    updateAchievedSpeedDisplay();
 
     // Keep the toolbar speed readout in sync: auto-slowdown and its silent
     // recovery ramp change the effective speed without any user input
@@ -687,13 +674,84 @@ function init() {
   const speedDownBtn = document.getElementById('speed-down');
   const speedPresets = document.querySelectorAll('.speed-preset');
 
+  /**
+   * A requested speed, the way the user set it: 1x, 10x, 0.01x - no trailing
+   * zeros on a number they typed in themselves.
+   */
+  function formatRequestedSpeed(speed: number): string {
+    return Number.isInteger(speed) ? `${speed}` : speed < 1 ? `${speed}` : speed.toFixed(1);
+  }
+
+  /**
+   * A measured speed, which needs enough digits to be worth reading at any
+   * scale: 0.43x and 0.010x are both meaningful, and both would round to
+   * nothing at one decimal place.
+   */
+  function formatAchievedSpeed(speed: number): string {
+    if (speed >= 10) return speed.toFixed(0);
+    if (speed >= 1) return speed.toFixed(1);
+    if (speed >= 0.1) return speed.toFixed(2);
+    return speed.toFixed(3);
+  }
+
+  /** Wall clock, compact: 12.3s below a minute, then 3:05, then 1:02:33. */
+  function formatWallTime(seconds: number): string {
+    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    const mm = String(m).padStart(2, '0');
+    const ss = String(s).padStart(2, '0');
+    return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+  }
+
+  function updateWallTimeDisplay(): void {
+    const el = document.getElementById('wall-time');
+    if (el) el.textContent = `Wall: ${formatWallTime(gameLoop.getRunningWallTime())}`;
+  }
+
+  /**
+   * Status-bar speed: what the simulation is ACHIEVING, with the speed it is
+   * trying to reach in brackets whenever it cannot keep up. The achieved
+   * figure is averaged over a couple of seconds of wall time by the game loop
+   * - a single frame's ratio swings too wildly to read.
+   */
+  function updateAchievedSpeedDisplay(): void {
+    const el = document.getElementById('sim-speed');
+    if (!el) return;
+    const commanded = gameLoop.getSimSpeed();
+    const target = gameLoop.getTargetSimSpeed();
+    const achieved = gameLoop.getAchievedSpeed();
+
+    if (achieved === null) {
+      // Nothing has run yet, so there is no achieved speed to report. Show the
+      // request rather than inventing a measurement.
+      el.textContent = `Speed: ${formatRequestedSpeed(commanded)}x`;
+      el.style.color = '#aaa';
+      return;
+    }
+
+    // 10% slack, the same the loop's own falling-behind test uses, so ordinary
+    // frame jitter on a plant that IS keeping up does not flicker the readout.
+    const lagging = achieved < commanded * 0.9;
+    let text = `Speed: ${formatAchievedSpeed(achieved)}x`;
+    if (lagging) text += ` [${formatRequestedSpeed(commanded)}x]`;
+    // Auto-slowdown holding the speed below what the user asked for is a
+    // deliberate choice, not lag, so it gets its own words.
+    if (commanded < target - 0.001) {
+      text += ` (auto-slow from ${formatRequestedSpeed(target)}x)`;
+    }
+    el.textContent = text;
+    el.style.color = lagging ? '#ff4444' : '#aaa';
+  }
+
   function updateSpeedDisplay() {
     const speed = gameLoop.getSimSpeed();
     const target = gameLoop.getTargetSimSpeed();
     const autoSlowed = speed < target - 0.001;
     if (speedDisplay) {
       // Recovery from auto-slow passes through fractional speeds (1.5x, ...)
-      const label = Number.isInteger(speed) ? `${speed}` : speed < 1 ? `${speed}` : speed.toFixed(1);
+      const label = formatRequestedSpeed(speed);
       speedDisplay.textContent = autoSlowed ? `${label}x*` : `${label}x`;
       speedDisplay.title = autoSlowed
         ? `Auto-slowdown active: running at ${label}x, returning to ${target}x once the transient settles`
@@ -755,6 +813,8 @@ function init() {
     if (timeDisplay) {
       timeDisplay.textContent = `Time: ${state.time.toFixed(3)}s (${historyInfo.currentStepNumber} steps)`;
     }
+    updateWallTimeDisplay();
+    updateAchievedSpeedDisplay();
 
     // Update debug panel
     updateDebugPanel(state, gameLoop.getSolverMetrics(), gameLoop.getPressureSolverStatus());
@@ -2561,6 +2621,12 @@ function init() {
         lastSimTime: 0,
       };
       updateDebugPanel(currentState, emptyMetrics, gameLoop.getPressureSolverStatus());
+
+      // The new state came with a fresh wall clock and no speed history; say
+      // so now rather than leaving the previous plant's numbers on screen
+      // until the first frame runs.
+      updateWallTimeDisplay();
+      updateAchievedSpeedDisplay();
 
       if (plantState.components.size > 0) {
       } else {

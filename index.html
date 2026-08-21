@@ -221,7 +221,8 @@
       <div id="status-bar">
         <span id="mouse-pos">X: 0, Y: 0</span>
         <span id="sim-time">Time: 0.0s</span>
-        <span id="sim-speed">Speed: 1x</span>
+        <span id="wall-time" title="Wall-clock time this run has spent actually running. Paused time is not counted, and the clock restarts whenever the simulation is rebuilt - including on the way back from a construction visit, which keeps its simulated time but starts a fresh wall clock.">Wall: 0.0s</span>
+        <span id="sim-speed" title="Simulated seconds per real second, averaged over the last 2 seconds of wall time (a single frame's ratio jumps around too much to read). If the simulation cannot keep up, the speed it is trying to reach follows in brackets.">Speed: 1x</span>
         <span id="perf-info">dt: 0ms</span>
       </div>
       <div id="construction-cost-panel" style="display: none;">

@@ -112,6 +112,18 @@ export class GameLoop {
   private isPaused: boolean = false;
   private targetSimSpeed: number; // Speed before auto-slowdown
 
+  // Wall-clock accounting for the status bar. Accumulates only while the loop
+  // is actually running, so it reads as "how long this run has been going",
+  // not how long the page has been open.
+  private runningWallTime: number = 0;
+  // Rolling (wall, sim) pairs behind the achieved-speed readout. One frame's
+  // ratio is not a speed: a frame can integrate a whole second of simulation
+  // or almost none, so the instantaneous number jumps around far too much to
+  // read. Averaging over a window of wall time gives the figure a person can
+  // actually compare against the speed they asked for.
+  private speedSamples: { wall: number; sim: number }[] = [];
+  private readonly ACHIEVED_SPEED_WINDOW: number = 2.0; // seconds of wall time
+
   // State tracking for auto-slowdown
   private previousPower: number = 0;
   private previousMaxTemp: number = 0;
@@ -261,6 +273,8 @@ export class GameLoop {
     this.cumulativeTempChange = 0;
     this.changeWindowTime = 0;
     this.recentEvents = [];
+    this.runningWallTime = 0;
+    this.speedSamples = [];
 
     // Reset solver state (timestep, counters, etc.) BEFORE recording the
     // initial snapshot so it carries no stale flow-rates context
@@ -331,6 +345,11 @@ export class GameLoop {
       const servedDt = Math.min(frameDt, 1 / this.config.targetFrameRate);
       const simDt = servedDt * this.simSpeed;
 
+      // Count the REAL interval, not the capped one: this is wall time the
+      // user sat through, and dividing simulated time by it is what makes the
+      // achieved-speed readout mean what it says.
+      this.runningWallTime += frameDt;
+
       try {
         // Advance physics using the configured solver
         if (!this.rk45Solver) {
@@ -338,6 +357,7 @@ export class GameLoop {
         }
         const result = this.rk45Solver.advance(this.state, simDt, frameDt * 1000);
         this.state = result.state;
+        this.recordSpeedSample();
 
         // Time the cap threw away is time we fell behind, and the solver cannot
         // see it: it finished everything we asked for, so its own falling-behind
@@ -644,6 +664,13 @@ export class GameLoop {
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
 
+    // A different plant is a different run: its wall clock starts at zero and
+    // the old plant's speed samples say nothing about this one. (A simulation
+    // resumed after a construction visit keeps its simulated time but starts a
+    // fresh wall clock - the tooltip on the readout says so.)
+    this.runningWallTime = 0;
+    this.speedSamples = [];
+
     // Clear recent events (prevents stale events from blocking new ones due to time comparison)
     this.recentEvents = [];
 
@@ -659,6 +686,43 @@ export class GameLoop {
     this.lastSnapshotStep = 0;
 
     console.log(`[GameLoop] Simulation state updated with ${newState.flowNodes.size} flow nodes`);
+  }
+
+  /**
+   * Record a (wall, sim) pair and retire the samples that have aged out of
+   * the averaging window. The sample that has just passed the far edge is
+   * KEPT, as the baseline to measure against - drop it and the window
+   * collapses toward a single frame, which is the noise this exists to avoid.
+   */
+  private recordSpeedSample(): void {
+    this.speedSamples.push({ wall: this.runningWallTime, sim: this.state.time });
+    while (this.speedSamples.length > 2 &&
+           this.runningWallTime - this.speedSamples[1].wall >= this.ACHIEVED_SPEED_WINDOW) {
+      this.speedSamples.shift();
+    }
+  }
+
+  /**
+   * Wall-clock seconds this run has spent actually running (paused time is
+   * not counted). Reset whenever the simulation state is replaced or reset.
+   */
+  getRunningWallTime(): number {
+    return this.runningWallTime;
+  }
+
+  /**
+   * Simulated seconds per wall second, averaged over the last
+   * ACHIEVED_SPEED_WINDOW of running wall time. Null until two samples exist
+   * (nothing has run yet) - callers should show the requested speed instead
+   * rather than inventing a number.
+   */
+  getAchievedSpeed(): number | null {
+    if (this.speedSamples.length < 2) return null;
+    const oldest = this.speedSamples[0];
+    const newest = this.speedSamples[this.speedSamples.length - 1];
+    const wallSpan = newest.wall - oldest.wall;
+    if (wallSpan <= 0) return null;
+    return (newest.sim - oldest.sim) / wallSpan;
   }
 
   /**
