@@ -13,6 +13,13 @@
  * still file. The dialog is built the same way as the rest of the Jack UI
  * (programmatic DOM + inline cssText, see jack-plot.ts) so it needs no markup
  * in index.html.
+ *
+ * "Don't ask again" turns the dialog off for later reports, remembering the
+ * context choice that was made alongside it. Two rules keep that from becoming
+ * the silent data-sharing this dialog exists to prevent: it can only be set
+ * from the dialog itself (so it is always chosen with the full payload on
+ * screen, never buried in a settings page), and every automatic send still
+ * announces itself with a toast carrying a one-click "Ask me next time".
  */
 
 export interface CarConsentRequest {
@@ -27,9 +34,70 @@ export interface CarConsentDecision {
   approved: boolean;
   /** False when the user kept the report but declined the context block. */
   includeContext: boolean;
+  /** True when a stored "don't ask again" approved this without a dialog. */
+  auto: boolean;
 }
 
-const DENIED: CarConsentDecision = { approved: false, includeContext: false };
+const DENIED: CarConsentDecision = { approved: false, includeContext: false, auto: false };
+
+// ---------------------------------------------------------------------------
+// Stored "don't ask again" preference
+// ---------------------------------------------------------------------------
+
+const PREF_KEY = 'meltdown_car_autosend';
+
+interface AutoSendPref {
+  autoSend: true;
+  /** The context choice the user made when they ticked "don't ask again". */
+  includeContext: boolean;
+  /** When it was granted, so the toast can say how long it has been on. */
+  since: string;
+}
+
+function readAutoSendPref(): AutoSendPref | null {
+  try {
+    const raw = localStorage.getItem(PREF_KEY);
+    if (!raw) return null;
+    const pref = JSON.parse(raw) as Partial<AutoSendPref>;
+    // Only an explicit true counts - a corrupt or partial record must fall
+    // back to asking, never to sending
+    if (pref?.autoSend !== true) return null;
+    return {
+      autoSend: true,
+      includeContext: pref.includeContext !== false,
+      since: typeof pref.since === 'string' ? pref.since : '',
+    };
+  } catch {
+    return null;  // unreadable storage: ask
+  }
+}
+
+function writeAutoSendPref(includeContext: boolean): void {
+  try {
+    const pref: AutoSendPref = {
+      autoSend: true,
+      includeContext,
+      since: new Date().toISOString(),
+    };
+    localStorage.setItem(PREF_KEY, JSON.stringify(pref));
+  } catch {
+    /* storage full/blocked: the choice just doesn't stick, and we keep asking */
+  }
+}
+
+/** Revoke automatic sending, so the next report shows the dialog again. */
+export function clearAutoSendPref(): void {
+  try {
+    localStorage.removeItem(PREF_KEY);
+  } catch {
+    /* nothing we can do; the dialog is the safe default anyway */
+  }
+}
+
+/** Whether reports are currently sent without asking. */
+export function isAutoSendEnabled(): boolean {
+  return readAutoSendPref() !== null;
+}
 
 /** Human labels for the context keys, so the dialog isn't raw JSON. */
 const CONTEXT_LABELS: Record<string, string> = {
@@ -50,8 +118,19 @@ function formatContextValue(value: unknown): string {
  * Show the report to the user and resolve with their decision. Resolves
  * DENIED on Escape, backdrop click, or the "Don't send" button - anything
  * other than an explicit press of "Send report" is a no.
+ *
+ * If the user has previously chosen "don't ask again", this resolves
+ * immediately with that standing approval and no dialog is shown.
  */
 export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDecision> {
+  const standing = readAutoSendPref();
+  if (standing) {
+    return Promise.resolve({
+      approved: true,
+      includeContext: standing.includeContext,
+      auto: true,
+    });
+  }
   return new Promise((resolve) => {
     const backdrop = document.createElement('div');
     backdrop.id = 'jack-car-consent';
@@ -174,10 +253,34 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
       });
     }
 
+    // --- "don't ask again" -----------------------------------------------
+    // Only settable here, with the full report on screen, and it takes effect
+    // only if this report is actually approved (see the Send handler).
+    const dontAskToggle = document.createElement('input');
+    dontAskToggle.type = 'checkbox';
+    dontAskToggle.id = 'jack-car-consent-dontask';
+
+    const dontAskLabel = document.createElement('label');
+    dontAskLabel.htmlFor = dontAskToggle.id;
+    dontAskLabel.title =
+      'Send this and future bug reports without showing this dialog, keeping ' +
+      'whatever choice you made above about the technical context. Each ' +
+      'automatic send still shows a notice with a button to start asking again.';
+    dontAskLabel.style.cssText =
+      'display: flex; align-items: flex-start; gap: 7px; margin-top: 16px; ' +
+      'font-size: 11px; color: #99aacc; cursor: pointer; line-height: 1.4;';
+    dontAskLabel.appendChild(dontAskToggle);
+    const dontAskText = document.createElement('span');
+    dontAskText.textContent =
+      "Don't ask again - send future reports automatically (you'll still get a " +
+      'notice each time, with a button to start asking again)';
+    dontAskLabel.appendChild(dontAskText);
+    panel.appendChild(dontAskLabel);
+
     // --- buttons ---------------------------------------------------------
     const buttonRow = document.createElement('div');
     buttonRow.style.cssText =
-      'display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px;';
+      'display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px;';
 
     const baseBtn = `
       padding: 7px 16px; border-radius: 4px; cursor: pointer;
@@ -217,9 +320,12 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
     }
 
     denyBtn.addEventListener('click', () => finish(DENIED));
-    sendBtn.addEventListener('click', () =>
-      finish({ approved: true, includeContext: contextToggle.checked })
-    );
+    sendBtn.addEventListener('click', () => {
+      // Persist the standing approval only on an actual send. Ticking the box
+      // and then declining must not leave auto-send armed.
+      if (dontAskToggle.checked) writeAutoSendPref(contextToggle.checked);
+      finish({ approved: true, includeContext: contextToggle.checked, auto: false });
+    });
     // Backdrop click cancels, but only when the press STARTED on the backdrop
     // (matches ConnectionDialog: dragging a text selection out must not cancel)
     let downOnBackdrop = false;
@@ -236,4 +342,63 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
     // Default focus on the safe choice, so a stray Enter does not send
     denyBtn.focus();
   });
+}
+
+/**
+ * Announce a report that went out under a standing "don't ask again", and
+ * offer to turn asking back on. This is what keeps auto-send from being
+ * silent: the user always learns a report left the machine, and the way to
+ * stop it is one click away in the notice itself rather than buried in a
+ * settings page.
+ */
+export function notifyAutoFiled(title: string, outcome: 'sent' | 'parked'): void {
+  const toast = document.createElement('div');
+  toast.id = 'jack-car-autosend-notice';
+  toast.style.cssText = `
+    position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%);
+    z-index: 10000; max-width: min(520px, 92vw);
+    background: #1a1e24; border: 1px solid #445566; border-radius: 6px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5); color: #d0d8e0;
+    font-family: 'Consolas', monospace; font-size: 12px;
+    padding: 10px 12px; display: flex; align-items: center; gap: 12px;
+  `;
+
+  const text = document.createElement('span');
+  text.textContent =
+    outcome === 'sent'
+      ? `Bug report sent automatically: ${title}`
+      : `Bug report saved to send later: ${title}`;
+  text.style.cssText = 'flex: 1 1 auto; word-break: break-word;';
+  toast.appendChild(text);
+
+  const askBtn = document.createElement('button');
+  askBtn.textContent = 'Ask me next time';
+  askBtn.title =
+    'Turn off automatic sending, so the next bug report shows you the full ' +
+    'report and waits for your approval.';
+  askBtn.style.cssText = `
+    flex: 0 0 auto; padding: 5px 10px; border-radius: 4px; cursor: pointer;
+    background: #262c36; border: 1px solid #445566; color: #d0d8e0;
+    font-family: inherit; font-size: 11px;
+  `;
+  askBtn.addEventListener('click', () => {
+    clearAutoSendPref();
+    text.textContent = 'Automatic sending is off - you\'ll be asked next time.';
+    askBtn.remove();
+    setTimeout(() => toast.remove(), 4000);
+  });
+  toast.appendChild(askBtn);
+
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '×';
+  closeBtn.title = 'Dismiss';
+  closeBtn.style.cssText =
+    'flex: 0 0 auto; background: none; border: none; color: #99aacc; ' +
+    'cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px;';
+  closeBtn.addEventListener('click', () => toast.remove());
+  toast.appendChild(closeBtn);
+
+  document.body.appendChild(toast);
+  // Long enough to read and act on; the revoke is the whole point of it
+  setTimeout(() => toast.remove(), 12000);
 }

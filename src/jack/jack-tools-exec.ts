@@ -15,7 +15,7 @@ import {
   execQueryHistory,
   execPlotHistory,
 } from './jack-history';
-import { requestCarConsent } from './jack-car-consent';
+import { requestCarConsent, notifyAutoFiled } from './jack-car-consent';
 
 const barFromPa = (pa: number) => Number((pa / 1e5).toFixed(3));
 const cFromK = (k: number) => Number((k - 273.15).toFixed(2));
@@ -449,7 +449,8 @@ export function executeJackTool(
 // quotes their plant and their words, and the context block carries the
 // browser user-agent - so the send is gated on an explicit consent dialog
 // (jack-car-consent.ts). Denial is final: nothing is transmitted and nothing
-// is parked locally.
+// is parked locally. A user who has chosen "don't ask again" skips the dialog
+// but still gets a notice per send, with a one-click revoke.
 // ---------------------------------------------------------------------------
 
 const PROD_CAR_ENDPOINT =
@@ -518,7 +519,16 @@ async function fileCarReport(
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = (await resp.json()) as { carId?: string };
     record(`Jack filed CAR ${data.carId ?? '?'}: ${title}`);
-    return { ok: true, carId: data.carId ?? null, note: 'CAR filed with the site office.' };
+    if (consent.auto) notifyAutoFiled(title, 'sent');
+    return {
+      ok: true,
+      carId: data.carId ?? null,
+      note: consent.auto
+        ? 'CAR filed with the site office. It was sent without asking, under the ' +
+          "user's standing \"don't ask again\" choice - they were shown a notice " +
+          'with a button to start asking again. Mention it was filed, briefly.'
+        : 'CAR filed with the site office.',
+    };
   } catch (e) {
     // Offline / endpoint not deployed: park the report locally so it isn't
     // lost, and tell the model honestly what happened.
@@ -529,6 +539,7 @@ async function fileCarReport(
       localStorage.setItem(key, JSON.stringify(pending.slice(-20)));
     } catch { /* storage full - the report is only in the chat log */ }
     record(`Jack wrote up a CAR (site office unreachable): ${title}`);
+    if (consent.auto) notifyAutoFiled(title, 'parked');
     return {
       ok: true,
       carId: null,
