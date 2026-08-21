@@ -263,7 +263,7 @@ export const JACK_TOOLS: Anthropic.Messages.Tool[] = [
   {
     name: "file_car",
     description:
-      "File a Corrective Action Report (CAR) - a bug report for the game's developers. Use when the user reports (or you observe) behavior that looks like a defect in the game itself: physics that can't be right, UI that misbehaves, tools that error on valid input, numbers that contradict each other. Not for player mistakes or design questions. Summarize the problem factually; game context (mode, sim time, selection) is attached automatically.",
+      "File a Corrective Action Report (CAR) - a bug report for the game's developers. Use when the user reports (or you observe) behavior that looks like a defect in the game itself: physics that can't be right, UI that misbehaves, tools that error on valid input, numbers that contradict each other. Not for player mistakes or design questions. Summarize the problem factually; game context (mode, sim time, selection) is attached automatically. The user is shown the full report and must approve it before anything is sent, and they may withhold the attached context - so write the description as something they will read. Check the tool result before you speak: if it says the user declined, the report was NOT filed, so don't claim otherwise and don't refile unless asked.",
     input_schema: {
       type: "object",
       properties: {

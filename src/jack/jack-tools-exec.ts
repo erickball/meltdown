@@ -15,6 +15,7 @@ import {
   execQueryHistory,
   execPlotHistory,
 } from './jack-history';
+import { requestCarConsent } from './jack-car-consent';
 
 const barFromPa = (pa: number) => Number((pa / 1e5).toFixed(3));
 const cFromK = (k: number) => Number((k - 273.15).toFixed(2));
@@ -443,6 +444,12 @@ export function executeJackTool(
 // ---------------------------------------------------------------------------
 // Corrective Action Reports (Jack's bug reports), persisted server-side to
 // the Firestore "jack-cars" collection via the fileCar cloud function.
+//
+// A CAR carries the user's own data off their machine - Jack's description
+// quotes their plant and their words, and the context block carries the
+// browser user-agent - so the send is gated on an explicit consent dialog
+// (jack-car-consent.ts). Denial is final: nothing is transmitted and nothing
+// is parked locally.
 // ---------------------------------------------------------------------------
 
 const PROD_CAR_ENDPOINT =
@@ -464,18 +471,43 @@ async function fileCarReport(
   const description = String(input.description ?? '').slice(0, 8000);
   if (!title || !description) return err('file_car needs a title and a description');
   const sim = host.getSimState();
+  const context = {
+    mode: host.getMode(),
+    simTime: sim?.time ?? null,
+    selectedComponent: host.getSelectedComponentId(),
+    componentCount: host.plantState.components.size,
+    userAgent: navigator.userAgent,
+  };
+
+  // Nothing leaves the machine without the user seeing it first. The dialog
+  // shows the full payload verbatim; the user can also keep the report but
+  // withhold the auto-collected context block.
+  const consent = await requestCarConsent({
+    title,
+    description,
+    severity: input.severity,
+    component: typeof input.component === 'string' ? input.component : undefined,
+    context,
+  });
+  if (!consent.approved) {
+    // Declined means declined: not sent, and NOT parked in localStorage
+    // either. Tell the model plainly so it doesn't claim it filed one.
+    record(`CAR not filed - user declined to send: ${title}`);
+    return {
+      ok: true,
+      carId: null,
+      note:
+        'The user declined to send this report, so nothing was submitted. ' +
+        'Do not say it was filed, and do not retry without being asked.',
+    };
+  }
+
   const payload = {
     title,
     description,
     severity: input.severity,
     component: typeof input.component === 'string' ? input.component : undefined,
-    context: {
-      mode: host.getMode(),
-      simTime: sim?.time ?? null,
-      selectedComponent: host.getSelectedComponentId(),
-      componentCount: host.plantState.components.size,
-      userAgent: navigator.userAgent,
-    },
+    ...(consent.includeContext ? { context } : {}),
   };
   try {
     const resp = await fetch(carEndpoint(), {
