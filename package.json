@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build && move dist\\index.html dist\\meltdown.html",
     "preview": "vite preview",
-    "test": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/check-accumulate-rates.ts && npx tsx scripts/test-flow-physics.ts && npx tsx scripts/test-replay-seek.ts",
+    "test": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/check-accumulate-rates.ts && npx tsx scripts/test-flow-physics.ts && npx tsx scripts/test-replay-seek.ts && npx tsx scripts/test-display-flow.ts",
     "test:plants": "npx tsx scripts/test-plant-scenarios.ts",
     "test:levels": "npx tsx scripts/test-game-levels.ts all",
     "test:all": "npx tsx src/simulation/test-suite.ts && npx tsx scripts/test-flow-physics.ts && npx tsx scripts/test-plant-scenarios.ts && npx tsx scripts/test-hx-bundles.ts"

@@ -10,6 +10,8 @@ import {
   renderDebugGrid,
 } from './isometric';
 import { getFluidColor, COLORS, renderColorLegend } from './colors';
+import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
+import { PipeContentsTracker } from './display-flow';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -18,6 +20,10 @@ export class PlantCanvas {
   private plantState: PlantState;
   private simState: SimulationState | null = null;
   private _simStateWarningLogged: boolean = false;
+  /** Which end's fluid each line is full of, so that lines which only slosh
+   *  hold one endpoint's colour instead of strobing between the two. See
+   *  display-flow.ts. */
+  private pipeContents = new PipeContentsTracker();
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
@@ -2683,9 +2689,12 @@ export class PlantCanvas {
     const flow = this.simState.flowConnections.find(f => f.id === flowId);
     if (!flow) return componentFluid;
 
-    // Donor node: what is flowing through the line right now. Stagnant lines
-    // (massFlowRate 0) show the upstream node, matching the drawn direction.
-    const donorId = flow.massFlowRate >= 0 ? flow.fromNodeId : flow.toNodeId;
+    // Donor node: the end whose fluid the line is actually FULL of, which is
+    // not the instantaneous flow direction on a line that only sloshes (see
+    // display-flow.ts). Stagnant lines show the upstream node, matching the
+    // drawn direction.
+    const forward = this.pipeContents.donorEnd(flow) === 'from';
+    const donorId = forward ? flow.fromNodeId : flow.toNodeId;
     const donor = this.simState.flowNodes.get(donorId);
     if (!donor) return componentFluid;
 
@@ -2697,13 +2706,21 @@ export class PlantCanvas {
     };
 
     // A separated two-phase node feeds liquid from a bottom nozzle and vapor
-    // from a top one; the flow operator already decided which. Paint the line
-    // that phase rather than the node's bulk mixture color.
+    // from a top one. Paint the line that phase rather than the node's bulk
+    // mixture color. `flow.currentFlowPhase` is the answer for the node the
+    // INSTANTANEOUS sign picked, so it is the wrong end whenever the ledger
+    // above disagrees; ask the same draw sampler the physics uses about the
+    // donor we actually chose, at the port on that end.
     if (fluid.phase === 'two-phase') {
-      if (flow.currentFlowPhase === 'liquid') {
+      const phase = flowPhaseAt(
+        donor,
+        forward ? flow.fromElevation : flow.toElevation,
+        flow.massFlowRate
+      );
+      if (phase === 'liquid') {
         fluid.phase = 'liquid';
         fluid.quality = 0;
-      } else if (flow.currentFlowPhase === 'vapor') {
+      } else if (phase === 'vapor') {
         fluid.phase = 'vapor';
         fluid.quality = 1;
       }
@@ -3263,6 +3280,7 @@ export class PlantCanvas {
   public setSimState(state: SimulationState): void {
     this.simState = state;
     this._simStateWarningLogged = false; // Reset warning flag when state is set
+    this.pipeContents.update(state);
   }
 
   public getView(): ViewState {
