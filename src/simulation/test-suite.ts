@@ -32,6 +32,7 @@ import {
 } from './graphite.js';
 import { cloneSimulationState } from './solver.js';
 import { hxTubeLengthFactor, helicalLengthFactor, hxTubeLength } from './hx-bundles.js';
+import { concentricGrayBodyArea } from './factory.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
@@ -1647,6 +1648,52 @@ test('a hand-set factor is honoured up to the packing limit', () => {
 test('straight and U-tube bundles are unaffected by the coil derivation', () => {
   assertClose(hxTubeLengthFactor({ ...COIL, hxType: 'straight', tubeCount: 5000 }), 1, 1e-9, 'straight');
   assertClose(hxTubeLengthFactor({ ...COIL, hxType: 'utube', tubeCount: 5000 }), 2.1, 1e-9, 'U-tube');
+});
+
+// ============================================================================
+// Gray-body enclosures
+// ============================================================================
+// One formula serves the reflector-to-vessel gap and every declared radiant
+// surface (cavity cooling panels), so its limits are worth pinning: it is the
+// thing that decides how much decay heat a gas reactor can shed with
+// everything switched off.
+
+category('Gray-body radiation');
+
+test('a black inner surface in a huge black enclosure radiates its own area', () => {
+  // e_in = e_out = 1 and r_out >> r_in: the correction term vanishes and
+  // A_eff collapses onto the bare cylinder area.
+  const a = concentricGrayBodyArea(1, 1000, 10, 1, 1);
+  assertClose(a, 2 * Math.PI * 1 * 10, 1e-9, 'black body in a black cavern');
+});
+
+test('a gray inner surface is throttled by its own emissivity', () => {
+  const a = concentricGrayBodyArea(1, 1000, 10, 0.5, 1);
+  assertClose(a, 0.5 * 2 * Math.PI * 10, 1e-6, 'e_in scales it directly');
+});
+
+test('a close-fitting gray shroud costs both surfaces', () => {
+  // Equal radii is the flat-plate limit: 1/(1/e1 + 1/e2 - 1).
+  const tight = concentricGrayBodyArea(1, 1.0001, 10, 0.8, 0.8);
+  const expected = 2 * Math.PI * 10 / (1 / 0.8 + 1 / 0.8 - 1);
+  assertClose(tight / expected, 1, 1e-3, 'concentric limit -> parallel plates');
+  // The same surfaces further apart lose less to re-reflection.
+  assert(concentricGrayBodyArea(1, 10, 10, 0.8, 0.8) > tight,
+    'a distant outer surface returns less radiation to the emitter');
+});
+
+test('the Xe-100 cavity panels take ~0.9 MW off a vessel at operating temperature', () => {
+  // 20 m of 5.04 m OD vessel at 260 C inside 6.0 m panels at 45 C. This is
+  // the number that decides whether the system is a real parasitic loss
+  // (~0.5% of core power) or decoration.
+  const a = concentricGrayBodyArea(2.52, 3.0, 20, 0.8, 0.9);
+  const q = 5.670374419e-8 * a * (533.15 ** 4 - 318.15 ** 4);
+  assert(q > 0.8e6 && q < 1.1e6,
+    `cavity duty at operating temperature should be ~0.9 MW, got ${(q / 1e6).toFixed(2)} MW`);
+  // And it more than triples on its own as the vessel heads for 500 C with
+  // the circulator dead - no signal, no valve, just T^4.
+  const hot = 5.670374419e-8 * a * (773.15 ** 4 - 373.15 ** 4);
+  assert(hot / q > 3, `duty must climb steeply with vessel temperature, got ${(hot / q).toFixed(1)}x`);
 });
 
 // ============================================================================

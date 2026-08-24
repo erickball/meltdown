@@ -8,3 +8,8 @@ scripts/uv_grid_data_v13_filtered.json text eol=lf
 public/saturation_dome_iapws.json text eol=lf
 public/uv_grid_data_v13_filtered.json text eol=lf
 *.py text eol=lf
+
+# Same reason, different generator: scripts/gen-xe100.ts writes this preset
+# with LF, so without this every regeneration reads as a 1581-line diff and
+# the real change is invisible.
+src/presets/xe100.json text eol=lf

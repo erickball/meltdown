@@ -265,6 +265,125 @@ add('val-prel-1', {
 });
 
 // ---------------------------------------------------------------------------
+// Reactor cavity cooling system (RCCS)
+// ---------------------------------------------------------------------------
+// The ultimate heat sink an HTGR actually relies on, and the reason it can be
+// walked away from. A ring of water-filled standpipes lines the concrete
+// cavity around the RPV and takes the vessel's heat by THERMAL RADIATION
+// across the air gap - no pump, no valve, no signal, nothing to fail. The
+// water rises by its own buoyancy into a large elevated tank and returns cold
+// down the outside, a thermosyphon that runs on the temperature difference it
+// is trying to remove.
+//
+// The physics is all in the T^4: at the 260 C the vessel runs on load the
+// panels take about 1 MW - a real and correctly-sized parasitic loss, 0.5% of
+// core power - while at the 400-500 C the vessel reaches with the circulator
+// dead the same panels take 3-4 MW without anything being switched on. Decay
+// heat one hour after trip is about 2 MW, so the system self-selects: it is
+// weak when the plant is healthy and strong exactly when it is not.
+//
+// PANEL. 120 standpipes on a 6.0 m circle around the 5.04 m OD vessel,
+// 60 mm bore, 6 mm wall, the full 20 m of vessel height. Split into two 10 m
+// sections in series, which is what makes the thermosyphon honest: this model
+// puts a node's fluid at its component's BASE elevation and charges the
+// column between bases to the connections, so a single 20 m lump would drive
+// the whole loop with its hot outlet density. Two sections give the riser a
+// real axial profile and let each face its own 10 m of vessel.
+//
+// Drawn as the lumped standpipe it hydraulically is - 0.66 m by 10 m holds
+// the bank's 3.4 m3 a section (120 * pi/4 * 0.06^2 * 10) as an honest
+// cylinder - and stood on the 3 m ring radius where the tubes actually are.
+// The RING is described in radiantSurface below, which is the right place for
+// it: that block is the panel's METAL, and it is deliberately independent of
+// the component's shape. Carrying the ring as the drawn diameter and pinning
+// the water with an explicit `volume` was the other option, and it is a trap
+// - the dialog drops a stored volume the moment anyone edits the geometry,
+// and the bank would silently become 283 m3 of water.
+//
+// Both of a section's connections attach at its base, and that is not
+// cosmetic either: a node's ports have to sit at the same local elevation or
+// the hydrostatic term they carry does not cancel around the loop, and what
+// is left over is a standing head no density difference put there.
+const rccsPanel = (id: string, elevation: number, pressure: number, half: string) => add(id, {
+  type: 'tank', label: `RCCS Cavity Panels (${half})`,
+  position: { x: 36, y: 75 }, rotation: 0, elevation,
+  width: 0.66, height: 10, wallThickness: 0.006,
+  fillLevel: 1, pressureRating: 16,
+  // The metal that sees the vessel. Emissivities: 0.9 for the painted panel
+  // face (they are deliberately blackened for exactly this reason), 0.8 for
+  // the oxidised carbon-steel RPV - the same value the reflector-to-vessel
+  // path uses. hydraulicDiameter is the TUBE bore: the lump has no passage of
+  // its own, and using the 6 m ring diameter for the water-side convection
+  // would price it as a plenum instead of a tube.
+  radiantSurface: {
+    facesComponentId: 'rv-1',
+    diameter: 6.0, height: 10,
+    emissivity: 0.9, facingEmissivity: 0.8,
+    thickness: 0.006, hydraulicDiameter: 0.06,
+  },
+  ports: ports([
+    [`${id}-in`, -3.0, 5],   // up from the section below (or the downcomer)
+    [`${id}-out`, 3.0, 5],   // on up the riser
+  ]),
+  // Seeded on the static ladder under a water surface 39.6 m up. A rung out
+  // here is a standing wave in a loop with no pump to absorb it.
+  fluid: { temperature: 318, pressure, phase: 'liquid', quality: 0, flowRate: 0 },
+  nqa1: true, containedBy: 'bui-1',
+});
+rccsPanel('rccs-panel-1', 0, 4.72e5, 'lower');
+rccsPanel('rccs-panel-2', 10, 3.75e5, 'upper');
+
+// TANK. 201 m3 at the top of the building, 85% full: 171 t of water. That
+// inventory IS the grace period - 2 MW of decay heat spends about six hours
+// just warming it to boiling and another two days boiling it off, which is
+// where the "72 hours with no operator action" claim in these designs comes
+// from. It is also the loop's cold leg and its expansion space: the air
+// cushion over the water takes the thermal expansion of the whole loop, so
+// nothing has to be vented while the water is still subcooled.
+//
+// 4 x 16 m and not a squat 6 x 8 of the same volume: the hydrostatic model
+// derives a node's height from its VOLUME (h = sqrt(V/(pi/4))), so a drawn
+// shape that does not satisfy width = sqrt(height) reports a liquid column it
+// does not have. At 4 x 16 the two agree and its 13.6 m of water is 13.6 m
+// of head.
+//
+// Two-phase at the saturation pressure of 40 C water with an atmosphere of
+// air on top - a vented tank of cold water, which is what it is. Filling it
+// as "1 bar, 40 C" instead makes it saturated at 100 C: a partly-filled tank
+// takes its temperature from its pressure, not from the number typed here.
+add('rccs-tank-1', {
+  type: 'tank', label: 'RCCS Water Tank',
+  position: { x: 40, y: 68 }, rotation: 0, elevation: 26,
+  width: 4, height: 16, wallThickness: 0.012,
+  fillLevel: 0.85, pressureRating: 10,
+  ports: ports([
+    ['rccs-tank-1-draw', -2, 8],     // downcomer to the panels
+    ['rccs-tank-1-return', 2, 8],    // riser return
+    ['rccs-tank-1-vent', 0, -8],     // relief on the dome
+  ]),
+  fluid: { temperature: 313, pressure: 7375, phase: 'liquid', quality: 0, flowRate: 0 },
+  initialNcg: { N2: 0.78, O2: 0.21, Ar: 0.009 },
+  nqa1: true, containedBy: 'bui-1',
+});
+
+// Overpressure protection for the closed loop. An open pool would boil at
+// atmospheric pressure and vent outdoors through a stack; this loop is closed
+// and slightly pressurised, so once the tank reaches saturation at 2 bar the
+// steam goes to the reactor building. Without it the tank is a sealed vessel
+// with a boiler under it and the only ending is a rupture.
+add('val-rccs-1', {
+  type: 'valve', label: 'RCCS Tank Relief',
+  valveType: 'relief',
+  position: { x: 44, y: 66 }, rotation: 0, elevation: 42,
+  diameter: 0.1, opening: 0, volume: 0.1,
+  pressureRating: 20, setpoint: 2e5, blowdown: 0.05,
+  ports: ports([['val-rccs-1-in', -0.1, 0, 'in'], ['val-rccs-1-out', 0.1, 0, 'out']]),
+  fluid: { temperature: 313, pressure: 7375, phase: 'vapor', quality: 1, flowRate: 0 },
+  initialNcg: { N2: 0.78, O2: 0.21, Ar: 0.009 },
+  nqa1: true, containedBy: 'bui-1',
+});
+
+// ---------------------------------------------------------------------------
 // SG tube leak valve: the SGTR scenario's fault injector
 // ---------------------------------------------------------------------------
 // Normally shut; scripts/xe100-scenarios.ts sgtr opens it to rupture a tube
@@ -337,6 +456,13 @@ add('cond-pump-1', {
   position: { x: 66, y: 92 }, rotation: 0, elevation: 0,
   diameter: 0.4, running: true, speed: 1,
   ratedFlow: 80, ratedHead: 200, orientation: 'right-left',
+  // The suction run from the hotwell and the discharge header to the feed
+  // pump - 0.4 m bore, ~30 m of it. The rating-derived default is 0.32 m3,
+  // which is the bare casing and nothing else, and on a station blackout
+  // this line VOIDS: the node drained to 0.2 kg of flashed steam passing 16
+  // kg/s, turned over its whole inventory every step, and collapsed the
+  // timestep to the floor. Real condensate piping absorbs that.
+  volume: 4,
   ports: ports([['cond-pump-1-inlet', 0.3, 0, 'in'], ['cond-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: 312, pressure: P_COND, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: false, pressureRating: 40,
@@ -387,6 +513,11 @@ add('fw-pump-1', {
   // over-deliver, cold feed swelled the subcooled section, boiling area
   // collapsed, generation fell, and the sag deepened.
   ratedFlow: 80, ratedHead: 6000, orientation: 'right-left',
+  // Suction header from the condensate pump plus the pump's own casing (see
+  // cond-pump-1 for why the 0.32 m3 default is not survivable when the line
+  // voids). Smaller than the condensate side: this run is short and the
+  // long haul to the heater sits downstream of the check valve.
+  volume: 2.5,
   ports: ports([['fw-pump-1-inlet', 0.3, 0, 'in'], ['fw-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: T_FEED, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: false, pressureRating: 250,
@@ -436,8 +567,27 @@ add('fwh-1', {
   // and the shell settles a breath above it. Seeding the shell hotter is
   // not conservative: at 36 bar the UA drove 435 MW into the tube side's
   // stiff liquid and its thermal expansion hit 268 bar in half a second.
-  shellFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.25, flowRate: 0 },
-  secondaryFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.25, flowRate: 0 },
+  //
+  // QUALITY 0.023, NOT 0.25. This is the level the drain controller below is
+  // asking for, and seeding anywhere else broke the heater in the first
+  // minute of every run. Quality is a MASS fraction: 0.25 of a 13.4 m3 shell
+  // at 16 bar is 0.4 m3 of water - a 0.15 m level under a controller holding
+  // out for 2 m. The drain slammed to its 2% stop and stayed there, so 25
+  // kg/s of extraction went in and 4 went out, and the shell walked from 16
+  // bar to 53 and burst at 64 s - every run, since the heater was added.
+  // Nothing downstream could stop it either: raising the shell's rating just
+  // moved the rupture to the drain valve at 65 bar. 0.023 is 3.8 m3 of water
+  // in 13.4, i.e. 2 m of level in a 7 m shell, and the loop starts inside
+  // its own control band: bleed and drain settle equal at ~15 kg/s with the
+  // shell at 18 bar and the feed leaving at 195 C.
+  //
+  // The deeper asymmetry is real and worth knowing: this bleed is tapped off
+  // the 165 bar main steam header, not a turbine casing, so nothing BOUNDS
+  // the shell pressure the way a real extraction nozzle does. The shell can
+  // only hold station by condensing everything the valve lets in, which it
+  // can do - but only while its drain can run.
+  shellFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
+  secondaryFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   fillLevel: 0.3,
   ports: ports([
     ['fwh-1-tube-1', -0.5, 3.5],   // feed in (from the FW pump)
@@ -812,6 +962,31 @@ connect('rv-1', 'rv-1-cold-leg', 'val-prel-1', 'val-prel-1-in',
   { fromElevation: 19, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
 connect('val-prel-1', 'val-prel-1-out', 'bui-1', 'bui-1-north',
   { fromElevation: 0, toElevation: 30, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
+
+// ---------------------------------------------------------------------------
+// RCCS thermosyphon: tank -> down the outside -> panels -> up -> tank
+// ---------------------------------------------------------------------------
+// Nothing drives this but density. Cold water falls 26 m from the tank to the
+// bottom of the panels and the warmed water climbs the same 26 m back, so the
+// head is g times the difference between those two columns - a couple of kPa,
+// nothing, and it is enough because there is almost nothing to push against.
+// The LINES set the flow, not the tubes: 120 parallel 60 mm bores are
+// hydraulically invisible (~10 Pa at design) while the 0.15 m headers at K~8
+// take the whole head. Lands ~10 kg/s and ~25 K of rise at the ~1 MW on-load
+// duty, which is what these systems are built to do.
+connect('rccs-tank-1', 'rccs-tank-1-draw', 'rccs-panel-1', 'rccs-panel-1-in',
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+    flowArea: 0.0177, length: 32, resistanceCoeff: 8 });
+connect('rccs-panel-1', 'rccs-panel-1-out', 'rccs-panel-2', 'rccs-panel-2-in',
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+    flowArea: 0.0177, length: 10, resistanceCoeff: 2 });
+connect('rccs-panel-2', 'rccs-panel-2-out', 'rccs-tank-1', 'rccs-tank-1-return',
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+    flowArea: 0.0177, length: 18, resistanceCoeff: 6 });
+connect('rccs-tank-1', 'rccs-tank-1-vent', 'val-rccs-1', 'val-rccs-1-in',
+  { fromElevation: 16, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
+connect('val-rccs-1', 'val-rccs-1-out', 'bui-1', 'bui-1-south',
+  { fromElevation: 0, toElevation: 42, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 // Leak path: SG tube side -> leak valve -> SG shell side

@@ -32,7 +32,7 @@ import {
   H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM,
 } from './otsg';
 import * as Water from './water-properties';
-import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent } from '../types';
+import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
@@ -1498,6 +1498,11 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   // radiates to the vessel wall node, which does not exist until then.
   createReflectorThermalNodes(plantState, state);
 
+  // Declared radiant surfaces (cavity cooling panels and the like). Same
+  // reason for the ordering: both walls have to exist before they can see
+  // each other.
+  createRadiantSurfaceConnections(plantState, state);
+
   // MCCI pass: ex-vessel debris bed + basemat for cores whose vessel stands
   // inside a building. Runs after ALL flow nodes exist (the containment may
   // appear later than the vessel in the component list).
@@ -1853,8 +1858,16 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // moves ~150x the volume, and its ducting is correspondingly large -
       // scale by the design gas density or the node's tiny gas mass caps the
       // whole loop's timestep.
-      let volume = Math.max(0.3, 0.004 * ratedFlow);
-      if (pumpPhase === 'vapor') {
+      // An explicit `volume` wins, as it does for tanks and valves: the
+      // derivation below is a rating-based guess at "casing plus some pipe",
+      // and a plant that knows its actual suction and discharge runs should
+      // be able to say so. It matters most when a line VOIDS - a pump node
+      // that drains to a couple of hundred grams of flashed steam turns over
+      // its whole inventory every step and takes the timestep with it.
+      let volume = pump.volume !== undefined
+        ? pump.volume
+        : Math.max(0.3, 0.004 * ratedFlow);
+      if (pump.volume === undefined && pumpPhase === 'vapor') {
         let rhoGas = Math.max(0.1, (pressure * 0.018) / (8.314 * temp)); // steam
         if (pump.initialNcg) {
           for (const [species, bar] of Object.entries(pump.initialNcg as Record<string, number>)) {
@@ -3426,6 +3439,32 @@ function wallNodePolicy(): 'none' | 'rpv-bui' | 'thick' | 'all' {
 }
 
 /**
+ * Effective radiating area for two long concentric gray cylinders (m2).
+ *
+ *     A_eff = A_inner / (1/e_in + (r_in/r_out)(1/e_out - 1))
+ *
+ * so that Q = sigma * A_eff * (T_in^4 - T_out^4). This is the standard
+ * two-surface enclosure result: the inner cylinder cannot see itself, so
+ * every photon it emits lands on the outer one, and the correction term is
+ * the share the outer surface reflects back weighted by the area ratio.
+ * Both the reflector-to-vessel gap and a cavity cooling panel around a
+ * vessel are this same geometry.
+ */
+export function concentricGrayBodyArea(
+  innerRadius: number,
+  outerRadius: number,
+  height: number,
+  innerEmissivity: number,
+  outerEmissivity: number,
+): number {
+  const innerArea = 2 * Math.PI * innerRadius * height;
+  return innerArea / (
+    1 / innerEmissivity +
+    (innerRadius / outerRadius) * (1 / outerEmissivity - 1)
+  );
+}
+
+/**
  * Graphite reflector thermal nodes and the passive heat path they carry.
  *
  * The reflector is not just a neutron economy device. On a pebble bed it is
@@ -3594,9 +3633,12 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
       );
     }
     const eWall = 0.8; // oxidised steel
-    const exchangeArea = refGeo.outerArea / (
-      1 / NBG_18.emissivity +
-      (refGeo.outerRadius / vesselRadius) * (1 / eWall - 1)
+    // refGeo.outerArea is the reflector's own lateral area, so pass the
+    // height that generates it rather than re-deriving one.
+    const exchangeArea = concentricGrayBodyArea(
+      refGeo.outerRadius, vesselRadius,
+      refGeo.outerArea / (2 * Math.PI * refGeo.outerRadius),
+      NBG_18.emissivity, eWall,
     );
     state.thermalConnections.push({
       id: `radiation-${reflectorId}-wall`,
@@ -3623,6 +3665,64 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
   let created = 0;
   for (const [id, component] of plantState.components) {
     const comp = component as any;
+
+    // A declared radiant surface OWNS its wall: the whole point of the
+    // component is the metal that faces the other one, so its geometry
+    // comes from the radiantSurface block and not from the component's own
+    // shape (a bank of standpipes lumped into one flow node has a bore, not
+    // a diameter). It gets a wall under EVERY policy for the same reason an
+    // HX shell does - without one there is nothing to radiate to, and the
+    // heat path the plant was built around silently does not exist.
+    const surface: RadiantSurface | undefined = comp.radiantSurface;
+    if (surface && !state.thermalNodes.has(`${id}-wall`)) {
+      const flow = state.flowNodes.get(id);
+      if (!flow) {
+        console.error(
+          `[Factory] '${id}' declares a radiant surface but has no flow node of its ` +
+          `own, so there is nothing for the absorbed heat to go into. The surface is ` +
+          `skipped - give it a component type that holds fluid (pipe, tank, vessel).`
+        );
+        continue;
+      }
+      const area = Math.PI * surface.diameter * surface.height;
+      state.thermalNodes.set(`${id}-wall`, {
+        id: `${id}-wall`,
+        label: `${component.label || id} surface`,
+        temperature: flow.fluid.temperature,
+        mass: area * surface.thickness * 7850,
+        specificHeat: 490,
+        thermalConductivity: 40,
+        characteristicLength: surface.thickness,
+        surfaceArea: area,
+        heatGeneration: 0,
+        maxTemperature: 1700,
+      });
+      // Inner face: the metal dumps into its own coolant. A panel of tubes
+      // is lumped into one node, so the convection has to be told the tube
+      // bore - the lump's nominal diameter is not a flow passage.
+      state.convectionConnections.push({
+        id: `convection-${id}-wall`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: id,
+        surfaceArea: area,
+        characteristicDiameter: surface.hydraulicDiameter ?? surface.diameter,
+      });
+      // Back face: natural convection to whatever fills the cavity. Real
+      // cavity coolers pick up a useful minority of their load this way,
+      // and it is the path that keeps working if the radiating body cools.
+      const cavityId = component.containedBy;
+      if (cavityId && state.flowNodes.has(cavityId)) {
+        state.convectionConnections.push({
+          id: `convection-${id}-wall-outer`,
+          thermalNodeId: `${id}-wall`,
+          flowNodeId: cavityId,
+          surfaceArea: area,
+          characteristicDiameter: surface.diameter,
+        });
+      }
+      created++;
+      continue;
+    }
 
     // Heat exchangers have no flow node under their bare id (they build
     // `-tube` and `-shell`), so the generic lookup below never reaches
@@ -3856,6 +3956,119 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
   }
   if (created > 0) {
     console.log(`[Factory] Wall thermal nodes: policy '${policy}' created ${created}`);
+  }
+}
+
+/**
+ * The radiation link declared by every `radiantSurface` block.
+ *
+ * A gray-body connection between two wall nodes, evaluated live from both
+ * metal temperatures - so a cavity cooling panel gets stronger by itself as
+ * the vessel it faces heats up (T^4), which is exactly why such a system
+ * needs no pump, no valve and no signal. Nothing here switches on.
+ *
+ * Runs after createWallThermalNodes so both walls exist.
+ */
+function createRadiantSurfaceConnections(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    const surface: RadiantSurface | undefined = (component as any).radiantSurface;
+    if (!surface) continue;
+
+    const facingComp = plantState.components.get(surface.facesComponentId) as any;
+    if (!facingComp) {
+      console.error(
+        `[Factory] '${id}' radiates to '${surface.facesComponentId}', which is not a ` +
+        `component in this plant. The surface absorbs nothing - whatever heat path it ` +
+        `was built for does not exist.`
+      );
+      continue;
+    }
+    const facingWallId = `${surface.facesComponentId}-wall`;
+    if (!state.thermalNodes.has(facingWallId)) {
+      console.error(
+        `[Factory] '${id}' radiates to '${surface.facesComponentId}', but that component ` +
+        `has no wall thermal node ('${facingWallId}') - there is no metal temperature to ` +
+        `radiate from. Check the wall-node policy (WALL_NODES) or the component type.`
+      );
+      continue;
+    }
+    const ownWallId = `${id}-wall`;
+    if (!state.thermalNodes.has(ownWallId)) {
+      console.error(
+        `[Factory] '${id}' declares a radiant surface but its own wall node ` +
+        `('${ownWallId}') was never built, so the link has no cold side.`
+      );
+      continue;
+    }
+
+    // Outer radius of the facing component's pressure boundary. Every family
+    // spells its geometry differently and guessing one would silently mis-size
+    // the view factor, so an unknown shape is an error, not a default.
+    let facingRadius: number | undefined;
+    switch (facingComp.type) {
+      case 'reactorVessel':
+      case 'vessel':
+        facingRadius = facingComp.innerDiameter / 2 + facingComp.wallThickness;
+        break;
+      case 'tank':
+        facingRadius = facingComp.width / 2 + (facingComp.wallThickness ?? 0);
+        break;
+      case 'pipe':
+        facingRadius = facingComp.diameter / 2 + (facingComp.thickness ?? 0);
+        break;
+      case 'crossVessel':
+        facingRadius = facingComp.outerDiameter / 2;
+        break;
+      case 'building':
+        facingRadius = facingComp.shape === 'cylinder'
+          ? facingComp.diameter / 2 + (facingComp.wallThickness ?? 0)
+          : undefined;
+        break;
+    }
+    if (!(facingRadius! > 0)) {
+      console.error(
+        `[Factory] '${id}' radiates to '${surface.facesComponentId}' (${facingComp.type}), ` +
+        `whose outer radius this pass does not know how to read. Add its geometry to ` +
+        `createRadiantSurfaceConnections, or face a component with a cylindrical boundary.`
+      );
+      continue;
+    }
+
+    const ownRadius = surface.diameter / 2;
+    if (Math.abs(ownRadius - facingRadius!) < 1e-9) {
+      console.error(
+        `[Factory] '${id}' and '${surface.facesComponentId}' have the same radius ` +
+        `(${ownRadius.toFixed(2)} m), so neither encloses the other and the concentric ` +
+        `view factor is meaningless. Separate them.`
+      );
+      continue;
+    }
+
+    // Whichever is narrower is the emitter - a cavity panel wraps its vessel,
+    // but a cooled liner inside a furnace is wrapped BY it, and the same
+    // formula covers both once the roles are read from the geometry.
+    const panelEncloses = ownRadius > facingRadius!;
+    const innerRadius = panelEncloses ? facingRadius! : ownRadius;
+    const outerRadius = panelEncloses ? ownRadius : facingRadius!;
+    const innerEmissivity = panelEncloses ? surface.facingEmissivity : surface.emissivity;
+    const outerEmissivity = panelEncloses ? surface.emissivity : surface.facingEmissivity;
+
+    const exchangeArea = concentricGrayBodyArea(
+      innerRadius, outerRadius, surface.height, innerEmissivity, outerEmissivity);
+
+    state.thermalConnections.push({
+      id: `radiation-${surface.facesComponentId}-${id}`,
+      fromNodeId: facingWallId,
+      toNodeId: ownWallId,
+      conductance: 0, // open gas gap - radiation only
+      radiationCoeff: exchangeArea,
+    });
+
+    console.log(
+      `[Factory] Radiant surface '${id}': ${surface.height.toFixed(1)} m x ` +
+      `${surface.diameter.toFixed(2)} m dia facing '${surface.facesComponentId}' ` +
+      `(${(2 * facingRadius!).toFixed(2)} m dia), ${exchangeArea.toFixed(1)} m2 effective`
+    );
   }
 }
 

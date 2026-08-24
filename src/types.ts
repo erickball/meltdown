@@ -52,6 +52,45 @@ export interface Port {
   connectedTo?: string; // Port ID of connected component
 }
 
+/**
+ * A cylindrical metal surface that trades thermal radiation with another
+ * component's wall across an open gas gap.
+ *
+ * This is the generic building block behind a reactor cavity cooling system:
+ * water-filled standpipes ringing a hot vessel, taking its heat by radiation
+ * with no pump, no valve and no signal in the path. It is not specific to
+ * that use - anything with a wall can face anything else with a wall (a
+ * shield tank around a hot pipe, a cooled liner around a furnace) - so the
+ * geometry is declared here rather than inferred from the component's own
+ * shape. The component's own dimensions still set its FLUID inventory; this
+ * block sets the METAL that sees the other component.
+ *
+ * The pair is treated as concentric gray cylinders, which is the standard
+ * closed-form enclosure: one surface wraps the other, and the gas between
+ * them is transparent. Whichever of the two is narrower is the emitter.
+ */
+export interface RadiantSurface {
+  /** Component whose wall node this surface exchanges radiation with. */
+  facesComponentId: string;
+  /** Diameter of this cylindrical surface (m). */
+  diameter: number;
+  /** Vertical extent of the exchange (m). */
+  height: number;
+  /** Emissivity of this surface (0-1). Painted/oxidised steel is ~0.9. */
+  emissivity: number;
+  /** Emissivity of the facing wall (0-1). Oxidised carbon steel is ~0.8. */
+  facingEmissivity: number;
+  /** Metal thickness (m) - sets this surface's thermal mass. */
+  thickness: number;
+  /**
+   * Hydraulic diameter for the surface-to-fluid convection (m). A panel of
+   * standpipes is lumped into one flow node, so its tube bore has to be
+   * stated: the lumped node's own diameter is not a flow passage.
+   * Defaults to the surface diameter.
+   */
+  hydraulicDiameter?: number;
+}
+
 export interface ComponentBase {
   id: string;
   type: ComponentType;
@@ -75,6 +114,9 @@ export interface ComponentBase {
   // part in low-alloy steel ruptures in minutes at core-outlet temperature.
   // See src/simulation/materials.ts.
   material?: string;
+  // A cylindrical metal surface that exchanges thermal radiation with another
+  // component's wall across an open gap. See RadiantSurface.
+  radiantSurface?: RadiantSurface;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
