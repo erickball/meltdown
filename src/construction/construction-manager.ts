@@ -3115,6 +3115,28 @@ export class ConstructionManager {
         delete component.volume;
       }
     }
+    // Radiant cavity surface. One nested block written whole: it is only
+    // meaningful complete, and a half-built one would wire a radiation path
+    // with a made-up view factor. Unchecking removes it, which removes the
+    // heat path - the same edit, read the other way.
+    if (properties.radiantSurface !== undefined) {
+      if (properties.radiantSurface) {
+        const prev = component.radiantSurface ?? {};
+        component.radiantSurface = {
+          facesComponentId: properties.radiantFaces ?? prev.facesComponentId ?? '',
+          diameter: properties.radiantDiameter ?? prev.diameter ?? 6,
+          height: properties.radiantHeight ?? prev.height ?? 10,
+          emissivity: properties.radiantEmissivity ?? prev.emissivity ?? 0.9,
+          facingEmissivity: properties.radiantFacingEmissivity ?? prev.facingEmissivity ?? 0.8,
+          // mm in the dialog, m in the model
+          thickness: (properties.radiantThickness ?? (prev.thickness ?? 0.006) * 1000) / 1000,
+          hydraulicDiameter:
+            (properties.radiantBore ?? (prev.hydraulicDiameter ?? 0.06) * 1000) / 1000,
+        };
+      } else {
+        delete component.radiantSurface;
+      }
+    }
     // Condenser geometry: square footprint, V = width² × height
     if (component.type === 'condenser' && properties.volume !== undefined && component.height) {
       component.width = Math.sqrt(properties.volume / component.height);

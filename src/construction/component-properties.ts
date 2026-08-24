@@ -178,6 +178,21 @@ export function readComponentOption(optionName: string, component: Record<string
     // Tanks/pressurizers: cylinder drawn as width (diameter) × height
     if (optionName === 'volume') return tankVolume(component);
     if (optionName === 'diameter') return component.width;
+    // Radiant cavity surface: one nested block, SI in the model, mm in the
+    // dialog for the two thicknesses/bores (same convention as everywhere
+    // else here). Absent block reads as "off" with the dialog defaults, so
+    // an ordinary tank round-trips unchanged.
+    const rs = component.radiantSurface;
+    switch (optionName) {
+      case 'radiantSurface': return rs !== undefined;
+      case 'radiantFaces': return rs?.facesComponentId ?? '';
+      case 'radiantDiameter': if (rs) return rs.diameter; break;
+      case 'radiantHeight': if (rs) return rs.height; break;
+      case 'radiantEmissivity': if (rs) return rs.emissivity; break;
+      case 'radiantFacingEmissivity': if (rs) return rs.facingEmissivity; break;
+      case 'radiantThickness': if (rs) return rs.thickness * 1000; break;
+      case 'radiantBore': if (rs) return (rs.hydraulicDiameter ?? rs.diameter) * 1000; break;
+    }
     // Pressurizer heaters: stored as capacity in W (what the simulation uses)
     if (optionName === 'heaterPower' && component.heaterCapacity !== undefined) {
       return component.heaterCapacity / 1e6; // W to MW

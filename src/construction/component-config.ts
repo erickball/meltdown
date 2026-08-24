@@ -147,6 +147,23 @@ export const componentDefinitions: Record<string, {
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
+      // Radiant cavity surface (reactor cavity cooling panels and the like)
+      { name: 'radiantSurface', type: 'checkbox', label: 'Radiant cavity surface', default: false,
+        help: 'Make this tank a cooled panel that absorbs THERMAL RADIATION from another component across an open gas gap. This is how a reactor cavity cooling system works: water-filled standpipes ringing a hot vessel, taking its heat with no pump, no valve and no signal in the path. The duty follows T⁴, so it strengthens by itself as the thing it faces heats up.' },
+      { name: 'radiantFaces', type: 'text', label: 'Faces Component', default: '', dependsOn: { field: 'radiantSurface', value: true },
+        help: 'ID of the component whose wall this surface trades radiation with (e.g. rv-1). That component needs a wall thermal node, and one of the two must enclose the other - they are treated as concentric cylinders.' },
+      { name: 'radiantDiameter', type: 'number', label: 'Surface Diameter', default: 6, min: 0.1, max: 60, step: 0.1, unit: 'm', dependsOn: { field: 'radiantSurface', value: true },
+        help: 'Diameter of the cylinder this surface forms - for a ring of standpipes, the circle they stand on. Deliberately separate from the tank\'s own drawn size, which sets the WATER inventory: a lumped bank of tubes has a bore, not a diameter.' },
+      { name: 'radiantHeight', type: 'number', label: 'Surface Height', default: 10, min: 0.1, max: 60, step: 0.5, unit: 'm', dependsOn: { field: 'radiantSurface', value: true },
+        help: 'Vertical extent of the exchange. Only the height both surfaces share does any radiating.' },
+      { name: 'radiantEmissivity', type: 'number', label: 'Surface Emissivity', default: 0.9, min: 0.05, max: 1, step: 0.05, dependsOn: { field: 'radiantSurface', value: true },
+        help: 'This surface. Cavity panels are deliberately blackened for exactly this reason - painted steel is ~0.9.' },
+      { name: 'radiantFacingEmissivity', type: 'number', label: 'Facing Emissivity', default: 0.8, min: 0.05, max: 1, step: 0.05, dependsOn: { field: 'radiantSurface', value: true },
+        help: 'The other component\'s wall. Oxidised carbon steel is ~0.8; polished metal is far lower and would cripple the path.' },
+      { name: 'radiantThickness', type: 'number', label: 'Surface Metal Thickness', default: 6, min: 0.5, max: 100, step: 0.5, unit: 'mm', dependsOn: { field: 'radiantSurface', value: true },
+        help: 'Sets the panel\'s thermal mass - how long it takes to respond, not how much it eventually carries.' },
+      { name: 'radiantBore', type: 'number', label: 'Coolant Passage Bore', default: 60, min: 1, max: 2000, step: 5, unit: 'mm', dependsOn: { field: 'radiantSurface', value: true },
+        help: 'Bore of the tubes the coolant actually runs in, used for the panel-to-water convection. The tank is one well-mixed lump, so its nominal diameter is not a flow passage and using it would price the water side as a plenum.' },
       // Calculated fields
       { name: 'minPressureRating', type: 'calculated', label: 'Min Pressure (Hydrostatic)', default: 0, unit: 'bar',
         calculate: (p) => {
