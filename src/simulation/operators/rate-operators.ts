@@ -31,6 +31,7 @@ import {
   mixtureThermalConductivity,
   mixtureViscosity,
   averageMolecularWeight,
+  diffusivityInMixture,
 } from '../gas-properties';
 import {
   graphiteSpecificHeat,
@@ -310,6 +311,15 @@ export function getReactorPowerState(): ReactorPowerDisplayState {
   return { ...lastReactorPower };
 }
 
+/**
+ * Molar mass of water (kg/mol). One value for the whole wall-transfer path:
+ * the steam inventory, the property blend and the condensing mass flux all
+ * have to agree on it, or the dew point the convection side computes differs
+ * in the last decimal from the one the condensation side does and a wall can
+ * be condensing according to one and dry according to the other.
+ */
+const M_H2O = 0.018015;
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
@@ -330,7 +340,8 @@ export class ConvectionRateOperator implements RateOperator {
       const D = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
 
       const h_liquid = this.liquidHeatTransferCoeff(flowNode, state, conn, D);
-      const h_vapor = this.vaporHeatTransferCoeff(flowNode, state, D);
+      const h_vapor = this.vaporHeatTransferCoeff(
+        flowNode, state, D, thermalNode.temperature);
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       lastConvectionHeatRates.set(conn.id, Q);
@@ -497,57 +508,342 @@ export class ConvectionRateOperator implements RateOperator {
   }
 
   /**
-   * Vapor-exposed surface: Dittus-Boelter with the ACTUAL gas mixture's
-   * properties - steam blended with any NCG by vapor-space mole fraction.
-   * Pure steam keeps its low conductivity (tubes above the water line
-   * transfer little - dryout); a helium loop gets helium's ~5x better
-   * conductivity, which is what makes gas-cooled cores coolable at all.
+   * Vapor-exposed surface. Three mechanisms on the ACTUAL gas mixture's
+   * properties - steam blended with any NCG by vapor-space mole fraction:
+   * forced convection, natural convection, and condensation when the wall is
+   * below the local dew point. See vaporWallHeatTransfer for the model; this
+   * is the thin wrapper that keeps the operator's call site tidy.
    */
-  private vaporHeatTransferCoeff(flowNode: FlowNode, state: SimulationState, D: number): number {
-    let totalMassFlow = 0;
-    for (const fc of state.flowConnections) {
-      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
-        totalMassFlow += Math.abs(fc.massFlowRate);
-      }
-    }
-
-    const T = flowNode.fluid.temperature;
-    const ncg = flowNode.fluid.ncg;
-    const nNcg = ncg ? totalMoles(ncg) : 0;
-
-    // Steam sharing the vapor space (all water for a vapor node, the vapor
-    // fraction for a two-phase node)
-    const steamVaporMass = flowNode.fluid.phase === 'two-phase'
-      ? flowNode.fluid.mass * (flowNode.fluid.quality ?? 0)
-      : flowNode.fluid.mass;
-    const nSteam = steamVaporMass / 0.018;
-    const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
-
-    // Mole-fraction blend of steam and NCG transport properties
-    const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = 0.018;
-    let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
-    if (xNcg > 0 && ncg) {
-      k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
-      mu = (1 - xNcg) * mu_steam + xNcg * mixtureViscosity(ncg, T);
-      cpMolar = (1 - xNcg) * cpMolar_steam + xNcg * mixtureCp(ncg);
-      M = (1 - xNcg) * M_steam + xNcg * averageMolecularWeight(ncg);
-    }
-    const Pr = (cpMolar / M) * mu / k;
-
-    // Vapor-space density: ideal-gas steam at its partial pressure plus the
-    // NCG mixture (valid above the water critical point, unlike the
-    // saturated-vapor table this replaced)
-    const rho_g = approxVaporDensity(flowNode);
-
-    const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowNode.flowArea) : 0;
-    const Re = (rho_g * velocity * D) / mu;
-
-    const h_natural = 50; // W/m²-K
-    if (Re < 2300) return h_natural;
-
-    const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4);
-    return Math.max(h_natural, (Nu * k) / D);
+  private vaporHeatTransferCoeff(
+    flowNode: FlowNode,
+    state: SimulationState,
+    D: number,
+    T_wall: number,
+  ): number {
+    const { total } = vaporWallHeatTransfer(flowNode, state, D, T_wall);
+    return total;
   }
+}
+
+/**
+ * The vapor-side wall coefficient, broken into the mechanisms that make it
+ * up (W/m²-K, all referred to |T_bulk - T_wall|).
+ *
+ * Split out of the operator so the composed path - not just its pieces - can
+ * be tested directly: it is the interaction between the sensible layer and
+ * the mass transfer riding on it that is easy to get wrong.
+ */
+export function vaporWallHeatTransfer(
+  flowNode: FlowNode,
+  state: SimulationState,
+  D: number,
+  T_wall: number,
+): { total: number; sensible: number; condensation: number; natural: number; forced: number } {
+  let totalMassFlow = 0;
+  for (const fc of state.flowConnections) {
+    if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
+      totalMassFlow += Math.abs(fc.massFlowRate);
+    }
+  }
+
+  const T = flowNode.fluid.temperature;
+  const ncg = flowNode.fluid.ncg;
+  const nNcg = ncg ? totalMoles(ncg) : 0;
+
+  // Steam sharing the vapor space (all water for a vapor node, the vapor
+  // fraction for a two-phase node)
+  const steamVaporMass = flowNode.fluid.phase === 'two-phase'
+    ? flowNode.fluid.mass * (flowNode.fluid.quality ?? 0)
+    : flowNode.fluid.mass;
+  const nSteam = steamVaporMass / M_H2O;
+  const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
+
+  // Mole-fraction blend of steam and NCG transport properties
+  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = M_H2O;
+  let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
+  if (xNcg > 0 && ncg) {
+    k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
+    mu = (1 - xNcg) * mu_steam + xNcg * mixtureViscosity(ncg, T);
+    cpMolar = (1 - xNcg) * cpMolar_steam + xNcg * mixtureCp(ncg);
+    M = (1 - xNcg) * M_steam + xNcg * averageMolecularWeight(ncg);
+  }
+  const cpMass = cpMolar / M;          // J/kg-K
+  const Pr = cpMass * mu / k;
+
+  // Vapor-space density: ideal-gas steam at its partial pressure plus the
+  // NCG mixture (valid above the water critical point, unlike the
+  // saturated-vapor table this replaced)
+  const rho_g = approxVaporDensity(flowNode);
+
+  const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowNode.flowArea) : 0;
+  const Re = (rho_g * velocity * D) / mu;
+
+  // --- Sensible heat: forced and natural convection, blended -------------
+  // Dittus-Boelter for the forced part. Below the transition it does not
+  // apply, and the churn that IS there is what the natural-convection term
+  // describes, so the forced contribution simply fades out with Re instead
+  // of being switched off at 2300.
+  const h_forced = Re > 0
+    ? (0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4) * k) / D
+    : 0;
+
+  // What the gas looks like right at the wall. On a condensing wall that
+  // is NOT just cooler gas - steam has been removed from it, so it is
+  // heavier by composition as well as by temperature, and on a steam/air
+  // wall the composition term is the bigger of the two by a factor of
+  // three. That is the buoyancy actually driving the boundary layer.
+  const iface = wallAdjacentGas(flowNode, T, T_wall, nSteam, nNcg, M);
+  const h_natural = naturalConvectionCoeff(
+    iface.relativeDensityDifference, rho_g, mu, k, cpMass, D);
+
+  // Churchill's cubic blend of the two limits: smooth everywhere, and it
+  // reduces to whichever mechanism is actually doing the work. The old
+  // code took max(50, forced), which both hid the natural-convection
+  // physics behind a constant and put a hard corner at Re = 2300.
+  const h_sensible = Math.cbrt(
+    h_natural * h_natural * h_natural + h_forced * h_forced * h_forced);
+
+  // --- Latent heat: condensation on a wall below the local dew point ----
+  const h_cond = condensationCoeff(
+    flowNode, T, T_wall, nSteam, nNcg, h_sensible, Pr, D,
+    { rho: rho_g, mu, k }, iface);
+
+  // The sensible and latent paths act on the same surface at once, so they
+  // add. Both are referred to the SAME (T_bulk - T_wall) the caller
+  // multiplies by, which is what makes that legitimate.
+  return {
+    total: h_sensible + h_cond,
+    sensible: h_sensible,
+    condensation: h_cond,
+    natural: h_natural,
+    forced: h_forced,
+  };
+}
+
+/**
+ * The state of the gas immediately against the wall, and how much heavier or
+ * lighter it is than the bulk.
+ *
+ * On a dry wall this is just "the same gas, at the wall temperature", and the
+ * relative density difference reduces to |dT|/T - the ordinary ideal-gas
+ * thermal buoyancy. On a CONDENSING wall it is a different gas: steam has
+ * been taken out of it, leaving the non-condensables behind at the interface
+ * partial pressure, so it is heavier by composition as well as by
+ * temperature. In a steam/air containment that composition term is about
+ * three times the thermal one, and leaving it out under-predicts the
+ * boundary layer by half.
+ *
+ * One expression covers both cases, which is the point: there is no
+ * condensing-mode branch in the convection correlation, only a density.
+ */
+interface WallAdjacentGas {
+  /** True when the wall is below the local dew point. */
+  condensing: boolean;
+  /** Dew point of the bulk's steam partial pressure (K). */
+  dewPoint: number;
+  /** Steam mole fraction in the bulk, and at the interface. */
+  yBulk: number;
+  yInterface: number;
+  /** |rho_wall - rho_bulk| / mean, the buoyancy driving the layer. */
+  relativeDensityDifference: number;
+}
+
+function wallAdjacentGas(
+  flowNode: FlowNode,
+  T_bulk: number,
+  T_wall: number,
+  nSteam: number,
+  nNcg: number,
+  M_bulk: number,      // bulk mean molecular weight (kg/mol)
+): WallAdjacentGas {
+  const thermalOnly = T_bulk > 0 ? Math.abs(T_wall - T_bulk) / T_bulk : 0;
+  const dry: WallAdjacentGas = {
+    condensing: false, dewPoint: 0, yBulk: 0, yInterface: 0,
+    relativeDensityDifference: thermalOnly,
+  };
+
+  const P = flowNode.fluid.pressure;
+  if (!(P > 0) || !(nSteam > 0) || !(T_wall > 0) || !(T_bulk > 0)) return dry;
+
+  const yBulk = nSteam / (nSteam + nNcg);
+  const dewPoint = Water.saturationTemperature(yBulk * P);
+  if (T_wall >= dewPoint) return dry;
+
+  const yInterface = Math.min(Water.saturationPressure(T_wall) / P, 1);
+  // Mean molecular weight of each side. The non-condensables' own mean is
+  // whatever is left once steam is accounted for, and it is the same gas on
+  // both sides - only its share changes.
+  const M_ncg = nNcg > 0
+    ? (M_bulk - yBulk * M_H2O) / Math.max(1 - yBulk, 1e-12)
+    : M_H2O;
+  const M_interface = yInterface * M_H2O + (1 - yInterface) * M_ncg;
+  // Ideal gas at the same total pressure: rho ~ M/T.
+  const rhoBulk = M_bulk / T_bulk;
+  const rhoInterface = M_interface / T_wall;
+  const mean = 0.5 * (rhoBulk + rhoInterface);
+  return {
+    condensing: true,
+    dewPoint,
+    yBulk,
+    yInterface,
+    relativeDensityDifference: mean > 0
+      ? Math.abs(rhoInterface - rhoBulk) / mean
+      : thermalOnly,
+  };
+}
+
+/**
+ * Natural convection off a vertical surface (W/m²-K), Churchill-Chu:
+ *
+ *   Nu = { 0.825 + 0.387 Ra^(1/6) / [1 + (0.492/Pr)^(9/16)]^(8/27) }²
+ *
+ * valid over the whole Rayleigh range - laminar through turbulent - with no
+ * regime switch, which is why it is the right shape for a model that must
+ * not step. Ra = g (drho/rho) L^3 rho^2 cp / (mu k).
+ *
+ * The buoyancy comes in as a relative DENSITY difference rather than as
+ * beta*dT, because on a condensing wall the density difference is mostly
+ * compositional (see wallAdjacentGas). For a dry gas the two are identical -
+ * drho/rho = dT/T for an ideal gas at fixed composition - so nothing is
+ * special-cased to get the ordinary case back.
+ *
+ * This replaces a hard-coded 50 W/m²-K. That constant was an order of
+ * magnitude too big for a large surface in quiescent gas: it had the Xe-100
+ * reactor vessel shedding 3.75 MW into the building air, four times what its
+ * cavity cooling panels take, from a coefficient that should be about 7.7.
+ * The number now comes out of the fluid's own properties and the buoyancy
+ * actually driving it, so a helium space, an air cavity and a steam
+ * containment each get their own answer instead of sharing one.
+ *
+ * Exported for direct testing of the correlation.
+ */
+export function naturalConvectionCoeff(
+  relativeDensityDifference: number,  // |rho_wall - rho_bulk| / mean; dT/T when dry
+  rho: number,       // gas density (kg/m³)
+  mu: number,        // dynamic viscosity (Pa s)
+  k: number,         // thermal conductivity (W/m-K)
+  cp: number,        // specific heat (J/kg-K)
+  L: number,         // characteristic length (m)
+): number {
+  const drho = Math.abs(relativeDensityDifference);
+  if (!(drho > 0) || !(rho > 0) || !(L > 0) || !(mu > 0) || !(k > 0)) return 0;
+  const Pr = (cp * mu) / k;
+  const Ra = (9.81 * drho * L * L * L * rho * rho * cp) / (mu * k);
+  const f = Math.pow(1 + Math.pow(0.492 / Pr, 9 / 16), 8 / 27);
+  const Nu = Math.pow(0.825 + (0.387 * Math.pow(Ra, 1 / 6)) / f, 2);
+  return (Nu * k) / L;
+}
+
+/**
+ * Condensation on a wall colder than the local dew point (W/m²-K, referred
+ * to the bulk-to-wall temperature difference).
+ *
+ * TWO resistances in series, which is the whole model - there is no regime
+ * switch and no correlation selected by hand:
+ *
+ *  1. DIFFUSION of steam through the non-condensable gas to the interface.
+ *     Non-condensables do not condense, so they pile up at the wall and the
+ *     arriving steam has to diffuse through them. Stefan flow through a
+ *     stagnant species:
+ *         N" = c k_m ln[(1 - y_i)/(1 - y_b)]     [mol/m²s]
+ *     with y the steam mole fraction at the interface (i) and in the bulk
+ *     (b), c = P/RT, and the mass-transfer coefficient k_m from the
+ *     Chilton-Colburn analogy against the sensible-heat correlation already
+ *     computed: Sh = Nu (Sc/Pr)^(1/3), k_m = Sh D_AB / L. The diffusivity is
+ *     Fuller's, through the actual mixture - so helium, air and CO2 each
+ *     hinder condensation by their own transport properties rather than by
+ *     a tabulated containment number.
+ *
+ *  2. CONDUCTION through the condensate film, Nusselt's vertical-plate
+ *     result:
+ *         h_film = 0.943 [rho_f (rho_f - rho_g) g h_fg k_f^3 /
+ *                         (mu_f L (T_sat - T_wall))]^(1/4)
+ *
+ * Series is what makes the limits come out right without asserting them.
+ * Strip the non-condensables and the diffusion resistance vanishes (the log
+ * diverges) leaving pure Nusselt - thousands of W/m²-K, the textbook
+ * pure-steam answer. Add a per cent of air and the diffusion term collapses
+ * onto the tens-to-hundreds that containment experiments actually measure.
+ * The old single constant of 50 sat in the middle of that range and could
+ * not tell the two cases apart.
+ *
+ * A wall ABOVE the dew point returns zero: there is no film on it, and this
+ * model does not track wall liquid, so there is nothing available to
+ * evaporate. The value is continuous through that crossing (it goes to zero
+ * there) - the same one-sided shape boilingCurve already has.
+ *
+ * Exported for direct testing.
+ */
+export function condensationCoeff(
+  flowNode: FlowNode,
+  T_bulk: number,
+  T_wall: number,
+  nSteam: number,     // mol of steam in the vapor space
+  nNcg: number,       // mol of non-condensables sharing it
+  h_sensible: number, // the sensible-side coefficient, for the analogy
+  Pr: number,
+  L: number,
+  // The SAME blended mixture properties the sensible side used. Handing this
+  // the non-condensables' own numbers instead quietly puts the analogy on a
+  // different boundary layer than the one it is an analogy TO, which for a
+  // helium space (k is ten times air's) is not a small error.
+  gas: { rho: number; mu: number; k: number },
+  // The interface state, already solved once for the buoyancy the sensible
+  // side needed. Shared rather than recomputed so the two cannot disagree
+  // about whether this wall is condensing.
+  iface: WallAdjacentGas,
+): number {
+  const dT = T_bulk - T_wall;
+  if (!(dT > 0) || !(nSteam > 0) || !(L > 0)) return 0;
+  if (!iface.condensing) return 0;        // dry wall: nothing to condense onto
+
+  const P_total = flowNode.fluid.pressure;
+  if (!(P_total > 0)) return 0;
+
+  const { yBulk, yInterface, dewPoint: T_dew } = iface;
+
+  const h_fg = Water.latentHeat(T_dew);
+  const rho_f = Water.saturatedLiquidDensity(T_dew);
+  const rho_g = Water.saturatedVaporDensity(T_dew);
+  const mu_f = Water.liquidViscosity(T_dew);
+  const k_f = Water.liquidThermalConductivity(T_dew);
+
+  // Film conduction (Nusselt). The film's own temperature drop is dew point
+  // to wall, which is not the bulk-to-wall difference the caller works in -
+  // a superheated bulk sits above its own dew point. Refer it to the
+  // caller's difference so the two resistances can be added.
+  const dTfilm = Math.max(T_dew - T_wall, 1e-6);
+  const h_film = 0.943 * Math.pow(
+    (rho_f * Math.max(rho_f - rho_g, 1) * 9.81 * h_fg * k_f * k_f * k_f) /
+    (mu_f * L * dTfilm), 0.25);
+  const h_film_ref = h_film * (dTfilm / dT);
+
+  // Diffusion through the non-condensables. With none present the log
+  // diverges and the series reduces to the film alone, which is the correct
+  // pure-steam limit rather than a special case.
+  let h_diffusion = Infinity;
+  if (nNcg > 0 && yInterface < 1) {
+    const ncg = flowNode.fluid.ncg ?? emptyGasComposition();
+    const D_AB = diffusivityInMixture('H2O', ncg, nSteam, T_bulk, P_total);
+    const Sc = gas.mu / (gas.rho * D_AB);
+    // Chilton-Colburn: the same boundary layer transports heat and mass, so
+    // the mass-transfer coefficient rides on the heat-transfer one already
+    // computed rather than needing its own correlation.
+    const Nu = (h_sensible * L) / Math.max(gas.k, 1e-6);
+    const Sh = Nu * Math.cbrt(Sc / Math.max(Pr, 1e-6));
+    const k_m = (Sh * D_AB) / L;                  // m/s
+    const c = P_total / (8.31446 * T_bulk);       // mol/m³
+    // ln[(1 - y_i)/(1 - y_b)] > 0 exactly when the interface is drier than
+    // the bulk, i.e. when steam is actually moving toward the wall.
+    const logDriving = Math.log((1 - yInterface) / Math.max(1 - yBulk, 1e-12));
+    if (!(logDriving > 0)) return 0;
+    const molarFlux = c * k_m * logDriving;       // mol/m²s
+    const q = molarFlux * M_H2O * h_fg;           // W/m²
+    h_diffusion = q / dT;
+  }
+
+  // Both terms now speak in the caller's units, so they add as resistances.
+  return 1 / (1 / h_diffusion + 1 / Math.max(h_film_ref, 1e-9));
 }
 
 /**

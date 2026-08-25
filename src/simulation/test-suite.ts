@@ -33,6 +33,10 @@ import {
 import { cloneSimulationState } from './solver.js';
 import { hxTubeLengthFactor, helicalLengthFactor, hxTubeLength } from './hx-bundles.js';
 import { concentricGrayBodyArea } from './factory.js';
+import { vaporWallHeatTransfer } from './operators/rate-operators.js';
+import { liquidViscosity, liquidThermalConductivity } from './water-properties.js';
+import { emptyGasComposition } from './gas-properties.js';
+import { createFluidState } from './operators/index.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry } from './factory.js';
 import {
@@ -1694,6 +1698,153 @@ test('the Xe-100 cavity panels take ~0.9 MW off a vessel at operating temperatur
   // the circulator dead - no signal, no valve, just T^4.
   const hot = 5.670374419e-8 * a * (773.15 ** 4 - 373.15 ** 4);
   assert(hot / q > 3, `duty must climb steeply with vessel temperature, got ${(hot / q).toFixed(1)}x`);
+});
+
+// ============================================================================
+// Wall heat transfer: natural convection and condensation
+// ============================================================================
+// These replaced a hard-coded h = 50 W/m²-K that stood in for both mechanisms
+// at once and was an order of magnitude wrong for each of them in opposite
+// directions. What is pinned here is the two limits (dry gas, pure steam) and
+// the containment middle, because the whole value of the model is that one
+// expression covers all three.
+
+category('Wall heat transfer');
+
+/** A bare state holding one gas node - enough for the coefficient path. */
+function gasSpace(opts: {
+  steamMoles: number; ncgMoles: number; T: number; P: number; helium?: boolean;
+}): { node: FlowNode; state: SimulationState } {
+  const volume = 1000;
+  const fluid = createFluidState(opts.T, opts.P, 'vapor', 1, volume, undefined);
+  fluid.pressure = opts.P;
+  fluid.temperature = opts.T;
+  fluid.mass = opts.steamMoles * 0.018015;
+  const ncg = emptyGasComposition();
+  if (opts.helium) ncg.He = opts.ncgMoles;
+  else { ncg.N2 = opts.ncgMoles * 0.79; ncg.O2 = opts.ncgMoles * 0.21; }
+  fluid.ncg = ncg;
+  const node = {
+    id: 'g', label: 'g', fluid, volume,
+    hydraulicDiameter: 5, flowArea: 25, height: 10, elevation: 0,
+  } as FlowNode;
+  const state = {
+    flowNodes: new Map([[node.id, node]]), flowConnections: [],
+    thermalNodes: new Map(), thermalConnections: [],
+    convectionConnections: [], radiationConnections: [],
+  } as unknown as SimulationState;
+  return { node, state };
+}
+
+/** Moles filling a 1000 m³ space at (P, T). */
+const fillMoles = (P: number, T: number) => (P * 1000) / (8.31446 * T);
+
+test('a big steel surface in still air gets single-digit h, not 50', () => {
+  // 4.6 m vessel, 230 K hotter than the air around it. Churchill-Chu by hand
+  // gives ~7.7; the constant this replaced gave 50 and had the Xe-100 vessel
+  // shedding 3.75 MW into the reactor building.
+  const T = 300, P = 1e5;
+  const n = fillMoles(P, T);
+  const { node, state } = gasSpace({ steamMoles: n * 1e-6, ncgMoles: n, T, P });
+  const h = vaporWallHeatTransfer(node, state, 4.6, 530);
+  assert(h.natural > 4 && h.natural < 12,
+    `air natural convection should be ~8 W/m²-K, got ${h.natural.toFixed(1)}`);
+  assertClose(h.total, h.natural, 1e-9, 'a dry space has no latent path at all');
+});
+
+test('a helium space out-transfers air, but by less than its conductivity', () => {
+  // Helium conducts ~10x better than air, which is why a gas reactor is
+  // coolable at all - but in NATURAL convection it gives some of that back:
+  // Ra goes as rho², and helium at the same pressure is seven times lighter,
+  // so its Rayleigh number is ~50x smaller. h ~ k Ra^(1/3) nets out under 2x.
+  // The old constant of 50 could not tell the two gases apart at all, and
+  // this is the case where the difference decides whether a core is coolable.
+  const air = gasSpace({ steamMoles: 1, ncgMoles: fillMoles(60e5, 800), T: 800, P: 60e5 });
+  const he = gasSpace({
+    steamMoles: 1, ncgMoles: fillMoles(60e5, 800), T: 800, P: 60e5, helium: true });
+  const hAir = vaporWallHeatTransfer(air.node, air.state, 2, 900).natural;
+  const hHe = vaporWallHeatTransfer(he.node, he.state, 2, 900).natural;
+  assert(hHe > hAir && hHe < 10 * hAir,
+    `helium should beat air, but not by its conductivity ratio: ` +
+    `got ${hHe.toFixed(1)} vs ${hAir.toFixed(1)}`);
+  // And a dense gas at 60 bar convects far better than the same gas at one -
+  // the rho² in Ra, which a constant coefficient cannot express.
+  const thin = gasSpace({ steamMoles: 1, ncgMoles: fillMoles(1e5, 800), T: 800, P: 1e5 });
+  const hThin = vaporWallHeatTransfer(thin.node, thin.state, 2, 900).natural;
+  assert(hAir > 3 * hThin,
+    `60 bar air should far out-convect 1 bar air, got ${hAir.toFixed(1)} vs ${hThin.toFixed(1)}`);
+});
+
+test('containment condensation lands on the measured band, not on one number', () => {
+  // Uchida, h = 380 (m_steam/m_air)^0.7, is the classic containment fit and
+  // sits at the conservative end of the data. A mechanistic model should
+  // shadow it across the range rather than match it exactly.
+  const P = 3e5;
+  for (const steamFrac of [0.2, 0.35, 0.5, 0.7]) {
+    const T = saturationTemperature(steamFrac * P);
+    const total = fillMoles(P, T);
+    const nSteam = total * steamFrac, nNcg = total - nSteam;
+    const { node, state } = gasSpace({ steamMoles: nSteam, ncgMoles: nNcg, T, P });
+    const h = vaporWallHeatTransfer(node, state, 5, T - 20);
+    const uchida = 380 * Math.pow((nSteam * 0.018015) / (nNcg * 0.029), 0.7);
+    const ratio = h.total / uchida;
+    assert(ratio > 0.5 && ratio < 2,
+      `at ${(100 * steamFrac).toFixed(0)}% steam, h=${h.total.toFixed(0)} vs Uchida ` +
+      `${uchida.toFixed(0)} (ratio ${ratio.toFixed(2)}) - outside the measured band`);
+  }
+});
+
+test('non-condensables poison condensation; pure steam is film-limited', () => {
+  // The physics the single constant could not hold: pure steam condenses at
+  // thousands of W/m²-K, and a few per cent of air knocks an order of
+  // magnitude off it. That is why a containment with air in it behaves
+  // nothing like a clean steam space.
+  const P = 3e5;
+  const T = saturationTemperature(P);
+  const total = fillMoles(P, T);
+  const pure = gasSpace({ steamMoles: total, ncgMoles: 0, T, P });
+  const dirty = gasSpace({ steamMoles: total * 0.9, ncgMoles: total * 0.1, T: saturationTemperature(0.9 * P), P });
+  const hPure = vaporWallHeatTransfer(pure.node, pure.state, 5, T - 20).condensation;
+  const hDirty = vaporWallHeatTransfer(
+    dirty.node, dirty.state, 5, saturationTemperature(0.9 * P) - 20).condensation;
+  assert(hPure > 1500 && hPure < 20000,
+    `pure-steam film condensation should be thousands, got ${hPure.toFixed(0)}`);
+  assert(hPure > 3 * hDirty,
+    `10% air must cost most of it, got ${hPure.toFixed(0)} vs ${hDirty.toFixed(0)}`);
+});
+
+test('a wall above the dew point condenses nothing, continuously', () => {
+  // There is no film on a wall warmer than the dew point and this model does
+  // not track wall liquid, so there is nothing to evaporate. The value has to
+  // reach zero smoothly rather than step, or the solver pays for it.
+  const P = 3e5;
+  const dew = saturationTemperature(0.5 * P);
+  const T_bulk = dew + 30;                       // superheated bulk
+  const total = fillMoles(P, T_bulk);
+  const mk = () => gasSpace({
+    steamMoles: total * 0.5, ncgMoles: total * 0.5, T: T_bulk, P });
+  const at = (offset: number) => {
+    const { node, state } = mk();
+    return vaporWallHeatTransfer(node, state, 5, dew + offset).condensation;
+  };
+  assertClose(at(5), 0, 1e-12, 'a warm wall must not condense');
+  assertClose(at(0.5), 0, 1e-12, 'nor one half a kelvin above the dew point');
+  assert(at(-0.01) < 1, `just below, it must start from nothing, got ${at(-0.01).toFixed(3)}`);
+  assert(at(-10) > at(-1) && at(-1) > at(-0.1), 'and grow monotonically with subcooling');
+});
+
+test('the liquid-water transport fits match IAPWS where it matters', () => {
+  // The film resistance runs on these, and water is ten times less viscous
+  // at 150 C than at 20 - a single room-temperature value is wrong by that
+  // factor exactly where condensation happens.
+  assertClose(liquidViscosity(293.15) / 1.002e-3, 1, 0.05, 'viscosity at 20 C');
+  assertClose(liquidViscosity(423.15) / 1.82e-4, 1, 0.05, 'viscosity at 150 C');
+  assertClose(liquidThermalConductivity(300) / 0.610, 1, 0.03, 'conductivity at 300 K');
+  assertClose(liquidThermalConductivity(500) / 0.642, 1, 0.03, 'conductivity at 500 K');
+  // The maximum near 415 K is the part a monotonic fit gets wrong.
+  assert(liquidThermalConductivity(415) > liquidThermalConductivity(300) &&
+    liquidThermalConductivity(415) > liquidThermalConductivity(560),
+    'conductivity must peak in the middle of the range, not run monotonically');
 });
 
 // ============================================================================
