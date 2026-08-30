@@ -1223,11 +1223,11 @@ function interpolateFromGrid(
   let mP0 = 0, mP1 = 0, mP2 = 0;
   let supportCount = 0;
 
-  // Plain inverse-distance sums (fringe/degenerate fallback = old behavior).
-  // Also track whether the query is actually SURROUNDED by the points feeding
-  // that fallback - see the guard below for why.
-  let plainWeight = 0, plainT = 0, plainP = 0, plainCount = 0;
-  let uBelow = false, uAbove = false, vBelow = false, vAbove = false;
+  // Whether the query is bracketed in v by the candidate points. Needed on
+  // EVERY query (the vapor hand-off below), so it is tracked in this pass;
+  // the u-bracket flags and the inverse-distance sums are needed only if the
+  // fit degenerates, so they are deferred to the fallback pass at the bottom.
+  let vBelow = false, vAbove = false;
 
   for (const pt of nearby) {
     const x = logV - pt.logV;
@@ -1239,12 +1239,6 @@ function interpolateFromGrid(
       return { T: pt.T_K, P: pt.P_MPa * 1e6 };
     }
 
-    const plain = 1 / distSq;
-    plainWeight += plain;
-    plainT += plain * pt.T_K;
-    plainP += plain * pt.P_MPa;
-    plainCount++;
-    if (pt.u <= u_kJkg) uBelow = true; else uAbove = true;
     if (pt.v <= v) vBelow = true; else vAbove = true;
 
     const q = Math.sqrt(distSq) / R;
@@ -1330,6 +1324,28 @@ function interpolateFromGrid(
   // plateau tens of kJ/kg wide with steps at its edges. dT/du = 0 breaks
   // anything solving through this surface - the water/NCG energy split
   // brackets a root in u and cannot find one across a plateau.
+  //
+  // These sums used to accumulate in the fit loop above. That charged every
+  // query - and the vast majority take the MLS branch - for a divide and four
+  // more flops per candidate point, over the WHOLE 5x5 block rather than the
+  // handful inside the taper radius (77 points per block on average). They are
+  // gathered here instead, over the same array in the same order, so the sums
+  // are bit-identical to the fused version; only the queries that actually
+  // reach this branch pay for them.
+  let plainWeight = 0, plainT = 0, plainP = 0, plainCount = 0;
+  let uBelow = false, uAbove = false;
+  for (const pt of nearby) {
+    const x = logV - pt.logV;
+    const y = (u_kJkg - pt.u) * U_SCALE;
+    const distSq = x * x + y * y;
+    const plain = 1 / distSq;
+    plainWeight += plain;
+    plainT += plain * pt.T_K;
+    plainP += plain * pt.P_MPa;
+    plainCount++;
+    if (pt.u <= u_kJkg) uBelow = true; else uAbove = true;
+  }
+
   if (plainWeight === 0 || plainCount < 3 || !uBelow || !uAbove) {
     return null;
   }
