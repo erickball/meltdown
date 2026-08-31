@@ -110,3 +110,44 @@ cv-1-inner ceiling 0.07–0.2 s → gone; dt bounded next by the OTSG phase
 boundary and neutronics (~0.5–1 s scale). Plausibly 2–4x on gas plants,
 less on PWR (already at 30–200 ms for other reasons). The cond-pump-1
 pressure guard is NOT addressed by this and stays.
+
+## Stage-frequency splitting: concrete failure modes (Erick's question, 2026-08-31)
+
+Pulling advection out of the stage rates means intermediate RK states are no
+longer refreshed by transport, and every other operator evaluates against
+them. Named consequences, in decreasing expected severity:
+
+1. **BWR void-feedback aliasing.** Node masses stop evolving within the
+   step, so density/void reactivity feedback updates at step frequency, not
+   stage frequency. Void is a BWR's fastest feedback loop and already
+   carries slosh noise - sampling it once per step risks aliasing an
+   oscillation the stages currently resolve. BWR trajectory families move
+   into the stage-2 A/B, not the final battery.
+2. **Coupling-term error, O(dt).** A node whose balance is
+   advection-dominated (condenser, heaters, transit ducts) drifts under its
+   non-advective physics alone during the step - wall heat keeps pulling
+   with nothing replenishing - so heat-transfer rates are evaluated at a
+   slightly wrong dT. Largest exactly where advection dominates; partially
+   self-limiting because those nodes tend to have weak other-physics.
+3. **Steady-state bias, O(dt).** The implicit update restores each node once
+   per step, so its time-AVERAGE state sits ~half a step of non-advective
+   drift away from the true steady value, and every flux computed from it
+   inherits the bias. This is the same disease the pressure closure's
+   measured-q term cures in its own domain; the plain split has no
+   equivalent corrector.
+4. All of it is invisible to the embedded error estimate - bounded by the
+   raised throughput guard, not controlled.
+
+Why proceed anyway: flows already crossed this bridge (implicit momentum
+froze them through the stages) and trajectory families survived; moving the
+transported mass/energy to the SAME frequency as the flows that carry it
+restores a consistency the current half-split lacks.
+
+**Mitigation B (build only if stage-2 A/B demands it):** feed the stages a
+frozen transport tendency - the last implicit solve's per-node advective
+rates, constant across stages - so intermediate states drift realistically;
+the implicit solve then computes the CORRECTION against what the stages
+already integrated. Kills failure modes 1-3; costs exact-conservation
+bookkeeping (the correction must subtract the integrated estimate to the
+last joule). Predictor-corrector, standard shape, easy to get subtly wrong -
+measure first.
