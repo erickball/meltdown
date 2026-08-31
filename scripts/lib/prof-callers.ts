@@ -49,9 +49,21 @@ for (let i = 0; i < prof.samples.length; i++) {
     const p = parent.get(cur.id);
     cur = p === undefined ? undefined : byId.get(p);
   }
-  const key = cur
-    ? `${cur.callFrame.functionName || '(anon)'} @ ${short(cur.callFrame)}:${cur.callFrame.lineNumber + 1}`
+  // The first outside frame is often an anonymous closure (atP, resid, TOf
+  // ...), which lumps distinct call paths together. Keep walking to the first
+  // NAMED frame and report both: "named-owner <- immediate-caller".
+  const imm = cur;
+  let named = cur;
+  while (named && !named.callFrame.functionName) {
+    const p = parent.get(named.id);
+    named = p === undefined ? undefined : byId.get(p);
+  }
+  const immStr = imm
+    ? `${imm.callFrame.functionName || '(anon)'} @ ${short(imm.callFrame)}`
     : '(root)';
+  const key = named && named !== imm
+    ? `${named.callFrame.functionName} <- ${immStr}`
+    : immStr + (imm ? `:${imm.callFrame.lineNumber + 1}` : '');
   byCaller.set(key, (byCaller.get(key) || 0) + dt);
 }
 

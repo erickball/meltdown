@@ -243,41 +243,76 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number
     if (est && est > vg) hint = est;
   }
   if (hint && hint > vg) {
-    // Try a tight bracket around the estimate first (inverse index is good
-    // to a few tenths of a percent; a caller's previous iterate better),
-    // then a loose one; inside a verified bracket, SECANT on ln P vs ln v -
-    // near-affine locally - lands within tolerance in 2-3 probes where
-    // bisection took 13.
-    for (const span of [1.02, 1.3]) {
-      const lo = Math.max(Math.log(vg * (1 + 1e-9)), Math.log(hint / span));
-      const hi = Math.min(lnHi, Math.log(hint * span));
-      if (hi <= lo) continue;
-      let a = lo, b = hi;
-      let ra = pOf(a) - P, rb = pOf(b) - P;
-      if (!(ra >= 0 && rb <= 0)) continue;
-      // Illinois false position: plain regula falsi STALLS on convex
-      // residuals (one endpoint sticks and convergence goes one-sided
-      // linear - measured ~17 probes per call against the intended ~4).
-      // Halving the retained endpoint's residual restores superlinear
-      // convergence with the bracket guarantee intact.
-      let side = 0;
-      for (let i = 0; i < 24; i++) {
-        if (b - a < tolLn) break;
+    // Safeguarded secant from the hint, replacing a tight/loose bracket
+    // ladder. The ladder verified a +/-2% bracket around the hint with two
+    // probes and fell back to +/-30% when the sign check failed - and in a
+    // running plant it failed for HALF of all calls (measured 53.8% of
+    // superheatedV calls at exactly 10 probes), because the hint is the
+    // previous iterate of solveP's own pressure search: by the time it is
+    // reused, P has moved a few percent, so v has too. The ladder paid 2
+    // probes to discover the staleness, 2 more to verify the loose bracket,
+    // and ~6 inside it - 9.85 probes per call fleet-wide.
+    //
+    // The engine here spends its probes learning the curve instead of
+    // checking fences. ln P is near-affine in ln v for vapor (exactly affine
+    // with slope -1 for an ideal gas at fixed u), so:
+    //  - probe the hint;
+    //  - take one Newton step with an assumed slope of -1. Steam's true
+    //    slope is steeper (about -1.05 to -1.3), so the assumed-shallower
+    //    slope deliberately OVERSHOOTS a little and the second probe
+    //    usually lands on the far side of the root - an instant sign
+    //    bracket, where the ladder needed two dedicated probes;
+    //  - continue with secant steps, tightening the bracket as sides are
+    //    seen (Illinois halving on stall, as before); a step that leaves the
+    //    known bracket bisects instead.
+    // A near-critical isobar runs nearly flat in ln v, so the slope-(-1)
+    // step badly UNDERSHOOTS there; the secant learns the real slope from
+    // its first two points and recovers, and the per-step cap below stops a
+    // tiny learned slope from flinging an iterate across the domain. If the
+    // engine has not converged in 15 probes, fall through to the wide
+    // verified-bracket path, which keeps the loud not-actually-vapor error.
+    const xFloor = Math.log(vg * (1 + 1e-9));
+    let x0 = Math.min(Math.max(Math.log(hint), xFloor), lnHi);
+    let r0 = Math.log(pOf(x0) / P);
+    if (r0 === 0) return Math.exp(x0);
+    // Sign convention: r > 0 means P(v) too high, v too small, root above.
+    let a = r0 > 0 ? x0 : xFloor, ra = r0 > 0 ? r0 : NaN;   // below-root side
+    let b = r0 < 0 ? x0 : lnHi, rb = r0 < 0 ? r0 : NaN;     // above-root side
+    let x1 = x0 + Math.min(0.7, Math.max(-0.7, r0));        // Newton, slope -1
+    if (!(x1 > a && x1 < b)) x1 = 0.5 * (a + b);
+    let side = 0;
+    let converged = false;
+    for (let i = 0; i < 14; i++) {
+      const r1 = Math.log(pOf(x1) / P);
+      if (r1 > 0) {
+        a = x1; ra = r1;
+        if (side === 1 && !Number.isNaN(rb)) rb *= 0.5;
+        side = 1;
+      } else {
+        b = x1; rb = r1;
+        if (side === -1 && !Number.isNaN(ra)) ra *= 0.5;
+        side = -1;
+      }
+      if (!Number.isNaN(ra) && !Number.isNaN(rb)) {
+        // Bracketed: false position (Illinois-damped residuals).
+        if (b - a < tolLn) { converged = true; break; }
         let m = ra - rb !== 0 ? a + (b - a) * ra / (ra - rb) : 0.5 * (a + b);
         if (!(m > a && m < b)) m = 0.5 * (a + b);
-        const rm = pOf(m) - P;
-        if (rm > 0) {
-          a = m; ra = rm;
-          if (side === 1) rb *= 0.5;
-          side = 1;
-        } else {
-          b = m; rb = rm;
-          if (side === -1) ra *= 0.5;
-          side = -1;
-        }
+        x0 = x1; r0 = r1;
+        x1 = m;
+      } else {
+        // One-sided still: secant from the last two probes, step-capped.
+        const denom = r1 - r0;
+        let dx = denom !== 0 ? -r1 * (x1 - x0) / denom : (r1 > 0 ? 0.7 : -0.7);
+        dx = Math.min(0.7, Math.max(-0.7, dx));
+        if (r1 > 0 && dx < 0) dx = 0.7;    // must move up toward the root
+        if (r1 < 0 && dx > 0) dx = -0.7;   // must move down
+        x0 = x1; r0 = r1;
+        x1 = x1 + dx;
+        if (!(x1 > a && x1 < b)) x1 = 0.5 * (a + b);
       }
-      return Math.exp(0.5 * (a + b));
     }
+    if (converged) return Math.exp(0.5 * (a + b));
   }
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
   if (!(pLo >= P * (1 - 1e-6) && pHi <= P)) {
@@ -294,12 +329,37 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number
       `P(${Math.exp(lnHi).toExponential(1)})=${(pHi / 1e5).toFixed(2)} bar). ` +
       `The superheat section state is outside the vapor region.`);
   }
-  for (let i = 0; i < 80; i++) {
-    const lnM = 0.5 * (lnLo + lnHi);
-    if (pOf(lnM) > P) lnLo = lnM; else lnHi = lnM;
-    if (lnHi - lnLo < tolLn) break;
+  if (pLo <= P) {
+    // Inside the sign-tolerance band the bracket check admits (pLo within
+    // 1e-6 of P from below): the residual is non-positive over the whole
+    // bracket, so bisection converged onto lnLo - which is v_g. Say so
+    // directly instead of spending 22 probes walking there.
+    return Math.exp(lnLo);
   }
-  return Math.exp(0.5 * (lnLo + lnHi));
+  // Verified bracket: Illinois false position instead of pure bisection.
+  // ln P is near-affine in ln v across the vapor region, so false position
+  // lands in a handful of probes where bisection paid log2(span/tol) - about
+  // 22 at the default tolerance over this five-decade bracket (measured 23-30
+  // probes per hintless call, a quarter of ALL property queries).
+  let wa = lnLo, wra = pLo - P;
+  let wb = lnHi, wrb = pHi - P;
+  let wside = 0;
+  for (let i = 0; i < 80; i++) {
+    if (wb - wa < tolLn) break;
+    let m = wra - wrb !== 0 ? wa + (wb - wa) * wra / (wra - wrb) : 0.5 * (wa + wb);
+    if (!(m > wa && m < wb)) m = 0.5 * (wa + wb);
+    const rm = pOf(m) - P;
+    if (rm > 0) {
+      wa = m; wra = rm;
+      if (wside === 1) wrb *= 0.5;
+      wside = 1;
+    } else {
+      wb = m; wrb = rm;
+      if (wside === -1) wra *= 0.5;
+      wside = -1;
+    }
+  }
+  return Math.exp(0.5 * (wa + wb));
 }
 
 // ---------------------------------------------------------------------------
