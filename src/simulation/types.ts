@@ -407,7 +407,23 @@ export interface ConvectionConnection {
   // when absent - which for large vessels is meters and badly underestimates
   // h (Nu*k/D with node-scale D was the main reason SG heat transfer ran
   // ~10x low).
+  //
+  // This is the HEATER's dimension, and it is the right length for the
+  // correlations that describe something happening ON the heater - Bromley
+  // film boiling wants the cylinder it is blanketing. It is the WRONG length
+  // for the channel correlations (Dittus-Boelter, Churchill-Chu), which want
+  // the passage the coolant is flowing through. See flowHydraulicDiameter.
   characteristicDiameter?: number;
+
+  // The coolant passage washing this surface, where it differs from the
+  // node as a whole (m², m). A rod bundle is the case that forces the
+  // distinction: the core barrel's cross-section is not a flow area, because
+  // the rods occupy 36% of it, and the channel's hydraulic diameter
+  // (4*A_free/P_wetted, ~17 mm for a PWR lattice) is not the rod diameter
+  // (9.5 mm). Both fall back to the node's own values when absent, so a
+  // connection that does not care is unaffected.
+  flowPassageArea?: number;
+  flowHydraulicDiameter?: number;
 }
 
 export interface FlowConnection {

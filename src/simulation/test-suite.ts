@@ -39,7 +39,7 @@ import { liquidViscosity, liquidThermalConductivity, liquidSpecificHeat,
 import { emptyGasComposition } from './gas-properties.js';
 import { createFluidState } from './operators/index.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
-import { coreReflectorGeometry } from './factory.js';
+import { coreReflectorGeometry, coreRodGeometry } from './factory.js';
 import {
   saturationAtP,
   subcooledLiquidV,
@@ -1966,6 +1966,55 @@ test('a quiescent liquid surface gets a Rayleigh number, not a floor of 500', ()
     `a 3 m surface in still hot water should be ~10^3 W/m²-K, got ${big.toFixed(0)}`);
   assert(Math.abs(small - 500) > 100 && Math.abs(big - 500) > 100,
     'neither should land on the old constant');
+});
+
+test('node velocity is throughput, not inflow plus outflow', () => {
+  // Summing |mdot| over every connection counts the same stream twice, once
+  // arriving and once leaving. A pass-through node must read the same
+  // velocity as the flow actually crossing it.
+  const P = 70e5;
+  const T_sat = saturationTemperature(P);
+  const { node, state, conn } = saturatedPool(P, T_sat, T_sat - 1);
+  (state as any).flowConnections = [
+    { id: 'in', fromNodeId: 'src', toNodeId: 'pool', massFlowRate: 100 },
+    { id: 'out', fromNodeId: 'pool', toNodeId: 'sink', massFlowRate: 100 },
+  ];
+  const twoWay = liquidWallHeatTransfer(node, state as any, conn, 0.02).Re;
+  // The same 100 kg/s arriving on one connection and leaving on three.
+  (state as any).flowConnections = [
+    { id: 'in', fromNodeId: 'src', toNodeId: 'pool', massFlowRate: 100 },
+    { id: 'o1', fromNodeId: 'pool', toNodeId: 's1', massFlowRate: 40 },
+    { id: 'o2', fromNodeId: 'pool', toNodeId: 's2', massFlowRate: 35 },
+    { id: 'o3', fromNodeId: 'pool', toNodeId: 's3', massFlowRate: 25 },
+  ];
+  const header = liquidWallHeatTransfer(node, state as any, conn, 0.02).Re;
+  assertClose(header / twoWay, 1, 1e-9,
+    'a header passing the same throughput must read the same Reynolds number');
+});
+
+test('a rod bundle is a channel, not a bore - and the rods are in the way', () => {
+  // Two lengths and two areas, from numbers the presets already carry. A PWR
+  // barrel of 3.1 m with 38000 rods of 9.5 mm: the rods take 2.69 of the
+  // 7.55 m² bore, leaving 4.86 m² of coolant - within a few per cent of a
+  // real plant's ~4.7 - and the channel they leave has a 17 mm hydraulic
+  // diameter, not the 9.5 mm of the rod itself.
+  const geo = coreRodGeometry({
+    id: 'cb', innerDiameter: 3.1, actualFuelRodCount: 38000, activeFuelHeight: 3.66,
+  } as any);
+  assertClose(geo.freeFlowArea, 4.855, 0.02, 'coolant flow area');
+  assertClose(geo.flowHydraulicDiameter, 0.01713, 0.02, 'channel hydraulic diameter');
+  assert(geo.flowHydraulicDiameter > geo.rodDiameter,
+    'the channel is wider than the rod that bounds it');
+  // A bundle denser than its barrel is refused rather than handed back as a
+  // negative flow area.
+  let message = '';
+  try {
+    coreRodGeometry({ id: 'cb', innerDiameter: 1.0, actualFuelRodCount: 38000 } as any);
+  } catch (e) {
+    message = e instanceof Error ? e.message : String(e);
+  }
+  assert(message.includes('no room for coolant'),
+    `an impossible bundle must be refused, got: ${message || '(none)'}`);
 });
 
 // ============================================================================

@@ -873,6 +873,13 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         flowNodeId: coolantFlowNodeId,
         surfaceArea,
         characteristicDiameter: surfaceD,
+        // The passage washing the rods, distinct from the rods themselves. A
+        // pebble bed already had its void fraction applied to the node's own
+        // flow area, so it needs nothing here.
+        ...(isPebbleBed ? {} : {
+          flowPassageArea: geo!.freeFlowArea,
+          flowHydraulicDiameter: geo!.flowHydraulicDiameter,
+        }),
         tubeBottomElevation: coreBottomElevation,
         tubeHeight: activeH,
       });
@@ -2423,7 +2430,7 @@ function createValveStateFromComponent(component: PlantComponent): ValveState | 
  * heat path wiring. Everything derives from the rod design the user built;
  * the defaults reproduce a typical PWR (38k rods, 9.5 mm OD, 0.6 mm clad).
  */
-function coreRodGeometry(component: PlantComponent) {
+export function coreRodGeometry(component: PlantComponent) {
   const vessel = component as any;
   const rodDiameter = vessel.rodDiameter ? vessel.rodDiameter / 1000 : 0.0095; // m
   const cladThickness = vessel.cladThickness ? vessel.cladThickness / 1000 : 0.0006; // m
@@ -2433,7 +2440,37 @@ function coreRodGeometry(component: PlantComponent) {
   const pelletRadius = Math.max(1e-4, rodDiameter / 2 - cladThickness);
   const rodOuterArea = Math.PI * rodDiameter * activeHeight * rodCount; // m²
   const pelletArea = 2 * Math.PI * pelletRadius * activeHeight * rodCount; // m²
-  return { rodDiameter, cladThickness, rodCount, activeHeight, pelletRadius, rodOuterArea, pelletArea };
+
+  // The coolant PASSAGE through the bundle, which is not the barrel bore.
+  // Rods occupy 36% of a PWR barrel's cross-section, so crediting them with
+  // none of it under-reads the coolant velocity by that much; and the channel
+  // the coolant actually runs in has a hydraulic diameter of 4*A_free over
+  // the wetted perimeter (~17 mm for these numbers), not the 9.5 mm rod
+  // diameter that Dittus-Boelter was being handed.
+  //
+  // Nothing new has to be declared for this: rod count, rod diameter and the
+  // barrel bore are all already on the component.
+  const barrelRadius = (vessel.innerDiameter ?? vessel.width ?? 3) / 2;
+  const barrelArea = Math.PI * barrelRadius * barrelRadius;
+  const rodCrossSection = rodCount * Math.PI * rodDiameter * rodDiameter / 4;
+  if (rodCrossSection >= 0.9 * barrelArea) {
+    throw new Error(
+      `[Factory] Core '${component.id}': ${rodCount} rods of ${(rodDiameter * 1000).toFixed(1)} mm ` +
+      `block ${(100 * rodCrossSection / barrelArea).toFixed(0)}% of a ` +
+      `${(2 * barrelRadius).toFixed(2)} m barrel. There is no room for coolant - reduce the rod ` +
+      `count or diameter, or widen the barrel.`
+    );
+  }
+  const freeFlowArea = barrelArea - rodCrossSection;
+  // Rods plus the barrel wall. The wall is a rounding error against thousands
+  // of rods but costs nothing to include.
+  const wettedPerimeter = rodCount * Math.PI * rodDiameter + 2 * Math.PI * barrelRadius;
+  const flowHydraulicDiameter = (4 * freeFlowArea) / wettedPerimeter;
+
+  return {
+    rodDiameter, cladThickness, rodCount, activeHeight, pelletRadius,
+    rodOuterArea, pelletArea, freeFlowArea, flowHydraulicDiameter,
+  };
 }
 
 /**

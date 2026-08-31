@@ -320,6 +320,31 @@ export function getReactorPowerState(): ReactorPowerDisplayState {
  */
 const M_H2O = 0.018015;
 
+/**
+ * Mass flow passing THROUGH a node (kg/s), for the velocity the channel
+ * correlations run on.
+ *
+ * Summing |mdot| over every connection touching the node counts the same
+ * throughput twice - once arriving and once leaving - because mass is
+ * conserved at the node. Halving it is exact for any topology in balance: a
+ * pass-through with one inlet and one outlet, and a header splitting one
+ * stream into three, both come out right. A dead-ended branch has no
+ * through-flow to speak of and gets half of what it is exchanging, which is
+ * as meaningful as a single number there can be.
+ *
+ * This ran 2x fast everywhere, which inflated Re by 2 and h by ~1.7 on every
+ * forced-convection surface in every plant.
+ */
+function nodeThroughput(state: SimulationState, nodeId: string): number {
+  let sum = 0;
+  for (const fc of state.flowConnections) {
+    if (fc.fromNodeId === nodeId || fc.toNodeId === nodeId) {
+      sum += Math.abs(fc.massFlowRate);
+    }
+  }
+  return 0.5 * sum;
+}
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
@@ -337,11 +362,18 @@ export class ConvectionRateOperator implements RateOperator {
       const { liquidArea, vaporArea } = this.effectiveSurfaceAreas(conn, flowNode);
 
       const dT = thermalNode.temperature - flowNode.fluid.temperature;
-      const D = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
+      // Two lengths, because the correlations want different ones. D_heater
+      // is the rod or tube the heat comes off, which is what film boiling
+      // blankets; D_flow is the passage the coolant runs in, which is what
+      // the channel correlations are written against. They coincide for a
+      // bare surface in a big volume and differ by ~2x in a rod bundle.
+      const D_heater = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
+      const D_flow = conn.flowHydraulicDiameter ?? D_heater;
 
-      const h_liquid = this.liquidHeatTransferCoeff(flowNode, state, conn, D);
+      const h_liquid = this.liquidHeatTransferCoeff(
+        flowNode, state, conn, D_flow, D_heater);
       const h_vapor = this.vaporHeatTransferCoeff(
-        flowNode, state, D, thermalNode.temperature);
+        flowNode, state, D_flow, thermalNode.temperature, conn);
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       lastConvectionHeatRates.set(conn.id, Q);
@@ -446,9 +478,10 @@ export class ConvectionRateOperator implements RateOperator {
     flowNode: FlowNode,
     state: SimulationState,
     conn: ConvectionConnection,
-    D: number
+    D_flow: number,
+    D_heater: number,
   ): number {
-    return liquidWallHeatTransfer(flowNode, state, conn, D).total;
+    return liquidWallHeatTransfer(flowNode, state, conn, D_flow, D_heater).total;
   }
 
 
@@ -464,8 +497,9 @@ export class ConvectionRateOperator implements RateOperator {
     state: SimulationState,
     D: number,
     T_wall: number,
+    conn?: ConvectionConnection,
   ): number {
-    const { total } = vaporWallHeatTransfer(flowNode, state, D, T_wall);
+    const { total } = vaporWallHeatTransfer(flowNode, state, D, T_wall, conn);
     return total;
   }
 }
@@ -484,6 +518,7 @@ export function liquidWallHeatTransfer(
   state: SimulationState,
   conn: ConvectionConnection,
   D: number,
+  D_heater: number = D,
 ): {
   total: number; singlePhase: number; phaseChange: number;
   natural: number; forced: number; Re: number;
@@ -491,13 +526,7 @@ export function liquidWallHeatTransfer(
     const fluid = flowNode.fluid;
     const T = fluid.temperature;
 
-    // Get flow rate through this node
-    let totalMassFlow = 0;
-    for (const fc of state.flowConnections) {
-      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
-        totalMassFlow += Math.abs(fc.massFlowRate);
-      }
-    }
+    const totalMassFlow = nodeThroughput(state, flowNode.id);
 
     const rho = fluid.phase === 'two-phase'
       ? Water.saturatedLiquidDensity(T)
@@ -516,7 +545,10 @@ export function liquidWallHeatTransfer(
     const cp = Water.liquidSpecificHeat(T);
     const Pr = (cp * mu) / k;
 
-    const velocity = totalMassFlow / (rho * flowNode.flowArea);
+    // The passage washing THIS surface, which in a rod bundle is not the
+    // node's bore: the rods take 36% of it.
+    const flowArea = conn.flowPassageArea ?? flowNode.flowArea;
+    const velocity = totalMassFlow / (rho * flowArea);
     const Re = (rho * velocity * D) / mu;
 
     // Forced convection. Dittus-Boelter is a turbulent correlation and the
@@ -582,8 +614,10 @@ export function liquidWallHeatTransfer(
         // boiling act only on the wetted fraction; the vapor film replaces
         // (not augments) them on the rest of the surface - this IS the h
         // collapse.
+        // D_heater, not D_flow: Bromley film boiling is about the cylinder
+        // the vapor film is wrapped around.
         const { wettedFraction, h_phaseChange } = boilingCurve(
-          fluid.temperature, fluid.pressure, thermalNode.temperature, D
+          fluid.temperature, fluid.pressure, thermalNode.temperature, D_heater
         );
         h = wettedFraction * h + h_phaseChange;
         phaseChange = h_phaseChange;
@@ -606,13 +640,9 @@ export function vaporWallHeatTransfer(
   state: SimulationState,
   D: number,
   T_wall: number,
+  conn?: ConvectionConnection,
 ): { total: number; sensible: number; condensation: number; natural: number; forced: number } {
-  let totalMassFlow = 0;
-  for (const fc of state.flowConnections) {
-    if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
-      totalMassFlow += Math.abs(fc.massFlowRate);
-    }
-  }
+  const totalMassFlow = nodeThroughput(state, flowNode.id);
 
   const T = flowNode.fluid.temperature;
   const ncg = flowNode.fluid.ncg;
@@ -643,7 +673,8 @@ export function vaporWallHeatTransfer(
   // saturated-vapor table this replaced)
   const rho_g = approxVaporDensity(flowNode);
 
-  const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowNode.flowArea) : 0;
+  const flowArea = conn?.flowPassageArea ?? flowNode.flowArea;
+  const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowArea) : 0;
   const Re = (rho_g * velocity * D) / mu;
 
   // --- Sensible heat: forced and natural convection, blended -------------
