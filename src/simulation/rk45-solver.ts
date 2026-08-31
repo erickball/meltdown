@@ -15,7 +15,7 @@
  * - Solver combines rates using RK45 and adjusts timestep based on error
  */
 
-import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG } from './types';
+import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG, SANITY_PRESSURE_TOLERANCE, SANITY_PRESSURE_SCALE_FLOOR } from './types';
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
 import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass } from './gas-properties';
@@ -1079,8 +1079,7 @@ export function checkStateSanity(
     }
 
     {
-      const P_SCALE_FLOOR = 2e5; // Pa
-      const pScale = Math.max(oldNode.fluid.pressure, P_SCALE_FLOOR);
+      const pScale = Math.max(oldNode.fluid.pressure, SANITY_PRESSURE_SCALE_FLOOR);
       const pChange = Math.abs(newNode.fluid.pressure - oldNode.fluid.pressure) / pScale;
 
       // QUIET-NODE RELAXATION: what makes a large per-step pressure swing
@@ -1100,7 +1099,7 @@ export function checkStateSanity(
       const inventoryFractionMoved = (throughputHere * 0.5 * dt) / newTotalMass;
       const quiet = inventoryFractionMoved < 0.01 &&
         oldNode.fluid.phase === newNode.fluid.phase;
-      const pTol = 0.2 * (quiet ? Math.max(1, quietPressureToleranceScale) : 1);
+      const pTol = SANITY_PRESSURE_TOLERANCE * (quiet ? Math.max(1, quietPressureToleranceScale) : 1);
 
       if (pChange > pTol) {
         // Scale badness: tolerance = badness 1, 2x tolerance = 2, etc.
@@ -1368,6 +1367,13 @@ export class RK45Solver {
   // predictor's output.
   private candidateStartFlows?: Map<string, number>;
   private lastOuterResolveLog = 0;
+  // Scheme-governor introspection (stage 5): steps turned away before the
+  // stages because the solve predicted an out-of-tolerance swing, and steps
+  // run with explicit stage advection because the swing was too big but the
+  // dt was inside the explicit Courant ceiling.
+  public predictiveSwingRejections = 0;
+  public explicitFallbackSteps = 0;
+  private lastSwingRejectLog = 0;
 
   private lastAcceptedFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
 
@@ -1495,6 +1501,8 @@ export class RK45Solver {
     this.candidateAdvectionRates = undefined;
     this.candidateAdvectionTendency = undefined;
     this.candidateStartFlows = undefined;
+    this.predictiveSwingRejections = 0;
+    this.explicitFallbackSteps = 0;
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -1849,12 +1857,49 @@ export class RK45Solver {
         // consistent booking. The transport itself is applied after the
         // stages (physics-then-advection splitting - see
         // stampImplicitAdvection for why not before).
+        //
+        // SCHEME GOVERNOR (stage 5): the implicit split is only trustworthy
+        // while the solve's linearization is - and the solve just PREDICTED
+        // this step's pressure swing, before any stage work is spent. Three
+        // deterministic outcomes of (state, dt), so the choice cannot
+        // flip-flop:
+        //   swing within the guard's tolerance -> implicit advection (stamp
+        //     + frozen tendency), dt free to ride the relaxed ceiling;
+        //   swing too big, dt within the explicit Courant ceiling -> run
+        //     THIS step with explicit stage advection (the proven scheme is
+        //     trusted exactly where its own ceiling says so);
+        //   swing too big and dt beyond the explicit ceiling -> reject now,
+        //     for the cost of one LU instead of a doomed six-stage attempt
+        //     (the same predict-don't-discover trick as materialCourantDt).
         if (this.pressureSolver.config.implicitAdvection) {
-          const tendency = this.pressureSolver.stampImplicitAdvection(solvedState);
-          if (tendency.size > 0) {
-            const tendencyRates = createZeroRates();
-            for (const [id, t] of tendency) tendencyRates.flowNodes.set(id, t);
-            this.candidateAdvectionTendency = tendencyRates;
+          const swing = this.pressureSolver.getLastPredictedSwing();
+          // 0.9: same headroom convention as the materialCourantDt ceiling -
+          // the prediction is linear, the realized swing can grow a little.
+          if (swing <= 0.9 * SANITY_PRESSURE_TOLERANCE) {
+            const tendency = this.pressureSolver.stampImplicitAdvection(solvedState);
+            if (tendency.size > 0) {
+              const tendencyRates = createZeroRates();
+              for (const [id, t] of tendency) tendencyRates.flowNodes.set(id, t);
+              this.candidateAdvectionTendency = tendencyRates;
+            }
+          } else {
+            // Stale stamps from the previous accepted step must not leak
+            // into an explicit attempt (the advection operator and the
+            // guards read them).
+            for (const conn of solvedState.flowConnections) conn.implicitAdvection = false;
+            const explicitCeiling = this.materialCourantDt(solvedState);
+            if (dt > explicitCeiling) {
+              this.predictiveSwingRejections++;
+              const now = performance.now();
+              if (now - this.lastSwingRejectLog > 1000) {
+                this.lastSwingRejectLog = now;
+                console.warn(`[RK45] Predicted pressure swing ${(swing * 100).toFixed(0)}% of scale ` +
+                  `at dt=${(dt * 1e3).toFixed(1)}ms (explicit ceiling ${(explicitCeiling * 1e3).toFixed(1)}ms) - ` +
+                  `rejecting before the stages`);
+              }
+              return { newState: state, error: 1e10, k: [], errorRates: createZeroRates() };
+            }
+            this.explicitFallbackSteps++;
           }
         }
       } catch (e) {

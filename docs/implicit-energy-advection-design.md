@@ -338,3 +338,51 @@ actually move the mass.
 Status: corrector kept behind its default-off knob as a measured negative
 result with reusable machinery (corrector-mode solve, banked closure).
 Default-off remains bit-neutral; npm test and flow-physics green.
+
+## Stage-5 findings (per-step scheme governor, 2026-08-31) - and the verdict
+
+Erick's suggestion, operationalized cheaply: the predictor solve records
+its own predicted per-step pressure swing (guard-scaled - the tolerance
+and scale floor now live in types.ts, shared with checkStateSanity so the
+prediction and the guard cannot disagree). Before any stage work, the
+governor makes a three-way deterministic choice: swing within 0.9x the
+guard tolerance -> implicit advection as usual; swing too big but dt
+within the EXPLICIT Courant ceiling -> run this step with explicit stage
+advection (the proven scheme, trusted exactly where its own ceiling says
+so); swing too big beyond that ceiling -> reject for the cost of one LU
+instead of a doomed six-stage attempt. Counters exposed as
+predictiveSwingRejections / explicitFallbackSteps.
+
+Result on the Xe-100, 600 s uncapped: the catastrophic oscillation is
+GONE (the governor is a real stabilizer - no more 53<->172 MW swings, dt
+rides 150-500 ms), the BWR stays in family, and the pre-stage rejections
+fire by the thousands at one-LU cost. But the trajectory settles at
+104-120 MW - still ~25% below the 134-141 reference family. This is the
+split's O(dt) COUPLING BIAS (stage-2 failure modes 2-3, only partially
+cured by T0): advection-dominated nodes' physics evaluated against
+drifting states biases every flux, and no pressure-swing signal can see
+an energy-coupling bias. The governor solved the stability problem and
+thereby EXPOSED the accuracy problem cleanly.
+
+**The verdict, after five stages of measurement:** on plants like the
+Xe-100 there is no dt window where the nearly-implicit split wins. At
+dt <= 20-50 ms it is trajectory-faithful but slower than the OFF
+baseline (2.3-2.7x vs 3.3-3.5x realtime). At dt >= 100 ms it is faster
+per-step but trajectory-biased ~20-25%, and the plant's stiff small
+nodes cap useful dt near the explicit Courant ceiling anyway. Explicit
+stage advection is simply MORE ACCURATE per unit dt in the range that
+matters, because it re-evaluates the advective couplings at stage
+frequency - the very thing the implicit split removes. The branch's
+premise (remove the material Courant limit -> 2-4x on gas plants) is
+falsified for this class of plant, not by stability but by
+accuracy-per-dt.
+
+Recommendation: park the branch. Keep (all default-off, all
+bit-neutral): the T0 stage-drift mitigation, the transport M-matrix
+solve, the corrector-mode solve machinery, the scheme governor and its
+predicted-swing plumbing, and the trajectory probe. If this is ever
+revisited, the entry point is not more splitting work - it is either a
+genuinely fully-coupled nonlinear step (Newton over EOS + transport +
+momentum, a different robustness regime), or accepting the explicit
+scheme and attacking the OTHER dt ceilings (cond-pump-1's ring, the
+OTSG boundary) that bound the baseline.

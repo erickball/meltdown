@@ -63,6 +63,7 @@ import {
   FlowConnection,
   PressureSolverConfig,
   DEFAULT_PRESSURE_SOLVER_CONFIG,
+  SANITY_PRESSURE_SCALE_FLOOR,
 } from '../types';
 import {
   numericalBulkModulus,
@@ -142,6 +143,13 @@ export class PressureSolver {
   /** Get the status of the last pressure solve */
   getLastStatus(): PressureSolverStatus {
     return { ...this.lastStatus, K_max: this.config.K_max };
+  }
+
+  // Predicted max relative pressure swing of the most recent predictor
+  // solve (guard-scaled; see the recording site in solveImplicit).
+  private lastPredictedSwing = 0;
+  getLastPredictedSwing(): number {
+    return this.lastPredictedSwing;
   }
 
   /**
@@ -1050,6 +1058,23 @@ export class PressureSolver {
     let maxResidual = 0;
     for (let i = 0; i < n; i++) {
       maxResidual = Math.max(maxResidual, Math.abs(c[i] * dP[i]));
+    }
+
+    // Predicted per-step pressure swing, on the sanity guard's own scale:
+    // the solve's linear estimate of what checkStateSanity will measure
+    // after the step. The scheme governor in rk45 reads it BEFORE the
+    // stages run - a step the solve itself expects to swing past the
+    // guard's tolerance costs one LU to turn away instead of a full
+    // six-stage attempt. Not recorded for corrector-mode solves (their δP
+    // is relative to a probe state, not the step start).
+    if (!corrector) {
+      let maxSwing = 0;
+      for (let i = 0; i < n; i++) {
+        const scale = Math.max(nodeList[i].fluid.pressure, SANITY_PRESSURE_SCALE_FLOOR);
+        const s = Math.abs(dP[i]) / scale;
+        if (s > maxSwing) maxSwing = s;
+      }
+      this.lastPredictedSwing = maxSwing;
     }
 
     this.lastStatus = {

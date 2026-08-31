@@ -973,6 +973,14 @@ export interface PressureSolverConfig {
   outerResolveDiag?: boolean;
 }
 
+/** Per-step pressure-swing tolerance, shared between the post-step sanity
+ *  guard (checkStateSanity) and the implicit solve's PREDICTED swing (the
+ *  per-step scheme governor reads it before the stages run). One tolerance
+ *  and one scale floor, so the predictive decision and the after-the-fact
+ *  guard can never disagree about what "too big" means. */
+export const SANITY_PRESSURE_TOLERANCE = 0.2;
+export const SANITY_PRESSURE_SCALE_FLOOR = 2e5; // Pa
+
 /** Default configuration for pressure solver */
 export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   K_max: undefined,  // Physical K - the direct solve doesn't need a cap for stability
