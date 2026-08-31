@@ -33,8 +33,9 @@ import {
 import { cloneSimulationState } from './solver.js';
 import { hxTubeLengthFactor, helicalLengthFactor, hxTubeLength } from './hx-bundles.js';
 import { concentricGrayBodyArea } from './factory.js';
-import { vaporWallHeatTransfer } from './operators/rate-operators.js';
-import { liquidViscosity, liquidThermalConductivity } from './water-properties.js';
+import { vaporWallHeatTransfer, liquidWallHeatTransfer } from './operators/rate-operators.js';
+import { liquidViscosity, liquidThermalConductivity, liquidSpecificHeat,
+  liquidThermalExpansivity } from './water-properties.js';
 import { emptyGasComposition } from './gas-properties.js';
 import { createFluidState } from './operators/index.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
@@ -1739,6 +1740,33 @@ function gasSpace(opts: {
 /** Moles filling a 1000 m³ space at (P, T). */
 const fillMoles = (P: number, T: number) => (P * 1000) / (8.31446 * T);
 
+/**
+ * A saturated two-phase pool with a wall at T_wall against it - the shape the
+ * liquid-side phase-change branches key off.
+ */
+function saturatedPool(P: number, T_sat: number, T_wall: number): {
+  node: FlowNode; state: SimulationState; conn: any;
+} {
+  const volume = 10;
+  const rho_f = saturatedLiquidDensity(T_sat);
+  const node = {
+    id: 'pool', label: 'pool', volume,
+    hydraulicDiameter: 0.02, flowArea: 1, height: 2, elevation: 0,
+    fluid: {
+      mass: 0.5 * rho_f * volume, internalEnergy: 0, temperature: T_sat,
+      pressure: P, phase: 'two-phase' as const, quality: 0.01, flowRate: 0,
+    },
+  } as unknown as FlowNode;
+  const conn = { id: 'c', thermalNodeId: 'w', flowNodeId: 'pool', surfaceArea: 1 };
+  const state = {
+    flowNodes: new Map([[node.id, node]]),
+    flowConnections: [],
+    thermalNodes: new Map([['w', { id: 'w', temperature: T_wall } as any]]),
+    thermalConnections: [], convectionConnections: [conn], radiationConnections: [],
+  } as unknown as SimulationState;
+  return { node, state, conn };
+}
+
 test('a big steel surface in still air gets single-digit h, not 50', () => {
   // 4.6 m vessel, 230 K hotter than the air around it. Churchill-Chu by hand
   // gives ~7.7; the constant this replaced gave 50 and had the Xe-100 vessel
@@ -1845,6 +1873,89 @@ test('the liquid-water transport fits match IAPWS where it matters', () => {
   assert(liquidThermalConductivity(415) > liquidThermalConductivity(300) &&
     liquidThermalConductivity(415) > liquidThermalConductivity(560),
     'conductivity must peak in the middle of the range, not run monotonically');
+});
+
+test('cp and expansivity come off the tables, shape and all', () => {
+  // Both are differenced from the saturated-liquid curves rather than fitted,
+  // because every closed form that captures the near-critical rise gets the
+  // flat part wrong. Anchors from IAPWS.
+  assertClose(liquidSpecificHeat(293.15) / 4184, 1, 0.02, 'cp at 20 C');
+  assertClose(liquidSpecificHeat(473.15) / 4497, 1, 0.03, 'cp at 200 C');
+  assert(liquidSpecificHeat(573.15) > 5000,
+    `cp must climb steeply toward the critical point, got ${liquidSpecificHeat(573.15).toFixed(0)}`);
+  assertClose(liquidThermalExpansivity(293.15) / 2.07e-4, 1, 0.10, 'beta at 20 C');
+  assertClose(liquidThermalExpansivity(473.15) / 1.35e-3, 1, 0.10, 'beta at 200 C');
+});
+
+test('water expansivity passes through zero at the 4 C density maximum', () => {
+  // This is the case that rules out beta = 1/T, and any fit that tames the
+  // near-critical pole flattens it away. Below 4 C water CONTRACTS as it
+  // warms, so beta is negative - and natural convection there runs backwards,
+  // which is why lakes freeze from the top.
+  assert(liquidThermalExpansivity(275.15) < 0, 'beta below 4 C must be negative');
+  assert(liquidThermalExpansivity(283.15) > 0, 'and positive above it');
+  assert(Math.abs(liquidThermalExpansivity(277.15)) < 5e-5,
+    'and near zero at the density maximum itself');
+  // The pole at the other end is the reason near-critical circulation is so
+  // vigorous, and it has to survive too: 1.4e-3 at 200 C against 1.7e-2 by
+  // 640 K, an order of magnitude, still climbing.
+  assert(liquidThermalExpansivity(640) > 10 * liquidThermalExpansivity(473.15),
+    'expansivity must diverge toward the critical point');
+  // The ideal-gas value would be wrong by an order of magnitude at the cold
+  // end, which is the whole reason this function exists.
+  assert(liquidThermalExpansivity(293.15) < 0.3 / 293.15,
+    'a liquid is not a gas: beta must be far below 1/T');
+});
+
+test('a cold wall in a saturated pool gets a COEFFICIENT, not a flux', () => {
+  // bbe107c moved the nucleate-boiling algebra into boilingCurve for hot
+  // walls and dropped the `/ dT` from the cold-wall branch on the way past,
+  // so W/m² was being added to a W/m²-K and the term ran a factor of dT too
+  // large. The invariant that catches it: h * dT has to reproduce the flux
+  // the correlation was asked for, and h must NOT scale linearly with dT the
+  // way a mis-divided flux does.
+  const P = 70e5;
+  const T_sat = saturationTemperature(P);
+  const hAt = (subcooling: number) => {
+    const { node, state, conn } = saturatedPool(P, T_sat, T_sat - subcooling);
+    return liquidWallHeatTransfer(node, state, conn, 0.02).phaseChange;
+  };
+  // The sharpest signature is the SHAPE. The Zuber saturation caps the flux
+  // near the critical heat flux, so a properly divided coefficient rises,
+  // peaks around 20 K and then FALLS as dT keeps growing under a capped
+  // numerator. Undivided it is the flux itself, which only ever climbs.
+  const h5 = hAt(5), h20 = hAt(20), h50 = hAt(50);
+  assert(h20 > h5, 'h should rise with subcooling while the flux is still growing');
+  assert(h50 < h20,
+    `h must turn over once the flux saturates at CHF, got ${h5.toExponential(1)} -> ` +
+    `${h20.toExponential(1)} -> ${h50.toExponential(1)}`);
+  // And the flux it implies has to stay bounded by the boiling crisis rather
+  // than running to hundreds of MW/m².
+  const flux50 = h50 * 50;
+  assert(flux50 < 6e6,
+    `implied flux must stay near the Zuber CHF, got ${(flux50 / 1e6).toFixed(1)} MW/m²`);
+  // Magnitude: a plausible coefficient, not a flux wearing its units.
+  assert(h5 > 1e3 && h5 < 2e5,
+    `5 K subcooling should give a coefficient in the 10^3-10^5 range, got ${h5.toExponential(1)}`);
+});
+
+test('a quiescent liquid surface gets a Rayleigh number, not a floor of 500', () => {
+  // The old code returned a flat 500 W/m²-K whenever Re fell short, which is
+  // the same mistake the gas side had: a constant standing in for a
+  // correlation. A big surface and a small one in the same still water now
+  // differ, and both differ from 500.
+  const P = 70e5;
+  const T_sat = saturationTemperature(P);
+  const at = (D: number) => {
+    const { node, state, conn } = saturatedPool(P, T_sat, T_sat + 3);
+    return liquidWallHeatTransfer(node, state, conn, D).natural;
+  };
+  const small = at(0.02), big = at(3.0);
+  assert(small > big, 'a smaller characteristic length transfers better');
+  assert(big > 200 && big < 5000,
+    `a 3 m surface in still hot water should be ~10^3 W/m²-K, got ${big.toFixed(0)}`);
+  assert(Math.abs(small - 500) > 100 && Math.abs(big - 500) > 100,
+    'neither should land on the old constant');
 });
 
 // ============================================================================

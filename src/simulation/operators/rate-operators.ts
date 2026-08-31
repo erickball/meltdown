@@ -446,66 +446,9 @@ export class ConvectionRateOperator implements RateOperator {
     conn: ConvectionConnection,
     D: number
   ): number {
-    const fluid = flowNode.fluid;
-
-    // Get flow rate through this node
-    let totalMassFlow = 0;
-    for (const fc of state.flowConnections) {
-      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
-        totalMassFlow += Math.abs(fc.massFlowRate);
-      }
-    }
-
-    // Liquid-phase properties (representative values)
-    const rho = fluid.phase === 'two-phase'
-      ? Water.saturatedLiquidDensity(fluid.temperature)
-      : fluid.mass / flowNode.volume;
-    const mu = 0.0003; // Pa·s
-    const k = 0.6;     // W/m-K
-    const Pr = 2.0;
-
-    const velocity = totalMassFlow / (rho * flowNode.flowArea);
-    const Re = (rho * velocity * D) / mu;
-
-    const h_natural = 500; // W/m²-K floor (natural convection)
-    let h = h_natural;
-    if (Re >= 2300) {
-      const Nu = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4);
-      h = Math.max(h_natural, (Nu * k) / D);
-    }
-
-    // Phase-change enhancement on saturated nodes
-    if (fluid.phase === 'two-phase') {
-      const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
-      if (thermalNode) {
-        const dTsigned = thermalNode.temperature - fluid.temperature;
-        const P = fluid.pressure;
-        if (dTsigned < 0) {
-          // Cold wall: condensation - no vapor blanketing, so the saturated-
-          // Thom enhancement applies at any subcooling.
-          // Thom: dT_sat = 22.65 * q[MW/m²]^0.5 * exp(-P/8.7 MPa)
-          //   =>  q = (dT * exp(P/8.7e6) / 22.65)^2 * 1e6  [W/m²]
-          // Zuber saturation q = qThom / (1 + qThom/qCHF) keeps the flux from
-          // running to absurd values at large subcooling.
-          const dT = -dTsigned;
-          const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
-          const qCHF = zuberCriticalHeatFlux(fluid.temperature);
-          if (qCHF > 0) h += qThom / (1 + qThom / qCHF);
-        } else if (dTsigned > 0) {
-          // Hot wall: full boiling curve with post-CHF collapse.
-          // Convection and nucleate boiling act only on the wetted fraction;
-          // the vapor film replaces (not augments) them on the rest of the
-          // surface - this IS the h collapse.
-          const { wettedFraction, h_phaseChange } = boilingCurve(
-            fluid.temperature, P, thermalNode.temperature, D
-          );
-          h = wettedFraction * h + h_phaseChange;
-        }
-      }
-    }
-
-    return h;
+    return liquidWallHeatTransfer(flowNode, state, conn, D).total;
   }
+
 
   /**
    * Vapor-exposed surface. Three mechanisms on the ACTUAL gas mixture's
@@ -523,6 +466,124 @@ export class ConvectionRateOperator implements RateOperator {
     const { total } = vaporWallHeatTransfer(flowNode, state, D, T_wall);
     return total;
   }
+}
+
+/**
+ * The liquid-side wall coefficient, broken into the mechanisms that make it
+ * up (W/m²-K).
+ *
+ * Split out of the operator for the same reason the vapor side was: the
+ * composed number is what the plant feels, and it is the composition - a
+ * forced term, a floor, and a phase-change term that sometimes REPLACES part
+ * of the others - that is easy to get wrong.
+ */
+export function liquidWallHeatTransfer(
+  flowNode: FlowNode,
+  state: SimulationState,
+  conn: ConvectionConnection,
+  D: number,
+): {
+  total: number; singlePhase: number; phaseChange: number;
+  natural: number; forced: number; Re: number;
+} {
+    const fluid = flowNode.fluid;
+    const T = fluid.temperature;
+
+    // Get flow rate through this node
+    let totalMassFlow = 0;
+    for (const fc of state.flowConnections) {
+      if (fc.fromNodeId === flowNode.id || fc.toNodeId === flowNode.id) {
+        totalMassFlow += Math.abs(fc.massFlowRate);
+      }
+    }
+
+    const rho = fluid.phase === 'two-phase'
+      ? Water.saturatedLiquidDensity(T)
+      : fluid.mass / flowNode.volume;
+
+    // Liquid properties at the node's OWN temperature. These were mu = 3e-4,
+    // k = 0.6, Pr = 2.0 - one set of roughly-150 C values applied to every
+    // liquid in every plant. Water is not that: its viscosity falls by a
+    // factor of twelve between 20 C and 330, its conductivity has a maximum
+    // near 150 C, and its Prandtl number runs from 7 down to 0.8 and back up.
+    // Measured against the constants, h was ~1.7x too LOW in a hot primary
+    // loop and ~1.6x too HIGH in cold water - the same constant wrong in
+    // opposite directions at the two ends of the range a plant visits.
+    const mu = Water.liquidViscosity(T);
+    const k = Water.liquidThermalConductivity(T);
+    const cp = Water.liquidSpecificHeat(T);
+    const Pr = (cp * mu) / k;
+
+    const velocity = totalMassFlow / (rho * flowNode.flowArea);
+    const Re = (rho * velocity * D) / mu;
+
+    // Forced convection. Dittus-Boelter is a turbulent correlation and the
+    // laminar branch is not it, but the natural-convection term below is what
+    // actually carries a quiescent surface, so the forced part is left to
+    // fade out with Re rather than being switched off at 2300.
+    const h_forced = Re > 0
+      ? (0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4) * k) / D
+      : 0;
+
+    // Natural convection, replacing a flat 500 W/m²-K floor. Churchill-Chu on
+    // the liquid's own Rayleigh number - and beta here is a REAL property,
+    // not the ideal gas's 1/T: water's expansivity is ten times smaller than
+    // 1/T at room temperature, passes through zero at its 4 C density
+    // maximum, and diverges at the critical point, which is why near-critical
+    // natural circulation is so vigorous.
+    const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
+    const dTwall = thermalNode ? Math.abs(thermalNode.temperature - T) : 0;
+    const beta = Water.liquidThermalExpansivity(T);
+    const h_natural = naturalConvectionCoeff(
+      Math.abs(beta) * dTwall, rho, mu, k, cp, D);
+
+    // Same cubic blend the vapor side uses: smooth everywhere, and it reduces
+    // to whichever mechanism is doing the work.
+    let h = Math.cbrt(
+      h_natural * h_natural * h_natural + h_forced * h_forced * h_forced);
+    const singlePhase = h;
+    let phaseChange = 0;
+
+    // Phase-change enhancement on saturated nodes
+    if (fluid.phase === 'two-phase') {
+      const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
+      if (thermalNode) {
+        const dTsigned = thermalNode.temperature - fluid.temperature;
+        const P = fluid.pressure;
+        if (dTsigned < 0) {
+          // Cold wall: condensation - no vapor blanketing, so the saturated-
+          // Thom enhancement applies at any subcooling.
+          // Thom: dT_sat = 22.65 * q[MW/m²]^0.5 * exp(-P/8.7 MPa)
+          //   =>  q = (dT * exp(P/8.7e6) / 22.65)^2 * 1e6  [W/m²]
+          // Zuber saturation q = qThom / (1 + qThom/qCHF) keeps the flux from
+          // running to absurd values at large subcooling.
+          //
+          // The `/ dT` at the end is what turns a FLUX into a coefficient,
+          // and it went missing here in bbe107c: that refactor added the
+          // hot-wall boiling curve (which does divide - `f * (qNb / dT)`) and
+          // dropped the division from this branch while moving it. The result
+          // was W/m² being added to a W/m²-K, so the term ran a factor of dT
+          // too large - five times at 5 K of subcooling, fifty at 50 - and a
+          // cold wall in a saturated pool was pinned to the fluid.
+          const dT = -dTsigned;
+          const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
+          const qCHF = zuberCriticalHeatFlux(fluid.temperature);
+          if (qCHF > 0) { phaseChange = qThom / (1 + qThom / qCHF) / dT; h += phaseChange; }
+        } else if (dTsigned > 0) {
+          // Hot wall: full boiling curve with post-CHF collapse.
+          // Convection and nucleate boiling act only on the wetted fraction;
+          // the vapor film replaces (not augments) them on the rest of the
+          // surface - this IS the h collapse.
+          const { wettedFraction, h_phaseChange } = boilingCurve(
+            fluid.temperature, P, thermalNode.temperature, D
+          );
+          h = wettedFraction * h + h_phaseChange;
+          phaseChange = h_phaseChange;
+        }
+      }
+    }
+
+    return { total: h, singlePhase, phaseChange, natural: h_natural, forced: h_forced, Re };
 }
 
 /**
@@ -723,10 +784,16 @@ function wallAdjacentGas(
  * actually driving it, so a helium space, an air cavity and a steam
  * containment each get their own answer instead of sharing one.
  *
+ * Serves the liquid side too, which is the reason the driving term is a
+ * relative density difference and not beta*dT with an assumed beta: a gas's
+ * expansivity is 1/T, a liquid's is a property with a zero in it (water's, at
+ * its 4 C density maximum) and a pole at the critical point. Each caller
+ * passes what its own fluid actually does.
+ *
  * Exported for direct testing of the correlation.
  */
 export function naturalConvectionCoeff(
-  relativeDensityDifference: number,  // |rho_wall - rho_bulk| / mean; dT/T when dry
+  relativeDensityDifference: number,  // drho/rho: beta*dT for a liquid, dT/T for a gas
   rho: number,       // gas density (kg/m³)
   mu: number,        // dynamic viscosity (Pa s)
   k: number,         // thermal conductivity (W/m-K)
