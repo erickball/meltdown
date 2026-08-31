@@ -43,6 +43,7 @@
 
 import {
   calculateState,
+  lastVaporPressureSlope,
   saturationTemperature,
   saturatedLiquidEnergy,
   saturatedVaporEnergy,
@@ -213,12 +214,14 @@ export function subcooledLiquidV(u: number): number {
  * Bisection on ln(v) - P falls monotonically with v at fixed u in the vapor
  * region, and the bracket is generous.
  */
-export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number): number {
+export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number, satIn?: SaturationProps): number {
   // Superheated vapor at pressure P always has v > v_g(P), so the saturated-
   // vapor volume is the exact lower bracket - guaranteed inside the property
   // grid's vapor region, unlike any fixed constant (a constant either strays
   // into the compressed-liquid fringe at high P or wastes bracket at low P).
-  const satP = saturationAtP(P);
+  // The dominant caller (atP) has this bundle in hand already - recomputing
+  // it here was 55% of ALL saturationAtP traffic.
+  const satP = satIn && satIn.P === P ? satIn : saturationAtP(P);
   const vg = satP.v_g;
   // Degenerate near-saturation case: a nascent superheat section sits within
   // property-interpolation noise of the saturated-vapor line, where the
@@ -243,76 +246,49 @@ export function superheatedV(u: number, P: number, tolLn = 1e-10, vHint?: number
     if (est && est > vg) hint = est;
   }
   if (hint && hint > vg) {
-    // Safeguarded secant from the hint, replacing a tight/loose bracket
-    // ladder. The ladder verified a +/-2% bracket around the hint with two
-    // probes and fell back to +/-30% when the sign check failed - and in a
-    // running plant it failed for HALF of all calls (measured 53.8% of
-    // superheatedV calls at exactly 10 probes), because the hint is the
-    // previous iterate of solveP's own pressure search: by the time it is
-    // reused, P has moved a few percent, so v has too. The ladder paid 2
-    // probes to discover the staleness, 2 more to verify the loose bracket,
-    // and ~6 inside it - 9.85 probes per call fleet-wide.
+    // Newton from the hint, using the property surface's OWN derivative. The
+    // MLS vapor interpolation fits lnP locally as a linear model and always
+    // computed its slope on the way to the value; calculateState now records
+    // it (lastVaporPressureSlope), and the ideal-gas extensions' slope is
+    // exactly -1. So every probe returns both a residual and the true local
+    // dlnP/dlnv, and this loop is plain damped Newton where its predecessor
+    // (a secant engine) had to spend probes LEARNING the slope - and its
+    // predecessor's predecessor (a bracket ladder) spent them checking
+    // fences. Measured: ladder 9.85 probes/call, secant 5.61, this ~2-3.
     //
-    // The engine here spends its probes learning the curve instead of
-    // checking fences. ln P is near-affine in ln v for vapor (exactly affine
-    // with slope -1 for an ideal gas at fixed u), so:
-    //  - probe the hint;
-    //  - take one Newton step with an assumed slope of -1. Steam's true
-    //    slope is steeper (about -1.05 to -1.3), so the assumed-shallower
-    //    slope deliberately OVERSHOOTS a little and the second probe
-    //    usually lands on the far side of the root - an instant sign
-    //    bracket, where the ladder needed two dedicated probes;
-    //  - continue with secant steps, tightening the bracket as sides are
-    //    seen (Illinois halving on stall, as before); a step that leaves the
-    //    known bracket bisects instead.
-    // A near-critical isobar runs nearly flat in ln v, so the slope-(-1)
-    // step badly UNDERSHOOTS there; the secant learns the real slope from
-    // its first two points and recovers, and the per-step cap below stops a
-    // tiny learned slope from flinging an iterate across the domain. If the
-    // engine has not converged in 15 probes, fall through to the wide
-    // verified-bracket path, which keeps the loud not-actually-vapor error.
+    // Safeguards, in the order they matter:
+    //  - a sign bracket is maintained as probes land; once both sides are
+    //    seen, a Newton step outside the bracket bisects instead;
+    //  - steps are capped at 0.7 in ln v, so a degenerate fitted slope
+    //    (grid fringe, where the getter reports NaN and -1.1 is assumed)
+    //    cannot fling an iterate across the domain;
+    //  - convergence is declared when the Newton step ITSELF is smaller than
+    //    tolLn - for a C1 surface that step bounds the distance to the root
+    //    the same way the old bracket width did;
+    //  - 12 probes without convergence falls through to the wide
+    //    verified-bracket path below, which keeps the loud
+    //    not-actually-vapor error exactly as it was.
     const xFloor = Math.log(vg * (1 + 1e-9));
-    let x0 = Math.min(Math.max(Math.log(hint), xFloor), lnHi);
-    let r0 = Math.log(pOf(x0) / P);
-    if (r0 === 0) return Math.exp(x0);
-    // Sign convention: r > 0 means P(v) too high, v too small, root above.
-    let a = r0 > 0 ? x0 : xFloor, ra = r0 > 0 ? r0 : NaN;   // below-root side
-    let b = r0 < 0 ? x0 : lnHi, rb = r0 < 0 ? r0 : NaN;     // above-root side
-    let x1 = x0 + Math.min(0.7, Math.max(-0.7, r0));        // Newton, slope -1
-    if (!(x1 > a && x1 < b)) x1 = 0.5 * (a + b);
-    let side = 0;
-    let converged = false;
-    for (let i = 0; i < 14; i++) {
-      const r1 = Math.log(pOf(x1) / P);
-      if (r1 > 0) {
-        a = x1; ra = r1;
-        if (side === 1 && !Number.isNaN(rb)) rb *= 0.5;
-        side = 1;
-      } else {
-        b = x1; rb = r1;
-        if (side === -1 && !Number.isNaN(ra)) ra *= 0.5;
-        side = -1;
+    let a = xFloor, b = lnHi;          // sign bracket: a has r > 0, b has r < 0
+    let haveA = false, haveB = false;
+    let x = Math.min(Math.max(Math.log(hint), xFloor), lnHi);
+    for (let i = 0; i < 12; i++) {
+      const r = Math.log(pOf(x) / P);
+      if (r === 0) return Math.exp(x);
+      let s = lastVaporPressureSlope();
+      if (!(s < 0)) s = -1.1;          // no vapor-path slope: assumed value
+      if (r > 0) { a = x; haveA = true; } else { b = x; haveB = true; }
+      const dxNewton = -r / s;
+      if (Math.abs(dxNewton) < tolLn) {
+        const xr = Math.min(Math.max(x + dxNewton, xFloor), lnHi);
+        return Math.exp(xr);
       }
-      if (!Number.isNaN(ra) && !Number.isNaN(rb)) {
-        // Bracketed: false position (Illinois-damped residuals).
-        if (b - a < tolLn) { converged = true; break; }
-        let m = ra - rb !== 0 ? a + (b - a) * ra / (ra - rb) : 0.5 * (a + b);
-        if (!(m > a && m < b)) m = 0.5 * (a + b);
-        x0 = x1; r0 = r1;
-        x1 = m;
-      } else {
-        // One-sided still: secant from the last two probes, step-capped.
-        const denom = r1 - r0;
-        let dx = denom !== 0 ? -r1 * (x1 - x0) / denom : (r1 > 0 ? 0.7 : -0.7);
-        dx = Math.min(0.7, Math.max(-0.7, dx));
-        if (r1 > 0 && dx < 0) dx = 0.7;    // must move up toward the root
-        if (r1 < 0 && dx > 0) dx = -0.7;   // must move down
-        x0 = x1; r0 = r1;
-        x1 = x1 + dx;
-        if (!(x1 > a && x1 < b)) x1 = 0.5 * (a + b);
-      }
+      x += Math.min(0.7, Math.max(-0.7, dxNewton));
+      if (haveA && haveB && !(x > a && x < b)) x = 0.5 * (a + b);
+      else if (x < xFloor) x = xFloor;
+      else if (x > lnHi) x = lnHi;
     }
-    if (converged) return Math.exp(0.5 * (a + b));
+    // No convergence: fall through to the wide verified-bracket path.
   }
   let pLo = pOf(lnLo), pHi = pOf(lnHi);
   if (!(pLo >= P * (1 - 1e-6) && pHi <= P)) {
@@ -444,7 +420,7 @@ export function evaluateOtsg(
     // Mass-averaged over the linear quality profile - see boilingMeanQuality
     const v2 = sat.v_f + boilingMeanQuality(sat.v_f, sat.v_g) * (sat.v_g - sat.v_f);
     const u3 = m3 > 0 ? u3Free : sat.u_g;
-    const v3 = m3 > 0 ? superheatedV(Math.max(u3, sat.u_g + 1e3), P) : sat.v_g;
+    const v3 = m3 > 0 ? superheatedV(Math.max(u3, sat.u_g + 1e3), P, undefined, undefined, sat) : sat.v_g;
     return { V: m1 * v1 + m2 * v2 + m3 * v3, sat, v1, v2, v3, u3 };
   };
 
@@ -766,6 +742,18 @@ export function evaluateOtsgPartition(
   let du3 = 0;
   let L3 = Math.max(0, Math.min(1, 1 - (massTotal * 0.0015) / V));
   let v3Carry: number | undefined;
+  let v3CarryP: number | undefined;
+  // The carried v3 was solved at a DIFFERENT pressure (solveP's previous
+  // iterate) - that staleness is why the hint used to miss its own tight
+  // bracket half the time. Vapor is near-ideal, so scale it: at fixed u an
+  // ideal gas has v proportional to 1/P; steam's true exponent is a bit
+  // smaller (dlnv/dlnP of -0.77 to -0.95), and 0.85 splits the range. The
+  // hint only seeds a safeguarded Newton, so the exponent needs to be
+  // roughly right, not exact.
+  const carriedHint = (P: number): number | undefined =>
+    v3Carry !== undefined && v3CarryP !== undefined && v3CarryP !== P
+      ? v3Carry * Math.pow(v3CarryP / P, 0.85)
+      : v3Carry;
   const atP = (P: number): AtP => {
     const sat = saturationAtP(P);
     const u1 = subcooledSectionMean(uFeedIn, sat);
@@ -826,12 +814,12 @@ export function evaluateOtsgPartition(
         // reports it.
         return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
       }
-      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-6, v3Carry) : sat.v_g;
-      if (u3Free > sat.u_g + 1e3) v3Carry = v3;
+      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-6, carriedHint(P), sat) : sat.v_g;
+      if (u3Free > sat.u_g + 1e3) { v3Carry = v3; v3CarryP = P; }
       return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat' };
     }
-    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-6, v3Carry) : sat.v_g;
-    if (du3 > 1e-9) v3Carry = v3;
+    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-6, carriedHint(P), sat) : sat.v_g;
+    if (du3 > 1e-9) { v3Carry = v3; v3CarryP = P; }
     const m2 = mR - m3;
     return {
       sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
@@ -1024,7 +1012,7 @@ export function superheatedStateAtPT(P: number, T: number): { u: number; v: numb
   const probe = (u: number, v: number) => calculateState(1, u, v);
   const u = u3AtTemperature(T, P, sat,
     (uu, vv) => probe(uu, vv), sat.u_g + 2500 * (T - sat.T), T);
-  return { u, v: superheatedV(u, P, 1e-4) };
+  return { u, v: superheatedV(u, P, 1e-4, undefined, sat) };
 }
 
 /** Invert the section temperature to u3 along the P-isobar - bisection with
@@ -1036,7 +1024,7 @@ function u3AtTemperature(
 ): number {
   let vT: number | undefined;
   const TOf = (u: number) => {
-    const v = superheatedV(u, P, 1e-4, vT);
+    const v = superheatedV(u, P, 1e-4, vT, sat);
     vT = v;
     return probe(u, v, 'pinned steam state').temperature;
   };
