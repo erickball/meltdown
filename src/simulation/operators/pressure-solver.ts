@@ -77,6 +77,7 @@ import {
   vaporCv,
 } from '../water-properties';
 import {
+  type GasComposition,
   totalMass as ncgTotalMass,
   totalMoles as ncgTotalMoles,
   mixtureCv as ncgMixtureCv,
@@ -372,7 +373,9 @@ export class PressureSolver {
    * rk45-error and pressure-sanity rejections on the very nodes the scheme
    * liberates).
    */
-  stampImplicitAdvection(state: SimulationState): void {
+  stampImplicitAdvection(
+    state: SimulationState
+  ): Map<string, { dMass: number; dEnergy: number; dNcg?: GasComposition }> {
     const eligibleNode = (node: FlowNode): boolean =>
       !node.otsg && node.fluid.phase !== 'two-phase';
     for (const conn of state.flowConnections) {
@@ -383,6 +386,53 @@ export class PressureSolver {
         (toNode.isBoundary || eligibleNode(toNode)) &&
         !(fromNode.isBoundary && toNode.isBoundary);
     }
+
+    // Frozen transport tendency T0: the per-node advective rates the solved
+    // flows imply at the step-START donor states, in the transport matrix's
+    // own bulk-donor convention (whole-node concentrations, hB = (U+PV)/M).
+    // The integrator adds c_i·dt·T0 to each intermediate stage STATE - never
+    // to the stage rates - so every other operator evaluates against
+    // realistically-drifting states while the books still flow exclusively
+    // through the operator rates and the exact post-stage transport solve.
+    // At a steady state T0 cancels the stages' non-advective drift, removing
+    // the O(dt) time-average bias that the plant's controllers amplified
+    // into a different operating point (stage-2 finding 3 in the design doc).
+    const tendency = new Map<string, { dMass: number; dEnergy: number; dNcg?: GasComposition }>();
+    const book = (node: FlowNode, sign: number, wWater: number, wEnergy: number,
+                  gas: GasComposition | undefined, gasPerTotal: number): void => {
+      if (node.isBoundary) return;
+      let e = tendency.get(node.id);
+      if (!e) {
+        e = { dMass: 0, dEnergy: 0 };
+        tendency.set(node.id, e);
+      }
+      e.dMass += sign * wWater;
+      e.dEnergy += sign * wEnergy;
+      if (gas) {
+        for (const species of ALL_GAS_SPECIES) {
+          const moles = gas[species] ?? 0;
+          if (moles === 0) continue;
+          if (!e.dNcg) e.dNcg = emptyGasComposition();
+          e.dNcg[species] += sign * moles * gasPerTotal;
+        }
+      }
+    };
+    for (const conn of state.flowConnections) {
+      if (!conn.implicitAdvection || conn.massFlowRate === 0) continue;
+      const donorIsFrom = conn.massFlowRate >= 0;
+      const absW = Math.abs(conn.massFlowRate);
+      const donor = state.flowNodes.get(donorIsFrom ? conn.fromNodeId : conn.toNodeId)!;
+      const rcvr = state.flowNodes.get(donorIsFrom ? conn.toNodeId : conn.fromNodeId)!;
+      const gas = donor.fluid.ncg;
+      const M = donor.fluid.mass + (gas ? ncgTotalMass(gas) : 0);
+      if (!(M > 0)) continue; // an empty donor transports nothing at first order
+      const hB = (donor.fluid.internalEnergy + donor.fluid.pressure * donor.volume) / M;
+      const wWater = absW * donor.fluid.mass / M;
+      const gasPerTotal = absW / M; // mol/s transported per mol held, scaled below by moles
+      book(donor, -1, wWater, absW * hB, gas, gasPerTotal);
+      book(rcvr, +1, wWater, absW * hB, gas, gasPerTotal);
+    }
+    return tendency;
   }
 
   applyImplicitAdvection(

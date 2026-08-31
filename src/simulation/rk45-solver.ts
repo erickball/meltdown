@@ -1332,6 +1332,10 @@ const B4 = [5179/57600, 0, 7571/16695, 393/640, -92097/339200, 187/2100, 1/40];
 // Error weights (B5 - B4)
 const E = B5.map((b5, i) => b5 - B4[i]);
 
+// Stage times c_i (row sums of A). Used to place the frozen advection
+// tendency into each stage STATE at the drift the stage's time implies.
+const C = [0, 1/5, 3/10, 4/5, 8/9, 1, 1];
+
 // ============================================================================
 // RK45 Solver Class
 // ============================================================================
@@ -1353,6 +1357,11 @@ export class RK45Solver {
   // The implicit advection pass's per-node applied rates for the CURRENT
   // step attempt (see step()); merged into candidateFlowRates.
   private candidateAdvectionRates?: Map<string, { dMass: number; dEnergy: number }>;
+  // Frozen advection tendency T0 for the CURRENT step attempt (mitigation B):
+  // the solved flows' donor-cell rates at the step-start state, injected into
+  // intermediate stage STATES (weight c_i) but never into the stage rates -
+  // the final solution and the transport solve's books never see it.
+  private candidateAdvectionTendency?: StateRates;
 
   private lastAcceptedFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
 
@@ -1478,6 +1487,7 @@ export class RK45Solver {
     this.lastAcceptedFlowRates = undefined;
     this.candidateFlowRates = undefined;
     this.candidateAdvectionRates = undefined;
+    this.candidateAdvectionTendency = undefined;
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -1730,6 +1740,7 @@ export class RK45Solver {
     // net flow the solve balanced. applyAllConstraints() skips the solver in
     // this mode.
     this.candidateAdvectionRates = undefined;
+    this.candidateAdvectionTendency = undefined;
     if (this.implicitMomentumActive() && this.pressureSolver) {
       const t0 = performance.now();
       const solvedState = cloneSimulationState(state);
@@ -1742,7 +1753,12 @@ export class RK45Solver {
         // stages (physics-then-advection splitting - see
         // stampImplicitAdvection for why not before).
         if (this.pressureSolver.config.implicitAdvection) {
-          this.pressureSolver.stampImplicitAdvection(solvedState);
+          const tendency = this.pressureSolver.stampImplicitAdvection(solvedState);
+          if (tendency.size > 0) {
+            const tendencyRates = createZeroRates();
+            for (const [id, t] of tendency) tendencyRates.flowNodes.set(id, t);
+            this.candidateAdvectionTendency = tendencyRates;
+          }
         }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -1775,6 +1791,14 @@ export class RK45Solver {
       const stageRates = createZeroRates();
       for (let j = 0; j < i; j++) {
         accumulateRates(stageRates, k[j], A[i][j]);
+      }
+      // Frozen advection tendency, weight c_i: the stage EVALUATES against a
+      // state that has received its share of the step's transport, but the
+      // tendency never enters k[] - the 5th-order solution and the error
+      // estimate stay physics-only, and the post-stage transport solve keeps
+      // sole ownership of the advection books.
+      if (this.candidateAdvectionTendency) {
+        accumulateRates(stageRates, this.candidateAdvectionTendency, C[i]);
       }
       const stageState = applyRatesToState(state, stageRates, dt);
 

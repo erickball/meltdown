@@ -195,3 +195,70 @@ ceiling (the materialCourantDt trick applied to the pressure swing), or an
 outer iteration of the flow solve at the post-transport state (re-solve
 once when the swing exceeds tolerance - a second LU, cheap next to a
 rejected six-stage attempt).
+
+## Stage-3 findings (mitigation B, 2026-08-31)
+
+Implemented, but NOT as the un-apply predictor-corrector sketched above -
+that shape risks exactly the "subtract to the last joule" bookkeeping it
+warns about. Instead: `stampImplicitAdvection` also returns the frozen
+tendency T0 (per-node donor-cell rates of water mass, energy, and
+per-species NCG moles at the step-start state, in the transport matrix's
+own bulk-donor convention - NCG included because a helium loop's entire
+drift IS its NCG), and the integrator adds c_i·dt·T0 to each intermediate
+stage STATE only. T0 never enters the stage rates k[], so the 5th-order
+solution and the error estimate stay physics-only and the exact post-stage
+transport solve keeps sole ownership of the books - algebraically identical
+to the corrector formulation, with zero conservation bookkeeping. At a
+steady state T0 cancels the stages' non-advective drift in the evaluation
+states, which is the failure-mode-3 cure. Default-off bit-neutral
+(identical trajectory fingerprint); flow-physics suite green with the knob
+on; npm test green. `scripts/probe-power-trajectory.ts` added (trajectory
+A/B tool; MAX_DT env caps solver dt for convergence experiments).
+
+1. **Stage-2 finding 3 was misdiagnosed.** The ON divergence is not a
+   settled wrong operating point - it is a sustained OSCILLATION, invisible
+   to endpoint sampling. Rerunning the stage-2 code with the trajectory
+   probe: power swings 38-267 MW with the documented "208 MW at t=300"
+   sitting exactly on a peak. Mitigation B damps the swing substantially
+   (roughly ±40 MW about 110 vs ±120 MW) but does not kill it.
+2. **The scheme is CONSISTENT - no bias bug.** ON with dt capped at 20 ms
+   tracks the OFF reference family within a few MW over the full horizon
+   (144.7 vs 141.4 MW at t=300) and rejections collapse to ~1%. The
+   remaining failure is purely large-dt stability, not correctness.
+3. **The stability boundary sits BELOW the Courant ceiling it removes.**
+   dt-cap sweep on the Xe-100: 20 ms clean, 50 ms marginal (damped
+   oscillation, dips to 97 MW and recovers to the family), 100 ms unstable
+   (the full limit cycle). The OFF baseline's material Courant ceiling
+   runs the same plant at 100-200 ms. So on the Xe-100 the liberated
+   scheme cannot pay: its own pressure-trust-region instability binds at
+   ~50 ms, under the ceiling the branch exists to remove. Wall clock
+   agrees: ON capped at 50 ms = 2.6x realtime vs OFF 3.3-3.5x.
+4. **Mechanism of the large-dt instability.** The rejection profile at
+   dt >= 100 ms is pressure-sanity on the plant's stiff SMALL nodes -
+   val-prel-1 (relief valve, 50%+ per-step pressure swings: chattering at
+   step frequency), rccs-panel-1/2, fw-pump-1, cond-pump-1 - i.e. the
+   implicit momentum solve's flows, solved against step-start pressures,
+   carry those nodes across pressure swings the linearization never saw.
+   Discover-by-rejection then whipsaws dt (18 -> 387 ms within a minute of
+   sim time), and the whipsaw itself feeds the plant-scale oscillation the
+   controllers ride. A predictive pressure-swing ceiling would only pin dt
+   at the ~50 ms stability boundary = still a loss; the lever that could
+   actually RAISE the boundary is the outer re-solve (corrector iteration
+   of the flow solve against the post-transport state), because it is the
+   staleness of the solved flows, not the guard's reaction to them, that
+   destabilizes.
+
+5. **BWR family holds with the knob on.** 300 s ON vs OFF on the BWR
+   preset: both trajectories live in the same 980-1018 MW slosh-noise band
+   with comparable wall clock and rejection profiles. No void-feedback
+   aliasing - unsurprising, since two-phase nodes are never stamped and
+   the scheme barely engages on that plant, but now it is measured rather
+   than assumed.
+
+Where this leaves the branch: mitigation B is correct, conservative, and
+required infrastructure, and the trajectory probe + MAX_DT knob make the
+stability boundary measurable. But the payoff gate has moved decisively
+into the momentum solve's trust region. Next chunk: outer re-solve of the
+pressure-flow system (predictor-corrector on flows), then re-measure the
+boundary; only add the predictive swing ceiling afterwards, as the smooth
+limiter for whatever boundary remains.
