@@ -1214,6 +1214,7 @@ function interpolateFromGrid(
   // Taper support radius: two cells in the normalized metric (covered by the
   // 5x5 search block in findNearbyPoints)
   const R = 2 * Math.min(GRID_CELL_SIZE_LOGV, GRID_CELL_SIZE_U * U_SCALE);
+  const R_SQ = R * R;
   const EPS = 1e-10; // regularizes the singular core; keeps fit near-interpolating
 
   // Weighted normal equations for basis [1, x, y]:
@@ -1241,8 +1242,17 @@ function interpolateFromGrid(
 
     if (pt.v <= v) vBelow = true; else vAbove = true;
 
+    // Support test in SQUARED distance, so a point outside the taper radius
+    // never pays for a sqrt - and most of a 5x5 block is outside it. Exact in
+    // real arithmetic (sqrt(d)/R >= 1 <=> d >= R^2); in floating point the two
+    // can disagree by an ulp for a point sitting exactly on the radius, and
+    // such a point enters with taper = (1-q)^4 * ... = 0, contributing exactly
+    // 0.0 to every sum but incrementing supportCount. That can only matter if
+    // it carries the count across the >= 3 threshold, which is a fit through
+    // three points where one has zero weight - already degenerate, and the
+    // pivot guards below reject it.
+    if (distSq >= R_SQ) continue;
     const q = Math.sqrt(distSq) / R;
-    if (q >= 1) continue;
 
     const oneMinusQ = 1 - q;
     const taper = oneMinusQ * oneMinusQ * oneMinusQ * oneMinusQ * (4 * q + 1);
