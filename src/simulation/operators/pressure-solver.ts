@@ -82,6 +82,9 @@ import {
   mixtureCv as ncgMixtureCv,
   mixtureCp as ncgMixtureCp,
   R_GAS,
+  GAS_PROPERTIES,
+  ALL_GAS_SPECIES,
+  emptyGasComposition,
 } from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
 import {
@@ -317,6 +320,251 @@ export class PressureSolver {
    * re-solved once so neighbors see the capped flow (one RELAP-style outer
    * iteration).
    */
+  /**
+   * Nearly-implicit advection (docs/implicit-energy-advection-design.md).
+   * Called once per step attempt, AFTER solve() has set the end-of-step
+   * connection flows. Applies the full step's advective transport for the
+   * eligible connection set by a donor-cell backward-Euler solve, and stamps
+   * every connection's `implicitAdvection` so the explicit advection
+   * operator, the throughput guard, and the material-Courant ceiling all
+   * read one consistent partition for this attempt.
+   *
+   * Eligibility: both endpoints single-phase, non-OTSG (bulk draws). For a
+   * bulk draw the explicit operator's water/gas/enthalpy split sums EXACTLY
+   * to total-mixture transport at the donor's bulk enthalpy
+   * hB = (U + P·V)/M_total: the water leg carries m_w·h_w = U_w + P_steam·V,
+   * the gas leg carries n·Cp·T = U_g + n·R·T = U_g + P_gas·V, and the
+   * partial pressures sum. So transporting (mass, species, energy) as bulk
+   * concentrations is the same physics, made implicit.
+   *
+   * The solve: with end-of-step masses M' known exactly from the flows
+   * (M'_i = M_i + dt·Σ signed W), every transported concentration obeys
+   *
+   *   (M'_i + dt·ΣW_out,i)·x'_i − dt·Σ_in W·x'_donor = Q_i(0) [+ boundary]
+   *
+   * one matrix A (diagonally dominant, non-positive off-diagonals - an
+   * M-matrix, unconditionally stable), factored once and back-solved per
+   * quantity: each gas species as kg-per-kg-total, and the energy as
+   * hB' = (U' + P(0)·V)/M' (same matrix; RHS U_i + P_i·V_i, then
+   * U' = M'·hB' − P·V). Water mass is the closure remainder
+   * m_w' = M' − Σ m_species': A·1 reproduces the mass update identically,
+   * so concentrations sum to one and the books close to machine precision.
+   *
+   * P is frozen at step start (the pressure-work part of h is first-order
+   * in dt and P is re-derived from (m,U,V) immediately after by the fluid
+   * state constraint). Failure of any invariant throws - the solver treats
+   * it like a failed pressure solve and rejects the step.
+   *
+   * Returns per-node advective rates {dMass (water, kg/s), dEnergy (W)} so
+   * the caller can fold them into the accepted-step rate history that the
+   * energy-coupled closure's measured-q term reads - q's convention is
+   * "total observed dU/dt minus modeled transport at current flows", and
+   * the transport this pass applies must stay inside "total observed".
+   */
+  /**
+   * Classify and stamp the implicit-advection partition from the step-START
+   * state. Run BEFORE the RK stages: the stamps tell the explicit advection
+   * operator, the throughput guard, and the Courant ceiling which
+   * connections this attempt's once-per-step transport solve owns. The
+   * transport itself is applied AFTER the stages (physics-then-advection
+   * splitting: applying it first fed each step's whole transport to the
+   * stages as an initial jolt, and the jolted feedback showed up as
+   * rk45-error and pressure-sanity rejections on the very nodes the scheme
+   * liberates).
+   */
+  stampImplicitAdvection(state: SimulationState): void {
+    const eligibleNode = (node: FlowNode): boolean =>
+      !node.otsg && node.fluid.phase !== 'two-phase';
+    for (const conn of state.flowConnections) {
+      const fromNode = state.flowNodes.get(conn.fromNodeId);
+      const toNode = state.flowNodes.get(conn.toNodeId);
+      conn.implicitAdvection = !!fromNode && !!toNode &&
+        (fromNode.isBoundary || eligibleNode(fromNode)) &&
+        (toNode.isBoundary || eligibleNode(toNode)) &&
+        !(fromNode.isBoundary && toNode.isBoundary);
+    }
+  }
+
+  applyImplicitAdvection(
+    state: SimulationState,
+    dt: number
+  ): Map<string, { dMass: number; dEnergy: number }> {
+    // The partition was stamped from the step-start state; read it, never
+    // re-derive (a phase flip during the stages must not split one step's
+    // booking between the two schemes).
+    const eligible: FlowConnection[] = [];
+    for (const conn of state.flowConnections) {
+      if (conn.implicitAdvection && conn.massFlowRate !== 0) eligible.push(conn);
+    }
+    const advRates = new Map<string, { dMass: number; dEnergy: number }>();
+    if (eligible.length === 0) return advRates;
+
+    // Index the interior nodes touched by eligible connections.
+    const index = new Map<string, number>();
+    const nodes: FlowNode[] = [];
+    for (const conn of eligible) {
+      for (const id of [conn.fromNodeId, conn.toNodeId]) {
+        if (index.has(id)) continue;
+        const node = state.flowNodes.get(id)!;
+        if (node.isBoundary) continue;
+        index.set(id, nodes.length);
+        nodes.push(node);
+      }
+    }
+    const n = nodes.length;
+    if (n === 0) return advRates;
+
+    // Start-of-step totals and the exact end-of-step mass update.
+    const M0 = new Float64Array(n);      // total inventory (water + gas), kg
+    const PV = new Float64Array(n);      // frozen pressure-volume term, J
+    const M1 = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      const gasMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+      M0[i] = node.fluid.mass + gasMass;
+      PV[i] = node.fluid.pressure * node.volume;
+      M1[i] = M0[i];
+    }
+    for (const conn of eligible) {
+      const W = conn.massFlowRate;
+      const iFrom = index.get(conn.fromNodeId) ?? -1;
+      const iTo = index.get(conn.toNodeId) ?? -1;
+      if (iFrom >= 0) M1[iFrom] -= W * dt;
+      if (iTo >= 0) M1[iTo] += W * dt;
+    }
+    for (let i = 0; i < n; i++) {
+      if (!(M1[i] > 0) || !isFinite(M1[i])) {
+        throw new Error(
+          `[ImplicitAdvection] Node '${nodes[i].id}' inventory would go to ` +
+          `${M1[i]?.toFixed(3)} kg over dt=${(dt * 1e3).toFixed(1)}ms ` +
+          `(started at ${M0[i].toFixed(3)} kg). The solved flows drain it dry ` +
+          `within one step - the step must shrink.`
+        );
+      }
+    }
+
+    // Assemble A: diag M1_i + dt·ΣW_out,i; off-diagonal −dt·W for inflows.
+    // Boundary donors contribute fixed-concentration RHS terms instead.
+    const A = new Float64Array(n * n);
+    for (let i = 0; i < n; i++) A[i * n + i] = M1[i];
+    interface BoundaryIn { i: number; W: number; donor: FlowNode }
+    const boundaryIn: BoundaryIn[] = [];
+    const boundaryOutRelease: Array<{ donorIdx: number; W: number }> = [];
+    for (const conn of eligible) {
+      const W = conn.massFlowRate;
+      const donorIsFrom = W >= 0;
+      const absW = Math.abs(W);
+      const donorId = donorIsFrom ? conn.fromNodeId : conn.toNodeId;
+      const rcvrId = donorIsFrom ? conn.toNodeId : conn.fromNodeId;
+      const iDonor = index.get(donorId) ?? -1;
+      const iRcvr = index.get(rcvrId) ?? -1;
+      const donorNode = state.flowNodes.get(donorId)!;
+      conn.currentFlowPhase = donorNode.fluid.phase === 'liquid' ? 'liquid' : 'vapor';
+      if (iDonor >= 0) {
+        A[iDonor * n + iDonor] += absW * dt;           // donor loses at its own x'
+        if (iRcvr >= 0) A[iRcvr * n + iDonor] -= absW * dt; // receiver gains at donor x'
+        else boundaryOutRelease.push({ donorIdx: iDonor, W: absW });
+      } else if (iRcvr >= 0) {
+        boundaryIn.push({ i: iRcvr, W: absW, donor: donorNode });
+      }
+    }
+
+    // Factor once (plain Gaussian elimination with partial pivoting via the
+    // shared helper), solve per quantity. Build all RHS columns first.
+    const speciesList = ALL_GAS_SPECIES;
+    const rhs: Float64Array[] = []; // one column per species + one for energy
+    for (let s = 0; s < speciesList.length; s++) {
+      const b = new Float64Array(n);
+      const mw = GAS_PROPERTIES[speciesList[s]].molecularWeight;
+      for (let i = 0; i < n; i++) {
+        b[i] = (nodes[i].fluid.ncg?.[speciesList[s]] ?? 0) * mw; // kg of species
+      }
+      for (const bin of boundaryIn) {
+        const dGas = bin.donor.fluid.ncg;
+        const dTotal = bin.donor.fluid.mass + (dGas ? ncgTotalMass(dGas) : 0);
+        if (dTotal > 0 && dGas) {
+          b[bin.i] += dt * bin.W * ((dGas[speciesList[s]] ?? 0) * mw) / dTotal;
+        }
+      }
+      rhs.push(b);
+    }
+    {
+      const b = new Float64Array(n);
+      for (let i = 0; i < n; i++) b[i] = nodes[i].fluid.internalEnergy + PV[i];
+      for (const bin of boundaryIn) {
+        const dGas = bin.donor.fluid.ncg;
+        const dTotal = bin.donor.fluid.mass + (dGas ? ncgTotalMass(dGas) : 0);
+        if (dTotal > 0) {
+          const hB = (bin.donor.fluid.internalEnergy +
+            bin.donor.fluid.pressure * bin.donor.volume) / dTotal;
+          b[bin.i] += dt * bin.W * hB;
+        }
+      }
+      rhs.push(b);
+    }
+    const solutions = solveLinearSystemMulti(A, rhs, n);
+
+    // Write back: species from their solved concentrations, water as the
+    // exact remainder, energy from hB'. Then report the applied rates.
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      const waterBefore = node.fluid.mass;
+      const energyBefore = node.fluid.internalEnergy;
+      let gasMass1 = 0;
+      const hadNcg = !!node.fluid.ncg;
+      let anyGas = false;
+      const ncg1 = emptyGasComposition();
+      for (let s = 0; s < speciesList.length; s++) {
+        const kg = solutions[s][i] * M1[i];   // solutions are concentrations, kg/kg
+        if (!isFinite(kg) || kg < -1e-9) {
+          throw new Error(
+            `[ImplicitAdvection] Species ${speciesList[s]} on '${node.id}' ` +
+            `solved to ${kg} kg - transport matrix produced a non-physical ` +
+            `composition.`
+          );
+        }
+        const kgClean = kg > 0 ? kg : 0; // -1e-9..0 is roundoff of a zero
+        gasMass1 += kgClean;
+        if (kgClean > 0) anyGas = true;
+        ncg1[speciesList[s]] = kgClean / GAS_PROPERTIES[speciesList[s]].molecularWeight;
+      }
+      const water1 = M1[i] - gasMass1;
+      if (!isFinite(water1) || water1 < -1e-9) {
+        throw new Error(
+          `[ImplicitAdvection] Water on '${node.id}' solved to ${water1} kg ` +
+          `(M'=${M1[i].toFixed(3)}, gas=${gasMass1.toFixed(3)}).`
+        );
+      }
+      const hB1 = solutions[speciesList.length][i];
+      const U1 = M1[i] * hB1 - PV[i];
+      if (!isFinite(U1)) {
+        throw new Error(`[ImplicitAdvection] Energy on '${node.id}' solved non-finite.`);
+      }
+      node.fluid.mass = water1 > 0 ? water1 : 0;
+      node.fluid.internalEnergy = U1;
+      if (anyGas || hadNcg) node.fluid.ncg = ncg1;
+      advRates.set(node.id, {
+        dMass: (node.fluid.mass - waterBefore) / dt,
+        dEnergy: (U1 - energyBefore) / dt,
+      });
+    }
+
+    // Gas leaving through a boundary connection exits the modeled system:
+    // book it as environmental release at the donor's SOLVED composition,
+    // matching the explicit operator's convention.
+    for (const out of boundaryOutRelease) {
+      if (!state.environmentalRelease) state.environmentalRelease = emptyGasComposition();
+      for (let s = 0; s < speciesList.length; s++) {
+        const xs = solutions[s][out.donorIdx]; // concentration, kg species / kg total
+        if (xs <= 0) continue;
+        const mw = GAS_PROPERTIES[speciesList[s]].molecularWeight;
+        state.environmentalRelease[speciesList[s]] += (out.W * dt * xs) / mw;
+      }
+    }
+
+    return advRates;
+  }
+
   private solveImplicit(
     state: SimulationState,
     dt: number,
@@ -1030,6 +1278,63 @@ export class PressureSolver {
  * Solve M*x = b via Gaussian elimination with partial pivoting.
  * M is n x n row-major and is destroyed in the process; b is destroyed too.
  */
+/**
+ * Multi-RHS variant of solveLinearSystem: one elimination, every column
+ * back-solved. The implicit advection pass solves the same transport matrix
+ * for each gas species plus the energy, and factoring per quantity would
+ * pay the O(n^3) cost k+1 times for identical arithmetic.
+ */
+function solveLinearSystemMulti(A: Float64Array, rhs: Float64Array[], n: number): Float64Array[] {
+  const M = A; // consumed - callers build A fresh
+  const bs = rhs;
+  for (let col = 0; col < n; col++) {
+    let pivotRow = col;
+    let pivotMag = Math.abs(M[col * n + col]);
+    for (let row = col + 1; row < n; row++) {
+      const mag = Math.abs(M[row * n + col]);
+      if (mag > pivotMag) { pivotMag = mag; pivotRow = row; }
+    }
+    if (pivotMag === 0 || !isFinite(pivotMag)) {
+      throw new Error(
+        `[ImplicitAdvection] Singular or non-finite transport matrix at column ${col}`
+      );
+    }
+    if (pivotRow !== col) {
+      for (let k = col; k < n; k++) {
+        const tmp = M[col * n + k];
+        M[col * n + k] = M[pivotRow * n + k];
+        M[pivotRow * n + k] = tmp;
+      }
+      for (const b of bs) {
+        const tmpB = b[col];
+        b[col] = b[pivotRow];
+        b[pivotRow] = tmpB;
+      }
+    }
+    const pivot = M[col * n + col];
+    for (let row = col + 1; row < n; row++) {
+      const factor = M[row * n + col] / pivot;
+      if (factor === 0) continue;
+      M[row * n + col] = 0;
+      for (let k = col + 1; k < n; k++) {
+        M[row * n + k] -= factor * M[col * n + k];
+      }
+      for (const b of bs) b[row] -= factor * b[col];
+    }
+  }
+  const out: Float64Array[] = [];
+  for (const b of bs) {
+    const x = new Float64Array(n);
+    for (let row = n - 1; row >= 0; row--) {
+      let sum = b[row];
+      for (let k = row + 1; k < n; k++) sum -= M[row * n + k] * x[k];
+      x[row] = sum / M[row * n + row];
+    }
+    out.push(x);
+  }
+  return out;
+}
+
 function solveLinearSystem(M: Float64Array, b: Float64Array, n: number): Float64Array {
   for (let col = 0; col < n; col++) {
     // Partial pivot

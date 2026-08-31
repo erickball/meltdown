@@ -151,3 +151,42 @@ already integrated. Kills failure modes 1-3; costs exact-conservation
 bookkeeping (the correction must subtract the integrated estimate to the
 last joule). Predictor-corrector, standard shape, easy to get subtly wrong -
 measure first.
+
+## Stage-2 findings (first implementation, 2026-08-31)
+
+Implemented: stamp-early/apply-late partition (`stampImplicitAdvection` /
+`applyImplicitAdvection` in pressure-solver.ts), one-LU multi-RHS transport
+solve (species as kg/kg concentrations, energy as bulk enthalpy
+hB' = (U'+PV)/M', water as the exact remainder - concentrations sum to one
+by construction so the books close to machine precision), q-history merge,
+guard/ceiling exemptions, IMPLICIT_ADVECTION env knob. Default-off verified
+bit-neutral (identical step signature).
+
+1. **Advection-FIRST splitting fails.** Applying the step's transport before
+   the stages feeds it to the physics as an initial jolt: rk45-error and
+   pressure-sanity rejections on the liberated nodes, trajectory bent 10%
+   (184 vs 204 MW at t=60). Physics-then-advection fixed all of it
+   (power back in family, flow-physics suite green with the knob on).
+2. **The pressure guard is the next wall, at nearly the same dt.** With
+   throughput exempted, the controller pushes dt up and
+   cv-1-inner:pressure + cond-pump-1:pressure reject instead - the implicit
+   momentum solve's own trust region (flows solved against step-start
+   pressures). Xe-100 net: 1.18x at 60 s, 0.7x at 300 s vs the
+   Courant-ceiling baseline - the ceiling's smooth limit beat implicit
+   advection's discover-by-rejection at the pressure guard. Relaxing the
+   Courant ceiling by 8x for stamped connections changed NOTHING
+   (bit-identical run) - the ceiling was never the active constraint in ON
+   mode.
+3. **Open question - trajectory validity**: ON lands at 208 MW at t=300
+   where OFF shows 141 (rated power is 200 MW; OFF may be mid-oscillation
+   on its way there - 600 s reference run pending). If ON genuinely
+   settles faster, the splitting is doing fine and the work shifts to the
+   pressure trust region; if ON diverged, mitigation B (frozen transport
+   tendency) moves from optional to required.
+
+Next lever is NOT more advection work: it is the pressure guard's
+step-frequency rejection cycle - either a predictive trust-region dt
+ceiling (the materialCourantDt trick applied to the pressure swing), or an
+outer iteration of the flow solve at the post-transport state (re-solve
+once when the swing exceeds tolerance - a second LU, cheap next to a
+rejected six-stage attempt).

@@ -1012,9 +1012,14 @@ export function checkStateSanity(
 ): number {
   let maxBadness = 0;
 
-  // Build throughput map for new state
+  // Build throughput map for new state. Connections whose transport the
+  // nearly-implicit advection pass applied are exempt - their donor-cell
+  // update is unconditionally stable, so their throughput is not a per-step
+  // accuracy hazard and must not bind dt (that exemption is the entire
+  // payoff of the implicit scheme).
   const nodeThroughput = new Map<string, number>();
   for (const conn of newState.flowConnections) {
+    if (conn.implicitAdvection) continue;
     const absFlow = Math.abs(conn.massFlowRate);
     nodeThroughput.set(conn.fromNodeId, (nodeThroughput.get(conn.fromNodeId) || 0) + absFlow);
     nodeThroughput.set(conn.toNodeId, (nodeThroughput.get(conn.toNodeId) || 0) + absFlow);
@@ -1345,6 +1350,10 @@ export class RK45Solver {
   // pressure solve's heat-source estimate: total dU/dt minus flow transport
   // is the wall-heat/work the closure cannot otherwise see.
   private candidateFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
+  // The implicit advection pass's per-node applied rates for the CURRENT
+  // step attempt (see step()); merged into candidateFlowRates.
+  private candidateAdvectionRates?: Map<string, { dMass: number; dEnergy: number }>;
+
   private lastAcceptedFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
 
   // Flag to dynamically enable/disable pressure solver at runtime
@@ -1380,10 +1389,24 @@ export class RK45Solver {
    * stays as the backstop for fast transients that outrun it.
    */
   private materialCourantDt(state: SimulationState): number {
+    // Implicitly-advected connections (stamped by the once-per-step pass)
+    // are unconditionally STABLE at any turnover, but not unconditionally
+    // trustworthy: the flows they carry were solved against step-start
+    // pressures, and a step that turns a node's contents over many times
+    // swings its pressure far outside that linearization's trust region -
+    // measured as cv-1-inner:pressure rejections replacing the throughput
+    // rejections when this ceiling exempted them entirely (discover-by-
+    // rejection all over again, one guard downstream). They contribute at
+    // a relaxed weight instead: 1/K of their throughput, i.e. a ceiling K
+    // times the explicit one - enough turnovers per step to bury the
+    // material Courant limit, few enough to keep the pressure solve inside
+    // its own trust region.
+    const IMPLICIT_ADVECTION_CEILING_RELAXATION = 8;
     const throughput = new Map<string, number>();
     for (const conn of state.flowConnections) {
-      const absFlow = Math.abs(conn.massFlowRate);
+      let absFlow = Math.abs(conn.massFlowRate);
       if (absFlow === 0) continue;
+      if (conn.implicitAdvection) absFlow /= IMPLICIT_ADVECTION_CEILING_RELAXATION;
       throughput.set(conn.fromNodeId, (throughput.get(conn.fromNodeId) || 0) + absFlow);
       throughput.set(conn.toNodeId, (throughput.get(conn.toNodeId) || 0) + absFlow);
     }
@@ -1454,6 +1477,7 @@ export class RK45Solver {
     // flow-rates context (it feeds the implicit pressure solve)
     this.lastAcceptedFlowRates = undefined;
     this.candidateFlowRates = undefined;
+    this.candidateAdvectionRates = undefined;
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -1705,11 +1729,21 @@ export class RK45Solver {
     // against constant flows, so the mass each node receives is exactly the
     // net flow the solve balanced. applyAllConstraints() skips the solver in
     // this mode.
+    this.candidateAdvectionRates = undefined;
     if (this.implicitMomentumActive() && this.pressureSolver) {
       const t0 = performance.now();
       const solvedState = cloneSimulationState(state);
       try {
         this.pressureSolver.solve(solvedState, dt, this.lastAcceptedFlowRates);
+        // Nearly-implicit advection, part 1 of 2: stamp the partition from
+        // the step-start state so the stages' explicit advection operator,
+        // the throughput guard, and the Courant ceiling all read one
+        // consistent booking. The transport itself is applied after the
+        // stages (physics-then-advection splitting - see
+        // stampImplicitAdvection for why not before).
+        if (this.pressureSolver.config.implicitAdvection) {
+          this.pressureSolver.stampImplicitAdvection(solvedState);
+        }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45] Implicit momentum solve failed, rejecting step: ${message}`);
@@ -1803,10 +1837,42 @@ export class RK45Solver {
     }
     const newState = applyRatesToState(state, solution5Rates, dt);
 
+    // Nearly-implicit advection, part 2 of 2: apply the step's transport for
+    // the stamped connection set against the solved (frozen) flows, using
+    // the post-stage states as donors. The final constraint application
+    // re-derives (T, P) from the mutated (m, U, ncg). A failed invariant
+    // (a node drained dry, a non-physical composition) rejects the step the
+    // same way a failed pressure solve does.
+    if (this.implicitMomentumActive() && this.pressureSolver?.config.implicitAdvection) {
+      try {
+        this.candidateAdvectionRates =
+          this.pressureSolver.applyImplicitAdvection(newState, dt);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.warn(`[RK45] Implicit advection failed, rejecting step: ${message}`);
+        return { newState: state, error: 1e10, k, errorRates: solution5Rates };
+      }
+    }
+
     // Stash this attempt's per-flow-node total rates; promoted to
     // lastAcceptedFlowRates only if the step is ACCEPTED. The implicit
     // pressure solve uses them to estimate each node's non-flow heat source.
-    this.candidateFlowRates = solution5Rates.flowNodes;
+    // The measured-q convention is "total observed dU/dt minus modeled
+    // transport at current flows", so transport the implicit advection pass
+    // applied OUTSIDE the rates must be folded back in here - otherwise q
+    // double-subtracts it for every implicitly-advected node.
+    if (this.candidateAdvectionRates) {
+      const merged = new Map<string, { dMass: number; dEnergy: number }>();
+      for (const [id, r] of solution5Rates.flowNodes) {
+        const adv = this.candidateAdvectionRates.get(id);
+        merged.set(id, adv
+          ? { dMass: r.dMass + adv.dMass, dEnergy: r.dEnergy + adv.dEnergy }
+          : { dMass: r.dMass, dEnergy: r.dEnergy });
+      }
+      this.candidateFlowRates = merged;
+    } else {
+      this.candidateFlowRates = solution5Rates.flowNodes;
+    }
 
     // Sanity check final state before returning
     const finalCheck = checkPreConstraintSanity(newState);

@@ -1647,6 +1647,9 @@ export class FlowRateOperator implements RateOperator {
 
     // For each flow connection, compute mass and energy transfer rates
     for (const conn of state.flowConnections) {
+      // Nearly-implicit advection owns this connection's transport for this
+      // step (stamped by the once-per-step pass; see FlowConnection type).
+      if (conn.implicitAdvection) continue;
       const fromNode = state.flowNodes.get(conn.fromNodeId);
       const toNode = state.flowNodes.get(conn.toNodeId);
 

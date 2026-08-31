@@ -155,6 +155,18 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   }
   // A/B override for the energy-coupled compliance term in the implicit
   // closure: ENERGY_COMPLIANCE=0 reverts to the mass-only closure.
+  // A/B override for nearly-implicit advection (implicit-energy branch):
+  // IMPLICIT_ADVECTION=1 turns it on. Default is the shipping default (off).
+  const advEnv = process.env.IMPLICIT_ADVECTION;
+  if (advEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        implicitAdvection: advEnv === '1',
+      },
+    };
+  }
   const energyEnv = process.env.ENERGY_COMPLIANCE;
   if (energyEnv !== undefined && config.pressureSolver !== false) {
     config = {

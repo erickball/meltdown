@@ -477,6 +477,14 @@ export interface FlowConnection {
   massFlowRate: number;             // kg/s (positive = from -> to)
   currentFlowPhase?: 'liquid' | 'vapor' | 'mixture';  // What phase is currently flowing
 
+  // Stamped once per step attempt by the implicit-advection pass (from the
+  // step-START state): true = this connection's transport is applied by the
+  // once-per-step donor-cell solve, and the explicit advection operator,
+  // the throughput sanity guard, and the material-Courant ceiling all skip
+  // it. The stamp - not a re-derivation - is what every consumer reads, so
+  // one step's booking can never split a connection between both schemes.
+  implicitAdvection?: boolean;
+
   // Target flow rate (computed from pressure balance, for debugging)
   targetFlowRate?: number;          // kg/s - what flow would be at equilibrium
 
@@ -937,6 +945,17 @@ export interface PressureSolverConfig {
    *  step - zero steady-state bias by construction. Only affects
    *  implicitMomentum mode. */
   energyCompliance?: boolean;
+  /** Nearly-implicit advection (see docs/implicit-energy-advection-design.md):
+   *  after the once-per-step flow solve, the mass/energy/NCG actually MOVED
+   *  by those flows is applied by a donor-cell backward-Euler solve instead
+   *  of being integrated explicitly through the RK stages - removing the
+   *  material Courant limit (dt <= ~0.4 m/W of the smallest transit node)
+   *  the way implicitMomentum removed the acoustic one. Applies only to
+   *  connections whose BOTH endpoints are single-phase non-OTSG nodes at
+   *  step start (bulk draws, where donor transport is exact); two-phase
+   *  separated draws and OTSG nodes keep explicit stage advection and their
+   *  Courant ceiling. EXPERIMENTAL - default off. */
+  implicitAdvection?: boolean;
 }
 
 /** Default configuration for pressure solver */
@@ -949,6 +968,7 @@ export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   // the reference implementation. See docs/semi-implicit-flow-solver-plan.md.
   implicitMomentum: true,
   energyCompliance: true,
+  implicitAdvection: false,
 };
 
 // ============================================================================
