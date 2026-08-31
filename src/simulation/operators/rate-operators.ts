@@ -418,14 +418,16 @@ export class ConvectionRateOperator implements RateOperator {
   }
 
   /**
-   * Wetted-surface heat transfer coefficient: single-phase forced convection
-   * (Dittus-Boelter at the connection's characteristic diameter) plus, for a
-   * saturated (two-phase) node, a phase-change term.
+   * Wetted-surface heat transfer coefficient: single-phase convection -
+   * Dittus-Boelter blended with Churchill-Chu on the liquid's own Rayleigh
+   * number, both on properties read at the node's temperature - plus, for a
+   * saturated (two-phase) node with a HOT wall, boiling.
    *
-   * Cold walls (condensation): Thom's nucleate-boiling correlation with a
-   * Zuber critical-heat-flux saturation, added to the convective term
-   * (Rohsenow superposition) - condensation has no boiling crisis, so the
-   * saturated-Thom form applies at any subcooling.
+   * Cold walls get the single-phase term and nothing else. See the comment
+   * at the branch itself for why there is no condensation term here: it is a
+   * wall that cannot nucleate, the vapor-exposed share of the same surface
+   * already carries condensation, and the latent heat is in the node's
+   * (u,v) bookkeeping either way.
    *
    * Hot walls (boiling): the full boiling curve. Below the critical heat
    * flux the same saturated-Thom nucleate term applies. Past the boiling
@@ -544,42 +546,47 @@ export function liquidWallHeatTransfer(
     const singlePhase = h;
     let phaseChange = 0;
 
-    // Phase-change enhancement on saturated nodes
+    // Boiling on a HOT wall in a saturated node. There is deliberately no
+    // matching branch for a cold one.
+    //
+    // Nucleate boiling is a wall process: vapor is generated AT the surface,
+    // out of cavities that only nucleate when the wall is superheated, and
+    // the correlation is really a statement about how many of those sites are
+    // active. A subcooled wall nucleates nothing, so there is no
+    // wall-anchored condensation phenomenon for an inverted boiling
+    // correlation to describe - which is what used to sit here, Thom run
+    // backwards on the wetted fraction of a cold wall.
+    //
+    // What condensation there is happens on the VAPOR-exposed share of the
+    // surface, and effectiveSurfaceAreas already splits it off and hands it
+    // to the condensation model on the vapor side. Adding a phase-change term
+    // to the wetted share on top of that describes the same vapor twice.
+    //
+    // Nor is any latent heat lost by dropping it: phase comes from (u,v), so
+    // energy taken out of a two-phase node condenses vapor inside the node as
+    // a matter of bookkeeping. `h` only ever set the RATE.
+    //
+    // Measured before removing it, because it was not dead code - it fired on
+    // 60-80% of samples on every outer casing wall in every water preset, and
+    // was 93-95% of those surfaces' coefficient. It made no difference
+    // anyway: on all of them the far side is a gas, and a 7 W/m²-K gas film
+    // against a 17000 W/m²-K liquid one IS the resistance. Settled pwr, with
+    // against without: 360.4 vs 364.2 kW across the wall, SG duty 1040903 vs
+    // 1039918 kW, the wall sitting 0.338 vs 0.526 K under the fluid. What it
+    // did change is how fast the wall gets there - about 20x - so casing
+    // metal now takes minutes rather than seconds to find its offset.
     if (fluid.phase === 'two-phase') {
       const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
-      if (thermalNode) {
-        const dTsigned = thermalNode.temperature - fluid.temperature;
-        const P = fluid.pressure;
-        if (dTsigned < 0) {
-          // Cold wall: condensation - no vapor blanketing, so the saturated-
-          // Thom enhancement applies at any subcooling.
-          // Thom: dT_sat = 22.65 * q[MW/m²]^0.5 * exp(-P/8.7 MPa)
-          //   =>  q = (dT * exp(P/8.7e6) / 22.65)^2 * 1e6  [W/m²]
-          // Zuber saturation q = qThom / (1 + qThom/qCHF) keeps the flux from
-          // running to absurd values at large subcooling.
-          //
-          // The `/ dT` at the end is what turns a FLUX into a coefficient,
-          // and it went missing here in bbe107c: that refactor added the
-          // hot-wall boiling curve (which does divide - `f * (qNb / dT)`) and
-          // dropped the division from this branch while moving it. The result
-          // was W/m² being added to a W/m²-K, so the term ran a factor of dT
-          // too large - five times at 5 K of subcooling, fifty at 50 - and a
-          // cold wall in a saturated pool was pinned to the fluid.
-          const dT = -dTsigned;
-          const qThom = Math.pow((dT * Math.exp(P / 8.7e6)) / 22.65, 2) * 1e6;
-          const qCHF = zuberCriticalHeatFlux(fluid.temperature);
-          if (qCHF > 0) { phaseChange = qThom / (1 + qThom / qCHF) / dT; h += phaseChange; }
-        } else if (dTsigned > 0) {
-          // Hot wall: full boiling curve with post-CHF collapse.
-          // Convection and nucleate boiling act only on the wetted fraction;
-          // the vapor film replaces (not augments) them on the rest of the
-          // surface - this IS the h collapse.
-          const { wettedFraction, h_phaseChange } = boilingCurve(
-            fluid.temperature, P, thermalNode.temperature, D
-          );
-          h = wettedFraction * h + h_phaseChange;
-          phaseChange = h_phaseChange;
-        }
+      if (thermalNode && thermalNode.temperature > fluid.temperature) {
+        // Full boiling curve with post-CHF collapse. Convection and nucleate
+        // boiling act only on the wetted fraction; the vapor film replaces
+        // (not augments) them on the rest of the surface - this IS the h
+        // collapse.
+        const { wettedFraction, h_phaseChange } = boilingCurve(
+          fluid.temperature, fluid.pressure, thermalNode.temperature, D
+        );
+        h = wettedFraction * h + h_phaseChange;
+        phaseChange = h_phaseChange;
       }
     }
 

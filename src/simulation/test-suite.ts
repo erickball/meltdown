@@ -1907,36 +1907,46 @@ test('water expansivity passes through zero at the 4 C density maximum', () => {
     'a liquid is not a gas: beta must be far below 1/T');
 });
 
-test('a cold wall in a saturated pool gets a COEFFICIENT, not a flux', () => {
-  // bbe107c moved the nucleate-boiling algebra into boilingCurve for hot
-  // walls and dropped the `/ dT` from the cold-wall branch on the way past,
-  // so W/m² was being added to a W/m²-K and the term ran a factor of dT too
-  // large. The invariant that catches it: h * dT has to reproduce the flux
-  // the correlation was asked for, and h must NOT scale linearly with dT the
-  // way a mis-divided flux does.
+test('a cold wall in a saturated pool gets NO phase-change term', () => {
+  // Nucleate boiling is a wall process - vapor comes out of cavities that
+  // only activate on a superheated surface - so a subcooled wall has nothing
+  // to nucleate and there is no wall-anchored condensation for an inverted
+  // boiling correlation to describe. What condensation there is happens on
+  // the VAPOR-exposed share of the surface, which effectiveSurfaceAreas
+  // splits off and hands to the vapor-side model, and the latent heat lands
+  // in the node's (u,v) bookkeeping regardless.
   const P = 70e5;
   const T_sat = saturationTemperature(P);
-  const hAt = (subcooling: number) => {
+  const at = (subcooling: number) => {
     const { node, state, conn } = saturatedPool(P, T_sat, T_sat - subcooling);
-    return liquidWallHeatTransfer(node, state, conn, 0.02).phaseChange;
+    return liquidWallHeatTransfer(node, state, conn, 0.02);
   };
-  // The sharpest signature is the SHAPE. The Zuber saturation caps the flux
-  // near the critical heat flux, so a properly divided coefficient rises,
-  // peaks around 20 K and then FALLS as dT keeps growing under a capped
-  // numerator. Undivided it is the flux itself, which only ever climbs.
-  const h5 = hAt(5), h20 = hAt(20), h50 = hAt(50);
-  assert(h20 > h5, 'h should rise with subcooling while the flux is still growing');
-  assert(h50 < h20,
-    `h must turn over once the flux saturates at CHF, got ${h5.toExponential(1)} -> ` +
-    `${h20.toExponential(1)} -> ${h50.toExponential(1)}`);
-  // And the flux it implies has to stay bounded by the boiling crisis rather
-  // than running to hundreds of MW/m².
-  const flux50 = h50 * 50;
-  assert(flux50 < 6e6,
-    `implied flux must stay near the Zuber CHF, got ${(flux50 / 1e6).toFixed(1)} MW/m²`);
-  // Magnitude: a plausible coefficient, not a flux wearing its units.
-  assert(h5 > 1e3 && h5 < 2e5,
-    `5 K subcooling should give a coefficient in the 10^3-10^5 range, got ${h5.toExponential(1)}`);
+  for (const sub of [0.5, 5, 20, 50]) {
+    const h = at(sub);
+    assertClose(h.phaseChange, 0, 1e-12,
+      `${sub} K of subcooling must add no phase-change term`);
+    assertClose(h.total, h.singlePhase, 1e-9,
+      `${sub} K: the total must be the single-phase coefficient alone`);
+  }
+  // It is not zero heat transfer - single-phase convection still runs, and
+  // now on real properties rather than the 500 W/m²-K floor it used to hit.
+  assert(at(5).total > 100, `a cold wall still convects, got ${at(5).total.toFixed(0)}`);
+});
+
+test('a HOT wall in the same pool still boils', () => {
+  // The asymmetry is the point: removing the cold-wall term must not touch
+  // the boiling curve on the other side of the crossing.
+  const P = 70e5;
+  const T_sat = saturationTemperature(P);
+  const hot = (superheat: number) => {
+    const { node, state, conn } = saturatedPool(P, T_sat, T_sat + superheat);
+    return liquidWallHeatTransfer(node, state, conn, 0.02);
+  };
+  assert(hot(5).phaseChange > 1e3,
+    `5 K of superheat should boil, got ${hot(5).phaseChange.toExponential(1)}`);
+  // And the crisis is still in there: past CHF the coefficient collapses.
+  assert(hot(200).phaseChange < hot(20).phaseChange,
+    'the post-CHF collapse must survive');
 });
 
 test('a quiescent liquid surface gets a Rayleigh number, not a floor of 500', () => {
