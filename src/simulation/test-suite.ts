@@ -46,6 +46,7 @@ import {
   superheatedV,
   evaluateOtsg,
   evaluateOtsgPartition,
+  counterflowOutletTemp,
   OtsgWallPin,
   otsgRates,
   boilingMeanQuality,
@@ -1150,7 +1151,13 @@ const PART_GEOM = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
  *  soaks fully to its metal). A wall at 273 K pins the steam at saturation -
  *  the dryout limit. */
 function pinAt(TWall3: number, WCp3 = 0): OtsgWallPin {
-  return { TWall3, hA3Full: 1200 * PART_GEOM.heatArea, WCp3 };
+  // Gas side: the ramp tops out AT the wall (TGasIn3 = TWall3) with an
+  // effectively infinite gas stream, so "soaks fully to its metal" keeps
+  // exactly the meaning it had before the outlet learned about the gas.
+  return {
+    TWall3, hA3Full: 1200 * PART_GEOM.heatArea, WCp3,
+    TGasIn3: TWall3, hAGas3Full: 1200 * PART_GEOM.heatArea, CGas3: 1e8,
+  };
 }
 const PIN_COLD = pinAt(273);
 /** Total section volume - the quantity an integrated m3 used to violate. */
@@ -1234,7 +1241,8 @@ test('a constructed three-section state round-trips, pressure included', () => {
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
   const ev = evaluateOtsgPartition(
     m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, m1, uFeed, geom,
-    { TWall3: T3, hA3Full: 1200 * geom.heatArea, WCp3: 0 });
+    { TWall3: T3, hA3Full: 1200 * geom.heatArea, WCp3: 0,
+      TGasIn3: T3, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 });
   assertClose(ev.P / 1e5, 80, 0.8, 'the pressure the partition was built at comes back');
   assertClose(ev.sections[0].mass, m1, 1e-2 * m1, 'economizer mass recovered');
   assertClose(ev.sections[1].mass, m2, 5e-2 * m2, 'boiling mass recovered');
@@ -1267,7 +1275,8 @@ test('the published pressure is the partition\'s, not the mush read', () => {
     `the uniform read of a partitioned boiler must be badly biased low, got ${(mushP / 1e5).toFixed(1)} bar`);
   const ev = evaluateOtsgPartition(m, U, m1, uFeed,
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
-    { TWall3: calculateState(1, u3, v3).temperature, hA3Full: 1200 * 2000, WCp3: 0 });
+    { TWall3: calculateState(1, u3, v3).temperature, hA3Full: 1200 * 2000, WCp3: 0,
+      TGasIn3: calculateState(1, u3, v3).temperature, hAGas3Full: 1200 * 2000, CGas3: 1e8 });
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
 });
 
@@ -1473,7 +1482,8 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
   assertClose(water.energy / 1e9, mass * uW / 1e9, 0.01 * mass * uW / 1e9,
     'as must the water energy');
 
-  const testPin = { TWall3: satW.T + 60, hA3Full: 1200 * geom.heatArea, WCp3: 0 };
+  const testPin = { TWall3: satW.T + 60, hA3Full: 1200 * geom.heatArea, WCp3: 0,
+    TGasIn3: satW.T + 60, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 };
   const withGas = evaluateOtsgPartition(mass, water.energy, 0, satW.u_f - 300e3, geom, testPin);
   const noGas = evaluateOtsgPartition(mass, mass * uW, 0, satW.u_f - 300e3, geom, testPin);
   assertClose(withGas.P / 1e5, noGas.P / 1e5, 0.02 * noGas.P / 1e5,
@@ -1522,6 +1532,76 @@ test('mean volume and mean quality are the same statement', () => {
       `v_f + x-bar*dv must reproduce v-bar at xOut=${xOut}`);
     assert(v > sat.v_f && v <= sat.v_g, `v-bar must lie inside the dome at xOut=${xOut}`);
   }
+});
+
+test('the counterflow outlet pinches at the gas inlet, not at twice the wall', () => {
+  // The relation itself, at its limits. The old ramping form's outlet ran to
+  // theta = 2 at weak draw, which is how a dried-out boiler offered its MSSV
+  // steam hotter than the helium heating it.
+  const TIn = 620, TGas = 1023;  // K: saturation in, Xe-100 helium inlet
+  const hA = 1200 * 2000, hAg = 300 * 2000;
+  // Weak draw: NTU huge, outlet must approach the gas inlet FROM BELOW.
+  const weak = counterflowOutletTemp(TIn, TGas, hA, hAg, 50, 4e5);
+  assert(weak <= TGas && weak > TGas - 1,
+    `a near-zero draw should soak to the gas inlet, got ${weak.toFixed(1)} vs ${TGas}`);
+  // Zero draw is the same limit exactly, not a special case.
+  assertClose(counterflowOutletTemp(TIn, TGas, hA, hAg, 0, 4e5), TGas, 1e-9,
+    'zero draw is the NTU->infinity limit');
+  // Monotone in draw: more flow, less approach.
+  const mid = counterflowOutletTemp(TIn, TGas, hA, hAg, 1e5, 4e5);
+  const strong = counterflowOutletTemp(TIn, TGas, hA, hAg, 3e5, 4e5);
+  assert(weak > mid && mid > strong, 'the approach must fall as the draw grows');
+  // And NOTHING exceeds the gas inlet, at any capacity ratio.
+  for (const Cw of [10, 1e4, 1e5, 4e5, 1e6]) {
+    const T = counterflowOutletTemp(TIn, TGas, hA, hAg, Cw, 4e5);
+    assert(T <= TGas + 1e-9 && T >= TIn,
+      `outlet must stay in [T_in, T_gas_in], got ${T.toFixed(1)} at Cw=${Cw}`);
+  }
+  // A gas inlet BELOW the steam inlet heats nothing - continuous, not clamped.
+  assertClose(counterflowOutletTemp(TIn, TIn - 50, hA, hAg, 1e4, 4e5), TIn, 1e-12,
+    'cold gas drives no superheat');
+});
+
+test('a weakly drawn superheat section offers steam bounded by its gas', () => {
+  // The partition end of the same statement: build a dried-out-ish state
+  // with a hot wall, a hotter gas inlet, and almost no draw, and check the
+  // OFFERED enthalpy against the ceiling the gas can support - the bound
+  // that used to be violated by 50-70 K.
+  const sat = saturationAtP(150e5);
+  const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+  const TGasIn = 1023;   // 750 C helium
+  const pin: OtsgWallPin = {
+    TWall3: 900, hA3Full: 1200 * geom.heatArea, WCp3: 3000 * 3, // ~3 kg/s draw
+    TGasIn3: TGasIn, hAGas3Full: 300 * geom.heatArea, CGas3: 2e5,
+  };
+  // Mass/energy that lands well into the superheat regime with a small slug.
+  const mass = 400;
+  const U = mass * 2.85e6;
+  const ev = evaluateOtsgPartition(mass, U, 30, sat.u_f - 300e3, geom, pin);
+  assert(ev.regime === 'superheat', `test state should superheat, got '${ev.regime}'`);
+  const s3 = ev.sections[2];
+  // The ceiling from the property surface itself, via the INVERSE map the
+  // rest of the plant applies to this enthalpy: bisect h until stateAtPh
+  // lands on the gas inlet temperature. Pricing the ceiling with a cp-linear
+  // extension instead would repeat the bug this test exists to catch - the
+  // first version of the fix bounded the temperature correctly and still
+  // delivered 900 C-equivalent enthalpy through the near-dome slope.
+  let hLo = ev.sat.h_g, hHi = ev.sat.h_g + 3e6;
+  for (let i = 0; i < 60; i++) {
+    const hm = 0.5 * (hLo + hHi);
+    if (stateAtPh(ev.P, hm).T < TGasIn) hLo = hm; else hHi = hm;
+  }
+  const hCeiling = 0.5 * (hLo + hHi);
+  assert(ev.hSteamOut <= hCeiling + 5e3,
+    `offered steam must stay under the gas ceiling: ` +
+    `${(ev.hSteamOut / 1e3).toFixed(0)} vs ${(hCeiling / 1e3).toFixed(0)} kJ/kg ` +
+    `(T-equivalent ${(stateAtPh(ev.P, ev.hSteamOut).T - 273.15).toFixed(0)} vs ` +
+    `${(TGasIn - 273.15).toFixed(0)} C)`);
+  // And it still leaves hotter than the section mean - the counterflow
+  // outlet property the linear form was right about.
+  assert(ev.hSteamOut > s3.hBar,
+    `the outlet should exceed the mean: ${(ev.hSteamOut / 1e3).toFixed(0)} vs ` +
+    `${(s3.hBar / 1e3).toFixed(0)} kJ/kg`);
 });
 
 // ============================================================================

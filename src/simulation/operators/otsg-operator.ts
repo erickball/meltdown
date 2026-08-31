@@ -178,11 +178,86 @@ export function otsgWallPin(
     throw new Error(`[OTSG] node '${node.id}': superheat metal node ` +
       `'${cfg.metalNodeIds[2]}' does not exist.`);
   }
+  const shell = state.flowNodes.get(cfg.shellNodeId);
+  if (!shell) {
+    throw new Error(`[OTSG] node '${node.id}': shell node '${cfg.shellNodeId}' ` +
+      `does not exist.`);
+  }
   return {
     TWall3: metal3.temperature,
     hA3Full: H_TUBE_STEAM * cfg.heatArea,
     WCp3: Math.max(0, flows.WSteamOut) * CP_STEAM_PIN,
+    // Gas side of the same section, from the same reads the march uses -
+    // one source, so the outlet's ceiling and the duty cannot disagree
+    // about what gas the bundle is sitting in.
+    TGasIn3: otsgGasInletTemp(state, shell),
+    hAGas3Full: otsgGasFilmCoefficient(shell, state) * cfg.heatArea,
+    CGas3: otsgGasMcp(shell, state) * (cfg.gasShare ?? 1),
   };
+}
+
+/**
+ * The gas temperature entering the bundle's shell - the upstream donor's,
+ * not the shell's own bulk. A well-mixed shell node sits at its OUTLET
+ * temperature, and both the march and the superheat outlet's ceiling need
+ * the other end of it.
+ */
+export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): number {
+  let TGasIn = shell.fluid.temperature;
+  for (const fc of state.flowConnections) {
+    if (fc.toNodeId === shell.id && fc.massFlowRate > 1e-6) {
+      const donor = state.flowNodes.get(fc.fromNodeId);
+      if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
+    } else if (fc.fromNodeId === shell.id && fc.massFlowRate < -1e-6) {
+      const donor = state.flowNodes.get(fc.toNodeId);
+      if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
+    }
+  }
+  return TGasIn;
+}
+
+/** Shell-side film coefficient (W/m2-K): crossflow Dittus-Boelter on the
+ *  actual gas mixture, floored at natural convection. */
+export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
+  const throughput = otsgShellThroughput(shell, state);
+  const ncg = shell.fluid.ncg;
+  const T = shell.fluid.temperature;
+  const k = ncg && totalMoles(ncg) > 0 ? mixtureThermalConductivity(ncg, T) : 0.05;
+  const mu = ncg && totalMoles(ncg) > 0 ? mixtureViscosity(ncg, T) : 3e-5;
+  const cp = otsgGasCpPerKg(shell);
+  const rho = approxVaporDensity(shell);
+  const D = 0.019; // tube OD - the crossflow characteristic length
+  const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
+  const Re = mu > 0 ? (rho * v * D) / mu : 0;
+  const Pr = k > 0 ? (cp * mu) / k : 0.7;
+  const hForced = Re > 10
+    ? 0.023 * Math.pow(Re, 0.8) * Math.pow(Math.max(0.1, Pr), 0.4) * k / D
+    : 0;
+  return Math.max(60, hForced);
+}
+
+/** Gas capacity rate mdot*cp through the shell (W/K). */
+export function otsgGasMcp(shell: FlowNode, state: SimulationState): number {
+  return otsgShellThroughput(shell, state) * otsgGasCpPerKg(shell);
+}
+
+function otsgShellThroughput(shell: FlowNode, state: SimulationState): number {
+  let throughput = 0;
+  for (const fc of state.flowConnections) {
+    if (fc.fromNodeId === shell.id || fc.toNodeId === shell.id) {
+      throughput += Math.abs(fc.massFlowRate);
+    }
+  }
+  return throughput / 2; // in + out both counted
+}
+
+function otsgGasCpPerKg(shell: FlowNode): number {
+  const ncg = shell.fluid.ncg;
+  if (ncg && totalMoles(ncg) > 0) {
+    const M = averageMolecularWeight(ncg);
+    return M > 0 ? mixtureCp(ncg) / M : 5195;
+  }
+  return 2000; // steam-ish
 }
 
 /**
@@ -357,16 +432,7 @@ export class OtsgRateOperator implements RateOperator {
       // plug-flow OUTLET temperature - the transit-branch principle applied
       // to the gas side. Marching from bulk instead left the cold leg 200 C
       // hot because the counterflow outlet never propagated downstream.
-      let TGasIn = shell.fluid.temperature;
-      for (const fc of state.flowConnections) {
-        if (fc.toNodeId === shell.id && fc.massFlowRate > 1e-6) {
-          const donor = state.flowNodes.get(fc.fromNodeId);
-          if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
-        } else if (fc.fromNodeId === shell.id && fc.massFlowRate < -1e-6) {
-          const donor = state.flowNodes.get(fc.toNodeId);
-          if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
-        }
-      }
+      const TGasIn = otsgGasInletTemp(state, shell);
       // Counterflow: gas physically meets the superheat section first, and
       // each section has its OWN metal - one shared wall cannot superheat
       // (boiling pins it to T_sat and clamps every other section's wall).
@@ -449,46 +515,11 @@ export class OtsgRateOperator implements RateOperator {
   /** Shell-gas film coefficient (W/m2-K): Dittus-Boelter on the shell node's
    *  through-flow, mixture properties, with a natural-convection floor. */
   private gasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
-    let throughput = 0;
-    for (const fc of state.flowConnections) {
-      if (fc.fromNodeId === shell.id || fc.toNodeId === shell.id) {
-        throughput += Math.abs(fc.massFlowRate);
-      }
-    }
-    throughput /= 2; // in + out both counted
-    const ncg = shell.fluid.ncg;
-    const T = shell.fluid.temperature;
-    const k = ncg && totalMoles(ncg) > 0 ? mixtureThermalConductivity(ncg, T) : 0.05;
-    const mu = ncg && totalMoles(ncg) > 0 ? mixtureViscosity(ncg, T) : 3e-5;
-    const cp = this.gasCpPerKg(shell);
-    const rho = approxVaporDensity(shell);
-    const D = 0.019; // tube OD - the crossflow characteristic length
-    const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
-    const Re = mu > 0 ? (rho * v * D) / mu : 0;
-    const Pr = k > 0 ? (cp * mu) / k : 0.7;
-    const hForced = Re > 10
-      ? 0.023 * Math.pow(Re, 0.8) * Math.pow(Math.max(0.1, Pr), 0.4) * k / D
-      : 0;
-    return Math.max(60, hForced);
+    return otsgGasFilmCoefficient(shell, state);
   }
 
   private gasMcp(shell: FlowNode, state: SimulationState): number {
-    let throughput = 0;
-    for (const fc of state.flowConnections) {
-      if (fc.fromNodeId === shell.id || fc.toNodeId === shell.id) {
-        throughput += Math.abs(fc.massFlowRate);
-      }
-    }
-    return (throughput / 2) * this.gasCpPerKg(shell);
-  }
-
-  private gasCpPerKg(shell: FlowNode): number {
-    const ncg = shell.fluid.ncg;
-    if (ncg && totalMoles(ncg) > 0) {
-      const M = averageMolecularWeight(ncg);
-      return M > 0 ? mixtureCp(ncg) / M : 5195;
-    }
-    return 2000; // steam-ish
+    return otsgGasMcp(shell, state);
   }
 }
 

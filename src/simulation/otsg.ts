@@ -606,6 +606,60 @@ export interface OtsgWallPin {
   TWall3: number;   // K   - the superheat section's metal temperature
   hA3Full: number;  // W/K - steam-film conductance if section 3 owned the whole bundle
   WCp3: number;     // W/K - steam draw's carrying capacity (W_steam * cp)
+  // The gas side of the same section, for the OUTLET. The mean above only
+  // needs the metal; the outlet needs to know where the metal's ramp TOPS
+  // OUT, and that is the gas inlet - the one temperature in the machine
+  // nothing downstream of it may exceed.
+  TGasIn3: number;    // K   - gas temperature entering the superheat section
+  hAGas3Full: number; // W/K - gas-film conductance if section 3 owned the whole bundle
+  CGas3: number;      // W/K - gas capacity rate through this bundle (mdot * cp * share)
+}
+
+/**
+ * Steam outlet temperature of a counterflow passage, from the standard
+ * effectiveness-NTU relation:
+ *
+ *     eps = (1 - e^(-NTU (1-Cr))) / (1 - Cr e^(-NTU (1-Cr)))
+ *     T_out = T_in + eps * (C_min / C_water) * (T_gas_in - T_in)
+ *
+ * with UA the two films in series across the (thin) tube wall, C_min/C_max
+ * the two capacity rates, NTU = UA/C_min.
+ *
+ * This exists because the closure's linear-profile forms cannot express the
+ * one bound that matters at low flow. The ramping theta (2NTU/(2+NTU)) tends
+ * to 2, so a weakly-drawn section's OUTLET extrapolates to twice its
+ * average-wall superheat - which is how the Xe-100's dried-out boiler offered
+ * the MSSV line steam 50-70 K hotter than the helium heating it. The
+ * effectiveness form contains the limit intrinsically: as the draw vanishes,
+ * NTU diverges, eps -> 1 and the outlet pinches at the GAS INLET, the
+ * physical ceiling. At small NTU it reduces to the same linear behaviour the
+ * closure already had, so the design point does not move.
+ *
+ * The limits are continuous, not special cases: a zero draw is the
+ * NTU -> infinity limit (a parcel soaking to the hot inlet), a dead gas
+ * stream heats nothing, and a hot inlet below the steam inlet drives the
+ * approach to zero from the (T_gas_in - T_in) factor itself.
+ */
+export function counterflowOutletTemp(
+  TIn: number, TGasIn: number,
+  hAWater: number, hAGas: number,
+  CWater: number, CGas: number,
+): number {
+  if (!(hAWater > 0) || !(hAGas > 0) || !(CGas > 0) || !(TGasIn > TIn)) return TIn;
+  const UA = 1 / (1 / hAWater + 1 / hAGas);
+  if (!(CWater > 1e-9)) return TGasIn;   // the NTU -> infinity limit, exactly
+  const Cmin = Math.min(CWater, CGas);
+  const Cmax = Math.max(CWater, CGas);
+  const Cr = Cmin / Cmax;
+  const NTU = UA / Cmin;
+  let eps: number;
+  if (1 - Cr < 1e-6) {
+    eps = NTU / (1 + NTU);               // balanced-flow limit of the same relation
+  } else {
+    const e = Math.exp(-NTU * (1 - Cr));
+    eps = (1 - e) / (1 - Cr * e);
+  }
+  return TIn + eps * (Cmin / CWater) * (TGasIn - TIn);
 }
 
 export function evaluateOtsgPartition(
@@ -619,6 +673,18 @@ export function evaluateOtsgPartition(
 ): OtsgEval {
   if (!Number.isFinite(m1Ledger) || m1Ledger < 0) {
     throw new Error(`[OTSG] economizer ledger is not a physical mass: m1=${m1Ledger} kg`);
+  }
+  // A half-built pin would silently price every draw at saturation (the
+  // effectiveness guards read an undefined gas side as "nothing to heat
+  // with"), and tsconfig excludes the test files where hand-built pins
+  // live - so the closure checks its own inputs. Zero is a legitimate
+  // value for the conductances and capacity rate; undefined is not.
+  if (!Number.isFinite(pin.TGasIn3) || !Number.isFinite(pin.hAGas3Full) ||
+      !Number.isFinite(pin.CGas3)) {
+    throw new Error(`[OTSG] wall pin has no gas side (TGasIn3=${pin.TGasIn3}, ` +
+      `hAGas3Full=${pin.hAGas3Full}, CGas3=${pin.CGas3}) - the superheat outlet ` +
+      `has no ceiling without it. Build pins through otsgWallPin, or supply all ` +
+      `three fields.`);
   }
   const V = geom.tubeVolume;
 
@@ -676,15 +742,53 @@ export function evaluateOtsgPartition(
         x2Out = 0.5 * (lo + hi);
       }
     }
-    // The draw leaves from the section's OUTLET - but the linear profile's
-    // outlet (2 h_bar - h_g) only exists when a boiling section actually
-    // FEEDS this one at saturation, so the inlet assumption fades with the
-    // boiling section's own presence. A supercritical pass has no h_g inlet
-    // at all (its inlet is the feed) and draws at its mean.
+    // The draw leaves from the section's OUTLET, which is a heat-transfer
+    // result, not a profile reconstruction. This used to be the linear
+    // inversion 2 h_bar - h_g, which is unbounded against the heat source:
+    // at weak draw its theta tends to 2, and the dried-out Xe-100 offered
+    // its MSSV line steam hotter than the helium. The counterflow
+    // effectiveness form pinches at the gas inlet instead, and reduces to
+    // the same linear behaviour at the design point (see
+    // counterflowOutletTemp).
+    //
+    // The outlet's temperature becomes an enthalpy by inverting the real
+    // property surface at (TOut, P) - the same u3AtTemperature the mean pin
+    // already uses. NOT by a cp-linear extension: steam's cp near the dome
+    // at these pressures is ~4.6 kJ/kg-K and falls to ~2.7 by 700 C, so the
+    // section's own near-dome slope stretched over hundreds of kelvin
+    // over-priced the outlet by ~400 kJ/kg - a correctly bounded
+    // TEMPERATURE arriving downstream as an unbounded enthalpy, which is
+    // the exact bug this replaces wearing different units. finish() runs
+    // once per evaluation, outside the pressure iteration, so the inversion
+    // is paid where the mean pin already pays it.
+    //
+    // The inlet-at-saturation assumption only exists while a boiling
+    // section actually FEEDS this one, so it fades with the boiling
+    // section's presence (w2), draws landing at the section mean without
+    // it. A supercritical pass has no h_g inlet at all (its inlet is the
+    // feed) and draws at its mean.
     const w2 = m2 / (m2 + 1);
-    const hSteamOut = m3 <= 0 ? sat.h_g
-      : regime === 'supercritical' ? h3Bar
-      : Math.max(sat.h_g, h3Bar + w2 * (h3Bar - sat.h_g));
+    let hSteamOut: number;
+    if (m3 <= 0) {
+      hSteamOut = sat.h_g;
+    } else if (regime === 'supercritical') {
+      hSteamOut = h3Bar;
+    } else {
+      const L3frac = V3 / VT;
+      const TOut = counterflowOutletTemp(
+        sat.T, pin.TGasIn3,
+        pin.hA3Full * L3frac, pin.hAGas3Full * L3frac,
+        pin.WCp3, pin.CGas3);
+      let hEps = sat.h_g;
+      if (TOut > sat.T + 0.5) {
+        const uOut = u3AtTemperature(TOut, P, sat, probe,
+          Math.max(u3, sat.u_g + 10e3), pin.TGasIn3);
+        const vOut = superheatedV(uOut, P, 1e-6,
+          v3 > sat.v_g ? v3 : undefined, sat);
+        hEps = uOut + P * vOut;
+      }
+      hSteamOut = Math.max(sat.h_g, w2 * hEps + (1 - w2) * h3Bar);
+    }
     return {
       P, sat,
       sections: [
