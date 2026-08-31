@@ -21,6 +21,7 @@ import { buildSimFromFile, run } from './lib/sim-harness';
 import { FlowRateOperator } from '../src/simulation/operators/rate-operators';
 import { calculateState } from '../src/simulation/water-properties';
 import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
+import { stateAtPh } from '../src/simulation/turbine-expansion';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PRESET = path.join(HERE, '..', 'src', 'presets', 'xe100.json');
@@ -52,9 +53,14 @@ function trueEnthalpy(id: string): { u: number; h: number; T: number; P: number 
   }
 }
 
-console.log('\n=== MSSV tap pricing: what the transport charges vs what the state is worth ===');
-console.log('   t(s)   msv_T(C)  |  msv: priced   true_h    delta  |  ' +
-  'tube: priced   true_h    delta  |  net per cycle');
+console.log('\n=== Is the offered steam bounded by the gas heating it? ===');
+console.log('  T_out = T(hSteamOut, P): what the extrapolated outlet enthalpy is');
+console.log('  actually worth as a temperature. It may not exceed the helium INLET');
+console.log('  (cv-1-inner) - the hottest gas the hot end of a counterflow bundle sees.');
+console.log('  T_eq = T(hSteamOut, P_msv): where a correctly-priced dead-ended breather');
+console.log('  equilibrates. If the valve tracks it, the valve is innocent.');
+console.log('   t(s)  m2(kg)  m3(kg)  T3mean   h_out   T_out   T_He_in   ' +
+  'msv_T    T_eq   msv-T_eq');
 
 function line() {
   const node = st().flowNodes.get('hx-1-tube');
@@ -62,29 +68,26 @@ function line() {
   let ev: any;
   try { ev = evaluateOtsgSections(st(), 'hx-1-tube', node).ev; } catch { return; }
   const s3 = ev.sections[2];
-  const u3 = ev.u3, v3 = s3.vBar;
-  // What the code charges: u3 + P_bulk * v3.
-  const hCharged = (u3 + ev.P * v3) / 1e3;
-  // What that state is actually worth: its OWN pressure from the tables.
-  let pImplied = NaN, hTrue = NaN, tState = NaN;
-  try {
-    const stt = calculateState(1, u3, v3);
-    pImplied = stt.pressure;
-    tState = stt.temperature - 273.15;
-    hTrue = (u3 + pImplied * v3) / 1e3;
-  } catch { /* off-grid */ }
-  const cached = (node.otsg as any).lastEval?.hSteamOut;
+  const T3 = s3.T - 273.15;
+  const heIn = (st().flowNodes.get('cv-1-inner')?.fluid.temperature ?? NaN) - 273.15;
   const msv = st().flowNodes.get('val-msv-1');
-  const msvU = msv && msv.fluid.mass > 0
-    ? (msv.fluid as any).internalEnergy / msv.fluid.mass : NaN;
+  const msvT = (msv?.fluid.temperature ?? NaN) - 273.15;
+  let tOut = NaN, tEq = NaN;
+  try { tOut = stateAtPh(ev.P, ev.hSteamOut).T - 273.15; } catch { /* off-grid */ }
+  try {
+    if (msv) tEq = stateAtPh(msv.fluid.pressure, ev.hSteamOut).T - 273.15;
+  } catch { /* off-grid */ }
   console.log(
-    `${st().time.toFixed(0).padStart(7)} ${s3.mass.toFixed(1).padStart(8)} ` +
-    `${tState.toFixed(0).padStart(7)} ` +
-    `${(ev.hSteamOut / 1e3).toFixed(0).padStart(9)} ` +
-    `${(cached === undefined ? NaN : cached / 1e3).toFixed(0).padStart(10)} ` +
-    `${(cached === undefined ? NaN : (cached - ev.hSteamOut) / 1e3).toFixed(0).padStart(8)}   ` +
-    `${((msv?.fluid.temperature ?? NaN) - 273.15).toFixed(0).padStart(8)} ` +
-    `${(msvU / 1e3).toFixed(0).padStart(7)}`);
+    `${st().time.toFixed(0).padStart(7)} ` +
+    `${ev.sections[1].mass.toFixed(1).padStart(7)} ` +
+    `${s3.mass.toFixed(1).padStart(7)} ` +
+    `${T3.toFixed(0).padStart(7)} ` +
+    `${(ev.hSteamOut / 1e3).toFixed(0).padStart(7)} ` +
+    `${tOut.toFixed(0).padStart(7)} ` +
+    `${heIn.toFixed(0).padStart(9)} ` +
+    `${msvT.toFixed(0).padStart(7)} ` +
+    `${tEq.toFixed(0).padStart(7)} ` +
+    `${(msvT - tEq).toFixed(0).padStart(9)}`);
 }
 
 line();
