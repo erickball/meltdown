@@ -266,9 +266,10 @@
             "direction": "out"
           }
         ],
+        "designInletPressure": 7200000,
         "inletFluid": {
-          "temperature": 559,
-          "pressure": 7200000,
+          "temperature": 319,
+          "pressure": 10000,
           "phase": "vapor",
           "quality": 1,
           "flowRate": 0

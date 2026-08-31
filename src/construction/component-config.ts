@@ -690,7 +690,7 @@ export const componentDefinitions: Record<string, {
       ]},
       { name: 'stages', type: 'number', label: 'Number of Stages', default: 3, min: 1, max: 5, step: 1 },
       { name: 'ratedPower', type: 'number', label: 'Rated Power', default: 1000, min: 100, max: 2000, step: 100, unit: 'MW' },
-      { name: 'inletPressure', type: 'number', label: 'Inlet Pressure', default: 60, min: 10, max: 100, step: 5, unit: 'bar', help: 'Initial steam condition in the casing. After a simulation has run, this shows the CURRENT inlet condition (it becomes the restart condition if you edit the turbine).' },
+      { name: 'inletPressure', type: 'number', label: 'Inlet Pressure', default: 60, min: 10, max: 100, step: 5, unit: 'bar', help: 'Steam supply (throttle) pressure the machine is built for - sets the rated steam flow and the design point below. The casing itself starts at exhaust pressure (a machine before steam admission holds condenser-side steam, not live steam). After a simulation has run, this shows the CURRENT casing condition (it becomes the restart condition if you edit the turbine).' },
       { name: 'designInletPressure', type: 'number', label: 'Design Inlet Pressure', default: 0, min: 0, max: 250, step: 5, unit: 'bar', help: 'Design point for the swallowing capacity (Stodola cone law, with Rated Steam Flow). 0 = freeze automatically at the inlet pressure when the simulation first starts; it does not move on mode-switch resumes.' },
       { name: 'exhaustPressure', type: 'number', label: 'Exhaust Pressure', default: 0.05, min: 0.01, max: 1, step: 0.01, unit: 'bar' },
       { name: 'turbineEfficiency', type: 'number', label: 'Turbine Isentropic Eff.', default: 85, min: 70, max: 95, step: 5, unit: '%' },

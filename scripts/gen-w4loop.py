@@ -212,7 +212,8 @@ add({"id": "turbine-1", "type": "turbine-generator", "label": "Turbine-Generator
          {"id": "inlet", "position": {"x": -10, "y": 0}, "direction": "in"},
          {"id": "outlet", "position": {"x": 10, "y": 0}, "direction": "out"}
      ],
-     "inletFluid": {"temperature": 549, "pressure": 6.0e6, "phase": "vapor", "quality": 1, "flowRate": 0},
+     "designInletPressure": 6.0e6,
+     "inletFluid": {"temperature": 319, "pressure": 1.0e4, "phase": "vapor", "quality": 1, "flowRate": 0},
      "outletFluid": {"temperature": 306, "pressure": 5000, "phase": "two-phase", "quality": 0.9, "flowRate": 0},
      "nqa1": False})
 

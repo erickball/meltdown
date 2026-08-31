@@ -1984,10 +1984,38 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
     case 'turbine-generator': {
       const turbineGen = component as any;
-      // Approximate as a cylinder (length = width, diameter = height), scaled down for
-      // internal blading/casing. A fixed volume regardless of turbine size gives unrealistically
-      // short steam residence time for large machines, destabilizing the solver.
-      const volume = Math.max(2, Math.PI * Math.pow((turbineGen.height || 4) / 2, 2) * (turbineGen.width || 10) * 0.6);
+      // Approximate the steam path as a cylinder (length = width, diameter =
+      // height), scaled down for internal blading/casing.
+      const pathVolume = Math.max(2, Math.PI * Math.pow((turbineGen.height || 4) / 2, 2) * (turbineGen.width || 10) * 0.6);
+      // The node models the machine as ONE volume at its EXHAUST state (the
+      // expansion operator advects header enthalpy in and takes all the stage
+      // work back out, so that is where the (m, U, V) state lands). But a real
+      // machine's steam spans ~2 decades of density from throttle to exhaust,
+      // and most of its MASS sits at the dense end: along an expansion the
+      // mass-weighted mean density is the log mean, rho_in/ln(rho_in/rho_out).
+      // For a condensing machine (say 40 bar, 13 kg/m3, down to 0.1 bar,
+      // 0.06 kg/m3) that mean is ~30x the exhaust density - so a node priced
+      // at exhaust density under-holds the machine's inventory by that
+      // factor. Cross-check on the Xe-100: geometric path volume 42 m3 held
+      // 2.6 kg where the log-mean estimate gives ~100 kg.
+      //
+      // Scale the node volume so it HOLDS the physical inventory at exhaust
+      // density. Volume and initial mass scale together at the same intensive
+      // state, so pressures and flows are untouched - only the storage term
+      // grows, which is the point: the node's energy turnover time was
+      // ~0.1 s and was the single largest consumer of the RK45 error budget
+      // (60% on the Xe-100), throttling the whole plant's timestep.
+      //
+      // The factor is fixed at its design-vacuum value, so a machine running
+      // at high backpressure overstates its inventory (the true ratio shrinks
+      // as exhaust density rises). That errs toward slower, smoother
+      // transients. The honest alternative - a node at the mid-expansion
+      // state between two Stodola resistances, whose density gives the right
+      // inventory with the bare geometric volume - is a redesign of the
+      // turbine's connection physics (discussed with Erick 2026-08-31;
+      // option B, parked unless this approximation's artifacts matter).
+      const STEAM_PATH_INVENTORY_FACTOR = 30;
+      const volume = pathVolume * STEAM_PATH_INVENTORY_FACTOR;
       const temp = turbineGen.inletFluid?.temperature || saturationTemperature(5.5e6);
       const pressure = turbineGen.inletFluid?.pressure || 5.5e6;
       // Governor valve position: 0 = closed, 1 = open

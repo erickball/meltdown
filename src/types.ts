@@ -326,7 +326,11 @@ export interface TurbineGeneratorComponent extends ComponentBase {
   efficiency: number;     // Isentropic efficiency (0-1)
   governorValve: number;  // Governor valve position (0-1)
   generatorEfficiency: number; // Generator efficiency (0-1), typically 0.98
-  inletFluid?: Fluid;     // Steam inlet conditions
+  // Sticky design point for the swallowing bound (Stodola). Stamped at
+  // placement from the dialog's inlet pressure; the factory freezes it from
+  // inletFluid only as a legacy fallback when absent/0.
+  designInletPressure?: number; // Pa
+  inletFluid?: Fluid;     // The CASING's fluid state (live; resume writes back here)
   outletFluid?: Fluid;    // Exhaust conditions
   extractionPorts?: ExtractionPort[];  // Extraction points for feedwater heating, ordered high to low pressure
 }

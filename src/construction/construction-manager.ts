@@ -835,7 +835,6 @@ export class ConstructionManager {
         const turbinePressureRating = (props.inletPressure || 60) * 1.5;
 
         // Inlet temperature should be saturation temperature at inlet pressure
-        const inletTempK = saturationTemperature(P_in);
 
         const turbineGen: TurbineGeneratorComponent = {
           id,
@@ -854,9 +853,19 @@ export class ConstructionManager {
           efficiency: eta_t,
           generatorEfficiency: eta_g,
           governorValve: (props.governorValve || 100) / 100,  // Convert % to 0-1
+          // The design point for the swallowing bound is stamped explicitly
+          // at placement, from the dialog's inlet pressure. It used to be
+          // frozen by the factory from inletFluid - but inletFluid is the
+          // CASING's initial state (resume.ts writes the live node state
+          // there), and a machine before steam admission holds condenser-side
+          // steam, not throttle steam. Seeding the casing at throttle
+          // pressure put tons of live steam in the node (the node's volume
+          // is sized to hold the machine's whole steam-path inventory), and
+          // t=0 blew it down through the condenser.
+          designInletPressure: P_in,
           inletFluid: {
-            temperature: inletTempK,
-            pressure: P_in,
+            temperature: saturationTemperature(P_out),
+            pressure: P_out,
             phase: 'vapor',
             quality: 1.0,
             flowRate: 0
