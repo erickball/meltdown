@@ -1361,6 +1361,46 @@ export class RK45Solver {
   // node+check that tripped the sanity guard) to a count.
   public rejectionStats = new Map<string, number>();
 
+  /**
+   * Largest dt the throughput guard in checkStateSanity would accept, with
+   * margin. The guard rejects a completed step when a node's transit flow
+   * moved more than 20% of its inventory (throughput/2 * dt > 0.2 * m) -
+   * the material Courant limit that the semi-implicit pressure solve does
+   * NOT remove (it collapses the acoustic mode; the fluid still physically
+   * transits a node in m/W seconds, and the donor-based advection is only
+   * accurate well inside that). This computes the same quantity from the
+   * step-START state so the limit is anticipated instead of discovered.
+   *
+   * Counting mirrors the guard exactly: |flow| summed over both endpoints
+   * (so a transit node's W counts once after the *0.5), inventory is water
+   * plus NCG, boundary nodes are exempt. Nodes below the guard's own 0.1 kg
+   * floor are skipped here too - the guard handles them its own way, and a
+   * dying sliver must not drag the whole plant's dt to zero through this
+   * ceiling. The 0.9 margin absorbs flow growth within the step; the guard
+   * stays as the backstop for fast transients that outrun it.
+   */
+  private materialCourantDt(state: SimulationState): number {
+    const throughput = new Map<string, number>();
+    for (const conn of state.flowConnections) {
+      const absFlow = Math.abs(conn.massFlowRate);
+      if (absFlow === 0) continue;
+      throughput.set(conn.fromNodeId, (throughput.get(conn.fromNodeId) || 0) + absFlow);
+      throughput.set(conn.toNodeId, (throughput.get(conn.toNodeId) || 0) + absFlow);
+    }
+    let ceiling = Infinity;
+    for (const [id, w] of throughput) {
+      const node = state.flowNodes.get(id);
+      if (!node || node.isBoundary) continue;
+      const gasMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
+      const totalMass = node.fluid.mass + gasMass;
+      if (totalMass < 0.1) continue;
+      // guard threshold: w * 0.5 * dt / m = 0.2  ->  dt = 0.4 m / w
+      const dtNode = 0.9 * 0.4 * totalMass / w;
+      if (dtNode < ceiling) ceiling = dtNode;
+    }
+    return Math.max(ceiling, this.config.minDt);
+  }
+
   private countRejection(cause: string): void {
     this.rejectionStats.set(cause, (this.rejectionStats.get(cause) || 0) + 1);
   }
@@ -1914,6 +1954,17 @@ export class RK45Solver {
           stepDt = Math.min(stepDt, op.getMaxStableDt(currentState));
         }
       }
+      // Material-Courant ceiling: never ATTEMPT a step the throughput guard
+      // in checkStateSanity would reject. The RK45 error norm is deliberately
+      // blind to balanced throughput (net rates are ~zero for a transit node
+      // in steady flow), so without this the controller grows dt straight
+      // past a small node's turnover time and discovers the limit by
+      // slamming into the guard - a full six-stage attempt wasted per
+      // discovery, in a reject/regrow cycle (measured: 1353 cv-1-inner
+      // throughput rejections per 60 s of Xe-100, ~half of all rejections).
+      // Same idea as an operator's getMaxStableDt: a mode the error
+      // controller cannot see must be declared, not discovered.
+      stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
 
       // Take a step
       const { newState, error, errorRates } = this.step(currentState, stepDt);
