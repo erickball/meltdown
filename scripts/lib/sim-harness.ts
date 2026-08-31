@@ -167,6 +167,20 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
       },
     };
   }
+  // A/B override for the stage-3 outer re-solve corrector (implicit-energy
+  // branch): OUTER_RESOLVE=1 turns it on (only acts with IMPLICIT_ADVECTION=1);
+  // OUTER_RESOLVE_DIAG=1 additionally logs the largest per-step corrections.
+  const resolveEnv = process.env.OUTER_RESOLVE;
+  if (resolveEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        outerResolve: resolveEnv === '1',
+        outerResolveDiag: process.env.OUTER_RESOLVE_DIAG === '1',
+      },
+    };
+  }
   const energyEnv = process.env.ENERGY_COMPLIANCE;
   if (energyEnv !== undefined && config.pressureSolver !== false) {
     config = {

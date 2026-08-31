@@ -1362,6 +1362,12 @@ export class RK45Solver {
   // intermediate stage STATES (weight c_i) but never into the stage rates -
   // the final solution and the transport solve's books never see it.
   private candidateAdvectionTendency?: StateRates;
+  // Step-start connection flows for the CURRENT attempt (outerResolve): the
+  // corrector's backward-Euler momentum re-solve must integrate stamped
+  // connections from the flows the step actually started with, not from the
+  // predictor's output.
+  private candidateStartFlows?: Map<string, number>;
+  private lastOuterResolveLog = 0;
 
   private lastAcceptedFlowRates?: Map<string, { dMass: number; dEnergy: number }>;
 
@@ -1488,6 +1494,7 @@ export class RK45Solver {
     this.candidateFlowRates = undefined;
     this.candidateAdvectionRates = undefined;
     this.candidateAdvectionTendency = undefined;
+    this.candidateStartFlows = undefined;
     for (const name of this.operatorTimes.keys()) {
       this.operatorTimes.set(name, 0);
     }
@@ -1723,6 +1730,90 @@ export class RK45Solver {
   }
 
   /**
+   * Outer re-solve (stage-3 corrector, docs/implicit-energy-advection-design.md).
+   *
+   * The predictor's flows were linearized at the step-START state; on stiff
+   * small nodes (relief valves, near-empty pump inlets) the pressure the step
+   * actually produces sits far outside that linearization, and the
+   * inconsistent flows destabilize the plant at large dt. So: run the
+   * predictor's transport once on a throwaway clone to SEE the end state,
+   * then re-solve the pressure-flow system against it -
+   *
+   *  1. probe = clone of the post-stage state; apply the implicit transport
+   *     and re-derive (T, P, phase). This is the end state the predictor's
+   *     flows imply, including the valve/choke response to it.
+   *  2. Re-solve in corrector mode: end-state compliances, conductances,
+   *     and donor enthalpies; the step-start flows as the momentum initial
+   *     condition; and the predictor's flows as the BANKED closure reference
+   *     (the probe's pressures already contain their transport, so the
+   *     compliance equation prices only the flow change - without that, the
+   *     corrector double-books the step's pressure response and
+   *     anti-damps the loops it is meant to steady). Unstamped connections
+   *     are skipped: their stage-explicit transport is settled fact, and the
+   *     corrector must not disturb the flow/transport identity it rests on.
+   *  3. Adopt the corrected flows for stamped connections only. The caller
+   *     then applies the implicit transport with THEM, so the books, the
+   *     measured-q merge, and the momentum state all follow the flows that
+   *     actually move the mass.
+   *
+   * One Picard sweep of the fully-coupled implicit step. The stages keep the
+   * predictor-flow drift (an O(dt²) splitting residual - they are not
+   * re-run). Throws propagate to the caller's try, rejecting the attempt.
+   */
+  private correctSolvedFlows(newState: SimulationState, dt: number): void {
+    const solver = this.pressureSolver!;
+    let probe = cloneSimulationState(newState);
+    solver.applyImplicitAdvection(probe, dt);
+    // Full constraint pass, not FluidState alone: nodes whose pressure is
+    // co-determined by other constraint operators (condenser hotwell, flow
+    // dynamics) otherwise show the corrector a phantom end pressure, and it
+    // "corrects" against it with the same sign every step - measured as a
+    // persistent +2 kg/s on the condensate train and a slow power drift
+    // even at dt=20ms. Post-accept operators (relief latching, bursting)
+    // are excluded by applyAllConstraints itself; the pressure solver is
+    // skipped in implicit-momentum mode. The probe is throwaway either way.
+    probe = this.applyAllConstraints(probe, dt, true);
+    // The probe's connections still carry the PREDICTOR's flows - the solve
+    // needs them as the banked reference for its closure; the step-start
+    // flows go in as the momentum initial condition only.
+    solver.solve(probe, dt, this.lastAcceptedFlowRates,
+      { startFlows: this.candidateStartFlows! });
+
+    const corrected = new Map<string, number>();
+    for (const conn of probe.flowConnections) corrected.set(conn.id, conn.massFlowRate);
+    const diag = solver.config.outerResolveDiag
+      ? [] as Array<{ id: string; w1: number; w2: number }>
+      : null;
+    for (const conn of newState.flowConnections) {
+      if (!conn.implicitAdvection) continue;
+      const w2 = corrected.get(conn.id);
+      if (w2 === undefined) continue;
+      if (diag) diag.push({ id: conn.id, w1: conn.massFlowRate, w2 });
+      conn.massFlowRate = w2;
+    }
+
+    if (diag) {
+      const now = performance.now();
+      if (now - this.lastOuterResolveLog > 1000) {
+        this.lastOuterResolveLog = now;
+        diag.sort((a, b) => Math.abs(b.w2 - b.w1) - Math.abs(a.w2 - a.w1));
+        const lines = diag.slice(0, 3).map(d => {
+          const c = newState.flowConnections.find(x => x.id === d.id)!;
+          const p0f = newState.flowNodes.get(c.fromNodeId)?.fluid.pressure ?? NaN;
+          const p1f = probe.flowNodes.get(c.fromNodeId)?.fluid.pressure ?? NaN;
+          const p0t = newState.flowNodes.get(c.toNodeId)?.fluid.pressure ?? NaN;
+          const p1t = probe.flowNodes.get(c.toNodeId)?.fluid.pressure ?? NaN;
+          return `${d.id}: ${d.w1.toFixed(2)}->${d.w2.toFixed(2)} kg/s ` +
+            `(from P ${(p0f / 1e5).toFixed(2)}->${(p1f / 1e5).toFixed(2)} bar, ` +
+            `to P ${(p0t / 1e5).toFixed(2)}->${(p1t / 1e5).toFixed(2)} bar)`;
+        });
+        console.log(`[OuterResolve] t=${newState.time.toFixed(1)}s dt=${(dt * 1e3).toFixed(1)}ms ` +
+          `largest corrections:\n  ${lines.join('\n  ')}`);
+      }
+    }
+  }
+
+  /**
    * Take a single RK45 step
    * Returns the new state, error estimate, and whether step was accepted
    */
@@ -1741,9 +1832,15 @@ export class RK45Solver {
     // this mode.
     this.candidateAdvectionRates = undefined;
     this.candidateAdvectionTendency = undefined;
+    this.candidateStartFlows = undefined;
     if (this.implicitMomentumActive() && this.pressureSolver) {
       const t0 = performance.now();
       const solvedState = cloneSimulationState(state);
+      if (this.pressureSolver.config.implicitAdvection && this.pressureSolver.config.outerResolve) {
+        const w0 = new Map<string, number>();
+        for (const conn of state.flowConnections) w0.set(conn.id, conn.massFlowRate);
+        this.candidateStartFlows = w0;
+      }
       try {
         this.pressureSolver.solve(solvedState, dt, this.lastAcceptedFlowRates);
         // Nearly-implicit advection, part 1 of 2: stamp the partition from
@@ -1869,6 +1966,9 @@ export class RK45Solver {
     // same way a failed pressure solve does.
     if (this.implicitMomentumActive() && this.pressureSolver?.config.implicitAdvection) {
       try {
+        if (this.pressureSolver.config.outerResolve && this.candidateStartFlows) {
+          this.correctSolvedFlows(newState, dt);
+        }
         this.candidateAdvectionRates =
           this.pressureSolver.applyImplicitAdvection(newState, dt);
       } catch (e) {

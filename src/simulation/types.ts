@@ -956,6 +956,21 @@ export interface PressureSolverConfig {
    *  separated draws and OTSG nodes keep explicit stage advection and their
    *  Courant ceiling. EXPERIMENTAL - default off. */
   implicitAdvection?: boolean;
+  /** Outer re-solve (stage-3 corrector, see the design doc): after the
+   *  stages and a probe application of the implicit transport, the
+   *  pressure-flow system is solved a second time against the END-of-step
+   *  linearization (post-transport pressures, end-state valve response,
+   *  chokes, donor enthalpies), and the transport is applied with the
+   *  corrected flows instead. Unstamped connections are held as fixed-flow
+   *  sources at the flows their stage-explicit transport actually used, so
+   *  the flow/transport identity the measured-q closure depends on is
+   *  preserved on both sides of the partition. One Picard sweep of the
+   *  fully-coupled implicit step. Only acts with implicitAdvection.
+   *  EXPERIMENTAL - default off. */
+  outerResolve?: boolean;
+  /** Log the corrector's largest flow corrections (rate-limited) - which
+   *  connections were stale and why. Diagnostic for the stage-3 work. */
+  outerResolveDiag?: boolean;
 }
 
 /** Default configuration for pressure solver */
@@ -969,6 +984,7 @@ export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   implicitMomentum: true,
   energyCompliance: true,
   implicitAdvection: false,
+  outerResolve: false,
 };
 
 // ============================================================================

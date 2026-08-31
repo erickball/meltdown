@@ -262,3 +262,79 @@ into the momentum solve's trust region. Next chunk: outer re-solve of the
 pressure-flow system (predictor-corrector on flows), then re-measure the
 boundary; only add the predictive swing ceiling afterwards, as the smooth
 limiter for whatever boundary remains.
+
+## Stage-4 findings (outer re-solve corrector, 2026-08-31)
+
+Implemented: `outerResolve` knob (default off; OUTER_RESOLVE=1 in the
+harness, OUTER_RESOLVE_DIAG=1 logs the largest corrections) - one Picard
+sweep of the fully-coupled backward-Euler step. After the stages, the
+predictor's transport is applied to a throwaway clone and (T, P, phase)
+re-derived: the end state the predictor implies. The pressure-flow system
+is then re-solved against that state (corrector mode on solve()) and the
+transport applied once, from the pre-transport state, with the corrected
+flows - books, q-merge, and momentum state all follow the flows that
+actually move the mass.
+
+1. **Formulation trap, recorded because it half-works and looks right:**
+   solving naively around the probe state double-books the step's
+   compliance response - the probe's pressures already CONTAIN the
+   predictor's transport, so a solve whose closure reads "net inflow =
+   c·δP from here" prices the step twice and anti-damps the very loops it
+   should steady (observed: ±1000 kg/s swings of the helium loop,
+   cv-1-annulus driven to negative energy). Corrector mode instead prices
+   only the flow CHANGE: closure Σφ·(ṁ¹ − ṁ_predictor) = c·δP with the
+   predictor flows subtracted at the same φ weights (banked), the
+   measured-q term dropped (already integrated into the probe), unstamped
+   connections skipped outright (their banked and fixed contributions
+   cancel; their stage-explicit transport is settled fact), and the
+   step-start flows as the momentum initial condition only.
+2. **Falsified on the Xe-100 at EVERY dt, including small ones.** 50 ms:
+   worse than no-corrector - late-run divergence (86.7 MW at t=300 vs
+   136.6-and-recovering without it) with a growing rejection storm.
+   100 ms: rejection-bound to a crawl (~60 s of sim in ten minutes of
+   wall). The Picard map does not contract on the stiff small valve/pump
+   transit nodes: a tiny-compliance node's probe pressure is itself the
+   predictor's overshoot artifact, the sweep amplifies it (relief flow
+   22 -> 32 kg/s off a probe spike to 87 bar), and the larger adopted
+   corrections push the transport solve outside ITS linearization -
+   U' = M1·hB' − P(0)·V goes negative on hard drains of gram-scale nodes
+   (val-prel-1 negative internal energy). And 20 ms, where the sweep
+   should be a no-op, shows the structural disease: a smooth off-family
+   drift (109.9 vs 144.7 MW at t=300) traced by the diagnostics to
+   cond-pump-1, which RINGS 0.2<->0.4 bar at step frequency (the
+   pre-existing chronic rejector, present in OFF mode too). The probe
+   samples the ring's peak, so the corrector adds the same-sign ~+2 kg/s
+   to the condensate train every step - it RECTIFIES a step-scale
+   oscillation into a DC flow bias. Deriving the probe with the full
+   constraint chain instead of FluidState alone does not change this
+   (the ring is real, not a derivation artifact). Rectification is
+   inherent to any outer iteration around a state that oscillates at
+   step scale; no sweep count or damping factor fixes it. Ringing modes
+   are only treated correctly INSIDE a single coupled solve, where they
+   are implicitly damped.
+3. **The valve-conductance-implicit idea is moot:** relief valves are
+   postAcceptOnly - disc position is frozen through every step attempt
+   and pop/reseat latches only between accepted steps. There is no
+   within-step valve response to make implicit; the within-step
+   nonlinearity that breaks the sweep is the EOS/compliance itself on
+   tiny nodes across multi-bar swings.
+4. **The branch premise is now in question.** The OFF baseline's Courant
+   ceiling holds the Xe-100 at 100-200 ms, and every liberated scheme
+   (plain split, +T0, +corrector) destabilizes at >= ~50-100 ms from
+   stiff-node pressure physics that has nothing to do with the material
+   Courant limit. Removing the Courant limit cannot pay on this plant
+   until the pressure trust region moves. The one remaining candidate
+   with a mechanism: the fully-coupled LINEAR step - substitute the
+   donor-transport M-matrix into the compliance closure so node pressures
+   couple through the transport network inside ONE solve (the actual
+   structure of RELAP's semi-implicit scheme; today's β/φ terms are its
+   diagonal approximation). Finding 2's rectification mechanism is an
+   argument FOR that route (only an in-solve treatment damps step-scale
+   ringing) and AGAINST any further outer-iteration work. But it is a
+   substantial build with uncertain payoff on a premise now weakened
+   twice, and deciding whether to attempt it or park the branch is a
+   judgment call, not an implementation detail.
+
+Status: corrector kept behind its default-off knob as a measured negative
+result with reusable machinery (corrector-mode solve, banked closure).
+Default-off remains bit-neutral; npm test and flow-physics green.

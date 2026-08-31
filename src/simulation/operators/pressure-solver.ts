@@ -161,7 +161,19 @@ export class PressureSolver {
   solve(
     state: SimulationState,
     dt: number,
-    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>
+    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>,
+    // Corrector mode (outerResolve): the state IS the predictor's end state
+    // (transport applied, pressures re-derived), and the solve is one Picard
+    // sweep of the fully-coupled backward-Euler step around it. startFlows
+    // supplies the step-START flows as the momentum initial condition for
+    // stamped connections; the connections themselves still carry the
+    // PREDICTOR's flows, which the closure needs as the banked reference -
+    // the probe's pressures already contain their transport, so the
+    // compliance equation must price only the CHANGE in flows, and δP then
+    // reads P_end − P_probe. Unstamped connections are skipped outright:
+    // their stage-explicit transport is banked in the state and their flows
+    // are settled fact, so their banked and fixed contributions cancel.
+    corrector?: { startFlows: Map<string, number> }
   ): void {
     if (state.flowNodes.size === 0 || !(dt > 0)) return;
 
@@ -212,7 +224,7 @@ export class PressureSolver {
     }
 
     if (this.config.implicitMomentum) {
-      this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates);
+      this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates, corrector);
       return;
     }
 
@@ -622,7 +634,8 @@ export class PressureSolver {
     nodeList: FlowNode[],
     c: Float64Array,
     n: number,
-    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>
+    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>,
+    corrector?: { startFlows: Map<string, number> }
   ): void {
     interface ImplicitEntry {
       conn: FlowConnection;
@@ -687,6 +700,11 @@ export class PressureSolver {
     const fixedFlows: Array<{
       flow: number; hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number;
     }> = [];
+    // Corrector mode: each participating connection's PREDICTOR flow, whose
+    // transport the probe state already banked. Subtracted from the closure
+    // RHS with the same φ weighting its replacement enters with, so the
+    // solve prices only the flow CHANGE (see the corrector param on solve).
+    const banked: typeof fixedFlows = [];
     const entries: ImplicitEntry[] = [];
 
     for (const conn of state.flowConnections) {
@@ -696,6 +714,13 @@ export class PressureSolver {
 
       const iFrom = index.get(conn.fromNodeId) ?? -1;
       const iTo = index.get(conn.toNodeId) ?? -1;
+
+      // Corrector mode: connections outside the implicit-advection partition
+      // had their transport integrated explicitly through the stages at the
+      // predictor's flows - settled fact, already in the probe's pressures.
+      // Their banked and fixed-flow RHS contributions would cancel exactly,
+      // so they are skipped outright (flows untouched, no row entries).
+      if (corrector && !conn.implicitAdvection) continue;
 
       const h = computeConnectionHydraulics(state, conn, fromNode, toNode);
 
@@ -707,7 +732,10 @@ export class PressureSolver {
         h.governorClosed ||
         (h.checkValve !== undefined && h.dP_driving < h.crackingPressure);
       if (closed) {
-        const mPrev = conn.massFlowRate;
+        const w1 = conn.massFlowRate;
+        // Corrector mode: decay from the step's TRUE initial flow, exactly
+        // as the predictor did (bit-identical when the valve state held).
+        const mPrev = corrector?.startFlows.get(conn.id) ?? w1;
         const mNew = mPrev / (1 + dt / CLOSED_FLOW_DECAY_TAU);
         conn.massFlowRate = mNew;
         conn.isChoked = false;
@@ -727,12 +755,14 @@ export class PressureSolver {
         };
         if (iFrom >= 0 || iTo >= 0) {
           const hDonor = useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0;
-          fixedFlows.push({ flow: mNew, hDonor, donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo });
+          const donorIsFrom = h.upstreamNode === fromNode;
+          fixedFlows.push({ flow: mNew, hDonor, donorIsFrom, iFrom, iTo });
+          if (corrector) banked.push({ flow: w1, hDonor, donorIsFrom, iFrom, iTo });
         }
         continue;
       }
 
-      const m0 = conn.massFlowRate;
+      const m0 = corrector?.startFlows.get(conn.id) ?? conn.massFlowRate;
       // Momentum in mass-flow form: dṁ/dt = (A/L)·ΔP (ṁ = ρAv, the density
       // cancels), so the flow produced by 1 Pa over dt is G0 = dt·A/L.
       const G0 = (dt * h.A) / h.L;
@@ -799,6 +829,12 @@ export class PressureSolver {
         donorIsFrom: h.upstreamNode === fromNode,
         iFrom, iTo, choke, capped: false, cappedFlow: 0,
       });
+      if (corrector && (iFrom >= 0 || iTo >= 0)) {
+        banked.push({
+          flow: conn.massFlowRate, hDonor,
+          donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo,
+        });
+      }
     }
 
     // Unmodeled energy source rate per node (W): wall heat, direct heating,
@@ -814,7 +850,11 @@ export class PressureSolver {
     // unchanged. One step stale during transients; zero (behave like the
     // mass-only closure) when no history exists yet.
     const q = new Float64Array(n);
-    if (useEnergy && lastEnergyRates) {
+    // Corrector mode: no q term - the step's unmodeled heat is already
+    // integrated into the probe state the solve linearizes around, and
+    // pricing it again would double-count it (the same disease as pricing
+    // the banked transport twice).
+    if (useEnergy && lastEnergyRates && !corrector) {
       const transport = new Float64Array(n);
       const addTransport = (
         flow: number, hDonor: number, donorIsFrom: boolean, iFrom: number, iTo: number
@@ -862,6 +902,16 @@ export class PressureSolver {
         const wTo = f.donorIsFrom ? 1 : phi(f.iTo, f.hDonor);
         if (f.iFrom >= 0) b[f.iFrom] -= wFrom * f.flow;
         if (f.iTo >= 0) b[f.iTo] += wTo * f.flow;
+      }
+      // Corrector mode: subtract each banked (predictor) flow with the same
+      // weighting its replacement enters with. The closure then reads
+      // Σφ·(ṁ¹ − ṁ_predictor) = c·δP, so δP is the pressure change BEYOND
+      // the probe state - which already contains the predictor's transport.
+      for (const f of banked) {
+        const wFrom = f.donorIsFrom ? phi(f.iFrom, f.hDonor) : 1;
+        const wTo = f.donorIsFrom ? 1 : phi(f.iTo, f.hDonor);
+        if (f.iFrom >= 0) b[f.iFrom] += wFrom * f.flow;
+        if (f.iTo >= 0) b[f.iTo] -= wTo * f.flow;
       }
       for (const e of entries) {
         const flowFixed = e.capped;
