@@ -177,12 +177,17 @@ bit-neutral (identical step signature).
    Courant ceiling by 8x for stamped connections changed NOTHING
    (bit-identical run) - the ceiling was never the active constraint in ON
    mode.
-3. **Open question - trajectory validity**: ON lands at 208 MW at t=300
-   where OFF shows 141 (rated power is 200 MW; OFF may be mid-oscillation
-   on its way there - 600 s reference run pending). If ON genuinely
-   settles faster, the splitting is doing fine and the work shifts to the
-   pressure trust region; if ON diverged, mitigation B (frozen transport
-   tendency) moves from optional to required.
+3. **RESOLVED - the ON trajectory DIVERGES.** The 600 s OFF reference holds
+   133.8 MW (the established family: every reference run since the turbine
+   IC fix sits at 134-141 MW from t=300 on). ON's 208 MW at t=300 is not
+   faster settling - it is a different operating point, ~50% off. The
+   plausible mechanism is failure mode 3 amplified by control feedback:
+   the O(dt) time-average state bias on advection-dominated nodes is
+   sensed by the plant's controllers (rod/valve loops respond to drifted
+   temperatures), and the closed loop turns a small per-step bias into a
+   different equilibrium. **Mitigation B (frozen transport tendency
+   through the stages, implicit solve as corrector) is REQUIRED, not
+   optional.** Do not trust any ON-mode trajectory until it lands.
 
 Next lever is NOT more advection work: it is the pressure guard's
 step-frequency rejection cycle - either a predictive trust-region dt
