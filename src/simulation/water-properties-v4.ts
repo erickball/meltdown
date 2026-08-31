@@ -1195,7 +1195,7 @@ function interpolateFromGrid(
   u: number,
   v: number,
   phase: 'liquid' | 'vapor'
-): { T: number; P: number } | null {
+): { T: number; P: number; dlnPdlogV?: number } | null {
   const nearby = findNearbyPoints(u, v, phase);
 
   if (nearby.length === 0) {
@@ -1312,16 +1312,23 @@ function interpolateFromGrid(
       const c12 = b12 / b11;
       const c22 = b22 - b12 * c12;
       if (c22 > PIVOT_MIN) {
-        const solve = (m0: number, m1: number, m2: number): number => {
+        // Returns both the fitted value at the query (coefficient a) and the
+        // fitted x-slope (coefficient b). The slope was always computed on
+        // the way to a; returning it is a free byproduct, and for the lnP
+        // field it is dlnP/dlog10(v) along constant u - the derivative the
+        // vapor inversion (superheatedV) otherwise re-estimates by secant,
+        // one property probe at a time. Same arithmetic, same values.
+        const solve = (m0: number, m1: number, m2: number): { a: number; b: number } => {
           const r1 = m1 - m0 * a01;
           const r2 = m2 - m0 * a02;
           const cc = (r2 - r1 * c12) / c22;      // coefficient c
           const bb = (r1 - b12 * cc) / b11;      // coefficient b
-          return m0 * inv00 - a01 * bb - a02 * cc; // coefficient a = value at query
+          return { a: m0 * inv00 - a01 * bb - a02 * cc, b: bb }; // a = value at query
         };
-        const T = solve(mT0, mT1, mT2);
-        const P = Math.exp(solve(mP0, mP1, mP2)) * 1e6; // MPa -> Pa
-        return { T, P };
+        const T = solve(mT0, mT1, mT2).a;
+        const pFit = solve(mP0, mP1, mP2);
+        const P = Math.exp(pFit.a) * 1e6; // MPa -> Pa
+        return { T, P, dlnPdlogV: pFit.b };
       }
     }
   }
@@ -2036,8 +2043,24 @@ function loadDataSync(): void {
 // Main State Calculation
 // ============================================================================
 
+/**
+ * Isoenergetic pressure slope dlnP/dln(v) of the vapor path taken by the most
+ * recent calculateState call, or NaN when that call did not go through a
+ * vapor-pressure path (liquid, two-phase). From the vapor grid this is the
+ * MLS fit's own lnP slope - the C1 surface's actual local derivative, not an
+ * approximation of it; on the two anchored ideal-gas extensions it is exactly
+ * -1 (fixed u fixes T, and P = Z_ref R T / v). Consumers: superheatedV's
+ * Newton iteration, which otherwise re-learns this slope by secant, one full
+ * property probe at a time.
+ */
+let lastVaporSlopeLnLn = NaN;
+export function lastVaporPressureSlope(): number {
+  return lastVaporSlopeLnLn;
+}
+
 export function calculateState(mass: number, internalEnergy: number, volume: number): WaterState {
   loadDataSync();
+  lastVaporSlopeLnLn = NaN;
 
   const rho = mass / volume;
   const v = volume / mass;  // Specific volume (m³/kg)
@@ -2227,10 +2250,12 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       T = aboveEdge.T;
       P = aboveEdge.P;
       calculationPath = 'vapor_superheat_extrapolation';
+      lastVaporSlopeLnLn = -1;
     } else if (gridResult) {
       T = gridResult.T;
       P = gridResult.P;
       calculationPath = 'vapor_grid';
+      if (gridResult.dlnPdlogV !== undefined) lastVaporSlopeLnLn = gridResult.dlnPdlogV / Math.LN10;
     } else {
       // ========================================================================
       // DO NOT ADD A FALLBACK HERE (beyond the two physical extensions below)
@@ -2257,6 +2282,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
         T = idealResult.T;
         P = idealResult.P;
         calculationPath = 'vapor_ideal_gas';
+        lastVaporSlopeLnLn = -1;
       } else {
         throw new Error(
           `[WaterProps v4] Vapor grid interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³. ` +
