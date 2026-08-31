@@ -786,7 +786,25 @@ export function evaluateOtsgPartition(
   // P (every section shrinks), so the bracket is clean.
   // ----------------------------------------------------------------
   const solveP = (): { P: number; fin: AtP } | 'supercritical' | null => {
-    const resid = (lnP: number) => atP(Math.exp(lnP)).Vsum - V;
+    // The Illinois loop's accepting exit collapses the bracket onto its last
+    // probe (a = b = lnM below), so the closing atP(exp(lnP)) re-evaluated
+    // the exact pressure resid had just evaluated - one full partition
+    // evaluation per solve, measured at 14.8% of ALL atP calls in a running
+    // Xe-100, spent recomputing a result already in hand. Remember the last
+    // probe and hand it back when the final lnP IS that probe. Within one
+    // solveP call du3 and L3 are fixed, so lnP alone is the key. This is not
+    // merely as good as recomputing, it is more consistent: the reused
+    // evaluation is the one the accepted residual was computed FROM, where a
+    // recompute answered with a v3 shifted by superheatedV's own tolerance
+    // (its v3Carry hint having been updated by the probe itself).
+    let lnLast = NaN;
+    let atPLast: AtP | null = null;
+    const resid = (lnP: number) => {
+      const r = atP(Math.exp(lnP));
+      lnLast = lnP;
+      atPLast = r;
+      return r.Vsum - V;
+    };
     // Bracket by expanding OUTWARD from a physical starting point - the
     // node's last published pressure, or failing that the uniform-EOS read
     // (biased low, but the same order as the root). Probing the global
@@ -861,7 +879,8 @@ export function evaluateOtsgPartition(
       if (Math.abs(rM) < rExit) { a = lnM; b = lnM; break; }
     }
     const lnP = 0.5 * (a + b);
-    return { P: Math.exp(lnP), fin: atP(Math.exp(lnP)) };
+    const fin = lnP === lnLast && atPLast ? atPLast : atP(Math.exp(lnP));
+    return { P: Math.exp(lnP), fin };
   };
 
   // Outer pin refinement: refresh (du3, L3) against the property surface at
