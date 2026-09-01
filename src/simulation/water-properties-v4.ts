@@ -239,6 +239,66 @@ let satBucketStart: Int32Array = new Int32Array(0);
 let satT0 = 0;
 let satBucketScale = 0;  // buckets per K
 
+/**
+ * A log10-spaced bucket index over a strictly monotone key column, used to
+ * start a binary search close to its answer instead of at the whole array.
+ *
+ * Unlike the temperature index above, the keys here (specific volume) span
+ * five decades, so the buckets are uniform in log10(key). Each bucket stores
+ * the inclusive index range the plain binary search can land in for any query
+ * inside it - computed by running THAT VERY SEARCH at the bucket's two edges
+ * during the build. Because the bracket index moves monotonically with the
+ * key, any query between those edges lands between those two answers, so the
+ * narrowed search is the same search started closer to its answer, and
+ * converges on the same index. Taking min/max of the two edge answers makes
+ * this work for ascending and descending columns alike.
+ */
+interface LogBucketIndex {
+  lo: Int32Array;    // per bucket: lowest index the search can land on
+  hi: Int32Array;    // per bucket: highest index + 1 (a valid search `hi`)
+  log0: number;      // log10 of the smallest key
+  scale: number;     // buckets per decade
+  buckets: number;
+}
+
+function buildLogBucketIndex(
+  buckets: number,
+  keyMin: number,
+  keyMax: number,
+  bracket: (x: number) => number
+): LogBucketIndex {
+  const log0 = Math.log10(keyMin);
+  const scale = buckets / (Math.log10(keyMax) - log0);
+  // buckets + 2 entries: a query exactly at keyMax lands in bucket `buckets`,
+  // and each bucket reads its own upper edge.
+  const lo = new Int32Array(buckets + 2);
+  const hi = new Int32Array(buckets + 2);
+  for (let b = 0; b <= buckets + 1; b++) {
+    // Probe the bucket edges. Values are held inside the column's range: the
+    // top bucket's upper edge can round just past keyMax, and the search is
+    // only defined on keys it actually brackets.
+    let xLo = Math.pow(10, log0 + b / scale);
+    let xHi = Math.pow(10, log0 + (b + 1) / scale);
+    if (xLo < keyMin) xLo = keyMin; else if (xLo > keyMax) xLo = keyMax;
+    if (xHi < keyMin) xHi = keyMin; else if (xHi > keyMax) xHi = keyMax;
+    const a = bracket(xLo);
+    const c = bracket(xHi);
+    lo[b] = a < c ? a : c;
+    hi[b] = (a > c ? a : c) + 1;
+  }
+  return { lo, hi, log0, scale, buckets };
+}
+
+// The saturation curve as flat columns, plus its index. findSaturationU is
+// the dome test - one call per calculateState, 3.2M per 30 simulated seconds
+// - and it walked an array of {v, u} objects 10 probes deep.
+let curveV: Float64Array = new Float64Array(0);
+let curveU: Float64Array = new Float64Array(0);
+let curveIndex: LogBucketIndex | null = null;
+
+// v_g column index, shared by the searches that invert v = v_g(T).
+let vgIndex: LogBucketIndex | null = null;
+
 // Grid cell parameters
 const GRID_CELL_SIZE_LOGV = 0.1;  // ~26% change in v per cell
 const GRID_CELL_SIZE_U = 50;      // 50 kJ/kg per cell
@@ -704,31 +764,22 @@ function findAllSaturationPropsAtV(v: number): {
     return null;
   }
 
-  // Binary search for T where v_g(T) = v
-  // v_g decreases with increasing T (index)
-  let lo = 0;
-  let hi = rawData.length - 1;
-
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (rawData[mid].v_g > v) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
+  // Bucket-narrowed binary search for T where v_g(T) = v, over the flat
+  // v_g column. v_g decreases with increasing T (index).
+  const lo = bracketVia(vgIndex!, v, satV_g, false);
+  const hi = lo + 1;
 
   // Interpolate between lo and hi
-  const v_g_lo = rawData[lo].v_g;
-  const v_g_hi = rawData[hi].v_g;
+  const v_g_lo = satV_g[lo];
+  const v_g_hi = satV_g[hi];
   const t = (v - v_g_lo) / (v_g_hi - v_g_lo);
 
   return {
-    T: rawData[lo].T_K + t * (rawData[hi].T_K - rawData[lo].T_K),
-    P: (rawData[lo].P_MPa + t * (rawData[hi].P_MPa - rawData[lo].P_MPa)) * 1e6,
-    u_f: (rawData[lo].u_f + t * (rawData[hi].u_f - rawData[lo].u_f)) * 1000,
-    u_g: (rawData[lo].u_g + t * (rawData[hi].u_g - rawData[lo].u_g)) * 1000,
-    v_f: rawData[lo].v_f + t * (rawData[hi].v_f - rawData[lo].v_f),
+    T: satT[lo] + t * (satT[hi] - satT[lo]),
+    P: (satP_MPa[lo] + t * (satP_MPa[hi] - satP_MPa[lo])) * 1e6,
+    u_f: (satU_f[lo] + t * (satU_f[hi] - satU_f[lo])) * 1000,
+    u_g: (satU_g[lo] + t * (satU_g[hi] - satU_g[lo])) * 1000,
+    v_f: satV_f[lo] + t * (satV_f[hi] - satV_f[lo]),
     v_g: v,  // By definition, this is exactly v
   };
 }
@@ -741,34 +792,27 @@ function findAllSaturationPropsAtV(v: number): {
  * sorted by v ascending, combining both the liquid and vapor lines.
  */
 function findSaturationU(v: number): number | null {
-  if (saturationCurve.length === 0) return null;
+  const n = curveV.length;
+  if (n === 0) return null;
 
-  const vMin = saturationCurve[0].v;
-  const vMax = saturationCurve[saturationCurve.length - 1].v;
+  const vMin = curveV[0];
+  const vMax = curveV[n - 1];
 
   // Check bounds
   if (v < vMin || v > vMax) {
     return null;
   }
 
-  // Binary search for bracketing points
-  let lo = 0;
-  let hi = saturationCurve.length - 1;
-
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (saturationCurve[mid].v <= v) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
+  // Bucket-narrowed binary search over the flat curve - same probes, same
+  // answer, just started next to it instead of at the whole array.
+  const lo = bracketVia(curveIndex!, v, curveV, true);
+  const hi = lo + 1;
 
   // Interpolate between lo and hi
-  const v_lo = saturationCurve[lo].v;
-  const v_hi = saturationCurve[hi].v;
-  const u_lo = saturationCurve[lo].u;
-  const u_hi = saturationCurve[hi].u;
+  const v_lo = curveV[lo];
+  const v_hi = curveV[hi];
+  const u_lo = curveU[lo];
+  const u_hi = curveU[hi];
 
   // Linear interpolation in v
   const t = (v - v_lo) / (v_hi - v_lo);
@@ -1176,6 +1220,104 @@ function buildSaturationCurve(): void {
 
   // Sort by v to ensure binary search works correctly
   saturationCurve.sort((a, b) => a.v - b.v);
+
+  // Flat mirror of the curve plus its index. Values are copied verbatim, so
+  // the interpolation sees the exact doubles it saw before.
+  const nCurve = saturationCurve.length;
+  curveV = new Float64Array(nCurve);
+  curveU = new Float64Array(nCurve);
+  for (let i = 0; i < nCurve; i++) {
+    curveV[i] = saturationCurve[i].v;
+    curveU[i] = saturationCurve[i].u;
+  }
+
+  // The index assumes a query's bracket moves monotonically with v, which
+  // needs strictly increasing v. Equal neighbours would also make the
+  // interpolation below divide by zero, so refuse to run rather than
+  // silently returning Infinity from the dome test.
+  for (let i = 1; i < nCurve; i++) {
+    if (!(curveV[i] > curveV[i - 1])) {
+      throw new Error(`[WaterProps v4] Saturation curve is not strictly increasing in v: ` +
+        `index ${i - 1} has v=${curveV[i - 1]}, index ${i} has v=${curveV[i]}. ` +
+        `findSaturationU cannot bracket such a curve.`);
+    }
+  }
+
+  curveIndex = buildLogBucketIndex(2048, curveV[0], curveV[nCurve - 1], curveBracket);
+
+  // v_g runs the other way (it falls as T rises) and lives in the raw table,
+  // whose flat columns buildSaturationTables has already made.
+  const nSat = satV_g.length;
+  for (let i = 1; i < nSat; i++) {
+    if (!(satV_g[i] < satV_g[i - 1])) {
+      throw new Error(`[WaterProps v4] Saturated vapour volume is not strictly decreasing: ` +
+        `index ${i - 1} has v_g=${satV_g[i - 1]}, index ${i} has v_g=${satV_g[i]}. ` +
+        `The v = v_g(T) inversion cannot bracket such a column.`);
+    }
+  }
+  vgIndex = buildLogBucketIndex(2048, satV_g[nSat - 1], satV_g[0], vgBracket);
+}
+
+/**
+ * The plain binary search findSaturationU has always run, over the flat
+ * curve. Kept as its own function because the index is built by running it
+ * at the bucket edges - the index can only ever agree with it.
+ */
+function curveBracket(v: number): number {
+  let lo = 0;
+  let hi = curveV.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (curveV[mid] <= v) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/** The same, for the descending v_g column. */
+function vgBracket(v: number): number {
+  let lo = 0;
+  let hi = satV_g.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (satV_g[mid] > v) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
+/**
+ * Bracket a key using its log bucket index: jump to the bucket, then run the
+ * same binary search over the narrowed range. Returns the same index the
+ * full-range search would.
+ */
+function bracketVia(idx: LogBucketIndex, key: number, column: Float64Array, ascending: boolean): number {
+  // Bucket domain guard, not a value clamp: callers have already rejected
+  // keys outside the column, so this only absorbs the rounding of log10 at
+  // the very ends of the range. Landing in a neighbouring bucket would still
+  // give the right answer - the search below re-derives it - but landing
+  // outside the array would read past it.
+  let b = ((Math.log10(key) - idx.log0) * idx.scale) | 0;
+  if (b < 0) b = 0; else if (b > idx.buckets) b = idx.buckets;
+  let lo = idx.lo[b];
+  let hi = idx.hi[b];
+  const last = column.length - 1;
+  if (hi > last) hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (ascending ? column[mid] <= key : column[mid] > key) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
 }
 
 function buildSpatialIndex(): void {
