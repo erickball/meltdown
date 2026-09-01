@@ -231,6 +231,15 @@ add('pump-1', {
 add('val-msv-1', {
   type: 'valve', label: 'Steam Dump / MSSV',
   valveType: 'relief',
+  // Stainless 304H, not the low-alloy default. This body sits on the
+  // superheated main steam header, and SA-533B "loses strength fast above
+  // ~700 K" by the material table's own note - at the 565 C design outlet it
+  // is already past that, and the wall-node change (which gave valves real
+  // metal instead of a slow lag of their fluid) turned that from an
+  // unmodelled assumption into a creep rupture in under three minutes. Real
+  // superheater-outlet valves are alloy or austenitic for exactly this
+  // reason.
+  material: 'stainless-304',
   position: { x: 66, y: 68 }, rotation: 0, elevation: 12,
   diameter: 0.12, opening: 0, volume: 0.1,
   pressureRating: 250, setpoint: 175e5, blowdown: 0.03,
@@ -395,6 +404,8 @@ add('val-rccs-1', {
 add('val-leak-1', {
   type: 'valve', label: 'SG Tube Leak',
   valveType: 'gate',
+  // Same duty as the MSSV tap - it hangs off the boiler tube at 640 C.
+  material: 'stainless-304',
   position: { x: 60, y: 74 }, rotation: 0, elevation: 7,
   diameter: 0.02, opening: 0,
   ports: ports([['val-leak-1-in', -0.1, 0, 'in'], ['val-leak-1-out', 0.1, 0, 'out']]),
@@ -601,6 +612,15 @@ add('fwh-1', {
 add('val-bleed-1', {
   type: 'valve', label: 'FWH Extraction Valve',
   valveType: 'gate',
+  // Stainless 304H, not the low-alloy default. This body sits on the
+  // superheated main steam header, and SA-533B "loses strength fast above
+  // ~700 K" by the material table's own note - at the 565 C design outlet it
+  // is already past that, and the wall-node change (which gave valves real
+  // metal instead of a slow lag of their fluid) turned that from an
+  // unmodelled assumption into a creep rupture in under three minutes. Real
+  // superheater-outlet valves are alloy or austenitic for exactly this
+  // reason.
+  material: 'stainless-304',
   position: { x: 70, y: 99 }, rotation: 0, elevation: 0,
   // Open at the operating throttle, and the body rides at TUBE pressure:
   // the valve sits on its OUTLET connection, so a closed valve with the

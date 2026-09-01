@@ -3495,12 +3495,19 @@ function wallNodePolicy(): 'none' | 'rpv-bui' | 'thick' | 'all' {
   const env = (globalThis as { process?: { env?: Record<string, string> } }).process?.env;
   const p = env?.WALL_NODES;
   if (p === 'none' || p === 'rpv-bui' || p === 'thick' || p === 'all') return p;
-  // Default: reactor vessels + buildings. Benchmarked (2026-07-08) as ~1-14%
-  // step cost on w4loop for the two walls that matter - the containment
-  // shell absorbs ~0.2 bar of LOCA blowdown in the first two minutes and
-  // vessel creep reads real metal. The wider tiers ('thick', 'all') tripled
-  // the node count for no visible physics change in the same transients.
-  return 'rpv-bui';
+  // Default: everything that holds pressure. This was 'rpv-bui' (reactor
+  // vessels + buildings) on the 2026-07-08 finding that the wider tiers
+  // "tripled the node count for no visible physics change" - true of the
+  // transients benchmarked then, and false now that creep-rupture reads
+  // these components.
+  //
+  // Without metal, burst-operator falls back to a first-order lag of the
+  // FLUID temperature, so a valve is creep-checked at the temperature of
+  // whatever is inside it. The Xe-100 MSSV, dead-ended on a hot line, was
+  // taking 0.45 of its creep life in 700 s at a temperature no metal it is
+  // made of ever actually reached. Metal that can lose heat is what makes
+  // that number mean something.
+  return 'all';
 }
 
 /**
@@ -3823,16 +3830,18 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
           surfaceArea: hxArea,
           characteristicDiameter: dia,
         });
+        // Ambient when nothing contains it - an outer face that exists only
+        // sometimes leaves the shell adiabatic outside, which is metal with
+        // nowhere to put its heat.
         const hxContainer = component.containedBy;
-        if (hxContainer && state.flowNodes.has(hxContainer)) {
-          state.convectionConnections.push({
-            id: `convection-${id}-wall-outer`,
-            thermalNodeId: `${id}-wall`,
-            flowNodeId: hxContainer,
-            surfaceArea: hxArea,
-            characteristicDiameter: dia,
-          });
-        }
+        state.convectionConnections.push({
+          id: `convection-${id}-wall-outer`,
+          thermalNodeId: `${id}-wall`,
+          flowNodeId: hxContainer && state.flowNodes.has(hxContainer)
+            ? hxContainer : 'atmosphere',
+          surfaceArea: hxArea,
+          characteristicDiameter: dia,
+        });
         created++;
       }
       continue;
@@ -3880,15 +3889,14 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
         });
         // Outer face on whatever the duct runs through
         const cvContainer = component.containedBy;
-        if (cvContainer && state.flowNodes.has(cvContainer)) {
-          state.convectionConnections.push({
-            id: `convection-${id}-shell-wall-outer`,
-            thermalNodeId: `${id}-shell-wall`,
-            flowNodeId: cvContainer,
-            surfaceArea: shellArea,
-            characteristicDiameter: outerD,
-          });
-        }
+        state.convectionConnections.push({
+          id: `convection-${id}-shell-wall-outer`,
+          thermalNodeId: `${id}-shell-wall`,
+          flowNodeId: cvContainer && state.flowNodes.has(cvContainer)
+            ? cvContainer : 'atmosphere',
+          surfaceArea: shellArea,
+          characteristicDiameter: outerD,
+        });
         created++;
       }
       continue;
@@ -3995,28 +4003,34 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
       characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
     });
 
-    // Outer face: wall <-> containing fluid (tank inside containment etc.);
-    // an uncontained BUILDING rejects to ambient instead - this is what lets
-    // a pressurized containment equilibrate over days instead of ramping
-    // monotonically (the atmosphere node is a fixed boundary).
+    // Outer face: wall <-> containing fluid (tank inside containment etc.),
+    // and ambient when nothing contains it. `containedBy: undefined` already
+    // means "stands in the open air" everywhere else in the model - it is
+    // where the burst model sends a rupture - so it means the same here.
+    //
+    // This used to be buildings ONLY, which left every uncontained component
+    // adiabatic on its outside: metal with an inner face and no outer one
+    // soaks to whatever it holds and stops nowhere. Giving a valve a wall
+    // without this would have moved its creep temperature by nothing at all,
+    // only delayed it.
+    //
+    // Convection alone, deliberately. A genuinely bare 700 C surface would
+    // shed several times more by RADIATION than by natural convection - but
+    // real plant piping and valve bodies are lagged, which suppresses both,
+    // and modelling the bare-metal radiation without the insulation that is
+    // actually there would overshoot in the other direction. Convection to
+    // ambient is the honest middle until insulation is a property.
     const containerId = component.containedBy;
-    if (containerId && state.flowNodes.has(containerId)) {
-      state.convectionConnections.push({
-        id: `convection-${id}-wall-outer`,
-        thermalNodeId: `${id}-wall`,
-        flowNodeId: containerId,
-        surfaceArea: area,
-        characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
-      });
-    } else if (isBuilding) {
-      state.convectionConnections.push({
-        id: `convection-${id}-wall-outer`,
-        thermalNodeId: `${id}-wall`,
-        flowNodeId: 'atmosphere',
-        surfaceArea: area,
-        characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
-      });
-    }
+    const outerFluid = containerId && state.flowNodes.has(containerId)
+      ? containerId
+      : 'atmosphere';
+    state.convectionConnections.push({
+      id: `convection-${id}-wall-outer`,
+      thermalNodeId: `${id}-wall`,
+      flowNodeId: outerFluid,
+      surfaceArea: area,
+      characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
+    });
     created++;
   }
   if (created > 0) {

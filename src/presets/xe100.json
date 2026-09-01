@@ -405,6 +405,7 @@
         "type": "valve",
         "label": "Steam Dump / MSSV",
         "valveType": "relief",
+        "material": "stainless-304",
         "position": {
           "x": 66,
           "y": 68
@@ -725,6 +726,7 @@
         "type": "valve",
         "label": "SG Tube Leak",
         "valveType": "gate",
+        "material": "stainless-304",
         "position": {
           "x": 60,
           "y": 74
@@ -1101,6 +1103,7 @@
         "type": "valve",
         "label": "FWH Extraction Valve",
         "valveType": "gate",
+        "material": "stainless-304",
         "position": {
           "x": 70,
           "y": 99
