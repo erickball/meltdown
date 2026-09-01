@@ -211,6 +211,34 @@ interface SaturationCurvePoint {
 }
 let saturationCurve: SaturationCurvePoint[] = [];
 
+// The raw saturation table as flat columns, in table order. findTempBracket
+// and the five T-indexed accessors read these instead of walking the
+// array-of-objects: dense Float64Array loads rather than a pointer chase and
+// a named-property offset per probe. Values are copied verbatim from
+// raw_data, so every interpolation sees the exact doubles it saw before.
+let satT: Float64Array = new Float64Array(0);      // K
+let satP_MPa: Float64Array = new Float64Array(0);
+let satU_f: Float64Array = new Float64Array(0);    // kJ/kg
+let satV_f: Float64Array = new Float64Array(0);    // m³/kg
+let satU_g: Float64Array = new Float64Array(0);    // kJ/kg
+let satV_g: Float64Array = new Float64Array(0);    // m³/kg
+
+// Direct-address index over T for findTempBracket. Bucket b covers
+// [T0 + b/scale, T0 + (b+1)/scale) and holds the largest table index whose T
+// is at or below that bucket's start, so a query jumps straight there and
+// walks forward to its bracket. The table's coarsest spacing is 2.29 K
+// against a 0.18 K bucket, so the walk is at most ONE step (mean 0.13)
+// where the binary search over 277 points took 9 probes.
+//
+// The walk is only correct because the bucket start is never PAST the true
+// bracket (T[start] <= bucket start <= T_K) and the table is strictly
+// increasing - buildSaturationTables verifies the latter and throws if it
+// ever stops holding.
+const SAT_BUCKETS = 2048;
+let satBucketStart: Int32Array = new Int32Array(0);
+let satT0 = 0;
+let satBucketScale = 0;  // buckets per K
+
 // Grid cell parameters
 const GRID_CELL_SIZE_LOGV = 0.1;  // ~26% change in v per cell
 const GRID_CELL_SIZE_U = 50;      // 50 kJ/kg per cell
@@ -232,36 +260,85 @@ const MLS_R_SQ = MLS_R * MLS_R;
  * Returns { lo, hi, t } where t is the interpolation factor.
  */
 function findTempBracket(T_K: number): { lo: number; hi: number; t: number } {
+  const n = satT.length;
+  if (n === 0) {
+    throw new Error('[WaterProps v4] Saturation tables not built - findTempBracket ' +
+      'called before buildSaturationTables()');
+  }
+
+  // Clamp to valid range
+  if (T_K <= satT[0]) {
+    return { lo: 0, hi: 0, t: 0 };
+  }
+  if (T_K >= satT[n - 1]) {
+    return { lo: n - 1, hi: n - 1, t: 0 };
+  }
+
+  // Jump to the bucket holding T_K, then walk forward to the last node at or
+  // below it - the same index the binary search converged on, since the
+  // bracket containing T_K is unique in a strictly increasing table.
+  const b = ((T_K - satT0) * satBucketScale) | 0;
+  let lo = satBucketStart[b];
+  while (satT[lo + 1] <= T_K) lo++;
+  const hi = lo + 1;
+
+  const T_lo = satT[lo];
+  const T_hi = satT[hi];
+  const t = (T_K - T_lo) / (T_hi - T_lo);
+
+  return { lo, hi, t };
+}
+
+/**
+ * Flatten the raw saturation table into columns and build the T index.
+ * Called from buildSaturationCurve so it cannot fall out of step with the
+ * data it mirrors.
+ */
+function buildSaturationTables(): void {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const rawData = saturationDome.raw_data;
   const n = rawData.length;
 
-  // Clamp to valid range
-  if (T_K <= rawData[0].T_K) {
-    return { lo: 0, hi: 0, t: 0 };
-  }
-  if (T_K >= rawData[n - 1].T_K) {
-    return { lo: n - 1, hi: n - 1, t: 0 };
+  satT = new Float64Array(n);
+  satP_MPa = new Float64Array(n);
+  satU_f = new Float64Array(n);
+  satV_f = new Float64Array(n);
+  satU_g = new Float64Array(n);
+  satV_g = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const pt = rawData[i];
+    satT[i] = pt.T_K;
+    satP_MPa[i] = pt.P_MPa;
+    satU_f[i] = pt.u_f;
+    satV_f[i] = pt.v_f;
+    satU_g[i] = pt.u_g;
+    satV_g[i] = pt.v_g;
   }
 
-  // Binary search for bracketing indices
-  let lo = 0;
-  let hi = n - 1;
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (rawData[mid].T_K <= T_K) {
-      lo = mid;
-    } else {
-      hi = mid;
+  // Both the bucket index and the uniqueness of a temperature bracket rest
+  // on this. A table that ever stops being strictly increasing would make
+  // findTempBracket return a silently wrong bracket, so refuse to run.
+  for (let i = 1; i < n; i++) {
+    if (!(satT[i] > satT[i - 1])) {
+      throw new Error(`[WaterProps v4] Saturation table is not strictly increasing in T: ` +
+        `index ${i - 1} has T=${satT[i - 1]} K, index ${i} has T=${satT[i]} K. ` +
+        `findTempBracket cannot bracket such a table.`);
     }
   }
 
-  const T_lo = rawData[lo].T_K;
-  const T_hi = rawData[hi].T_K;
-  const t = (T_K - T_lo) / (T_hi - T_lo);
-
-  return { lo, hi, t };
+  satT0 = satT[0];
+  satBucketScale = SAT_BUCKETS / (satT[n - 1] - satT[0]);
+  // One extra slot: a query just below the top of the range can round up to
+  // exactly SAT_BUCKETS, and a real entry there beats bounds-checking every
+  // lookup. Starting the walk early is always safe; starting it late is not.
+  satBucketStart = new Int32Array(SAT_BUCKETS + 1);
+  let j = 0;
+  for (let b = 0; b <= SAT_BUCKETS; b++) {
+    const tb = satT0 + b / satBucketScale;
+    while (j + 1 < n && satT[j + 1] <= tb) j++;
+    satBucketStart[b] = j;
+  }
 }
 
 /**
@@ -273,10 +350,9 @@ function P_sat_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const { lo, hi, t } = findTempBracket(T_K);
-  const rawData = saturationDome.raw_data;
 
-  const P_lo = rawData[lo].P_MPa;
-  const P_hi = rawData[hi].P_MPa;
+  const P_lo = satP_MPa[lo];
+  const P_hi = satP_MPa[hi];
   const P_MPa = P_lo + t * (P_hi - P_lo);
 
   return P_MPa * 1e6;
@@ -291,10 +367,9 @@ function u_f_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const { lo, hi, t } = findTempBracket(T_K);
-  const rawData = saturationDome.raw_data;
 
-  const u_lo = rawData[lo].u_f;
-  const u_hi = rawData[hi].u_f;
+  const u_lo = satU_f[lo];
+  const u_hi = satU_f[hi];
   const u_kJkg = u_lo + t * (u_hi - u_lo);
 
   return u_kJkg * 1000;
@@ -309,10 +384,9 @@ function v_f_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const { lo, hi, t } = findTempBracket(T_K);
-  const rawData = saturationDome.raw_data;
 
-  const v_lo = rawData[lo].v_f;
-  const v_hi = rawData[hi].v_f;
+  const v_lo = satV_f[lo];
+  const v_hi = satV_f[hi];
 
   return v_lo + t * (v_hi - v_lo);
 }
@@ -326,10 +400,9 @@ function u_g_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const { lo, hi, t } = findTempBracket(T_K);
-  const rawData = saturationDome.raw_data;
 
-  const u_lo = rawData[lo].u_g;
-  const u_hi = rawData[hi].u_g;
+  const u_lo = satU_g[lo];
+  const u_hi = satU_g[hi];
   const u_kJkg = u_lo + t * (u_hi - u_lo);
 
   return u_kJkg * 1000;
@@ -344,10 +417,9 @@ function v_g_from_T(T_K: number): number {
   if (!saturationDome) throw new Error('Saturation dome not loaded');
 
   const { lo, hi, t } = findTempBracket(T_K);
-  const rawData = saturationDome.raw_data;
 
-  const v_lo = rawData[lo].v_g;
-  const v_hi = rawData[hi].v_g;
+  const v_lo = satV_g[lo];
+  const v_hi = satV_g[hi];
 
   return v_lo + t * (v_hi - v_lo);
 }
@@ -861,10 +933,15 @@ function findTwoPhaseState(u: number, v: number): {
   let T_hi = T_data_max;
 
   function calcQualityDiff(T: number): { x_v: number; x_u: number; diff: number; v_f: number; v_g: number; u_f: number; u_g: number } {
-    const v_f = v_f_from_T(T);
-    const v_g = v_g_from_T(T);
-    const u_f = u_f_from_T(T);
-    const u_g = u_g_from_T(T);
+    // One bracket for all four columns. The four *_from_T accessors each
+    // repeat the same search at the same T, and this runs inside the
+    // bisection below - so the search was being done four times per probe.
+    // Same lookup, same lerp, same doubles as the accessors.
+    const { lo, hi, t } = findTempBracket(T);
+    const v_f = satV_f[lo] + t * (satV_f[hi] - satV_f[lo]);
+    const v_g = satV_g[lo] + t * (satV_g[hi] - satV_g[lo]);
+    const u_f = (satU_f[lo] + t * (satU_f[hi] - satU_f[lo])) * 1000;
+    const u_g = (satU_g[lo] + t * (satU_g[hi] - satU_g[lo])) * 1000;
 
     const x_v = (v - v_f) / (v_g - v_f);
     const x_u = (u - u_f) / (u_g - u_f);
@@ -1067,6 +1144,10 @@ function getCellKey(logV: number, u_kJkg: number): number {
  */
 function buildSaturationCurve(): void {
   if (!saturationDome) return;
+
+  // Flat columns and the T index are mirrors of the same raw table, so they
+  // are rebuilt here - the one place every load path already goes through.
+  buildSaturationTables();
 
   const rawData = saturationDome.raw_data;
   saturationCurve = [];
