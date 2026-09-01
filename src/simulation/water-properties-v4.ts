@@ -1763,6 +1763,30 @@ function interpolateFromGrid(
 /**
  * Find saturation properties at a given u by interpolating directly on the raw data.
  * This is consistent with findSaturationAtV - both use the same raw data.
+ *
+ * KNOWN DEFECT, near the critical point (found 2026-09-01, not fixed).
+ * The binary search below assumes u_f rises with index. It does, for 274 of
+ * the table's 276 intervals - and then TURNS OVER at the last two rows:
+ *
+ *   index 274: T = 646.637 K, u_f = 1950.998 kJ/kg
+ *   index 275: T = 646.817 K, u_f = 1949.730 kJ/kg   <-- falls by 1.27
+ *
+ * That is real physics, not corrupt data: within ~0.5 K of the critical
+ * point (647.096 K) the saturated-liquid branch turns back as u_f and u_g
+ * converge on u_c. A binary search cannot bracket a non-monotone column, so
+ * for u_kJkg in roughly [1949.7, 1951.0] this can converge on the wrong
+ * interval and return a T_sat/v_f/P_sat off the true saturation line - and
+ * the two candidate temperatures there differ by only ~0.2 K, so the error
+ * is small and easy to miss rather than obviously wrong.
+ *
+ * Consequences are confined to states within half a degree of critical. It
+ * is left alone deliberately: the honest fix is to decide what u_f even
+ * means on a branch that is doubling back (bracket both roots, or cut the
+ * table at the turnover), which is a physics decision, not a search fix.
+ * Do NOT "fix" this by giving the column a bucket index - an index bakes in
+ * exactly the monotonicity the data does not have. The sibling searches
+ * findSaturationU and findAllSaturationPropsAtV ARE indexed, precisely
+ * because their columns were verified strictly monotone at build time.
  */
 function findSaturationAtU(u: number): {
   T_sat: number;
@@ -1774,7 +1798,8 @@ function findSaturationAtU(u: number): {
   const rawData = saturationDome.raw_data;
   const u_kJkg = u / 1000;  // Convert J/kg to kJ/kg
 
-  // u_f increases with index (sorted by T, and u_f increases with T)
+  // u_f increases with index (sorted by T, and u_f increases with T) - except
+  // for the last two rows; see the near-critical defect noted above.
   const u_f_min = rawData[0].u_f;  // ~0 at triple point
   const u_f_max = rawData[rawData.length - 1].u_f;
 
