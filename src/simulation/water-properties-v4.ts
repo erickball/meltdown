@@ -127,13 +127,49 @@ interface SpatialIndex {
   // never-mutated structure. Interpolation was 35% of all simulation CPU.
   liquidBlocks: Map<number, CellBlock>;
   vaporBlocks: Map<number, CellBlock>;
+  // Every sub-cell candidate list of that phase, concatenated into flat
+  // typed arrays (see NearSoA). The blocks index into these.
+  liquidNear: NearSoA;
+  vaporNear: NearSoA;
+}
+
+/**
+ * One phase's grid points in flat typed arrays, plus the sub-cell candidate
+ * lists as indices into them.
+ *
+ * The MLS loop is the hottest loop in the simulation and it walks a
+ * candidate list end to end. Reading it through GridPoint object pointers
+ * costs a dependent load and a property offset per field, on objects the
+ * allocator scattered across the heap - so a 45-point vapor scan touched ~45
+ * unrelated cache lines. Typed arrays make that a dense stream, and V8 loads
+ * a Float64Array element as a raw indexed double with no map check.
+ *
+ * The candidate lists hold INDICES rather than copies of the point records.
+ * Sub-cell supports overlap heavily: 7579 grid points expand to ~437k
+ * candidate slots, a 58x duplication. Copying full records into those slots
+ * costs ~17 MB; 4-byte indices into a deduplicated table cost 1.7 MB, less
+ * than the 8-byte object pointers this replaces, and the point table itself
+ * (~300 KB) stays comfortably cache-resident.
+ *
+ * Coordinates and values are SPLIT rather than interleaved because the two
+ * are read at different rates: every candidate is tested against the support
+ * radius, but only the ~58% that pass contribute their T and lnP. Dense
+ * 16-byte coordinate records keep 4 points per cache line for the rejection
+ * scan, and the values stream is touched only on acceptance.
+ */
+interface NearSoA {
+  xy: Float64Array;     // per point, stride 2: logV, u (kJ/kg)
+  vals: Float64Array;   // per point, stride 3: T_K, lnP, P_MPa
+  idx: Int32Array;      // concatenated sub-cell candidate lists (point indices)
 }
 
 // Everything a query needs from its cell, precomputed once at index build.
 interface CellBlock {
   // Full 5x5-cell gather in the original dx/dy order. The degenerate-support
   // fallback averages over ALL of it, and the MLS sums accumulate in this
-  // order - order is part of the answer, not a detail.
+  // order - order is part of the answer, not a detail. Kept as GridPoint
+  // references: measured to run zero times on real plant traffic, so it is
+  // not worth a second packed copy of the whole block.
   all: GridPoint[];
   // min/max of pt.v over `all`. The vapor hand-off's v-bracket test - "does
   // any block point sit at-or-below (strictly above) the query's v" - is
@@ -146,7 +182,10 @@ interface CellBlock {
   // distSq < R_SQ support test for a query inside that sub-cell, so the
   // MLS loop scans ~40% fewer points (vapor grid: 77 -> 45 per query on
   // average, liquid 388 -> 224) for bit-identical sums.
-  near: [GridPoint[], GridPoint[], GridPoint[], GridPoint[]];
+  //
+  // Stored as (offset, length) into the phase's NearSoA.idx.
+  nearOff: Int32Array;  // length 4
+  nearLen: Int32Array;  // length 4
 }
 
 let spatialIndex: SpatialIndex | null = null;
@@ -1069,6 +1108,8 @@ function buildSpatialIndex(): void {
     vaporGrid: new Map(),
     liquidBlocks: new Map(),
     vaporBlocks: new Map(),
+    liquidNear: EMPTY_NEAR_SOA,
+    vaporNear: EMPTY_NEAR_SOA,
   };
 
   for (const pt of gridPoints) {
@@ -1108,74 +1149,8 @@ function buildSpatialIndex(): void {
   // is point-for-point and order-for-order what it always was: the MLS sums
   // accumulate in this order and the near-coincident-point early return
   // takes the first match, so order is part of the answer, not a detail.
-  for (const [grid, blocks] of [
-    [spatialIndex.liquidGrid, spatialIndex.liquidBlocks] as const,
-    [spatialIndex.vaporGrid, spatialIndex.vaporBlocks] as const,
-  ]) {
-    const wanted = new Set<number>();
-    for (const key of grid.keys()) {
-      const cellX = Math.floor(key / 8192) - 512;
-      const cellY = (key % 8192) - 512;
-      for (let dx = -2; dx <= 2; dx++) {
-        for (let dy = -2; dy <= 2; dy++) {
-          wanted.add((cellX + dx + 512) * 8192 + (cellY + dy + 512));
-        }
-      }
-    }
-    for (const key of wanted) {
-      const cellX = Math.floor(key / 8192) - 512;
-      const cellY = (key % 8192) - 512;
-      const gathered: GridPoint[] = [];
-      for (let dx = -2; dx <= 2; dx++) {
-        for (let dy = -2; dy <= 2; dy++) {
-          const cellPoints = grid.get((cellX + dx + 512) * 8192 + (cellY + dy + 512));
-          if (cellPoints) {
-            for (let i = 0; i < cellPoints.length; i++) gathered.push(cellPoints[i]);
-          }
-        }
-      }
-      if (gathered.length === 0) continue;
-
-      let vMin = Infinity;
-      let vMax = -Infinity;
-      for (const pt of gathered) {
-        if (pt.v < vMin) vMin = pt.v;
-        if (pt.v > vMax) vMax = pt.v;
-      }
-
-      // Sub-cell candidate filter. A grid point can contribute to a query
-      // only if its distSq beats the support test (distSq < R_SQ), and every
-      // query inside sub-rectangle S is at least dist(point, S) away from
-      // the point - so a point with dist(point, S) >= R can be dropped from
-      // S's candidate list without changing any query result. The relative
-      // pad is many orders above ulp level, so float rounding in this
-      // rectangle math can never disagree with the query loop's own distSq;
-      // padding is pure conservatism (a kept point that then fails the
-      // support test contributes nothing, exactly as it always did).
-      const R_PAD = MLS_R * (1 + 1e-6);
-      const R_PAD_SQ = R_PAD * R_PAD;
-      const near: CellBlock['near'] = [[], [], [], []];
-      const halfX = GRID_CELL_SIZE_LOGV / 2;
-      const halfY = GRID_CELL_SIZE_U / 2;
-      for (let sy = 0; sy < 2; sy++) {
-        for (let sx = 0; sx < 2; sx++) {
-          const x0 = cellX * GRID_CELL_SIZE_LOGV + sx * halfX;
-          const x1 = x0 + halfX;
-          const y0 = (cellY * GRID_CELL_SIZE_U + sy * halfY) * MLS_U_SCALE;
-          const y1 = (cellY * GRID_CELL_SIZE_U + (sy + 1) * halfY) * MLS_U_SCALE;
-          const list = near[sy * 2 + sx];
-          for (const pt of gathered) {
-            const ptY = pt.u * MLS_U_SCALE;
-            const ddx = Math.max(0, x0 - pt.logV, pt.logV - x1);
-            const ddy = Math.max(0, y0 - ptY, ptY - y1);
-            if (ddx * ddx + ddy * ddy < R_PAD_SQ) list.push(pt);
-          }
-        }
-      }
-
-      blocks.set(key, { all: gathered, vMin, vMax, near });
-    }
-  }
+  spatialIndex.liquidNear = buildCellBlocks(spatialIndex.liquidGrid, spatialIndex.liquidBlocks);
+  spatialIndex.vaporNear = buildCellBlocks(spatialIndex.vaporGrid, spatialIndex.vaporBlocks);
 
   console.log(`[WaterProps v4] Spatial index built: ${spatialIndex.liquidPoints.length} liquid, ` +
     `${spatialIndex.vaporPoints.length} vapor, ${spatialIndex.supercriticalPoints.length} supercritical`);
@@ -1192,6 +1167,118 @@ function buildSpatialIndex(): void {
     }
   }
   vaporHotEdge = Array.from(edgeByCell.values()).sort((a, b) => a.cellX - b.cellX);
+}
+
+const EMPTY_NEAR_SOA: NearSoA = {
+  xy: new Float64Array(0),
+  vals: new Float64Array(0),
+  idx: new Int32Array(0),
+};
+
+/**
+ * Gather one phase's 5x5 cell blocks and pack their sub-cell candidate lists
+ * into the phase's flat NearSoA. Returns that SoA; the blocks map is filled
+ * in place.
+ */
+function buildCellBlocks(
+  grid: Map<number, GridPoint[]>,
+  blocks: Map<number, CellBlock>
+): NearSoA {
+  // Deduplicated point table for this phase, and each point's index in it.
+  const xyParts: number[] = [];
+  const valParts: number[] = [];
+  const indexOf = new Map<GridPoint, number>();
+  for (const cellPoints of grid.values()) {
+    for (const pt of cellPoints) {
+      if (indexOf.has(pt)) continue;
+      indexOf.set(pt, xyParts.length / 2);
+      xyParts.push(pt.logV, pt.u);
+      valParts.push(pt.T_K, pt.lnP, pt.P_MPa);
+    }
+  }
+
+  // Candidate indices accumulate here and are frozen into a typed array at
+  // the end - the total count is not known until every block is gathered.
+  const idxParts: number[] = [];
+
+  const wanted = new Set<number>();
+  for (const key of grid.keys()) {
+    const cellX = Math.floor(key / 8192) - 512;
+    const cellY = (key % 8192) - 512;
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        wanted.add((cellX + dx + 512) * 8192 + (cellY + dy + 512));
+      }
+    }
+  }
+  for (const key of wanted) {
+    const cellX = Math.floor(key / 8192) - 512;
+    const cellY = (key % 8192) - 512;
+    const gathered: GridPoint[] = [];
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dy = -2; dy <= 2; dy++) {
+        const cellPoints = grid.get((cellX + dx + 512) * 8192 + (cellY + dy + 512));
+        if (cellPoints) {
+          for (let i = 0; i < cellPoints.length; i++) gathered.push(cellPoints[i]);
+        }
+      }
+    }
+    if (gathered.length === 0) continue;
+
+    let vMin = Infinity;
+    let vMax = -Infinity;
+    for (const pt of gathered) {
+      if (pt.v < vMin) vMin = pt.v;
+      if (pt.v > vMax) vMax = pt.v;
+    }
+
+    // Sub-cell candidate filter. A grid point can contribute to a query
+    // only if its distSq beats the support test (distSq < R_SQ), and every
+    // query inside sub-rectangle S is at least dist(point, S) away from
+    // the point - so a point with dist(point, S) >= R can be dropped from
+    // S's candidate list without changing any query result. The relative
+    // pad is many orders above ulp level, so float rounding in this
+    // rectangle math can never disagree with the query loop's own distSq;
+    // padding is pure conservatism (a kept point that then fails the
+    // support test contributes nothing, exactly as it always did).
+    const R_PAD = MLS_R * (1 + 1e-6);
+    const R_PAD_SQ = R_PAD * R_PAD;
+    const nearOff = new Int32Array(4);
+    const nearLen = new Int32Array(4);
+    const halfX = GRID_CELL_SIZE_LOGV / 2;
+    const halfY = GRID_CELL_SIZE_U / 2;
+    for (let sy = 0; sy < 2; sy++) {
+      for (let sx = 0; sx < 2; sx++) {
+        const x0 = cellX * GRID_CELL_SIZE_LOGV + sx * halfX;
+        const x1 = x0 + halfX;
+        const y0 = (cellY * GRID_CELL_SIZE_U + sy * halfY) * MLS_U_SCALE;
+        const y1 = (cellY * GRID_CELL_SIZE_U + (sy + 1) * halfY) * MLS_U_SCALE;
+        const slot = sy * 2 + sx;
+        nearOff[slot] = idxParts.length;
+        let n = 0;
+        for (const pt of gathered) {
+          const ptY = pt.u * MLS_U_SCALE;
+          const ddx = Math.max(0, x0 - pt.logV, pt.logV - x1);
+          const ddy = Math.max(0, y0 - ptY, ptY - y1);
+          if (ddx * ddx + ddy * ddy < R_PAD_SQ) {
+            // Same points, same relative order as the GridPoint list this
+            // replaces - now referenced by table index.
+            idxParts.push(indexOf.get(pt)!);
+            n++;
+          }
+        }
+        nearLen[slot] = n;
+      }
+    }
+
+    blocks.set(key, { all: gathered, vMin, vMax, nearOff, nearLen });
+  }
+
+  return {
+    xy: Float64Array.from(xyParts),
+    vals: Float64Array.from(valParts),
+    idx: Int32Array.from(idxParts),
+  };
 }
 
 // ============================================================================
@@ -1268,7 +1355,13 @@ function interpolateFromGrid(
   const halfCell = GRID_CELL_SIZE_LOGV / 2;
   const sx = logV - cellX * GRID_CELL_SIZE_LOGV >= halfCell ? 1 : 0;
   const sy = u_kJkg - cellY * GRID_CELL_SIZE_U >= GRID_CELL_SIZE_U / 2 ? 1 : 0;
-  const nearby = block.near[sy * 2 + sx];
+  const slot = sy * 2 + sx;
+  const soa = phase === 'liquid' ? spatialIndex.liquidNear : spatialIndex.vaporNear;
+  const soaXY = soa.xy;
+  const soaVals = soa.vals;
+  const soaIdx = soa.idx;
+  const nearStart = block.nearOff[slot];
+  const nearCount = block.nearLen[slot];
 
   // Scale factors to make logV and u comparable
   // logV range: about -3 to 2 (5 units)
@@ -1289,14 +1382,19 @@ function interpolateFromGrid(
   let mP0 = 0, mP1 = 0, mP2 = 0;
   let supportCount = 0;
 
-  for (const pt of nearby) {
-    const x = logV - pt.logV;
-    const y = (u_kJkg - pt.u) * U_SCALE;
+  // Walks the packed candidate stream (see NearSoA): coordinates are read for
+  // every candidate, values only for the ones that clear the support test.
+  for (let i = 0; i < nearCount; i++) {
+    const p = soaIdx[nearStart + i];
+    const xi = p * 2;
+    const x = logV - soaXY[xi];
+    const y = (u_kJkg - soaXY[xi + 1]) * U_SCALE;
     const distSq = x * x + y * y;
 
     if (distSq < 1e-12) {
       // Almost exactly on a point
-      return { T: pt.T_K, P: pt.P_MPa * 1e6 };
+      const vi = p * 3;
+      return { T: soaVals[vi], P: soaVals[vi + 2] * 1e6 };
     }
 
     // Support test in SQUARED distance, so a point outside the taper radius
@@ -1314,7 +1412,9 @@ function interpolateFromGrid(
     const oneMinusQ = 1 - q;
     const taper = oneMinusQ * oneMinusQ * oneMinusQ * oneMinusQ * (4 * q + 1);
     const w = taper / (distSq + EPS);
-    const lnP = pt.lnP;
+    const vi = p * 3;
+    const T_K = soaVals[vi];
+    const lnP = soaVals[vi + 1];
 
     supportCount++;
     S00 += w;
@@ -1323,9 +1423,9 @@ function interpolateFromGrid(
     S11 += w * x * x;
     S12 += w * x * y;
     S22 += w * y * y;
-    mT0 += w * pt.T_K;
-    mT1 += w * pt.T_K * x;
-    mT2 += w * pt.T_K * y;
+    mT0 += w * T_K;
+    mT1 += w * T_K * x;
+    mT2 += w * T_K * y;
     mP0 += w * lnP;
     mP1 += w * lnP * x;
     mP2 += w * lnP * y;
