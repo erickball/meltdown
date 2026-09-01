@@ -335,7 +335,10 @@ const M_H2O = 0.018015;
  * This ran 2x fast everywhere, which inflated Re by 2 and h by ~1.7 on every
  * forced-convection surface in every plant.
  */
-function nodeThroughput(state: SimulationState, nodeId: string): number {
+function nodeThroughput(
+  state: SimulationState, nodeId: string, table?: Map<string, number>,
+): number {
+  if (table) return table.get(nodeId) ?? 0;
   let sum = 0;
   for (const fc of state.flowConnections) {
     if (fc.fromNodeId === nodeId || fc.toNodeId === nodeId) {
@@ -345,11 +348,32 @@ function nodeThroughput(state: SimulationState, nodeId: string): number {
   return 0.5 * sum;
 }
 
+/**
+ * Every node's throughput in one sweep of the connection list.
+ *
+ * Computing it per-consumer is O(connections) EACH, and the convection pass
+ * asks twice per convection connection - on a four-loop plant that is 134
+ * surfaces x 2 x 87 connections = 23000 iterations per stage to produce at
+ * most 72 distinct numbers. One sweep is O(connections) total. Same
+ * arithmetic, same result; it is the loop nesting that was the cost.
+ */
+export function nodeThroughputTable(state: SimulationState): Map<string, number> {
+  const t = new Map<string, number>();
+  for (const fc of state.flowConnections) {
+    const m = Math.abs(fc.massFlowRate);
+    t.set(fc.fromNodeId, (t.get(fc.fromNodeId) ?? 0) + m);
+    t.set(fc.toNodeId, (t.get(fc.toNodeId) ?? 0) + m);
+  }
+  for (const [k, v] of t) t.set(k, 0.5 * v);
+  return t;
+}
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
+    const throughputs = nodeThroughputTable(state);
 
     for (const conn of state.convectionConnections) {
       const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
@@ -370,10 +394,20 @@ export class ConvectionRateOperator implements RateOperator {
       const D_heater = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
       const D_flow = conn.flowHydraulicDiameter ?? D_heater;
 
-      const h_liquid = this.liquidHeatTransferCoeff(
-        flowNode, state, conn, D_flow, D_heater);
-      const h_vapor = this.vaporHeatTransferCoeff(
-        flowNode, state, D_flow, thermalNode.temperature, conn);
+      // Each coefficient is only ever used against its own area, and a
+      // single-phase node has one of them at exactly zero - which is most
+      // surfaces in most plants. Computing the other anyway was half the
+      // convection pass multiplied by nothing: two correlation sets, a
+      // mixture-property sweep over every gas species, and a saturation
+      // lookup, to scale a zero.
+      const h_liquid = liquidArea > 0
+        ? this.liquidHeatTransferCoeff(
+            flowNode, state, conn, D_flow, D_heater, throughputs)
+        : 0;
+      const h_vapor = vaporArea > 0
+        ? this.vaporHeatTransferCoeff(
+            flowNode, state, D_flow, thermalNode.temperature, conn, throughputs)
+        : 0;
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       lastConvectionHeatRates.set(conn.id, Q);
@@ -480,8 +514,10 @@ export class ConvectionRateOperator implements RateOperator {
     conn: ConvectionConnection,
     D_flow: number,
     D_heater: number,
+    throughputs: Map<string, number>,
   ): number {
-    return liquidWallHeatTransfer(flowNode, state, conn, D_flow, D_heater).total;
+    return liquidWallHeatTransfer(
+      flowNode, state, conn, D_flow, D_heater, throughputs).total;
   }
 
 
@@ -497,9 +533,11 @@ export class ConvectionRateOperator implements RateOperator {
     state: SimulationState,
     D: number,
     T_wall: number,
-    conn?: ConvectionConnection,
+    conn: ConvectionConnection | undefined,
+    throughputs: Map<string, number>,
   ): number {
-    const { total } = vaporWallHeatTransfer(flowNode, state, D, T_wall, conn);
+    const { total } = vaporWallHeatTransfer(
+      flowNode, state, D, T_wall, conn, throughputs);
     return total;
   }
 }
@@ -519,6 +557,7 @@ export function liquidWallHeatTransfer(
   conn: ConvectionConnection,
   D: number,
   D_heater: number = D,
+  throughputs?: Map<string, number>,
 ): {
   total: number; singlePhase: number; phaseChange: number;
   natural: number; forced: number; Re: number;
@@ -526,7 +565,7 @@ export function liquidWallHeatTransfer(
     const fluid = flowNode.fluid;
     const T = fluid.temperature;
 
-    const totalMassFlow = nodeThroughput(state, flowNode.id);
+    const totalMassFlow = nodeThroughput(state, flowNode.id, throughputs);
 
     const rho = fluid.phase === 'two-phase'
       ? Water.saturatedLiquidDensity(T)
@@ -641,8 +680,9 @@ export function vaporWallHeatTransfer(
   D: number,
   T_wall: number,
   conn?: ConvectionConnection,
+  throughputs?: Map<string, number>,
 ): { total: number; sensible: number; condensation: number; natural: number; forced: number } {
-  const totalMassFlow = nodeThroughput(state, flowNode.id);
+  const totalMassFlow = nodeThroughput(state, flowNode.id, throughputs);
 
   const T = flowNode.fluid.temperature;
   const ncg = flowNode.fluid.ncg;
