@@ -368,12 +368,109 @@ export function nodeThroughputTable(state: SimulationState): Map<string, number>
   return t;
 }
 
+/**
+ * Everything a wall coefficient needs from the FLUID, which is a property of
+ * the node and not of the surface touching it.
+ *
+ * Only the area, the two characteristic lengths and the wall temperature
+ * differ between surfaces on the same node - so a node carrying several of
+ * them was paying for the same property blend, density and Prandtl number
+ * once per surface. On a four-loop plant that is 49% of the work: 36
+ * surfaces face the containment atmosphere and 27 more face `atmosphere`,
+ * which is a boundary node whose state never moves at all.
+ *
+ * Computed once per node per pass, memoised in maps the operator owns for
+ * the duration. Nothing is carried between passes - this is not a staleness
+ * cache and there is no band to get wrong, just the same arithmetic done
+ * once instead of N times.
+ */
+export interface ConvectionNodeProps {
+  liquid: Map<string, LiquidFluidProps>;
+  vapor: Map<string, VaporFluidProps>;
+  throughput: Map<string, number>;
+}
+
+interface LiquidFluidProps {
+  rho: number; mu: number; k: number; cp: number; Pr: number; beta: number;
+}
+interface VaporFluidProps {
+  k: number; mu: number; cpMass: number; M: number; Pr: number;
+  rho_g: number; nSteam: number; nNcg: number;
+}
+
+export function makeConvectionNodeProps(state: SimulationState): ConvectionNodeProps {
+  return { liquid: new Map(), vapor: new Map(), throughput: nodeThroughputTable(state) };
+}
+
+function liquidPropsFor(
+  flowNode: FlowNode, cache?: ConvectionNodeProps,
+): LiquidFluidProps {
+  const hit = cache?.liquid.get(flowNode.id);
+  if (hit) return hit;
+  const fluid = flowNode.fluid;
+  const T = fluid.temperature;
+  // Liquid properties at the node's OWN temperature. These were mu = 3e-4,
+  // k = 0.6, Pr = 2.0 - one set of roughly-150 C values applied to every
+  // liquid in every plant. Water is not that: its viscosity falls by a
+  // factor of twelve between 20 C and 330, its conductivity has a maximum
+  // near 150 C, and its Prandtl number runs from 7 down to 0.8 and back up.
+  const rho = fluid.phase === 'two-phase'
+    ? Water.saturatedLiquidDensity(T)
+    : fluid.mass / flowNode.volume;
+  const mu = Water.liquidViscosity(T);
+  const k = Water.liquidThermalConductivity(T);
+  const cp = Water.liquidSpecificHeat(T);
+  const out: LiquidFluidProps = {
+    rho, mu, k, cp, Pr: (cp * mu) / k,
+    beta: Water.liquidThermalExpansivity(T),
+  };
+  cache?.liquid.set(flowNode.id, out);
+  return out;
+}
+
+function vaporPropsFor(
+  flowNode: FlowNode, cache?: ConvectionNodeProps,
+): VaporFluidProps {
+  const hit = cache?.vapor.get(flowNode.id);
+  if (hit) return hit;
+  const T = flowNode.fluid.temperature;
+  const ncg = flowNode.fluid.ncg;
+  const nNcg = ncg ? totalMoles(ncg) : 0;
+  // Steam sharing the vapor space (all water for a vapor node, the vapor
+  // fraction for a two-phase node)
+  const steamVaporMass = flowNode.fluid.phase === 'two-phase'
+    ? flowNode.fluid.mass * (flowNode.fluid.quality ?? 0)
+    : flowNode.fluid.mass;
+  const nSteam = steamVaporMass / M_H2O;
+  const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
+  // Mole-fraction blend of steam and NCG transport properties
+  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = M_H2O;
+  let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
+  if (xNcg > 0 && ncg) {
+    k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
+    mu = (1 - xNcg) * mu_steam + xNcg * mixtureViscosity(ncg, T);
+    cpMolar = (1 - xNcg) * cpMolar_steam + xNcg * mixtureCp(ncg);
+    M = (1 - xNcg) * M_steam + xNcg * averageMolecularWeight(ncg);
+  }
+  const cpMass = cpMolar / M;
+  const out: VaporFluidProps = {
+    k, mu, cpMass, M, Pr: cpMass * mu / k,
+    // Vapor-space density: ideal-gas steam at its partial pressure plus the
+    // NCG mixture (valid above the water critical point, unlike the
+    // saturated-vapor table this replaced)
+    rho_g: approxVaporDensity(flowNode),
+    nSteam, nNcg,
+  };
+  cache?.vapor.set(flowNode.id, out);
+  return out;
+}
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
-    const throughputs = nodeThroughputTable(state);
+    const cache = makeConvectionNodeProps(state);
 
     for (const conn of state.convectionConnections) {
       const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
@@ -402,11 +499,11 @@ export class ConvectionRateOperator implements RateOperator {
       // lookup, to scale a zero.
       const h_liquid = liquidArea > 0
         ? this.liquidHeatTransferCoeff(
-            flowNode, state, conn, D_flow, D_heater, throughputs)
+            flowNode, state, conn, D_flow, D_heater, cache)
         : 0;
       const h_vapor = vaporArea > 0
         ? this.vaporHeatTransferCoeff(
-            flowNode, state, D_flow, thermalNode.temperature, conn, throughputs)
+            flowNode, state, D_flow, thermalNode.temperature, conn, cache)
         : 0;
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
@@ -514,10 +611,10 @@ export class ConvectionRateOperator implements RateOperator {
     conn: ConvectionConnection,
     D_flow: number,
     D_heater: number,
-    throughputs: Map<string, number>,
+    cache: ConvectionNodeProps,
   ): number {
     return liquidWallHeatTransfer(
-      flowNode, state, conn, D_flow, D_heater, throughputs).total;
+      flowNode, state, conn, D_flow, D_heater, cache).total;
   }
 
 
@@ -534,10 +631,10 @@ export class ConvectionRateOperator implements RateOperator {
     D: number,
     T_wall: number,
     conn: ConvectionConnection | undefined,
-    throughputs: Map<string, number>,
+    cache: ConvectionNodeProps,
   ): number {
     const { total } = vaporWallHeatTransfer(
-      flowNode, state, D, T_wall, conn, throughputs);
+      flowNode, state, D, T_wall, conn, cache);
     return total;
   }
 }
@@ -557,7 +654,7 @@ export function liquidWallHeatTransfer(
   conn: ConvectionConnection,
   D: number,
   D_heater: number = D,
-  throughputs?: Map<string, number>,
+  cache?: ConvectionNodeProps,
 ): {
   total: number; singlePhase: number; phaseChange: number;
   natural: number; forced: number; Re: number;
@@ -565,24 +662,8 @@ export function liquidWallHeatTransfer(
     const fluid = flowNode.fluid;
     const T = fluid.temperature;
 
-    const totalMassFlow = nodeThroughput(state, flowNode.id, throughputs);
-
-    const rho = fluid.phase === 'two-phase'
-      ? Water.saturatedLiquidDensity(T)
-      : fluid.mass / flowNode.volume;
-
-    // Liquid properties at the node's OWN temperature. These were mu = 3e-4,
-    // k = 0.6, Pr = 2.0 - one set of roughly-150 C values applied to every
-    // liquid in every plant. Water is not that: its viscosity falls by a
-    // factor of twelve between 20 C and 330, its conductivity has a maximum
-    // near 150 C, and its Prandtl number runs from 7 down to 0.8 and back up.
-    // Measured against the constants, h was ~1.7x too LOW in a hot primary
-    // loop and ~1.6x too HIGH in cold water - the same constant wrong in
-    // opposite directions at the two ends of the range a plant visits.
-    const mu = Water.liquidViscosity(T);
-    const k = Water.liquidThermalConductivity(T);
-    const cp = Water.liquidSpecificHeat(T);
-    const Pr = (cp * mu) / k;
+    const totalMassFlow = nodeThroughput(state, flowNode.id, cache?.throughput);
+    const { rho, mu, k, cp, Pr, beta } = liquidPropsFor(flowNode, cache);
 
     // The passage washing THIS surface, which in a rod bundle is not the
     // node's bore: the rods take 36% of it.
@@ -606,7 +687,6 @@ export function liquidWallHeatTransfer(
     // natural circulation is so vigorous.
     const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
     const dTwall = thermalNode ? Math.abs(thermalNode.temperature - T) : 0;
-    const beta = Water.liquidThermalExpansivity(T);
     const h_natural = naturalConvectionCoeff(
       Math.abs(beta) * dTwall, rho, mu, k, cp, D);
 
@@ -680,38 +760,11 @@ export function vaporWallHeatTransfer(
   D: number,
   T_wall: number,
   conn?: ConvectionConnection,
-  throughputs?: Map<string, number>,
+  cache?: ConvectionNodeProps,
 ): { total: number; sensible: number; condensation: number; natural: number; forced: number } {
-  const totalMassFlow = nodeThroughput(state, flowNode.id, throughputs);
-
+  const totalMassFlow = nodeThroughput(state, flowNode.id, cache?.throughput);
   const T = flowNode.fluid.temperature;
-  const ncg = flowNode.fluid.ncg;
-  const nNcg = ncg ? totalMoles(ncg) : 0;
-
-  // Steam sharing the vapor space (all water for a vapor node, the vapor
-  // fraction for a two-phase node)
-  const steamVaporMass = flowNode.fluid.phase === 'two-phase'
-    ? flowNode.fluid.mass * (flowNode.fluid.quality ?? 0)
-    : flowNode.fluid.mass;
-  const nSteam = steamVaporMass / M_H2O;
-  const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
-
-  // Mole-fraction blend of steam and NCG transport properties
-  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = M_H2O;
-  let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
-  if (xNcg > 0 && ncg) {
-    k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
-    mu = (1 - xNcg) * mu_steam + xNcg * mixtureViscosity(ncg, T);
-    cpMolar = (1 - xNcg) * cpMolar_steam + xNcg * mixtureCp(ncg);
-    M = (1 - xNcg) * M_steam + xNcg * averageMolecularWeight(ncg);
-  }
-  const cpMass = cpMolar / M;          // J/kg-K
-  const Pr = cpMass * mu / k;
-
-  // Vapor-space density: ideal-gas steam at its partial pressure plus the
-  // NCG mixture (valid above the water critical point, unlike the
-  // saturated-vapor table this replaced)
-  const rho_g = approxVaporDensity(flowNode);
+  const { k, mu, cpMass, M, Pr, rho_g, nSteam, nNcg } = vaporPropsFor(flowNode, cache);
 
   const flowArea = conn?.flowPassageArea ?? flowNode.flowArea;
   const velocity = totalMassFlow > 0 ? totalMassFlow / (rho_g * flowArea) : 0;
