@@ -1,6 +1,6 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
+import { renderComponent, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -15,8 +15,8 @@ import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
 
-/** Which projection draws the plant: flat plan, 2.5D perspective, or the tile grid. */
-export type ViewMode = '2d' | 'perspective' | 'grid';
+/** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
+export type ViewMode = 'perspective' | 'grid';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -32,9 +32,9 @@ export class PlantCanvas {
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
-  // 'perspective' is the 2.5D view (isometric.enabled mirrors it for the
-  // code that still reads that flag); 'grid' delegates projection, hit
-  // testing and the plant layers to GridView.
+  // 'perspective' is the 2.5D view, drawn by this class; 'grid' delegates
+  // projection, hit testing and the plant layers to GridView. (The flat 2D
+  // plan view this class used to draw was retired in favour of the grid.)
   private viewMode: ViewMode = 'perspective';
   private grid = new GridView();
 
@@ -42,11 +42,12 @@ export class PlantCanvas {
   // Separate from view.offsetY which controls elevation
   private cameraDepth: number = 0;
 
-
   // Interaction state
   private isDragging: boolean = false;
   private dragStart: Point = { x: 0, y: 0 };
   private selectedComponentId: string | null = null;
+  /** Grid view: the pipe run the user clicked (a connection has no id, so the object itself). */
+  private selectedConnection: Connection | null = null;
   private hoveredComponentId: string | null = null;
   private moveMode: boolean = false;
   private isMovingComponent: boolean = false;
@@ -101,6 +102,8 @@ export class PlantCanvas {
   public onComponentMove?: (componentId: string, newPosition: Point) => void;
   /** Grid view: a pipe was laid from one port to another (plan length in metres). */
   public onRouteComplete?: (from: PortHit, to: PortHit, route: Point[], planLength: number) => void;
+  /** Grid view: a pipe run was clicked (`again` = it was already the selected one). */
+  public onConnectionSelect?: (connection: Connection | null, again: boolean) => void;
 
   constructor(canvas: HTMLCanvasElement, plantState: PlantState) {
     this.canvas = canvas;
@@ -187,14 +190,11 @@ export class PlantCanvas {
 
     if (this.viewMode === 'grid') {
       this.grid.panByPixels(panX, panY);
-    } else if (this.isometric.enabled) {
+    } else {
       // Match the drag/edge-pan mapping: horizontal -> offsetX, vertical ->
       // cameraDepth, divided by zoom so the apparent speed stays constant
       this.view.offsetX += panX / this.isoZoom;
       this.cameraDepth -= panY / this.isoZoom;
-    } else {
-      this.view.offsetX += panX;
-      this.view.offsetY += panY;
     }
     this.clampView();
     e.preventDefault();
@@ -253,13 +253,27 @@ export class PlantCanvas {
           return;
         }
         this.selectedComponentId = clickedComponent.id;
+        this.selectConnection(null);
         this.onComponentSelect?.(clickedComponent.id);
       } else {
+        // Grid view: a click on a pipe run selects the connection (not while
+        // placing a component, when the click is about to place it there)
+        if (this.viewMode === 'grid' && !this.moveMode && !this.placementPreview) {
+          const conn = this.grid.connectionAt({ x, y }, this.plantState);
+          if (conn) {
+            const again = conn === this.selectedConnection;
+            this.selectedComponentId = null;
+            this.onComponentSelect?.(null);
+            this.selectConnection(conn, again);
+            return;
+          }
+        }
         // Start panning (only if not in move mode, or nothing selected)
         this.isDragging = true;
         this.dragStart = { x, y };
         if (!this.moveMode) {
           this.selectedComponentId = null;
+          this.selectConnection(null);
           this.onComponentSelect?.(null);
         }
       }
@@ -303,21 +317,10 @@ export class PlantCanvas {
       // Move the selected component
       const component = this.plantState.components.get(this.selectedComponentId);
       if (component) {
-        if (this.isometric.enabled) {
-          // In perspective mode, convert screen positions to world positions
-          const currentWorld = this.screenToWorldPerspective({ x, y });
-          const prevWorld = this.screenToWorldPerspective(this.dragStart);
-          const dx = currentWorld.x - prevWorld.x;
-          const dy = currentWorld.y - prevWorld.y;
-          component.position.x += dx;
-          component.position.y += dy;
-        } else {
-          // In 2D mode, use simple screen-to-world conversion
-          const dx = (x - this.dragStart.x) / this.view.zoom;
-          const dy = (y - this.dragStart.y) / this.view.zoom;
-          component.position.x += dx;
-          component.position.y += dy;
-        }
+        const currentWorld = this.getWorldPositionFromScreen({ x, y });
+        const prevWorld = this.getWorldPositionFromScreen(this.dragStart);
+        component.position.x += currentWorld.x - prevWorld.x;
+        component.position.y += currentWorld.y - prevWorld.y;
         this.dragStart = { x, y };
         this.onComponentMove?.(this.selectedComponentId, component.position);
       }
@@ -328,8 +331,8 @@ export class PlantCanvas {
 
       if (this.viewMode === 'grid') {
         this.grid.panByPixels(dx, dy);
-      } else if (this.isometric.enabled) {
-        // In isometric mode:
+      } else {
+        // In perspective mode:
         // - Drag left/right moves laterally (offsetX)
         // - Drag up/down moves forward/backward (cameraDepth)
         // Drag down = move forward (negative dy = forward)
@@ -337,10 +340,6 @@ export class PlantCanvas {
         // regardless of magnification
         this.view.offsetX += dx / this.isoZoom;
         this.cameraDepth -= dy / this.isoZoom; // Negate: drag down = move forward
-      } else {
-        // In normal 2D mode, drag moves view offset directly
-        this.view.offsetX += dx;
-        this.view.offsetY += dy;
       }
 
       this.clampView();
@@ -394,48 +393,28 @@ export class PlantCanvas {
       return;
     }
 
-    if (this.isometric.enabled) {
-      if (e.shiftKey || e.ctrlKey) {
-        // Shift/Ctrl + scroll changes view angle (the old plain-scroll behavior)
-        // Scroll up = look more from above, scroll down = look more forward
-        // With Shift held some mice report the wheel as deltaX, so fall back to it
-        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-        const angleStep = 5;
-        this.viewAngle += delta > 0 ? angleStep : -angleStep;
-        this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
+    if (e.shiftKey || e.ctrlKey) {
+      // Shift/Ctrl + scroll changes view angle (the old plain-scroll behavior)
+      // Scroll up = look more from above, scroll down = look more forward
+      // With Shift held some mice report the wheel as deltaX, so fall back to it
+      const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+      const angleStep = 5;
+      this.viewAngle += delta > 0 ? angleStep : -angleStep;
+      this.viewAngle = Math.max(10, Math.min(50, this.viewAngle));
 
-        // Update the view angle slider and display to match
-        const slider = document.getElementById('view-elevation') as HTMLInputElement;
-        const display = document.getElementById('view-elevation-value');
-        if (slider) {
-          slider.value = String(this.viewAngle);
-        }
-        if (display) {
-          display.textContent = String(this.viewAngle);
-        }
-      } else {
-        // Plain scroll zooms about the mid-screen anchor
-        const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-        this.applyIsoZoom(this.isoZoom * zoomFactor);
+      // Update the view angle slider and display to match
+      const slider = document.getElementById('view-elevation') as HTMLInputElement;
+      const display = document.getElementById('view-elevation-value');
+      if (slider) {
+        slider.value = String(this.viewAngle);
+      }
+      if (display) {
+        display.textContent = String(this.viewAngle);
       }
     } else {
-      // In 2D mode, scroll wheel zooms
-      const rect = this.canvas.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const mouseY = e.clientY - rect.top;
-
-      // Zoom toward mouse position
+      // Plain scroll zooms about the mid-screen anchor
       const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-      const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
-
-      // Adjust offset to zoom toward mouse
-      const worldX = (mouseX - this.view.offsetX) / this.view.zoom;
-      const worldY = (mouseY - this.view.offsetY) / this.view.zoom;
-
-      this.view.zoom = newZoom;
-      this.view.offsetX = mouseX - worldX * newZoom;
-      this.view.offsetY = mouseY - worldY * newZoom;
-      this.clampView();
+      this.applyIsoZoom(this.isoZoom * zoomFactor);
     }
   }
 
@@ -455,7 +434,7 @@ export class PlantCanvas {
         this.grid.zoomAt(center, zoomFactor);
         this.grid.panByPixels(center.x - this.lastPinchCenter.x, center.y - this.lastPinchCenter.y);
         this.syncIsoZoomUI();
-      } else if (this.isometric.enabled) {
+      } else {
         // Pinch zooms the perspective view about the mid-screen anchor
         this.applyIsoZoom(this.isoZoom * zoomFactor);
 
@@ -463,21 +442,6 @@ export class PlantCanvas {
         // (horizontal -> offsetX, vertical -> cameraDepth), scaled by zoom
         this.view.offsetX += (center.x - this.lastPinchCenter.x) / this.isoZoom;
         this.cameraDepth -= (center.y - this.lastPinchCenter.y) / this.isoZoom;
-        this.clampView();
-      } else {
-        const newZoom = Math.max(10, Math.min(200, this.view.zoom * zoomFactor));
-
-        // Zoom toward center
-        const worldX = (center.x - this.view.offsetX) / this.view.zoom;
-        const worldY = (center.y - this.view.offsetY) / this.view.zoom;
-
-        this.view.zoom = newZoom;
-        this.view.offsetX = center.x - worldX * newZoom;
-        this.view.offsetY = center.y - worldY * newZoom;
-
-        // Also pan by the center's motion
-        this.view.offsetX += center.x - this.lastPinchCenter.x;
-        this.view.offsetY += center.y - this.lastPinchCenter.y;
         this.clampView();
       }
     }
@@ -501,24 +465,13 @@ export class PlantCanvas {
       if (!a.containedBy && b.containedBy) return 1;
 
       // Second priority: depth sorting
-      if (this.isometric.enabled) {
-        return a.position.y - b.position.y;
-      }
-      return 0;
+      return a.position.y - b.position.y;
     });
 
     for (const component of components) {
-      if (this.isometric.enabled) {
-        // In isometric mode, check against projected screen bounds
-        if (this.isPointInProjectedComponent(screenPos, component)) {
-          return component;
-        }
-      } else {
-        // In 2D mode, use world coordinate check
-        const worldPos = this.getWorldPositionFromScreen(screenPos);
-        if (this.isPointInComponent(worldPos, component)) {
-          return component;
-        }
+      // Check against projected screen bounds
+      if (this.isPointInProjectedComponent(screenPos, component)) {
+        return component;
       }
     }
     return null;
@@ -768,18 +721,6 @@ export class PlantCanvas {
    */
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
     if (this.viewMode === 'grid') return this.grid.componentScreenBounds(component);
-    if (!this.isometric.enabled) {
-      // In 2D mode, use simple world-to-screen conversion
-      const bounds = getComponentBounds(component, this.view);
-      const screenCenter = worldToScreen(component.position, this.view);
-      const topY = screenCenter.y + bounds.y;
-      return {
-        topCenter: { x: screenCenter.x, y: topY },
-        scale: 1,
-        width: bounds.width,
-        height: bounds.height,
-      };
-    }
 
     // Isometric/perspective mode - replicate the visual bounds calculation
     const elevation = getComponentElevation(component);
@@ -961,34 +902,20 @@ export class PlantCanvas {
       for (const port of component.ports) {
         const portWorldPos = this.getPortWorldPosition(component, port);
 
-        if (this.isometric.enabled) {
-          // In isometric mode, check against screen position
-          const portScreenPos = this.getPortScreenPosition(component, port);
-          if (!portScreenPos) continue;
+        // Check against screen position
+        const portScreenPos = this.getPortScreenPosition(component, port);
+        if (!portScreenPos) continue;
 
-          const distance = Math.hypot(
-            screenPos.x - portScreenPos.x,
-            screenPos.y - portScreenPos.y
-          );
+        const distance = Math.hypot(
+          screenPos.x - portScreenPos.x,
+          screenPos.y - portScreenPos.y
+        );
 
-          // Include the stroke width in detection radius (stroke is ~25% of radius, centered on edge)
-          const strokeWidth = Math.max(1, portScreenPos.radius * 0.25);
-          const detectionRadius = portScreenPos.radius + strokeWidth / 2;
-          if (distance <= detectionRadius) {
-            matches.push({ component, port, worldPos: portWorldPos, worldY: portWorldPos.y, localY: port.position.y });
-          }
-        } else {
-          // In 2D mode, use world coordinate check
-          const worldPos = screenToWorld(screenPos, this.view);
-          const portRadius = 0.18; // Detection radius in meters (includes stroke)
-          const distance = Math.hypot(
-            worldPos.x - portWorldPos.x,
-            worldPos.y - portWorldPos.y
-          );
-
-          if (distance <= portRadius) {
-            matches.push({ component, port, worldPos: portWorldPos, worldY: portWorldPos.y, localY: port.position.y });
-          }
+        // Include the stroke width in detection radius (stroke is ~25% of radius, centered on edge)
+        const strokeWidth = Math.max(1, portScreenPos.radius * 0.25);
+        const detectionRadius = portScreenPos.radius + strokeWidth / 2;
+        if (distance <= detectionRadius) {
+          matches.push({ component, port, worldPos: portWorldPos, worldY: portWorldPos.y, localY: port.position.y });
         }
       }
     }
@@ -1148,79 +1075,6 @@ export class PlantCanvas {
       y: translateY + rotatedY,
       radius: Math.max(4, 0.4 * centerZoom)
     };
-  }
-
-  private isPointInComponent(worldPos: Point, component: PlantComponent): boolean {
-    // Transform point to component local coordinates
-    const dx = worldPos.x - component.position.x;
-    const dy = worldPos.y - component.position.y;
-    const cos = Math.cos(-component.rotation);
-    const sin = Math.sin(-component.rotation);
-    const localX = dx * cos - dy * sin;
-    const localY = dx * sin + dy * cos;
-
-    if (this.isInComponentShape(localX, localY, component)) return true;
-
-    // Minimum hit box, the 2D twin of the isometric one: a component smaller
-    // than the click target is caught by a padded box around it instead. In
-    // world metres here, since this path tests in world coordinates.
-    const minHalf = PlantCanvas.MIN_CLICK_TARGET_PX / 2 / this.view.zoom;
-    const size = this.getComponentSize(component);
-    const boxLeft = component.type === 'pipe' ? 0 : -size.width / 2;
-    const boxRight = component.type === 'pipe' ? size.width : size.width / 2;
-    return localX >= Math.min(boxLeft, boxRight - minHalf * 2) - minHalf
-      && localX <= Math.max(boxRight, boxLeft + minHalf * 2) + minHalf
-      && Math.abs(localY) <= Math.max(size.height / 2, minHalf);
-  }
-
-  /** The component's own drawn shape, in its local coordinates (metres). */
-  private isInComponentShape(localX: number, localY: number, component: PlantComponent): boolean {
-    // Check bounds based on component type
-    switch (component.type) {
-      case 'tank':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'pipe':
-        return localX >= 0 && localX <= component.length &&
-               Math.abs(localY) <= component.diameter / 2;
-      case 'pump':
-        return Math.hypot(localX, localY) <= component.diameter / 2;
-      case 'vessel':
-        const r = component.innerDiameter / 2 + component.wallThickness;
-        return Math.abs(localX) <= r && Math.abs(localY) <= component.height / 2;
-      case 'reactorVessel':
-        const rv = component as import('../types').ReactorVesselComponent;
-        const rvR = rv.innerDiameter / 2 + rv.wallThickness;
-        return Math.abs(localX) <= rvR && Math.abs(localY) <= rv.height / 2;
-      case 'coreBarrel':
-        const cb = component as import('../types').CoreBarrelComponent;
-        const cbR = cb.innerDiameter / 2 + cb.thickness;
-        return Math.abs(localX) <= cbR && Math.abs(localY) <= cb.height / 2;
-      case 'valve':
-        const vr = component.diameter;
-        return Math.abs(localX) <= vr && Math.abs(localY) <= vr;
-      case 'heatExchanger':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'turbine-generator':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'turbine-driven-pump':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'condenser':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'controller':
-        return Math.abs(localX) <= component.width / 2 &&
-               Math.abs(localY) <= component.height / 2;
-      case 'switchyard':
-        const sw = component as import('../types').SwitchyardComponent;
-        return Math.abs(localX) <= sw.width / 2 &&
-               Math.abs(localY) <= sw.height / 2;
-      default:
-        return false;
-    }
   }
 
   public resize(): void {
@@ -1445,15 +1299,8 @@ export class PlantCanvas {
   public getWorldPositionFromScreen(screenPos: Point): Point {
     if (this.viewMode === 'grid') {
       return this.grid.screenToWorld(screenPos);
-    } else if (this.isometric.enabled) {
-      return this.screenToWorldPerspective(screenPos);
-    } else {
-      // Use standard 2D conversion
-      return {
-        x: (screenPos.x - this.view.offsetX) / this.view.zoom,
-        y: (screenPos.y - this.view.offsetY) / this.view.zoom
-      };
     }
+    return this.screenToWorldPerspective(screenPos);
   }
 
   // Public method to convert world coordinates to screen coordinates
@@ -1461,11 +1308,8 @@ export class PlantCanvas {
   public getScreenPositionFromWorld(worldPos: Point, elevation: number = 0): Point {
     if (this.viewMode === 'grid') {
       return this.grid.worldToScreen(worldPos);
-    } else if (this.isometric.enabled) {
-      return this.worldToScreenPerspective(worldPos, elevation).pos;
-    } else {
-      return worldToScreen(worldPos, this.view);
     }
+    return this.worldToScreenPerspective(worldPos, elevation).pos;
   }
 
   // Get the screen Y coordinate for ground level (elevation 0) at a given world position
@@ -1473,14 +1317,10 @@ export class PlantCanvas {
   public getGroundY(worldPos: Point): number | null {
     if (this.viewMode === 'grid') {
       return this.grid.worldToScreen(worldPos).y;
-    } else if (this.isometric.enabled) {
-      const result = this.worldToScreenPerspective(worldPos, 0);
-      if (result.scale <= 0) return null;
-      return result.pos.y;
-    } else {
-      // In 2D mode, ground level is at some fixed Y based on view
-      return worldToScreen(worldPos, this.view).y;
     }
+    const result = this.worldToScreenPerspective(worldPos, 0);
+    if (result.scale <= 0) return null;
+    return result.pos.y;
   }
 
   // Get camera depth for external use (e.g., shrub rendering)
@@ -1542,14 +1382,11 @@ export class PlantCanvas {
 
     if (this.viewMode === 'grid') {
       this.grid.panByPixels(panX, panY);
-    } else if (this.isometric.enabled) {
+    } else {
       // Match the drag mapping: horizontal -> offsetX, vertical -> cameraDepth
       // (divided by zoom so the apparent pan speed is magnification-independent)
       this.view.offsetX += panX / this.isoZoom;
       this.cameraDepth -= panY / this.isoZoom;
-    } else {
-      this.view.offsetX += panX;
-      this.view.offsetY += panY;
     }
     this.clampView();
   }
@@ -1557,24 +1394,21 @@ export class PlantCanvas {
   private clampView(): void {
     const rect = this.canvas.getBoundingClientRect();
 
-    if (this.isometric.enabled) {
-      // Limit view.offsetY (vestigial in this mode - the perspective
-      // projection does not read it; arrow keys now pan offsetX/cameraDepth)
-      const minOffsetY = rect.height * 0.2;
-      const maxOffsetY = rect.height * 1.2;
-      this.view.offsetY = Math.max(minOffsetY, Math.min(maxOffsetY, this.view.offsetY));
+    // Limit view.offsetY (vestigial in this mode - the perspective
+    // projection does not read it; arrow keys now pan offsetX/cameraDepth)
+    const minOffsetY = rect.height * 0.2;
+    const maxOffsetY = rect.height * 1.2;
+    this.view.offsetY = Math.max(minOffsetY, Math.min(maxOffsetY, this.view.offsetY));
 
-      // Limit lateral movement (view.offsetX)
-      const maxOffsetX = rect.width * 3;
-      const minOffsetX = -rect.width * 2;
-      this.view.offsetX = Math.max(minOffsetX, Math.min(maxOffsetX, this.view.offsetX));
+    // Limit lateral movement (view.offsetX)
+    const maxOffsetX = rect.width * 3;
+    const minOffsetX = -rect.width * 2;
+    this.view.offsetX = Math.max(minOffsetX, Math.min(maxOffsetX, this.view.offsetX));
 
-      // Limit forward/backward movement (cameraDepth)
-      const maxDepth = rect.height * 2;
-      const minDepth = -rect.height * 2;
-      this.cameraDepth = Math.max(minDepth, Math.min(maxDepth, this.cameraDepth));
-    }
-    // No clamping in normal 2D mode - allow free panning
+    // Limit forward/backward movement (cameraDepth)
+    const maxDepth = rect.height * 2;
+    const minDepth = -rect.height * 2;
+    this.cameraDepth = Math.max(minDepth, Math.min(maxDepth, this.cameraDepth));
   }
 
   public render(): void {
@@ -1596,17 +1430,13 @@ export class PlantCanvas {
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Draw background - either grid or isometric ground
-    if (this.isometric.enabled) {
-      renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
+    // Draw the ground
+    renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
 
-      // Draw construction grid on ground plane in construction mode
-      if (this.constructionMode) {
-        renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
-          (pos, elev) => this.worldToScreenPerspective(pos, elev));
-      }
-    } else {
-      renderGrid(ctx, this.view, rect.width, rect.height);
+    // Draw construction grid on ground plane in construction mode
+    if (this.constructionMode) {
+      renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
+        (pos, elev) => this.worldToScreenPerspective(pos, elev));
     }
 
     // Sort components by depth for proper layering in isometric view
@@ -1637,268 +1467,265 @@ export class PlantCanvas {
       if (isContainedBy(a, b.id)) return 1;  // a is inside b (directly or indirectly), draw a last
       if (isContainedBy(b, a.id)) return -1; // b is inside a (directly or indirectly), draw b last
 
-      // Second priority: depth sorting in isometric mode
-      if (!this.isometric.enabled) return 0;
+      // Second priority: depth sorting
       return (b.position.y - a.position.y);
     });
 
-    // Draw shadows first (if isometric)
+    // Draw shadows first
     // Shadows are computed in world space using 3D ray-plane intersection
-    if (this.isometric.enabled) {
-      // Building floors go first, directly on the ground: shadows,
-      // construction footprint outlines, and components all draw on top
-      for (const component of sortedComponents) {
+    // Building floors go first, directly on the ground: shadows,
+    // construction footprint outlines, and components all draw on top
+    for (const component of sortedComponents) {
+      if (component.type === 'building') {
+        renderBuildingFloor(
+          ctx,
+          component as import('../types').BuildingComponent,
+          (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
+        );
+      }
+    }
+
+    // Sun direction vector (direction light travels, from sun toward ground)
+    // Sun at 45 degrees elevation, behind objects and slightly to the left
+    const sunElevation = 45 * Math.PI / 180; // 45 degrees above horizon
+    const sunAzimuth = 10 * Math.PI / 180;   // 10 degrees to the left
+    const sunDirX = Math.sin(sunAzimuth) * Math.cos(sunElevation);   // ~0.16 (light goes right)
+    const sunDirY = -Math.cos(sunAzimuth) * Math.cos(sunElevation);  // ~-0.92 (light goes toward camera)
+    const sunDirZ = -Math.sin(sunElevation);                          // ~-0.34 (light goes down)
+
+    // Shadow offset per unit of elevation: where ray hits ground
+    // For point at (x, y, z), ray is (x, y, z) + t*(sunDirX, sunDirY, sunDirZ)
+    // Hits ground when z + t*sunDirZ = 0, so t = -z/sunDirZ
+    // Ground intersection: x - z*sunDirX/sunDirZ, y - z*sunDirY/sunDirZ
+    const shadowOffsetXPerZ = -sunDirX / sunDirZ;  // 0.1 (shadow goes right)
+    const shadowOffsetYPerZ = -sunDirY / sunDirZ;  // -0.4 (shadow goes toward camera)
+
+    for (const component of sortedComponents) {
+      try {
+        // Skip shadows for contained components (they're inside something)
+        if (component.containedBy) continue;
+
+        // Skip shadows for switchyard (it has its own individual equipment shadows)
+        if (component.type === 'switchyard') continue;
+
+        const size = this.getComponentSize(component);
+        const worldWidth = size.width || 1;
+        const worldHeight = size.height || 1;
+
+        // Get component's elevation (z coordinate)
+        const elevation = getComponentElevation(component);
+
+        // Component center in world space
+        // For most components, position IS the center
+        // For pipes, position is at one end, so we need to offset to find the center
+        // For buildings, shadow should be at the front (toward camera) not center
+        let centerX = component.position.x;
+        let centerY = component.position.y;
+
+        // For buildings, move shadow origin to front of the building (toward camera = -Y)
         if (component.type === 'building') {
-          renderBuildingFloor(
-            ctx,
-            component as import('../types').BuildingComponent,
-            (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
-          );
+          const bldg = component as any;
+          const bldgDepth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
+          centerY -= bldgDepth / 2;  // Move to front edge
         }
+        // Note: pipe offset handled below by adjusting local corners
+
+        // Component corners in local 3D space
+        const halfW = worldWidth / 2;
+        const cos = Math.cos(component.rotation);
+        const sin = Math.sin(component.rotation);
+
+        // For pipes, position is at one end, not center
+        // Local x: pipes go from 0 to length (not centered like other components)
+        let localLeft = -halfW;
+        let localRight = halfW;
+        if (component.type === 'pipe') {
+          // Pipe starts at position (local x=0) and extends to length
+          localLeft = 0;
+          localRight = worldWidth; // = length
+        }
+
+        // Shadow is cast by the TOP of the component projecting onto the ground
+        const baseElevation = elevation;
+
+        // For pipes, shadow height is the diameter, not the length
+        const shadowHeight = component.type === 'pipe' ? (component as any).diameter : worldHeight;
+        const topZ = baseElevation + shadowHeight;
+
+        // Base center corners (y=0 since components are drawn at midpoint)
+        const baseFrontLeft = { x: localLeft, y: 0, z: baseElevation };
+        const baseFrontRight = { x: localRight, y: 0, z: baseElevation };
+
+        // Top center corners
+        const topFrontLeft = { x: localLeft, y: 0, z: topZ };
+        const topFrontRight = { x: localRight, y: 0, z: topZ };
+
+        // Project all 4 corners to ground plane
+        const shadowCorners: Point[] = [];
+        const corners3D = [topFrontLeft, topFrontRight, baseFrontRight, baseFrontLeft];
+
+        for (const local of corners3D) {
+          // Rotate to world space
+          const worldX = centerX + local.x * cos - local.y * sin;
+          const worldY = centerY + local.x * sin + local.y * cos;
+          const worldZ = local.z;
+
+          // Ray from this point in sun direction hits ground at:
+          const groundX = worldX + worldZ * shadowOffsetXPerZ;
+          const groundY = worldY + worldZ * shadowOffsetYPerZ;
+
+          shadowCorners.push({ x: groundX, y: groundY });
+        }
+
+        // Project shadow corners from world space to screen space
+        const screenCorners = shadowCorners.map(corner =>
+          this.worldToScreenPerspective(corner, 0)
+        );
+
+        // Skip if any corner is behind camera
+        if (screenCorners.some(c => c.scale <= 0)) continue;
+
+        ctx.save();
+
+        // Draw shadow as polygon
+        ctx.globalAlpha = 0.4;
+        ctx.fillStyle = 'rgba(20, 15, 10, 1)';
+        ctx.beginPath();
+        ctx.moveTo(screenCorners[0].pos.x, screenCorners[0].pos.y);
+        for (let i = 1; i < screenCorners.length; i++) {
+          ctx.lineTo(screenCorners[i].pos.x, screenCorners[i].pos.y);
+        }
+        ctx.closePath();
+        ctx.fill();
+
+        // For HX, add additional shadow pieces for plenum and bulge
+        if (component.type === 'heatExchanger') {
+          const hx = component as import('../types').HeatExchangerComponent;
+          const isVertical = (hx.height || 8) > (hx.width || 2.5);
+          const hxType = hx.hxType || 'utube';
+          const shellDiameter = isVertical ? (hx.width || 2.5) : (hx.height || 2.5);
+          const plenumLen = hx.plenumLength || 0;
+
+          // Draw plenum shadow (extends below shell bottom for vertical, or to left for horizontal)
+          if (plenumLen > 0) {
+            const plenumCorners: Point[] = [];
+            if (isVertical) {
+              // Plenum extends below shell (z from elevation-plenumLen to elevation)
+              const plenumBottom = elevation - plenumLen;
+              const plenumTop = elevation;
+              const plenumHalfW = shellDiameter / 2;
+              const plenumCorners3D = [
+                { x: -plenumHalfW, y: 0, z: plenumTop },
+                { x: plenumHalfW, y: 0, z: plenumTop },
+                { x: plenumHalfW, y: 0, z: plenumBottom },
+                { x: -plenumHalfW, y: 0, z: plenumBottom }
+              ];
+              for (const local of plenumCorners3D) {
+                const worldX = centerX + local.x * cos - local.y * sin;
+                const worldY = centerY + local.x * sin + local.y * cos;
+                const groundX = worldX + local.z * shadowOffsetXPerZ;
+                const groundY = worldY + local.z * shadowOffsetYPerZ;
+                plenumCorners.push({ x: groundX, y: groundY });
+              }
+            } else {
+              // Horizontal: plenum extends to left (negative x)
+              const shellLeft = -worldWidth / 2;
+              const plenumCorners3D = [
+                { x: shellLeft, y: 0, z: elevation },
+                { x: shellLeft, y: 0, z: elevation + shellDiameter },
+                { x: shellLeft - plenumLen, y: 0, z: elevation + shellDiameter },
+                { x: shellLeft - plenumLen, y: 0, z: elevation }
+              ];
+              for (const local of plenumCorners3D) {
+                const worldX = centerX + local.x * cos - local.y * sin;
+                const worldY = centerY + local.x * sin + local.y * cos;
+                const groundX = worldX + local.z * shadowOffsetXPerZ;
+                const groundY = worldY + local.z * shadowOffsetYPerZ;
+                plenumCorners.push({ x: groundX, y: groundY });
+              }
+            }
+
+            const plenumScreenCorners = plenumCorners.map(c => this.worldToScreenPerspective(c, 0));
+            if (!plenumScreenCorners.some(c => c.scale <= 0)) {
+              ctx.beginPath();
+              ctx.moveTo(plenumScreenCorners[0].pos.x, plenumScreenCorners[0].pos.y);
+              for (let i = 1; i < plenumScreenCorners.length; i++) {
+                ctx.lineTo(plenumScreenCorners[i].pos.x, plenumScreenCorners[i].pos.y);
+              }
+              ctx.closePath();
+              ctx.fill();
+            }
+          }
+
+          // Draw bulge shadow for U-tube (extends above shell top for vertical, or to right for horizontal)
+          if (hxType === 'utube') {
+            const bulgeRadius = shellDiameter / 2;
+            const bulgeCorners: Point[] = [];
+            if (isVertical) {
+              // Bulge extends above shell (z from topZ to topZ + bulgeRadius)
+              const bulgeBottom = topZ;
+              const bulgeTop = topZ + bulgeRadius;
+              const bulgeHalfW = shellDiameter / 2;
+              const bulgeCorners3D = [
+                { x: -bulgeHalfW, y: 0, z: bulgeBottom },
+                { x: bulgeHalfW, y: 0, z: bulgeBottom },
+                { x: bulgeHalfW, y: 0, z: bulgeTop },
+                { x: -bulgeHalfW, y: 0, z: bulgeTop }
+              ];
+              for (const local of bulgeCorners3D) {
+                const worldX = centerX + local.x * cos - local.y * sin;
+                const worldY = centerY + local.x * sin + local.y * cos;
+                const groundX = worldX + local.z * shadowOffsetXPerZ;
+                const groundY = worldY + local.z * shadowOffsetYPerZ;
+                bulgeCorners.push({ x: groundX, y: groundY });
+              }
+            } else {
+              // Horizontal: bulge extends to right
+              const shellRight = worldWidth / 2;
+              const bulgeCorners3D = [
+                { x: shellRight, y: 0, z: elevation },
+                { x: shellRight, y: 0, z: elevation + shellDiameter },
+                { x: shellRight + bulgeRadius, y: 0, z: elevation + shellDiameter },
+                { x: shellRight + bulgeRadius, y: 0, z: elevation }
+              ];
+              for (const local of bulgeCorners3D) {
+                const worldX = centerX + local.x * cos - local.y * sin;
+                const worldY = centerY + local.x * sin + local.y * cos;
+                const groundX = worldX + local.z * shadowOffsetXPerZ;
+                const groundY = worldY + local.z * shadowOffsetYPerZ;
+                bulgeCorners.push({ x: groundX, y: groundY });
+              }
+            }
+
+            const bulgeScreenCorners = bulgeCorners.map(c => this.worldToScreenPerspective(c, 0));
+            if (!bulgeScreenCorners.some(c => c.scale <= 0)) {
+              ctx.beginPath();
+              ctx.moveTo(bulgeScreenCorners[0].pos.x, bulgeScreenCorners[0].pos.y);
+              for (let i = 1; i < bulgeScreenCorners.length; i++) {
+                ctx.lineTo(bulgeScreenCorners[i].pos.x, bulgeScreenCorners[i].pos.y);
+              }
+              ctx.closePath();
+              ctx.fill();
+            }
+          }
+        }
+
+        ctx.restore();
+      } catch (e) {
+        console.error('Shadow rendering error:', e);
       }
+    }
 
-      // Sun direction vector (direction light travels, from sun toward ground)
-      // Sun at 45 degrees elevation, behind objects and slightly to the left
-      const sunElevation = 45 * Math.PI / 180; // 45 degrees above horizon
-      const sunAzimuth = 10 * Math.PI / 180;   // 10 degrees to the left
-      const sunDirX = Math.sin(sunAzimuth) * Math.cos(sunElevation);   // ~0.16 (light goes right)
-      const sunDirY = -Math.cos(sunAzimuth) * Math.cos(sunElevation);  // ~-0.92 (light goes toward camera)
-      const sunDirZ = -Math.sin(sunElevation);                          // ~-0.34 (light goes down)
-
-      // Shadow offset per unit of elevation: where ray hits ground
-      // For point at (x, y, z), ray is (x, y, z) + t*(sunDirX, sunDirY, sunDirZ)
-      // Hits ground when z + t*sunDirZ = 0, so t = -z/sunDirZ
-      // Ground intersection: x - z*sunDirX/sunDirZ, y - z*sunDirY/sunDirZ
-      const shadowOffsetXPerZ = -sunDirX / sunDirZ;  // 0.1 (shadow goes right)
-      const shadowOffsetYPerZ = -sunDirY / sunDirZ;  // -0.4 (shadow goes toward camera)
-
+    // Draw ground-level outlines in construction mode
+    if (this.constructionMode) {
       for (const component of sortedComponents) {
-        try {
-          // Skip shadows for contained components (they're inside something)
-          if (component.containedBy) continue;
-
-          // Skip shadows for switchyard (it has its own individual equipment shadows)
-          if (component.type === 'switchyard') continue;
-
-          const size = this.getComponentSize(component);
-          const worldWidth = size.width || 1;
-          const worldHeight = size.height || 1;
-
-          // Get component's elevation (z coordinate)
-          const elevation = getComponentElevation(component);
-
-          // Component center in world space
-          // For most components, position IS the center
-          // For pipes, position is at one end, so we need to offset to find the center
-          // For buildings, shadow should be at the front (toward camera) not center
-          let centerX = component.position.x;
-          let centerY = component.position.y;
-
-          // For buildings, move shadow origin to front of the building (toward camera = -Y)
-          if (component.type === 'building') {
-            const bldg = component as any;
-            const bldgDepth = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
-            centerY -= bldgDepth / 2;  // Move to front edge
-          }
-          // Note: pipe offset handled below by adjusting local corners
-
-          // Component corners in local 3D space
-          const halfW = worldWidth / 2;
-          const cos = Math.cos(component.rotation);
-          const sin = Math.sin(component.rotation);
-
-          // For pipes, position is at one end, not center
-          // Local x: pipes go from 0 to length (not centered like other components)
-          let localLeft = -halfW;
-          let localRight = halfW;
-          if (component.type === 'pipe') {
-            // Pipe starts at position (local x=0) and extends to length
-            localLeft = 0;
-            localRight = worldWidth; // = length
-          }
-
-          // Shadow is cast by the TOP of the component projecting onto the ground
-          const baseElevation = elevation;
-
-          // For pipes, shadow height is the diameter, not the length
-          const shadowHeight = component.type === 'pipe' ? (component as any).diameter : worldHeight;
-          const topZ = baseElevation + shadowHeight;
-
-          // Base center corners (y=0 since components are drawn at midpoint)
-          const baseFrontLeft = { x: localLeft, y: 0, z: baseElevation };
-          const baseFrontRight = { x: localRight, y: 0, z: baseElevation };
-
-          // Top center corners
-          const topFrontLeft = { x: localLeft, y: 0, z: topZ };
-          const topFrontRight = { x: localRight, y: 0, z: topZ };
-
-          // Project all 4 corners to ground plane
-          const shadowCorners: Point[] = [];
-          const corners3D = [topFrontLeft, topFrontRight, baseFrontRight, baseFrontLeft];
-
-          for (const local of corners3D) {
-            // Rotate to world space
-            const worldX = centerX + local.x * cos - local.y * sin;
-            const worldY = centerY + local.x * sin + local.y * cos;
-            const worldZ = local.z;
-
-            // Ray from this point in sun direction hits ground at:
-            const groundX = worldX + worldZ * shadowOffsetXPerZ;
-            const groundY = worldY + worldZ * shadowOffsetYPerZ;
-
-            shadowCorners.push({ x: groundX, y: groundY });
-          }
-
-          // Project shadow corners from world space to screen space
-          const screenCorners = shadowCorners.map(corner =>
-            this.worldToScreenPerspective(corner, 0)
-          );
-
-          // Skip if any corner is behind camera
-          if (screenCorners.some(c => c.scale <= 0)) continue;
-
-          ctx.save();
-
-          // Draw shadow as polygon
-          ctx.globalAlpha = 0.4;
-          ctx.fillStyle = 'rgba(20, 15, 10, 1)';
-          ctx.beginPath();
-          ctx.moveTo(screenCorners[0].pos.x, screenCorners[0].pos.y);
-          for (let i = 1; i < screenCorners.length; i++) {
-            ctx.lineTo(screenCorners[i].pos.x, screenCorners[i].pos.y);
-          }
-          ctx.closePath();
-          ctx.fill();
-
-          // For HX, add additional shadow pieces for plenum and bulge
-          if (component.type === 'heatExchanger') {
-            const hx = component as import('../types').HeatExchangerComponent;
-            const isVertical = (hx.height || 8) > (hx.width || 2.5);
-            const hxType = hx.hxType || 'utube';
-            const shellDiameter = isVertical ? (hx.width || 2.5) : (hx.height || 2.5);
-            const plenumLen = hx.plenumLength || 0;
-
-            // Draw plenum shadow (extends below shell bottom for vertical, or to left for horizontal)
-            if (plenumLen > 0) {
-              const plenumCorners: Point[] = [];
-              if (isVertical) {
-                // Plenum extends below shell (z from elevation-plenumLen to elevation)
-                const plenumBottom = elevation - plenumLen;
-                const plenumTop = elevation;
-                const plenumHalfW = shellDiameter / 2;
-                const plenumCorners3D = [
-                  { x: -plenumHalfW, y: 0, z: plenumTop },
-                  { x: plenumHalfW, y: 0, z: plenumTop },
-                  { x: plenumHalfW, y: 0, z: plenumBottom },
-                  { x: -plenumHalfW, y: 0, z: plenumBottom }
-                ];
-                for (const local of plenumCorners3D) {
-                  const worldX = centerX + local.x * cos - local.y * sin;
-                  const worldY = centerY + local.x * sin + local.y * cos;
-                  const groundX = worldX + local.z * shadowOffsetXPerZ;
-                  const groundY = worldY + local.z * shadowOffsetYPerZ;
-                  plenumCorners.push({ x: groundX, y: groundY });
-                }
-              } else {
-                // Horizontal: plenum extends to left (negative x)
-                const shellLeft = -worldWidth / 2;
-                const plenumCorners3D = [
-                  { x: shellLeft, y: 0, z: elevation },
-                  { x: shellLeft, y: 0, z: elevation + shellDiameter },
-                  { x: shellLeft - plenumLen, y: 0, z: elevation + shellDiameter },
-                  { x: shellLeft - plenumLen, y: 0, z: elevation }
-                ];
-                for (const local of plenumCorners3D) {
-                  const worldX = centerX + local.x * cos - local.y * sin;
-                  const worldY = centerY + local.x * sin + local.y * cos;
-                  const groundX = worldX + local.z * shadowOffsetXPerZ;
-                  const groundY = worldY + local.z * shadowOffsetYPerZ;
-                  plenumCorners.push({ x: groundX, y: groundY });
-                }
-              }
-
-              const plenumScreenCorners = plenumCorners.map(c => this.worldToScreenPerspective(c, 0));
-              if (!plenumScreenCorners.some(c => c.scale <= 0)) {
-                ctx.beginPath();
-                ctx.moveTo(plenumScreenCorners[0].pos.x, plenumScreenCorners[0].pos.y);
-                for (let i = 1; i < plenumScreenCorners.length; i++) {
-                  ctx.lineTo(plenumScreenCorners[i].pos.x, plenumScreenCorners[i].pos.y);
-                }
-                ctx.closePath();
-                ctx.fill();
-              }
-            }
-
-            // Draw bulge shadow for U-tube (extends above shell top for vertical, or to right for horizontal)
-            if (hxType === 'utube') {
-              const bulgeRadius = shellDiameter / 2;
-              const bulgeCorners: Point[] = [];
-              if (isVertical) {
-                // Bulge extends above shell (z from topZ to topZ + bulgeRadius)
-                const bulgeBottom = topZ;
-                const bulgeTop = topZ + bulgeRadius;
-                const bulgeHalfW = shellDiameter / 2;
-                const bulgeCorners3D = [
-                  { x: -bulgeHalfW, y: 0, z: bulgeBottom },
-                  { x: bulgeHalfW, y: 0, z: bulgeBottom },
-                  { x: bulgeHalfW, y: 0, z: bulgeTop },
-                  { x: -bulgeHalfW, y: 0, z: bulgeTop }
-                ];
-                for (const local of bulgeCorners3D) {
-                  const worldX = centerX + local.x * cos - local.y * sin;
-                  const worldY = centerY + local.x * sin + local.y * cos;
-                  const groundX = worldX + local.z * shadowOffsetXPerZ;
-                  const groundY = worldY + local.z * shadowOffsetYPerZ;
-                  bulgeCorners.push({ x: groundX, y: groundY });
-                }
-              } else {
-                // Horizontal: bulge extends to right
-                const shellRight = worldWidth / 2;
-                const bulgeCorners3D = [
-                  { x: shellRight, y: 0, z: elevation },
-                  { x: shellRight, y: 0, z: elevation + shellDiameter },
-                  { x: shellRight + bulgeRadius, y: 0, z: elevation + shellDiameter },
-                  { x: shellRight + bulgeRadius, y: 0, z: elevation }
-                ];
-                for (const local of bulgeCorners3D) {
-                  const worldX = centerX + local.x * cos - local.y * sin;
-                  const worldY = centerY + local.x * sin + local.y * cos;
-                  const groundX = worldX + local.z * shadowOffsetXPerZ;
-                  const groundY = worldY + local.z * shadowOffsetYPerZ;
-                  bulgeCorners.push({ x: groundX, y: groundY });
-                }
-              }
-
-              const bulgeScreenCorners = bulgeCorners.map(c => this.worldToScreenPerspective(c, 0));
-              if (!bulgeScreenCorners.some(c => c.scale <= 0)) {
-                ctx.beginPath();
-                ctx.moveTo(bulgeScreenCorners[0].pos.x, bulgeScreenCorners[0].pos.y);
-                for (let i = 1; i < bulgeScreenCorners.length; i++) {
-                  ctx.lineTo(bulgeScreenCorners[i].pos.x, bulgeScreenCorners[i].pos.y);
-                }
-                ctx.closePath();
-                ctx.fill();
-              }
-            }
-          }
-
-          ctx.restore();
-        } catch (e) {
-          console.error('Shadow rendering error:', e);
-        }
+        this.renderGroundOutline(ctx, component);
       }
+    }
 
-      // Draw ground-level outlines in construction mode
-      if (this.constructionMode) {
-        for (const component of sortedComponents) {
-          this.renderGroundOutline(ctx, component);
-        }
-      }
-
-      // Draw placement preview (footprint following cursor)
-      if (this.placementPreview && this.constructionMode) {
-        this.renderPlacementPreview(ctx);
-      }
+    // Draw placement preview (footprint following cursor)
+    if (this.placementPreview && this.constructionMode) {
+      this.renderPlacementPreview(ctx);
     }
 
     // Draw controller wires (control signal connections to cores)
@@ -1912,17 +1739,12 @@ export class PlantCanvas {
             let controllerScreen: Point;
             let coreScreen: Point;
 
-            if (this.isometric.enabled) {
-              const controllerElev = controller.elevation ?? 0;
-              const coreElev = (core as any).elevation ?? 0;
-              const controllerProj = this.worldToScreenPerspective(controller.position, controllerElev);
-              const coreProj = this.worldToScreenPerspective(core.position, coreElev);
-              controllerScreen = controllerProj.pos;
-              coreScreen = coreProj.pos;
-            } else {
-              controllerScreen = worldToScreen(controller.position, this.view);
-              coreScreen = worldToScreen(core.position, this.view);
-            }
+            const controllerElev = controller.elevation ?? 0;
+            const coreElev = (core as any).elevation ?? 0;
+            const controllerProj = this.worldToScreenPerspective(controller.position, controllerElev);
+            const coreProj = this.worldToScreenPerspective(core.position, coreElev);
+            controllerScreen = controllerProj.pos;
+            coreScreen = coreProj.pos;
 
             // Draw thin black wire from controller to core
             ctx.save();
@@ -1962,46 +1784,40 @@ export class PlantCanvas {
             let switchyardScreen: Point;
             let generatorScreen: Point;
 
-            if (this.isometric.enabled) {
-              const tgElev = tg.elevation ?? 0;
+            const tgElev = tg.elevation ?? 0;
 
-              // Switchyard position - project to footprint center (ground level)
-              // The switchyard is drawn centered on its footprint, so target ground projection
-              const switchyardProj = this.worldToScreenPerspective(switchyard.position, 0);
-              switchyardScreen = {
-                x: switchyardProj.pos.x,
-                y: switchyardProj.pos.y
-              };
+            // Switchyard position - project to footprint center (ground level)
+            // The switchyard is drawn centered on its footprint, so target ground projection
+            const switchyardProj = this.worldToScreenPerspective(switchyard.position, 0);
+            switchyardScreen = {
+              x: switchyardProj.pos.x,
+              y: switchyardProj.pos.y
+            };
 
-              // Generator circle position (at exhaust end of turbine)
-              const tgW = tg.width;
-              const tgH = tg.height;
-              const genR = tgH / 3;
-              const isLeftRight = tg.orientation !== 'right-left';
-              const genLocalX = isLeftRight ? (tgW / 2 + genR) : (-tgW / 2 - genR);
+            // Generator circle position (at exhaust end of turbine)
+            const tgW = tg.width;
+            const tgH = tg.height;
+            const genR = tgH / 3;
+            const isLeftRight = tg.orientation !== 'right-left';
+            const genLocalX = isLeftRight ? (tgW / 2 + genR) : (-tgW / 2 - genR);
 
-              // Transform to world coords
-              const cos = Math.cos(tg.rotation);
-              const sin = Math.sin(tg.rotation);
-              const genWorldX = tg.position.x + genLocalX * cos;
-              const genWorldY = tg.position.y + genLocalX * sin;
+            // Transform to world coords
+            const cos = Math.cos(tg.rotation);
+            const sin = Math.sin(tg.rotation);
+            const genWorldX = tg.position.x + genLocalX * cos;
+            const genWorldY = tg.position.y + genLocalX * sin;
 
-              // Project the generator's world position to screen space
-              // The generator circle is drawn at local Y=0, which is the vertical center of the turbine
-              // In perspective rendering, components are drawn at:
-              //   translateY = centerScreen.pos.y - visualHalfH (upward from ground projection)
-              // So the center (local Y=0) is at centerScreen.pos.y - visualHalfH in screen space
-              const genProj = this.worldToScreenPerspective({ x: genWorldX, y: genWorldY }, tgElev);
-              const visualHalfH = (tg.height / 2) * genProj.scale * 50 * this.getViewTransform().verticalScale;
-              generatorScreen = {
-                x: genProj.pos.x,
-                y: genProj.pos.y - visualHalfH  // Center of generator circle
-              };
-            } else {
-              switchyardScreen = worldToScreen(switchyard.position, this.view);
-              // Simple 2D case - generator at turbine position
-              generatorScreen = worldToScreen(generator.position, this.view);
-            }
+            // Project the generator's world position to screen space
+            // The generator circle is drawn at local Y=0, which is the vertical center of the turbine
+            // In perspective rendering, components are drawn at:
+            //   translateY = centerScreen.pos.y - visualHalfH (upward from ground projection)
+            // So the center (local Y=0) is at centerScreen.pos.y - visualHalfH in screen space
+            const genProj = this.worldToScreenPerspective({ x: genWorldX, y: genWorldY }, tgElev);
+            const visualHalfH = (tg.height / 2) * genProj.scale * 50 * this.getViewTransform().verticalScale;
+            generatorScreen = {
+              x: genProj.pos.x,
+              y: genProj.pos.y - visualHalfH  // Center of generator circle
+            };
 
             // Draw dashed electrical connection
             ctx.save();
@@ -2026,240 +1842,226 @@ export class PlantCanvas {
     for (const component of sortedComponents) {
       ctx.save();
 
-      // Apply perspective projection if in isometric mode
-      if (this.isometric.enabled) {
-        const elevation = getComponentElevation(component);
-        const size = this.getComponentSize(component);
-        const halfW = size.width / 2;
-        const halfH = size.height / 2;
+      const elevation = getComponentElevation(component);
+      const size = this.getComponentSize(component);
+      const halfW = size.width / 2;
+      const halfH = size.height / 2;
 
-        // Component position (for pipes, this is at one end; for others, it's the center)
-        const centerX = component.position.x;
-        const centerY = component.position.y;
+      // Component position (for pipes, this is at one end; for others, it's the center)
+      const centerX = component.position.x;
+      const centerY = component.position.y;
 
-        // Component corners in local space (before rotation)
-        const cos = Math.cos(component.rotation);
-        const sin = Math.sin(component.rotation);
+      // Component corners in local space (before rotation)
+      const cos = Math.cos(component.rotation);
+      const sin = Math.sin(component.rotation);
 
-        // For pipes, local coords go from (0, -halfH) to (length, halfH)
-        // For others, centered: (-halfW, -halfH) to (halfW, halfH)
-        let localLeft = -halfW;
-        let localRight = halfW;
-        if (component.type === 'pipe') {
-          localLeft = 0;
-          localRight = size.width; // = length
-        }
+      // For pipes, local coords go from (0, -halfH) to (length, halfH)
+      // For others, centered: (-halfW, -halfH) to (halfW, halfH)
+      let localLeft = -halfW;
+      let localRight = halfW;
+      if (component.type === 'pipe') {
+        localLeft = 0;
+        localRight = size.width; // = length
+      }
 
-        // Define 4 corners: front-left, front-right, back-right, back-left
-        // Front = toward camera (-Y in world), Back = toward horizon (+Y)
-        const localCorners = [
-          { x: localLeft, y: -halfH },   // front-left
-          { x: localRight, y: -halfH },  // front-right
-          { x: localRight, y: halfH },   // back-right
-          { x: localLeft, y: halfH },    // back-left
-        ];
+      // Define 4 corners: front-left, front-right, back-right, back-left
+      // Front = toward camera (-Y in world), Back = toward horizon (+Y)
+      const localCorners = [
+        { x: localLeft, y: -halfH },   // front-left
+        { x: localRight, y: -halfH },  // front-right
+        { x: localRight, y: halfH },   // back-right
+        { x: localLeft, y: halfH },    // back-left
+      ];
 
-        // Transform corners to world space and project to screen
-        const screenCorners = localCorners.map(local => {
-          const worldX = centerX + local.x * cos - local.y * sin;
-          const worldY = centerY + local.x * sin + local.y * cos;
-          return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
-        });
+      // Transform corners to world space and project to screen
+      const screenCorners = localCorners.map(local => {
+        const worldX = centerX + local.x * cos - local.y * sin;
+        const worldY = centerY + local.x * sin + local.y * cos;
+        return this.worldToScreenPerspective({ x: worldX, y: worldY }, elevation);
+      });
 
-        // Skip if any corner is behind camera
-        if (screenCorners.some(c => c.scale <= 0 || c.scale < 0.05)) {
-          ctx.restore();
-          continue;
-        }
+      // Skip if any corner is behind camera
+      if (screenCorners.some(c => c.scale <= 0 || c.scale < 0.05)) {
+        ctx.restore();
+        continue;
+      }
 
-        // Get the projected corner positions
-        const frontLeft = screenCorners[0].pos;
-        const frontRight = screenCorners[1].pos;
-        const backLeft = screenCorners[3].pos;
+      // Get the projected corner positions
+      const frontLeft = screenCorners[0].pos;
+      const frontRight = screenCorners[1].pos;
+      const backLeft = screenCorners[3].pos;
 
-        // Use front edge width for zoom (may be overridden for non-pipe components)
-        const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
-        let projectedZoom = frontWidth / size.width;
+      // Use front edge width for zoom (may be overridden for non-pipe components)
+      const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
+      let projectedZoom = frontWidth / size.width;
 
-        // Get vertical scale first - needed for translation calculation
-        const { verticalScale } = this.getViewTransform();
+      // Get vertical scale first - needed for translation calculation
+      const { verticalScale } = this.getViewTransform();
 
-        // Position the component based on how renderComponent draws it:
-        // - For pipes: draws from (0,0) to (length,0), so translate to front-left
-        // - For others: draws centered at (0,0), so translate to front-center, offset up by halfH
-        // IMPORTANT: Account for verticalScale so the base of the component stays on the ground
-        // after the vertical compression is applied
-        let translateX: number;
-        let translateY: number;
-        // Screen-pixel offset from the component's drawing origin down to its
-        // visual base (used to anchor the elevation label at the base)
-        let labelBaseOffsetY = 0;
+      // Position the component based on how renderComponent draws it:
+      // - For pipes: draws from (0,0) to (length,0), so translate to front-left
+      // - For others: draws centered at (0,0), so translate to front-center, offset up by halfH
+      // IMPORTANT: Account for verticalScale so the base of the component stays on the ground
+      // after the vertical compression is applied
+      let translateX: number;
+      let translateY: number;
+      // Screen-pixel offset from the component's drawing origin down to its
+      // visual base (used to anchor the elevation label at the base)
+      let labelBaseOffsetY = 0;
 
-        if (component.type === 'pipe') {
-          // For pipes with endpoint data, project both endpoints and draw between them
-          const pipe = component as import('../types').PipeComponent;
-          if (pipe.endPosition && pipe.endElevation !== undefined) {
-            // Project start point (position, elevation)
-            const startScreen = this.worldToScreenPerspective(
-              { x: pipe.position.x, y: pipe.position.y },
-              pipe.elevation ?? 0
-            );
-            // Project end point
-            const endScreen = this.worldToScreenPerspective(
-              pipe.endPosition,
-              pipe.endElevation
-            );
-
-            if (startScreen.scale > 0 && endScreen.scale > 0) {
-              // Calculate screen-space length and rotation
-              const screenDx = endScreen.pos.x - startScreen.pos.x;
-              const screenDy = endScreen.pos.y - startScreen.pos.y;
-              const screenLength = Math.hypot(screenDx, screenDy);
-              const screenRotation = Math.atan2(screenDy, screenDx);
-
-              // Calculate perspective-scaled diameters at each end
-              // The raw perspective is subtle due to perspectiveOffset flattening,
-              // so we exaggerate the taper ratio to make it more visually apparent.
-              // taperExaggeration of 2.0 means: if far end would be 90% of near end,
-              // it becomes 80% instead (difference doubled).
-              const taperExaggeration = 2.0;
-              const avgScale = (startScreen.scale + endScreen.scale) / 2;
-              const rawRatio = endScreen.scale / startScreen.scale;
-              const exaggeratedRatio = 1 - (1 - rawRatio) * taperExaggeration;
-              // Clamp to reasonable range (don't let it go negative or too extreme)
-              const clampedRatio = Math.max(0.3, Math.min(1.5, exaggeratedRatio));
-
-              const startZoom = avgScale * 50;
-              const endZoom = startZoom * clampedRatio;
-
-              // Wall thickness (use pressure rating if available)
-              const wallThickness = pipe.thickness;
-              const startOuterD = (pipe.diameter + wallThickness * 2) * startZoom;
-              const startInnerD = pipe.diameter * startZoom;
-              const endOuterD = (pipe.diameter + wallThickness * 2) * endZoom;
-              const endInnerD = pipe.diameter * endZoom;
-
-              // Position at start point, rotate toward end point
-              ctx.translate(startScreen.pos.x, startScreen.pos.y);
-              ctx.rotate(screenRotation);
-
-              // Draw tapered pipe (trapezoid) - outer wall
-              ctx.fillStyle = COLORS.steel;
-              ctx.beginPath();
-              ctx.moveTo(0, -startOuterD / 2);           // top-left (start)
-              ctx.lineTo(screenLength, -endOuterD / 2);  // top-right (end)
-              ctx.lineTo(screenLength, endOuterD / 2);   // bottom-right (end)
-              ctx.lineTo(0, startOuterD / 2);            // bottom-left (start)
-              ctx.closePath();
-              ctx.fill();
-
-              // Draw tapered inner pipe (fluid space)
-              if (pipe.fluid) {
-                ctx.fillStyle = getFluidColor(pipe.fluid);
-              } else {
-                ctx.fillStyle = '#111';
-              }
-              ctx.beginPath();
-              ctx.moveTo(0, -startInnerD / 2);
-              ctx.lineTo(screenLength, -endInnerD / 2);
-              ctx.lineTo(screenLength, endInnerD / 2);
-              ctx.lineTo(0, startInnerD / 2);
-              ctx.closePath();
-              ctx.fill();
-
-              // Draw pipe edges (top and bottom lines)
-              ctx.strokeStyle = COLORS.steelHighlight;
-              ctx.lineWidth = 1;
-              ctx.beginPath();
-              ctx.moveTo(0, -startOuterD / 2);
-              ctx.lineTo(screenLength, -endOuterD / 2);
-              ctx.moveTo(0, startOuterD / 2);
-              ctx.lineTo(screenLength, endOuterD / 2);
-              ctx.stroke();
-
-              // Selection highlight
-              const isSelected = component.id === this.selectedComponentId;
-              if (isSelected) {
-                ctx.strokeStyle = 'rgba(100, 150, 255, 0.8)';
-                ctx.lineWidth = 2;
-                ctx.beginPath();
-                ctx.moveTo(-2, -startOuterD / 2 - 2);
-                ctx.lineTo(screenLength + 2, -endOuterD / 2 - 2);
-                ctx.lineTo(screenLength + 2, endOuterD / 2 + 2);
-                ctx.lineTo(-2, startOuterD / 2 + 2);
-                ctx.closePath();
-                ctx.stroke();
-              }
-
-              ctx.restore();
-              this.renderBelowGradeOverlay(ctx, component);
-              continue; // Skip the normal rendering path
-            }
-          }
-
-          // Fallback for pipes without endpoint data (should not happen)
-          console.error(`[render] Pipe ${component.id} has no endpoint data`);
-          const visualHalfH = halfH * projectedZoom;
-          translateX = backLeft.x;
-          translateY = backLeft.y - visualHalfH;
-          labelBaseOffsetY = visualHalfH;
-        } else {
-          // Other components draw centered at their position
-          // Project the actual center point (component.position) to screen space
-          const centerScreen = this.worldToScreenPerspective(
-            { x: component.position.x, y: component.position.y },
-            elevation
+      if (component.type === 'pipe') {
+        // For pipes with endpoint data, project both endpoints and draw between them
+        const pipe = component as import('../types').PipeComponent;
+        if (pipe.endPosition && pipe.endElevation !== undefined) {
+          // Project start point (position, elevation)
+          const startScreen = this.worldToScreenPerspective(
+            { x: pipe.position.x, y: pipe.position.y },
+            pipe.elevation ?? 0
+          );
+          // Project end point
+          const endScreen = this.worldToScreenPerspective(
+            pipe.endPosition,
+            pipe.endElevation
           );
 
-          // Use center-based zoom for consistent sizing
-          const centerZoom = centerScreen.scale * 50;
-          const visualHalfH = halfH * centerZoom * verticalScale;
+          if (startScreen.scale > 0 && endScreen.scale > 0) {
+            // Calculate screen-space length and rotation
+            const screenDx = endScreen.pos.x - startScreen.pos.x;
+            const screenDy = endScreen.pos.y - startScreen.pos.y;
+            const screenLength = Math.hypot(screenDx, screenDy);
+            const screenRotation = Math.atan2(screenDy, screenDx);
 
-          // Position so the component's center is at the projected center point
-          translateX = centerScreen.pos.x;
-          translateY = centerScreen.pos.y - visualHalfH;
-          labelBaseOffsetY = visualHalfH;
+            // Calculate perspective-scaled diameters at each end
+            // The raw perspective is subtle due to perspectiveOffset flattening,
+            // so we exaggerate the taper ratio to make it more visually apparent.
+            // taperExaggeration of 2.0 means: if far end would be 90% of near end,
+            // it becomes 80% instead (difference doubled).
+            const taperExaggeration = 2.0;
+            const avgScale = (startScreen.scale + endScreen.scale) / 2;
+            const rawRatio = endScreen.scale / startScreen.scale;
+            const exaggeratedRatio = 1 - (1 - rawRatio) * taperExaggeration;
+            // Clamp to reasonable range (don't let it go negative or too extreme)
+            const clampedRatio = Math.max(0.3, Math.min(1.5, exaggeratedRatio));
 
-          // Override projectedZoom with center-based zoom for this component
-          projectedZoom = centerZoom;
+            const startZoom = avgScale * 50;
+            const endZoom = startZoom * clampedRatio;
+
+            // Wall thickness (use pressure rating if available)
+            const wallThickness = pipe.thickness;
+            const startOuterD = (pipe.diameter + wallThickness * 2) * startZoom;
+            const startInnerD = pipe.diameter * startZoom;
+            const endOuterD = (pipe.diameter + wallThickness * 2) * endZoom;
+            const endInnerD = pipe.diameter * endZoom;
+
+            // Position at start point, rotate toward end point
+            ctx.translate(startScreen.pos.x, startScreen.pos.y);
+            ctx.rotate(screenRotation);
+
+            // Draw tapered pipe (trapezoid) - outer wall
+            ctx.fillStyle = COLORS.steel;
+            ctx.beginPath();
+            ctx.moveTo(0, -startOuterD / 2);           // top-left (start)
+            ctx.lineTo(screenLength, -endOuterD / 2);  // top-right (end)
+            ctx.lineTo(screenLength, endOuterD / 2);   // bottom-right (end)
+            ctx.lineTo(0, startOuterD / 2);            // bottom-left (start)
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw tapered inner pipe (fluid space)
+            if (pipe.fluid) {
+              ctx.fillStyle = getFluidColor(pipe.fluid);
+            } else {
+              ctx.fillStyle = '#111';
+            }
+            ctx.beginPath();
+            ctx.moveTo(0, -startInnerD / 2);
+            ctx.lineTo(screenLength, -endInnerD / 2);
+            ctx.lineTo(screenLength, endInnerD / 2);
+            ctx.lineTo(0, startInnerD / 2);
+            ctx.closePath();
+            ctx.fill();
+
+            // Draw pipe edges (top and bottom lines)
+            ctx.strokeStyle = COLORS.steelHighlight;
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, -startOuterD / 2);
+            ctx.lineTo(screenLength, -endOuterD / 2);
+            ctx.moveTo(0, startOuterD / 2);
+            ctx.lineTo(screenLength, endOuterD / 2);
+            ctx.stroke();
+
+            // Selection highlight
+            const isSelected = component.id === this.selectedComponentId;
+            if (isSelected) {
+              ctx.strokeStyle = 'rgba(100, 150, 255, 0.8)';
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(-2, -startOuterD / 2 - 2);
+              ctx.lineTo(screenLength + 2, -endOuterD / 2 - 2);
+              ctx.lineTo(screenLength + 2, endOuterD / 2 + 2);
+              ctx.lineTo(-2, startOuterD / 2 + 2);
+              ctx.closePath();
+              ctx.stroke();
+            }
+
+            ctx.restore();
+            this.renderBelowGradeOverlay(ctx, component);
+            continue; // Skip the normal rendering path
+          }
         }
 
-        ctx.translate(translateX, translateY);
-        // Skip rotation for pumps - they handle orientation internally via mirroring
-        if (component.type !== 'pump') {
-          ctx.rotate(component.rotation);
-        }
-
-        // Apply vertical compression based on view angle (looking from above = compressed)
-        // Skip for pipes since they're thin horizontal elements and compression looks wrong
-        if (component.type !== 'pipe') {
-          ctx.scale(1, verticalScale);
-        }
-
-        const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
-        const isSelected = component.id === this.selectedComponentId;
-        // Create projection function for components that need world-to-screen mapping
-        // Returns both screen position and scale factor for proper perspective rendering
-        const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
-        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !this.constructionMode, this.plantState, worldToScreenFn);
-
-        // Render elevation label (reset scale first so text isn't squished)
-        if (component.type !== 'pipe') {
-          ctx.scale(1, 1 / verticalScale);
-        }
-        renderElevationLabel(ctx, component, labelBaseOffsetY, projectedZoom / 50);
+        // Fallback for pipes without endpoint data (should not happen)
+        console.error(`[render] Pipe ${component.id} has no endpoint data`);
+        const visualHalfH = halfH * projectedZoom;
+        translateX = backLeft.x;
+        translateY = backLeft.y - visualHalfH;
+        labelBaseOffsetY = visualHalfH;
       } else {
-        const screenPos = worldToScreen(component.position, this.view);
-        ctx.translate(screenPos.x, screenPos.y);
-        // Skip rotation for pumps - they handle orientation internally via mirroring
-        if (component.type !== 'pump') {
-          ctx.rotate(component.rotation);
-        }
+        // Other components draw centered at their position
+        // Project the actual center point (component.position) to screen space
+        const centerScreen = this.worldToScreenPerspective(
+          { x: component.position.x, y: component.position.y },
+          elevation
+        );
 
-        // Render the component
-        const isSelected = component.id === this.selectedComponentId;
-        renderComponent(ctx, component, this.view, isSelected, false, this.plantState.connections, !this.constructionMode, this.plantState);
+        // Use center-based zoom for consistent sizing
+        const centerZoom = centerScreen.scale * 50;
+        const visualHalfH = halfH * centerZoom * verticalScale;
+
+        // Position so the component's center is at the projected center point
+        translateX = centerScreen.pos.x;
+        translateY = centerScreen.pos.y - visualHalfH;
+        labelBaseOffsetY = visualHalfH;
+
+        // Override projectedZoom with center-based zoom for this component
+        projectedZoom = centerZoom;
       }
+
+      ctx.translate(translateX, translateY);
+      // Skip rotation for pumps - they handle orientation internally via mirroring
+      if (component.type !== 'pump') {
+        ctx.rotate(component.rotation);
+      }
+
+      // Apply vertical compression based on view angle (looking from above = compressed)
+      // Skip for pipes since they're thin horizontal elements and compression looks wrong
+      if (component.type !== 'pipe') {
+        ctx.scale(1, verticalScale);
+      }
+
+      const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
+      const isSelected = component.id === this.selectedComponentId;
+      // Create projection function for components that need world-to-screen mapping
+      // Returns both screen position and scale factor for proper perspective rendering
+      const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
+      renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !this.constructionMode, this.plantState, worldToScreenFn);
+
+      // Render elevation label (reset scale first so text isn't squished)
+      if (component.type !== 'pipe') {
+        ctx.scale(1, 1 / verticalScale);
+      }
+      renderElevationLabel(ctx, component, labelBaseOffsetY, projectedZoom / 50);
 
       ctx.restore();
 
@@ -2282,16 +2084,8 @@ export class PlantCanvas {
           const touchesSelection = this.selectedComponentId !== null &&
             (connection.fromComponentId === this.selectedComponentId ||
              connection.toComponentId === this.selectedComponentId);
-          if (this.isometric.enabled) {
-            // Use perspective-aware connection rendering with actual connection elevations
-            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
-          } else {
-            // Calculate world positions of ports
-            const fromWorld = this.getPortWorldPosition(fromComponent, fromPort);
-            const toWorld = this.getPortWorldPosition(toComponent, toPort);
-            renderConnection(ctx, fromWorld, toWorld,
-              this.getConnectionFluid(connection, fromComponent), this.view);
-          }
+          // Perspective-aware connection rendering with actual connection elevations
+          this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
         }
       }
     }
@@ -2299,15 +2093,13 @@ export class PlantCanvas {
     // Restore each building's near footprint wall on top of its contents, so
     // equipment inside a building reads as inside it (see the function's
     // comment) rather than standing in front of the shell.
-    if (this.isometric.enabled) {
-      for (const component of sortedComponents) {
-        if (component.type !== 'building') continue;
-        renderBuildingFrontEdge(
-          ctx,
-          component as import('../types').BuildingComponent,
-          (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
-        );
-      }
+    for (const component of sortedComponents) {
+      if (component.type !== 'building') continue;
+      renderBuildingFrontEdge(
+        ctx,
+        component as import('../types').BuildingComponent,
+        (pos, elev = 0) => this.worldToScreenPerspective(pos, elev)
+      );
     }
 
     // Elevation nudge arrows go above everything so they are never buried
@@ -2321,14 +2113,10 @@ export class PlantCanvas {
 
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
-      // Pass port screen position getter for proper positioning in isometric mode
-      const getPortScreenPos = this.isometric.enabled
-        ? (comp: PlantComponent, port: { position: Point }) => this.getPortScreenPosition(comp, port)
-        : undefined;
-      // Pass connection endpoint getter that accounts for elevation offsets
-      const getConnScreenPos = this.isometric.enabled
-        ? (fromComp: PlantComponent, toComp: PlantComponent, conn: Connection) => this.getConnectionScreenEndpoints(fromComp, toComp, conn)
-        : undefined;
+      // Port screen positions and connection endpoints (accounting for
+      // elevation offsets) come from the projection
+      const getPortScreenPos = (comp: PlantComponent, port: { position: Point }) => this.getPortScreenPosition(comp, port);
+      const getConnScreenPos = (fromComp: PlantComponent, toComp: PlantComponent, conn: Connection) => this.getConnectionScreenEndpoints(fromComp, toComp, conn);
       renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos);
     } else {
       // Debug: log once if simState is not set
@@ -2399,20 +2187,13 @@ export class PlantCanvas {
         let portRadius: number;
         let lineWidth: number;
 
-        if (this.isometric.enabled) {
-          // Use the same positioning as click detection
-          const portScreenPos = this.getPortScreenPosition(component, port);
-          if (!portScreenPos) continue;
+        // Use the same positioning as click detection
+        const portScreenPos = this.getPortScreenPosition(component, port);
+        if (!portScreenPos) continue;
 
-          screenPos = { x: portScreenPos.x, y: portScreenPos.y };
-          portRadius = portScreenPos.radius;
-          lineWidth = Math.max(1, portRadius * 0.25);
-        } else {
-          const worldPos = this.getPortWorldPosition(component, port);
-          screenPos = worldToScreen(worldPos, this.view);
-          portRadius = 8;
-          lineWidth = 2;
-        }
+        screenPos = { x: portScreenPos.x, y: portScreenPos.y };
+        portRadius = portScreenPos.radius;
+        lineWidth = Math.max(1, portRadius * 0.25);
 
         // Check if this port is highlighted
         const isHighlighted = this.highlightedPort &&
@@ -2750,7 +2531,7 @@ export class PlantCanvas {
    */
   private renderElevationArrows(ctx: CanvasRenderingContext2D, components: PlantComponent[]): void {
     this.elevationArrowTargets = [];
-    if (!this.showElevationArrows || this.viewMode === '2d') return;
+    if (!this.showElevationArrows) return;
 
     const R = 7;         // arrow button radius, px
     const GAP = 4;       // px between the component edge and the buttons
@@ -2863,7 +2644,6 @@ export class PlantCanvas {
    * screen (screen Y alone does not determine depth in this projection).
    */
   private renderBelowGradeOverlay(ctx: CanvasRenderingContext2D, component: PlantComponent): void {
-    if (!this.isometric.enabled) return;
     // Buildings and switchyards are drawn from the ground plane up regardless
     // of their elevation field, so there is nothing of them below grade
     if (component.type === 'building' || component.type === 'switchyard') return;
@@ -3299,39 +3079,14 @@ export class PlantCanvas {
     return { ...this.view };
   }
 
-  public setIsometric(enabled: boolean): void {
-    this.setViewMode(enabled ? 'perspective' : '2d');
-  }
-
   public setViewMode(mode: ViewMode): void {
     if (this.viewMode === mode) return;
     this.viewMode = mode;
-    this.isometric.enabled = mode === 'perspective';
     this.cancelRouting();
 
     // Adjust view when switching modes to keep components visible
     const rect = this.canvas.getBoundingClientRect();
-    if (mode === '2d') {
-      // Switching to 2D: center view on components
-      const components = Array.from(this.plantState.components.values());
-      if (components.length > 0) {
-        // Find bounding box of all components
-        let minX = Infinity, maxX = -Infinity;
-        let minY = Infinity, maxY = -Infinity;
-        for (const comp of components) {
-          minX = Math.min(minX, comp.position.x);
-          maxX = Math.max(maxX, comp.position.x);
-          minY = Math.min(minY, comp.position.y);
-          maxY = Math.max(maxY, comp.position.y);
-        }
-        const centerX = (minX + maxX) / 2;
-        const centerY = (minY + maxY) / 2;
-
-        this.view.zoom = 10;
-        this.view.offsetX = rect.width / 2 - centerX * this.view.zoom;
-        this.view.offsetY = rect.height / 2 - centerY * this.view.zoom;
-      }
-    } else if (mode === 'perspective') {
+    if (mode === 'perspective') {
       // Switching to 2.5D: reset camera depth
       this.cameraDepth = 0;
     } else {
@@ -3343,14 +3098,6 @@ export class PlantCanvas {
 
   public getViewMode(): ViewMode {
     return this.viewMode;
-  }
-
-  public toggleIsometric(): void {
-    this.setIsometric(!this.isometric.enabled);
-  }
-
-  public getIsometric(): boolean {
-    return this.isometric.enabled;
   }
 
   public setViewElevation(sliderValue: number): void {
@@ -3420,19 +3167,11 @@ export class PlantCanvas {
   }
 
   public zoomIn(): void {
-    if (this.viewMode !== '2d') {
-      this.applyIsoZoom(this.currentZoomFactor() * 1.2);
-    } else {
-      this.view.zoom = Math.min(200, this.view.zoom * 1.2);
-    }
+    this.applyIsoZoom(this.currentZoomFactor() * 1.2);
   }
 
   public zoomOut(): void {
-    if (this.viewMode !== '2d') {
-      this.applyIsoZoom(this.currentZoomFactor() / 1.2);
-    } else {
-      this.view.zoom = Math.max(10, this.view.zoom / 1.2);
-    }
+    this.applyIsoZoom(this.currentZoomFactor() / 1.2);
   }
 
   public resetView(): void {
@@ -3457,12 +3196,29 @@ export class PlantCanvas {
 
   public clearSelection(): void {
     this.selectedComponentId = null;
+    this.selectConnection(null);
     this.onComponentSelect?.(null);
   }
 
   public selectComponent(id: string): void {
     this.selectedComponentId = id;
+    this.selectConnection(null);
     this.onComponentSelect?.(id);
+  }
+
+  public getSelectedConnection(): Connection | null {
+    return this.selectedConnection;
+  }
+
+  /** The connection whose drawn pipe run is under a screen point (grid view only). */
+  public getConnectionAtScreen(screenPos: Point): Connection | null {
+    return this.viewMode === 'grid' ? this.grid.connectionAt(screenPos, this.plantState) : null;
+  }
+
+  private selectConnection(conn: Connection | null, again: boolean = false): void {
+    const changed = conn !== this.selectedConnection;
+    this.selectedConnection = conn;
+    if (changed || again) this.onConnectionSelect?.(conn, again);
   }
 
   public setMoveMode(enabled: boolean): void {
@@ -3590,6 +3346,8 @@ export class PlantCanvas {
       plantState: this.plantState,
       simState: this.simState,
       selectedComponentId: this.selectedComponentId,
+      selectedConnection: this.selectedConnection && this.plantState.connections.includes(this.selectedConnection)
+        ? this.selectedConnection : null,
       hoveredComponentId: this.hoveredComponentId,
       showPorts: this.showPorts,
       highlightedPort: this.highlightedPort,

@@ -267,6 +267,39 @@ export function portAnchor(component: PlantComponent, portId: string): PortAncho
   return portAnchors(component).find(a => a.port.id === portId) ?? null;
 }
 
+/** Upright cylinders whose side nozzles are drawn on whichever side faces the partner (as the 2.5D view does). */
+const MIRRORS_LATERAL_PORTS = new Set(['tank', 'vessel', 'reactorVessel', 'coreBarrel']);
+
+/**
+ * A port's anchor for a connection to a partner at `partnerRef`. A vessel's
+ * side nozzle is not on a fixed side of the tank in this model - the drawing
+ * puts it on the side facing whatever it connects to - so an east/west port
+ * of an upright cylinder is mirrored to the edge facing the partner. Other
+ * components keep their stored side.
+ */
+export function portAnchorFacing(component: PlantComponent, portId: string, partnerRef: Point): PortAnchor | null {
+  const a = portAnchor(component, portId);
+  if (!a || !MIRRORS_LATERAL_PORTS.has(component.type)) return a;
+  if (a.side !== 'E' && a.side !== 'W') return a;
+  const dx = partnerRef.x - component.position.x;
+  if (Math.abs(dx) < EPS) return a;
+  const wantSide: Side = dx > 0 ? 'E' : 'W';
+  if (a.side === wantSide) return a;
+  const rect = footprintRect(component.position, componentFootprint(component));
+  const point = { x: wantSide === 'E' ? rect.x1 : rect.x0, y: a.point.y };
+  const v = sideVector(wantSide);
+  return { port: a.port, point, side: wantSide, out: { x: point.x + v.x * TILE_M / 2, y: point.y } };
+}
+
+/** The point a partner's route comes from: a pipe's end, otherwise the component centre. */
+function partnerReference(component: PlantComponent, portId: string): Point {
+  if (component.type === 'pipe') {
+    const a = portAnchor(component, portId);
+    if (a) return a.point;
+  }
+  return component.position;
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -428,8 +461,8 @@ export function connectionRoute(conn: Connection, plantState: PlantState): Point
   const fromComponent = plantState.components.get(conn.fromComponentId);
   const toComponent = plantState.components.get(conn.toComponentId);
   if (!fromComponent || !toComponent) return null;
-  const a = portAnchor(fromComponent, conn.fromPortId);
-  const b = portAnchor(toComponent, conn.toPortId);
+  const a = portAnchorFacing(fromComponent, conn.fromPortId, partnerReference(toComponent, conn.toPortId));
+  const b = portAnchorFacing(toComponent, conn.toPortId, partnerReference(fromComponent, conn.fromPortId));
   if (!a || !b) return null;
   if (conn.route && conn.route.length >= 2) return reanchorRoute(conn.route, a, b);
   return autoRoute(a, b);

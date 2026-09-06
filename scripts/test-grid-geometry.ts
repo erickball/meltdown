@@ -5,7 +5,7 @@
 import {
   TILE_M, componentFootprint, footprintForType, snapCenter, footprintRect, portAnchors,
   autoRoute, completeRoute, extendRoute, rubberBand, routeLength, simplifyRoute, reanchorRoute,
-  connectionRoute, pipeRoute, cellCenter, distanceToPolyline, pointAlongRoute,
+  connectionRoute, pipeRoute, cellCenter, distanceToPolyline, pointAlongRoute, portAnchorFacing,
 } from '../src/render/grid-geometry';
 import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point } from '../src/types';
 
@@ -150,6 +150,28 @@ console.log('Routing');
   const mid = pointAlongRoute(done, 0.5);
   check('midpoint lies on the route', distanceToPolyline(mid.point, done) < 1e-9);
   check('direction is a unit vector', near(Math.hypot(mid.dir.x, mid.dir.y), 1));
+}
+
+console.log('Partner-facing nozzles');
+{
+  // A tank's left nozzle connected to something on its right is drawn on the right
+  const t = tank('t', 2, 2, 2, 4);      // footprint x 1..3
+  const u = tank('u', 12, 2, 2, 4);     // east of t
+  const plant: PlantState = {
+    components: new Map<string, any>([[t.id, t], [u.id, u]]),
+    connections: [], simTime: 0, simSpeed: 1, isPaused: true,
+  };
+  const conn: Connection = { fromComponentId: 't', fromPortId: 't-left', toComponentId: 'u', toPortId: 'u-right' };
+  const r = connectionRoute(conn, plant)!;
+  check('tank left nozzle mirrors to the east edge when the partner is east', near(r[0].x, 3), fmt(r));
+  check('partner right nozzle mirrors to its west edge', near(r[r.length - 1].x, 11), fmt(r));
+  check('mirrored route is a straight run', r.length === 2, fmt(r));
+  const p = pump('p', 20.5, 2.5);
+  plant.components.set(p.id, p);
+  const conn2: Connection = { fromComponentId: 'p', fromPortId: 'p-outlet', toComponentId: 'u', toPortId: 'u-left' };
+  const r2 = connectionRoute(conn2, plant)!;
+  check('pump ports keep their stored side', near(r2[0].x, 21), fmt(r2));
+  check('top/bottom nozzles never mirror', portAnchorFacing(t, 't-top', { x: 50, y: 0 })!.side === 'N');
 }
 
 console.log('Pipes');

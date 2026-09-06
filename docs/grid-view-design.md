@@ -1,9 +1,10 @@
 # Grid view
 
-A third way of looking at (and building) a plant, alongside the flat 2D plan
-and the 2.5D perspective: a top-down tile map in the style of
-factory-building games. Selected from the View panel (2D / 2.5D / Grid); the
-choice is remembered in `meltdown_settings`.
+The "2D" view: a top-down tile map in the style of factory-building games,
+alongside the 2.5D perspective. Selected from the View panel (2D / 2.5D);
+the choice is remembered in `meltdown_settings`. It replaced the original
+flat plan view, whose code was removed from PlantCanvas (internally the mode
+is still called `grid`).
 
 Nothing about a plant changes when it is viewed on the grid. World
 coordinates stay in metres; the grid is a 1 m lattice laid over them. What
@@ -17,7 +18,7 @@ them are drawn.
 | Tile | 1 m square (`TILE_M`). Cell (i, j) covers [i, i+1) × [j, j+1); pipe routes run through cell centres. | `grid-geometry.ts` |
 | Footprint | Whole tiles, w × d, centred on `position`. Upright cylinders are square (d = w); pumps, valves and controllers are 1 × 1; front-view drawings (turbine, condenser, horizontal HX) take the smaller of their two drawn dimensions as depth; buildings and switchyards are plan-native. | `componentFootprint` |
 | Snapping | Odd footprints centre on a cell, even ones on a lattice corner, so edges always land on tile lines. Applied to placement clicks and to moves. | `snapCenter`, `PlantCanvas.snapPlacementPosition` / `snapComponentPosition` |
-| Port anchor | Each port anchors on the midpoint of one footprint edge cell and faces that side. Side comes from the port's front-view position: lateral ports go E/W, a port on top of the drawing leaves from the back (N), one on the bottom from the front (S). Two ports landing on the same edge cell are spread along the edge. | `portAnchors` |
+| Port anchor | Each port anchors on the midpoint of one footprint edge cell and faces that side. Side comes from the port's front-view position: lateral ports go E/W, a port on top of the drawing leaves from the back (N), one on the bottom from the front (S). Two ports landing on the same edge cell are spread along the edge. For a connection, an E/W nozzle of an upright cylinder (tank, vessel, reactor vessel, core barrel) is mirrored to the edge facing its partner, as the 2.5D view draws it; otherwise a cold leg stored on the "left" of a vessel whose partner sits to the right would loop all the way round. | `portAnchors`, `portAnchorFacing` |
 | Route | Orthogonal polyline from anchor to anchor. Leaves and enters through the "out" cell half a tile outside the edge, so a pipe always exits the component straight before bending. | `autoRoute`, `completeRoute` |
 | Stored route | `Connection.route` / `PipeComponent.route`: the polyline the user drew. Rendering only; the physical `length` lives where it always did (the dialog is seeded with the drawn plan length plus the rise between the two ports). Absent = auto-routed with one bend. | `types.ts` |
 | Re-anchoring | A stored route whose ends no longer sit on the anchors (component edited, pump re-oriented) keeps its interior and re-lays the legs into each port at draw time. A component moved by dragging in grid view drops the routes touching it instead, because the old interior would be dragged along. | `reanchorRoute`, `PlantCanvas.rerouteConnectionsOf` |
@@ -27,7 +28,7 @@ them are drawn.
 Layers, back to front (`GridView.render`):
 
 1. Ground: a repeating texture anchored to the world lattice, then tile lines
-   (stronger in construction mode).
+   (clear in construction mode, all but invisible while simulating).
 2. Buildings in plan (concrete floor, thick wall, label) and switchyards.
    A building is hit-tested on its wall ring only, so clicks inside reach the
    equipment.
@@ -95,6 +96,13 @@ resulting connection (or auto-created pipe) carries the route.
 
 Moving: components snap to the lattice; a pipe with a drawn route moves as one
 piece and its route with it.
+
+Selecting a pipe run: a click on a connection's run (where no component is
+hit) selects it - halo plus a label with its ends, bore and length, and
+while simulating the mass flow and phase. Clicking the selected run again
+while building opens the connection edit dialog. Connections have no id, so
+the selection is the connection object itself and lapses when the plant is
+replaced.
 
 ## Not done yet
 

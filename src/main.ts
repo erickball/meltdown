@@ -13,7 +13,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -1716,7 +1716,17 @@ function init() {
       console.error(`[Edit] Plant connection ${fromId} → ${toId} not found`);
       return;
     }
+    editPlantConnection(plantConn);
+  });
 
+  // Grid view: clicking a pipe run selects it; clicking the selected run
+  // again while building opens its edit dialog (same one as the detail
+  // panel's Edit button)
+  plantCanvas.onConnectionSelect = (conn, again) => {
+    if (conn && again && currentMode === 'construction') editPlantConnection(conn);
+  };
+
+  function editPlantConnection(plantConn: Connection): void {
     // Get the components
     const fromComponent = plantState.components.get(plantConn.fromComponentId);
     const toComponent = plantState.components.get(plantConn.toComponentId);
@@ -1745,7 +1755,7 @@ function init() {
         }
       }
     });
-  });
+  }
 
   // Connection delete callback
   setConnectionDeleteCallback((fromId: string, toId: string) => {
@@ -1770,12 +1780,12 @@ function init() {
   // Move mode button
   const moveModeBtn = document.getElementById('move-mode') as HTMLButtonElement;
 
-  // View mode selector: flat 2D, 2.5D perspective, or the tile grid. The
-  // choice is remembered across sessions.
+  // View mode selector: the tile grid (shown as "2D") or the 2.5D
+  // perspective. The choice is remembered across sessions; a setting saved
+  // by the retired flat plan view lands on the grid.
   const viewModeButtons: Array<[ViewMode, string]> = [
-    ['2d', 'view-mode-2d'],
-    ['perspective', 'view-mode-perspective'],
     ['grid', 'view-mode-grid'],
+    ['perspective', 'view-mode-perspective'],
   ];
   const viewAngleControl = document.getElementById('view-angle-control');
   const gridViewHint = document.getElementById('grid-view-hint');
@@ -1791,7 +1801,8 @@ function init() {
   for (const [m, id] of viewModeButtons) {
     document.getElementById(id)?.addEventListener('click', () => applyViewMode(m, true));
   }
-  applyViewMode(loadSettings().viewMode ?? 'perspective', false);
+  const savedViewMode = loadSettings().viewMode as string | undefined;
+  applyViewMode(savedViewMode === 'grid' || savedViewMode === '2d' ? 'grid' : 'perspective', false);
 
   // Grid view: the canvas lays pipe along the tiles itself and hands the
   // finished route here. The dialog's length field is seeded with the drawn
