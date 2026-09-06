@@ -57,6 +57,7 @@ import {
   transitStandingQ,
   streamApproach,
   marchCounterflowGas,
+  reconcileSlugMass,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
 import { tubeWaterState } from './operators/otsg-operator.js';
@@ -1099,6 +1100,63 @@ test('lattice reactivity path survives full voiding without NaN', () => {
 // ============================================================================
 
 category('OTSG closure');
+
+test('economizer boundary is still at the same pressure', () => {
+  const sat = saturationAtP(165e5);
+  const uIn = sat.u_f - 300e3;
+  assertClose(reconcileSlugMass(350, sat.u_f, sat.u_f, uIn, 480), 350, 1e-12, 'same saturation -> same slug');
+  assertClose(reconcileSlugMass(350, NaN, sat.u_f, uIn, 480), 350, 1e-12, 'no reference yet -> ledger as is');
+  assertClose(reconcileSlugMass(600, sat.u_f, sat.u_f, uIn, 480), 480, 1e-12, 'never more than the node holds');
+});
+
+test('a falling pressure flashes the hot end of the slug, energy carried exactly', () => {
+  // Linear profile from u_in to the OLD saturation; the part above the new
+  // saturation leaves. The fraction that stays is (u_f - u_in)/(u_ref - u_in),
+  // and the flashed part must carry exactly its own profile-mean energy so
+  // that the leftovers (totals minus slug) inherit it without invention.
+  const satHi = saturationAtP(165e5), satLo = saturationAtP(50e5);
+  const uIn = satHi.u_f - 800e3;   // inlet colder than the 50 bar saturation
+  const m1 = 350;
+  // A slug whose inlet is already above the new saturation flashes entirely
+  assertClose(reconcileSlugMass(m1, satHi.u_f, satLo.u_f, satLo.u_f + 1e3, 480), 0, 1e-12, 'all of it above saturation -> all flashed');
+  const m1New = reconcileSlugMass(m1, satHi.u_f, satLo.u_f, uIn, 480);
+  const f = (satLo.u_f - uIn) / (satHi.u_f - uIn);
+  assertClose(m1New, m1 * f, 1e-9, 'remaining slug is the profile fraction below the new saturation');
+  assert(m1New < m1, 'the slug must shrink when pressure falls');
+  const U1Old = m1 * 0.5 * (uIn + satHi.u_f);
+  const U1New = m1New * 0.5 * (uIn + satLo.u_f);
+  const flashedMean = 0.5 * (satHi.u_f + satLo.u_f);
+  assertClose(U1Old - U1New, (m1 - m1New) * flashedMean, 1e-6 * U1Old,
+    'energy handed to the leftovers = flashed mass at its own profile mean');
+});
+
+test('a rising pressure lets the newly subcooled liquid join the slug', () => {
+  // Boiling-section liquid sat at the old saturation; now it is subcooled by
+  // the rise and belongs to the economizer. The joined mass carries u_ref,
+  // so the enlarged profile's energy is the old slug's plus exactly that.
+  const satLo = saturationAtP(50e5), satHi = saturationAtP(60e5);
+  const uIn = satLo.u_f - 400e3;
+  const m1 = 300;
+  const m1New = reconcileSlugMass(m1, satLo.u_f, satHi.u_f, uIn, 480);
+  assert(m1New > m1, `the slug must grow when pressure rises (${m1New.toFixed(2)} vs ${m1})`);
+  const dm = m1New - m1;
+  const U1Old = m1 * 0.5 * (uIn + satLo.u_f);
+  const U1New = m1New * 0.5 * (uIn + satHi.u_f);
+  assertClose(U1New - U1Old, dm * satLo.u_f, 1e-6 * U1Old, 'joined mass arrives at the old saturation energy');
+  // A rise large enough to subcool everything makes the whole tube economizer
+  const satWay = saturationAtP(200e5);
+  assertClose(reconcileSlugMass(m1, satLo.u_f, satWay.u_f, uIn, 480), 480, 1e-12, 'capped at the node inventory');
+});
+
+test('the boundary move is continuous through no-change', () => {
+  const sat = saturationAtP(100e5);
+  const uIn = sat.u_f - 300e3;
+  const up = reconcileSlugMass(200, sat.u_f, sat.u_f + 10, uIn, 480);
+  const dn = reconcileSlugMass(200, sat.u_f, sat.u_f - 10, uIn, 480);
+  assertClose(up, 200, 1e-2, 'tiny rise moves the slug a tiny amount');
+  assertClose(dn, 200, 1e-2, 'tiny fall moves the slug a tiny amount');
+  assert(up > 200 && dn < 200, 'and in the right directions');
+});
 
 test('boiling section mass-averages its quality, not its length', () => {
   // At 165 bar the phases differ ~5x in density, so the mass sits well down

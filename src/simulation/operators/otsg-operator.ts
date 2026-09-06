@@ -272,7 +272,7 @@ function otsgGasCpPerKg(shell: FlowNode): number {
 export function evaluateOtsgSections(
   state: SimulationState, id: string, node: FlowNode,
   opts?: { exact?: boolean },
-): { ev: OtsgEval; flows: OtsgFlows; water: { pressure: number; energy: number; gasPressure: number } } {
+): { ev: OtsgEval; flows: OtsgFlows; water: { pressure: number; energy: number; gasPressure: number }; exact: boolean } {
   const cfg = node.otsg;
   if (!cfg) {
     throw new Error(`[OTSG] node '${id}' has no otsg state - it is not a ` +
@@ -295,8 +295,8 @@ export function evaluateOtsgSections(
   // each was ~95% of the simulation's property traffic.
   const c = cfg.partitionCache;
   if (c && c.forMass === node.fluid.mass && c.forEnergy === water.energy && c.forM1 === cfg.m1 &&
-      (c.exact || !opts?.exact)) {
-    return { ev: c.ev as OtsgEval, flows, water };
+      c.forUFRef === cfg.uFRef && (c.exact || !opts?.exact)) {
+    return { ev: c.ev as OtsgEval, flows, water, exact: c.exact };
   }
   // Diagnostics, tests and once-per-step consumers ask for exact: the
   // tangent's frozen sections are anchored up to ~0.4% of mass away, which
@@ -307,20 +307,25 @@ export function evaluateOtsgSections(
     const dU = water.energy - lin.U;
     const dm1 = cfg.m1 - lin.m1;
     const BAND = 0.004;
-    if (Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
+    // The boundary reference moves the slug like a mass change does, so it
+    // gets the same band, measured on the profile's own energy span.
+    const evA = lin.ev as OtsgEval;
+    const dRef = (cfg.uFRef ?? NaN) - (lin.uFRef ?? NaN);
+    const refClose = (cfg.uFRef === undefined && lin.uFRef === undefined) ||
+      (Number.isFinite(dRef) && Math.abs(dRef) < BAND * Math.max(1e4, evA.sat.u_f - Math.min(flows.uFeed, evA.sat.u_f - 25e3)));
+    if (refClose && Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
         Math.abs(dm1) < BAND * Math.max(lin.m1, 0.02 * lin.m)) {
-      const evA = lin.ev as OtsgEval;
       const P = lin.P + lin.dPdm * dm + lin.dPdU * dU + lin.dPdm1 * dm1;
       const ev: OtsgEval = { ...evA, P };
-      cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, ev, exact: false };
-      return { ev, flows, water };
+      cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: false };
+      return { ev, flows, water, exact: false };
     }
   }
   const ev = evaluateOtsgPartition(
     node.fluid.mass, water.energy, cfg.m1, flows.uFeed,
     { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
     otsgWallPin(state, node, flows),
-    PStart,
+    PStart, cfg.uFRef,
   );
   // Anchor the tangent: three one-sided finite differences, each a
   // warm-started solve. Paid once per re-anchor, saved ~13 times per step.
@@ -331,20 +336,20 @@ export function evaluateOtsgSections(
   let dPdm = 0, dPdU = 0, dPdm1 = 0;
   try {
     dPdm = (evaluateOtsgPartition(node.fluid.mass + dm, water.energy + dm * flows.hFeed,
-      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P).P - ev.P) / dm;
+      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dm;
     dPdU = (evaluateOtsgPartition(node.fluid.mass, water.energy + dU,
-      cfg.m1, flows.uFeed, geom, pin, ev.P).P - ev.P) / dU;
+      cfg.m1, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dU;
     dPdm1 = (evaluateOtsgPartition(node.fluid.mass, water.energy,
-      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P).P - ev.P) / dm;
-    cfg.partitionLin = { m: node.fluid.mass, U: water.energy, m1: cfg.m1, P: ev.P, dPdm, dPdU, dPdm1, ev };
+      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dm;
+    cfg.partitionLin = { m: node.fluid.mass, U: water.energy, m1: cfg.m1, uFRef: cfg.uFRef, P: ev.P, dPdm, dPdU, dPdm1, ev };
   } catch {
     // A perturbation fell off a regime edge: no tangent here - every state
     // in this neighborhood pays for its own exact solve, which is the
     // correct price at a regime boundary.
     cfg.partitionLin = undefined;
   }
-  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, ev, exact: true };
-  return { ev, flows, water };
+  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: true };
+  return { ev, flows, water, exact: true };
 }
 
 /**
@@ -464,6 +469,27 @@ export class OtsgRateOperator implements RateOperator {
       const { Q1, Q2, Q3 } = otsgWaterSideDuties(ev, flows,
         [metal1.temperature, metal2.temperature, metal3.temperature]);
       const QWaterTotal = Q1 + Q2 + Q3;
+      // OTSG_TRACE=<nodeId>: one line per 0.5 s of sim time with the
+      // partition, the metal and the duties - the view that found the
+      // bottled-boiler ring. Reads an env var once per evaluation; the
+      // string compare is nothing next to the partition solve.
+      const traceId = (globalThis as any).process?.env?.OTSG_TRACE;
+      if (traceId === id) {
+        const g: any = globalThis as any;
+        const slot = Math.floor(state.time * 2);
+        if (g.__otsgTraceSlot !== slot) {
+          g.__otsgTraceSlot = slot;
+          const sec = ev.sections;
+          console.log(`[OTSG_TRACE] t=${state.time.toFixed(2)} P=${(ev.P / 1e5).toFixed(2)}bar ` +
+            `m=${node.fluid.mass.toFixed(2)}kg u=${(node.fluid.internalEnergy / node.fluid.mass / 1e3).toFixed(0)}kJ/kg ` +
+            `regime=${ev.regime} m123=${sec[0].mass.toFixed(2)}/${sec[1].mass.toFixed(2)}/${sec[2].mass.toFixed(2)} ` +
+            `A123=${sec[0].area.toFixed(1)}/${sec[1].area.toFixed(1)}/${sec[2].area.toFixed(1)} ` +
+            `T123=${(sec[0].T - 273).toFixed(0)}/${(sec[1].T - 273).toFixed(0)}/${(sec[2].T - 273).toFixed(0)} ` +
+            `Tm=${(metal1.temperature - 273).toFixed(0)}/${(metal2.temperature - 273).toFixed(0)}/${(metal3.temperature - 273).toFixed(0)} ` +
+            `Q123=${(Q1 / 1e6).toFixed(2)}/${(Q2 / 1e6).toFixed(2)}/${(Q3 / 1e6).toFixed(2)}MW Qgas=${(QGasTotal / 1e6).toFixed(2)}MW ` +
+            `WFeed=${flows.WFeed.toFixed(2)} WSteam=${flows.WSteamOut.toFixed(2)} WLiq=${WLiquidOut.toFixed(2)}`);
+        }
+      }
 
       // ----------------------------------------------------------------
       // Partition rate: the economizer's transit balance, in MASS. Feed
@@ -568,8 +594,30 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
     for (const [id, node] of state.flowNodes) {
       if (!node.otsg) continue;
       if (!(node.fluid.mass > 0)) continue;
-      const { ev, water } = evaluateOtsgSections(state, id, node);
+      const { ev, water, exact } = evaluateOtsgSections(state, id, node);
       node.fluid.pressure = ev.P + water.gasPressure;
+      // The economizer boundary moved with this state's pressure (flash /
+      // joining, reconcileSlugMass): make the moved slug the ledger and
+      // record the saturation it is now consistent with. Only from an EXACT
+      // solve - a tangent-riding evaluation carries its anchor's sections,
+      // and writing those over the integrated ledger would erase the
+      // step's transit. At the same pressure the reconciliation of the
+      // written pair is the identity, so the cached evaluation stays valid
+      // for it: re-key the cache and the tangent anchor instead of paying
+      // for a second solve on the same state.
+      if (exact && ev.regime !== 'supercritical') {
+        const m1New = ev.sections[0].mass;
+        node.otsg.m1 = m1New;
+        node.otsg.uFRef = ev.sat.u_f;
+        if (node.otsg.partitionCache) {
+          node.otsg.partitionCache.forM1 = m1New;
+          node.otsg.partitionCache.forUFRef = ev.sat.u_f;
+        }
+        if (node.otsg.partitionLin && node.otsg.partitionLin.ev === ev) {
+          node.otsg.partitionLin.m1 = m1New;
+          node.otsg.partitionLin.uFRef = ev.sat.u_f;
+        }
+      }
       // Refresh the draw-enthalpy cache HERE, where every state passes -
       // the rate operator's write lands on stage clones and never reaches
       // the accepted state or the once-per-step pressure solve, and a vapor

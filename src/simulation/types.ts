@@ -232,6 +232,12 @@ export interface FlowNode {
    */
   otsg?: {
     m1: number;              // kg - subcooled section mass (integrated)
+    /** J/kg - saturated-liquid energy at the pressure the ledger was last
+     *  reconciled to. The economizer boundary moves with pressure relative
+     *  to it (flash on the way down, subcooled liquid joining on the way
+     *  up - otsg.ts reconcileSlugMass); written back with m1 from exact
+     *  partition solves only. Undefined until the first solve. */
+    uFRef?: number;
     heatArea: number;        // m2 - this bundle's tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
     /** Fraction of the shell stream this bundle sees (1 when it is the only
@@ -257,7 +263,7 @@ export interface FlowNode {
      *  stale, the full solve runs and re-anchors - so fast transients pay
      *  full price and quiet stages pay nothing. */
     partitionLin?: {
-      m: number; U: number; m1: number;
+      m: number; U: number; m1: number; uFRef?: number;
       P: number;
       dPdm: number; dPdU: number; dPdm1: number;
       ev: unknown;
@@ -272,6 +278,7 @@ export interface FlowNode {
       forMass: number;
       forEnergy: number;
       forM1: number;
+      forUFRef?: number;
       ev: unknown;
       /** false when the entry rode the partitionLin tangent: its sections
        *  are the anchor's, good for stage rates but not for invariants -

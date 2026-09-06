@@ -529,6 +529,73 @@ export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): num
 }
 
 /**
+ * Move the economizer boundary with pressure.
+ *
+ * The economizer is a MASS ledger priced at the profile mean (u_in + u_f(P))/2.
+ * Holding that mass fixed across a pressure change reprices its energy by
+ * m1*du_f/2, and the difference lands on the leftovers - correct in
+ * direction for a FALLING pressure (the hot end of the slug flashes) and
+ * wrong for a RISING one (a subcooled slug does not absorb energy from the
+ * vapor above it: what happens is that liquid at the old saturation, now
+ * subcooled, joins it). On the bottled Xe-100 after a blackout the second
+ * case pumped ~80 MJ per swing between a 350 kg slug and a 10-20 kg superheat
+ * section, which then read 1150 C against a 500 C wall and rang 50<->180 bar.
+ *
+ * With the linear profile from u_in to the saturation the ledger was last
+ * reconciled to (uFRef), both directions follow with no new constants:
+ *  - u_f < uFRef (pressure fell): the part of the profile above the new
+ *    saturation flashes out of the section. What remains is the fraction
+ *    (u_f - u_in)/(uFRef - u_in), and the flashed part carries exactly its
+ *    own profile-mean energy (uFRef + u_f)/2 to the leftovers - the
+ *    leftovers ARE totals minus slug, so that accounting is automatic.
+ *  - u_f > uFRef (pressure rose): boiling-section liquid at uFRef is now
+ *    subcooled and joins, dm = m1*(u_f - uFRef)/(2*uFRef - u_in - u_f), the
+ *    amount that makes the enlarged profile's mean hold the old slug's
+ *    energy plus the joined mass at uFRef. Capped at the node's inventory
+ *    (a pressure jump large enough to subcool everything makes the whole
+ *    tube economizer, which is what the flooded regime then reports).
+ * Identity when u_f === uFRef, continuous through it.
+ */
+export function reconcileSlugMass(
+  m1: number, uFRef: number, uF: number, uIn: number, massTotal: number,
+  // Liquid the leftovers can actually give up (kg). The joining rule assumes
+  // boiling-section liquid at uFRef exists to join; past what the leftovers
+  // hold there is nothing to join, and pulling more would leave a sliver
+  // carrying all the remaining energy - which the partition's sentinel
+  // reads as "pressure far too low" and the root find then chases upward.
+  // Infinity = no such limit (tests of the bare profile rule).
+  joinCap = Infinity,
+): number {
+  if (!(m1 > 0)) return 0;
+  if (!Number.isFinite(uFRef) || uFRef === uF) return Math.min(m1, massTotal);
+  const spanRef = uFRef - uIn;
+  if (!(spanRef > 0)) return Math.min(m1, massTotal);
+  let out: number;
+  if (uF < uFRef) {
+    out = m1 * Math.max(0, uF - uIn) / spanRef;
+  } else {
+    const denom = 2 * uFRef - uIn - uF;
+    const grow = denom > 0 ? m1 * (uF - uFRef) / denom : Infinity;
+    out = m1 + Math.min(grow, Math.max(0, joinCap));
+  }
+  return Math.max(0, Math.min(out, massTotal));
+}
+
+/**
+ * Liquid the leftovers (mR, UR) can give to the economizer when the
+ * pressure rises: joining removes mass at uFRef and must leave the remainder
+ * no hotter than saturated vapor at the new pressure - the most the
+ * two-phase remainder can be drained of liquid. Zero when the leftovers are
+ * already dry (or empty).
+ */
+export function slugJoinCap(mR: number, UR: number, uFRef: number, uG: number): number {
+  if (!(mR > 0)) return 0;
+  const uBar = UR / mR;
+  if (!(uBar < uG) || !(uG > uFRef)) return 0;
+  return mR * (uG - uBar) / (uG - uFRef);
+}
+
+/**
  * The RUNTIME closure: partition AND pressure solved together from the
  * node's conserved totals, the economizer's integrated energy, and the wall.
  *
@@ -670,6 +737,10 @@ export function evaluateOtsgPartition(
   geom: OtsgGeometry,
   pin: OtsgWallPin,
   PStart?: number,
+  // Saturation liquid energy (J/kg) the ledger was last reconciled to; the
+  // economizer boundary moves with pressure relative to it (see
+  // reconcileSlugMass). Undefined = first evaluation, ledger taken as is.
+  uFRef?: number,
 ): OtsgEval {
   if (!Number.isFinite(m1Ledger) || m1Ledger < 0) {
     throw new Error(`[OTSG] economizer ledger is not a physical mass: m1=${m1Ledger} kg`);
@@ -871,7 +942,23 @@ export function evaluateOtsgPartition(
     // it into a partition no pressure could pack.) The cap at the node's
     // inventory bites only when draws have removed slug water the ledger
     // never saw leave - which the drift watch reports.
-    const m1 = Math.min(m1Ledger, massTotal);
+    // The boundary moves with pressure: flash on the way down, subcooled
+    // liquid joining on the way up (reconcileSlugMass). The profile inlet is
+    // the same one subcooledSectionMean prices the section against.
+    const m1Raw = Math.min(m1Ledger, massTotal);
+    // How much liquid the leftovers can give the slug on a pressure rise:
+    // judged with the slug priced at the REFERENCE saturation (the energy
+    // it actually held), not at this trial pressure - pricing it at the
+    // trial pressure is the repricing the boundary move exists to replace,
+    // and it let the root find talk itself up to 220 bar.
+    let joinCap = 0;
+    if (uFRef !== undefined && sat.u_f > uFRef) {
+      const uInRef = Math.min(uFeedIn, uFRef - 25e3);
+      const URRef = UTotal - m1Raw * 0.5 * (uInRef + uFRef);
+      joinCap = slugJoinCap(massTotal - m1Raw, URRef, uFRef, sat.u_g);
+    }
+    const m1 = reconcileSlugMass(m1Raw, uFRef ?? NaN, sat.u_f,
+      Math.min(uFeedIn, sat.u_f - 25e3), massTotal, joinCap);
     const mR = massTotal - m1;
     const UR = UTotal - m1 * u1;
     const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
