@@ -19,7 +19,8 @@ them are drawn.
 | Footprint | Whole tiles, w × d, centred on `position`. Upright cylinders are square (d = w); pumps, valves and controllers are 1 × 1; front-view drawings (turbine, condenser, horizontal HX) take the smaller of their two drawn dimensions as depth; buildings and switchyards are plan-native. | `componentFootprint` |
 | Snapping | Odd footprints centre on a cell, even ones on a lattice corner, so edges always land on tile lines. Applied to placement clicks and to moves. | `snapCenter`, `PlantCanvas.snapPlacementPosition` / `snapComponentPosition` |
 | Port anchor | Each port anchors on the midpoint of one footprint edge cell and faces that side. Side comes from the port's front-view position: lateral ports go E/W, a port on top of the drawing leaves from the back (N), one on the bottom from the front (S). Two ports landing on the same edge cell are spread along the edge. For a connection, an E/W nozzle of an upright cylinder (tank, vessel, reactor vessel, core barrel) is mirrored to the edge facing its partner, as the 2.5D view draws it; otherwise a cold leg stored on the "left" of a vessel whose partner sits to the right would loop all the way round. | `portAnchors`, `portAnchorFacing` |
-| Route | Orthogonal polyline from anchor to anchor. Leaves and enters through the "out" cell half a tile outside the edge, so a pipe always exits the component straight before bending. | `autoRoute`, `completeRoute` |
+| Route | Orthogonal polyline from anchor to anchor. Leaves and enters through the "out" cell half a tile outside the edge, so a pipe always exits the component straight before bending. Between the out-cells an automatic route is found by an A* search over cells with a bend penalty, where cells inside the footprint of standing equipment cost extra (pipes are runs, buildings are floors, so neither is an obstacle). The cost is finite, so a port inside a footprint still routes out through the wall. Routes are cached in `GridView` and recomputed only when their ends or the obstacle set move. | `autoRoute`, `searchRoute`, `routeObstacles`, `completeRoute` |
+| Lanes | Runs that share a corridor are drawn side by side: every straight segment gets one lane along its whole length (so a run does not wobble cell to cell), overlapping segments on the same line form a group, and the group's lanes are spread across the tile, compressing to fit when the corridor is full. Ends stay on their anchors with a short jog onto the lane. Display only - the stored geometry, lengths and hit tests use the laned polylines only for drawing and clicking. | `laneOffsetRoutes` |
 | Stored route | `Connection.route` / `PipeComponent.route`: the polyline the user drew. Rendering only; the physical `length` lives where it always did (the dialog is seeded with the drawn plan length plus the rise between the two ports). Absent = auto-routed with one bend. | `types.ts` |
 | Re-anchoring | A stored route whose ends no longer sit on the anchors (component edited, pump re-oriented) keeps its interior and re-lays the legs into each port at draw time. A component moved by dragging in grid view drops the routes touching it instead, because the old interior would be dragged along. | `reanchorRoute`, `PlantCanvas.rerouteConnectionsOf` |
 
@@ -33,10 +34,11 @@ Layers, back to front (`GridView.render`):
    A building is hit-tested on its wall ring only, so clicks inside reach the
    equipment.
 3. Foundation pads under every standing component, with a bevel and shadow.
-4. Pipes: pipe components and connections as routed runs with a dark wall, a
-   fluid-coloured body (the same donor-node colour logic as the other views),
-   a sheen, elbows at bends and flanges at the ends. Openings between a
-   component and its container are internal and are not drawn.
+4. Pipes: pipe components and connections as routed runs (laned where they
+   share a corridor) with a dark wall, a fluid-coloured body (the same
+   donor-node colour logic as the other views), a sheen, elbows at bends and
+   flanges at the ends. Openings between a component and its container are
+   internal and are not drawn.
 5. Sprites: the component's existing front-view drawing standing on its pad,
    rising north from the south edge of the footprint, painter-sorted by south
    edge and containment. Raised components float on columns above the pad

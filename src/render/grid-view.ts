@@ -20,6 +20,7 @@ import {
   componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
   portAnchors, portAnchor, connectionRoute, pipeRoute, routeLength, completeRoute, rubberBand,
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
+  routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 
@@ -70,6 +71,23 @@ export interface RoutingState {
   sourceRect: PlanRect | null;
 }
 
+/** A pipe component or a plant connection: the things drawn as runs. */
+type Run = Connection | PipeComponent;
+
+/**
+ * Where every run goes this frame. `routes` are the geometric polylines
+ * (what a connection's length and hit test refer to); `display` are the
+ * same runs laid side by side where they share a corridor.
+ */
+interface RouteLayout {
+  routes: Map<Run, Point[]>;
+  display: Map<Run, Point[]>;
+}
+
+function isConnection(run: Run): run is Connection {
+  return 'fromPortId' in run;
+}
+
 /** Screen layout of a standing sprite. */
 interface SpriteLayout {
   fp: Footprint;
@@ -95,6 +113,67 @@ export class GridView {
   routing: RoutingState | null = null;
   private art = new GridArt();
   private size = { width: 800, height: 600 };
+  /** Automatic routes are a search; keep them until their inputs change. */
+  private routeCache = new Map<Run, { key: string; pts: Point[] }>();
+  private layout: RouteLayout | null = null;
+
+  // ---------------------------------------------------------------------
+  // Route layout
+  // ---------------------------------------------------------------------
+
+  /**
+   * Routes for every run in the plant, laned for drawing. Rebuilt each
+   * frame from cached routes: a route is recomputed only when its ends or
+   * the obstacle set have moved, since the obstacle-avoiding search is the
+   * one expensive step.
+   */
+  private buildLayout(plantState: PlantState): RouteLayout {
+    const obstacles = routeObstacles(plantState);
+    const obsKey = obstaclesKey(obstacles);
+    const routes = new Map<Run, Point[]>();
+    const runs: RouteRun[] = [];
+    const seen = new Set<Run>();
+
+    for (const c of plantState.components.values()) {
+      if (c.type !== 'pipe' || (c as any).isHydraulicOnly) continue;
+      const pipe = c as PipeComponent;
+      const pts = pipeRoute(pipe);
+      routes.set(pipe, pts);
+      runs.push({ key: pipe, pts, width: this.lineWidthForDiameter(pipe.diameter || 0.3) / this.cam.ppm });
+    }
+    for (const conn of plantState.connections) {
+      const from = plantState.components.get(conn.fromComponentId);
+      const to = plantState.components.get(conn.toComponentId);
+      if (!from || !to || this.isContainmentPair(from, to)) continue;
+      const endsKey = JSON.stringify([
+        from.position, to.position, conn.fromPortId, conn.toPortId, conn.route ?? null,
+        from.type === 'pipe' ? pipeRoute(from as PipeComponent) : null,
+        to.type === 'pipe' ? pipeRoute(to as PipeComponent) : null,
+      ]);
+      const key = `${obsKey}|${endsKey}`;
+      seen.add(conn);
+      let cached = this.routeCache.get(conn);
+      if (!cached || cached.key !== key) {
+        const pts = connectionRoute(conn, plantState, obstacles);
+        if (!pts) continue;
+        cached = { key, pts };
+        this.routeCache.set(conn, cached);
+      }
+      if (routeLength(cached.pts) < 1e-6) continue;
+      routes.set(conn, cached.pts);
+      runs.push({ key: conn, pts: cached.pts, width: this.lineWidthForArea(conn.flowArea) / this.cam.ppm });
+    }
+    for (const k of this.routeCache.keys()) {
+      if (!seen.has(k)) this.routeCache.delete(k);
+    }
+    return { routes, display: laneOffsetRoutes(runs) as Map<Run, Point[]> };
+  }
+
+  /** The last frame's layout (built now if there is none yet). */
+  private currentLayout(plantState: PlantState): RouteLayout {
+    if (!this.layout) this.layout = this.buildLayout(plantState);
+    return this.layout;
+  }
 
   // ---------------------------------------------------------------------
   // Camera
@@ -265,7 +344,8 @@ export class GridView {
 
   /** Where a flow arrow for a connection belongs: the middle of its route, along it. */
   connectionScreenEndpoints(conn: Connection, plantState: PlantState): ConnectionScreenEndpoints | null {
-    const pts = connectionRoute(conn, plantState);
+    const layout = this.currentLayout(plantState);
+    const pts = layout.display.get(conn) ?? connectionRoute(conn, plantState);
     if (!pts) return null;
     const len = routeLength(pts);
     const scale = this.cam.ppm / 50;
@@ -347,7 +427,8 @@ export class GridView {
       if (c.type === 'pipe') {
         const pipe = c as PipeComponent;
         const half = Math.max((pipe.diameter || 0.3) / 2, MIN_CLICK_TARGET_PX / 2 / this.cam.ppm);
-        if (distanceToPolyline(world, pipeRoute(pipe)) <= half) return c;
+        const pts = this.currentLayout(plantState).display.get(pipe) ?? pipeRoute(pipe);
+        if (distanceToPolyline(world, pts) <= half) return c;
         continue;
       }
       if (c.type === 'building') {
@@ -384,17 +465,13 @@ export class GridView {
     const world = this.screenToWorld(screen);
     let best: Connection | null = null;
     let bestD = Infinity;
-    for (const conn of plantState.connections) {
-      const from = plantState.components.get(conn.fromComponentId);
-      const to = plantState.components.get(conn.toComponentId);
-      if (!from || !to || this.isContainmentPair(from, to)) continue;
-      const route = connectionRoute(conn, plantState);
-      if (!route || routeLength(route) < 1e-6) continue;
-      const halfWidth = Math.max(this.lineWidthForArea(conn.flowArea) / 2, 6) / this.cam.ppm;
-      const d = distanceToPolyline(world, route);
+    for (const [run, pts] of this.currentLayout(plantState).display) {
+      if (!isConnection(run)) continue;
+      const halfWidth = Math.max(this.lineWidthForArea(run.flowArea) / 2, 6) / this.cam.ppm;
+      const d = distanceToPolyline(world, pts);
       if (d <= halfWidth && d < bestD) {
         bestD = d;
-        best = conn;
+        best = run;
       }
     }
     return best;
@@ -479,6 +556,7 @@ export class GridView {
 
   render(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     this.size = { width: f.width, height: f.height };
+    this.layout = this.buildLayout(f.plantState);
     const order = this.drawOrder(f.plantState);
 
     this.renderGround(ctx, f);
@@ -711,27 +789,26 @@ export class GridView {
 
   private renderRoutes(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     const { plantState } = f;
-    // Pipe components first (they are the long runs), then the connections
-    for (const c of plantState.components.values()) {
-      if (c.type !== 'pipe' || (c as any).isHydraulicOnly) continue;
-      const pipe = c as PipeComponent;
-      const pts = pipeRoute(pipe).map(p => this.worldToScreen(p));
+    const layout = this.currentLayout(plantState);
+    // Pipe components first (they are the long runs), then the connections.
+    // Openings between a component and its container are internal and are
+    // not in the layout.
+    for (const [run, pts] of layout.display) {
+      if (isConnection(run)) continue;
+      const pipe = run;
       const color = pipe.fluid ? getFluidColor(pipe.fluid) : COLORS.steel;
-      this.drawPipe(ctx, pts, color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
+      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
     }
-    for (const conn of plantState.connections) {
+    for (const [run, pts] of layout.display) {
+      if (!isConnection(run)) continue;
+      const conn = run;
       const from = plantState.components.get(conn.fromComponentId);
-      const to = plantState.components.get(conn.toComponentId);
-      if (!from || !to) continue;
-      // An opening between a component and its container is internal: nothing to lay
-      if (this.isContainmentPair(from, to)) continue;
-      const route = connectionRoute(conn, plantState);
-      if (!route || routeLength(route) < 1e-6) continue;
+      if (!from) continue;
       const fluid = f.connectionFluid(conn, from);
       const color = fluid ? getFluidColor(fluid) : '#667788';
       const touchesSelection = conn === f.selectedConnection || (f.selectedComponentId !== null &&
         (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId));
-      this.drawPipe(ctx, route.map(p => this.worldToScreen(p)), color, this.lineWidthForArea(conn.flowArea), touchesSelection);
+      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForArea(conn.flowArea), touchesSelection);
     }
   }
 
@@ -814,7 +891,7 @@ export class GridView {
     const from = plantState.components.get(conn.fromComponentId);
     const to = plantState.components.get(conn.toComponentId);
     if (!from || !to) return;
-    const route = connectionRoute(conn, plantState);
+    const route = this.currentLayout(plantState).display.get(conn);
     if (!route) return;
     const mid = pointAlongRoute(route, 0.5).point;
     const s = this.worldToScreen(mid);

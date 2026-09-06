@@ -18,6 +18,10 @@
  *  - A port anchors on the midpoint of one footprint edge cell, facing one
  *    of the four grid sides. The route into or out of that port passes
  *    through the cell just outside that edge (the port's "out" cell).
+ *  - Automatic routes are found by a search over cells that steers around
+ *    the footprints of standing equipment (searchRoute); drawn routes are
+ *    kept as drawn. Where several runs share a cell they are laid side by
+ *    side for drawing (laneOffsetRoutes) - the stored geometry is unchanged.
  */
 import { Point, PlantComponent, Port, Connection, PlantState, PipeComponent } from '../types';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
@@ -359,16 +363,313 @@ function pathPreferringAxis(from: Point, to: Point, axis: 'x' | 'y'): Point[] {
 
 /**
  * The full route between two ports when nobody has drawn one: out of the
- * first port, one bend at most between the two out-cells, into the second.
+ * first port, then between the two out-cells - steering around other
+ * equipment when the obstacles are given, a single bend otherwise - and
+ * into the second.
  */
-export function autoRoute(a: PortAnchor, b: PortAnchor): Point[] {
+export function autoRoute(a: PortAnchor, b: PortAnchor, obstacles?: Obstacle[]): Point[] {
   const pts: Point[] = [a.point];
   if (a.out) pts.push(a.out);
   const start = pts[pts.length - 1];
   const end = b.out ?? b.point;
-  pts.push(...pathPreferringAxis(start, end, leaveAxis(a.side)).slice(1));
+  const middle = obstacles
+    ? searchRoute(start, end, obstacles, sideVector(a.side))
+    : pathPreferringAxis(start, end, leaveAxis(a.side));
+  pts.push(...middle.slice(1));
   if (b.out) pts.push(b.point);
   return simplifyRoute(pts);
+}
+
+// ---------------------------------------------------------------------------
+// Obstacle-avoiding search
+// ---------------------------------------------------------------------------
+
+/** A footprint an automatic route should not cut through. */
+export interface Obstacle extends PlanRect {
+  id: string;
+}
+
+/**
+ * What an automatic route steers around: the footprints of standing
+ * equipment. Pipes are runs, not obstacles, and a building is a floor
+ * others stand on, so pipes run through it freely.
+ */
+export function routeObstacles(plantState: PlantState): Obstacle[] {
+  const out: Obstacle[] = [];
+  for (const c of plantState.components.values()) {
+    if ((c as any).isHydraulicOnly || c.type === 'pipe' || c.type === 'building') continue;
+    out.push({ id: c.id, ...footprintRect(c.position, componentFootprint(c)) });
+  }
+  return out;
+}
+
+/** A string that changes whenever the obstacle set does (route cache key). */
+export function obstaclesKey(obstacles: Obstacle[]): string {
+  return obstacles.map(o => `${o.id}:${o.x0},${o.y0},${o.x1},${o.y1}`).join(';');
+}
+
+/** Extra cost per cell of cutting through equipment. Finite, so a route from a port inside a footprint still exists. */
+const OBSTACLE_PENALTY = 12;
+/** Extra cost per bend, so a route runs straight where it can. */
+const BEND_PENALTY = 1.5;
+/** Cells of slack around the endpoints' bounding box the search may use to go round things. */
+const SEARCH_MARGIN = 8;
+
+function cellPenalty(cx: number, cy: number, obstacles: Obstacle[]): number {
+  for (const o of obstacles) {
+    if (cx > o.x0 && cx < o.x1 && cy > o.y0 && cy < o.y1) return OBSTACLE_PENALTY;
+  }
+  return 0;
+}
+
+class MinHeap<T> {
+  private items: Array<{ k: number; v: T }> = [];
+  get size(): number { return this.items.length; }
+  push(k: number, v: T): void {
+    const a = this.items;
+    a.push({ k, v });
+    let i = a.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (a[p].k <= a[i].k) break;
+      [a[p], a[i]] = [a[i], a[p]];
+      i = p;
+    }
+  }
+  pop(): T {
+    const a = this.items;
+    const top = a[0];
+    const last = a.pop()!;
+    if (a.length > 0) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < a.length && a[l].k < a[m].k) m = l;
+        if (r < a.length && a[r].k < a[m].k) m = r;
+        if (m === i) break;
+        [a[m], a[i]] = [a[i], a[m]];
+        i = m;
+      }
+    }
+    return top.v;
+  }
+}
+
+const DIRS: Point[] = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
+
+/**
+ * Orthogonal path between two points over the cell lattice (A* with a bend
+ * penalty), avoiding obstacle footprints where it can. Points that are not
+ * cell centres (a pipe end on a cell edge) are joined to the nearest cell
+ * centre by a short leg. Never fails: obstacles only cost, so a port inside
+ * a footprint still gets a route - out through the wall.
+ */
+export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], startDir?: Point): Point[] {
+  const s = cellCenter(start), e = cellCenter(end);
+  const si = Math.floor(s.x / TILE_M), sj = Math.floor(s.y / TILE_M);
+  const ei = Math.floor(e.x / TILE_M), ej = Math.floor(e.y / TILE_M);
+  const x0 = Math.min(si, ei) - SEARCH_MARGIN, x1 = Math.max(si, ei) + SEARCH_MARGIN;
+  const y0 = Math.min(sj, ej) - SEARCH_MARGIN, y1 = Math.max(sj, ej) + SEARCH_MARGIN;
+  const W = x1 - x0 + 1, H = y1 - y0 + 1;
+  const idx = (i: number, j: number, d: number) => ((j - y0) * W + (i - x0)) * 4 + d;
+
+  const best = new Float64Array(W * H * 4).fill(Infinity);
+  const from = new Int32Array(W * H * 4).fill(-1);
+  const heap = new MinHeap<number>();
+  const h = (i: number, j: number) => Math.abs(i - ei) + Math.abs(j - ej);
+  const startD = startDir ? DIRS.findIndex(d => d.x === Math.sign(startDir.x) && d.y === Math.sign(startDir.y)) : -1;
+
+  // Start with every heading (a start direction, if given, is free; the rest pay a bend)
+  for (let d = 0; d < 4; d++) {
+    const g = startD < 0 || d === startD ? 0 : BEND_PENALTY;
+    best[idx(si, sj, d)] = g;
+    heap.push(g + h(si, sj), idx(si, sj, d));
+  }
+
+  let goal = -1;
+  while (heap.size > 0) {
+    const cur = heap.pop();
+    const d = cur % 4;
+    const cellIndex = (cur - d) / 4;
+    const i = (cellIndex % W) + x0;
+    const j = Math.floor(cellIndex / W) + y0;
+    if (i === ei && j === ej) { goal = cur; break; }
+    const g = best[cur];
+    for (let nd = 0; nd < 4; nd++) {
+      const ni = i + DIRS[nd].x, nj = j + DIRS[nd].y;
+      if (ni < x0 || ni > x1 || nj < y0 || nj > y1) continue;
+      const cost = g + 1 + (nd === d ? 0 : BEND_PENALTY) +
+        cellPenalty((ni + 0.5) * TILE_M, (nj + 0.5) * TILE_M, obstacles);
+      const ni_ = idx(ni, nj, nd);
+      if (cost < best[ni_] - EPS) {
+        best[ni_] = cost;
+        from[ni_] = cur;
+        heap.push(cost + h(ni, nj), ni_);
+      }
+    }
+  }
+
+  const cells: Point[] = [];
+  if (goal < 0) {
+    // Out of the search box (cannot happen while both ends are inside it); one bend
+    return manhattanPath(start, end, 'x');
+  }
+  for (let cur = goal; cur >= 0; cur = from[cur]) {
+    const d = cur % 4;
+    const cellIndex = (cur - d) / 4;
+    cells.push({ x: ((cellIndex % W) + x0 + 0.5) * TILE_M, y: (Math.floor(cellIndex / W) + y0 + 0.5) * TILE_M });
+    if (from[cur] < 0) break;
+  }
+  cells.reverse();
+  const pts: Point[] = [];
+  if (!samePoint(start, s)) pts.push(start);
+  pts.push(...cells);
+  if (!samePoint(end, e)) pts.push(end);
+  return simplifyRoute(pts);
+}
+
+// ---------------------------------------------------------------------------
+// Lanes: runs that share a cell are drawn side by side
+// ---------------------------------------------------------------------------
+
+export interface RouteRun {
+  key: unknown;
+  pts: Point[];
+  /** Drawn width in metres, for spacing. */
+  width: number;
+}
+
+interface LaneSegment {
+  run: RouteRun;
+  index: number;      // segment index within the run
+  line: number;       // the y of a horizontal segment, the x of a vertical one
+  lo: number;
+  hi: number;
+  offset: number;
+  /** A short stub at a run's end stays on its anchor. */
+  pinned: boolean;
+}
+
+/**
+ * Perpendicular offsets so runs sharing a corridor sit next to each other
+ * rather than on top of one another. Each straight segment is atomic: it
+ * gets one lane along its whole length, so a run does not wobble from cell
+ * to cell. Segments overlapping on the same line form a group; lanes are
+ * spread across the tile and compress to fit when the corridor is full.
+ * Segment ends on ports stay put (a short jog joins them to the lane).
+ */
+export function laneOffsetRoutes(runs: RouteRun[]): Map<unknown, Point[]> {
+  const segments: LaneSegment[] = [];
+  const byLine = new Map<string, LaneSegment[]>();
+  for (const run of runs) {
+    const n = run.pts.length;
+    for (let i = 0; i < n - 1; i++) {
+      const a = run.pts[i], b = run.pts[i + 1];
+      const horizontal = Math.abs(a.y - b.y) < EPS;
+      const vertical = Math.abs(a.x - b.x) < EPS;
+      if (!horizontal && !vertical) continue; // diagonal legs (pipe ends off-lattice) are drawn as they are
+      const len = Math.abs(horizontal ? b.x - a.x : b.y - a.y);
+      const seg: LaneSegment = {
+        run, index: i,
+        line: horizontal ? a.y : a.x,
+        lo: horizontal ? Math.min(a.x, b.x) : Math.min(a.y, b.y),
+        hi: horizontal ? Math.max(a.x, b.x) : Math.max(a.y, b.y),
+        offset: 0,
+        pinned: (i === 0 || i === n - 2) && len < TILE_M - EPS,
+      };
+      segments.push(seg);
+      const k = `${horizontal ? 'h' : 'v'}:${Math.round(seg.line * 1e4)}`;
+      let list = byLine.get(k);
+      if (!list) { list = []; byLine.set(k, list); }
+      list.push(seg);
+    }
+  }
+
+  // Lane assignment per line: interval-graph colouring over overlap groups
+  for (const list of byLine.values()) {
+    const active = list.filter(s => !s.pinned).sort((a, b) => a.lo - b.lo);
+    let groupStart = 0;
+    while (groupStart < active.length) {
+      // Extend the group while segments keep overlapping the running extent
+      let groupEnd = groupStart;
+      let extent = active[groupStart].hi;
+      while (groupEnd + 1 < active.length && active[groupEnd + 1].lo < extent - EPS) {
+        groupEnd++;
+        extent = Math.max(extent, active[groupEnd].hi);
+      }
+      const group = active.slice(groupStart, groupEnd + 1);
+      if (group.length > 1) {
+        const lanes = new Map<LaneSegment, number>();
+        for (const seg of group) {
+          const used = new Set<number>();
+          for (const [other, lane] of lanes) {
+            if (other.lo < seg.hi - EPS && seg.lo < other.hi - EPS) used.add(lane);
+          }
+          let lane = 0;
+          while (used.has(lane)) lane++;
+          lanes.set(seg, lane);
+        }
+        const count = Math.max(...lanes.values()) + 1;
+        const widest = Math.max(...group.map(s => s.run.width));
+        const spacing = Math.min(TILE_M / count, widest + 0.12 * TILE_M);
+        for (const [seg, lane] of lanes) seg.offset = (lane - (count - 1) / 2) * spacing;
+      }
+      groupStart = groupEnd + 1;
+    }
+  }
+
+  // Rebuild each run's polyline from its offset segments
+  const out = new Map<unknown, Point[]>();
+  const segsOf = new Map<RouteRun, Map<number, LaneSegment>>();
+  for (const seg of segments) {
+    let m = segsOf.get(seg.run);
+    if (!m) { m = new Map(); segsOf.set(seg.run, m); }
+    m.set(seg.index, seg);
+  }
+  for (const run of runs) {
+    const m = segsOf.get(run);
+    const pts = run.pts;
+    if (!m || pts.length < 2 || [...m.values()].every(s => s.offset === 0)) {
+      out.set(run.key, pts);
+      continue;
+    }
+    const n = pts.length;
+    const isH = (i: number) => Math.abs(pts[i].y - pts[i + 1].y) < EPS;
+    const off = (i: number) => m.get(i)?.offset ?? 0;
+    // Position of segment i's offset line and the shifted copy of a point on it
+    const shifted = (i: number, p: Point): Point => isH(i) ? { x: p.x, y: p.y + off(i) } : { x: p.x + off(i), y: p.y };
+    const result: Point[] = [];
+    // Start: on the anchor, with a jog onto the first lane if it is offset
+    if (off(0) !== 0) {
+      const d = isH(0) ? { x: Math.sign(pts[1].x - pts[0].x), y: 0 } : { x: 0, y: Math.sign(pts[1].y - pts[0].y) };
+      const jog = { x: pts[0].x + d.x * TILE_M / 2, y: pts[0].y + d.y * TILE_M / 2 };
+      result.push(pts[0], jog, shifted(0, jog));
+    } else {
+      result.push(pts[0]);
+    }
+    for (let k = 1; k < n - 1; k++) {
+      const prev = k - 1, next = k;
+      const a = shifted(prev, pts[k]), b = shifted(next, pts[k]);
+      if (isH(prev) === isH(next)) {
+        // Collinear neighbours (a lane change along one line): step across
+        result.push(a, b);
+      } else {
+        // Corner: the vertical segment fixes x, the horizontal one fixes y
+        result.push(isH(prev) ? { x: b.x, y: a.y } : { x: a.x, y: b.y });
+      }
+    }
+    if (off(n - 2) !== 0) {
+      const d = isH(n - 2) ? { x: Math.sign(pts[n - 2].x - pts[n - 1].x), y: 0 } : { x: 0, y: Math.sign(pts[n - 2].y - pts[n - 1].y) };
+      const jog = { x: pts[n - 1].x + d.x * TILE_M / 2, y: pts[n - 1].y + d.y * TILE_M / 2 };
+      result.push(shifted(n - 2, jog), jog, pts[n - 1]);
+    } else {
+      result.push(pts[n - 1]);
+    }
+    out.set(run.key, simplifyRoute(result));
+  }
+  return out;
 }
 
 /**
@@ -454,10 +755,11 @@ export function reanchorRoute(route: Point[], a: PortAnchor, b: PortAnchor): Poi
 
 /**
  * The polyline a plant connection is drawn along in grid view: the stored
- * route (re-anchored if its ends have moved), else an automatic one.
- * Null when either end cannot be resolved.
+ * route (re-anchored if its ends have moved), else an automatic one that
+ * steers around the given obstacles (computed from the plant when not
+ * given). Null when either end cannot be resolved.
  */
-export function connectionRoute(conn: Connection, plantState: PlantState): Point[] | null {
+export function connectionRoute(conn: Connection, plantState: PlantState, obstacles?: Obstacle[]): Point[] | null {
   const fromComponent = plantState.components.get(conn.fromComponentId);
   const toComponent = plantState.components.get(conn.toComponentId);
   if (!fromComponent || !toComponent) return null;
@@ -465,7 +767,7 @@ export function connectionRoute(conn: Connection, plantState: PlantState): Point
   const b = portAnchorFacing(toComponent, conn.toPortId, partnerReference(fromComponent, conn.fromPortId));
   if (!a || !b) return null;
   if (conn.route && conn.route.length >= 2) return reanchorRoute(conn.route, a, b);
-  return autoRoute(a, b);
+  return autoRoute(a, b, obstacles ?? routeObstacles(plantState));
 }
 
 /** Point and unit direction at a fraction (0..1) of the route's length. */

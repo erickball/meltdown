@@ -6,6 +6,7 @@ import {
   TILE_M, componentFootprint, footprintForType, snapCenter, footprintRect, portAnchors,
   autoRoute, completeRoute, extendRoute, rubberBand, routeLength, simplifyRoute, reanchorRoute,
   connectionRoute, pipeRoute, cellCenter, distanceToPolyline, pointAlongRoute, portAnchorFacing,
+  searchRoute, routeObstacles, laneOffsetRoutes, Obstacle,
 } from '../src/render/grid-geometry';
 import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point } from '../src/types';
 
@@ -172,6 +173,87 @@ console.log('Partner-facing nozzles');
   const r2 = connectionRoute(conn2, plant)!;
   check('pump ports keep their stored side', near(r2[0].x, 21), fmt(r2));
   check('top/bottom nozzles never mirror', portAnchorFacing(t, 't-top', { x: 50, y: 0 })!.side === 'N');
+}
+
+console.log('Obstacle avoidance');
+{
+  const isOrtho = (r: Point[]) => r.every((p, i) => i === 0 || near(p.x, r[i - 1].x) || near(p.y, r[i - 1].y));
+  const crosses = (r: Point[], o: Obstacle) => {
+    for (let i = 1; i < r.length; i++) {
+      const a = r[i - 1], b = r[i];
+      const steps = Math.max(1, Math.round(Math.hypot(b.x - a.x, b.y - a.y) / 0.25));
+      for (let k = 0; k <= steps; k++) {
+        const x = a.x + (b.x - a.x) * k / steps, y = a.y + (b.y - a.y) * k / steps;
+        if (x > o.x0 + 1e-6 && x < o.x1 - 1e-6 && y > o.y0 + 1e-6 && y < o.y1 - 1e-6) return true;
+      }
+    }
+    return false;
+  };
+  const wall: Obstacle = { id: 'wall', x0: 5, y0: -3, x1: 7, y1: 4 }; // between x=0 and x=12 on row 0.5
+  const r = searchRoute({ x: 0.5, y: 0.5 }, { x: 12.5, y: 0.5 }, [wall], { x: 1, y: 0 });
+  check('search route is orthogonal', isOrtho(r), fmt(r));
+  check('search route goes round the obstacle', !crosses(r, wall), fmt(r));
+  check('search route ends where asked', samePt(r[0], { x: 0.5, y: 0.5 }) && samePt(r[r.length - 1], { x: 12.5, y: 0.5 }), fmt(r));
+  check('search route is the shortest way round (12 + 2 x 4 detour)', near(routeLength(r), 12 + 2 * 4), `${routeLength(r)}`);
+  const free = searchRoute({ x: 0.5, y: 0.5 }, { x: 12.5, y: 0.5 }, [], { x: 1, y: 0 });
+  check('no obstacle: a straight run', free.length === 2 && near(routeLength(free), 12), fmt(free));
+  const bend = searchRoute({ x: 0.5, y: 0.5 }, { x: 6.5, y: 4.5 }, [], { x: 1, y: 0 });
+  check('no obstacle, offset target: one bend, leaving straight first', bend.length === 3 && near(bend[1].y, 0.5), fmt(bend));
+  const boxed = searchRoute({ x: 3.5, y: 3.5 }, { x: 10.5, y: 3.5 }, [{ id: 'around', x0: 2, y0: 2, x1: 5, y1: 5 }], { x: 1, y: 0 });
+  check('a start inside a footprint still gets out', samePt(boxed[boxed.length - 1], { x: 10.5, y: 3.5 }) && isOrtho(boxed), fmt(boxed));
+
+  // Through the plant: a tank in the way of two others
+  const a = tank('a', 1, 1, 2, 4);      // x 0..2
+  const b = tank('b', 15, 1, 2, 4);     // x 14..16
+  const mid = tank('mid', 8, 1, 4, 8);  // x 6..10, y -1..3: right on the straight line
+  const plant: PlantState = {
+    components: new Map<string, any>([[a.id, a], [b.id, b], [mid.id, mid]]),
+    connections: [], simTime: 0, simSpeed: 1, isPaused: true,
+  };
+  const obs = routeObstacles(plant);
+  check('every tank is an obstacle', obs.length === 3);
+  const route = connectionRoute({ fromComponentId: 'a', fromPortId: 'a-right', toComponentId: 'b', toPortId: 'b-left' }, plant)!;
+  const midRect = obs.find(o => o.id === 'mid')!;
+  check('auto route between tanks avoids the tank between them', !crosses(route, midRect), fmt(route));
+  check('auto route still starts and ends on the anchors', near(route[0].x, 2) && near(route[route.length - 1].x, 14), fmt(route));
+  const building = { id: 'bldg', type: 'building', position: { x: 8, y: 1 }, rotation: 0, shape: 'rectangle', width: 30, length: 30, height: 20, wallThickness: 1, steelFraction: 0.1, pressureRating: 1, ports: [] };
+  plant.components.set('bldg', building as any);
+  check('buildings are not obstacles', routeObstacles(plant).length === 3);
+}
+
+console.log('Lanes');
+{
+  const isOrtho = (r: Point[]) => r.every((p, i) => i === 0 || near(p.x, r[i - 1].x) || near(p.y, r[i - 1].y));
+  // Two runs sharing a horizontal corridor on row y=2.5 from x=1 to x=9
+  const r1 = [{ x: 0, y: 2.5 }, { x: 10, y: 2.5 }];
+  const r2 = [{ x: 0.5, y: 0.5 }, { x: 0.5, y: 2.5 }, { x: 9.5, y: 2.5 }, { x: 9.5, y: 6.5 }];
+  const lanes = laneOffsetRoutes([
+    { key: 'r1', pts: r1, width: 0.3 },
+    { key: 'r2', pts: r2, width: 0.3 },
+  ]);
+  const d1 = lanes.get('r1')!, d2 = lanes.get('r2')!;
+  check('displayed runs stay orthogonal', isOrtho(d1) && isOrtho(d2), fmt(d1) + ' | ' + fmt(d2));
+  check('run ends stay on their anchors', samePt(d1[0], r1[0]) && samePt(d1[d1.length - 1], r1[1]) && samePt(d2[0], r2[0]) && samePt(d2[d2.length - 1], r2[3]));
+  // y of a run where it crosses x = 5 (the middle of the shared corridor)
+  const yOf = (pts: Point[]) => {
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      if (near(a.y, b.y) && Math.min(a.x, b.x) <= 5 && Math.max(a.x, b.x) >= 5) return a.y;
+    }
+    return NaN;
+  };
+  const y1 = yOf(d1), y2 = yOf(d2);
+  check('the two runs sit on different lanes in the shared corridor', Math.abs(y1 - y2) > 0.2, `${y1} vs ${y2}`);
+  check('lanes are centred on the corridor', near(y1 + y2, 5, 1e-6), `${y1} + ${y2}`);
+  check('lanes stay within the tile', Math.abs(y1 - 2.5) < 0.5 && Math.abs(y2 - 2.5) < 0.5);
+  // A lone run is untouched
+  const alone = laneOffsetRoutes([{ key: 'r1', pts: r1, width: 0.3 }]);
+  check('a run with no neighbours keeps its geometry', alone.get('r1') === r1);
+  // Five wide runs: compressed to fit the tile
+  const many = Array.from({ length: 5 }, (_, i) => ({ key: `m${i}`, pts: [{ x: 0, y: 4.5 }, { x: 10, y: 4.5 }], width: 0.5 }));
+  const packed = laneOffsetRoutes(many);
+  const ys = many.map(m => yOf(packed.get(m.key)!)).sort((p, q) => p - q);
+  check('a full corridor compresses its lanes into the tile', ys[4] - ys[0] <= 1 + 1e-9 && ys[1] - ys[0] > 0.1, ys.join(','));
 }
 
 console.log('Pipes');
