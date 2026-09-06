@@ -143,6 +143,10 @@ export interface PipeComponent extends ComponentBase {
   // End point has its own position and elevation
   endPosition?: Point;      // World position of pipe outlet end
   endElevation?: number;    // Elevation of pipe outlet end (meters)
+  // Plan polyline the pipe is drawn along in grid view (metres, grid-aligned,
+  // inlet end first). Absent for pipes laid in the other views, which the
+  // grid view auto-routes between position and endPosition.
+  route?: Point[];
 }
 
 export interface PumpComponent extends ComponentBase {
@@ -577,6 +581,10 @@ export interface Connection {
   // Flow parameters (optional, used when creating simulation)
   flowArea?: number;       // m² - cross-sectional area
   length?: number;         // m - connection length
+  // Plan polyline drawn by the user in grid view (metres, grid-aligned, from
+  // the from-port to the to-port). Rendering only; `length` carries the
+  // physical length. Absent = auto-routed on the grid.
+  route?: Point[];
 }
 
 // View/camera state

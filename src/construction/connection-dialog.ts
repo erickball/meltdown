@@ -45,6 +45,8 @@ export class ConnectionDialog {
   private currentCallback: ((config: ConnectionConfig | null) => void) | null = null;
   private currentEditCallback: ((result: ConnectionEditResult | null) => void) | null = null;
   private isEditMode: boolean = false;
+  /** Length a pipe drawn on the grid measured, to seed the length field. */
+  private suggestedLength: number | null = null;
   private fromComponent: PlantComponent | null = null;
   private toComponent: PlantComponent | null = null;
   private fromPort: Port | null = null;
@@ -89,13 +91,15 @@ export class ConnectionDialog {
     toComponent: PlantComponent,
     fromPort: Port,
     toPort: Port,
-    callback: (config: ConnectionConfig | null) => void
+    callback: (config: ConnectionConfig | null) => void,
+    options?: { suggestedLength?: number }
   ) {
     this.fromComponent = fromComponent;
     this.toComponent = toComponent;
     this.fromPort = fromPort;
     this.toPort = toPort;
     this.currentCallback = callback;
+    this.suggestedLength = options?.suggestedLength ?? null;
 
     // Set title
     const fromName = fromComponent.label || fromComponent.id;
@@ -405,7 +409,10 @@ export class ConnectionDialog {
     const lengthInput = document.createElement('input');
     lengthInput.type = 'number';
     lengthInput.id = 'length';
-    lengthInput.value = String(isContainedConnection ? 0.5 : Math.max(minLength, 2));
+    // A pipe drawn along the grid arrives with its measured length; otherwise
+    // start from a short run
+    lengthInput.value = String(isContainedConnection ? 0.5
+      : Math.max(minLength, this.suggestedLength ?? 2));
     lengthInput.min = String(minLength);
     lengthInput.max = String(maxLength);
     lengthInput.step = '0.1';

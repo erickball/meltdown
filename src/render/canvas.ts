@@ -1,6 +1,6 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, getComponentVisualHeight, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
+import { renderComponent, renderGrid, renderConnection, screenToWorld, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, getComponentBounds, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -12,6 +12,11 @@ import {
 import { getFluidColor, COLORS, renderColorLegend } from './colors';
 import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
+import { getComponentSize, getDefaultComponentSize } from './component-size';
+import { GridView, PortHit } from './grid-view';
+
+/** Which projection draws the plant: flat plan, 2.5D perspective, or the tile grid. */
+export type ViewMode = '2d' | 'perspective' | 'grid';
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -27,6 +32,11 @@ export class PlantCanvas {
   private showPorts: boolean = false;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
+  // 'perspective' is the 2.5D view (isometric.enabled mirrors it for the
+  // code that still reads that flag); 'grid' delegates projection, hit
+  // testing and the plant layers to GridView.
+  private viewMode: ViewMode = 'perspective';
+  private grid = new GridView();
 
   // Camera depth for forward/backward movement in isometric view
   // Separate from view.offsetY which controls elevation
@@ -89,6 +99,8 @@ export class PlantCanvas {
   public onMouseMove?: (worldPos: Point) => void;
   public onComponentSelect?: (componentId: string | null) => void;
   public onComponentMove?: (componentId: string, newPosition: Point) => void;
+  /** Grid view: a pipe was laid from one port to another (plan length in metres). */
+  public onRouteComplete?: (from: PortHit, to: PortHit, route: Point[], planLength: number) => void;
 
   constructor(canvas: HTMLCanvasElement, plantState: PlantState) {
     this.canvas = canvas;
@@ -124,6 +136,13 @@ export class PlantCanvas {
     this.canvas.addEventListener('pointercancel', this.handlePointerUp.bind(this));
     this.canvas.addEventListener('pointerleave', this.handlePointerUp.bind(this));
     this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
+    this.canvas.addEventListener('contextmenu', (e) => {
+      // Right-click abandons a pipe being laid on the grid
+      if (this.viewMode === 'grid' && this.grid.routing) {
+        this.cancelRouting();
+        e.preventDefault();
+      }
+    });
 
     // Track whether the cursor is over the open canvas (vs a UI panel, which
     // overlaps the canvas and steals the pointer) - gates edge-scroll panning.
@@ -149,6 +168,12 @@ export class PlantCanvas {
     // to that screen edge would edge-scroll (key repeat gives continuous
     // motion). Screen-space step, so a press covers the same fraction of
     // the view at any zoom.
+    if (e.key === 'Escape' && this.viewMode === 'grid' && this.grid.routing) {
+      this.cancelRouting();
+      e.preventDefault();
+      return;
+    }
+
     const step = 40; // Pixels per key press
     let panX = 0;
     let panY = 0;
@@ -160,7 +185,9 @@ export class PlantCanvas {
       default: return;
     }
 
-    if (this.isometric.enabled) {
+    if (this.viewMode === 'grid') {
+      this.grid.panByPixels(panX, panY);
+    } else if (this.isometric.enabled) {
       // Match the drag/edge-pan mapping: horizontal -> offsetX, vertical ->
       // cameraDepth, divided by zoom so the apparent speed stays constant
       this.view.offsetX += panX / this.isoZoom;
@@ -200,6 +227,9 @@ export class PlantCanvas {
       return;
     }
     if (this.activePointers.size > 2 || !e.isPrimary) return;
+
+    // Grid view lays pipe from ports itself (drag or click-click)
+    if (this.viewMode === 'grid' && this.handleGridPointerDown(e, x, y)) return;
 
     // If ports are shown (connect mode), check if clicking on a port first
     // If so, don't select the component - let the port click handler deal with it
@@ -256,12 +286,18 @@ export class PlantCanvas {
     this.mouseOverCanvas = true;
 
     // Update world position callback
-    const worldPos = screenToWorld({ x, y }, this.view);
+    const worldPos = this.getWorldPositionFromScreen({ x, y });
     this.onMouseMove?.(worldPos);
 
     // Update hover state
     const hovered = this.getComponentAtScreen({ x, y });
     this.hoveredComponentId = hovered?.id ?? null;
+
+    if (this.viewMode === 'grid' && this.grid.routing) {
+      this.grid.updateRoutingCursor({ x, y }, this.plantState);
+      this.canvas.style.cursor = this.grid.routing.target ? 'pointer' : 'crosshair';
+      return;
+    }
 
     if (this.isMovingComponent && this.selectedComponentId) {
       // Move the selected component
@@ -290,7 +326,9 @@ export class PlantCanvas {
       const dx = x - this.dragStart.x;
       const dy = y - this.dragStart.y;
 
-      if (this.isometric.enabled) {
+      if (this.viewMode === 'grid') {
+        this.grid.panByPixels(dx, dy);
+      } else if (this.isometric.enabled) {
         // In isometric mode:
         // - Drag left/right moves laterally (offsetX)
         // - Drag up/down moves forward/backward (cameraDepth)
@@ -325,6 +363,20 @@ export class PlantCanvas {
     if (this.activePointers.size < 2) {
       this.lastPinchDist = 0;
     }
+    if (this.viewMode === 'grid' && this.grid.routing?.dragging && e.isPrimary) {
+      // End of a sweep: released on a port finishes the pipe, released on
+      // open ground leaves it waiting for a click on one. A release where
+      // the press was is a click, which never finishes (two ports can share
+      // a spot - a pipe end on the nozzle it feeds - and a click on one
+      // must not land on the other).
+      this.grid.routing.dragging = false;
+      const rect = this.canvas.getBoundingClientRect();
+      const up = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const press = this.grid.routing.pressScreen;
+      const moved = !press || Math.hypot(up.x - press.x, up.y - press.y) > 6;
+      const hit = moved ? this.grid.portAt(up, this.plantState, this.grid.routing.from.component.id) : null;
+      if (hit) this.completeRoute(hit);
+    }
     if (this.activePointers.size === 0) {
       this.isDragging = false;
       this.isMovingComponent = false;
@@ -333,6 +385,14 @@ export class PlantCanvas {
 
   private handleWheel(e: WheelEvent): void {
     e.preventDefault();
+
+    if (this.viewMode === 'grid') {
+      // Zoom about the cursor, the way a map does
+      const rect = this.canvas.getBoundingClientRect();
+      this.grid.zoomAt({ x: e.clientX - rect.left, y: e.clientY - rect.top }, e.deltaY > 0 ? 0.9 : 1.1);
+      this.syncIsoZoomUI();
+      return;
+    }
 
     if (this.isometric.enabled) {
       if (e.shiftKey || e.ctrlKey) {
@@ -391,7 +451,11 @@ export class PlantCanvas {
     if (this.lastPinchDist > 0) {
       const zoomFactor = dist / this.lastPinchDist;
 
-      if (this.isometric.enabled) {
+      if (this.viewMode === 'grid') {
+        this.grid.zoomAt(center, zoomFactor);
+        this.grid.panByPixels(center.x - this.lastPinchCenter.x, center.y - this.lastPinchCenter.y);
+        this.syncIsoZoomUI();
+      } else if (this.isometric.enabled) {
         // Pinch zooms the perspective view about the mid-screen anchor
         this.applyIsoZoom(this.isoZoom * zoomFactor);
 
@@ -423,6 +487,7 @@ export class PlantCanvas {
   }
 
   public getComponentAtScreen(screenPos: Point): PlantComponent | null {
+    if (this.viewMode === 'grid') return this.grid.componentAt(screenPos, this.plantState);
     // Check components in reverse order (top-most first, closest to camera)
     // Filter out hydraulic-only components (they're not rendered, so shouldn't be clickable)
     const components = Array.from(this.plantState.components.values())
@@ -702,6 +767,7 @@ export class PlantCanvas {
    * This uses the same calculation as isPointInProjectedComponent for consistency.
    */
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
+    if (this.viewMode === 'grid') return this.grid.componentScreenBounds(component);
     if (!this.isometric.enabled) {
       // In 2D mode, use simple world-to-screen conversion
       const bounds = getComponentBounds(component, this.view);
@@ -882,6 +948,10 @@ export class PlantCanvas {
   }
 
   public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
+    if (this.viewMode === 'grid') {
+      const hit = this.grid.portAt(screenPos, this.plantState);
+      return hit ? { component: hit.component, port: hit.port, worldPos: hit.anchor.point } : null;
+    }
     // Collect all ports that match, then return the one visually in front
     const matches: Array<{ component: PlantComponent, port: any, worldPos: Point, worldY: number, localY: number }> = [];
 
@@ -1164,6 +1234,7 @@ export class PlantCanvas {
     // but be explicit to avoid issues)
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
+    this.grid.setViewportSize(rect.width, rect.height);
   }
 
   // Perspective projection constants
@@ -1345,6 +1416,11 @@ export class PlantCanvas {
    * is instead a fixed-anchor magnification applied inside the projection.
    */
   private applyIsoZoom(newZoom: number): void {
+    if (this.viewMode === 'grid') {
+      this.grid.setZoomFactor(newZoom);
+      this.syncIsoZoomUI();
+      return;
+    }
     this.isoZoom = Math.max(PlantCanvas.MIN_ISO_ZOOM, Math.min(PlantCanvas.MAX_ISO_ZOOM, newZoom));
     this.syncIsoZoomUI();
   }
@@ -1354,19 +1430,22 @@ export class PlantCanvas {
   private syncIsoZoomUI(): void {
     const slider = document.getElementById('view-zoom') as HTMLInputElement | null;
     const display = document.getElementById('view-zoom-value');
+    const zoom = this.viewMode === 'grid' ? this.grid.zoomFactor : this.isoZoom;
     if (slider) {
       // Slider is logarithmic: value = 100 * log10(zoom)
-      slider.value = String(Math.round(100 * Math.log10(this.isoZoom)));
+      slider.value = String(Math.round(100 * Math.log10(zoom)));
     }
     if (display) {
-      display.textContent = String(Math.round(this.isoZoom * 100));
+      display.textContent = String(Math.round(zoom * 100));
     }
   }
 
   // Public method to convert screen to world coordinates
   // Uses perspective projection when in isometric mode
   public getWorldPositionFromScreen(screenPos: Point): Point {
-    if (this.isometric.enabled) {
+    if (this.viewMode === 'grid') {
+      return this.grid.screenToWorld(screenPos);
+    } else if (this.isometric.enabled) {
       return this.screenToWorldPerspective(screenPos);
     } else {
       // Use standard 2D conversion
@@ -1380,7 +1459,9 @@ export class PlantCanvas {
   // Public method to convert world coordinates to screen coordinates
   // Uses perspective projection when in isometric mode
   public getScreenPositionFromWorld(worldPos: Point, elevation: number = 0): Point {
-    if (this.isometric.enabled) {
+    if (this.viewMode === 'grid') {
+      return this.grid.worldToScreen(worldPos);
+    } else if (this.isometric.enabled) {
       return this.worldToScreenPerspective(worldPos, elevation).pos;
     } else {
       return worldToScreen(worldPos, this.view);
@@ -1390,7 +1471,9 @@ export class PlantCanvas {
   // Get the screen Y coordinate for ground level (elevation 0) at a given world position
   // Used for clamping break connections so they don't go below ground
   public getGroundY(worldPos: Point): number | null {
-    if (this.isometric.enabled) {
+    if (this.viewMode === 'grid') {
+      return this.grid.worldToScreen(worldPos).y;
+    } else if (this.isometric.enabled) {
       const result = this.worldToScreenPerspective(worldPos, 0);
       if (result.scale <= 0) return null;
       return result.pos.y;
@@ -1457,7 +1540,9 @@ export class PlantCanvas {
     const panX = -ix * step;
     const panY = -iy * step;
 
-    if (this.isometric.enabled) {
+    if (this.viewMode === 'grid') {
+      this.grid.panByPixels(panX, panY);
+    } else if (this.isometric.enabled) {
       // Match the drag mapping: horizontal -> offsetX, vertical -> cameraDepth
       // (divided by zoom so the apparent pan speed is magnification-independent)
       this.view.offsetX += panX / this.isoZoom;
@@ -1501,6 +1586,12 @@ export class PlantCanvas {
     const dtSeconds = this.lastFrameTime === null ? 0 : Math.min(0.1, (now - this.lastFrameTime) / 1000);
     this.lastFrameTime = now;
     this.updateEdgePan(dtSeconds);
+
+    if (this.viewMode === 'grid') {
+      this.renderGridFrame(ctx, rect.width, rect.height);
+      requestAnimationFrame(() => this.render());
+      return;
+    }
 
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);
@@ -2280,99 +2371,14 @@ export class PlantCanvas {
     };
   }
 
-  // Get component size in world units (meters) for shadow rendering
+  // Component drawn size / default size live in component-size.ts so the
+  // grid view shares one convention with this class
   private getComponentSize(component: PlantComponent): { width: number; height: number } {
-    switch (component.type) {
-      case 'tank':
-        return { width: (component as any).width, height: (component as any).height };
-      case 'pipe':
-        return { width: (component as any).length, height: (component as any).diameter };
-      case 'pump': {
-        // Pump is drawn much larger than its diameter
-        // Height comes from the shared visual-height helper so connection
-        // elevations (stored against the same convention) stay anchored to
-        // the drawn nozzles. Width includes volute bulge and outlet pipe.
-        const pumpD = (component as any).diameter || 0.3;
-        const pumpScale = pumpD * 1.3;
-        const pumpWidth = pumpScale * 1.5;   // Casing + volute + outlet
-        return { width: pumpWidth, height: getComponentVisualHeight(component) };
-      }
-      case 'vessel':
-        const vesselR = (component as any).innerDiameter / 2 + (component as any).wallThickness;
-        return { width: vesselR * 2, height: (component as any).height };
-      case 'reactorVessel':
-        const rvR2 = (component as any).innerDiameter / 2 + (component as any).wallThickness;
-        return { width: rvR2 * 2, height: (component as any).height };
-      case 'coreBarrel':
-        // Core barrel is the cylindrical region inside a reactor vessel
-        const cbR = (component as any).innerDiameter / 2 + (component as any).thickness;
-        return { width: cbR * 2, height: (component as any).height };
-      case 'valve':
-        const valveD = (component as any).diameter || 0.2;
-        return { width: valveD * 2, height: getComponentVisualHeight(component) };
-      case 'heatExchanger':
-        return { width: (component as any).width, height: (component as any).height };
-      case 'turbine-generator':
-        return { width: (component as any).width || 1.5, height: (component as any).height || 1.2 };
-      case 'turbine-driven-pump':
-        return { width: (component as any).width || 1, height: (component as any).height || 0.6 };
-      case 'condenser':
-        return { width: (component as any).width || 2, height: (component as any).height || 1 };
-      case 'controller':
-        return { width: (component as any).width || 1, height: (component as any).height || 1 };
-      case 'switchyard':
-        return { width: (component as any).width || 15, height: (component as any).height || 12 };
-      case 'building': {
-        const bldg = component as any;
-        // For buildings, the footprint is width x length (depth)
-        const w = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.width || 40);
-        const d = bldg.shape === 'cylinder' ? (bldg.diameter || 40) : (bldg.length || 40);
-        return { width: w, height: d };
-      }
-      case 'crossVessel':
-        // Cross-vessel: length is horizontal extent, outerDiameter is the height/depth
-        return { width: (component as any).length || 3, height: (component as any).outerDiameter || 1 };
-      default:
-        console.warn(`[getComponentSize] Unknown component type: ${(component as any).type}, using default size`);
-        return { width: 1, height: 1 };
-    }
+    return getComponentSize(component);
   }
 
-  // Get default size for a component type (for placement preview)
   private getDefaultComponentSize(componentType: string): { width: number; height: number } {
-    switch (componentType) {
-      case 'tank':
-        return { width: 2, height: 2 }; // Typical tank footprint
-      case 'pressurizer':
-        return { width: 2, height: 2 };
-      case 'pipe':
-        return { width: 10, height: 0.3 }; // Length x diameter
-      case 'pump':
-        return { width: 1.5, height: 2.2 }; // Pump visual size
-      case 'valve':
-        return { width: 0.4, height: 0.4 };
-      case 'reactor-vessel':
-        return { width: 5, height: 5 }; // Vessel diameter
-      case 'heat-exchanger':
-        return { width: 2.5, height: 8 }; // Vertical orientation (default): width=diameter, height=length
-      case 'turbine-generator':
-        return { width: 6, height: 4 };
-      case 'condenser':
-        return { width: 8, height: 4 };
-      case 'controller':
-      case 'scram-controller':
-        return { width: 1, height: 1 };
-      case 'switchyard':
-        return { width: 15, height: 12 };
-      case 'building':
-        return { width: 40, height: 40 };
-      case 'core':
-        return { width: 3.4, height: 3.4 };
-      case 'cross-vessel':
-        return { width: 3, height: 1 };
-      default:
-        return { width: 2, height: 2 };
-    }
+    return getDefaultComponentSize(componentType);
   }
 
   // Set placement preview (for showing footprint when placing a component)
@@ -2744,7 +2750,7 @@ export class PlantCanvas {
    */
   private renderElevationArrows(ctx: CanvasRenderingContext2D, components: PlantComponent[]): void {
     this.elevationArrowTargets = [];
-    if (!this.showElevationArrows || !this.isometric.enabled) return;
+    if (!this.showElevationArrows || this.viewMode === '2d') return;
 
     const R = 7;         // arrow button radius, px
     const GAP = 4;       // px between the component edge and the buttons
@@ -2773,7 +2779,12 @@ export class PlantCanvas {
       // the same projection hit testing uses, so arrows track the drawing
       let anchorX: number;
       let anchorY: number;
-      if (component.type === 'pipe') {
+      if (this.viewMode === 'grid') {
+        const box = this.grid.spriteScreenBox(component);
+        if (!box) continue;
+        anchorX = box.right;
+        anchorY = (box.top + box.bottom) / 2;
+      } else if (component.type === 'pipe') {
         const pipe = component as import('../types').PipeComponent;
         if (!pipe.endPosition) continue;
         const a = this.worldToScreenPerspective(pipe.position, pipe.elevation ?? 0);
@@ -3266,6 +3277,7 @@ export class PlantCanvas {
     this.showPorts = show;
     if (!show) {
       this.highlightedPort = null;  // Clear highlight when hiding ports
+      this.grid.cancelRouting();
     }
   }
 
@@ -3288,39 +3300,49 @@ export class PlantCanvas {
   }
 
   public setIsometric(enabled: boolean): void {
-    const wasEnabled = this.isometric.enabled;
-    this.isometric.enabled = enabled;
+    this.setViewMode(enabled ? 'perspective' : '2d');
+  }
+
+  public setViewMode(mode: ViewMode): void {
+    if (this.viewMode === mode) return;
+    this.viewMode = mode;
+    this.isometric.enabled = mode === 'perspective';
+    this.cancelRouting();
 
     // Adjust view when switching modes to keep components visible
-    if (wasEnabled !== enabled) {
-      const rect = this.canvas.getBoundingClientRect();
-
-      if (!enabled) {
-        // Switching from 2.5D to 2D: center view on components
-        const components = Array.from(this.plantState.components.values());
-        if (components.length > 0) {
-          // Find bounding box of all components
-          let minX = Infinity, maxX = -Infinity;
-          let minY = Infinity, maxY = -Infinity;
-          for (const comp of components) {
-            minX = Math.min(minX, comp.position.x);
-            maxX = Math.max(maxX, comp.position.x);
-            minY = Math.min(minY, comp.position.y);
-            maxY = Math.max(maxY, comp.position.y);
-          }
-          const centerX = (minX + maxX) / 2;
-          const centerY = (minY + maxY) / 2;
-
-          // Use zoom=1 and center on components
-          this.view.zoom = 10;
-          this.view.offsetX = rect.width / 2 - centerX * this.view.zoom;
-          this.view.offsetY = rect.height / 2 - centerY * this.view.zoom;
+    const rect = this.canvas.getBoundingClientRect();
+    if (mode === '2d') {
+      // Switching to 2D: center view on components
+      const components = Array.from(this.plantState.components.values());
+      if (components.length > 0) {
+        // Find bounding box of all components
+        let minX = Infinity, maxX = -Infinity;
+        let minY = Infinity, maxY = -Infinity;
+        for (const comp of components) {
+          minX = Math.min(minX, comp.position.x);
+          maxX = Math.max(maxX, comp.position.x);
+          minY = Math.min(minY, comp.position.y);
+          maxY = Math.max(maxY, comp.position.y);
         }
-      } else {
-        // Switching from 2D to 2.5D: reset camera depth
-        this.cameraDepth = 0;
+        const centerX = (minX + maxX) / 2;
+        const centerY = (minY + maxY) / 2;
+
+        this.view.zoom = 10;
+        this.view.offsetX = rect.width / 2 - centerX * this.view.zoom;
+        this.view.offsetY = rect.height / 2 - centerY * this.view.zoom;
       }
+    } else if (mode === 'perspective') {
+      // Switching to 2.5D: reset camera depth
+      this.cameraDepth = 0;
+    } else {
+      this.grid.setViewportSize(rect.width, rect.height);
+      this.grid.centerOn(this.plantState);
     }
+    this.syncIsoZoomUI();
+  }
+
+  public getViewMode(): ViewMode {
+    return this.viewMode;
   }
 
   public toggleIsometric(): void {
@@ -3387,17 +3409,27 @@ export class PlantCanvas {
     Object.assign(this.view, view);
   }
 
+  /** The magnification the +/- buttons and slider act on in the current view. */
+  private currentZoomFactor(): number {
+    return this.viewMode === 'grid' ? this.grid.zoomFactor : this.isoZoom;
+  }
+
+  /** Grid view: bring the plant to the middle of the screen (after loading one, for instance). */
+  public centerOnPlant(): void {
+    if (this.viewMode === 'grid') this.grid.centerOn(this.plantState);
+  }
+
   public zoomIn(): void {
-    if (this.isometric.enabled) {
-      this.applyIsoZoom(this.isoZoom * 1.2);
+    if (this.viewMode !== '2d') {
+      this.applyIsoZoom(this.currentZoomFactor() * 1.2);
     } else {
       this.view.zoom = Math.min(200, this.view.zoom * 1.2);
     }
   }
 
   public zoomOut(): void {
-    if (this.isometric.enabled) {
-      this.applyIsoZoom(this.isoZoom / 1.2);
+    if (this.viewMode !== '2d') {
+      this.applyIsoZoom(this.currentZoomFactor() / 1.2);
     } else {
       this.view.zoom = Math.max(10, this.view.zoom / 1.2);
     }
@@ -3412,6 +3444,10 @@ export class PlantCanvas {
     };
     this.cameraDepth = 0;
     this.isoZoom = 1;
+    if (this.viewMode === 'grid') {
+      this.grid.cam.ppm = GridView.DEFAULT_PPM;
+      this.grid.centerOn(this.plantState);
+    }
     this.syncIsoZoomUI();
   }
 
@@ -3438,5 +3474,149 @@ export class PlantCanvas {
 
   public isMoveMode(): boolean {
     return this.moveMode;
+  }
+  // ---------------------------------------------------------------------
+  // Grid view
+  // ---------------------------------------------------------------------
+
+  /** Snap a placement point so the new component's footprint lands on whole tiles (grid view only). */
+  public snapPlacementPosition(componentType: string, pos: Point): Point {
+    return this.viewMode === 'grid' ? this.grid.snapPlacement(componentType, pos) : pos;
+  }
+
+  /** Snap a moved component's position to the tile lattice (grid view only). */
+  public snapComponentPosition(component: PlantComponent, pos: Point): Point {
+    return this.viewMode === 'grid' ? this.grid.snapComponent(component, pos) : pos;
+  }
+
+  /**
+   * Forget the drawn pipe routes touching a component that was moved. A
+   * route drawn for the old position would drag its interior along to the
+   * new one; the automatic route is the honest starting point again.
+   */
+  public rerouteConnectionsOf(componentId: string): void {
+    for (const conn of this.plantState.connections) {
+      if (conn.fromComponentId === componentId || conn.toComponentId === componentId) {
+        delete conn.route;
+      }
+    }
+  }
+
+  public isRouting(): boolean {
+    return this.grid.routing !== null;
+  }
+
+  /** Every port's on-screen position in the current view (test and assistant hook). */
+  public listPortScreenPositions(): Array<{ componentId: string; portId: string; x: number; y: number }> {
+    const out: Array<{ componentId: string; portId: string; x: number; y: number }> = [];
+    for (const component of this.plantState.components.values()) {
+      if (!component.ports || (component as any).isHydraulicOnly) continue;
+      for (const port of component.ports) {
+        let pos: { x: number; y: number } | null;
+        if (this.viewMode === 'grid') {
+          pos = this.grid.portScreenPosition(component, port.id);
+        } else if (this.viewMode === 'perspective') {
+          pos = this.getPortScreenPosition(component, port);
+        } else {
+          pos = worldToScreen(this.getPortWorldPosition(component, port), this.view);
+        }
+        if (pos) out.push({ componentId: component.id, portId: port.id, x: pos.x, y: pos.y });
+      }
+    }
+    return out;
+  }
+
+  public cancelRouting(): void {
+    if (this.grid.routing) {
+      this.grid.cancelRouting();
+      this.highlightedPort = null;
+    }
+  }
+
+  /**
+   * Pipe laying in grid view. Returns true when the press was consumed.
+   *
+   * A press on a port starts a pipe; sweeping from there lays it cell by
+   * cell (releasing on another port finishes it). A press on open ground
+   * while a pipe is waiting fixes the rubber band as laid pipe and sweeps
+   * on from there; a press on a port finishes it. Presses that are not
+   * about pipes fall through to the normal select/pan handling.
+   */
+  private handleGridPointerDown(e: PointerEvent, x: number, y: number): boolean {
+    if (e.button === 2) {
+      if (this.grid.routing) {
+        this.cancelRouting();
+        return true;
+      }
+      return false;
+    }
+    if (e.button !== 0 || !this.showPorts) return false;
+
+    if (this.grid.routing) {
+      const hit = this.grid.portAt({ x, y }, this.plantState, this.grid.routing.from.component.id);
+      if (hit) {
+        this.completeRoute(hit);
+      } else {
+        this.grid.updateRoutingCursor({ x, y }, this.plantState);
+        this.grid.fixWaypoint();
+        this.grid.routing.dragging = true;
+        this.grid.routing.pressScreen = { x, y };
+      }
+      return true;
+    }
+
+    const hit = this.grid.portAt({ x, y }, this.plantState);
+    if (!hit) return false;
+    this.grid.startRouting(hit);
+    this.grid.routing!.dragging = true;
+    this.grid.routing!.pressScreen = { x, y };
+    this.highlightedPort = { componentId: hit.component.id, portId: hit.port.id };
+    return true;
+  }
+
+  private completeRoute(target: PortHit): void {
+    const from = this.grid.routing!.from;
+    const { route, length } = this.grid.finishRouting(target);
+    this.highlightedPort = null;
+    this.onRouteComplete?.(from, target, route, length);
+  }
+
+  /** One grid-view frame: GridView draws the ground and plant, then the shared overlays go on top. */
+  private renderGridFrame(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    ctx.clearRect(0, 0, width, height);
+    this.grid.render(ctx, {
+      width,
+      height,
+      plantState: this.plantState,
+      simState: this.simState,
+      selectedComponentId: this.selectedComponentId,
+      hoveredComponentId: this.hoveredComponentId,
+      showPorts: this.showPorts,
+      highlightedPort: this.highlightedPort,
+      constructionMode: this.constructionMode,
+      placementPreview: this.placementPreview,
+      connectionFluid: (conn, from) => this.getConnectionFluid(conn, from),
+    });
+
+    const components = Array.from(this.plantState.components.values())
+      .filter(c => !(c as any).isHydraulicOnly);
+    this.renderElevationArrows(ctx, components);
+
+    if (this.simState) {
+      const getPortScreenPos = (comp: PlantComponent, port: { position: Point }) =>
+        this.grid.portScreenPosition(comp, (port as Port).id);
+      const getConnScreenPos = (_from: PlantComponent, _to: PlantComponent, conn: Connection) =>
+        this.grid.connectionScreenEndpoints(conn, this.plantState);
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos);
+
+      const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
+      renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
+      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
+    }
+
+    renderColorLegend(ctx, width, height);
   }
 }

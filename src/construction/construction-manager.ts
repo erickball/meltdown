@@ -1838,7 +1838,8 @@ export class ConstructionManager {
     length: number,
     fromElevation: number,
     toElevation: number,
-    pressureRating?: number  // bar - from the connection dialog's line spec; overrides the endpoint-derived default
+    pressureRating?: number,  // bar - from the connection dialog's line spec; overrides the endpoint-derived default
+    route?: Point[]           // plan polyline drawn in grid view (rendering only)
   ): boolean {
     // Create an intermediate pipe component
     const pipeId = this.generateComponentId('pipe');
@@ -1954,7 +1955,9 @@ export class ConstructionManager {
       // 3D endpoint data for isometric rendering
       elevation: startElevation,
       endPosition: { x: endX, y: endY },
-      endElevation: endElevation
+      endElevation: endElevation,
+      // Grid view draws the pipe along the route the user laid
+      ...(route && route.length >= 2 ? { route } : {})
     };
 
     // A pipe between two components that share a container runs inside that
@@ -2043,7 +2046,8 @@ export class ConstructionManager {
     flowArea?: number,
     length?: number,
     fromPhaseTolerance?: number,
-    toPhaseTolerance?: number
+    toPhaseTolerance?: number,
+    route?: Point[]   // plan polyline drawn in grid view (rendering only)
   ): boolean {
     // Find components by searching for which component owns each port
     // This is more robust than parsing port IDs, which can have varying formats
@@ -2229,7 +2233,8 @@ export class ConstructionManager {
       fromPhaseTolerance: effectiveFromPhaseTolerance,
       toPhaseTolerance: toPhaseTolerance,
       flowArea: flowArea,
-      length: effectiveLength
+      length: effectiveLength,
+      ...(route && route.length >= 2 ? { route } : {})
     };
 
     this.plantState.connections.push(connection);

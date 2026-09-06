@@ -196,8 +196,18 @@
         <hr />
         <h3>View</h3>
         <div style="font-size: 11px; color: #888; margin: 4px 0;">Scroll to zoom</div>
-        <button id="toggle-isometric" class="view-btn active">🎛️ 2.5D View</button>
-        <div class="slider-control" style="margin: 8px 0;"
+        <div class="view-mode-controls">
+          <button id="view-mode-2d" class="view-mode-btn"
+                  title="Flat plan view: components drawn to scale, connections as curves.">2D</button>
+          <button id="view-mode-perspective" class="view-mode-btn active"
+                  title="2.5D perspective view of the site, with camera angle and elevation.">2.5D</button>
+          <button id="view-mode-grid" class="view-mode-btn"
+                  title="Tile grid, like a factory-building game: components snap to 1 m tiles and sit on foundation pads, connection points face neighbouring tiles, and pipes run along the grid. In Connect mode, press on a connection point and drag (or click, then click) to lay a pipe; Esc or right-click abandons it.">⊞ Grid</button>
+        </div>
+        <div id="grid-view-hint" style="display: none; font-size: 11px; color: #888; margin: 4px 0; max-width: 250px;">
+          Components snap to tiles. Connect: drag from a connection point to lay pipe along the grid; release (or click) on another point to finish. Esc cancels.
+        </div>
+        <div id="view-angle-control" class="slider-control" style="margin: 8px 0;"
              title="Camera angle above horizontal: low = looking across the site, high = looking down from above. Ctrl+scroll on the canvas also adjusts this. Does not change magnification - use Zoom for that.">
           <label for="view-elevation" style="font-size: 11px;">View Angle (ctrl+scroll wheel): <span id="view-elevation-value">30</span>°</label>
           <input type="range" id="view-elevation" min="10" max="50" value="30" style="width: 100%;" />
