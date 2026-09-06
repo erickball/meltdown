@@ -513,6 +513,11 @@ export interface CrossVesselComponent extends ComponentBase {
   // Inner hot leg pipe
   innerDiameter: number;      // meters - inner diameter of the hot leg pipe
   innerWallThickness: number; // meters - wall thickness of the inner pipe
+  // Optional explicit hot-pipe length. By default the factory derives it as
+  // `length` plus the radius of each vessel the inner pipe joins - the hot
+  // pipe runs centerline to centerline (core outlet plenum to SG bundle
+  // inlet) while the annulus spans only the wall-to-wall gap.
+  innerLength?: number;       // meters
   pressureRating: number;     // bar - design pressure (should match parent vessel)
   // Connection info
   targetComponentId?: string; // ID of component this connects to (e.g., steam generator)

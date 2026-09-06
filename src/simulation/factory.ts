@@ -1283,16 +1283,52 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       const annulusNode = createCrossVesselAnnulusNode(component);
       state.flowNodes.set(annulusNode.id, annulusNode);
 
-      // Create thermal node for the inner pipe wall
+      // The two sections of a coaxial duct are NOT the same length. `length`
+      // is the run between the two vessel walls, and that is all the annulus
+      // spans: the cold return leaves the annulus at the RPV wall into the
+      // downcomer and enters it at the SG wall. The hot inner pipe keeps
+      // going on both sides - from the core outlet plenum at the reactor
+      // vessel's centerline, through the RPV wall, across the gap, through
+      // the SG wall, to the bundle inlet at the SG's centerline. So its
+      // length is the gap plus the radius of each vessel it joins, derived
+      // here from the connected components (a core barrel resolves to the
+      // vessel that contains it, as the lower-head logic above already does).
+      // This is real inventory: on the Xe-100 the 7 m gap becomes a 10.7 m
+      // hot duct, +53% helium in the plant's smallest transit node - the
+      // node whose ~0.2 s residence time sets the material Courant ceiling.
+      const innerLength = crossVesselInnerLength(id, cv, plantState);
+      const innerNode = state.flowNodes.get(`${id}-inner`);
+      if (!innerNode) {
+        throw new Error(`[Factory] CrossVessel ${id}: inner flow node '${id}-inner' missing when sizing the hot duct`);
+      }
+      if (innerLength !== cv.length) {
+        // Scale the node built from `length` at constant intensive state, the
+        // same way the pipe-inventory lumping pass does.
+        const factor = innerLength / cv.length;
+        innerNode.volume *= factor;
+        innerNode.fluid.mass *= factor;
+        innerNode.fluid.internalEnergy *= factor;
+        if (innerNode.fluid.ncg) {
+          for (const species of Object.keys(innerNode.fluid.ncg)) {
+            innerNode.fluid.ncg[species as keyof typeof innerNode.fluid.ncg]! *= factor;
+          }
+        }
+      }
+
+      // Create thermal node for the inner pipe wall. The liner runs the full
+      // hot-duct length; only the gap portion of its outer face sees the
+      // annulus (the in-vessel portions face the vessels' own gas and are
+      // left adiabatic here - the liner is insulated in the real machine,
+      // and this is the smaller of its two faces' couplings).
       const innerRadius = cv.innerDiameter / 2;
       const outerRadius = innerRadius + cv.innerWallThickness;
-      const innerSurfaceArea = 2 * Math.PI * innerRadius * cv.length;  // Inner surface
-      const outerSurfaceArea = 2 * Math.PI * outerRadius * cv.length;  // Outer surface
+      const innerSurfaceArea = 2 * Math.PI * innerRadius * innerLength;  // Inner surface, full duct
+      const outerSurfaceArea = 2 * Math.PI * outerRadius * cv.length;    // Outer surface facing the annulus
 
       // Pipe wall thermal properties (steel)
       const steelDensity = 7800;  // kg/m³
       const steelCp = 500;  // J/kg-K
-      const wallVolume = Math.PI * (outerRadius * outerRadius - innerRadius * innerRadius) * cv.length;
+      const wallVolume = Math.PI * (outerRadius * outerRadius - innerRadius * innerRadius) * innerLength;
       const wallMass = wallVolume * steelDensity;
 
       // Initial wall temperature - average of hot and cold side
@@ -1330,7 +1366,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         surfaceArea: outerSurfaceArea,
       });
 
-      console.log(`[Factory] CrossVessel ${id}: created inner pipe and annulus flow nodes with thermal coupling`);
+      console.log(`[Factory] CrossVessel ${id}: created inner pipe and annulus flow nodes with thermal coupling ` +
+        `(hot duct ${innerLength.toFixed(2)} m centerline-to-centerline, annulus ${cv.length} m wall-to-wall)`);
     }
 
     // Turbine-driven pumps: the base flow node (component id) is the steam
@@ -3152,6 +3189,58 @@ function hxTubeBore(hx: any, tubeOD: number): number {
     );
   }
   return bore;
+}
+
+/**
+ * Length of a coaxial duct's hot inner pipe: the wall-to-wall `length` plus
+ * the radius of each vessel it joins, because the hot pipe runs from
+ * centerline to centerline (core outlet plenum to SG bundle inlet) while
+ * the annulus spans only the gap. An explicit `innerLength` on the
+ * component overrides the derivation. A side whose vessel radius cannot be
+ * determined contributes nothing - loudly, since that silently reverts that
+ * side to the wall-to-wall length.
+ */
+function crossVesselInnerLength(cvId: string, cv: any, plantState: PlantState): number {
+  if (typeof cv.innerLength === 'number' && cv.innerLength > 0) return cv.innerLength;
+
+  // Components on each end of the inner pipe, by the same port-id convention
+  // the connection mapper uses (`inner` in the port id).
+  let inHalf = 0, outHalf = 0;
+  let inSeen = false, outSeen = false;
+  for (const conn of plantState.connections) {
+    if (conn.toComponentId === cvId && conn.toPortId.includes('inner')) {
+      inSeen = true;
+      inHalf = Math.max(inHalf, enclosingVesselHalfWidth(conn.fromComponentId, plantState, cvId, 'inlet'));
+    }
+    if (conn.fromComponentId === cvId && conn.fromPortId.includes('inner')) {
+      outSeen = true;
+      outHalf = Math.max(outHalf, enclosingVesselHalfWidth(conn.toComponentId, plantState, cvId, 'outlet'));
+    }
+  }
+  if (!inSeen || !outSeen) {
+    console.warn(`[Factory] CrossVessel ${cvId}: inner pipe has ${inSeen ? '' : 'NO inlet '}${!inSeen && !outSeen ? 'and ' : ''}${outSeen ? '' : 'NO outlet '}connection - ` +
+      `hot-duct length falls back to the wall-to-wall ${cv.length} m on that side`);
+  }
+  return cv.length + inHalf + outHalf;
+}
+
+/**
+ * Half the lateral extent of the vessel a duct end lands in. A core barrel
+ * sits inside its reactor vessel, so the duct crosses the VESSEL's radius,
+ * not the barrel's. Returns 0 with a loud warning when no diameter/width is
+ * known for the component.
+ */
+function enclosingVesselHalfWidth(compId: string, plantState: PlantState, cvId: string, side: string): number {
+  let comp = plantState.components.get(compId) as any;
+  if (!comp) return 0;
+  if (comp.type === 'coreBarrel' && comp.containedBy) {
+    comp = (plantState.components.get(comp.containedBy) as any) ?? comp;
+  }
+  const extent = comp.innerDiameter ?? comp.diameter ?? comp.width;
+  if (typeof extent === 'number' && extent > 0) return extent / 2;
+  console.warn(`[Factory] CrossVessel ${cvId}: cannot derive the ${side}-side vessel radius from '${comp.id}' ` +
+    `(type ${comp.type}, no innerDiameter/diameter/width) - hot duct not extended on that side`);
+  return 0;
 }
 
 /**

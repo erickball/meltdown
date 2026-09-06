@@ -31,7 +31,9 @@ import type { SimulationState } from '../src/simulation/types';
 import { getGraphiteOxidationDiagnostics } from '../src/simulation/operators/graphite-oxidation';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PRESET = path.join(HERE, '..', 'src', 'presets', 'xe100.json');
+// PRESET=<path> runs the scenarios against another preset file (A/B of a
+// geometry or preset change under the same fault sequence).
+const PRESET = process.env.PRESET ?? path.join(HERE, '..', 'src', 'presets', 'xe100.json');
 
 const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'sgtr';
 const seconds = parseFloat(process.argv[3] ?? '1800');
