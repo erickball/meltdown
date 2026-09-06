@@ -32,6 +32,8 @@ import {
   otsgRates,
   transitStandingQ,
   marchCounterflowGas,
+  reconcileSlugMass,
+  saturationAtP,
   OtsgEval,
   OtsgWallPin,
 } from '../otsg';
@@ -305,16 +307,20 @@ export function evaluateOtsgSections(
   if (lin) {
     const dm = node.fluid.mass - lin.m;
     const dU = water.energy - lin.U;
-    const dm1 = cfg.m1 - lin.m1;
     const BAND = 0.004;
-    // The boundary reference moves the slug like a mass change does, so it
-    // gets the same band, measured on the profile's own energy span.
+    // The slug is a (ledger, reference) pair that the partition re-bases
+    // whenever it solves exactly, and the anchor object is SHARED by every
+    // clone of a state - so neither side's raw ledger is a stable thing to
+    // compare. Compare what is invariant under re-basing: this state's slug
+    // reconciled to the ANCHOR's pressure, against the anchor's own slug.
+    // (Uncapped reconciliation: this decides a band, not the physics.)
     const evA = lin.ev as OtsgEval;
-    const dRef = (cfg.uFRef ?? NaN) - (lin.uFRef ?? NaN);
-    const refClose = (cfg.uFRef === undefined && lin.uFRef === undefined) ||
-      (Number.isFinite(dRef) && Math.abs(dRef) < BAND * Math.max(1e4, evA.sat.u_f - Math.min(flows.uFeed, evA.sat.u_f - 25e3)));
-    if (refClose && Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
-        Math.abs(dm1) < BAND * Math.max(lin.m1, 0.02 * lin.m)) {
+    const satA = saturationAtP(lin.P);
+    const m1Here = reconcileSlugMass(Math.min(cfg.m1, node.fluid.mass), cfg.uFRef ?? NaN,
+      satA.u_f, Math.min(flows.uFeed, satA.u_f - 25e3), node.fluid.mass);
+    const dm1 = m1Here - evA.sections[0].mass;
+    if (Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
+        Math.abs(dm1) < BAND * Math.max(evA.sections[0].mass, 0.02 * lin.m)) {
       const P = lin.P + lin.dPdm * dm + lin.dPdU * dU + lin.dPdm1 * dm1;
       const ev: OtsgEval = { ...evA, P };
       cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: false };
@@ -603,19 +609,18 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       // and writing those over the integrated ledger would erase the
       // step's transit. At the same pressure the reconciliation of the
       // written pair is the identity, so the cached evaluation stays valid
-      // for it: re-key the cache and the tangent anchor instead of paying
-      // for a second solve on the same state.
+      // for it: re-key the cache instead of paying for a second solve on the
+      // same state.
       if (exact && ev.regime !== 'supercritical') {
         const m1New = ev.sections[0].mass;
         node.otsg.m1 = m1New;
         node.otsg.uFRef = ev.sat.u_f;
+        // Replace, never mutate: the cache and tangent objects are shared by
+        // every clone of this state (otsg is spread-copied). The tangent
+        // anchor is left alone - its band test reconciles both sides to the
+        // anchor's pressure, so re-basing this state does not move it.
         if (node.otsg.partitionCache) {
-          node.otsg.partitionCache.forM1 = m1New;
-          node.otsg.partitionCache.forUFRef = ev.sat.u_f;
-        }
-        if (node.otsg.partitionLin && node.otsg.partitionLin.ev === ev) {
-          node.otsg.partitionLin.m1 = m1New;
-          node.otsg.partitionLin.uFRef = ev.sat.u_f;
+          node.otsg.partitionCache = { ...node.otsg.partitionCache, forM1: m1New, forUFRef: ev.sat.u_f };
         }
       }
       // Refresh the draw-enthalpy cache HERE, where every state passes -
