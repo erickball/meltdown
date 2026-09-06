@@ -151,8 +151,70 @@ export class PressureSolver {
   getLastPredictedSwing(): number {
     return this.lastPredictedSwing;
   }
-  // Per-node predicted δP (Pa) of the most recent predictor solve. Diagnostic.
+  // Per-node predicted δP (Pa) of the most recent predictor solve (probes).
   readonly lastPredictedDP = new Map<string, number>();
+  // The most recent predictor solve's system, kept for measureClosureError:
+  // node order, compliances c_i (kg/s per Pa), the assembled matrix M (a
+  // copy - the solve consumes its own), and the solved δP.
+  private lastClosure: { ids: string[]; c: Float64Array; M: Float64Array; dP: Float64Array } | null = null;
+
+  /**
+   * Closure-consistency error of the most recent predictor solve, measured
+   * against the realized end-of-step pressures: the inventory this step's
+   * flows were wrong by because the solve balanced them against pressures
+   * the EOS did not produce.
+   *
+   * With r_i = ΔP_realized,i − δP_predicted,i, the solve's mass closure
+   * c·δP = Σ±ṁ¹ is violated by c∘r. Not all of that is a flow error: a
+   * pressure error the network cannot act on - uniform across a loop, or
+   * on a node whose open connections carry almost no conductance (a
+   * feedwater tube behind a long thin pipe, an OTSG partition whose
+   * pressure its own closure owns) - would have moved nothing. The flows
+   * that WOULD have changed are the network's linear response, one solve
+   * of the same system: M·δq = c∘r, δṁ_j = D_j·(δq_from − δq_to). The
+   * resulting net inventory error per node is (B·δṁ)_i·dt = c_i·(r_i −
+   * δq_i)·dt, and relative to the node's inventory it has the form of the
+   * relative mass-rate term in the RK45 error norm. RMS over the solved
+   * nodes, like that norm; the worst node is reported for diagnostics.
+   *
+   * Cost: one dense elimination of the stored matrix per accepted attempt.
+   */
+  measureClosureError(
+    fromState: SimulationState,
+    toState: SimulationState,
+    dt: number
+  ): {
+    rms: number; maxRel: number; maxNode: string;
+    detail?: { predicted: number; mismatch: number; response: number; c: number; mass: number };
+  } | null {
+    const lc = this.lastClosure;
+    if (!lc) return null;
+    const n = lc.ids.length;
+    const r = new Float64Array(n);
+    const rhs = new Float64Array(n);
+    const mass = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const from = fromState.flowNodes.get(lc.ids[i]);
+      const to = toState.flowNodes.get(lc.ids[i]);
+      if (!from || !to) continue;
+      r[i] = (to.fluid.pressure - from.fluid.pressure) - lc.dP[i];
+      rhs[i] = lc.c[i] * r[i];
+      mass[i] = from.fluid.mass + (from.fluid.ncg ? ncgTotalMass(from.fluid.ncg) : 0);
+    }
+    const dq = solveLinearSystem(lc.M.slice(), rhs, n);
+    let sumSq = 0, count = 0, maxRel = 0, maxNode = '', maxI = -1;
+    for (let i = 0; i < n; i++) {
+      if (!(mass[i] > 0)) continue;
+      const rel = Math.abs(lc.c[i] * (r[i] - dq[i]) * dt) / mass[i];
+      sumSq += rel * rel;
+      count++;
+      if (rel > maxRel) { maxRel = rel; maxNode = lc.ids[i]; maxI = i; }
+    }
+    const detail = maxI >= 0
+      ? { predicted: lc.dP[maxI], mismatch: r[maxI], response: dq[maxI], c: lc.c[maxI], mass: mass[maxI] }
+      : undefined;
+    return { rms: count > 0 ? Math.sqrt(sumSq / count) : 0, maxRel, maxNode, detail };
+  }
 
   /**
    * Correct connection flow rates toward mass balance, weighted by node stiffness.
@@ -660,6 +722,11 @@ export class PressureSolver {
       choke: ChokeLimit | null;
       capped: boolean;
       cappedFlow: number;
+      // Check valve seated this step: flow exactly zero, no conductance.
+      // Decided on END-of-step quantities (the momentum predictor's sign,
+      // then the solved flow), never on the start-of-step driving pressure -
+      // see the seating pass after the solve.
+      seated: boolean;
     }
 
     // Energy-coupled compliance: beta_i = dP/dU at constant (m, V) and the
@@ -734,13 +801,14 @@ export class PressureSolver {
 
       const h = computeConnectionHydraulics(state, conn, fromNode, toNode);
 
-      // Closed valve, closed governor, or check valve without cracking
-      // pressure: no conductance, and the flow decays to zero (implicit form
-      // of the explicit operator's dṁ/dt = -ṁ/τ).
-      const closed =
-        h.valveClosed ||
-        h.governorClosed ||
-        (h.checkValve !== undefined && h.dP_driving < h.crackingPressure);
+      // Closed valve or closed governor: no conductance, and the flow decays
+      // to zero (implicit form of the explicit operator's dṁ/dt = -ṁ/τ).
+      // Check valves are NOT in this list: they are solved below as an
+      // asymmetric resistance (reverse branch blocked, cracking pressure as
+      // a forward preload), so the disc position is an outcome of the
+      // end-of-step balance instead of a start-of-step switch - the switch
+      // limit-cycled against stiff liquid nodes (see connection-hydraulics).
+      const closed = h.valveClosed || h.governorClosed;
       if (closed) {
         const w1 = conn.massFlowRate;
         // Corrector mode: decay from the step's TRUE initial flow, exactly
@@ -793,8 +861,50 @@ export class PressureSolver {
       // gravity, pump shutoff head); C is branch-dependent: forward flow sees
       // pipe friction + pump-curve quadratic, reverse flow sees pipe friction
       // + the reverse-block resistance of running pumps.
-      const dP_nf = h.dP_pressure + h.dP_gravity + h.pumpShutoff;
+      // A check valve's cracking pressure is the spring preload the forward
+      // flow must overcome: an offset against the driving pressure, like a
+      // pump's shutoff head with the opposite sign. Below it (and for any
+      // reverse driving pressure) b < 0 selects the reverse branch, whose
+      // resistance carries the check valve's block, so the predicted flow
+      // is ~zero without ever switching the connection out of the solve.
+      const dP_nf = h.dP_pressure + h.dP_gravity + h.pumpShutoff - h.crackingPressure;
       const b = m0 + G0 * dP_nf;
+      // Check valve whose momentum cannot stay forward through this step:
+      // the disc seats. Flow exactly zero, no conductance - a seated valve
+      // leaks nothing, and a large "reverse resistance" is not the same
+      // thing (10000x the pipe's K still passed ~6 kg/s backwards under the
+      // PWR feedwater line's 42 bar reverse head, which the post-step
+      // reverse-flow rule then zeroed, leaving the solve's predicted node
+      // pressure with no mass behind it - 12,000 sanity rejections per
+      // minute). This decision is on the momentum predictor's sign, i.e.
+      // the END-of-step tendency; the old rule closed on the start-of-step
+      // driving pressure and limit-cycled against stiff liquid nodes (see
+      // the seating pass below for the other half).
+      if (h.checkValve !== undefined && b < 0) {
+        if (corrector && (iFrom >= 0 || iTo >= 0)) {
+          // Corrector mode banks the predictor's flow like every other
+          // participating connection (its transport is already in the probe).
+          banked.push({
+            flow: conn.massFlowRate,
+            hDonor: useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0,
+            donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo,
+          });
+        }
+        conn.massFlowRate = 0;
+        conn.isChoked = false;
+        conn.machNumber = 0;
+        conn.debug = {
+          flowPhase: h.flowPhase,
+          rho_flow: h.rho_flow,
+          dP_driving: h.dP_driving,
+          dP_friction: h.dP_friction,
+          dP_net: h.dP_driving + h.dP_friction,
+          dMassFlowRate: -m0 / dt,
+          isChoked: false,
+          machNumber: 0,
+        };
+        continue;
+      }
       const C = b >= 0
         ? h.frictionQuadForward + h.pumpQuad
         : h.frictionQuadReverse;
@@ -837,7 +947,7 @@ export class PressureSolver {
       entries.push({
         conn, h, D, m0, mStar, hDonor,
         donorIsFrom: h.upstreamNode === fromNode,
-        iFrom, iTo, choke, capped: false, cappedFlow: 0,
+        iFrom, iTo, choke, capped: false, cappedFlow: 0, seated: false,
       });
       if (corrector && (iFrom >= 0 || iTo >= 0)) {
         banked.push({
@@ -900,6 +1010,7 @@ export class PressureSolver {
     // singular assembly still fails loudly in solveLinearSystem.
     const phi = (i: number, hDonor: number): number =>
       i < 0 || !useEnergy ? 1 : 1 + (hDonor - hNode[i]) * beta[i] * c[i] * dt;
+    let lastMatrix: Float64Array | null = null;
     const solveNetwork = (): Float64Array => {
       const M = new Float64Array(n * n);
       const b = new Float64Array(n);
@@ -924,7 +1035,7 @@ export class PressureSolver {
         if (f.iTo >= 0) b[f.iTo] -= wTo * f.flow;
       }
       for (const e of entries) {
-        const flowFixed = e.capped;
+        const flowFixed = e.capped || e.seated;
         const flow = flowFixed ? e.cappedFlow : e.mStar;
         const wFrom = e.donorIsFrom ? phi(e.iFrom, e.hDonor) : 1;
         const wTo = e.donorIsFrom ? 1 : phi(e.iTo, e.hDonor);
@@ -940,12 +1051,13 @@ export class PressureSolver {
           if (e.iFrom >= 0) M[e.iTo * n + e.iFrom] -= wTo * e.D;
         }
       }
+      lastMatrix = M.slice(); // solveLinearSystem consumes M; the closure check needs it
       return solveLinearSystem(M, b, n);
     };
 
     let dP = solveNetwork();
     const flowOf = (e: ImplicitEntry): number => {
-      if (e.capped) return e.cappedFlow;
+      if (e.capped || e.seated) return e.cappedFlow;
       const pFrom = e.iFrom >= 0 ? dP[e.iFrom] : 0;
       const pTo = e.iTo >= 0 ? dP[e.iTo] : 0;
       return e.mStar + e.D * (pFrom - pTo);
@@ -964,6 +1076,31 @@ export class PressureSolver {
         e.capped = true;
         e.cappedFlow = (m1 >= 0 ? 1 : -1) * capMag;
         anyCapped = true;
+      }
+    }
+
+    // Check-valve seating pass: an open check valve whose SOLVED end-of-step
+    // flow came out reversed seats - flow exactly zero, conductance dropped -
+    // and the network is re-solved once so its neighbours see the seated
+    // valve (the same one-outer-iteration treatment as choked flow above).
+    // Together with the predictor-sign test this makes the disc position an
+    // outcome of the end-of-step balance. The old start-of-step test
+    // (driving pressure below cracking -> hold shut, decay the flow with
+    // τ=0.1 s) limit-cycled against stiff liquid nodes: the open step
+    // overfilled the node past the upstream pressure, the "closed" step
+    // still passed 56 kg/s while the node drained, the valve reopened
+    // against a 12 bar head, repeat - ±3-6 bar and ±15 kg/s every step on
+    // the Xe-100 feedwater train at every dt, predicted exactly by the
+    // solve and invisible to every error control. A seated valve does not
+    // reopen within the step; it reopens next step when the predictor's
+    // momentum says so.
+    let anySeated = false;
+    for (const e of entries) {
+      if (!e.h.checkValve || e.capped || e.seated) continue;
+      if (flowOf(e) < 0) {
+        e.seated = true;
+        e.cappedFlow = 0;
+        anySeated = true;
       }
     }
 
@@ -1037,7 +1174,7 @@ export class PressureSolver {
       }
     }
 
-    if (anyCapped || anyStiffened) {
+    if (anyCapped || anyStiffened || anySeated) {
       dP = solveNetwork();
     }
 
@@ -1099,6 +1236,9 @@ export class PressureSolver {
       // node, so a probe can compare it with what the EOS actually produced.
       this.lastPredictedDP.clear();
       for (let i = 0; i < n; i++) this.lastPredictedDP.set(nodeList[i].id, dP[i]);
+      this.lastClosure = lastMatrix
+        ? { ids: nodeList.map(nd => nd.id), c: Float64Array.from(c), M: lastMatrix, dP: Float64Array.from(dP) }
+        : null;
     }
 
     this.lastStatus = {

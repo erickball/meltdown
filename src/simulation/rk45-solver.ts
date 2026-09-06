@@ -1267,6 +1267,24 @@ export interface RK45Config {
   // verified by scripts/bitcheck.ts - this exists as a config knob purely
   // for A/B verification (INPLACE_CONSTRAINTS=0 in the script harnesses).
   inPlaceConstraints?: boolean;
+
+  // Let the closure-consistency error of the implicit pressure-flow solve
+  // take part in step control (see closureErrorNorm). The error is always
+  // computed and reported (lastClosureError, rejection stats, probes);
+  // this decides whether it can shrink dt. DEFAULT OFF, measured 2026-09-06:
+  // the term is exact and silent on the PWR/BWR (100x/20x below relTol at
+  // steady state) and caught a wrong gas bulk modulus at 60x relTol, but
+  // on the Xe-100 it is fed by a real closure gap the solve cannot close
+  // yet - the OTSG tube pressure drops ~1.5 bar in the step after each
+  // feedwater-controller scan (the partition's response to a pump-speed
+  // step, which the compliance model does not predict), and the network
+  // response of that misprediction on the sliver steam nodes hanging off
+  // the tube (val-msv-1, 5 kg; val-leak-1, 2 kg) is ~1% of their inventory
+  // per step, 15-40x relTol. Honest, but it costs 6.4x -> 1.9x realtime for
+  // a defect that is the OTSG's, not the loop's. Flip on (or via
+  // CLOSURE_ERROR=1 in the script harnesses) once the OTSG's pressure
+  // response to feed changes is in the solve's closure.
+  closureErrorControl?: boolean;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -1444,6 +1462,61 @@ export class RK45Solver {
     }
     return Math.max(ceiling, this.config.minDt);
   }
+
+  // Closure-consistency error of the most recent step attempt (same units
+  // as the RK45 error norm), the node that dominated it and its relative
+  // mispredicted inventory. Diagnostics for probes; see closureErrorNorm.
+  public lastClosureError = 0;
+  public lastClosureNode = '';
+  public lastClosureNodeRel = 0;
+
+  /**
+   * Local error estimate for the once-per-step implicit pressure-flow solve.
+   *
+   * The solve linearizes each node's pressure response (compliance c_i,
+   * energy slope β_i) at the step-start state, predicts the end-of-step
+   * pressures, and freezes the flows it balanced against them. Nothing in
+   * the RK45 error estimate sees that solve: flow momentum has no rates in
+   * implicit mode, and balanced throughput cancels in the mass terms. So a
+   * solve whose closure disagrees with the EOS - a wrong bulk modulus, a
+   * dome edge crossed mid-step, an excursion outside the linearization's
+   * trust region - was invisible to the controller and discovered only if
+   * the sanity guard's 20% pressure change tripped, or not at all: the
+   * helium-loop flip-flop this was built against (a fixed steam γ in the
+   * gas compliance) swung ±3 bar on 60 bar and passed the guard every
+   * step, with nothing able to shrink dt out of it.
+   *
+   * The measure (PressureSolver.measureClosureError): the inventory each
+   * node's flows were wrong by, from the network's own linear response to
+   * the pressure misprediction - the part of the error that would actually
+   * have moved mass, not the raw c·ΔP mismatch (which over-charges soft
+   * nodes whose pressure the mass compliance does not own: OTSG partitions,
+   * sliver-inventory valve nodes - measured at 100x relTol on the Xe-100 at
+   * steady state, dt driven to the floor, with that naive measure).
+   * Relative to node inventory it has the form of the relative mass-rate
+   * term in computeRatesNorm, so it joins the error controller at the same
+   * relTol with no tolerance of its own. A consistent closure leaves an
+   * O(dt²) remainder (EOS curvature over the step) that shrinks with dt
+   * like any local error, so dt adapts to it exactly as it does to the
+   * explicit physics - declared where the solve can predict
+   * (materialCourantDt), measured where it cannot (here).
+   */
+  private closureErrorNorm(fromState: SimulationState, toState: SimulationState, dt: number): number {
+    const ps = this.pressureSolver;
+    const m = ps && this.implicitMomentumActive() ? ps.measureClosureError(fromState, toState, dt) : null;
+    if (!m) {
+      this.lastClosureError = 0;
+      this.lastClosureNode = '';
+      this.lastClosureNodeRel = 0;
+      return 0;
+    }
+    this.lastClosureNode = m.maxNode;
+    this.lastClosureNodeRel = m.maxRel;
+    this.lastClosureDetail = m.detail;
+    this.lastClosureError = m.rms;
+    return m.rms;
+  }
+  public lastClosureDetail?: { predicted: number; mismatch: number; response: number; c: number; mass: number };
 
   private countRejection(cause: string): void {
     this.rejectionStats.set(cause, (this.rejectionStats.get(cause) || 0) + 1);
@@ -2270,9 +2343,15 @@ export class RK45Solver {
       const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive(),
         this.config.quietPressureToleranceScale ?? 1);
 
-      // Combine RK45 error with sanity check
+      // Closure-consistency error of the implicit pressure-flow solve: what
+      // the solve predicted for this step's pressures against what the EOS
+      // produced, as mispredicted inventory (see closureErrorNorm).
+      const closureNorm = this.closureErrorNorm(currentState, constrainedState, stepDt);
+      const closureError = this.config.closureErrorControl === true ? closureNorm : 0;
+
+      // Combine RK45 error with sanity check and closure error
       // Sanity score > 1 means something suspicious happened
-      const effectiveError = Math.max(error, sanityScore * this.config.relTol);
+      const effectiveError = Math.max(error, sanityScore * this.config.relTol, closureError);
 
       // Accept or reject based on combined error. A non-finite error is never
       // acceptable - not even at minimum dt - because it means some rate went
@@ -2332,8 +2411,11 @@ export class RK45Solver {
         // Reject step - shrink timestep and retry
         rejectsThisFrame++;
         this.rejectedSteps++;
+        const closureBound = sanityScore <= 1 && isFinite(effectiveError) && closureError > error;
         this.onStepRejected?.(currentState, constrainedState, stepDt,
-          sanityScore > 1 ? lastSanityFailureReason : (isFinite(effectiveError) ? `rk45-error ${effectiveError.toExponential(2)}` : 'nan-error'));
+          sanityScore > 1 ? lastSanityFailureReason
+            : closureBound ? `${this.lastClosureNode}: closure error ${closureError.toExponential(2)} (node rel ${this.lastClosureNodeRel.toExponential(2)})`
+            : (isFinite(effectiveError) ? `rk45-error ${effectiveError.toExponential(2)}` : 'nan-error'));
 
         if (sanityScore > 1) {
           const reason = lastSanityFailureReason;
@@ -2360,7 +2442,7 @@ export class RK45Solver {
             }
           }
         } else {
-          this.countRejection(error >= 1e10 ? 'stage-failure' : 'rk45-error');
+          this.countRejection(error >= 1e10 ? 'stage-failure' : closureBound ? `closure:${this.lastClosureNode}` : 'rk45-error');
         }
 
         if (sanityScore > 1) {
@@ -2510,7 +2592,9 @@ export class RK45Solver {
     // singleStep always accepts - run the irreversible-outcome operators too
     constrainedState = this.applyPostAcceptConstraints(constrainedState, this.currentDt);
 
-    const effectiveError = Math.max(error, sanityScore * this.config.relTol);
+    const closureNorm = this.closureErrorNorm(state, constrainedState, this.currentDt);
+    const closureError = this.config.closureErrorControl === true ? closureNorm : 0;
+    const effectiveError = Math.max(error, sanityScore * this.config.relTol, closureError);
 
     const metrics: SolverMetrics = {
       currentDt: this.currentDt,

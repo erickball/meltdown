@@ -191,6 +191,13 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
       },
     };
   }
+  // A/B override for the closure-consistency error term of the implicit
+  // pressure-flow solve in step control: CLOSURE_ERROR=1 lets it shrink dt
+  // (shipping default is off; the diagnostics are always computed).
+  const closureEnv = process.env.CLOSURE_ERROR;
+  if (closureEnv !== undefined) {
+    config = { ...config, closureErrorControl: closureEnv === '1' };
+  }
   const solver = new RK45Solver(config);
   // OTSG must run FIRST: it writes each moving-boundary node's sectioned
   // evaluation cache (draw enthalpies), which FlowRateOperator consults in

@@ -171,10 +171,27 @@ function widen(map: Map<string, Band>, key: string, v: number) {
   if (!b) map.set(key, { min: v, max: v });
   else { if (v < b.min) b.min = v; if (v > b.max) b.max = v; }
 }
+// Closure-consistency diagnostics per window: RMS norm max, and the worst
+// node's relative mispredicted inventory (see RK45Solver.closureErrorNorm)
+let closureNormMax = 0;
+const closureNodeMax = new Map<string, number>();
+const closureDetail = new Map<string, string>();
 sim.solver.onSubstepComplete = (state, _n, dt) => {
   stepsInWindow++;
   if (dt < dtMin) dtMin = dt;
   if (dt > dtMax) dtMax = dt;
+  const s: any = sim.solver;
+  if (s.lastClosureError > closureNormMax) closureNormMax = s.lastClosureError;
+  if (s.lastClosureNode) {
+    const prev = closureNodeMax.get(s.lastClosureNode) || 0;
+    if (s.lastClosureNodeRel > prev) {
+      closureNodeMax.set(s.lastClosureNode, s.lastClosureNodeRel);
+      const d = s.lastClosureDetail;
+      if (d) closureDetail.set(s.lastClosureNode,
+        `dt=${(dt * 1e3).toFixed(0)}ms pred=${(d.predicted / 1e3).toFixed(1)}kPa mismatch=${(d.mismatch / 1e3).toFixed(1)}kPa ` +
+        `response=${(d.response / 1e3).toFixed(1)}kPa c=${d.c.toExponential(1)} m=${d.mass.toFixed(3)}kg`);
+    }
+  }
   for (const c of loopConns) widen(flowBands, c.id, c.massFlowRate);
   const live = state.flowConnections;
   for (const c of live) if (loopConns.some(l => l.id === c.id)) widen(flowBands, c.id, c.massFlowRate);
@@ -220,6 +237,13 @@ for (let i = 1; i <= ticks; i++) {
     const swings = loopIds.map(id => { const b = pBands.get(id)!; return `${id.slice(0, 8)} ${((b.max - b.min) / 1e3).toFixed(0)}`; }).join('  ');
     console.log(`${sim.state.time.toFixed(1).padStart(5)}  ${(sim.state.neutronics.power / 1e6).toFixed(1).padStart(7)}  ` +
       `${(dtMin * 1e3).toFixed(1)}-${(dtMax * 1e3).toFixed(1)}  ${String(stepsInWindow).padStart(5)} ${String(rejInWindow).padStart(3)} | ${flows} | ${swings}`);
+    const worst = [...closureNodeMax.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4)
+      .map(([id, r]) => `${id}=${r.toExponential(1)}`).join(' ');
+    console.log(`        closure: norm max ${closureNormMax.toExponential(2)} (relTol ${(sim.solver as any).config.relTol}); worst nodes ${worst}`);
+    for (const [id] of [...closureNodeMax.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2)) {
+      console.log(`          ${id}: ${closureDetail.get(id)}`);
+    }
+    closureNormMax = 0; closureNodeMax.clear(); closureDetail.clear();
     flowBands.clear(); pBands.clear();
     dtMin = Infinity; dtMax = 0; stepsInWindow = 0; rejInWindow = 0;
   }
