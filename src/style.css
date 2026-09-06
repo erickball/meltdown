@@ -881,3 +881,28 @@ body {
 .btn-secondary:hover {
   background: #556677;
 }
+
+/* View mode selector (2D / 2.5D / Grid) - a compact segmented control */
+.view-mode-controls {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.view-mode-btn {
+  flex: 1;
+  padding: 6px 4px !important;
+  text-align: center !important;
+  background: #2a2a2a !important;
+  border: 2px solid #444 !important;
+  color: #888 !important;
+  font-size: 12px !important;
+  transition: all 0.2s;
+}
+
+.view-mode-btn.active {
+  background: #3a4a3a !important;
+  border-color: #4a7 !important;
+  color: #4a7 !important;
+  font-weight: bold;
+}

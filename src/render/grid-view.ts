@@ -1,0 +1,983 @@
+/**
+ * Grid view: a top-down tile map in the style of factory-building games.
+ *
+ * The world plan is drawn straight down (screen = (world - camera) * ppm),
+ * components snap to whole tiles and stand on a foundation pad as 3/4-view
+ * sprites (the same front-view drawings the other views use, rising north
+ * from the south edge of their footprint), and every connection is a pipe
+ * laid along the grid through cell centres. PlantCanvas delegates to this
+ * class for projection, hit testing, and the frame's ground/plant layers,
+ * then draws the shared overlays (gauges, flow arrows, ...) on top.
+ */
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent } from '../types';
+import { SimulationState } from '../simulation';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints } from './components';
+import { getFluidColor, COLORS } from './colors';
+import { getComponentSize } from './component-size';
+import { readoutScale } from './readout-scale';
+import {
+  TILE_M, Footprint, PlanRect, PortAnchor, Side,
+  componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
+  portAnchors, portAnchor, connectionRoute, pipeRoute, routeLength, completeRoute, rubberBand,
+  extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
+} from './grid-geometry';
+import { GridArt } from './grid-art';
+
+export interface GridCamera {
+  /** World point (metres) at the canvas centre. */
+  x: number;
+  y: number;
+  /** Pixels per metre. */
+  ppm: number;
+}
+
+/** Everything the frame needs from the owning canvas. */
+export interface GridFrameState {
+  width: number;
+  height: number;
+  plantState: PlantState;
+  simState: SimulationState | null;
+  selectedComponentId: string | null;
+  hoveredComponentId: string | null;
+  showPorts: boolean;
+  highlightedPort: { componentId: string; portId: string } | null;
+  constructionMode: boolean;
+  placementPreview: { componentType: string; position: Point } | null;
+  connectionFluid: (conn: Connection, from: PlantComponent) => Fluid | undefined;
+}
+
+export interface PortHit {
+  component: PlantComponent;
+  port: Port;
+  anchor: PortAnchor;
+}
+
+/** A pipe being laid from a port. */
+export interface RoutingState {
+  from: PortHit;
+  /** Vertices laid so far (cell centres); the last one is the loose end. */
+  waypoints: Point[];
+  cursorCell: Point | null;
+  /** Port under the cursor that the route would finish into. */
+  target: PortHit | null;
+  /** True while the pointer is held down and sweeping cells. */
+  dragging: boolean;
+  /** Screen point of the press that started the current sweep (a release near it is a click, not a drag). */
+  pressScreen: Point | null;
+  /** The source component's footprint: a sweep never lays pipe back through it. */
+  sourceRect: PlanRect | null;
+}
+
+/** Screen layout of a standing sprite. */
+interface SpriteLayout {
+  fp: Footprint;
+  rect: PlanRect;
+  zoom: number;
+  centerX: number;
+  /** Screen y of the sprite's bottom edge (south footprint edge, lifted by elevation). */
+  baseY: number;
+  halfHpx: number;
+  halfWpx: number;
+  lift: number;
+}
+
+/** How far (px per metre of elevation) a raised component floats above its pad. */
+const LIFT_PER_M = 0.5;
+/** Small fittings are drawn no smaller than this many tiles across, so a valve is visible. */
+const MIN_SPRITE_TILES = 0.8;
+const MIN_CLICK_TARGET_PX = 24;
+
+export class GridView {
+  static readonly DEFAULT_PPM = 24;
+  static readonly MIN_PPM = 5;
+  static readonly MAX_PPM = 160;
+
+  cam: GridCamera = { x: 0, y: 0, ppm: GridView.DEFAULT_PPM };
+  routing: RoutingState | null = null;
+  private art = new GridArt();
+  private size = { width: 800, height: 600 };
+
+  // ---------------------------------------------------------------------
+  // Camera
+  // ---------------------------------------------------------------------
+
+  setViewportSize(width: number, height: number): void {
+    this.size = { width, height };
+  }
+
+  worldToScreen(p: Point): Point {
+    return {
+      x: (p.x - this.cam.x) * this.cam.ppm + this.size.width / 2,
+      y: (p.y - this.cam.y) * this.cam.ppm + this.size.height / 2,
+    };
+  }
+
+  screenToWorld(s: Point): Point {
+    return {
+      x: (s.x - this.size.width / 2) / this.cam.ppm + this.cam.x,
+      y: (s.y - this.size.height / 2) / this.cam.ppm + this.cam.y,
+    };
+  }
+
+  panByPixels(dx: number, dy: number): void {
+    this.cam.x -= dx / this.cam.ppm;
+    this.cam.y -= dy / this.cam.ppm;
+  }
+
+  /** Zoom by a factor keeping the world point under `screen` fixed. */
+  zoomAt(screen: Point, factor: number): void {
+    const before = this.screenToWorld(screen);
+    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.MAX_PPM, this.cam.ppm * factor));
+    const after = this.screenToWorld(screen);
+    this.cam.x += before.x - after.x;
+    this.cam.y += before.y - after.y;
+  }
+
+  /** Zoom relative to the default scale (1 = DEFAULT_PPM), about the canvas centre. */
+  get zoomFactor(): number {
+    return this.cam.ppm / GridView.DEFAULT_PPM;
+  }
+
+  setZoomFactor(z: number): void {
+    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.MAX_PPM, z * GridView.DEFAULT_PPM));
+  }
+
+  /**
+   * Centre the camera on the plant and zoom so all of it is in view (never
+   * closer than the default scale). With no plant, look at the origin.
+   */
+  centerOn(plantState: PlantState): void {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const c of plantState.components.values()) {
+      if ((c as any).isHydraulicOnly) continue;
+      const rect = c.type === 'pipe'
+        ? (() => {
+            const pts = pipeRoute(c as PipeComponent);
+            return { x0: Math.min(...pts.map(p => p.x)), x1: Math.max(...pts.map(p => p.x)),
+                     y0: Math.min(...pts.map(p => p.y)), y1: Math.max(...pts.map(p => p.y)) };
+          })()
+        : footprintRect(c.position, componentFootprint(c));
+      minX = Math.min(minX, rect.x0); maxX = Math.max(maxX, rect.x1);
+      minY = Math.min(minY, rect.y0); maxY = Math.max(maxY, rect.y1);
+    }
+    if (!Number.isFinite(minX)) {
+      this.cam.x = 0; this.cam.y = 0;
+      this.cam.ppm = GridView.DEFAULT_PPM;
+      return;
+    }
+    this.cam.x = (minX + maxX) / 2;
+    this.cam.y = (minY + maxY) / 2;
+    const margin = 4 * TILE_M;
+    const fitPpm = Math.min(
+      this.size.width / (maxX - minX + 2 * margin),
+      this.size.height / (maxY - minY + 2 * margin));
+    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.DEFAULT_PPM, fitPpm));
+  }
+
+  // ---------------------------------------------------------------------
+  // Snapping
+  // ---------------------------------------------------------------------
+
+  snapPlacement(componentType: string, pos: Point): Point {
+    return snapCenter(pos, footprintForType(componentType));
+  }
+
+  snapComponent(component: PlantComponent, pos: Point): Point {
+    if (component.type === 'pipe') {
+      // Pipe ends live on cell edges/centres already; keep them on the half-tile lattice
+      return { x: Math.round(pos.x * 2 / TILE_M) * TILE_M / 2, y: Math.round(pos.y * 2 / TILE_M) * TILE_M / 2 };
+    }
+    return snapCenter(pos, componentFootprint(component));
+  }
+
+  // ---------------------------------------------------------------------
+  // Layout
+  // ---------------------------------------------------------------------
+
+  private isGroundLayer(component: PlantComponent): boolean {
+    return component.type === 'building' || component.type === 'switchyard';
+  }
+
+  private spriteLayout(component: PlantComponent): SpriteLayout {
+    const size = getComponentSize(component);
+    const fp = componentFootprint(component);
+    const rect = footprintRect(component.position, fp);
+    const visualH = getComponentVisualHeight(component);
+    const largest = Math.max(size.width, visualH);
+    const spriteScale = largest > 0 && largest < MIN_SPRITE_TILES * TILE_M ? (MIN_SPRITE_TILES * TILE_M) / largest : 1;
+    const zoom = this.cam.ppm * spriteScale;
+    const elevation = component.elevation ?? 0;
+    const lift = elevation * LIFT_PER_M * this.cam.ppm;
+    const south = this.worldToScreen({ x: component.position.x, y: rect.y1 });
+    return {
+      fp, rect, zoom,
+      centerX: south.x,
+      baseY: south.y - lift,
+      halfHpx: (size.height / 2) * zoom,
+      halfWpx: (size.width / 2) * zoom,
+      lift,
+    };
+  }
+
+  /** Screen box of a sprite (or of a ground-layer footprint), for gauges and hit tests. */
+  spriteScreenBox(component: PlantComponent): { left: number; right: number; top: number; bottom: number } | null {
+    if (component.type === 'pipe') {
+      const pts = pipeRoute(component as PipeComponent).map(p => this.worldToScreen(p));
+      const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+      const pad = Math.max(4, ((component as PipeComponent).diameter || 0.3) * this.cam.ppm);
+      return { left: Math.min(...xs) - pad, right: Math.max(...xs) + pad, top: Math.min(...ys) - pad, bottom: Math.max(...ys) + pad };
+    }
+    if (this.isGroundLayer(component)) {
+      const rect = footprintRect(component.position, componentFootprint(component));
+      const a = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+      const b = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+      return { left: a.x, right: b.x, top: a.y, bottom: b.y };
+    }
+    const L = this.spriteLayout(component);
+    return {
+      left: L.centerX - L.halfWpx,
+      right: L.centerX + L.halfWpx,
+      top: L.baseY - 2 * L.halfHpx,
+      bottom: L.baseY,
+    };
+  }
+
+  componentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width: number; height: number } | null {
+    const box = this.spriteScreenBox(component);
+    if (!box) return null;
+    return {
+      topCenter: { x: (box.left + box.right) / 2, y: box.top },
+      scale: this.cam.ppm / 50,
+      width: box.right - box.left,
+      height: box.bottom - box.top,
+    };
+  }
+
+  portScreenPosition(component: PlantComponent, portId: string): { x: number; y: number; radius: number } | null {
+    const a = portAnchor(component, portId);
+    if (!a) return null;
+    const s = this.worldToScreen(a.point);
+    return { x: s.x, y: s.y, radius: this.portRadius() };
+  }
+
+  private portRadius(): number {
+    return Math.max(5, Math.min(14, this.cam.ppm * 0.22));
+  }
+
+  /** Where a flow arrow for a connection belongs: the middle of its route, along it. */
+  connectionScreenEndpoints(conn: Connection, plantState: PlantState): ConnectionScreenEndpoints | null {
+    const pts = connectionRoute(conn, plantState);
+    if (!pts) return null;
+    const len = routeLength(pts);
+    const scale = this.cam.ppm / 50;
+    if (len < 1e-6) {
+      // Zero-length stub (a pipe laid in grid view starts exactly at the
+      // port): point the arrow along the pipe it feeds
+      const fromComponent = plantState.components.get(conn.fromComponentId);
+      const toComponent = plantState.components.get(conn.toComponentId);
+      const pipe = [fromComponent, toComponent].find(c => c?.type === 'pipe') as PipeComponent | undefined;
+      if (pipe) {
+        const pr = pipeRoute(pipe);
+        const atStart = samePoint(pr[0], pts[0]);
+        // Downstream direction of the stub's from->to sense: into the pipe at
+        // its start (the stub feeds it), out of the pipe at its end
+        const a = atStart ? pr[0] : pr[pr.length - 1];
+        const b = atStart ? pr[1] : pr[pr.length - 2];
+        const d = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const ux = (atStart ? 1 : -1) * (b.x - a.x) / d;
+        const uy = (atStart ? 1 : -1) * (b.y - a.y) / d;
+        const half = TILE_M * 0.5;
+        return {
+          fromPos: this.worldToScreen({ x: a.x - ux * half, y: a.y - uy * half }),
+          toPos: this.worldToScreen({ x: a.x + ux * half, y: a.y + uy * half }),
+          scale,
+        };
+      }
+      const s = this.worldToScreen(pts[0]);
+      return { fromPos: s, toPos: s, scale };
+    }
+    const mid = pointAlongRoute(pts, 0.5);
+    const half = Math.min(TILE_M * 0.5, len / 4);
+    return {
+      fromPos: this.worldToScreen({ x: mid.point.x - mid.dir.x * half, y: mid.point.y - mid.dir.y * half }),
+      toPos: this.worldToScreen({ x: mid.point.x + mid.dir.x * half, y: mid.point.y + mid.dir.y * half }),
+      scale,
+    };
+  }
+
+  // ---------------------------------------------------------------------
+  // Hit testing
+  // ---------------------------------------------------------------------
+
+  private drawOrder(plantState: PlantState): PlantComponent[] {
+    const comps = Array.from(plantState.components.values()).filter(c => !(c as any).isHydraulicOnly);
+    const depth = new Map<string, number>();
+    const depthOf = (c: PlantComponent): number => {
+      const cached = depth.get(c.id);
+      if (cached !== undefined) return cached;
+      let d = 0;
+      const seen = new Set<string>();
+      let cur: PlantComponent | undefined = c;
+      while (cur?.containedBy && !seen.has(cur.id)) {
+        seen.add(cur.id);
+        cur = plantState.components.get(cur.containedBy);
+        d++;
+      }
+      depth.set(c.id, d);
+      return d;
+    };
+    const southEdge = (c: PlantComponent): number => {
+      if (c.type === 'pipe') return Math.max(...pipeRoute(c as PipeComponent).map(p => p.y));
+      return footprintRect(c.position, componentFootprint(c)).y1;
+    };
+    return comps.sort((a, b) => {
+      // Ground-layer things first, then by containment depth, then by south edge
+      const ga = this.isGroundLayer(a) ? 0 : 1, gb = this.isGroundLayer(b) ? 0 : 1;
+      if (ga !== gb) return ga - gb;
+      const da = depthOf(a), db = depthOf(b);
+      if (da !== db) return da - db;
+      return southEdge(a) - southEdge(b);
+    });
+  }
+
+  componentAt(screen: Point, plantState: PlantState): PlantComponent | null {
+    const world = this.screenToWorld(screen);
+    const order = this.drawOrder(plantState);
+    for (let i = order.length - 1; i >= 0; i--) {
+      const c = order[i];
+      if (c.type === 'pipe') {
+        const pipe = c as PipeComponent;
+        const half = Math.max((pipe.diameter || 0.3) / 2, MIN_CLICK_TARGET_PX / 2 / this.cam.ppm);
+        if (distanceToPolyline(world, pipeRoute(pipe)) <= half) return c;
+        continue;
+      }
+      if (c.type === 'building') {
+        // The wall ring only - clicks on the floor fall through to what is inside
+        const rect = footprintRect(c.position, componentFootprint(c));
+        const inset = Math.max(0.6, 8 / this.cam.ppm);
+        const inOuter = world.x >= rect.x0 && world.x <= rect.x1 && world.y >= rect.y0 && world.y <= rect.y1;
+        const inInner = world.x >= rect.x0 + inset && world.x <= rect.x1 - inset && world.y >= rect.y0 + inset && world.y <= rect.y1 - inset;
+        if (inOuter && !inInner) return c;
+        continue;
+      }
+      const box = this.spriteScreenBox(c);
+      if (!box) continue;
+      const padX = Math.max(0, (MIN_CLICK_TARGET_PX - (box.right - box.left)) / 2);
+      const padY = Math.max(0, (MIN_CLICK_TARGET_PX - (box.bottom - box.top)) / 2);
+      if (screen.x >= box.left - padX && screen.x <= box.right + padX && screen.y >= box.top - padY && screen.y <= box.bottom + padY) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * The port under a screen point. Where two ports coincide (a pipe's end
+   * sits exactly on the nozzle it was laid to), the free one wins, then the
+   * nearer one.
+   */
+  portAt(screen: Point, plantState: PlantState, exclude?: string): PortHit | null {
+    const r = this.portRadius() + 3;
+    let best: PortHit | null = null;
+    let bestKey = Infinity;
+    for (const component of plantState.components.values()) {
+      if (!component.ports || (component as any).isHydraulicOnly) continue;
+      if (exclude && component.id === exclude) continue;
+      for (const anchor of portAnchors(component)) {
+        const s = this.worldToScreen(anchor.point);
+        const d = Math.hypot(screen.x - s.x, screen.y - s.y);
+        if (d > r) continue;
+        const key = d + (anchor.port.connectedTo ? 1000 : 0);
+        if (key < bestKey) {
+          bestKey = key;
+          best = { component, port: anchor.port, anchor };
+        }
+      }
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------------
+  // Routing interaction
+  // ---------------------------------------------------------------------
+
+  startRouting(from: PortHit): void {
+    this.routing = {
+      from,
+      waypoints: [from.anchor.out ?? from.anchor.point],
+      cursorCell: null,
+      target: null,
+      dragging: false,
+      pressScreen: null,
+      sourceRect: from.component.type === 'pipe' ? null
+        : footprintRect(from.component.position, componentFootprint(from.component)),
+    };
+  }
+
+  /** Track the cursor: which cell it is over and whether it rests on a finishing port. */
+  updateRoutingCursor(screen: Point, plantState: PlantState): void {
+    if (!this.routing) return;
+    const world = this.screenToWorld(screen);
+    this.routing.cursorCell = cellCenter(world);
+    this.routing.target = this.portAt(screen, plantState, this.routing.from.component.id);
+    if (this.routing.dragging && !this.insideSource(this.routing.cursorCell)) {
+      this.routing.waypoints = extendRoute(this.routing.waypoints, this.routing.cursorCell);
+    }
+  }
+
+  private insideSource(cell: Point): boolean {
+    const r = this.routing?.sourceRect;
+    if (!r) return false;
+    return cell.x > r.x0 && cell.x < r.x1 && cell.y > r.y0 && cell.y < r.y1;
+  }
+
+  /** Commit the rubber band as laid pipe (a click on open ground while routing). */
+  fixWaypoint(): void {
+    if (!this.routing || !this.routing.cursorCell || this.insideSource(this.routing.cursorCell)) return;
+    this.routing.waypoints = extendRoute(this.routing.waypoints, this.routing.cursorCell);
+  }
+
+  /** The finished route into a target port, and its plan length. */
+  finishRouting(target: PortHit): { route: Point[]; length: number } {
+    const r = this.routing!;
+    const route = completeRoute([r.from.anchor.point, ...r.waypoints], target.anchor);
+    this.routing = null;
+    return { route, length: routeLength(route) };
+  }
+
+  cancelRouting(): void {
+    this.routing = null;
+  }
+
+  // ---------------------------------------------------------------------
+  // Rendering
+  // ---------------------------------------------------------------------
+
+  render(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    this.size = { width: f.width, height: f.height };
+    const order = this.drawOrder(f.plantState);
+
+    this.renderGround(ctx, f);
+
+    // Ground layer: building floors and switchyards, in plan
+    for (const c of order) {
+      if (c.type === 'building') this.renderBuilding(ctx, c as BuildingComponent, f);
+      else if (c.type === 'switchyard') this.renderSwitchyard(ctx, c as SwitchyardComponent, f);
+    }
+
+    // Foundation pads under every standing component
+    for (const c of order) {
+      if (this.isGroundLayer(c) || c.type === 'pipe') continue;
+      this.renderPad(ctx, c, f);
+    }
+
+    this.renderRoutes(ctx, f);
+
+    // Standing sprites, back to front
+    for (const c of order) {
+      if (this.isGroundLayer(c) || c.type === 'pipe') continue;
+      this.renderSprite(ctx, c, f);
+    }
+
+    this.renderSignalLines(ctx, f);
+
+    if (f.showPorts) this.renderPorts(ctx, f);
+    if (this.routing) this.renderRouting(ctx, f);
+    if (f.placementPreview && f.constructionMode) this.renderPlacementPreview(ctx, f);
+  }
+
+  private renderGround(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+    ctx.fillStyle = this.art.pattern(ctx, 'ground', this.cam.ppm, origin);
+    ctx.fillRect(0, 0, f.width, f.height);
+
+    // Tile lines: faint always, stronger while building
+    const ppm = this.cam.ppm;
+    if (ppm >= 10) {
+      const alpha = f.constructionMode ? 0.16 : 0.07;
+      const tl = this.screenToWorld({ x: 0, y: 0 });
+      const br = this.screenToWorld({ x: f.width, y: f.height });
+      const x0 = Math.floor(tl.x / TILE_M), x1 = Math.ceil(br.x / TILE_M);
+      const y0 = Math.floor(tl.y / TILE_M), y1 = Math.ceil(br.y / TILE_M);
+      ctx.lineWidth = 1;
+      for (const major of [false, true]) {
+        ctx.strokeStyle = major ? `rgba(40, 40, 30, ${alpha * 1.8})` : `rgba(40, 40, 30, ${alpha})`;
+        ctx.beginPath();
+        for (let i = x0; i <= x1; i++) {
+          if ((i % 5 === 0) !== major) continue;
+          const sx = Math.round(this.worldToScreen({ x: i * TILE_M, y: 0 }).x) + 0.5;
+          ctx.moveTo(sx, 0); ctx.lineTo(sx, f.height);
+        }
+        for (let j = y0; j <= y1; j++) {
+          if ((j % 5 === 0) !== major) continue;
+          const sy = Math.round(this.worldToScreen({ x: 0, y: j * TILE_M }).y) + 0.5;
+          ctx.moveTo(0, sy); ctx.lineTo(f.width, sy);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+
+  private wallColor(building: BuildingComponent): { wall: string; light: string } {
+    const steelFrac = building.steelFraction || 0.1;
+    const r = Math.round(100 * steelFrac + 180 * (1 - steelFrac));
+    const g = Math.round(105 * steelFrac + 175 * (1 - steelFrac));
+    const b = Math.round(115 * steelFrac + 165 * (1 - steelFrac));
+    return { wall: `rgb(${r}, ${g}, ${b})`, light: `rgb(${Math.min(255, r + 30)}, ${Math.min(255, g + 30)}, ${Math.min(255, b + 30)})` };
+  }
+
+  /** A building in plan: concrete floor inside a thick wall, labelled. */
+  private renderBuilding(ctx: CanvasRenderingContext2D, b: BuildingComponent, f: GridFrameState): void {
+    const rect = footprintRect(b.position, componentFootprint(b));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const w = br.x - tl.x, h = br.y - tl.y;
+    const cx = (tl.x + br.x) / 2, cy = (tl.y + br.y) / 2;
+    const wallPx = Math.max(3, Math.min(w, h) * 0.035, (b.wallThickness || 1) * this.cam.ppm);
+    const { wall, light } = this.wallColor(b);
+    const isSelected = b.id === f.selectedComponentId;
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+
+    const shape = () => {
+      ctx.beginPath();
+      if (b.shape === 'cylinder') ctx.ellipse(cx, cy, w / 2, h / 2, 0, 0, Math.PI * 2);
+      else ctx.rect(tl.x, tl.y, w, h);
+    };
+
+    // Shadow to the south-east so the wall reads as raised
+    ctx.save();
+    ctx.translate(wallPx * 0.6, wallPx * 0.8);
+    shape();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.22)';
+    ctx.fill();
+    ctx.restore();
+
+    shape();
+    ctx.fillStyle = this.art.pattern(ctx, 'concrete', this.cam.ppm, origin);
+    ctx.fill();
+
+    // Wall: outer dark edge, body, inner highlight
+    ctx.lineWidth = wallPx;
+    ctx.strokeStyle = wall;
+    shape();
+    ctx.stroke();
+    ctx.lineWidth = Math.max(1, wallPx * 0.25);
+    ctx.strokeStyle = light;
+    ctx.save();
+    ctx.translate(-wallPx * 0.3, -wallPx * 0.3);
+    shape();
+    ctx.stroke();
+    ctx.restore();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.save();
+    ctx.translate(wallPx * 0.5, wallPx * 0.5);
+    shape();
+    ctx.stroke();
+    ctx.restore();
+
+    if (isSelected) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = COLORS.selectionHighlight;
+      shape();
+      ctx.stroke();
+    }
+
+    // Label in the near corner
+    const fontPx = Math.max(9, Math.min(18, this.cam.ppm * 0.5));
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(30, 30, 30, 0.75)';
+    const label = b.label || b.id;
+    const lx = b.shape === 'cylinder' ? cx - ctx.measureText(label).width / 2 : tl.x + wallPx + 4;
+    const ly = b.shape === 'cylinder' ? tl.y + h * 0.18 : tl.y + wallPx + 3;
+    ctx.fillText(label, lx, ly);
+  }
+
+  private renderSwitchyard(ctx: CanvasRenderingContext2D, s: SwitchyardComponent, f: GridFrameState): void {
+    const rect = footprintRect(s.position, componentFootprint(s));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+    // Gravel yard on a concrete apron with a fence line
+    ctx.fillStyle = this.art.pattern(ctx, 'pad', this.cam.ppm, origin);
+    ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.strokeStyle = 'rgba(60, 60, 60, 0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.strokeRect(tl.x + 1, tl.y + 1, br.x - tl.x - 2, br.y - tl.y - 2);
+    ctx.setLineDash([]);
+
+    const center = this.worldToScreen(s.position);
+    ctx.save();
+    ctx.translate(center.x, center.y);
+    const view: ViewState = { offsetX: 0, offsetY: 0, zoom: this.cam.ppm };
+    renderComponent(ctx, s, view, s.id === f.selectedComponentId, true, f.plantState.connections, !f.constructionMode, f.plantState);
+    ctx.restore();
+  }
+
+  /** Concrete foundation with a soft shadow, sized to the footprint. */
+  private renderPad(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
+    const rect = footprintRect(c.position, componentFootprint(c));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const w = br.x - tl.x, h = br.y - tl.y;
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+    const inset = Math.min(w, h) * 0.06;
+
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
+    ctx.fillRect(tl.x + inset + 2, tl.y + inset + 3, w - 2 * inset, h - 2 * inset);
+    ctx.fillStyle = this.art.pattern(ctx, 'pad', this.cam.ppm, origin);
+    ctx.fillRect(tl.x + inset, tl.y + inset, w - 2 * inset, h - 2 * inset);
+    // Bevel: light top/left, dark bottom/right
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+    ctx.beginPath();
+    ctx.moveTo(tl.x + inset, br.y - inset); ctx.lineTo(tl.x + inset, tl.y + inset); ctx.lineTo(br.x - inset, tl.y + inset);
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.beginPath();
+    ctx.moveTo(br.x - inset, tl.y + inset); ctx.lineTo(br.x - inset, br.y - inset); ctx.lineTo(tl.x + inset, br.y - inset);
+    ctx.stroke();
+
+    if (c.id === f.hoveredComponentId && f.constructionMode) {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(tl.x, tl.y, w, h);
+    }
+  }
+
+  /** The component's front-view drawing standing on its pad. */
+  private renderSprite(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
+    const L = this.spriteLayout(c);
+    if (L.centerX + L.halfWpx < -50 || L.centerX - L.halfWpx > f.width + 50 ||
+        L.baseY < -50 || L.baseY - 2 * L.halfHpx > f.height + 50) return;
+
+    // Cast shadow of a raised component back onto its pad
+    if (L.lift > 0) {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
+      ctx.beginPath();
+      ctx.ellipse(L.centerX, L.baseY + L.lift, L.halfWpx * 0.9, Math.max(3, L.halfWpx * 0.25), 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Support columns from pad to base
+      ctx.strokeStyle = 'rgba(70, 70, 70, 0.8)';
+      ctx.lineWidth = Math.max(2, this.cam.ppm * 0.08);
+      ctx.beginPath();
+      for (const t of [-0.6, 0.6]) {
+        ctx.moveTo(L.centerX + L.halfWpx * t, L.baseY + L.lift);
+        ctx.lineTo(L.centerX + L.halfWpx * t, L.baseY);
+      }
+      ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.translate(L.centerX, L.baseY - L.halfHpx);
+    const view: ViewState = { offsetX: 0, offsetY: 0, zoom: L.zoom };
+    const isSelected = c.id === f.selectedComponentId;
+    renderComponent(ctx, c, view, isSelected, true, f.plantState.connections, !f.constructionMode, f.plantState);
+    ctx.restore();
+
+    // Below-grade portion: shade with soil so a sunken condenser reads as buried
+    if (L.lift < 0) {
+      const groundY = L.baseY + L.lift;
+      ctx.fillStyle = 'rgba(96, 78, 52, 0.55)';
+      ctx.fillRect(L.centerX - L.halfWpx - 2, groundY, 2 * L.halfWpx + 4, L.baseY - groundY + 1);
+    }
+
+    const elevation = c.elevation ?? 0;
+    if (elevation !== 0) {
+      ctx.font = `${Math.round(10 * readoutScale(this.cam.ppm / 50))}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#000';
+      ctx.fillText(`${elevation.toFixed(1)} m`, L.centerX, L.baseY + Math.max(0, L.lift) + 2);
+    }
+  }
+
+  private lineWidthForArea(flowArea: number | undefined): number {
+    const d = flowArea && flowArea > 0 ? Math.sqrt(4 * flowArea / Math.PI) : 0.3;
+    return this.lineWidthForDiameter(d);
+  }
+
+  private lineWidthForDiameter(d: number): number {
+    return Math.max(4, Math.min(this.cam.ppm * 0.6, d * this.cam.ppm));
+  }
+
+  private isContainmentPair(a: PlantComponent, b: PlantComponent): boolean {
+    return a.containedBy === b.id || b.containedBy === a.id;
+  }
+
+  private renderRoutes(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const { plantState } = f;
+    // Pipe components first (they are the long runs), then the connections
+    for (const c of plantState.components.values()) {
+      if (c.type !== 'pipe' || (c as any).isHydraulicOnly) continue;
+      const pipe = c as PipeComponent;
+      const pts = pipeRoute(pipe).map(p => this.worldToScreen(p));
+      const color = pipe.fluid ? getFluidColor(pipe.fluid) : COLORS.steel;
+      this.drawPipe(ctx, pts, color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
+    }
+    for (const conn of plantState.connections) {
+      const from = plantState.components.get(conn.fromComponentId);
+      const to = plantState.components.get(conn.toComponentId);
+      if (!from || !to) continue;
+      // An opening between a component and its container is internal: nothing to lay
+      if (this.isContainmentPair(from, to)) continue;
+      const route = connectionRoute(conn, plantState);
+      if (!route || routeLength(route) < 1e-6) continue;
+      const fluid = f.connectionFluid(conn, from);
+      const color = fluid ? getFluidColor(fluid) : '#667788';
+      const touchesSelection = f.selectedComponentId !== null &&
+        (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId);
+      this.drawPipe(ctx, route.map(p => this.worldToScreen(p)), color, this.lineWidthForArea(conn.flowArea), touchesSelection);
+    }
+  }
+
+  /** A pipe run: shadow, dark wall, fluid-coloured body, a sheen, elbows at bends, flanges at the ends. */
+  private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean): void {
+    if (pts.length < 2) return;
+    const path = () => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    };
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    if (highlight) {
+      ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
+      ctx.lineWidth = w + 8;
+      path(); ctx.stroke();
+    }
+
+    ctx.save();
+    ctx.translate(w * 0.25, w * 0.4);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.28)';
+    ctx.lineWidth = w + 1;
+    path(); ctx.stroke();
+    ctx.restore();
+
+    ctx.strokeStyle = '#2a2e33';
+    ctx.lineWidth = w + 2;
+    path(); ctx.stroke();
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = w;
+    path(); ctx.stroke();
+
+    // Cylinder sheen along the upper-left of the run
+    ctx.save();
+    ctx.translate(-w * 0.18, -w * 0.18);
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
+    ctx.lineWidth = Math.max(1, w * 0.22);
+    path(); ctx.stroke();
+    ctx.restore();
+
+    // Elbows
+    ctx.fillStyle = '#3a3f45';
+    ctx.strokeStyle = '#1c1f23';
+    ctx.lineWidth = 1;
+    for (let i = 1; i < pts.length - 1; i++) {
+      ctx.beginPath();
+      ctx.arc(pts[i].x, pts[i].y, w * 0.62, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+    }
+
+    // Flanges at the ends, perpendicular to the last segment
+    ctx.fillStyle = '#4a5058';
+    for (const [a, b] of [[pts[0], pts[1]], [pts[pts.length - 1], pts[pts.length - 2]]]) {
+      const dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const nx = -dy / d, ny = dx / d;
+      const half = w * 0.75;
+      const thick = Math.max(2, w * 0.28);
+      ctx.beginPath();
+      ctx.moveTo(a.x + nx * half, a.y + ny * half);
+      ctx.lineTo(a.x - nx * half, a.y - ny * half);
+      ctx.lineTo(a.x - nx * half + dx / d * thick, a.y - ny * half + dy / d * thick);
+      ctx.lineTo(a.x + nx * half + dx / d * thick, a.y + ny * half + dy / d * thick);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /** Controller wires and switchyard-to-generator lines. */
+  private renderSignalLines(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const { plantState } = f;
+    ctx.save();
+    ctx.strokeStyle = '#222';
+    ctx.lineWidth = 2;
+    for (const c of plantState.components.values()) {
+      let other: PlantComponent | undefined;
+      let dash: number[];
+      if (c.type === 'controller') {
+        const id = (c as ControllerComponent).connectedCoreId;
+        other = id ? plantState.components.get(id) : undefined;
+        dash = [6, 4];
+      } else if (c.type === 'switchyard') {
+        const id = (c as SwitchyardComponent).connectedGeneratorId;
+        other = id ? plantState.components.get(id) : undefined;
+        dash = [8, 4];
+      } else continue;
+      if (!other) continue;
+      const a = this.worldToScreen(c.position);
+      const b = this.worldToScreen(other.position);
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = '#222';
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  private portFill(port: Port, highlighted: boolean): string {
+    if (port.direction === 'in') return highlighted ? 'rgba(100, 255, 100, 0.95)' : 'rgba(100, 200, 100, 0.85)';
+    if (port.direction === 'out') return highlighted ? 'rgba(255, 100, 100, 0.95)' : 'rgba(200, 100, 100, 0.85)';
+    return highlighted ? 'rgba(100, 200, 255, 0.95)' : 'rgba(100, 150, 200, 0.85)';
+  }
+
+  private drawPortMarker(ctx: CanvasRenderingContext2D, s: Point, side: Side, port: Port, radius: number, highlighted: boolean): void {
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.portFill(port, highlighted);
+    ctx.fill();
+    ctx.strokeStyle = highlighted ? '#fff' : 'rgba(255, 255, 255, 0.85)';
+    ctx.lineWidth = highlighted ? 2.5 : 1.5;
+    ctx.stroke();
+
+    if (port.direction === 'in' || port.direction === 'out') {
+      // Arrow along the side normal: into the component for inlets, out for outlets
+      const v = sideVector(side);
+      const sign = port.direction === 'out' ? 1 : -1;
+      const dirX = v.x * sign, dirY = v.y * sign;
+      const len = radius * 0.55, head = radius * 0.35;
+      const sx = s.x - dirX * len, sy = s.y - dirY * len;
+      const ex = s.x + dirX * len, ey = s.y + dirY * len;
+      const ang = Math.atan2(dirY, dirX);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = Math.max(1, radius * 0.2);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy); ctx.lineTo(ex, ey);
+      ctx.moveTo(ex + head * Math.cos(ang + Math.PI - Math.PI / 5), ey + head * Math.sin(ang + Math.PI - Math.PI / 5));
+      ctx.lineTo(ex, ey);
+      ctx.lineTo(ex + head * Math.cos(ang + Math.PI + Math.PI / 5), ey + head * Math.sin(ang + Math.PI + Math.PI / 5));
+      ctx.stroke();
+    }
+  }
+
+  private renderPorts(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const radius = this.portRadius();
+    for (const component of f.plantState.components.values()) {
+      if (!component.ports || (component as any).isHydraulicOnly) continue;
+      for (const anchor of portAnchors(component)) {
+        const s = this.worldToScreen(anchor.point);
+        if (s.x < -20 || s.x > f.width + 20 || s.y < -20 || s.y > f.height + 20) continue;
+        const highlighted = !!f.highlightedPort &&
+          f.highlightedPort.componentId === component.id && f.highlightedPort.portId === anchor.port.id;
+        const isTarget = !!this.routing?.target &&
+          this.routing.target.component.id === component.id && this.routing.target.port.id === anchor.port.id;
+        const r = highlighted || isTarget ? radius * 1.4 : radius;
+        this.drawPortMarker(ctx, s, anchor.side, anchor.port, r, highlighted || isTarget);
+        if (highlighted || isTarget) {
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, r * 1.3 + Math.sin(Date.now() * 0.004) * radius * 0.3, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255, 255, 100, 0.6)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+    }
+  }
+
+  /** The pipe being laid: solid where committed, dashed to the cursor, with a running length. */
+  private renderRouting(ctx: CanvasRenderingContext2D, _f: GridFrameState): void {
+    const r = this.routing!;
+    const w = Math.max(4, this.cam.ppm * 0.3);
+    const laid = [r.from.anchor.point, ...r.waypoints];
+    let preview: Point[] = [];
+    if (r.target) {
+      preview = completeRoute(laid, r.target.anchor).slice(laid.length - 1);
+    } else if (r.cursorCell) {
+      preview = rubberBand(r.waypoints, r.cursorCell);
+    }
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const stroke = (pts: Point[], dashed: boolean) => {
+      if (pts.length < 2) return;
+      ctx.setLineDash(dashed ? [w, w * 0.8] : []);
+      ctx.beginPath();
+      const s0 = this.worldToScreen(pts[0]);
+      ctx.moveTo(s0.x, s0.y);
+      for (let i = 1; i < pts.length; i++) {
+        const s = this.worldToScreen(pts[i]);
+        ctx.lineTo(s.x, s.y);
+      }
+      ctx.stroke();
+    };
+    ctx.strokeStyle = 'rgba(20, 24, 30, 0.6)';
+    ctx.lineWidth = w + 3;
+    stroke(laid, false);
+    ctx.strokeStyle = r.target ? 'rgba(120, 230, 140, 0.95)' : 'rgba(140, 190, 255, 0.95)';
+    ctx.lineWidth = w;
+    stroke(laid, false);
+    ctx.strokeStyle = r.target ? 'rgba(120, 230, 140, 0.8)' : 'rgba(140, 190, 255, 0.7)';
+    stroke(preview, true);
+    ctx.setLineDash([]);
+
+    // Running length at the loose end
+    const tail = preview.length > 0 ? preview[preview.length - 1] : laid[laid.length - 1];
+    const total = routeLength(laid) + routeLength(preview);
+    const label = `${total.toFixed(1)} m`;
+    const s = this.worldToScreen(tail);
+    ctx.font = 'bold 12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    const tw = ctx.measureText(label).width;
+    ctx.fillStyle = 'rgba(20, 24, 30, 0.8)';
+    ctx.fillRect(s.x + 10, s.y - 26, tw + 10, 18);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(label, s.x + 15, s.y - 10);
+    ctx.restore();
+  }
+
+  private renderPlacementPreview(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const { componentType, position } = f.placementPreview!;
+    const fp = footprintForType(componentType);
+    const center = snapCenter(position, fp);
+    const rect = footprintRect(center, fp);
+    let clash = false;
+    for (const c of f.plantState.components.values()) {
+      if ((c as any).isHydraulicOnly || c.type === 'pipe' || c.type === 'building') continue;
+      if (rectsOverlap(rect, footprintRect(c.position, componentFootprint(c)))) { clash = true; break; }
+    }
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    ctx.save();
+    ctx.fillStyle = clash ? 'rgba(255, 170, 60, 0.28)' : 'rgba(90, 220, 130, 0.28)';
+    ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.strokeStyle = clash ? 'rgba(255, 170, 60, 0.95)' : 'rgba(90, 220, 130, 0.95)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.setLineDash([]);
+    ctx.font = '11px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(20, 24, 30, 0.85)';
+    ctx.fillText(`${fp.w} × ${fp.d} tiles${clash ? ' (overlaps)' : ''}`, (tl.x + br.x) / 2, tl.y - 4);
+    ctx.restore();
+  }
+}

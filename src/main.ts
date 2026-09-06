@@ -1,4 +1,5 @@
-import { PlantCanvas } from './render/canvas';
+import { PlantCanvas, ViewMode } from './render/canvas';
+import { getComponentVisualHeight } from './render/components';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
 import pwrPresetData from './presets/pwr.json';
@@ -12,7 +13,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -62,6 +63,7 @@ const SETTINGS_KEY = 'meltdown_settings';
 
 interface AppSettings {
   deterministicMode?: boolean;
+  viewMode?: ViewMode;
 }
 
 function loadSettings(): AppSettings {
@@ -1768,14 +1770,46 @@ function init() {
   // Move mode button
   const moveModeBtn = document.getElementById('move-mode') as HTMLButtonElement;
 
-  // Isometric view toggle
-  const isometricBtn = document.getElementById('toggle-isometric') as HTMLButtonElement;
-  if (isometricBtn) {
-    isometricBtn.addEventListener('click', () => {
-      plantCanvas.toggleIsometric();
-      isometricBtn.classList.toggle('active', plantCanvas.getIsometric());
-    });
+  // View mode selector: flat 2D, 2.5D perspective, or the tile grid. The
+  // choice is remembered across sessions.
+  const viewModeButtons: Array<[ViewMode, string]> = [
+    ['2d', 'view-mode-2d'],
+    ['perspective', 'view-mode-perspective'],
+    ['grid', 'view-mode-grid'],
+  ];
+  const viewAngleControl = document.getElementById('view-angle-control');
+  const gridViewHint = document.getElementById('grid-view-hint');
+  function applyViewMode(mode: ViewMode, persist: boolean): void {
+    plantCanvas.setViewMode(mode);
+    for (const [m, id] of viewModeButtons) {
+      document.getElementById(id)?.classList.toggle('active', m === mode);
+    }
+    if (viewAngleControl) viewAngleControl.style.display = mode === 'perspective' ? '' : 'none';
+    if (gridViewHint) gridViewHint.style.display = mode === 'grid' ? '' : 'none';
+    if (persist) saveSettings({ ...loadSettings(), viewMode: mode });
   }
+  for (const [m, id] of viewModeButtons) {
+    document.getElementById(id)?.addEventListener('click', () => applyViewMode(m, true));
+  }
+  applyViewMode(loadSettings().viewMode ?? 'perspective', false);
+
+  // Grid view: the canvas lays pipe along the tiles itself and hands the
+  // finished route here. The dialog's length field is seeded with the drawn
+  // plan length plus the climb between the two ports; the route is kept
+  // with the connection (or the pipe it creates) for drawing.
+  plantCanvas.onRouteComplete = (from, to, route, planLength) => {
+    if (from.component.id === to.component.id) {
+      showNotification('Cannot connect component to itself', 'warning');
+      return;
+    }
+    const portAbsElevation = (c: PlantComponent, port: Port) =>
+      (c.elevation ?? 0) + getComponentVisualHeight(c) / 2 - port.position.y;
+    const rise = Math.abs(portAbsElevation(from.component, from.port) - portAbsElevation(to.component, to.port));
+    if (connectionStatus) {
+      connectionStatus.textContent = `Pipe laid: ${planLength.toFixed(1)} m along the grid`;
+    }
+    openConnectionDialog(from, to, route, planLength + rise);
+  };
 
   // View elevation slider (controls both camera height and view angle)
   const viewElevationSlider = document.getElementById('view-elevation') as HTMLInputElement;
@@ -1853,6 +1887,9 @@ function init() {
     // Restore construction-path invariants (port.connectedTo flags, canonical
     // pump port geometry/orientation) that raw JSON doesn't carry
     constructionManager.normalizeLoadedPlant();
+
+    // Plants are laid out for the 2.5D camera; the grid camera goes to them
+    plantCanvas.centerOnPlant();
   }
 
   // Migrate pipes to have endPosition and endElevation for 3D rendering
@@ -2246,7 +2283,17 @@ function init() {
     const importFileInput = dialog.querySelector('#dialog-import-file') as HTMLInputElement;
     const closeBtn = dialog.querySelector('#dialog-close-btn') as HTMLButtonElement;
 
-    const cleanup = () => document.body.removeChild(overlay);
+    // Every way out of the dialog (close, backdrop, Escape, loading a preset)
+    // goes through here, so the Escape listener must come off with the
+    // overlay - a leftover one would try to remove it again on the next
+    // Escape pressed anywhere (e.g. abandoning a pipe in grid view)
+    const cleanup = () => {
+      document.removeEventListener('keydown', escHandler);
+      if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    };
+    function escHandler(e: KeyboardEvent) {
+      if (e.key === 'Escape') cleanup();
+    }
 
     const refreshConfigs = () => {
       const names = getSavedConfigNames();
@@ -2458,9 +2505,7 @@ function init() {
 
     closeBtn.addEventListener('click', cleanup);
     overlay.addEventListener('click', (e) => { if (e.target === overlay) cleanup(); });
-    document.addEventListener('keydown', function escHandler(e) {
-      if (e.key === 'Escape') { cleanup(); document.removeEventListener('keydown', escHandler); }
-    });
+    document.addEventListener('keydown', escHandler);
 
     saveNameInput.focus();
   }
@@ -2954,13 +2999,21 @@ function init() {
               const dz = (pipe.endElevation ?? 0) - (pipe.elevation ?? 0);
               pipe.length = Math.sqrt(dx*dx + dy*dy + dz*dz);
             } else {
-              // Move both ends together (translate the whole pipe)
-              const dx = worldClick.x - moveStartOffset.x - pipe.position.x;
-              const dy = worldClick.y - moveStartOffset.y - pipe.position.y;
+              // Move both ends together (translate the whole pipe, and the
+              // grid route drawn for it)
+              const target = plantCanvas.snapComponentPosition(pipe, {
+                x: worldClick.x - moveStartOffset.x,
+                y: worldClick.y - moveStartOffset.y,
+              });
+              const dx = target.x - pipe.position.x;
+              const dy = target.y - pipe.position.y;
               pipe.position.x += dx;
               pipe.position.y += dy;
               pipe.endPosition.x += dx;
               pipe.endPosition.y += dy;
+              if (pipe.route) {
+                pipe.route = pipe.route.map(p => ({ x: p.x + dx, y: p.y + dy }));
+              }
             }
             // Update port position
             const rightPort = pipe.ports.find(p => p.id.endsWith('-right'));
@@ -2973,9 +3026,13 @@ function init() {
             movingComponent.position.y = worldClick.y - moveStartOffset.y;
           }
         } else {
-          // Non-pipe components: move normally
-          movingComponent.position.x = worldClick.x - moveStartOffset.x;
-          movingComponent.position.y = worldClick.y - moveStartOffset.y;
+          // Non-pipe components: move normally (snapped to the tile lattice in grid view)
+          const target = plantCanvas.snapComponentPosition(movingComponent, {
+            x: worldClick.x - moveStartOffset.x,
+            y: worldClick.y - moveStartOffset.y,
+          });
+          movingComponent.position.x = target.x;
+          movingComponent.position.y = target.y;
         }
         // Anything inside the component rides along. Dragging one END of a
         // pipe reshapes it rather than translating it, so passengers stay put
@@ -3087,7 +3144,10 @@ function init() {
           // Threshold: within 30% of pipe length from either end = move that end
           const endThreshold = pipeScreenLength * 0.3;
 
-          if (distToStart < endThreshold && distToStart < distToEnd) {
+          if (plantCanvas.getViewMode() === 'grid' && pipe.route) {
+            // A pipe drawn along the grid moves as one piece
+            pipeDragMode = 'both';
+          } else if (distToStart < endThreshold && distToStart < distToEnd) {
             pipeDragMode = 'start';
           } else if (distToEnd < endThreshold && distToEnd < distToStart) {
             pipeDragMode = 'end';
@@ -3150,6 +3210,9 @@ function init() {
         // A real move: if it crossed a building boundary, confirm the
         // containment change (and revert the move if the player cancels).
         maybeConfirmContainmentChange(moved, preDrag);
+        // Pipes drawn to the old position no longer fit; the grid view
+        // routes them afresh
+        if (plantCanvas.getViewMode() === 'grid') plantCanvas.rerouteConnectionsOf(moved.id);
         const carried = moveFollowers.length;
         showNotification(
           `Moved ${moved.label || moved.id}` +
@@ -3224,8 +3287,9 @@ function init() {
 
     if (constructionSubMode === 'place' && selectedComponentType) {
       // Component placement mode - convert screen to world coordinates
-      // Uses perspective projection when in isometric mode
-      const worldPos = plantCanvas.getWorldPositionFromScreen({ x, y });
+      // (perspective projection in 2.5D, snapped to whole tiles on the grid)
+      const worldPos = plantCanvas.snapPlacementPosition(
+        selectedComponentType, plantCanvas.getWorldPositionFromScreen({ x, y }));
 
       // Check if clicking on an existing container component (tank, vessel, reactor vessel)
       const clickedComponent = plantCanvas.getComponentAtScreen({ x, y });
@@ -3400,6 +3464,9 @@ function init() {
         proceedWithPlacement();
       }
     } else if (constructionSubMode === 'connect') {
+      // Grid view lays pipe from port to port itself (see onRouteComplete)
+      if (plantCanvas.getViewMode() === 'grid') return;
+
       // Connection mode - detect clicked port
       const portInfo = plantCanvas.getPortAtScreen({ x, y });
 
@@ -3426,56 +3493,72 @@ function init() {
           }
 
           // Show connection configuration dialog with port-specific elevations
-          connectionDialog.show(
-            connectingFrom.component,
-            portInfo.component,
-            connectingFrom.port,
-            portInfo.port,
-            (config: ConnectionConfig | null) => {
-              if (config) {
-                // Create the connection
-                let success: boolean;
-                if (config.createPipe) {
-                  success = constructionManager.createConnectionWithPipe(
-                    config.fromPort.id,
-                    config.toPort.id,
-                    config.flowArea,
-                    config.length,
-                    config.fromElevation,
-                    config.toElevation,
-                    config.pressureRating
-                  );
-                } else {
-                  success = constructionManager.createConnection(
-                    config.fromPort.id,
-                    config.toPort.id,
-                    config.fromElevation,
-                    config.toElevation,
-                    config.flowArea,
-                    config.length
-                  );
-                }
-
-                if (success) {
-                  showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
-                } else {
-                  showNotification('Failed to create connection', 'error');
-                }
-              }
-
-              // Reset connection state
-              connectingFrom = null;
-              plantCanvas.setHighlightedPort(null, null); // Clear highlight
-              if (connectionStatus) {
-                connectionStatus.textContent = 'Select first component...';
-              }
-            }
-          );
+          openConnectionDialog(connectingFrom, { component: portInfo.component, port: portInfo.port });
         }
       }
     }
   });
 
+
+  // Connection dialog for a chosen pair of ports, then the connection itself.
+  // `route`/`suggestedLength` come from a pipe drawn in grid view.
+  function openConnectionDialog(
+    from: { component: PlantComponent; port: Port },
+    to: { component: PlantComponent; port: Port },
+    route?: Point[],
+    suggestedLength?: number
+  ): void {
+    connectionDialog.show(
+      from.component,
+      to.component,
+      from.port,
+      to.port,
+      (config: ConnectionConfig | null) => {
+        if (config) {
+          // Create the connection
+          let success: boolean;
+          if (config.createPipe) {
+            success = constructionManager.createConnectionWithPipe(
+              config.fromPort.id,
+              config.toPort.id,
+              config.flowArea,
+              config.length,
+              config.fromElevation,
+              config.toElevation,
+              config.pressureRating,
+              route
+            );
+          } else {
+            success = constructionManager.createConnection(
+              config.fromPort.id,
+              config.toPort.id,
+              config.fromElevation,
+              config.toElevation,
+              config.flowArea,
+              config.length,
+              undefined,
+              undefined,
+              route
+            );
+          }
+
+          if (success) {
+            showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
+          } else {
+            showNotification('Failed to create connection', 'error');
+          }
+        }
+
+        // Reset connection state
+        connectingFrom = null;
+        plantCanvas.setHighlightedPort(null, null); // Clear highlight
+        if (connectionStatus) {
+          connectionStatus.textContent = 'Select first component...';
+        }
+      },
+      suggestedLength !== undefined ? { suggestedLength } : undefined
+    );
+  }
 
   // Helper to set construction sub-mode
   function setConstructionSubMode(mode: 'place' | 'connect' | 'move') {
