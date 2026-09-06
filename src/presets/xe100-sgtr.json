@@ -1981,5 +1981,38 @@
       "length": 8,
       "resistanceCoeff": 8
     }
-  ]
+  ],
+  "scenario": {
+    "description": "Turbine trip at t=400 s bottles the boiler toward the dump setpoint, then at t=550 s an SG tube ruptures: 165-bar steam into 60-bar helium, carried to the hot graphite where it gasifies to H2 and CO.",
+    "events": [
+      {
+        "time": 400,
+        "message": "Turbine tripped - boiler bottling up",
+        "actions": [
+          {
+            "kind": "controller",
+            "id": "ctl-msp-1",
+            "mode": "manual",
+            "manualOutput": 0.02
+          },
+          {
+            "kind": "turbine-governor",
+            "id": "turbine-1",
+            "value": 0.02
+          }
+        ]
+      },
+      {
+        "time": 550,
+        "message": "SG tube ruptured (full 3e-4 m2 double-ended)",
+        "actions": [
+          {
+            "kind": "valve",
+            "id": "val-leak-1",
+            "position": 1
+          }
+        ]
+      }
+    ]
+  }
 }

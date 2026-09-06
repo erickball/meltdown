@@ -92,7 +92,8 @@ export type GameEventType =
   | 'falling-behind'
   | 'auto-slowdown'
   | 'simulation-error'
-  | 'component-burst';
+  | 'component-burst'
+  | 'scenario';
 
 export interface GameEvent {
   type: GameEventType;

@@ -1,3 +1,4 @@
+import { initScenarioState } from './scenario';
 /**
  * Simulation State Factory
  *
@@ -1756,6 +1757,9 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
       }
     }
   }
+
+  // Timed accident sequence, if the preset ships one
+  state.scenario = initScenarioState(plantState.scenario);
 
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 

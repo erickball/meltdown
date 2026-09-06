@@ -1981,5 +1981,62 @@
       "length": 8,
       "resistanceCoeff": 8
     }
-  ]
+  ],
+  "scenario": {
+    "description": "Station blackout at t=400 s: circulator, feed and condensate pumps trip, turbine shut, no scram. The pebble bed rides it out on temperature feedback and the reflector-to-cavity heat path alone.",
+    "events": [
+      {
+        "time": 400,
+        "message": "Station blackout - circulator, feed and condensate pumps tripped, turbine shut, no scram",
+        "actions": [
+          {
+            "kind": "pump",
+            "id": "pump-1",
+            "running": false,
+            "speed": 0
+          },
+          {
+            "kind": "pump",
+            "id": "fw-pump-1",
+            "running": false,
+            "speed": 0
+          },
+          {
+            "kind": "pump",
+            "id": "cond-pump-1",
+            "running": false,
+            "speed": 0
+          },
+          {
+            "kind": "controller",
+            "id": "ctl-fw-1",
+            "mode": "manual",
+            "manualOutput": 0
+          },
+          {
+            "kind": "controller",
+            "id": "ctl-msp-1",
+            "mode": "manual",
+            "manualOutput": 0.02
+          },
+          {
+            "kind": "turbine-governor",
+            "id": "turbine-1",
+            "value": 0.02
+          },
+          {
+            "kind": "valve",
+            "id": "val-bleed-1",
+            "position": 0
+          },
+          {
+            "kind": "controller",
+            "id": "ctl-fwh-1",
+            "mode": "manual",
+            "manualOutput": 0
+          }
+        ]
+      }
+    ]
+  }
 }

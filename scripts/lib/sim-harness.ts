@@ -122,6 +122,7 @@ export function buildSimFromFile(
   const plantState: PlantState = {
     components: new Map<string, PlantComponent>(data.components),
     connections: data.connections ?? [],
+    scenario: data.scenario,
   };
   setSimulationRandomSeed(0);
   return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
@@ -198,6 +199,10 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   if (closureEnv !== undefined) {
     config = { ...config, closureErrorControl: closureEnv === '1' };
   }
+  // A/B overrides for the two inventory guards (THROUGHPUT_GUARD=0 /
+  // NETMASS_GUARD=0 disable; defaults on).
+  if (process.env.THROUGHPUT_GUARD !== undefined) config = { ...config, throughputGuard: process.env.THROUGHPUT_GUARD === '1' };
+  if (process.env.NETMASS_GUARD !== undefined) config = { ...config, netMassGuard: process.env.NETMASS_GUARD === '1' };
   const solver = new RK45Solver(config);
   // OTSG must run FIRST: it writes each moving-boundary node's sectioned
   // evaluation cache (draw enthalpies), which FlowRateOperator consults in

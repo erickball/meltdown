@@ -43,6 +43,7 @@ export function serializeSimulationState(state: SimulationState): unknown {
     burstStates: s.burstStates ? Array.from(s.burstStates.entries()) : undefined,
     // transient, consumed each step - not worth persisting
     pendingEvents: undefined,
+    scenario: s.scenario ? { events: s.scenario.events, fired: s.scenario.fired } : undefined,
   };
 }
 
@@ -74,6 +75,7 @@ export function deserializeSimulationState(data: Record<string, unknown>): Simul
     liquidBasePressures: d.liquidBasePressures ? new Map(d.liquidBasePressures) : undefined,
     burstStates: d.burstStates ? new Map(d.burstStates) : undefined,
     pendingEvents: [],
+    scenario: d.scenario ? { events: (d.scenario as any).events, fired: (d.scenario as any).fired } : undefined,
   } as unknown as SimulationState;
   delete (state as unknown as Record<string, unknown>).version;
   return state;

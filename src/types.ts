@@ -1,3 +1,4 @@
+import type { ScenarioSpec } from './simulation/scenario-types';
 // Physical units (all SI)
 // Temperature: Kelvin (display as Celsius)
 // Pressure: Pascals
@@ -552,6 +553,9 @@ export type PlantComponent =
 export interface PlantState {
   components: Map<string, PlantComponent>;
   connections: Connection[];
+  // Optional timed accident sequence shipped with a preset (see
+  // simulation/scenario-types.ts); fired automatically while the plant runs.
+  scenario?: ScenarioSpec;
   simTime: number;
   simSpeed: number;
   isPaused: boolean;

@@ -35,7 +35,7 @@ function node(state: SimulationState, id: string) {
 }
 
 function line(state: SimulationState) {
-  const feed = conn(state, 'flow-fw-pump-1-fwh-1');
+  const feed = conn(state, 'flow-fw-pump-1-val-fpcv-1');
   // Both bundles hang off the same header - sum them, and report the SPLIT,
   // because two parallel boiling channels swapping flow is its own failure.
   const toSgA = conn(state, 'flow-val-fwcv-1-hx-1');

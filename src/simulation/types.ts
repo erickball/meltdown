@@ -1,3 +1,4 @@
+import type { ScenarioEvent } from './scenario-types';
 /**
  * Simulation State Types
  *
@@ -686,6 +687,9 @@ export interface SimulationState {
 
   // Pending events for GameLoop to emit (set by constraint operators like BurstCheckOperator)
   pendingEvents?: Array<{ type: string; message: string; data?: Record<string, unknown> }>;
+  // Timed accident sequence from the preset (see scenario-types.ts) and how
+  // many of its events have fired. Fired by fireDueScenarioEvents.
+  scenario?: { events: ScenarioEvent[]; fired: number };
 }
 
 export interface ComponentStates {

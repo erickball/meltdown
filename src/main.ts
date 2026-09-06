@@ -5,6 +5,8 @@ import pwrPresetData from './presets/pwr.json';
 import bwrPresetData from './presets/bwr.json';
 import htgrPresetData from './presets/htgr.json';
 import xe100PresetData from './presets/xe100.json';
+import xe100SboPresetData from './presets/xe100-sbo.json';
+import xe100SgtrPresetData from './presets/xe100-sgtr.json';
 import twoLoopPresetData from './presets/two-loop.json';
 import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
@@ -426,6 +428,9 @@ function init() {
     } else if (event.type === 'component-burst') {
       // LOCA - component rupture event: hold the banner 30 s unless dismissed
       showNotification(event.message, 'error', 30000);
+    } else if (event.type === 'scenario') {
+      // A preset's scripted accident sequence just acted on the plant
+      showNotification('Scenario: ' + event.message, 'warning', 15000);
     } else if (event.type === 'simulation-error') {
       // Show error dialog for simulation errors
       showErrorDialog('Simulation Error', event.message);
@@ -1814,6 +1819,7 @@ function init() {
     return {
       components: Array.from(state.components.entries()),
       connections: state.connections,
+      ...(state.scenario ? { scenario: state.scenario } : {}),
     };
   }
 
@@ -1833,6 +1839,10 @@ function init() {
     if (data.connections) {
       plantState.connections = data.connections;
     }
+
+    // Timed accident sequence, if the preset ships one (a plant without one
+    // must not inherit the previous preset's)
+    plantState.scenario = data.scenario ?? undefined;
 
     // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
     migrateReactorVessels(plantState);
@@ -2281,6 +2291,21 @@ function init() {
           'moving phase boundaries (water in the tubes - an SG tube leak pushes steam INTO the ' +
           'primary, where hot graphite gasifies it to H₂ and CO). Walk-away safe: trip the ' +
           'circulator and watch decay heat leave through the reflector.',
+      },
+      {
+        label: 'Xe-100 Station Blackout', data: xe100SboPresetData,
+        tooltip: 'The Xe-100 with a scripted station blackout at t = 400 s: circulator, feed and ' +
+          'condensate pumps trip, turbine shut, no scram. Nothing is left but temperature ' +
+          'feedback and the reflector-to-cavity heat path - watch fission power die on its own ' +
+          'and decay heat soak into the graphite. The event fires automatically; a notification ' +
+          'marks it.',
+      },
+      {
+        label: 'Xe-100 SG Tube Rupture', data: xe100SgtrPresetData,
+        tooltip: 'The Xe-100 with a scripted turbine trip at t = 400 s (the boiler bottles up ' +
+          'toward the dump setpoint) followed by an SG tube rupture at t = 550 s: 165-bar steam ' +
+          'into 60-bar helium, carried to the hot graphite where it gasifies to H₂ and CO. ' +
+          'Both events fire automatically; notifications mark them.',
       },
       {
         label: 'Two-Loop PWR', data: twoLoopPresetData,

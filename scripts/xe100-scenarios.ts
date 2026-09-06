@@ -31,11 +31,13 @@ import type { SimulationState } from '../src/simulation/types';
 import { getGraphiteOxidationDiagnostics } from '../src/simulation/operators/graphite-oxidation';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// PRESET=<path> runs the scenarios against another preset file (A/B of a
-// geometry or preset change under the same fault sequence).
-const PRESET = process.env.PRESET ?? path.join(HERE, '..', 'src', 'presets', 'xe100.json');
-
 const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'sgtr';
+// The fault sequences live in the scenario presets (gen-xe100.ts writes them;
+// src/simulation/scenario-types.ts describes them) and fire from inside the
+// solver, so this script only drives time and reports. PRESET=<path> runs a
+// different preset file under its own sequence.
+const PRESET = process.env.PRESET ??
+  path.join(HERE, '..', 'src', 'presets', scenario === 'sgtr' ? 'xe100-sgtr.json' : 'xe100-sbo.json');
 const seconds = parseFloat(process.argv[3] ?? '1800');
 const SETTLE = 400; // s to steady state before the fault
 
@@ -47,6 +49,9 @@ function advance(secs: number, dt = 0.05) {
   for (let i = 0; i < ticks; i++) {
     const r = sim.solver.advance(sim.state, dt);
     sim.state = r.state;
+    for (const ev of sim.state.pendingEvents ?? []) {
+      if (ev.type === 'scenario') console.log(`--- ${ev.message} ---`);
+    }
     sim.state.pendingEvents = [];
     const used = r.metrics?.minDtUsed;
     if (Number.isFinite(used)) minDt = Math.min(minDt, used);
@@ -125,62 +130,12 @@ advance(SETTLE);
 header();
 line();
 
-// --- Inject the fault -------------------------------------------------------
-if (scenario === 'lofc') {
-  // Loss of ALL forced cooling, which is the design-basis event this plant is
-  // actually built around - not just the helium circulator. A station
-  // blackout takes the feed pumps and the condensate pumps with it and shuts
-  // the turbine, so the secondary is gone within seconds too. Tripping only
-  // the circulator leaves a live feed train chasing a boiler that has stopped
-  // boiling, which is neither the real sequence nor a stable one.
-  //
-  // What is left is the passive chain and nothing else: fuel -> graphite ->
-  // reflector -> radiation -> vessel wall -> radiation -> cavity cooling
-  // panels -> thermosyphon -> tank. Every link runs on temperature alone.
-  for (const id of ['pump-1', 'fw-pump-1', 'cond-pump-1']) {
-    const p = st().components.pumps.get(id);
-    if (!p) throw new Error(`${id} not found`);
-    p.running = false;
-    p.speed = 0;
-  }
-  // Feed controller off with the pump it drives, or it winds up commanding a
-  // dead machine and slams the speed back the moment anything is restored.
-  const feedCtl = st().components.controllers?.get('ctl-fw-1');
-  if (feedCtl) { (feedCtl as any).mode = 'manual'; (feedCtl as any).manualOutput = 0; }
-  const govCtl = st().components.controllers?.get('ctl-msp-1');
-  if (govCtl) { (govCtl as any).mode = 'manual'; (govCtl as any).manualOutput = 0.02; }
-  const turbNode = st().flowNodes.get('turbine-1');
-  if (turbNode) turbNode.governorValve = 0.02;
-  // The extraction line is a 165-bar tap into a heater with no drain pumps
-  // left; shut it with the plant.
-  const bleed = st().components.valves.get('val-bleed-1');
-  if (bleed) bleed.position = 0;
-  const bleedCtl = st().components.controllers?.get('ctl-fwh-1');
-  if (bleedCtl) { (bleedCtl as any).mode = 'manual'; (bleedCtl as any).manualOutput = 0; }
-  console.log(`--- Station blackout at t=${st().time.toFixed(0)} s: ` +
-    `circulator, feed and condensate pumps tripped, turbine shut, no scram ---`);
-} else {
-  // Turbine trip first: the bottled secondary pressurizes toward the steam
-  // dump setpoint, so the tube sees full boiler pressure against 58-bar
-  // helium when it lets go. (At the plant's settled state the tube side runs
-  // NEAR primary pressure, so an at-power rupture would mostly just swap a
-  // little gas - trip-then-rupture is the sequence that drives real water
-  // ingress, and turbine trip + SGTR is a bona fide compound accident.)
-  const gov = st().components.controllers?.get
-    ? st().components.controllers.get('ctl-msp-1')
-    : undefined;
-  if (gov) { (gov as any).mode = 'manual'; (gov as any).manualOutput = 0.02; }
-  const turbNode = st().flowNodes.get('turbine-1');
-  if (turbNode) turbNode.governorValve = 0.02;
-  console.log(`--- Turbine tripped at t=${st().time.toFixed(0)} s; boiler bottling up ---`);
-  advance(150);
-  line();
-  const v = st().components.valves.get('val-leak-1');
-  if (!v) throw new Error('val-leak-1 not found');
-  v.position = 1.0;
-  console.log(`--- SG tube ruptured at t=${st().time.toFixed(0)} s (full 3e-4 m2 double-ended) ---`);
-}
-
+// --- The fault ---------------------------------------------------------------
+// Fired by the preset's scenario events as time passes (see scenario-types);
+// the solver reports each one through pendingEvents, echoed here.
+const events = sim.state.scenario?.events ?? [];
+if (events.length === 0) throw new Error(`${PRESET} carries no scenario events`);
+for (const ev of events) console.log(`  scheduled t=${ev.time} s: ${ev.message}`);
 const step = Math.max(20, Math.round(seconds / 25));
 for (let t = 0; t < seconds; t += step) {
   advance(step);

@@ -479,6 +479,23 @@ add('cond-pump-1', {
   nqa1: false, pressureRating: 40,
 });
 
+// Pump-discharge check valves. A windmilling centrifugal pump does not block
+// reverse flow (the impeller block applies only while it runs), and without
+// these a station blackout let the 170 C feed line flash and blow ~560 kg/s
+// BACKWARDS through both tripped pumps into the condenser, emptying the
+// heater tube and both pump bodies in six seconds. Every real feed train has
+// them, one per pump discharge. Volume is the discharge spool, not a bare
+// disc: sub-litre valve nodes on flashing paths diverge the solver.
+add('val-cpcv-1', {
+  type: 'valve', label: 'Condensate Pump Discharge Check',
+  valveType: 'check',
+  position: { x: 63, y: 92 }, rotation: 0, elevation: 0,
+  diameter: 0.25, opening: 1, crackingPressure: 10000, volume: 0.3,
+  ports: ports([['val-cpcv-1-in', 0.1, 0, 'in'], ['val-cpcv-1-out', -0.1, 0, 'out']]),
+  fluid: { temperature: 312, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },
+  nqa1: false, pressureRating: 40,
+});
+
 add('fw-pump-1', {
   type: 'pump', label: 'Feedwater Pump',
   position: { x: 60, y: 92 }, rotation: 0, elevation: 0,
@@ -531,6 +548,18 @@ add('fw-pump-1', {
   volume: 2.5,
   ports: ports([['fw-pump-1-inlet', 0.3, 0, 'in'], ['fw-pump-1-outlet', -0.3, 0, 'out']]),
   fluid: { temperature: T_FEED, pressure: 2e6, phase: 'liquid', quality: 0, flowRate: 0 },
+  nqa1: false, pressureRating: 250,
+});
+
+// Feed pump discharge check (see val-cpcv-1). Sits on the ladder at the
+// pump's delivery pressure, ~188 bar at design flow.
+add('val-fpcv-1', {
+  type: 'valve', label: 'Feed Pump Discharge Check',
+  valveType: 'check',
+  position: { x: 60, y: 95.5 }, rotation: 90, elevation: 0,
+  diameter: 0.2, opening: 1, crackingPressure: 10000, volume: 0.3,
+  ports: ports([['val-fpcv-1-in', 0.1, 0, 'in'], ['val-fpcv-1-out', -0.1, 0, 'out']]),
+  fluid: { temperature: T_FEED, pressure: 188e5, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: false, pressureRating: 250,
 });
 
@@ -829,7 +858,7 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 // what looked reverse-signed was merely glacial. The pump curve's droop is
 // still underneath as the fallback if the loop saturates.
 controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
-  sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-fwh-1' },
+  sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
   setpoint: {
     op: 'sum',
     inputs: [
@@ -949,11 +978,17 @@ connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - 25, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
 connect('condenser-1', 'condenser-1-bottom', 'cond-pump-1', 'cond-pump-1-inlet',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0.1, toElevation: 0, flowArea: 0.2, length: 4 });
-connect('cond-pump-1', 'cond-pump-1-outlet', 'fw-pump-1', 'fw-pump-1-inlet',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4 });
-// Feed train: pump -> HP heater tubes -> check valve -> SG bundles
-connect('fw-pump-1', 'fw-pump-1-outlet', 'fwh-1', 'fwh-1-tube-1',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4 });
+// Condensate pump -> discharge check -> feed pump (the old single 4 m run,
+// split around the check valve)
+connect('cond-pump-1', 'cond-pump-1-outlet', 'val-cpcv-1', 'val-cpcv-1-in',
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
+connect('val-cpcv-1', 'val-cpcv-1-out', 'fw-pump-1', 'fw-pump-1-inlet',
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
+// Feed train: pump -> discharge check -> HP heater tubes -> check valve -> SG bundles
+connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fpcv-1', 'val-fpcv-1-in',
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
+connect('val-fpcv-1', 'val-fpcv-1-out', 'fwh-1', 'fwh-1-tube-1',
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
 
 // Steam dump: off the main steam line, discharging into the condenser
 // Dump capacity ~40 kg/s at the setpoint (choked) - about 70% of full
@@ -1058,3 +1093,70 @@ const out = { components, connections };
 const target = path.join(HERE, '..', 'src', 'presets', 'xe100.json');
 fs.writeFileSync(target, JSON.stringify(out, null, 2) + '\n');
 console.log(`Wrote ${target}: ${components.length} components, ${connections.length} connections`);
+
+// ---------------------------------------------------------------------------
+// Scenario presets: the same plant with a timed accident sequence attached
+// (src/simulation/scenario-types.ts). The events act on the plant exactly as
+// an operator would, after a settling period from the design-point start.
+// scripts/xe100-scenarios.ts runs these same files headless.
+// ---------------------------------------------------------------------------
+const SETTLE = 400; // s at the design point before the fault
+
+const stationBlackout = {
+  description: 'Station blackout at t=400 s: circulator, feed and condensate pumps trip, ' +
+    'turbine shut, no scram. The pebble bed rides it out on temperature feedback and ' +
+    'the reflector-to-cavity heat path alone.',
+  events: [{
+    time: SETTLE,
+    message: 'Station blackout - circulator, feed and condensate pumps tripped, turbine shut, no scram',
+    actions: [
+      // Loss of ALL forced cooling, the design-basis event this plant is
+      // built around - not just the helium circulator. A station blackout
+      // takes the feed and condensate pumps with it and shuts the turbine.
+      { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+      { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
+      { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
+      // Feed controller off with the pump it drives, or it winds up commanding
+      // a dead machine and slams the speed back the moment anything returns.
+      { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },
+      // Governor shut with the turbine
+      { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0.02 },
+      { kind: 'turbine-governor', id: 'turbine-1', value: 0.02 },
+      // The extraction line is a 165-bar tap into a heater with no drain
+      // pumps left; shut it with the plant.
+      { kind: 'valve', id: 'val-bleed-1', position: 0 },
+      { kind: 'controller', id: 'ctl-fwh-1', mode: 'manual', manualOutput: 0 },
+    ],
+  }],
+};
+
+const tubeRupture = {
+  description: 'Turbine trip at t=400 s bottles the boiler toward the dump setpoint, then at ' +
+    't=550 s an SG tube ruptures: 165-bar steam into 60-bar helium, carried to the hot ' +
+    'graphite where it gasifies to H2 and CO.',
+  events: [
+    {
+      time: SETTLE,
+      message: 'Turbine tripped - boiler bottling up',
+      // Trip first: at the settled state the tube side runs NEAR primary
+      // pressure, so an at-power rupture would mostly just swap a little
+      // gas. Trip-then-rupture is the sequence that drives real water
+      // ingress, and it is a bona fide compound accident.
+      actions: [
+        { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0.02 },
+        { kind: 'turbine-governor', id: 'turbine-1', value: 0.02 },
+      ],
+    },
+    {
+      time: SETTLE + 150,
+      message: 'SG tube ruptured (full 3e-4 m2 double-ended)',
+      actions: [{ kind: 'valve', id: 'val-leak-1', position: 1.0 }],
+    },
+  ],
+};
+
+for (const [file, scenario] of [['xe100-sbo.json', stationBlackout], ['xe100-sgtr.json', tubeRupture]] as const) {
+  const t = path.join(HERE, '..', 'src', 'presets', file);
+  fs.writeFileSync(t, JSON.stringify({ ...out, scenario }, null, 2) + '\n');
+  console.log(`Wrote ${t}: ${scenario.events.length} scenario event(s)`);
+}

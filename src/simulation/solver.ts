@@ -1213,6 +1213,8 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     environmentalRelease: state.environmentalRelease ? { ...state.environmentalRelease } : undefined,
     // Clone pending events (shallow clone is fine - they're consumed after processing)
     pendingEvents: state.pendingEvents ? [...state.pendingEvents] : undefined,
+    // Scenario progress is state (events are immutable, the counter moves)
+    scenario: state.scenario ? { events: state.scenario.events, fired: state.scenario.fired } : undefined,
   };
 
   addCloneTime(performance.now() - t0);

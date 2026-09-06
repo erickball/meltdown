@@ -1,3 +1,4 @@
+import { fireDueScenarioEvents } from './scenario';
 /**
  * RK45 Solver with Embedded Error Estimation
  *
@@ -1015,7 +1016,10 @@ export function checkStateSanity(
   newState: SimulationState,
   dt: number,
   implicitFlows = false,
-  quietPressureToleranceScale = 1
+  quietPressureToleranceScale = 1,
+  // A/B knobs (see RK45Config.throughputGuard / netMassGuard)
+  throughputGuard = true,
+  netMassGuard = true
 ): number {
   let maxBadness = 0;
 
@@ -1135,7 +1139,7 @@ export function checkStateSanity(
     // simply tracks its donor), and it must not drag the plant's dt down.
     // The net-depletion guard below still applies.
     const throughput = nodeThroughput.get(id) || 0;
-    if (throughput > 0 && newTotalMass >= 0.1) {
+    if (throughputGuard && throughput > 0 && newTotalMass >= 0.1) {
       const massMovedThisStep = throughput * 0.5 * dt; // 0.5 because we counted both ends
       const massFraction = massMovedThisStep / newTotalMass;
       if (massFraction > 0.2) {
@@ -1150,7 +1154,7 @@ export function checkStateSanity(
     // This catches cases where inflow >> outflow or vice versa
     const massChange = newNode.fluid.mass - oldNode.fluid.mass;
     const relMassChange = Math.abs(massChange) / Math.max(1, oldNode.fluid.mass);
-    if (relMassChange > 0.5) {
+    if (netMassGuard && relMassChange > 0.5) {
       // More than 50% mass change in one step - suspicious
       const badness = relMassChange / 0.5;
       if (badness > maxBadness) lastSanityFailureReason = `${id}: relMassChange=${(relMassChange*100).toFixed(1)}% (${oldNode.fluid.mass.toFixed(2)}->${newNode.fluid.mass.toFixed(2)}kg)`;
@@ -1299,6 +1303,14 @@ export interface RK45Config {
   // CLOSURE_ERROR=1 in the script harnesses) once the OTSG's pressure
   // response to feed changes is in the solve's closure.
   closureErrorControl?: boolean;
+
+  // A/B knobs for the two inventory guards in checkStateSanity (both default
+  // on): the gross-throughput guard (20% of inventory moved per step) and
+  // the net-change guard (50% per step, 1 kg floor). THROUGHPUT_GUARD=0 /
+  // NETMASS_GUARD=0 in the script harnesses. Measured 2026-09-06 - see the
+  // design doc addendum before changing the defaults.
+  throughputGuard?: boolean;
+  netMassGuard?: boolean;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -2211,6 +2223,9 @@ export class RK45Solver {
     state: SimulationState;
     metrics: SolverMetrics;
   } {
+    // The preset's timed scenario acts on the plant between ticks, here so
+    // every harness (game loop, headless scripts) sees the same sequence.
+    fireDueScenarioEvents(state);
     const frameStart = performance.now();
 
     // Reset operator times for this frame
@@ -2355,7 +2370,8 @@ export class RK45Solver {
 
       // Check for obviously bad physics (in addition to RK45 error estimate)
       const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive(),
-        this.config.quietPressureToleranceScale ?? 1);
+        this.config.quietPressureToleranceScale ?? 1,
+        this.config.throughputGuard !== false, this.config.netMassGuard !== false);
 
       // Closure-consistency error of the implicit pressure-flow solve: what
       // the solve predicted for this step's pressures against what the EOS
@@ -2519,6 +2535,7 @@ export class RK45Solver {
     error: number;
     metrics: SolverMetrics;
   } {
+    fireDueScenarioEvents(state);
     const { newState, error, errorRates } = this.step(state, this.currentDt);
 
     // Quick sanity check BEFORE constraints to avoid crashing water properties
@@ -2596,7 +2613,8 @@ export class RK45Solver {
 
     // Check sanity and log warning if needed
     const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive(),
-      this.config.quietPressureToleranceScale ?? 1);
+      this.config.quietPressureToleranceScale ?? 1,
+      this.config.throughputGuard !== false, this.config.netMassGuard !== false);
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }
