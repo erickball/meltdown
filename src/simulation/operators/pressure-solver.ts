@@ -723,9 +723,9 @@ export class PressureSolver {
       capped: boolean;
       cappedFlow: number;
       // Check valve seated this step: flow exactly zero, no conductance.
-      // Decided on END-of-step quantities (the momentum predictor's sign,
-      // then the solved flow), never on the start-of-step driving pressure -
-      // see the seating pass after the solve.
+      // Decided on the SOLVED end-of-step flow, never on the start-of-step
+      // driving pressure or on the predictor's extrapolation - see the
+      // seating pass after the solve.
       seated: boolean;
     }
 
@@ -869,42 +869,17 @@ export class PressureSolver {
       // is ~zero without ever switching the connection out of the solve.
       const dP_nf = h.dP_pressure + h.dP_gravity + h.pumpShutoff - h.crackingPressure;
       const b = m0 + G0 * dP_nf;
-      // Check valve whose momentum cannot stay forward through this step:
-      // the disc seats. Flow exactly zero, no conductance - a seated valve
-      // leaks nothing, and a large "reverse resistance" is not the same
-      // thing (10000x the pipe's K still passed ~6 kg/s backwards under the
-      // PWR feedwater line's 42 bar reverse head, which the post-step
-      // reverse-flow rule then zeroed, leaving the solve's predicted node
-      // pressure with no mass behind it - 12,000 sanity rejections per
-      // minute). This decision is on the momentum predictor's sign, i.e.
-      // the END-of-step tendency; the old rule closed on the start-of-step
-      // driving pressure and limit-cycled against stiff liquid nodes (see
-      // the seating pass below for the other half).
-      if (h.checkValve !== undefined && b < 0) {
-        if (corrector && (iFrom >= 0 || iTo >= 0)) {
-          // Corrector mode banks the predictor's flow like every other
-          // participating connection (its transport is already in the probe).
-          banked.push({
-            flow: conn.massFlowRate,
-            hDonor: useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0,
-            donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo,
-          });
-        }
-        conn.massFlowRate = 0;
-        conn.isChoked = false;
-        conn.machNumber = 0;
-        conn.debug = {
-          flowPhase: h.flowPhase,
-          rho_flow: h.rho_flow,
-          dP_driving: h.dP_driving,
-          dP_friction: h.dP_friction,
-          dP_net: h.dP_driving + h.dP_friction,
-          dMassFlowRate: -m0 / dt,
-          isChoked: false,
-          machNumber: 0,
-        };
-        continue;
-      }
+      // A check valve is NOT seated on the predictor's sign here. That test
+      // (b = m0 + G0*(dP_nf - cracking) < 0) is an explicit extrapolation of
+      // the start-of-step pressures over the whole step, and on a short, fat
+      // line between two stiff liquid nodes (feed pump -> discharge check ->
+      // heater, G0 ~ 1e-3 kg/s/Pa) a 0.4 bar adverse difference at step start
+      // "reverses" 70 kg/s that the implicit solve would have carried forward
+      // - the valve seated, the node behind it overpressurized, and the step
+      // was rejected 1400 times a minute at 11 ms. The disc position is an
+      // outcome of the solved end-of-step balance: see the seating pass after
+      // the solve. The preload stays in dP_nf so the predictor is consistent
+      // with the physics when the valve IS open.
       const C = b >= 0
         ? h.frictionQuadForward + h.pumpQuad
         : h.frictionQuadReverse;
@@ -1083,8 +1058,10 @@ export class PressureSolver {
     // flow came out reversed seats - flow exactly zero, conductance dropped -
     // and the network is re-solved once so its neighbours see the seated
     // valve (the same one-outer-iteration treatment as choked flow above).
-    // Together with the predictor-sign test this makes the disc position an
-    // outcome of the end-of-step balance. The old start-of-step test
+    // This makes the disc position an outcome of the end-of-step balance
+    // (a valve that was seated last step enters the solve open, and is
+    // seated again here if its solved flow is still reversed - one re-solve
+    // per step while it holds). The old start-of-step test
     // (driving pressure below cracking -> hold shut, decay the flow with
     // τ=0.1 s) limit-cycled against stiff liquid nodes: the open step
     // overfilled the node past the upstream pressure, the "closed" step
