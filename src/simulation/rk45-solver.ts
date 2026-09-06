@@ -1461,6 +1461,13 @@ export class RK45Solver {
   // is the only wall-clock-influenced input, and the log pins it down).
   public onSubstepComplete?: (state: SimulationState, stepNumber: number, acceptedDt: number) => void;
 
+  // Optional callback invoked on each REJECTED step attempt, with the state
+  // the attempt started from, the candidate it produced, the dt it tried and
+  // the reason it was refused. Diagnostic only - the solver's own behaviour
+  // does not depend on it. This is what lets a probe see the pressure swings
+  // the sanity guard refuses, which never reach onSubstepComplete.
+  public onStepRejected?: (fromState: SimulationState, candidate: SimulationState, attemptedDt: number, reason: string) => void;
+
   constructor(config: Partial<RK45Config> = {}) {
     this.config = { ...DEFAULT_RK45_CONFIG, ...config };
     this.currentDt = this.config.initialDt;
@@ -2325,6 +2332,8 @@ export class RK45Solver {
         // Reject step - shrink timestep and retry
         rejectsThisFrame++;
         this.rejectedSteps++;
+        this.onStepRejected?.(currentState, constrainedState, stepDt,
+          sanityScore > 1 ? lastSanityFailureReason : (isFinite(effectiveError) ? `rk45-error ${effectiveError.toExponential(2)}` : 'nan-error'));
 
         if (sanityScore > 1) {
           const reason = lastSanityFailureReason;

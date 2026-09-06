@@ -185,6 +185,29 @@ improvements:
    re-solve). This is a Newton iteration on the real nonlinearity — no tuning
    constants — and it removed ~90 % of step rejections on the reactor presets.
 
+   *Addendum (2026-09-06): the "already liquid" case is no longer gated on
+   predicted net inflow.* The correction originally ran only for nodes whose
+   first-solve prediction c_i·δP_i·dt was positive. That gate was load-bearing
+   in the wrong direction: a liquid node just inside the blend zone (the
+   Xe-100 condensate pump body — 4.5 m³ at 40 kPa, 0.02 mL/kg on the liquid
+   side of v_f, 80 kg/s through it) is priced ~500× too soft, and on that
+   soft row the energy-coupled closure can predict net *outflow* while the
+   momentum rows deliver net inflow. The gate then skipped the correction on
+   exactly the steps that needed it; the solve admitted ~0.3 kg the liquid
+   could not hold, the EOS answered with +150–260 kPa, and the pressure guard
+   rejected the step — 97 % of all Xe-100 rejections, every one starting from
+   a node with mEdge < 0. On the liquid side, stiffness is a property of the
+   state, not of the flow direction, so the K_liq secant now applies whichever
+   way the predicted flow points (the crossing case is unchanged). Measured:
+   Xe-100 rejections 764 → 83 per 60 s and 1.65× wall speed; BWR 1799 → 349
+   per 120 s and 5.25× → 6.86×; PWR and tankburst step-for-step identical.
+   The pump body now sits at its hydrostatic 40 kPa with zero two-phase steps
+   where it previously flashed to P_sat and slammed back every ~0.6 s. The
+   tempting alternative — measuring the guard's tolerance against the adjacent
+   pump head — was tried first and rejected: it removed the same rejections
+   but left the node two-phase 57 % of the time with 2.7 bar spikes, i.e. it
+   accepted the cavitation instead of curing the solve that caused it.
+
 Other notes:
 - Shared hydraulics model lives in `operators/connection-hydraulics.ts` (one
   model, two callers: `FlowMomentumRateOperator` and `PressureSolver`).

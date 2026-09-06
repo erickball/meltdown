@@ -983,7 +983,9 @@ export class PressureSolver {
     for (let i = 0; i < n; i++) {
       const node = nodeList[i];
       const dm = c[i] * dP[i] * dt; // predicted absorbed mass this step (kg)
-      if (!(dm > 0)) continue;      // only inflow compression spikes
+      // Only liquid and two-phase nodes have a liquid branch to be stiff
+      // against (same regime split as getEffectiveBulkModulus).
+      if (node.fluid.phase !== 'liquid' && node.fluid.phase !== 'two-phase') continue;
       // NCG provides a real gas cushion - the liquid branch never applies
       const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
       if (ncgMass > 1e-6 * node.fluid.mass) continue;
@@ -1001,7 +1003,23 @@ export class PressureSolver {
       let cSecant: number | null = null;
       if (mEdge <= 0) {
         // Already liquid: the true stiffness is the full liquid bulk modulus
-        // (the dome-edge blend may have softened c_i by orders of magnitude)
+        // (the dome-edge blend may have softened c_i by orders of magnitude).
+        //
+        // This applies whichever way the predicted net flow points. It used
+        // to be gated on predicted net INFLOW, and that gate was load-bearing
+        // in the wrong direction: a liquid node sitting just inside the blend
+        // zone (a condensate pump body at 40 kPa, 0.02 mL/kg on the liquid
+        // side of v_f, with 80 kg/s passing through) is priced 500x too soft,
+        // and the energy-coupled closure on that soft row can predict net
+        // OUTFLOW while the momentum rows deliver net inflow. The gate then
+        // skipped the correction on exactly the steps that needed it, the
+        // solve admitted ~0.3 kg the liquid could not hold, and the EOS
+        // answered with a +150-260 kPa spike the step controller had to
+        // reject - 97% of all rejections on the Xe-100 preset, every one of
+        // them starting from a node with mEdge < 0. On the liquid side the
+        // stiffness is a property of the state, not of the flow direction:
+        // inflow compresses at K_liq and outflow decompresses at K_liq (until
+        // it reaches P_sat, which the step controller still resolves).
         cSecant = node.fluid.mass / (K_liq * dt);
       } else if (dm > mEdge) {
         // Crossing into liquid this step: pressure response of the true EOS
