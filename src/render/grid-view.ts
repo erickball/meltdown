@@ -11,7 +11,7 @@
  */
 import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue } from './components';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
@@ -38,6 +38,8 @@ export interface GridFrameState {
   plantState: PlantState;
   simState: SimulationState | null;
   selectedComponentId: string | null;
+  /** A pipe run the user clicked (see connectionAt). */
+  selectedConnection: Connection | null;
   hoveredComponentId: string | null;
   showPorts: boolean;
   highlightedPort: { componentId: string; portId: string } | null;
@@ -74,15 +76,12 @@ interface SpriteLayout {
   rect: PlanRect;
   zoom: number;
   centerX: number;
-  /** Screen y of the sprite's bottom edge (south footprint edge, lifted by elevation). */
+  /** Screen y of the sprite's bottom edge (the south footprint edge). */
   baseY: number;
   halfHpx: number;
   halfWpx: number;
-  lift: number;
 }
 
-/** How far (px per metre of elevation) a raised component floats above its pad. */
-const LIFT_PER_M = 0.5;
 /** Small fittings are drawn no smaller than this many tiles across, so a valve is visible. */
 const MIN_SPRITE_TILES = 0.8;
 const MIN_CLICK_TARGET_PX = 24;
@@ -206,16 +205,16 @@ export class GridView {
     const largest = Math.max(size.width, visualH);
     const spriteScale = largest > 0 && largest < MIN_SPRITE_TILES * TILE_M ? (MIN_SPRITE_TILES * TILE_M) / largest : 1;
     const zoom = this.cam.ppm * spriteScale;
-    const elevation = component.elevation ?? 0;
-    const lift = elevation * LIFT_PER_M * this.cam.ppm;
+    // Everything sits on its pad regardless of elevation (the elevation is
+    // labelled instead): a raised duct floating above the pipes that meet it
+    // reads as detached, not as high
     const south = this.worldToScreen({ x: component.position.x, y: rect.y1 });
     return {
       fp, rect, zoom,
       centerX: south.x,
-      baseY: south.y - lift,
+      baseY: south.y,
       halfHpx: (size.height / 2) * zoom,
       halfWpx: (size.width / 2) * zoom,
-      lift,
     };
   }
 
@@ -376,6 +375,31 @@ export class GridView {
    * sits exactly on the nozzle it was laid to), the free one wins, then the
    * nearer one.
    */
+  /**
+   * The connection whose drawn run is under a screen point (nearest wins).
+   * Openings between a component and its container are not drawn, so they
+   * cannot be hit.
+   */
+  connectionAt(screen: Point, plantState: PlantState): Connection | null {
+    const world = this.screenToWorld(screen);
+    let best: Connection | null = null;
+    let bestD = Infinity;
+    for (const conn of plantState.connections) {
+      const from = plantState.components.get(conn.fromComponentId);
+      const to = plantState.components.get(conn.toComponentId);
+      if (!from || !to || this.isContainmentPair(from, to)) continue;
+      const route = connectionRoute(conn, plantState);
+      if (!route || routeLength(route) < 1e-6) continue;
+      const halfWidth = Math.max(this.lineWidthForArea(conn.flowArea) / 2, 6) / this.cam.ppm;
+      const d = distanceToPolyline(world, route);
+      if (d <= halfWidth && d < bestD) {
+        bestD = d;
+        best = conn;
+      }
+    }
+    return best;
+  }
+
   portAt(screen: Point, plantState: PlantState, exclude?: string): PortHit | null {
     const r = this.portRadius() + 3;
     let best: PortHit | null = null;
@@ -481,6 +505,7 @@ export class GridView {
 
     this.renderSignalLines(ctx, f);
 
+    if (f.selectedConnection) this.renderConnectionLabel(ctx, f, f.selectedConnection);
     if (f.showPorts) this.renderPorts(ctx, f);
     if (this.routing) this.renderRouting(ctx, f);
     if (f.placementPreview && f.constructionMode) this.renderPlacementPreview(ctx, f);
@@ -491,10 +516,10 @@ export class GridView {
     ctx.fillStyle = this.art.pattern(ctx, 'ground', this.cam.ppm, origin);
     ctx.fillRect(0, 0, f.width, f.height);
 
-    // Tile lines: faint always, stronger while building
+    // Tile lines: clear while building, all but gone while the plant runs
     const ppm = this.cam.ppm;
     if (ppm >= 10) {
-      const alpha = f.constructionMode ? 0.16 : 0.07;
+      const alpha = f.constructionMode ? 0.16 : 0.02;
       const tl = this.screenToWorld({ x: 0, y: 0 });
       const br = this.screenToWorld({ x: f.width, y: f.height });
       const x0 = Math.floor(tl.x / TILE_M), x1 = Math.ceil(br.x / TILE_M);
@@ -654,23 +679,6 @@ export class GridView {
     if (L.centerX + L.halfWpx < -50 || L.centerX - L.halfWpx > f.width + 50 ||
         L.baseY < -50 || L.baseY - 2 * L.halfHpx > f.height + 50) return;
 
-    // Cast shadow of a raised component back onto its pad
-    if (L.lift > 0) {
-      ctx.fillStyle = 'rgba(0, 0, 0, 0.18)';
-      ctx.beginPath();
-      ctx.ellipse(L.centerX, L.baseY + L.lift, L.halfWpx * 0.9, Math.max(3, L.halfWpx * 0.25), 0, 0, Math.PI * 2);
-      ctx.fill();
-      // Support columns from pad to base
-      ctx.strokeStyle = 'rgba(70, 70, 70, 0.8)';
-      ctx.lineWidth = Math.max(2, this.cam.ppm * 0.08);
-      ctx.beginPath();
-      for (const t of [-0.6, 0.6]) {
-        ctx.moveTo(L.centerX + L.halfWpx * t, L.baseY + L.lift);
-        ctx.lineTo(L.centerX + L.halfWpx * t, L.baseY);
-      }
-      ctx.stroke();
-    }
-
     ctx.save();
     ctx.translate(L.centerX, L.baseY - L.halfHpx);
     const view: ViewState = { offsetX: 0, offsetY: 0, zoom: L.zoom };
@@ -678,20 +686,13 @@ export class GridView {
     renderComponent(ctx, c, view, isSelected, true, f.plantState.connections, !f.constructionMode, f.plantState);
     ctx.restore();
 
-    // Below-grade portion: shade with soil so a sunken condenser reads as buried
-    if (L.lift < 0) {
-      const groundY = L.baseY + L.lift;
-      ctx.fillStyle = 'rgba(96, 78, 52, 0.55)';
-      ctx.fillRect(L.centerX - L.halfWpx - 2, groundY, 2 * L.halfWpx + 4, L.baseY - groundY + 1);
-    }
-
     const elevation = c.elevation ?? 0;
     if (elevation !== 0) {
       ctx.font = `${Math.round(10 * readoutScale(this.cam.ppm / 50))}px monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillStyle = '#000';
-      ctx.fillText(`${elevation.toFixed(1)} m`, L.centerX, L.baseY + Math.max(0, L.lift) + 2);
+      ctx.fillText(`${elevation.toFixed(1)} m`, L.centerX, L.baseY + 2);
     }
   }
 
@@ -728,8 +729,8 @@ export class GridView {
       if (!route || routeLength(route) < 1e-6) continue;
       const fluid = f.connectionFluid(conn, from);
       const color = fluid ? getFluidColor(fluid) : '#667788';
-      const touchesSelection = f.selectedComponentId !== null &&
-        (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId);
+      const touchesSelection = conn === f.selectedConnection || (f.selectedComponentId !== null &&
+        (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId));
       this.drawPipe(ctx, route.map(p => this.worldToScreen(p)), color, this.lineWidthForArea(conn.flowArea), touchesSelection);
     }
   }
@@ -801,6 +802,70 @@ export class GridView {
       ctx.closePath();
       ctx.fill(); ctx.stroke();
     }
+    ctx.restore();
+  }
+
+  /**
+   * What a selected pipe run is: its ends, its bore and length, and while
+   * the plant runs, what is flowing through it.
+   */
+  private renderConnectionLabel(ctx: CanvasRenderingContext2D, f: GridFrameState, conn: Connection): void {
+    const { plantState, simState } = f;
+    const from = plantState.components.get(conn.fromComponentId);
+    const to = plantState.components.get(conn.toComponentId);
+    if (!from || !to) return;
+    const route = connectionRoute(conn, plantState);
+    if (!route) return;
+    const mid = pointAlongRoute(route, 0.5).point;
+    const s = this.worldToScreen(mid);
+
+    const name = (c: PlantComponent) => c.label || c.id;
+    const lines: string[] = [`${name(from)} \u2192 ${name(to)}`];
+    const bore = conn.flowArea && conn.flowArea > 0 ? Math.sqrt(4 * conn.flowArea / Math.PI) : undefined;
+    const geometry: string[] = [];
+    if (bore !== undefined) geometry.push(`\u2300 ${formatGaugeValue(bore)} m`);
+    if (conn.length !== undefined) geometry.push(`L ${formatGaugeValue(conn.length)} m`);
+    if (geometry.length > 0) lines.push(geometry.join('  \u00b7  '));
+    if (simState) {
+      const flowId = flowConnectionIdForPlantConnection(conn, plantState);
+      const flow = flowId ? simState.flowConnections.find(fc => fc.id === flowId) : undefined;
+      if (flow) {
+        const fluid = f.connectionFluid(conn, from);
+        const phase = fluid ? fluid.phase : '';
+        lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
+      }
+    } else if (f.constructionMode) {
+      lines.push('click again to edit');
+    }
+
+    ctx.save();
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    const pad = 6;
+    const lineH = 15;
+    const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + pad * 2;
+    const h = lines.length * lineH + pad * 2 - 3;
+    let x = s.x + 14;
+    let y = s.y - h / 2;
+    if (x + w > f.width - 4) x = s.x - 14 - w;
+    y = Math.max(4, Math.min(f.height - h - 4, y));
+    ctx.fillStyle = 'rgba(20, 24, 30, 0.9)';
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+    lines.forEach((l, i) => {
+      ctx.fillStyle = i === 0 ? '#fff' : '#cfd6e0';
+      ctx.font = i === 0 ? 'bold 12px sans-serif' : '12px sans-serif';
+      ctx.fillText(l, x + pad, y + pad + i * lineH);
+    });
+    // Leader from the run to the box
+    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.lineTo(x < s.x ? x + w : x, s.y);
+    ctx.stroke();
     ctx.restore();
   }
 

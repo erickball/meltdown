@@ -4791,6 +4791,20 @@ function resolveDesignPressureBar(
   return undefined;
 }
 
+/**
+ * A gauge reading to three significant figures, without trailing zeros and
+ * without exponent notation: 154.23 -> "154", 9.204 -> "9.2", 0.0517 -> "0.0517".
+ */
+export function formatGaugeValue(value: number): string {
+  if (!Number.isFinite(value)) return String(value);
+  if (value === 0) return '0';
+  const magnitude = Math.floor(Math.log10(Math.abs(value)));
+  const decimals = Math.max(0, 2 - magnitude);
+  const rounded = Number(value.toPrecision(3));
+  if (decimals === 0) return rounded.toFixed(0);
+  return rounded.toFixed(decimals).replace(/0+$/, '').replace(/\.$/, '');
+}
+
 export function renderPressureGauge(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
@@ -4992,7 +5006,7 @@ export function renderPressureGauge(
       ctx.stroke();
     }
 
-    // Draw pressure value in center - with 1 decimal place
+    // Draw pressure value in center, to three significant figures
     // Scale font size with gauge, no minimum so it scales to zero at extreme distances
     const valueFontSize = 12 * gaugeScale;
     ctx.font = `bold ${valueFontSize}px monospace`;
@@ -5001,9 +5015,10 @@ export function renderPressureGauge(
     // Draw text outline for crispness
     ctx.strokeStyle = 'rgba(20, 22, 28, 0.8)';
     ctx.lineWidth = 2 * gaugeScale;
-    ctx.strokeText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
+    const pressureText = formatGaugeValue(pressureBar);
+    ctx.strokeText(pressureText, 0, -1 * gaugeScale);
     ctx.fillStyle = '#fff';
-    ctx.fillText(`${pressureBar.toFixed(1)}`, 0, -1 * gaugeScale);
+    ctx.fillText(pressureText, 0, -1 * gaugeScale);
 
     // Draw "bar" unit below the value
     const unitFontSize = 7 * gaugeScale;
