@@ -400,3 +400,69 @@ Paired 60 s (master → this): Xe-100 as shipped 1879/83 rejections/4.41× →
 4904/349/7.95× → 4797/286/8.71×. Next ceiling on the Xe-100 is
 cv-1-inner's material Courant limit (~63 ms with the long duct), then
 neutronics' declared 120 ms.
+
+
+## Addendum: drained nodes, the inventory guards, and the bottled OTSG (2026-09-06, later)
+
+**Drained nodes.** The absolute 0.1 kg inventory floor is gone (3d53340).
+Saturated steam at condenser vacuum is ~0.035 kg/m³, so a 3 m³ feed line
+that has blown down to the condenser holds ~0.1 kg and a 0.1 m³ valve
+node holds grams: the floor declared the physically correct drained state
+invalid. Only *no* inventory is a fault now; the EOS-domain check
+(specific volume above the triple-point vapor line) is the limit.
+
+**Check valves** (a5a55de, eda6de2) are solved connections: cracking
+pressure as a forward preload, seated (flow zero, conductance dropped,
+one re-solve) only when the *solved* end-of-step flow is reversed. Not on
+the start-of-step driving pressure (limit-cycled against stiff nodes) and
+not on the predictor's sign (an explicit extrapolation that "reverses"
+70 kg/s across a short fat line on a 0.4 bar adverse difference).
+
+**The three inventory guards, measured.** `checkStateSanity` carries a
+gross-throughput guard (20% of inventory moved per step), a net-change
+guard (50% per step, 1 kg floor) and a 0.1 kg exemption from the
+throughput guard and the Courant ceiling. With A/B knobs
+(`throughputGuard`, `netMassGuard`) on the shipped plants for 60 s:
+Xe-100 1215 steps / 4 rejections and PWR 8785 / 81 with or without
+either guard; BWR 4814 / 291 vs 4802 / 298, endpoint inside its slosh
+band. On steady plants they are inert now that the closure is consistent
+and check valves do not chatter. What each one is a proxy for:
+
+- *Gross throughput* stands in for the donor-cell transport error of the
+  explicit stages. For a balanced pass-through node that error is zero
+  (the node tracks its donor at any turnover), which is why a valve should
+  never limit dt on it - and in a transient the RK45 embedded estimate
+  already sees transport error through the energy and composition rates.
+  The one thing it genuinely bounds is overdraw: frozen flows removing
+  more than a node holds within a step.
+- *Net change* stands in for the frozen-flow inconsistency the RK45 error
+  is blind to (linear mass evolution has zero embedded error). That is
+  exactly what `measureClosureError` now quantifies from the network's
+  own response.
+- The *0.1 kg exemption* stands in for "a tiny node's relative errors are
+  meaningless when it is a pass-through" - the same fact as the first
+  bullet, from the other side.
+
+So the principled replacement is not smarter thresholds: bound overdraw
+by inventory (a node may not lose more than it holds), let the closure
+error carry the frozen-flow term, and drop the rest. That is gated on
+`closureErrorControl`, which is gated on the OTSG below. Until then the
+guards stay, defaults on, and cost nothing on the shipped plants.
+
+**The bottled OTSG is a ledger problem, not a dry-out regime.** Traced on
+the station blackout (OTSG_TRACE): after the trip the partition keeps its
+~350 kg economizer slug on the m1 mass ledger and prices it at the profile
+mean u1(P). Every pressure swing reprices 350 kg by Δu_f(P), and the
+difference lands on whatever is left - a 10-20 kg superheat section - whose
+temperature then reads 1100-1150 °C against a 500 °C wall (Q3 = −143 MW,
+steam heating the metal), and the boiling section flickers between 0 and
+30 kg with 84-98 MW bursts as its two-phase volume claims half the tube at
+50 bar. The ring is 50↔180 bar at the second scale, and it is what makes
+the blackout crawl at ms steps. Repricing is right for a *falling*
+pressure (the slug flashes) and wrong for a rising one (a subcooled slug
+does not absorb energy from nowhere). The fix is an energy state for the
+slug alongside its mass, with flash as an explicit transfer when u1 exceeds
+u_f(P), plus a wetted-area bound on the boiling section's coefficient. The
+earlier energy-only ledger failed for a different reason (mass derived from
+energy overran the tube); this is both integrated. Not done here - it is
+the OTSG-partition rework, and it wants its own design pass.
