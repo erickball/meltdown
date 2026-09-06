@@ -333,3 +333,70 @@ flipping sign on 86% of accepted steps at avg dt 17.5 ms to ~±1 kg/s at the
 50 ms tick cap; melt-test early trajectory matches the explicit reference
 family (monotone core dryout); all plant-scenario, flow-physics, and unit
 suites green in both ENERGY_COMPLIANCE and IMPLICIT_MOMENTUM A/B states.
+
+
+## Addendum: the "acoustic ceiling" that was a closure bug (2026-09-06)
+
+Lengthening the Xe-100 hot duct (correct geometry, parked on
+`worktree-cv-inner-length`) lifted the cv-1-inner material-Courant ceiling
+from ~36 to ~63 ms, and the plant promptly surged: primary flows 0–160 kg/s,
+circulator stalling, ±3 bar between adjacent nodes. The first reading was
+that the loop's Helmholtz mode (probe spectrum: ~15 Hz, cold-leg side
+sloshing through the core) needed ~3 explicit steps per period and a
+"declared acoustic-resolution ceiling" analogous to `materialCourantDt`.
+That reading was wrong, and the ceiling was never built:
+
+1. **The surge was period-2 at any dt above ~45 ms**, i.e. an inconsistent
+   closure, not an under-resolved wave. `scripts/probe-loop-mode.ts`
+   printed the solve's predicted δP against the realized ΔP per node: every
+   gas node came in ~28% low, the ratio of helium's γ (5/3) to the fixed
+   steam γ = 1.3 in `getEffectiveBulkModulus`. The energy slope β beside it
+   already used the real mixture heat capacity, so one closure held two
+   opinions about the gas. Now `K = P·(1 + P·V/(T·C_th))`, the isentropic
+   modulus of the actual steam+NCG mixture from the same C_th. With it the
+   same run is dead steady at 50 ms and predicted/realized agree to the kPa.
+   A consistent backward-Euler closure damps every acoustic mode at every
+   dt; there is nothing to resolve.
+
+2. **Check valves seat on end-of-step quantities.** The next thing the
+   per-step probe showed was ±3–6 bar and ±15 kg/s every step on the Xe-100
+   feedwater train at every dt, predicted exactly by the solve: the check
+   valve was held shut on the start-of-step driving pressure with its flow
+   decaying at τ = 0.1 s (56 kg/s "through a closed valve"), and against a
+   stiff liquid node that is a limit cycle. Check valves are now solved
+   connections: cracking pressure as a forward preload on the momentum
+   predictor, seated (flow zero, conductance dropped) when the predictor's
+   momentum cannot stay forward, and an open valve whose solved flow comes
+   out reversed is seated with one re-solve (the choke-cap outer
+   iteration). A finite "reverse resistance" instead of seating leaked
+   ~6 kg/s backwards under the PWR feed line's 42 bar reverse head.
+
+3. **Closure-consistency error** (`PressureSolver.measureClosureError`,
+   `RK45Solver.closureErrorNorm`). What a consistent solve still cannot see:
+   nothing in the RK45 error estimate looks at the once-per-step solve
+   (momentum has no rates in implicit mode, balanced throughput cancels).
+   With `r = ΔP_realized − δP_predicted`, the flows that would actually
+   have moved are the network's linear response `M·δq = c∘r` (one
+   elimination of the stored matrix), and the per-node inventory error
+   `c·(r − δq)·dt` relative to inventory has the form of the RK45 norm's
+   mass term, so it can join step control at relTol with no tolerance of
+   its own. The raw `c·r` mismatch is not usable — it over-charges nodes
+   whose pressure the mass compliance does not own (OTSG partitions,
+   sliver valve nodes) at 100× relTol. Measured: catches the fixed-γ bug at
+   60× relTol; silent on the PWR (100× below) and BWR (20× below) at steady
+   state; on the Xe-100 it is fed by a real gap the solve cannot close yet —
+   the OTSG tube pressure drops ~1.5 bar in the step after each
+   feedwater-controller scan, which the compliance model does not predict,
+   and the response on the sliver steam nodes off the tube (val-msv-1,
+   val-leak-1) is ~1% of their inventory per step. Resolving that honestly
+   costs 6.4× → 1.9× realtime, so control ships **off**
+   (`closureErrorControl`, `CLOSURE_ERROR=1` in the harnesses); the error is
+   always computed and reported. Flip it on once the OTSG's response to feed
+   changes is in the closure.
+
+Paired 60 s (master → this): Xe-100 as shipped 1879/83 rejections/4.41× →
+1804/3/4.51× (the 33 ms Courant ceiling still binds); long duct
+1638/221/3.95× → 1207/3/5.55×; PWR 8783/81/3.32× → 8790/84/3.29×; BWR
+4904/349/7.95× → 4797/286/8.71×. Next ceiling on the Xe-100 is
+cv-1-inner's material Courant limit (~63 ms with the long duct), then
+neutronics' declared 120 ms.
