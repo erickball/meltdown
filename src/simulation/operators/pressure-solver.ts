@@ -151,6 +151,8 @@ export class PressureSolver {
   getLastPredictedSwing(): number {
     return this.lastPredictedSwing;
   }
+  // Per-node predicted δP (Pa) of the most recent predictor solve. Diagnostic.
+  readonly lastPredictedDP = new Map<string, number>();
 
   /**
    * Correct connection flow rates toward mass balance, weighted by node stiffness.
@@ -1093,6 +1095,10 @@ export class PressureSolver {
         if (s > maxSwing) maxSwing = s;
       }
       this.lastPredictedSwing = maxSwing;
+      // Diagnostic: the solve's predicted end-of-step pressure change per
+      // node, so a probe can compare it with what the EOS actually produced.
+      this.lastPredictedDP.clear();
+      for (let i = 0; i < n; i++) this.lastPredictedDP.set(nodeList[i].id, dP[i]);
     }
 
     this.lastStatus = {
@@ -1123,12 +1129,31 @@ export class PressureSolver {
     const T_K = node.fluid.temperature;
     const P = node.fluid.pressure;
 
-    // Heat capacity ratio for steam (used for vapor)
-    const gamma = 1.3;
-
     if (phase !== 'liquid' && phase !== 'two-phase') {
-      // Vapor (including NCG-dominated nodes): ideal gas K = gamma*P
-      return gamma * P;
+      // Vapor / gas space: isentropic ideal-gas bulk modulus K = γ·P of the
+      // ACTUAL mixture (steam + NCG), not a fixed steam γ. With the total
+      // constant-volume heat capacity C_th = m_w·cv_w + Σn·Cv (the same
+      // quantity energyComplianceSlope's β = P/(T·C_th) is built on) and
+      // P·V = (m_w·R_w + n·R)·T, the mixture's γ = C_p/C_v = 1 + P·V/(T·C_th),
+      // so K = P·(1 + P·V/(T·C_th)) - one expression for pure steam
+      // (γ ≈ 1.3), helium (5/3), air (1.4) and any blend, consistent with β.
+      // Measured with a hard-coded 1.3 on the Xe-100 helium loop: the solve
+      // under-predicted every node's pressure change by the ratio
+      // (5/3)/1.3 ≈ 1.28, and at 50 ms steps that mismatch fed a step-scale
+      // flip-flop of the whole loop (±100 kg/s, ±3 bar) that the backward-
+      // Euler solve would damp if its closure matched the EOS.
+      const V = node.volume;
+      const m_w = node.fluid.mass;
+      const ncg = node.fluid.ncg;
+      const nMoles = ncg ? ncgTotalMoles(ncg) : 0;
+      const C_th = m_w * vaporCv(T_K) + (nMoles > 0 ? nMoles * ncgMixtureCv(ncg!) : 0);
+      if (!(C_th > 0) || !(T_K > 0)) {
+        throw new Error(
+          `[PressureSolver] Cannot form a gas bulk modulus for '${node.id}': ` +
+          `C_th=${C_th} J/K (m_w=${m_w} kg, n_ncg=${nMoles} mol), T=${T_K} K, P=${P} Pa`
+        );
+      }
+      return P * (1 + (P * V) / (T_K * C_th));
     }
 
     // Liquid and two-phase share one continuous treatment across the liquid
