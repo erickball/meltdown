@@ -466,3 +466,34 @@ u_f(P), plus a wetted-area bound on the boiling section's coefficient. The
 earlier energy-only ledger failed for a different reason (mass derived from
 energy overran the tube); this is both integrated. Not done here - it is
 the OTSG-partition rework, and it wants its own design pass.
+
+
+### Done (same day): the economizer boundary moves with pressure
+
+The ledger stays MASS. What changed is what happens to it across a
+pressure change: instead of repricing the fixed mass at the new profile
+mean (energy from nowhere on a rise, and the two earlier single-ledger
+variants each wrong in one direction), the boundary itself moves relative
+to the saturation the ledger was last reconciled to (`node.otsg.uFRef`,
+`reconcileSlugMass` in otsg.ts): on a fall the part of the linear profile
+above the new saturation flashes out, carrying exactly its own
+profile-mean energy; on a rise the boiling-section liquid at the old
+saturation, now subcooled, joins - the amount that makes the enlarged
+profile hold the old slug's energy plus the joined mass at the old
+saturation, capped by the liquid the leftovers can give up
+(`slugJoinCap`, remainder no hotter than saturated vapor, judged with the
+slug priced at the *reference* saturation - judging it at the trial
+pressure reintroduces the repricing and sends the root find to 220 bar
+through the "leftovers cannot carry their energy" sentinel). Write-back of
+the moved slug and the new reference happens from exact partition solves
+only; the cache and tangent are re-keyed rather than re-solved.
+
+Blackout after this: tube pressure declines smoothly 162 → 86 bar over 50 s
+as the boiler blows down through the dump, the superheat section stays
+430–520 °C and below its wall, Q3 stays positive, and the run has 23
+rejections in 200 s where the ring produced hundreds at ms steps. The
+steady plant is unchanged in kind (300 s, 6000 steps, 5 rejections, 138 MW)
+but its off-design settling point moved (the tube carries 274 kg at t=400,
+not 485) - the design-point gap is as open as before. With the ring gone,
+the closure-error control (`closureErrorControl`) and the guard cleanup are
+unblocked and worth re-measuring.
