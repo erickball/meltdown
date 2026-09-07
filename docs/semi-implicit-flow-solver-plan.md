@@ -497,3 +497,40 @@ but its off-design settling point moved (the tube carries 274 kg at t=400,
 not 485) - the design-point gap is as open as before. With the ring gone,
 the closure-error control (`closureErrorControl`) and the guard cleanup are
 unblocked and worth re-measuring.
+
+
+## Addendum: partition tangent, actuator stroke, stiff wall-fluid pairs (2026-09-06, evening)
+
+- **Partition tangent from the implicit function** (68a0f91). Anchoring the
+  OTSG tangent re-solved the pressure three times per anchor for finite
+  differences; the pressure is the root of R(P; m, U, m1) = 0, so
+  dP/dx = −(∂R/∂x)/(∂R/∂P) with every term one residual evaluation at the
+  solved pressure. ~15% per step on the Xe-100, same step count. The rest
+  of the boundary reconciliation's per-step cost is the tangent band's 0.4%
+  width sitting at the size of one 50 ms step's energy change (exact solves
+  1543 → 1982 per minute); a step-aware band is the remaining lever.
+- **Actuators stroke continuously** (7962a7c). A scan leaves a command; the
+  device moves toward it at its rate limit on every accepted step
+  (`ControllerState.actual`). Nothing the plant sees jumps. It did not open
+  the closure-error gate: the sliver steam nodes off the OTSG tube are
+  charged for *following* the tube, whose per-step pressure change the
+  linear closure cannot price - pricing its energy response with the
+  partition's own dP/dU made the mismatch worse (140 → 400-700 kPa/step),
+  because what moves the tube each step is its partition dynamics (ledger
+  transit, wall pin), not a mass or energy response at all. That gate needs
+  the partition's rates in the solve's RHS, like the measured heat source.
+- **Stiff wall-fluid pairs exchanged implicitly** (this commit). Pairs whose
+  relaxation time τ = 1/(hA(1/C_f + 1/C_w)) is shorter than the step are
+  taken out of the stages for the attempt and exchanged by the exact
+  two-body relaxation over dt. The criterion is the resolution boundary
+  (dt vs τ), not a tuned number; a lower bound on C_f (m × 50 J/kg·K, below
+  every species) rules out the ordinary pairs without a property call.
+  Steady plants are bit-identical (no pair stamps); the blackout, whose
+  feed train drains to steam, stamps 193 pair-attempts with the same trajectory (fuel 851 °C, rejections 16 → 14, smallest dt 0.001 → 0.003 ms) at the same wall time (paired 87.4/91.3 vs 88.2/90.9 s) - cost-neutral, and no speedup on this scenario because the drained lines no longer bind its step; the OTSG does.
+- **Design-point gap, diagnosed not fixed.** The Xe-100 settles at 138-147
+  MW because the helical SG's gas side is short: helium leaves the shell at
+  ~453 °C against a 273 °C economizer wall (gas-side NTU ≈ 1, ~0.4 MW/K
+  delivered against ~2 needed for 200 MW at design temperatures). The feed
+  loop is not the limiter (anchoring its setpoint at 60 kg/s moved settled
+  power 138 → 147 MW and the tube re-flooded). This is the known helical
+  tube-length question, which re-rates every HTGR-style SG.
