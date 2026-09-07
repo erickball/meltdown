@@ -32,6 +32,8 @@ import type { ControllerSignal } from './simulation/types';
 import { hxBundleCount, hxTubeNodeIds } from './simulation/hx-bundles';
 import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
+import type { FlowNode } from './simulation/types';
+import { pressureAtConnection } from './simulation/operators/connection-hydraulics';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -148,26 +150,9 @@ function formatDensity(rho: number): string {
   }
 }
 
-/**
- * Calculate pressure at a connection point, including hydrostatic head.
- * Uses actual density - works for any phase including high-pressure gas or supercritical.
- */
-function getPressureAtConnectionDebug(node: { fluid: { pressure: number; mass: number }; volume: number; height?: number }, connectionElevation?: number): number {
-  const g = 9.81;
-  const baseP = node.fluid.pressure;
-  const rho = node.fluid.mass / node.volume;
-
-  // Estimate node height
-  const nodeHeight = node.height ?? Math.cbrt(node.volume);
-
-  if (connectionElevation === undefined) {
-    connectionElevation = nodeHeight / 2;
-  }
-
-  // Hydrostatic head from fluid above the connection point
-  // baseP is at top of node, connection is at some elevation from bottom
-  const fluidAbove = nodeHeight - connectionElevation;
-  return baseP + rho * g * fluidAbove;
+/** Pressure at a connection point: the same model the flow solver uses. */
+function getPressureAtConnectionDebug(node: FlowNode, connectionElevation?: number): number {
+  return pressureAtConnection(node, connectionElevation);
 }
 
 /** Pressure solver status for debug panel display */

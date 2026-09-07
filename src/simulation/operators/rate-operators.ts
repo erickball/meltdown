@@ -51,6 +51,7 @@ import {
   DrawComposition,
   approxVaporDensity,
   CLOSED_FLOW_DECAY_TAU,
+  pressureAtConnection,
 } from './connection-hydraulics';
 
 // Shared per-connection hydraulics now live in connection-hydraulics.ts (one
@@ -2823,40 +2824,9 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
 export class FlowDynamicsConstraintOperator implements ConstraintOperator {
   name = 'FlowDynamics';
 
-  /**
-   * Calculate pressure at a specific connection elevation within a node,
-   * accounting for hydrostatic head within the node.
-   */
+  /** Pressure at a connection point inside a node: the shared model (connection-hydraulics). */
   private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
-    const g = 9.81;
-    const baseP = node.fluid.pressure;
-    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    if (connectionElevation === undefined) {
-      connectionElevation = nodeHeight / 2;
-    }
-
-    if (node.fluid.phase === 'two-phase') {
-      const quality = node.fluid.quality || 0;
-      const T_C = node.fluid.temperature - 273.15;
-      const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                         T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                         700 - 2.5 * (T_C - 300);
-      const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
-      const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
-      const liquidLevel = nodeHeight * (1 - voidFraction);
-
-      if (connectionElevation < liquidLevel) {
-        return baseP + rho_liquid * g * (liquidLevel - connectionElevation);
-      }
-      return baseP;
-    } else if (node.fluid.phase === 'liquid') {
-      // Liquid nodes: base pressure is at top, add hydrostatic head below
-      const rho = node.fluid.mass / node.volume;
-      const liquidHead = nodeHeight - connectionElevation;
-      return baseP + rho * g * liquidHead;
-    }
-    return baseP;
+    return pressureAtConnection(node, connectionElevation);
   }
 
   applyConstraints(state: SimulationState): SimulationState {

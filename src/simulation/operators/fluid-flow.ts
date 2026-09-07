@@ -17,9 +17,10 @@
 import { SimulationState, FlowNode, FlowConnection, PumpState, ValveState, CheckValveState } from '../types';
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
-import { saturationPressure } from '../water-properties';
+
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
 import { totalMoles, steamNcgSoundSpeed, ncgSoundSpeed, R_GAS } from '../gas-properties';
+import { pressureAtConnection, pumpHeadFactor } from './connection-hydraulics';
 
 // ============================================================================
 // Flow Operator
@@ -767,156 +768,14 @@ export class FlowOperator implements PhysicsOperator {
     return actualDensity; // Fallback
   }
 
-  /**
-   * Calculate pump head degradation factor based on suction conditions.
-   *
-   * This handles two related phenomena that must be continuous at the boundary:
-   *
-   * 1. NPSH degradation (liquid suction):
-   *    When P_suction approaches P_vapor, pressure drop at the impeller eye
-   *    causes local flashing → cavitation → head loss.
-   *    NPSH_available = (P_suction - P_vapor) / (ρ * g)
-   *
-   * 2. Two-phase degradation (vapor already in suction):
-   *    Vapor present reduces volumetric efficiency. The density already captures
-   *    some of this (dP = ρgh), but pumps also lose efficiency with void fraction.
-   *
-   * At the boundary (saturated liquid ↔ two-phase at x=0), both models must agree.
-   * We define a "base factor" at NPSH_a=0 / quality=0 and degrade from there.
-   *
-   * @param pump The pump state
-   * @param suctionNode The flow node at pump suction
-   * @param pumpRho Density being used for pump calculations (kg/m³)
-   * @returns Factor 0-1 to multiply rated head by (1 = no degradation)
-   */
+  /** Pump head degradation with suction conditions: the shared model (connection-hydraulics). */
   private calculatePumpHeadFactor(pump: PumpState, suctionNode: FlowNode, pumpRho: number): number {
-    const g = 9.81;
-    const pumpType = pump.pumpType ?? 'centrifugal';
-
-    // Base factor at the boundary (NPSH_a = 0 or quality = 0)
-    // This is the factor when saturated liquid enters (about to flash)
-    // Centrifugal: still develops significant head but cavitating
-    // Positive displacement: more tolerant
-    const baseFactor = pumpType === 'centrifugal' ? 0.85 : 0.95;
-
-    if (suctionNode.fluid.phase === 'two-phase') {
-      // Two-phase suction: degrade based on void fraction (volume fraction of vapor)
-      // Void fraction is what matters for pump performance, not quality (mass fraction)
-      // A small mass of vapor occupies a large volume because ρ_vapor << ρ_liquid
-      //
-      // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
-      //
-      // At quality = 0: α = 0, factor = baseFactor (matches NPSH_a = 0 case)
-      // At quality = 1: α = 1, factor approaches 0 (can't pump pure vapor effectively)
-      const quality = suctionNode.fluid.quality ?? 0;
-
-      // Calculate void fraction from quality and phase densities
-      const rho_f = this.getNodeDensity(suctionNode, 'liquid');
-      const rho_g = this.getNodeDensity(suctionNode, 'vapor');
-
-      // Avoid division by zero at quality extremes
-      let voidFraction: number;
-      if (quality <= 0) {
-        voidFraction = 0;
-      } else if (quality >= 1) {
-        voidFraction = 1;
-      } else {
-        // α = (x / ρ_g) / (x / ρ_g + (1-x) / ρ_f)
-        const v_vapor = quality / rho_g;
-        const v_liquid = (1 - quality) / rho_f;
-        voidFraction = v_vapor / (v_vapor + v_liquid);
-      }
-
-      if (pumpType === 'centrifugal') {
-        // Centrifugal pumps lose head rapidly with void fraction
-        // factor = baseFactor * (1 - α)^2
-        // At α=0: 0.85, at α=0.5: 0.21, at α=1: 0
-        return baseFactor * Math.pow(1 - voidFraction, 2);
-      } else {
-        // Positive displacement: more tolerant, linear degradation
-        // factor = baseFactor * (1 - 0.8 * α)
-        // At α=0: 0.95, at α=0.5: 0.57, at α=1: 0.19
-        return baseFactor * (1 - 0.8 * voidFraction);
-      }
-    }
-
-    // Liquid suction: use NPSH-based degradation
-    const P_suction = suctionNode.fluid.pressure;
-    const T_suction = suctionNode.fluid.temperature;
-    const P_vapor = saturationPressure(T_suction);
-
-    // NPSH available (in meters of fluid head)
-    const npshAvailable = (P_suction - P_vapor) / (pumpRho * g);
-
-    // Get required NPSH from pump
-    const npshRequired = pump.npshRequired ?? 5;
-
-    // If NPSH_a >= NPSH_r, no degradation
-    if (npshAvailable >= npshRequired) {
-      return 1.0;
-    }
-
-    // NPSH ratio: 1.0 = exactly at NPSHr, 0 = at vapor pressure (saturated)
-    const npshRatio = Math.max(0, npshAvailable / npshRequired);
-
-    // Interpolate from 1.0 at npshRatio=1 to baseFactor at npshRatio=0
-    // This ensures continuity with the two-phase model at quality=0
-    return baseFactor + (1.0 - baseFactor) * npshRatio;
+    return pumpHeadFactor(pump, suctionNode, pumpRho);
   }
 
-  /**
-   * Calculate the pressure at a specific connection elevation within a node.
-   *
-   * For two-phase nodes, the node's stored pressure is the saturation pressure
-   * at the liquid surface. Connections below the liquid level experience additional
-   * hydrostatic pressure from the liquid column above them.
-   *
-   * P_connection = P_node + ρ_liquid * g * (liquidLevel - connectionElevation)
-   *
-   * For single-phase liquid nodes, the stored pressure is typically at some
-   * reference point. We adjust based on connection elevation.
-   *
-   * @param node The flow node
-   * @param connectionElevation Height of connection point relative to node bottom (m)
-   * @returns Pressure at the connection point (Pa)
-   */
+  /** Pressure at a connection point inside a node: the shared model (connection-hydraulics). */
   private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
-    const g = 9.81;
-    const baseP = node.fluid.pressure;
-
-    // Use stored height if available, otherwise estimate from volume
-    const nodeHeight = node.height ?? Math.sqrt(node.volume / (Math.PI * 0.25));
-
-    // Default connection elevation to mid-height if not specified
-    if (connectionElevation === undefined) {
-      connectionElevation = nodeHeight / 2;
-    }
-
-    if (node.fluid.phase === 'two-phase') {
-      // For two-phase, base pressure is saturation pressure at the liquid surface
-      // Connections below liquid level have higher pressure due to liquid head
-      const liquidLevel = this.getLiquidLevel(node);
-      const rho_liquid = this.getNodeDensity(node, 'liquid');
-
-      if (connectionElevation < liquidLevel) {
-        // Below liquid level: add hydrostatic head from liquid above
-        const liquidHead = liquidLevel - connectionElevation;
-        return baseP + rho_liquid * g * liquidHead;
-      } else {
-        // Above liquid level (in steam space): just saturation pressure
-        // (vapor is compressible, hydrostatic effect is negligible)
-        return baseP;
-      }
-    } else if (node.fluid.phase === 'liquid') {
-      // For liquid nodes, treat like 100% filled two-phase: base pressure is at top,
-      // connections below get hydrostatic head from the liquid column above
-      const rho = this.getNodeDensity(node, 'actual');
-      const liquidHead = nodeHeight - connectionElevation;  // distance from connection to top
-      return baseP + rho * g * liquidHead;
-    } else {
-      // Vapor - negligible hydrostatic effect
-      return baseP;
-    }
+    return pressureAtConnection(node, connectionElevation);
   }
 
   /**

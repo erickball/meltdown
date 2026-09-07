@@ -1,0 +1,210 @@
+{
+ "components": [
+  [
+   "ocean",
+   {
+    "id": "ocean",
+    "type": "tank",
+    "label": "Ocean",
+    "position": {
+     "x": 0,
+     "y": 0
+    },
+    "rotation": 0,
+    "elevation": -10,
+    "width": 40,
+    "height": 10,
+    "wallThickness": 0.05,
+    "fillLevel": 0.5,
+    "pressureRating": 2,
+    "ports": [
+     {
+      "id": "ocean-bottom",
+      "position": {
+       "x": 20,
+       "y": 5
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 2339,
+     "phase": "two-phase",
+     "quality": 0.0001,
+     "flowRate": 0
+    },
+    "initialNcg": {
+     "N2": 0.78,
+     "O2": 0.21
+    }
+   }
+  ],
+  [
+   "sp",
+   {
+    "id": "sp",
+    "type": "pipe",
+    "label": "Suction pipe",
+    "position": {
+     "x": 25,
+     "y": 0
+    },
+    "rotation": 0,
+    "diameter": 0.2,
+    "thickness": 0.01,
+    "length": 15,
+    "pressureRating": 10,
+    "ports": [
+     {
+      "id": "sp-left",
+      "position": {
+       "x": 0,
+       "y": 0
+      },
+      "direction": "both"
+     },
+     {
+      "id": "sp-right",
+      "position": {
+       "x": 15,
+       "y": 0
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 101325,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "elevation": 8,
+    "endPosition": {
+     "x": 40,
+     "y": 0
+    },
+    "endElevation": 8
+   }
+  ],
+  [
+   "pump-1",
+   {
+    "id": "pump-1",
+    "type": "pump",
+    "label": "Pump",
+    "position": {
+     "x": 42,
+     "y": 0
+    },
+    "rotation": 0,
+    "elevation": 9,
+    "diameter": 0.3,
+    "running": true,
+    "speed": 1,
+    "ratedFlow": 100,
+    "ratedHead": 30,
+    "orientation": "left-right",
+    "ports": [
+     {
+      "id": "pump-1-inlet",
+      "position": {
+       "x": -0.5,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "pump-1-outlet",
+      "position": {
+       "x": 0.5,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 101325,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "pressureRating": 10
+   }
+  ],
+  [
+   "pool",
+   {
+    "id": "pool",
+    "type": "tank",
+    "label": "Pool",
+    "position": {
+     "x": 50,
+     "y": 0
+    },
+    "rotation": 0,
+    "elevation": 15,
+    "width": 10,
+    "height": 6,
+    "wallThickness": 0.05,
+    "fillLevel": 0.3,
+    "pressureRating": 2,
+    "ports": [
+     {
+      "id": "pool-top",
+      "position": {
+       "x": 0,
+       "y": -3
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 2339,
+     "phase": "two-phase",
+     "quality": 0.0001,
+     "flowRate": 0
+    },
+    "initialNcg": {
+     "N2": 0.78,
+     "O2": 0.21
+    }
+   }
+  ]
+ ],
+ "connections": [
+  {
+   "fromComponentId": "ocean",
+   "fromPortId": "ocean-bottom",
+   "toComponentId": "sp",
+   "toPortId": "sp-left",
+   "fromElevation": 1,
+   "toElevation": 0.1,
+   "flowArea": 0.031415900000000004,
+   "length": 15
+  },
+  {
+   "fromComponentId": "sp",
+   "fromPortId": "sp-right",
+   "toComponentId": "pump-1",
+   "toPortId": "pump-1-inlet",
+   "fromElevation": 0.1,
+   "toElevation": 0.3,
+   "flowArea": 0.031415900000000004,
+   "length": 2
+  },
+  {
+   "fromComponentId": "pump-1",
+   "fromPortId": "pump-1-outlet",
+   "toComponentId": "pool",
+   "toPortId": "pool-top",
+   "fromElevation": 0.3,
+   "toElevation": 6,
+   "flowArea": 0.031415900000000004,
+   "length": 10
+  }
+ ]
+}

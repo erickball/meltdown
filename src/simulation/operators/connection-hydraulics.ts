@@ -30,7 +30,7 @@ import {
 } from '../gas-properties';
 import {
   soundSpeed, criticalPressureRatio, WaterState,
-  saturatedLiquidDensity, saturatedVaporDensity, surfaceTension,
+  saturatedLiquidDensity, saturatedVaporDensity, surfaceTension, saturationPressure,
 } from '../water-properties';
 import { pumpHeadPressure, pumpHeadSlopeMagnitude } from './pump-curve';
 
@@ -286,48 +286,103 @@ export function findCheckValveForConnection(
 // ============================================================================
 
 /**
- * Calculate pressure at a specific connection elevation within a node,
- * accounting for hydrostatic head within the node.
+ * Pressure at a connection point inside a node: the node's pressure (which
+ * lives at the liquid surface of a two-phase node and at the top of a
+ * liquid-full one) plus the weight of the liquid standing above the port.
+ *
+ * The liquid surface comes from the node's REAL vertical extent
+ * (`node.height`, the component's drawn height; zero for well-mixed pipes,
+ * pumps and valves, which then have no internal head at all) and from the
+ * liquid volume the node actually holds, through the same obstruction-aware
+ * level the draw model uses - so "where is the water" is answered once.
+ * It used to be guessed from the volume as a cylinder whose height equals
+ * its diameter, which turned a wide 10 m deep reservoir into a 126 m column
+ * and gave squat tanks tens of metres of head they never had.
+ *
+ * A port drawn outside the node's extent (a valve pot with a port 3 m up)
+ * still draws from somewhere inside it, as in drawCompositionAt.
  */
 export function pressureAtConnection(node: FlowNode, connectionElevation?: number): number {
   const g = 9.81;
   const baseP = node.fluid.pressure;
+  const nodeHeight = node.height ?? Math.cbrt(node.volume);
+  if (nodeHeight <= 0) return baseP;
 
-  // Estimate node height (assume cylindrical with height ≈ diameter)
-  const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
-
-  if (connectionElevation === undefined) {
-    connectionElevation = nodeHeight / 2;
-  }
+  const elev = connectionElevation === undefined
+    ? nodeHeight / 2
+    : Math.max(0, Math.min(nodeHeight, connectionElevation));
 
   if (node.fluid.phase === 'two-phase') {
-    // Calculate liquid level from quality
-    const quality = node.fluid.quality || 0;
-    // Approximate liquid/vapor densities
-    const T_C = node.fluid.temperature - 273.15;
-    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                       700 - 2.5 * (T_C - 300);
-    const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
-
-    // Void fraction and liquid level
-    const voidFraction = (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor);
-    const liquidVolumeFraction = 1 - voidFraction;
-    const liquidLevel = nodeHeight * liquidVolumeFraction;
-
-    if (connectionElevation < liquidLevel) {
-      // Below liquid: add hydrostatic head
-      return baseP + rho_liquid * g * (liquidLevel - connectionElevation);
+    const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
+    const rho_liquid = approxLiquidDensity(node);
+    const liquidVolume = Math.min(node.volume, node.fluid.mass * (1 - quality) / rho_liquid);
+    const liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
+    if (elev < liquidLevel) {
+      return baseP + rho_liquid * g * (liquidLevel - elev);
     }
-    return baseP;  // In steam space
+    return baseP;  // In the gas space
   } else if (node.fluid.phase === 'liquid') {
-    // Liquid nodes: base pressure is at top, add hydrostatic head below
+    // Liquid-full: base pressure is at the top, everything below carries the column
     const rho = node.fluid.mass / node.volume;
-    const liquidHead = nodeHeight - connectionElevation;
-    return baseP + rho * g * liquidHead;
+    return baseP + rho * g * (nodeHeight - elev);
   }
 
   return baseP;  // Vapor - no adjustment
+}
+
+/**
+ * How much of its rated head a pump develops given what is in its suction.
+ *
+ * Two mechanisms, continuous at the boundary between them:
+ *  1. NPSH degradation (liquid suction): as the suction pressure approaches
+ *     the vapor pressure, the pressure drop at the impeller eye flashes the
+ *     liquid locally - cavitation - and head is lost. NPSH available =
+ *     (P_suction - P_vapor) / (rho g); below the pump's NPSH required the
+ *     factor falls from 1 toward the base factor at NPSH_a = 0.
+ *  2. Void degradation (two-phase suction): vapor in the pump displaces the
+ *     liquid the impeller works on. Centrifugal pumps lose head as
+ *     (1 - alpha)^2 of the base factor, positive-displacement pumps more
+ *     gently; at alpha = 1 a centrifugal pump is gas-bound and develops
+ *     nothing.
+ * At saturated liquid (NPSH_a = 0, x = 0) both give the base factor.
+ *
+ * This is what makes a drained intake matter: a pump whose suction line has
+ * run dry sits on a pot of vapor and stops delivering, instead of pushing
+ * vapor uphill with full liquid head.
+ */
+export function pumpHeadFactor(
+  pump: { npshRequired?: number; pumpType?: 'centrifugal' | 'positive' },
+  suctionNode: FlowNode,
+  pumpRho: number
+): number {
+  const g = 9.81;
+  const pumpType = pump.pumpType ?? 'centrifugal';
+  const baseFactor = pumpType === 'centrifugal' ? 0.85 : 0.95;
+
+  if (suctionNode.fluid.phase === 'two-phase') {
+    // Void fraction from what the pot actually holds - the liquid volume its
+    // mass and quality account for against its total volume (the same book
+    // the draw model keeps), not a density-ratio estimate of it
+    const quality = Math.max(0, Math.min(1, suctionNode.fluid.quality ?? 0));
+    const liquidVolume = suctionNode.volume > 0
+      ? Math.min(suctionNode.volume, suctionNode.fluid.mass * (1 - quality) / approxLiquidDensity(suctionNode))
+      : 0;
+    const voidFraction = suctionNode.volume > 0 ? 1 - liquidVolume / suctionNode.volume : 1;
+    return pumpType === 'centrifugal'
+      ? baseFactor * Math.pow(1 - voidFraction, 2)
+      : baseFactor * (1 - 0.8 * voidFraction);
+  }
+
+  if (suctionNode.fluid.phase !== 'liquid') {
+    // A pump full of gas develops no liquid head
+    return 0;
+  }
+
+  const npshAvailable = (suctionNode.fluid.pressure - saturationPressure(suctionNode.fluid.temperature)) / (pumpRho * g);
+  const npshRequired = pump.npshRequired ?? 5;
+  if (npshAvailable >= npshRequired) return 1.0;
+  const npshRatio = Math.max(0, npshAvailable / npshRequired);
+  return baseFactor + (1.0 - baseFactor) * npshRatio;
 }
 
 /**
@@ -974,13 +1029,16 @@ export function computeConnectionHydraulics(
         // Otherwise use mixture density (pump is cavitating)
       }
 
-      // Head from the pump curve: falls off with flow, zero at runout.
-      dP_pump = pumpHeadPressure(pump, currentFlow, pumpRho);
+      // Head from the pump curve: falls off with flow, zero at runout - and
+      // the whole curve scales down with what the suction can supply
+      // (cavitation, vapor in the pump: see pumpHeadFactor)
+      const headFactor = pumpHeadFactor(pump, pumpNode, pumpRho);
+      dP_pump = pumpHeadPressure(pump, currentFlow, pumpRho) * headFactor;
 
       // Decomposition for implicit momentum: the affinity-law curve is
       // dP(ṁ) = 1.25·s²·ρgH − 0.25·ρgH/Q_r²·max(0,ṁ)², i.e. a constant
       // shutoff term plus a quadratic that composes with pipe friction.
-      const gH = pump.ratedHead * pumpRho * 9.81;
+      const gH = pump.ratedHead * pumpRho * 9.81 * headFactor;
       const s = pump.effectiveSpeed;
       pumpShutoff = 1.25 * s * s * gH;
       if (pump.ratedFlow > 0) {

@@ -35,6 +35,7 @@ import {
 } from '../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
+import { computeConnectionHydraulics } from '../src/simulation/operators/connection-hydraulics';
 
 // Parse command line args
 const args = process.argv.slice(2);
@@ -271,6 +272,20 @@ function logSimState(state: SimulationState): void {
       if (Math.abs(conn.massFlowRate) > 0.001) {
         const phase = (conn as any).currentFlowPhase;
         console.log(`  ${conn.fromNodeId} -> ${conn.toNodeId}: ${conn.massFlowRate.toFixed(3)} kg/s${phase ? ` [${phase}]` : ''}`);
+      }
+      // DUMP_CONN=<substring>: print the driving-pressure terms of matching
+      // connections, for diagnosing why a flow is what it is
+      if (process.env.DUMP_CONN && conn.id.includes(process.env.DUMP_CONN)) {
+        const fromNode = state.flowNodes.get(conn.fromNodeId);
+        const toNode = state.flowNodes.get(conn.toNodeId);
+        if (fromNode && toNode) {
+          const h = computeConnectionHydraulics(state, conn, fromNode, toNode);
+          const bar = (x: number) => (x / 1e5).toFixed(4);
+          console.log(`    [hydraulics ${conn.id}] phase=${h.flowPhase} rho_flow=${h.rho_flow.toFixed(2)} v=${h.v.toFixed(2)} ` +
+            `dP_pressure=${bar(h.dP_pressure)} dP_gravity=${bar(h.dP_gravity)} dP_pump=${bar(h.dP_pump)} ` +
+            `dP_driving=${bar(h.dP_driving)} dP_friction=${bar(h.dP_friction)} K=${h.K_eff.toFixed(2)} ` +
+            `shutoff=${bar(h.pumpShutoff)} dz=${conn.elevation} fromElev=${conn.fromElevation} toElev=${conn.toElevation}`);
+        }
       }
     }
   }

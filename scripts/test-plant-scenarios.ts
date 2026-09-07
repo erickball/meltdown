@@ -98,6 +98,34 @@ test('Natural circulation: condensing loop circulates without pumps', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Suction lift: atmosphere can only push water up so far
+// ---------------------------------------------------------------------------
+
+test('Suction lift: a pump 8 m above the water draws it, 14 m above it runs its intake dry', () => {
+  // Open reservoir (air over 20 C water, surface at -5 m), a suction pipe up
+  // to a pump, and a discharge to an open pool at +15 m. The pump is rated
+  // 100 kg/s at 30 m head - plenty for the discharge; what limits it is
+  // what the atmosphere can push up the intake (~10 m of water minus
+  // friction and the pump's NPSH).
+  const ok = buildSimFromFile(path.join(PLANT_DIR, 'suction-lift-8m.json'));
+  run(ok, 30.0, 0.01);
+  const q8 = flowRate(ok.state, 'pump-1', 'pool');
+  assert(q8 > 20, `8 m lift should deliver (cavitating, suction-limited), got ${q8.toFixed(1)} kg/s`);
+  assert(q8 < 150, `8 m lift must be suction-limited well below the pump's runout, got ${q8.toFixed(1)} kg/s`);
+  assertStateSane(ok.state);
+
+  const dry = buildSimFromFile(path.join(PLANT_DIR, 'suction-lift-14m.json'));
+  run(dry, 30.0, 0.01);
+  const q14 = flowRate(dry.state, 'pump-1', 'pool');
+  assert(Math.abs(q14) < 2, `14 m lift cannot deliver, got ${q14.toFixed(2)} kg/s`);
+  // The intake pipe has flashed and emptied: two-phase at the vapor pressure
+  const sp = dry.state.flowNodes.get('sp')!;
+  assert(sp.fluid.phase === 'two-phase' && sp.fluid.pressure < 0.1e5,
+    `intake should have run dry (two-phase near vapor pressure), got ${sp.fluid.phase} at ${(sp.fluid.pressure / 1e5).toFixed(3)} bar`);
+  assertStateSane(dry.state);
+});
+
+// ---------------------------------------------------------------------------
 // Accumulator injection: check valve holds, then injects after blowdown
 // ---------------------------------------------------------------------------
 
