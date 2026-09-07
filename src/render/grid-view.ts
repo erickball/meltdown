@@ -11,7 +11,7 @@
  */
 import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction } from './components';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
@@ -658,6 +658,19 @@ export class GridView {
     shape();
     ctx.fillStyle = this.art.pattern(ctx, 'concrete', this.cam.ppm, origin);
     ctx.fill();
+
+    // The atmosphere inside, as a translucent tint over the floor: the same
+    // fluid/NCG colouring the 2.5D shell shows (steam, hydrogen, a flooded
+    // sump), clipped to the floor so the outline stays the plan shape
+    if (b.fluid) {
+      ctx.save();
+      shape();
+      ctx.clip();
+      ctx.globalAlpha = 0.55;
+      const liquidFraction = getLiquidFraction(b, b.fluid, !f.constructionMode);
+      renderFluidWithNcg(ctx, b.fluid, tl.x, tl.y, w, h, liquidFraction, b.fluid.separation ?? 1, 6);
+      ctx.restore();
+    }
 
     // Wall: outer dark edge, body, inner highlight
     ctx.lineWidth = wallPx;
