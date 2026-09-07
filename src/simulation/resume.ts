@@ -68,27 +68,27 @@ function liquidVolumeFraction(node: FlowNode): number {
 }
 
 /** Vapor-space volume of a node (for live NCG partial pressure). */
-function vaporVolume(node: FlowNode): number {
-  const f = node.fluid;
-  if (f.phase === 'vapor') return node.volume;
-  if (f.phase === 'liquid') return 0;
-  const rho_g = Water.saturatedVaporDensity(f.temperature);
-  return (f.mass * f.quality) / rho_g;
-}
-
 /**
  * Live steam partial pressure: node total pressure minus the NCG partial
- * pressure over the actual vapor space (Dalton). Liquid-full nodes have no
- * gas space; their stored pressure is used as-is.
+ * pressure (Dalton).
+ *
+ * Over the node's TOTAL volume, because that is where both of the books this
+ * has to agree with put it: the live mixture solve prices the gas as
+ * n R T / V_node (mixture-properties.ts, deliberately - see its header), and
+ * the factory's initialNcg bar->moles conversion uses V_node too, as does
+ * ncgToInitialBar below. Pricing it over the VAPOUR space instead - which
+ * this used to do - puts the NCG partial above the node's own total pressure
+ * for anything half full of air, and the write-back then fell back to the
+ * total: a 30 C spent-fuel pool, or an air-blanketed CST, came back from a
+ * mode switch as saturated water at 100 C.
  */
 function steamPartialPressurePa(node: FlowNode): number {
   const f = node.fluid;
   if (!f.ncg) return f.pressure;
-  const V_gas = vaporVolume(node);
-  if (!(V_gas > 0)) return f.pressure;
+  if (!(node.volume > 0)) return f.pressure;
   let P_ncg = 0;
   for (const moles of Object.values(f.ncg)) {
-    if (moles && moles > 0) P_ncg += (moles * R_GAS * f.temperature) / V_gas;
+    if (moles && moles > 0) P_ncg += (moles * R_GAS * f.temperature) / node.volume;
   }
   const P_steam = f.pressure - P_ncg;
   if (!(P_steam > 0)) {
@@ -205,6 +205,15 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
       }
 
       case 'condenser': {
+        if (!node) break;
+        writeFluidIC(c, node);
+        c.fillLevel = liquidVolumeFraction(node);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
+        break;
+      }
+
+      case 'pool': {
         if (!node) break;
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
@@ -336,6 +345,10 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
     // criticality search
     const fuelNode = sim.thermalNodes.get(`${id}-fuel`);
     if (fuelNode) c.fuelTemperature = fuelNode.temperature;
+    // Spent-fuel racks carry their own metal temperature back, so a pool
+    // whose racks have heated up does not come back cold from a mode switch
+    const rackNode = sim.thermalNodes.get(`${id}-pellets`);
+    if (rackNode) c.rackTemperature = rackNode.temperature;
     if (sim.neutronics.coreId === id) {
       c.controlRodPosition = sim.neutronics.controlRodPosition;
     }

@@ -9,9 +9,9 @@
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
-import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent } from '../types';
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent } from '../types';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
@@ -287,7 +287,9 @@ export class GridView {
   // ---------------------------------------------------------------------
 
   private isGroundLayer(component: PlantComponent): boolean {
-    return component.type === 'building' || component.type === 'switchyard';
+    // Things that ARE the ground where they stand: a building's floor, a
+    // switchyard's apron, and a pool, which is a hole in it.
+    return component.type === 'building' || component.type === 'switchyard' || component.type === 'pool';
   }
 
   private spriteLayout(component: PlantComponent): SpriteLayout {
@@ -445,6 +447,11 @@ export class GridView {
         if (distanceToPolyline(world, pts) <= half) return c;
         continue;
       }
+      if (c.type === 'pool') {
+        const rect = footprintRect(c.position, componentFootprint(c));
+        if (world.x >= rect.x0 && world.x <= rect.x1 && world.y >= rect.y0 && world.y <= rect.y1) return c;
+        continue;
+      }
       if (c.type === 'building') {
         // The wall ring only - clicks on the floor fall through to what is inside
         const rect = footprintRect(c.position, componentFootprint(c));
@@ -580,6 +587,7 @@ export class GridView {
     for (const c of order) {
       if (c.type === 'building') this.renderBuilding(ctx, c as BuildingComponent, f);
       else if (c.type === 'switchyard') this.renderSwitchyard(ctx, c as SwitchyardComponent, f);
+      else if (c.type === 'pool') this.renderPool(ctx, c as PoolComponent, f);
     }
 
     // Foundation pads under every standing component
@@ -831,6 +839,121 @@ export class GridView {
     ctx.fillText(label, lx, ly);
   }
 
+  /**
+   * A spent-fuel pool in plan: a square hole with a concrete coping, the
+   * water seen from above (deeper water is darker and bluer), the racks as a
+   * grid of assembly cells under it, and the level read off the rim as both
+   * a bar and a number.
+   *
+   * The level is the one thing the player has to watch, so it is drawn twice
+   * - as depth of colour over the whole basin and as a gauge on the rim -
+   * and the racks stop being blue and start glowing the moment the water
+   * stops covering them, which is exactly when the physics stops cooling
+   * them with liquid.
+   */
+  private renderPool(ctx: CanvasRenderingContext2D, pool: PoolComponent, f: GridFrameState): void {
+    const rect = footprintRect(pool.position, componentFootprint(pool));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const w = br.x - tl.x, h = br.y - tl.y;
+    const copingPx = Math.max(3, Math.min(w, h) * 0.05, (pool.wallThickness || 1.5) * this.cam.ppm);
+    const depth = pool.depth || 12;
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+
+    // Concrete coping around the opening
+    ctx.fillStyle = this.art.pattern(ctx, 'concrete', this.cam.ppm, origin);
+    ctx.fillRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+    ctx.strokeStyle = 'rgba(50, 50, 50, 0.55)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+
+    // The basin itself, and the water standing in it. `level` is the
+    // liquid's height above the floor, from the same volume fraction the
+    // simulation keeps.
+    const liquidFraction = getLiquidFraction(pool, pool.fluid ?? ({} as Fluid), !f.constructionMode);
+    const level = liquidFraction * depth;
+    ctx.fillStyle = '#2b2f31';                       // dry liner
+    ctx.fillRect(tl.x, tl.y, w, h);
+
+    // Racks, drawn under the water
+    const cells = Math.max(2, Math.min(14, Math.round(Math.sqrt(pool.assemblyCount || 800) / 2)));
+    const rackInset = Math.min(w, h) * 0.12;
+    const rackX = tl.x + rackInset, rackY = tl.y + rackInset;
+    const rackW = w - 2 * rackInset, rackH = h - 2 * rackInset;
+    const rackTop = (pool.rackBottomElevation ?? 0.5) + (pool.rackHeight || 3.66);
+    const covered = level >= rackTop;
+    const glow = poolRackGlow((pool as { rackTemperature?: number }).rackTemperature
+      ?? pool.fluid?.temperature ?? 300);
+    if (rackW > 2 && rackH > 2) {
+      ctx.fillStyle = glow > 0.02
+        ? `rgb(${Math.round(90 + 165 * glow)}, ${Math.round(95 + 60 * glow)}, ${Math.round(105 - 60 * glow)})`
+        : '#4a5257';
+      ctx.fillRect(rackX, rackY, rackW, rackH);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 1; i < cells; i++) {
+        const x = rackX + (rackW * i) / cells;
+        const y = rackY + (rackH * i) / cells;
+        ctx.moveTo(x, rackY); ctx.lineTo(x, rackY + rackH);
+        ctx.moveTo(rackX, y); ctx.lineTo(rackX + rackW, y);
+      }
+      ctx.stroke();
+    }
+
+    // Water over the whole basin: opacity grows with how much stands there,
+    // so a full pool reads deep blue and a drained one reads bare liner
+    if (level > 0) {
+      const shade = Math.min(0.82, 0.25 + 0.6 * (level / Math.max(depth, 1e-6)));
+      const hot = (pool.fluid?.temperature ?? 300) > 368;   // near boiling
+      ctx.fillStyle = hot
+        ? `rgba(150, 190, 205, ${shade.toFixed(3)})`
+        : `rgba(30, 95, 150, ${shade.toFixed(3)})`;
+      ctx.fillRect(tl.x, tl.y, w, h);
+    }
+    ctx.strokeStyle = covered ? 'rgba(180, 210, 230, 0.8)' : 'rgba(230, 140, 60, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(tl.x, tl.y, w, h);
+
+    // Level gauge on the rim (west edge), reading up from the floor
+    const gaugeW = Math.max(4, Math.min(12, copingPx * 0.8));
+    const gx = tl.x - copingPx + 1;
+    ctx.fillStyle = 'rgba(20, 20, 20, 0.55)';
+    ctx.fillRect(gx, tl.y, gaugeW, h);
+    const fillPx = h * Math.max(0, Math.min(1, level / Math.max(depth, 1e-6)));
+    ctx.fillStyle = covered ? '#4ea3e0' : '#e08a3c';
+    ctx.fillRect(gx, tl.y + h - fillPx, gaugeW, fillPx);
+    // Where the top of the fuel is: below this line the racks are uncovering
+    const rackLinePx = h * Math.max(0, Math.min(1, rackTop / Math.max(depth, 1e-6)));
+    ctx.strokeStyle = 'rgba(255, 90, 60, 0.95)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(gx, tl.y + h - rackLinePx);
+    ctx.lineTo(gx + gaugeW, tl.y + h - rackLinePx);
+    ctx.stroke();
+
+    // Label and numeric level
+    const fontPx = Math.max(9, Math.min(16, this.cam.ppm * 0.45));
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(20, 20, 20, 0.8)';
+    ctx.fillText(pool.label || pool.id, tl.x + 3, tl.y - copingPx + 2);
+    ctx.font = `${fontPx}px monospace`;
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = covered ? 'rgba(235, 240, 245, 0.95)' : 'rgba(255, 170, 90, 0.98)';
+    const over = level - rackTop;
+    ctx.fillText(
+      `${formatGaugeValue(level)} m  (${over >= 0 ? '+' : ''}${formatGaugeValue(over)} m over fuel)`,
+      tl.x + 3, tl.y + h - 3);
+
+    if (pool.id === f.selectedComponentId) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = COLORS.selectionHighlight;
+      ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+    }
+  }
+
   private renderSwitchyard(ctx: CanvasRenderingContext2D, s: SwitchyardComponent, f: GridFrameState): void {
     const rect = footprintRect(s.position, componentFootprint(s));
     const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
@@ -1023,13 +1146,14 @@ export class GridView {
     const { plantState, simState } = f;
     const from = plantState.components.get(conn.fromComponentId);
     const to = plantState.components.get(conn.toComponentId);
-    if (!from || !to) return;
+    // One end may be the environment, which is not a component
+    if (!from && !to) return;
     const route = this.currentLayout(plantState).display.get(conn);
     if (!route) return;
     const mid = pointAlongRoute(route, 0.5).point;
     const s = this.worldToScreen(mid);
 
-    const name = (c: PlantComponent) => c.label || c.id;
+    const name = (c: PlantComponent | undefined) => c ? (c.label || c.id) : 'Open air';
     const lines: string[] = [`${name(from)} \u2192 ${name(to)}`];
     const bore = conn.flowArea && conn.flowArea > 0 ? Math.sqrt(4 * conn.flowArea / Math.PI) : undefined;
     const geometry: string[] = [];
@@ -1040,7 +1164,7 @@ export class GridView {
       const flowId = flowConnectionIdForPlantConnection(conn, plantState);
       const flow = flowId ? simState.flowConnections.find(fc => fc.id === flowId) : undefined;
       if (flow) {
-        const fluid = f.connectionFluid(conn, from);
+        const fluid = f.connectionFluid(conn, (from ?? to)!);
         const phase = fluid ? fluid.phase : '';
         lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
       }

@@ -56,6 +56,11 @@ export function getComponentSize(component: PlantComponent): { width: number; he
       return { width: (component as any).width || 1, height: (component as any).height || 1 };
     case 'switchyard':
       return { width: (component as any).width || 15, height: (component as any).height || 12 };
+    case 'pool':
+      // Front-view box, as for a tank: as wide as the pool is across and as
+      // tall as it is deep. Its PLAN footprint is square (side x side) - see
+      // footprintFromSize, which squares it off the width.
+      return { width: (component as any).side || 12, height: (component as any).depth || 12 };
     case 'building': {
       const bldg = component as any;
       // For buildings, the footprint is width x length (depth)
@@ -110,6 +115,8 @@ export function getDefaultComponentSize(componentType: string): { width: number;
       return { width: 15, height: 12 };
     case 'building':
       return { width: 40, height: 40 };
+    case 'pool':
+      return { width: 12, height: 12 };
     case 'core':
       return { width: 3.4, height: 3.4 };
     case 'cross-vessel':

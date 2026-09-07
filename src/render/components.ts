@@ -15,6 +15,7 @@ import {
   SwitchyardComponent,
   BuildingComponent,
   CrossVesselComponent,
+  PoolComponent,
   ViewState,
   Fluid,
   Point,
@@ -76,6 +77,9 @@ export function getComponentVisualHeight(component: PlantComponent): number {
       return ((component as ValveComponent).diameter || 0.2) * 2;
     case 'pipe':
       return (component as PipeComponent).diameter || 0.3;
+    case 'pool':
+      // A pool has no `height`: its vertical extent is the depth it is sunk to
+      return (component as PoolComponent).depth || 12;
     default:
       if ('height' in component) return (component as { height: number }).height;
       return 2;
@@ -926,6 +930,9 @@ export function renderComponent(
     case 'crossVessel':
       renderCrossVessel(ctx, component as CrossVesselComponent, view, isSimulating, worldToScreenFn);
       break;
+    case 'pool':
+      renderPool(ctx, component as PoolComponent, view, isSimulating);
+      break;
   }
 
   // Draw selection highlight
@@ -978,6 +985,101 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
 
   // Highlight edges
   ctx.strokeStyle = COLORS.steelHighlight;
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-w / 2, -h / 2, w, h);
+}
+
+/**
+ * Spent-fuel pool, front view: a concrete box sunk into the ground, the
+ * water standing in it, and the racks of fuel on the floor. The racks are
+ * drawn where the model puts them - rackBottomElevation up from the floor,
+ * rackHeight tall - so what the picture says about the water covering the
+ * fuel is what the heat-transfer model is actually doing.
+ */
+export function poolRackGlow(rackTemperatureK: number): number {
+  // Steel grey below boiling, orange-white by the time the cladding is in
+  // trouble (~1200 K, where Zr-steam oxidation runs away).
+  return Math.max(0, Math.min(1, (rackTemperatureK - 373) / 800));
+}
+
+function renderPool(
+  ctx: CanvasRenderingContext2D, pool: PoolComponent, view: ViewState, isSimulating: boolean
+): void {
+  const w = (pool.side || 12) * view.zoom;
+  const h = (pool.depth || 12) * view.zoom;
+  const wallPx = Math.max(2, (pool.wallThickness || 1.5) * view.zoom);
+
+  // Concrete structure
+  ctx.fillStyle = '#8a8a84';
+  ctx.fillRect(-w / 2, -h / 2, w, h);
+
+  const innerW = w - wallPx * 2;
+  const innerH = h - wallPx;            // open at the top: no lid
+  const innerX = -innerW / 2;
+  const innerY = -h / 2;
+
+  // Contents: the same fluid/NCG colouring every other vessel uses (so steam,
+  // air and hydrogen read the same here as in a tank), with the racks drawn
+  // over it and the water then washed back over the racks so both are legible.
+  const liquidFraction = pool.fluid ? getLiquidFraction(pool, pool.fluid, isSimulating) : 0;
+  ctx.fillStyle = '#0b1418';
+  ctx.fillRect(innerX, innerY, innerW, innerH);
+  if (pool.fluid) {
+    renderFluidWithNcg(ctx, pool.fluid, innerX, innerY, innerW, innerH, liquidFraction, 1);
+  }
+
+  // Fuel racks standing on the floor, where the model puts them
+  const rackBottom = pool.rackBottomElevation ?? 0.5;
+  const rackH = (pool.rackHeight || 3.66) * view.zoom;
+  const rackY = innerY + innerH - rackBottom * view.zoom - rackH;
+  const rackW = innerW * 0.8;
+  const rackX = -rackW / 2;
+  if (rackH > 0 && rackY > innerY) {
+    const glow = poolRackGlow((pool as { rackTemperature?: number }).rackTemperature
+      ?? pool.fluid?.temperature ?? 300);
+    const r = Math.round(90 + 165 * glow);
+    const g = Math.round(95 + 60 * glow);
+    const b = Math.round(105 - 60 * glow);
+    if (glow > 0.02) {
+      ctx.fillStyle = `rgba(255, 140, 40, ${(0.35 * glow).toFixed(3)})`;
+      ctx.fillRect(rackX - 3, rackY - 3, rackW + 6, rackH + 6);
+    }
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(rackX, rackY, rackW, rackH);
+    // Assembly cells
+    const cells = Math.max(3, Math.min(16, Math.round(rackW / Math.max(4, view.zoom * 0.8))));
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < cells; i++) {
+      const x = rackX + (rackW * i) / cells;
+      ctx.moveTo(x, rackY);
+      ctx.lineTo(x, rackY + rackH);
+    }
+    ctx.stroke();
+  }
+
+  // The water washed back over the racks, and a bright surface line: the
+  // level is the one number that matters here, so it has to be visible even
+  // where the racks stand in front of it.
+  const waterPx = innerH * Math.max(0, Math.min(1, liquidFraction));
+  if (waterPx > 0) {
+    const hot = (pool.fluid?.temperature ?? 300) > 368;
+    ctx.fillStyle = hot ? 'rgba(170, 205, 225, 0.45)' : 'rgba(25, 100, 200, 0.62)';
+    ctx.fillRect(innerX, innerY + innerH - waterPx, innerW, waterPx);
+    ctx.strokeStyle = 'rgba(190, 225, 245, 0.95)';
+    ctx.lineWidth = Math.max(1, h * 0.006);
+    ctx.beginPath();
+    ctx.moveTo(innerX, innerY + innerH - waterPx);
+    ctx.lineTo(innerX + innerW, innerY + innerH - waterPx);
+    ctx.stroke();
+  }
+
+  // Liner + rim
+  ctx.strokeStyle = '#c9d2d6';
+  ctx.lineWidth = Math.max(1, wallPx * 0.15);
+  ctx.strokeRect(innerX, innerY, innerW, innerH);
+  ctx.strokeStyle = '#5c5c58';
   ctx.lineWidth = 1;
   ctx.strokeRect(-w / 2, -h / 2, w, h);
 }
@@ -4215,6 +4317,11 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
         width: bldgWidth + bldgDepth * 0.6 + 10,
         height: bldgDepth + bldgHeight / 2 + 10,
       };
+    case 'pool': {
+      const poolSide = ((component as PoolComponent).side || 12) * view.zoom;
+      const poolDepth = ((component as PoolComponent).depth || 12) * view.zoom;
+      return { x: -poolSide / 2, y: -poolDepth / 2, width: poolSide, height: poolDepth };
+    }
     case 'crossVessel':
       const cv = component as CrossVesselComponent;
       const cvLength = cv.length * view.zoom;

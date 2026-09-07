@@ -115,6 +115,7 @@ export function mapComponentTypeToDefinition(type: string, component?: Record<st
     'controller': 'scram-controller',
     'switchyard': 'switchyard',
     'building': 'building',
+    'pool': 'pool',
     'crossVessel': 'cross-vessel'
   };
   return mapping[type] || type;
@@ -275,7 +276,8 @@ export function readComponentOption(optionName: string, component: Record<string
       return value / 1e5;  // Pa to bar
     }
     // Convert W to MW for power fields (turbine ratedPower, core thermalPower, condenser coolingCapacity stored in W)
-    if (optionName === 'ratedPower' || optionName === 'thermalPower' || optionName === 'coolingCapacity') {
+    if (optionName === 'ratedPower' || optionName === 'thermalPower' || optionName === 'coolingCapacity' ||
+        optionName === 'fuelPower') {
       return value / 1e6;  // W to MW
     }
     // Convert K to C for temperature fields stored in K

@@ -21,7 +21,7 @@ import { PlantState } from '../src/types';
 const TYPES = [
   'tank', 'pressurizer', 'pipe', 'valve', 'check-valve', 'relief-valve',
   'porv', 'pump', 'heat-exchanger', 'condenser', 'turbine-generator',
-  'turbine-driven-pump',
+  'turbine-driven-pump', 'pool',
 ];
 
 function editableOptions(defKey: string): ComponentOption[] {

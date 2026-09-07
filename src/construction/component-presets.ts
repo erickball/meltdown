@@ -318,6 +318,28 @@ const builtinPresets: ComponentPreset[] = [
     properties: { nqa1: false, buildingShape: 'rectangle', height: 30, width: 50, length: 80, pressureRating: 1, steelFraction: 0.3 },
   },
 
+  // ------------------------------------------------------------- spent fuel pools
+  {
+    id: 'pool-pwr', type: 'pool', name: 'PWR Spent Fuel Pool',
+    description: 'Full-core-offload pool: 800 assemblies under ~7 m of water, 5 MW of decay heat. Days of margin while it is full, hours once it is not.',
+    properties: {
+      nqa1: true, elevation: -12, side: 12, depth: 12, wallThickness: 1.5,
+      fuelPower: 5, assemblyCount: 800, rodsPerAssembly: 264, rodDiameter: 9.5,
+      cladThickness: 0.6, rackHeight: 3.66, rackBottomElevation: 0.5,
+      initialLevel: 60, initialTemperature: 30,
+    },
+  },
+  {
+    id: 'pool-small', type: 'pool', name: 'Small Fuel Pool (recently discharged)',
+    description: 'A small pool holding one hot discharge: far less water and a similar heat load, so it warms in tens of minutes rather than days.',
+    properties: {
+      nqa1: true, elevation: -8, side: 7, depth: 8, wallThickness: 1.2,
+      fuelPower: 3, assemblyCount: 160, rodsPerAssembly: 264, rodDiameter: 9.5,
+      cladThickness: 0.6, rackHeight: 3.66, rackBottomElevation: 0.5,
+      initialLevel: 65, initialTemperature: 40,
+    },
+  },
+
   // ------------------------------------------------------------- standalone pipes
   {
     id: 'pipe-primary', type: 'pipe', name: 'Primary Loop Piping',
