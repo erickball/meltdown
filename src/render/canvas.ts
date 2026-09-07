@@ -79,6 +79,12 @@ export class PlantCanvas {
 
   // Construction mode - shows grid and component outlines at ground level
   private constructionMode: boolean = true;
+  // Whether the player may place/connect right now. Separate from
+  // constructionMode, which says how components are DRAWN (running plant vs
+  // design drawing): building is allowed in simulation mode too, and the
+  // placement/routing affordances have to follow the builder, not the
+  // drawing style.
+  private buildMode: boolean = true;
 
   // Elevation nudge arrows (move mode). `elevationArrowTargets` is rebuilt
   // every frame by the drawing pass, so hit testing can only ever hit an
@@ -1463,8 +1469,8 @@ export class PlantCanvas {
     }
     mark('ground');
 
-    // Draw construction grid on ground plane in construction mode
-    if (this.constructionMode) {
+    // Draw the layout grid on the ground plane while building
+    if (this.showsBuildOverlays()) {
       renderDebugGrid(ctx, this.view, rect.width, rect.height, this.cameraDepth,
         (pos, elev) => this.worldToScreenPerspective(pos, elev));
     }
@@ -1747,15 +1753,17 @@ export class PlantCanvas {
       }
     }
 
-    // Draw ground-level outlines in construction mode
-    if (this.constructionMode) {
+    // Ground-level outlines: always while designing, and while the plant is
+    // running only when the player is actually placing something (they are a
+    // drawing aid, not part of the operating view)
+    if (this.showsBuildOverlays()) {
       for (const component of sortedComponents) {
         this.renderGroundOutline(ctx, component);
       }
     }
 
     // Draw placement preview (footprint following cursor)
-    if (this.placementPreview && this.constructionMode) {
+    if (this.placementPreview && this.buildMode) {
       this.renderPlacementPreview(ctx);
     }
 
@@ -3221,6 +3229,26 @@ export class PlantCanvas {
   }
 
   /**
+   * Allow (or forbid) placement previews, port routing and the layout grid.
+   * True in construction mode and, since live editing, in simulation mode as
+   * well - the two flags are separate because constructionMode also selects
+   * how components are drawn.
+   */
+  public setBuildMode(enabled: boolean): void {
+    this.buildMode = enabled;
+  }
+
+  /**
+   * Whether to draw the design overlays (coordinate grid, ground outlines):
+   * always while designing, and while the plant is RUNNING only when the
+   * player is actually placing something. They are drawing aids, not part of
+   * the operating view.
+   */
+  private showsBuildOverlays(): boolean {
+    return this.constructionMode || (this.buildMode && this.placementPreview !== null);
+  }
+
+  /**
    * Show the per-component elevation nudge arrows (move mode only). They are
    * drawn as a final overlay and hit-tested through
    * getElevationArrowAtScreen.
@@ -3402,7 +3430,7 @@ export class PlantCanvas {
       }
       return false;
     }
-    if (e.button !== 0 || !this.showPorts) return false;
+    if (e.button !== 0 || !this.showPorts || !this.buildMode) return false;
 
     if (this.grid.routing) {
       const hit = this.grid.portAt({ x, y }, this.plantState, this.grid.routing.from.component.id);
@@ -3448,6 +3476,7 @@ export class PlantCanvas {
       showPorts: this.showPorts,
       highlightedPort: this.highlightedPort,
       constructionMode: this.constructionMode,
+      buildMode: this.buildMode,
       placementPreview: this.placementPreview,
       connectionFluid: (conn, from) => this.getConnectionFluid(conn, from),
     });

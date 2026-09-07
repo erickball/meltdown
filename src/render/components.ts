@@ -4718,12 +4718,20 @@ export function renderFlowConnectionArrows(
  * instead of both resolving to whichever appears first. Cached against the
  * connection list, which only changes when the plant is edited.
  */
-let flowIdCache: { connections: readonly Connection[]; ids: string[] } | undefined;
+let flowIdCache: { connections: readonly Connection[]; length: number; ids: string[] } | undefined;
 
 function flowConnectionIds(plantState: PlantState): string[] {
-  if (flowIdCache?.connections !== plantState.connections) {
+  // The LENGTH is part of the key, not just the array's identity: the
+  // construction manager pushes onto (and splices out of) the existing array
+  // rather than replacing it, so a connection added while the plant is on
+  // screen leaves an array-identical but stale cache - the new run then has
+  // no plant connection to draw against, and every frame logs that it cannot
+  // find its port positions.
+  if (flowIdCache?.connections !== plantState.connections ||
+      flowIdCache.length !== plantState.connections.length) {
     flowIdCache = {
       connections: plantState.connections,
+      length: plantState.connections.length,
       ids: assignFlowConnectionIds(plantState.connections),
     };
   }

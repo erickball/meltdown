@@ -20,7 +20,7 @@
         <h3>Mode</h3>
         <div class="mode-controls">
           <button id="mode-construction" class="mode-btn active" title="Edit the plant. The running simulation is saved, and component dialogs show the CURRENT conditions as the new initial conditions.">🔧 Construction</button>
-          <button id="mode-simulation" class="mode-btn" title="Run the plant. Returning from Construction resumes where you left off; any components you edited (re)initialize from their edited settings instead.">▶️ Simulation</button>
+          <button id="mode-simulation" class="mode-btn" title="Run the plant. Returning from Construction resumes where you left off; any components you edited (re)initialize from their edited settings instead. You can keep building while it runs: placing, deleting, connecting and editing all rebuild the simulation in place, at the same simulated time.">▶️ Simulation</button>
         </div>
 
         <!-- Simulation Controls Section -->
@@ -140,7 +140,8 @@
         <div class="construction-controls" id="construction-controls">
           <hr />
           <h3>Components</h3>
-        <div class="component-categories">
+        <div class="component-categories"
+             title="Pick a component, then click the site to place it. This works while the plant is running too: the new component starts from its own initial conditions and everything already running carries straight on at the same simulated time. Rebuilding the plant does clear the rewind history.">
           <details open>
             <summary>Vessels</summary>
             <button data-component="tank" class="component-btn">Tank</button>
@@ -185,13 +186,15 @@
         <button id="open-save-load-btn" class="mode-btn">💾 Save / Load</button>
         </div>
 
-        <!-- Edit tools (construction mode only - hidden while simulating) -->
+        <!-- Edit tools. Connect works while the plant runs (new pipes start at
+             zero flow); Move is construction-only - see setBuildToolsAvailable. -->
         <div id="edit-section">
         <hr />
         <h3>Edit</h3>
         <button id="move-mode" class="mode-btn"
                 title="Drag a component to move it in plan; use the ▲▼ buttons beside it to raise or lower it 0.5 m at a time. Anything inside a component (a core barrel in a vessel, equipment in a building) moves with it. Buildings only move once armed with their own 'Move Building' button.">Move Components</button>
-        <button id="connect-mode-btn" class="mode-btn">🔗 Connect Components</button>
+        <button id="connect-mode-btn" class="mode-btn"
+                title="Show connection points and lay pipe between them. Available while the plant is running: a new run starts at zero flow and the rest of the plant keeps going.">🔗 Connect Components</button>
         <div id="connection-info" style="margin-top: 10px; font-size: 11px; color: #888; display: none;">
           <div id="connection-status">Select first component...</div>
         </div>

@@ -40,6 +40,10 @@ import {
   captureResumeSnapshot,
   transplantSimulationState,
   ResumeSnapshot,
+  beginLivePlantEdit,
+  commitLivePlantEdit,
+  revertLivePlantEdit,
+  LiveEditSnapshot,
 } from './simulation';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -1344,6 +1348,10 @@ function init() {
   // simulation mode resumes it (edited components re-initialize instead).
   // Cleared whenever a different plant is loaded.
   let resumeSnapshot: ResumeSnapshot | null = null;
+  // A live plant edit in flight (see beginLiveEdit, further down). Declared
+  // here so deserializePlantState - which is defined above that block - can
+  // drop it when a different plant is loaded.
+  let pendingLiveEdit: PendingLiveEdit | null = null;
   let selectedComponentType: string | null = null;
   const componentDialog = new ComponentDialog();
   const connectionDialog = new ConnectionDialog();
@@ -1430,27 +1438,31 @@ function init() {
       return;
     }
 
-    // Construction mode keyboard shortcuts
-    if (currentMode === 'construction') {
-      // Delete key deletes the selected component (but not Backspace - that's for text editing)
-      if (e.key === 'Delete' && selectedComponentId) {
-        e.preventDefault();
-        const component = constructionManager.getComponent(selectedComponentId);
-        const label = component?.label || selectedComponentId;
-        if (confirm(`Delete component "${label}"? This will also remove all its connections.`)) {
-          const wasController = component?.type === 'controller';
-          constructionManager.deleteComponent(selectedComponentId);
-          if (wasController) {
-            gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-          }
-          plantCanvas.clearSelection();
-          selectedComponentId = null;
-          updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
-          updateConstructionCostPanel();
+    // Delete key removes the selected component (but not Backspace - that's
+    // for text editing). Works in both modes: while the plant is running the
+    // simulation is rebuilt around the removal.
+    if (e.key === 'Delete' && selectedComponentId &&
+        (currentMode === 'construction' || liveBuildAllowed())) {
+      e.preventDefault();
+      const component = constructionManager.getComponent(selectedComponentId);
+      const label = component?.label || selectedComponentId;
+      if (confirm(`Delete component "${label}"? This will also remove all its connections.`)) {
+        const doomedId = selectedComponentId;
+        const wasController = component?.type === 'controller';
+        liveEdit(`Removing ${label}`, () => constructionManager.deleteComponent(doomedId));
+        if (wasController) {
+          gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
         }
+        plantCanvas.clearSelection();
+        selectedComponentId = null;
+        updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+        updateConstructionCostPanel();
       }
       return;
     }
+
+    // The remaining shortcuts drive the simulation
+    if (currentMode === 'construction') return;
 
     switch (e.key) {
       case ' ':
@@ -1510,6 +1522,12 @@ function init() {
       }
     }
 
+    // Snapshot BEFORE the dialog is populated. The write-back inside
+    // beginLiveEdit is what puts the CURRENT conditions into the IC fields
+    // the dialog reads, and the snapshot has to be taken after it or every
+    // component would come back looking edited.
+    const liveSnap = beginLiveEdit();
+
     componentDialog.showEdit(component as Record<string, any>, (properties) => {
       if (properties) {
         constructionManager.updateComponent(componentId, properties);
@@ -1535,10 +1553,17 @@ function init() {
         if (component.type === 'controller') {
           gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
         }
+        // Rebuild the running simulation around the edit: the edited
+        // component re-initializes from the values the dialog just showed
+        // (which are its live conditions), everything else carries on
+        commitLiveEdit(liveSnap, `Editing ${component.label || componentId}`);
         // Refresh the component detail panel
         if (gameLoop) {
           updateComponentDetail(componentId, plantState, gameLoop.getState());
         }
+      } else {
+        // Cancelled: nothing changed, let the clock go again
+        abandonLiveEdit(liveSnap);
       }
     }, availableCores, availableGenerators);
   });
@@ -1585,15 +1610,19 @@ function init() {
     };
     console.log(`[EditCore] open for ${reactorVesselId}: barrel ${rv.coreBarrelId} thermalPower=${((barrel.thermalPower ?? 3000e6) / 1e6).toFixed(0)} MWt`);
 
+    const liveSnap = beginLiveEdit();
+
     componentDialog.showEdit(coreRecord, (properties) => {
-      if (!properties) return;
+      if (!properties) { abandonLiveEdit(liveSnap); return; }
       console.log(`[EditCore] apply to ${reactorVesselId}: thermalPower=${properties.thermalPower} MWt, diameter=${properties.diameter} m, enrichment=${properties.enrichmentPct}%`);
       const result = constructionManager.addCoreToContainer(reactorVesselId, properties);
       if (result.success) {
+        commitLiveEdit(liveSnap, `Editing the core in ${rv.label || reactorVesselId}`);
         updateConstructionCostPanel();
         if (gameLoop) updateComponentDetail(reactorVesselId, plantState, gameLoop.getState());
         showNotification('Core updated', 'info');
       } else {
+        abandonLiveEdit(liveSnap);
         showNotification(result.error || 'Failed to update core', 'error');
       }
     });
@@ -1616,8 +1645,11 @@ function init() {
     if (confirm(`Delete component "${componentId}"? This will also remove all its connections.`)) {
       // Check if this is a controller before deleting
       const wasController = plantState.components.get(componentId)?.type === 'controller';
+      const label = plantState.components.get(componentId)?.label || componentId;
 
-      constructionManager.deleteComponent(componentId);
+      // Live: the simulation is rebuilt without the component and its
+      // connections; everything else keeps running from where it was
+      liveEdit(`Removing ${label}`, () => constructionManager.deleteComponent(componentId));
 
       // If we deleted a controller, update the scram setpoints
       if (wasController) {
@@ -1667,43 +1699,11 @@ function init() {
       return;
     }
 
-    // Get the components
-    const fromComponent = plantState.components.get(plantConn.fromComponentId);
-    const toComponent = plantState.components.get(plantConn.toComponentId);
-
-    if (!fromComponent || !toComponent) {
-      console.error(`[Edit] Components not found for connection`);
-      return;
-    }
-
-    // Show the edit dialog
-    connectionDialog.edit(plantConn, fromComponent, toComponent, (result: ConnectionEditResult | null) => {
-      if (result) {
-        // Update the plant connection
-        plantConn.fromElevation = result.fromElevation;
-        plantConn.toElevation = result.toElevation;
-        plantConn.flowArea = result.flowArea;
-        plantConn.length = result.length;
-        plantConn.fromOpeningHeight = result.fromOpeningHeight;
-        plantConn.toOpeningHeight = result.toOpeningHeight;
-
-        // Also update the simulation connection directly for immediate effect
-        simConn.flowArea = result.flowArea;
-        simConn.fromElevation = result.fromElevation;
-        simConn.toElevation = result.toElevation;
-        simConn.fromOpeningHeight = result.fromOpeningHeight;
-        simConn.toOpeningHeight = result.toOpeningHeight;
-        // Note: length affects inertance which is calculated at simulation start,
-        // so changing it during simulation won't have full effect until restart
-
-
-        // Refresh the component detail panel
-        const selectedId = plantCanvas.getSelectedComponentId?.();
-        if (selectedId) {
-          updateComponentDetail(selectedId, plantState, simState);
-        }
-      }
-    });
+    // One dialog, one apply path: editPlantConnection edits the PLANT
+    // connection and rebuilds the running simulation around it. (This used
+    // to poke the simulation connection's geometry directly and leave its
+    // inertance stale until the next restart.)
+    editPlantConnection(plantConn);
   });
 
   // Plant connection edit callback (before simulation starts)
@@ -1725,7 +1725,9 @@ function init() {
   // again while building opens its edit dialog (same one as the detail
   // panel's Edit button)
   plantCanvas.onConnectionSelect = (conn, again) => {
-    if (conn && again && currentMode === 'construction') editPlantConnection(conn);
+    if (conn && again && (currentMode === 'construction' || liveBuildAllowed())) {
+      editPlantConnection(conn);
+    }
   };
 
   function editPlantConnection(plantConn: Connection): void {
@@ -1738,6 +1740,8 @@ function init() {
       return;
     }
 
+    const liveSnap = beginLiveEdit();
+
     // Show the edit dialog
     connectionDialog.edit(plantConn, fromComponent, toComponent, (result: ConnectionEditResult | null) => {
       if (result) {
@@ -1749,12 +1753,20 @@ function init() {
         plantConn.fromOpeningHeight = result.fromOpeningHeight;
         plantConn.toOpeningHeight = result.toOpeningHeight;
 
+        // Rebuild: bore and length set the flow area and the inertance, which
+        // are baked into the simulation connection at build time. An edited
+        // run restarts at zero flow (resume.ts only carries momentum across
+        // connections that did not change).
+        commitLiveEdit(liveSnap,
+          `Editing the pipe ${fromComponent.label || plantConn.fromComponentId} \u2192 ${toComponent.label || plantConn.toComponentId}`);
 
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
         if (selectedId) {
           updateComponentDetail(selectedId, plantState, gameLoop?.getState() || {} as SimulationState);
         }
+      } else {
+        abandonLiveEdit(liveSnap);
       }
     });
   }
@@ -1762,7 +1774,10 @@ function init() {
   // Connection delete callback
   setConnectionDeleteCallback((fromId: string, toId: string) => {
     if (confirm(`Delete connection between ${fromId} and ${toId}?`)) {
-      const deleted = constructionManager.deleteConnection(fromId, toId);
+      let deleted = false;
+      liveEdit(`Removing the pipe ${fromId} \u2192 ${toId}`, () => {
+        deleted = constructionManager.deleteConnection(fromId, toId);
+      });
       if (deleted) {
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
@@ -1873,8 +1888,11 @@ function init() {
 
   // Deserialize JSON object back to PlantState
   function deserializePlantState(data: any): void {
-    // A different plant invalidates any saved mode-switch resume state
+    // A different plant invalidates any saved mode-switch resume state, and
+    // any live edit still waiting on an open dialog (commitLiveEdit refuses
+    // a superseded snapshot rather than resuming the old plant onto this one)
     resumeSnapshot = null;
+    pendingLiveEdit = null;
     plantState.components.clear();
     plantState.connections = [];
 
@@ -2531,6 +2549,179 @@ function init() {
     openSaveLoadBtn.addEventListener('click', showSaveLoadDialog);
   }
 
+  // ==========================================================================
+  // Live plant edits: build while the simulation runs
+  // ==========================================================================
+  //
+  // Every plant change made in simulation mode goes through this pair, so the
+  // pause/rebuild/resume sequence exists exactly once. beginLiveEdit() writes
+  // the live state back into the components' initial-condition fields (which
+  // is what makes an edit dialog opened next show CURRENT conditions) and
+  // snapshots the plant; commitLiveEdit() rebuilds from the edited plant and
+  // transplants the live state of everything that did not change.
+  //
+  // Where live editing does not apply (construction mode, career mode)
+  // beginLiveEdit() returns null and commitLiveEdit() does nothing, so the
+  // edit sites below behave exactly as they did before.
+
+  /** Told the user once that a live edit clears the rewind history. */
+  let liveEditHistoryWarned = false;
+
+  /**
+   * Whether the plant may be built while it runs. Sandbox: yes. Career mode:
+   * no - construction there is an OUTAGE, and GameModeManager bills repairs
+   * and lost generation when you leave simulation mode (beforeModeSwitch).
+   * Building mid-run would walk straight past that, so career keeps the
+   * stop-the-plant-to-build rule and the palette stays hidden while running.
+   */
+  function liveBuildAllowed(): boolean {
+    return !gameMode?.active;
+  }
+
+  interface PendingLiveEdit {
+    snapshot: LiveEditSnapshot;
+    /** The clock was running when the edit started, so put it back running. */
+    wasRunning: boolean;
+  }
+
+  // At most one edit gesture is in flight (dialogs are modal); the variable
+  // itself is declared at the top of init() - see the note there.
+
+  /**
+   * Start an edit gesture: hold the clock, write the live state into the
+   * components' IC fields, and snapshot the plant.
+   *
+   * THE CLOCK HAS TO STOP FOR THE WHOLE GESTURE, not just the rebuild. The
+   * per-frame syncSimulationToVisuals writes display values into the very
+   * component fields the snapshot compares to tell an edited component from
+   * an untouched one, so a single frame between the snapshot and the rebuild
+   * makes EVERY component look edited and re-initializes the whole plant.
+   * Holding it also means the dialog shows exactly the conditions the resumed
+   * simulation will carry.
+   *
+   * Returns null wherever live editing does not apply (construction mode,
+   * career mode, an empty simulation) - the caller then behaves as before.
+   */
+  function beginLiveEdit(): PendingLiveEdit | null {
+    // A dialog abandoned by opening another one would otherwise leave the
+    // clock stopped on a snapshot nobody is going to commit
+    if (pendingLiveEdit) abandonLiveEdit(pendingLiveEdit);
+    // Construction mode (the mode switch resumes instead) and career mode
+    // (construction is an outage there) both fall through: the plant edit
+    // still happens, it just does not rebuild the running simulation.
+    if (currentMode !== 'simulation' || !liveBuildAllowed()) return null;
+    const liveState = gameLoop.getState();
+    if (!liveState || liveState.flowNodes.size === 0) return null;
+    const wasRunning = !gameLoop.getIsPaused();
+    gameLoop.pause();
+    updatePauseButton();
+    pendingLiveEdit = { snapshot: beginLivePlantEdit(liveState, plantState), wasRunning };
+    return pendingLiveEdit;
+  }
+
+  /** The gesture ended without a plant change (cancelled dialog, failed
+   *  creation): let the clock go again. */
+  function abandonLiveEdit(pending: PendingLiveEdit | null): void {
+    if (!pending || pendingLiveEdit !== pending) return; // already superseded
+    pendingLiveEdit = null;
+    if (pending.wasRunning) gameLoop.resume();
+    updatePauseButton();
+  }
+
+  /**
+   * Rebuild the running simulation around an edit that has already been made
+   * to the plant. Returns true when the simulation was rebuilt.
+   *
+   * The rebuild is synchronous and can take tens of milliseconds on a big
+   * plant; the clock has been stopped since beginLiveEdit and is put back the
+   * way it was afterwards, so no frame ever steps a half-built state. If the
+   * factory refuses the edited design, the plant is put back exactly as it
+   * was and the simulation keeps running the state it already had - a running
+   * simulation that no longer describes the plant on screen would be far
+   * worse than a rejected edit.
+   */
+  function commitLiveEdit(pending: PendingLiveEdit | null, what: string): boolean {
+    if (!pending) return false;
+    if (pendingLiveEdit !== pending) {
+      // Superseded: another edit gesture started, or a different plant was
+      // loaded, while this dialog was open. The snapshot describes a plant
+      // that no longer exists, so it cannot be resumed onto this one.
+      console.warn(`[LiveEdit] ${what}: dropped - the plant changed while the dialog was open.`);
+      return false;
+    }
+    pendingLiveEdit = null;
+    const { snapshot, wasRunning } = pending;
+
+    let result;
+    try {
+      const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
+      setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
+      result = commitLivePlantEdit(plantState, snapshot);
+    } catch (error) {
+      revertLivePlantEdit(plantState, snapshot);
+      if (wasRunning) gameLoop.resume();
+      updatePauseButton();
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[LiveEdit] ${what}: the edited plant could not be built - reverted.`, error);
+      showErrorDialog(
+        'Cannot apply that change to the running plant',
+        `${what} could not be turned into a simulation, so the change was undone and ` +
+        `the plant is still running as it was.\n\n${message}`);
+      return false;
+    }
+
+    // The rewind history describes a plant that no longer exists: its
+    // snapshots carry the OLD node set, so replaying or seeking into them
+    // would step a state the current plant cannot produce. Truncate it here
+    // (setSimulationState clears it and restarts step numbering at the
+    // current simulated time) rather than let a seek quietly resurrect the
+    // pre-edit plant.
+    if (!liveEditHistoryWarned) {
+      liveEditHistoryWarned = true;
+      console.warn(
+        '[LiveEdit] Rewind history TRUNCATED at this edit. Editing the plant while it runs ' +
+        'changes the shape of the state vector, so snapshots taken before the edit describe ' +
+        'a plant that no longer exists and cannot be replayed against the new one. ' +
+        'Simulated time is unchanged and history starts accumulating again from here. ' +
+        'This message appears once per session.');
+    }
+
+    // The clock is stopped from here until the finally below. Anything that
+    // throws while repainting the panels must NOT leave it stopped - a plant
+    // frozen by a display bug is the worst possible failure of a live edit.
+    try {
+      gameLoop.setSimulationState(result.state);
+      gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+      plantCanvas.setSimState(result.state);
+      refreshDisplayAfterRestore();
+      updateConstructionCostPanel();
+    } finally {
+      if (wasRunning) gameLoop.resume();
+      updatePauseButton();
+    }
+
+    console.log(`[LiveEdit] ${what}: ${result.notes.join('; ')}`);
+    showNotification(
+      `${what} applied to the running plant - ${result.notes[0]} (rewind history restarts here)`,
+      'info', 6000);
+    return true;
+  }
+
+  /** A live edit with no dialog in the middle: snapshot, mutate, rebuild. */
+  function liveEdit(what: string, mutate: () => void): void {
+    const pending = beginLiveEdit();
+    try {
+      mutate();
+    } catch (error) {
+      if (pending) {
+        revertLivePlantEdit(plantState, pending.snapshot);
+        abandonLiveEdit(pending);
+      }
+      throw error;
+    }
+    commitLiveEdit(pending, what);
+  }
+
   function setMode(mode: 'construction' | 'simulation'): void {
     // Career mode gates mode switches (BUILD required before operating;
     // returning to construction mid-run is an outage with repair billing)
@@ -2574,7 +2765,9 @@ function init() {
 
       // Enable construction mode visuals (grid, outlines)
       plantCanvas.setConstructionMode(true);
+      plantCanvas.setBuildMode(true);
       plantCanvas.setMoveMode(constructionSubMode === 'move');
+      setBuildToolsAvailable(true);
 
       // Pause simulation. Refresh the button even though it is hidden here:
       // it is the label the user meets on the way back into simulation mode,
@@ -2627,21 +2820,29 @@ function init() {
       modeConstructionBtn?.classList.remove('active');
       modeSimulationBtn?.classList.add('active');
 
-      // Show simulation controls, hide construction controls and edit tools
+      // Show simulation controls. The component palette and the connect tool
+      // stay up: the plant can be built while it runs (every such edit goes
+      // through commitLiveEdit). Only the cost panel folds away - it is a
+      // design-stage readout, and career mode bills construction separately.
+      const canBuildLive = liveBuildAllowed();
       if (simControls) simControls.style.display = 'block';
-      if (constructionControls) constructionControls.style.display = 'none';
+      if (constructionControls) constructionControls.style.display = canBuildLive ? 'block' : 'none';
       if (constructionCostPanel) constructionCostPanel.style.display = 'none';
-      if (editSection) editSection.style.display = 'none';
-      // Leave connect/move mode so the canvas doesn't stay in a sub-mode
-      // whose buttons are now hidden
+      if (editSection) editSection.style.display = canBuildLive ? 'block' : 'none';
+      // Start from the placement tool: move mode is construction-only (see
+      // setBuildToolsAvailable), so leaving the canvas in it would strand it
+      // in a sub-mode with no way out.
       setConstructionSubMode('place');
+      setBuildToolsAvailable(false);
 
       // Show MW to grid panel in simulation mode
       const mwPanel = document.getElementById('mw-to-grid-panel');
       if (mwPanel) mwPanel.style.display = 'block';
 
-      // Disable construction mode visuals
+      // Draw the plant as a running plant (gauges, fluid levels), but keep
+      // the placement/routing affordances live
       plantCanvas.setConstructionMode(false);
+      plantCanvas.setBuildMode(canBuildLive);
       plantCanvas.setMoveMode(false);
 
       // Clear component selection
@@ -2972,8 +3173,7 @@ function init() {
       portTooltip.classList.remove('visible');
     }
 
-    if (currentMode !== 'construction') {
-      // Clear placement preview when not in construction mode
+    if (currentMode !== 'construction' && !liveBuildAllowed()) {
       plantCanvas.setPlacementPreview(null, null);
       return;
     }
@@ -3288,9 +3488,13 @@ function init() {
     }
   }
 
-  // Canvas click handler for placing components or making connections
+  // Canvas click handler for placing components or making connections.
+  // Runs in both modes - a plant can be built while it is running (each
+  // change is absorbed by commitLiveEdit). In simulation mode the sub-mode
+  // is 'place' with nothing selected until the player picks a component, so
+  // ordinary clicks fall through to selection as before.
   canvas.addEventListener('click', (e) => {
-    if (currentMode !== 'construction') return;
+    if (currentMode !== 'construction' && !liveBuildAllowed()) return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -3340,6 +3544,13 @@ function init() {
 
       // Function to proceed with component placement
       const proceedWithPlacement = (containedBy?: string) => {
+        // Snapshot before the dialog opens (see beginLiveEdit): in simulation
+        // mode this is what lets the new component drop into a plant that is
+        // already running. A new component always starts from its factory
+        // initial conditions; every other component carries on untouched.
+        const liveSnap = beginLiveEdit();
+        let placed = false;
+
         // If placing inside a container, use the container's position
         let placementPos = worldPos;
         if (containedBy && clickedComponent) {
@@ -3394,6 +3605,7 @@ function init() {
               console.log(`[Placement] core -> addCoreToContainer('${containedBy}' [${coreTarget?.type}]), thermalPower=${config.properties.thermalPower} MWt`);
               const result = constructionManager.addCoreToContainer(containedBy, config.properties);
               if (result.success) {
+                placed = true;
                 // Name the ACTUAL container - it is not always the clicked component
                 showNotification(`Added reactor core to ${coreTarget?.label || containedBy}`, 'info');
               } else {
@@ -3419,6 +3631,7 @@ function init() {
               const componentId = constructionManager.createComponent(config);
 
               if (componentId) {
+                placed = true;
 
                 // If a scram controller was placed, update the game loop setpoints
                 if (config.type === 'scram-controller') {
@@ -3441,6 +3654,11 @@ function init() {
               }
             }
 
+            // Absorb the new component into the running simulation (a no-op
+            // in construction mode, where the mode switch does it instead)
+            if (placed) commitLiveEdit(liveSnap, `Placing ${config.name || config.type}`);
+            else abandonLiveEdit(liveSnap);
+
             // Clear component selection after placing
             selectedComponentType = null;
             constructionButtons.forEach(b => b.classList.remove('selected'));
@@ -3451,6 +3669,8 @@ function init() {
               placementHintDiv.style.display = 'none';
             }
           } else {
+            // Placement cancelled
+            abandonLiveEdit(liveSnap);
           }
         }, availableCores, availableGenerators, defaultName);
       };
@@ -3524,6 +3744,10 @@ function init() {
     route?: Point[],
     suggestedLength?: number
   ): void {
+    // Snapshot before the dialog opens (see beginLiveEdit); the new run is
+    // built at zero flow and every other component keeps its live state.
+    const liveSnap = beginLiveEdit();
+
     connectionDialog.show(
       from.component,
       to.component,
@@ -3559,10 +3783,16 @@ function init() {
           }
 
           if (success) {
+            commitLiveEdit(liveSnap,
+              `Connecting ${config.fromComponent.label} to ${config.toComponent.label}`);
             showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
           } else {
+            abandonLiveEdit(liveSnap);
             showNotification('Failed to create connection', 'error');
           }
+        } else {
+          // Connection cancelled
+          abandonLiveEdit(liveSnap);
         }
 
         // Reset connection state
@@ -3574,6 +3804,26 @@ function init() {
       },
       suggestedLength !== undefined ? { suggestedLength } : undefined
     );
+  }
+
+  /**
+   * Enable/disable the build tools that only work with the plant stopped.
+   *
+   * Placing, deleting, connecting and editing all work live (the simulation
+   * is rebuilt around the change). Moving does not: a drag repositions a
+   * component continuously, and every intermediate position would need its
+   * own rebuild - and the relocated component would re-initialize from its
+   * current conditions while its pipes re-route underneath it. That is an
+   * outage job, so the button says so instead of pretending.
+   */
+  let moveToolAvailable = true;
+  function setBuildToolsAvailable(constructionMode: boolean): void {
+    moveToolAvailable = constructionMode;
+    if (!moveModeBtn) return;
+    moveModeBtn.classList.toggle('tool-unavailable', !constructionMode);
+    moveModeBtn.title = constructionMode
+      ? 'Drag a component to move it in plan; use the \u25b2\u25bc buttons beside it to raise or lower it 0.5 m at a time. Anything inside a component (a core barrel in a vessel, equipment in a building) moves with it. Buildings only move once armed with their own \'Move Building\' button.'
+      : 'Not available while the plant is running: relocating a component would re-initialize it from its current conditions and re-route its pipes under it, once per step of the drag. Switch to Construction mode to move things.';
   }
 
   // Helper to set construction sub-mode
@@ -3649,6 +3899,13 @@ function init() {
   // Move mode button handler
   if (moveModeBtn) {
     moveModeBtn.addEventListener('click', () => {
+      if (!moveToolAvailable) {
+        showNotification(
+          'Moving components is a construction-mode job: relocating a running component ' +
+          'would re-initialize it from its current conditions and re-route its pipes under ' +
+          'it. Switch to Construction mode to move things.', 'warning', 7000);
+        return;
+      }
       if (constructionSubMode === 'move') {
         // Exit move mode, return to place mode
         setConstructionSubMode('place');

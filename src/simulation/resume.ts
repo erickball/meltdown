@@ -352,7 +352,19 @@ const VOLATILE_COMPONENT_KEYS = new Set([
   'tubeSections', 'bundleFluids', 'opFlowFraction',
 ]);
 
-/** Deterministic JSON: sorted keys, volatile top-level fields stripped. */
+/**
+ * Wiring bookkeeping that lives at any depth inside a component and is not an
+ * initial condition. `Port.connectedTo` names the port at the far end of a
+ * connection; the construction manager writes it as connections come and go,
+ * renderers and Jack's free-port search read it, and the FACTORY never looks
+ * at it (the connection list is the wiring, port.connectedTo is a convenience
+ * index over it). Counting it would mean that running a new pipe to a vessel
+ * re-initializes that vessel - an untouched component made dirty by its
+ * neighbour's edit. The connections themselves are compared separately.
+ */
+const VOLATILE_NESTED_KEYS = new Set(['connectedTo']);
+
+/** Deterministic JSON: sorted keys, volatile fields stripped. */
 function stableStringify(value: unknown, stripVolatile = false): string {
   const seen = new Set<object>();
   const norm = (v: unknown, top: boolean): unknown => {
@@ -363,6 +375,7 @@ function stableStringify(value: unknown, stripVolatile = false): string {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(v as object).sort()) {
       if (top && stripVolatile && VOLATILE_COMPONENT_KEYS.has(key)) continue;
+      if (stripVolatile && VOLATILE_NESTED_KEYS.has(key)) continue;
       const val = (v as Record<string, unknown>)[key];
       if (val === undefined || typeof val === 'function') continue;
       out[key] = norm(val, false);

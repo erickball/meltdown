@@ -47,6 +47,8 @@ export interface GridFrameState {
   showPorts: boolean;
   highlightedPort: { componentId: string; portId: string } | null;
   constructionMode: boolean;
+  /** The player may place/connect right now (true in both modes since live edits). */
+  buildMode: boolean;
   placementPreview: { componentType: string; position: Point } | null;
   connectionFluid: (conn: Connection, from: PlantComponent) => Fluid | undefined;
 }
@@ -599,7 +601,7 @@ export class GridView {
     if (f.selectedConnection) this.renderConnectionLabel(ctx, f, f.selectedConnection);
     if (f.showPorts) this.renderPorts(ctx, f);
     if (this.routing) this.renderRouting(ctx, f);
-    if (f.placementPreview && f.constructionMode) this.renderPlacementPreview(ctx, f);
+    if (f.placementPreview && f.buildMode) this.renderPlacementPreview(ctx, f);
   }
 
   private renderGround(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
@@ -610,7 +612,9 @@ export class GridView {
     // Tile lines: clear while building, all but gone while the plant runs
     const ppm = this.cam.ppm;
     if (ppm >= 10) {
-      const alpha = f.constructionMode ? 0.16 : 0.02;
+      const building = f.constructionMode ||
+        (f.buildMode && (f.placementPreview !== null || f.showPorts));
+      const alpha = building ? 0.16 : 0.02;
       const tl = this.screenToWorld({ x: 0, y: 0 });
       const br = this.screenToWorld({ x: f.width, y: f.height });
       const x0 = Math.floor(tl.x / TILE_M), x1 = Math.ceil(br.x / TILE_M);
@@ -873,7 +877,7 @@ export class GridView {
     ctx.moveTo(br.x - inset, tl.y + inset); ctx.lineTo(br.x - inset, br.y - inset); ctx.lineTo(tl.x + inset, br.y - inset);
     ctx.stroke();
 
-    if (c.id === f.hoveredComponentId && f.constructionMode) {
+    if (c.id === f.hoveredComponentId && f.buildMode) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
       ctx.lineWidth = 2;
       ctx.strokeRect(tl.x, tl.y, w, h);
@@ -1040,9 +1044,8 @@ export class GridView {
         const phase = fluid ? fluid.phase : '';
         lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
       }
-    } else if (f.constructionMode) {
-      lines.push('click again to edit');
     }
+    if (f.buildMode) lines.push('click again to edit');
 
     ctx.save();
     ctx.font = '12px sans-serif';
