@@ -1,4 +1,5 @@
 import type { ScenarioSpec } from './simulation/scenario-types';
+import type { TerrainSpec } from './terrain-types';
 // Physical units (all SI)
 // Temperature: Kelvin (display as Celsius)
 // Pressure: Pascals
@@ -560,6 +561,9 @@ export interface PlantState {
   // Optional timed accident sequence shipped with a preset (see
   // simulation/scenario-types.ts); fired automatically while the plant runs.
   scenario?: ScenarioSpec;
+  // Optional ground: a height field over the plan plus water bodies (see
+  // terrain-types.ts). A component's `elevation` is above the local ground.
+  terrain?: TerrainSpec;
   simTime: number;
   simSpeed: number;
   isPaused: boolean;
