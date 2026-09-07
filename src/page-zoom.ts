@@ -9,16 +9,20 @@
  *
  *  - double-tap zoom is disabled on the UI (`touch-action: manipulation` in
  *    the stylesheet; the canvas keeps `none` for its own gestures), and
- *  - whenever the browser is zoomed in, a "reset zoom" button floats inside
- *    the visible part of the page (tracked through the visualViewport API,
- *    since a fixed-position element is fixed to the layout viewport and can
- *    be off screen just like the toolbar). Pressing it rewrites the viewport
- *    meta tag to the fit-to-width scale for a moment, which every mobile
- *    engine honours as a new initial scale, then restores the tag so pinch
- *    zoom on the page stays available.
+ *  - whenever the browser is zoomed in, the canvas hands its touch gestures
+ *    back to the browser, so a double-tap or a pinch on the canvas fits the
+ *    page again the way it does on the controls. The game's own pan and
+ *    pinch on the canvas return as soon as the page fits.
+ *  - a "reset zoom" button also floats inside the visible part of the page
+ *    (tracked through the visualViewport API, since a fixed-position element
+ *    is fixed to the layout viewport and can be off screen just like the
+ *    toolbar). Pressing it rewrites the viewport meta tag to the fit-to-width
+ *    scale for a moment, which Chrome honours as a new initial scale (Firefox
+ *    for Android does not - there the double-tap is the way back), then
+ *    restores the tag so pinch zoom on the page stays available.
  *
  * On a desktop browser the visual viewport is never narrower than the layout
- * viewport, so the button never shows.
+ * viewport, so none of this engages.
  */
 
 const LAYOUT_WIDTH = 1280;
@@ -26,8 +30,9 @@ const LAYOUT_WIDTH = 1280;
 export function installPageZoomReset(): void {
   const vv = window.visualViewport;
   const button = document.getElementById('page-zoom-reset');
+  const canvas = document.getElementById('plant-canvas');
   const meta = document.querySelector('meta[name="viewport"]') as HTMLMetaElement | null;
-  if (!vv || !button || !meta) return;
+  if (!vv || !button || !canvas || !meta) return;
 
   const originalContent = meta.content;
 
@@ -39,7 +44,11 @@ export function installPageZoomReset(): void {
   };
 
   const place = (): void => {
-    if (!isZoomedIn()) {
+    const zoomed = isZoomedIn();
+    // Zoomed in: the browser gets the canvas gestures (double-tap and pinch
+    // fit the page again); otherwise the game keeps them (style.css: none)
+    canvas.style.touchAction = zoomed ? 'auto' : '';
+    if (!zoomed) {
       button.hidden = true;
       return;
     }
