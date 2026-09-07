@@ -765,6 +765,19 @@ function absoluteBase(component: { position: { x: number; y: number }; elevation
   return terrainHeightAt(buildTerrain, component.position) + ((component as any).elevation || 0);
 }
 
+/**
+ * The reserved component id that means "the outside air" on a connection.
+ *
+ * `atmosphere` is already the model's one boundary node (see
+ * createAtmosphereNode) and already where a rupture discharges. Naming it
+ * as a connection endpoint is how a plant says a line is open to the
+ * environment - a pool vent, a stack, a drain onto the ground - without a
+ * component that would need a position, a volume and a drawing. Liquid that
+ * crosses into it lands in the terrain basin under its SOURCE node, which is
+ * what turns a leak into a puddle (operators/surface-water.ts).
+ */
+export const ENVIRONMENT_NODE_ID = 'atmosphere';
+
 /** Mid-height of a node, the reference a port without an elevation of its own sits at (as in pressureAtConnection). */
 function nodeMidHeight(node: FlowNode | undefined): number {
   if (!node) return 0;
@@ -1080,6 +1093,88 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
           // built yet at this point in the component loop.
         }
       }
+    }
+
+    // ------------------------------------------------------------------
+    // Spent-fuel racks: the same rod bundle a core is made of, standing in
+    // a pool, with a CONSTANT heat generation instead of neutronics. The
+    // heat path is pellets -> cladding (conduction) -> water (convection),
+    // and the convection connection carries the rack's vertical extent, so
+    // a falling level uncovers the rods through exactly the wetted-fraction
+    // model a core uses - nothing here is pool-specific physics.
+    // ------------------------------------------------------------------
+    if (component.type === 'pool') {
+      const pool = component as any;
+      const geo = poolRackGeometry(component);
+      const poolNode = state.flowNodes.get(id);
+      const waterT = poolNode?.fluid.temperature ?? 303.15;
+      const rackT = pool.rackTemperature ?? waterT;
+
+      state.thermalNodes.set(`${id}-pellets`, {
+        id: `${id}-pellets`,
+        label: `${component.label || 'Pool'} Fuel`,
+        temperature: rackT,
+        mass: geo.fuelMass,
+        specificHeat: 300,          // J/kg-K, UO2
+        thermalConductivity: 3,     // W/m-K
+        characteristicLength: geo.pelletRadius,
+        surfaceArea: 2 * Math.PI * geo.pelletRadius * geo.activeHeight * geo.rodCount,
+        heatGeneration: pool.fuelPower ?? 0,
+        maxTemperature: 2800,
+        meltingPoint: 2800,
+        latentHeatFusion: 274e3,
+      });
+      state.thermalNodes.set(`${id}-clad`, {
+        id: `${id}-clad`,
+        label: `${component.label || 'Pool'} Cladding`,
+        temperature: rackT,
+        mass: geo.cladMass,
+        specificHeat: 330,          // J/kg-K, Zircaloy
+        thermalConductivity: 16,
+        characteristicLength: geo.cladThickness,
+        surfaceArea: geo.rodOuterArea,
+        heatGeneration: 0,
+        maxTemperature: 1500,
+        meltingPoint: 2100,
+        latentHeatFusion: 225e3,
+        // Zr-steam oxidation on uncovered racks: the exothermic runaway and
+        // the hydrogen that comes with it are the real spent-fuel hazard.
+        oxidation: {
+          oxidizedFraction: 0,
+          totalZrMass: geo.cladMass,
+          associatedCoolantNode: id,
+        },
+      });
+      // Pellet interior r/(4k), gas gap, half the clad wall - in series, the
+      // same rod resistance the core uses.
+      const hFuelToClad = 1 / (
+        geo.pelletRadius / (4 * 3) +
+        1 / 5000 +
+        geo.cladThickness / (2 * 16)
+      );
+      state.thermalConnections.push({
+        id: `conduction-${id}-pellets-clad`,
+        fromNodeId: `${id}-pellets`,
+        toNodeId: `${id}-clad`,
+        conductance: hFuelToClad * geo.rodOuterArea,
+      });
+      state.convectionConnections.push({
+        id: `convection-${id}-racks`,
+        thermalNodeId: `${id}-clad`,
+        flowNodeId: id,
+        surfaceArea: geo.rodOuterArea,
+        characteristicDiameter: geo.rodDiameter,
+        flowPassageArea: geo.freeFlowArea,
+        flowHydraulicDiameter: geo.flowHydraulicDiameter,
+        tubeBottomElevation: geo.bottomElevation,
+        tubeHeight: geo.activeHeight,
+      });
+      console.log(
+        `[Factory] Pool ${id}: ${geo.rodCount} rods, ${geo.rodOuterArea.toFixed(0)} m2 wetted, ` +
+        `${((geo.fuelMass + geo.cladMass) / 1000).toFixed(0)} t of fuel at ` +
+        `${((pool.fuelPower ?? 0) / 1e6).toFixed(2)} MW, active fuel ` +
+        `${geo.bottomElevation.toFixed(2)}-${(geo.bottomElevation + geo.activeHeight).toFixed(2)} m above the floor`
+      );
     }
 
     // Create thermal nodes and shell-side flow node for heat exchangers
@@ -2472,6 +2567,63 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
+    case 'pool': {
+      const pool = component as any;
+      const side = pool.side ?? 12;
+      const depth = pool.depth ?? 12;
+      const geo = poolRackGeometry(component);
+      // Water capacity: the basin less what the fuel rods displace. The node
+      // is one well-mixed prism, as every other node is, so the displacement
+      // is carried in its cross-section rather than as a band - the level is
+      // then exact on inventory, and reads a few centimetres low across the
+      // rack band itself.
+      const volume = side * side * depth - geo.rodCrossSection * geo.activeHeight;
+      if (volume <= 0) {
+        throw new Error(
+          `[Factory] Pool '${component.id}': the racks displace more than the basin holds ` +
+          `(${(geo.rodCrossSection * geo.activeHeight).toFixed(1)} m3 of rods in a ` +
+          `${side.toFixed(1)} x ${side.toFixed(1)} x ${depth.toFixed(1)} m pool).`
+        );
+      }
+      const fillLevel = pool.fillLevel !== undefined ? pool.fillLevel : 1.0;
+      const ncg: NcgPartialPressures | undefined = pool.initialNcg;
+      // Same IC convention as a tank: `fluid.pressure` is the STEAM partial
+      // pressure and the NCG spec is added on top, so an open pool is water
+      // at its own vapour pressure under a column of air.
+      const pressure = Math.max(pool.fluid?.pressure ?? Water.saturationPressure(293.15), MIN_STEAM_PRESSURE_PA);
+
+      let fluid: FluidState;
+      if (fillLevel >= 0.999) {
+        const temp = pool.fluid?.temperature || 303.15;
+        console.log(`[Factory] Pool ${component.id}: creating LIQUID state at ${(pressure / 1e5).toFixed(4)} bar steam, ${temp.toFixed(1)}K`);
+        fluid = createFluidState(temp, pressure, 'liquid', 0, volume, ncg);
+      } else if (fillLevel <= 0.001) {
+        const temp = pool.fluid?.temperature || 303.15;
+        console.log(`[Factory] Pool ${component.id}: creating VAPOR state (dry pool) at ${(pressure / 1e5).toFixed(4)} bar steam, ${temp.toFixed(1)}K`);
+        fluid = createFluidState(temp, pressure, 'vapor', 1, volume, ncg);
+      } else {
+        const temp = Water.saturationTemperature(pressure);
+        const rho_f = Water.saturatedLiquidDensity(temp);
+        const rho_g = Water.saturatedVaporDensity(temp);
+        const m_liquid = rho_f * fillLevel * volume;
+        const m_vapor = rho_g * (1 - fillLevel) * volume;
+        const quality = m_vapor / (m_liquid + m_vapor);
+        console.log(`[Factory] Pool ${component.id}: creating TWO-PHASE state: fillLevel=${fillLevel}, P_steam=${(pressure / 1e5).toFixed(4)} bar, T_sat=${temp.toFixed(1)}K, quality=${quality.toExponential(3)}`);
+        fluid = createFluidState(temp, pressure, 'two-phase', quality, volume, ncg);
+      }
+
+      return {
+        id: component.id,
+        label: component.label || 'Spent Fuel Pool',
+        fluid,
+        volume,
+        hydraulicDiameter: Math.min(side, depth),
+        flowArea: side * side,
+        height: depth,
+        elevation,
+      };
+    }
+
     default:
       console.warn(`[Simulation] Unknown component type: ${(component as any).type}`);
       return null;
@@ -2570,6 +2722,49 @@ export function coreRodGeometry(component: PlantComponent) {
   return {
     rodDiameter, cladThickness, rodCount, activeHeight, pelletRadius,
     rodOuterArea, pelletArea, freeFlowArea, flowHydraulicDiameter,
+  };
+}
+
+/**
+ * Spent-fuel rack geometry: the same rod bundle a core is made of, only
+ * standing in a pool instead of a barrel. Derived from the stored assembly
+ * count and the rod design, so nothing about the rack is a magic number:
+ * the wetted surface is the rods' outside, the thermal mass is their pellets
+ * plus their cladding, and the passage the pool water rises through is the
+ * pool's own cross-section minus what the rods occupy.
+ */
+export function poolRackGeometry(component: PlantComponent) {
+  const pool = component as any;
+  const side = pool.side ?? 12;
+  const rodDiameter = (pool.rodDiameter ?? 9.5) / 1000;      // m
+  const cladThickness = (pool.cladThickness ?? 0.6) / 1000;  // m
+  const rodCount = (pool.assemblyCount ?? 800) * (pool.rodsPerAssembly ?? 264);
+  const activeHeight = pool.rackHeight ?? 3.66;              // m
+  const bottomElevation = pool.rackBottomElevation ?? 0.5;   // m above the floor
+  const pelletRadius = Math.max(1e-4, rodDiameter / 2 - cladThickness);
+
+  const rodOuterArea = Math.PI * rodDiameter * activeHeight * rodCount;   // m2
+  // UO2 pellets (10970 kg/m3) and Zircaloy cladding (6500 kg/m3)
+  const fuelMass = Math.PI * pelletRadius * pelletRadius * activeHeight * rodCount * 10970;
+  const cladMass = Math.PI * cladThickness * (rodDiameter - cladThickness) *
+    activeHeight * rodCount * 6500;
+
+  const poolArea = side * side;
+  const rodCrossSection = rodCount * Math.PI * rodDiameter * rodDiameter / 4;
+  if (rodCrossSection >= 0.9 * poolArea) {
+    throw new Error(
+      `[Factory] Pool '${component.id}': ${rodCount} rods of ${(rodDiameter * 1000).toFixed(1)} mm ` +
+      `block ${(100 * rodCrossSection / poolArea).toFixed(0)}% of a ${side.toFixed(1)} m square pool. ` +
+      `There is no room for water - reduce the assembly count or widen the pool.`
+    );
+  }
+  const freeFlowArea = poolArea - rodCrossSection;
+  const wettedPerimeter = rodCount * Math.PI * rodDiameter + 4 * side;
+  const flowHydraulicDiameter = (4 * freeFlowArea) / wettedPerimeter;
+
+  return {
+    rodDiameter, cladThickness, rodCount, activeHeight, bottomElevation, pelletRadius,
+    rodOuterArea, fuelMass, cladMass, rodCrossSection, freeFlowArea, flowHydraulicDiameter,
   };
 }
 
@@ -3437,7 +3632,15 @@ function createFlowConnectionFromPlantConnection(
   const fromComponent = plantState.components.get(connection.fromComponentId);
   const toComponent = plantState.components.get(connection.toComponentId);
 
-  if (!fromComponent || !toComponent) {
+  const fromIsEnvironment = !fromComponent && connection.fromComponentId === ENVIRONMENT_NODE_ID;
+  const toIsEnvironment = !toComponent && connection.toComponentId === ENVIRONMENT_NODE_ID;
+  if (fromIsEnvironment && toIsEnvironment) {
+    throw new Error(
+      `[Factory] Connection '${connection.fromComponentId}' -> '${connection.toComponentId}': ` +
+      `a line cannot run from the environment to the environment.`
+    );
+  }
+  if ((!fromComponent && !fromIsEnvironment) || (!toComponent && !toIsEnvironment)) {
     console.warn(`[Simulation] Connection references missing component`);
     return null;
   }
@@ -3448,14 +3651,14 @@ function createFlowConnectionFromPlantConnection(
 
   // Handle heat exchanger port mappings. Tube ports of a multi-bundle
   // exchanger carry a `-b{n}` suffix naming which bundle they open into.
-  if (fromComponent.type === 'heatExchanger') {
+  if (fromComponent?.type === 'heatExchanger') {
     if (connection.fromPortId.includes('tube')) {
       fromNodeId = hxTubePortNodeId(fromComponent, connection.fromPortId);
     } else if (connection.fromPortId.includes('shell')) {
       fromNodeId = `${connection.fromComponentId}-shell`;
     }
   }
-  if (toComponent.type === 'heatExchanger') {
+  if (toComponent?.type === 'heatExchanger') {
     if (connection.toPortId.includes('tube')) {
       toNodeId = hxTubePortNodeId(toComponent, connection.toPortId);
     } else if (connection.toPortId.includes('shell')) {
@@ -3469,22 +3672,22 @@ function createFlowConnectionFromPlantConnection(
   // the suffix so a component id containing 'pump' doesn't misroute steam.
   const isTdPumpWaterPort = (portId: string) =>
     portId.endsWith('pump-suction') || portId.endsWith('pump-discharge');
-  if (fromComponent.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.fromPortId)) {
+  if (fromComponent?.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.fromPortId)) {
     fromNodeId = `${connection.fromComponentId}-pump`;
   }
-  if (toComponent.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.toPortId)) {
+  if (toComponent?.type === 'turbine-driven-pump' && isTdPumpWaterPort(connection.toPortId)) {
     toNodeId = `${connection.toComponentId}-pump`;
   }
 
   // Handle cross-vessel port mappings (inner vs annulus)
-  if (fromComponent.type === 'crossVessel') {
+  if (fromComponent?.type === 'crossVessel') {
     if (connection.fromPortId.includes('inner')) {
       fromNodeId = `${connection.fromComponentId}-inner`;
     } else if (connection.fromPortId.includes('annulus')) {
       fromNodeId = `${connection.fromComponentId}-annulus`;
     }
   }
-  if (toComponent.type === 'crossVessel') {
+  if (toComponent?.type === 'crossVessel') {
     if (connection.toPortId.includes('inner')) {
       toNodeId = `${connection.toComponentId}-inner`;
     } else if (connection.toPortId.includes('annulus')) {
@@ -3512,10 +3715,10 @@ function createFlowConnectionFromPlantConnection(
       `Expected inlet, outlet, or extraction-N.`
     );
   };
-  if (fromComponent.type === 'turbine-generator') {
+  if (fromComponent?.type === 'turbine-generator') {
     fromNodeId = turbinePortNodeId(connection.fromComponentId, connection.fromPortId) ?? fromNodeId;
   }
-  if (toComponent.type === 'turbine-generator') {
+  if (toComponent?.type === 'turbine-generator') {
     toNodeId = turbinePortNodeId(connection.toComponentId, connection.toPortId) ?? toNodeId;
   }
 
@@ -3525,10 +3728,28 @@ function createFlowConnectionFromPlantConnection(
   // prices the node-side head to. (It used to be base to base only, which
   // made a nozzle 5 m up a tank drive as if it were at the bottom.) A port
   // without an elevation of its own sits at mid-height of its node.
-  const fromBase = absoluteBase(fromComponent);
-  const toBase = absoluteBase(toComponent);
-  const fromPoint = fromBase + (connection.fromElevation ?? nodeMidHeight(state.flowNodes.get(fromNodeId)));
-  const toPoint = toBase + (connection.toElevation ?? nodeMidHeight(state.flowNodes.get(toNodeId)));
+  //
+  // The ENVIRONMENT end has no geometry of its own. It sits at the same
+  // physical point as the port it faces unless the connection states an
+  // elevation for it, which is then read as a height above the local
+  // GROUND beside the other component (a stack, a drain outfall). Either
+  // way a vent to open air carries no head no density difference put there,
+  // and a liner crack drains at its own depth rather than having to climb
+  // to grade first.
+  const plantEnd = (fromComponent ?? toComponent)!;
+  const groundBesideThePlant = terrainHeightAt(buildTerrain, plantEnd.position);
+  const pointOf = (
+    component: PlantComponent | undefined,
+    nodeId: string,
+    localElevation: number | undefined,
+  ): number | undefined => {
+    if (!component) return localElevation === undefined ? undefined : groundBesideThePlant + localElevation;
+    return absoluteBase(component) + (localElevation ?? nodeMidHeight(state.flowNodes.get(nodeId)));
+  };
+  const fromPointOrEnv = pointOf(fromComponent, fromNodeId, connection.fromElevation);
+  const toPointOrEnv = pointOf(toComponent, toNodeId, connection.toElevation);
+  const fromPoint = fromPointOrEnv ?? toPointOrEnv!;
+  const toPoint = toPointOrEnv ?? fromPointOrEnv!;
   const elevationChange = toPoint - fromPoint;
 
   // Use flow area from plant connection if provided, otherwise estimate from components
@@ -3537,12 +3758,12 @@ function createFlowConnectionFromPlantConnection(
   let length = connection.length ?? 1;
 
   // Use pipe dimensions if connecting through pipes (overrides connection flowArea)
-  if (fromComponent.type === 'pipe') {
+  if (fromComponent?.type === 'pipe') {
     const pipe = fromComponent as any;
     flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
     hydraulicDiameter = pipe.diameter;
     length = pipe.length;
-  } else if (toComponent.type === 'pipe') {
+  } else if (toComponent?.type === 'pipe') {
     const pipe = toComponent as any;
     flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
     hydraulicDiameter = pipe.diameter;
@@ -3560,7 +3781,7 @@ function createFlowConnectionFromPlantConnection(
   // but switches to mixture/vapor when the hotwell is nearly empty.
   // Using 0.01m (1cm) as minimum liquid level for "pure liquid" draw.
   let fromPhaseTolerance = connection.fromPhaseTolerance;
-  if (fromPhaseTolerance === undefined && fromComponent.type === 'condenser') {
+  if (fromPhaseTolerance === undefined && fromComponent?.type === 'condenser') {
     // Check if connection is at the bottom (fromElevation near 0 or undefined)
     const connElev = connFromElevation ?? 0;
     if (connElev < 0.2) {
@@ -3570,7 +3791,7 @@ function createFlowConnectionFromPlantConnection(
 
   // Same for toNode (in case flow reverses)
   let toPhaseTolerance = connection.toPhaseTolerance;
-  if (toPhaseTolerance === undefined && toComponent.type === 'condenser') {
+  if (toPhaseTolerance === undefined && toComponent?.type === 'condenser') {
     const connElev = connToElevation ?? 0;
     if (connElev < 0.2) {
       toPhaseTolerance = 0.01;
@@ -4363,22 +4584,45 @@ function createMcciNodes(plantState: PlantState, state: SimulationState): void {
 // ============================================================================
 
 /**
- * Create the atmosphere boundary node.
- * Represents ambient conditions for LOCA scenarios where fluid escapes containment.
+ * Create the atmosphere boundary node: the outside air.
+ *
+ * It is AIR, not steam. The node used to be a kilogram-for-kilogram block of
+ * water vapour at 1 atm, which is fine as long as nothing ever flows the
+ * other way - a break only discharges - but it is not what anything opening
+ * to the outside actually faces. Two things went wrong with the old
+ * composition the moment a line was open in both directions:
+ *
+ *  - A vent (a spent-fuel pool's rim, a vault stack) sat with ~1 atm of
+ *    steam on one side and a few kPa of steam under a column of air on the
+ *    other, so the species gradient drove tonnes of water INTO the plant.
+ *  - Every uncontained component's outer wall faces this node. Pure steam at
+ *    1 atm has a 100 °C dew point, so bare metal anywhere below boiling was
+ *    condensing "outdoor" steam onto itself.
+ *
+ * Standard sea-level air at 20 °C and 50% relative humidity: dry-air species
+ * at their atmospheric fractions plus the water vapour actually in it. The
+ * volume stays effectively infinite and the node is still a fixed boundary,
+ * so nothing about it is ever integrated - the composition only decides what
+ * comes back through a line that opens inward.
  */
 function createAtmosphereNode(): FlowNode {
+  const T_AMBIENT = 293.15;             // K (20 °C)
+  const P_AMBIENT = 101325;             // Pa (1 atm total)
+  const RELATIVE_HUMIDITY = 0.5;
+  const volume = 1e12;                  // Effectively infinite
+  const P_steam = Water.saturationPressure(T_AMBIENT) * RELATIVE_HUMIDITY;
+  const P_dryAir = P_AMBIENT - P_steam;
+  // Dry-air mole fractions (N2 / O2 / Ar make up 99.96% of it)
+  const air: NcgPartialPressures = {
+    N2: (P_dryAir * 0.7808) / 1e5,
+    O2: (P_dryAir * 0.2095) / 1e5,
+    Ar: (P_dryAir * 0.0093) / 1e5,
+  };
   return {
-    id: 'atmosphere',
+    id: ENVIRONMENT_NODE_ID,
     label: 'Atmosphere',
-    fluid: {
-      mass: 1e12,                    // Effectively infinite
-      internalEnergy: 1e12 * 293 * 1000, // ~20°C air
-      temperature: 293,              // K (20°C)
-      pressure: 101325,              // 1 atm
-      phase: 'vapor',
-      quality: 1,
-    },
-    volume: 1e12,                    // Effectively infinite
+    fluid: createFluidState(T_AMBIENT, P_steam, 'vapor', 1, volume, air),
+    volume,
     hydraulicDiameter: 100,
     flowArea: 1e6,
     elevation: 0,

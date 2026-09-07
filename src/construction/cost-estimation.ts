@@ -929,6 +929,50 @@ export function estimateBuildingCost(props: {
 }
 
 /**
+ * Spent-fuel pool: a reinforced-concrete basin with a welded stainless liner
+ * and high-density storage racks. Priced by the things that actually scale
+ * it - the wetted liner/concrete area, the hole it stands in, and the number
+ * of storage cells - not as a pressure vessel, which it is not.
+ */
+export function estimateSpentFuelPoolCost(props: {
+  side: number;             // m
+  depth: number;            // m
+  wallThickness: number;    // m
+  assemblyCount: number;
+  nqa1: boolean;
+}): CostEstimate {
+  const surfaceArea = 4 * props.side * props.depth + props.side * props.side; // walls + floor
+  // 6 mm stainless liner, seam-welded over a leak-chase channel system
+  const linerMass = surfaceArea * 0.006 * 7850; // kg
+  const steelCost = linerMass * 22;             // $/kg installed
+  const concreteVolume = surfaceArea * props.wallThickness;
+  const concreteCost = concreteVolume * 1.308 * 800; // $/yd3, heavily reinforced
+  const excavationCost = props.side * props.side * props.depth * 250; // $/m3 of hole
+  // High-density borated-steel storage cells, one per assembly
+  const rackCost = props.assemblyCount * 12000;
+
+  const materialCost = steelCost + concreteCost + excavationCost + rackCost;
+  const installationCost = materialCost * INSTALLATION_MULTIPLIERS.simpleTank;
+  const subtotal = materialCost + installationCost;
+  const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+
+  return {
+    materialCost,
+    fabricationCost: 0,
+    installationCost,
+    subtotal,
+    nqa1Premium,
+    total: subtotal + nqa1Premium,
+    breakdown: {
+      linerCost: Math.round(steelCost),
+      concreteCost: Math.round(concreteCost),
+      excavationCost: Math.round(excavationCost),
+      rackCost: Math.round(rackCost),
+    },
+  };
+}
+
+/**
  * Format a dollar amount for display
  */
 export function formatCost(amount: number): string {
@@ -1089,6 +1133,15 @@ export function estimateComponentCost(
         nqa1,
       });
     }
+
+    case 'pool':
+      return estimateSpentFuelPoolCost({
+        side: props.side || 12,
+        depth: props.depth || 12,
+        wallThickness: props.wallThickness || 1.5,
+        assemblyCount: props.assemblyCount || 800,
+        nqa1,
+      });
 
     case 'cross-vessel': {
       // Cross-vessel is a structural extension of the parent vessel
@@ -1300,6 +1353,7 @@ export function mapComponentTypeToDefinition(type: string, component?: Record<st
     'turbine-generator': 'turbine-generator',
     'turbine-driven-pump': 'turbine-driven-pump',
     'fuelAssembly': 'core',
+    'pool': 'pool',
     'coreBarrel': 'core', // Core barrel is part of reactor vessel cost
     'controller': 'scram-controller',
   };

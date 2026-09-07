@@ -96,7 +96,9 @@ function tiles(metres: number): number {
 export function footprintFromSize(type: string, size: { width: number; height: number }): Footprint {
   if (ONE_TILE.has(type)) return { w: 1, d: 1 };
   if (PLAN_NATIVE.has(type)) return { w: tiles(size.width), d: tiles(size.height) };
-  if (CYLINDRICAL_UPRIGHT.has(type)) {
+  if (CYLINDRICAL_UPRIGHT.has(type) || type === 'pool') {
+    // Cylinders and the (square) spent-fuel pool are as deep in plan as they
+    // are wide; a pool's drawn `height` is its DEPTH, not a plan dimension.
     const w = tiles(size.width);
     return { w, d: w };
   }
@@ -120,6 +122,7 @@ export function footprintForType(componentType: string): Footprint {
     'heat-exchanger': 'heatExchanger', 'check-valve': 'valve', 'relief-valve': 'valve',
     'porv': 'valve', 'scram-controller': 'controller', 'pid-controller': 'controller',
     'cross-vessel': 'crossVessel',
+    'pool': 'pool',
   };
   return footprintFromSize(storedType[componentType] ?? componentType, size);
 }
@@ -759,9 +762,30 @@ export function reanchorRoute(route: Point[], a: PortAnchor, b: PortAnchor): Poi
  * steers around the given obstacles (computed from the plant when not
  * given). Null when either end cannot be resolved.
  */
+/**
+ * The reserved endpoint id meaning "the outside air" (see ENVIRONMENT_NODE_ID
+ * in simulation/factory.ts). It is not a component, so a line to it is drawn
+ * as a short stub leaving its port rather than a run to somewhere.
+ */
+export const ENVIRONMENT_ID = 'atmosphere';
+
+/** Two tiles of pipe out of a port, for a line that vents to open air. */
+export function environmentStub(component: PlantComponent, portId: string): Point[] | null {
+  const anchor = portAnchor(component, portId);
+  if (!anchor || !anchor.out) return null;
+  const v = sideVector(anchor.side);
+  return [anchor.point, anchor.out, { x: anchor.out.x + v.x * TILE_M, y: anchor.out.y + v.y * TILE_M }];
+}
+
 export function connectionRoute(conn: Connection, plantState: PlantState, obstacles?: Obstacle[]): Point[] | null {
   const fromComponent = plantState.components.get(conn.fromComponentId);
   const toComponent = plantState.components.get(conn.toComponentId);
+  if (!fromComponent && conn.fromComponentId === ENVIRONMENT_ID && toComponent) {
+    return environmentStub(toComponent, conn.toPortId);
+  }
+  if (!toComponent && conn.toComponentId === ENVIRONMENT_ID && fromComponent) {
+    return environmentStub(fromComponent, conn.fromPortId);
+  }
   if (!fromComponent || !toComponent) return null;
   const a = portAnchorFacing(fromComponent, conn.fromPortId, partnerReference(toComponent, conn.toPortId));
   const b = portAnchorFacing(toComponent, conn.toPortId, partnerReference(fromComponent, conn.fromPortId));

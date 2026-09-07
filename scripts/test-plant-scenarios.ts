@@ -495,4 +495,98 @@ test('SCRAM leaves fission-product decay heat behind', () => {
     `decay heat must have a long tail, fell ${pools60.toExponential(2)} -> ${pools160.toExponential(2)} W in 100 s`);
 });
 
+// ---------------------------------------------------------------------------
+// Spent-fuel pool: constant rack heat, a cracked liner, and make-up water
+// ---------------------------------------------------------------------------
+
+test('Spent fuel pool: warms at its rack power, drains through a cracked liner into the ground, and refills', () => {
+  // 12 x 12 x 12 m pool sunk to grade (elevation -12 on ground at +4.5 m),
+  // ~1000 t of 30 C water over 800 assemblies making a constant 5 MW, open
+  // to the sky through a vent connection to the atmosphere. The scenario
+  // cracks the liner at t = 10 s; the crack is a tall opening 0.4 m up the
+  // pool wall, so what drives it is the water standing above it.
+  const sim = buildSimFromFile(path.join(PLANT_DIR, 'pool-level1.json'));
+  const pool = () => sim.state.flowNodes.get('pool')!;
+  const clad = () => sim.state.thermalNodes.get('pool-clad')!;
+  const level = () => nodeLiquidLevel(pool());
+  const spec = sim.state.terrain!.spec;
+
+  // Geometry: the floor is 12 m below the ground under it, the rim at grade
+  const ground = terrainHeightAt(spec, pool().position!);
+  assert(Math.abs(pool().elevation - (ground - 12)) < 1e-6,
+    `pool floor should sit 12 m below its ground (${ground.toFixed(2)} m), got ${pool().elevation.toFixed(2)}`);
+  assert(Math.abs((pool().height ?? 0) - 12) < 1e-6, 'pool node height should be its depth');
+
+  // The vent must carry no standing head: an open rim faces open air at the
+  // same point, so nothing drives it but the pool's own pressure.
+  const vent = sim.state.flowConnections.find(c => c.id === 'flow-pool-atmosphere')!;
+  assert(!!vent && sim.state.flowNodes.get(vent.toNodeId)!.isBoundary,
+    'the pool vent should run to the atmosphere boundary node');
+  assert(Math.abs(vent.elevation) < 1e-9, `vent should have no elevation change, got ${vent.elevation}`);
+
+  // ---- Phase 1: heat-up before the earthquake -----------------------------
+  // The first ~20 s go into establishing the fuel-to-water temperature
+  // gradient (the 543 t of fuel and cladding start at the water temperature
+  // and have to climb ~0.5 K before they can pass 5 MW across the film), so
+  // the heating RATE is measured after that, where the fuel stores nothing
+  // more and the whole rack power lands in the water.
+  run(sim, 30.0, 0.05);
+  const T0 = pool().fluid.temperature;
+  const m0 = pool().fluid.mass;
+  run(sim, 90.0, 0.05);         // t = 120 s, the moment the crack opens
+  assert(Math.abs(flowRate(sim.state, 'crack', 'atmosphere')) < 1e-3,
+    'the crack must be shut before the earthquake');
+  const dT = pool().fluid.temperature - T0;
+  const expected = 5e6 * 90.0 / (m0 * 4180);
+  assert(Math.abs(dT / expected - 1) < 0.06,
+    `pool should warm ${(expected * 1000).toFixed(1)} mK in 90 s at 5 MW into ` +
+    `${(m0 / 1000).toFixed(0)} t, got ${(dT * 1000).toFixed(1)} mK`);
+  assert(Math.abs(pool().fluid.pressure - 101325) < 2000,
+    `an open pool must sit at atmospheric pressure, got ${(pool().fluid.pressure / 1e5).toFixed(4)} bar`);
+  assertStateSane(sim.state);
+
+  // ---- Phase 2: the crack drains it ---------------------------------------
+  run(sim, 200.0, 0.05);        // t = 320 s, 200 s of leaking
+  const levelHigh = level();
+  const leakHigh = flowRate(sim.state, 'crack', 'atmosphere');
+  assert(leakHigh > 200, `a cracked liner under ~6.7 m of water should run hard, got ${leakHigh.toFixed(0)} kg/s`);
+  assertBetween(levelHigh, 6.3, 7.0, 'pool level 200 s after the crack opens (m)');
+
+  run(sim, 3800.0, 0.05);       // t = 4120 s
+  const levelLow = level();
+  const leakLow = flowRate(sim.state, 'crack', 'atmosphere');
+  assert(levelLow < 1.0, `the pool should be nearly drained by t=4000 s, level ${levelLow.toFixed(2)} m`);
+  // Head above a low crack, and the crack's tall opening drawing part vapour:
+  // the leak falls away steeply rather than running at full bore to the last drop
+  assert(leakLow < 0.25 * leakHigh,
+    `leak should collapse as the level drops: ${leakHigh.toFixed(0)} -> ${leakLow.toFixed(0)} kg/s`);
+  assert(leakLow > 1, `the crack should still be running, got ${leakLow.toFixed(2)} kg/s`);
+
+  // The racks are uncovering, so they are running hotter than the water
+  assert(clad().temperature > pool().fluid.temperature,
+    'uncovering racks must run above the water they no longer sit in');
+  assertStateSane(sim.state);
+
+  // ---- Phase 3: where the water went --------------------------------------
+  // It left through a boundary connection, so it is on the ground under the
+  // crack, in that cell's basin, and the ground has been drinking it.
+  const leaked = m0 - pool().fluid.mass;    // kg (the vent's net is ~0)
+  const stored = Array.from(sim.state.surfaceWater!.volumes.values()).reduce((s, v) => s + v, 0);
+  assert(stored > 100, `the leak should have made a real puddle, got ${stored.toFixed(1)} m3`);
+  assert(stored < 0.8 * (leaked / 1000),
+    `open ground must have soaked up a good share of ${(leaked / 1000).toFixed(0)} m3, ` +
+    `but ${stored.toFixed(0)} m3 is still standing`);
+
+  // ---- Phase 4: make-up water ---------------------------------------------
+  const levelBeforeMakeup = level();
+  const mu = sim.state.components.pumps.get('mu-pump')!;
+  mu.running = true;
+  run(sim, 300.0, 0.05);
+  assert(flowRate(sim.state, 'mu-pump', 'pool') > 10,
+    `the make-up pump should deliver, got ${flowRate(sim.state, 'mu-pump', 'pool').toFixed(1)} kg/s`);
+  assert(level() > levelBeforeMakeup,
+    `make-up should raise the level: ${levelBeforeMakeup.toFixed(3)} -> ${level().toFixed(3)} m`);
+  assertStateSane(sim.state);
+});
+
 report('Plant Scenario Regression Suite');

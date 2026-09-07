@@ -1581,6 +1581,60 @@ export class ConstructionManager {
         break;
       }
 
+      case 'pool': {
+        // Spent-fuel pool: a square, open, sunken basin with racks of spent
+        // fuel standing in it. Sunken is not a special case - `elevation` is
+        // always measured from the local ground, so a pool at grade sits at
+        // minus its own depth and its rim lands at 0.
+        const side = props.side ?? 12;
+        const depth = props.depth ?? 12;
+        const half = side / 2;
+        const poolPorts: Port[] = [
+          { id: `${id}-vent`, position: { x: 0, y: -half }, direction: 'both' },
+          { id: `${id}-drain`, position: { x: 0, y: half }, direction: 'both' },
+          { id: `${id}-makeup-w`, position: { x: -half, y: 0 }, direction: 'both' },
+          { id: `${id}-makeup-e`, position: { x: half, y: 0 }, direction: 'both' },
+        ];
+        // Open to the air, so the steam pressure is simply what water at the
+        // pool's temperature exerts - the dialog has no pressure to set.
+        const poolT = props.initialTemperature !== undefined ? props.initialTemperature + 273.15 : 303.15;
+        const poolFill = props.initialLevel !== undefined ? props.initialLevel / 100 : 0.6;
+        const poolFluid: Fluid = {
+          ...defaultFluid,
+          temperature: poolT,
+          pressure: Math.max(saturationPressure(poolT), MIN_STEAM_PRESSURE_PA),
+          phase: poolFill <= 0 ? 'vapor' : poolFill >= 1 ? 'liquid' : 'two-phase',
+        };
+        const pool = {
+          id,
+          type: 'pool' as const,
+          label: props.name || 'Spent Fuel Pool',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? -depth,
+          side,
+          depth,
+          wallThickness: props.wallThickness ?? 1.5,
+          fillLevel: poolFill,
+          fuelPower: (props.fuelPower ?? 5) * 1e6,   // MW -> W
+          assemblyCount: props.assemblyCount ?? 800,
+          rodsPerAssembly: props.rodsPerAssembly ?? 264,
+          rodDiameter: props.rodDiameter ?? 9.5,
+          cladThickness: props.cladThickness ?? 0.6,
+          rackHeight: props.rackHeight ?? 3.66,
+          rackBottomElevation: props.rackBottomElevation ?? 0.5,
+          pressureRating: props.pressureRating ?? 2,
+          ports: poolPorts,
+          fluid: poolFluid,
+          initialNcg: props.initialNcg ?? { N2: 0.78, O2: 0.21 },
+        };
+        (pool as any).nqa1 = props.nqa1 ?? true;
+        this.plantState.components.set(id, pool as any);
+        console.log(`[Construction] Created spent fuel pool: ${side}x${side}x${depth} m, ` +
+          `${props.assemblyCount ?? 800} assemblies at ${props.fuelPower ?? 5} MW`);
+        break;
+      }
+
       case 'building': {
         // Building/Containment - large structure that can contain other components
         // Defaults to air at atmospheric pressure, 0% fill level
@@ -2668,7 +2722,9 @@ export class ConstructionManager {
   }
 
   private generateComponentId(type: string): string {
-    const prefix = type.substring(0, 3);
+    // Three letters is enough to tell every other type apart; 'pool' would
+    // become 'poo', which is not a name anyone wants on their plant.
+    const prefix = type === 'pool' ? 'pool' : type.substring(0, 3);
     const nextId = this.getNextIdNumber();
     this.nextComponentId = nextId + 1;
     return `${prefix}-${nextId}`;
@@ -3155,6 +3211,20 @@ export class ConstructionManager {
     if (component.type === 'condenser' && properties.volume !== undefined && component.height) {
       component.width = Math.sqrt(properties.volume / component.height);
       delete component.volume;
+    }
+    // Spent-fuel racks: dialog edits MW, the thermal node reads W. The pool
+    // has no pressure field of its own - it is open to the air, so its steam
+    // pressure follows the water temperature.
+    if (component.type === 'pool') {
+      for (const field of ['side', 'depth', 'wallThickness', 'assemblyCount',
+                           'rodsPerAssembly', 'rackHeight', 'rackBottomElevation'] as const) {
+        if (properties[field] !== undefined) component[field] = properties[field];
+      }
+      if (properties.fuelPower !== undefined) component.fuelPower = properties.fuelPower * 1e6;
+      if (properties.initialTemperature !== undefined && component.fluid) {
+        component.fluid.pressure = Math.max(
+          saturationPressure(properties.initialTemperature + 273.15), MIN_STEAM_PRESSURE_PA);
+      }
     }
     // Pressurizer heaters: dialog edits MW, simulation reads heaterCapacity in W
     if (properties.heaterPower !== undefined) {

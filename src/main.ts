@@ -143,6 +143,7 @@ function getPidDynamicChoices(plantState: PlantState): Record<string, Array<{ id
       case 'vessel':
       case 'condenser':
       case 'crossVessel':
+      case 'pool':
       case 'coreBarrel':
         flowNodes.push({ id, label });
         break;
@@ -237,6 +238,11 @@ function getPortTypeLabel(portId: string, componentId: string): string {
     'inner-out': 'Inner 2',
     'annulus-1': 'Annulus 1',
     'annulus-2': 'Annulus 2',
+    // Spent-fuel pool
+    'vent': 'Vent (rim, open to the sky)',
+    'drain': 'Drain (floor)',
+    'makeup-w': 'Make-up West',
+    'makeup-e': 'Make-up East',
     // Positional ports (tanks, vessels, buildings)
     'top': 'Top',
     'bottom': 'Bottom',
@@ -3739,6 +3745,12 @@ function init() {
   (window as any).__meltdownDebug.jackTool = (name: string, input: Record<string, unknown>) =>
     executeJackTool(name, input, jackHost, () => {});
   (window as any).__meltdownDebug.getPlotDrawnWindow = getPlotDrawnWindow;
+  // Headless-test hook: load a plant JSON (the same shape save/load and the
+  // scripts/test-plants fixtures use) without going through the save slots
+  (window as any).__meltdownDebug.loadPlantData = (data: unknown) => {
+    deserializePlantState(data);
+    updateConstructionCostPanel();
+  };
 
   // Start in construction mode
   setMode('construction');
@@ -3942,6 +3954,13 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         cv.annulusFluid.ncg = annulusNode.fluid.ncg;
         cv.annulusFluid.volume = annulusNode.volume;
       }
+    }
+
+    // Spent-fuel racks: the drawings redden with the cladding temperature,
+    // so it has to reach the plant component the same way fuel temperature does
+    if (component.type === 'pool') {
+      const rackNode = simState.thermalNodes.get(`${component.id}-clad`);
+      if (rackNode) (component as { rackTemperature?: number }).rackTemperature = rackNode.temperature;
     }
 
     // For vessels with fuel, sync fuel temperature
