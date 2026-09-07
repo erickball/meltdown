@@ -289,6 +289,39 @@ export class ConductionRateOperator implements RateOperator {
 // getTurbineCondenserState pattern): the RK45 path never writes
 // state.energyDiagnostics, so the panels read these instead.
 const lastConvectionHeatRates = new Map<string, number>();
+/** hA (W/K) of each convection pair at its last explicit evaluation - what
+ *  the solver's stiff-pair split reads to size a pair's relaxation time. */
+const lastConvectionConductance = new Map<string, number>();
+export function getLastConvectionConductance(): Map<string, number> {
+  return lastConvectionConductance;
+}
+export function recordConvectionHeatRate(connId: string, Q: number): void {
+  lastConvectionHeatRates.set(connId, Q);
+}
+
+/**
+ * A flow node's effective heat capacity (J/K) for wall exchange: water at
+ * its effective specific heat (two-phase includes the evaporation buffer,
+ * exactly as FluidStateUpdateOperator's stability estimate prices it) plus
+ * the NCG at constant volume. Zero for an empty node.
+ */
+export function fluidHeatCapacity(node: FlowNode): number {
+  let C = 0;
+  if (node.fluid.ncg) {
+    const n = totalMoles(node.fluid.ncg);
+    if (n > 0) C += n * mixtureCv(node.fluid.ncg);
+  }
+  if (node.fluid.mass > 0) {
+    let steamEnergy = node.fluid.internalEnergy;
+    if (node.fluid.ncg) {
+      const n = totalMoles(node.fluid.ncg);
+      if (n > 0) steamEnergy = Math.max(0, steamEnergy - n * mixtureCv(node.fluid.ncg) * node.fluid.temperature);
+    }
+    const w = Water.calculateState(node.fluid.mass, steamEnergy, node.volume);
+    C += node.fluid.mass * Water.effectiveSpecificHeat(w);
+  }
+  return C;
+}
 
 /** Last computed per-connection convective heat rate (W), keyed by connection id */
 export function getConvectionHeatRates(): ReadonlyMap<string, number> {
@@ -477,6 +510,10 @@ export class ConvectionRateOperator implements RateOperator {
       const flowNode = state.flowNodes.get(conn.flowNodeId);
 
       if (!thermalNode || !flowNode) continue;
+      // Applied implicitly for this step by the solver (relaxation faster
+      // than the step): nothing explicit to add, and the conductance stays
+      // what the last explicit evaluation measured.
+      if (conn.implicitThisStep) continue;
 
       // Split the surface into liquid-wetted and vapor-exposed portions by
       // the node's liquid level (tubes above the water line barely transfer).
@@ -508,6 +545,7 @@ export class ConvectionRateOperator implements RateOperator {
       const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
 
       lastConvectionHeatRates.set(conn.id, Q);
+      lastConvectionConductance.set(conn.id, h_liquid * liquidArea + h_vapor * vaporArea);
 
       // Solid temperature rate (effective capacity includes latent heat)
       const dT_solid = -Q / nodeHeatCapacity(thermalNode);

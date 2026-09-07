@@ -1,4 +1,5 @@
 import { fireDueScenarioEvents } from './scenario';
+import { getLastConvectionConductance, recordConvectionHeatRate, fluidHeatCapacity, nodeHeatCapacity } from './operators/rate-operators';
 /**
  * RK45 Solver with Embedded Error Estimation
  *
@@ -1544,6 +1545,70 @@ export class RK45Solver {
   }
   public lastClosureDetail?: { predicted: number; mismatch: number; response: number; c: number; mass: number };
 
+  // Stiff wall-fluid pairs exchanged implicitly on the last attempt, and the
+  // running total over all attempts (diagnostics).
+  public lastStiffConvectionPairs = 0;
+  public stiffConvectionPairSteps = 0;
+
+  /**
+   * Wall-to-fluid exchange for pairs the explicit stages cannot integrate
+   * at this step: a node holding grams of steam next to a hot wall relaxes
+   * to the wall in milliseconds (tau = 1/(hA(1/C_f + 1/C_w))), and stepping
+   * that relaxation explicitly at a plant-scale dt is unstable - the error
+   * controller answered by driving dt to tau, i.e. the whole plant crawled
+   * for one empty pipe. Real drained lines are common in blowdowns.
+   *
+   * A pair whose relaxation time is shorter than the step is taken out of
+   * the stages for this attempt (stamped, so ConvectionRateOperator skips
+   * it) and exchanged here by the exact two-body relaxation over dt:
+   * Q*dt = dT * C_f C_w/(C_f + C_w) * (1 - exp(-dt/tau)), energy moved
+   * between the fluid and the wall to the joule. The criterion is the
+   * resolution boundary itself (dt vs tau), not a tuned number: below it
+   * the stages are the better integrator (they re-evaluate the coupling at
+   * stage frequency, together with everything else), above it they cannot
+   * integrate the pair at all. The conductance is the pair's own from its
+   * last explicit evaluation; a pair that has never been evaluated stays
+   * explicit.
+   */
+  private applyStiffConvection(state: SimulationState, dt: number): number {
+    const hAOf = getLastConvectionConductance();
+    let n = 0;
+    for (const conn of state.convectionConnections) {
+      conn.implicitThisStep = false;
+      const hA = hAOf.get(conn.id);
+      if (!(hA! > 0)) continue;
+      const fluid = state.flowNodes.get(conn.flowNodeId);
+      const wall = state.thermalNodes.get(conn.thermalNodeId);
+      if (!fluid || !wall || fluid.isBoundary) continue;
+      const Cw = nodeHeatCapacity(wall);
+      if (!(Cw > 0)) continue;
+      // Rule the ordinary pair out without a property call: no fluid in the
+      // plant has a cv below 50 J/kg-K (xenon, the lowest species in the
+      // gas table, is 95; steam 1400; liquid water 4200; a two-phase node's
+      // effective value carries the evaporation buffer on top), so
+      // m*50 J/K bounds C_f from below and that bounds tau from below. A
+      // pair explicit at the bound's tau is explicit at its real one; only
+      // the candidates pay for the effective heat capacity.
+      const gasMass = fluid.fluid.ncg ? ncgTotalMass(fluid.fluid.ncg) : 0;
+      const CfLow = (fluid.fluid.mass + gasMass) * 50;
+      if (!(CfLow > 0)) continue;
+      if (dt <= 1 / (hA! * (1 / CfLow + 1 / Cw))) continue;
+      const Cf = fluidHeatCapacity(fluid);
+      if (!(Cf > 0)) continue;
+      const tau = 1 / (hA! * (1 / Cf + 1 / Cw));
+      if (dt <= tau) continue;
+      const dT = wall.temperature - fluid.fluid.temperature;
+      const Ceq = (Cf * Cw) / (Cf + Cw);
+      const Qdt = dT * Ceq * (1 - Math.exp(-dt / tau));
+      fluid.fluid.internalEnergy += Qdt;
+      wall.temperature -= Qdt / Cw;
+      conn.implicitThisStep = true;
+      recordConvectionHeatRate(conn.id, Qdt / dt);
+      n++;
+    }
+    return n;
+  }
+
   private countRejection(cause: string): void {
     this.rejectionStats.set(cause, (this.rejectionStats.get(cause) || 0) + 1);
   }
@@ -2016,6 +2081,12 @@ export class RK45Solver {
       this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
       state = solvedState;
     }
+
+    // Wall-fluid pairs the explicit stages cannot resolve at this dt are
+    // exchanged implicitly here, once per attempt (see applyStiffConvection).
+    if (!(this.implicitMomentumActive() && this.pressureSolver)) state = cloneSimulationState(state);
+    this.lastStiffConvectionPairs = this.applyStiffConvection(state, dt);
+    this.stiffConvectionPairSteps += this.lastStiffConvectionPairs;
 
     // Compute the 7 stages of DOPRI5
     const k: StateRates[] = [];

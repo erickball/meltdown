@@ -51,6 +51,7 @@ const wallSec = (performance.now() - wallStart) / 1000;
 console.log(`\nwall=${wallSec.toFixed(2)}s = ${(sim.state.time / wallSec).toFixed(2)}x realtime`);
 console.log(`governor: predictive-swing rejections=${sim.solver.predictiveSwingRejections} ` +
   `explicit-fallback steps=${sim.solver.explicitFallbackSteps}`);
+console.log(`stiff wall-fluid pairs exchanged implicitly (pair-attempts): ${sim.solver.stiffConvectionPairSteps}`);
 console.log('top rejection causes:');
 for (const [cause, n] of [...sim.solver.rejectionStats.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8)) {
   console.log(`  ${cause.padEnd(50)} ${n}`);
