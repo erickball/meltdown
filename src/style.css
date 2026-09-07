@@ -603,6 +603,16 @@ body {
   font-weight: bold;
 }
 
+/* A tool that cannot be used right now. Deliberately NOT the `disabled`
+   attribute: a disabled button swallows pointer events in some browsers, and
+   the whole point is that hovering it explains why it is unavailable. The
+   click handler refuses the action and repeats the reason. */
+.mode-btn.tool-unavailable {
+  opacity: 0.4;
+  cursor: not-allowed;
+  border-style: dashed !important;
+}
+
 .component-categories {
   max-height: 300px;
   overflow-y: auto;

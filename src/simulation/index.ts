@@ -106,6 +106,13 @@ export {
 } from './resume';
 export type { ResumeSnapshot } from './resume';
 
+// Live plant edits: the same write-back/snapshot/transplant sequence applied
+// without leaving simulation mode (build while the plant runs)
+export {
+  beginLivePlantEdit, commitLivePlantEdit, revertLivePlantEdit, applyLivePlantEdit,
+} from './live-edit';
+export type { LiveEditSnapshot, LiveEditResult } from './live-edit';
+
 // Heat-exchanger tube-bundle naming (shared by the factory, renderer and UI)
 export {
   hxBundleCount,
