@@ -331,29 +331,16 @@ export function evaluateOtsgSections(
     node.fluid.mass, water.energy, cfg.m1, flows.uFeed,
     { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
     otsgWallPin(state, node, flows),
-    PStart, cfg.uFRef,
+    PStart, cfg.uFRef, { hFeed: flows.hFeed },
   );
-  // Anchor the tangent: three one-sided finite differences, each a
-  // warm-started solve. Paid once per re-anchor, saved ~13 times per step.
-  const geom = { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea };
-  const pin = otsgWallPin(state, node, flows);
-  const dm = Math.max(0.5, 2e-3 * node.fluid.mass);
-  const dU = Math.max(1e5, 2e-3 * Math.abs(water.energy));
-  let dPdm = 0, dPdU = 0, dPdm1 = 0;
-  try {
-    dPdm = (evaluateOtsgPartition(node.fluid.mass + dm, water.energy + dm * flows.hFeed,
-      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dm;
-    dPdU = (evaluateOtsgPartition(node.fluid.mass, water.energy + dU,
-      cfg.m1, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dU;
-    dPdm1 = (evaluateOtsgPartition(node.fluid.mass, water.energy,
-      cfg.m1 + dm, flows.uFeed, geom, pin, ev.P, cfg.uFRef).P - ev.P) / dm;
-    cfg.partitionLin = { m: node.fluid.mass, U: water.energy, m1: cfg.m1, uFRef: cfg.uFRef, P: ev.P, dPdm, dPdU, dPdm1, ev };
-  } catch {
-    // A perturbation fell off a regime edge: no tangent here - every state
-    // in this neighborhood pays for its own exact solve, which is the
-    // correct price at a regime boundary.
-    cfg.partitionLin = undefined;
-  }
+  // Anchor the tangent from the closure's own implicit-function derivatives
+  // (OtsgEval.tangent): residual evaluations at the solved pressure, not
+  // three more root finds. Absent at a regime edge - every state in that
+  // neighborhood then pays for its own exact solve, the correct price there.
+  cfg.partitionLin = ev.tangent
+    ? { m: node.fluid.mass, U: water.energy, m1: cfg.m1, uFRef: cfg.uFRef, P: ev.P,
+        dPdm: ev.tangent.dPdm, dPdU: ev.tangent.dPdU, dPdm1: ev.tangent.dPdm1, ev }
+    : undefined;
   cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: true };
   return { ev, flows, water, exact: true };
 }

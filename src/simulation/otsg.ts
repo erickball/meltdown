@@ -382,6 +382,13 @@ export interface OtsgEval {
    *  'flooded' (no dry steam), 'dryout' (dry steam at saturation), 'superheat'
    *  (volume and energy both enforced), 'supercritical' (no dome at all). */
   regime: 'flooded' | 'dryout' | 'superheat' | 'supercritical';
+  /** Pressure tangent at the solved point (Pa/kg, Pa/J, Pa/kg), when asked
+   *  for: dPdm follows feed addition (mass, its enthalpy and the ledger
+   *  together), dPdU energy alone, dPdm1 the ledger alone. From the
+   *  implicit function - residual derivatives at the solved pressure - so
+   *  it costs residual evaluations, not root finds. Absent when a
+   *  perturbation lands on a regime edge (no tangent there). */
+  tangent?: { dPdm: number; dPdU: number; dPdm1: number };
 }
 
 const P_MIN = 700;      // Pa - just above the triple point
@@ -741,6 +748,9 @@ export function evaluateOtsgPartition(
   // economizer boundary moves with pressure relative to it (see
   // reconcileSlugMass). Undefined = first evaluation, ledger taken as is.
   uFRef?: number,
+  // Ask for the pressure tangent (see OtsgEval.tangent); hFeed prices the
+  // mass perturbation the way feed arrives.
+  tangentSpec?: { hFeed: number },
 ): OtsgEval {
   if (!Number.isFinite(m1Ledger) || m1Ledger < 0) {
     throw new Error(`[OTSG] economizer ledger is not a physical mass: m1=${m1Ledger} kg`);
@@ -929,7 +939,9 @@ export function evaluateOtsgPartition(
     v3Carry !== undefined && v3CarryP !== undefined && v3CarryP !== P
       ? v3Carry * Math.pow(v3CarryP / P, 0.85)
       : v3Carry;
-  const atP = (P: number): AtP => {
+  // The residual is a function of (P; totals, ledger). Solving takes the
+  // node's own; the tangent below perturbs them at the solved pressure.
+  const atPX = (P: number, massTotal: number, UTotal: number, m1Ledger: number): AtP => {
     const sat = saturationAtP(P);
     const u1 = subcooledSectionMean(uFeedIn, sat);
     const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
@@ -1024,6 +1036,8 @@ export function evaluateOtsgPartition(
   // warm-started from the node's last published pressure. V(P) falls with
   // P (every section shrinks), so the bracket is clean.
   // ----------------------------------------------------------------
+  const atP = (P: number): AtP => atPX(P, massTotal, UTotal, m1Ledger);
+
   const solveP = (): { P: number; fin: AtP } | 'supercritical' | null => {
     // The Illinois loop's accepting exit collapses the bracket onto its last
     // probe (a = b = lnM below), so the closing atP(exp(lnP)) re-evaluated
@@ -1185,8 +1199,39 @@ export function evaluateOtsgPartition(
   if (fin.m3 > 1e-12) {
     v3 = (V - fin.m1 * fin.v1 - fin.m2 * fin.v2) / fin.m3;
   }
-  return finish(P, fin.sat, fin.m1, fin.u1, fin.v1, fin.m2, fin.x2Bar, fin.v2,
+  const ev = finish(P, fin.sat, fin.m1, fin.u1, fin.v1, fin.m2, fin.x2Bar, fin.v2,
     fin.m3, fin.u3, v3, fin.regime);
+  if (tangentSpec) {
+    // Implicit-function tangent of the volume closure R(P; m, U, m1) = 0:
+    // dP/dx = -(dR/dx)/(dR/dP), every derivative one residual evaluation
+    // at the solved pressure with the pin held. The finite-difference
+    // version this replaces re-solved the pressure three times per anchor
+    // (each a root find of ~10-20 residual evaluations) and was ~3/4 of
+    // the partition's whole cost. Same perturbation sizes as before so the
+    // tangent means the same thing. A perturbation that lands on a regime
+    // edge (a sentinel volume, a property failure) yields no tangent - the
+    // consumer then solves exactly in that neighborhood, as it always did.
+    try {
+      const dm = Math.max(0.5, 2e-3 * massTotal);
+      const dU = Math.max(1e5, 2e-3 * Math.abs(UTotal));
+      const dP = 2e-3 * P;
+      const R = (Pq: number, mT: number, UT: number, m1L: number): number => {
+        const r = atPX(Pq, mT, UT, m1L).Vsum - V;
+        if (!Number.isFinite(r) || Math.abs(r) > 1e3 * V) throw new Error('sentinel');
+        return r;
+      };
+      const R0 = R(P, massTotal, UTotal, m1Ledger);
+      const RP = (R(P + dP, massTotal, UTotal, m1Ledger) - R0) / dP;
+      if (!(RP < 0)) throw new Error('non-monotone residual');
+      const dPdm = -((R(P, massTotal + dm, UTotal + dm * tangentSpec.hFeed, m1Ledger + dm) - R0) / dm) / RP;
+      const dPdU = -((R(P, massTotal, UTotal + dU, m1Ledger) - R0) / dU) / RP;
+      const dPdm1 = -((R(P, massTotal, UTotal, m1Ledger + dm) - R0) / dm) / RP;
+      if ([dPdm, dPdU, dPdm1].every(Number.isFinite)) ev.tangent = { dPdm, dPdU, dPdm1 };
+    } catch {
+      // no tangent in this neighborhood
+    }
+  }
+  return ev;
 }
 
 /**
