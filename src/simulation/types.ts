@@ -825,6 +825,12 @@ export interface ControllerState {
   // ---- runtime state (updated once per accepted solver step) ----
   lastOutput: number;
   lastError: number;
+  /** Where the actuator actually IS, as opposed to what the loop last
+   *  commanded (lastOutput). The command changes at scans; the actuator
+   *  moves toward it at its rate limit on every accepted step, so nothing
+   *  the plant sees ever jumps. Undefined until the first step (then the
+   *  command). Not used by rod controllers. */
+  actual?: number;
   /** previous feedforward measurement (velocity-form feedforward) */
   lastFeedforward?: number;
   /** auxiliary memory (rod controller: previous reactor power for the

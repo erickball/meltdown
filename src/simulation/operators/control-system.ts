@@ -139,8 +139,31 @@ export class ControlSystemOperator implements ConstraintOperator {
         ctl.lastScanTime = state.time;
         this.updateController(newState, ctl, Number.isFinite(since) ? since : dt);
       }
+      // The actuators move EVERY step, toward the command the last scan
+      // left, at their rate limit. A scan used to write its command straight
+      // to the plant, so a governor with a 2 s stroke scanned at 0.1 s jumped
+      // 5% at a time and a boiler with dP/dm in the bars-per-kilogram range
+      // took each feed step as a 1.5 bar kick - a discontinuity no error
+      // controller can price, and the largest thing left in the closure
+      // error of the Xe-100. Real actuators stroke continuously; the loop's
+      // rate limit already IS that stroke rate, so this only moves where the
+      // limit is applied: from the command to the device.
+      for (const [, ctl] of newState.components.controllers) {
+        if (ctl.actuator.kind === 'control-rods') continue;
+        this.slewActuator(newState, ctl, dt);
+      }
     }
     return newState;
+  }
+
+  /** Move the actuator toward the loop's command at its rate limit. */
+  private slewActuator(state: SimulationState, ctl: ControllerState, dt: number): void {
+    const command = ctl.lastOutput;
+    const actual = ctl.actual ?? command;
+    const maxStep = ctl.actuator.rateLimit * dt;
+    const next = Math.max(actual - maxStep, Math.min(actual + maxStep, command));
+    ctl.actual = next;
+    this.writeActuator(state, ctl, next);
   }
 
   /**
@@ -238,12 +261,14 @@ export class ControlSystemOperator implements ConstraintOperator {
       output = ctl.lastOutput + du;
     }
 
-    // Actuator limits: slew rate, then saturation
+    // Command limits: at most one scan's worth of stroke, then saturation.
+    // The command is what the actuator can reach by the next scan; the
+    // device itself is moved toward it step by step (slewActuator), so the
+    // plant sees a continuous stroke, never a jump.
     const maxStep = ctl.actuator.rateLimit * dt;
     output = Math.max(ctl.lastOutput - maxStep, Math.min(ctl.lastOutput + maxStep, output));
     output = Math.max(ctl.actuator.min, Math.min(ctl.actuator.max, output));
 
-    this.writeActuator(state, ctl, output);
     ctl.lastOutput = output;
     ctl.lastError = error;
   }
