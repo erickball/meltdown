@@ -1,4 +1,5 @@
 import { PlantCanvas, ViewMode } from './render/canvas';
+import { installPageZoomReset } from './page-zoom';
 import { getComponentVisualHeight } from './render/components';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
@@ -327,6 +328,7 @@ function init() {
 
   // Debug handle for headless test scripts (see also __debugCursor)
   (window as any).__meltdownDebug = { plantCanvas, plantState };
+  installPageZoomReset();
 
   // Initialize debug panel
   initDebugPanel();

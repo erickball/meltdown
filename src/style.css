@@ -15,6 +15,25 @@ body {
   width: 100vw;
   height: 100vh;
   position: relative;
+  /* Taps on the UI must never double-tap-zoom the page on a phone; pinch
+     stays available. The canvas overrides this with `none` below. */
+  touch-action: manipulation;
+}
+
+/* Floats inside the visible part of the page while the browser is zoomed in
+   (positioned by src/page-zoom.ts through the visualViewport API) */
+#page-zoom-reset {
+  position: absolute;
+  z-index: 6000;
+  padding: 10px 14px;
+  background: #ffcc33;
+  color: #222;
+  border: 2px solid #b08a00;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: bold;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
 }
 
 #plant-canvas {
