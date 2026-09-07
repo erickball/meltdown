@@ -128,7 +128,7 @@ function seededRandom(seed: number): number {
 }
 
 // Time seed that updates every second for animated two-phase effect
-function getTimeSeed(): number {
+export function getTimeSeed(): number {
   return Math.floor(Date.now() / 1000);
 }
 
@@ -1515,6 +1515,12 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
  * red outline with a red flare/glow so it reads against the fuel rods.
  * (Percent of rated power lives in the selection dialog.)
  */
+/** The core power readout's text, as drawn (the sprite cache keys on it). */
+export function formatCorePowerLabel(thermalPowerW: number): string {
+  const mw = thermalPowerW / 1e6;
+  return `${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`;
+}
+
 function renderCorePowerLabel(
   ctx: CanvasRenderingContext2D,
   coreIds: (string | undefined)[],
@@ -1524,22 +1530,22 @@ function renderCorePowerLabel(
   const rp = getReactorPowerState();
   if (!rp.coreId || !coreIds.includes(rp.coreId)) return;
 
-  const mw = rp.thermalPower / 1e6;
-  const label = `${mw >= 100 ? mw.toFixed(0) : mw.toPrecision(3)} MWt`;
+  const label = formatCorePowerLabel(rp.thermalPower);
   const fontSize = 17 * readoutScale(view.zoom / 50);
   ctx.save();
   ctx.font = `bold ${fontSize}px monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  // Red flare behind the text (two shadowed stroke passes deepen the glow)
-  ctx.shadowColor = 'rgba(255, 45, 0, 0.95)';
-  ctx.shadowBlur = fontSize * 0.9;
+  // Red flare behind the text: a wide translucent stroke under a tight
+  // solid one. (A shadowBlur glow costs a Gaussian pass per draw.)
+  ctx.lineJoin = 'round';
+  ctx.strokeStyle = 'rgba(255, 45, 0, 0.45)';
+  ctx.lineWidth = fontSize * 0.7;
+  ctx.strokeText(label, 0, y);
   ctx.strokeStyle = '#e02010';
   ctx.lineWidth = fontSize / 5;
   ctx.strokeText(label, 0, y);
-  ctx.strokeText(label, 0, y);
   // Crisp white text on top
-  ctx.shadowBlur = 0;
   ctx.fillStyle = '#fff';
   ctx.fillText(label, 0, y);
   ctx.restore();

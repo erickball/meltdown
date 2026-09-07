@@ -1,6 +1,7 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port } from '../types';
-import { SimulationState } from '../simulation';
-import { renderComponent, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
+import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
+import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -24,6 +25,14 @@ export class PlantCanvas {
   private view: ViewState;
   private plantState: PlantState;
   private simState: SimulationState | null = null;
+  /** 2.5D offscreen caches (see sprite-cache.ts); both can be switched off for A/B. */
+  public renderCache = { sprites: true, ground: true };
+  public readonly spriteCache = new ComponentSpriteCache();
+  private readonly groundCache = new LayerCache();
+  /** Wall time of the last 2.5D frame's drawing, ms, and its breakdown by section (for perf probes). */
+  public lastFrameMs = 0;
+  public frameProfile: Record<string, number> = {};
+  private lastCameraKey = '';
   private _simStateWarningLogged: boolean = false;
   /** Which end's fluid each line is full of, so that lines which only slosh
    *  hold one endpoint's colour instead of strobing between the two. See
@@ -1427,11 +1436,32 @@ export class PlantCanvas {
       return;
     }
 
+    const frameStart = performance.now();
+    const profile: Record<string, number> = {};
+    let markTime = frameStart;
+    const mark = (section: string) => {
+      const t = performance.now();
+      profile[section] = (profile[section] ?? 0) + (t - markTime);
+      markTime = t;
+    };
+    const dpr = window.devicePixelRatio || 1;
+    this.spriteCache.beginFrame();
+    const cameraKey = `${rect.width},${rect.height},${this.view.offsetX},${this.view.offsetY},${this.view.zoom},${this.cameraDepth},${this.viewAngle},${this.isoZoom},${this.isometric.enabled}`;
+    const cameraMoving = cameraKey !== this.lastCameraKey;
+    this.lastCameraKey = cameraKey;
+
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Draw the ground
-    renderIsometricGround(ctx, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
+    // Draw the ground (cached until the camera or viewport moves)
+    const paintGround = (c: CanvasRenderingContext2D) =>
+      renderIsometricGround(c, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
+    if (this.renderCache.ground) {
+      this.groundCache.draw(ctx, cameraKey, rect.width, rect.height, dpr, paintGround);
+    } else {
+      paintGround(ctx);
+    }
+    mark('ground');
 
     // Draw construction grid on ground plane in construction mode
     if (this.constructionMode) {
@@ -1471,6 +1501,7 @@ export class PlantCanvas {
       return (b.position.y - a.position.y);
     });
 
+    mark('sort');
     // Draw shadows first
     // Shadows are computed in world space using 3D ray-plane intersection
     // Building floors go first, directly on the ground: shadows,
@@ -1837,6 +1868,7 @@ export class PlantCanvas {
       }
     }
 
+    mark('floors+shadows');
     // Draw components with perspective projection
     // Project all 4 corners individually for proper ground-plane alignment
     for (const component of sortedComponents) {
@@ -2030,8 +2062,10 @@ export class PlantCanvas {
         const visualHalfH = halfH * centerZoom * verticalScale;
 
         // Position so the component's center is at the projected center point
-        translateX = centerScreen.pos.x;
-        translateY = centerScreen.pos.y - visualHalfH;
+        // Snap the drawing origin to a device pixel: a cached sprite blits
+        // 1:1 without resampling, and the vector path lands on the same grid
+        translateX = Math.round(centerScreen.pos.x * dpr) / dpr;
+        translateY = Math.round((centerScreen.pos.y - visualHalfH) * dpr) / dpr;
         labelBaseOffsetY = visualHalfH;
 
         // Override projectedZoom with center-based zoom for this component
@@ -2044,23 +2078,36 @@ export class PlantCanvas {
         ctx.rotate(component.rotation);
       }
 
-      // Apply vertical compression based on view angle (looking from above = compressed)
-      // Skip for pipes since they're thin horizontal elements and compression looks wrong
-      if (component.type !== 'pipe') {
-        ctx.scale(1, verticalScale);
-      }
-
-      const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
+      // Vertical compression based on view angle (looking from above = compressed).
+      // Skipped for pipes since they're thin horizontal elements and compression looks wrong
+      const componentVerticalScale = component.type !== 'pipe' ? verticalScale : 1;
       const isSelected = component.id === this.selectedComponentId;
+      const isSimulating = !this.constructionMode;
       // Create projection function for components that need world-to-screen mapping
       // Returns both screen position and scale factor for proper perspective rendering
       const worldToScreenFn = (pos: Point, elev: number = 0) => this.worldToScreenPerspective(pos, elev);
-      renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, !this.constructionMode, this.plantState, worldToScreenFn);
 
-      // Render elevation label (reset scale first so text isn't squished)
-      if (component.type !== 'pipe') {
-        ctx.scale(1, 1 / verticalScale);
+      const keyStart = performance.now();
+      const spriteKey = this.renderCache.sprites ? this.spriteKeyFor(component, isSelected, isSimulating) : null;
+      profile['keys'] = (profile['keys'] ?? 0) + (performance.now() - keyStart);
+      if (spriteKey !== null) {
+        // Painted once into an offscreen canvas, blitted until something
+        // the painter reads changes (scaled from a nearby zoom during a pan)
+        const spriteView: ViewState = { ...this.view, zoom: projectedZoom };
+        const sprite = this.spriteCache.get(
+          component.id, `${spriteKey}|${componentVerticalScale}|${dpr}`, projectedZoom, cameraMoving,
+          halfW * projectedZoom, halfH * projectedZoom * componentVerticalScale, componentVerticalScale, dpr,
+          (sctx) => renderComponent(sctx, component, spriteView, isSelected, true, this.plantState.connections, isSimulating, this.plantState)
+        );
+        ComponentSpriteCache.blit(ctx, sprite, projectedZoom);
+      } else {
+        const isometricView: ViewState = { ...this.view, zoom: projectedZoom };
+        ctx.scale(1, componentVerticalScale);
+        renderComponent(ctx, component, isometricView, isSelected, true, this.plantState.connections, isSimulating, this.plantState, worldToScreenFn);
+        // Reset scale so the elevation label's text isn't squished
+        ctx.scale(1, 1 / componentVerticalScale);
       }
+
       renderElevationLabel(ctx, component, labelBaseOffsetY, projectedZoom / 50);
 
       ctx.restore();
@@ -2071,6 +2118,8 @@ export class PlantCanvas {
       this.renderBelowGradeOverlay(ctx, component);
     }
 
+    mark('components');
+    profile['components'] -= profile['keys'] ?? 0;
     // Draw connections (on top of components so labels are visible)
     for (const connection of this.plantState.connections) {
       const fromComponent = this.plantState.components.get(connection.fromComponentId);
@@ -2090,6 +2139,7 @@ export class PlantCanvas {
       }
     }
 
+    mark('connections');
     // Restore each building's near footprint wall on top of its contents, so
     // equipment inside a building reads as inside it (see the function's
     // comment) rather than standing in front of the shell.
@@ -2111,6 +2161,7 @@ export class PlantCanvas {
       this.renderPortIndicators(ctx);
     }
 
+    mark('edges+arrows+ports');
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
       // Port screen positions and connection endpoints (accounting for
@@ -2126,6 +2177,7 @@ export class PlantCanvas {
       }
     }
 
+    mark('flow arrows');
     // Draw pressure gauges on flow nodes
     if (this.simState) {
       // Pass screen bounds getter function for proper gauge positioning
@@ -2142,6 +2194,10 @@ export class PlantCanvas {
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
       renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
     }
+
+    mark('gauges+overlays');
+    this.lastFrameMs = performance.now() - frameStart;
+    this.frameProfile = profile;
 
     // Draw color legend at bottom of canvas
     renderColorLegend(ctx, rect.width, rect.height);
@@ -2161,6 +2217,46 @@ export class PlantCanvas {
 
   // Component drawn size / default size live in component-size.ts so the
   // grid view shares one convention with this class
+  /**
+   * Everything the component's painter reads, as a string, or null when the
+   * component is not sprite-cacheable (pipes are drawn inline as tapered
+   * trapezoids; switchyards, buildings and cross vessels project their own
+   * world points and so depend on the whole camera).
+   */
+  private spriteKeyFor(component: PlantComponent, isSelected: boolean, isSimulating: boolean): string | null {
+    switch (component.type) {
+      case 'tank': case 'pump': case 'vessel': case 'valve': case 'heatExchanger':
+      case 'turbine-generator': case 'turbine-driven-pump': case 'condenser':
+      case 'reactorVessel': case 'controller':
+        break;
+      default:
+        return null;
+    }
+    let key = quantizedKey(component);
+    if (component.type === 'reactorVessel') {
+      // The vessel painter looks up its core barrel's fluid, the vessel/barrel
+      // connections (for the plate holes) and the reactor power readout
+      const barrelId = (component as import('../types').ReactorVesselComponent).coreBarrelId;
+      const barrel = barrelId ? this.plantState.components.get(barrelId) : undefined;
+      if (barrel) key += '|' + quantizedKey(barrel);
+      for (const c of this.plantState.connections) {
+        if (c.fromComponentId === component.id || c.toComponentId === component.id ||
+            (barrelId && (c.fromComponentId === barrelId || c.toComponentId === barrelId))) {
+          key += `|${c.fromComponentId}.${c.fromPortId}>${c.toComponentId}.${c.toPortId}`;
+        }
+      }
+      // Readouts are keyed at the precision they are drawn with
+      const rp = getReactorPowerState();
+      key += `|${rp.coreId}|${formatCorePowerLabel(rp.thermalPower)}`;
+    } else if (component.type === 'turbine-generator') {
+      key += `|${Math.round(getTurbineCondenserState().turbinePower / 1e6)}`;
+    } else if (component.type === 'condenser') {
+      key += `|${Math.round(getTurbineCondenserState().condenserHeatRejection / 1e6)}`;
+    }
+    if (isSimulating && keyAnimates(key)) key += `|t${getTimeSeed()}`;
+    return `${key}|${isSelected ? 1 : 0}|${isSimulating ? 1 : 0}`;
+  }
+
   private getComponentSize(component: PlantComponent): { width: number; height: number } {
     return getComponentSize(component);
   }
