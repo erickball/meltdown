@@ -145,7 +145,7 @@ function getTimeSeed(): number {
  * @param isSimulating - Whether simulation is running
  * @returns Liquid volume fraction (0-1), where 1 = fully liquid
  */
-function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean): number {
+export function getLiquidFraction(component: any, fluid: Fluid, isSimulating: boolean): number {
   // In construction mode, use stored fillLevel if available
   if (!isSimulating && component.fillLevel !== undefined) {
     return component.fillLevel;
@@ -716,7 +716,7 @@ function calculateNcgFraction(fluid: Fluid): number {
  *   display (steam as white pixels + NCG species as their colors)
  * - When NCG <= 1%: render pure steam
  */
-function renderFluidWithNcg(
+export function renderFluidWithNcg(
   ctx: CanvasRenderingContext2D,
   fluid: Fluid,
   x: number,
