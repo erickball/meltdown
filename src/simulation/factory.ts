@@ -38,6 +38,9 @@ import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
+import { terrainHeightAt, buildTerrainModel } from './terrain';
+import type { TerrainSpec } from '../terrain-types';
+import { createSurfaceWaterState } from './operators/surface-water';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -750,8 +753,32 @@ export function createDemoReactor(): SimulationState {
  * Create a simulation state from a user-constructed plant
  * Converts visual plant components to simulation nodes and connections
  */
+/**
+ * Ground of the plant being built. Every node and connection builder below
+ * reads component elevations through absoluteBase(), which adds the ground
+ * height under the component: `elevation` on a component means "above the
+ * local ground". Set for the duration of createSimulationFromPlant.
+ */
+let buildTerrain: TerrainSpec | undefined;
+
+function absoluteBase(component: { position: { x: number; y: number }; elevation?: number } | PlantComponent): number {
+  return terrainHeightAt(buildTerrain, component.position) + ((component as any).elevation || 0);
+}
+
+/** Mid-height of a node, the reference a port without an elevation of its own sits at (as in pressureAtConnection). */
+function nodeMidHeight(node: FlowNode | undefined): number {
+  if (!node) return 0;
+  const h = node.height ?? Math.cbrt(node.volume);
+  return h > 0 ? h / 2 : 0;
+}
+
 export function createSimulationFromPlant(plantState: PlantState): SimulationState {
   const state = createSimulationState();
+  buildTerrain = plantState.terrain;
+  if (plantState.terrain) {
+    state.terrain = buildTerrainModel(plantState.terrain);
+    state.surfaceWater = createSurfaceWaterState(state.terrain);
+  }
 
   // Track which components have been processed
   const processedComponents = new Set<string>();
@@ -760,6 +787,8 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   for (const [id, component] of plantState.components) {
     const flowNode = createFlowNodeFromComponent(component);
     if (flowNode) {
+      flowNode.position = { x: component.position.x, y: component.position.y };
+      flowNode.groundHeight = terrainHeightAt(buildTerrain, component.position);
       state.flowNodes.set(flowNode.id, flowNode);
       processedComponents.add(id);
 
@@ -1389,7 +1418,9 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         hydraulicDiameter: 0.3,
         flowArea: 0.07,
         height: 0,
-        elevation: (component as any).elevation || 0,
+        elevation: absoluteBase(component),
+        position: { x: component.position.x, y: component.position.y },
+        groundHeight: terrainHeightAt(buildTerrain, component.position),
       });
 
       // Steam admission: initial governor position from the component
@@ -1446,7 +1477,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
   let connectionIndex = -1;
   for (const connection of plantState.connections) {
     connectionIndex++;
-    const flowConnection = createFlowConnectionFromPlantConnection(connection, plantState);
+    const flowConnection = createFlowConnectionFromPlantConnection(connection, plantState, state);
     if (flowConnection) {
       if (flowConnection.id !== connectionIds[connectionIndex]) {
         console.log(`[Factory] '${flowConnection.id}' is taken by another connection between ` +
@@ -1770,7 +1801,7 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
  * Create a flow node from a plant component
  */
 function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null {
-  const elevation = (component as any).elevation || 0;
+  const elevation = absoluteBase(component);
 
   switch (component.type) {
     case 'tank': {
@@ -3074,7 +3105,7 @@ function createHeatExchangerThermalNode(component: PlantComponent, b: number): T
  */
 function createHeatExchangerTubeNode(component: PlantComponent, b: number): FlowNode {
   const hx = component as any;
-  const elevation = hx.elevation || 0;
+  const elevation = absoluteBase(component);
   const nBundles = hxBundleCount(hx);
   // Tube volume scales with tube count/size, not a fixed constant - otherwise a HX
   // sized for a small or large plant would have identical (and often unrealistically
@@ -3122,7 +3153,7 @@ function createHeatExchangerTubeNode(component: PlantComponent, b: number): Flow
  */
 function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const hx = component as any;
-  const elevation = hx.elevation || 0;
+  const elevation = absoluteBase(component);
   // Approximate shell as a cylinder (diameter = width) minus tube bundle volume,
   // rather than a fixed constant - see tube-side volume comment above for why.
   const shellVolume = Math.max(2, Math.PI * Math.pow((hx.width || 3) / 2, 2) * (hx.height || 10) * 0.75);
@@ -3252,7 +3283,7 @@ function enclosingVesselHalfWidth(compId: string, plantState: PlantState, cvId: 
  */
 function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
   const cv = component as any;
-  const elevation = cv.elevation || 0;
+  const elevation = absoluteBase(component);
 
   // Calculate annulus volume
   const innerRadius = cv.innerDiameter / 2;
@@ -3295,7 +3326,7 @@ function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
 function createTurbineExtractionNodes(component: PlantComponent): FlowNode[] {
   const turbine = component as any;
   const extractionPorts = turbine.extractionPorts || [];
-  const elevation = turbine.elevation || 0;
+  const elevation = absoluteBase(component);
 
   const nodes: FlowNode[] = [];
 
@@ -3400,7 +3431,8 @@ function addHeatExchangerTubeFriction(
 
 function createFlowConnectionFromPlantConnection(
   connection: Connection,
-  plantState: PlantState
+  plantState: PlantState,
+  state: SimulationState
 ): FlowConnection | null {
   const fromComponent = plantState.components.get(connection.fromComponentId);
   const toComponent = plantState.components.get(connection.toComponentId);
@@ -3487,9 +3519,17 @@ function createFlowConnectionFromPlantConnection(
     toNodeId = turbinePortNodeId(connection.toComponentId, connection.toPortId) ?? toNodeId;
   }
 
-  const fromElevation = (fromComponent as any).elevation || 0;
-  const toElevation = (toComponent as any).elevation || 0;
-  const elevationChange = toElevation - fromElevation;
+  // Gravity along the connection runs between the two CONNECTION POINTS: each
+  // component's base (the ground under it plus its own elevation) plus the
+  // port's height above that base - the same point pressureAtConnection
+  // prices the node-side head to. (It used to be base to base only, which
+  // made a nozzle 5 m up a tank drive as if it were at the bottom.) A port
+  // without an elevation of its own sits at mid-height of its node.
+  const fromBase = absoluteBase(fromComponent);
+  const toBase = absoluteBase(toComponent);
+  const fromPoint = fromBase + (connection.fromElevation ?? nodeMidHeight(state.flowNodes.get(fromNodeId)));
+  const toPoint = toBase + (connection.toElevation ?? nodeMidHeight(state.flowNodes.get(toNodeId)));
+  const elevationChange = toPoint - fromPoint;
 
   // Use flow area from plant connection if provided, otherwise estimate from components
   let flowArea = connection.flowArea ?? 0.1; // Use plant connection's flowArea if set

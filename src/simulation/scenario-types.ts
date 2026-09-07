@@ -19,7 +19,9 @@ export type ScenarioAction =
   /** Put a controller in manual at a fixed output, or back to auto. */
   | { kind: 'controller'; id: string; mode: 'auto' | 'manual'; manualOutput?: number }
   /** Set a turbine node's governor valve directly (0 shut .. 1 open). */
-  | { kind: 'turbine-governor'; id: string; value: number };
+  | { kind: 'turbine-governor'; id: string; value: number }
+  /** Move a water body's surface (m above datum) to a level, over `over` seconds (a tsunami). */
+  | { kind: 'water-level'; id: string; surface: number; over?: number };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */

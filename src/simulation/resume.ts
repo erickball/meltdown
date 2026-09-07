@@ -610,6 +610,7 @@ export function transplantSimulationState(
   fresh.time = saved.time;
   if (saved.atmosphereRelease) fresh.atmosphereRelease = saved.atmosphereRelease;
   if (saved.environmentalRelease) fresh.environmentalRelease = saved.environmentalRelease;
+  if (saved.surfaceWater && fresh.surfaceWater) fresh.surfaceWater = saved.surfaceWater;
   if (saved.liquidBasePressures) {
     fresh.liquidBasePressures = fresh.liquidBasePressures ?? new Map();
     for (const [nodeId, pressure] of saved.liquidBasePressures) {

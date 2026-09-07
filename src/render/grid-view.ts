@@ -23,6 +23,8 @@ import {
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
+import { TerrainSpec } from '../terrain-types';
+import { TerrainModel, buildTerrainModel, surfaceAtVolume } from '../simulation/terrain';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -116,6 +118,16 @@ export class GridView {
   /** Automatic routes are a search; keep them until their inputs change. */
   private routeCache = new Map<Run, { key: string; pts: Point[] }>();
   private layout: RouteLayout | null = null;
+  /** Basins of the plant's terrain, rebuilt when the height field object changes. */
+  private terrainModel: { spec: TerrainSpec; model: TerrainModel } | null = null;
+
+  private terrainFor(spec: TerrainSpec | undefined): TerrainModel | null {
+    if (!spec) return null;
+    if (!this.terrainModel || this.terrainModel.spec !== spec) {
+      this.terrainModel = { spec, model: buildTerrainModel(spec) };
+    }
+    return this.terrainModel.model;
+  }
 
   // ---------------------------------------------------------------------
   // Route layout
@@ -560,6 +572,7 @@ export class GridView {
     const order = this.drawOrder(f.plantState);
 
     this.renderGround(ctx, f);
+    this.renderTerrain(ctx, f);
 
     // Ground layer: building floors and switchyards, in plan
     for (const c of order) {
@@ -619,6 +632,109 @@ export class GridView {
         ctx.stroke();
       }
     }
+  }
+
+  /**
+   * The lie of the land: a height tint over the ground texture (low ground
+   * greener and darker, high ground paler and browner), contour lines every
+   * metre with a heavier one every five, and the water standing in each
+   * basin - the sea and lakes at their surface, puddles where a leak has
+   * pooled - as translucent blue over every cell below the surface.
+   */
+  private renderTerrain(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    const spec = f.plantState.terrain;
+    const model = this.terrainFor(spec);
+    if (!spec || !model) return;
+    const { origin, cellSize, cols, rows, heights } = spec;
+    const half = cellSize / 2;
+
+    // Visible cell range
+    const tl = this.screenToWorld({ x: 0, y: 0 });
+    const br = this.screenToWorld({ x: f.width, y: f.height });
+    const i0 = Math.max(0, Math.floor((tl.x - origin.x) / cellSize - 1));
+    const i1 = Math.min(cols - 1, Math.ceil((br.x - origin.x) / cellSize + 1));
+    const j0 = Math.max(0, Math.floor((tl.y - origin.y) / cellSize - 1));
+    const j1 = Math.min(rows - 1, Math.ceil((br.y - origin.y) / cellSize + 1));
+    if (i1 < i0 || j1 < j0) return;
+
+    let hMin = Infinity, hMax = -Infinity;
+    for (const h of heights) { if (h < hMin) hMin = h; if (h > hMax) hMax = h; }
+    const span = Math.max(1, hMax - hMin);
+
+    // Water surface per basin: scripted bodies and stored puddles from the
+    // simulation; before one exists, the bodies at their declared surfaces
+    const surfaceOf = new Map<number, number>();
+    const sim = f.simState;
+    for (const b of model.basins) {
+      if (b.water) {
+        const live = sim?.surfaceWater?.bodies.get(b.water.id);
+        surfaceOf.set(b.id, live ? live.surface : b.water.surface);
+      } else {
+        const v = sim?.surfaceWater?.volumes.get(b.id) ?? 0;
+        if (v > 0) surfaceOf.set(b.id, surfaceAtVolume(model, b, v));
+      }
+    }
+
+    const px = cellSize * this.cam.ppm;
+    ctx.save();
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const c = j * cols + i;
+        const h = heights[c];
+        const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
+        // Height tint: valley green to hilltop tan
+        const t = (h - hMin) / span;
+        const r = Math.round(70 + 140 * t), g = Math.round(125 + 45 * t), bl = Math.round(55 + 55 * t);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${bl}, 0.5)`;
+        ctx.fillRect(s.x, s.y, px + 0.5, px + 0.5);
+        // Standing water
+        const surface = surfaceOf.get(model.basinOf[c]);
+        if (surface !== undefined && surface > h) {
+          const depth = surface - h;
+          const a = Math.min(0.85, 0.35 + depth * 0.08);
+          ctx.fillStyle = `rgba(40, 90, 170, ${a.toFixed(3)})`;
+          ctx.fillRect(s.x, s.y, px + 0.5, px + 0.5);
+        }
+      }
+    }
+
+    // Contours: an edge between two cells whose heights straddle a level.
+    // The minor interval follows the map's relief (about twelve steps over
+    // its span, rounded to 1/2/5); minor lines are skipped when the cells
+    // are so coarse that nearly every edge would carry one.
+    let meanStep = 0, edges = 0;
+    for (let j = 0; j < rows; j++) {
+      for (let i = 0; i + 1 < cols; i++) { meanStep += Math.abs(heights[j * cols + i + 1] - heights[j * cols + i]); edges++; }
+    }
+    meanStep = edges > 0 ? meanStep / edges : 0;
+    const raw = span / 12;
+    const mag = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-6))));
+    const minor = [1, 2, 5, 10].map(m => m * mag).find(v => v >= raw) ?? 10 * mag;
+    const major = minor * 5;
+    const levels: Array<readonly [number, string, number]> = [[major, 'rgba(60, 45, 20, 0.65)', 1.5]];
+    if (meanStep < minor) levels.unshift([minor, 'rgba(60, 45, 20, 0.3)', 1]);
+    if (px >= 3) {
+      for (const [interval, style, width] of levels) {
+        ctx.strokeStyle = style;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        for (let j = j0; j <= j1; j++) {
+          for (let i = i0; i <= i1; i++) {
+            const c = j * cols + i;
+            const hc = Math.floor(heights[c] / interval);
+            const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
+            if (i + 1 < cols && Math.floor(heights[c + 1] / interval) !== hc) {
+              ctx.moveTo(s.x + px, s.y); ctx.lineTo(s.x + px, s.y + px);
+            }
+            if (j + 1 < rows && Math.floor(heights[c + cols] / interval) !== hc) {
+              ctx.moveTo(s.x, s.y + px); ctx.lineTo(s.x + px, s.y + px);
+            }
+          }
+        }
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
   }
 
   private wallColor(building: BuildingComponent): { wall: string; light: string } {

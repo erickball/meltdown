@@ -31,6 +31,8 @@ import {
   FlowDynamicsConstraintOperator,
   ChokedFlowDisplayOperator,
   PumpSpeedRateOperator,
+  SurfaceWaterRateOperator,
+  SurfaceWaterConstraintOperator,
   BurstCheckOperator,
   ControlSystemOperator,
   SteadyStateDetector,
@@ -123,6 +125,7 @@ export function buildSimFromFile(
     components: new Map<string, PlantComponent>(data.components),
     connections: data.connections ?? [],
     scenario: data.scenario,
+    terrain: data.terrain,
   };
   setSimulationRandomSeed(0);
   return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
@@ -225,6 +228,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addRateOperator(new NeutronicsRateOperator());
   solver.addRateOperator(new TurbineCondenserRateOperator());
   solver.addRateOperator(new PumpSpeedRateOperator());
+  solver.addRateOperator(new SurfaceWaterRateOperator());
   solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
   solver.addConstraintOperator(new FluidStateConstraintOperator());
   solver.addConstraintOperator(new OtsgPartitionConstraintOperator());
@@ -232,6 +236,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addConstraintOperator(new ChokedFlowDisplayOperator());
   // Sampled process controllers act last, on the accepted state (finalOnly)
   solver.addConstraintOperator(new ControlSystemOperator());
+  solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
   solver.addConstraintOperator(new OtsgLedgerCheckOperator());
   return solver;
 }

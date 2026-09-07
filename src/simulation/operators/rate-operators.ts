@@ -3024,7 +3024,9 @@ export class PumpSpeedRateOperator implements RateOperator {
         continue;
       }
 
-      if (pump.running) {
+      // A drowned motor cannot run: a flooded pump coasts down like a tripped
+      // one, and stays down until the water is gone (surface-water.ts)
+      if (pump.running && !pump.flooded) {
         const targetSpeed = pump.speed;
         if (pump.effectiveSpeed < targetSpeed) {
           // Ramp up: constant rate to reach target in rampUpTime

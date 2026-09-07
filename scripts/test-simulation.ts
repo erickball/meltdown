@@ -30,6 +30,8 @@ import {
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
+  SurfaceWaterRateOperator,
+  SurfaceWaterConstraintOperator,
   BurstCheckOperator,
   ControlSystemOperator,
 } from '../src/simulation';
@@ -71,6 +73,8 @@ if (plantData.components) {
 if (plantData.connections) {
   plantState.connections = plantData.connections;
 }
+if (plantData.scenario) plantState.scenario = plantData.scenario;
+if (plantData.terrain) plantState.terrain = plantData.terrain;
 
 console.log(`Loaded ${plantState.components.size} components, ${plantState.connections.length} connections`);
 
@@ -123,12 +127,14 @@ solver.addRateOperator(new HeatGenerationRateOperator());
 solver.addRateOperator(new NeutronicsRateOperator());
 solver.addRateOperator(new TurbineCondenserRateOperator());
 solver.addRateOperator(new PumpSpeedRateOperator());
+solver.addRateOperator(new SurfaceWaterRateOperator());
 
 // Add constraint operators
 solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
 solver.addConstraintOperator(new FluidStateConstraintOperator());
 solver.addConstraintOperator(new BurstCheckOperator());
 solver.addConstraintOperator(new ControlSystemOperator());
+solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
 
 // Log initial state
 console.log('\n=== Initial State ===');

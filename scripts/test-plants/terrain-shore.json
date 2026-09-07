@@ -1,0 +1,362 @@
+{
+ "components": [
+  [
+   "res",
+   {
+    "id": "res",
+    "type": "tank",
+    "label": "Shore reservoir",
+    "position": {
+     "x": 130,
+     "y": 40
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "width": 8,
+    "height": 4,
+    "wallThickness": 0.05,
+    "fillLevel": 0.8,
+    "pressureRating": 2,
+    "ports": [
+     {
+      "id": "res-bottom",
+      "position": {
+       "x": 4,
+       "y": 2
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 2339,
+     "phase": "two-phase",
+     "quality": 0.0001,
+     "flowRate": 0
+    },
+    "initialNcg": {
+     "N2": 0.78,
+     "O2": 0.21
+    }
+   }
+  ],
+  [
+   "pump-1",
+   {
+    "id": "pump-1",
+    "type": "pump",
+    "label": "Shore pump",
+    "position": {
+     "x": 136,
+     "y": 40
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "diameter": 0.3,
+    "running": true,
+    "speed": 1,
+    "ratedFlow": 50,
+    "ratedHead": 25,
+    "orientation": "left-right",
+    "ports": [
+     {
+      "id": "pump-1-inlet",
+      "position": {
+       "x": -0.5,
+       "y": 0
+      },
+      "direction": "in"
+     },
+     {
+      "id": "pump-1-outlet",
+      "position": {
+       "x": 0.5,
+       "y": 0
+      },
+      "direction": "out"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 101325,
+     "phase": "liquid",
+     "quality": 0,
+     "flowRate": 0
+    },
+    "pressureRating": 10
+   }
+  ],
+  [
+   "pool",
+   {
+    "id": "pool",
+    "type": "tank",
+    "label": "Hill pool",
+    "position": {
+     "x": 30,
+     "y": 40
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "width": 6,
+    "height": 3,
+    "wallThickness": 0.05,
+    "fillLevel": 0.3,
+    "pressureRating": 2,
+    "ports": [
+     {
+      "id": "pool-top",
+      "position": {
+       "x": 0,
+       "y": -1.5
+      },
+      "direction": "both"
+     }
+    ],
+    "fluid": {
+     "temperature": 293.15,
+     "pressure": 2339,
+     "phase": "two-phase",
+     "quality": 0.0001,
+     "flowRate": 0
+    },
+    "initialNcg": {
+     "N2": 0.78,
+     "O2": 0.21
+    }
+   }
+  ]
+ ],
+ "connections": [
+  {
+   "fromComponentId": "res",
+   "fromPortId": "res-bottom",
+   "toComponentId": "pump-1",
+   "toPortId": "pump-1-inlet",
+   "fromElevation": 0.5,
+   "toElevation": 0.3,
+   "flowArea": 0.031415900000000004,
+   "length": 6
+  },
+  {
+   "fromComponentId": "pump-1",
+   "fromPortId": "pump-1-outlet",
+   "toComponentId": "pool",
+   "toPortId": "pool-top",
+   "fromElevation": 0.3,
+   "toElevation": 3,
+   "flowArea": 0.031415900000000004,
+   "length": 110
+  }
+ ],
+ "terrain": {
+  "origin": {
+   "x": 0,
+   "y": 0
+  },
+  "cellSize": 10,
+  "cols": 20,
+  "rows": 8,
+  "heights": [
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2,
+   12.0,
+   11.2,
+   10.4,
+   9.6,
+   8.8,
+   8.0,
+   7.2,
+   6.4,
+   5.6,
+   4.8,
+   4.0,
+   3.2,
+   2.4,
+   1.6,
+   0.8,
+   0.0,
+   -2,
+   -2,
+   -2,
+   -2
+  ],
+  "waters": [
+   {
+    "id": "sea",
+    "seed": {
+     "x": 180,
+     "y": 40
+    },
+    "surface": 0
+   }
+  ]
+ },
+ "scenario": {
+  "description": "Tsunami: the sea rises 5 m over 20 s at t=20 s and falls back at t=60 s",
+  "events": [
+   {
+    "time": 20,
+    "message": "Tsunami - sea rising",
+    "actions": [
+     {
+      "kind": "water-level",
+      "id": "sea",
+      "surface": 5,
+      "over": 20
+     }
+    ]
+   },
+   {
+    "time": 60,
+    "message": "Wave receding",
+    "actions": [
+     {
+      "kind": "water-level",
+      "id": "sea",
+      "surface": 0,
+      "over": 30
+     }
+    ]
+   }
+  ]
+ }
+}

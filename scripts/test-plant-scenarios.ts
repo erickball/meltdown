@@ -18,6 +18,7 @@ import {
   assertStateSane,
 } from './lib/sim-harness';
 import { triggerScram, nodeLiquidLevel } from '../src/simulation';
+import { terrainHeightAt } from '../src/simulation/terrain';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -123,6 +124,51 @@ test('Suction lift: a pump 8 m above the water draws it, 14 m above it runs its 
   assert(sp.fluid.phase === 'two-phase' && sp.fluid.pressure < 0.1e5,
     `intake should have run dry (two-phase near vapor pressure), got ${sp.fluid.phase} at ${(sp.fluid.pressure / 1e5).toFixed(3)} bar`);
   assertStateSane(dry.state);
+});
+
+// ---------------------------------------------------------------------------
+// Terrain: a shore pump is drowned by a tsunami and recovers when it recedes
+// ---------------------------------------------------------------------------
+
+test('Terrain: the sea rising over a shore pump drowns it, and it restarts when the water is gone', () => {
+  // Ground slopes from +12 m down to the sea; the reservoir and pump stand on
+  // the shore at ground +2 m and lift water to a pool on the hill (ground
+  // +10 m). The scenario raises the sea 5 m at t=20 s and drops it at t=60 s.
+  const sim = buildSimFromFile(path.join(PLANT_DIR, 'terrain-shore.json'));
+  const spec = sim.state.terrain!.spec;
+  const groundUnder = (id: string) => terrainHeightAt(spec, sim.state.flowNodes.get(id)!.position!);
+  const pumpNode = sim.state.flowNodes.get('pump-1')!;
+  const pumpGround = groundUnder('pump-1');
+  assert(pumpGround > 0.5 && pumpGround < 2.5, `fixture: the pump should stand low on the shore, ground ${pumpGround.toFixed(2)} m`);
+  assert(Math.abs(pumpNode.elevation - pumpGround) < 1e-6, `pump base should be the ground under it (${pumpGround.toFixed(2)} m), got ${pumpNode.elevation.toFixed(2)}`);
+  const poolNode = sim.state.flowNodes.get('pool')!;
+  const poolGround = groundUnder('pool');
+  assert(Math.abs(poolNode.elevation - poolGround) < 1e-6, `pool base should be its hillside ground (${poolGround.toFixed(2)} m), got ${poolNode.elevation.toFixed(2)}`);
+  // Gravity along the discharge runs from the pump nozzle (0.3 m up its base)
+  // to the pool inlet (3 m up the pool's base): the port elevations count
+  const lift = sim.state.flowConnections.find(c => c.id === 'flow-pump-1-pool')!;
+  const expectedLift = (poolGround + 3) - (pumpGround + 0.3);
+  assert(Math.abs(lift.elevation - expectedLift) < 1e-6, `discharge climb should be ${expectedLift.toFixed(2)} m, got ${lift.elevation.toFixed(2)} m`);
+
+  run(sim, 15.0, 0.02);
+  const q0 = flowRate(sim.state, 'pump-1', 'pool');
+  assert(q0 > 10, `shore pump should be lifting to the hill, got ${q0.toFixed(1)} kg/s`);
+  assert(!sim.state.components.pumps.get('pump-1')!.flooded, 'pump must not be flooded at sea level 0');
+
+  run(sim, 30.0, 0.02);   // t = 45 s: the sea has stood at +5 m for 5 s
+  const sea = sim.state.surfaceWater!.bodies.get('sea')!;
+  assert(Math.abs(sea.surface - 5) < 1e-6, `sea should have risen to +5 m, got ${sea.surface}`);
+  const pump = sim.state.components.pumps.get('pump-1')!;
+  assert(pump.flooded, 'pump standing at +2 m must be flooded under a +5 m sea');
+  assert(pump.effectiveSpeed < 0.5, `flooded pump must be coasting down, speed ${pump.effectiveSpeed.toFixed(2)}`);
+
+  run(sim, 60.0, 0.02);   // t = 105 s: the sea has been back at 0 since t=90
+  // (re-read: every accepted step is a new state object)
+  const seaAfter = sim.state.surfaceWater!.bodies.get('sea')!;
+  assert(Math.abs(seaAfter.surface) < 1e-6, `sea should be back at 0, got ${seaAfter.surface}`);
+  assert(!sim.state.components.pumps.get('pump-1')!.flooded, 'pump must be dry again');
+  assert(sim.state.components.pumps.get('pump-1')!.effectiveSpeed > 0.9, 'pump restarts once the water is gone');
+  assertStateSane(sim.state);
 });
 
 // ---------------------------------------------------------------------------

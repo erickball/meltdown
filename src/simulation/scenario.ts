@@ -51,6 +51,15 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
       n.governorValve = a.value;
       return;
     }
+    case 'water-level': {
+      const body = state.surfaceWater?.bodies.get(a.id);
+      if (!body) throw new Error(`[Scenario] water body '${a.id}' not found (the plant has no such terrain water)`);
+      body.from = body.surface;
+      body.to = a.surface;
+      body.t0 = state.time;
+      body.over = a.over ?? 0;
+      return;
+    }
     default:
       throw new Error(`[Scenario] unknown action ${JSON.stringify(a)}`);
   }

@@ -69,6 +69,8 @@ export interface StateRates {
   // mol/s of NCG leaving the modeled system through boundary nodes
   // (accumulates into state.environmentalRelease - the radiological source term)
   environmentalRelease?: GasComposition;
+  // m³/s of water arriving on (or soaking into) the ground, per terrain basin
+  surfaceWater?: Map<number, number>;
 }
 
 // ============================================================================
@@ -278,6 +280,13 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     });
   }
 
+  if (a.surfaceWater || b.surfaceWater) {
+    result.surfaceWater = new Map(a.surfaceWater ?? []);
+    for (const [basin, dV] of b.surfaceWater ?? []) {
+      result.surfaceWater.set(basin, (result.surfaceWater.get(basin) ?? 0) + dV);
+    }
+  }
+
   // Combine environmental release rates
   if (a.environmentalRelease || b.environmentalRelease) {
     result.environmentalRelease = emptyGasComposition();
@@ -376,6 +385,13 @@ export function accumulateRates(target: StateRates, source: StateRates, factor =
     else target.pumps.set(id, { dEffectiveSpeed: r.dEffectiveSpeed * factor });
   }
 
+  if (source.surfaceWater) {
+    if (!target.surfaceWater) target.surfaceWater = new Map();
+    for (const [basin, dV] of source.surfaceWater) {
+      target.surfaceWater.set(basin, (target.surfaceWater.get(basin) ?? 0) + dV * factor);
+    }
+  }
+
   if (source.environmentalRelease) {
     if (!target.environmentalRelease) target.environmentalRelease = emptyGasComposition();
     for (const species of ALL_GAS_SPECIES) {
@@ -457,6 +473,11 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     result.pumps.set(id, {
       dEffectiveSpeed: r.dEffectiveSpeed * factor,
     });
+  }
+
+  if (rates.surfaceWater) {
+    result.surfaceWater = new Map();
+    for (const [basin, dV] of rates.surfaceWater) result.surfaceWater.set(basin, dV * factor);
   }
 
   if (rates.environmentalRelease) {
@@ -613,6 +634,12 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
   }
 
   // Accumulate NCG vented through boundary nodes (radiological source term)
+  if (rates.surfaceWater && newState.surfaceWater) {
+    for (const [basin, dV] of rates.surfaceWater) {
+      newState.surfaceWater.volumes.set(basin, (newState.surfaceWater.volumes.get(basin) ?? 0) + dV * dt);
+    }
+  }
+
   if (rates.environmentalRelease) {
     if (!newState.environmentalRelease) {
       newState.environmentalRelease = emptyGasComposition();

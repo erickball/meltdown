@@ -9,6 +9,7 @@
  * warns if we can't keep up with real time.
  */
 
+import { cloneSurfaceWaterState } from './operators/surface-water';
 import { SimulationState, SolverMetrics } from './types';
 
 // ============================================================================
@@ -1211,6 +1212,9 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     burstConfig: state.burstConfig ? { ...state.burstConfig } : undefined,
     atmosphereRelease: state.atmosphereRelease ? { ...state.atmosphereRelease } : undefined,
     environmentalRelease: state.environmentalRelease ? { ...state.environmentalRelease } : undefined,
+    // Terrain is derived once and never mutated: shared. The water on it is state.
+    terrain: state.terrain,
+    surfaceWater: state.surfaceWater ? cloneSurfaceWaterState(state.surfaceWater) : undefined,
     // Clone pending events (shallow clone is fine - they're consumed after processing)
     pendingEvents: state.pendingEvents ? [...state.pendingEvents] : undefined,
     // Scenario progress is state (events are immutable, the counter moves)

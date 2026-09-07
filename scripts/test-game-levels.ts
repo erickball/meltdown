@@ -37,6 +37,8 @@ import {
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
+  SurfaceWaterRateOperator,
+  SurfaceWaterConstraintOperator,
   BurstCheckOperator,
   ControlSystemOperator,
   getTurbineCondenserState,
@@ -82,10 +84,12 @@ function makeSolver(): RK45Solver {
   solver.addRateOperator(new NeutronicsRateOperator());
   solver.addRateOperator(new TurbineCondenserRateOperator());
   solver.addRateOperator(new PumpSpeedRateOperator());
+  solver.addRateOperator(new SurfaceWaterRateOperator());
   solver.addConstraintOperator(new FlowDynamicsConstraintOperator());
   solver.addConstraintOperator(new FluidStateConstraintOperator());
   solver.addConstraintOperator(new BurstCheckOperator());
   solver.addConstraintOperator(new ControlSystemOperator());
+  solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
   return solver;
 }
 

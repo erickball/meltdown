@@ -1,4 +1,6 @@
 import type { ScenarioEvent } from './scenario-types';
+import type { TerrainModel } from './terrain';
+import type { SurfaceWaterState } from './operators/surface-water';
 /**
  * Simulation State Types
  *
@@ -156,8 +158,13 @@ export interface FlowNode {
   flowArea: number;                 // m² - cross-sectional flow area
   height?: number;                  // m - vertical height (for phase separation)
 
-  // Elevation for natural circulation
+  // Elevation for natural circulation: the node's base, absolute (the
+  // ground under the component plus the component's own elevation)
   elevation: number;                // m - height relative to reference
+  // Plan position and ground height of the component this node came from
+  // (surface water: where a leak lands, whether the node is flooded)
+  position?: { x: number; y: number };
+  groundHeight?: number;
 
   // Containment hierarchy
   // Every flow node must be "inside" something else - either another node or atmosphere
@@ -702,6 +709,10 @@ export interface SimulationState {
   // Timed accident sequence from the preset (see scenario-types.ts) and how
   // many of its events have fired. Fired by fireDueScenarioEvents.
   scenario?: { events: ScenarioEvent[]; fired: number };
+  // Ground (derived once from the plant's height field; never mutated) and
+  // the water standing on it (see operators/surface-water.ts)
+  terrain?: TerrainModel;
+  surfaceWater?: SurfaceWaterState;
 }
 
 export interface ComponentStates {
@@ -857,6 +868,8 @@ export interface PumpState {
   rampUpTime: number;               // seconds - time to reach full speed from stopped
   coastDownTime: number;            // seconds - time to coast to stop when tripped
   npshRequired: number;             // m - NPSH required by pump (NPSHr)
+  /** Standing in water above its base: the motor is drowned (surface-water.ts). */
+  flooded?: boolean;
   pumpType: 'centrifugal' | 'positive';  // Type affects cavitation behavior
   // Steam-turbine-driven pump (e.g. turbine-driven AFW): the pump has no
   // motor - its speed follows the steam flow through its drive turbine node.

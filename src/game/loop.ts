@@ -37,6 +37,8 @@ import {
   FluidStateConstraintOperator,
   FlowDynamicsConstraintOperator,
   PumpSpeedRateOperator,
+  SurfaceWaterRateOperator,
+  SurfaceWaterConstraintOperator,
   BurstCheckOperator,
   ChokedFlowDisplayOperator,
   ControlSystemOperator,
@@ -195,6 +197,7 @@ export class GameLoop {
 
       // Add pump speed rate operator (integrates pump ramp-up/coast-down)
       this.rk45Solver.addRateOperator(new PumpSpeedRateOperator());
+      this.rk45Solver.addRateOperator(new SurfaceWaterRateOperator());
 
       // Add constraint operators (enforce thermodynamic consistency)
       this.rk45Solver.addConstraintOperator(new FluidStateConstraintOperator());
@@ -203,6 +206,7 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
       this.rk45Solver.addConstraintOperator(new ChokedFlowDisplayOperator()); // Sets conn.isChoked for debug display
       this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
+      this.rk45Solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
       this.rk45Solver.addConstraintOperator(new OtsgLedgerCheckOperator()); // OTSG economizer ledger vs the wall (finalOnly)
 
       // Per accepted substep, log only the dt (three numbers) - full-state

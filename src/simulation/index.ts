@@ -193,3 +193,5 @@ export {
   mixedGasColor,
   compositionSummary,
 } from './gas-properties';
+export { SurfaceWaterRateOperator, SurfaceWaterConstraintOperator, isFlooded, surfaceUnder, basinSurface } from './operators/surface-water';
+export { terrainHeightAt, buildTerrainModel, surfaceAtVolume, volumeAtSurface, cellAt } from './terrain';

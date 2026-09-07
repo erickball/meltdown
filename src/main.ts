@@ -1867,6 +1867,7 @@ function init() {
       components: Array.from(state.components.entries()),
       connections: state.connections,
       ...(state.scenario ? { scenario: state.scenario } : {}),
+      ...(state.terrain ? { terrain: state.terrain } : {}),
     };
   }
 
@@ -1890,6 +1891,8 @@ function init() {
     // Timed accident sequence, if the preset ships one (a plant without one
     // must not inherit the previous preset's)
     plantState.scenario = data.scenario ?? undefined;
+    // Ground, likewise: a flat plant must not keep the previous one's hills
+    plantState.terrain = data.terrain ?? undefined;
 
     // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
     migrateReactorVessels(plantState);
