@@ -2659,7 +2659,12 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     rampUpTime: 5.0,
     coastDownTime: 30.0,
     npshRequired: pump.npshRequired || 5,  // Default 5m NPSHr
-    pumpType: pump.type || 'centrifugal',
+    // The dialog's "Pump Type" is stored as pumpType (component-properties.ts,
+    // construction-manager.ts); `pump.type` is the component KIND, 'pump'.
+    // Reading that here built every pump as "pump", which matched neither
+    // branch of pumpHeadFactor and silently took its positive-displacement
+    // default.
+    pumpType: pump.pumpType || 'centrifugal',
   };
 }
 

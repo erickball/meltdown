@@ -333,22 +333,41 @@ export function pressureAtConnection(node: FlowNode, connectionElevation?: numbe
 /**
  * How much of its rated head a pump develops given what is in its suction.
  *
- * Two mechanisms, continuous at the boundary between them:
- *  1. NPSH degradation (liquid suction): as the suction pressure approaches
- *     the vapor pressure, the pressure drop at the impeller eye flashes the
- *     liquid locally - cavitation - and head is lost. NPSH available =
- *     (P_suction - P_vapor) / (rho g); below the pump's NPSH required the
- *     factor falls from 1 toward the base factor at NPSH_a = 0.
- *  2. Void degradation (two-phase suction): vapor in the pump displaces the
- *     liquid the impeller works on. Centrifugal pumps lose head as
- *     (1 - alpha)^2 of the base factor, positive-displacement pumps more
- *     gently; at alpha = 1 a centrifugal pump is gas-bound and develops
- *     nothing.
- * At saturated liquid (NPSH_a = 0, x = 0) both give the base factor.
+ * The head itself already scales with the density of what the pump holds
+ * (pumpRho, the node's bulk density including any gas): a helium circulator
+ * develops rho_gas g H from its gas, and a water pump that has gas-locked
+ * develops rho_gas g H too - a few tenths of a percent of its liquid head
+ * for the same impeller. This factor is only the part the density does not
+ * carry, the impeller's own loss of capability against a liquid that is
+ * flashing or a mixture that is neither liquid nor gas, and it is ONE
+ * continuous function of the suction state across the whole (u, v) plane:
  *
- * This is what makes a drained intake matter: a pump whose suction line has
- * run dry sits on a pot of vapor and stops delivering, instead of pushing
- * vapor uphill with full liquid head.
+ *  1. Subcooled liquid: as the suction pressure approaches the vapor
+ *     pressure, the pressure drop at the impeller eye flashes the liquid
+ *     locally - cavitation - and head is lost. NPSH available =
+ *     (P_suction - P_vapor) / (rho g); below the pump's NPSH required the
+ *     factor falls from 1 toward the base factor at NPSH_a = 0, the
+ *     saturated-liquid edge of the dome.
+ *  2. Two-phase: vapor in the pump displaces the liquid the impeller works
+ *     on. From the base factor at alpha = 0 the head falls through a
+ *     mid-void minimum (a centrifugal pump keeps a quarter of its base
+ *     factor at 50% void, a positive-displacement pump 60% - the values the
+ *     earlier (1-alpha)^2 and (1-0.8 alpha) laws gave there) and recovers
+ *     to 1 at alpha = 1: by then the pump is full of gas, pumpRho is the gas
+ *     density, the head is a gas circulator's and there is nothing left to
+ *     cavitate. The quadratic through those three points meets the liquid
+ *     law at one dome edge and the gas law at the other. Both the density
+ *     and this factor apply, as in the RELAP/Semiscale two-phase pump
+ *     model: dP = rho_mix g H with H itself degraded mid-void.
+ *  3. Single-phase gas (steam or NCG): 1. No liquid to flash, no interface
+ *     to lose; all of the (small) head is in pumpRho. Returning 0 here, as
+ *     this once did ("a pump full of gas develops no liquid head"), zeroed
+ *     every gas circulator in the model: the Xe-100 primary loop stopped at
+ *     step 1 and the plant fell over 70 s later.
+ *
+ * This is still what makes a drained intake matter: a water pump whose
+ * suction line has run dry sits on a pot of vapor and delivers rho_vapor g H
+ * instead of pushing vapor uphill with the full liquid head.
  */
 export function pumpHeadFactor(
   pump: { npshRequired?: number; pumpType?: 'centrifugal' | 'positive' },
@@ -357,9 +376,13 @@ export function pumpHeadFactor(
 ): number {
   const g = 9.81;
   const pumpType = pump.pumpType ?? 'centrifugal';
+  // Head kept at incipient cavitation (NPSH_a = 0, saturated liquid)
   const baseFactor = pumpType === 'centrifugal' ? 0.85 : 0.95;
+  const phase = suctionNode.fluid.phase;
 
-  if (suctionNode.fluid.phase === 'two-phase') {
+  if (phase === 'vapor') return 1.0;
+
+  if (phase === 'two-phase') {
     // Void fraction from what the pot actually holds - the liquid volume its
     // mass and quality account for against its total volume (the same book
     // the draw model keeps), not a density-ratio estimate of it
@@ -367,15 +390,12 @@ export function pumpHeadFactor(
     const liquidVolume = suctionNode.volume > 0
       ? Math.min(suctionNode.volume, suctionNode.fluid.mass * (1 - quality) / approxLiquidDensity(suctionNode))
       : 0;
-    const voidFraction = suctionNode.volume > 0 ? 1 - liquidVolume / suctionNode.volume : 1;
-    return pumpType === 'centrifugal'
-      ? baseFactor * Math.pow(1 - voidFraction, 2)
-      : baseFactor * (1 - 0.8 * voidFraction);
-  }
-
-  if (suctionNode.fluid.phase !== 'liquid') {
-    // A pump full of gas develops no liquid head
-    return 0;
+    const alpha = suctionNode.volume > 0 ? 1 - liquidVolume / suctionNode.volume : 1;
+    // Quadratic through (0, baseFactor), (1/2, midVoidFactor), (1, 1)
+    const midVoidFactor = baseFactor * (pumpType === 'centrifugal' ? 0.25 : 0.6);
+    const chord = baseFactor * (1 - alpha) + alpha;
+    const sag = 4 * ((baseFactor + 1) / 2 - midVoidFactor);
+    return chord - sag * alpha * (1 - alpha);
   }
 
   const npshAvailable = (suctionNode.fluid.pressure - saturationPressure(suctionNode.fluid.temperature)) / (pumpRho * g);
@@ -1014,20 +1034,12 @@ export function computeConnectionHydraulics(
       const pumpNode = fromNode;
       // Include NCG mass: a gas circulator develops rho*g*H head from the
       // gas it actually contains (a few % of a water pump's - physical for
-      // the same impeller, so gas loops need high-head circulators).
-      let pumpRho = nodeBulkDensity(pumpNode);
-
-      if (pumpNode.fluid.phase === 'two-phase' && pumpNode.fluid.quality !== undefined) {
-        // Pumps draw from the bottom (liquid) if there is enough of it
-        const liquidFraction = 1 - pumpNode.fluid.quality;
-        const liquidMass = pumpNode.fluid.mass * liquidFraction;
-
-        // If there's significant liquid (more than 10kg), use liquid density
-        if (liquidMass > 10) {
-          pumpRho = approxLiquidDensity(pumpNode);
-        }
-        // Otherwise use mixture density (pump is cavitating)
-      }
+      // the same impeller, so gas loops need high-head circulators). A
+      // two-phase pump works on its mixture density; the impeller's extra
+      // loss against a mixture is pumpHeadFactor's. (This used to switch to
+      // the liquid density whenever the pot held more than 10 kg of liquid -
+      // a threshold the continuous factor does not need.)
+      const pumpRho = nodeBulkDensity(pumpNode);
 
       // Head from the pump curve: falls off with flow, zero at runout - and
       // the whole curve scales down with what the suction can supply
