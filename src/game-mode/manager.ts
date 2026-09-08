@@ -9,9 +9,11 @@
  */
 
 import { PlantState } from '../types';
-import { SimulationState, getTurbineCondenserState } from '../simulation';
+import { SimulationState, getTurbineCondenserState, nodeLiquidLevel } from '../simulation';
 import { GameLoop, GameEvent } from '../game';
-import { LevelDef, GamePhase, GoalProgress, CareerSave, GameEventKind, FiredEvent, DialogueLine } from './types';
+import {
+  LevelDef, GamePhase, GoalProgress, CareerSave, GameEventKind, FiredEvent, DialogueLine, HazardDef,
+} from './types';
 import { Ledger } from './economy';
 import { assessRelease, formatActivity } from './consequences';
 import { RandomEventEngine } from './events';
@@ -41,6 +43,38 @@ export interface GameHost {
    * SHOW ALL toggle); null restores the full catalog.
    */
   setPaletteFilter?(types: string[] | null): void;
+  /** Set the simulation speed and refresh the toolbar readout. */
+  setSimSpeed?(speed: number): void;
+  /**
+   * Switch the plant view. The 2D tile grid is the only view that draws
+   * terrain, so a level whose ground matters asks for 'grid'.
+   */
+  setViewMode?(mode: 'grid' | 'perspective'): void;
+  /**
+   * Whether the CONSTRUCTION mode button is usable, and why not when it is
+   * not (shown as its tooltip). A live-build level has no outage.
+   */
+  setConstructionAvailable?(available: boolean, reason: string): void;
+}
+
+/**
+ * Why a live-build level refuses to go back to construction mode. Shown both
+ * as the notification when the button is pressed and as its tooltip.
+ */
+const NO_OUTAGE_REASON =
+  'No outage on this job - the fuel keeps heating whether you are building or not. ' +
+  'Place equipment and run pipe with the plant live.';
+
+/**
+ * A duration in plain words: "2h 15m", "48 min", "90 s". Used wherever the
+ * player is told how long something has left (or has been wrong for).
+ */
+function formatDuration(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 120) return `${s} s`;
+  const m = Math.round(s / 60);
+  if (m < 90) return `${m} min`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
 }
 
 /** Event kinds that count as equipment casualties for 'events' goals. */
@@ -98,6 +132,12 @@ export class GameModeManager {
   // (the player watches it unfold) before the boss steps in. This guards
   // against re-arming and against other end conditions preempting it.
   private releaseArmed = false;
+  // Hazards (physical limits that end the level). A 'level' hazard is only a
+  // failure once it has stood breached for its grace period, so the moment
+  // each breach began is kept here, keyed by hazard, and cleared the instant
+  // the plant recovers.
+  private hazardBreachStart = new Map<string, number>();
+  private hazardWarned = new Set<string>();
 
   constructor(private host: GameHost) {
     this.save = this.loadSave();
@@ -123,6 +163,25 @@ export class GameModeManager {
   }
 
   get active(): boolean { return this.level !== null; }
+
+  /**
+   * True while a level that is built DURING the run is in progress. main.ts
+   * asks this to decide whether the palette works in simulation mode.
+   */
+  get liveBuild(): boolean { return this.level?.liveBuild === true; }
+
+  /** The level being played, or null. */
+  get currentLevel(): LevelDef | null { return this.level; }
+
+  /**
+   * True when the level being played has no money model at all (LevelDef
+   * `economy: 'none'`). main.ts asks so it can leave the overnight-cost
+   * panel down: a build cost is meaningless where nothing is bought.
+   */
+  get moneyHidden(): boolean { return this.economyOff; }
+
+  /** True when this level has no money model at all (see LevelDef.economy). */
+  private get economyOff(): boolean { return this.level?.economy === 'none'; }
 
   // ==========================================================================
   // Title screen
@@ -217,7 +276,16 @@ export class GameModeManager {
     this.speedHintShown = false;
     this.steadySamples = [];
     this.designSnapshot = null;
+    this.hazardBreachStart = new Map();
+    this.hazardWarned = new Set();
     this.host.setPaletteFilter?.(level.palette ?? null);
+    if (level.view) this.host.setViewMode?.(level.view);
+
+    // The HUD goes up BEFORE the plant is loaded: loading it fits the grid
+    // camera to the plant, and that fit measures the panels standing on the
+    // canvas - a HUD that appears afterwards would have covered the top of a
+    // plant already centred without it.
+    this.hud.show();
 
     // Load the starting plant. A design override carries the player's own
     // failed layout (retry) or the reference solution (answer key); otherwise
@@ -240,6 +308,7 @@ export class GameModeManager {
     for (const id of stockIds) this.ledger.stockIds.add(id);
 
     this.hud.show();
+    this.hud.setEconomyVisible(!this.economyOff);
     this.hud.setLevel(level.title);
     this.hud.setHints(opts?.hints ?? level.hints);
     this.hud.clearEvents();
@@ -262,6 +331,7 @@ export class GameModeManager {
     this.operatorPanel.hide();
     this.closeTitle();
     this.host.setPaletteFilter?.(null);
+    this.host.setConstructionAvailable?.(true, '');
     this.level = null;
     this.ledger = null;
     this.eventEngine = null;
@@ -275,14 +345,18 @@ export class GameModeManager {
         this.hud.setPhase('BRIEFING', null);
         break;
       case 'construction':
-        this.hud.setPhase(this.builtOnce ? 'OUTAGE' : 'CONSTRUCTION',
-          this.builtOnce ? 'RESUME OPERATION' : 'BUILD IT');
+        // A live-build level never comes back here: the one press starts the
+        // job, and everything after that is built with the plant running.
+        this.hud.setPhase(
+          this.builtOnce ? 'OUTAGE' : (this.level?.liveBuild ? 'STANDING BY' : 'CONSTRUCTION'),
+          this.builtOnce ? 'RESUME OPERATION' : (this.level?.liveBuild ? 'TAKE THE WATCH' : 'BUILD IT'));
         this.operatorPanel.hide();
         this.refreshConstructionHud();
         break;
       case 'operation':
-        this.hud.setPhase('OPERATING', 'OUTAGE');
-        this.hud.setPrimaryEnabled(true);
+        // No outage button where there is no outage.
+        this.hud.setPhase('OPERATING', this.level?.liveBuild ? null : 'OUTAGE');
+        if (!this.level?.liveBuild) this.hud.setPrimaryEnabled(true);
         break;
       case 'debrief':
       case 'failed':
@@ -311,6 +385,12 @@ export class GameModeManager {
 
     // -> construction
     if (this.phase === 'operation') {
+      // A live-build level has no outage to bill: construction mode is
+      // simply not available while it runs.
+      if (this.level.liveBuild) {
+        this.host.showNotification(NO_OUTAGE_REASON, 'warning');
+        return false;
+      }
       this.beginOutage();
     }
     return true;
@@ -367,6 +447,13 @@ export class GameModeManager {
     if (!this.level || !this.ledger) return;
 
     if (this.phase === 'construction' && !this.builtOnce) {
+      // No money model: nothing to borrow, nothing to price. Taking the
+      // watch just starts the clock.
+      if (this.economyOff) {
+        this.builtOnce = true;
+        this.startOperation();
+        return;
+      }
       const cost = this.ledger.designCost(this.host.plantState.components as any);
       if (cost > this.level.loanCap) {
         this.host.showNotification(
@@ -406,12 +493,38 @@ export class GameModeManager {
     );
     this.eventEngine?.arm(this.firedKinds);
     this.host.setMode('simulation');
+    this.validateHazards();
+    this.host.setConstructionAvailable?.(!this.level!.liveBuild, NO_OUTAGE_REASON);
     this.host.gameLoop.resume();
+    if (this.level!.simSpeed !== undefined) this.host.setSimSpeed?.(this.level!.simSpeed);
     // setMode synced the pause button to the (paused) state BEFORE this resume,
     // so refresh it now that the loop is actually running.
     this.host.refreshSimControls?.();
     this.tunes.stop();
-    this.hud.ticker('Plant online. The meter is running - so is the interest.');
+    this.hud.ticker(this.economyOff
+      ? 'You have the watch. The clock is running.'
+      : 'Plant online. The meter is running - so is the interest.');
+  }
+
+  /**
+   * A level's hazards name simulation nodes. Check they exist the moment the
+   * plant goes on line rather than discovering a typo at the instant the
+   * level was supposed to end.
+   */
+  private validateHazards(): void {
+    const state = this.host.gameLoop.getState();
+    if (!state || !this.level?.hazards) return;
+    for (const h of this.level.hazards) {
+      const found = h.kind === 'temperature'
+        ? state.thermalNodes.has(h.nodeId)
+        : state.flowNodes.has(h.nodeId);
+      if (!found) {
+        throw new Error(
+          `[Career] Level '${this.level.id}' watches ${h.kind} node '${h.nodeId}', ` +
+          `which the plant it just built does not have. Fix the level's hazards ` +
+          `or its stock plant - a limit on a node that does not exist can never fire.`);
+      }
+    }
   }
 
   // ==========================================================================
@@ -448,6 +561,13 @@ export class GameModeManager {
     } else if (event.type === 'scram') {
       this.hud.ticker(event.message, true);
       this.hud.addEvent(event.message, simTime, true);
+    } else if (event.type === 'scenario') {
+      // The plant's own scripted sequence (an earthquake, a tsunami) acting
+      // on the level: it belongs in the same log as everything else that
+      // happens to the player.
+      this.hud.ticker(event.message, true);
+      this.hud.addEvent(event.message, simTime, true);
+      this.tunes.sfx('alarm');
     }
   }
 
@@ -461,7 +581,7 @@ export class GameModeManager {
       this.runHighWater = state.time;
       this.operatedSeconds += dt;
       const electricWatts = getTurbineCondenserState().turbinePower;
-      this.ledger.accrue(this.operatedSeconds, dt, electricWatts);
+      if (!this.economyOff) this.ledger.accrue(this.operatedSeconds, dt, electricWatts);
 
       // random / scripted trouble
       const due = this.eventEngine?.poll(state.time, electricWatts > 1e6) ?? [];
@@ -488,7 +608,7 @@ export class GameModeManager {
     if (now - this.lastHudUpdate > 250) {
       this.lastHudUpdate = now;
       const mwe = getTurbineCondenserState().turbinePower / 1e6;
-      this.hud.setMoney(this.ledger.snapshot(this.operatedSeconds), mwe);
+      if (!this.economyOff) this.hud.setMoney(this.ledger.snapshot(this.operatedSeconds), mwe);
       this.hud.setGoals(this.goalProgress());
       this.checkEndConditions(state);
     }
@@ -498,6 +618,11 @@ export class GameModeManager {
   refreshConstructionHud(): void {
     if (!this.active || !this.ledger || !this.level) return;
     if (this.phase !== 'construction') return;
+    if (this.economyOff) {
+      this.hud.setGoals(this.goalProgress());
+      this.hud.setPrimaryEnabled(true, 'Start the clock. From here you build with the plant running.');
+      return;
+    }
     const cost = this.ledger.designCost(this.host.plantState.components as any);
     this.hud.setBudget(cost, this.level.loanCap);
     this.hud.setGoals(this.goalProgress());
@@ -661,6 +786,14 @@ export class GameModeManager {
           const frac = Math.min(1, this.survivedCasualties / def.count);
           return { def, fraction: frac, done: this.survivedCasualties >= def.count, readout: `${this.survivedCasualties} / ${def.count} handled` };
         }
+        case 'survive': {
+          const frac = Math.min(1, this.operatedSeconds / def.seconds);
+          const left = Math.max(0, def.seconds - this.operatedSeconds);
+          return {
+            def, fraction: frac, done: this.operatedSeconds >= def.seconds,
+            readout: frac >= 1 ? 'watch complete' : `${formatDuration(left)} to go`,
+          };
+        }
       }
     });
   }
@@ -796,8 +929,15 @@ export class GameModeManager {
       return;
     }
 
+    // physical limits (fuel damage, uncovered fuel, ...)
+    const breach = this.checkHazards(state);
+    if (breach) {
+      this.safetyFailure(breach.hazard, breach.detail);
+      return;
+    }
+
     // bankruptcy
-    if (this.ledger.cash < 0) {
+    if (!this.economyOff && this.ledger.cash < 0) {
       this.bankruptcyFailure();
       return;
     }
@@ -809,27 +949,111 @@ export class GameModeManager {
     }
   }
 
+  /**
+   * The first hazard the plant is outside, or null. A temperature limit bites
+   * the moment it is crossed; a level limit only after its grace period of
+   * CONTINUOUS breach, so make-up that catches up in time is not punished.
+   *
+   * A watched node that has disappeared (the player deleted the component) is
+   * a breach, not an error: the thing that was supposed to be protected is
+   * gone.
+   */
+  private checkHazards(state: SimulationState): { hazard: HazardDef; detail: string } | null {
+    if (!this.level?.hazards) return null;
+    for (const h of this.level.hazards) {
+      const key = `${h.kind}:${h.nodeId}`;
+      if (h.kind === 'temperature') {
+        const node = state.thermalNodes.get(h.nodeId);
+        if (!node) return { hazard: h, detail: `${h.label} is no longer part of the plant.` };
+        const c = node.temperature - 273.15;
+        if (c >= h.limitC) {
+          return { hazard: h, detail: `${h.label} reached ${c.toFixed(0)} °C - the limit is ${h.limitC} °C.` };
+        }
+        if (c >= h.limitC - 100 && !this.hazardWarned.has(key)) {
+          this.hazardWarned.add(key);
+          this.hud.ticker(`${h.label} is at ${c.toFixed(0)} °C and climbing (limit ${h.limitC} °C).`, true);
+        }
+      } else {
+        const node = state.flowNodes.get(h.nodeId);
+        if (!node) return { hazard: h, detail: `${h.label} is no longer part of the plant.` };
+        const level = nodeLiquidLevel(node);
+        if (level >= h.minMetres) {
+          this.hazardBreachStart.delete(key);
+          this.hazardWarned.delete(key);
+          continue;
+        }
+        const since = this.hazardBreachStart.get(key);
+        if (since === undefined) {
+          this.hazardBreachStart.set(key, this.operatedSeconds);
+          if (!this.hazardWarned.has(key)) {
+            this.hazardWarned.add(key);
+            this.hud.ticker(
+              `${h.label}: ${level.toFixed(2)} m, below the ${h.minMetres.toFixed(2)} m it needs. ` +
+              `${formatDuration(h.graceSeconds)} to put it right.`, true);
+          }
+          continue;
+        }
+        const held = this.operatedSeconds - since;
+        if (held >= h.graceSeconds) {
+          return {
+            hazard: h,
+            detail: `${h.label} stood below ${h.minMetres.toFixed(2)} m for ${formatDuration(held)}.`,
+          };
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A physical limit was breached: the plant is stopped and the boss arrives.
+   * Unlike a release, there is nothing left to watch unfold - the damage is
+   * the end of the level.
+   */
+  private safetyFailure(hazard: HazardDef, detail: string): void {
+    if (!this.level) return;
+    this.host.gameLoop.pause();
+    this.setPhase('failed');
+    this.eventEngine?.disarm();
+    this.tunes.play('disaster');
+    this.failureChoices(
+      'SAFETY LIMIT EXCEEDED',
+      [detail, hazard.consequence],
+      [
+        { who: 'grubb', mood: 'panic', text: 'Stop. STOP. Whatever you are doing, it is not working, and the readouts are the colour I dread.' },
+        { who: 'grubb', mood: 'angry', text: detail },
+        { who: 'grubb', mood: 'neutral', text: hazard.consequence },
+        { who: 'grubb', mood: 'angry', text: 'Go back and do it again, and this time do it before the number gets there, not after.' },
+      ]
+    );
+  }
+
   private completeLevel(): void {
     if (!this.level || !this.ledger) return;
     this.host.gameLoop.pause();
     this.setPhase('debrief');
-    this.ledger.cash += this.level.completionBonus;
+    if (!this.economyOff) {
+      this.ledger.cash += this.level.completionBonus;
+      const best = this.save.best[this.level.id];
+      if (best === undefined || this.ledger.cash > best) {
+        this.save.best[this.level.id] = this.ledger.cash;
+      }
+    }
     this.tunes.play('victory');
 
-    const best = this.save.best[this.level.id];
-    if (best === undefined || this.ledger.cash > best) {
-      this.save.best[this.level.id] = this.ledger.cash;
-    }
     this.save.unlocked = Math.max(this.save.unlocked, this.levelIndex + 1);
     this.persistSave();
 
-    this.dialogue.show(this.level.debrief, () => {
-      this.choiceOverlay('LEVEL COMPLETE', [
+    const summary = this.economyOff
+      ? [`Time on watch: ${formatDuration(this.operatedSeconds)} of simulated plant time.`]
+      : [
         `Bonus paid: ${formatCost(this.level!.completionBonus)}`,
         `Final account: ${formatCost(this.ledger!.cash)}`,
         `Energy delivered: ${this.ledger!.energyMWh.toFixed(1)} MWh`,
         `Interest paid: ${formatCost(this.ledger!.interestPaid)}`,
-      ], [
+      ];
+    this.dialogue.show(this.level.debrief, () => {
+      this.choiceOverlay('LEVEL COMPLETE', summary, [
         ...(this.levelIndex + 1 < LEVELS.length
           ? [{ label: 'NEXT ASSIGNMENT', action: () => this.startLevel(this.levelIndex + 1) }] : []),
         { label: 'TITLE SCREEN', action: () => this.showTitle() },
@@ -851,12 +1075,16 @@ export class GameModeManager {
     const l = this.ledger!;
     const d = [...headline];
     d.push(`Time on line: ${(this.operatedSeconds / 60).toFixed(1)} sim-min`);
-    d.push(`Energy delivered: ${l.energyMWh.toFixed(1)} MWh`);
-    d.push(`Peak generation: ${this.runPeakMWe.toFixed(0)} MWe`);
+    if (!this.economyOff) {
+      d.push(`Energy delivered: ${l.energyMWh.toFixed(1)} MWh`);
+      d.push(`Peak generation: ${this.runPeakMWe.toFixed(0)} MWe`);
+    }
     if (this.runPeakFuelTemp > 0) {
       d.push(`Peak fuel temperature: ${(this.runPeakFuelTemp - 273.15).toFixed(0)} °C`);
     }
-    d.push(`Revenue ${formatCost(l.revenue)} – interest ${formatCost(l.interestPaid)} – repairs ${formatCost(l.repairsPaid)}`);
+    if (!this.economyOff) {
+      d.push(`Revenue ${formatCost(l.revenue)} – interest ${formatCost(l.interestPaid)} – repairs ${formatCost(l.repairsPaid)}`);
+    }
     if (this.burstThisRun.length) {
       d.push(`Ruptured: ${this.burstThisRun.map(b => b.label).join(', ')}`);
     }

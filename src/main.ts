@@ -1930,6 +1930,30 @@ function init() {
   for (const [m, id] of viewModeButtons) {
     document.getElementById(id)?.addEventListener('click', () => applyViewMode(m, true));
   }
+  /**
+   * Measure the floating panels that cover the canvas (the toolbar down the
+   * left, the career HUD across the top) and hand the rectangle they leave to
+   * the canvas, so fit-to-plant does not put half the plant behind the
+   * toolbar. Measured rather than hard-coded: the toolbar's width follows its
+   * content and the HUD is not always there.
+   */
+  function refreshViewportInsets(): void {
+    const rectOf = (id: string) => {
+      const el = document.getElementById(id);
+      if (!el || el.offsetParent === null) return null;
+      return el.getBoundingClientRect();
+    };
+    const toolbar = rectOf('toolbar');
+    const hud = document.querySelector('.gm-hud') as HTMLElement | null;
+    plantCanvas.setViewportInsets({
+      left: toolbar ? toolbar.right + 8 : 0,
+      top: hud ? hud.getBoundingClientRect().height + 8 : 0,
+      // The gas legend and the status bar are drawn ON the canvas, so there
+      // is no element to measure - this is their combined height.
+      bottom: 60,
+    });
+  }
+
   const savedViewMode = loadSettings().viewMode as string | undefined;
   applyViewMode(savedViewMode === 'grid' || savedViewMode === '2d' ? 'grid' : 'perspective', false);
 
@@ -2034,7 +2058,9 @@ function init() {
     // pump port geometry/orientation) that raw JSON doesn't carry
     constructionManager.normalizeLoadedPlant();
 
-    // Plants are laid out for the 2.5D camera; the grid camera goes to them
+    // Plants are laid out for the 2.5D camera; the grid camera goes to them,
+    // aiming at the part of the canvas the floating panels leave visible.
+    refreshViewportInsets();
     plantCanvas.centerOnPlant();
   }
 
@@ -2681,13 +2707,19 @@ function init() {
 
   /**
    * Whether the plant may be built while it runs. Sandbox: yes. Career mode:
-   * no - construction there is an OUTAGE, and GameModeManager bills repairs
-   * and lost generation when you leave simulation mode (beforeModeSwitch).
-   * Building mid-run would walk straight past that, so career keeps the
-   * stop-the-plant-to-build rule and the palette stays hidden while running.
+   * normally no - construction there is an OUTAGE, and GameModeManager bills
+   * repairs and lost generation when you leave simulation mode
+   * (beforeModeSwitch). Building mid-run would walk straight past that, so
+   * career keeps the stop-the-plant-to-build rule and the palette stays
+   * hidden while running.
+   *
+   * The exception is a level flagged `liveBuild` (LevelDef): an emergency the
+   * player builds their way out of with the plant live. Such a level has no
+   * outage to bill - the manager refuses the switch back to construction
+   * mode altogether - so there is nothing to walk past.
    */
   function liveBuildAllowed(): boolean {
-    return !gameMode?.active;
+    return !gameMode?.active || gameMode.liveBuild;
   }
 
   interface PendingLiveEdit {
@@ -2866,8 +2898,10 @@ function init() {
       if (simControls) simControls.style.display = 'none';
       if (constructionControls) constructionControls.style.display = 'block';
       if (editSection) editSection.style.display = 'block';
+      // The overnight-cost readout is a money panel: a level with no economy
+      // (nothing is bought, the warehouse is the limit) leaves it down.
       if (constructionCostPanel) {
-        constructionCostPanel.style.display = 'block';
+        constructionCostPanel.style.display = gameMode?.moneyHidden ? 'none' : 'block';
         updateConstructionCostPanel();
       }
 
@@ -4104,6 +4138,25 @@ function init() {
       paletteFilterTypes = types;
       paletteShowAll = false;
       applyPaletteFilter();
+    },
+    setSimSpeed: (speed: number) => {
+      gameLoop.setSimSpeed(speed);
+      updateSpeedDisplay();
+    },
+    setViewMode: (mode: 'grid' | 'perspective') => applyViewMode(mode, false),
+    setConstructionAvailable: (available: boolean, reason: string) => {
+      // The button stays clickable (setMode's career guard repeats the
+      // reason as a notification); what changes is that it looks unavailable
+      // and says why on hover. A disabled button would swallow the click and
+      // with it the explanation.
+      if (!modeConstructionBtn) return;
+      if (modeConstructionBtn.dataset.baseTitle === undefined) {
+        modeConstructionBtn.dataset.baseTitle = modeConstructionBtn.title;
+      }
+      modeConstructionBtn.classList.toggle('tool-unavailable', !available);
+      modeConstructionBtn.title = available
+        ? (modeConstructionBtn.dataset.baseTitle ?? '')
+        : reason;
     },
   });
 

@@ -21,6 +21,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
+import { nodeLiquidLevel } from '../src/simulation';
 import {
   createSimulationFromPlant,
   setSimulationRandomSeed,
@@ -207,15 +209,250 @@ async function runCheck(key: string, check: LevelCheck, simSecondsOverride?: num
   return pass;
 }
 
+
+// ===========================================================================
+// LEVEL 1: HOT AND DRY (spent fuel pool)
+// ===========================================================================
+//
+// This level is not judged on megawatts, so it gets its own checks: what has
+// to be true is that the crisis is real, that the level's two obstacles bite
+// the way the design says they do, and that a plant which answers them holds
+// the fuel covered for the full six hours.
+//
+//   1. NOBODY HOME. Nothing is built. The crack must uncover the racks well
+//      inside the level, and keep them uncovered past the grace period - i.e.
+//      the level's `level` hazard fires and the player loses.
+//   2. THE SUCTION-LIFT TRAP. A pump standing on the pool bench, 13 m above
+//      the sea, must NOT deliver: the atmosphere cannot push water that high
+//      and its intake flashes.
+//   3. THE SHORE PUMP. The same pump moved down to the shore must deliver
+//      real flow UP to the pool.
+//   4. SIX HOURS. Tank make-up through the flood, the shore pump before and
+//      after it, and the pool stays over the racks for the whole level -
+//      with the tsunami drowning the shore pump in the middle and it
+//      restarting on its own when the water goes.
+//
+// Check 4 is the level's answer key expressed as a static plant driven by
+// scenario actions rather than as live edits; the in-game reference design
+// (LevelDef.reference) is still to be built.
+
+const SFP_LEVEL = 'src/game-mode/levels/spent-fuel-pool.json';
+/** Rack top: the level the pool must stay above (rackBottom + rackHeight). */
+const SFP_RACK_TOP = 4.16;
+/** Grace the level allows below the rack top before it is a loss. */
+const SFP_GRACE = 1200;
+
+type PlantJsonRW = {
+  components: Array<[string, Record<string, unknown>]>;
+  connections: Array<Record<string, unknown>>;
+  scenario?: { description?: string; events: Array<Record<string, unknown>> };
+  terrain?: unknown;
+};
+
+function sfpPlant(): PlantJsonRW {
+  return JSON.parse(fs.readFileSync(path.resolve(process.cwd(), SFP_LEVEL), 'utf-8'));
+}
+
+/** A make-up pump the way the palette would build one, at a plan position. */
+function sfpPump(id: string, label: string, x: number, y: number, ratedFlow: number, ratedHead: number) {
+  return [id, {
+    id, type: 'pump', label,
+    position: { x, y }, rotation: 0, elevation: 0,
+    diameter: 0.2 + Math.sqrt(ratedFlow / 1000) * 0.4,
+    running: false, speed: 1,
+    ratedFlow, ratedHead, orientation: 'left-right',
+    npshRequired: 5,
+    ports: [
+      { id: `${id}-inlet`, position: { x: -0.5, y: 0 }, direction: 'in' },
+      { id: `${id}-outlet`, position: { x: 0.5, y: 0 }, direction: 'out' },
+    ],
+    fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
+    pressureRating: 25,
+  }] as [string, Record<string, unknown>];
+}
+
+function sfpLine(
+  fromComponentId: string, fromPortId: string, toComponentId: string, toPortId: string,
+  fromElevation: number, toElevation: number, length: number, flowArea: number
+) {
+  return { fromComponentId, fromPortId, toComponentId, toPortId, fromElevation, toElevation, length, flowArea };
+}
+
+/** Pool water level (m above the pool floor). */
+function sfpLevel(state: ReturnType<typeof createSimulationFromPlant>): number {
+  return nodeLiquidLevel(state.flowNodes.get('pool')!);
+}
+
+function sfpCladC(state: ReturnType<typeof createSimulationFromPlant>): number {
+  return state.thermalNodes.get('pool-clad')!.temperature - 273.15;
+}
+
+async function runSpentFuelPoolChecks(): Promise<boolean> {
+  console.log(`\n=== Level 1: HOT AND DRY (spent fuel pool) ===`);
+  let pass = true;
+  const fail = (m: string) => { console.log(`  FAIL: ${m}`); pass = false; };
+  // SFP_ONLY=1|23|4 runs one sub-check while tuning the level.
+  const only = process.env.SFP_ONLY;
+  const wants = (n: string) => !only || only.includes(n);
+
+  // -- 1. Nobody home: the crack alone must lose the level ------------------
+  if (wants('1')) {
+    const sim = buildSimFromPlantJson(sfpPlant() as never);
+    const level0 = sfpLevel(sim.state);
+    let firstUncovered = -1;
+    let uncoveredSince = -1;
+    let lossAt = -1;
+    while (sim.state.time < 7000 && lossAt < 0) {
+      run(sim, 20, 0.25);
+      sim.state.pendingEvents = [];
+      const lvl = sfpLevel(sim.state);
+      if (lvl < SFP_RACK_TOP) {
+        if (firstUncovered < 0) firstUncovered = sim.state.time;
+        if (uncoveredSince < 0) uncoveredSince = sim.state.time;
+        if (sim.state.time - uncoveredSince >= SFP_GRACE) lossAt = sim.state.time;
+      } else {
+        uncoveredSince = -1;
+      }
+    }
+    console.log(`  [1] unfed: level ${level0.toFixed(2)} m -> ${sfpLevel(sim.state).toFixed(2)} m; ` +
+      `racks uncovered at t=${firstUncovered.toFixed(0)} s, level lost at t=${lossAt.toFixed(0)} s, ` +
+      `clad ${sfpCladC(sim.state).toFixed(0)} C`);
+    if (firstUncovered < 0) fail('an unfed pool must uncover its racks inside the level');
+    if (lossAt < 0) fail(`an unfed pool must stay uncovered past the ${SFP_GRACE} s grace period`);
+  }
+
+  // -- 2 & 3. The suction lift ---------------------------------------------
+  // The same pump, same pipe, same pool: only the ground under it differs.
+  for (const spot of (wants('2') ? [
+    { name: 'pool bench (+13 m)', id: 'trap', x: 95, y: 75, suction: 150, discharge: 45, deliver: false },
+    { name: 'shore (+1.7 m)', id: 'shore', x: 200, y: 75, suction: 45, discharge: 155, deliver: true },
+  ] : [])) {
+    const plant = sfpPlant();
+    plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y, 200, 60));
+    (plant.components.find(c => c[0] === spot.id)![1] as Record<string, unknown>).running = true;
+    plant.connections.push(
+      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, 0.5, 0.3, spot.suction, 0.0707),
+      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, 10.5, spot.discharge, 0.0707));
+    plant.scenario = undefined;   // no earthquake: this is about the pump alone
+    const sim = buildSimFromPlantJson(plant as never);
+    run(sim, 120, 0.02);
+    const q = flowRate(sim.state, spot.id, 'pool');
+    const suction = sim.state.flowNodes.get(spot.id)!;
+    console.log(`  [${spot.deliver ? 3 : 2}] ${spot.name}: ${q.toFixed(1)} kg/s to the pool, ` +
+      `pump node ${suction.fluid.phase} at ${(suction.fluid.pressure / 1e5).toFixed(3)} bar`);
+    if (spot.deliver && !(q > 40)) fail(`a shore pump should push water up to the pool, got ${q.toFixed(1)} kg/s`);
+    if (!spot.deliver && !(Math.abs(q) < 2)) {
+      fail(`a pump 13 m above the sea cannot draw it, got ${q.toFixed(1)} kg/s`);
+    }
+    if (!spot.deliver && !(suction.fluid.phase === 'two-phase' && suction.fluid.pressure < 0.3e5)) {
+      fail(`the trapped pump's suction should have flashed, got ${suction.fluid.phase} at ` +
+        `${(suction.fluid.pressure / 1e5).toFixed(3)} bar`);
+    }
+  }
+
+  // -- 4. Six hours: sea pump either side of the wave, tanks through it -----
+  if (wants('4')) {
+    const plant = sfpPlant();
+    plant.components.push(
+      sfpPump('shore-pump', 'Sea Pump', 200, 75, 200, 60),
+      // The tank line needs no pump: both tanks stand on the bench with the
+      // pool sunk 10.5 m below their feet, so they feed it by gravity. What
+      // it needs is a valve, because 1200 t of gravity feed left open runs
+      // out long before the wave does.
+      ['tank-valve', {
+        id: 'tank-valve', type: 'valve', label: 'Tank Make-up Valve',
+        position: { x: 78, y: 62 }, rotation: 0, elevation: 0,
+        diameter: 0.2, volume: 0.3, valveType: 'gate', opening: 0,
+        ports: [
+          { id: 'tank-valve-in', position: { x: -0.5, y: 0 }, direction: 'both' },
+          { id: 'tank-valve-out', position: { x: 0.5, y: 0 }, direction: 'both' },
+        ],
+        fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
+        pressureRating: 20,
+      }] as [string, Record<string, unknown>]);
+    plant.connections.push(
+      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', 0.5, 0.3, 45, 0.0707),
+      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, 10.5, 155, 0.0707),
+      sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
+      sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
+      sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));
+    // The operator's actions, as scenario events instead of live edits. The
+    // sea pump goes on as soon as the liner cracks and REFILLS the pool -
+    // that head is the buffer the tanks then only have to top up while the
+    // wave has the pump stopped. The tank line is opened just before the wave
+    // lands and shut once the sea pump is dry and back on the load.
+    plant.scenario!.events.push(
+      { time: 2410, message: 'Sea pump on the line', actions: [
+        { kind: 'pump', id: 'shore-pump', running: true, speed: 1 },
+      ] },
+      { time: 3700, message: 'Wave inbound: tank make-up opened', actions: [
+        { kind: 'valve', id: 'tank-valve', position: 1 },
+      ] },
+      { time: 9600, message: 'Sea pump has the load; securing the tank line', actions: [
+        { kind: 'valve', id: 'tank-valve', position: 0 },
+      ] });
+    const sim = buildSimFromPlantJson(plant as never);
+    let minLevel = Infinity;
+    let maxClad = -Infinity;
+    let uncoveredSince = -1;
+    let worstUncovered = 0;
+    let floodedAt = -1;
+    let recoveredAt = -1;
+    let lastLog = 0;
+    while (sim.state.time < 21600) {
+      run(sim, 20, 0.5);
+      sim.state.pendingEvents = [];
+      const lvl = sfpLevel(sim.state);
+      minLevel = Math.min(minLevel, lvl);
+      maxClad = Math.max(maxClad, sfpCladC(sim.state));
+      if (lvl < SFP_RACK_TOP) {
+        if (uncoveredSince < 0) uncoveredSince = sim.state.time;
+        worstUncovered = Math.max(worstUncovered, sim.state.time - uncoveredSince);
+      } else {
+        uncoveredSince = -1;
+      }
+      const shore = sim.state.components.pumps.get('shore-pump')!;
+      if (shore.flooded && floodedAt < 0) floodedAt = sim.state.time;
+      if (floodedAt > 0 && !shore.flooded && recoveredAt < 0) recoveredAt = sim.state.time;
+      if (sim.state.time - lastLog >= 1800) {
+        lastLog = sim.state.time;
+        console.log(`      t=${sim.state.time.toFixed(0).padStart(5)}s  pool ${lvl.toFixed(2)} m  ` +
+          `clad ${sfpCladC(sim.state).toFixed(0)} C  ` +
+          `tanks ${((sim.state.flowNodes.get('tank-a')!.fluid.mass + sim.state.flowNodes.get('tank-b')!.fluid.mass) / 1000).toFixed(0)} t  ` +
+          `shore ${shore.flooded ? 'FLOODED' : 'dry'} (${shore.effectiveSpeed.toFixed(2)})`);
+      }
+    }
+    console.log(`  [4] six hours: min pool level ${minLevel.toFixed(2)} m (racks at ${SFP_RACK_TOP} m), ` +
+      `peak clad ${maxClad.toFixed(0)} C, longest uncovery ${worstUncovered.toFixed(0)} s, ` +
+      `shore pump drowned at t=${floodedAt.toFixed(0)} s and restarted at t=${recoveredAt.toFixed(0)} s`);
+    if (!(worstUncovered < SFP_GRACE)) fail(`the answer must keep the racks covered, uncovered for ${worstUncovered.toFixed(0)} s`);
+    if (!(maxClad < 600)) fail(`cladding must stay below the 600 C limit, peaked at ${maxClad.toFixed(0)} C`);
+    if (!(floodedAt > 0)) fail('the tsunami must drown a pump standing on the shore');
+    if (!(recoveredAt > floodedAt)) fail('the shore pump must restart once the sea has gone back down');
+  }
+
+  console.log(`\n[sfp] -> ${pass ? 'PASS' : 'FAIL'}`);
+  return pass;
+}
+
 async function main() {
   const which = process.argv[2] ?? 'all';
   const simSeconds = process.argv[3] ? parseFloat(process.argv[3]) : undefined;
-  const keys = which === 'all' ? Object.keys(CHECKS) : [which];
+  const keys = which === 'all' ? ['sfp', ...Object.keys(CHECKS)] : [which];
   let allPass = true;
   for (const key of keys) {
+    if (key === 'sfp') {
+      try {
+        allPass = (await runSpentFuelPoolChecks()) && allPass;
+      } catch (err) {
+        console.error('[sfp] simulation threw:', err);
+        allPass = false;
+      }
+      continue;
+    }
     const check = CHECKS[key];
     if (!check) {
-      console.error(`Unknown level check '${key}'. Available: ${Object.keys(CHECKS).join(', ')}`);
+      console.error(`Unknown level check '${key}'. Available: sfp, ${Object.keys(CHECKS).join(', ')}`);
       process.exit(1);
     }
     try {

@@ -115,6 +115,16 @@ export class GridView {
   static readonly MAX_PPM = 160;
 
   cam: GridCamera = { x: 0, y: 0, ppm: GridView.DEFAULT_PPM };
+
+  /**
+   * Pixels of the canvas that other UI stands on top of (the toolbar down the
+   * left, the career HUD across the top, the legend along the bottom). The
+   * canvas fills the window and those panels float over it, so fit-to-plant
+   * has to aim at what is left rather than at the canvas, or a plant that
+   * technically fits ends up half of it behind the toolbar. Set by main.ts,
+   * which owns the DOM; zero here so nothing depends on it being set.
+   */
+  insets = { left: 0, top: 0, right: 0, bottom: 0 };
   routing: RoutingState | null = null;
   private art = new GridArt();
   private size = { width: 800, height: 600 };
@@ -258,13 +268,25 @@ export class GridView {
       this.cam.ppm = GridView.DEFAULT_PPM;
       return;
     }
-    this.cam.x = (minX + maxX) / 2;
-    this.cam.y = (minY + maxY) / 2;
+    // Fit into the part of the canvas nothing is standing on...
+    const free = {
+      w: Math.max(80, this.size.width - this.insets.left - this.insets.right),
+      h: Math.max(80, this.size.height - this.insets.top - this.insets.bottom),
+    };
     const margin = 4 * TILE_M;
     const fitPpm = Math.min(
-      this.size.width / (maxX - minX + 2 * margin),
-      this.size.height / (maxY - minY + 2 * margin));
+      free.w / (maxX - minX + 2 * margin),
+      free.h / (maxY - minY + 2 * margin));
     this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.DEFAULT_PPM, fitPpm));
+    // ...and put the plant's middle in the middle of THAT, not of the canvas:
+    // the camera sits at the canvas centre, so offset it by however far the
+    // free area's centre is from there.
+    const freeCentre = {
+      x: this.insets.left + free.w / 2,
+      y: this.insets.top + free.h / 2,
+    };
+    this.cam.x = (minX + maxX) / 2 - (freeCentre.x - this.size.width / 2) / this.cam.ppm;
+    this.cam.y = (minY + maxY) / 2 - (freeCentre.y - this.size.height / 2) / this.cam.ppm;
   }
 
   // ---------------------------------------------------------------------

@@ -81,6 +81,18 @@ export class GameHud {
     this.set('.gm-hud-level', title);
   }
 
+  /**
+   * Show or hide the money readouts. A level with no economy (LevelDef
+   * `economy: 'none'`) has no cash, loan, price or generation to report, and
+   * four permanently-blank fields read as a bug rather than as a design.
+   */
+  setEconomyVisible(visible: boolean): void {
+    for (const sel of ['.gm-hud-cash', '.gm-hud-loan', '.gm-hud-price', '.gm-hud-mw']) {
+      const el = this.root?.querySelector(sel) as HTMLElement | null;
+      if (el) el.style.display = visible ? '' : 'none';
+    }
+  }
+
   setPhase(phase: string, primaryLabel: string | null): void {
     this.set('.gm-hud-phase', phase);
     const btn = this.root?.querySelector('.gm-hud-primary') as HTMLButtonElement | null;

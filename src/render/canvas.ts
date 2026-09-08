@@ -3290,6 +3290,18 @@ export class PlantCanvas {
     if (this.viewMode === 'grid') this.grid.centerOn(this.plantState);
   }
 
+  /**
+   * Tell the grid view which edges of the canvas are covered by floating UI
+   * (px), so fit-to-plant aims at the part the player can actually see. The
+   * canvas fills the window and the toolbar/HUD/legend sit on top of it.
+   */
+  public setViewportInsets(insets: { left?: number; top?: number; right?: number; bottom?: number }): void {
+    this.grid.insets = {
+      left: insets.left ?? 0, top: insets.top ?? 0,
+      right: insets.right ?? 0, bottom: insets.bottom ?? 0,
+    };
+  }
+
   public zoomIn(): void {
     this.applyIsoZoom(this.currentZoomFactor() * 1.2);
   }
