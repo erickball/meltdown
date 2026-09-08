@@ -9,7 +9,7 @@
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
-import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent } from '../types';
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock } from '../types';
 import { stockedComponentTypes, typeDisplayName, PIPE_METRES_PER_STICK } from '../game/stock';
 import { SimulationState } from '../simulation';
 import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
@@ -1009,7 +1009,49 @@ export class GridView {
     const inY = tl.y + wallPx * 2 + 2;
     const inW = w - 2 * wallPx - 4;
     const inH = h - wallPx * 2 - 6;
-    if (inW < 8 || inH < 8) return;      // too small on screen to hold anything
+    // Zoomed too far out to draw the contents - the label and the numbers
+    // below still go on, because that is what a distant yard is read by
+    const roomForStock = inW >= 8 && inH >= 8;
+
+    if (roomForStock) this.renderYardStock(ctx, stock, inX, inY, inW, inH);
+
+    // --- labels ------------------------------------------------------------
+    const fontPx = Math.max(8, Math.min(15, this.cam.ppm * 0.42));
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(25, 25, 25, 0.85)';
+    ctx.fillText(wh.label || wh.id, tl.x + 2, tl.y - 2);
+
+    ctx.font = `${fontPx}px monospace`;
+    ctx.textBaseline = 'top';
+    const summary = [`${formatGaugeValue(stock.pipeMeters)} m`]
+      .concat(stockedComponentTypes(stock)
+        .map(([type, count]) => `${count}x ${typeDisplayName(type, count !== 1)}`))
+      .join('  ');
+    // Dark plate behind the readout so it survives the gravel pattern
+    const textW = ctx.measureText(summary).width;
+    ctx.fillStyle = 'rgba(15, 18, 20, 0.6)';
+    ctx.fillRect(tl.x + 1, br.y + 1, textW + 6, fontPx + 4);
+    ctx.fillStyle = 'rgba(235, 240, 245, 0.95)';
+    ctx.fillText(summary, tl.x + 4, br.y + 3);
+
+    if (wh.id === f.selectedComponentId) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = COLORS.selectionHighlight;
+      ctx.strokeRect(tl.x, tl.y, w, h);
+    }
+  }
+
+  /**
+   * What is standing in the yard: the pipe racks on the west, crates on the
+   * east. Split out of renderWarehouse so a yard drawn too small to hold
+   * anything readable simply skips it and still gets its label.
+   */
+  private renderYardStock(
+    ctx: CanvasRenderingContext2D, stock: PlantStock,
+    inX: number, inY: number, inW: number, inH: number
+  ): void {
     const pipeW = inW * 0.6;
     const crateX = inX + pipeW + 3;
     const crateW = inW - pipeW - 3;
@@ -1064,32 +1106,6 @@ export class GridView {
         slot++;
       }
       if (slot < 0) break;
-    }
-
-    // --- labels ------------------------------------------------------------
-    const fontPx = Math.max(8, Math.min(15, this.cam.ppm * 0.42));
-    ctx.font = `bold ${fontPx}px sans-serif`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'bottom';
-    ctx.fillStyle = 'rgba(25, 25, 25, 0.85)';
-    ctx.fillText(wh.label || wh.id, tl.x + 2, tl.y - 2);
-
-    ctx.font = `${fontPx}px monospace`;
-    ctx.textBaseline = 'top';
-    const summary = [`${formatGaugeValue(stock.pipeMeters)} m`]
-      .concat(items.map(([type, count]) => `${count}x ${typeDisplayName(type, count !== 1)}`))
-      .join('  ');
-    // Dark plate behind the readout so it survives the gravel pattern
-    const textW = ctx.measureText(summary).width;
-    ctx.fillStyle = 'rgba(15, 18, 20, 0.6)';
-    ctx.fillRect(tl.x + 1, br.y + 1, textW + 6, fontPx + 4);
-    ctx.fillStyle = 'rgba(235, 240, 245, 0.95)';
-    ctx.fillText(summary, tl.x + 4, br.y + 3);
-
-    if (wh.id === f.selectedComponentId) {
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = COLORS.selectionHighlight;
-      ctx.strokeRect(tl.x, tl.y, w, h);
     }
   }
 
