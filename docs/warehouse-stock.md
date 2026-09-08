@@ -101,10 +101,12 @@ nothing of a warehouse to re-initialize - but exactly the sort of false
 - **One warehouse per plant.** `findWarehouse` takes the first one; a second
   yard is drawn and priced but never spent from.
 - **A charge is spent at the end of a successful build**, so a component whose
-  creation throws part-way through costs nothing. A `createConnectionWithPipe`
-  that is refused for pipe leaves the endpoints untouched, but a *cross-vessel*
-  annulus connection has already moved the cross-vessel by the time its (zero
-  metre, always affordable) charge is checked.
+  creation throws part-way through costs nothing. A refusal is checked as late
+  as the length is knowable, though, which is after two cosmetic side effects
+  have already happened: `createConnectionWithPipe` may have re-oriented a pump
+  toward its new partner, and a cross-vessel annulus connection has already
+  moved the cross-vessel (that one always costs zero metres, so it can never
+  actually be refused). Neither changes the physics of the existing plant.
 - **The warehouse has no capacity**, no delivery time, and no cost for what it
   holds. The parts are priced when they are placed, as they always were.
 
