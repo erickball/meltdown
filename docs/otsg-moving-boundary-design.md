@@ -195,6 +195,90 @@ visibly disagreeing with the plant around them, which
 `OtsgLedgerCheckOperator` reports (steam over every wall that persists, or a
 claim swallowing the whole inventory).
 
+## 3b. Addendum: what leaves the tube, and out of which section
+
+*(2026-09-08. Fixes the drift source §3a's "ledger and its leash" paragraph
+could only report.)*
+
+The economizer is a MASS ledger, so every kilogram of slug water that leaves
+the node has to be debited from it. Booking an outflow by the momentum path's
+phase LABEL (`conn.currentFlowPhase`) cannot do that. That label is written
+last, before the rates run, by `FlowDynamicsConstraintOperator`'s own phase
+model, which knows nothing about the partition: it estimates the node's
+height as the cube root of its volume (1.2 m for an Xe-100 bundle whose real
+tubes are 14 m) and compares the connection's elevation against a
+bulk-quality liquid level inside that fiction. Every nozzle more than a metre
+up therefore reads 'vapor' whatever is standing at it. Measured on a
+circulator trip (`scripts/probe-otsg-draw.ts`): **128-190 kg of slug water
+left the tube over 180 s without the ledger ever being debited** - 2.7-4.2%
+of everything that left, 10.5% on a station blackout - and past the point
+where the bundle floods, a mid-bundle leak drains the economizer with the
+whole draw booked to the steam section.
+
+The section that owns a draw is the one PHYSICALLY at the nozzle, and the
+partition already answers that: `drawCompositionAt` reads the partition's own
+section boundaries by elevation (economizer / boiling / superheat), the same
+convention the feed nozzle is selected by. It is also the answer the ENERGY
+side has always used - `FlowRateOperator` and the pressure solver both price
+a draw by blending those same mass weights over the section enthalpies
+(`hLiquidOut` = the slug's mean, `hSteamOut` = the superheat outlet). So the
+mass debit and the energy the node loses now describe ONE event. Only the
+LIQUID share needs booking, because the boiling and superheat masses are
+derived from the totals.
+
+**What is not booked by elevation: the steam pass's transit scale.**
+`WSteamOut` is not a second ledger; it is the flow the wall pin's theta and
+the superheater's transit branch are scaled by. The sections of a
+once-through tube are in SERIES, so what the bundle ships had to flow
+through the sections above the water it came from - the outlet is the top of
+the tube, and the drawn nozzle's half-metre of stub below it is
+drawing-frame detail, not a bypass. So the transit scale stays the bundle's
+whole non-liquid throughput. Scaling it by elevation instead was built and
+measured: the moment a flooding tube's boiling section rose past the steam
+nozzle, the pin's theta stepped from ~0.1 to 1 (a dead-ended pocket soaking
+to its metal, T3 270 -> 390 C) and on a tube that is 99% water that step
+lands in the published pressure through the last cubic centimetres of vapour
+- circulator-trip rejections 649 -> 1201. A discontinuity in an ARGUMENT,
+which no timestep can shrink. The residual defect is that the zone boundary
+crossing a nozzle is a POINT sample (`drawCompositionAt` gives OTSG nozzles
+no opening height and no interface tolerance), so `wLiquid` still flips 0<->1
+as a boundary sweeps past; a real nozzle diameter would crossfade it.
+
+An INFLOW is the DONOR's business, so it is classified by the DONOR's own
+draw model at its own nozzle - its non-vapor share (1 - wVapor), the
+continuous form of the "not labelled vapor" test it replaces. For the
+single-phase feed line that is every plant's normal case that share is
+exactly 1, as the label was; where it differs it is again the answer the
+energy side already uses, because `FlowRateOperator` prices what arrives by
+this same composition of this same donor.
+
+The `m1/(m1+1)` weight on a liquid draw STAYS. The new classification does
+taper a draw off as its section dies - `wLiquid` goes to zero once the
+economizer boundary falls below the nozzle - but for a feed nozzle 1 m up a
+14 m tube that is at 7% of the inventory, not at zero, so the emptying-
+section guard is still the thing that keeps `dm1` from running through the
+floor.
+
+**Measured (`perf-xe100` 120 s, `perf-lofc` 180 s, tick 0.1 s):** steady
+Xe-100 2406 steps / 3 rejections, unchanged; blackout 2290/294 ->
+2917/490; circulator trip 3117/649 -> 3164/634 with the two "needs more than
+220 bar to pack" refusals gone. PWR and BWR bit-identical. Read those
+rejection counts against the plant's own chaos: a 1e-12 relative tickle on
+one booked draw moves the SAME code's blackout 294 -> 360 and its circulator
+trip 649 -> 600, and moves the pack refusals 2 -> 0 and the "steam above its
+wall" reports 3 -> 0. Rare-event counts on one 180 s run are noise at this
+sample size; the 128-190 kg of undebited slug water is not.
+
+The "economizer ledger claims 99.x%" reports (20 of them on the circulator
+trip) do NOT go away, and should not: by t=50 s that tube is genuinely water
+solid (988 kg in 1.19 m3 at v = 0.00120 m3/kg, u = 842 kJ/kg against
+u_f = 1040), so a ledger claiming 99.8% of it is telling the truth. The
+report fires because `node.fluid.phase` is 'two-phase' on a gram of steam at
+the top. That check is asking the wrong question - the drift it wants to see
+is the integrator's ceiling CLIPPING the ledger, which `probe-otsg-draw.ts`
+measures directly (21% of accepted ticks on that run, both before and after
+this change) - and rewriting it that way is left open.
+
 ## 4. Interface conditions
 
 Interfaces sit at saturation by definition:
