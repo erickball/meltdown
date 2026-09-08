@@ -139,6 +139,17 @@ export interface TankComponent extends ComponentBase {
   wallThickness: number;
   fillLevel: number;    // 0-1
   pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
+  /**
+   * Id of a terrain water body (`PlantState.terrain.waters`) that this tank
+   * IS. A sea or a lake a pump takes suction on is an ordinary tank node -
+   * finite inventory, a real water surface, a nozzle to pipe to - but drawing
+   * it as a steel cylinder standing on the beach is a lie. With this set, the
+   * views draw no vessel at all: the blue area the terrain already paints for
+   * that body is the component's picture, its nozzle is drawn at the water's
+   * edge, and selecting it lights up the whole body. Nothing about the
+   * physics changes.
+   */
+  waterBody?: string;
 }
 
 /**
@@ -633,6 +644,15 @@ export interface CrossVesselComponent extends ComponentBase {
   // boundary cold.
   initialNcg?: { [species: string]: number };
   annulusInitialNcg?: { [species: string]: number };
+}
+
+/**
+ * The terrain water body a component is drawn as, if any (see
+ * TankComponent.waterBody). One place to ask, so the renderers, the hit
+ * tests and the route obstacles all agree.
+ */
+export function waterBodyOf(component: { type: string; waterBody?: string }): string | undefined {
+  return component.type === 'tank' && component.waterBody ? component.waterBody : undefined;
 }
 
 export type PlantComponent =

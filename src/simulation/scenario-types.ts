@@ -21,7 +21,17 @@ export type ScenarioAction =
   /** Set a turbine node's governor valve directly (0 shut .. 1 open). */
   | { kind: 'turbine-governor'; id: string; value: number }
   /** Move a water body's surface (m above datum) to a level, over `over` seconds (a tsunami). */
-  | { kind: 'water-level'; id: string; surface: number; over?: number };
+  | { kind: 'water-level'; id: string; surface: number; over?: number }
+  /**
+   * Shake the camera for `seconds` of REAL time (an earthquake felt through
+   * the control-room window). Purely a view effect - it moves the render
+   * transform and nothing in the plant - so the seconds are wall-clock,
+   * not simulation time: at 60x a three-second jolt of simulation would be
+   * fifty milliseconds and the player would never see it. `amplitude` is the
+   * peak camera offset in screen pixels at the start of the jolt, which then
+   * decays to nothing.
+   */
+  | { kind: 'shake'; seconds: number; amplitude?: number };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */

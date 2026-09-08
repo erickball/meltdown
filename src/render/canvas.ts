@@ -1,4 +1,4 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, waterBodyOf } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
 import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
@@ -15,6 +15,7 @@ import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
+import { CameraShake } from './camera-shake';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
 export type ViewMode = 'perspective' | 'grid';
@@ -46,6 +47,8 @@ export class PlantCanvas {
   // plan view this class used to draw was retired in favour of the grid.)
   private viewMode: ViewMode = 'perspective';
   private grid = new GridView();
+  /** Ground motion (a scenario `shake` action): a render-transform jolt, nothing more. */
+  private shake = new CameraShake();
 
   // Camera depth for forward/backward movement in isometric view
   // Separate from view.offsetY which controls elevation
@@ -1459,6 +1462,12 @@ export class PlantCanvas {
     // Clear
     ctx.clearRect(0, 0, rect.width, rect.height);
 
+    // Ground motion: everything after this is drawn from a jolted camera.
+    // The legend at the bottom is deliberately outside it - it is a panel on
+    // the glass, not part of the view.
+    const shake = this.shake.offset(rect.width, rect.height);
+    if (shake) CameraShake.apply(ctx, shake, rect.width, rect.height);
+
     // Draw the ground (cached until the camera or viewport moves)
     const paintGround = (c: CanvasRenderingContext2D) =>
       renderIsometricGround(c, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
@@ -1544,6 +1553,9 @@ export class PlantCanvas {
 
         // Skip shadows for switchyard (it has its own individual equipment shadows)
         if (component.type === 'switchyard') continue;
+
+        // A component that IS a body of water has no body to cast one
+        if (waterBodyOf(component as never)) continue;
 
         const size = this.getComponentSize(component);
         const worldWidth = size.width || 1;
@@ -2206,6 +2218,8 @@ export class PlantCanvas {
     mark('gauges+overlays');
     this.lastFrameMs = performance.now() - frameStart;
     this.frameProfile = profile;
+
+    if (shake) ctx.restore();
 
     // Draw color legend at bottom of canvas
     renderColorLegend(ctx, rect.width, rect.height);
@@ -3285,6 +3299,14 @@ export class PlantCanvas {
     return this.viewMode === 'grid' ? this.grid.zoomFactor : this.isoZoom;
   }
 
+  /**
+   * Jolt the camera for `seconds` of real time (a scenario earthquake). Both
+   * views honour it; nothing in the plant moves.
+   */
+  public startShake(seconds: number, amplitude?: number): void {
+    this.shake.start(seconds, amplitude);
+  }
+
   /** Grid view: bring the plant to the middle of the screen (after loading one, for instance). */
   public centerOnPlant(): void {
     if (this.viewMode === 'grid') this.grid.centerOn(this.plantState);
@@ -3476,6 +3498,8 @@ export class PlantCanvas {
   /** One grid-view frame: GridView draws the ground and plant, then the shared overlays go on top. */
   private renderGridFrame(ctx: CanvasRenderingContext2D, width: number, height: number): void {
     ctx.clearRect(0, 0, width, height);
+    const shake = this.shake.offset(width, height);
+    if (shake) CameraShake.apply(ctx, shake, width, height);
     this.grid.render(ctx, {
       width,
       height,
@@ -3511,6 +3535,8 @@ export class PlantCanvas {
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
       renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
     }
+
+    if (shake) ctx.restore();
 
     renderColorLegend(ctx, width, height);
   }
