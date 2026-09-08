@@ -25,7 +25,34 @@ export type GoalDef =
    * (default 150) at least 30 s after it fired. Guarantees the level can't
    * be coasted before its scripted trouble arrives.
    */
-  | { kind: 'events'; count: number; recoverMwe?: number; label?: string };
+  | { kind: 'events'; count: number; recoverMwe?: number; label?: string }
+  /**
+   * Still standing when the clock runs out: the goal completes once the
+   * level has been OPERATED (not merely loaded) for `seconds` of simulation
+   * time. The win condition for levels whose job is to survive rather than
+   * to produce - there is nothing to sell in a spent fuel pool.
+   */
+  | { kind: 'survive'; seconds: number; label?: string };
+
+/**
+ * A physical limit the plant must stay inside. Unlike a goal, a hazard is a
+ * way to LOSE: the manager checks each one against the live simulation and
+ * ends the level the moment it is breached. They are addressed by simulation
+ * node id, so a level defines them against the ids in its own stock plant.
+ */
+export type HazardDef =
+  /**
+   * A thermal node (fuel, cladding, a wall) that must stay below `limitC`.
+   */
+  | { kind: 'temperature'; nodeId: string; limitC: number; label: string; consequence: string }
+  /**
+   * A flow node whose liquid level must stay at or above `minMetres` (metres
+   * above the node's own base). A dip is allowed for `graceSeconds` of
+   * CONTINUOUS breach - the clock resets the moment the level recovers - so
+   * a transient while make-up catches up is survivable and walking away is
+   * not.
+   */
+  | { kind: 'level'; nodeId: string; minMetres: number; graceSeconds: number; label: string; consequence: string };
 
 /** Random / scripted event kinds the engine can fire during operation. */
 export type GameEventKind =
@@ -84,6 +111,41 @@ export interface LevelDef {
   goals: GoalDef[];
   /** Level fails if the radiological release severity index reaches this. */
   maxRelease: number;
+  /** Physical limits that end the level when breached (see HazardDef). */
+  hazards?: HazardDef[];
+
+  /**
+   * Build while the plant RUNS (an RTS-style emergency) instead of stopping
+   * it for an outage. With this set the level never returns to construction
+   * mode: main.ts's liveBuildAllowed() lets the palette work in simulation
+   * mode, the HUD offers no OUTAGE button, and a mode switch back to
+   * construction is refused rather than billed as an outage.
+   */
+  liveBuild?: boolean;
+
+  /**
+   * 'loan' (the default) is the career economy: a construction loan, its
+   * interest, revenue from the grid, and bankruptcy as a failure mode.
+   * 'none' switches all of that off - no cash, no loan, no revenue, no
+   * interest, no bankruptcy, and the HUD's money readouts are hidden. The
+   * limit on what can be built is then the warehouse stock in the stock
+   * plant, not money.
+   */
+  economy?: 'loan' | 'none';
+
+  /**
+   * Simulation speed to set when the level goes on line (e.g. 60 for a level
+   * whose six sim-hours are meant to take six real minutes). Omit to leave
+   * the player's current speed alone.
+   */
+  simSpeed?: number;
+
+  /**
+   * View the level opens in. The 2D tile grid is the only view that draws
+   * terrain, so any level whose ground matters wants 'grid'. Omit to leave
+   * the player's own choice alone.
+   */
+  view?: 'grid' | 'perspective';
 
   /**
    * Construction-palette focus for early levels: component types (the

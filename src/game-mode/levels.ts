@@ -7,6 +7,7 @@
  */
 
 import { LevelDef } from './types';
+import spentFuelPool from './levels/spent-fuel-pool.json';
 import level1Site from './levels/level1-site.json';
 import level1ReactorSolution from './levels/level1-reactor-solution.json';
 import pwrPreset from '../presets/pwr.json';
@@ -36,8 +37,84 @@ function mergePlantJson(...parts: unknown[]): unknown {
 export const LEVELS: LevelDef[] = [
   // =========================================================================
   {
+    id: 'spent-fuel-pool',
+    title: 'LEVEL 1: HOT AND DRY',
+    tagline: 'A cracked fuel pool on a cliff, and the sea a long way below it.',
+    stockPlant: spentFuelPool,
+
+    // No money on this job at all: what you can build is what is in the yard.
+    economy: 'none',
+    loanCap: 0,
+    startingCash: 0,
+    completionBonus: 0,
+    basePowerPrice: 0,
+    interestAPR: 0,
+
+    // Six sim hours at 60x is six real minutes. The plant is tiny (one pool,
+    // three tanks, whatever the player puts up) so the solver keeps up.
+    simSpeed: 60,
+    // The tile grid is the only view that draws terrain, and this level IS
+    // its terrain.
+    view: 'grid',
+    // Build with the plant running: there is no outage while fuel is heating.
+    liveBuild: true,
+
+    goals: [
+      { kind: 'survive', seconds: 21600, label: 'Keep the fuel covered for six hours' },
+    ],
+    // Nothing here is pressurised or contained: any real fuel damage vents
+    // straight to the sky, so the release limit is set where a first sign of
+    // damage already counts.
+    maxRelease: 0.01,
+    hazards: [
+      {
+        kind: 'level', nodeId: 'pool', minMetres: 4.16, graceSeconds: 1200,
+        label: 'Pool level',
+        consequence:
+          'The racks stand 4.16 m tall. Water below that leaves fuel in steam, ' +
+          'and steam does not carry 8 megawatts away.',
+      },
+      {
+        kind: 'temperature', nodeId: 'pool-clad', limitC: 600,
+        label: 'Cladding temperature',
+        consequence:
+          'Zircaloy has almost no strength left at 600 \u00b0C, and its reaction with ' +
+          'steam turns self-sustaining not far above 800 \u00b0C. Past that the fuel ' +
+          'makes its own heat and hydrogen and nobody is putting it back.',
+      },
+    ],
+
+    palette: ['pump', 'pipe', 'valve'],
+    // Nothing random on this level: the earthquake and the wave are in the
+    // plant's own scenario block, on a fixed clock.
+    events: { warmupSeconds: Infinity, meanIntervalSeconds: Infinity, pool: [] },
+
+    briefing: [
+      { who: 'grubb', mood: 'neutral', text: 'Kid. Before you ask: no, this is not a power plant. It is a swimming pool with two hundred and fifty spent fuel assemblies at the bottom of it.' },
+      { who: 'grubb', mood: 'neutral', text: 'Eight megawatts of decay heat, and the only thing standing between that and the evening news is nine metres of water. The cooling pumps went with the switchyard last night.' },
+      { who: 'grubb', mood: 'happy', text: 'Good news: with that much water it warms up slower than my coffee. You have got time. Not a lot of it.' },
+      { who: 'inspector', mood: 'neutral', text: 'Inspector Pruitt. The seismologists are unhappy. If that liner cracks, your pool becomes a bathtub with the plug out.' },
+      { who: 'grubb', mood: 'angry', text: 'The yard has three hundred metres of pipe, two pumps and a couple of valves. That is the whole company. There is no budget, there is no bank, there is a YARD.' },
+      { who: 'grubb', mood: 'neutral', text: 'Water: two site tanks up here on the bench, and the sea. The tanks are close and they are FINITE. The sea is not finite, but it is down there and you are up here.' },
+      { who: 'inspector', mood: 'unimpressed', text: 'Keep the fuel covered for six hours and I will write this up as an event, not an accident. Uncover it and we will both be explaining ourselves for years.' },
+      { who: 'grubb', mood: 'happy', text: 'Build while it runs - no shutting anything down, nothing to shut down. Go.' },
+    ],
+    debrief: [
+      { who: 'grubb', mood: 'happy', text: 'Six hours. The water is still over the fuel and the fuel is still in one piece.' },
+      { who: 'inspector', mood: 'neutral', text: 'Level held, cladding cool, and the only thing you lost was a tank of demineralised water and some pipe. I am recording this as an event.' },
+      { who: 'grubb', mood: 'happy', text: 'An EVENT. You hear that? Not an accident. That is the nicest word anyone at that agency has ever said to me.' },
+    ],
+    hints: [
+      'Watch the pool level readout - the racks are 4.16 m tall, and everything below that number is trouble.',
+      'The crack passes about 100 kg/s once the level is down near the racks. A make-up pump much bigger than that just empties the tanks faster.',
+      'A pump can only SUCK water up about ten metres before its intake boils. It can PUSH it as high as its head allows.',
+      'When the wave comes, anything standing on the shore is under water and stays stopped until it drains. Make the tanks last.',
+    ],
+  },
+  // =========================================================================
+  {
     id: 'first-light',
-    title: 'LEVEL 1: FIRST LIGHT',
+    title: 'LEVEL 2: FIRST LIGHT',
     tagline: 'Everything is on site except, well, the reactor.',
     stockPlant: level1Site,
     loanCap: 750e6,
@@ -90,7 +167,7 @@ export const LEVELS: LevelDef[] = [
   // =========================================================================
   {
     id: 'shakedown',
-    title: 'LEVEL 2: SHAKEDOWN',
+    title: 'LEVEL 3: SHAKEDOWN',
     tagline: 'A whole plant, free and clear. What could it be hiding?',
     stockPlant: pwrPreset,
     loanCap: 500e6,
@@ -145,7 +222,7 @@ export const LEVELS: LevelDef[] = [
   // =========================================================================
   {
     id: 'going-concern',
-    title: 'LEVEL 3: GOING CONCERN',
+    title: 'LEVEL 4: GOING CONCERN',
     tagline: 'An empty field, a big loan, and a bigger interest payment.',
     stockPlant: null,
     loanCap: 6e9,
@@ -201,7 +278,7 @@ export const LEVELS: LevelDef[] = [
   // =========================================================================
   {
     id: 'the-inspection',
-    title: 'LEVEL 4: THE INSPECTION',
+    title: 'LEVEL 5: THE INSPECTION',
     tagline: 'The NRC would like a word. And a demonstration.',
     stockPlant: twoLoopPreset,
     loanCap: 500e6,
@@ -224,7 +301,7 @@ export const LEVELS: LevelDef[] = [
     },
     briefing: [
       { who: 'grubb', mood: 'panic', text: 'Bad news. The Nuclear Regulatory Commission is here. IN THE BUILDING. There\'s a man with a clipboard drinking my coffee.' },
-      { who: 'inspector', mood: 'neutral', text: 'Inspector Pruitt, NRC. This facility is due for an operational stress audit. Today, your plant will experience one significant equipment casualty.' },
+      { who: 'inspector', mood: 'neutral', text: 'Pruitt again. This facility is due for an operational stress audit. Today, your plant will experience one significant equipment casualty.' },
       { who: 'inspector', mood: 'unimpressed', text: 'I will not tell you what, and I will not tell you when. You will maintain generation, you will protect the core, and you will release nothing to the environment. Nothing.' },
       { who: 'grubb', mood: 'angry', text: 'Release? RELEASE? Pruitt, this is the tightest ship in the fleet. My engineer here has ice water for blood. Show him, kid.' },
       { who: 'inspector', mood: 'neutral', text: 'For your reference: a scram is an acceptable outcome. A release is a career outcome. Yours and mine. Proceed.' },

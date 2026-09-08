@@ -120,13 +120,29 @@ export function buildSimFromFile(
   path: string,
   solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {}
 ): Sim {
-  const data = JSON.parse(fs.readFileSync(path, 'utf-8'));
+  return buildSimFromPlantJson(JSON.parse(fs.readFileSync(path, 'utf-8')), solverConfig);
+}
+
+/**
+ * Build from an already-parsed preset-format plant, so a test can modify one
+ * (add the pump it is about to prove something about) before building.
+ * buildSimFromFile is this plus the read.
+ */
+export function buildSimFromPlantJson(
+  data: {
+    components?: Array<[string, PlantComponent]>;
+    connections?: PlantConnection[];
+    scenario?: unknown;
+    terrain?: unknown;
+  },
+  solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {}
+): Sim {
   const plantState: PlantState = {
-    components: new Map<string, PlantComponent>(data.components),
+    components: new Map<string, PlantComponent>(data.components ?? []),
     connections: data.connections ?? [],
     scenario: data.scenario,
     terrain: data.terrain,
-  };
+  } as PlantState;
   setSimulationRandomSeed(0);
   return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
 }

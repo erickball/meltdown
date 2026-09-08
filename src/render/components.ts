@@ -23,7 +23,7 @@ import {
   PlantState,
   Connection,
 } from '../types';
-import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds } from '../simulation';
+import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
 import { PIPE_METRES_PER_STICK, formatMetres, stockedComponentTypes } from '../game/stock';
 import {
   getFluidColor,
@@ -4754,6 +4754,32 @@ export function renderFlowConnectionArrows(
       if (pc) {
           const fromComponent = plantState.components.get(pc.fromComponentId);
           const toComponent = plantState.components.get(pc.toComponentId);
+
+          // A vent or a break faces the ENVIRONMENT, which is not a component
+          // and has no geometry: it sits at the very point of the port it
+          // faces. Draw the arrow there, on the plant side, rather than
+          // hunting for a second endpoint that does not exist.
+          const plantSide = pc.toComponentId === ENVIRONMENT_NODE_ID ? fromComponent
+            : pc.fromComponentId === ENVIRONMENT_NODE_ID ? toComponent
+            : undefined;
+          if (plantSide) {
+            const portId = pc.toComponentId === ENVIRONMENT_NODE_ID ? pc.fromPortId : pc.toPortId;
+            const port = plantSide.ports?.find(p => p.id === portId);
+            if (port && getPortScreenPos) {
+              const screen = getPortScreenPos(plantSide, port);
+              if (screen) {
+                fromScreenPos = { x: screen.x, y: screen.y };
+                toScreenPos = fromScreenPos;
+                arrowScale = screen.radius / 25;
+              }
+            } else if (port) {
+              const world = getPortWorldPosition(plantSide, portId);
+              if (world) {
+                fromScreenPos = worldToScreen(world, view);
+                toScreenPos = fromScreenPos;
+              }
+            }
+          }
 
           if (fromComponent && toComponent) {
             // Try to use the connection screen position callback first (accounts for elevations)
