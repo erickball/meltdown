@@ -1,4 +1,4 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, waterBodyOf } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
 import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
@@ -1553,6 +1553,9 @@ export class PlantCanvas {
 
         // Skip shadows for switchyard (it has its own individual equipment shadows)
         if (component.type === 'switchyard') continue;
+
+        // A component that IS a body of water has no body to cast one
+        if (waterBodyOf(component as never)) continue;
 
         const size = this.getComponentSize(component);
         const worldWidth = size.width || 1;
