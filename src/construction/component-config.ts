@@ -147,6 +147,8 @@ export const componentDefinitions: Record<string, {
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
+      { name: 'waterBody', type: 'text', label: 'Draw As Water Body', default: '',
+        help: 'ID of a terrain water body (the sea or lake on this site) that this tank IS. Leave blank for an ordinary tank. Set, and no vessel is drawn at all: the blue water the map already paints for that body becomes the component picture, only its nozzle is shown - at the water edge, where a pipe can be dragged to it - and selecting it lights up the whole body. Nothing about the physics changes: it is still one tank node with a finite inventory, so a sea can be pumped dry.' },
       // Radiant cavity surface (reactor cavity cooling panels and the like)
       { name: 'radiantSurface', type: 'checkbox', label: 'Radiant cavity surface', default: false,
         help: 'Make this tank a cooled panel that absorbs THERMAL RADIATION from another component across an open gas gap. This is how a reactor cavity cooling system works: water-filled standpipes ringing a hot vessel, taking its heat with no pump, no valve and no signal in the path. The duty follows T⁴, so it strengthens by itself as the thing it faces heats up.' },

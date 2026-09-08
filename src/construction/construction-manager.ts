@@ -3298,6 +3298,14 @@ export class ConstructionManager {
         delete component.volume;
       }
     }
+    // A tank drawn as a terrain water body (see TankComponent.waterBody).
+    // Blank means "an ordinary tank", so the field is removed rather than
+    // stored empty - a stray '' would still count as "has a water body".
+    if (component.type === 'tank' && properties.waterBody !== undefined) {
+      const body = String(properties.waterBody).trim();
+      if (body) component.waterBody = body;
+      else delete component.waterBody;
+    }
     // Radiant cavity surface. One nested block written whole: it is only
     // meaningful complete, and a half-built one would wire a radiation path
     // with a made-up view factor. Unchecking removes it, which removes the
