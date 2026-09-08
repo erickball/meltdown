@@ -113,8 +113,31 @@ export interface OtsgFlows {
 export function classifyOtsgFlows(
   state: SimulationState, id: string, node: FlowNode, waterPressure: number,
 ): OtsgFlows {
-  let WFeed = 0, hFeedNum = 0;
+  let WFeed = 0;
   let WSteamOut = 0, WLiquidOut = 0;
+  // THE ECONOMIZER'S INLET ENTHALPY is accumulated WITHOUT any flow rate in
+  // it - see the note where hFeed is formed below - so it cannot step when
+  // the feed stops.
+  let hInNum = 0, hInDen = 0;
+  // Saturated liquid enthalpy in the tube itself: the top of the
+  // economizer's profile, and the reference every inlet's subcooling is
+  // measured against.
+  const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
+    waterPressure / saturatedLiquidDensity(node.fluid.temperature);
+  // WHICH connection is the economizer's inlet is GEOMETRY, not flow: a
+  // once-through tube takes its feed at the bottom and gives up steam at the
+  // top, which is the same convention the partition's own phase-by-elevation
+  // answer rests on. Selecting it by elevation makes the inlet enthalpy
+  // independent of both the flow rate and the momentum solve's phase LABEL -
+  // and the label matters here, because a flooded tube ships water out its
+  // steam nozzle, and letting those (2-5 kg, wildly swinging) sliver valve
+  // nodes price a 73 kg slug put their noise straight into the published
+  // pressure.
+  let minElev = Infinity;
+  for (const conn of state.flowConnections) {
+    if (conn.fromNodeId === id) minElev = Math.min(minElev, conn.fromElevation ?? 0);
+    else if (conn.toNodeId === id) minElev = Math.min(minElev, conn.toElevation ?? 0);
+  }
   for (const conn of state.flowConnections) {
     const isFrom = conn.fromNodeId === id;
     const isTo = conn.toNodeId === id;
@@ -122,38 +145,65 @@ export function classifyOtsgFlows(
     // Signed flow INTO this node
     const w = isTo ? conn.massFlowRate : -conn.massFlowRate;
     const phase = conn.currentFlowPhase ?? 'liquid';
-    if (w > 0) {
-      // Vapor inflow (backflow from a steam header) needs no bookkeeping:
-      // it lands in the node's totals and the solved partition picks it up as
-      // vapor region on the next evaluation.
-      if (phase !== 'vapor') {
-        // Feed enthalpy from the donor node: subcooled liquid at its
-        // temperature (u_f(T) + P v_f(T) - compressibility negligible)
-        const donor = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
-        const Td = donor?.fluid.temperature ?? 473;
-        const hIn = saturatedLiquidEnergy(Td) + waterPressure / saturatedLiquidDensity(Td);
-        // Liquid inflow feeds the SUBCOOLED section only to the extent it is
-        // actually subcooled: water within ~12 K of saturation flashes into
-        // the boiling region essentially on entry, so it routes to section 2
-        // (whose mass is derived - no bookkeeping). The 50 kJ/kg ramp is a
-        // smoothing width, not a threshold: routing varies continuously with
-        // subcooling, and a transiently near-saturated stream (leak backflow,
-        // recirculation) can no longer poison the subcooled section's
-        // mean-enthalpy closure - which is exactly how this line's absence
-        // killed a run.
-        const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
-          waterPressure / saturatedLiquidDensity(node.fluid.temperature);
-        const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
-        WFeed += w * wSub;
-        hFeedNum += w * wSub * hIn;
-      }
-    } else if (w < 0) {
+    // The water on the OTHER side of this connection, as subcooled liquid at
+    // its own temperature (u_f(T) + P v_f(T) - compressibility negligible).
+    // Which end is the donor depends on the flow's sign, but which node is
+    // the OTHER one does not - and the inlet's own enthalpy is a fact about
+    // the water standing there either way.
+    const other = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
+    if (!other) {
+      throw new Error(`[OTSG] node '${id}': connection '${conn.id}' names a node ` +
+        `('${isTo ? conn.fromNodeId : conn.toNodeId}') that does not exist.`);
+    }
+    const hIn = saturatedLiquidEnergy(other.fluid.temperature) +
+      waterPressure / saturatedLiquidDensity(other.fluid.temperature);
+    // Liquid inflow feeds the SUBCOOLED section only to the extent it is
+    // actually subcooled: water within ~12 K of saturation flashes into
+    // the boiling region essentially on entry, so it routes to section 2
+    // (whose mass is derived - no bookkeeping). The 50 kJ/kg ramp is a
+    // smoothing width, not a threshold: routing varies continuously with
+    // subcooling, and a transiently near-saturated stream (leak backflow,
+    // recirculation) can no longer poison the subcooled section's
+    // mean-enthalpy closure - which is exactly how this line's absence
+    // killed a run.
+    const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
+    // Vapor inflow (backflow from a steam header) needs no bookkeeping: it
+    // lands in the node's totals and the solved partition picks it up as
+    // vapor region on the next evaluation. A vapor line is also not part of
+    // the economizer's inlet.
+    const elevHere = (isTo ? conn.toElevation : conn.fromElevation) ?? 0;
+    if (elevHere === minElev) {
+      hInNum += wSub * hIn;
+      hInDen += wSub;
+    }
+    if (phase !== 'vapor' && w > 0) WFeed += w * wSub;
+    if (w < 0) {
       if (phase === 'vapor') WSteamOut += -w;
       else if (phase === 'liquid') WLiquidOut += -w;
       // mixture draws come from section 2: derived mass, no bookkeeping
     }
   }
-  const hFeed = WFeed > 0 ? hFeedNum / WFeed : saturatedLiquidEnergy(473);
+  // The inlet enthalpy that prices the economizer's linear profile - and
+  // therefore the ENERGY of the whole slug, m1 * (u_in + u_f)/2 - must not
+  // depend on the feed's flow RATE. It used to: `WFeed > 0 ? mean : h_f(473 K)`
+  // handed the profile a hard-coded 200 C the instant the feed stopped.
+  // Measured on a blacked-out Xe-100 bundle: uFeed stepped 1136 -> 840 kJ/kg
+  // in one step, which repriced a 73 kg slug by 11 MJ - 6% of the node's
+  // energy, landing entirely on the 31 kg of leftovers that set the pressure
+  // - and the published pressure jumped 81 -> 99 bar. The closure itself is
+  // smooth in this argument (0.045 bar per kJ/kg over the whole span); the
+  // jump was the argument's. It drove 79% of that run's rejections, and no
+  // amount of dt could shrink it.
+  //
+  // So the inlet is what it physically is: the enthalpy of the water
+  // standing at the tube's LOWEST connections - its feed nozzle - weighted
+  // by how subcooled each one is, the same weight that decides how much of
+  // an inflow the economizer takes at all. With one feed line this is
+  // exactly the value the flow-weighted mean gave, flowing or not. With
+  // nothing subcooled there the weights vanish together with (h_f - h_in),
+  // so the ratio tends to h_f itself: an economizer with no colder water to
+  // draw on degenerates to zero subcooling, continuously.
+  const hFeed = hInDen > 0 ? hInNum / hInDen : hfNow;
   return {
     WFeed, hFeed,
     uFeed: hFeed - waterPressure * 0.0012,   // u = h - Pv, liquid v ~ 1.2 L/kg

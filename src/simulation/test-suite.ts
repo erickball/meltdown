@@ -46,6 +46,7 @@ import {
   superheatedV,
   evaluateOtsg,
   evaluateOtsgPartition,
+  otsgPartitionAtP,
   counterflowOutletTemp,
   OtsgWallPin,
   otsgRates,
@@ -60,7 +61,7 @@ import {
   reconcileSlugMass,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
-import { tubeWaterState } from './operators/otsg-operator.js';
+import { tubeWaterState, classifyOtsgFlows } from './operators/otsg-operator.js';
 import {
   binaryDiffusivity,
   diffusivityInMixture,
@@ -1458,6 +1459,105 @@ test('nothing steps as the wall warms through saturation', () => {
   assert(maxJumpT < 2, `steam temperature stepped ${maxJumpT.toFixed(2)} K across the wall seam`);
   assert(maxJumpH < 15e3, `draw enthalpy stepped ${(maxJumpH / 1e3).toFixed(1)} kJ/kg across the wall seam`);
   assert(maxJumpP < 0.01, `pressure stepped ${(100 * maxJumpP).toFixed(1)}% across the wall seam`);
+});
+
+test('both regime seams join branch against branch, not just by eye', () => {
+  // The closure branches on the SIGN of a solved mass, and the design claims
+  // the switch happens exactly where the two descriptions coincide. That is
+  // only checkable ARM AGAINST ARM at one pressure with the pin held, which
+  // is what otsgPartitionAtP exposes. Walk the energy total finely across
+  // each seam and require every quantity the arms compute differently -
+  // the boiling section's mean volume and quality, the section masses, and
+  // the volume the partition needs - to have no step in it: the largest
+  // adjacent difference must stay within a small multiple of the typical
+  // one. A KINK (slope change) is allowed and expected; a JUMP is not.
+  //
+  // The m3 = 0 seam coincides because m3 = 0 means the leftovers' mean
+  // energy IS the full boiling profile's, so the flooded arm's free quality
+  // lands on x2BarFull and the log-mean identity makes the two v2 the same
+  // number. The m2 = 0 seam coincides because m3 = mR means UR/mR is
+  // exactly the pinned u3.
+  const mass = 1000;
+  const P0 = 80e5;
+  const sat = saturationAtP(P0);
+  const uFeed = sat.u_f - 300e3;
+  const step = (arr: number[]) => {
+    const d = [];
+    for (let i = 1; i < arr.length; i++) d.push(Math.abs(arr[i] - arr[i - 1]));
+    const sorted = [...d].sort((a, b) => a - b);
+    return { max: Math.max(...d), med: sorted[Math.floor(sorted.length / 2)] };
+  };
+  // Locate a seam by bisecting on the sign of the quantity that names it.
+  const seamAt = (du3: number, want: 'm3' | 'm2') => {
+    let lo = 0.2 * sat.u_f, hi = sat.u_g + 1.2e6;
+    for (let i = 0; i < 80; i++) {
+      const um = 0.5 * (lo + hi);
+      const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * um, m1Ledger: 0, uFeedIn: uFeed, du3 });
+      const q = want === 'm3' ? r.m3 : r.m2;
+      // m3 rises with energy, m2 falls once superheat exists.
+      if (want === 'm3' ? q <= 0 : q > 0) lo = um; else hi = um;
+    }
+    return 0.5 * (lo + hi);
+  };
+  for (const du3 of [0, 400e3]) {
+    for (const want of ['m3', 'm2'] as const) {
+      const uSeam = seamAt(du3, want);
+      const N = 60;
+      const width = 4e3;   // +/- 4 kJ/kg of specific energy across the seam
+      const V: number[] = [], v2: number[] = [], x2: number[] = [], m2: number[] = [], m3: number[] = [];
+      for (let i = 0; i <= N; i++) {
+        const u = uSeam - width + (2 * width * i) / N;
+        const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * u, m1Ledger: 0, uFeedIn: uFeed, du3 });
+        V.push(r.Vsum); v2.push(r.v2); x2.push(r.x2Bar); m2.push(r.m2); m3.push(r.m3);
+      }
+      for (const [name, arr] of [['Vsum', V], ['v2', v2], ['x2Bar', x2], ['m2', m2], ['m3', m3]] as const) {
+        const { max, med } = step(arr as number[]);
+        assert(max <= 4 * med + 1e-12,
+          `${name} JUMPS across the ${want} = 0 seam at du3=${(du3 / 1e3).toFixed(0)} kJ/kg: ` +
+          `largest adjacent step ${max.toExponential(2)} against a typical ${med.toExponential(2)} - ` +
+          `the two arms do not coincide there`);
+      }
+    }
+  }
+});
+
+test('the classified feed enthalpy does not depend on the feed FLOW RATE', () => {
+  // The economizer's inlet enthalpy prices the whole slug's energy,
+  // m1 * (u_in + u_f)/2, so a step in it lands entirely on the leftovers
+  // that set the tube's pressure. classifyOtsgFlows used to read
+  // `WFeed > 0 ? donor mean : h_f(473 K)`, and the instant a feed pump
+  // coasted to zero the inlet jumped to that hard-coded 200 C: measured on
+  // a blacked-out Xe-100 bundle, uFeed stepped 1136 -> 840 kJ/kg, repriced a
+  // 73 kg slug by 11 MJ, and the published pressure went 81 -> 99 bar in one
+  // step - 79% of that run's rejections, and dt could not shrink it away
+  // because the jump was in an input, not in a rate.
+  const tube: any = {
+    id: 'tube', volume: 1, flowArea: 0.1,
+    fluid: { mass: 500, internalEnergy: 5e8, pressure: 80e5, temperature: saturationAtP(80e5).T, phase: 'two-phase' },
+    otsg: { m1: 100, heatArea: 100, shellNodeId: 'shell', metalNodeIds: ['m1', 'm2', 'm3'] },
+  };
+  const donor: any = {
+    id: 'donor', volume: 1, flowArea: 0.1,
+    fluid: { mass: 500, internalEnergy: 4e8, pressure: 80e5, temperature: 473, phase: 'liquid' },
+  };
+  const mk = (w: number): any => ({
+    state: {
+      flowNodes: new Map<string, any>([['tube', tube], ['donor', donor]]),
+      flowConnections: [{
+        id: 'feed', fromNodeId: 'donor', toNodeId: 'tube',
+        massFlowRate: w, currentFlowPhase: 'liquid', fromElevation: 1, toElevation: 1,
+      }],
+    },
+  });
+  const flowing = classifyOtsgFlows(mk(30).state, 'tube', tube, 80e5);
+  const coasted = classifyOtsgFlows(mk(0).state, 'tube', tube, 80e5);
+  const stopped = classifyOtsgFlows(mk(-5).state, 'tube', tube, 80e5);
+  assertClose(coasted.uFeed, flowing.uFeed, 1,
+    'the inlet enthalpy must not move when the feed flow reaches zero');
+  assertClose(stopped.uFeed, flowing.uFeed, 1,
+    'nor when the feed line reverses - the water standing at the inlet is the same water');
+  assertClose(flowing.WFeed, 30, 1e-6, 'the feed RATE still follows the flow');
+  assertClose(coasted.WFeed, 0, 1e-9, 'a coasted feed delivers nothing');
 });
 
 test('the sections fit the tube whatever the totals hold', () => {
