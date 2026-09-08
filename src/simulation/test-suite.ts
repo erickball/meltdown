@@ -11,7 +11,11 @@ import { calculateState, distanceToSaturationLine, saturationPressure, saturatio
   saturatedLiquidDensity, saturatedVaporDensity, saturatedLiquidEnergy,
   saturatedVaporEnergy } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
-import { computeReactivityComponents } from './operators/neutronics.js';
+import {
+  computeReactivityComponents, neutronSourceRate, normalizedNeutronSource,
+  FISSION_ENERGY, DECAY_HEAT_GROUPS,
+} from './operators/neutronics.js';
+import { NeutronicsRateOperator } from './operators/rate-operators.js';
 import { ControlSystemOperator, describeControllerSignal,
   primaryControllerSignal } from './operators/control-system.js';
 import {
@@ -1244,6 +1248,113 @@ test('lattice reactivity path survives full voiding without NaN', () => {
   });
   assert(isFinite(voided.total) && voided.total < -0.5,
     `voided core must be finite and deeply subcritical, got ${voided.total}`);
+});
+
+// ============================================================================
+// Neutron source
+// ============================================================================
+
+category('Neutron source');
+
+/** Minimal SimulationState carrying only a neutronics state. */
+function neutronicsOnlyState(n: NeutronicsState): SimulationState {
+  return {
+    time: 0,
+    thermalNodes: new Map(),
+    flowNodes: new Map(),
+    thermalConnections: [],
+    convectionConnections: [],
+    flowConnections: [],
+    neutronics: n,
+    components: {
+      pumps: new Map(), valves: new Map(), checkValves: new Map(), controllers: new Map(),
+    },
+  } as unknown as SimulationState;
+}
+
+test('source strength converts to normalized units with Lambda cancelling in N_ss', () => {
+  const n = makeNeutronics({
+    nominalPower: 1e9, promptNeutronLifetime: 1e-4,
+    startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+  });
+  assertClose(neutronSourceRate(n), 1e9, 1, 'total source = the installed source alone');
+  const S = normalizedNeutronSource(n);
+  assertClose(S, 1e9 * FISSION_ENERGY / (1e9 * 1e-4), 1e-18, 'S = s_n*E_f/(P_nom*Lambda)');
+  // The subcritical steady state must be the parameter-free multiplication
+  // result P_ss = s_n * E_f / (-rho), independent of Lambda.
+  const rho = -0.0325; // 5 $
+  const nSs = S * n.promptNeutronLifetime / -rho;
+  assertClose(nSs, 1e9 * FISSION_ENERGY / (1e9 * -rho), 1e-18, 'N_ss = s_n*E_f/(P_nom*(-rho))');
+  const nFast = makeNeutronics({ ...n, promptNeutronLifetime: 1e-6 });
+  assertClose(normalizedNeutronSource(nFast) * 1e-6 / -rho, nSs, 1e-18,
+    'a 100x shorter neutron lifetime must not move the shutdown power level');
+});
+
+test('irradiated-fuel source follows the decay-heat inventory', () => {
+  const n = makeNeutronics({
+    nominalPower: 1e9, startupSourceRate: 0, spontaneousFissionSource: 0,
+    irradiatedFuelSource: 1e10,
+    decayHeatPools: DECAY_HEAT_GROUPS.map(g => g.fraction * 1e9), // full-power equilibrium
+  });
+  assertClose(neutronSourceRate(n), 1e10, 1e-3 * 1e10,
+    'pools at full-power equilibrium give the full irradiated source');
+  const cold = makeNeutronics({ ...n, decayHeatPools: DECAY_HEAT_GROUPS.map(() => 0) });
+  assertClose(neutronSourceRate(cold), 0, 1e-9, 'a never-operated core has no curium source');
+  const half = makeNeutronics({
+    ...n, decayHeatPools: DECAY_HEAT_GROUPS.map(g => 0.5 * g.fraction * 1e9),
+  });
+  assertClose(neutronSourceRate(half), 0.5e10, 1e-3 * 1e10, 'and it scales linearly with it');
+});
+
+test('subcritical kinetics relax onto the source-driven steady state', () => {
+  // Deeply subcritical (rods in), starting from an absurdly low power the way
+  // a long shutdown used to leave it. The kinetics must climb BACK UP to
+  // N_ss = S*Lambda/(-rho) and stay there - no floors involved.
+  const n = makeNeutronics({
+    nominalPower: 1e9, power: 1e9 * 1e-30, precursorConcentration: 1e-30,
+    controlRodPosition: 0, controlRodWorth: 0.05, excessReactivity: 0,
+    startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+  });
+  const state = neutronicsOnlyState(n);
+  const op = new NeutronicsRateOperator();
+  const dt = 0.05;
+  for (let i = 0; i < 20000; i++) { // 1000 s
+    const rates = op.computeRates(state);
+    state.neutronics.power += rates.neutronics.dPower * dt;
+    state.neutronics.precursorConcentration += rates.neutronics.dPrecursorConcentration * dt;
+    assert(state.neutronics.power >= 0 && state.neutronics.precursorConcentration >= 0,
+      `kinetics went negative at t=${(i * dt).toFixed(2)}s: P=${state.neutronics.power}, ` +
+      `C=${state.neutronics.precursorConcentration}`);
+  }
+  const rho = state.neutronics.reactivity;
+  assert(rho < -0.04, `rods-in reactivity should be deeply negative, got ${rho}`);
+  const S = normalizedNeutronSource(state.neutronics);
+  const expectedN = S * state.neutronics.promptNeutronLifetime / -rho;
+  const expectedC = state.neutronics.delayedNeutronFraction * S /
+    (state.neutronics.precursorDecayConstant * -rho);
+  assertClose(state.neutronics.power / state.neutronics.nominalPower, expectedN,
+    1e-3 * expectedN, 'power settles at S*Lambda/(-rho)');
+  assertClose(state.neutronics.precursorConcentration, expectedC, 1e-3 * expectedC,
+    'precursors settle at beta*S/(lambda*(-rho))');
+});
+
+test('a supercritical core with zero flux still starts up from the source', () => {
+  // Both kinetics branches must produce positive dN/dt from N = C = 0: with
+  // no source that state is a fixed point and the reactor is dead forever.
+  for (const rho of [-0.05, -0.001, 0, 0.003, 0.008, 0.02]) {
+    const n = makeNeutronics({
+      nominalPower: 1e9, power: 0, precursorConcentration: 0,
+      controlRodPosition: 1, controlRodWorth: 0, excessReactivity: rho,
+      fuelTempCoeff: 0, coolantTempCoeff: 0, coolantDensityCoeff: 0,
+      startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+    });
+    const rates = new NeutronicsRateOperator().computeRates(neutronicsOnlyState(n));
+    assertClose(n.reactivity, rho, 1e-12, `test rho setup (${rho})`);
+    assert(rates.neutronics.dPower > 0,
+      `dP/dt must be positive from zero flux at rho=${rho}, got ${rates.neutronics.dPower}`);
+    assert(isFinite(rates.neutronics.dPower) && isFinite(rates.neutronics.dPrecursorConcentration),
+      `rates must be finite at rho=${rho}`);
+  }
 });
 
 // ============================================================================

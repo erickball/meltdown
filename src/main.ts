@@ -449,6 +449,11 @@ function init() {
     } else if (event.type === 'scenario') {
       // A preset's scripted accident sequence just acted on the plant
       showNotification('Scenario: ' + event.message, 'warning', 15000);
+    } else if (event.type === 'shake') {
+      // Ground motion: the view jolts, the plant does not. No banner - the
+      // scenario event that ordered it carries the words.
+      const d = event.data as { seconds?: number; amplitude?: number } | undefined;
+      plantCanvas.startShake(d?.seconds ?? 2, d?.amplitude);
     } else if (event.type === 'simulation-error') {
       // Show error dialog for simulation errors
       showErrorDialog('Simulation Error', event.message);
@@ -1706,6 +1711,7 @@ function init() {
       // 0 = fully inserted, 1 = fully withdrawn (same convention everywhere)
       initialRodPosition: Math.round((barrel.controlRodPosition ?? 0.5) * 100),
       startCritical: barrel.startCritical !== false,
+      startupSourceNps: (barrel as any).startupSourceNps ?? 1e9,
       autoPoison: barrel.autoPoison !== false,
       ...(barrel.burnablePoisonPcm !== undefined ? { burnablePoisonPcm: barrel.burnablePoisonPcm } : {}),
     };

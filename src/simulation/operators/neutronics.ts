@@ -6,7 +6,7 @@
  * temperature changes.
  *
  * Physics:
- *   dN/dt = (ρ - β) / Λ * N + λ * C
+ *   dN/dt = (ρ - β) / Λ * N + λ * C + S
  *   dC/dt = β / Λ * N - λ * C
  *
  * Where:
@@ -16,6 +16,8 @@
  *   β = delayed neutron fraction (~0.0065 for U-235)
  *   Λ = prompt neutron lifetime (~1e-4 s for LWRs)
  *   λ = precursor decay constant (~0.08 s⁻¹ effective)
+ *   S = neutron source, in the same normalized units as N (see
+ *       normalizedNeutronSource below)
  *
  * For stability, this operator subcycles with smaller timesteps
  * since neutronics can be much faster than thermal-hydraulics.
@@ -35,6 +37,159 @@ export const BORON_WORTH_PER_PPM = -8e-5;
 // trace-steam density (~0.01 kg/m³), and normalizing by that would hand a
 // later-flooded core hundreds of times the physical worth.
 export const BORON_REF_WATER_DENSITY = 750; // kg/m³
+
+// ============================================================================
+// Fission-product decay heat groups
+// ============================================================================
+
+/**
+ * Fission-product decay heat groups: a coarse 4-group fit to ANS-5.1 decay
+ * power after long operation. Each group builds toward fraction*P_fission
+ * with time constant 1/lambda and releases its inventory after shutdown:
+ * ~5% of prior power at 10 s, ~3% at 100 s, ~1.5% at 1000 s.
+ *
+ * (Lives here rather than with the rate operator that integrates the pools
+ * because the neutron source model below reads the pool inventory too.)
+ */
+export const DECAY_HEAT_GROUPS: ReadonlyArray<{ fraction: number; lambda: number }> = [
+  { fraction: 0.026, lambda: 0.1 },   // short-lived products, tau ~10 s
+  { fraction: 0.020, lambda: 0.01 },  // tau ~100 s
+  { fraction: 0.012, lambda: 1e-3 },  // tau ~17 min
+  { fraction: 0.012, lambda: 1e-4 },  // tau ~2.8 h
+];
+
+/** Fraction of fission energy that is delayed (deposited via the pools) */
+export const DECAY_HEAT_TOTAL_FRACTION = DECAY_HEAT_GROUPS.reduce((s, g) => s + g.fraction, 0);
+
+// ============================================================================
+// Neutron source
+// ============================================================================
+//
+// A real core is never a pure multiplier of its own neutrons: it always sits
+// on top of a source, so flux and precursors relax to a positive
+// source-driven subcritical level instead of decaying toward zero. With the
+// source term S in the kinetics,
+//
+//   dN/dt = (rho - beta)/Lambda * N + lambda * C + S
+//   dC/dt = beta/Lambda * N - lambda * C
+//
+// the subcritical steady state (rho < 0) is
+//
+//   C_ss = beta * S / (lambda * (-rho)),   N_ss = S * Lambda / (-rho)
+//
+// which is what keeps a shut-down core at a readable, physical power level
+// and makes a restart take the real amount of time instead of climbing out
+// of an arbitrary floor (or out of 1e-90).
+//
+// Source strengths below are physical: neutrons/s emitted in the core. The
+// conversion to the normalized units of N (N = P_fission / P_nominal) is
+//
+//   S = s_n * E_fission / (P_nominal * Lambda)
+//
+// because the normalized population and the fission power are related by
+// P = N * P_nominal = n * E_fission / Lambda for a population n. Note that
+// Lambda cancels in the steady state:
+//
+//   N_ss = s_n * E_fission / (P_nominal * (-rho))
+//
+// i.e. P_ss = s_n * E_fission * k/(1-k) - source neutrons times the number
+// of fissions each one causes by subcritical multiplication. That is the
+// number to check this model against, and it has no free parameters.
+
+/**
+ * Recoverable energy per fission (J). 200 MeV, the standard LWR value.
+ */
+export const FISSION_ENERGY = 3.204e-11;
+
+/**
+ * Spontaneous-fission neutron yield of U-238: 0.0136 n/(s*g), i.e. 13.6
+ * n/(s*kg) (LANL neutron source tables; U-238 SF half-life 8.2e15 y).
+ * This is the ONE source term a never-irradiated core cannot be without,
+ * so even fresh fuel with no installed source has a positive steady state.
+ */
+export const U238_SF_YIELD = 13.6; // n/(s*kg of U-238)
+
+/**
+ * Neutron emission of an operating core's own irradiated fuel, per kg of
+ * heavy metal, when the fission-product inventory is at its full-power
+ * equilibrium.
+ *
+ * Basis: discharged PWR fuel at ~45 GWd/tHM carries ~40 g/tHM of Cm-244
+ * whose spontaneous-fission yield is 1.08e7 n/(s*g) - about 4e8 n/s per
+ * tonne of heavy metal, and curium dominates the neutron emission of spent
+ * LWR fuel. Cm-244 builds up roughly as burnup^3, so a core holding a
+ * uniform spread of burnups from fresh to discharge averages ~1/4 of the
+ * discharge value: ~1e8 n/s per tonne = 1e5 n/(s*kg HM).
+ *
+ * ASSUMPTION (stated because the model has no burnup accounting): this term
+ * is scaled by the fission-product decay-heat inventory, the only measure of
+ * irradiation history the simulation carries. That is exactly right for the
+ * photoneutron part of the shutdown source (D(gamma,n) driven by
+ * fission-product gammas) but it makes the curium part decay over hours
+ * after shutdown, whereas real Cm-244 persists for years (18 y half-life).
+ * The consequence is that a core shut down for much longer than the pools'
+ * ~3 h memory falls back to the installed source plus U-238 spontaneous
+ * fission - roughly an order of magnitude low for an equilibrium core, and
+ * three e-foldings of restart ramp, not a qualitative change.
+ */
+export const IRRADIATED_FUEL_SOURCE_PER_KG_HM = 1e5; // n/(s*kg HM)
+
+/**
+ * Default installed startup-source strength (neutrons/s), used when a core
+ * does not specify one. Real PWR source assemblies span ~1e8 n/s (a primary
+ * Cf-252 capsule) to ~1e9 n/s (a pair of activated Sb-124/Be secondary
+ * source assemblies); 1e9 is the strong end of that range and is what a
+ * plant that expects to start up from cold, fresh fuel installs.
+ *
+ * Sanity check on a 1000 MWt core held 5 $ subcritical (rho = -0.0325):
+ * P_ss = 1e9 * 3.2e-11 / 0.0325 = 1 W = 1e-9 of nominal - the bottom of the
+ * source range on a real startup chart.
+ */
+export const DEFAULT_STARTUP_SOURCE_RATE = 1e9; // n/s
+
+/**
+ * Total neutron source in the core, neutrons/s: the installed startup
+ * source, spontaneous fission of the U-238 in the fuel, and the irradiated
+ * fuel's own emission scaled by the current fission-product inventory.
+ */
+export function neutronSourceRate(n: NeutronicsState): number {
+  let s = (n.startupSourceRate ?? 0) + (n.spontaneousFissionSource ?? 0);
+
+  const irradiated = n.irradiatedFuelSource ?? 0;
+  const pools = n.decayHeatPools;
+  if (irradiated > 0 && pools && pools.length > 0 && n.nominalPower > 0) {
+    let decayPower = 0;
+    for (const q of pools) decayPower += q;
+    // Pools sit at DECAY_HEAT_TOTAL_FRACTION * P_nominal after long
+    // operation at rated power, which is the state the per-kg figure above
+    // is anchored at.
+    s += irradiated * decayPower / (DECAY_HEAT_TOTAL_FRACTION * n.nominalPower);
+  }
+
+  if (!(s >= 0) || !isFinite(s)) {
+    throw new Error(
+      `[Neutronics] Non-finite or negative neutron source: startup=${n.startupSourceRate} ` +
+      `spontaneous=${n.spontaneousFissionSource} irradiated=${irradiated} ` +
+      `pools=${pools} P_nom=${n.nominalPower}. Physics has failed.`
+    );
+  }
+  return s;
+}
+
+/**
+ * The neutron source in the normalized units of the kinetics equations
+ * (fraction of nominal fission power per second):
+ *   S = s_n * E_fission / (P_nominal * Lambda)
+ */
+export function normalizedNeutronSource(n: NeutronicsState): number {
+  if (!(n.nominalPower > 0) || !(n.promptNeutronLifetime > 0)) {
+    throw new Error(
+      `[Neutronics] Cannot normalize the neutron source: nominalPower=${n.nominalPower} W, ` +
+      `promptNeutronLifetime=${n.promptNeutronLifetime} s. Physics has failed.`
+    );
+  }
+  return neutronSourceRate(n) * FISSION_ENERGY / (n.nominalPower * n.promptNeutronLifetime);
+}
 
 // ============================================================================
 // Shared reactivity computation (used by NeutronicsOperator,
@@ -158,6 +313,16 @@ export function getRelocatedFuelFraction(n: NeutronicsState, state: SimulationSt
 // Neutronics Operator
 // ============================================================================
 
+/**
+ * Explicit-Euler point kinetics with internal subcycling. The shipping
+ * operator stack uses NeutronicsRateOperator (rate-operators.ts) instead,
+ * which hands the same physics to the RK45 error controller.
+ *
+ * There is no "standby mode" that skips the kinetics after a scram: with a
+ * neutron source the subcritical equations have a positive steady state that
+ * the integrator walks to on the precursor timescale (~10 s), so the fast
+ * mode it was avoiding is gone and nothing has to be floored on the way out.
+ */
 export class NeutronicsOperator implements PhysicsOperator {
   name = 'Neutronics';
 
@@ -165,9 +330,6 @@ export class NeutronicsOperator implements PhysicsOperator {
   private lastPower: number = 0;
   private lastPowerTime: number = 0;
   private powerRateOfChange: number = 0;  // dP/dt / P (relative rate)
-
-  // Standby mode for post-SCRAM with negligible power
-  private inStandby: boolean = false;
 
   apply(state: SimulationState, dt: number): SimulationState {
     const n = state.neutronics;
@@ -180,71 +342,37 @@ export class NeutronicsOperator implements PhysicsOperator {
     const newState = cloneSimulationState(state);
     const nNew = newState.neutronics;
 
-    // Always compute reactivity (needed for standby mode too)
     const rho = this.computeTotalReactivity(nNew, newState);
     nNew.reactivity = rho;
-
-    // Check for standby mode: scrammed AND power < 1% nominal AND subcritical
-    const powerFraction = nNew.power / nNew.nominalPower;
-    const shouldBeStandby = nNew.scrammed && powerFraction < 0.01 && rho < 0;
-
-    if (shouldBeStandby && !this.inStandby) {
-      this.inStandby = true;
-      // console.log('[Neutronics] Entering standby mode - power negligible, reactor subcritical');
-    } else if (!shouldBeStandby && this.inStandby) {
-      this.inStandby = false;
-      // Recriticality or power increase - wake up
-      if (rho >= 0) {
-        console.log('[Neutronics] Exiting standby - reactivity went positive (recriticality risk)');
-        // Set precursors to a minimum "source" level for restart calculations
-        nNew.precursorConcentration = Math.max(nNew.precursorConcentration, 1e-6);
-      } else {
-        // console.log('[Neutronics] Exiting standby - power increasing');
-      }
-    }
-
-    // In standby mode, just update decay heat and skip kinetics
-    if (this.inStandby) {
-      this.updateDecayHeat(nNew, state.time, dt);
-
-      // Power is just decay heat in standby
-      nNew.power = nNew.nominalPower * nNew.decayHeatFraction;
-
-      // Precursors decay away
-      const lambda = nNew.precursorDecayConstant;
-      nNew.precursorConcentration *= Math.exp(-lambda * dt);
-      nNew.precursorConcentration = Math.max(nNew.precursorConcentration, 1e-10);
-
-      return newState;
-    }
 
     // Full point kinetics calculation
     const beta = nNew.delayedNeutronFraction;
     const Lambda = nNew.promptNeutronLifetime;
     const lambda = nNew.precursorDecayConstant;
+    const S = normalizedNeutronSource(nNew);
 
     // Normalized power (N = P / P_nominal)
     let N = nNew.power / nNew.nominalPower;
     let C = nNew.precursorConcentration;
 
     // Rate equations
-    const dN_dt = (rho - beta) / Lambda * N + lambda * C;
+    const dN_dt = (rho - beta) / Lambda * N + lambda * C + S;
     const dC_dt = beta / Lambda * N - lambda * C;
 
     // Update
     N += dN_dt * dt;
     C += dC_dt * dt;
 
-    // Prevent negative values
-    N = Math.max(N, 1e-10);
-    C = Math.max(C, 1e-10);
+    // No floors: with the source term, N and C relax to the positive
+    // subcritical steady state N_ss = S*Lambda/(-rho), C_ss = beta*S/(lambda*(-rho)).
+    // A negative value here would be an integration failure, and the solver's
+    // state validation (solver.ts) throws on it rather than hiding it.
 
-    // Limit power rate of change for ease of use
-    const maxPowerChangeRate = 4; // 400% per second (still very fast)
-    const maxChange = maxPowerChangeRate * dt;
-    const oldN = nNew.power / nNew.nominalPower;
-    if (N > oldN + maxChange) N = oldN + maxChange;
-    if (N < oldN - maxChange && N < oldN) N = Math.max(oldN - maxChange, 1e-10);
+    // No rate limit on power: a reactivity excursion is quenched by Doppler
+    // feedback, which the subcycled kinetics and the thermal operators
+    // resolve on their own. (The shipping RK45 path never had one - a
+    // prompt-critical prompt-crit.json run peaks at 90x nominal and passes
+    // through 90000 %/s, 200 times the 400 %/s this used to allow.)
 
     // Update decay heat fraction based on operating history
     this.updateDecayHeat(nNew, state.time, dt);
@@ -290,11 +418,6 @@ export class NeutronicsOperator implements PhysicsOperator {
     // This coupling happens on thermal timescales (seconds), not prompt
     // neutron timescales (milliseconds).
 
-    // In standby mode, neutronics imposes no constraint
-    if (this.inStandby) {
-      return Infinity;
-    }
-
     // If power is very stable (low rate of change), allow larger steps
     // powerRateOfChange is |dP/dt| / P in units of 1/s
     // A rate of 0.01/s means 1% change per second - very stable
@@ -334,11 +457,6 @@ export class NeutronicsOperator implements PhysicsOperator {
   getSubcycleCount(state: SimulationState, dt: number): number {
     // If no core, no subcycling needed
     if (!state.neutronics.coreId) {
-      return 1;
-    }
-
-    // In standby mode, no subcycling needed
-    if (this.inStandby) {
       return 1;
     }
 

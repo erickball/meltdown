@@ -51,6 +51,18 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
       n.governorValve = a.value;
       return;
     }
+    case 'shake': {
+      // Nothing in the plant moves: this is queued for whoever is drawing.
+      // A headless run has no camera and simply drops it.
+      if (!(a.seconds > 0)) throw new Error(`[Scenario] shake needs a positive duration, got ${a.seconds}`);
+      if (!state.pendingEvents) state.pendingEvents = [];
+      state.pendingEvents.push({
+        type: 'shake',
+        message: `Ground motion for ${a.seconds.toFixed(0)} s`,
+        data: { seconds: a.seconds, amplitude: a.amplitude },
+      });
+      return;
+    }
     case 'water-level': {
       const body = state.surfaceWater?.bodies.get(a.id);
       if (!body) throw new Error(`[Scenario] water body '${a.id}' not found (the plant has no such terrain water)`);

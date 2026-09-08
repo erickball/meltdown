@@ -147,6 +147,8 @@ export const componentDefinitions: Record<string, {
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
+      { name: 'waterBody', type: 'text', label: 'Draw As Water Body', default: '',
+        help: 'ID of a terrain water body (the sea or lake on this site) that this tank IS. Leave blank for an ordinary tank. Set, and no vessel is drawn at all: the blue water the map already paints for that body becomes the component picture, only its nozzle is shown - at the water edge, where a pipe can be dragged to it - and selecting it lights up the whole body. Nothing about the physics changes: it is still one tank node with a finite inventory, so a sea can be pumped dry.' },
       // Radiant cavity surface (reactor cavity cooling panels and the like)
       { name: 'radiantSurface', type: 'checkbox', label: 'Radiant cavity surface', default: false,
         help: 'Make this tank a cooled panel that absorbs THERMAL RADIATION from another component across an open gas gap. This is how a reactor cavity cooling system works: water-filled standpipes ringing a hot vessel, taking its heat with no pump, no valve and no signal in the path. The duty follows T⁴, so it strengthens by itself as the thing it faces heats up.' },
@@ -857,6 +859,13 @@ export const componentDefinitions: Record<string, {
         dependsOn: { field: 'autoPoison', value: false },
         help: 'Reactivity permanently held down by burnable absorbers. Too little and the rods cannot shut the core down; too much and it cannot go critical. Note: a core that starts cold loses several thousand pcm of moderator reactivity as it heats up to operating temperature, so leave extra excess if you plan a cold startup.' },
       { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks. Total rod worth scales with bank count (see the estimate at right): ~4 banks is PWR-like (rods alone cannot hold a cold core down - pair with boron), 8-10 banks is BWR-like (enough authority for cold shutdown on rods alone, with generous excess for the cold-to-hot reactivity swing). Each bank adds drive mechanisms, so more authority costs more.' },
+      { name: 'startupSourceNps', type: 'number', label: 'Startup Neutron Source', default: 1e9, min: 0, step: 1e8, unit: 'n/s',
+        help: 'Strength of the installed startup source (a californium capsule or activated antimony-beryllium rods), in neutrons per second. ' +
+          'It is what a shut-down core multiplies: fission power settles at s·E_fission·k/(1-k), so at 5 $ subcritical this default (10⁹ n/s) ' +
+          'holds a 1000 MWt core near 1 W, about 1e-9 of rated - the bottom of a real source range. Real assemblies run 1e8 to 1e9 n/s. ' +
+          'Set 0 for no installed source: the core then relies on spontaneous fission of its own U-238 (and, once it has been operated, of the ' +
+          'curium in irradiated fuel), which is thousands of times weaker - a cold, fresh core would take far longer to bring up, which is ' +
+          'exactly why real plants install one.' },
       { name: 'startCritical', type: 'checkbox', label: 'Start at critical rod position', default: true,
         help: 'Place the control rods where total reactivity is exactly zero at the initial plant conditions, so the reactor starts steady instead of ramping. Uncheck to set the position yourself (e.g. to start shut down).' },
       { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%',

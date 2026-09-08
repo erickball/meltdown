@@ -72,14 +72,49 @@ the tsunami.
 ## Drawing (2D grid view)
 
 Height tint over the ground texture (valley green to hilltop tan), contour
-lines every metre with a heavier line every five, and every cell below its
-basin's water surface in translucent blue (deeper = more opaque): the sea
-and lakes at their surfaces, puddles where a leak has pooled. In
-construction mode the bodies show at their declared surfaces.
+lines (minor interval about a twelfth of the relief rounded to 1/2/5, index
+contour every fifth), and every cell below its basin's water surface in
+translucent blue (deeper = more opaque): the sea and lakes at their
+surfaces, puddles where a leak has pooled. In construction mode the bodies
+show at their declared surfaces.
+
+Contours are marching squares over the BILINEAR surface (`terrainHeightAt`)
+on a lattice three times finer than the cells, chained into polylines and
+drawn through their own midpoints as quadratic curves
+(`src/render/terrain-contours.ts`). They therefore curve and close the way a
+surveyed contour does. The geometry is world-space and cached with the
+height field, so only the projection is per frame. (The first version walked
+cell EDGES, which drew a staircase.)
+
+## A water body that is also a component
+
+A sea or lake a pump takes suction on has to be a real flow node - finite
+inventory, a water surface, a nozzle to pipe to - and until now that meant a
+steel tank drawn standing on the beach. `TankComponent.waterBody` names a
+terrain water body that the tank IS:
+
+- the grid view treats it as a GROUND-LAYER component: no pad, no sprite.
+  The blue the terrain already paints for that body is its picture.
+- its hit area is the water (`GridView.onWaterBody`) plus a small reach round
+  its nozzle, so clicking the sea selects it; selecting or hovering it tints
+  the whole body and outlines its shore.
+- gauges hang off the nozzle rather than off the (meaningless) footprint, and
+  the footprint is not a routing obstacle - a pipe crosses water.
+- 2.5D, which has no terrain, draws the water SURFACE as a low band at the
+  component's own water line instead of a vessel.
+
+Nothing about the physics changes: it is one tank node, and a sea can be
+pumped dry. The tank's `elevation`/`height`/`fillLevel` still have to put its
+surface at the body's surface - that is the author's job, and the level
+generator asserts it.
 
 ## Not yet
 
 - A terrain editor (levels ship their height field); hills as a build item.
-- The 2.5D view ignores terrain.
+- The 2.5D view ignores terrain (a `waterBody` tank draws only its surface).
 - Ground water as a source: a puddle cannot be pumped.
+- A `waterBody` tank and the terrain body it draws as are still DECOUPLED:
+  raising the body (a tsunami) does not raise the tank's level.
 - Flooding affects pumps only; a flooded tank or valve carries on.
+- The water fill is still per CELL, so a coastline reads blockier than the
+  contours that now curve over it.

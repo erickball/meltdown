@@ -1350,6 +1350,9 @@ export class ConstructionManager {
         if (props.autoPoison === false && props.burnablePoisonPcm !== undefined) {
           (core as any).burnablePoisonPcm = props.burnablePoisonPcm;
         }
+        // Installed startup neutron source (n/s) - what a shut-down core
+        // multiplies; see operators/neutronics.ts
+        (core as any).startupSourceNps = props.startupSourceNps ?? 1e9;
         // Rods placed at the critical position (rho = 0) by the factory
         (core as any).startCritical = props.startCritical !== false;
         if (props.fuelForm === 'pebbles') {
@@ -3295,6 +3298,14 @@ export class ConstructionManager {
         delete component.volume;
       }
     }
+    // A tank drawn as a terrain water body (see TankComponent.waterBody).
+    // Blank means "an ordinary tank", so the field is removed rather than
+    // stored empty - a stray '' would still count as "has a water body".
+    if (component.type === 'tank' && properties.waterBody !== undefined) {
+      const body = String(properties.waterBody).trim();
+      if (body) component.waterBody = body;
+      else delete component.waterBody;
+    }
     // Radiant cavity surface. One nested block written whole: it is only
     // meaningful complete, and a half-built one would wire a radiation path
     // with a made-up view factor. Unchecking removes it, which removes the
@@ -3792,6 +3803,9 @@ export class ConstructionManager {
         delete component.burnablePoisonPcm;
       }
     }
+    if (properties.startupSourceNps !== undefined) {
+      component.startupSourceNps = properties.startupSourceNps;
+    }
     if (properties.rodPitch !== undefined) {
       component.rodPitch = properties.rodPitch;
       // Recalculate fuel rod count if pitch changed
@@ -4017,6 +4031,8 @@ export class ConstructionManager {
     } else {
       delete container.burnablePoisonPcm;
     }
+    // Installed startup neutron source (n/s)
+    container.startupSourceNps = coreProperties.startupSourceNps ?? 1e9;
     // Pebble-bed fuel form (graphite-moderated TRISO bed; see htgr preset)
     if (isPebbleBed) {
       container.fuelForm = 'pebbles';
@@ -4095,6 +4111,7 @@ export class ConstructionManager {
           } else {
             delete (coreBarrel as any).burnablePoisonPcm;
           }
+          (coreBarrel as any).startupSourceNps = container.startupSourceNps;
           (coreBarrel as any).startCritical = container.startCritical;
           (coreBarrel as any).thermalPower = container.thermalPower;
           if (container.fuelForm === 'pebbles') {
