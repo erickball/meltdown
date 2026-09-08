@@ -785,6 +785,35 @@ function nodeMidHeight(node: FlowNode | undefined): number {
   return h > 0 ? h / 2 : 0;
 }
 
+/**
+ * Where a pipe's fluid actually is: the middle of its run.
+ *
+ * A pipe is drawn as a line between two points - `elevation` is the
+ * centerline where it leaves its start component, `endElevation` where it
+ * meets the component at its far end (construction sets both from the ports
+ * it joins, and each end stands over its own ground) - so a line that
+ * descends 3 m HOLDS a 3 m column of water. A pipe node is well mixed and
+ * has no internal height, which makes it a POINT, and the point that
+ * represents a segment's contents is its centroid: the mid-run elevation.
+ * Half the column it holds then sits above that point and half below, so
+ * each of the two lines at its ends carries half of the run's weight in its
+ * own elevation change, which is what a staggered-grid momentum balance
+ * asks for.
+ *
+ * `endElevation` used to be ignored entirely: the node sat at the START end,
+ * its whole vertical run was charged to whichever connection came after it,
+ * and its pressure was referenced to the top of a column it was carrying.
+ * That pinned the PWR condensate line - 3.1 m down out of a condenser - at
+ * the condenser's vacuum, where it flashed, went compressible, decoupled the
+ * two connections, and drained the line to 10 kg of 0 C water.
+ */
+function pipeMidRun(pipe: any): number {
+  const startElevation = terrainHeightAt(buildTerrain, pipe.position) + (pipe.elevation || 0);
+  const endElevation = terrainHeightAt(buildTerrain, pipe.endPosition ?? pipe.position)
+    + (pipe.endElevation ?? pipe.elevation ?? 0);
+  return (startElevation + endElevation) / 2;
+}
+
 export function createSimulationFromPlant(plantState: PlantState): SimulationState {
   const state = createSimulationState();
   buildTerrain = plantState.terrain;
@@ -1987,9 +2016,9 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 
       console.log(`[Factory] Pipe ${component.id}: creating ${phase} state at ${(pressure/1e5).toFixed(1)} bar, ${temp.toFixed(0)}K, quality=${quality.toFixed(2)}`);
 
-      // For pipes, "height" is the vertical component of the pipe length
-      // This affects phase separation - horizontal pipes separate better than vertical
-      // We'll set height = 0 for pipes since they're treated as well-mixed anyway
+      // A pipe is well mixed - no internal height, so no internal head and
+      // no stratification - which makes it a point, and that point is the
+      // middle of its run (pipeMidRun), not the end it happens to start at.
       return {
         id: component.id,
         label: component.label || 'Pipe',
@@ -1998,7 +2027,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         hydraulicDiameter: pipe.diameter,
         flowArea: Math.PI * radius * radius,
         height: 0,  // Pipes are well-mixed, height doesn't affect separation
-        elevation,
+        elevation: pipeMidRun(pipe),
       };
     }
 
@@ -3741,18 +3770,38 @@ function createFlowConnectionFromPlantConnection(
   // way a vent to open air carries no head no density difference put there,
   // and a liner crack drains at its own depth rather than having to climb
   // to grade first.
+  //
+  // A PIPE end is the one point that is not read from the connection.
+  // Construction writes half a diameter there ("the pipe is small, the
+  // connection is at its center") for BOTH of a pipe's ends, because a pipe
+  // has no internal height to hang a port on; a well-mixed pipe answers
+  // every line at the one pressure it has, which lives at the middle of its
+  // run (see pipeMidRun). Pricing gravity to that point is what splits the
+  // weight of a sloped run between the lines at its two ends instead of
+  // charging all of it to one of them.
   const plantEnd = (fromComponent ?? toComponent)!;
   const groundBesideThePlant = terrainHeightAt(buildTerrain, plantEnd.position);
+  const localElevationOf = (
+    component: PlantComponent | undefined,
+    stated: number | undefined,
+  ): number | undefined => (component?.type === 'pipe' ? 0 : stated);
+  const localFrom = localElevationOf(fromComponent, connection.fromElevation);
+  const localTo = localElevationOf(toComponent, connection.toElevation);
   const pointOf = (
     component: PlantComponent | undefined,
     nodeId: string,
     localElevation: number | undefined,
   ): number | undefined => {
     if (!component) return localElevation === undefined ? undefined : groundBesideThePlant + localElevation;
-    return absoluteBase(component) + (localElevation ?? nodeMidHeight(state.flowNodes.get(nodeId)));
+    // The node's own reference elevation, which is what its local port
+    // elevations are measured from and what pressureAtConnection prices head
+    // against. It equals absoluteBase for every component but a pipe, whose
+    // node sits at the middle of its run rather than at its start end.
+    const base = state.flowNodes.get(nodeId)?.elevation ?? absoluteBase(component);
+    return base + (localElevation ?? nodeMidHeight(state.flowNodes.get(nodeId)));
   };
-  const fromPointOrEnv = pointOf(fromComponent, fromNodeId, connection.fromElevation);
-  const toPointOrEnv = pointOf(toComponent, toNodeId, connection.toElevation);
+  const fromPointOrEnv = pointOf(fromComponent, fromNodeId, localFrom);
+  const toPointOrEnv = pointOf(toComponent, toNodeId, localTo);
   const fromPoint = fromPointOrEnv ?? toPointOrEnv!;
   const toPoint = toPointOrEnv ?? fromPointOrEnv!;
   const elevationChange = toPoint - fromPoint;
@@ -3775,10 +3824,11 @@ function createFlowConnectionFromPlantConnection(
     length = pipe.length;
   }
 
-  // Get connection point elevations from plant connection (relative to component bottom)
-  // These are physical elevations in meters
-  const connFromElevation = connection.fromElevation;
-  const connToElevation = connection.toElevation;
+  // Connection point elevations, measured from each node's own reference -
+  // the same points gravity was priced between above, so the head inside a
+  // node and the head along the line between two nodes agree.
+  const connFromElevation = localFrom;
+  const connToElevation = localTo;
 
   // Auto-detect phase tolerance for condenser bottom connections
   // If fromPhaseTolerance isn't set, and this is a condenser with a low elevation connection,
