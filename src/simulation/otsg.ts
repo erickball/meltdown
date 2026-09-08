@@ -736,6 +736,152 @@ export function counterflowOutletTemp(
   return TIn + eps * (Cmin / CWater) * (TGasIn - TIn);
 }
 
+/** The partition at ONE trial pressure - the closed form the pressure root
+ *  find is solving. Exported so a probe or a test can read the volume
+ *  residual and both sides of a regime seam directly, at the same (P, du3)
+ *  the closure itself uses: the seams are supposed to join where the two
+ *  descriptions coincide, and that is only checkable branch against branch. */
+export interface OtsgAtP {
+  sat: SaturationProps;
+  m1: number; u1: number; v1: number;
+  m2: number; x2Bar: number; v2: number;
+  m3: number; u3: number; v3: number;
+  /** sum(m_i v_i) - the volume this partition needs at this pressure. The
+   *  pressure solve is the root of Vsum - V_tube. */
+  Vsum: number;
+  regime: OtsgEval['regime'];
+  /** True when v3 came from a superheatedV inversion, so a caller iterating
+   *  nearby pressures can carry it as the next warm start. */
+  v3Solved: boolean;
+}
+
+export interface OtsgAtPArgs {
+  massTotal: number;
+  UTotal: number;
+  m1Ledger: number;
+  uFeedIn: number;
+  /** Saturation liquid energy the ledger was last reconciled to; undefined
+   *  = take the ledger as it stands (see reconcileSlugMass). */
+  uFRef?: number;
+  /** The wall pin as an energy offset above saturated vapour, u3 - u_g. */
+  du3: number;
+  /** Warm start for the superheated-volume inversion. */
+  v3Hint?: number;
+}
+
+/**
+ * The partition at one pressure. Mass and energy split the leftovers in
+ * every regime; which arm applies is decided by the SIGN of a solved mass,
+ * and the arms are supposed to agree where they meet:
+ *
+ *  - m3 <= 0 (flooded): no dry steam. The boiling section's mean quality is
+ *    the energy's to set; below zero quality the leftovers are simply liquid
+ *    cooler than saturation, which subcooledLiquidV continues.
+ *  - 0 < m3 < mR (dryout/superheat): the pin sets u3, the energy sets m3,
+ *    the rest boils.
+ *  - m3 >= mR: the totals carry more energy than pinned steam can hold at
+ *    this pressure, so u3 unpins upward and the leftovers are one
+ *    superheated region.
+ *
+ * The m3 = 0 seam coincides because the boiling section's mean quality there
+ * IS the full-profile mean x2BarFull (m3 = 0 means UR = mR*u2Full), and the
+ * log-mean identity v_f + x2BarFull*(v_g - v_f) = vBarFull makes the two
+ * arms' v2 the same number; the m2 = 0 seam coincides because m3 = mR means
+ * UR/mR is exactly the pinned u3. Verified branch-against-branch by
+ * test-suite's OTSG seam-continuity cases.
+ */
+export function otsgPartitionAtP(P: number, a: OtsgAtPArgs): OtsgAtP {
+  const { massTotal, UTotal, m1Ledger, uFeedIn, uFRef, du3 } = a;
+  const sat = saturationAtP(P);
+  const u1 = subcooledSectionMean(uFeedIn, sat);
+  const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
+  // The slug ledger is a MASS, priced at the profile mean u1(P) - so a
+  // falling pressure reprices the same slug COLDER and the energy
+  // difference flows to the vapor side of the books by construction,
+  // which is exactly the flash a depressurized slug undergoes. (The
+  // energy-ledger variant could not express that: as u_f fell, the same
+  // joules claimed MORE mass than the tube held, and a blowdown walked
+  // it into a partition no pressure could pack.) The cap at the node's
+  // inventory bites only when draws have removed slug water the ledger
+  // never saw leave - which the drift watch reports.
+  // The boundary moves with pressure: flash on the way down, subcooled
+  // liquid joining on the way up (reconcileSlugMass). The profile inlet is
+  // the same one subcooledSectionMean prices the section against.
+  const m1Raw = Math.min(m1Ledger, massTotal);
+  // How much liquid the leftovers can give the slug on a pressure rise:
+  // judged with the slug priced at the REFERENCE saturation (the energy
+  // it actually held), not at this trial pressure - pricing it at the
+  // trial pressure is the repricing the boundary move exists to replace,
+  // and it let the root find talk itself up to 220 bar.
+  let joinCap = 0;
+  if (uFRef !== undefined && sat.u_f > uFRef) {
+    const uInRef = Math.min(uFeedIn, uFRef - 25e3);
+    const URRef = UTotal - m1Raw * 0.5 * (uInRef + uFRef);
+    joinCap = slugJoinCap(massTotal - m1Raw, URRef, uFRef, sat.u_g);
+  }
+  const m1 = reconcileSlugMass(m1Raw, uFRef ?? NaN, sat.u_f,
+    Math.min(uFeedIn, sat.u_f - 25e3), massTotal, joinCap);
+  const mR = massTotal - m1;
+  const UR = UTotal - m1 * u1;
+  const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
+  const x2BarFull = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
+  const u2Full = sat.u_f + x2BarFull * (sat.u_g - sat.u_f);
+  if (mR <= Math.max(1e-12, UR / U3_CEILING)) {
+    // The leftovers cannot carry the leftover energy below the table
+    // ceiling (a sliver holding everything, or nothing holding
+    // something). The truthful monotone signal is that this pressure is
+    // far too low: the slug is over-priced here, and more pressure
+    // reprices it hotter. Continuous with the sliver sentinel below.
+    if (UR > 1e-6 * Math.max(1, UTotal)) {
+      return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat', v3Solved: false };
+    }
+    return { sat, m1, u1, v1, m2: 0, x2Bar: 0, v2: sat.v_f, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1, regime: 'flooded', v3Solved: false };
+  }
+  const u3 = sat.u_g + du3;
+  // Superheat mass from the energy total: every kilogram promoted from
+  // the full boiling profile to pinned steam costs (u3 - u2Full).
+  const m3 = du3 > 1e-9 ? (UR - mR * u2Full) / (u3 - u2Full)
+    : (UR - mR * u2Full) / (sat.u_g - u2Full);   // dryout pin: vapor at u_g
+  if (m3 <= 0) {
+    // Flooded: the mean quality is the energy's to set, and below zero it
+    // is simply liquid cooler than saturation - continuous at x2Bar = 0.
+    const uBar2 = UR / mR;
+    const x2Bar = (uBar2 - sat.u_f) / (sat.u_g - sat.u_f);
+    const v2 = x2Bar >= 0
+      ? sat.v_f + x2Bar * (sat.v_g - sat.v_f)
+      : subcooledLiquidV(uBar2);
+    return { sat, m1, u1, v1, m2: mR, x2Bar, v2, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1 + mR * v2, regime: 'flooded', v3Solved: false };
+  }
+  if (m3 >= mR) {
+    // More energy than wall-limited steam can hold: u3 unpins upward and
+    // the leftovers are one superheated region (or the seam itself).
+    const u3Free = UR / mR;
+    if (u3Free > U3_CEILING) {
+      // A sliver carrying energy past the steam tables. While the root
+      // find is PROBING a pressure far below the root, the ledger's mass
+      // claim swells (u1 falls with P) and squeezes the leftovers into
+      // exactly this - and the truthful monotone answer is that such a
+      // sliver would need unbounded volume: the residual says "P is far
+      // too low" and the search moves on. If the SOLVED pressure lands
+      // here, the volume never closes and the loud no-pressure error
+      // reports it.
+      return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat', v3Solved: false };
+    }
+    const solve3 = u3Free > sat.u_g + 1e3;
+    const v3 = solve3 ? superheatedV(u3Free, P, 1e-6, a.v3Hint, sat) : sat.v_g;
+    return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat', v3Solved: solve3 };
+  }
+  const solve3 = du3 > 1e-9;
+  const v3 = solve3 ? superheatedV(u3, P, 1e-6, a.v3Hint, sat) : sat.v_g;
+  const m2 = mR - m3;
+  return {
+    sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
+    Vsum: m1 * v1 + m2 * vBarFull + m3 * v3,
+    regime: solve3 ? 'superheat' : 'dryout',
+    v3Solved: solve3,
+  };
+}
+
 export function evaluateOtsgPartition(
   massTotal: number,
   UTotal: number,
@@ -909,16 +1055,10 @@ export function evaluateOtsgPartition(
   }
 
   // ----------------------------------------------------------------
-  // The partition at one pressure - closed form given the pin's u3.
+  // The partition at one pressure - closed form given the pin's u3
+  // (otsgPartitionAtP, below).
   // ----------------------------------------------------------------
-  interface AtP {
-    sat: SaturationProps;
-    m1: number; u1: number; v1: number;
-    m2: number; x2Bar: number; v2: number;
-    m3: number; u3: number; v3: number;
-    Vsum: number;
-    regime: OtsgEval['regime'];
-  }
+  type AtP = OtsgAtP;
   // The pin's exact placement needs the section's own conductance (theta
   // depends on L3) and a property inversion, both too heavy for the inner
   // pressure iterations - so the OUTER loop carries the pin as an energy
@@ -942,93 +1082,11 @@ export function evaluateOtsgPartition(
   // The residual is a function of (P; totals, ledger). Solving takes the
   // node's own; the tangent below perturbs them at the solved pressure.
   const atPX = (P: number, massTotal: number, UTotal: number, m1Ledger: number): AtP => {
-    const sat = saturationAtP(P);
-    const u1 = subcooledSectionMean(uFeedIn, sat);
-    const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
-    // The slug ledger is a MASS, priced at the profile mean u1(P) - so a
-    // falling pressure reprices the same slug COLDER and the energy
-    // difference flows to the vapor side of the books by construction,
-    // which is exactly the flash a depressurized slug undergoes. (The
-    // energy-ledger variant could not express that: as u_f fell, the same
-    // joules claimed MORE mass than the tube held, and a blowdown walked
-    // it into a partition no pressure could pack.) The cap at the node's
-    // inventory bites only when draws have removed slug water the ledger
-    // never saw leave - which the drift watch reports.
-    // The boundary moves with pressure: flash on the way down, subcooled
-    // liquid joining on the way up (reconcileSlugMass). The profile inlet is
-    // the same one subcooledSectionMean prices the section against.
-    const m1Raw = Math.min(m1Ledger, massTotal);
-    // How much liquid the leftovers can give the slug on a pressure rise:
-    // judged with the slug priced at the REFERENCE saturation (the energy
-    // it actually held), not at this trial pressure - pricing it at the
-    // trial pressure is the repricing the boundary move exists to replace,
-    // and it let the root find talk itself up to 220 bar.
-    let joinCap = 0;
-    if (uFRef !== undefined && sat.u_f > uFRef) {
-      const uInRef = Math.min(uFeedIn, uFRef - 25e3);
-      const URRef = UTotal - m1Raw * 0.5 * (uInRef + uFRef);
-      joinCap = slugJoinCap(massTotal - m1Raw, URRef, uFRef, sat.u_g);
-    }
-    const m1 = reconcileSlugMass(m1Raw, uFRef ?? NaN, sat.u_f,
-      Math.min(uFeedIn, sat.u_f - 25e3), massTotal, joinCap);
-    const mR = massTotal - m1;
-    const UR = UTotal - m1 * u1;
-    const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
-    const x2BarFull = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
-    const u2Full = sat.u_f + x2BarFull * (sat.u_g - sat.u_f);
-    if (mR <= Math.max(1e-12, UR / U3_CEILING)) {
-      // The leftovers cannot carry the leftover energy below the table
-      // ceiling (a sliver holding everything, or nothing holding
-      // something). The truthful monotone signal is that this pressure is
-      // far too low: the slug is over-priced here, and more pressure
-      // reprices it hotter. Continuous with the sliver sentinel below.
-      if (UR > 1e-6 * Math.max(1, UTotal)) {
-        return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
-      }
-      return { sat, m1, u1, v1, m2: 0, x2Bar: 0, v2: sat.v_f, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1, regime: 'flooded' };
-    }
-    const u3 = sat.u_g + du3;
-    // Superheat mass from the energy total: every kilogram promoted from
-    // the full boiling profile to pinned steam costs (u3 - u2Full).
-    const m3 = du3 > 1e-9 ? (UR - mR * u2Full) / (u3 - u2Full)
-      : (UR - mR * u2Full) / (sat.u_g - u2Full);   // dryout pin: vapor at u_g
-    if (m3 <= 0) {
-      // Flooded: the mean quality is the energy's to set, and below zero it
-      // is simply liquid cooler than saturation - continuous at x2Bar = 0.
-      const uBar2 = UR / mR;
-      const x2Bar = (uBar2 - sat.u_f) / (sat.u_g - sat.u_f);
-      const v2 = x2Bar >= 0
-        ? sat.v_f + x2Bar * (sat.v_g - sat.v_f)
-        : subcooledLiquidV(uBar2);
-      return { sat, m1, u1, v1, m2: mR, x2Bar, v2, m3: 0, u3: sat.u_g, v3: sat.v_g, Vsum: m1 * v1 + mR * v2, regime: 'flooded' };
-    }
-    if (m3 >= mR) {
-      // More energy than wall-limited steam can hold: u3 unpins upward and
-      // the leftovers are one superheated region (or the seam itself).
-      const u3Free = UR / mR;
-      if (u3Free > U3_CEILING) {
-        // A sliver carrying energy past the steam tables. While the root
-        // find is PROBING a pressure far below the root, the ledger's mass
-        // claim swells (u1 falls with P) and squeezes the leftovers into
-        // exactly this - and the truthful monotone answer is that such a
-        // sliver would need unbounded volume: the residual says "P is far
-        // too low" and the search moves on. If the SOLVED pressure lands
-        // here, the volume never closes and the loud no-pressure error
-        // reports it.
-        return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: U3_CEILING, v3: 1e6, Vsum: 1e6, regime: 'superheat' };
-      }
-      const v3 = u3Free > sat.u_g + 1e3 ? superheatedV(u3Free, P, 1e-6, carriedHint(P), sat) : sat.v_g;
-      if (u3Free > sat.u_g + 1e3) { v3Carry = v3; v3CarryP = P; }
-      return { sat, m1, u1, v1, m2: 0, x2Bar: x2BarFull, v2: vBarFull, m3: mR, u3: u3Free, v3, Vsum: m1 * v1 + mR * v3, regime: 'superheat' };
-    }
-    const v3 = du3 > 1e-9 ? superheatedV(u3, P, 1e-6, carriedHint(P), sat) : sat.v_g;
-    if (du3 > 1e-9) { v3Carry = v3; v3CarryP = P; }
-    const m2 = mR - m3;
-    return {
-      sat, m1, u1, v1, m2, x2Bar: x2BarFull, v2: vBarFull, m3, u3, v3,
-      Vsum: m1 * v1 + m2 * vBarFull + m3 * v3,
-      regime: du3 > 1e-9 ? 'superheat' : 'dryout',
-    };
+    const r = otsgPartitionAtP(P, {
+      massTotal, UTotal, m1Ledger, uFeedIn, uFRef, du3, v3Hint: carriedHint(P),
+    });
+    if (r.v3Solved) { v3Carry = r.v3; v3CarryP = P; }
+    return r;
   };
 
   // ----------------------------------------------------------------

@@ -149,6 +149,44 @@ numbers:
   drawn at 1.46 MJ/kg where the superheat section held ~3), and the books
   inflate until no pressure can pack them.
 
+**The economizer's INLET enthalpy is geometry, not flow.** The slug's energy
+is priced at the profile mean (u_in + u_f(P))/2, so `u_in` multiplies the
+whole ledger: on a blacked-out Xe-100 bundle a 73 kg slug and 31 kg of
+leftovers means a 1 kJ/kg move in `u_in` is 2.3 kJ/kg on the steam that sets
+the pressure. `classifyOtsgFlows` therefore takes `u_in` from the water
+STANDING at the tube's lowest connections - its feed nozzle - weighted by how
+subcooled each is, with no flow rate in the expression. It used to read
+`WFeed > 0 ? donor-weighted mean : h_f(473 K)`, and the instant a feed pump
+coasted to zero the inlet stepped to that hard-coded 200 C: measured 1136 ->
+840 kJ/kg in one step, repricing the slug by 11 MJ and moving the published
+pressure 81 -> 99 bar. That single input step was 79% of a station
+blackout's solver rejections (1527 of 1933 in 180 s), and no timestep could
+shrink it, because the jump was in an argument rather than in a rate. With
+one feed line the new expression is exactly the value the flow-weighted mean
+gave; with nothing subcooled at the inlet the weights vanish together with
+(h_f - h_in), so it tends to h_f and the economizer degenerates to zero
+subcooling continuously.
+
+**KNOWN OPEN: the volume residual can fold.** The boundary move
+(`reconcileSlugMass`) is evaluated at the walk's TRIAL pressure, which closes
+a positive feedback loop inside the root find: a higher trial pressure leaves
+more of the tube subcooled, the bigger slug takes mass at the cold profile
+mean and leaves the enthalpy behind, the leftovers get hotter and need MORE
+volume. Near the critical point that beats the compression term about 6 to 1.
+Measured on one blackout state (330 kg, 508 MJ, 1.19 m3, ledger 279 kg): R(P)
+runs UPHILL from 158 to 188 bar and has three roots - 153, 179 and 189 bar -
+and which one is published depends on the warm start, so the pressure is
+hysteretic. It shows up on ~0.7% of tube-ticks of that run
+(`scripts/probe-otsg-roots.ts` counts them; `scripts/probe-otsg-resid.ts`
+dumps R(P)). Freezing the move against the pressure the node last published
+does make R monotone - verified over 140-198 bar - but it converts the fold
+into an explicit one-publication lag around the same >1 loop gain, and the
+circulator-trip case then diverges at t=71 s. The real cure is the
+cancellation underneath it: the leftovers are (totals - slug), and when the
+slug is 90% of the inventory their energy is a difference of large numbers
+with dP/dm1 up to 10 bar/kg. That is the "drop the ledger, solve all three
+masses from the totals plus the wall pin" rework, not a patch here.
+
 **The ledger and its leash.** m₁ is watched, not trusted: the integrator
 floors it at zero and ceilings it at the node's own mass; the closure caps
 the claim at the inventory; and because u₃ is pinned, a drifting claim can no
