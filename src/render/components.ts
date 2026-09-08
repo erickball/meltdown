@@ -16,6 +16,7 @@ import {
   BuildingComponent,
   CrossVesselComponent,
   PoolComponent,
+  WarehouseComponent,
   ViewState,
   Fluid,
   Point,
@@ -23,6 +24,7 @@ import {
   Connection,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds } from '../simulation';
+import { PIPE_METRES_PER_STICK, formatMetres, stockedComponentTypes } from '../game/stock';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -80,6 +82,10 @@ export function getComponentVisualHeight(component: PlantComponent): number {
     case 'pool':
       // A pool has no `height`: its vertical extent is the depth it is sunk to
       return (component as PoolComponent).depth || 12;
+    case 'warehouse':
+      // A shed stands about as tall as it is deep, with a floor-to-eaves
+      // minimum that keeps a shallow yard from drawing as a slot
+      return Math.max(3, (component as WarehouseComponent).depth || 4);
     default:
       if ('height' in component) return (component as { height: number }).height;
       return 2;
@@ -932,6 +938,9 @@ export function renderComponent(
       break;
     case 'pool':
       renderPool(ctx, component as PoolComponent, view, isSimulating);
+      break;
+    case 'warehouse':
+      renderWarehouse(ctx, component as WarehouseComponent, view);
       break;
   }
 
@@ -3622,6 +3631,103 @@ function renderController(ctx: CanvasRenderingContext2D, controller: ControllerC
   ctx.strokeRect(-w / 2 + 1, -h / 2 + 1, w - 2, h - 2);
 }
 
+
+/**
+ * The supply yard in front view (2.5D): an open-fronted shed with the stock
+ * standing in it - a bundle of pipe seen end-on whose rows grow with the
+ * metres in stock, and a row of crates/pump silhouettes for the equipment.
+ *
+ * Deliberately plain. The grid view is where a level is meant to be read;
+ * this only has to look like a warehouse with things in it from across the
+ * site, and to visibly empty as the player builds.
+ */
+function renderWarehouse(
+  ctx: CanvasRenderingContext2D,
+  wh: WarehouseComponent,
+  view: ViewState
+): void {
+  const w = (wh.width || 6) * view.zoom;
+  const h = getComponentVisualHeight(wh) * view.zoom;
+  const x0 = -w / 2, y0 = -h / 2;
+  const stock = wh.stock ?? { pipeMeters: 0, components: {} };
+  const wall = Math.max(1.5, Math.min(w, h) * 0.05);
+
+  // Shed: dark interior behind a light frame, with a shallow roof overhang
+  ctx.fillStyle = '#2b3238';
+  ctx.fillRect(x0, y0, w, h);
+  ctx.fillStyle = '#7f8a94';
+  ctx.fillRect(x0 - w * 0.03, y0 - h * 0.1, w * 1.06, h * 0.12);   // roof
+  ctx.fillRect(x0, y0, wall, h);                                     // left post
+  ctx.fillRect(x0 + w - wall, y0, wall, h);                          // right post
+  ctx.fillStyle = '#5c646c';
+  ctx.fillRect(x0, y0 + h - wall, w, wall);                          // floor slab
+  ctx.strokeStyle = 'rgba(20, 24, 28, 0.9)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x0, y0, w, h);
+
+  const inX = x0 + wall + 1;
+  const inY = y0 + h * 0.12;
+  const inW = w - 2 * wall - 2;
+  const inH = h - wall - h * 0.12 - 1;
+  if (inW < 4 || inH < 4) return;
+
+  // Pipe bundle, seen end-on: one circle per stick, stacked in rows
+  const sticks = Math.ceil(Math.max(0, stock.pipeMeters) / PIPE_METRES_PER_STICK);
+  const bundleW = inW * 0.55;
+  const d = Math.max(2, Math.min(bundleW / 6, inH / 4));
+  const perRow = Math.max(1, Math.floor(bundleW / d));
+  const rows = Math.max(1, Math.floor(inH / d));
+  const drawn = Math.min(sticks, rows * perRow);
+  for (let i = 0; i < drawn; i++) {
+    const row = Math.floor(i / perRow);
+    const col = i % perRow;
+    const cx = inX + (col + 0.5) * d;
+    const cy = inY + inH - (row + 0.5) * d;      // stacks up from the floor
+    ctx.fillStyle = '#9aa6b1';
+    ctx.beginPath();
+    ctx.arc(cx, cy, d * 0.42, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#3a4148';
+    ctx.beginPath();
+    ctx.arc(cx, cy, d * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Crates along the right-hand side of the floor
+  const crateX = inX + bundleW + 2;
+  const crateW = inW - bundleW - 2;
+  const cs = Math.max(3, Math.min(crateW / 3, inH / 3));
+  let slot = 0;
+  for (const [type, count] of stockedComponentTypes(stock)) {
+    for (let n = 0; n < count; n++) {
+      const cols = Math.max(1, Math.floor(crateW / (cs + 1)));
+      const row = Math.floor(slot / cols);
+      const col = slot % cols;
+      const cx = crateX + col * (cs + 1);
+      const cy = inY + inH - (row + 1) * (cs + 1);
+      if (cy < inY) { slot = -1; break; }
+      ctx.fillStyle = type === 'pump' ? '#3f7f6a' : '#8a6b3f';
+      ctx.fillRect(cx, cy, cs, cs);
+      ctx.strokeStyle = 'rgba(25, 20, 12, 0.8)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + 0.5, cy + 0.5, cs - 1, cs - 1);
+      slot++;
+    }
+    if (slot < 0) break;
+  }
+
+  // Sign board over the door
+  if (w > 40) {
+    ctx.fillStyle = 'rgba(235, 240, 245, 0.95)';
+    ctx.font = `bold ${Math.max(7, Math.min(13, h * 0.13))}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${formatMetres(stock.pipeMeters)} m`, 0, y0 - h * 0.04);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+  }
+}
+
 /**
  * Render a switchyard component
  * Shows transformers, equipment, power line towers, and connection to grid
@@ -4321,6 +4427,11 @@ export function getComponentBounds(component: PlantComponent, view: ViewState): 
       const poolSide = ((component as PoolComponent).side || 12) * view.zoom;
       const poolDepth = ((component as PoolComponent).depth || 12) * view.zoom;
       return { x: -poolSide / 2, y: -poolDepth / 2, width: poolSide, height: poolDepth };
+    }
+    case 'warehouse': {
+      const whW = ((component as WarehouseComponent).width || 6) * view.zoom;
+      const whH = getComponentVisualHeight(component) * view.zoom;
+      return { x: -whW / 2, y: -whH / 2, width: whW, height: whH };
     }
     case 'crossVessel':
       const cv = component as CrossVesselComponent;

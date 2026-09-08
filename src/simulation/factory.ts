@@ -2653,6 +2653,10 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
+    // Non-hydraulic by design: the supply yard holds parts, not fluid
+    case 'warehouse':
+      return null;
+
     default:
       console.warn(`[Simulation] Unknown component type: ${(component as any).type}`);
       return null;

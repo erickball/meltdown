@@ -192,6 +192,30 @@
     },
     "pressureRating": 25
    }
+  ],
+  [
+   "warehouse",
+   {
+    "id": "warehouse",
+    "type": "warehouse",
+    "label": "Supply Yard",
+    "position": {
+     "x": 110,
+     "y": 70
+    },
+    "rotation": 0,
+    "elevation": 0,
+    "width": 8.0,
+    "depth": 6.0,
+    "stock": {
+     "pipeMeters": 400,
+     "components": {
+      "pump": 2,
+      "valve": 1
+     }
+    },
+    "ports": []
+   }
   ]
  ],
  "connections": [

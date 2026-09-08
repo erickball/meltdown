@@ -1011,6 +1011,48 @@ export const componentDefinitions: Record<string, {
     ]
   },
 
+  // Supply yard: the level's parts list, standing on the map
+  'warehouse': {
+    displayName: 'Warehouse',
+    options: [
+      { name: 'name', type: 'text', label: 'Name', default: 'Warehouse' },
+      { name: 'width', type: 'number', label: 'Width', default: 6, min: 2, max: 60, step: 0.5, unit: 'm',
+        help: 'Plan width of the yard. Cosmetic - it does not change what the yard holds.' },
+      { name: 'depth', type: 'number', label: 'Depth', default: 4, min: 2, max: 60, step: 0.5, unit: 'm',
+        help: 'Plan depth of the yard. Cosmetic - it does not change what the yard holds.' },
+      { name: 'stockPipeMeters', type: 'number', label: 'Pipe in Stock', default: 0, min: 0, max: 100000, step: 10, unit: 'm',
+        help: 'Total metres of pipe on the racks. Every connection and every pipe component spends its own length; deleting one puts the metres back, and editing a run pays or refunds the difference.' },
+      { name: 'stockPumps', type: 'number', label: 'Pumps in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockValves', type: 'number', label: 'Valves in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'Every kind of valve - gate, check, relief and PORV are all stored as valves, so all four buttons draw on this one pile.' },
+      { name: 'stockTanks', type: 'number', label: 'Tanks in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'Tanks AND pressurizers - the model stores a pressurizer as a tank, so both buttons draw on this pile.' },
+      { name: 'stockVessels', type: 'number', label: 'Standalone Cores in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'Standalone reactor cores, which the model stores as fuelled vessels. Pressurizers are stored as TANKS, so they come out of the tank pile.' },
+      { name: 'stockHeatExchangers', type: 'number', label: 'Heat Exchangers in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockCondensers', type: 'number', label: 'Condensers in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockTurbineDrivenPumps', type: 'number', label: 'Turbine-Driven Pumps in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockTurbineGenerators', type: 'number', label: 'Turbine-Generators in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockReactorVessels', type: 'number', label: 'Reactor Vessels in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockCrossVessels', type: 'number', label: 'Cross-Vessels in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockControllers', type: 'number', label: 'Controllers in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockBuildings', type: 'number', label: 'Buildings in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockPools', type: 'number', label: 'Pools in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockSwitchyards', type: 'number', label: 'Switchyards in Stock', default: 0, min: 0, max: 999, step: 1,
+        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+    ]
+  },
+
   // Structures
   'building': {
     displayName: 'Building / Containment',

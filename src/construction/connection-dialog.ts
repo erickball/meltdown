@@ -4,6 +4,7 @@ import { PlantComponent, Port, Connection } from '../types';
 import { getComponentVisualHeight } from '../render/components';
 import { hasPinnedPortElevations } from './component-properties';
 import { PIPE_SPECS, findMatchingPipeSpec, pipeSpecFlowArea } from './component-presets';
+import { formatMetres } from '../game/stock';
 
 // Shared tooltip for the offtake opening-height inputs (edit form, both ends)
 const OPENING_HEIGHT_TIP =
@@ -51,6 +52,17 @@ export class ConnectionDialog {
   private toComponent: PlantComponent | null = null;
   private fromPort: Port | null = null;
   private toPort: Port | null = null;
+  /**
+   * Metres of pipe the warehouse has left, or null when the plant has no
+   * warehouse (unlimited). Injected by main.ts so the dialog stays ignorant
+   * of the plant; it only ever displays the number.
+   */
+  private pipeStockProvider: (() => number | null) | null = null;
+
+  /** Tell the dialog where to read the remaining pipe stock. */
+  setPipeStockProvider(provider: () => number | null): void {
+    this.pipeStockProvider = provider;
+  }
 
   constructor() {
     this.dialog = document.getElementById('connection-dialog')!;
@@ -425,6 +437,22 @@ export class ConnectionDialog {
       ? 'Distance the fluid travels through the shared wall/opening between these two regions. Short (≤1 m) - it sets the flow inertia and friction of the internal port, not a length of external pipe.'
       : `Min: ${minLength.toFixed(1)} m (3D port distance)`;
     lengthGroup.appendChild(lengthHelp);
+
+    // What the warehouse has left, when the plant has one. Nothing here
+    // enforces it - the construction manager does - but the number has to be
+    // beside the field you spend it with.
+    const pipeStock = this.pipeStockProvider?.() ?? null;
+    if (pipeStock !== null) {
+      const stockNote = document.createElement('div');
+      stockNote.className = 'help-text';
+      stockNote.id = 'pipe-stock-note';
+      stockNote.style.color = pipeStock > 0 ? '#8bc' : '#f77';
+      stockNote.title = 'This run is charged its length against the warehouse. ' +
+        'Deleting it later puts the metres back; editing the length pays or refunds the difference.';
+      stockNote.textContent = `Pipe in stock: ${formatMetres(pipeStock)} m`;
+      lengthGroup.appendChild(stockNote);
+    }
+
     this.bodyElement.appendChild(lengthGroup);
 
     // Track the current minimum length so we can detect when user has length set to minimum

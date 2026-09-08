@@ -34,6 +34,8 @@ import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
 import type { FlowNode } from './simulation/types';
 import { pressureAtConnection } from './simulation/operators/connection-hydraulics';
+import { formatMetres, stockedComponentTypes, typeDisplayName } from './game/stock';
+import type { PlantStock } from './types';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -1448,6 +1450,32 @@ export function updateComponentDetail(
       html += '</div>';
       break;
     }
+    case 'warehouse': {
+      // What is left on the shelf - the same numbers the toolbar badges and
+      // the yard drawing read, from the same place.
+      const stock = component.stock as PlantStock | undefined;
+      if (!stock) {
+        html += `<div class="detail-row"><span class="detail-label">Stock:</span>` +
+          `<span class="detail-value" style="color: #f77;">missing</span></div>`;
+        break;
+      }
+      html += `<div class="detail-row"><span class="detail-label">Pipe:</span>` +
+        `<span class="detail-value" style="color: ${stock.pipeMeters > 0 ? '#7f7' : '#f77'};">` +
+        `${formatMetres(stock.pipeMeters)} m</span></div>`;
+      const items = stockedComponentTypes(stock);
+      for (const [type, count] of items) {
+        const name = typeDisplayName(type, count !== 1);
+        html += `<div class="detail-row"><span class="detail-label">` +
+          `${name.charAt(0).toUpperCase()}${name.slice(1)}:</span>` +
+          `<span class="detail-value">${count}</span></div>`;
+      }
+      if (items.length === 0) {
+        html += `<div class="detail-row"><span class="detail-label">Equipment:</span>` +
+          `<span class="detail-value" style="color: #f77;">none left</span></div>`;
+      }
+      break;
+    }
+
     case 'switchyard': {
       const connectedGenId = component.connectedGeneratorId as string | undefined;
       const transmissionVoltage = component.transmissionVoltage as number;

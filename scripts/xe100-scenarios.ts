@@ -164,5 +164,6 @@ for (const [id, b] of st().burstStates ?? []) {
 if (!bursts) console.log('  No bursts.');
 console.log(`  Smallest dt: ${(minDt * 1000).toFixed(3)} ms`);
 console.log(`  Stiff wall-fluid pairs exchanged implicitly (pair-attempts): ${sim.solver.stiffConvectionPairSteps}`);
+console.log(`  Secant-compliance re-solves: ${sim.solver.secantResolveSteps}`);
 console.log(`  Wall time: ${((performance.now() - wallStart) / 1000).toFixed(1)} s for ${(st().time).toFixed(0)} s of plant`);
 console.log();

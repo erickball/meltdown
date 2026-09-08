@@ -185,6 +185,18 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
       },
     };
   }
+  // A/B override for the EOS-secant compliance candidate in the dome-crossing
+  // pass (dome-resolve experiment): EOS_SECANT=1 turns it on. Default off.
+  const eosSecantEnv = process.env.EOS_SECANT;
+  if (eosSecantEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        eosSecantCompliance: eosSecantEnv === '1',
+      },
+    };
+  }
   const energyEnv = process.env.ENERGY_COMPLIANCE;
   if (energyEnv !== undefined && config.pressureSolver !== false) {
     config = {

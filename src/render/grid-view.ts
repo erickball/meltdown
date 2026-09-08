@@ -9,7 +9,8 @@
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
-import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent } from '../types';
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock } from '../types';
+import { stockedComponentTypes, typeDisplayName, PIPE_METRES_PER_STICK } from '../game/stock';
 import { SimulationState } from '../simulation';
 import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
 import { getFluidColor, COLORS } from './colors';
@@ -289,7 +290,8 @@ export class GridView {
   private isGroundLayer(component: PlantComponent): boolean {
     // Things that ARE the ground where they stand: a building's floor, a
     // switchyard's apron, and a pool, which is a hole in it.
-    return component.type === 'building' || component.type === 'switchyard' || component.type === 'pool';
+    return component.type === 'building' || component.type === 'switchyard' ||
+      component.type === 'pool' || component.type === 'warehouse';
   }
 
   private spriteLayout(component: PlantComponent): SpriteLayout {
@@ -447,7 +449,7 @@ export class GridView {
         if (distanceToPolyline(world, pts) <= half) return c;
         continue;
       }
-      if (c.type === 'pool') {
+      if (c.type === 'pool' || c.type === 'warehouse') {
         const rect = footprintRect(c.position, componentFootprint(c));
         if (world.x >= rect.x0 && world.x <= rect.x1 && world.y >= rect.y0 && world.y <= rect.y1) return c;
         continue;
@@ -588,6 +590,7 @@ export class GridView {
       if (c.type === 'building') this.renderBuilding(ctx, c as BuildingComponent, f);
       else if (c.type === 'switchyard') this.renderSwitchyard(ctx, c as SwitchyardComponent, f);
       else if (c.type === 'pool') this.renderPool(ctx, c as PoolComponent, f);
+      else if (c.type === 'warehouse') this.renderWarehouse(ctx, c as WarehouseComponent, f);
     }
 
     // Foundation pads under every standing component
@@ -951,6 +954,199 @@ export class GridView {
       ctx.lineWidth = 3;
       ctx.strokeStyle = COLORS.selectionHighlight;
       ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+    }
+  }
+
+  /**
+   * The supply yard in plan: an open-sided shed on a concrete apron with the
+   * stock stacked in it - racks of pipe on the left, crates of equipment on
+   * the right, and the numbers over the top.
+   *
+   * The stacks are the point. One drawn stick is PIPE_METRES_PER_STICK metres
+   * and one crate is one part, so the piles visibly shrink as the player
+   * builds and an empty yard reads as empty racks rather than as a number
+   * that happens to say zero. The numeric labels carry the exact figures, so
+   * a yard holding more sticks than the racks can draw still reads correctly
+   * (the drawing fills, the label keeps counting).
+   */
+  private renderWarehouse(ctx: CanvasRenderingContext2D, wh: WarehouseComponent, f: GridFrameState): void {
+    const rect = footprintRect(wh.position, componentFootprint(wh));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const w = br.x - tl.x, h = br.y - tl.y;
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+    const stock = wh.stock ?? { pipeMeters: 0, components: {} };
+
+    // Apron
+    ctx.fillStyle = this.art.pattern(ctx, 'pad', this.cam.ppm, origin);
+    ctx.fillRect(tl.x, tl.y, w, h);
+
+    // The shed: a roof band along the north edge, open to the south. Drawn as
+    // a solid roof strip plus the two side walls, so the yard reads as a
+    // three-sided structure you can walk parts out of.
+    const wallPx = Math.max(2, Math.min(w, h) * 0.055);
+    ctx.fillStyle = 'rgba(96, 104, 112, 0.95)';
+    ctx.fillRect(tl.x, tl.y, w, wallPx * 2);                      // back wall + roof edge
+    ctx.fillRect(tl.x, tl.y, wallPx, h);                           // west wall
+    ctx.fillRect(br.x - wallPx, tl.y, wallPx, h);                  // east wall
+    ctx.strokeStyle = 'rgba(35, 38, 42, 0.85)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tl.x + 0.5, tl.y + 0.5, w - 1, h - 1);
+    // Open south side: a dashed threshold rather than a wall
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(210, 180, 90, 0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(tl.x + wallPx, br.y - 1);
+    ctx.lineTo(br.x - wallPx, br.y - 1);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Interior: pipe racks on the west, crates on the east. Both stack from
+    // the BACK of the shed forward, so a pile that is being drawn down
+    // visibly retreats toward the wall instead of thinning out evenly.
+    const inX = tl.x + wallPx + 2;
+    const inY = tl.y + wallPx * 2 + 2;
+    const inW = w - 2 * wallPx - 4;
+    const inH = h - wallPx * 2 - 6;
+    // Zoomed too far out to draw the contents - the label and the numbers
+    // below still go on, because that is what a distant yard is read by
+    const roomForStock = inW >= 8 && inH >= 8;
+
+    if (roomForStock) this.renderYardStock(ctx, stock, inX, inY, inW, inH);
+
+    // --- labels ------------------------------------------------------------
+    const fontPx = Math.max(8, Math.min(15, this.cam.ppm * 0.42));
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(25, 25, 25, 0.85)';
+    ctx.fillText(wh.label || wh.id, tl.x + 2, tl.y - 2);
+
+    ctx.font = `${fontPx}px monospace`;
+    ctx.textBaseline = 'top';
+    const summary = [`${formatGaugeValue(stock.pipeMeters)} m`]
+      .concat(stockedComponentTypes(stock)
+        .map(([type, count]) => `${count}x ${typeDisplayName(type, count !== 1)}`))
+      .join('  ');
+    // Dark plate behind the readout so it survives the gravel pattern
+    const textW = ctx.measureText(summary).width;
+    ctx.fillStyle = 'rgba(15, 18, 20, 0.6)';
+    ctx.fillRect(tl.x + 1, br.y + 1, textW + 6, fontPx + 4);
+    ctx.fillStyle = 'rgba(235, 240, 245, 0.95)';
+    ctx.fillText(summary, tl.x + 4, br.y + 3);
+
+    if (wh.id === f.selectedComponentId) {
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = COLORS.selectionHighlight;
+      ctx.strokeRect(tl.x, tl.y, w, h);
+    }
+  }
+
+  /**
+   * What is standing in the yard: the pipe racks on the west, crates on the
+   * east. Split out of renderWarehouse so a yard drawn too small to hold
+   * anything readable simply skips it and still gets its label.
+   */
+  private renderYardStock(
+    ctx: CanvasRenderingContext2D, stock: PlantStock,
+    inX: number, inY: number, inW: number, inH: number
+  ): void {
+    const pipeW = inW * 0.6;
+    const crateX = inX + pipeW + 3;
+    const crateW = inW - pipeW - 3;
+
+    // --- pipe sticks -------------------------------------------------------
+    // A fixed number of sticks across a rack row, so the stack reads as a
+    // stack at any zoom and any yard size.
+    const PIPE_COLS = 6;
+    const sticks = Math.ceil(Math.max(0, stock.pipeMeters) / PIPE_METRES_PER_STICK);
+    const stickW = pipeW / PIPE_COLS;
+    const rowH = Math.max(2.5, Math.min(inH / 5, stickW * 0.85));
+    const rows = Math.max(1, Math.floor(inH / rowH));
+    const drawn = Math.min(sticks, rows * PIPE_COLS);
+    for (let i = 0; i < drawn; i++) {
+      const row = Math.floor(i / PIPE_COLS);
+      const col = i % PIPE_COLS;
+      const x = inX + col * stickW;
+      const y = inY + row * rowH;
+      // A stick of pipe seen from above: a bright body with a dark seam
+      ctx.fillStyle = '#9fb0bd';
+      ctx.fillRect(x + 0.5, y + 0.5, Math.max(1.5, stickW - 1.5), Math.max(1.5, rowH - 1.5));
+      ctx.fillStyle = 'rgba(28, 32, 36, 0.6)';
+      ctx.fillRect(x + 0.5, y + rowH - 2, Math.max(1.5, stickW - 1.5), 1);
+      ctx.strokeStyle = 'rgba(20, 24, 28, 0.45)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, Math.max(1.5, stickW - 1.5), Math.max(1.5, rowH - 1.5));
+    }
+    // Bare rails below the stack, so the space keeps reading as pipe storage
+    // even when it is empty
+    ctx.strokeStyle = 'rgba(140, 140, 140, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let r = Math.ceil(drawn / PIPE_COLS); r < rows; r++) {
+      const y = inY + r * rowH + rowH / 2;
+      ctx.moveTo(inX, y); ctx.lineTo(inX + pipeW, y);
+    }
+    ctx.stroke();
+
+    // --- crates ------------------------------------------------------------
+    const items = stockedComponentTypes(stock);
+    const CRATE_COLS = 2;
+    const crateSize = Math.max(4, Math.min(crateW / CRATE_COLS - 2, inH / 4));
+    let slot = 0;
+    for (const [type, count] of items) {
+      for (let n = 0; n < count; n++) {
+        const row = Math.floor(slot / CRATE_COLS);
+        const col = slot % CRATE_COLS;
+        const x = crateX + col * (crateSize + 2);
+        const y = inY + row * (crateSize + 2);
+        if (y + crateSize > inY + inH) { slot = -1; break; }
+        this.drawStockCrate(ctx, x, y, crateSize, type);
+        slot++;
+      }
+      if (slot < 0) break;
+    }
+  }
+
+  /**
+   * One item of stock in the yard: a pump gets its own silhouette (a volute
+   * and a motor) because pumps are the part the early levels are counted in;
+   * everything else is a crate stencilled with the first letters of its type.
+   */
+  private drawStockCrate(
+    ctx: CanvasRenderingContext2D, x: number, y: number, size: number, type: string
+  ): void {
+    if (type === 'pump') {
+      ctx.fillStyle = '#3f7f6a';
+      ctx.beginPath();
+      ctx.arc(x + size * 0.45, y + size * 0.55, size * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#2c5c4d';
+      ctx.fillRect(x + size * 0.7, y + size * 0.3, size * 0.3, size * 0.5);
+      ctx.strokeStyle = 'rgba(15, 20, 18, 0.8)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+      return;
+    }
+    ctx.fillStyle = '#8a6b3f';
+    ctx.fillRect(x, y, size, size);
+    ctx.strokeStyle = 'rgba(40, 30, 15, 0.8)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x, y); ctx.lineTo(x + size, y + size);
+    ctx.moveTo(x + size, y); ctx.lineTo(x, y + size);
+    ctx.stroke();
+    ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+    if (size >= 9) {
+      ctx.fillStyle = 'rgba(255, 245, 225, 0.9)';
+      ctx.font = `bold ${Math.floor(size * 0.5)}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(typeDisplayName(type as never).slice(0, 2).toUpperCase(),
+        x + size / 2, y + size / 2);
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
     }
   }
 

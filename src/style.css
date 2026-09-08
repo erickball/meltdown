@@ -645,6 +645,28 @@ body {
   font-size: 11px !important;
 }
 
+/* How much of this part the warehouse still has. Sits at the right-hand end
+   of the build button; absent entirely when the plant has no warehouse. */
+.stock-badge {
+  float: right;
+  color: #9cf;
+  font-variant-numeric: tabular-nums;
+  font-weight: bold;
+}
+
+.component-btn.tool-unavailable .stock-badge {
+  color: #f88;
+}
+
+/* A build button whose pile is empty. Same reasoning as .mode-btn: NOT the
+   `disabled` attribute, so the tooltip explaining why still works and the
+   click handler can say it again. */
+.component-btn.tool-unavailable {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-style: dashed !important;
+}
+
 /* Career levels can focus the palette on a short parts list; hidden buttons
    must out-!important the display rule above */
 .component-btn.palette-hidden {

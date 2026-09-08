@@ -739,6 +739,52 @@ export function estimateControllerCost(props: {
 }
 
 /**
+ * Estimate cost for a warehouse: a pre-engineered metal building on a slab.
+ *
+ * The PARTS inside it are not priced here - they are already priced when the
+ * player places them, and pricing them twice would make a stocked yard look
+ * like the most expensive thing on the site. This is the shed, the apron and
+ * the racking only.
+ */
+export function estimateWarehouseCost(props: {
+  width: number;   // m
+  depth: number;   // m
+  nqa1: boolean;
+}): CostEstimate {
+  const area = Math.max(1, props.width) * Math.max(1, props.depth);   // m2
+
+  // Pre-engineered steel building, erected: ~$900/m2 of floor
+  const shellCost = 900 * area;
+  // Reinforced slab + apron, ~$350/m2 over 1.5x the building footprint
+  const slabCost = 350 * area * 1.5;
+  // Pipe racking, shelving, a jib crane
+  const fitOutCost = 260 * area + 90000;
+
+  const materialCost = shellCost * 0.55 + slabCost * 0.6 + fitOutCost * 0.7;
+  const fabricationCost = shellCost * 0.2 + fitOutCost * 0.15;
+  const installationCost = shellCost * 0.25 + slabCost * 0.4 + fitOutCost * 0.15;
+  const subtotal = materialCost + fabricationCost + installationCost;
+  // A warehouse is never safety-related, but the option exists on every
+  // component, so honour it rather than special-casing it away
+  const nqa1Premium = props.nqa1 ? subtotal * 0.4 : 0;
+
+  return {
+    materialCost,
+    fabricationCost,
+    installationCost,
+    subtotal,
+    nqa1Premium,
+    total: subtotal + nqa1Premium,
+    breakdown: {
+      'Pre-engineered building': shellCost,
+      'Slab and apron': slabCost,
+      'Racking and handling': fitOutCost,
+      ...(nqa1Premium > 0 ? { 'NQA-1 premium': nqa1Premium } : {}),
+    },
+  };
+}
+
+/**
  * Estimate cost for a switchyard
  *
  * Major components:
@@ -1102,6 +1148,13 @@ export function estimateComponentCost(
     case 'pid-controller':
       return estimateControllerCost({
         controllerType: 'pid',
+        nqa1,
+      });
+
+    case 'warehouse':
+      return estimateWarehouseCost({
+        width: props.width || 6,
+        depth: props.depth || 4,
         nqa1,
       });
 
