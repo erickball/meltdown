@@ -1301,14 +1301,16 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
               surfaceArea: oneMetal.surfaceArea / 3,
             });
           });
-          // Seed the ONE integrated partition variable - the subcooled
-          // section's MASS - consistently with the node's own bulk state: a
+          // Seed the ONE integrated section - the economizer's (mass,
+          // energy) pair - consistently with the node's own bulk state: a
           // liquid start is all subcooled section, so it holds the node's
-          // whole inventory; anything else starts with none. The rest of
-          // the partition (and the node's pressure) is solved from the
-          // totals at the first evaluation, so every start is consistent.
+          // whole inventory AND all of its energy; anything else starts with
+          // neither. The rest of the partition (and the node's pressure) is
+          // solved from the totals at the first evaluation, so every start
+          // is consistent.
           tubeNode.otsg = {
             m1: tubeNode.fluid.phase === 'liquid' ? tubeNode.fluid.mass : 0,
+            U1: tubeNode.fluid.phase === 'liquid' ? tubeNode.fluid.internalEnergy : 0,
             heatArea: tubeArea,
             shellNodeId: `${id}-shell`,
             metalNodeIds: metalIds,
@@ -1360,7 +1362,12 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
             tubeNode.fluid.temperature = sat.T;
             tubeNode.fluid.phase = 'two-phase';
             tubeNode.fluid.quality = (m2 * x2Bar + m3) / (m1 + m2 + m3);
-            tubeNode.otsg.m1 = m1;
+            tubeNode.otsg!.m1 = m1;
+            // The slug's energy is its seeded profile's own: the same mean
+            // the section volumes above were built from, so the first
+            // evaluation reconciles to the identity and the design point is
+            // an equilibrium of the integrated pair, not just of its mass.
+            tubeNode.otsg!.U1 = m1 * u1b;
             // Metal seeds DERIVED from the design duties through the same
             // film equations the operator runs - flat guesses are not an
             // option in either direction: a wall 8 K over saturation where

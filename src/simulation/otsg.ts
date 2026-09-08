@@ -346,7 +346,8 @@ export interface OtsgState {
   m1: number;   // kg - subcooled section
   m2: number;   // kg - two-phase section
   m3: number;   // kg - superheated section
-  U3: number;   // J  - superheated section energy (its only free intensive DOF)
+  U1: number;   // J  - subcooled section energy (the slug carries its own)
+  U3: number;   // J  - superheated section energy
 }
 
 export interface OtsgGeometry {
@@ -383,12 +384,13 @@ export interface OtsgEval {
    *  (volume and energy both enforced), 'supercritical' (no dome at all). */
   regime: 'flooded' | 'dryout' | 'superheat' | 'supercritical';
   /** Pressure tangent at the solved point (Pa/kg, Pa/J, Pa/kg), when asked
-   *  for: dPdm follows feed addition (mass, its enthalpy and the ledger
-   *  together), dPdU energy alone, dPdm1 the ledger alone. From the
+   *  for: dPdm follows feed addition (mass, its enthalpy and the slug's own
+   *  pair together), dPdU energy alone, dPdm1 and dPdU1 the slug's mass and
+   *  energy alone. From the
    *  implicit function - residual derivatives at the solved pressure - so
    *  it costs residual evaluations, not root finds. Absent when a
    *  perturbation lands on a regime edge (no tangent there). */
-  tangent?: { dPdm: number; dPdU: number; dPdm1: number };
+  tangent?: { dPdm: number; dPdU: number; dPdm1: number; dPdU1: number };
 }
 
 const P_MIN = 700;      // Pa - just above the triple point
@@ -398,15 +400,16 @@ const P_MAX = 2.15e7;   // Pa - just below critical
  * Evaluate the tube side: solve pressure from the volume constraint and
  * derive every section's geometry and mean state.
  *
- * @param uFeedIn  feed specific internal energy (J/kg) - sets the subcooled
- *                 section's mean via the linear profile
+ * Both end sections carry their own energy: the subcooled section's mean
+ * comes from U1/m1 (its cold end is then 2 u1 - u_f - see OtsgSlug), the
+ * superheat section's from U3/m3. No feed enthalpy appears anywhere in the
+ * evaluation; it prices only the mass entering, in otsgRates.
  */
 export function evaluateOtsg(
   state: OtsgState,
   geom: OtsgGeometry,
-  uFeedIn: number,
 ): OtsgEval {
-  const { m1, m2, m3, U3 } = state;
+  const { m1, m2, m3, U1, U3 } = state;
   if (!(m1 >= 0 && m2 >= 0 && m3 >= 0)) {
     throw new Error(`[OTSG] negative section mass: m=[${m1}, ${m2}, ${m3}] kg`);
   }
@@ -419,10 +422,11 @@ export function evaluateOtsg(
   // Superheat specific energy. With m3 = 0 the section has no state of its
   // own; u_g at the solved pressure is its nascent state (pass-through).
   const u3Free = m3 > 0 ? U3 / m3 : NaN;
+  // Subcooled specific energy: its own integrated state.
+  const u1Bar = m1 > 0 ? U1 / m1 : NaN;
 
   const volumeAt = (P: number): { V: number; sat: SaturationProps; v1: number; v2: number; v3: number; u3: number } => {
     const sat = saturationAtP(P);
-    const u1Bar = 0.5 * (uFeedIn + sat.u_f);        // linear enthalpy profile
     const v1 = m1 > 0 ? subcooledLiquidV(Math.min(u1Bar, sat.u_f)) : sat.v_f;
     // Mass-averaged over the linear quality profile - see boilingMeanQuality
     const v2 = sat.v_f + boilingMeanQuality(sat.v_f, sat.v_g) * (sat.v_g - sat.v_f);
@@ -450,8 +454,7 @@ export function evaluateOtsg(
   const fin = volumeAt(P);
   const sat = fin.sat;
 
-  // Section mean enthalpies (profile closures; section 3 is free)
-  const u1Bar = 0.5 * (uFeedIn + sat.u_f);
+  // Section mean enthalpies (the boiling profile closure; the ends are free)
   const h1Bar = u1Bar + P * fin.v1;
   // Same mass-weighting as the volume: the enthalpy a kilogram of this
   // section carries on average, not the enthalpy at its mid-LENGTH
@@ -536,70 +539,118 @@ export function subcooledSectionMean(uFeedIn: number, sat: SaturationProps): num
 }
 
 /**
- * Move the economizer boundary with pressure.
+ * The economizer's integrated state: its mass, its ENERGY, and the
+ * saturation the pair was last made consistent with.
  *
- * The economizer is a MASS ledger priced at the profile mean (u_in + u_f(P))/2.
- * Holding that mass fixed across a pressure change reprices its energy by
- * m1*du_f/2, and the difference lands on the leftovers - correct in
- * direction for a FALLING pressure (the hot end of the slug flashes) and
- * wrong for a RISING one (a subcooled slug does not absorb energy from the
- * vapor above it: what happens is that liquid at the old saturation, now
- * subcooled, joins it). On the bottled Xe-100 after a blackout the second
- * case pumped ~80 MJ per swing between a 350 kg slug and a 10-20 kg superheat
- * section, which then read 1150 C against a 500 C wall and rang 50<->180 bar.
+ * The slug used to be a mass ledger alone, priced on a linear profile pinned
+ * at the instantaneous inlet enthalpy - U1 = m1 (u_in + u_f(P))/2. That pin
+ * had two consequences the plant could feel. A feed-temperature change
+ * repriced the WHOLE slug in one step (a 20 K move is ~10 MJ across a 220 kg
+ * Xe-100 slug, all of it landing on the leftovers that set the pressure).
+ * And a STANDING slug under a hot wall could not warm: the only way the
+ * model could absorb Q1 was to move the boundary, so at W = 0 it reported
+ * W12 = 2 Q1/(u_f - u_in) - twice the batch-heating rate - while the real
+ * slug's mean energy rose. The energy the pinned profile could not hold
+ * landed on the leftovers, which is one source of the "steam section hotter
+ * than its wall" reports.
  *
- * With the linear profile from u_in to the saturation the ledger was last
- * reconciled to (uFRef), both directions follow with no new constants:
- *  - u_f < uFRef (pressure fell): the part of the profile above the new
- *    saturation flashes out of the section. What remains is the fraction
- *    (u_f - u_in)/(uFRef - u_in), and the flashed part carries exactly its
- *    own profile-mean energy (uFRef + u_f)/2 to the leftovers - the
- *    leftovers ARE totals minus slug, so that accounting is automatic.
- *  - u_f > uFRef (pressure rose): boiling-section liquid at uFRef is now
- *    subcooled and joins, dm = m1*(u_f - uFRef)/(2*uFRef - u_in - u_f), the
- *    amount that makes the enlarged profile's mean hold the old slug's
- *    energy plus the joined mass at uFRef. Capped at the node's inventory
- *    (a pressure jump large enough to subcool everything makes the whole
- *    tube economizer, which is what the flooded regime then reports).
- * Identity when u_f === uFRef, continuous through it.
+ * Carrying U1 fixes both, and the profile is then DERIVED from the pair: it
+ * stays linear (uniform in u per unit mass to this model's accuracy), so
+ * with mean u1 = U1/m1 running to the saturation the pair is referenced to,
+ * the COLD END is
+ *
+ *     u_a = 2 u1 - u_f
+ *
+ * and the inlet enthalpy prices only the mass actually entering (otsgRates),
+ * never the water already standing there.
  */
-export function reconcileSlugMass(
-  m1: number, uFRef: number, uF: number, uIn: number, massTotal: number,
-  // Liquid the leftovers can actually give up (kg). The joining rule assumes
-  // boiling-section liquid at uFRef exists to join; past what the leftovers
-  // hold there is nothing to join, and pulling more would leave a sliver
-  // carrying all the remaining energy - which the partition's sentinel
-  // reads as "pressure far too low" and the root find then chases upward.
-  // Infinity = no such limit (tests of the bare profile rule).
+export interface OtsgSlug {
+  m1: number;      // kg
+  U1: number;      // J
+  /** Saturated-liquid energy (J/kg) the pair was last reconciled to;
+   *  undefined = take it as it stands (first evaluation). */
+  uFRef?: number;
+}
+
+/** Never more slug than the tube holds. Capping the mass rescales the energy
+ *  with it, so the profile keeps its shape (its mean u is unchanged). */
+function capSlug(m1: number, U1: number, massTotal: number): { m1: number; U1: number } {
+  if (!(m1 > massTotal)) return { m1, U1 };
+  return { m1: massTotal, U1: massTotal > 0 ? U1 * massTotal / m1 : 0 };
+}
+
+/**
+ * Move the economizer boundary with pressure - one expression, both
+ * directions.
+ *
+ * The profile's COLD END is the physical invariant of a pressure move: no
+ * heat has crossed the tube wall, so the coldest water in the slug is still
+ * the coldest water in the slug. What moves is the hot end, which is where
+ * saturation now is. Preserving the profile's mass density in energy space,
+ * dm/du = m1/(u_fRef - u_a), and re-cutting it at the new saturation gives
+ *
+ *     m1' = m1 (u_f - u_a)/(u_fRef - u_a),    U1' = m1' (u_a + u_f)/2
+ *
+ * which reads, on a FALL, as the part of the profile above the new
+ * saturation flashing out of the section (carrying its own profile mean -
+ * the leftovers ARE totals minus slug, so that accounting is automatic);
+ * and on a RISE as boiling-section liquid at the old saturation joining and
+ * being warmed to fill the newly-subcooled span, the latent heat for which
+ * comes from the vapour condensing beside it (again automatic). Identity at
+ * u_f = u_fRef, continuous through it, and exactly reversible.
+ *
+ * The rise is capped by `joinCap` - the liquid the leftovers can actually
+ * give up (slugJoinCap): past what they hold there is nothing to join, and
+ * pulling more would leave a sliver carrying all the remaining energy, which
+ * the partition's sentinel reads as "pressure far too low" and the root find
+ * then chases upward. A capped join keeps the cold end and thins the
+ * profile instead.
+ *
+ * The MASS-ledger predecessor needed a different rule per direction, and its
+ * rise had to over-join to undo its own repricing (its denominator was
+ * (u_fRef - u_a) - (u_f - u_fRef), so it grew faster than the profile does);
+ * with the energy carried there is nothing to undo.
+ */
+export function reconcileSlug(
+  m1: number, U1: number, uFRef: number, uF: number, massTotal: number,
   joinCap = Infinity,
-): number {
-  if (!(m1 > 0)) return 0;
-  if (!Number.isFinite(uFRef) || uFRef === uF) return Math.min(m1, massTotal);
-  const spanRef = uFRef - uIn;
-  if (!(spanRef > 0)) return Math.min(m1, massTotal);
-  let out: number;
-  if (uF < uFRef) {
-    out = m1 * Math.max(0, uF - uIn) / spanRef;
-  } else {
-    const denom = 2 * uFRef - uIn - uF;
-    const grow = denom > 0 ? m1 * (uF - uFRef) / denom : Infinity;
-    out = m1 + Math.min(grow, Math.max(0, joinCap));
-  }
-  return Math.max(0, Math.min(out, massTotal));
+): { m1: number; U1: number } {
+  if (!(m1 > 0)) return { m1: 0, U1: 0 };
+  // With no usable reference (the first evaluation, or a pair whose mean has
+  // already reached the reference) the profile is simply read at the CURRENT
+  // saturation, which makes the expression below the exact identity.
+  let ref = Number.isFinite(uFRef) ? uFRef : uF;
+  let uA = 2 * U1 / m1 - ref;
+  if (!(ref - uA > 0)) { ref = uF; uA = 2 * U1 / m1 - ref; }
+  // The whole profile is at or above saturation - the section has boiled
+  // away. This is where a slug dying under a hot wall ENDS: its mass and its
+  // subcooling go to zero together (m1 stays proportional to the span,
+  // because the duty carries the section's own area), and whichever of the
+  // two crosses first, the sliver that is left is not subcooled water and
+  // its energy belongs to the leftovers, which is where subtracting it puts
+  // it. No floor, and nothing to switch.
+  const span = uF - uA;
+  if (!(span > 0)) return { m1: 0, U1: 0 };
+  let m1New = m1 * span / (ref - uA);
+  if (uF > ref) m1New = m1 + Math.min(m1New - m1, Math.max(0, joinCap));
+  m1New = Math.min(m1New, massTotal);
+  return { m1: m1New, U1: m1New * 0.5 * (uA + uF) };
 }
 
 /**
  * Liquid the leftovers (mR, UR) can give to the economizer when the
- * pressure rises: joining removes mass at uFRef and must leave the remainder
- * no hotter than saturated vapor at the new pressure - the most the
- * two-phase remainder can be drained of liquid. Zero when the leftovers are
- * already dry (or empty).
+ * pressure rises: joining removes mass at `uJoin` - the mean energy the
+ * joining water leaves with, saturated liquid at the old pressure warmed to
+ * fill the newly-subcooled span - and must leave the remainder no hotter
+ * than saturated vapor at the new pressure, the most a two-phase remainder
+ * can be drained of liquid. Zero when the leftovers are already dry (or
+ * empty).
  */
-export function slugJoinCap(mR: number, UR: number, uFRef: number, uG: number): number {
+export function slugJoinCap(mR: number, UR: number, uJoin: number, uG: number): number {
   if (!(mR > 0)) return 0;
   const uBar = UR / mR;
-  if (!(uBar < uG) || !(uG > uFRef)) return 0;
-  return mR * (uG - uBar) / (uG - uFRef);
+  if (!(uBar < uG) || !(uG > uJoin)) return 0;
+  return mR * (uG - uBar) / (uG - uJoin);
 }
 
 /**
@@ -758,11 +809,9 @@ export interface OtsgAtP {
 export interface OtsgAtPArgs {
   massTotal: number;
   UTotal: number;
-  m1Ledger: number;
-  uFeedIn: number;
-  /** Saturation liquid energy the ledger was last reconciled to; undefined
-   *  = take the ledger as it stands (see reconcileSlugMass). */
-  uFRef?: number;
+  /** The economizer's integrated (mass, energy) pair and the saturation it
+   *  was last reconciled to - see OtsgSlug and reconcileSlug. */
+  slug: OtsgSlug;
   /** The wall pin as an energy offset above saturated vapour, u3 - u_g. */
   du3: number;
   /** Warm start for the superheated-volume inversion. */
@@ -791,38 +840,31 @@ export interface OtsgAtPArgs {
  * test-suite's OTSG seam-continuity cases.
  */
 export function otsgPartitionAtP(P: number, a: OtsgAtPArgs): OtsgAtP {
-  const { massTotal, UTotal, m1Ledger, uFeedIn, uFRef, du3 } = a;
+  const { massTotal, UTotal, slug, du3 } = a;
+  const uFRef = slug.uFRef;
   const sat = saturationAtP(P);
-  const u1 = subcooledSectionMean(uFeedIn, sat);
-  const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
-  // The slug ledger is a MASS, priced at the profile mean u1(P) - so a
-  // falling pressure reprices the same slug COLDER and the energy
-  // difference flows to the vapor side of the books by construction,
-  // which is exactly the flash a depressurized slug undergoes. (The
-  // energy-ledger variant could not express that: as u_f fell, the same
-  // joules claimed MORE mass than the tube held, and a blowdown walked
-  // it into a partition no pressure could pack.) The cap at the node's
-  // inventory bites only when draws have removed slug water the ledger
-  // never saw leave - which the drift watch reports.
-  // The boundary moves with pressure: flash on the way down, subcooled
-  // liquid joining on the way up (reconcileSlugMass). The profile inlet is
-  // the same one subcooledSectionMean prices the section against.
-  const m1Raw = Math.min(m1Ledger, massTotal);
-  // How much liquid the leftovers can give the slug on a pressure rise:
-  // judged with the slug priced at the REFERENCE saturation (the energy
-  // it actually held), not at this trial pressure - pricing it at the
-  // trial pressure is the repricing the boundary move exists to replace,
-  // and it let the root find talk itself up to 220 bar.
+  // The economizer carries its own (mass, energy), and the boundary moves
+  // with pressure from that pair: the part of the profile above the new
+  // saturation flashes out on the way down, boiling-section liquid joins on
+  // the way up (reconcileSlug). Nothing here is priced from the feed - the
+  // slug's mean IS its own state, so a pressure move no longer reprices the
+  // water standing in the tube and a feed-temperature move no longer
+  // reprices it either.
+  const raw = capSlug(slug.m1, slug.U1, massTotal);
+  // How much liquid the leftovers can give the slug on a pressure rise,
+  // judged with the slug at the energy it actually holds (no repricing to
+  // undo, which is what let the root find talk itself up to 220 bar).
   let joinCap = 0;
   if (uFRef !== undefined && sat.u_f > uFRef) {
-    const uInRef = Math.min(uFeedIn, uFRef - 25e3);
-    const URRef = UTotal - m1Raw * 0.5 * (uInRef + uFRef);
-    joinCap = slugJoinCap(massTotal - m1Raw, URRef, uFRef, sat.u_g);
+    joinCap = slugJoinCap(massTotal - raw.m1, UTotal - raw.U1,
+      0.5 * (uFRef + sat.u_f), sat.u_g);
   }
-  const m1 = reconcileSlugMass(m1Raw, uFRef ?? NaN, sat.u_f,
-    Math.min(uFeedIn, sat.u_f - 25e3), massTotal, joinCap);
+  const rec = reconcileSlug(raw.m1, raw.U1, uFRef ?? NaN, sat.u_f, massTotal, joinCap);
+  const m1 = rec.m1;
+  const u1 = m1 > 0 ? rec.U1 / m1 : sat.u_f;
+  const v1 = subcooledLiquidV(Math.max(1e4, Math.min(u1, sat.u_f)));
   const mR = massTotal - m1;
-  const UR = UTotal - m1 * u1;
+  const UR = UTotal - rec.U1;
   const vBarFull = boilingMeanVolume(sat.v_f, sat.v_g, 1);
   const x2BarFull = (vBarFull - sat.v_f) / (sat.v_g - sat.v_f);
   const u2Full = sat.u_f + x2BarFull * (sat.u_g - sat.u_f);
@@ -885,21 +927,24 @@ export function otsgPartitionAtP(P: number, a: OtsgAtPArgs): OtsgAtP {
 export function evaluateOtsgPartition(
   massTotal: number,
   UTotal: number,
-  m1Ledger: number,
-  uFeedIn: number,
+  // The economizer's integrated (mass, energy) pair and the saturation it
+  // was last reconciled to (see OtsgSlug); the boundary moves with pressure
+  // relative to that reference in reconcileSlug.
+  slug: OtsgSlug,
   geom: OtsgGeometry,
   pin: OtsgWallPin,
   PStart?: number,
-  // Saturation liquid energy (J/kg) the ledger was last reconciled to; the
-  // economizer boundary moves with pressure relative to it (see
-  // reconcileSlugMass). Undefined = first evaluation, ledger taken as is.
-  uFRef?: number,
   // Ask for the pressure tangent (see OtsgEval.tangent); hFeed prices the
   // mass perturbation the way feed arrives.
   tangentSpec?: { hFeed: number },
 ): OtsgEval {
+  const m1Ledger = slug.m1;
   if (!Number.isFinite(m1Ledger) || m1Ledger < 0) {
     throw new Error(`[OTSG] economizer ledger is not a physical mass: m1=${m1Ledger} kg`);
+  }
+  if (!Number.isFinite(slug.U1) || slug.U1 < 0 || (slug.U1 > 0 && !(m1Ledger > 0))) {
+    throw new Error(`[OTSG] economizer ledger is not a physical (mass, energy) pair: ` +
+      `m1=${m1Ledger} kg carrying U1=${slug.U1} J. An empty section holds no energy.`);
   }
   // A half-built pin would silently price every draw at saturation (the
   // effectiveness guards read an undefined gas side as "nothing to heat
@@ -1081,9 +1126,11 @@ export function evaluateOtsgPartition(
       : v3Carry;
   // The residual is a function of (P; totals, ledger). Solving takes the
   // node's own; the tangent below perturbs them at the solved pressure.
-  const atPX = (P: number, massTotal: number, UTotal: number, m1Ledger: number): AtP => {
+  const atPX = (P: number, massTotal: number, UTotal: number, m1L: number, U1L: number): AtP => {
     const r = otsgPartitionAtP(P, {
-      massTotal, UTotal, m1Ledger, uFeedIn, uFRef, du3, v3Hint: carriedHint(P),
+      massTotal, UTotal,
+      slug: { m1: m1L, U1: U1L, uFRef: slug.uFRef },
+      du3, v3Hint: carriedHint(P),
     });
     if (r.v3Solved) { v3Carry = r.v3; v3CarryP = P; }
     return r;
@@ -1094,7 +1141,7 @@ export function evaluateOtsgPartition(
   // warm-started from the node's last published pressure. V(P) falls with
   // P (every section shrinks), so the bracket is clean.
   // ----------------------------------------------------------------
-  const atP = (P: number): AtP => atPX(P, massTotal, UTotal, m1Ledger);
+  const atP = (P: number): AtP => atPX(P, massTotal, UTotal, slug.m1, slug.U1);
 
   const solveP = (): { P: number; fin: AtP } | 'supercritical' | null => {
     // The Illinois loop's accepting exit collapses the bracket onto its last
@@ -1273,18 +1320,26 @@ export function evaluateOtsgPartition(
       const dm = Math.max(0.5, 2e-3 * massTotal);
       const dU = Math.max(1e5, 2e-3 * Math.abs(UTotal));
       const dP = 2e-3 * P;
-      const R = (Pq: number, mT: number, UT: number, m1L: number): number => {
-        const r = atPX(Pq, mT, UT, m1L).Vsum - V;
+      const R = (Pq: number, mT: number, UT: number, m1L: number, U1L: number): number => {
+        const r = atPX(Pq, mT, UT, m1L, U1L).Vsum - V;
         if (!Number.isFinite(r) || Math.abs(r) > 1e3 * V) throw new Error('sentinel');
         return r;
       };
-      const R0 = R(P, massTotal, UTotal, m1Ledger);
-      const RP = (R(P + dP, massTotal, UTotal, m1Ledger) - R0) / dP;
+      const m1L = slug.m1, U1L = slug.U1;
+      const R0 = R(P, massTotal, UTotal, m1L, U1L);
+      const RP = (R(P + dP, massTotal, UTotal, m1L, U1L) - R0) / dP;
       if (!(RP < 0)) throw new Error('non-monotone residual');
-      const dPdm = -((R(P, massTotal + dm, UTotal + dm * tangentSpec.hFeed, m1Ledger + dm) - R0) / dm) / RP;
-      const dPdU = -((R(P, massTotal, UTotal + dU, m1Ledger) - R0) / dU) / RP;
-      const dPdm1 = -((R(P, massTotal, UTotal, m1Ledger + dm) - R0) / dm) / RP;
-      if ([dPdm, dPdU, dPdm1].every(Number.isFinite)) ev.tangent = { dPdm, dPdU, dPdm1 };
+      // Feed arrival moves all four together: mass, energy, and the slug's
+      // own pair (the entering water lands in the economizer at its own
+      // enthalpy).
+      const dPdm = -((R(P, massTotal + dm, UTotal + dm * tangentSpec.hFeed,
+        m1L + dm, U1L + dm * tangentSpec.hFeed) - R0) / dm) / RP;
+      const dPdU = -((R(P, massTotal, UTotal + dU, m1L, U1L) - R0) / dU) / RP;
+      const dPdm1 = -((R(P, massTotal, UTotal, m1L + dm, U1L) - R0) / dm) / RP;
+      const dPdU1 = -((R(P, massTotal, UTotal, m1L, U1L + dU) - R0) / dU) / RP;
+      if ([dPdm, dPdU, dPdm1, dPdU1].every(Number.isFinite)) {
+        ev.tangent = { dPdm, dPdU, dPdm1, dPdU1 };
+      }
     } catch {
       // no tangent in this neighborhood
     }
@@ -1372,19 +1427,43 @@ export interface OtsgRates {
 }
 
 /**
- * Section rates from the energy balances with the profile closures held.
- * Each balance is d(m h-bar - m P v-bar)/dt = W_in h_in - W_out h_out + Q -
- * P dV/dt; with v-bar constant per evaluation the P dV folds into using the
- * section MEAN enthalpy h-bar on the storage side, giving
+ * Section rates: the ends run their own open-system balances, and the
+ * boiling section - whose energy is DERIVED from its profile - hands over
+ * the interface flux that makes its balance close.
  *
- *   W12 = (Q1 - W_in (hBar1 - h_in)) / (h_f - hBar1)
+ *   W12 = Q1 / (h_f - h_a) = Q1 / (2 (h_f - hBar1))
  *   W23 = (Q2 - W12 (hBar2 - h_f)) / (h_g - hBar2)
  *
- * with hBar taken from the EVALUATED section means (not the idealized
- * midpoint) so the total energy balance closes exactly - the test checks it
- * to 1e-9. Both fluxes reduce to W at steady state and go NEGATIVE when the
- * physics says the boundary recedes: cold feed with no heat pushes the
- * saturation boundary upward, mass converting 2 -> 1 at h_f.
+ * W12 IS THE MASS CROSSING SATURATION, and with the slug carrying its own
+ * energy that is all it is. The profile is uniform in enthalpy per unit
+ * mass, dm/dh = m1/(h_f - h_a), and the wall pushes every kilogram up at
+ * Q1/m1, so the flux across the saturation line is Q1/(h_f - h_a) - and the
+ * cold end h_a = 2 hBar1 - h_f is the profile's own, not the feed's. Two
+ * consequences the mass-ledger form could not express:
+ *
+ *  - a STANDING slug (W_in = 0) warms instead of only shortening. The old
+ *    numerator was Q1 - W_in (hBar1 - h_in), which at W_in = 0 forced the
+ *    whole duty into boundary motion: W12 = Q1/(h_f - hBar1), twice the
+ *    batch rate, while the real slug's mean energy rose and the energy the
+ *    pinned profile could not hold landed on the leftovers. Now
+ *    dm1/dt = -Q1/(h_f - h_a) and dh_a/dt = Q1/m1 - the profile rises
+ *    uniformly while its hot end boils off, with no switch between the
+ *    regimes;
+ *  - the boundary no longer moves for a flow that carries no heat. Cold feed
+ *    with Q1 = 0 gives W12 = 0: the column shifts up bodily, the slug gets
+ *    longer and colder on average, and nothing crosses saturation - which is
+ *    the physics (the interface is a material one when there is no phase
+ *    change). The pinned profile had to report W12 < 0 there, converting
+ *    boiling-section mass to subcooled at h_f, because its mean was not
+ *    allowed to move. A pressure RISE does still recruit boiling-section
+ *    liquid, and that move is reconcileSlug's, where it belongs.
+ *
+ * Steady flow is exact either way: W12 = Q1/(2(h_f - hBar1)) with
+ * Q1 = W (h_f - h_in) and hBar1 = (h_in + h_f)/2 gives W12 = W.
+ *
+ * hBar is taken from the EVALUATED section means (not an idealized
+ * midpoint), and the boiling section's W23 closes ITS balance exactly - the
+ * test checks the total to 1e-9.
  *
  * @param Q1,Q2,Q3  heat INTO each section from the wall (W)
  * @param WIn       feed mass flow into section 1 (kg/s)
@@ -1404,25 +1483,34 @@ export function otsgRates(
   const hBar1 = ev.sections[0].hBar;
   const hBar2 = ev.sections[1].hBar;
 
+  const m1 = ev.sections[0].mass;
+  // Half the profile's span in enthalpy: h_f - hBar1 = (h_f - h_a)/2.
   const d1 = sat.h_f - hBar1;
-  if (d1 <= 1e3) {
-    throw new Error(`[OTSG] subcooled section mean enthalpy ${(hBar1 / 1e3).toFixed(0)} kJ/kg ` +
+  if (m1 > 0 && !(d1 > 0)) {
+    throw new Error(`[OTSG] the subcooled section's mean enthalpy ${(hBar1 / 1e3).toFixed(0)} kJ/kg ` +
       `is at or above saturated liquid (${(sat.h_f / 1e3).toFixed(0)} kJ/kg at ` +
-      `${(ev.P / 1e5).toFixed(1)} bar). A subcooled section cannot exist with ` +
-      `near-saturated feed - this needs the feed rerouted to the two-phase ` +
-      `section, which the model does not do yet.`);
+      `${(ev.P / 1e5).toFixed(1)} bar) while it still holds ${m1.toFixed(3)} kg. ` +
+      `reconcileSlug is supposed to have flashed such a slug away entirely - ` +
+      `the partition and the ledger disagree about where saturation is.`);
   }
   const d2 = sat.h_g - hBar2;
 
-  const W12 = (Q1 - WIn * (hBar1 - hIn)) / d1;
+  // A section with no mass has no profile to push mass across: nothing
+  // crosses until the first gram arrives (and then it arrives cold, so the
+  // span it has to climb is the full one). The vanishing limit from the
+  // other side is finite without any floor: Q1 carries the section's AREA,
+  // which is proportional to its mass, so W12 = Q1/(2 d1) with both m1 and
+  // d1 going to zero linearly together stays bounded - a slug boiling away
+  // under a hot wall dies at a finite rate.
+  const W12 = m1 > 0 ? Q1 / (2 * d1) : 0;
   const W23 = (Q2 - W12 * (hBar2 - sat.h_f)) / d2;
 
   // Subcooled section: the ordinary open-system balance. Feed enters at its
   // own enthalpy, mass leaves across the boundary at h_f, the wall adds Q1,
-  // and the moving boundary does P dV work. This is the runtime closure's
-  // integrated state - every joule it reports came in through one of these
-  // three terms, so the leftovers cannot inherit energy the wall never
-  // delivered. (Its MASS follows: m1 = U1/u1Bar - see evaluateOtsgAtP.)
+  // and the moving boundary does P dV work. Both the mass and the energy are
+  // integrated, so every joule the slug reports came in through one of these
+  // three terms and the leftovers cannot inherit energy the wall never
+  // delivered. The feed enthalpy hIn prices only the mass entering NOW.
   const dm1 = WIn - W12;
   const dU1 = WIn * hIn - W12 * sat.h_f + Q1 - ev.P * (dm1 * ev.sections[0].vBar);
 

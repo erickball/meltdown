@@ -58,7 +58,7 @@ import {
   transitStandingQ,
   streamApproach,
   marchCounterflowGas,
-  reconcileSlugMass,
+  reconcileSlug,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
 import { tubeWaterState, classifyOtsgFlows } from './operators/otsg-operator.js';
@@ -442,7 +442,12 @@ const H_FEED = U_FEED + 165e5 / saturatedLiquidDensity(473);
 /** Build a section state that occupies exactly V_tube at pressure P*. */
 function otsgStateAtP(Pstar: number, f1: number, f2: number, u3Superheat: number) {
   const sat = saturationAtP(Pstar);
+  // The slug's own energy: the profile a steadily-fed economizer actually
+  // holds (see OtsgSlug). It is uniform in ENTHALPY per unit mass - that is
+  // what a steady flow under a wall builds - so its mean enthalpy is
+  // (h_in + h_f)/2 and its mean ENERGY is that less the flow work P v1.
   const v1 = subcooledLiquidV(0.5 * (U_FEED + sat.u_f));
+  const u1 = 0.5 * (H_FEED + sat.h_f) - Pstar * v1;
   // The boiling section's MASS-averaged specific volume - the same closure the
   // model uses, so this fixture really does occupy V_tube (building it with an
   // arithmetic mean instead put 20% more mass in the section than fits, and
@@ -453,12 +458,13 @@ function otsgStateAtP(Pstar: number, f1: number, f2: number, u3Superheat: number
   const V1 = OTSG_GEOM.tubeVolume * f1, V2 = OTSG_GEOM.tubeVolume * f2;
   const V3 = OTSG_GEOM.tubeVolume - V1 - V2;
   const m3 = V3 / v3;
-  return { state: { m1: V1 / v1, m2: V2 / v2, m3, U3: m3 * u3 }, sat };
+  const m1 = V1 / v1;
+  return { state: { m1, m2: V2 / v2, m3, U1: m1 * u1, U3: m3 * u3 }, sat };
 }
 
 test('pressure closure round-trips a constructed 165-bar state', () => {
   const { state } = otsgStateAtP(165e5, 0.3, 0.5, 150e3);
-  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
   assert(Math.abs(ev.P / 165e5 - 1) < 1e-3,
     `closure should recover 165 bar, got ${(ev.P / 1e5).toFixed(2)}`);
   // Sections in their regimes: T1 < Tsat, T2 = Tsat, T3 > Tsat
@@ -472,19 +478,24 @@ test('pressure closure round-trips a constructed 165-bar state', () => {
 
 test('interface fluxes reduce to through-flow at steady state', () => {
   const { state } = otsgStateAtP(165e5, 0.3, 0.5, 150e3);
-  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
   const W = 77;
   const Q1 = W * (ev.sat.h_f - H_FEED);
   const Q2 = W * (ev.sat.h_g - ev.sat.h_f);
   const Q3 = W * (ev.hSteamOut - ev.sat.h_g);
   const r = otsgRates(ev, W, H_FEED, W, Q1, Q2, Q3);
-  assert(Math.abs(r.W12 - W) < 1e-6 && Math.abs(r.W23 - W) < 1e-6,
+  // W12 = Q1/(h_f - h_a) is an identity in the profile the section actually
+  // carries, so it reproduces the through-flow exactly - up to the fixture's
+  // own pressure round-trip (it was built at 165 bar and the closure recovers
+  // it to ~1e-4, which moves h_f by tens of J/kg against a 400 kJ/kg span).
+  // W23 closes the boiling section's balance and is exact either way.
+  assert(Math.abs(r.W12 - W) < 1e-3 * W && Math.abs(r.W23 - W) < 1e-3 * W,
     `steady state must carry W through both interfaces: W12=${r.W12.toFixed(3)}, W23=${r.W23.toFixed(3)}`);
-  assert(Math.abs(r.dm1) < 1e-6 && Math.abs(r.dm2) < 1e-6 && Math.abs(r.dm3) < 1e-6,
+  assert(Math.abs(r.dm1) < 1e-3 * W && Math.abs(r.dm2) < 1e-3 * W && Math.abs(r.dm3) < 1e-3 * W,
     'steady state must hold all section masses');
-  assert(Math.abs(r.dU3) < 1,
+  assert(Math.abs(r.dU3) < 1e-3 * W * ev.sat.h_g,
     `steady state must hold U3, got dU3=${r.dU3.toExponential(2)} W`);
-  assert(Math.abs(r.dU1) < 1,
+  assert(Math.abs(r.dU1) < 1e-3 * W * ev.sat.h_f,
     `steady state must hold U1 too, got dU1=${r.dU1.toExponential(2)} W`);
 });
 
@@ -492,12 +503,14 @@ test('section energy bookkeeping is exact (no leaked enthalpy)', () => {
   // Total energy rate must equal boundary fluxes + heat, for an arbitrary
   // off-steady operating point, with each section's P dV work included.
   const { state } = otsgStateAtP(165e5, 0.35, 0.45, 120e3);
-  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
   const WIn = 60, WOut = 82, Q1 = 55e6, Q2 = 70e6, Q3 = 12e6;
   const r = otsgRates(ev, WIn, H_FEED, WOut, Q1, Q2, Q3);
-  const u1Bar = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
   const u2Bar = ev.sections[1].hBar - ev.P * ev.sections[1].vBar;
-  const dUtotal = u1Bar * r.dm1 + u2Bar * r.dm2 + r.dU3;
+  // Both end sections carry their own energy; only the boiling section's is
+  // derived from its profile (u2Bar per kg), and W23 is what makes ITS
+  // balance close.
+  const dUtotal = r.dU1 + u2Bar * r.dm2 + r.dU3;
   const dVtotal = ev.sections[0].vBar * r.dm1 + ev.sections[1].vBar * r.dm2 + ev.sections[2].vBar * r.dm3;
   const balance = WIn * H_FEED - WOut * ev.hSteamOut + Q1 + Q2 + Q3 - ev.P * dVtotal;
   assert(Math.abs(dUtotal - balance) < Math.abs(balance) * 1e-9 + 1,
@@ -506,18 +519,84 @@ test('section energy bookkeeping is exact (no leaked enthalpy)', () => {
     'mass must close exactly');
 });
 
-test('cold feed with no heat pushes the boiling boundary up, not down', () => {
+test('a flow that carries no heat moves no mass across saturation', () => {
+  // Cold feed, wall dead. Nothing boils and nothing condenses, so the column
+  // simply shifts: the slug takes the feed and gets longer and colder on
+  // average, and the saturation boundary - a MATERIAL interface when there
+  // is no phase change - does not move relative to the water. The pinned-
+  // profile predecessor had to report W12 < 0 here (converting boiling
+  // mass to subcooled at h_f) purely because its mean was not free to move.
   const { state } = otsgStateAtP(100e5, 0.3, 0.5, 100e3);
-  const ev = evaluateOtsg(state, OTSG_GEOM, U_FEED);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
   const r = otsgRates(ev, 50, H_FEED, 0, 0, 0, 0);
-  assert(r.W12 < 0, `unheated cold feed must recede the boundary (W12 negative), got ${r.W12.toFixed(1)}`);
-  assert(r.dm1 > 50, 'subcooled section must grow by feed plus swept-over mass');
+  assertClose(r.W12, 0, 1e-12, 'no heat, no crossing');
+  assertClose(r.dm1, 50, 1e-12, 'the section grows by exactly what entered it');
+  assertClose(r.dU1, 50 * H_FEED - ev.P * 50 * ev.sections[0].vBar, 1,
+    'and gains exactly the feed enthalpy less the work its boundary does');
+  // ...and the profile's cold end falls toward the feed, which is the whole
+  // point: the slug's mean is its own state now.
+  const u1 = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
+  const du1 = (r.dU1 - u1 * r.dm1) / ev.sections[0].mass;
+  assert(du1 < 0, `cold feed must cool the slug's mean, got ${(du1 / 1e3).toFixed(3)} kJ/kg-s`);
+});
+
+test('a standing slug under a hot wall warms; it does not only shorten', () => {
+  // The regime the pinned profile could not express. With no feed the whole
+  // duty used to go into boundary motion - W12 = Q1/(h_f - hBar1), twice the
+  // batch-heating rate - and the energy the profile could not hold landed on
+  // the leftovers. Now dm1/dt = -Q1/(h_f - h_a) and the cold end climbs at
+  // Q1/m1: batch heating, with no switch between the regimes.
+  const { state } = otsgStateAtP(100e5, 0.3, 0.5, 100e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
+  const Q1 = 8e6;
+  const r = otsgRates(ev, 0, H_FEED, 0, Q1, 0, 0);
+  const m1 = ev.sections[0].mass;
+  const hBar1 = ev.sections[0].hBar;
+  const span = 2 * (ev.sat.h_f - hBar1);            // h_f - h_a
+  assertClose(r.W12, Q1 / span, 1e-9 * Math.abs(r.W12), 'mass crosses at Q1 over the profile span');
+  assertClose(r.dm1, -Q1 / span, 1e-9 * Math.abs(r.dm1), 'and the slug shortens at exactly that rate');
+  // The cold end rises at Q1/m1 - every kilogram heating at the same rate.
+  const u1 = hBar1 - ev.P * ev.sections[0].vBar;
+  const du1 = (r.dU1 - u1 * r.dm1) / m1;
+  assertClose(2 * du1, Q1 / m1, 1e-3 * Q1 / m1, 'the cold end climbs at Q1/m1');
+  assert(du1 > 0, 'the standing slug WARMS - the mean must rise, not hold');
+});
+
+test('a feed-temperature step prices only the water entering', () => {
+  // The pin this closure exists to remove: the slug's energy used to be
+  // m1 (u_in + u_f)/2, so a 20 K move in the feed repriced the whole
+  // standing slug in one step. Now the inlet enthalpy multiplies W_in
+  // alone, so the slug's state - and every pressure that follows from it -
+  // is untouched by a feed that is not flowing, and moves at one turnover's
+  // pace when it is.
+  const { state } = otsgStateAtP(165e5, 0.3, 0.5, 150e3);
+  const ev = evaluateOtsg(state, OTSG_GEOM);
+  const hCold = H_FEED - 20 * 4.5e3;   // ~20 K colder feed
+  const stopped = otsgRates(ev, 0, H_FEED, 0, 30e6, 40e6, 5e6);
+  const stoppedCold = otsgRates(ev, 0, hCold, 0, 30e6, 40e6, 5e6);
+  assertClose(stoppedCold.dU1, stopped.dU1, 1e-9 * Math.abs(stopped.dU1),
+    'with no feed flowing, the feed temperature changes nothing at all');
+  assertClose(stoppedCold.dm1, stopped.dm1, 1e-9 * Math.abs(stopped.dm1),
+    'nor the boundary rate');
+  // Flowing: the difference in dU1 is exactly the entering mass times the
+  // enthalpy step, and the slug's mean relaxes over one turnover m1/W.
+  const W = 40;
+  const hot = otsgRates(ev, W, H_FEED, 0, 30e6, 40e6, 5e6);
+  const cold = otsgRates(ev, W, hCold, 0, 30e6, 40e6, 5e6);
+  assertClose(hot.dU1 - cold.dU1, W * (H_FEED - hCold), 1e-6 * W * H_FEED,
+    'a flowing feed prices exactly the mass it delivers');
+  const m1 = ev.sections[0].mass;
+  const u1 = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
+  const du1 = (cold.dU1 - u1 * cold.dm1) / m1;
+  const turnover = m1 / W;
+  assert(Math.abs(du1) < Math.abs(u1) / turnover,
+    'the mean cannot move faster than one turnover allows');
 });
 
 test('empty superheat section: smooth pass-through, no singularities', () => {
   const { state } = otsgStateAtP(165e5, 0.35, 0.65, 100e3);
   const s = { ...state, m3: 0, U3: 0 };
-  const ev = evaluateOtsg(s, OTSG_GEOM, U_FEED);
+  const ev = evaluateOtsg(s, OTSG_GEOM);
   assert(Number.isFinite(ev.P) && Number.isFinite(ev.hSteamOut),
     'evaluation must stay finite with an empty superheat section');
   assert(Math.abs(ev.hSteamOut - ev.sat.h_g) < 1,
@@ -1102,61 +1181,85 @@ test('lattice reactivity path survives full voiding without NaN', () => {
 
 category('OTSG closure');
 
-test('economizer boundary is still at the same pressure', () => {
+test('the boundary move is the identity when saturation has not moved', () => {
   const sat = saturationAtP(165e5);
   const uIn = sat.u_f - 300e3;
-  assertClose(reconcileSlugMass(350, sat.u_f, sat.u_f, uIn, 480), 350, 1e-12, 'same saturation -> same slug');
-  assertClose(reconcileSlugMass(350, NaN, sat.u_f, uIn, 480), 350, 1e-12, 'no reference yet -> ledger as is');
-  assertClose(reconcileSlugMass(600, sat.u_f, sat.u_f, uIn, 480), 480, 1e-12, 'never more than the node holds');
+  const U1 = 350 * 0.5 * (uIn + sat.u_f);
+  const same = reconcileSlug(350, U1, sat.u_f, sat.u_f, 480);
+  assertClose(same.m1, 350, 1e-12, 'same saturation -> same slug');
+  assertClose(same.U1, U1, 1e-9 * U1, 'and the same energy');
+  const fresh = reconcileSlug(350, U1, NaN, sat.u_f, 480);
+  assertClose(fresh.m1, 350, 1e-12, 'no reference yet -> pair as it stands');
+  const capped = reconcileSlug(600, 600 * 0.5 * (uIn + sat.u_f), sat.u_f, sat.u_f, 480);
+  assertClose(capped.m1, 480, 1e-12, 'never more than the node holds');
+  assertClose(capped.U1 / capped.m1, 0.5 * (uIn + sat.u_f), 1e-9 * sat.u_f,
+    'and capping the mass keeps the profile: the mean does not move');
 });
 
 test('a falling pressure flashes the hot end of the slug, energy carried exactly', () => {
-  // Linear profile from u_in to the OLD saturation; the part above the new
-  // saturation leaves. The fraction that stays is (u_f - u_in)/(u_ref - u_in),
-  // and the flashed part must carry exactly its own profile-mean energy so
-  // that the leftovers (totals minus slug) inherit it without invention.
+  // The profile runs from its own cold end u_a up to the OLD saturation; the
+  // part above the new saturation leaves. The fraction that stays is
+  // (u_f - u_a)/(u_ref - u_a), and the flashed part must carry exactly its
+  // own profile-mean energy so that the leftovers (totals minus slug)
+  // inherit it without invention.
   const satHi = saturationAtP(165e5), satLo = saturationAtP(50e5);
-  const uIn = satHi.u_f - 800e3;   // inlet colder than the 50 bar saturation
+  const uA = satHi.u_f - 800e3;   // cold end colder than the 50 bar saturation
   const m1 = 350;
-  // A slug whose inlet is already above the new saturation flashes entirely
-  assertClose(reconcileSlugMass(m1, satHi.u_f, satLo.u_f, satLo.u_f + 1e3, 480), 0, 1e-12, 'all of it above saturation -> all flashed');
-  const m1New = reconcileSlugMass(m1, satHi.u_f, satLo.u_f, uIn, 480);
-  const f = (satLo.u_f - uIn) / (satHi.u_f - uIn);
-  assertClose(m1New, m1 * f, 1e-9, 'remaining slug is the profile fraction below the new saturation');
-  assert(m1New < m1, 'the slug must shrink when pressure falls');
-  const U1Old = m1 * 0.5 * (uIn + satHi.u_f);
-  const U1New = m1New * 0.5 * (uIn + satLo.u_f);
+  const U1 = m1 * 0.5 * (uA + satHi.u_f);
+  // A slug whose cold end is already above the new saturation flashes entirely
+  const hot = reconcileSlug(m1, m1 * 0.5 * (satLo.u_f + 1e3 + satHi.u_f), satHi.u_f, satLo.u_f, 480);
+  assertClose(hot.m1, 0, 1e-12, 'all of it above saturation -> all flashed');
+  assertClose(hot.U1, 0, 1e-12, 'and it takes its energy with it');
+  const rec = reconcileSlug(m1, U1, satHi.u_f, satLo.u_f, 480);
+  const f = (satLo.u_f - uA) / (satHi.u_f - uA);
+  assertClose(rec.m1, m1 * f, 1e-9, 'remaining slug is the profile fraction below the new saturation');
+  assert(rec.m1 < m1, 'the slug must shrink when pressure falls');
+  assertClose(rec.U1 / rec.m1, 0.5 * (uA + satLo.u_f), 1e-9 * satLo.u_f,
+    'and the remainder keeps its cold end: mean = (u_a + u_f_new)/2');
   const flashedMean = 0.5 * (satHi.u_f + satLo.u_f);
-  assertClose(U1Old - U1New, (m1 - m1New) * flashedMean, 1e-6 * U1Old,
+  assertClose(U1 - rec.U1, (m1 - rec.m1) * flashedMean, 1e-6 * U1,
     'energy handed to the leftovers = flashed mass at its own profile mean');
 });
 
 test('a rising pressure lets the newly subcooled liquid join the slug', () => {
   // Boiling-section liquid sat at the old saturation; now it is subcooled by
-  // the rise and belongs to the economizer. The joined mass carries u_ref,
-  // so the enlarged profile's energy is the old slug's plus exactly that.
+  // the rise and belongs to the economizer, warmed to fill the new span by
+  // the vapour condensing beside it. The profile density dm/du is preserved,
+  // so the cold end does not move.
   const satLo = saturationAtP(50e5), satHi = saturationAtP(60e5);
-  const uIn = satLo.u_f - 400e3;
+  const uA = satLo.u_f - 400e3;
   const m1 = 300;
-  const m1New = reconcileSlugMass(m1, satLo.u_f, satHi.u_f, uIn, 480);
-  assert(m1New > m1, `the slug must grow when pressure rises (${m1New.toFixed(2)} vs ${m1})`);
-  const dm = m1New - m1;
-  const U1Old = m1 * 0.5 * (uIn + satLo.u_f);
-  const U1New = m1New * 0.5 * (uIn + satHi.u_f);
-  assertClose(U1New - U1Old, dm * satLo.u_f, 1e-6 * U1Old, 'joined mass arrives at the old saturation energy');
+  const U1 = m1 * 0.5 * (uA + satLo.u_f);
+  const rec = reconcileSlug(m1, U1, satLo.u_f, satHi.u_f, 480);
+  assert(rec.m1 > m1, `the slug must grow when pressure rises (${rec.m1.toFixed(2)} vs ${m1})`);
+  assertClose(rec.m1, m1 * (satHi.u_f - uA) / (satLo.u_f - uA), 1e-9,
+    'it grows by the profile density times the newly subcooled span');
+  assertClose(rec.U1 / rec.m1, 0.5 * (uA + satHi.u_f), 1e-9 * satHi.u_f,
+    'and the enlarged profile keeps the same cold end');
+  // Exactly reversible: going back down returns the original pair
+  const back = reconcileSlug(rec.m1, rec.U1, satHi.u_f, satLo.u_f, 480);
+  assertClose(back.m1, m1, 1e-9, 'the move is exactly reversible in mass');
+  assertClose(back.U1, U1, 1e-9 * U1, 'and in energy');
   // A rise large enough to subcool everything makes the whole tube economizer
   const satWay = saturationAtP(200e5);
-  assertClose(reconcileSlugMass(m1, satLo.u_f, satWay.u_f, uIn, 480), 480, 1e-12, 'capped at the node inventory');
+  assertClose(reconcileSlug(m1, U1, satLo.u_f, satWay.u_f, 480).m1, 480, 1e-12,
+    'capped at the node inventory');
+  // A capped join thins the profile rather than moving its cold end
+  const held = reconcileSlug(m1, U1, satLo.u_f, satHi.u_f, 480, 5);
+  assertClose(held.m1, m1 + 5, 1e-12, 'the join is limited by what the leftovers can give');
+  assertClose(held.U1 / held.m1, 0.5 * (uA + satHi.u_f), 1e-9 * satHi.u_f,
+    'and the cold end is still the cold end');
 });
 
 test('the boundary move is continuous through no-change', () => {
   const sat = saturationAtP(100e5);
-  const uIn = sat.u_f - 300e3;
-  const up = reconcileSlugMass(200, sat.u_f, sat.u_f + 10, uIn, 480);
-  const dn = reconcileSlugMass(200, sat.u_f, sat.u_f - 10, uIn, 480);
-  assertClose(up, 200, 1e-2, 'tiny rise moves the slug a tiny amount');
-  assertClose(dn, 200, 1e-2, 'tiny fall moves the slug a tiny amount');
-  assert(up > 200 && dn < 200, 'and in the right directions');
+  const uA = sat.u_f - 300e3;
+  const U1 = 200 * 0.5 * (uA + sat.u_f);
+  const up = reconcileSlug(200, U1, sat.u_f, sat.u_f + 10, 480);
+  const dn = reconcileSlug(200, U1, sat.u_f, sat.u_f - 10, 480);
+  assertClose(up.m1, 200, 1e-2, 'tiny rise moves the slug a tiny amount');
+  assertClose(dn.m1, 200, 1e-2, 'tiny fall moves the slug a tiny amount');
+  assert(up.m1 > 200 && dn.m1 < 200, 'and in the right directions');
 });
 
 test('boiling section mass-averages its quality, not its length', () => {
@@ -1206,6 +1309,9 @@ test('a boiling section that stops short of dry steam is wetter still', () => {
 // steam hotter than its own metal.
 
 const PART_GEOM = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
+/** No economizer at all: an empty section holds no mass and no energy, and
+ *  needs no saturation reference. */
+const EMPTY_SLUG = { m1: 0, U1: 0 };
 /** A test pin: wall temperature straight through (no draw, so the section
  *  soaks fully to its metal). A wall at 273 K pins the steam at saturation -
  *  the dryout limit. */
@@ -1238,7 +1344,7 @@ test('flooded bundle: the boiling section stops short of dry steam, at its own p
   const v = sat.v_f + x * (sat.v_g - sat.v_f);
   const u = sat.u_f + x * (sat.u_g - sat.u_f);
   const mass = PART_GEOM.tubeVolume / v;
-  const ev = evaluateOtsgPartition(mass, mass * u, 0, sat.u_f - 300e3, PART_GEOM, PIN_COLD);
+  const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, PART_GEOM, PIN_COLD);
   assertClose(ev.P / 1e5, 80, 0.1, 'the volume constraint recovers the pressure');
   assert(ev.sections[2].mass === 0,
     `a flooded bundle has no dry steam, got m3=${ev.sections[2].mass.toFixed(1)} kg`);
@@ -1258,7 +1364,7 @@ test('a two-phase bundle over a cold wall dries out rather than superheating', (
   const v = sat.v_f + x * (sat.v_g - sat.v_f);
   const u = sat.u_f + x * (sat.u_g - sat.u_f);
   const mass = PART_GEOM.tubeVolume / v;
-  const ev = evaluateOtsgPartition(mass, mass * u, 0, sat.u_f - 300e3, PART_GEOM, PIN_COLD);
+  const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, PART_GEOM, PIN_COLD);
   assertClose(ev.P / 1e5, 80, 0.1, 'pressure recovered');
   assert(ev.sections[2].mass > 0.5 * mass,
     `most of an 80%-quality bundle is dry steam, got ${(100 * ev.sections[2].mass / mass).toFixed(0)}%`);
@@ -1273,7 +1379,7 @@ test('a dry bundle is all superheat, at its own bulk state and pressure', () => 
   const u = sat.u_g + 400e3;
   const v = superheatedV(u, P0);
   const mass = PART_GEOM.tubeVolume / v;
-  const ev = evaluateOtsgPartition(mass, mass * u, 0, sat.u_f - 300e3, PART_GEOM, PIN_COLD);
+  const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, PART_GEOM, PIN_COLD);
   assertClose(ev.P / 1e5, 80, 0.5, 'pressure recovered from the vapor state');
   assert(ev.sections[2].mass > 0.99 * mass,
     `a superheated bundle is all superheat section, got ${(100 * ev.sections[2].mass / mass).toFixed(1)}%`);
@@ -1299,7 +1405,7 @@ test('a constructed three-section state round-trips, pressure included', () => {
   const m1 = 4000, m2 = 900, m3 = 120;
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
   const ev = evaluateOtsgPartition(
-    m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, m1, uFeed, geom,
+    m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, { m1, U1: m1 * u1Bar }, geom,
     { TWall3: T3, hA3Full: 1200 * geom.heatArea, WCp3: 0,
       TGasIn3: T3, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 });
   assertClose(ev.P / 1e5, 80, 0.8, 'the pressure the partition was built at comes back');
@@ -1332,7 +1438,7 @@ test('the published pressure is the partition\'s, not the mush read', () => {
   const mushP = calculateState(m, U, V).pressure;
   assert(mushP < 60e5,
     `the uniform read of a partitioned boiler must be badly biased low, got ${(mushP / 1e5).toFixed(1)} bar`);
-  const ev = evaluateOtsgPartition(m, U, m1, uFeed,
+  const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
     { TWall3: calculateState(1, u3, v3).temperature, hA3Full: 1200 * 2000, WCp3: 0,
       TGasIn3: calculateState(1, u3, v3).temperature, hAGas3Full: 1200 * 2000, CGas3: 1e8 });
@@ -1359,7 +1465,7 @@ test('the wall referees the partition: steam follows its metal, never past it', 
   let lastT3 = 0;
   for (const dT of [20, 60, 120]) {
     const TW = sat0.T + dT;
-    const ev = evaluateOtsgPartition(m, U, m1, uFeed, geom, pinAt(TW));
+    const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(TW));
     // The pin's own fidelity is ~1 K (interpolated inversion plus a 0.25 K
     // refresh band) - the referee bounds the steam AT that fidelity, which
     // is far inside the tens-of-kelvin film differences that matter.
@@ -1391,8 +1497,8 @@ test('a stronger steam draw pulls the pin toward saturation', () => {
   const m = m1 + m2 + m3;
   const U = m1 * u1Bar + m2 * u2 + m3 * u3c;
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3c, tubeLength: 1, heatArea: 2000 };
-  const still = evaluateOtsgPartition(m, U, m1, uFeed, geom, pinAt(sat0.T + 120, 0));
-  const drawing = evaluateOtsgPartition(m, U, m1, uFeed, geom, pinAt(sat0.T + 120, 500e3));
+  const still = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(sat0.T + 120, 0));
+  const drawing = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(sat0.T + 120, 500e3));
   assert(drawing.sections[2].T < still.sections[2].T - 5,
     `a drawn-through section must sit cooler than a stagnant one ` +
     `(${drawing.sections[2].T.toFixed(1)} vs ${still.sections[2].T.toFixed(1)} K)`);
@@ -1414,7 +1520,7 @@ test('nothing steps as a bundle floods, dries out and superheats', () => {
   let maxJumpM3 = 0, maxJumpH = 0, maxJumpF = 0, maxJumpP = 0;
   for (let i = 0; i <= N; i++) {
     const u = uLo + (uHi - uLo) * i / N;
-    const ev = evaluateOtsgPartition(mass, mass * u, 0, sat80.u_f - 300e3, PART_GEOM, PIN_COLD);
+    const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, PART_GEOM, PIN_COLD);
     assertClose(sectionVolume(ev), PART_GEOM.tubeVolume, 1e-4 * PART_GEOM.tubeVolume,
       `volume must close at u=${(u / 1e3).toFixed(0)} kJ/kg`);
     const cur = { m3: ev.sections[2].mass, h: ev.hSteamOut, f3: ev.sections[2].lengthFrac, P: ev.P };
@@ -1445,7 +1551,7 @@ test('nothing steps as the wall warms through saturation', () => {
   let maxJumpM3 = 0, maxJumpT = 0, maxJumpH = 0, maxJumpP = 0;
   for (let i = 0; i <= N; i++) {
     const TW = sat.T - 20 + 60 * i / N;
-    const ev = evaluateOtsgPartition(mass, mass * u, 0, sat.u_f - 300e3, PART_GEOM, pinAt(TW));
+    const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, PART_GEOM, pinAt(TW));
     const cur = { m3: ev.sections[2].mass, T3: ev.sections[2].T, h: ev.hSteamOut, P: ev.P };
     if (prev) {
       maxJumpM3 = Math.max(maxJumpM3, Math.abs(cur.m3 - prev.m3) / mass);
@@ -1492,7 +1598,7 @@ test('both regime seams join branch against branch, not just by eye', () => {
     let lo = 0.2 * sat.u_f, hi = sat.u_g + 1.2e6;
     for (let i = 0; i < 80; i++) {
       const um = 0.5 * (lo + hi);
-      const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * um, m1Ledger: 0, uFeedIn: uFeed, du3 });
+      const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * um, slug: EMPTY_SLUG, du3 });
       const q = want === 'm3' ? r.m3 : r.m2;
       // m3 rises with energy, m2 falls once superheat exists.
       if (want === 'm3' ? q <= 0 : q > 0) lo = um; else hi = um;
@@ -1507,7 +1613,7 @@ test('both regime seams join branch against branch, not just by eye', () => {
       const V: number[] = [], v2: number[] = [], x2: number[] = [], m2: number[] = [], m3: number[] = [];
       for (let i = 0; i <= N; i++) {
         const u = uSeam - width + (2 * width * i) / N;
-        const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * u, m1Ledger: 0, uFeedIn: uFeed, du3 });
+        const r = otsgPartitionAtP(P0, { massTotal: mass, UTotal: mass * u, slug: EMPTY_SLUG, du3 });
         V.push(r.Vsum); v2.push(r.v2); x2.push(r.x2Bar); m2.push(r.m2); m3.push(r.m3);
       }
       for (const [name, arr] of [['Vsum', V], ['v2', v2], ['x2Bar', x2], ['m2', m2], ['m3', m3]] as const) {
@@ -1574,7 +1680,8 @@ test('the sections fit the tube whatever the totals hold', () => {
         const v = sat.v_f + x * (sat.v_g - sat.v_f);
         const u = sat.u_f + x * (sat.u_g - sat.u_f);
         const mass = PART_GEOM.tubeVolume / v;
-        const ev = evaluateOtsgPartition(mass, mass * u, slugFrac * mass, uFeed, PART_GEOM, pinAt(TW));
+        const ev = evaluateOtsgPartition(mass, mass * u,
+          { m1: slugFrac * mass, U1: slugFrac * mass * u1Bar }, PART_GEOM, pinAt(TW));
         assertClose(sectionVolume(ev), PART_GEOM.tubeVolume, 1e-3 * PART_GEOM.tubeVolume,
           `TW=${TW.toFixed(0)} K, x=${x}, slug=${slugFrac}: sections must fill the tube exactly`);
       assert(ev.sections[0].mass >= 0 && ev.sections[1].mass >= 0 && ev.sections[2].mass >= 0,
@@ -1597,7 +1704,7 @@ test('above the critical pressure the tube is one fluid, not three sections', ()
   const mass = 5000;
   const Pu = calculateState(1, u, geom.tubeVolume / mass).pressure;
   assert(Pu > P_CRITICAL, `fixture must be supercritical, got ${(Pu / 1e5).toFixed(0)} bar`);
-  const ev = evaluateOtsgPartition(mass, mass * u, 0, sat.u_f - 500e3, geom, pinAt(700));
+  const ev = evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, geom, pinAt(700));
   assert(ev.regime === 'supercritical', `no sub-critical pressure packs this, got '${ev.regime}'`);
   assertClose(ev.P / 1e5, Pu / 1e5, 0.01 * Pu / 1e5,
     'above the dome the uniform read is unbiased and IS the pressure');
@@ -1642,8 +1749,8 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
 
   const testPin = { TWall3: satW.T + 60, hA3Full: 1200 * geom.heatArea, WCp3: 0,
     TGasIn3: satW.T + 60, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 };
-  const withGas = evaluateOtsgPartition(mass, water.energy, 0, satW.u_f - 300e3, geom, testPin);
-  const noGas = evaluateOtsgPartition(mass, mass * uW, 0, satW.u_f - 300e3, geom, testPin);
+  const withGas = evaluateOtsgPartition(mass, water.energy, EMPTY_SLUG, geom, testPin);
+  const noGas = evaluateOtsgPartition(mass, mass * uW, EMPTY_SLUG, geom, testPin);
   assertClose(withGas.P / 1e5, noGas.P / 1e5, 0.02 * noGas.P / 1e5,
     'the same water must solve the same pressure whether or not helium shares the tube');
   assertClose(withGas.sections[2].mass, noGas.sections[2].mass, 0.02 * mass,
@@ -1662,7 +1769,7 @@ test('totals that are not water at any pressure are refused loudly', () => {
   const u = 400e3;
   let message = '';
   try {
-    evaluateOtsgPartition(mass, mass * u, 0, 300e3, geom, PIN_COLD);
+    evaluateOtsgPartition(mass, mass * u, EMPTY_SLUG, geom, PIN_COLD);
   } catch (e) {
     message = e instanceof Error ? e.message : String(e);
   }
@@ -1735,7 +1842,7 @@ test('a weakly drawn superheat section offers steam bounded by its gas', () => {
   // Mass/energy that lands well into the superheat regime with a small slug.
   const mass = 400;
   const U = mass * 2.85e6;
-  const ev = evaluateOtsgPartition(mass, U, 30, sat.u_f - 300e3, geom, pin);
+  const ev = evaluateOtsgPartition(mass, U, { m1: 30, U1: 30 * (sat.u_f - 150e3) }, geom, pin);
   assert(ev.regime === 'superheat', `test state should superheat, got '${ev.regime}'`);
   const s3 = ev.sections[2];
   // The ceiling from the property surface itself, via the INVERSE map the

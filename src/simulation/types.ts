@@ -222,12 +222,15 @@ export interface FlowNode {
    * design.md). Present only on heatExchanger tube nodes built with
    * tubeModel: 'moving-boundary'.
    *
-   * ONE partition variable is integrated state: m1, the MASS of the
-   * subcooled section - how much cold feed is in the tube is genuine
-   * dynamics (the history of feed that has not yet boiled), updated by its
-   * transit balance. Its energy is priced at the profile mean u1(P), so a
-   * pressure drop reprices the slug colder and hands the difference to the
-   * vapor side of the books - the flash a depressurized slug undergoes.
+   * ONE SECTION is integrated state: the economizer, as the (mass, energy)
+   * pair (m1, U1) - how much cold feed is in the tube and how warm it has
+   * got are both genuine dynamics (the history of feed that has not yet
+   * boiled), updated by its own transit and energy balances. Its linear
+   * profile is DERIVED from the pair: mean u1 = U1/m1 running up to
+   * saturation, so the cold end is 2 u1 - u_f (see otsg.ts OtsgSlug). No
+   * feed enthalpy prices the standing water, which is what let a
+   * feed-temperature change reprice the whole slug in one step, and a
+   * standing slug under a hot wall can now WARM instead of only shortening.
    * Everything else is SOLVED on every evaluation
    * (evaluateOtsgPartition): the boiling/superheat split from the node's
    * mass and energy, the superheat energy from the WALL (the steam's
@@ -239,11 +242,12 @@ export interface FlowNode {
    */
   otsg?: {
     m1: number;              // kg - subcooled section mass (integrated)
-    /** J/kg - saturated-liquid energy at the pressure the ledger was last
-     *  reconciled to. The economizer boundary moves with pressure relative
-     *  to it (flash on the way down, subcooled liquid joining on the way
-     *  up - otsg.ts reconcileSlugMass); written back with m1 from exact
-     *  partition solves only. Undefined until the first solve. */
+    U1: number;              // J  - subcooled section energy (integrated)
+    /** J/kg - saturated-liquid energy at the pressure the (m1, U1) pair was
+     *  last reconciled to. The economizer boundary moves with pressure
+     *  relative to it (flash on the way down, boiling-section liquid joining
+     *  on the way up - otsg.ts reconcileSlug); written back with the pair
+     *  from exact partition solves only. Undefined until the first solve. */
     uFRef?: number;
     heatArea: number;        // m2 - this bundle's tube heat-transfer area
     shellNodeId: string;     // gas-side flow node
@@ -270,9 +274,9 @@ export interface FlowNode {
      *  stale, the full solve runs and re-anchors - so fast transients pay
      *  full price and quiet stages pay nothing. */
     partitionLin?: {
-      m: number; U: number; m1: number; uFRef?: number;
+      m: number; U: number; m1: number; U1: number; uFRef?: number;
       P: number;
-      dPdm: number; dPdU: number; dPdm1: number;
+      dPdm: number; dPdU: number; dPdm1: number; dPdU1: number;
       ev: unknown;
     };
     /** Derived cache: the full partition evaluation for exactly these
@@ -285,6 +289,7 @@ export interface FlowNode {
       forMass: number;
       forEnergy: number;
       forM1: number;
+      forU1: number;
       forUFRef?: number;
       ev: unknown;
       /** false when the entry rode the partitionLin tangent: its sections

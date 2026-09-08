@@ -126,8 +126,9 @@ if (process.env.SWEEP === '1') {
   for (let f = -0.06; f <= 0.0601; f += 0.004) {
     const m1 = m1c * (1 + f);
     try {
-      const ev = evaluateOtsgPartition(node.fluid.mass, water.energy, m1, flows.uFeed,
-        geom, pin, node.fluid.pressure, cfg.uFRef);
+      const ev = evaluateOtsgPartition(node.fluid.mass, water.energy,
+        { m1, U1: cfg.m1 > 0 ? cfg.U1 * (m1 / cfg.m1) : 0, uFRef: cfg.uFRef },
+        geom, pin, node.fluid.pressure);
       const u1 = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
       console.log(`  ${m1.toFixed(1).padStart(8)} ${(ev.P / 1e5).toFixed(2).padStart(8)}   ` +
         `${ev.regime.padEnd(13)} ${ev.sections[1].mass.toFixed(1).padStart(6)} ` +

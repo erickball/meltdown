@@ -54,8 +54,8 @@ for (const du3 of DU3S) {
     const P = (PLO + ((PHI - PLO) * i) / NP) * 1e5;
     try {
       const r = otsgPartitionAtP(P, {
-        massTotal: node.fluid.mass, UTotal: water.energy, m1Ledger: cfg.m1,
-        uFeedIn: flows.uFeed, uFRef: cfg.uFRef, du3,
+        massTotal: node.fluid.mass, UTotal: water.energy,
+        slug: { m1: cfg.m1, U1: cfg.U1, uFRef: cfg.uFRef }, du3,
       });
       const mR = node.fluid.mass - r.m1;
       const UR = water.energy - r.m1 * r.u1;

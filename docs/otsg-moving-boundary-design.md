@@ -279,6 +279,147 @@ is the integrator's ceiling CLIPPING the ledger, which `probe-otsg-draw.ts`
 measures directly (21% of accepted ticks on that run, both before and after
 this change) - and rewriting it that way is left open.
 
+## 3c. Addendum: the slug carries its own energy
+
+*(2026-09-08. Replaces the pinned-profile pricing described in 3a - "the
+economizer's INLET enthalpy is geometry, not flow" - which was a repair to
+this defect rather than a cure for it.)*
+
+The economizer was a MASS ledger priced on a linear profile pinned at the
+instantaneous inlet enthalpy, U1 = m1 (u_in + u_f(P))/2. Two things followed
+that the plant could feel:
+
+- a feed-temperature change repriced the WHOLE slug in one step. Measured
+  (`scripts/probe-otsg-feedstep.ts`, MODE=step, a 20 K chill of the water at
+  the feed nozzle): the same totals and the same slug mass, priced the old
+  way, publish **144 -> 174 bar in a single step**. The published pressure
+  now moves 154.23 -> 154.12 bar across the same step, and the profile's cold
+  end walks with the feed at its own turnover instead;
+- a STANDING slug under a hot wall could not warm. The old flux was
+  W12 = (Q1 - W_in (hBar1 - h_in))/(h_f - hBar1), and at W_in = 0 that put
+  the whole duty into boundary motion - twice the batch-heating rate - while
+  the real slug's mean energy rose. The energy the pinned profile could not
+  hold landed on the leftovers, which is one source of the "steam section
+  above its wall" reports.
+
+**The state is now the pair (m1, U1) and the profile is DERIVED from it.**
+It stays linear - uniform in enthalpy per unit mass, which is what a steady
+flow under a wall builds - so with mean hBar1 = U1/m1 + P v1 running up to
+the saturation the pair is referenced to, the cold end is
+h_a = 2 hBar1 - h_f. The balances are the ordinary ones:
+
+    dm1/dt = W_in - W12 - (liquid draws booked to the slug)
+    dU1/dt = W_in h_in - W12 h_f + Q1 - P dV1/dt - (draws at u1 per kg)
+    W12    = Q1 / (h_f - h_a) = Q1 / (2 (h_f - hBar1))
+
+W12 is just the mass crossing saturation: the profile's density in energy
+space is dm/dh = m1/(h_f - h_a), the wall pushes every kilogram up at Q1/m1,
+and their product is the flux. A draw costs the section u1 per kg - its
+enthalpy out less the boundary work the vacated volume does, which is the
+flow work it left with.
+
+Three limits, each an analytic check and each a unit test:
+
+1. **steady flow.** W12 = W_in and Q1 = W_in (h_f - h_in) give h_a = h_in:
+   the derived profile IS the pinned one, so the steady plant does not move.
+   This is exact in the profile the section carries, unlike the old form's
+   algebraic identity - the fixture's own pressure round-trip (1e-4) is now
+   what limits it, which is why that test's tolerance is 1e-3 W rather than
+   1e-6 kg/s.
+2. **no feed.** dm1/dt = -Q1/(h_f - h_a) and dh_a/dt = Q1/m1: the whole
+   profile rises uniformly while its hot end boils off. Batch heating, with
+   no switch between the regimes. In the plant (MODE=reversal, feed pump
+   tripped): the cold end climbs at 5 kJ/kg-s and m1, u1 and the published
+   pressure all stay smooth through the check valves seating.
+3. **a colder feed** relaxes the cold end over one turnover m1/W_in, because
+   cold mass arrives at the cold end. No lag constant, and nothing frozen -
+   which is what the parked `otsg-slug-fraction` attempt got wrong by
+   lagging the inlet instead.
+
+**A flow that carries no heat now moves no mass across saturation.** Q1 = 0
+gives W12 = 0: the column shifts bodily, the slug gets longer and colder on
+average, and the interface - a material one when there is no phase change -
+does not move relative to the water. The pinned profile had to report
+W12 < 0 there. A pressure move still recruits boiling-section liquid, and
+that belongs to `reconcileSlug`, below.
+
+**reconcileSlug: one expression, both directions.** The physical invariant of
+a pressure move is the profile's COLD END - no heat has crossed the wall, so
+the coldest water in the slug is still the coldest water in the slug.
+Preserving the profile's mass density in energy space and re-cutting it at
+the new saturation gives
+
+    m1' = m1 (u_f - u_a)/(u_fRef - u_a),   U1' = m1' (u_a + u_f)/2
+
+which reads on a FALL as the part above the new saturation flashing out
+(carrying exactly its own profile mean, which the leftovers inherit by
+subtraction) and on a RISE as boiling-section liquid at the old saturation
+joining and being warmed to fill the newly-subcooled span by the vapour
+condensing beside it. Identity at u_f = u_fRef, exactly reversible, and the
+rise still capped by what the leftovers can give (`slugJoinCap`, now judged
+at the joining water's own mean energy). `uFRef` therefore STAYS: the fall
+needs to know where the boundary was. The mass-ledger predecessor needed a
+different rule per direction, and its rise had to over-join to undo its own
+repricing; with the energy carried there is nothing to undo. The span-sign
+test also carries the extinction limit: a pair whose mean has reached
+saturation has boiled away, m1 = U1 = 0, no floor and nothing to switch. (A
+sliver at m1 = 0.1 kg whose mean overshot saturation between write-backs is
+exactly that state, and before the unified form it tripped the closure's own
+invariant and killed a blackout at t = 159 s.)
+
+**The extinction limit is benign, and that is not luck.** As a standing slug
+dies, Q1 carries the section's own AREA, which is proportional to its mass,
+so m1 stays proportional to its subcooling: measured on a blackout,
+m1/(h_f - hBar1) held at 0.906 kg per kJ/kg for the last seconds while both
+went to zero linearly and dm1/dt sat at -0.65 kg/s. W12 = Q1/(2 d1) is a
+ratio of two quantities that vanish together.
+
+**Two things this exposed, both fixed here.** The routing ramp measured an
+inflow's subcooling against `saturatedLiquidEnergy(node.fluid.temperature)` -
+and that temperature is the partition's mass-weighted MEAN of the three
+sections, so a bundle holding 18 kg of 450 C steam reported a saturation 30 K
+above its own T_sat and scored feed that was 6 kJ/kg ABOVE saturation as 30 K
+subcooled, routing it into the economizer at full weight. It now reads the
+saturation at the tube's own pressure. And the tangent band (`partitionLin`)
+gained a gate on the PREDICTED PRESSURE MOVE: the state bands bound how
+stale the anchor's sections are, but on a nearly water-solid tube the
+leftovers are a difference of two large integrated numbers and dP/dU1 is
+enormous, so a slug-energy move well inside its own band can imply tens of
+bar. Without the gate the linearized pressure failed the solver's own
+20%-per-step sanity check 943 times on a circulator trip (1714 rejections);
+with it, 410 and none from the tube.
+
+**Measured (`perf-xe100` 120 s, `perf-lofc` 180 s, tick 0.1 s), against 3b:**
+steady Xe-100 2406/3 -> 2416/5 (148 MW, an oscillating plant); blackout
+2917/490 -> 2455/358; circulator trip 3164/634 -> 3392/410, and the one pack
+refusal 3b still had is gone. "Steam above its wall" reports 2 -> 1 on the
+circulator trip and 0 -> 0 on the blackout (4 and 3 at the baseline). PWR and BWR bit-identical; npm test and the replay
+bit-identity suite green; xe100-scenarios runs through with no bursts. The
+"economizer ledger claims 99.x%" reports are unchanged (19-20 on the
+circulator trip) and remain the water-solid tube 3b describes, not drift.
+
+**One run got worse, and it is not the closure.** `xe100-scenarios` (the
+station-blackout preset, settled 400 s then blacked out) now bursts the FW
+check valve at t = 422.1 s with a 317-bar differential, where 3b does not.
+Diagnosis: that node is a LIQUID-FULL 204 kg feed header, acoustically stiff,
+and 20 s into the blowdown the tube and the feed line sit within a bar of
+each other (108 vs 107) while the line's flow reverses through +88 to
++242 kg/s in two ticks - a feed-line water hammer, robust across tick sizes
+(0.04 / 0.05 / 0.1 s all burst it within 4 s of the same instant). The tube's
+own published pressure stays smooth through it at ~110 bar, with no pack
+refusal and no ledger report, so this is the feed train's stiffness being
+crossed by a slightly different trajectory rather than a partition failure.
+The trajectory differs because the STEADY state does: this preset settles
+with 227 kg in the tube and 128 MW where 3b settles at 175 kg and 113 MW -
+closer to the seeded design point (222 kg slug, 200 MW), which is a separate
+open item.
+
+**Still open.** The fold (§3a) is untouched: `reconcileSlug` is still
+evaluated at the walk's TRIAL pressure, and near-critical states can still
+present several roots. `subcooledSectionMean` survives only to seed the
+design point and to build test fixtures - no runtime path prices a section
+from a feed enthalpy any more.
+
 ## 4. Interface conditions
 
 Interfaces sit at saturation by definition:
