@@ -333,6 +333,11 @@ export interface CoreBarrelComponent extends ComponentBase {
   // Control rod properties
   controlRodCount?: number;     // Number of control rod banks to display
   controlRodPosition?: number;  // 0 = fully inserted, 1 = fully withdrawn
+  /** Installed startup neutron source, neutrons/s (0 = none). This is what a
+   *  subcritical core multiplies, so it sets the shutdown power level and
+   *  therefore how long a restart takes; see operators/neutronics.ts.
+   *  Absent = the default installed source. */
+  startupSourceNps?: number;
 }
 
 export interface HeatExchangerComponent extends ComponentBase {

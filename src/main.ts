@@ -1711,6 +1711,7 @@ function init() {
       // 0 = fully inserted, 1 = fully withdrawn (same convention everywhere)
       initialRodPosition: Math.round((barrel.controlRodPosition ?? 0.5) * 100),
       startCritical: barrel.startCritical !== false,
+      startupSourceNps: (barrel as any).startupSourceNps ?? 1e9,
       autoPoison: barrel.autoPoison !== false,
       ...(barrel.burnablePoisonPcm !== undefined ? { burnablePoisonPcm: barrel.burnablePoisonPcm } : {}),
     };
