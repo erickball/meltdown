@@ -1057,19 +1057,48 @@ function findTwoPhaseState(u: number, v: number): {
   }
 
   // ------------------------------------------------------------------------
-  // Solve diff(T) = 0 to FLOATING-POINT resolution in T, by bisection.
+  // Bisect until BOTH OUTPUTS of this function - quality and saturation
+  // pressure - are pinned to a relative epsilon across the bracket.
   //
-  // This used to be a bisection that quit at an ABSOLUTE bracket width of
-  // 1 mK (or |diff| < 1e-6), and both of those are scale-free tolerances on
-  // quantities whose scale depends on the state. A cold tank whose headspace
-  // holds a few kg of steam sits at x ~ 4e-6, i.e. u is only ~10 J/kg above
-  // u_f while du_f/dT ~ 4180 J/(kg*K): 1 mK of T slop is a THIRD of the
-  // entire quality budget. Because bisection midpoints land on a dyadic grid
-  // of the initial bracket, T came out quantized (373.9 K / 2^19 = 0.71 mK
-  // steps) and quality sawtoothed +-12% - a draining tank appeared to shed
-  // half a kilogram of steam in one tick, over and over, with mass, energy
-  // and volume all perfectly smooth. Converging the root instead of merely
-  // locating it removes the staircase: T*(u, v) is continuous, so quality is.
+  // The stopping rule used to be an ABSOLUTE bracket width of 1 mK (or
+  // |x_v - x_u| < 1e-6), and no tolerance on T alone can work here, because
+  // the two outputs have OPPOSITE sensitivities to it:
+  //
+  //  - A cold tank whose headspace holds a few kg of steam sits at
+  //    x ~ 4e-6: u is only ~10 J/kg above u_f while du_f/dT ~ 4190
+  //    J/(kg*K), so one millikelvin is a THIRD of the whole quality budget
+  //    (and 1e-6 of residual is a QUARTER of x). Bisection midpoints land
+  //    on a dyadic grid of the initial bracket, so T came out quantized
+  //    onto a 0.713 mK ladder (the dome's 373.90 K / 2^19), held there
+  //    exactly for hundreds of ticks, and quality sawtoothed by up to 15% -
+  //    a draining tank appeared to shed half a kilogram of steam in one
+  //    tick, over and over, with mass, energy and volume perfectly smooth.
+  //  - Meanwhile a quality-only tolerance would be far too loose the other
+  //    way. At x ~ 0.5 and 300 C, holding quality to 1e-4 admits 0.03 K of
+  //    slop, and dP_sat/dT there is 79 kPa/K: every grid rung would step the
+  //    node's pressure by ~2 kPa, and a 1e-4 relative tolerance on quality
+  //    lets the pressure ladder run to tens of kPa.
+  //
+  // So bound each output relatively, using the bracket endpoints already in
+  // hand: the spread of the energy-based quality x_u and of the
+  // volume-based quality x_v must each be within EPS_REL of the mean
+  // quality, AND the spread of P_sat must be within EPS_REL of the mean
+  // pressure. Whichever output is the fussy one at this state governs, and
+  // the residual sawtooth is bounded at EPS_REL relative rather than 13%.
+  // EPS_REL is a RESOLUTION constant - it never reaches the answer, it only
+  // says how finely the root is resolved.
+  //
+  // At EPS_REL = 1e-5 the tank state above needs the bracket down to
+  // ~2e-8 K (34 probes) and a mid-quality 300 C state down to ~1e-3 K
+  // (20 probes, where pressure is the binding output); converging all the
+  // way to one ULP of T instead costs a flat ~50 for both. Across the pwr
+  // and xe100 presets that averages 23-25 probes per solve against 50, and
+  // the residual sawtooth it leaves is bounded at EPS_REL: the tank's worst
+  // one-tick quality step over a 5000 s drain is 1.89e-2%, against 1.88e-2%
+  // for the fully converged root and 15% for the old 1 mK cutoff. A state
+  // at x = 0 exactly has no relative quality scale to resolve, so it falls
+  // through to the floating-point backstop below and pays the full ~50;
+  // that is 0.1-0.2% of solves in those presets.
   //
   // Interpolation is tempting and does not work here: the residual is wildly
   // asymmetric across the bracket. Its top end is the saturation data's last
@@ -1079,44 +1108,60 @@ function findTwoPhaseState(u: number, v: number): {
   // weights its step by those two residuals, so it inches away from the near
   // endpoint in geometrically growing steps and needs ~48 probes to walk
   // 15 K, no better than bisecting the whole dome; and Brent's safeguard
-  // buys nothing when EVERY interpolated step is the bad one. So: bisect,
-  // ~53 probes for the full 374 K, no cleverness and no failure modes. That
-  // is 2.8x the 19 probes the old 1 mK cutoff spent - the price of a root
-  // that is actually converged, and it costs a few percent of wall on the
-  // most water-heavy preset. The way to buy it back is a tighter starting
-  // bracket rather than a smarter iteration: a two-phase state at T needs
-  // v_f(T) <= v, and v_f is monotone, so inverting it would cap T near 550 K
-  // instead of 647 K for a tank like this AND leave the residual O(1) at
-  // both ends, where interpolation would finally earn its keep.
+  // buys nothing when EVERY interpolated step is the bad one. The way to
+  // make interpolation pay would be a tighter STARTING bracket - a
+  // two-phase state at T needs v_f(T) <= v, and v_f is monotone, so
+  // inverting it would cap T near 550 K instead of 647 K for a tank like
+  // this AND leave the residual O(1) at both ends. Not done here.
   //
-  // Since bisection needs 53 halvings from the widest possible bracket, the
-  // 200-iteration budget cannot be spent by anything but a bug, which is why
-  // running out of it throws rather than returning a half-solved root.
+  // Since bisection needs ~53 halvings to exhaust the widest possible
+  // bracket, the 200-iteration budget cannot be spent by anything but a
+  // bug, which is why running out of it throws rather than returning a
+  // half-solved root.
   // ------------------------------------------------------------------------
+  const EPS_REL = 1e-5;
   const MAX_ITER = 200;
   let best = Math.abs(diff_lo.diff) <= Math.abs(diff_hi.diff)
     ? { T: T_lo, d: diff_lo }
     : { T: T_hi, d: diff_hi };
+  let P_lo = P_sat_from_T(T_lo);
+  let P_hi = P_sat_from_T(T_hi);
   let converged = false;
 
   for (let iter = 0; iter < MAX_ITER; iter++) {
-    // Converged when the bracket is at the resolution of a double at this T.
+    // Both outputs bracketed to EPS_REL of their own magnitude?
+    const xTol = EPS_REL * Math.abs(
+      0.25 * (diff_lo.x_v + diff_lo.x_u + diff_hi.x_v + diff_hi.x_u));
+    if (Math.abs(diff_hi.x_u - diff_lo.x_u) <= xTol &&
+        Math.abs(diff_hi.x_v - diff_lo.x_v) <= xTol &&
+        Math.abs(P_hi - P_lo) <= EPS_REL * 0.5 * (P_lo + P_hi)) {
+      converged = true;
+      break;
+    }
+    // Backstop for a state with no relative scale left to resolve (x = 0,
+    // or a P_sat of zero): the bracket is at the resolution of a double.
     if (T_hi - T_lo <= 4 * Number.EPSILON * T_hi) { converged = true; break; }
 
     const T_mid = 0.5 * (T_lo + T_hi);
     // No representable T strictly inside the bracket: `best` is the answer.
     if (!(T_mid > T_lo && T_mid < T_hi)) { converged = true; break; }
 
+    (globalThis as any).__tpProbes = ((globalThis as any).__tpProbes||0)+1;
     const diff_mid = calcQualityDiff(T_mid);
     if (Math.abs(diff_mid.diff) < Math.abs(best.d.diff)) best = { T: T_mid, d: diff_mid };
     if (diff_mid.diff === 0) { best = { T: T_mid, d: diff_mid }; converged = true; break; }
 
+    // diff is monotone in T, so the smallest |diff| ever seen is always at a
+    // CURRENT endpoint - which is why `best` is guaranteed to sit inside the
+    // converged bracket, and so to satisfy the tolerances tested above.
     if (diff_lo.diff * diff_mid.diff < 0) {
       T_hi = T_mid;
       diff_hi = diff_mid;
+      P_hi = P_sat_from_T(T_mid);
     } else {
       T_lo = T_mid;
       diff_lo = diff_mid;
+      P_lo = P_sat_from_T(T_mid);
     }
   }
 
@@ -1134,6 +1179,7 @@ function findTwoPhaseState(u: number, v: number): {
 
   // Report the best-converged iterate. T, P and quality all come from the
   // SAME evaluation, so they are one consistent state.
+  (globalThis as any).__tpCalls = ((globalThis as any).__tpCalls||0)+1;
   const quality = Math.max(0, Math.min(1, (best.d.x_v + best.d.x_u) / 2));
   return {
     T: best.T,
