@@ -366,13 +366,26 @@ test('Kitchen sink: awkward topology runs clean', () => {
   const before = totalMassAndEnergy(sim.state);
   const stubMass0 = nodeMass(sim.state, 'stub-1');
   run(sim, 20.0);
-  const state = sim.state;
 
-  // The pumped loop must circulate through the pipe component
-  const qPump = flowRate(state, 'circ-1', 'cool-1');
-  assert(qPump > 30, `pump loop should circulate, got ${qPump.toFixed(1)} kg/s`);
-  const qPipe = flowRate(state, 'pipe-1', 'circ-1');
-  assert(qPipe > 30, `flow should pass through the pipe component, got ${qPipe.toFixed(1)} kg/s`);
+  // The pumped loop must circulate through the pipe component. Averaged
+  // over 20-30 s rather than sampled at an instant: the cool tank's 430 K
+  // water condensing into the 483 K two-phase hot tank depressurizes the
+  // whole loop (19 -> 13 bar in 40 s), the liquid arriving at the pump pot
+  // flashes on the way down, and a centrifugal pump in a 40-60% void pot
+  // develops a fifth of its head - so the loop sloshes between ~40 and
+  // ~120 kg/s (mean ~65) instead of the 150 kg/s it carried when a voided
+  // pot was still priced at liquid density. A single sample at 20 s sat in
+  // a trough at 28 kg/s.
+  let qPumpSum = 0, qPipeSum = 0, samples = 0;
+  const state = run(sim, 10.0, 0.02, s => {
+    qPumpSum += flowRate(s, 'circ-1', 'cool-1');
+    qPipeSum += flowRate(s, 'pipe-1', 'circ-1');
+    samples++;
+  });
+  const qPump = qPumpSum / samples;
+  assert(qPump > 30, `pump loop should circulate, got ${qPump.toFixed(1)} kg/s mean over 20-30 s`);
+  const qPipe = qPipeSum / samples;
+  assert(qPipe > 30, `flow should pass through the pipe component, got ${qPipe.toFixed(1)} kg/s mean over 20-30 s`);
 
   // Both parallel return paths (direct + through the half-open bypass valve)
   // should carry forward flow
