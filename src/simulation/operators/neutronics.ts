@@ -368,12 +368,11 @@ export class NeutronicsOperator implements PhysicsOperator {
     // A negative value here would be an integration failure, and the solver's
     // state validation (solver.ts) throws on it rather than hiding it.
 
-    // Limit power rate of change for ease of use
-    const maxPowerChangeRate = 4; // 400% per second (still very fast)
-    const maxChange = maxPowerChangeRate * dt;
-    const oldN = nNew.power / nNew.nominalPower;
-    if (N > oldN + maxChange) N = oldN + maxChange;
-    if (N < oldN - maxChange && N < oldN) N = oldN - maxChange;
+    // No rate limit on power: a reactivity excursion is quenched by Doppler
+    // feedback, which the subcycled kinetics and the thermal operators
+    // resolve on their own. (The shipping RK45 path never had one - a
+    // prompt-critical prompt-crit.json run peaks at 90x nominal and passes
+    // through 90000 %/s, 200 times the 400 %/s this used to allow.)
 
     // Update decay heat fraction based on operating history
     this.updateDecayHeat(nNew, state.time, dt);
