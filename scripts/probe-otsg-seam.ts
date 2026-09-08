@@ -75,7 +75,9 @@ for (let i = 0; i <= N; i++) {
   const uf = VAR === 'uf' ? flows.uFeed * (1 + f) : flows.uFeed;
   const varVal = VAR === 'U' ? U / 1e6 : VAR === 'm' ? m : VAR === 'uf' ? uf / 1e3 : m1;
   try {
-    const ev = evaluateOtsgPartition(m, U, m1, uf, geom, pin, PStart, cfg.uFRef);
+    const ev = evaluateOtsgPartition(m, U,
+      { m1, U1: cfg.m1 > 0 ? cfg.U1 * (m1 / cfg.m1) : 0, uFRef: cfg.uFRef },
+      geom, pin, PStart);
     const sat = ev.sat;
     const u2 = ev.sections[1].hBar - ev.P * ev.sections[1].vBar;
     const x2 = (u2 - sat.u_f) / (sat.u_g - sat.u_f);

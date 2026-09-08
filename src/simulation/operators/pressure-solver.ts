@@ -724,6 +724,8 @@ export class PressureSolver {
       D: number;       // conductance (kg/s per Pa)
       m0: number;      // start-of-step flow (kg/s)
       mStar: number;   // BE-predicted flow before pressure correction (kg/s)
+      G0: number;      // dt*A/L - the flow one Pa produces over this step
+      CFwd: number;    // forward-branch quadratic resistance (Pa per (kg/s)^2)
       hDonor: number;  // specific enthalpy the flow transports (J/kg)
       donorIsFrom: boolean; // donor side of the connection (by current flow direction)
       iFrom: number;
@@ -732,9 +734,9 @@ export class PressureSolver {
       capped: boolean;
       cappedFlow: number;
       // Check valve seated this step: flow exactly zero, no conductance.
-      // Decided on the SOLVED end-of-step flow, never on the start-of-step
-      // driving pressure or on the predictor's extrapolation - see the
-      // seating pass after the solve.
+      // Decided on the disc's DRIVING pressure (cracking preload included)
+      // confirmed by a reversed solved flow - never on the predictor's
+      // extrapolation alone. See the seating pass after the solve.
       seated: boolean;
     }
 
@@ -929,7 +931,8 @@ export class PressureSolver {
       const choke = computeChokeLimit(
         conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow, h.throatArea);
       entries.push({
-        conn, h, D, m0, mStar, hDonor,
+        conn, h, D, m0, mStar, hDonor, G0,
+        CFwd: h.frictionQuadForward + h.pumpQuad,
         donorIsFrom: h.upstreamNode === fromNode,
         iFrom, iTo, choke, capped: false, cappedFlow: 0, seated: false,
       });
@@ -1083,10 +1086,54 @@ export class PressureSolver {
     let anySeated = false;
     for (const e of entries) {
       if (!e.h.checkValve || e.capped || e.seated) continue;
-      if (flowOf(e) < 0) {
-        e.seated = true;
-        e.cappedFlow = 0;
-        anySeated = true;
+      const w = flowOf(e);
+      if (w < 0) {
+        // WHY THE SOLVED FLOW ALONE CANNOT DECIDE THE DISC. The driving
+        // pressure the disc actually responds to is dP_nf - the port
+        // pressures, gravity and the pump's shutoff head, less the spring
+        // preload the component already carries. When that is ADVERSE the
+        // predictor has already taken the reverse branch, and a reversed
+        // solved flow is the end-of-step balance agreeing: the valve seats
+        // and passes exactly zero.
+        //
+        // When it is FORWARD, a reversed solved flow is arithmetic, not
+        // physics. A short liquid line's conductance dwarfs its nodes'
+        // compliances (D/c = 146 on the Xe-100 feed train), so the solve has
+        // to null essentially all of a predictor that ran the full head
+        // across bare pipe, and the returned flow is mStar + D·δP - two
+        // numbers agreeing to a fraction of a percent. Any linearization
+        // error in δP flips its sign. Measured: a dead-headed feedwater
+        // heater at 271 bar against a 115 bar valve body (156 bar forward,
+        // cracking 0.1 bar) predicted mStar = +3945 kg/s and the solve
+        // returned -107 kg/s. Seating on that is self-confirming - zero flow
+        // preserves the head - so the valve stayed shut for 140 consecutive
+        // ticks while the trapped heater heated on to 289 bar, then
+        // equalized in ONE step: 253 kg/s and 317 bar in the valve body,
+        // which burst it.
+        //
+        // So a forward-headed disc stays OPEN, and the flow it carries is
+        // the one physical quantity the cancellation cannot corrupt: the
+        // flow that equalizes the two nodes over this step. Moving w·dt
+        // kilograms lowers the source by w/c_from Pa and raises the receiver
+        // by w/c_to, so equalization is at w = dP_nf/(1/c_from + 1/c_to) -
+        // the same limit the two-node solve tends to when D >> c, built from
+        // the compliances the solver already has. It is a bound, applied
+        // exactly like the choked-flow cap above (fix the flow, re-solve
+        // once), and it only ever reduces a flow the solve already wanted:
+        // min(mStar, w_eq). A boundary node absorbs without limit, so its
+        // 1/c term is zero; with both ends boundaries there is nothing to
+        // equalize and the predictor stands.
+        const dPnf = e.h.dP_pressure + e.h.dP_gravity + e.h.pumpShutoff - e.h.crackingPressure;
+        if (dPnf > 0 && e.mStar > 0) {
+          const invC = (e.iFrom >= 0 ? 1 / c[e.iFrom] : 0) + (e.iTo >= 0 ? 1 / c[e.iTo] : 0);
+          e.capped = true;
+          e.cappedFlow = invC > 0 ? Math.min(e.mStar, dPnf / invC) : e.mStar;
+          anyCapped = true;
+        } else {
+          e.seated = true;
+          e.cappedFlow = 0;
+          anySeated = true;
+        }
       }
     }
 

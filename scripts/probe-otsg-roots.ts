@@ -83,8 +83,8 @@ for (let i = 0; i < Math.round(seconds / 0.1); i++) {
         let R: number;
         try {
           R = otsgPartitionAtP(P, {
-            massTotal: node.fluid.mass, UTotal: water.energy, m1Ledger: cfg.m1,
-            uFeedIn: flows.uFeed, uFRef: cfg.uFRef, du3,
+            massTotal: node.fluid.mass, UTotal: water.energy,
+            slug: { m1: cfg.m1, U1: cfg.U1, uFRef: cfg.uFRef }, du3,
           }).Vsum - V;
         } catch { prevR = NaN; continue; }
         // The sliver sentinel deliberately returns a huge volume ("this

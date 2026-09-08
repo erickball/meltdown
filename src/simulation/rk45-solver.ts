@@ -31,6 +31,7 @@ export interface FlowNodeRates {
   dEnergy: number;    // W - rate of internal energy change
   dNcg?: GasComposition;  // mol/s - rate of NCG moles change (optional, only if NCG present)
   dOtsgM1?: number;       // kg/s - OTSG subcooled-section mass rate (its partition state)
+  dOtsgU1?: number;       // W    - and its energy rate: the slug carries its own
   dDepositedCsI?: number; // mol/s - CsI aerosol plating out onto this node's surfaces
 }
 
@@ -196,6 +197,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     if (aRates.dOtsgM1 !== undefined || bRates.dOtsgM1 !== undefined) {
       combined.dOtsgM1 = (aRates.dOtsgM1 ?? 0) + (bRates.dOtsgM1 ?? 0);
     }
+    if (aRates.dOtsgU1 !== undefined || bRates.dOtsgU1 !== undefined) {
+      combined.dOtsgU1 = (aRates.dOtsgU1 ?? 0) + (bRates.dOtsgU1 ?? 0);
+    }
     if (aRates.dNcg || bRates.dNcg) {
       combined.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -328,6 +332,7 @@ export function accumulateRates(target: StateRates, source: StateRates, factor =
     t.dMass += r.dMass * factor;
     t.dEnergy += r.dEnergy * factor;
     if (r.dOtsgM1 !== undefined) t.dOtsgM1 = (t.dOtsgM1 ?? 0) + r.dOtsgM1 * factor;
+    if (r.dOtsgU1 !== undefined) t.dOtsgU1 = (t.dOtsgU1 ?? 0) + r.dOtsgU1 * factor;
     if (r.dDepositedCsI !== undefined) {
       t.dDepositedCsI = (t.dDepositedCsI ?? 0) + r.dDepositedCsI * factor;
     }
@@ -411,6 +416,7 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     };
     // Scale NCG rates if present
     if (r.dOtsgM1 !== undefined) scaled.dOtsgM1 = r.dOtsgM1 * factor;
+    if (r.dOtsgU1 !== undefined) scaled.dOtsgU1 = r.dOtsgU1 * factor;
     if (r.dNcg) {
       scaled.dNcg = emptyGasComposition();
       for (const species of ALL_GAS_SPECIES) {
@@ -518,17 +524,23 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
       }
       node.fluid.internalEnergy += nodeRates.dEnergy * dt;
 
-      // OTSG partition: the subcooled section's mass lives inside the
-      // node's ordinary conserved totals, so moving it can never create or
-      // lose anything - it only moves the internal boundary. The floor
-      // absorbs float residue (the rate is constructed to vanish as the
-      // section empties); the ceiling is the physical statement that one
+      // OTSG partition: the subcooled section's mass AND energy live inside
+      // the node's ordinary conserved totals, so moving them can never
+      // create or lose anything - they only move the internal boundary. The
+      // floors absorb float residue (the rates are constructed to vanish as
+      // the section empties); the ceiling is the physical statement that one
       // section cannot hold more water than the whole node does.
       if (node.otsg && nodeRates.dOtsgM1 !== undefined) {
-        node.otsg.m1 = Math.min(
-          Math.max(0, node.fluid.mass),
-          Math.max(0, node.otsg.m1 + nodeRates.dOtsgM1 * dt),
-        );
+        const m1Raw = node.otsg.m1 + nodeRates.dOtsgM1 * dt;
+        const m1 = Math.min(Math.max(0, node.fluid.mass), Math.max(0, m1Raw));
+        const U1Raw = Math.max(0, node.otsg.U1 + (nodeRates.dOtsgU1 ?? 0) * dt);
+        // The leash on the mass takes the energy with it, at the section's
+        // own mean, so the profile keeps its shape: a section pegged at the
+        // tube's whole inventory while its energy kept climbing would read
+        // back a mean above saturation, which is not a state the model has
+        // room for. An empty section holds no energy at all, exactly.
+        node.otsg.m1 = m1;
+        node.otsg.U1 = m1 > 0 && m1Raw > 0 ? U1Raw * (m1 / m1Raw) : 0;
       }
 
       if (nodeRates.dNcg) {
@@ -758,6 +770,16 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
         sumSq += relM1Rate * relM1Rate;
         count++;
       }
+      // The slug's ENERGY is integrated state too, and it is measured
+      // against the node's own energy for the same reason the mass is
+      // measured against the node's mass: a joule misplaced matters the
+      // same wherever it lands, and the denominator cannot vanish as the
+      // section dies.
+      if (r.dOtsgU1 !== undefined && Math.abs(node.fluid.internalEnergy) > 0) {
+        const relU1Rate = r.dOtsgU1 / Math.abs(node.fluid.internalEnergy);
+        sumSq += relU1Rate * relU1Rate;
+        count++;
+      }
     }
   }
 
@@ -881,6 +903,17 @@ export function computeErrorContributors(rates: StateRates, state: SimulationSta
             type: 'mass',
             contribution: relM1Rate,
             description: `economizer ${r.dOtsgM1 > 0 ? '+' : ''}${r.dOtsgM1.toFixed(2)} kg/s`
+          });
+        }
+      }
+      if (r.dOtsgU1 !== undefined && Math.abs(node.fluid.internalEnergy) > 0) {
+        const relU1Rate = Math.abs(r.dOtsgU1 / Math.abs(node.fluid.internalEnergy));
+        if (relU1Rate > 1e-8) {
+          contributions.push({
+            nodeId: id,
+            type: 'energy',
+            contribution: relU1Rate,
+            description: `economizer ${r.dOtsgU1 > 0 ? '+' : ''}${(r.dOtsgU1 / 1e6).toFixed(2)} MW`
           });
         }
       }

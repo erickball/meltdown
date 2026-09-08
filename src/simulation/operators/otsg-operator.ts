@@ -37,7 +37,7 @@ import {
   otsgRates,
   transitStandingQ,
   marchCounterflowGas,
-  reconcileSlugMass,
+  reconcileSlug,
   saturationAtP,
   OtsgEval,
   OtsgWallPin,
@@ -132,9 +132,20 @@ export function classifyOtsgFlows(
   let hInNum = 0, hInDen = 0;
   // Saturated liquid enthalpy in the tube itself: the top of the
   // economizer's profile, and the reference every inlet's subcooling is
-  // measured against.
-  const hfNow = saturatedLiquidEnergy(node.fluid.temperature) +
-    waterPressure / saturatedLiquidDensity(node.fluid.temperature);
+  // measured against. It is the saturation at the tube's own PRESSURE.
+  // Reading it off node.fluid.temperature instead - which the partition
+  // publishes as the mass-weighted MEAN of the three sections - put it
+  // wherever the superheat section happened to be: a bundle holding 18 kg of
+  // 450 C steam reported a mean 30 K above its own T_sat, so feed that was
+  // 6 kJ/kg ABOVE saturation was scored 30 K subcooled and routed into the
+  // economizer at full weight. That is the routing ramp's whole job -
+  // near-saturated inflow belongs in the boiling section, whose mass is
+  // derived - and it was reading the wrong thermometer. Measured: on a
+  // blackout with a hot feed line it drove the slug's mean at 7 kJ/kg-s
+  // toward a saturation 28 kJ/kg away while Q1 ran backwards, and the
+  // partition ran out of leftovers.
+  const satNow = saturationAtP(waterPressure);
+  const hfNow = satNow.h_f;
   // WHICH connection is the economizer's inlet is GEOMETRY, not flow: a
   // once-through tube takes its feed at the bottom and gives up steam at the
   // top, which is the same convention the partition's own phase-by-elevation
@@ -424,7 +435,7 @@ export function evaluateOtsgSections(
   // each was ~95% of the simulation's property traffic.
   const c = cfg.partitionCache;
   if (c && c.forMass === node.fluid.mass && c.forEnergy === water.energy && c.forM1 === cfg.m1 &&
-      c.forUFRef === cfg.uFRef && (c.exact || !opts?.exact)) {
+      c.forU1 === cfg.U1 && c.forUFRef === cfg.uFRef && (c.exact || !opts?.exact)) {
     return { ev: c.ev as OtsgEval, flows, water, exact: c.exact };
   }
   // Diagnostics, tests and once-per-step consumers ask for exact: the
@@ -443,32 +454,51 @@ export function evaluateOtsgSections(
     // (Uncapped reconciliation: this decides a band, not the physics.)
     const evA = lin.ev as OtsgEval;
     const satA = saturationAtP(lin.P);
-    const m1Here = reconcileSlugMass(Math.min(cfg.m1, node.fluid.mass), cfg.uFRef ?? NaN,
-      satA.u_f, Math.min(flows.uFeed, satA.u_f - 25e3), node.fluid.mass);
-    const dm1 = m1Here - evA.sections[0].mass;
+    const here = reconcileSlug(Math.min(cfg.m1, node.fluid.mass),
+      cfg.m1 > 0 ? cfg.U1 * Math.min(1, node.fluid.mass / cfg.m1) : 0,
+      cfg.uFRef ?? NaN, satA.u_f, node.fluid.mass);
+    const dm1 = here.m1 - evA.sections[0].mass;
+    const U1A = evA.sections[0].mass * (evA.sections[0].hBar - lin.P * evA.sections[0].vBar);
+    const dU1 = here.U1 - U1A;
+    const P = lin.P + lin.dPdm * dm + lin.dPdU * dU + lin.dPdm1 * dm1 + lin.dPdU1 * dU1;
+    // The state bands above bound how stale the anchor's SECTIONS are; this
+    // one bounds the linearization itself, in the only variable the tangent
+    // predicts. It matters because the tube's pressure is not equally
+    // sensitive everywhere: on a nearly water-solid tube the leftovers are a
+    // difference of two large integrated numbers and dP/dU1 is enormous, so
+    // a slug-energy move well inside its own band can imply tens of bar.
+    // Measured on a circulator trip once the slug carried its own energy:
+    // without this gate the linearized pressure failed the solver's own
+    // 20%-per-step sanity check 943 times and the run paid 1714 rejections;
+    // with it, 634 and none from the tube. Where the tangent is this stiff
+    // the correct price is an exact solve, which is what falling through to
+    // one below does.
     if (Math.abs(dm) < BAND * lin.m && Math.abs(dU) < BAND * Math.abs(lin.U) &&
-        Math.abs(dm1) < BAND * Math.max(evA.sections[0].mass, 0.02 * lin.m)) {
-      const P = lin.P + lin.dPdm * dm + lin.dPdU * dU + lin.dPdm1 * dm1;
+        Math.abs(dm1) < BAND * Math.max(evA.sections[0].mass, 0.02 * lin.m) &&
+        Math.abs(dU1) < BAND * Math.max(U1A, 0.02 * Math.abs(lin.U)) &&
+        Math.abs(P - lin.P) < BAND * lin.P) {
       const ev: OtsgEval = { ...evA, P };
-      cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: false };
+      cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forU1: cfg.U1, forUFRef: cfg.uFRef, ev, exact: false };
       return { ev, flows, water, exact: false };
     }
   }
   const ev = evaluateOtsgPartition(
-    node.fluid.mass, water.energy, cfg.m1, flows.uFeed,
+    node.fluid.mass, water.energy,
+    { m1: cfg.m1, U1: cfg.U1, uFRef: cfg.uFRef },
     { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
     otsgWallPin(state, node, flows),
-    PStart, cfg.uFRef, { hFeed: flows.hFeed },
+    PStart, { hFeed: flows.hFeed },
   );
   // Anchor the tangent from the closure's own implicit-function derivatives
   // (OtsgEval.tangent): residual evaluations at the solved pressure, not
   // three more root finds. Absent at a regime edge - every state in that
   // neighborhood then pays for its own exact solve, the correct price there.
   cfg.partitionLin = ev.tangent
-    ? { m: node.fluid.mass, U: water.energy, m1: cfg.m1, uFRef: cfg.uFRef, P: ev.P,
-        dPdm: ev.tangent.dPdm, dPdU: ev.tangent.dPdU, dPdm1: ev.tangent.dPdm1, ev }
+    ? { m: node.fluid.mass, U: water.energy, m1: cfg.m1, U1: cfg.U1, uFRef: cfg.uFRef, P: ev.P,
+        dPdm: ev.tangent.dPdm, dPdU: ev.tangent.dPdU, dPdm1: ev.tangent.dPdm1,
+        dPdU1: ev.tangent.dPdU1, ev }
     : undefined;
-  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forUFRef: cfg.uFRef, ev, exact: true };
+  cfg.partitionCache = { forMass: node.fluid.mass, forEnergy: water.energy, forM1: cfg.m1, forU1: cfg.U1, forUFRef: cfg.uFRef, ev, exact: true };
   return { ev, flows, water, exact: true };
 }
 
@@ -612,29 +642,37 @@ export class OtsgRateOperator implements RateOperator {
       }
 
       // ----------------------------------------------------------------
-      // Partition rate: the economizer's transit balance, in MASS. Feed
-      // enters, mass crosses the boundary at h_f as fast as the wall can
-      // heat it there (W12), and a liquid draw takes slug water with it,
-      // weighted so an emptying section never steps its own rate. The
-      // energy side needs no rate at all - the slug is priced at the
-      // profile mean, so its energy follows m1 and the pressure. The
-      // boiling/superheat split (and the pressure) are solved, not stepped.
+      // Partition rates: the economizer's own transit AND energy balances.
+      // Feed enters at its enthalpy, mass crosses the boundary at h_f as
+      // fast as the wall can heat it there (W12 = Q1/(h_f - h_a)), the wall
+      // adds Q1, and a liquid draw takes slug water with it - weighted so
+      // an emptying section never steps its own rate, and at the SAME
+      // weighted mass on both books so the pair keeps describing a profile.
+      // A draw's energy costs the section u1 per kg: its enthalpy out less
+      // the boundary work the vacated volume does, which is the flow work
+      // it left with. The boiling/superheat split (and the pressure) are
+      // solved, not stepped.
       // ----------------------------------------------------------------
       // A domeless tube (supercritical) has no phase boundary for the
       // transit balance to move - otsgRates' interface algebra divides by
       // widths that do not exist there and returns garbage that once walked
       // the ledger from 227 to 373 kg in a second. The ledger holds still
       // and resumes when the dome comes back.
-      const dM1 = ev.regime === 'supercritical' ? 0 : (() => {
+      let dM1 = 0, dU1 = 0;
+      if (ev.regime !== 'supercritical') {
         const r = otsgRates(ev, WFeed, hFeed, WSteamOut, Q1, Q2, Q3);
         const m1Now = ev.sections[0].mass;
         const w1 = m1Now / (m1Now + 1);
-        return r.dm1 - w1 * WLiquidOut;
-      })();
+        const WSlugOut = w1 * WLiquidOut;
+        const u1Now = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
+        dM1 = r.dm1 - WSlugOut;
+        dU1 = r.dU1 - WSlugOut * u1Now;
+      }
 
       const nodeRates = rates.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
       nodeRates.dEnergy += QWaterTotal;
       nodeRates.dOtsgM1 = (nodeRates.dOtsgM1 ?? 0) + dM1;
+      nodeRates.dOtsgU1 = (nodeRates.dOtsgU1 ?? 0) + dU1;
       rates.flowNodes.set(id, nodeRates);
 
       const shellRates = rates.flowNodes.get(cfg.shellNodeId) ?? { dMass: 0, dEnergy: 0 };
@@ -717,8 +755,8 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       const { ev, water, exact } = evaluateOtsgSections(state, id, node);
       node.fluid.pressure = ev.P + water.gasPressure;
       // The economizer boundary moved with this state's pressure (flash /
-      // joining, reconcileSlugMass): make the moved slug the ledger and
-      // record the saturation it is now consistent with. Only from an EXACT
+      // joining, reconcileSlug): make the moved (mass, energy) pair the
+      // ledger and record the saturation it is now consistent with. Only from an EXACT
       // solve - a tangent-riding evaluation carries its anchor's sections,
       // and writing those over the integrated ledger would erase the
       // step's transit. At the same pressure the reconciliation of the
@@ -727,14 +765,16 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       // same state.
       if (exact && ev.regime !== 'supercritical') {
         const m1New = ev.sections[0].mass;
+        const U1New = m1New * (ev.sections[0].hBar - ev.P * ev.sections[0].vBar);
         node.otsg.m1 = m1New;
+        node.otsg.U1 = U1New;
         node.otsg.uFRef = ev.sat.u_f;
         // Replace, never mutate: the cache and tangent objects are shared by
         // every clone of this state (otsg is spread-copied). The tangent
         // anchor is left alone - its band test reconciles both sides to the
         // anchor's pressure, so re-basing this state does not move it.
         if (node.otsg.partitionCache) {
-          node.otsg.partitionCache = { ...node.otsg.partitionCache, forM1: m1New, forUFRef: ev.sat.u_f };
+          node.otsg.partitionCache = { ...node.otsg.partitionCache, forM1: m1New, forU1: U1New, forUFRef: ev.sat.u_f };
         }
       }
       // Refresh the draw-enthalpy cache HERE, where every state passes -
@@ -840,9 +880,13 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
       // surface around it: only the unpinned (post-depressurization) regime
       // can produce it, and it should relax through Q3 - persisting means
       // upstream physics is pumping energy in or a regime is stuck.
-      // (2) The ledger claiming the whole inventory: U1's transit balance
-      // has walked away from the water actually in the tube - this is the
-      // drift this closure is designed to make VISIBLE rather than absorb.
+      // (2) The ledger claiming the whole inventory: the economizer's
+      // transit balance has walked away from the water actually in the tube
+      // - this is the drift this closure is designed to make VISIBLE rather
+      // than absorb. (It also fires on a tube that has genuinely gone water
+      // solid, where a 99.8% claim is the truth; the condition that would
+      // separate the two is the integrator's ceiling CLIPPING the pair,
+      // which scripts/probe-otsg-draw.ts measures directly.)
       const m1Claim = ev.sections[0].mass / node.fluid.mass;
       const excess = ev.sections[2].T - TWallMax;
       const hotSteam = excess > OtsgLedgerCheckOperator.REPORT_MARGIN;
@@ -852,12 +896,21 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
       if (last !== undefined && state.time - last < OtsgLedgerCheckOperator.QUIET_SECONDS) continue;
       this.lastReport.set(id, state.time);
 
+      // The slug's own state, as the profile the pair describes: mean u,
+      // and the cold end 2 u1 - u_f it implies. A drifting pair shows up
+      // here first - as a cold end below the coldest water the plant has,
+      // or one that has climbed to saturation.
+      const s1 = ev.sections[0];
+      const u1 = s1.mass > 0 ? s1.hBar - ev.P * s1.vBar : NaN;
       const where = `Node: ${(node.fluid.pressure / 1e5).toFixed(1)} bar published, ` +
         `${node.fluid.mass.toFixed(0)} kg, ` +
         `u=${(water.energy / node.fluid.mass / 1e3).toFixed(0)} kJ/kg, ` +
         `v=${(node.volume / node.fluid.mass).toFixed(5)} m3/kg; ` +
         `sections ${ev.sections.map(x => x.mass.toFixed(0)).join('/')} kg, ` +
-        `m1 ledger=${node.otsg!.m1.toFixed(0)} kg, '${ev.regime}' branch.`;
+        `economizer ledger=${node.otsg!.m1.toFixed(0)} kg carrying ` +
+        `${(node.otsg!.U1 / 1e6).toFixed(0)} MJ (profile ` +
+        `${((2 * u1 - ev.sat.u_f) / 1e3).toFixed(0)} -> ${(ev.sat.u_f / 1e3).toFixed(0)} kJ/kg, ` +
+        `mean ${(u1 / 1e3).toFixed(0)}), '${ev.regime}' branch.`;
       if (hotSteam) {
         console.error(
           `[OTSG] ${id}: the steam section is ${excess.toFixed(0)} K ABOVE the hottest surface ` +

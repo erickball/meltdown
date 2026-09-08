@@ -622,3 +622,88 @@ The two mechanisms that actually cost the steps are (1) the energy response of
 near-saturated liquid slivers, which needs the energy leg of the closure to
 see throughflow enthalpy anomalies rather than a stiffer diagonal, and (2) the
 OTSG partition's dt-independent pressure discontinuity.
+
+## Addendum: the check valve that seated itself shut against 156 bar (2026-09-08)
+
+A check valve on the Xe-100 feed train held **exactly zero flow for 140
+consecutive ticks** while its forward head grew from 129 to 179 bar, then
+released the whole thing in one step - 253 kg/s, 317 bar in the valve body,
+which burst it. The valve is not the plant's: it is the seating pass's.
+
+**The gate was not hysteresis and not a missing re-try.** Instrumented at
+every step of the seated stretch, the valve enters each step with
+`m0 = 0.000` kg/s (last step's seated flow) and the full current head:
+
+```
+t=415.000 dt=50ms m0=0.000 dPport=+156.19 grav=0.000 crack=0.100
+          mStar=+3945.10  D=1.58e-4  dPfrom=-268.85 dPto=-13.02
+          wSolved=-107.41   -> SEAT
+t=421.000 dt=50ms m0=0.000 dPport=+177.97 crack=0.100
+          mStar=+4276.74  D=1.49e-4  dPfrom=-290.36 dPto=-2.24
+          wSolved=-11.98    -> SEAT
+```
+
+So the disc is re-tried with the live head every step and the predictor
+plainly wants forward flow. What fails is the **flow recovery**:
+`w = ṁ* + D·(δP_from − δP_to)`. A short liquid line's conductance dwarfs its
+nodes' compliances - `D/c = 146` for this pair (D = 1.58e-4 kg/s/Pa,
+c_body = 1.85e-6) - so the solve must null essentially all of a predictor
+that ran the full head across bare pipe, and `w` is the difference of two
+numbers agreeing to 0.4%. Any linearization error in δP flips its sign. Part
+of that error is structural: the tangent of a quadratic resistance is HALF
+its chord (with ṁ ∝ √ΔP, ṁ*/D = 2ΔP), so the linear correction only reaches
+zero flow after removing TWICE the head - measured δP difference / head =
+−256/156 = **1.64**. Replacing the tangent with the secant of the same
+closed form (`G0·ṁ*/b`) brings that to 1.05 - and 5% of 3945 kg/s is still
+−161 kg/s, so the sign test still seats. **The sign of the solved flow is
+not a usable disc criterion in the D ≫ c regime**, at any linearization.
+
+And seating on it is self-confirming: zero flow preserves the head, so the
+next step reproduces the verdict exactly. That is the 140 ticks. The
+trapped-liquid feedwater heater behind the valve meanwhile heated on at
++2.3 bar/s from 271 to 289 bar, and the burst was the release.
+
+**The fix.** The disc is gated on the pressure it actually responds to -
+`dP_nf` (port pressures + gravity + pump shutoff − the component's own
+cracking preload). Adverse: seat, exactly zero flow, as before. Forward: the
+valve stays open, and the flow it carries is the one quantity the
+cancellation cannot corrupt - the flow that **equalizes the two nodes over
+this step**. Moving w·dt kg lowers the source by w/c_from Pa and raises the
+receiver by w/c_to, so equalization sits at
+
+    w_eq = dP_nf / (1/c_from + 1/c_to)
+
+which is exactly the limit the two-node solve tends to as D ≫ c, built from
+compliances the solver already has. It is applied as a bound - `min(ṁ*, w_eq)`
+- through the existing choked-flow machinery (fix the flow, re-solve once),
+so it only ever reduces a flow the solve already wanted, and a boundary node
+(infinite compliance) contributes no 1/c term. No threshold beyond the
+cracking pressure, no hysteresis, no rate limit.
+
+With it, the same valve trickles ~0.6-1.2 kg/s continuously and the heater
+never traps: 271 bar becomes 4 bar of working head over the valve body.
+
+**Measured, paired** (`perf-xe100` 120 s / `perf-lofc` 180 s at tick 0.1 s;
+`xe100-scenarios` = the blackout preset run 1800 s at 0.05 s):
+
+| run | commit 1 | +fix | commit 2 | +fix |
+|---|---|---|---|---|
+| xe100 120 s | 2406/3, 137.7 MW | 2406/3, 137.7 MW | 2416/5, 147.5 MW | 2416/5, 147.5 MW |
+| blackout | 2917/490 | 2870/431 | 2455/358 | 2329/281 |
+| circulator trip | 3164/634 | 3164/634 | 3392/410 | 3392/410 |
+| xe100-scenarios | no bursts | no bursts | **burst 422.1 s** | **no bursts** |
+| PWR / BWR | 8778/104, 4837/413 | bit-identical | bit-identical | bit-identical |
+
+The steady plant and the circulator trip are bit-identical on both commits:
+the bound only ever binds where the solved flow came out reversed under a
+forward head, which never happens in the ordinary operating range.
+`test-flow-physics` stays 10/10, including "check valve blocks adverse
+pressure gradient" (the seated valve still passes exactly zero across a
+10000x-K reverse path) and "check valve passes forward pressure gradient".
+
+**Still open.** The cancellation itself is untouched: for D ≫ c the solved
+flow of ANY connection is a difference of large numbers, and only check
+valves currently notice (because only they read its sign). Recovering
+connection flows from the node mass balances rather than from the momentum
+linearization would remove the whole class; it is a solver rework, not a
+gate fix.
