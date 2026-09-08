@@ -1006,6 +1006,21 @@ export interface PressureSolverConfig {
   /** Log the corrector's largest flow corrections (rate-limited) - which
    *  connections were stale and why. Diagnostic for the stage-3 work. */
   outerResolveDiag?: boolean;
+  /** EOS-secant compliance candidate in the dome-crossing pass.
+   *
+   *  The secant-compliance pass replaces a node's linearized compliance when
+   *  the step carries it onto or across the saturated-liquid line, but it
+   *  derives the true stiffness from a bulk modulus and the v_f edge, which
+   *  only describes nodes that START on the liquid side of the dome: a vapour
+   *  or gas node that the step floods solid keeps its soft gamma*P pricing.
+   *  With this on, every non-NCG node also gets a candidate compliance read
+   *  straight from the tables at the end state the SOLVED flows predict
+   *  (mass and donor-cell energy transport plus the measured source), and the
+   *  stiffest candidate wins - so any regime the node can land in is covered
+   *  with no phase test and no constants. Costs one EOS evaluation per node
+   *  per solve. EXPERIMENTAL - default off (see the dome-resolve experiment
+   *  in docs/semi-implicit-flow-solver-plan.md). */
+  eosSecantCompliance?: boolean;
 }
 
 /** Per-step pressure-swing tolerance, shared between the post-step sanity
@@ -1028,6 +1043,7 @@ export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   energyCompliance: true,
   implicitAdvection: false,
   outerResolve: false,
+  eosSecantCompliance: false,
 };
 
 // ============================================================================

@@ -196,6 +196,9 @@ console.log(`steps=${stats.totalSteps} rejected=${stats.rejectedSteps} ` +
   `final dt=${(stats.currentDt * 1e3).toFixed(2)}ms min dt=${(minDt * 1e3).toFixed(3)}ms ` +
   `wall/step=${(1e3 * wallSec / Math.max(1, stats.totalSteps)).toFixed(3)}ms`);
 
+console.log(`secant-compliance re-solves: ${sim.solver.secantResolveSteps}  ` +
+  `stiff wall-fluid pair-attempts: ${sim.solver.stiffConvectionPairSteps}`);
+
 console.log('\noperator wall time:');
 for (const [name, ms] of [...opTotals.entries()].sort((a, b) => b[1] - a[1])) {
   if (ms / 1000 < 0.01) continue;
