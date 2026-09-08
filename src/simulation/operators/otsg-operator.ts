@@ -17,12 +17,17 @@
  * bookkeeping here can disagree with conservation, with the room the tubes
  * actually have, or with the walls doing the heating.
  *
- * External flows and the partition: connection flows are classified by the
- * phase they are actually carrying (currentFlowPhase, set by the momentum
- * solve): liquid inflow is feed into section 1; every other flow - the steam
- * draw, vapor backflow, a mid-bundle mixture leak - moves only the totals,
- * and the solved partition follows. Liquid draws leave section 1 weighted by
- * m1/(m1+1), so an emptying subcooled section never steps its own rate.
+ * External flows and the partition: an OUTFLOW is booked to the section that
+ * physically occupies its nozzle - the partition's own phase-by-elevation
+ * answer (drawCompositionAt), the same weights the energy side prices the
+ * draw with - so slug water leaving a flooded tube is debited from the slug
+ * whatever the momentum path's phase label says. Only that share needs
+ * booking - the boiling and superheat masses are derived from the totals -
+ * and the rest of what the bundle ships is the scale the steam pass transits
+ * at. An INFLOW is the donor's business, classified by the DONOR's own draw
+ * model: its non-vapor share, routed to section 1 in proportion to how
+ * subcooled it is. Liquid draws leave section 1 weighted by m1/(m1+1), so an
+ * emptying subcooled section never steps its own rate.
  */
 
 import { SimulationState, FlowNode } from '../types';
@@ -46,7 +51,7 @@ import {
   mixtureCp,
   averageMolecularWeight,
 } from '../gas-properties';
-import { approxVaporDensity } from './connection-hydraulics';
+import { approxVaporDensity, drawCompositionAt } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
 
 // Tube-side film coefficients live in otsg.ts so the factory's design-point
@@ -106,8 +111,14 @@ export interface OtsgFlows {
   WFeed: number;       // kg/s of liquid inflow routed to the subcooled section
   hFeed: number;       // J/kg - its mean enthalpy
   uFeed: number;       // J/kg - the same, as internal energy
-  WSteamOut: number;   // kg/s vapor drawn from section 3
-  WLiquidOut: number;  // kg/s liquid drawn from section 1
+  /** kg/s - everything the bundle ships that is NOT economizer water: the
+   *  scale the steam pass transits at (see classifyOtsgFlows). Needs no
+   *  section booking, because those sections are derived from the totals. */
+  WSteamOut: number;
+  /** kg/s - the share of the outflow drawn from the economizer, by the
+   *  partition's own phase-by-elevation answer. The one draw the ledger has
+   *  to be debited for. */
+  WLiquidOut: number;
 }
 
 export function classifyOtsgFlows(
@@ -144,7 +155,6 @@ export function classifyOtsgFlows(
     if (!isFrom && !isTo) continue;
     // Signed flow INTO this node
     const w = isTo ? conn.massFlowRate : -conn.massFlowRate;
-    const phase = conn.currentFlowPhase ?? 'liquid';
     // The water on the OTHER side of this connection, as subcooled liquid at
     // its own temperature (u_f(T) + P v_f(T) - compressibility negligible).
     // Which end is the donor depends on the flow's sign, but which node is
@@ -176,11 +186,78 @@ export function classifyOtsgFlows(
       hInNum += wSub * hIn;
       hInDen += wSub;
     }
-    if (phase !== 'vapor' && w > 0) WFeed += w * wSub;
-    if (w < 0) {
-      if (phase === 'vapor') WSteamOut += -w;
-      else if (phase === 'liquid') WLiquidOut += -w;
-      // mixture draws come from section 2: derived mass, no bookkeeping
+    // WHAT LEAVES IS DECIDED BY THE PARTITION, NOT BY A LABEL.
+    //
+    // This used to book an outflow by conn.currentFlowPhase - the momentum
+    // path's phase LABEL. That label is written last, before the rates run,
+    // by FlowDynamicsConstraintOperator's own phase model, which knows
+    // nothing about the partition: it estimates the node's height from its
+    // volume as a cylinder (1.2 m for an Xe-100 bundle whose real tubes are
+    // 14 m) and compares the connection's elevation against a bulk-quality
+    // liquid level inside it. Every nozzle above ~1 m therefore reads
+    // 'vapor' whatever is actually there. On a FLOODED tube - the whole
+    // second half of a circulator trip - that booked 20-25 kg/s of boiling
+    // water leaving the top nozzle to the steam section and NOTHING to the
+    // slug, and a mid-bundle leak draining the economizer to the steam
+    // section too. The node's totals lost that water; the ledger did not,
+    // so m1 drifted up over the inventory, hit the closure's cap
+    // ("economizer ledger claims 99.x%"), and the partition it then asked
+    // for needed more than 220 bar to pack.
+    //
+    // The section that owns a draw is the one PHYSICALLY at the nozzle, and
+    // the partition already answers that question - drawCompositionAt reads
+    // its own section boundaries by elevation (economizer / boiling /
+    // superheat), which is the same convention the feed nozzle is selected
+    // by above. It is also the answer the ENERGY side already uses: both
+    // FlowRateOperator and the pressure solver price a draw by blending
+    // these same mass weights over the section enthalpies (hLiquidOut for
+    // the slug's mean, hSteamOut for the superheat outlet). So booking the
+    // mass by the same weights makes the section debit and the energy the
+    // node loses describe one event instead of two.
+    //
+    // An INFLOW is the DONOR's business, so it is classified by the DONOR's
+    // own draw model at its own nozzle: what the other node ships is what
+    // arrives, and (1 - wVapor) is the non-vapor share - the continuous form
+    // of the 'not labelled vapor' test it replaces. For the single-phase
+    // feed line that is every plant's normal case it is exactly 1, as the
+    // label was; where it differs, it is the answer the ENERGY side already
+    // uses, since FlowRateOperator prices what arrives by this same
+    // composition of the same donor.
+    //
+    // WHY THE ELEVATION ANSWER GOVERNS THE LEDGER BUT NOT THE TRANSIT
+    // SCALE. Only the LIQUID share needs booking - the boiling and superheat
+    // masses are derived from the totals - so WLiquidOut is the whole of the
+    // mass-conservation question, and it is the elevation's to answer: water
+    // leaving at 5 m came out of whatever section holds 5 m.
+    //
+    // WSteamOut is not a second booking; it is the scale the steam pass
+    // transits at (the wall pin's theta and the superheater's transit
+    // branch). The sections of a once-through tube are in SERIES, so what
+    // the bundle ships had to flow through the sections above the water it
+    // came from - the outlet is the top of the tube, and the drawn nozzle's
+    // 0.5 m of stub below it is drawing-frame detail, not a bypass. So the
+    // transit scale is the bundle's whole non-liquid throughput, and it does
+    // not step when a section boundary sweeps past a nozzle. Booking it by
+    // elevation instead was measured: the moment the boiling section's top
+    // rose past the steam nozzle on a flooding tube, the pin's theta stepped
+    // from ~0.1 to 1 (a dead-ended pocket soaking to its metal, T3 270 ->
+    // 390 C) and, on a tube that is 99% water, that step lands in the
+    // published pressure through the last cubic centimetres of vapour -
+    // circulator-trip rejections 649 -> 1201 for it. A discontinuity in an
+    // ARGUMENT, which no timestep can shrink.
+    if (w > 0) {
+      const compIn = drawCompositionAt(
+        other, isTo ? conn.fromElevation : conn.toElevation, w,
+        isTo ? conn.fromPhaseTolerance : conn.toPhaseTolerance,
+        isTo ? conn.fromOpeningHeight : conn.toOpeningHeight, undefined, false);
+      WFeed += w * wSub * (1 - compIn.wVapor);
+    } else if (w < 0) {
+      const compOut = drawCompositionAt(
+        node, elevHere, -w,
+        isTo ? conn.toPhaseTolerance : conn.fromPhaseTolerance,
+        isTo ? conn.toOpeningHeight : conn.fromOpeningHeight, undefined, false);
+      WLiquidOut += -w * compOut.wLiquid;
+      WSteamOut += -w * (1 - compOut.wLiquid);
     }
   }
   // The inlet enthalpy that prices the economizer's linear profile - and
