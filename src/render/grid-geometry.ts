@@ -23,7 +23,7 @@
  *    kept as drawn. Where several runs share a cell they are laid side by
  *    side for drawing (laneOffsetRoutes) - the stored geometry is unchanged.
  */
-import { Point, PlantComponent, Port, Connection, PlantState, PipeComponent } from '../types';
+import { Point, PlantComponent, Port, Connection, PlantState, PipeComponent, waterBodyOf } from '../types';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 
 /** Tile edge length in metres. World coordinates are metres, so this is also the lattice pitch. */
@@ -400,7 +400,10 @@ export interface Obstacle extends PlanRect {
 export function routeObstacles(plantState: PlantState): Obstacle[] {
   const out: Obstacle[] = [];
   for (const c of plantState.components.values()) {
-    if ((c as any).isHydraulicOnly || c.type === 'pipe' || c.type === 'building') continue;
+    // Open water is not standing equipment: a pipe crosses it, it does not
+    // have to go round the sea.
+    if ((c as any).isHydraulicOnly || c.type === 'pipe' || c.type === 'building' ||
+        waterBodyOf(c as never)) continue;
     out.push({ id: c.id, ...footprintRect(c.position, componentFootprint(c)) });
   }
   return out;

@@ -9,7 +9,7 @@
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
-import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock } from '../types';
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock, waterBodyOf } from '../types';
 import { stockedComponentTypes, typeDisplayName, PIPE_METRES_PER_STICK } from '../game/stock';
 import { SimulationState } from '../simulation';
 import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
@@ -25,7 +25,8 @@ import {
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
-import { TerrainModel, buildTerrainModel, surfaceAtVolume } from '../simulation/terrain';
+import { TerrainModel, buildTerrainModel, surfaceAtVolume, cellAt as terrainCellAt } from '../simulation/terrain';
+import { contourPolylines, ContourSet } from './terrain-contours';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -131,15 +132,36 @@ export class GridView {
   /** Automatic routes are a search; keep them until their inputs change. */
   private routeCache = new Map<Run, { key: string; pts: Point[] }>();
   private layout: RouteLayout | null = null;
-  /** Basins of the plant's terrain, rebuilt when the height field object changes. */
-  private terrainModel: { spec: TerrainSpec; model: TerrainModel } | null = null;
+  /**
+   * Everything derived from the plant's height field, rebuilt when the field
+   * object changes: the basins, the contour polylines (world coordinates, so
+   * they survive every camera move), and the world rectangle the camera is
+   * kept inside.
+   */
+  private terrainCache: {
+    spec: TerrainSpec;
+    model: TerrainModel;
+    contours: ContourSet[];
+    extent: PlanRect;
+  } | null = null;
 
-  private terrainFor(spec: TerrainSpec | undefined): TerrainModel | null {
+  private terrainDataFor(spec: TerrainSpec | undefined) {
     if (!spec) return null;
-    if (!this.terrainModel || this.terrainModel.spec !== spec) {
-      this.terrainModel = { spec, model: buildTerrainModel(spec) };
+    if (!this.terrainCache || this.terrainCache.spec !== spec) {
+      const half = spec.cellSize / 2;
+      this.terrainCache = {
+        spec,
+        model: buildTerrainModel(spec),
+        contours: contourPolylines(spec),
+        extent: {
+          x0: spec.origin.x - half,
+          y0: spec.origin.y - half,
+          x1: spec.origin.x + (spec.cols - 1) * spec.cellSize + half,
+          y1: spec.origin.y + (spec.rows - 1) * spec.cellSize + half,
+        },
+      };
     }
-    return this.terrainModel.model;
+    return this.terrainCache;
   }
 
   // ---------------------------------------------------------------------
@@ -206,6 +228,7 @@ export class GridView {
 
   setViewportSize(width: number, height: number): void {
     this.size = { width, height };
+    this.clampToTerrain();
   }
 
   worldToScreen(p: Point): Point {
@@ -225,15 +248,17 @@ export class GridView {
   panByPixels(dx: number, dy: number): void {
     this.cam.x -= dx / this.cam.ppm;
     this.cam.y -= dy / this.cam.ppm;
+    this.clampToTerrain();
   }
 
   /** Zoom by a factor keeping the world point under `screen` fixed. */
   zoomAt(screen: Point, factor: number): void {
     const before = this.screenToWorld(screen);
-    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.MAX_PPM, this.cam.ppm * factor));
+    this.cam.ppm = this.clampPpm(this.cam.ppm * factor);
     const after = this.screenToWorld(screen);
     this.cam.x += before.x - after.x;
     this.cam.y += before.y - after.y;
+    this.clampToTerrain();
   }
 
   /** Zoom relative to the default scale (1 = DEFAULT_PPM), about the canvas centre. */
@@ -242,7 +267,54 @@ export class GridView {
   }
 
   setZoomFactor(z: number): void {
-    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.MAX_PPM, z * GridView.DEFAULT_PPM));
+    this.cam.ppm = this.clampPpm(z * GridView.DEFAULT_PPM);
+    this.clampToTerrain();
+  }
+
+  /**
+   * The world rectangle the camera may look at: the height field plus a
+   * cell of shoulder. A plant with no terrain has no edge to fall off, so
+   * it gets none of this and pans as far as the player likes.
+   */
+  private cameraBounds(): PlanRect | null {
+    const t = this.terrainCache;
+    if (!t) return null;
+    const m = t.spec.cellSize;
+    return { x0: t.extent.x0 - m, y0: t.extent.y0 - m, x1: t.extent.x1 + m, y1: t.extent.y1 + m };
+  }
+
+  /**
+   * Zoom limits. On a plant with terrain the far end is "the whole map on
+   * screen": zooming out past that would only add empty space beyond the
+   * edge of the world.
+   */
+  private clampPpm(ppm: number): number {
+    const b = this.cameraBounds();
+    let min = GridView.MIN_PPM;
+    if (b) {
+      const fit = Math.min(this.size.width / (b.x1 - b.x0), this.size.height / (b.y1 - b.y0));
+      min = Math.max(min, Math.min(GridView.MAX_PPM, fit));
+    }
+    return Math.max(min, Math.min(GridView.MAX_PPM, ppm));
+  }
+
+  /**
+   * Keep the view inside the map. Along an axis where the map is smaller
+   * than the viewport the camera is centred on it instead - there is nowhere
+   * to pan to, so drifting would only slide the map about.
+   */
+  private clampToTerrain(): void {
+    const b = this.cameraBounds();
+    if (!b) return;
+    this.cam.ppm = this.clampPpm(this.cam.ppm);
+    const halfW = this.size.width / 2 / this.cam.ppm;
+    const halfH = this.size.height / 2 / this.cam.ppm;
+    this.cam.x = b.x1 - b.x0 <= 2 * halfW
+      ? (b.x0 + b.x1) / 2
+      : Math.min(Math.max(this.cam.x, b.x0 + halfW), b.x1 - halfW);
+    this.cam.y = b.y1 - b.y0 <= 2 * halfH
+      ? (b.y0 + b.y1) / 2
+      : Math.min(Math.max(this.cam.y, b.y0 + halfH), b.y1 - halfH);
   }
 
   /**
@@ -250,6 +322,7 @@ export class GridView {
    * closer than the default scale). With no plant, look at the origin.
    */
   centerOn(plantState: PlantState): void {
+    this.terrainDataFor(plantState.terrain);
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const c of plantState.components.values()) {
       if ((c as any).isHydraulicOnly) continue;
@@ -265,7 +338,8 @@ export class GridView {
     }
     if (!Number.isFinite(minX)) {
       this.cam.x = 0; this.cam.y = 0;
-      this.cam.ppm = GridView.DEFAULT_PPM;
+      this.cam.ppm = this.clampPpm(GridView.DEFAULT_PPM);
+      this.clampToTerrain();
       return;
     }
     // Fit into the part of the canvas nothing is standing on...
@@ -277,7 +351,7 @@ export class GridView {
     const fitPpm = Math.min(
       free.w / (maxX - minX + 2 * margin),
       free.h / (maxY - minY + 2 * margin));
-    this.cam.ppm = Math.max(GridView.MIN_PPM, Math.min(GridView.DEFAULT_PPM, fitPpm));
+    this.cam.ppm = this.clampPpm(Math.min(GridView.DEFAULT_PPM, fitPpm));
     // ...and put the plant's middle in the middle of THAT, not of the canvas:
     // the camera sits at the canvas centre, so offset it by however far the
     // free area's centre is from there.
@@ -287,6 +361,7 @@ export class GridView {
     };
     this.cam.x = (minX + maxX) / 2 - (freeCentre.x - this.size.width / 2) / this.cam.ppm;
     this.cam.y = (minY + maxY) / 2 - (freeCentre.y - this.size.height / 2) / this.cam.ppm;
+    this.clampToTerrain();
   }
 
   // ---------------------------------------------------------------------
@@ -311,9 +386,28 @@ export class GridView {
 
   private isGroundLayer(component: PlantComponent): boolean {
     // Things that ARE the ground where they stand: a building's floor, a
-    // switchyard's apron, and a pool, which is a hole in it.
+    // switchyard's apron, a pool (a hole in it), and a tank that is really a
+    // body of open water - the terrain has already painted that one, so it
+    // gets no pad and no sprite, only its nozzle.
     return component.type === 'building' || component.type === 'switchyard' ||
-      component.type === 'pool' || component.type === 'warehouse';
+      component.type === 'pool' || component.type === 'warehouse' ||
+      waterBodyOf(component as never) !== undefined;
+  }
+
+  /**
+   * Whether a world point is standing in a given terrain water body. This is
+   * what makes the sea clickable: the component has no drawn body, so the
+   * water IS its hit area.
+   */
+  private onWaterBody(plantState: PlantState, bodyId: string, world: Point): boolean {
+    const t = this.terrainDataFor(plantState.terrain);
+    if (!t) return false;
+    if (world.x < t.extent.x0 || world.x > t.extent.x1 ||
+        world.y < t.extent.y0 || world.y > t.extent.y1) return false;
+    const cell = terrainCellAt(t.spec, world);
+    if (cell < 0) return false;
+    const basin = t.model.basins[t.model.basinOf[cell]];
+    return basin?.water?.id === bodyId && t.spec.heights[cell] < basin.water.surface;
   }
 
   private spriteLayout(component: PlantComponent): SpriteLayout {
@@ -344,6 +438,20 @@ export class GridView {
       const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
       const pad = Math.max(4, ((component as PipeComponent).diameter || 0.3) * this.cam.ppm);
       return { left: Math.min(...xs) - pad, right: Math.max(...xs) + pad, top: Math.min(...ys) - pad, bottom: Math.max(...ys) + pad };
+    }
+    if (waterBodyOf(component as never)) {
+      // No drawn body: hang the gauges off the nozzle, which is where the
+      // player's pipe meets the water and where they will be looking.
+      const anchors = portAnchors(component);
+      if (anchors.length === 0) return null;
+      const pts = anchors.map(a => this.worldToScreen(a.point));
+      const pad = this.portRadius() + 4;
+      return {
+        left: Math.min(...pts.map(p => p.x)) - pad,
+        right: Math.max(...pts.map(p => p.x)) + pad,
+        top: Math.min(...pts.map(p => p.y)) - pad,
+        bottom: Math.max(...pts.map(p => p.y)) + pad,
+      };
     }
     if (this.isGroundLayer(component)) {
       const rect = footprintRect(component.position, componentFootprint(component));
@@ -469,6 +577,17 @@ export class GridView {
         const half = Math.max((pipe.diameter || 0.3) / 2, MIN_CLICK_TARGET_PX / 2 / this.cam.ppm);
         const pts = this.currentLayout(plantState).display.get(pipe) ?? pipeRoute(pipe);
         if (distanceToPolyline(world, pts) <= half) return c;
+        continue;
+      }
+      const body = waterBodyOf(c as never);
+      if (body) {
+        // The water is the picture, so the water is the hit area - plus the
+        // nozzle itself, which may sit a step up the beach.
+        if (this.onWaterBody(plantState, body, world)) return c;
+        const reach = Math.max(1.5, this.portRadius() / this.cam.ppm);
+        for (const a of portAnchors(c)) {
+          if (Math.hypot(world.x - a.point.x, world.y - a.point.y) <= reach) return c;
+        }
         continue;
       }
       if (c.type === 'pool' || c.type === 'warehouse') {
@@ -601,6 +720,10 @@ export class GridView {
 
   render(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     this.size = { width: f.width, height: f.height };
+    // One place that guarantees the drawn frame is inside the map, whatever
+    // moved the camera (a resize, a restored setting, a future caller)
+    this.terrainDataFor(f.plantState.terrain);
+    this.clampToTerrain();
     this.layout = this.buildLayout(f.plantState);
     const order = this.drawOrder(f.plantState);
 
@@ -613,6 +736,7 @@ export class GridView {
       else if (c.type === 'switchyard') this.renderSwitchyard(ctx, c as SwitchyardComponent, f);
       else if (c.type === 'pool') this.renderPool(ctx, c as PoolComponent, f);
       else if (c.type === 'warehouse') this.renderWarehouse(ctx, c as WarehouseComponent, f);
+      else if (waterBodyOf(c as never)) this.renderWaterIntake(ctx, c, f);
     }
 
     // Foundation pads under every standing component
@@ -680,8 +804,9 @@ export class GridView {
    */
   private renderTerrain(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     const spec = f.plantState.terrain;
-    const model = this.terrainFor(spec);
-    if (!spec || !model) return;
+    const terrain = this.terrainDataFor(spec);
+    if (!spec || !terrain) return;
+    const model = terrain.model;
     const { origin, cellSize, cols, rows, heights } = spec;
     const half = cellSize / 2;
 
@@ -712,6 +837,26 @@ export class GridView {
       }
     }
 
+    // A water body that IS a component (see TankComponent.waterBody) lights
+    // up when that component is picked, because the water is all the player
+    // can see of it - there is no vessel to put a selection box round.
+    let litBody: string | undefined;
+    let litSelected = false;
+    for (const c of f.plantState.components.values()) {
+      const body = waterBodyOf(c as never);
+      if (!body) continue;
+      if (c.id === f.selectedComponentId) { litBody = body; litSelected = true; break; }
+      if (c.id === f.hoveredComponentId) { litBody = body; }
+    }
+    const waterIdOf = (cell: number): string | undefined =>
+      model.basins[model.basinOf[cell]]?.water?.id;
+    const isLit = (cell: number): boolean => {
+      if (litBody === undefined) return false;
+      if (waterIdOf(cell) !== litBody) return false;
+      const surface = surfaceOf.get(model.basinOf[cell]);
+      return surface !== undefined && surface > heights[cell];
+    };
+
     const px = cellSize * this.cam.ppm;
     ctx.save();
     for (let j = j0; j <= j1; j++) {
@@ -732,46 +877,76 @@ export class GridView {
           ctx.fillStyle = `rgba(40, 90, 170, ${a.toFixed(3)})`;
           ctx.fillRect(s.x, s.y, px + 0.5, px + 0.5);
         }
+        if (isLit(c)) {
+          ctx.fillStyle = litSelected ? 'rgba(120, 200, 255, 0.30)' : 'rgba(255, 255, 255, 0.16)';
+          ctx.fillRect(s.x, s.y, px + 0.5, px + 0.5);
+        }
       }
     }
 
-    // Contours: an edge between two cells whose heights straddle a level.
-    // The minor interval follows the map's relief (about twelve steps over
-    // its span, rounded to 1/2/5); minor lines are skipped when the cells
-    // are so coarse that nearly every edge would carry one.
-    let meanStep = 0, edges = 0;
-    for (let j = 0; j < rows; j++) {
-      for (let i = 0; i + 1 < cols; i++) { meanStep += Math.abs(heights[j * cols + i + 1] - heights[j * cols + i]); edges++; }
-    }
-    meanStep = edges > 0 ? meanStep / edges : 0;
-    const raw = span / 12;
-    const mag = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-6))));
-    const minor = [1, 2, 5, 10].map(m => m * mag).find(v => v >= raw) ?? 10 * mag;
-    const major = minor * 5;
-    const levels: Array<readonly [number, string, number]> = [[major, 'rgba(60, 45, 20, 0.65)', 1.5]];
-    if (meanStep < minor) levels.unshift([minor, 'rgba(60, 45, 20, 0.3)', 1]);
-    if (px >= 3) {
-      for (const [interval, style, width] of levels) {
-        ctx.strokeStyle = style;
-        ctx.lineWidth = width;
-        ctx.beginPath();
-        for (let j = j0; j <= j1; j++) {
-          for (let i = i0; i <= i1; i++) {
-            const c = j * cols + i;
-            const hc = Math.floor(heights[c] / interval);
-            const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
-            if (i + 1 < cols && Math.floor(heights[c + 1] / interval) !== hc) {
-              ctx.moveTo(s.x + px, s.y); ctx.lineTo(s.x + px, s.y + px);
-            }
-            if (j + 1 < rows && Math.floor(heights[c + cols] / interval) !== hc) {
-              ctx.moveTo(s.x, s.y + px); ctx.lineTo(s.x + px, s.y + px);
-            }
-          }
+    // ...and an outline round the whole lit body: the edges of lit cells that
+    // face a cell which is not lit are its shore.
+    if (litBody !== undefined) {
+      ctx.strokeStyle = litSelected ? COLORS.selectionHighlight : 'rgba(255, 255, 255, 0.75)';
+      ctx.lineWidth = litSelected ? 3 : 2;
+      ctx.beginPath();
+      for (let j = j0; j <= j1; j++) {
+        for (let i = i0; i <= i1; i++) {
+          const c = j * cols + i;
+          if (!isLit(c)) continue;
+          const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
+          if (i === 0 || !isLit(c - 1)) { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x, s.y + px); }
+          if (i === cols - 1 || !isLit(c + 1)) { ctx.moveTo(s.x + px, s.y); ctx.lineTo(s.x + px, s.y + px); }
+          if (j === 0 || !isLit(c - cols)) { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + px, s.y); }
+          if (j === rows - 1 || !isLit(c + cols)) { ctx.moveTo(s.x, s.y + px); ctx.lineTo(s.x + px, s.y + px); }
         }
+      }
+      ctx.stroke();
+    }
+
+    // Contours: polylines of the interpolated ground (terrain-contours.ts),
+    // drawn through their own midpoints as quadratic curves so they bend the
+    // way a surveyed contour does instead of stepping along cell edges. The
+    // geometry is world-space and cached with the height field; only the
+    // projection happens per frame.
+    if (px >= 3) {
+      for (const set of terrain.contours) {
+        ctx.strokeStyle = set.major ? 'rgba(60, 45, 20, 0.65)' : 'rgba(60, 45, 20, 0.3)';
+        ctx.lineWidth = set.major ? 1.5 : 1;
+        ctx.beginPath();
+        for (const line of set.lines) this.traceSmooth(ctx, line);
         ctx.stroke();
       }
     }
     ctx.restore();
+  }
+
+  /**
+   * Add a world-space polyline to the current path as a smooth curve: each
+   * vertex is the control point of a quadratic that runs between the
+   * midpoints of the segments meeting there. Off-screen lines are skipped
+   * whole - a contour is one long line and clipping it per segment would cost
+   * more than letting the canvas reject it.
+   */
+  private traceSmooth(ctx: CanvasRenderingContext2D, line: Point[]): void {
+    if (line.length < 2) return;
+    const pts = line.map(p => this.worldToScreen(p));
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    if (maxX < 0 || minX > this.size.width || maxY < 0 || minY > this.size.height) return;
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i + 1 < pts.length; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2;
+      const my = (pts[i].y + pts[i + 1].y) / 2;
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my);
+    }
+    const last = pts[pts.length - 1];
+    ctx.lineTo(last.x, last.y);
   }
 
   private wallColor(building: BuildingComponent): { wall: string; light: string } {
@@ -977,6 +1152,46 @@ export class GridView {
       ctx.strokeStyle = COLORS.selectionHighlight;
       ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
     }
+  }
+
+  /**
+   * A component that IS a body of water has no body to draw - the terrain
+   * has already painted it. All that is left is the one thing the player
+   * needs to find: where its nozzle meets the shore. A short jetty stub and
+   * the name, nothing more, so the water still reads as water.
+   */
+  private renderWaterIntake(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
+    const anchors = portAnchors(c);
+    if (anchors.length === 0) return;
+    const lit = c.id === f.selectedComponentId || c.id === f.hoveredComponentId;
+    const r = Math.max(3, this.portRadius() * 0.7);
+    for (const a of anchors) {
+      const s = this.worldToScreen(a.point);
+      const back = a.out ? this.worldToScreen(a.out) : s;
+      // A stub from the water out to the anchor: the jetty the pipe lands on
+      ctx.strokeStyle = lit ? COLORS.selectionHighlight : 'rgba(60, 60, 62, 0.85)';
+      ctx.lineWidth = Math.max(2, r * 0.7);
+      ctx.beginPath();
+      ctx.moveTo(back.x, back.y);
+      ctx.lineTo(s.x, s.y);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(150, 158, 165, 0.95)';
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(25, 30, 34, 0.9)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    const s = this.worldToScreen(anchors[0].point);
+    const fontPx = Math.max(8, Math.min(15, this.cam.ppm * 0.42));
+    ctx.font = `bold ${fontPx}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(225, 235, 245, 0.9)';
+    ctx.fillText(c.label || c.id, s.x, s.y - r - 3);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
   }
 
   /**
@@ -1194,34 +1409,48 @@ export class GridView {
     ctx.restore();
   }
 
-  /** Concrete foundation with a soft shadow, sized to the footprint. */
+  /**
+   * Concrete foundation with a soft shadow.
+   *
+   * The slab stands OUT past the footprint, the way the pool's coping does,
+   * because a component's footprint is the thing itself: a round tank drawn
+   * inside its own square footprint hid the pad completely and the tank read
+   * as standing on bare gravel. A border of slab around it is what makes it
+   * read as founded.
+   */
   private renderPad(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
     const rect = footprintRect(c.position, componentFootprint(c));
     const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
     const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
     const w = br.x - tl.x, h = br.y - tl.y;
     const origin = this.worldToScreen({ x: 0, y: 0 });
-    const inset = Math.min(w, h) * 0.06;
+    // A margin of slab, in metres, so the border stays put as the view zooms
+    const out = Math.max(2, Math.min(1.5, Math.min(w, h) / this.cam.ppm * 0.09) * this.cam.ppm);
+    const x = tl.x - out, y = tl.y - out, pw = w + 2 * out, ph = h + 2 * out;
 
     ctx.fillStyle = 'rgba(0, 0, 0, 0.25)';
-    ctx.fillRect(tl.x + inset + 2, tl.y + inset + 3, w - 2 * inset, h - 2 * inset);
+    ctx.fillRect(x + 2, y + 3, pw, ph);
     ctx.fillStyle = this.art.pattern(ctx, 'pad', this.cam.ppm, origin);
-    ctx.fillRect(tl.x + inset, tl.y + inset, w - 2 * inset, h - 2 * inset);
+    ctx.fillRect(x, y, pw, ph);
     // Bevel: light top/left, dark bottom/right
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
     ctx.beginPath();
-    ctx.moveTo(tl.x + inset, br.y - inset); ctx.lineTo(tl.x + inset, tl.y + inset); ctx.lineTo(br.x - inset, tl.y + inset);
+    ctx.moveTo(x, y + ph); ctx.lineTo(x, y); ctx.lineTo(x + pw, y);
     ctx.stroke();
     ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
     ctx.beginPath();
-    ctx.moveTo(br.x - inset, tl.y + inset); ctx.lineTo(br.x - inset, br.y - inset); ctx.lineTo(tl.x + inset, br.y - inset);
+    ctx.moveTo(x + pw, y); ctx.lineTo(x + pw, y + ph); ctx.lineTo(x, y + ph);
     ctx.stroke();
+    // A hairline on the footprint itself, so the slab reads as a border
+    // around the thing rather than as a bigger thing
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+    ctx.strokeRect(tl.x + 0.5, tl.y + 0.5, w - 1, h - 1);
 
     if (c.id === f.hoveredComponentId && f.buildMode) {
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
       ctx.lineWidth = 2;
-      ctx.strokeRect(tl.x, tl.y, w, h);
+      ctx.strokeRect(x, y, pw, ph);
     }
   }
 

@@ -966,6 +966,25 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   const w = tank.width * view.zoom;
   const h = tank.height * view.zoom;
 
+  // A tank that IS a terrain water body (a sea, a lake) has no vessel to
+  // draw. The grid view suppresses it entirely and lets the painted water
+  // stand for it; this view has no terrain, so all it can honestly show is
+  // the water surface itself - a low band at the component's own water line,
+  // wide enough to pipe to and small enough not to pretend to be a tank.
+  if (tank.waterBody) {
+    const surface = h * ((tank.fillLevel ?? 0.5) - 0.5);
+    const band = Math.max(2, h * 0.06);
+    ctx.fillStyle = 'rgba(40, 100, 165, 0.75)';
+    ctx.fillRect(-w / 2, -surface - band, w, band * 2);
+    ctx.strokeStyle = 'rgba(170, 210, 235, 0.9)';
+    ctx.lineWidth = Math.max(1, band * 0.35);
+    ctx.beginPath();
+    ctx.moveTo(-w / 2, -surface);
+    ctx.lineTo(w / 2, -surface);
+    ctx.stroke();
+    return;
+  }
+
   // Calculate wall thickness from pressure rating if available, otherwise use stored value
   let wallThickness = tank.wallThickness;
   if (tank.pressureRating !== undefined && tank.pressureRating > 0) {
