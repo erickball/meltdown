@@ -177,7 +177,20 @@ export function readComponentOption(optionName: string, component: Record<string
   if (component.type === 'warehouse') {
     if (optionName === 'stockPipeMeters') return component.stock?.pipeMeters ?? 0;
     if (optionName === 'stockPipeSpec') return component.stock?.pipeSpec ?? '';
-    if (optionName === 'stockLines') return component.stock?.components ?? [];
+    if (optionName === 'stockLines') {
+      const lines = component.stock?.components;
+      if (lines !== undefined && !Array.isArray(lines)) {
+        // The old type-keyed block. getStock() converts it the moment anything
+        // touches the plant's stock, so seeing it here means the dialog was
+        // opened on a plant nothing has read yet - and showing it as an empty
+        // list would WIPE the yard on confirm.
+        throw new Error(
+          `[Warehouse] Stock block is still in the old type-keyed form ` +
+          `(${JSON.stringify(lines)}). Read it through getStock() in ` +
+          `src/game/stock.ts first, which migrates it to lines.`);
+      }
+      return lines ?? [];
+    }
   }
 
   // PID controller fields live in the nested pid config with SI units
