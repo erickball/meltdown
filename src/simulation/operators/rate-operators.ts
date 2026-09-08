@@ -16,7 +16,10 @@ import {
   createZeroRates,
 } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
-import { computeReactivityComponents, getRelocatedFuelFraction } from './neutronics';
+import {
+  computeReactivityComponents, getRelocatedFuelFraction, normalizedNeutronSource,
+  DECAY_HEAT_GROUPS, DECAY_HEAT_TOTAL_FRACTION,
+} from './neutronics';
 import * as Water from '../water-properties';
 import { solveMixtureState, type MixtureState } from '../mixture-properties';
 import { simulationConfig } from '../types';
@@ -1380,21 +1383,10 @@ export class HeatGenerationRateOperator implements RateOperator {
 // Neutronics Rate Operator
 // ============================================================================
 
-/**
- * Fission-product decay heat groups: a coarse 4-group fit to ANS-5.1 decay
- * power after long operation. Each group builds toward fraction*P_fission
- * with time constant 1/lambda and releases its inventory after shutdown:
- * ~5% of prior power at 10 s, ~3% at 100 s, ~1.5% at 1000 s.
- */
-export const DECAY_HEAT_GROUPS: ReadonlyArray<{ fraction: number; lambda: number }> = [
-  { fraction: 0.026, lambda: 0.1 },   // short-lived products, tau ~10 s
-  { fraction: 0.020, lambda: 0.01 },  // tau ~100 s
-  { fraction: 0.012, lambda: 1e-3 },  // tau ~17 min
-  { fraction: 0.012, lambda: 1e-4 },  // tau ~2.8 h
-];
-
-/** Fraction of fission energy that is delayed (deposited via the pools) */
-export const DECAY_HEAT_TOTAL_FRACTION = DECAY_HEAT_GROUPS.reduce((s, g) => s + g.fraction, 0);
+// The decay-heat group fit lives with the rest of the neutronics parameters
+// (the neutron source model reads the pool inventory too); re-exported here
+// because this is where the pools are integrated and where callers look.
+export { DECAY_HEAT_GROUPS, DECAY_HEAT_TOTAL_FRACTION } from './neutronics';
 
 export class NeutronicsRateOperator implements RateOperator {
   name = 'Neutronics';
@@ -1424,6 +1416,12 @@ export class NeutronicsRateOperator implements RateOperator {
     const beta = n.delayedNeutronFraction;
     const Lambda = n.promptNeutronLifetime;
     const lambda = n.precursorDecayConstant;
+    // Neutron source in normalized units (fraction of nominal fission power
+    // per second) - see neutronics.ts. This is what gives the subcritical
+    // equations a positive steady state N_ss = S*Lambda/(-rho) instead of
+    // decaying toward zero, so a shut-down core sits at a physical
+    // source-driven level and a restart takes the real amount of time.
+    const S = normalizedNeutronSource(n);
 
     // Normalized power
     const N = n.power / n.nominalPower;
@@ -1464,11 +1462,18 @@ export class NeutronicsRateOperator implements RateOperator {
       // For shutdown (ρ < 0): dC/dt < 0 (precursors decay)
       // For critical (ρ = 0): dC/dt = 0 (equilibrium)
       // For subcritical (0 < ρ < β): dC/dt > 0 (precursors build up)
+      //
+      // With the neutron source S the prompt equilibrium is
+      //   N_eq = (λ*C + S) * Λ / (β - ρ)
+      // and substituting it into the precursor equation gives
+      //   dC/dt = (λ*C*ρ + β*S) / (β - ρ)
+      // whose zero is C_ss = β*S/(λ*(-ρ)) - the source-driven precursor
+      // level a shut-down core relaxes onto, with N_ss = S*Λ/(-ρ).
 
-      dC_dt = lambda * C * rho / subcriticalMargin;
+      dC_dt = (lambda * C * rho + beta * S) / subcriticalMargin;
 
-      // Power follows equilibrium with precursors
-      const N_eq = lambda * Lambda * C / subcriticalMargin;
+      // Power follows equilibrium with precursors (and the source)
+      const N_eq = (lambda * C + S) * Lambda / subcriticalMargin;
 
       // Rate of power change = rate of approach to equilibrium. Physically
       // this IS the prompt jump - timescale Λ/(β-ρ), sub-millisecond - so N
@@ -1503,7 +1508,7 @@ export class NeutronicsRateOperator implements RateOperator {
       //
       // The dt cancels when dividing, so we can use any convenient dt.
 
-      const result = this.analyticalPointKinetics(N, C, rho, beta, Lambda, lambda);
+      const result = this.analyticalPointKinetics(N, C, rho, beta, Lambda, lambda, S);
       dN_dt = result.dN_dt;
       dC_dt = result.dC_dt;
     }
@@ -1533,11 +1538,15 @@ export class NeutronicsRateOperator implements RateOperator {
   /**
    * Analytical solution to point kinetics equations for near-critical reactivity.
    *
-   * Solves the 2x2 linear system:
-   *   dN/dt = a*N + b*C    where a = (ρ-β)/Λ, b = λ
-   *   dC/dt = c*N + d*C          c = β/Λ,     d = -λ
+   * Solves the 2x2 affine system:
+   *   dN/dt = a*N + b*C + S  where a = (ρ-β)/Λ, b = λ
+   *   dC/dt = c*N + d*C            c = β/Λ,     d = -λ
    *
-   * Uses matrix exponential via eigenvalue decomposition.
+   * Uses matrix exponential via eigenvalue decomposition, with the source
+   * carried by the particular solution x_src(t) = Σ_i b_i v_i (e^(λ_i t)-1)/λ_i
+   * (the eigen-decomposition of ∫exp(As)ds·[S,0]ᵀ; that form stays finite as
+   * an eigenvalue passes through zero, unlike the -A⁻¹[S,0]ᵀ fixed point,
+   * which diverges at ρ = 0).
    * Returns effective rates (change per unit time).
    *
    * @param N - Normalized power (N = P / P_nominal)
@@ -1546,6 +1555,7 @@ export class NeutronicsRateOperator implements RateOperator {
    * @param beta - Delayed neutron fraction
    * @param Lambda - Prompt neutron lifetime (s)
    * @param lambda - Precursor decay constant (1/s)
+   * @param S - Neutron source in normalized units (1/s)
    */
   private analyticalPointKinetics(
     N: number,
@@ -1553,7 +1563,8 @@ export class NeutronicsRateOperator implements RateOperator {
     rho: number,
     beta: number,
     Lambda: number,
-    lambda: number
+    lambda: number,
+    S: number
   ): { dN_dt: number; dC_dt: number } {
     // Matrix coefficients
     const a = (rho - beta) / Lambda;
@@ -1615,7 +1626,7 @@ export class NeutronicsRateOperator implements RateOperator {
       if (Math.abs(detV) < 1e-30) {
         // Degenerate case - fall back to explicit rates
         return {
-          dN_dt: a * N + b * C,
+          dN_dt: a * N + b * C + S,
           dC_dt: c * N + d * C,
         };
       }
@@ -1623,12 +1634,21 @@ export class NeutronicsRateOperator implements RateOperator {
       const c1 = (v2_C * N - v2_N * C) / detV;
       const c2 = (-v1_C * N + v1_N * C) / detV;
 
+      // Source vector [S, 0]ᵀ in the same eigenbasis
+      const s1 = v2_C * S / detV;
+      const s2 = -v1_C * S / detV;
+
       // Solution at time dt
       const exp1 = Math.exp(lambda1 * dt);
       const exp2 = Math.exp(lambda2 * dt);
 
-      N_new = c1 * v1_N * exp1 + c2 * v2_N * exp2;
-      C_new = c1 * v1_C * exp1 + c2 * v2_C * exp2;
+      // (e^(λ dt) - 1)/λ, the time integral of e^(λ t) over the window;
+      // expm1 keeps it accurate, and the λ→0 limit is the window itself.
+      const g1 = Math.abs(lambda1 * dt) < 1e-12 ? dt : Math.expm1(lambda1 * dt) / lambda1;
+      const g2 = Math.abs(lambda2 * dt) < 1e-12 ? dt : Math.expm1(lambda2 * dt) / lambda2;
+
+      N_new = c1 * v1_N * exp1 + c2 * v2_N * exp2 + s1 * v1_N * g1 + s2 * v2_N * g2;
+      C_new = c1 * v1_C * exp1 + c2 * v2_C * exp2 + s1 * v1_C * g1 + s2 * v2_C * g2;
     } else if (D < -1e-20) {
       // Complex eigenvalues (rare for typical reactor parameters)
       // λ = α ± iω where α = tr/2, ω = sqrt(-D)/2
@@ -1660,6 +1680,11 @@ export class NeutronicsRateOperator implements RateOperator {
 
       N_new = expAlpha * ((cosOmega + m11 * sinOmega) * N + m12 * sinOmega * C);
       C_new = expAlpha * (m21 * sinOmega * N + (cosOmega + m22 * sinOmega) * C);
+      // Source over the window, to first order. Complex eigenvalues need
+      // D = tr² + 4λρ/Λ < 0 and hence ρ < 0, which this branch is never
+      // entered with (the caller uses it only for ρ > β - 0.001), so the
+      // exact particular solution would be dead code.
+      N_new += S * dt;
     } else {
       // Repeated eigenvalue (D ≈ 0) - near-critical degeneracy
       // λ = tr/2 (repeated)
@@ -1675,6 +1700,10 @@ export class NeutronicsRateOperator implements RateOperator {
       // exp(At) = exp(λt) * [[1 + t*a_adj, t*b], [t*c, 1 + t*d_adj]]
       N_new = expLambda * ((1 + dt * a_adj) * N + dt * b * C);
       C_new = expLambda * (dt * c * N + (1 + dt * d_adj) * C);
+      // Source over the window, to first order - as above, a repeated
+      // eigenvalue needs 4λρ/Λ = -tr² <= 0 and so ρ <= 0, unreachable from
+      // this method's only caller.
+      N_new += S * dt;
     }
 
     // Return effective rates
