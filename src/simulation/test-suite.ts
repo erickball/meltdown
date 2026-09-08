@@ -7,7 +7,9 @@
  * Tests are organized by category and only show detailed output on failure.
  */
 
-import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
+import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature,
+  saturatedLiquidDensity, saturatedVaporDensity, saturatedLiquidEnergy,
+  saturatedVaporEnergy } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import { computeReactivityComponents } from './operators/neutronics.js';
 import { ControlSystemOperator, describeControllerSignal,
@@ -157,6 +159,65 @@ test('Two-phase mixture at 10 bar, 50% quality', () => {
   assert(result.phase === 'two-phase', `Phase should be two-phase, got ${result.phase}`);
   assertClose(result.quality, 0.5, 0.05, 'Quality');
   assertClose(result.pressure / 1e5, 10, 1, 'Pressure (bar)');
+});
+
+test('a two-phase root stays continuous at parts-per-million quality', () => {
+  // A cold demineralised-water tank - 14 m across, 7 m tall, 78% full at
+  // 288 K with a few kg of steam over the water - sits at x ~ 4e-6. There u
+  // is only ~10 J/kg above u_f while du_f/dT ~ 4190 J/(kg*K), so a
+  // millikelvin of slop in the two-phase temperature is a THIRD of the whole
+  // quality budget. The root solve used to quit at an ABSOLUTE 1 mK bracket
+  // width (and at |x_v - x_u| < 1e-6, which is 25% of x here); because
+  // bisection midpoints land on a dyadic grid of the initial bracket, T came
+  // out quantised onto a 0.71 mK ladder and quality sawtoothed +-12%. A tank
+  // draining smoothly appeared to shed half a tonne-of-steam-per-percent in
+  // single ticks, and the displayed level - derived from quality - jumped UP
+  // while the tank emptied. Sweep u at fixed v and demand the root be
+  // monotone, step-free, and self-consistent.
+  const v = 1.308295276077e-3;   // V/m for that tank, m^3/kg
+  const u0 = 62846.99;           // J/kg, ~10 J/kg above u_f(288.1 K)
+  const du = 0.25, N = 60;
+
+  let prevT = -Infinity, prevX = -Infinity;
+  let maxStep = 0, firstStep = 0;
+  for (let i = 0; i <= N; i++) {
+    const u = u0 + i * du;
+    const s = calculateState(1.0, u, v);
+    assert(s.phase === 'two-phase', `sweep left the dome at u=${u}: ${s.phase}`);
+
+    // The root must satisfy the condition it was solved for: the quality read
+    // off the volumes and the quality read off the energies must agree. At
+    // x ~ 4e-6 an absolute tolerance says nothing, so test the RELATIVE gap.
+    const v_f = 1 / saturatedLiquidDensity(s.temperature);
+    const v_g = 1 / saturatedVaporDensity(s.temperature);
+    const u_f = saturatedLiquidEnergy(s.temperature);
+    const u_g = saturatedVaporEnergy(s.temperature);
+    const x_v = (v - v_f) / (v_g - v_f);
+    const x_u = (u - u_f) / (u_g - u_f);
+    assert(Math.abs(x_v - x_u) < 1e-6 * s.quality,
+      `two-phase root is inconsistent at u=${u.toFixed(2)}: x_v=${x_v.toExponential(6)} ` +
+      `vs x_u=${x_u.toExponential(6)} (${(100 * (x_v - x_u) / s.quality).toFixed(3)}% of x)`);
+
+    // Adding energy at fixed volume must warm the water and boil a little
+    // more of it - strictly, every step, with no plateaus and no reversals.
+    if (i > 0) {
+      assert(s.temperature > prevT, `T not increasing with u at u=${u.toFixed(2)}`);
+      assert(s.quality > prevX, `quality not increasing with u at u=${u.toFixed(2)}`);
+      const step = s.quality - prevX;
+      if (i === 1) firstStep = step;
+      maxStep = Math.max(maxStep, step);
+    }
+    prevT = s.temperature;
+    prevX = s.quality;
+  }
+
+  // A staircase shows up as one giant increment among many tiny ones. The
+  // true response is smooth, so every increment is within a hair of the
+  // first; the old code's biggest was ~4000x it.
+  assert(maxStep < 1.05 * firstStep,
+    `quality steps unevenly - largest increment ${maxStep.toExponential(3)} is ` +
+    `${(maxStep / firstStep).toFixed(1)}x the first (${firstStep.toExponential(3)}), ` +
+    `which means the two-phase temperature is quantised`);
 });
 
 test('Superheated steam at 500K, 1 bar', () => {
