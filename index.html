@@ -142,6 +142,10 @@
           <h3>Components</h3>
         <div class="component-categories"
              title="Pick a component, then click the site to place it. This works while the plant is running too: the new component starts from its own initial conditions and everything already running carries straight on at the same simulated time. Rebuilding the plant does clear the rewind history.">
+          <details open id="yard-palette-group" style="display: none;">
+            <summary title="What is actually standing in this plant's supply yard, one button per stack. A stack that names an equipment design hands out exactly that design - there is nothing left to choose when you place it, so the placement dialog only asks where it goes and what to call it.">Supply Yard</summary>
+            <div id="yard-palette-buttons"></div>
+          </details>
           <details open>
             <summary>Vessels</summary>
             <button data-component="tank" class="component-btn">Tank</button>

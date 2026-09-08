@@ -57,6 +57,12 @@ function perturbOption(o: ComponentOption): any {
     }
     case 'ncg':
       return { N2: 0.5 };
+    case 'stockLines':
+      // A design line beside a generic one: the two shapes a yard can hold.
+      return [
+        { type: 'pump', design: 'pump-service-water-lp', count: 2 },
+        { type: 'valve', count: 1 },
+      ];
     default: // text
       return `${o.default}-edited`;
   }

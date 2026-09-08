@@ -165,7 +165,19 @@ const components: Array<[string, Record<string, unknown>]> = [
     id: 'yard', type: 'warehouse', label: 'Supply Yard',
     position: { x: 60, y: 115 }, rotation: 0, elevation: 0,
     width: 12, depth: 8,
-    stock: { pipeMeters: 300, components: { pump: 2, valve: 2 } },
+    // Fully specified: the yard hands out ONE pump design and ONE line size,
+    // so placing from it asks the player where the part goes, not what it is.
+    // The pump is the low-pressure service water machine (200 kg/s at 60 m):
+    // enough to lift from the shore ~15 m below the pool rim and beat the
+    // ~144 kg/s crack, not enough to fill the pool in a moment.
+    stock: {
+      pipeMeters: 300,
+      pipeSpec: 'spec-12in-service',
+      components: [
+        { type: 'pump', design: 'pump-service-water-lp', count: 2 },
+        { type: 'valve', design: 'valve-service-water', count: 2 },
+      ],
+    },
     ports: [],
   }],
 ];

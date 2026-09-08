@@ -61,7 +61,7 @@ Two obstacles fall straight out of the ground:
 | `tank-a` | Demineralised Water Tank | 14 m x 7 m, 78% full = **840 t** at 15 C |
 | `tank-b` | Fire Water Tank | 10 m x 6 m, 80% full = **377 t** at 15 C |
 | `sea` | The Sea (a tank) | 34 m x 8 m on the -4 m shelf, half full so its surface is 0 m = 11 300 t |
-| `yard` | Supply Yard (warehouse) | **300 m of pipe, 2 pumps, 2 valves** |
+| `yard` | Supply Yard (warehouse) | **300 m of 12-inch service water pipe, 2 Low-Pressure Service Water Pumps, 2 Service Water Isolation valves** - fully specified, see below |
 
 Plus a vent from the pool rim to `atmosphere` (no standing head), and the
 crack's own line to `atmosphere`.
@@ -155,10 +155,20 @@ give up 602 t of their 1217 t: real pressure, real margin.
   also why an *un-valved* tank line drains 1200 t in about 90 sim-minutes:
   the headless answer key throttles with a valve, and a player who leaves it
   open will watch the yard's water go over the pool rim and out of the vent.
-* The default palette pump is **1000 kg/s**. The crack passes about 100 kg/s
-  once the level is near the racks; a 1000 kg/s make-up pump simply pushes
-  tank water out of the vent ten times faster. One of the four HUD hints says
-  so in as many words.
+* **The yard's parts are fully specified.** The pump is the
+  `pump-service-water-lp` design (200 kg/s at 60 m, 16 bar casing, NPSHr 5 m)
+  and the pipe is `spec-12in-service` (0.3 m bore, 16 bar). Placing from the
+  yard offers no design choice at all - the palette button IS the design, and
+  the placement dialog locks every field but the name and the elevation. See
+  [warehouse-stock.md](warehouse-stock.md).
+* That pump measures **352 kg/s** from the shore into the pool (check `[3]`)
+  against a crack that passes ~144 kg/s at the start and ~100 kg/s near the
+  racks: it keeps up with the leak and refills the pool in tens of minutes,
+  not instantly. From the bench it delivers **-0.0 kg/s** - the suction lift
+  flashes its intake - which is the level's first obstacle, unchanged.
+  Before this the palette handed out a 1000 kg/s generic pump, which simply
+  pushed tank water out of the vent ten times faster; one of the four HUD
+  hints still warns about oversizing.
 * The sea is the only lasting source, and reaching it needs a pump *at the
   shore*, which means waiting out the wave. A pump on the bench delivers zero.
 

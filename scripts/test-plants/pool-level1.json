@@ -209,10 +209,19 @@
     "depth": 6.0,
     "stock": {
      "pipeMeters": 400,
-     "components": {
-      "pump": 2,
-      "valve": 1
-     }
+     "pipeSpec": "spec-12in-service",
+     "components": [
+      {
+       "type": "pump",
+       "design": "pump-service-water-lp",
+       "count": 2
+      },
+      {
+       "type": "valve",
+       "design": "valve-service-water",
+       "count": 1
+      }
+     ]
     },
     "ports": []
    }
