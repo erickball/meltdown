@@ -45,6 +45,10 @@ import {
   revertLivePlantEdit,
   LiveEditSnapshot,
 } from './simulation';
+import {
+  getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
+  typeDisplayName, formatMetres, applyConnectionLengthEdit,
+} from './game/stock';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions, auditComponentEditSync } from './construction/component-config';
@@ -1361,6 +1365,9 @@ function init() {
   let selectedComponentType: string | null = null;
   const componentDialog = new ComponentDialog();
   const connectionDialog = new ConnectionDialog();
+  // The dialog reads the racks through this rather than the plant, so it has
+  // no idea a warehouse exists - it just shows a number when there is one.
+  connectionDialog.setPipeStockProvider(() => pipeMetersRemaining(plantState));
   const constructionManager = new ConstructionManager(plantState);
 
   // Construction cost panel elements
@@ -1378,9 +1385,97 @@ function init() {
   }
 
   /**
+   * Show what the warehouse has left on the build buttons.
+   *
+   * A plant with no warehouse builds from an unlimited store, so the badges
+   * disappear entirely and the palette is exactly what it has always been.
+   * With one, every button carries its remaining count (metres, for the two
+   * pipe-laying controls) and an empty pile greys the button out with
+   * `.tool-unavailable` - deliberately not the `disabled` attribute, which
+   * eats the tooltip that explains why (same reasoning as the Move tool).
+   *
+   * Cheap enough to call on every construction change: it is ~20 buttons and
+   * it skips the DOM writes when nothing about the stock has changed.
+   */
+  let lastStockSignature: string | null = null;
+  function refreshStockBadges(): void {
+    const stock = getStock(plantState);
+    const signature = stock ? JSON.stringify(stock) : 'unlimited';
+    if (signature === lastStockSignature) return;
+    lastStockSignature = signature;
+
+    const badge = (btn: HTMLElement, text: string | null): void => {
+      const base = btn.dataset.baseLabel ?? (btn.dataset.baseLabel = btn.textContent ?? '');
+      btn.textContent = base;
+      if (text === null) return;
+      const span = document.createElement('span');
+      span.className = 'stock-badge';
+      span.textContent = text;
+      btn.appendChild(span);
+    };
+
+    document.querySelectorAll<HTMLButtonElement>('.component-btn').forEach(btn => {
+      const paletteKey = btn.dataset.component;
+      if (!paletteKey) return;
+      if (btn.dataset.baseTitle === undefined) btn.dataset.baseTitle = btn.title;
+      const baseTitle = btn.dataset.baseTitle || '';
+
+      if (!stock) {
+        badge(btn, null);
+        btn.classList.remove('tool-unavailable');
+        btn.title = baseTitle;
+        return;
+      }
+
+      const storedType = storedTypeForPaletteKey(paletteKey);
+      if (storedType === 'warehouse') {
+        // Putting up another yard costs nothing out of this one
+        badge(btn, null);
+        btn.classList.remove('tool-unavailable');
+        btn.title = baseTitle;
+        return;
+      }
+      if (storedType === 'pipe') {
+        const metres = pipeMetersRemaining(plantState) ?? 0;
+        badge(btn, `${formatMetres(metres)} m`);
+        btn.classList.toggle('tool-unavailable', metres <= 0);
+        btn.title = metres > 0
+          ? `${formatMetres(metres)} m of pipe left in the warehouse. A run costs its own length.`
+          : 'The warehouse is out of pipe. Delete a run somewhere else to get the metres back.';
+        return;
+      }
+      const left = componentsRemaining(plantState, storedType) ?? 0;
+      badge(btn, `\u00d7${left}`);
+      btn.classList.toggle('tool-unavailable', left <= 0);
+      const name = typeDisplayName(storedType, left !== 1);
+      btn.title = left > 0
+        ? `${left} ${name} left in the warehouse.` + (baseTitle ? ` ${baseTitle}` : '')
+        : `The warehouse has no more ${typeDisplayName(storedType, true)}. ` +
+          `Deleting one that is already built puts it back on the shelf.`;
+    });
+
+    // Laying pipe on the grid spends the same metres
+    const connectBtn = document.getElementById('connect-mode-btn');
+    if (connectBtn) {
+      if (connectBtn.dataset.baseTitle === undefined) connectBtn.dataset.baseTitle = connectBtn.title;
+      const baseTitle = connectBtn.dataset.baseTitle || '';
+      if (!stock) {
+        badge(connectBtn, null);
+        connectBtn.title = baseTitle;
+      } else {
+        const metres = pipeMetersRemaining(plantState) ?? 0;
+        badge(connectBtn, `${formatMetres(metres)} m`);
+        connectBtn.title = `${formatMetres(metres)} m of pipe left in the warehouse; ` +
+          `a run costs its own length.` + (baseTitle ? ` ${baseTitle}` : '');
+      }
+    }
+  }
+
+  /**
    * Update the construction cost panel with current plant costs
    */
   function updateConstructionCostPanel(): void {
+    refreshStockBadges();
     if (!constructionCostPanel) return;
 
     let totalCost = 0;
@@ -1751,13 +1846,23 @@ function init() {
     // Show the edit dialog
     connectionDialog.edit(plantConn, fromComponent, toComponent, (result: ConnectionEditResult | null) => {
       if (result) {
+        // Lengthening a run costs the extra metres; shortening it hands them
+        // back. Refused, the edit does not happen at all - so the connection
+        // must be left exactly as it was, including the fields above.
+        const lengthEdit = applyConnectionLengthEdit(plantState, plantConn, result.length);
+        if (!lengthEdit.ok) {
+          abandonLiveEdit(liveSnap);
+          showNotification(lengthEdit.reason, 'warning');
+          return;
+        }
+
         // Update the connection with new values
         plantConn.fromElevation = result.fromElevation;
         plantConn.toElevation = result.toElevation;
         plantConn.flowArea = result.flowArea;
-        plantConn.length = result.length;
         plantConn.fromOpeningHeight = result.fromOpeningHeight;
         plantConn.toOpeningHeight = result.toOpeningHeight;
+        updateConstructionCostPanel();
 
         // Rebuild: bore and length set the flow area and the inertance, which
         // are baked into the simulation connection at build time. An edited
@@ -1785,6 +1890,7 @@ function init() {
         deleted = constructionManager.deleteConnection(fromId, toId);
       });
       if (deleted) {
+        updateConstructionCostPanel();
         // Refresh the component detail panel
         const selectedId = plantCanvas.getSelectedComponentId?.();
         if (selectedId) {
@@ -2948,6 +3054,14 @@ function init() {
 
       if (!componentType) return;
 
+      // Out of stock: say so rather than opening a dialog that cannot be
+      // confirmed. (The button is greyed with a class, not `disabled`, so the
+      // click still arrives here and the tooltip still works.)
+      if (button.classList.contains('tool-unavailable')) {
+        showNotification(button.title, 'warning');
+        return;
+      }
+
       // If clicking the same component again, deselect it
       if (selectedComponentType === componentType) {
         constructionButtons.forEach(b => b.classList.remove('selected'));
@@ -2975,7 +3089,9 @@ function init() {
 
       // Update UI
       if (selectedComponentDiv) {
-        selectedComponentDiv.textContent = `Selected: ${button.textContent}`;
+        // baseLabel is the button text without its stock badge
+        selectedComponentDiv.textContent =
+          `Selected: ${button.dataset.baseLabel ?? button.textContent}`;
       }
       if (placementHintDiv) {
         placementHintDiv.style.display = 'block';
@@ -3656,7 +3772,9 @@ function init() {
                 showNotification(`Created ${config.name} (${config.type})${containerNote}`, 'info');
               } else {
                 console.error(`[Construction] Failed to create component`);
-                showNotification(`Failed to create ${config.type}`, 'error');
+                const refused = constructionManager.takeStockRefusal();
+                showNotification(refused ?? `Failed to create ${config.type}`,
+                  refused ? 'warning' : 'error');
               }
             }
 
@@ -3794,8 +3912,11 @@ function init() {
             showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
           } else {
             abandonLiveEdit(liveSnap);
-            showNotification('Failed to create connection', 'error');
+            const refused = constructionManager.takeStockRefusal();
+            showNotification(refused ?? 'Failed to create connection',
+              refused ? 'warning' : 'error');
           }
+          updateConstructionCostPanel();
         } else {
           // Connection cancelled
           abandonLiveEdit(liveSnap);

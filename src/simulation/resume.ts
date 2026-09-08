@@ -359,10 +359,19 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
 // 2. Snapshot + write-back fidelity audit
 // ============================================================================
 
-/** Sim-link / render-cache fields that are not initial conditions. */
+/**
+ * Sim-link / render-cache fields that are not initial conditions.
+ *
+ * `stock` is the warehouse's parts list. It changes every time the player
+ * places or deletes something, and the factory never reads it (a warehouse
+ * has no node of any kind), so counting it would mark the warehouse edited on
+ * every single build - harmless today, but exactly the kind of false "this
+ * component changed" that the transplant guard exists to avoid.
+ */
 const VOLATILE_COMPONENT_KEYS = new Set([
   'simNodeId', 'simPumpId', 'simValveId',
   'tubeSections', 'bundleFluids', 'opFlowFraction',
+  'stock',
 ]);
 
 /**

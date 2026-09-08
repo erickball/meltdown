@@ -16,14 +16,21 @@ import {
   CondenserComponent,
   ControllerComponent,
   SwitchyardComponent,
+  WarehouseComponent,
   CrossVesselComponent,
   Connection,
   Port,
   Point,
   Fluid,
+  ComponentType,
   ExtractionPort
 } from '../types';
 import { ComponentConfig } from './component-config';
+import { WAREHOUSE_STOCK_OPTIONS } from './component-properties';
+import {
+  chargeForComponent, chargeForPipe, checkCharge, spend, refund,
+  refundDeletedComponent, storedTypeForPaletteKey, describeStock,
+} from '../game/stock';
 import { getComponentVisualHeight } from '../render/components';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
@@ -227,6 +234,19 @@ export function heatExchangerPorts(opts: {
 export class ConstructionManager {
   private plantState: PlantState;
   private nextComponentId: number = 1;
+  /**
+   * Why the last build was refused, when it was the warehouse that refused
+   * it. The manager is headless, so it cannot raise the notification itself;
+   * main.ts takes the message and shows it instead of a generic failure.
+   */
+  private lastStockRefusal: string | null = null;
+
+  /** The reason the last create* call returned null/false, if stock was it. */
+  takeStockRefusal(): string | null {
+    const reason = this.lastStockRefusal;
+    this.lastStockRefusal = null;
+    return reason;
+  }
 
   constructor(plantState: PlantState) {
     this.plantState = plantState;
@@ -242,6 +262,21 @@ export class ConstructionManager {
   }
 
   createComponent(config: ComponentConfig): string | null {
+    // The warehouse decides whether this part exists to be placed. Checked
+    // BEFORE anything is built and spent only once the component is really
+    // in the plant, so a refused or failed placement costs nothing.
+    const storedType = storedTypeForPaletteKey(config.type);
+    const stockCharge = chargeForComponent(
+      storedType,
+      storedType === 'pipe' ? (config.properties?.length as number | undefined) : undefined);
+    const affordable = checkCharge(this.plantState, stockCharge);
+    if (!affordable.ok) {
+      this.lastStockRefusal = affordable.reason;
+      console.warn(`[Construction] ${affordable.reason}`);
+      return null;
+    }
+    this.lastStockRefusal = null;
+
     const id = this.generateComponentId(config.type);
     const { x, y } = config.position;  // These are already world coordinates
     const props = config.properties;
@@ -1581,6 +1616,32 @@ export class ConstructionManager {
         break;
       }
 
+      case 'warehouse': {
+        // A supply yard: no ports, no flow node, no thermal node. It exists
+        // to HOLD the level's parts list and to show it on the map.
+        const warehouse: WarehouseComponent = {
+          id,
+          type: 'warehouse',
+          label: props.name || 'Warehouse',
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          width: props.width ?? 6,
+          depth: props.depth ?? 4,
+          stock: { pipeMeters: props.stockPipeMeters ?? 0, components: {} },
+          ports: []   // Parts are carried out by hand, not piped
+        };
+        for (const [option, stockedType] of Object.entries(WAREHOUSE_STOCK_OPTIONS)) {
+          const count = props[option];
+          if (count !== undefined) {
+            warehouse.stock.components[stockedType as ComponentType] = count;
+          }
+        }
+        this.plantState.components.set(id, warehouse);
+        console.log(`[Construction] Created warehouse '${id}': ${describeStock(warehouse.stock)}`);
+        break;
+      }
+
       case 'pool': {
         // Spent-fuel pool: a square, open, sunken basin with racks of spent
         // fuel standing in it. Sunken is not a special case - `elevation` is
@@ -1881,6 +1942,18 @@ export class ConstructionManager {
       }
     }
 
+    // The part leaves the shelf only now that it is standing in the plant.
+    // The type it was CHARGED as has to be the type that was actually built,
+    // or the refund on deletion would come back to a different pile.
+    const built = this.plantState.components.get(id);
+    if (built && stockCharge.kind === 'component' && built.type !== stockCharge.type) {
+      throw new Error(
+        `[Construction] Palette key '${config.type}' was charged to the ` +
+        `'${stockCharge.type}' stock but built a '${built.type}'. Fix ` +
+        `PALETTE_TO_STORED in src/game/stock.ts.`);
+    }
+    spend(this.plantState, stockCharge);
+
     console.log(`[Construction] Created component '${id}' of type '${config.type}'`);
     return id;
   }
@@ -1993,6 +2066,19 @@ export class ConstructionManager {
     console.log(`[Construction] Auto-pipe rating: ${pressureRating !== undefined
       ? `${pipePressureRating} bar (from line spec)`
       : `max(${fromPressureRating}, ${toPressureRating}) = ${pipePressureRating} bar`}`);
+
+    // The auto-pipe is pipe like any other: it costs the length that is
+    // actually laid (the two stub connections that join it to the endpoints
+    // carry no length of their own).
+    const pipeCharge = chargeForPipe(pipeLength);
+    const pipeAffordable = checkCharge(this.plantState, pipeCharge);
+    if (!pipeAffordable.ok) {
+      this.lastStockRefusal = pipeAffordable.reason;
+      console.warn(`[Construction] ${pipeAffordable.reason}`);
+      return false;
+    }
+    this.lastStockRefusal = null;
+    spend(this.plantState, pipeCharge);
 
     const pipe: PipeComponent = {
       id: pipeId,
@@ -2260,6 +2346,19 @@ export class ConstructionManager {
       effectiveLength = 0;
       console.log(`[Construction] Cross-vessel annulus connection: forcing length to 0 (physically touching)`);
     }
+
+    // The run costs its own length off the pipe racks. Charged here, at the
+    // last point where the connection can still be refused without half of
+    // it existing; refunded by deleteConnection/deleteComponent.
+    const runCharge = chargeForPipe(effectiveLength ?? 0);
+    const runAffordable = checkCharge(this.plantState, runCharge);
+    if (!runAffordable.ok) {
+      this.lastStockRefusal = runAffordable.reason;
+      console.warn(`[Construction] ${runAffordable.reason}`);
+      return false;
+    }
+    this.lastStockRefusal = null;
+    spend(this.plantState, runCharge);
 
     // Update port connections
     fromPort.connectedTo = toPortId;
@@ -2724,7 +2823,10 @@ export class ConstructionManager {
   private generateComponentId(type: string): string {
     // Three letters is enough to tell every other type apart; 'pool' would
     // become 'poo', which is not a name anyone wants on their plant.
-    const prefix = type === 'pool' ? 'pool' : type.substring(0, 3);
+    // 'war' for a warehouse reads as something else entirely.
+    const prefix = type === 'pool' ? 'pool'
+      : type === 'warehouse' ? 'wh'
+      : type.substring(0, 3);
     const nextId = this.getNextIdNumber();
     this.nextComponentId = nextId + 1;
     return `${prefix}-${nextId}`;
@@ -2994,6 +3096,11 @@ export class ConstructionManager {
       }
     }
 
+    // Back on the shelf: this component, plus every run that went with it.
+    // Sub-components that came free with the parent (a reactor vessel's core
+    // barrel) are not refunded - they were never charged.
+    refundDeletedComponent(this.plantState, component, connectionsToRemove);
+
     // Filter out the removed connections
     this.plantState.connections = this.plantState.connections.filter(
       conn => !idsToDelete.has(conn.fromComponentId) && !idsToDelete.has(conn.toComponentId)
@@ -3085,6 +3192,9 @@ export class ConstructionManager {
       const toPort = toComp.ports.find(p => p.id === conn.toPortId);
       if (toPort) toPort.connectedTo = undefined;
     }
+
+    // Its length goes back on the pipe racks
+    refund(this.plantState, chargeForPipe(conn.length ?? 0));
 
     // Remove the connection
     this.plantState.connections.splice(connIndex, 1);
@@ -3584,6 +3694,24 @@ export class ConstructionManager {
         port.position.x = -port.position.x;
       }
     }
+    // Warehouse: plan size and the stock itself. Every dialog field is
+    // written here (the switchyard's is not, which is why editing one trips
+    // the round-trip audit - do not copy that).
+    if (component.type === 'warehouse') {
+      const warehouse = component as unknown as WarehouseComponent;
+      if (!warehouse.stock) warehouse.stock = { pipeMeters: 0, components: {} };
+      if (properties.width !== undefined) warehouse.width = properties.width;
+      if (properties.depth !== undefined) warehouse.depth = properties.depth;
+      if (properties.stockPipeMeters !== undefined) {
+        warehouse.stock.pipeMeters = properties.stockPipeMeters;
+      }
+      for (const [option, stockedType] of Object.entries(WAREHOUSE_STOCK_OPTIONS)) {
+        if (properties[option] !== undefined) {
+          warehouse.stock.components[stockedType as ComponentType] = properties[option];
+        }
+      }
+    }
+
     // Switchyard wiring
     if (properties.connectedGenerator !== undefined && component.type === 'switchyard') {
       component.connectedGeneratorId = properties.connectedGenerator || undefined;

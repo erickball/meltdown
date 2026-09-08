@@ -114,6 +114,7 @@ export function mapComponentTypeToDefinition(type: string, component?: Record<st
     'fuelAssembly': 'core',
     'controller': 'scram-controller',
     'switchyard': 'switchyard',
+    'warehouse': 'warehouse',
     'building': 'building',
     'pool': 'pool',
     'crossVessel': 'cross-vessel'
@@ -122,11 +123,43 @@ export function mapComponentTypeToDefinition(type: string, component?: Record<st
 }
 
 /**
+ * Warehouse dialog field -> the stored ComponentType whose pile it counts.
+ * ConstructionManager.updateComponent writes through the same table, so the
+ * dialog and the model cannot drift (scripts/check-dialog-sync.ts proves it).
+ */
+export const WAREHOUSE_STOCK_OPTIONS: Record<string, string> = {
+  'stockPumps': 'pump',
+  'stockValves': 'valve',
+  'stockTanks': 'tank',
+  'stockVessels': 'vessel',
+  'stockHeatExchangers': 'heatExchanger',
+  'stockCondensers': 'condenser',
+  'stockTurbineDrivenPumps': 'turbine-driven-pump',
+  'stockTurbineGenerators': 'turbine-generator',
+  'stockReactorVessels': 'reactorVessel',
+  'stockCrossVessels': 'crossVessel',
+  'stockControllers': 'controller',
+  'stockBuildings': 'building',
+  'stockPools': 'pool',
+  'stockSwitchyards': 'switchyard',
+};
+
+/**
  * Read the current value of a dialog option from a stored component,
  * handling property-name mapping and model-unit -> display-unit conversion.
  * Returns defaultValue when the component genuinely has no such property.
  */
 export function readComponentOption(optionName: string, component: Record<string, any>, defaultValue: any): any {
+  // Warehouse stock lives in a nested block keyed by stored component type,
+  // so the dialog's flat 'stockPumps' fields need the same mapping the write
+  // path uses. WAREHOUSE_STOCK_OPTIONS (above) is the single table both
+  // directions read.
+  if (component.type === 'warehouse') {
+    if (optionName === 'stockPipeMeters') return component.stock?.pipeMeters ?? 0;
+    const stockedType = WAREHOUSE_STOCK_OPTIONS[optionName];
+    if (stockedType) return component.stock?.components?.[stockedType] ?? 0;
+  }
+
   // PID controller fields live in the nested pid config with SI units
   if (component.controllerType === 'pid' && component.pid) {
     const pid = component.pid;

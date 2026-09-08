@@ -46,7 +46,8 @@ export type ComponentType =
   | 'switchyard'
   | 'building'
   | 'crossVessel'
-  | 'pool';
+  | 'pool'
+  | 'warehouse';
 
 export interface Port {
   id: string;
@@ -166,6 +167,36 @@ export interface PoolComponent extends ComponentBase {
   /** Initial rack metal temperature (K). Defaults to the water temperature. */
   rackTemperature?: number;
   pressureRating?: number;  // bar - liner/wall rating
+}
+
+/**
+ * What is left on the shelf. `pipeMeters` is metres of pipe (every connection
+ * and every pipe component is charged its own `length`); `components` is a
+ * count per stored ComponentType, so all four valve palette buttons draw on
+ * the same 'valve' pile.
+ *
+ * A type that is ABSENT is out of stock, exactly as a type with 0 is - the
+ * distinction would be a special case with no meaning to the player.
+ */
+export interface PlantStock {
+  pipeMeters: number;
+  components: Partial<Record<ComponentType, number>>;
+}
+
+/**
+ * The supply yard. Non-hydraulic (no ports, no flow node, no thermal node) -
+ * it exists so a level can hand the player a FINITE parts list and so that
+ * list is visible on the map instead of hidden in a menu.
+ *
+ * A plant with no warehouse has unlimited stock: that is what every existing
+ * design is, and nothing about building in one changes. See src/game/stock.ts,
+ * which owns every rule about spending and refunding.
+ */
+export interface WarehouseComponent extends ComponentBase {
+  type: 'warehouse';
+  width: number;        // m - plan width (across the screen)
+  depth: number;        // m - plan depth
+  stock: PlantStock;
 }
 
 export interface PipeComponent extends ComponentBase {
@@ -588,7 +619,8 @@ export type PlantComponent =
   | SwitchyardComponent
   | BuildingComponent
   | CrossVesselComponent
-  | PoolComponent;
+  | PoolComponent
+  | WarehouseComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;
