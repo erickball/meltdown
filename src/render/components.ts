@@ -24,7 +24,7 @@ import {
   Connection,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
-import { PIPE_METRES_PER_STICK, formatMetres, stockedComponentTypes } from '../game/stock';
+import { PIPE_METRES_PER_STICK, formatMetres, stockedLines } from '../game/stock';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -3717,7 +3717,7 @@ function renderWarehouse(
   const crateW = inW - bundleW - 2;
   const cs = Math.max(3, Math.min(crateW / 3, inH / 3));
   let slot = 0;
-  for (const [type, count] of stockedComponentTypes(stock)) {
+  for (const { type, count } of stockedLines(stock)) {
     for (let n = 0; n < count; n++) {
       const cols = Math.max(1, Math.floor(crateW / (cs + 1)));
       const row = Math.floor(slot / cols);

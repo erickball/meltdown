@@ -10,7 +10,10 @@
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
 import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock, waterBodyOf } from '../types';
-import { stockedComponentTypes, typeDisplayName, PIPE_METRES_PER_STICK } from '../game/stock';
+import {
+  stockedLines, stockLineDisplayName, typeDisplayName, pipeSpecDisplayName,
+  PIPE_METRES_PER_STICK,
+} from '../game/stock';
 import { SimulationState } from '../simulation';
 import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
 import { getFluidColor, COLORS } from './colors';
@@ -1260,18 +1263,24 @@ export class GridView {
     ctx.fillStyle = 'rgba(25, 25, 25, 0.85)';
     ctx.fillText(wh.label || wh.id, tl.x + 2, tl.y - 2);
 
+    // One line per stack, NAMED: a yard that hands out a specified design is
+    // lying if it just says "2x pump". The pipe line names its size the same
+    // way when the yard holds one standardized spec.
     ctx.font = `${fontPx}px monospace`;
     ctx.textBaseline = 'top';
-    const summary = [`${formatGaugeValue(stock.pipeMeters)} m`]
-      .concat(stockedComponentTypes(stock)
-        .map(([type, count]) => `${count}x ${typeDisplayName(type, count !== 1)}`))
-      .join('  ');
+    const rows = [stock.pipeSpec
+      ? `${formatGaugeValue(stock.pipeMeters)} m  ${pipeSpecDisplayName(stock.pipeSpec)}`
+      : `${formatGaugeValue(stock.pipeMeters)} m pipe`];
+    for (const line of stockedLines(stock)) {
+      rows.push(`${line.count}x ${stockLineDisplayName(line.type, line.design, line.count !== 1)}`);
+    }
     // Dark plate behind the readout so it survives the gravel pattern
-    const textW = ctx.measureText(summary).width;
+    const rowH = fontPx + 2;
+    const textW = Math.max(...rows.map(r => ctx.measureText(r).width));
     ctx.fillStyle = 'rgba(15, 18, 20, 0.6)';
-    ctx.fillRect(tl.x + 1, br.y + 1, textW + 6, fontPx + 4);
+    ctx.fillRect(tl.x + 1, br.y + 1, textW + 6, rows.length * rowH + 4);
     ctx.fillStyle = 'rgba(235, 240, 245, 0.95)';
-    ctx.fillText(summary, tl.x + 4, br.y + 3);
+    rows.forEach((row, i) => ctx.fillText(row, tl.x + 4, br.y + 3 + i * rowH));
 
     if (wh.id === f.selectedComponentId) {
       ctx.lineWidth = 3;
@@ -1328,11 +1337,11 @@ export class GridView {
     ctx.stroke();
 
     // --- crates ------------------------------------------------------------
-    const items = stockedComponentTypes(stock);
+    const items = stockedLines(stock);
     const CRATE_COLS = 2;
     const crateSize = Math.max(4, Math.min(crateW / CRATE_COLS - 2, inH / 4));
     let slot = 0;
-    for (const [type, count] of items) {
+    for (const { type, count } of items) {
       for (let n = 0; n < count; n++) {
         const row = Math.floor(slot / CRATE_COLS);
         const col = slot % CRATE_COLS;

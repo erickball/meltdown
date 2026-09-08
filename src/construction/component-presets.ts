@@ -66,6 +66,11 @@ const builtinPresets: ComponentPreset[] = [
     description: 'Moves large volumes of cooling water at low head (circulating water, component cooling, service water).',
     properties: { nqa1: false, type: 'centrifugal', ratedFlow: 1500, ratedHead: 30, pressureRating: 10, speed: 900, efficiency: 85, npshRequired: 4, initialState: 'on' },
   },
+  {
+    id: 'pump-service-water-lp', type: 'pump', name: 'Low-Pressure Service Water Pump',
+    description: 'Yard-scale make-up and service water: a couple of hundred kg/s at modest head, enough to lift from a shore or basin intake ~15 m below the discharge and still push into an open tank. Low casing rating - it belongs on a 16 bar service line, not on anything pressurized.',
+    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 200, ratedHead: 60, pressureRating: 16, speed: 1800, efficiency: 80, npshRequired: 5, initialState: 'on' },
+  },
 
   // ------------------------------------------------------------- tanks
   {
@@ -185,6 +190,11 @@ const builtinPresets: ComponentPreset[] = [
     id: 'valve-cw-butterfly', type: 'valve', name: 'Cooling Water (Butterfly)',
     description: 'Large low-pressure butterfly valve for circulating/service water systems.',
     properties: { nqa1: false, type: 'butterfly', diameter: 0.6, pressureRating: 10 },
+  },
+  {
+    id: 'valve-service-water', type: 'valve', name: 'Service Water Isolation (Gate)',
+    description: 'Line-sized gate valve for a low-pressure service or make-up water run. Bore matches the 12-inch service water line spec; rated for a low-head pump shutoff, not for primary or steam pressure.',
+    properties: { nqa1: false, type: 'gate', diameter: 0.3, pressureRating: 16 },
   },
 
   // ------------------------------------------------------------- check valves
@@ -405,6 +415,18 @@ export function hasPresetSupport(type: string): boolean {
   return presetSupportedTypes.has(type);
 }
 
+/**
+ * One design by id, across built-ins and the user's saved designs. Returns
+ * null when the id is unknown - callers that were HANDED an id (a warehouse
+ * stock line, a placed component's `design`) must say so loudly rather than
+ * quietly building something else.
+ */
+export function getPresetById(id: string): ComponentPreset | null {
+  return builtinPresets.find(p => p.id === id)
+    ?? loadCustomPresets().find(p => p.id === id)
+    ?? null;
+}
+
 /** Built-in designs first, then the user's saved designs, for one component type */
 export function getPresetsForType(type: string): ComponentPreset[] {
   return [
@@ -444,6 +466,11 @@ export const PIPE_SPECS: PipeSpec[] = [
     description: 'General auxiliary service: RHR suction, aux feedwater, CVCS headers, medium-pressure process lines.',
   },
   {
+    id: 'spec-12in-service', label: 'Service water line — 12″ (0.3 m), 16 bar',
+    diameter: 0.3, pressureRating: 16,
+    description: 'Service, cooling and make-up water at yard pressure. Big enough to carry a few hundred kg/s at a sane velocity, rated only for a low-head pump - keep it away from anything that can see primary or steam pressure.',
+  },
+  {
     id: 'spec-14in', label: 'Surge line — 14″ (0.35 m), 175 bar',
     diameter: 0.35, pressureRating: 175,
     description: 'Pressurizer surge line and other full-primary-pressure runs below loop size.',
@@ -472,6 +499,11 @@ export const PIPE_SPECS: PipeSpec[] = [
 
 export function pipeSpecFlowArea(spec: PipeSpec): number {
   return Math.PI * spec.diameter * spec.diameter / 4;
+}
+
+/** One standardized line size by id, or null when the id is unknown. */
+export function getPipeSpecById(id: string): PipeSpec | null {
+  return PIPE_SPECS.find(s => s.id === id) ?? null;
 }
 
 /** Find the spec whose flow area matches (within 2%), e.g. when re-opening an edit dialog */

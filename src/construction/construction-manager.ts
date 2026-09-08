@@ -22,11 +22,10 @@ import {
   Port,
   Point,
   Fluid,
-  ComponentType,
   ExtractionPort
 } from '../types';
 import { ComponentConfig } from './component-config';
-import { WAREHOUSE_STOCK_OPTIONS } from './component-properties';
+import { parseStockLines } from './component-properties';
 import {
   chargeForComponent, chargeForPipe, checkCharge, spend, refund,
   refundDeletedComponent, storedTypeForPaletteKey, describeStock,
@@ -268,6 +267,7 @@ export class ConstructionManager {
     const storedType = storedTypeForPaletteKey(config.type);
     const stockCharge = chargeForComponent(
       storedType,
+      config.design,
       storedType === 'pipe' ? (config.properties?.length as number | undefined) : undefined);
     const affordable = checkCharge(this.plantState, stockCharge);
     if (!affordable.ok) {
@@ -1631,15 +1631,13 @@ export class ConstructionManager {
           elevation: props.elevation ?? 0,
           width: props.width ?? 6,
           depth: props.depth ?? 4,
-          stock: { pipeMeters: props.stockPipeMeters ?? 0, components: {} },
+          stock: {
+            pipeMeters: props.stockPipeMeters ?? 0,
+            pipeSpec: props.stockPipeSpec || undefined,
+            components: parseStockLines(props.stockLines),
+          },
           ports: []   // Parts are carried out by hand, not piped
         };
-        for (const [option, stockedType] of Object.entries(WAREHOUSE_STOCK_OPTIONS)) {
-          const count = props[option];
-          if (count !== undefined) {
-            warehouse.stock.components[stockedType as ComponentType] = count;
-          }
-        }
         this.plantState.components.set(id, warehouse);
         console.log(`[Construction] Created warehouse '${id}': ${describeStock(warehouse.stock)}`);
         break;
@@ -1955,6 +1953,9 @@ export class ConstructionManager {
         `'${stockCharge.type}' stock but built a '${built.type}'. Fix ` +
         `PALETTE_TO_STORED in src/game/stock.ts.`);
     }
+    // The design the part was built to rides on the component, so a deletion
+    // refunds it to the line it came out of and the panels can name it.
+    if (built && config.design) built.design = config.design;
     spend(this.plantState, stockCharge);
 
     console.log(`[Construction] Created component '${id}' of type '${config.type}'`);
@@ -3710,16 +3711,17 @@ export class ConstructionManager {
     // the round-trip audit - do not copy that).
     if (component.type === 'warehouse') {
       const warehouse = component as unknown as WarehouseComponent;
-      if (!warehouse.stock) warehouse.stock = { pipeMeters: 0, components: {} };
+      if (!warehouse.stock) warehouse.stock = { pipeMeters: 0, components: [] };
       if (properties.width !== undefined) warehouse.width = properties.width;
       if (properties.depth !== undefined) warehouse.depth = properties.depth;
       if (properties.stockPipeMeters !== undefined) {
         warehouse.stock.pipeMeters = properties.stockPipeMeters;
       }
-      for (const [option, stockedType] of Object.entries(WAREHOUSE_STOCK_OPTIONS)) {
-        if (properties[option] !== undefined) {
-          warehouse.stock.components[stockedType as ComponentType] = properties[option];
-        }
+      if (properties.stockPipeSpec !== undefined) {
+        warehouse.stock.pipeSpec = properties.stockPipeSpec || undefined;
+      }
+      if (properties.stockLines !== undefined) {
+        warehouse.stock.components = parseStockLines(properties.stockLines);
       }
     }
 

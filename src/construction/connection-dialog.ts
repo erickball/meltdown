@@ -58,10 +58,56 @@ export class ConnectionDialog {
    * of the plant; it only ever displays the number.
    */
   private pipeStockProvider: (() => number | null) | null = null;
+  private yardPipeSpecProvider: (() => string | null) | null = null;
 
   /** Tell the dialog where to read the remaining pipe stock. */
   setPipeStockProvider(provider: () => number | null): void {
     this.pipeStockProvider = provider;
+  }
+
+  /**
+   * Where to read the ONE standardized line size the supply yard hands out
+   * (a PipeSpec id), or null when the plant has no yard or its yard holds
+   * unspecified bulk pipe. When there is one, the spec dropdown shows it and
+   * is locked: the pipe is already on the racks, so only the route and the
+   * length are the builder's.
+   */
+  setYardPipeSpecProvider(provider: () => string | null): void {
+    this.yardPipeSpecProvider = provider;
+  }
+
+  /** The tooltip that explains a locked line size, in one place. */
+  private static readonly YARD_SPEC_TOOLTIP =
+    'The supply yard stocks one line size. This run is made from that pipe, ' +
+    'so the size and rating are fixed - only where it goes and how long it is ' +
+    'are yours to set.';
+
+  /**
+   * Show the yard's line size on a spec dropdown and lock it. Returns the
+   * spec id that was pinned, or null when the yard names none. A yard naming
+   * a spec that does not exist is reported loudly rather than quietly
+   * letting the builder pick.
+   */
+  private pinYardSpec(specSelect: HTMLSelectElement, specGroup: HTMLElement): string | null {
+    const yardSpecId = this.yardPipeSpecProvider?.() ?? null;
+    if (!yardSpecId) return null;
+    if (!PIPE_SPECS.some(s => s.id === yardSpecId)) {
+      console.error(
+        `[Connection] The supply yard names pipe spec '${yardSpecId}', which is not ` +
+        `in PIPE_SPECS (src/construction/component-presets.ts). Leaving the line ` +
+        `size open.`);
+      return null;
+    }
+    specSelect.value = yardSpecId;
+    specSelect.disabled = true;
+    specSelect.title = ConnectionDialog.YARD_SPEC_TOOLTIP;
+    specGroup.title = ConnectionDialog.YARD_SPEC_TOOLTIP;
+    const note = document.createElement('div');
+    note.className = 'help-text';
+    note.style.color = '#da5';
+    note.textContent = 'From the supply yard - this is the pipe you have.';
+    specGroup.appendChild(note);
+    return yardSpecId;
   }
 
   constructor() {
@@ -333,6 +379,8 @@ export class ConnectionDialog {
       specDesc = document.createElement('div');
       specDesc.className = 'help-text';
       specGroup.appendChild(specDesc);
+      // A supply yard that stocks one line size has already made this choice
+      this.pinYardSpec(specSelect, specGroup);
       this.bodyElement.appendChild(specGroup);
     }
 
@@ -898,6 +946,9 @@ export class ConnectionDialog {
     specDesc.className = 'help-text';
     specDesc.textContent = matchedSpec ? matchedSpec.description : '';
     specGroup.appendChild(specDesc);
+    // The yard's own line size, if it has one: an existing run cannot be
+    // re-specified into a bigger bore for free when the metres are counted.
+    const pinnedSpecId = this.pinYardSpec(specSelect, specGroup);
     this.bodyElement.appendChild(specGroup);
 
     // Diameter field - coupled to the flow area below (A = π d²/4)
@@ -947,6 +998,16 @@ export class ConnectionDialog {
     flowAreaHelp.textContent = 'Cross-sectional area of connection';
     flowAreaGroup.appendChild(flowAreaHelp);
     this.bodyElement.appendChild(flowAreaGroup);
+
+    if (pinnedSpecId) {
+      const pinned = PIPE_SPECS.find(s => s.id === pinnedSpecId)!;
+      flowAreaInput.value = pipeSpecFlowArea(pinned).toFixed(4);
+      diameterInput.value = String(+equivDiameter(pipeSpecFlowArea(pinned)).toPrecision(4));
+      flowAreaInput.readOnly = true;
+      diameterInput.readOnly = true;
+      flowAreaHelp.textContent = `Set by the yard's line size (${pinned.diameter} m inner diameter)`;
+      diameterHelp.textContent = ConnectionDialog.YARD_SPEC_TOOLTIP;
+    }
 
     // A manual edit of either coupled field means the value no longer comes
     // from the selected spec - keep the pair and the spec dropdown in sync
