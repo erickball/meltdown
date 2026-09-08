@@ -1577,6 +1577,13 @@ export class RK45Solver {
   public lastStiffConvectionPairs = 0;
   public stiffConvectionPairSteps = 0;
 
+  /** Attempts on which the secant-compliance pass re-solved the network
+   *  because a node's dome-edge stiffness differed from its linearization
+   *  (diagnostics, same reporting role as stiffConvectionPairSteps). */
+  get secantResolveSteps(): number {
+    return this.pressureSolver?.secantResolveSteps ?? 0;
+  }
+
   /**
    * Wall-to-fluid exchange for pairs the explicit stages cannot integrate
    * at this step: a node holding grams of steam next to a hot wall relaxes

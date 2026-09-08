@@ -68,6 +68,7 @@ import {
 import {
   numericalBulkModulus,
   saturationPressure,
+  calculateState,
   distanceToSaturationLine,
   saturatedLiquidDensity,
   saturatedVaporDensity,
@@ -153,6 +154,14 @@ export class PressureSolver {
   }
   // Per-node predicted δP (Pa) of the most recent predictor solve (probes).
   readonly lastPredictedDP = new Map<string, number>();
+  // Per-node compliance c_i (kg/s per Pa) the most recent predictor solve
+  // actually used, i.e. AFTER the secant pass (probes).
+  readonly lastComplianceUsed = new Map<string, number>();
+  // Nodes whose compliance the secant pass replaced on the most recent
+  // predictor solve, keyed by node id with the branch that fired (probes).
+  readonly lastSecantNodes = new Map<string, string>();
+  /** Total number of network re-solves the secant-compliance pass caused. */
+  public secantResolveSteps = 0;
   // The most recent predictor solve's system, kept for measureClosureError:
   // node order, compliances c_i (kg/s per Pa), the assembled matrix M (a
   // copy - the solve consumes its own), and the solved δP.
@@ -1095,17 +1104,96 @@ export class PressureSolver {
     // the pressure rise the liquid branch actually produces - and re-solve.
     // This is one Newton-style iteration on the genuine nonlinearity; no
     // tuning constants beyond the physics already in the tables.
+    //
+    // EOS-SECANT CANDIDATE (config.eosSecantCompliance, experimental): the
+    // bulk-modulus form below reads the dome edge from v_f at the node's
+    // CURRENT u, so it only describes nodes that already sit on or just
+    // inside the liquid line - a vapour or gas node that this step floods
+    // solid keeps its soft γ·P pricing and overfills exactly as the
+    // hypothesis says. Rather than add a second edge formula for that
+    // direction, ask the tables at the end state the solve itself predicts
+    // (mass and donor-cell energy transport of the SOLVED flows, plus the
+    // measured source), and keep whichever candidate is stiffest. Same
+    // one-re-solve shape, same "materially stiffer" test, no phase test and
+    // no constants - the EOS and the step are the only inputs.
+    let dMdt: Float64Array | null = null;
+    let dUdt: Float64Array | null = null;
+    if (this.config.eosSecantCompliance) {
+      dMdt = new Float64Array(n);
+      dUdt = new Float64Array(n);
+      // The energy transport needs bulk enthalpies whether or not the
+      // energy-coupled closure is on (it bills arrivals at the receiver's h,
+      // exactly as the advection operator does).
+      const hB = useEnergy ? hNode : new Float64Array(n);
+      if (!useEnergy) for (let i = 0; i < n; i++) hB[i] = this.bulkEnthalpy(nodeList[i]);
+      const add = (
+        flow: number, hDon: number, donorIsFrom: boolean, iFrom: number, iTo: number
+      ): void => {
+        if (iFrom >= 0) {
+          dMdt![iFrom] -= flow;
+          dUdt![iFrom] -= flow * (donorIsFrom ? hDon : hB[iFrom]);
+        }
+        if (iTo >= 0) {
+          dMdt![iTo] += flow;
+          dUdt![iTo] += flow * (donorIsFrom ? hB[iTo] : hDon);
+        }
+      };
+      for (const f of fixedFlows) add(f.flow, f.hDonor, f.donorIsFrom, f.iFrom, f.iTo);
+      for (const e of entries) add(flowOf(e), e.hDonor, e.donorIsFrom, e.iFrom, e.iTo);
+      for (let i = 0; i < n; i++) dUdt[i] += q[i];
+    }
+
     let anyStiffened = false;
+    if (!corrector) this.lastSecantNodes.clear();
     for (let i = 0; i < n; i++) {
       const node = nodeList[i];
-      const dm = c[i] * dP[i] * dt; // predicted absorbed mass this step (kg)
-      // Only liquid and two-phase nodes have a liquid branch to be stiff
-      // against (same regime split as getEffectiveBulkModulus).
-      if (node.fluid.phase !== 'liquid' && node.fluid.phase !== 'two-phase') continue;
-      // NCG provides a real gas cushion - the liquid branch never applies
+      // NCG provides a real gas cushion - the liquid branch never applies,
+      // and a mixture node's pressure is not calculateState's to give.
       const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
       if (ncgMass > 1e-6 * node.fluid.mass) continue;
 
+      let cSecant: number | null = null;
+      let branch = '';
+
+      if (dMdt && dUdt) {
+        const dmNet = dMdt[i] * dt;
+        const mEnd = node.fluid.mass + dmNet;
+        const UEnd = node.fluid.internalEnergy + dUdt[i] * dt;
+        if (mEnd > 0 && isFinite(UEnd)) {
+          // Both ends of the secant come from the SAME function. Taking the
+          // start pressure from node.fluid instead would fold in whatever
+          // offset another model holds against the uniform read - a
+          // moving-boundary boiler tube publishes its partition's pressure,
+          // 18-55 bar off its own mush read - and a compliance built on that
+          // offset pins the node's mass balance for a reason that has
+          // nothing to do with its stiffness.
+          const dP_eos = calculateState(mEnd, UEnd, node.volume).pressure
+            - calculateState(node.fluid.mass, node.fluid.internalEnergy, node.volume).pressure;
+          // A compliance is a mass/pressure ratio: it exists only where the
+          // predicted pressure moves WITH the predicted mass. When the two
+          // disagree in sign the step's pressure motion is energy-driven and
+          // no diagonal entry can represent it (a negative c would also break
+          // the assembly) - leave that to the energy leg of the closure.
+          if (dmNet * dP_eos > 0) {
+            cSecant = dmNet / (dP_eos * dt);
+            branch = 'eos';
+          }
+        }
+      }
+
+      // Bulk-modulus form: only liquid and two-phase nodes have a liquid
+      // branch to be stiff against (same regime split as
+      // getEffectiveBulkModulus).
+      if (node.fluid.phase !== 'liquid' && node.fluid.phase !== 'two-phase') {
+        if (cSecant !== null && cSecant < 0.5 * c[i]) {
+          if (!corrector) this.lastSecantNodes.set(node.id, branch);
+          c[i] = cSecant;
+          anyStiffened = true;
+        }
+        continue;
+      }
+
+      const dm = c[i] * dP[i] * dt; // predicted absorbed mass this step (kg)
       const u = node.fluid.internalEnergy / node.fluid.mass;
       const v = node.volume / node.fluid.mass;
       const sat = distanceToSaturationLine(u, v);
@@ -1116,7 +1204,9 @@ export class PressureSolver {
       const mEdge = node.volume / v_f - node.fluid.mass;
 
       const K_liq = numericalBulkModulus(node.fluid.temperature - 273.15, this.config.K_max);
-      let cSecant: number | null = null;
+      const stiffest = (cand: number, label: string): void => {
+        if (cSecant === null || cand < cSecant) { cSecant = cand; branch = label; }
+      };
       if (mEdge <= 0) {
         // Already liquid: the true stiffness is the full liquid bulk modulus
         // (the dome-edge blend may have softened c_i by orders of magnitude).
@@ -1136,16 +1226,17 @@ export class PressureSolver {
         // stiffness is a property of the state, not of the flow direction:
         // inflow compresses at K_liq and outflow decompresses at K_liq (until
         // it reaches P_sat, which the step controller still resolves).
-        cSecant = node.fluid.mass / (K_liq * dt);
+        stiffest(node.fluid.mass / (K_liq * dt), 'already-liquid');
       } else if (dm > mEdge) {
         // Crossing into liquid this step: pressure response of the true EOS
         // is ~zero until the edge, then liquid compression beyond it
         const dP_true = (K_liq * (dm - mEdge)) / node.fluid.mass;
-        cSecant = dm / (dP_true * dt);
+        stiffest(dm / (dP_true * dt), 'crossing-in');
       }
       // Only intervene when the true response is materially stiffer than the
       // linearization (avoid churn from tiny corrections)
       if (cSecant !== null && cSecant < 0.5 * c[i]) {
+        if (!corrector) this.lastSecantNodes.set(node.id, branch);
         c[i] = cSecant;
         anyStiffened = true;
       }
@@ -1153,6 +1244,7 @@ export class PressureSolver {
 
     if (anyCapped || anyStiffened || anySeated) {
       dP = solveNetwork();
+      if (anyStiffened && !corrector) this.secantResolveSteps++;
     }
 
     // Apply end-of-step flows and refresh per-connection display state.
@@ -1212,7 +1304,11 @@ export class PressureSolver {
       // Diagnostic: the solve's predicted end-of-step pressure change per
       // node, so a probe can compare it with what the EOS actually produced.
       this.lastPredictedDP.clear();
-      for (let i = 0; i < n; i++) this.lastPredictedDP.set(nodeList[i].id, dP[i]);
+      this.lastComplianceUsed.clear();
+      for (let i = 0; i < n; i++) {
+        this.lastPredictedDP.set(nodeList[i].id, dP[i]);
+        this.lastComplianceUsed.set(nodeList[i].id, c[i]);
+      }
       this.lastClosure = lastMatrix
         ? { ids: nodeList.map(nd => nd.id), c: Float64Array.from(c), M: lastMatrix, dP: Float64Array.from(dP) }
         : null;

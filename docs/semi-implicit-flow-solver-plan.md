@@ -534,3 +534,91 @@ unblocked and worth re-measuring.
   loop is not the limiter (anchoring its setpoint at 60 kg/s moved settled
   power 138 → 147 MW and the tube re-flooded). This is the known helical
   tube-length question, which re-rates every HTGR-style SG.
+
+
+## Addendum: the dome-crossing rejection hypothesis, falsified (2026-09-07, `dome-resolve`)
+
+**Hypothesis.** On the Xe-100 with the helium circulator tripped, 63% of
+rejections are the 20% pressure-sanity guard on the sliver steam-line nodes
+(val-bleed-1 0.152 m3, val-leak-1 10 L) that the flooded OTSG tube fills with
+water. The proposal: those nodes start the step as soft vapour/two-phase, are
+priced soft, the solved inflow overfills them, and the EOS answers hundreds of
+bar away - so a secant compliance through the dome-edge crossing, plus one
+re-solve, should fix the closure instead of shrinking dt.
+
+**Instrumentation** (`scripts/probe-dome-crossing.ts`): for every rejected
+attempt, the offending node's start/end (u, v) against the liquid line, the
+compliance the solve used *after* the secant pass, the solve's predicted dP,
+and the realized dP decomposed on the EOS at fixed volume into
+dP_m = P(m1,U0) - P(m0,U0) and dP_u = P(m0,U1) - P(m0,U0). 180 s, trip at
+20 s, 3252 steps / 712 rejections:
+
+| node | rej | crossed the line | secant already fired | mean abs dP_real | dP_pred | dP_m | dP_u | EOS offset |
+|---|---|---|---|---|---|---|---|---|
+| val-bleed-1 | 233 | 63 | 209 | 15.7 bar | 5.5 | 2.8 | **15.8** | 0.00 |
+| val-leak-1  | 213 | 72 | 170 | 18.3 | 18.2 | 7.3 | **11.9** | 0.00 |
+| hx-1-tube   |  90 |  0 |   0 | 13.1 | 0.02 | 0.05 | 0.06 | **23.1** |
+| hx-1-tube-b2|  51 |  0 |   0 | 15.9 | 0.01 | 0.04 | 0.07 | **19.3** |
+| val-fpcv-1  |   4 |  0 |   0 | 33.1 | 18.7 | 32.3 | 0.7 | 0.00 |
+
+**The hypothesis does not hold.** The secant pass already fires on 90% / 80%
+of the two sliver nodes' rejections and already prices them at the full liquid
+bulk modulus (60-700 bar/kg); genuine crossings occur on only 27-34% of them
+and move 0.03-0.3 kg. What the guard measures is instead the **energy** term:
+a few kJ/kg of specific-energy change on a 125 kg node sitting 0.5-3 mL/kg
+from the saturated-liquid line is 10-20 bar, and the closure prices liquid
+dP/dU at the two-phase beta blended toward zero (~0.04 Pa/J against a true
+~2.7 Pa/J) - which is deliberate (see the beta = 0 note above; the falsified
+alternative was destabilizing through the stale q source). On val-bleed-1 the
+predicted dP even comes out with the wrong sign. On val-leak-1 the closure
+predicts the swing to ~10% and the step is rejected anyway, because the swing
+is real: no compliance change can help there.
+
+The OTSG tube pair (20% of rejections) is a third mechanism entirely: dP_m and
+dP_u are both ~0.00 bar, the solve predicts ~0.00 bar, the node's *carried*
+pressure is 18-55 bar away from its own uniform (m, U, V) read, and the
+realized jump is **identical at dt = 100 ms and at dt = 0.00 ms** (8.6 bar
+either way). That is the partition's discontinuous published pressure, not a
+step-size or compliance defect - the guard is being fed a closure output whose
+jump does not shrink with dt.
+
+**What was implemented anyway** (`eosSecantCompliance`, `EOS_SECANT=1`,
+default OFF). The one real gap the instrumentation confirms is that the
+bulk-modulus secant reads the dome edge from v_f at the node's *current* u, so
+it only describes nodes already on or just inside the liquid line: a vapour or
+gas node the step floods solid keeps its soft gamma*P pricing. Instead of a
+second edge formula for that direction, every non-NCG node now also gets a
+candidate compliance read straight from the tables at the end state the solved
+flows predict (mass plus donor-cell energy transport plus the measured
+source), and the stiffest candidate wins. Both ends of the secant come from
+the same function - taking the start pressure from `node.fluid` instead folds
+in the OTSG partition's 18-55 bar offset, which pins that node's mass balance
+for a reason unrelated to its stiffness (measured: it "fixed" hx-1-tube
+90 -> 4 rejections for entirely the wrong reason). No phase test, no new
+constants; it reuses the existing "materially stiffer" test and the same
+one-re-solve shape. Count reported as `secantResolveSteps`.
+
+**Paired numbers (steps / rejections; wall clock on a shared machine, so
+best-of-5 where it is quoted):**
+
+| run | off | on |
+|---|---|---|
+| circulator trip 180 s | 3252 / 712, 6.13x | 2949 / **403**, 6.87x |
+| circulator + feed (SBO) 180 s | 4222 / 1933 | **4450 / 2125** (worse) |
+| xe100 steady 120 s | 2406 / 3, 140.8 MW | 2409 / 2, 138.4 MW |
+| pwr 60 s | 8778 / 104, 531.6 MW, 2.59 ms/step | 8784 / 104, 531.3 MW, **2.80 ms/step** |
+| bwr 60 s | 4837 / 413, 943.1 MW, 1.85 ms/step | 4813 / 388, 973.8 MW, 1.96 ms/step |
+| xe100-scenarios lofc / sgtr | 138.0 s / 144.4 s wall | 143.5 s / **184.8 s** wall |
+
+`npm test` is green both ways.
+
+**Verdict: do not turn it on.** It buys 43% fewer rejections and ~10% wall on
+the one transient it was aimed at, and pays for it with +6-8% per-step cost on
+the water presets (two extra table evaluations per node per solve), a WORSE
+SBO and SGTR, and a perturbed trajectory on every preset (BWR settled power
++3.3%). Kept default-off as an A/B knob because the mechanism it closes is
+real; the rejections it was supposed to remove are not compliance errors.
+The two mechanisms that actually cost the steps are (1) the energy response of
+near-saturated liquid slivers, which needs the energy leg of the closure to
+see throughflow enthalpy anomalies rather than a stiffer diagonal, and (2) the
+OTSG partition's dt-independent pressure discontinuity.
