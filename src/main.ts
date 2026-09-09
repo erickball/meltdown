@@ -14,7 +14,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -48,7 +48,9 @@ import {
 } from './simulation';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
-  typeDisplayName, formatMetres, applyConnectionLengthEdit,
+  formatMetres, applyConnectionLengthEdit,
+  stockedPipeSpecId, stockLineDisplayName, pipeSpecDisplayName,
+  paletteKeyForStockLine,
 } from './game/stock';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -450,6 +452,11 @@ function init() {
     } else if (event.type === 'scenario') {
       // A preset's scripted accident sequence just acted on the plant
       showNotification('Scenario: ' + event.message, 'warning', 15000);
+    } else if (event.type === 'shake') {
+      // Ground motion: the view jolts, the plant does not. No banner - the
+      // scenario event that ordered it carries the words.
+      const d = event.data as { seconds?: number; amplitude?: number } | undefined;
+      plantCanvas.startShake(d?.seconds ?? 2, d?.amplitude);
     } else if (event.type === 'simulation-error') {
       // Show error dialog for simulation errors
       showErrorDialog('Simulation Error', event.message);
@@ -1364,11 +1371,18 @@ function init() {
   // drop it when a different plant is loaded.
   let pendingLiveEdit: PendingLiveEdit | null = null;
   let selectedComponentType: string | null = null;
+  /**
+   * The equipment design the selected palette button hands out, when it is a
+   * supply-yard line. Null for an ordinary palette button, where the player
+   * still picks a design in the placement dialog.
+   */
+  let selectedComponentDesign: string | null = null;
   const componentDialog = new ComponentDialog();
   const connectionDialog = new ConnectionDialog();
   // The dialog reads the racks through this rather than the plant, so it has
   // no idea a warehouse exists - it just shows a number when there is one.
   connectionDialog.setPipeStockProvider(() => pipeMetersRemaining(plantState));
+  connectionDialog.setYardPipeSpecProvider(() => stockedPipeSpecId(plantState));
   const constructionManager = new ConstructionManager(plantState);
 
   // Construction cost panel elements
@@ -1405,6 +1419,10 @@ function init() {
     if (signature === lastStockSignature) return;
     lastStockSignature = signature;
 
+    // The yard IS the palette when there is one: rebuild its buttons first,
+    // then badge everything (theirs included) in one pass.
+    rebuildYardPalette(stock);
+
     const badge = (btn: HTMLElement, text: string | null): void => {
       const base = btn.dataset.baseLabel ?? (btn.dataset.baseLabel = btn.textContent ?? '');
       btn.textContent = base;
@@ -1438,20 +1456,25 @@ function init() {
       }
       if (storedType === 'pipe') {
         const metres = pipeMetersRemaining(plantState) ?? 0;
+        const specId = stockedPipeSpecId(plantState);
+        const specNote = specId ? ` It is ${pipeSpecDisplayName(specId)}, and that size is fixed.` : '';
         badge(btn, `${formatMetres(metres)} m`);
         btn.classList.toggle('tool-unavailable', metres <= 0);
         btn.title = metres > 0
-          ? `${formatMetres(metres)} m of pipe left in the warehouse. A run costs its own length.`
+          ? `${formatMetres(metres)} m of pipe left in the warehouse. A run costs its own length.${specNote}`
           : 'The warehouse is out of pipe. Delete a run somewhere else to get the metres back.';
         return;
       }
-      const left = componentsRemaining(plantState, storedType) ?? 0;
+      // A yard button is one stock LINE; a plain palette button is the
+      // generic pile for its type.
+      const design = btn.dataset.design || undefined;
+      const left = componentsRemaining(plantState, storedType, design) ?? 0;
       badge(btn, `\u00d7${left}`);
       btn.classList.toggle('tool-unavailable', left <= 0);
-      const name = typeDisplayName(storedType, left !== 1);
+      const name = stockLineDisplayName(storedType, design, left !== 1);
       btn.title = left > 0
         ? `${left} ${name} left in the warehouse.` + (baseTitle ? ` ${baseTitle}` : '')
-        : `The warehouse has no more ${typeDisplayName(storedType, true)}. ` +
+        : `The warehouse has no more ${stockLineDisplayName(storedType, design, true)}. ` +
           `Deleting one that is already built puts it back on the shelf.`;
     });
 
@@ -1469,6 +1492,76 @@ function init() {
         connectBtn.title = `${formatMetres(metres)} m of pipe left in the warehouse; ` +
           `a run costs its own length.` + (baseTitle ? ` ${baseTitle}` : '');
       }
+    }
+
+    // New buttons (or none) - re-decide what the palette shows
+    applyPaletteFilter();
+  }
+
+  /**
+   * The palette a supply yard hands the player: one button per STOCK LINE,
+   * not one per component type. A line that names an equipment design says so
+   * on its face ("Low-Pressure Service Water Pump x2") and placing from it
+   * builds exactly that design with no design choice - the part is already
+   * built and standing in the yard. A generic line (no design) behaves
+   * exactly as the old type buttons did.
+   *
+   * With no warehouse the section is empty and hidden, and the palette is
+   * exactly what it has always been.
+   */
+  function rebuildYardPalette(stock: PlantStock | null): void {
+    const group = document.getElementById('yard-palette-group');
+    const host = document.getElementById('yard-palette-buttons');
+    if (!group || !host) return;
+    host.innerHTML = '';
+    if (!stock) {
+      group.style.display = 'none';
+      return;
+    }
+    group.style.display = '';
+
+    const makeButton = (paletteKey: string, design: string | undefined,
+                        label: string, title: string): void => {
+      const btn = document.createElement('button');
+      btn.className = 'component-btn yard-btn';
+      btn.dataset.component = paletteKey;
+      if (design) btn.dataset.design = design;
+      btn.textContent = label;
+      btn.dataset.baseLabel = label;
+      btn.dataset.baseTitle = title;
+      btn.title = title;
+      btn.addEventListener('click', () => selectPaletteButton(btn));
+      host.appendChild(btn);
+    };
+
+    // Pipe first: it is measured in metres rather than counted, and almost
+    // every line the player builds needs some.
+    const specId = stock.pipeSpec ?? null;
+    makeButton('pipe', undefined,
+      specId ? pipeSpecDisplayName(specId) : 'Pipe',
+      specId
+        ? `The yard's pipe: ${pipeSpecDisplayName(specId)}. Every run costs its own ` +
+          `length, and the size and rating are fixed - only the route and the length are yours.`
+        : 'Bulk pipe from the yard. Every run costs its own length.');
+
+    for (const line of stock.components) {
+      let paletteKey: string;
+      try {
+        paletteKey = paletteKeyForStockLine(line);
+      } catch (e) {
+        // A line naming a design nothing knows: say so on the palette rather
+        // than quietly dropping the part the level meant to hand over.
+        console.error(e);
+        showNotification(String((e as Error).message ?? e), 'error');
+        continue;
+      }
+      const name = stockLineDisplayName(line.type, line.design);
+      makeButton(paletteKey, line.design, name,
+        line.design
+          ? `${name}, from the supply yard. It is already built to this design, ` +
+            `so placing one asks you only where it goes and what to call it.`
+          : `${name} - the yard stocks these without a specified design, so you ` +
+            `choose one when you place it.`);
     }
   }
 
@@ -1707,6 +1800,7 @@ function init() {
       // 0 = fully inserted, 1 = fully withdrawn (same convention everywhere)
       initialRodPosition: Math.round((barrel.controlRodPosition ?? 0.5) * 100),
       startCritical: barrel.startCritical !== false,
+      startupSourceNps: (barrel as any).startupSourceNps ?? 1e9,
       autoPoison: barrel.autoPoison !== false,
       ...(barrel.burnablePoisonPcm !== undefined ? { burnablePoisonPcm: barrel.burnablePoisonPcm } : {}),
     };
@@ -2993,8 +3087,7 @@ function init() {
       plantCanvas.setMoveMode(false);
 
       // Clear component selection
-      selectedComponentType = null;
-      constructionButtons.forEach(btn => btn.classList.remove('selected'));
+      clearPaletteSelection();
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
       if (placementHintDiv) placementHintDiv.style.display = 'none';
 
@@ -3082,56 +3175,76 @@ function init() {
   }
 
   // Component selection handlers
-  constructionButtons.forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const button = e.target as HTMLButtonElement;
-      const componentType = button.dataset.component;
+  /**
+   * Picking a part off the palette. Shared by the static type buttons and by
+   * the supply-yard buttons, which are rebuilt whenever the stock changes and
+   * so cannot live in the NodeList captured at load.
+   *
+   * A yard button carries `data-design`: the equipment design that button
+   * hands out, which the placement dialog then shows fixed.
+   */
+  function selectPaletteButton(button: HTMLButtonElement): void {
+    const componentType = button.dataset.component;
+    const design = button.dataset.design || null;
+    if (!componentType) return;
 
-      if (!componentType) return;
+    // Out of stock: say so rather than opening a dialog that cannot be
+    // confirmed. (The button is greyed with a class, not `disabled`, so the
+    // click still arrives here and the tooltip still works.)
+    if (button.classList.contains('tool-unavailable')) {
+      showNotification(button.title, 'warning');
+      return;
+    }
 
-      // Out of stock: say so rather than opening a dialog that cannot be
-      // confirmed. (The button is greyed with a class, not `disabled`, so the
-      // click still arrives here and the tooltip still works.)
-      if (button.classList.contains('tool-unavailable')) {
-        showNotification(button.title, 'warning');
-        return;
-      }
-
-      // If clicking the same component again, deselect it
-      if (selectedComponentType === componentType) {
-        constructionButtons.forEach(b => b.classList.remove('selected'));
-        selectedComponentType = null;
-        if (selectedComponentDiv) {
-          selectedComponentDiv.textContent = 'Select a component to place';
-        }
-        if (placementHintDiv) {
-          placementHintDiv.style.display = 'none';
-        }
-        return;
-      }
-
-      // If in connect or move mode, switch to place mode
-      if (constructionSubMode !== 'place') {
-        setConstructionSubMode('place');
-      }
-
-      // Clear previous selection
-      constructionButtons.forEach(b => b.classList.remove('selected'));
-
-      // Select this component
-      button.classList.add('selected');
-      selectedComponentType = componentType;
-
-      // Update UI
+    // If clicking the same part again, deselect it
+    if (selectedComponentType === componentType && selectedComponentDesign === design) {
+      clearPaletteSelection();
       if (selectedComponentDiv) {
-        // baseLabel is the button text without its stock badge
-        selectedComponentDiv.textContent =
-          `Selected: ${button.dataset.baseLabel ?? button.textContent}`;
+        selectedComponentDiv.textContent = 'Select a component to place';
       }
       if (placementHintDiv) {
-        placementHintDiv.style.display = 'block';
+        placementHintDiv.style.display = 'none';
       }
+      return;
+    }
 
+    // If in connect or move mode, switch to place mode
+    if (constructionSubMode !== 'place') {
+      setConstructionSubMode('place');
+    }
+
+    clearPaletteSelection();
+
+    // Select this component
+    button.classList.add('selected');
+    selectedComponentType = componentType;
+    selectedComponentDesign = design;
+
+    // Update UI
+    if (selectedComponentDiv) {
+      // baseLabel is the button text without its stock badge
+      selectedComponentDiv.textContent =
+        `Selected: ${button.dataset.baseLabel ?? button.textContent}`;
+    }
+    if (placementHintDiv) {
+      placementHintDiv.style.display = 'block';
+    }
+  }
+
+  /**
+   * Drop the current palette selection. Queries the document rather than the
+   * NodeList captured at load, because the supply-yard buttons are created
+   * (and replaced) as the stock changes.
+   */
+  function clearPaletteSelection(): void {
+    document.querySelectorAll('.component-btn').forEach(b => b.classList.remove('selected'));
+    selectedComponentType = null;
+    selectedComponentDesign = null;
+  }
+
+  constructionButtons.forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      selectPaletteButton(e.currentTarget as HTMLButtonElement);
     });
   });
 
@@ -3748,6 +3861,10 @@ function init() {
           defaultName = `${definition.displayName} ${nextIdNum}`;
         }
 
+        // A yard part is placed to the design the yard stocks: the dialog
+        // shows it, locks every field but the name, and stamps it on the
+        // component so the refund goes back to the line it came from.
+        const yardDesign = selectedComponentDesign ?? undefined;
         componentDialog.show(
           selectedComponentType!,
           placementPos,
@@ -3819,8 +3936,7 @@ function init() {
             else abandonLiveEdit(liveSnap);
 
             // Clear component selection after placing
-            selectedComponentType = null;
-            constructionButtons.forEach(b => b.classList.remove('selected'));
+            clearPaletteSelection();
             if (selectedComponentDiv) {
               selectedComponentDiv.textContent = 'Select a component to place';
             }
@@ -3831,7 +3947,7 @@ function init() {
             // Placement cancelled
             abandonLiveEdit(liveSnap);
           }
-        }, availableCores, availableGenerators, defaultName);
+        }, availableCores, availableGenerators, defaultName, yardDesign);
       };
 
       console.log(`[Placement] ${selectedComponentType} click at world (${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}): ` +
@@ -4030,8 +4146,7 @@ function init() {
 
     if (mode !== 'place') {
       // Clear component selection when not in place mode
-      selectedComponentType = null;
-      constructionButtons.forEach(b => b.classList.remove('selected'));
+      clearPaletteSelection();
       if (selectedComponentDiv) {
         selectedComponentDiv.textContent = 'No component selected';
       }
@@ -4087,10 +4202,17 @@ function init() {
     const container = document.querySelector('.component-categories') as HTMLElement | null;
     if (!container) return;
     const filtering = paletteFilterTypes !== null && !paletteShowAll;
+    // With a supply yard on the map the palette IS the yard: one button per
+    // stock LINE. The generic type buttons would offer parts the yard does not
+    // have and a design choice the yard has already made, so they stand down -
+    // all but Warehouse, which costs nothing out of the yard it edits.
+    const yardActive = getStock(plantState) !== null;
     container.querySelectorAll<HTMLButtonElement>('.component-btn').forEach(btn => {
       const t = btn.dataset.component ?? '';
+      const hiddenByLevel = filtering && !paletteFilterTypes!.includes(t);
+      const hiddenByYard = yardActive && !btn.classList.contains('yard-btn') && t !== 'warehouse';
       // class, not inline style: .component-btn carries display:block !important
-      btn.classList.toggle('palette-hidden', filtering && !paletteFilterTypes!.includes(t));
+      btn.classList.toggle('palette-hidden', hiddenByLevel || hiddenByYard);
     });
     container.querySelectorAll('details').forEach(d => {
       const anyVisible = Array.from(d.querySelectorAll<HTMLButtonElement>('.component-btn'))
@@ -4098,7 +4220,9 @@ function init() {
       (d as HTMLElement).style.display = anyVisible ? '' : 'none';
     });
     let toggle = document.getElementById('palette-filter-toggle') as HTMLButtonElement | null;
-    if (paletteFilterTypes !== null) {
+    // With a yard on the map there is no wider catalog to show: the palette is
+    // the yard's own stock, and the toggle would promise parts that are not there.
+    if (paletteFilterTypes !== null && !yardActive) {
       if (!toggle) {
         toggle = document.createElement('button');
         toggle.id = 'palette-filter-toggle';

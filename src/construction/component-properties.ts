@@ -11,6 +11,8 @@
 // display units (bar, °C, MW, mm, %). All conversions live here and in
 // updateComponent - nowhere else.
 
+import type { StockLine } from '../types';
+
 /**
  * Components whose connection elevations are pinned to their port geometry.
  *
@@ -123,26 +125,46 @@ export function mapComponentTypeToDefinition(type: string, component?: Record<st
 }
 
 /**
- * Warehouse dialog field -> the stored ComponentType whose pile it counts.
- * ConstructionManager.updateComponent writes through the same table, so the
- * dialog and the model cannot drift (scripts/check-dialog-sync.ts proves it).
+ * The warehouse's equipment list, as the dialog's `stockLines` field carries
+ * it: an array of { type, design?, count }. The dialog edits the very shape
+ * the model stores, so there is no mapping table to drift - this normalizer
+ * is only about rejecting garbage loudly and dropping empty rows.
+ *
+ * ConstructionManager (create AND updateComponent) writes through this, and
+ * readComponentOption reads the stored array straight back, so
+ * scripts/check-dialog-sync.ts proves the round trip.
  */
-export const WAREHOUSE_STOCK_OPTIONS: Record<string, string> = {
-  'stockPumps': 'pump',
-  'stockValves': 'valve',
-  'stockTanks': 'tank',
-  'stockVessels': 'vessel',
-  'stockHeatExchangers': 'heatExchanger',
-  'stockCondensers': 'condenser',
-  'stockTurbineDrivenPumps': 'turbine-driven-pump',
-  'stockTurbineGenerators': 'turbine-generator',
-  'stockReactorVessels': 'reactorVessel',
-  'stockCrossVessels': 'crossVessel',
-  'stockControllers': 'controller',
-  'stockBuildings': 'building',
-  'stockPools': 'pool',
-  'stockSwitchyards': 'switchyard',
-};
+export function parseStockLines(value: unknown): StockLine[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(
+      `[Warehouse] Stock lines must be an array of { type, design?, count }, got ` +
+      `${JSON.stringify(value)}.`);
+  }
+  const lines: StockLine[] = [];
+  for (const raw of value as Array<Record<string, unknown>>) {
+    if (!raw || typeof raw !== 'object' || typeof raw.type !== 'string') {
+      throw new Error(
+        `[Warehouse] Stock line ${JSON.stringify(raw)} has no component type. ` +
+        `Every line is { type, design?, count }.`);
+    }
+    const count = Number(raw.count ?? 0);
+    if (!Number.isFinite(count) || count < 0) {
+      throw new Error(
+        `[Warehouse] Stock line '${raw.type}' has a count of ${JSON.stringify(raw.count)}. ` +
+        `A count is a non-negative number.`);
+    }
+    const design = typeof raw.design === 'string' && raw.design ? raw.design : undefined;
+    // Two rows for the same part are one pile - the player edited a list, not
+    // a ledger, and two lines of the same design would split its refunds.
+    const existing = lines.find(l => l.type === raw.type && l.design === design);
+    if (existing) existing.count += count;
+    else lines.push(design
+      ? { type: raw.type as StockLine['type'], design, count }
+      : { type: raw.type as StockLine['type'], count });
+  }
+  return lines;
+}
 
 /**
  * Read the current value of a dialog option from a stored component,
@@ -150,14 +172,25 @@ export const WAREHOUSE_STOCK_OPTIONS: Record<string, string> = {
  * Returns defaultValue when the component genuinely has no such property.
  */
 export function readComponentOption(optionName: string, component: Record<string, any>, defaultValue: any): any {
-  // Warehouse stock lives in a nested block keyed by stored component type,
-  // so the dialog's flat 'stockPumps' fields need the same mapping the write
-  // path uses. WAREHOUSE_STOCK_OPTIONS (above) is the single table both
-  // directions read.
+  // Warehouse stock lives in a nested block; the dialog edits the same shape
+  // the model stores, so the read is the stored value straight back.
   if (component.type === 'warehouse') {
     if (optionName === 'stockPipeMeters') return component.stock?.pipeMeters ?? 0;
-    const stockedType = WAREHOUSE_STOCK_OPTIONS[optionName];
-    if (stockedType) return component.stock?.components?.[stockedType] ?? 0;
+    if (optionName === 'stockPipeSpec') return component.stock?.pipeSpec ?? '';
+    if (optionName === 'stockLines') {
+      const lines = component.stock?.components;
+      if (lines !== undefined && !Array.isArray(lines)) {
+        // The old type-keyed block. getStock() converts it the moment anything
+        // touches the plant's stock, so seeing it here means the dialog was
+        // opened on a plant nothing has read yet - and showing it as an empty
+        // list would WIPE the yard on confirm.
+        throw new Error(
+          `[Warehouse] Stock block is still in the old type-keyed form ` +
+          `(${JSON.stringify(lines)}). Read it through getStock() in ` +
+          `src/game/stock.ts first, which migrates it to lines.`);
+      }
+      return lines ?? [];
+    }
   }
 
   // PID controller fields live in the nested pid config with SI units

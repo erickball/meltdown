@@ -132,6 +132,11 @@ export interface ComponentBase {
   // A cylindrical metal surface that exchanges thermal radiation with another
   // component's wall across an open gap. See RadiantSurface.
   radiantSurface?: RadiantSurface;
+  // The equipment design (component-presets.ts preset id) this part was built
+  // to, when it was built from one. Set by the create dialog and by a
+  // warehouse stock line; it is what makes a refund go back to the line the
+  // part came out of, and what the info panel names.
+  design?: string;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
@@ -145,6 +150,17 @@ export interface TankComponent extends ComponentBase {
   wallThickness: number;
   fillLevel: number;    // 0-1
   pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
+  /**
+   * Id of a terrain water body (`PlantState.terrain.waters`) that this tank
+   * IS. A sea or a lake a pump takes suction on is an ordinary tank node -
+   * finite inventory, a real water surface, a nozzle to pipe to - but drawing
+   * it as a steel cylinder standing on the beach is a lie. With this set, the
+   * views draw no vessel at all: the blue area the terrain already paints for
+   * that body is the component's picture, its nozzle is drawn at the water's
+   * edge, and selecting it lights up the whole body. Nothing about the
+   * physics changes.
+   */
+  waterBody?: string;
 }
 
 /**
@@ -191,17 +207,39 @@ export interface PoolComponent extends ComponentBase {
 }
 
 /**
- * What is left on the shelf. `pipeMeters` is metres of pipe (every connection
- * and every pipe component is charged its own `length`); `components` is a
- * count per stored ComponentType, so all four valve palette buttons draw on
- * the same 'valve' pile.
+ * One line of the yard's equipment list: a COUNT of one fully specified part.
  *
- * A type that is ABSENT is out of stock, exactly as a type with 0 is - the
+ * `design` is the id of a preset in src/construction/component-presets.ts.
+ * A line WITH a design hands out exactly that equipment design - the player
+ * gets no design choice when placing from it, because the part is already
+ * built and standing in the yard. A line with NO design is generic: any
+ * design of that stored type comes off it, which is what every yard held
+ * before designs existed.
+ *
+ * The stored ComponentType is still what identifies the pile's kind, so all
+ * four valve palette buttons draw on a 'valve' line and a pressurizer draws
+ * on a 'tank' line.
+ */
+export interface StockLine {
+  type: ComponentType;
+  design?: string;
+  count: number;
+}
+
+/**
+ * What is left on the shelf. `pipeMeters` is metres of pipe (every connection
+ * and every pipe component is charged its own `length`) and `pipeSpec`, when
+ * set, is the ONE standardized line size that pipe is: the connection dialog
+ * shows it fixed and only the route and length are the player's.
+ *
+ * A line that is ABSENT is out of stock, exactly as a line with 0 is - the
  * distinction would be a special case with no meaning to the player.
  */
 export interface PlantStock {
   pipeMeters: number;
-  components: Partial<Record<ComponentType, number>>;
+  /** PipeSpec id (PIPE_SPECS in component-presets.ts); absent = any size. */
+  pipeSpec?: string;
+  components: StockLine[];
 }
 
 /**
@@ -343,6 +381,11 @@ export interface CoreBarrelComponent extends ComponentBase {
   // Control rod properties
   controlRodCount?: number;     // Number of control rod banks to display
   controlRodPosition?: number;  // 0 = fully inserted, 1 = fully withdrawn
+  /** Installed startup neutron source, neutrons/s (0 = none). This is what a
+   *  subcritical core multiplies, so it sets the shutdown power level and
+   *  therefore how long a restart takes; see operators/neutronics.ts.
+   *  Absent = the default installed source. */
+  startupSourceNps?: number;
 }
 
 export interface HeatExchangerComponent extends ComponentBase {
@@ -622,6 +665,15 @@ export interface CrossVesselComponent extends ComponentBase {
   // boundary cold.
   initialNcg?: { [species: string]: number };
   annulusInitialNcg?: { [species: string]: number };
+}
+
+/**
+ * The terrain water body a component is drawn as, if any (see
+ * TankComponent.waterBody). One place to ask, so the renderers, the hit
+ * tests and the route obstacles all agree.
+ */
+export function waterBodyOf(component: { type: string; waterBody?: string }): string | undefined {
+  return component.type === 'tank' && component.waterBody ? component.waterBody : undefined;
 }
 
 export type PlantComponent =

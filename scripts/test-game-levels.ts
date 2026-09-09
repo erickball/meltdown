@@ -22,6 +22,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 
 import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
+import {
+  getPresetById, getPipeSpecById, pipeSpecFlowArea,
+} from '../src/construction/component-presets';
 import { nodeLiquidLevel } from '../src/simulation';
 import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
 import {
@@ -260,21 +263,41 @@ function sfpPlant(): PlantJsonRW {
   return JSON.parse(fs.readFileSync(path.resolve(process.cwd(), SFP_LEVEL), 'utf-8'));
 }
 
-/** A make-up pump the way the palette would build one, at a plan position. */
-function sfpPump(id: string, label: string, x: number, y: number, ratedFlow: number, ratedHead: number) {
+/**
+ * THE pump the supply yard hands out for this level, read from the equipment
+ * design itself rather than from numbers copied here - so if the design is
+ * retuned, these checks measure the retuned design. Same for the yard's line
+ * size: the runs below are made of the pipe the yard stocks.
+ */
+const SFP_YARD_PUMP_DESIGN = 'pump-service-water-lp';
+const SFP_YARD_PIPE_SPEC = 'spec-12in-service';
+const SFP_PUMP = (() => {
+  const preset = getPresetById(SFP_YARD_PUMP_DESIGN);
+  if (!preset) throw new Error(`[sfp] no equipment design '${SFP_YARD_PUMP_DESIGN}'`);
+  return preset.properties as Record<string, number>;
+})();
+const SFP_PIPE_AREA = (() => {
+  const spec = getPipeSpecById(SFP_YARD_PIPE_SPEC);
+  if (!spec) throw new Error(`[sfp] no pipe spec '${SFP_YARD_PIPE_SPEC}'`);
+  return pipeSpecFlowArea(spec);
+})();
+
+/** A make-up pump as the yard hands it over, at a plan position. */
+function sfpPump(id: string, label: string, x: number, y: number) {
+  const ratedFlow = SFP_PUMP.ratedFlow;
   return [id, {
-    id, type: 'pump', label,
+    id, type: 'pump', label, design: SFP_YARD_PUMP_DESIGN,
     position: { x, y }, rotation: 0, elevation: 0,
     diameter: 0.2 + Math.sqrt(ratedFlow / 1000) * 0.4,
     running: false, speed: 1,
-    ratedFlow, ratedHead, orientation: 'left-right',
-    npshRequired: 5,
+    ratedFlow, ratedHead: SFP_PUMP.ratedHead, orientation: 'left-right',
+    npshRequired: SFP_PUMP.npshRequired,
     ports: [
       { id: `${id}-inlet`, position: { x: -0.5, y: 0 }, direction: 'in' },
       { id: `${id}-outlet`, position: { x: 0.5, y: 0 }, direction: 'out' },
     ],
     fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
-    pressureRating: 25,
+    pressureRating: SFP_PUMP.pressureRating,
   }] as [string, Record<string, unknown>];
 }
 
@@ -301,6 +324,26 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
   // SFP_ONLY=1|23|4 runs one sub-check while tuning the level.
   const only = process.env.SFP_ONLY;
   const wants = (n: string) => !only || only.includes(n);
+
+  // -- 0. The yard hands out the very design these checks measure -----------
+  {
+    const yard = (sfpPlant().components.find(c => c[0] === 'yard')![1] as
+      { stock: { pipeSpec?: string; components: Array<{ type: string; design?: string; count: number }> } }).stock;
+    const pumpLine = yard.components.find(l => l.type === 'pump');
+    if (!pumpLine || pumpLine.design !== SFP_YARD_PUMP_DESIGN) {
+      fail(`the yard should stock '${SFP_YARD_PUMP_DESIGN}' pumps, holds ` +
+        `${JSON.stringify(pumpLine)}`);
+    }
+    if (yard.pipeSpec !== SFP_YARD_PIPE_SPEC) {
+      fail(`the yard should stock '${SFP_YARD_PIPE_SPEC}' pipe, holds '${yard.pipeSpec}'`);
+    }
+    const valveLine = yard.components.find(l => l.type === 'valve');
+    if (!valveLine || !valveLine.design) {
+      fail(`the yard's valves should name a design, holds ${JSON.stringify(valveLine)}`);
+    }
+    console.log(`  [0] yard: ${yard.components.map(l => `${l.count}x ${l.design ?? l.type}`).join(', ')}` +
+      `, pipe ${yard.pipeSpec}`);
+  }
 
   // -- 1. Nobody home: the tear alone must lose the level ------------------
   // The loss is no longer "the water went below the racks". It is what a real
@@ -349,18 +392,20 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     { name: 'shore (+1.7 m)', id: 'shore', x: 200, y: 75, suction: 45, discharge: 155, deliver: true },
   ] : [])) {
     const plant = sfpPlant();
-    plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y, 200, 60));
+    plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y));
     (plant.components.find(c => c[0] === spot.id)![1] as Record<string, unknown>).running = true;
     plant.connections.push(
-      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, 0.5, 0.3, spot.suction, 0.0707),
-      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, 10.5, spot.discharge, 0.0707));
+      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, 0.5, 0.3, spot.suction, SFP_PIPE_AREA),
+      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, 10.5, spot.discharge, SFP_PIPE_AREA));
     plant.scenario = undefined;   // no earthquake: this is about the pump alone
     const sim = buildSimFromPlantJson(plant as never);
     run(sim, 120, 0.02);
     const q = flowRate(sim.state, spot.id, 'pool');
     const suction = sim.state.flowNodes.get(spot.id)!;
     console.log(`  [${spot.deliver ? 3 : 2}] ${spot.name}: ${q.toFixed(1)} kg/s to the pool, ` +
-      `pump node ${suction.fluid.phase} at ${(suction.fluid.pressure / 1e5).toFixed(3)} bar`);
+      `pump node ${suction.fluid.phase} at ${(suction.fluid.pressure / 1e5).toFixed(3)} bar ` +
+      `(${getPresetById(SFP_YARD_PUMP_DESIGN)!.name}, ${SFP_PUMP.ratedFlow} kg/s at ` +
+      `${SFP_PUMP.ratedHead} m, on ${getPipeSpecById(SFP_YARD_PIPE_SPEC)!.label})`);
     if (spot.deliver && !(q > 40)) fail(`a shore pump should push water up to the pool, got ${q.toFixed(1)} kg/s`);
     if (!spot.deliver && !(Math.abs(q) < 2)) {
       fail(`a pump 13 m above the sea cannot draw it, got ${q.toFixed(1)} kg/s`);
@@ -375,7 +420,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
   if (wants('4')) {
     const plant = sfpPlant();
     plant.components.push(
-      sfpPump('shore-pump', 'Sea Pump', 200, 75, 200, 60),
+      sfpPump('shore-pump', 'Sea Pump', 200, 75),
       // The tank line needs no pump: both tanks stand on the bench with the
       // pool sunk 10.5 m below their feet, so they feed it by gravity. What
       // it needs is a valve, because 1200 t of gravity feed left open runs
@@ -392,8 +437,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         pressureRating: 20,
       }] as [string, Record<string, unknown>]);
     plant.connections.push(
-      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', 0.5, 0.3, 45, 0.0707),
-      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, 10.5, 155, 0.0707),
+      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', 0.5, 0.3, 45, SFP_PIPE_AREA),
+      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, 10.5, 155, SFP_PIPE_AREA),
       sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
       sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
       sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));

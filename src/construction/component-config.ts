@@ -8,11 +8,17 @@ import { corePebbleGeometry } from '../simulation/factory';
 import {
   ComponentPreset,
   getPresetsForType,
+  getPresetById,
   hasPresetSupport,
   saveCustomPreset,
-  deleteCustomPreset
+  deleteCustomPreset,
+  PIPE_SPECS
 } from './component-presets';
 import { readComponentOption, mapComponentTypeToDefinition } from './component-properties';
+import {
+  STOCKABLE_TYPES, stockLineKey, storedTypeForPaletteKey, typeDisplayName,
+} from '../game/stock';
+import type { ComponentType, StockLine } from '../types';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -67,12 +73,24 @@ function dialogLatticeParams(p: Record<string, any>): LatticeParams {
   };
 }
 
+/**
+ * Why a placement form can be read but not changed. One string so the plate,
+ * the tooltip on every locked field and the docs cannot drift apart.
+ */
+export const YARD_FIXED_DESIGN_TOOLTIP =
+  'This part comes from the supply yard as-is: it is already built to this ' +
+  'design, so only its name and where you put it are yours to set.';
+
 export interface ComponentConfig {
   type: string;
   name: string;
   position: { x: number; y: number };
   properties: Record<string, any>;
   containedBy?: string;  // ID of container component (tank, vessel, containment building)
+  // The equipment design (component-presets id) this was configured from,
+  // when one was selected. Rides onto the built component so a warehouse
+  // refund goes back to the line the part came out of.
+  design?: string;
 }
 
 /**
@@ -106,7 +124,9 @@ const GAS_DISPLAY_NAMES: Record<GasSpecies, string> = {
 
 export interface ComponentOption {
   name: string;
-  type: 'number' | 'text' | 'select' | 'checkbox' | 'calculated' | 'ncg';
+  // 'stockLines' is the warehouse's equipment list: a repeatable list of
+  // { type, design?, count } rows, edited as the same array the model stores.
+  type: 'number' | 'text' | 'select' | 'checkbox' | 'calculated' | 'ncg' | 'stockLines';
   label: string;
   default: any;
   min?: number;
@@ -147,6 +167,8 @@ export const componentDefinitions: Record<string, {
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, O₂, H₂, He to the vapor space' },
+      { name: 'waterBody', type: 'text', label: 'Draw As Water Body', default: '',
+        help: 'ID of a terrain water body (the sea or lake on this site) that this tank IS. Leave blank for an ordinary tank. Set, and no vessel is drawn at all: the blue water the map already paints for that body becomes the component picture, only its nozzle is shown - at the water edge, where a pipe can be dragged to it - and selecting it lights up the whole body. Nothing about the physics changes: it is still one tank node with a finite inventory, so a sea can be pumped dry.' },
       // Radiant cavity surface (reactor cavity cooling panels and the like)
       { name: 'radiantSurface', type: 'checkbox', label: 'Radiant cavity surface', default: false,
         help: 'Make this tank a cooled panel that absorbs THERMAL RADIATION from another component across an open gas gap. This is how a reactor cavity cooling system works: water-filled standpipes ringing a hot vessel, taking its heat with no pump, no valve and no signal in the path. The duty follows T⁴, so it strengthens by itself as the thing it faces heats up.' },
@@ -857,6 +879,13 @@ export const componentDefinitions: Record<string, {
         dependsOn: { field: 'autoPoison', value: false },
         help: 'Reactivity permanently held down by burnable absorbers. Too little and the rods cannot shut the core down; too much and it cannot go critical. Note: a core that starts cold loses several thousand pcm of moderator reactivity as it heats up to operating temperature, so leave extra excess if you plan a cold startup.' },
       { name: 'controlRodBanks', type: 'number', label: 'Control Rod Banks', default: 4, min: 1, max: 10, step: 1, help: 'Number of control rod banks. Total rod worth scales with bank count (see the estimate at right): ~4 banks is PWR-like (rods alone cannot hold a cold core down - pair with boron), 8-10 banks is BWR-like (enough authority for cold shutdown on rods alone, with generous excess for the cold-to-hot reactivity swing). Each bank adds drive mechanisms, so more authority costs more.' },
+      { name: 'startupSourceNps', type: 'number', label: 'Startup Neutron Source', default: 1e9, min: 0, step: 1e8, unit: 'n/s',
+        help: 'Strength of the installed startup source (a californium capsule or activated antimony-beryllium rods), in neutrons per second. ' +
+          'It is what a shut-down core multiplies: fission power settles at s·E_fission·k/(1-k), so at 5 $ subcritical this default (10⁹ n/s) ' +
+          'holds a 1000 MWt core near 1 W, about 1e-9 of rated - the bottom of a real source range. Real assemblies run 1e8 to 1e9 n/s. ' +
+          'Set 0 for no installed source: the core then relies on spontaneous fission of its own U-238 (and, once it has been operated, of the ' +
+          'curium in irradiated fuel), which is thousands of times weaker - a cold, fresh core would take far longer to bring up, which is ' +
+          'exactly why real plants install one.' },
       { name: 'startCritical', type: 'checkbox', label: 'Start at critical rod position', default: true,
         help: 'Place the control rods where total reactivity is exactly zero at the initial plant conditions, so the reactor starts steady instead of ramping. Uncheck to set the position yourself (e.g. to start shut down).' },
       { name: 'initialRodPosition', type: 'number', label: 'Initial Rod Position', default: 50, min: 0, max: 100, step: 5, unit: '%',
@@ -1022,34 +1051,12 @@ export const componentDefinitions: Record<string, {
         help: 'Plan depth of the yard. Cosmetic - it does not change what the yard holds.' },
       { name: 'stockPipeMeters', type: 'number', label: 'Pipe in Stock', default: 0, min: 0, max: 100000, step: 10, unit: 'm',
         help: 'Total metres of pipe on the racks. Every connection and every pipe component spends its own length; deleting one puts the metres back, and editing a run pays or refunds the difference.' },
-      { name: 'stockPumps', type: 'number', label: 'Pumps in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockValves', type: 'number', label: 'Valves in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'Every kind of valve - gate, check, relief and PORV are all stored as valves, so all four buttons draw on this one pile.' },
-      { name: 'stockTanks', type: 'number', label: 'Tanks in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'Tanks AND pressurizers - the model stores a pressurizer as a tank, so both buttons draw on this pile.' },
-      { name: 'stockVessels', type: 'number', label: 'Standalone Cores in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'Standalone reactor cores, which the model stores as fuelled vessels. Pressurizers are stored as TANKS, so they come out of the tank pile.' },
-      { name: 'stockHeatExchangers', type: 'number', label: 'Heat Exchangers in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockCondensers', type: 'number', label: 'Condensers in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockTurbineDrivenPumps', type: 'number', label: 'Turbine-Driven Pumps in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockTurbineGenerators', type: 'number', label: 'Turbine-Generators in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockReactorVessels', type: 'number', label: 'Reactor Vessels in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockCrossVessels', type: 'number', label: 'Cross-Vessels in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockControllers', type: 'number', label: 'Controllers in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockBuildings', type: 'number', label: 'Buildings in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockPools', type: 'number', label: 'Pools in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
-      { name: 'stockSwitchyards', type: 'number', label: 'Switchyards in Stock', default: 0, min: 0, max: 999, step: 1,
-        help: 'How many are on the shelf. Each one placed takes one off; deleting one puts it back. 0 means the build button for it is greyed out.' },
+      { name: 'stockPipeSpec', type: 'select', label: 'Pipe Line Size', default: '',
+        options: [{ value: '', label: 'Any size - the builder picks' },
+          ...PIPE_SPECS.map(s => ({ value: s.id, label: s.label }))],
+        help: 'The one standardized line size this pipe IS. Pick a size and the connection dialog shows it fixed, with only the route and the length left to the builder. Leave it on "Any size" for a yard that just holds bulk pipe.' },
+      { name: 'stockLines', type: 'stockLines', label: 'Equipment in Stock', default: [],
+        help: 'What is standing in the yard, one line per part. Pick an equipment DESIGN and that is exactly what gets placed - no design choice at placement, because the part is already built. Choose "Generic" instead to hand out an unspecified part of that type, which is what a yard held before designs. All four valve buttons draw on a valve line, and a pressurizer draws on a tank line.' },
     ]
   },
 
@@ -1265,6 +1272,13 @@ export class ComponentDialog {
   // Preset (equipment design) state for the create dialog
   private isCreateMode: boolean = false;
   private currentPresetId: string | null = null;
+  /**
+   * Set when the part being placed comes out of a supply yard: the design is
+   * already built and standing there, so the form shows it and locks every
+   * field but the name. Null for ordinary palette placement, where the design
+   * dropdown is a starting point the player may edit.
+   */
+  private fixedDesignId: string | null = null;
   private currentDefaultName?: string;
   private currentAvailableCoresForCreate?: Array<{ id: string; label: string }>;
   // Plant-derived choice lists for options with dynamicOptions (keyed by list
@@ -1320,7 +1334,11 @@ export class ComponentDialog {
     callback: (config: ComponentConfig | null) => void,
     availableCores?: Array<{ id: string; label: string }>,
     availableGenerators?: Array<{ id: string; label: string }>,
-    defaultName?: string
+    defaultName?: string,
+    // Placing from a warehouse stock LINE: the id of the equipment design the
+    // yard holds. The form is filled from it and locked - the part is already
+    // built, so there is no design left to choose.
+    fixedDesignId?: string
   ) {
     const definition = componentDefinitions[componentType];
     if (!definition) {
@@ -1341,8 +1359,18 @@ export class ComponentDialog {
     this.isCreateMode = true;
     this.currentDefaultName = defaultName;
     this.currentAvailableCoresForCreate = availableCores;
+    this.fixedDesignId = fixedDesignId ?? null;
+    if (fixedDesignId && !getPresetById(fixedDesignId)) {
+      // Loud: a yard line naming a design nothing knows must not quietly
+      // place a generic part instead.
+      throw new Error(
+        `[Dialog] Cannot place from equipment design '${fixedDesignId}': no such ` +
+        `design in src/construction/component-presets.ts (or the saved custom ` +
+        `designs). The warehouse stock line that names it is wrong.`);
+    }
     const presets = getPresetsForType(componentType);
-    this.currentPresetId = presets.length > 0 ? presets[0].id : null;
+    this.currentPresetId = fixedDesignId
+      ?? (presets.length > 0 ? presets[0].id : null);
 
     // Build form (pass available cores for controller dropdowns, and optional default name)
     this.rebuildCreateForm();
@@ -1384,8 +1412,11 @@ export class ComponentDialog {
     const inputOptions = options.filter(o => o.type !== 'calculated');
     const calculatedOptions = options.filter(o => o.type === 'calculated');
 
-    // Equipment design picker (presets) - create mode only
-    if (this.isCreateMode && hasPresetSupport(this.currentType)) {
+    // Equipment design picker (presets) - create mode only. A part out of the
+    // supply yard has no picker at all: it is already built.
+    if (this.isCreateMode && this.fixedDesignId) {
+      this.bodyElement.appendChild(this.createFixedDesignSection());
+    } else if (this.isCreateMode && hasPresetSupport(this.currentType)) {
       this.bodyElement.appendChild(this.createDesignSection(options));
     }
 
@@ -1566,6 +1597,13 @@ export class ComponentDialog {
           formGroup.appendChild(ncgPanel);
           break;
 
+        case 'stockLines':
+          input = this.createStockLinesInput(option.name,
+            Array.isArray(option.default) ? option.default : []);
+          formGroup.appendChild(
+            this.createStockLinesPanel(input as HTMLInputElement));
+          break;
+
         default: // text
           input = document.createElement('input');
           input.type = 'text';
@@ -1738,6 +1776,65 @@ export class ComponentDialog {
 
     // Keep volume <-> diameter mutually consistent (tanks, pressurizers)
     this.setupGeometryCoupling();
+    if (this.isCreateMode && this.fixedDesignId) this.lockFieldsToYardDesign();
+  }
+
+  /**
+   * A part from the supply yard: the design is stated, not chosen. Everything
+   * else in the form is locked by lockFieldsToYardDesign(); this plate is what
+   * says why.
+   */
+  private createFixedDesignSection(): HTMLElement {
+    const preset = getPresetById(this.fixedDesignId!);
+
+    const section = document.createElement('div');
+    section.className = 'design-section form-group';
+    section.style.cssText = 'background: #232b3a; padding: 10px 12px; border-radius: 6px; border: 1px solid #3a4a6a; margin-bottom: 15px;';
+    section.title = YARD_FIXED_DESIGN_TOOLTIP;
+
+    const label = document.createElement('div');
+    label.style.cssText = 'color: #7af; font-size: 12px; margin-bottom: 6px;';
+    label.textContent = 'From the Supply Yard';
+    section.appendChild(label);
+
+    const name = document.createElement('div');
+    name.id = 'yard-design-name';
+    name.style.cssText = 'font-size: 14px; font-weight: bold; color: #cde;';
+    name.textContent = preset ? preset.name : `UNKNOWN DESIGN '${this.fixedDesignId}'`;
+    section.appendChild(name);
+
+    const desc = document.createElement('div');
+    desc.style.cssText = 'font-size: 11px; color: #99aacc; margin-top: 6px; line-height: 1.4;';
+    desc.textContent = preset?.description ?? '';
+    section.appendChild(desc);
+
+    const note = document.createElement('div');
+    note.style.cssText = 'font-size: 11px; color: #da5; margin-top: 6px; line-height: 1.4;';
+    note.textContent = YARD_FIXED_DESIGN_TOOLTIP;
+    section.appendChild(note);
+
+    return section;
+  }
+
+  /**
+   * Lock every field of a yard part except its name. The values still SUBMIT
+   * (handleConfirm reads .value, which a disabled input still carries), so the
+   * component is built to the yard's design exactly; the explanation hangs on
+   * the enclosing form group, which is not disabled and so keeps its tooltip.
+   */
+  private lockFieldsToYardDesign(): void {
+    const groups = this.bodyElement.querySelectorAll<HTMLElement>('.form-group');
+    groups.forEach(group => {
+      if (group.classList.contains('design-section')) return;
+      const optionName = group.dataset.optionName;
+      // Name and elevation are WHERE you put it and what you call it - the two
+      // things the yard does not decide. Everything else is the design.
+      if (optionName === undefined || optionName === 'name' || optionName === 'elevation') return;
+      group.title = YARD_FIXED_DESIGN_TOOLTIP;
+      group.style.opacity = '0.65';
+      group.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input, select, button')
+        .forEach(el => { el.disabled = true; });
+    });
   }
 
   /**
@@ -2039,6 +2136,201 @@ export class ComponentDialog {
    * Create the NCG (Non-Condensible Gas) input panel.
    * Shows a button that expands to reveal partial pressure inputs for each gas species.
    */
+  /**
+   * The hidden input that carries the warehouse's equipment list: the very
+   * array of { type, design?, count } the model stores, as JSON. The visible
+   * rows write through to it, and `dataset.jsonList` is what tells
+   * getCurrentProperties/handleConfirm to submit it parsed rather than as a
+   * string. (Same trick as the NCG panel: one field instead of a dozen.)
+   */
+  private createStockLinesInput(optionName: string, lines: StockLine[]): HTMLInputElement {
+    const input = document.createElement('input');
+    input.type = 'hidden';
+    input.id = `option-${optionName}`;
+    input.name = optionName;
+    input.dataset.jsonList = '1';
+    input.value = JSON.stringify(lines.map(l => l.design
+      ? { type: l.type, design: l.design, count: l.count }
+      : { type: l.type, count: l.count }));
+    return input;
+  }
+
+  /**
+   * Every part a yard line can name, as one grouped select: the generic
+   * "any design of this type" entries first, then the standard and saved
+   * DESIGNS. The option value is the line key ('pump',
+   * 'pump:pump-service-water-lp'), which is exactly how src/game/stock.ts
+   * identifies a pile.
+   */
+  private stockPartChoices(): Array<{ group: string; value: string; label: string }> {
+    const out: Array<{ group: string; value: string; label: string }> = [];
+    for (const type of STOCKABLE_TYPES) {
+      out.push({
+        group: 'Generic - any design',
+        value: stockLineKey(type),
+        label: `Generic ${typeDisplayName(type)}`,
+      });
+    }
+    for (const defKey of Object.keys(componentDefinitions)) {
+      // Pipe is measured in metres on its own field, never counted as a line
+      if (defKey === 'pipe' || defKey === 'warehouse') continue;
+      if (!hasPresetSupport(defKey)) continue;
+      let storedType: ComponentType;
+      try {
+        storedType = storedTypeForPaletteKey(defKey);
+      } catch {
+        continue;   // a form with presets but no palette button holds no stock
+      }
+      for (const preset of getPresetsForType(defKey)) {
+        out.push({
+          group: componentDefinitions[defKey].displayName,
+          value: stockLineKey(storedType, preset.id),
+          label: preset.name,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The repeatable equipment list: one row per stock line (part + count +
+   * remove), and an "Add a part" button. Every change rewrites the hidden
+   * input, so the dialog submits the same array shape the model stores and
+   * the round-trip audit compares like with like.
+   */
+  private createStockLinesPanel(input: HTMLInputElement): HTMLElement {
+    const container = document.createElement('div');
+    container.className = 'stock-lines-panel';
+    container.style.cssText = 'margin-top: 6px;';
+
+    const rowsEl = document.createElement('div');
+    rowsEl.style.cssText = 'display: flex; flex-direction: column; gap: 4px;';
+    container.appendChild(rowsEl);
+
+    const choices = this.stockPartChoices();
+    const read = (): StockLine[] => {
+      try {
+        const parsed = JSON.parse(input.value);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+    const write = (lines: StockLine[]): void => {
+      input.value = JSON.stringify(lines);
+    };
+
+    const render = (): void => {
+      const lines = read();
+      rowsEl.innerHTML = '';
+
+      if (lines.length === 0) {
+        const empty = document.createElement('div');
+        empty.style.cssText = 'font-size: 11px; color: #889; font-style: italic;';
+        empty.textContent = 'Nothing in the yard - every equipment button will be greyed out.';
+        rowsEl.appendChild(empty);
+      }
+
+      lines.forEach((line, index) => {
+        const row = document.createElement('div');
+        row.style.cssText = 'display: flex; gap: 6px; align-items: center;';
+
+        const partSelect = document.createElement('select');
+        partSelect.style.cssText = 'flex: 1; min-width: 0; font-size: 11px;';
+        partSelect.title = 'What this pile IS. Pick a design and placing from it ' +
+          'produces exactly that design with no design choice; pick a generic ' +
+          'entry to hand out an unspecified part of that type.';
+        const groups = new Map<string, HTMLOptGroupElement>();
+        const wanted = stockLineKey(line.type, line.design || undefined);
+        let matched = false;
+        for (const choice of choices) {
+          let group = groups.get(choice.group);
+          if (!group) {
+            group = document.createElement('optgroup');
+            group.label = choice.group;
+            groups.set(choice.group, group);
+            partSelect.appendChild(group);
+          }
+          const opt = document.createElement('option');
+          opt.value = choice.value;
+          opt.textContent = choice.label;
+          if (choice.value === wanted) { opt.selected = true; matched = true; }
+          group.appendChild(opt);
+        }
+        if (!matched) {
+          // A design this browser does not know (renamed, or a custom design
+          // saved elsewhere). Show it as what it is rather than silently
+          // snapping the line to some other part.
+          const opt = document.createElement('option');
+          opt.value = wanted;
+          opt.textContent = `UNKNOWN DESIGN: ${wanted}`;
+          opt.selected = true;
+          partSelect.insertBefore(opt, partSelect.firstChild);
+        }
+        partSelect.addEventListener('change', () => {
+          const [type, design] = partSelect.value.split(':');
+          const next = read();
+          next[index] = design
+            ? { type: type as ComponentType, design, count: next[index].count }
+            : { type: type as ComponentType, count: next[index].count };
+          write(next);
+          render();
+        });
+        row.appendChild(partSelect);
+
+        const countInput = document.createElement('input');
+        countInput.type = 'number';
+        countInput.min = '0';
+        countInput.step = '1';
+        countInput.value = String(line.count ?? 0);
+        countInput.title = 'How many are standing in the yard. Each one placed ' +
+          'takes one off this line; deleting one puts it back.';
+        countInput.style.cssText = 'width: 70px; flex: none; font-size: 11px;';
+        countInput.addEventListener('input', () => {
+          const next = read();
+          next[index] = { ...next[index], count: Math.max(0, Number(countInput.value) || 0) };
+          write(next);
+        });
+        row.appendChild(countInput);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.textContent = '\u00d7';
+        removeBtn.title = 'Take this line out of the yard entirely';
+        removeBtn.style.cssText = 'background: #3a2a2a; color: #faa; border: 1px solid #6a4a4a; padding: 2px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;';
+        removeBtn.addEventListener('click', () => {
+          const next = read();
+          next.splice(index, 1);
+          write(next);
+          render();
+        });
+        row.appendChild(removeBtn);
+
+        rowsEl.appendChild(row);
+      });
+    };
+
+    const addBtn = document.createElement('button');
+    addBtn.type = 'button';
+    addBtn.textContent = '+ Add a part';
+    addBtn.title = 'Add another line to the yard\u2019s equipment list';
+    addBtn.style.cssText = 'margin-top: 6px; background: #3a4a5a; color: #adf; border: 1px solid #4a6a8a; padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;';
+    addBtn.addEventListener('click', () => {
+      const next = read();
+      const first = choices[0];
+      const [type, design] = first.value.split(':');
+      next.push(design
+        ? { type: type as ComponentType, design, count: 1 }
+        : { type: type as ComponentType, count: 1 });
+      write(next);
+      render();
+    });
+    container.appendChild(addBtn);
+
+    render();
+    return container;
+  }
+
   private createNcgPanel(optionName: string, initialValue: NcgInitialCondition): HTMLElement {
     const container = document.createElement('div');
     container.className = 'ncg-panel';
@@ -2234,6 +2526,8 @@ export class ComponentDialog {
         props[option.name] = (element as HTMLInputElement).checked;
       } else if (element.type === 'number') {
         props[option.name] = parseFloat(element.value) || option.default;
+      } else if (element.dataset.jsonList === '1') {
+        props[option.name] = JSON.parse(element.value);
       } else if (element.type === 'hidden' && option.type === 'ncg') {
         // Parse NCG JSON
         try {
@@ -2261,6 +2555,10 @@ export class ComponentDialog {
         properties[name] = (element as HTMLInputElement).checked;
       } else if (element.type === 'number') {
         properties[name] = parseFloat(element.value);
+      } else if (element.dataset.jsonList === '1') {
+        // A repeatable list (the warehouse's stock lines) carried as JSON in
+        // a hidden input, submitted as the array the model stores.
+        properties[name] = JSON.parse(element.value);
       } else if (element.type === 'hidden' && name.includes('Ncg')) {
         // Parse NCG JSON from hidden input
         try {
@@ -2313,7 +2611,12 @@ export class ComponentDialog {
       type: this.currentType,
       name: properties.name || componentDefinitions[this.currentType].displayName,
       position: this.currentPosition,
-      properties
+      properties,
+      // Only a YARD part carries its design id. A design picked from the
+      // dropdown is a starting point the player may edit field by field, so
+      // stamping it would be a claim the component cannot keep - and it would
+      // send the refund to a stock line the placement never charged.
+      design: this.fixedDesignId ?? undefined,
     };
 
     this.dialog.style.display = 'none';
@@ -2539,6 +2842,7 @@ export class ComponentDialog {
     this.currentType = componentType;
     this.currentPosition = component.position || { x: 0, y: 0 };
     this.isCreateMode = false; // no design picker when editing an existing component
+    this.fixedDesignId = null;
     this.availableCores = availableCores || [];
     this.availableGenerators = availableGenerators || [];
     this.currentCallback = (config) => {
@@ -2752,6 +3056,13 @@ export class ComponentDialog {
           // Create the NCG control panel with existing values
           const ncgPanelEdit = this.createNcgPanel(option.name, ncgValue);
           formGroup.appendChild(ncgPanelEdit);
+          break;
+
+        case 'stockLines':
+          input = this.createStockLinesInput(option.name,
+            Array.isArray(existingValue) ? existingValue : []);
+          formGroup.appendChild(
+            this.createStockLinesPanel(input as HTMLInputElement));
           break;
 
         default: // text
@@ -2971,6 +3282,18 @@ function normalizeNcg(value: any): Record<string, number> {
   return out;
 }
 
+/**
+ * Normalize a warehouse stock list for comparison: drop empty rows, sort by
+ * line key so the order the rows happen to be in is not a difference.
+ */
+function normalizeStockLines(value: any): Array<[string, number]> {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter(l => l && typeof l.type === 'string' && Number(l.count) > 0)
+    .map(l => [stockLineKey(l.type, l.design || undefined), Number(l.count)] as [string, number])
+    .sort((a, b) => a[0].localeCompare(b[0]));
+}
+
 function optionValuesMatch(option: ComponentOption, submitted: any, actual: any): boolean {
   if (option.type === 'number') {
     const a = Number(submitted);
@@ -2986,6 +3309,10 @@ function optionValuesMatch(option: ComponentOption, submitted: any, actual: any)
   }
   if (option.type === 'ncg') {
     return JSON.stringify(normalizeNcg(submitted)) === JSON.stringify(normalizeNcg(actual));
+  }
+  if (option.type === 'stockLines') {
+    return JSON.stringify(normalizeStockLines(submitted)) ===
+      JSON.stringify(normalizeStockLines(actual));
   }
   return String(submitted ?? '') === String(actual ?? '');
 }

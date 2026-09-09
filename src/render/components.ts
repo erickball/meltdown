@@ -24,7 +24,7 @@ import {
   Connection,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
-import { PIPE_METRES_PER_STICK, formatMetres, stockedComponentTypes } from '../game/stock';
+import { PIPE_METRES_PER_STICK, formatMetres, stockedLines } from '../game/stock';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -972,6 +972,25 @@ export function renderComponent(
 function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: ViewState, isSimulating: boolean = false): void {
   const w = tank.width * view.zoom;
   const h = tank.height * view.zoom;
+
+  // A tank that IS a terrain water body (a sea, a lake) has no vessel to
+  // draw. The grid view suppresses it entirely and lets the painted water
+  // stand for it; this view has no terrain, so all it can honestly show is
+  // the water surface itself - a low band at the component's own water line,
+  // wide enough to pipe to and small enough not to pretend to be a tank.
+  if (tank.waterBody) {
+    const surface = h * ((tank.fillLevel ?? 0.5) - 0.5);
+    const band = Math.max(2, h * 0.06);
+    ctx.fillStyle = 'rgba(40, 100, 165, 0.75)';
+    ctx.fillRect(-w / 2, -surface - band, w, band * 2);
+    ctx.strokeStyle = 'rgba(170, 210, 235, 0.9)';
+    ctx.lineWidth = Math.max(1, band * 0.35);
+    ctx.beginPath();
+    ctx.moveTo(-w / 2, -surface);
+    ctx.lineTo(w / 2, -surface);
+    ctx.stroke();
+    return;
+  }
 
   // Calculate wall thickness from pressure rating if available, otherwise use stored value
   let wallThickness = tank.wallThickness;
@@ -3705,7 +3724,7 @@ function renderWarehouse(
   const crateW = inW - bundleW - 2;
   const cs = Math.max(3, Math.min(crateW / 3, inH / 3));
   let slot = 0;
-  for (const [type, count] of stockedComponentTypes(stock)) {
+  for (const { type, count } of stockedLines(stock)) {
     for (let n = 0; n < count; n++) {
       const cols = Math.max(1, Math.floor(crateW / (cs + 1)));
       const row = Math.floor(slot / cols);

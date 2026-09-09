@@ -13,6 +13,10 @@
  *   - an auto-pipe costs the pipe it lays, once
  *   - stock survives a save/load round trip
  *   - stock can never go negative: spending past a refusal throws
+ *   - a DESIGN line hands out exactly that design: placing from it stamps the
+ *     design on the component, the wrong design is refused, and the refund
+ *     goes back to the line the part came out of
+ *   - a yard that names a pipe spec exposes it to the connection dialog
  *
  * Usage: npx tsx scripts/test-stock.ts
  */
@@ -21,7 +25,8 @@ import { ConstructionManager } from '../src/construction/construction-manager';
 import {
   getStock, pipeMetersRemaining, componentsRemaining, findWarehouse,
   chargeForPipe, chargeForComponent, checkCharge, spend,
-  applyConnectionLengthEdit,
+  applyConnectionLengthEdit, stockedPipeSpecId, paletteKeyForStockLine,
+  stockLineDisplayName, findStockLine,
 } from '../src/game/stock';
 import type { PlantState, PlantComponent, Connection } from '../src/types';
 
@@ -98,7 +103,8 @@ const warehouseId = cm.createComponent({
   type: 'warehouse', name: 'Yard', position: { x: 20, y: 30 },
   properties: {
     name: 'Yard', width: 6, depth: 4,
-    stockPipeMeters: 100, stockPumps: 1,
+    stockPipeMeters: 100,
+    stockLines: [{ type: 'pump', count: 1 }],
   },
 })!;
 const warehouse = findWarehouse(plant)!;
@@ -287,6 +293,125 @@ console.log('\n--- Negative stock is impossible ---');
   check('spending a part that is not stocked throws', threwCount);
   check('no negative pile was created',
     (componentsRemaining(bare, 'pump') ?? -1) === 0);
+}
+
+// ---------------------------------------------------------------------------
+// 10. Design lines: a yard that hands out a specified part
+// ---------------------------------------------------------------------------
+console.log('\n--- A stock line that names an equipment design ---');
+{
+  const yard = emptyPlant();
+  const ycm = new ConstructionManager(yard);
+  ycm.createComponent({
+    type: 'warehouse', name: 'Service Yard', position: { x: 0, y: 0 },
+    properties: {
+      name: 'Service Yard', width: 8, depth: 6,
+      stockPipeMeters: 300,
+      stockPipeSpec: 'spec-12in-service',
+      stockLines: [
+        { type: 'pump', design: 'pump-service-water-lp', count: 2 },
+        { type: 'valve', design: 'valve-service-water', count: 1 },
+        { type: 'pump', count: 1 },     // a generic pile beside the design one
+      ],
+    },
+  });
+
+  check('the yard holds 2 service water pumps',
+    componentsRemaining(yard, 'pump', 'pump-service-water-lp') === 2);
+  check('the generic pump pile is a DIFFERENT line',
+    componentsRemaining(yard, 'pump') === 1);
+  check('it holds no RCPs at all',
+    componentsRemaining(yard, 'pump', 'pump-rcp-large') === 0);
+  check('the yard names its line size',
+    stockedPipeSpecId(yard) === 'spec-12in-service');
+  check('the design line is named by its design, not its type',
+    stockLineDisplayName('pump', 'pump-service-water-lp')
+      === 'Low-Pressure Service Water Pump',
+    stockLineDisplayName('pump', 'pump-service-water-lp'));
+  check('a design line knows which palette form builds it',
+    paletteKeyForStockLine({ type: 'valve', design: 'valve-service-water', count: 1 }) === 'valve');
+  check('a line naming a design nothing knows throws',
+    (() => {
+      try {
+        paletteKeyForStockLine({ type: 'pump', design: 'pump-imaginary', count: 1 });
+        return false;
+      } catch { return true; }
+    })());
+
+  // Placing from the design line
+  const svcPumpProps = { name: 'SW Pump 1', ratedFlow: 200, ratedHead: 60, elevation: 0 };
+  const svcId = ycm.createComponent({
+    type: 'pump', name: 'SW Pump 1', position: { x: 10, y: 0 },
+    design: 'pump-service-water-lp', properties: { ...svcPumpProps },
+  });
+  check('a pump places off the design line', svcId !== null);
+  check('the placed pump carries the design',
+    yard.components.get(svcId!)!.design === 'pump-service-water-lp');
+  check('it came off the DESIGN line',
+    componentsRemaining(yard, 'pump', 'pump-service-water-lp') === 1);
+  check('the generic pile was not touched', componentsRemaining(yard, 'pump') === 1);
+
+  // The wrong design is refused, even though pumps are in stock
+  const wrong = ycm.createComponent({
+    type: 'pump', name: 'RCP', position: { x: 20, y: 0 },
+    design: 'pump-rcp-large', properties: { ...svcPumpProps, name: 'RCP' },
+  });
+  check('a pump of a design the yard does not stock is refused', wrong === null);
+  check('the refusal names the DESIGN, not just the type',
+    (() => {
+      const reason = ycm.takeStockRefusal();
+      return !!reason && /Reactor Coolant Pump/i.test(reason);
+    })());
+  check('nothing was spent on the refusal',
+    componentsRemaining(yard, 'pump', 'pump-service-water-lp') === 1 &&
+    componentsRemaining(yard, 'pump') === 1);
+
+  // Deleting refunds to the line it came from
+  ycm.deleteComponent(svcId!);
+  check('deleting it puts it back on ITS line',
+    componentsRemaining(yard, 'pump', 'pump-service-water-lp') === 2);
+  check('and not on the generic pile', componentsRemaining(yard, 'pump') === 1);
+
+  // A part with no design goes back to the generic line
+  const genericId = ycm.createComponent({
+    type: 'pump', name: 'Any Pump', position: { x: 30, y: 0 },
+    properties: { ...svcPumpProps, name: 'Any Pump' },
+  });
+  check('a pump with no design comes off the generic line',
+    genericId !== null && componentsRemaining(yard, 'pump') === 0);
+  ycm.deleteComponent(genericId!);
+  check('and goes back to the generic line', componentsRemaining(yard, 'pump') === 1);
+  check('leaving the design line alone',
+    componentsRemaining(yard, 'pump', 'pump-service-water-lp') === 2);
+
+  // Salvage: a design line the yard never stocked is created by the refund
+  const salvage = ycm.createComponent({
+    type: 'valve', name: 'V1', position: { x: 40, y: 0 },
+    design: 'valve-service-water',
+    properties: { name: 'V1', diameter: 0.3, pressureRating: 16, elevation: 0 },
+  })!;
+  ycm.deleteComponent(salvage);
+  check('a design part deleted twice over is salvaged onto its own line',
+    componentsRemaining(yard, 'valve', 'valve-service-water') === 1);
+  check('the yard did not grow a generic valve pile',
+    findStockLine(getStock(yard)!, 'valve') === undefined);
+}
+
+// ---------------------------------------------------------------------------
+// 11. A yard saved in the old type-keyed form still builds
+// ---------------------------------------------------------------------------
+console.log('\n--- An old save migrates to generic lines ---');
+{
+  const legacy = emptyPlant();
+  legacy.components.set('yard', {
+    id: 'yard', type: 'warehouse', label: 'Old Yard',
+    position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
+    width: 6, depth: 4, ports: [],
+    stock: { pipeMeters: 50, components: { pump: 3, valve: 1 } },
+  } as never);
+  check('the old pump pile reads as a generic line',
+    componentsRemaining(legacy, 'pump') === 3);
+  check('and is an array now', Array.isArray(getStock(legacy)!.components));
 }
 
 console.log(failures === 0

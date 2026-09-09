@@ -7,9 +7,15 @@
  * Tests are organized by category and only show detailed output on failure.
  */
 
-import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature } from './water-properties.js';
+import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature,
+  saturatedLiquidDensity, saturatedVaporDensity, saturatedLiquidEnergy,
+  saturatedVaporEnergy } from './water-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
-import { computeReactivityComponents } from './operators/neutronics.js';
+import {
+  computeReactivityComponents, neutronSourceRate, normalizedNeutronSource,
+  FISSION_ENERGY, DECAY_HEAT_GROUPS,
+} from './operators/neutronics.js';
+import { NeutronicsRateOperator } from './operators/rate-operators.js';
 import { ControlSystemOperator, describeControllerSignal,
   primaryControllerSignal } from './operators/control-system.js';
 import {
@@ -157,6 +163,75 @@ test('Two-phase mixture at 10 bar, 50% quality', () => {
   assert(result.phase === 'two-phase', `Phase should be two-phase, got ${result.phase}`);
   assertClose(result.quality, 0.5, 0.05, 'Quality');
   assertClose(result.pressure / 1e5, 10, 1, 'Pressure (bar)');
+});
+
+test('a two-phase root stays continuous at parts-per-million quality', () => {
+  // A cold demineralised-water tank - 14 m across, 7 m tall, 78% full at
+  // 288 K with a few kg of steam over the water - sits at x ~ 4e-6. There u
+  // is only ~10 J/kg above u_f while du_f/dT ~ 4190 J/(kg*K), so a
+  // millikelvin of slop in the two-phase temperature is a THIRD of the whole
+  // quality budget. The root solve used to quit at an ABSOLUTE 1 mK bracket
+  // width (and at |x_v - x_u| < 1e-6, which is 25% of x here); because
+  // bisection midpoints land on a dyadic grid of the initial bracket, T came
+  // out quantised onto a 0.713 mK ladder and quality dropped up to 15% in a
+  // single tick - half a kilogram of steam vanishing at a stroke - while
+  // mass, energy, volume, T and P all moved smoothly, and the displayed
+  // level, which is derived from quality, jumped UP while the tank emptied.
+  // Sweep u at fixed v and demand the root be monotone, step-free, and
+  // self-consistent.
+  //
+  // The solve now resolves the root until BOTH of its outputs - quality and
+  // P_sat - are bracketed to EPS_REL = 1e-5 of their own magnitude, so it is
+  // quantised at that relative level and no finer. Everything below is
+  // stated against that: the sweep steps quality by 3.6e-4 relative, 36x
+  // EPS_REL, so quantisation cannot account for a step; and consistency is
+  // checked at a few EPS_REL rather than at machine precision.
+  const EPS_REL = 1e-5;          // must match findTwoPhaseState
+  const v = 1.308295276077e-3;   // V/m for that tank, m^3/kg
+  const u0 = 62846.99;           // J/kg, ~10 J/kg above u_f(288.1 K)
+  const du = 25, N = 40;
+
+  let prevT = -Infinity, prevX = -Infinity;
+  let maxStep = 0, firstStep = 0;
+  for (let i = 0; i <= N; i++) {
+    const u = u0 + i * du;
+    const s = calculateState(1.0, u, v);
+    assert(s.phase === 'two-phase', `sweep left the dome at u=${u}: ${s.phase}`);
+
+    // The root must satisfy the condition it was solved for: the quality read
+    // off the volumes and the quality read off the energies must agree. At
+    // x ~ 4e-6 an absolute tolerance says nothing, so test the RELATIVE gap.
+    const v_f = 1 / saturatedLiquidDensity(s.temperature);
+    const v_g = 1 / saturatedVaporDensity(s.temperature);
+    const u_f = saturatedLiquidEnergy(s.temperature);
+    const u_g = saturatedVaporEnergy(s.temperature);
+    const x_v = (v - v_f) / (v_g - v_f);
+    const x_u = (u - u_f) / (u_g - u_f);
+    assert(Math.abs(x_v - x_u) < 4 * EPS_REL * s.quality,
+      `two-phase root is inconsistent at u=${u.toFixed(2)}: x_v=${x_v.toExponential(6)} ` +
+      `vs x_u=${x_u.toExponential(6)} (${(100 * (x_v - x_u) / s.quality).toFixed(3)}% of x)`);
+
+    // Adding energy at fixed volume must warm the water and boil a little
+    // more of it - strictly, every step, with no plateaus and no reversals.
+    if (i > 0) {
+      assert(s.temperature > prevT, `T not increasing with u at u=${u.toFixed(2)}`);
+      assert(s.quality > prevX, `quality not increasing with u at u=${u.toFixed(2)}`);
+      const step = s.quality - prevX;
+      if (i === 1) firstStep = step;
+      maxStep = Math.max(maxStep, step);
+    }
+    prevT = s.temperature;
+    prevX = s.quality;
+  }
+
+  // A staircase shows up as one giant increment among many tiny ones. The
+  // true response is smooth: the increments vary by 1.5% across this sweep,
+  // all of it real curvature. On the old code this same sweep was not even
+  // monotone - its increments ran from -10.4% to +6.8%.
+  assert(maxStep < 1.05 * firstStep,
+    `quality steps unevenly - largest increment ${maxStep.toExponential(3)} is ` +
+    `${(maxStep / firstStep).toFixed(1)}x the first (${firstStep.toExponential(3)}), ` +
+    `which means the two-phase temperature is quantised`);
 });
 
 test('Superheated steam at 500K, 1 bar', () => {
@@ -1173,6 +1248,113 @@ test('lattice reactivity path survives full voiding without NaN', () => {
   });
   assert(isFinite(voided.total) && voided.total < -0.5,
     `voided core must be finite and deeply subcritical, got ${voided.total}`);
+});
+
+// ============================================================================
+// Neutron source
+// ============================================================================
+
+category('Neutron source');
+
+/** Minimal SimulationState carrying only a neutronics state. */
+function neutronicsOnlyState(n: NeutronicsState): SimulationState {
+  return {
+    time: 0,
+    thermalNodes: new Map(),
+    flowNodes: new Map(),
+    thermalConnections: [],
+    convectionConnections: [],
+    flowConnections: [],
+    neutronics: n,
+    components: {
+      pumps: new Map(), valves: new Map(), checkValves: new Map(), controllers: new Map(),
+    },
+  } as unknown as SimulationState;
+}
+
+test('source strength converts to normalized units with Lambda cancelling in N_ss', () => {
+  const n = makeNeutronics({
+    nominalPower: 1e9, promptNeutronLifetime: 1e-4,
+    startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+  });
+  assertClose(neutronSourceRate(n), 1e9, 1, 'total source = the installed source alone');
+  const S = normalizedNeutronSource(n);
+  assertClose(S, 1e9 * FISSION_ENERGY / (1e9 * 1e-4), 1e-18, 'S = s_n*E_f/(P_nom*Lambda)');
+  // The subcritical steady state must be the parameter-free multiplication
+  // result P_ss = s_n * E_f / (-rho), independent of Lambda.
+  const rho = -0.0325; // 5 $
+  const nSs = S * n.promptNeutronLifetime / -rho;
+  assertClose(nSs, 1e9 * FISSION_ENERGY / (1e9 * -rho), 1e-18, 'N_ss = s_n*E_f/(P_nom*(-rho))');
+  const nFast = makeNeutronics({ ...n, promptNeutronLifetime: 1e-6 });
+  assertClose(normalizedNeutronSource(nFast) * 1e-6 / -rho, nSs, 1e-18,
+    'a 100x shorter neutron lifetime must not move the shutdown power level');
+});
+
+test('irradiated-fuel source follows the decay-heat inventory', () => {
+  const n = makeNeutronics({
+    nominalPower: 1e9, startupSourceRate: 0, spontaneousFissionSource: 0,
+    irradiatedFuelSource: 1e10,
+    decayHeatPools: DECAY_HEAT_GROUPS.map(g => g.fraction * 1e9), // full-power equilibrium
+  });
+  assertClose(neutronSourceRate(n), 1e10, 1e-3 * 1e10,
+    'pools at full-power equilibrium give the full irradiated source');
+  const cold = makeNeutronics({ ...n, decayHeatPools: DECAY_HEAT_GROUPS.map(() => 0) });
+  assertClose(neutronSourceRate(cold), 0, 1e-9, 'a never-operated core has no curium source');
+  const half = makeNeutronics({
+    ...n, decayHeatPools: DECAY_HEAT_GROUPS.map(g => 0.5 * g.fraction * 1e9),
+  });
+  assertClose(neutronSourceRate(half), 0.5e10, 1e-3 * 1e10, 'and it scales linearly with it');
+});
+
+test('subcritical kinetics relax onto the source-driven steady state', () => {
+  // Deeply subcritical (rods in), starting from an absurdly low power the way
+  // a long shutdown used to leave it. The kinetics must climb BACK UP to
+  // N_ss = S*Lambda/(-rho) and stay there - no floors involved.
+  const n = makeNeutronics({
+    nominalPower: 1e9, power: 1e9 * 1e-30, precursorConcentration: 1e-30,
+    controlRodPosition: 0, controlRodWorth: 0.05, excessReactivity: 0,
+    startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+  });
+  const state = neutronicsOnlyState(n);
+  const op = new NeutronicsRateOperator();
+  const dt = 0.05;
+  for (let i = 0; i < 20000; i++) { // 1000 s
+    const rates = op.computeRates(state);
+    state.neutronics.power += rates.neutronics.dPower * dt;
+    state.neutronics.precursorConcentration += rates.neutronics.dPrecursorConcentration * dt;
+    assert(state.neutronics.power >= 0 && state.neutronics.precursorConcentration >= 0,
+      `kinetics went negative at t=${(i * dt).toFixed(2)}s: P=${state.neutronics.power}, ` +
+      `C=${state.neutronics.precursorConcentration}`);
+  }
+  const rho = state.neutronics.reactivity;
+  assert(rho < -0.04, `rods-in reactivity should be deeply negative, got ${rho}`);
+  const S = normalizedNeutronSource(state.neutronics);
+  const expectedN = S * state.neutronics.promptNeutronLifetime / -rho;
+  const expectedC = state.neutronics.delayedNeutronFraction * S /
+    (state.neutronics.precursorDecayConstant * -rho);
+  assertClose(state.neutronics.power / state.neutronics.nominalPower, expectedN,
+    1e-3 * expectedN, 'power settles at S*Lambda/(-rho)');
+  assertClose(state.neutronics.precursorConcentration, expectedC, 1e-3 * expectedC,
+    'precursors settle at beta*S/(lambda*(-rho))');
+});
+
+test('a supercritical core with zero flux still starts up from the source', () => {
+  // Both kinetics branches must produce positive dN/dt from N = C = 0: with
+  // no source that state is a fixed point and the reactor is dead forever.
+  for (const rho of [-0.05, -0.001, 0, 0.003, 0.008, 0.02]) {
+    const n = makeNeutronics({
+      nominalPower: 1e9, power: 0, precursorConcentration: 0,
+      controlRodPosition: 1, controlRodWorth: 0, excessReactivity: rho,
+      fuelTempCoeff: 0, coolantTempCoeff: 0, coolantDensityCoeff: 0,
+      startupSourceRate: 1e9, spontaneousFissionSource: 0, irradiatedFuelSource: 0,
+    });
+    const rates = new NeutronicsRateOperator().computeRates(neutronicsOnlyState(n));
+    assertClose(n.reactivity, rho, 1e-12, `test rho setup (${rho})`);
+    assert(rates.neutronics.dPower > 0,
+      `dP/dt must be positive from zero flux at rho=${rho}, got ${rates.neutronics.dPower}`);
+    assert(isFinite(rates.neutronics.dPower) && isFinite(rates.neutronics.dPrecursorConcentration),
+      `rates must be finite at rho=${rho}`);
+  }
 });
 
 // ============================================================================

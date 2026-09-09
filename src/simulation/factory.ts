@@ -22,7 +22,10 @@ import { createFluidState, NcgPartialPressures } from './operators';
 import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
 import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-properties';
 import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
-import { computeReactivityComponents } from './operators/neutronics';
+import {
+  computeReactivityComponents, U238_SF_YIELD, IRRADIATED_FUEL_SOURCE_PER_KG_HM,
+  DEFAULT_STARTUP_SOURCE_RATE,
+} from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { resolveMaterial } from './materials';
 import { NBG_18, A3_3 } from './graphite';
@@ -3250,9 +3253,28 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
   const delayedNeutronFraction = 0.0065;
   const precursorDecayConstant = 0.08;
   // Precursor equilibrium for the initial power: dC/dt = 0 => C = beta*N/(lambda*Lambda)
+  // (unchanged by the neutron source - the source enters dN/dt, not dC/dt)
   const precursorConcentration =
     (delayedNeutronFraction * (power / nominalPower)) /
     (precursorDecayConstant * promptNeutronLifetime);
+
+  // ---- Neutron source ----------------------------------------------------
+  // Heavy metal in the core, from the fuel node's mass and the fuel compound:
+  // UO2 is 238/270 uranium by mass, metal fuel is all uranium. Everything
+  // that is not U-235 is treated as U-238 (true to a fraction of a percent
+  // for fresh LEU - U-234/236 are trace).
+  const heavyMetalFraction = vessel.fuelMaterial === 'metal' ? 1 : 238 / 270;
+  const heavyMetalMass = (fuelNode?.mass ?? 0) * heavyMetalFraction; // kg
+  const u235Fraction = vessel.enrichment ?? (isPebbleBed ? 0.085 : 0.05);
+  const spontaneousFissionSource = heavyMetalMass * (1 - u235Fraction) * U238_SF_YIELD;
+  const irradiatedFuelSource = heavyMetalMass * IRRADIATED_FUEL_SOURCE_PER_KG_HM;
+  const startupSourceRate = vessel.startupSourceNps ?? DEFAULT_STARTUP_SOURCE_RATE;
+  if (!(startupSourceRate >= 0) || !isFinite(startupSourceRate)) {
+    throw new Error(
+      `[Factory] Core '${component.id}': startupSourceNps=${vessel.startupSourceNps} is not a ` +
+      `non-negative neutron emission rate`
+    );
+  }
 
   // Coefficient fields: physics for the linear path, diagnostic slopes at
   // the reference point for the lattice path (coolantTempCoeff stays live
@@ -3279,6 +3301,9 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     delayedNeutronFraction,
     precursorConcentration,
     precursorDecayConstant,
+    spontaneousFissionSource,
+    irradiatedFuelSource,
+    startupSourceRate,
     fuelTempCoeff,
     coolantTempCoeff,
     coolantDensityCoeff,

@@ -34,7 +34,9 @@ import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
 import type { FlowNode } from './simulation/types';
 import { pressureAtConnection } from './simulation/operators/connection-hydraulics';
-import { formatMetres, stockedComponentTypes, typeDisplayName } from './game/stock';
+import {
+  formatMetres, stockedLines, stockLineDisplayName, pipeSpecDisplayName,
+} from './game/stock';
 import type { PlantStock } from './types';
 
 // Store previous pressures to show transitions
@@ -1096,6 +1098,16 @@ export function updateComponentDetail(
   }
   html += `<div class="detail-row"><span class="detail-label">ID:</span><span class="detail-value">${componentId}</span></div>`;
   html += `<div class="detail-row"><span class="detail-label">Type:</span><span class="detail-value">${component.type}</span></div>`;
+  // The equipment design this part was built to, when it came from one (a
+  // supply-yard line). Named, not just an id, so the panel matches the button.
+  const designId = component.design as string | undefined;
+  if (designId) {
+    html += `<div class="detail-row"><span class="detail-label" ` +
+      `title="The equipment design this part was built to. It came out of the ` +
+      `supply yard already built, so its rating is fixed.">Design:</span>` +
+      `<span class="detail-value">` +
+      `${stockLineDisplayName(component.type as never, designId)}</span></div>`;
+  }
 
   // Position and elevation
   const pos = component.position as { x: number; y: number } | undefined;
@@ -1462,12 +1474,18 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Pipe:</span>` +
         `<span class="detail-value" style="color: ${stock.pipeMeters > 0 ? '#7f7' : '#f77'};">` +
         `${formatMetres(stock.pipeMeters)} m</span></div>`;
-      const items = stockedComponentTypes(stock);
-      for (const [type, count] of items) {
-        const name = typeDisplayName(type, count !== 1);
+      if (stock.pipeSpec) {
+        html += `<div class="detail-row"><span class="detail-label" ` +
+          `title="The one line size this yard's pipe is. The connection dialog ` +
+          `shows it fixed; only the route and length are yours.">Line size:</span>` +
+          `<span class="detail-value">${pipeSpecDisplayName(stock.pipeSpec)}</span></div>`;
+      }
+      const items = stockedLines(stock);
+      for (const line of items) {
+        const name = stockLineDisplayName(line.type, line.design, line.count !== 1);
         html += `<div class="detail-row"><span class="detail-label">` +
           `${name.charAt(0).toUpperCase()}${name.slice(1)}:</span>` +
-          `<span class="detail-value">${count}</span></div>`;
+          `<span class="detail-value">${line.count}</span></div>`;
       }
       if (items.length === 0) {
         html += `<div class="detail-row"><span class="detail-label">Equipment:</span>` +

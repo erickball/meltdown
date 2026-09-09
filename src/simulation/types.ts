@@ -569,6 +569,17 @@ export interface NeutronicsState {
   precursorConcentration: number;   // Relative units
   precursorDecayConstant: number;   // 1/s (λ) - effective value ~0.08
 
+  // Neutron source, in NEUTRONS PER SECOND emitted in the core. The kinetics
+  // add S = s_n * E_fission / (P_nominal * Λ) to dN/dt, which gives the
+  // subcritical equations the positive steady state N_ss = S*Λ/(-ρ) - the
+  // source-driven level a real shut-down core sits at. See
+  // operators/neutronics.ts for the physical basis of each term; the factory
+  // sizes them from the core's fuel inventory at build time.
+  spontaneousFissionSource?: number; // n/s - U-238 spontaneous fission (always present)
+  irradiatedFuelSource?: number;     // n/s - curium/photoneutrons at the pools' full-power
+                                     //       equilibrium, scaled by the live inventory
+  startupSourceRate?: number;        // n/s - installed startup source (0 = none)
+
   // Reactivity feedback coefficients. When latticeParams is present these
   // are DIAGNOSTIC slopes at the reference point (the lattice model is
   // evaluated directly instead); coolantTempCoeff remains live physics (the
