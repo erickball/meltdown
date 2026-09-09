@@ -1211,6 +1211,20 @@ export interface BurstState {
   // ground-contamination consequence.
   basematMeltThrough?: boolean;
 
+  // Vertical extent of the opening (m). A break is normally a hole with no
+  // meaningful height, but a scripted one can be a tear (a cracked pool
+  // liner), and a tall opening is what makes the draw crossfade from liquid
+  // to vapour as the level sweeps past it instead of stepping. Copied onto
+  // the break connection's fromOpeningHeight; see drawCompositionAt.
+  breakOpeningHeight?: number;
+
+  // True when the break was OPENED BY A SCENARIO rather than found by the
+  // pressure/creep checks - an earthquake tearing a liner that was never
+  // over its rating. Everything downstream (the break connection, the flow,
+  // the drawing, the surface-water path) is identical; only the wording of
+  // the event differs, because "ruptured at 0.0 bar differential" is a lie.
+  isScripted?: boolean;
+
   // Random seed for deterministic break size variation
   breakSizeSeed: number;
 }

@@ -750,8 +750,19 @@ export function computeRatesNorm(rates: StateRates, state: SimulationState): num
       // Relative mass rate (from net flow)
       // This is what matters for accuracy - if flows are unbalanced, mass changes.
       // Balanced high-throughput is fine because the net dMass will be small.
-      if (node.fluid.mass > 0) {
-        const relMassRate = r.dMass / node.fluid.mass;
+      //
+      // Measured against the node's WHOLE fluid inventory, water plus the
+      // non-condensables, not against the water alone. The rate being judged
+      // is the water's, but the question the error norm asks is "how much of
+      // what this node holds moved in one step", and the answer must not
+      // blow up because the water half of a gas-filled node has run out: a
+      // pool that has boiled dry under a blanket of its own hydrogen keeps
+      // 8000 mol of gas and a vanishing trace of steam, and dividing by the
+      // trace alone sent the error estimate to infinity at minimum dt.
+      const fluidInventory = node.fluid.mass +
+        (node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0);
+      if (fluidInventory > 0) {
+        const relMassRate = r.dMass / fluidInventory;
         sumSq += relMassRate * relMassRate;
         count++;
       }

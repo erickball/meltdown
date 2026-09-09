@@ -116,7 +116,24 @@ export function solveMixtureState(
 
   // -- No water: the pure-gas limit ----------------------------------------
   // A dried-out gas space is a VALID state, not an error.
-  if (waterMass <= 0) {
+  //
+  // "No water" also covers a water mass so small that, even at the very top
+  // of its physical energy range, it cannot change the node's total energy
+  // by one representable unit. There the split equation
+  //     f(u) = m*u + n*Cv*T(u) - U_total
+  // has lost its dependence on u in floating point, so there is no root to
+  // find; and V/m has overflowed, so there is no (u, v) state to look up
+  // either. This is a statement about double precision, not a physical
+  // threshold - it is the exact point at which the mixture and the pure gas
+  // stop being distinguishable numbers. It is reached by a node that has
+  // boiled dry and is then having its last traces of steam eaten by
+  // cladding oxidation, which consumes steam first order in the steam
+  // present: an exponential run-down that never crosses zero and used to
+  // take the run apart at m ~ 1e-306 kg.
+  const waterEnergyResolution = waterMass * U_SPECIFIC_MAX;
+  if (waterMass <= 0 ||
+      !Number.isFinite(volume / waterMass) ||
+      waterEnergyResolution <= Number.EPSILON * Math.abs(totalEnergy)) {
     const T = totalEnergy / gasHeatCapacity;
     const P = (gasMoles * R_GAS * T) / volume;
     return {

@@ -14,11 +14,13 @@
 
 import {
   test, assert, assertBetween, report,
-  buildSim, buildSimFromFile, run, runUntilSteady, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
+  buildSim, buildSimFromFile, buildSimFromPlantJson, run, runUntilSteady, flowRate, nodeMass, nodePressure, totalMassAndEnergy,
   assertStateSane,
 } from './lib/sim-harness';
 import { triggerScram, nodeLiquidLevel } from '../src/simulation';
+import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
 import { terrainHeightAt } from '../src/simulation/terrain';
+import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -516,8 +518,11 @@ test('Spent fuel pool: warms at its rack power, drains through a cracked liner i
   // 12 x 12 x 12 m pool sunk to grade (elevation -12 on ground at +4.5 m),
   // ~1000 t of 30 C water over 800 assemblies making a constant 5 MW, open
   // to the sky through a vent connection to the atmosphere. The scenario
-  // cracks the liner at t = 10 s; the crack is a tall opening 0.4 m up the
-  // pool wall, so what drives it is the water standing above it.
+  // tears the liner at t = 120 s with a scripted BURST - the same break
+  // machinery a pressure rupture uses, on a component whose rating was
+  // never exceeded - 0.4 m up the pool wall with a 0.8 m opening, so what
+  // drives it is the water standing above it and the leak crossfades to
+  // vapour as the level sweeps down through the tear.
   const sim = buildSimFromFile(path.join(PLANT_DIR, 'pool-level1.json'));
   const pool = () => sim.state.flowNodes.get('pool')!;
   const clad = () => sim.state.thermalNodes.get('pool-clad')!;
@@ -546,9 +551,13 @@ test('Spent fuel pool: warms at its rack power, drains through a cracked liner i
   run(sim, 30.0, 0.05);
   const T0 = pool().fluid.temperature;
   const m0 = pool().fluid.mass;
-  run(sim, 90.0, 0.05);         // t = 120 s, the moment the crack opens
-  assert(Math.abs(flowRate(sim.state, 'crack', 'atmosphere')) < 1e-3,
-    'the crack must be shut before the earthquake');
+  run(sim, 90.0, 0.05);         // t = 120 s, the moment the liner tears
+  const breakFlow = () =>
+    sim.state.flowConnections.find(c => c.id === 'break-pool')?.massFlowRate ?? 0;
+  assert(!sim.state.flowConnections.some(c => c.id === 'break-pool'),
+    'there must be no break at all before the earthquake');
+  assert(!sim.state.burstStates!.get('pool')!.isBurst,
+    'the pool must not be burst before the earthquake');
   const dT = pool().fluid.temperature - T0;
   const expected = 5e6 * 90.0 / (m0 * 4180);
   assert(Math.abs(dT / expected - 1) < 0.06,
@@ -556,18 +565,22 @@ test('Spent fuel pool: warms at its rack power, drains through a cracked liner i
     `${(m0 / 1000).toFixed(0)} t, got ${(dT * 1000).toFixed(1)} mK`);
   assert(Math.abs(pool().fluid.pressure - 101325) < 2000,
     `an open pool must sit at atmospheric pressure, got ${(pool().fluid.pressure / 1e5).toFixed(4)} bar`);
-  assertStateSane(sim.state);
+  assertStateSane(sim.state, ['pool']);
 
   // ---- Phase 2: the crack drains it ---------------------------------------
   run(sim, 200.0, 0.05);        // t = 320 s, 200 s of leaking
   const levelHigh = level();
-  const leakHigh = flowRate(sim.state, 'crack', 'atmosphere');
+  const leakHigh = breakFlow();
+  const bs = sim.state.burstStates!.get('pool')!;
+  assert(bs.isBurst && bs.isScripted, 'the scripted burst should have opened the pool');
+  assert(Math.abs((bs.breakElevation ?? 0) - (pool().elevation + 0.4)) < 1e-6,
+    `the tear should sit 0.4 m up the pool wall, got ${bs.breakElevation}`);
   assert(leakHigh > 200, `a cracked liner under ~6.7 m of water should run hard, got ${leakHigh.toFixed(0)} kg/s`);
   assertBetween(levelHigh, 6.3, 7.0, 'pool level 200 s after the crack opens (m)');
 
   run(sim, 3800.0, 0.05);       // t = 4120 s
   const levelLow = level();
-  const leakLow = flowRate(sim.state, 'crack', 'atmosphere');
+  const leakLow = breakFlow();
   assert(levelLow < 1.0, `the pool should be nearly drained by t=4000 s, level ${levelLow.toFixed(2)} m`);
   // Head above a low crack, and the crack's tall opening drawing part vapour:
   // the leak falls away steeply rather than running at full bore to the last drop
@@ -578,7 +591,7 @@ test('Spent fuel pool: warms at its rack power, drains through a cracked liner i
   // The racks are uncovering, so they are running hotter than the water
   assert(clad().temperature > pool().fluid.temperature,
     'uncovering racks must run above the water they no longer sit in');
-  assertStateSane(sim.state);
+  assertStateSane(sim.state, ['pool']);
 
   // ---- Phase 3: where the water went --------------------------------------
   // It left through a boundary connection, so it is on the ground under the
@@ -599,7 +612,94 @@ test('Spent fuel pool: warms at its rack power, drains through a cracked liner i
     `the make-up pump should deliver, got ${flowRate(sim.state, 'mu-pump', 'pool').toFixed(1)} kg/s`);
   assert(level() > levelBeforeMakeup,
     `make-up should raise the level: ${levelBeforeMakeup.toFixed(3)} -> ${level().toFixed(3)} m`);
-  assertStateSane(sim.state);
+  assertStateSane(sim.state, ['pool']);
+});
+
+test('Zircaloy fire: dry racks burn faster in air, and the fire eats its own oxygen', () => {
+  // The same pool, drained before the run starts and left standing with the
+  // racks already hot - the state a spent fuel pool reaches some hours after
+  // it boils dry. Nothing in the model is told this is a fire; there is no
+  // ignition temperature anywhere in it. The measurement is the DIFFERENCE
+  // between filling that space with air and filling it with nitrogen: same
+  // pool, same racks, same residual steam, so what separates them is the
+  // Zr + O2 reaction and nothing else.
+  //
+  // Both cases burn, because a pool open to the sky is never dry of steam -
+  // it draws humid air back in through its own vent as the reaction consumes
+  // moles, and the boundary atmosphere is an infinite reservoir of it. That
+  // is a limit of a one-node pool with one opening (see
+  // docs/zircaloy-air-oxidation.md) and it does not affect what is measured
+  // here, which is what the oxygen adds on top of that.
+  const dryPool = (o2Bar: number, n2Bar: number) => {
+    const plant = JSON.parse(fs.readFileSync(
+      path.join(PLANT_DIR, 'pool-level1.json'), 'utf-8')) as {
+        components: Array<[string, Record<string, unknown>]>;
+        scenario?: unknown;
+      };
+    const pool = plant.components.find(c => c[0] === 'pool')![1];
+    pool.fillLevel = 0;                  // dry: no water at all, only gas
+    pool.rackTemperature = 1023.15;      // 750 C - hot, and nowhere near melting
+    pool.initialNcg = { N2: n2Bar, O2: o2Bar };
+    (pool.fluid as Record<string, unknown>).temperature = 373.15;
+    plant.scenario = undefined;          // no earthquake; this is about the gas
+    return buildSimFromPlantJson(plant as never);
+  };
+
+  const measure = (sim: ReturnType<typeof buildSimFromPlantJson>) => {
+    const clad = () => sim.state.thermalNodes.get('pool-clad')!;
+    const node = () => sim.state.flowNodes.get('pool')!;
+    const o2Start = node().fluid.ncg!.O2;
+    let peakOxPower = 0, peakClad = clad().temperature, o2Min = o2Start;
+    for (let i = 0; i < 300; i++) {
+      run(sim, 1, 0.02);
+      sim.state.pendingEvents = [];
+      peakOxPower = Math.max(peakOxPower, getCladdingOxidationPower().get('pool-clad') ?? 0);
+      peakClad = Math.max(peakClad, clad().temperature);
+      o2Min = Math.min(o2Min, node().fluid.ncg!.O2);
+    }
+    return {
+      o2Start, o2Min, peakOxPower, peakClad,
+      endClad: clad().temperature,
+      burned: clad().oxidation!.oxidizedFraction,
+      endOxPower: getCladdingOxidationPower().get('pool-clad') ?? 0,
+      decay: sim.state.thermalNodes.get('pool-pellets')!.heatGeneration,
+    };
+  };
+
+  const air = measure(dryPool(0.21, 0.78));
+  const inert = measure(dryPool(0, 0.99));
+
+  console.log(`      [Zr-air]   air: peak clad ${(air.peakClad - 273.15).toFixed(0)} C, ` +
+    `peak oxidation ${(air.peakOxPower / 1e6).toFixed(1)} MW vs ${(air.decay / 1e6).toFixed(1)} MW decay, ` +
+    `O2 ${air.o2Start.toFixed(0)} -> ${air.o2Min.toFixed(0)} mol, ` +
+    `${(air.burned * 100).toFixed(2)}% of the cladding consumed`);
+  console.log(`      [Zr-air] inert: peak clad ${(inert.peakClad - 273.15).toFixed(0)} C, ` +
+    `peak oxidation ${(inert.peakOxPower / 1e6).toFixed(3)} MW, ` +
+    `${(inert.burned * 100).toFixed(4)}% consumed`);
+
+  assert(air.o2Start > 100, `the air case should start full of air, got ${air.o2Start.toFixed(1)} mol O2`);
+  assert(air.peakOxPower > air.decay,
+    `the fire must outrun the decay heat: ${(air.peakOxPower / 1e6).toFixed(2)} MW vs ` +
+    `${(air.decay / 1e6).toFixed(2)} MW`);
+  assert(air.o2Min < 0.5 * air.o2Start,
+    `the fire must eat the oxygen it burns: ${air.o2Start.toFixed(0)} -> ${air.o2Min.toFixed(0)} mol`);
+  assert(air.burned > 1.25 * Math.max(inert.burned, 1e-12),
+    `air must consume measurably more cladding than an inerted pool does: ` +
+    `${(air.burned * 100).toFixed(3)}% vs ${(inert.burned * 100).toFixed(4)}%`);
+  // The racks run only a few K hotter than the inert case, and that is
+  // correct rather than disappointing: a pool open to the sky loses the
+  // reaction heat up its own vent almost as fast as it is made (23,000 m2 of
+  // rod against the gas), so what the extra chemistry buys is metal
+  // consumed, not degrees. Degrees come later, when the gas has been driven
+  // out and there is nothing left to carry the heat away.
+  assert(air.peakClad > inert.peakClad + 3,
+    `the air reaction must heat the racks: ${(air.peakClad - 273.15).toFixed(1)} C vs ` +
+    `${(inert.peakClad - 273.15).toFixed(1)} C inerted`);
+  // The fire is its own extinguisher: once the oxygen in the pool is spent
+  // the rate follows it down, with no rule anywhere saying so.
+  assert(air.endOxPower < 0.5 * air.peakOxPower,
+    `oxygen starvation should take the fire back down from its peak ` +
+    `(${(air.peakOxPower / 1e6).toFixed(2)} MW), still at ${(air.endOxPower / 1e6).toFixed(2)} MW`);
 });
 
 report('Plant Scenario Regression Suite');

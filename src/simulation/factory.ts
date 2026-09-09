@@ -817,6 +817,34 @@ function pipeMidRun(pipe: any): number {
   return (startElevation + endElevation) / 2;
 }
 
+/** Default age of spent fuel in a pool (days) - a freshly offloaded core. */
+export const DEFAULT_FUEL_AGE_DAYS = 30;
+
+/**
+ * The reactor power that fuel of this age must have been making, from the
+ * decay heat it makes now.
+ *
+ * Way-Wigner: P(t)/P0 = 0.0622 (t^-0.2 - (t + T_op)^-0.2), t seconds since
+ * shutdown, T_op the irradiation time. T_op is taken as four years - a
+ * typical residence to discharge burnup - and the answer is insensitive to
+ * it for cooling times of days to years, because the second term is small.
+ *
+ * This is used ONLY to size the radiological inventory. The heat itself is
+ * whatever the component declares.
+ */
+export function ratedPowerFromDecayHeat(decayHeat: number, coolingSeconds: number): number {
+  const T_OP = 4 * 365.25 * 86400;   // s - four years of irradiation
+  const t = Math.max(1, coolingSeconds);
+  const fraction = 0.0622 * (Math.pow(t, -0.2) - Math.pow(t + T_OP, -0.2));
+  if (!(fraction > 0)) {
+    throw new Error(
+      `[Factory] Way-Wigner gave a non-positive decay fraction for a cooling ` +
+      `time of ${(coolingSeconds / 86400).toFixed(1)} days. Fuel cannot be ` +
+      `that old and still be warm.`);
+  }
+  return decayHeat / fraction;
+}
+
 export function createSimulationFromPlant(plantState: PlantState): SimulationState {
   const state = createSimulationState();
   buildTerrain = plantState.terrain;
@@ -1169,14 +1197,42 @@ export function createSimulationFromPlant(plantState: PlantState): SimulationSta
         maxTemperature: 1500,
         meltingPoint: 2100,
         latentHeatFusion: 225e3,
-        // Zr-steam oxidation on uncovered racks: the exothermic runaway and
-        // the hydrogen that comes with it are the real spent-fuel hazard.
+        // Zr oxidation on uncovered racks - in steam while there is water
+        // left to boil, and in AIR once there is not. The exothermic
+        // runaway, the hydrogen and the metal it eats are the real
+        // spent-fuel hazard (CladdingOxidationRateOperator).
         oxidation: {
           oxidizedFraction: 0,
           totalZrMass: geo.cladMass,
           associatedCoolantNode: id,
         },
       });
+
+      // What is actually radioactive in there. The pool states its DECAY
+      // HEAT, not a reactor power, so the inventory is derived from the heat
+      // and the fuel's age: Way-Wigner run backwards gives the rated power
+      // this fuel came off, and the core model's per-GWt equilibrium
+      // inventory then gives the moles. One stated assumption (how long ago
+      // it was discharged) instead of a magic number, and a pool of
+      // month-old fuel comes out ~30x hotter in curies than one of
+      // decade-old fuel at the same 8 MW, which is the truth of it.
+      const fpFuel = state.thermalNodes.get(`${id}-pellets`);
+      if (fpFuel && (pool.fuelPower ?? 0) > 0) {
+        const ratedPower = ratedPowerFromDecayHeat(
+          pool.fuelPower ?? 0, (pool.fuelAgeDays ?? DEFAULT_FUEL_AGE_DAYS) * 86400);
+        fpFuel.fissionProducts = {
+          nobleGas: 700e-9 * ratedPower,
+          volatile: 250e-9 * ratedPower,
+          initialNobleGas: 700e-9 * ratedPower,
+          initialVolatile: 250e-9 * ratedPower,
+          associatedCoolantNode: id,
+        };
+        console.log(`[Factory] Pool ${id}: ${(pool.fuelPower! / 1e6).toFixed(1)} MW of decay heat at ` +
+          `${((pool.fuelAgeDays ?? DEFAULT_FUEL_AGE_DAYS)).toFixed(0)} days out of the reactor is the ` +
+          `tail of a ${(ratedPower / 1e9).toFixed(2)} GWt core - ` +
+          `${(700e-9 * ratedPower).toFixed(0)} mol of noble gas and ` +
+          `${(250e-9 * ratedPower).toFixed(0)} mol of CsI-class volatiles in the racks`);
+      }
       // Pellet interior r/(4k), gas gap, half the clad wall - in series, the
       // same rod resistance the core uses.
       const hFuelToClad = 1 / (
@@ -4703,11 +4759,18 @@ function createAtmosphereNode(): FlowNode {
   const volume = 1e12;                  // Effectively infinite
   const P_steam = Water.saturationPressure(T_AMBIENT) * RELATIVE_HUMIDITY;
   const P_dryAir = P_AMBIENT - P_steam;
-  // Dry-air mole fractions (N2 / O2 / Ar make up 99.96% of it)
+  // Dry-air mole fractions (N2 / O2 / Ar make up 99.96% of it), RENORMALISED
+  // so the three of them carry all of the dry air. Taken raw they sum to
+  // 0.9996 and the "1 atm" atmosphere came out 40 Pa short of 1 atm - a
+  // standing head against every vented plant, which then rings its vent line
+  // on the way to equilibrium. The trace species left out (CO2, Ne, ...) are
+  // not modelled, so their share belongs to the three that are.
+  const AIR_N2 = 0.7808, AIR_O2 = 0.2095, AIR_AR = 0.0093;
+  const AIR_SUM = AIR_N2 + AIR_O2 + AIR_AR;
   const air: NcgPartialPressures = {
-    N2: (P_dryAir * 0.7808) / 1e5,
-    O2: (P_dryAir * 0.2095) / 1e5,
-    Ar: (P_dryAir * 0.0093) / 1e5,
+    N2: (P_dryAir * AIR_N2 / AIR_SUM) / 1e5,
+    O2: (P_dryAir * AIR_O2 / AIR_SUM) / 1e5,
+    Ar: (P_dryAir * AIR_AR / AIR_SUM) / 1e5,
   };
   return {
     id: ENVIRONMENT_NODE_ID,
