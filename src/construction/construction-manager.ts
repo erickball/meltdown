@@ -308,6 +308,9 @@ export class ConstructionManager {
     const defaultFluid: Fluid = {
       temperature: T,
       pressure: steamPressure,
+      // The pressure above is the STEAM partial (the factory adds any NCG on
+      // top); the renderer must not subtract the gas from it a second time.
+      steamPressure,
       phase: isVapor ? 'vapor' : isTwoPhase ? 'two-phase' : 'liquid',
       quality: defaultQuality,
       flowRate: 0
@@ -1780,14 +1783,21 @@ export class ConstructionManager {
         const buildingNcg = emptyGasComposition();
         const R = 8.314;
         const T_building = buildingFluid.temperature;
+        let buildingNcgPa = 0;
         for (const species of ALL_GAS_SPECIES) {
           const P_bar = (defaultNcg as Record<string, number>)[species];
           if (P_bar && P_bar > 0) {
             const P_Pa = P_bar * 1e5;
             buildingNcg[species as GasSpecies] = (P_Pa * volume) / (R * T_building);
+            buildingNcgPa += P_Pa;
           }
         }
         buildingFluid.ncg = buildingNcg;
+        // A building is the one component whose fluid.pressure IS the total,
+        // so the steam the renderer draws is what is left after the air - the
+        // same subtraction (and the same floor) the factory makes.
+        buildingFluid.steamPressure = Math.max(
+          buildingFluid.pressure - buildingNcgPa, MIN_STEAM_PRESSURE_PA);
 
         // Create ports at cardinal directions at ground level
         const portRadius = shape === 'cylinder' ? (diameter / 2) : (Math.max(buildingWidth, buildingLength) / 2);
@@ -2668,7 +2678,10 @@ export class ConstructionManager {
     // live nodes, so this is display-only.
     for (const [, component] of this.plantState.components) {
       const c = component as any;
-      this.applyNcgDisplayFill(c.fluid, c.initialNcg);
+      // A BUILDING's own fluid.pressure is the one that is a TOTAL (the
+      // factory subtracts the NCG spec from it); every other component's is
+      // the steam partial with the gas on top.
+      this.applyNcgDisplayFill(c.fluid, c.initialNcg, c.type === 'building');
       this.applyNcgDisplayFill(c.annulusFluid, c.annulusInitialNcg);
       this.applyNcgDisplayFill(c.secondaryFluid, c.shellInitialNcg);
       this.applyNcgDisplayFill(c.shellFluid, c.shellInitialNcg);
@@ -2724,7 +2737,8 @@ export class ConstructionManager {
    */
   private applyNcgDisplayFill(
     fluid: Fluid | undefined,
-    spec: Record<string, number> | undefined
+    spec: Record<string, number> | undefined,
+    pressureIsTotal = false
   ): void {
     if (!fluid || !spec || fluid.ncg) return;
     if (!Object.values(spec).some(p => p > 0)) return;
@@ -2732,14 +2746,27 @@ export class ConstructionManager {
     const R = 8.314; // J/(mol·K)
     const T = fluid.temperature || 300; // K
     const ncg = emptyGasComposition();
+    let ncgTotalPa = 0;
     for (const species of ALL_GAS_SPECIES) {
       const P_bar = spec[species];
       if (P_bar && P_bar > 0) {
         ncg[species as GasSpecies] = (P_bar * 1e5 * V) / (R * T);
+        ncgTotalPa += P_bar * 1e5;
       }
     }
     fluid.ncg = ncg;
     fluid.volume = V;
+    // Say which pressure fluid.pressure is, or the renderer has to guess.
+    // Everywhere but a building it is the initial-condition STEAM partial and
+    // the gas above is on top of it; the guess used to be the other way round,
+    // so a water tank at 17 mbar of steam under a bar of air had the air
+    // subtracted out to -0.98 bar, threw out of the steam tables mid-frame,
+    // and stopped the canvas for the rest of the session.
+    // The building floor is the factory's own (see its `building` branch):
+    // the picture has to show what the simulation is about to be built with.
+    fluid.steamPressure = pressureIsTotal
+      ? Math.max(fluid.pressure - ncgTotalPa, MIN_STEAM_PRESSURE_PA)
+      : fluid.pressure;
   }
 
   /**
@@ -3843,10 +3870,29 @@ export class ConstructionManager {
             }
           }
           component.fluid.ncg = ncg;
+          // The moles above were priced over V, so the fluid has to carry V or
+          // nothing can read the partial pressure back out of them.
+          component.fluid.volume = V;
         } else {
           component.fluid.ncg = undefined;
         }
       }
+    }
+    // Whatever moved above, restate WHICH pressure fluid.pressure is, so the
+    // renderer does not have to guess (see Fluid.steamPressure). A building is
+    // the one component that stores the total; everything else stores the
+    // steam partial with its gas on top.
+    if (component.fluid) {
+      const f = component.fluid;
+      let ncgPa = 0;
+      if (f.ncg && f.volume && f.volume > 0) {
+        for (const moles of Object.values(f.ncg) as number[]) {
+          if (moles && moles > 0) ncgPa += (moles * 8.314 * (f.temperature || 300)) / f.volume;
+        }
+      }
+      f.steamPressure = component.type === 'building'
+        ? Math.max(f.pressure - ncgPa, MIN_STEAM_PRESSURE_PA)
+        : f.pressure;
     }
     if (properties.initialLevel !== undefined) {
       component.fillLevel = properties.initialLevel / 100; // % to 0-1

@@ -322,9 +322,24 @@ export class GameLoop {
   }
 
   /**
-   * Main tick function - called each frame
+   * Main tick function - called each frame.
+   *
+   * The next frame is armed in a `finally`, not at the end of the work: the
+   * physics is inside a try/catch that pauses and reports, but everything
+   * OUTSIDE it - onWallFrame (the build queue), and the onStateUpdate the
+   * catch itself calls - was not, so a throw there stopped the clock for the
+   * rest of the session with nothing but a console line to say so. The
+   * exception still propagates; only the loop survives it.
    */
   private tick = (): void => {
+    try {
+      this.runFrame();
+    } finally {
+      requestAnimationFrame(this.tick);
+    }
+  };
+
+  private runFrame(): void {
     const now = performance.now();
     const frameDt = (now - this.lastFrameTime) / 1000; // Convert to seconds
     this.lastFrameTime = now;
@@ -333,7 +348,6 @@ export class GameLoop {
     // just the tiny delay between setting lastFrameTime and calling tick()
     if (this.firstTick) {
       this.firstTick = false;
-      requestAnimationFrame(this.tick);
       return;
     }
 
@@ -457,10 +471,7 @@ export class GameLoop {
         this.onStateUpdate?.(this.state, this.getSolverMetrics());
       }
     }
-
-    // Schedule next frame
-    requestAnimationFrame(this.tick);
-  };
+  }
 
   /**
    * Sync neutronics power to thermal node heat generation.

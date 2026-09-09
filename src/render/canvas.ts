@@ -1516,7 +1516,41 @@ export class PlantCanvas {
     this.cameraDepth = Math.max(minDepth, Math.min(maxDepth, this.cameraDepth));
   }
 
+  /**
+   * One animation frame, and the arming of the next one.
+   *
+   * THE LOOP MUST NOT BE ABLE TO STOP. It used to re-arm itself with a
+   * `requestAnimationFrame` written at the end of the drawing code, so the
+   * first frame that threw was also the last one ever drawn: the canvas
+   * froze on that image, in every mode, for the rest of the session, while
+   * the simulation went on running behind it. The only sign was one line in
+   * the console. That is the quietest possible failure of the loudest
+   * possible thing, and it is what a cracked spent fuel pool looked like to
+   * the player - a picture of a full pool that never changed.
+   *
+   * The throw is NOT swallowed: it propagates out of the frame exactly as
+   * before, once per frame, so the console says what is wrong for as long as
+   * it is wrong. What changes is that the next frame is armed first, and the
+   * frame after a failure starts from a clean 2D context - an aborted frame
+   * can leave save() calls unmatched on the state stack.
+   */
   public render(): void {
+    if (this.frameAborted) {
+      this.frameAborted = false;
+      (this.ctx as CanvasRenderingContext2D & { reset?: () => void }).reset?.();
+    }
+    this.frameAborted = true;
+    try {
+      this.renderFrame();
+    } finally {
+      requestAnimationFrame(() => this.render());
+    }
+  }
+
+  /** True while a frame is in flight; cleared when one completes normally. */
+  private frameAborted = false;
+
+  private renderFrame(): void {
     const ctx = this.ctx;
     const rect = this.canvas.getBoundingClientRect();
 
@@ -1528,7 +1562,7 @@ export class PlantCanvas {
 
     if (this.viewMode === 'grid') {
       this.renderGridFrame(ctx, rect.width, rect.height);
-      requestAnimationFrame(() => this.render());
+      this.frameAborted = false;
       return;
     }
 
@@ -2341,8 +2375,7 @@ export class PlantCanvas {
     // Draw color legend at bottom of canvas
     renderColorLegend(ctx, rect.width, rect.height);
 
-    // Schedule next frame
-    requestAnimationFrame(() => this.render());
+    this.frameAborted = false;
   }
 
   private getPortWorldPosition(component: PlantComponent, port: { position: Point }): Point {

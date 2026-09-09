@@ -37,6 +37,28 @@ export interface Fluid {
    * in construction mode, where fillLevel is the level.
    */
   liquidLevelFraction?: number;
+  /**
+   * Steam partial pressure (Pa) - the pressure the steam tables are to be
+   * evaluated at for this fluid.
+   *
+   * It exists because `pressure` means two different things depending on who
+   * wrote the object. The per-frame sync writes the simulation node's TOTAL
+   * pressure (steam + NCG, Dalton); the construction-mode write-back and the
+   * gas-fill display helper write the STEAM partial pressure, because that is
+   * the initial-condition convention the factory reads back. With NCG moles
+   * sitting on the fluid there is nothing to tell the two apart, and a
+   * renderer that subtracts the NCG partial from a pressure that never
+   * included it gets a negative steam pressure: a water tank holding 17 mbar
+   * of steam under a bar of air read as -0.98 bar and threw out of the steam
+   * tables, which killed the canvas animation loop for the rest of the
+   * session.
+   *
+   * So every producer now states it. Renderers use this for saturation
+   * lookups and `steamPressure + P_ncg` when they need the total. Absent on
+   * hand-built fluids and on anything the sync has not reached, where
+   * `pressure` is the only thing there is.
+   */
+  steamPressure?: number;
 }
 
 export type ComponentType =

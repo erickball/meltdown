@@ -104,6 +104,7 @@ export { baseFlowConnectionId, assignFlowConnectionIds } from './connection-ids'
 // edit-detection snapshots, and state transplant on re-entry
 export {
   writeSimulationStateToPlant, captureResumeSnapshot, transplantSimulationState,
+  steamPartialPressurePa,
 } from './resume';
 export type { ResumeSnapshot } from './resume';
 
