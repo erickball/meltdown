@@ -332,6 +332,7 @@ export function fluidHeatCapacity(node: FlowNode): number {
       density: node.volume > 0 ? node.fluid.mass / node.volume : 0,
       phase: node.fluid.phase,
       quality: node.fluid.quality ?? 0,
+      iceFraction: node.fluid.iceFraction ?? 0,
       specificEnergy: node.fluid.internalEnergy / node.fluid.mass,
     });
   }
