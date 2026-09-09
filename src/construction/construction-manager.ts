@@ -33,7 +33,9 @@ import {
 } from '../game/stock';
 import { getComponentVisualHeight } from '../render/components';
 import { getComponentSize } from '../render/component-size';
-import { portSide, Side } from '../render/grid-geometry';
+import {
+  portSide, Side, connectionRoute, findFreeEndJoins, routeLength,
+} from '../render/grid-geometry';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -527,19 +529,35 @@ export class ConstructionManager {
         const elevationChange = props.elevationChange ?? 0; // Height change from inlet to outlet
         const endElevation = startElevation + elevationChange;
 
+        // A pipe laid on the grid comes with the polyline it was drawn
+        // along, and its two ENDS are that polyline's ends. Without one the
+        // pipe runs east from its position for its length, as it always has.
+        // (`position` is the pipe's INLET END either way, which is why the
+        // grid places a pipe by cell rather than by footprint centre - see
+        // GridView.snapPlacement.)
+        const drawnRoute: Point[] | undefined =
+          Array.isArray(props.route) && props.route.length >= 2
+            ? (props.route as Point[]).map(p => ({ x: p.x, y: p.y }))
+            : undefined;
+        const startPoint: Point = drawnRoute ? drawnRoute[0] : { x: worldX, y: worldY };
+        const endPoint: Point = drawnRoute
+          ? drawnRoute[drawnRoute.length - 1]
+          : { x: worldX + pipeLength, y: worldY };
+
         const pipe: PipeComponent = {
           id,
           type: 'pipe',
           label: props.name || 'Pipe',
-          position: { x: worldX, y: worldY },
+          position: { x: startPoint.x, y: startPoint.y },
           elevation: startElevation,
           rotation: 0,
           diameter: props.diameter,
           thickness: 0.01,  // 1cm default wall thickness
           length: pipeLength,
-          // End position: pipe extends in +X direction from start
-          endPosition: { x: worldX + pipeLength, y: worldY },
+          // End position: the drawn route's far end, or +X from the start
+          endPosition: { x: endPoint.x, y: endPoint.y },
           endElevation: endElevation,
+          ...(drawnRoute ? { route: drawnRoute } : {}),
           pressureRating: props.pressureRating ?? 155, // bar (design pressure)
           ports: pipePorts,  // Pipes are bidirectional - flow determined by physics
           fluid: pipeFluid
@@ -3140,6 +3158,215 @@ export class ConstructionManager {
     return 1; // Assume full
   }
 
+
+  // -------------------------------------------------------------------------
+  // Ground pipe (the grid's pipe tool)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Lay a run of pipe on open ground along a drawn plan route, then join
+   * whichever of its two loose ends land on something.
+   *
+   * Charging rule, stated once and enforced here:
+   *  - GROUND pipe costs its own route length off `pipeMeters`, once,
+   *    through the same `createComponent` path every other part uses.
+   *  - the joins it makes are ZERO-length connections. The ends are
+   *    physically touching - there is no pipe between them - so an
+   *    auto-connection costs nothing and nothing is charged twice.
+   *  - a run drawn PORT to PORT is unchanged: it is a connection (or an
+   *    auto-pipe) charged by the length the dialog confirms.
+   *
+   * Returns null when the run could not be built (an unaffordable charge is
+   * the usual reason; `takeStockRefusal` carries the message).
+   */
+  layGroundPipe(properties: Record<string, any>, route: Point[]): { id: string; joined: number } | null {
+    if (!route || route.length < 2) {
+      console.error(`[Construction] layGroundPipe needs a route of at least two points, got ` +
+        `${route ? route.length : 'none'}.`);
+      return null;
+    }
+    const length = routeLength(route);
+    if (!(length > 0)) {
+      console.error(`[Construction] layGroundPipe was given a zero-length route: ${JSON.stringify(route)}`);
+      return null;
+    }
+    const id = this.createComponent({
+      type: 'pipe',
+      name: properties.name ?? 'Pipe',
+      position: { x: route[0].x, y: route[0].y },
+      properties: { ...properties, length, route },
+    });
+    if (!id) return null;
+
+    const pipe = this.plantState.components.get(id) as PipeComponent;
+    let joined = 0;
+    const bore = pipe.diameter || 0.3;
+    const flowArea = Math.PI * (bore / 2) * (bore / 2);
+    const joins = findFreeEndJoins(this.plantState, pipe);
+
+    // A run that lands on something starts at THAT thing's conditions rather
+    // than at the tool's cold, atmospheric default. Splicing a section into a
+    // hot loop and having it appear full of 25 C water would be a step change
+    // nobody asked for; a section on open ground keeps what it was given.
+    // (Same IC conventions as the factory: `fluid.pressure` is the steam
+    // partial pressure and `initialNcg` rides on top - see resume.ts.)
+    const neighbour = joins.length > 0 ? joins[0].join.component : undefined;
+    if (neighbour?.fluid) {
+      pipe.fluid = { ...neighbour.fluid, flowRate: 0 };
+      const ncg = (neighbour as Record<string, any>).initialNcg;
+      if (ncg) (pipe as Record<string, any>).initialNcg = { ...ncg };
+      console.log(`[Construction] Ground pipe '${id}' starts at '${neighbour.id}' conditions: ` +
+        `${(pipe.fluid.pressure / 1e5).toFixed(2)} bar, ${(pipe.fluid.temperature - 273.15).toFixed(1)} C, ` +
+        `${pipe.fluid.phase}`);
+    }
+
+    for (const { end, join } of joins) {
+      // The two ends touch, so the joining connection has no length of its
+      // own - and therefore no cost. Its elevation on the pipe side is the
+      // pipe's centreline, as an auto-pipe's stub connections use.
+      const ok = this.createConnection(
+        end.port.id, join.port.id, bore / 2, undefined, flowArea, 0);
+      if (ok) joined++;
+    }
+    if (joined > 0) {
+      console.log(`[Construction] Ground pipe '${id}' joined ${joined} free end(s) on contact`);
+    }
+    return { id, joined };
+  }
+
+  /** Every component id that goes away when this one is deleted (sub-components included). */
+  private idsRemovedWith(componentId: string): Set<string> {
+    const ids = new Set<string>([componentId]);
+    const component = this.plantState.components.get(componentId);
+    if (component && component.type === 'reactorVessel') {
+      const rv = component as ReactorVesselComponent;
+      if (rv.coreBarrelId) ids.add(rv.coreBarrelId);
+      if ((rv as any).insideBarrelId) ids.add((rv as any).insideBarrelId);
+      if ((rv as any).outsideBarrelId) ids.add((rv as any).outsideBarrelId);
+    }
+    return ids;
+  }
+
+  /**
+   * The connections attached to a component that is about to be deleted, in
+   * the three kinds that matter when deciding what happens to them:
+   *
+   *  - `keepable`  a run that CARRIES pipe and has something at its other end
+   *                to stay attached to. It can be left standing as ground
+   *                pipe along the very route it is drawn along.
+   *  - `doomed`    a run that carries pipe but has nothing to hold it up: its
+   *                far end goes with the same deletion, it runs to open air,
+   *                or it is an opening into the vessel this component sits
+   *                inside. It goes either way, and its metres come back.
+   *  - `joints`    a connection with NO length: two things touching, not a
+   *                run. There is no pipe in it to leave on the ground, and
+   *                whatever it touches (a section of ground pipe, usually)
+   *                keeps standing exactly where it is - only the joint goes.
+   */
+  attachedPipeRuns(componentId: string): {
+    keepable: Connection[]; doomed: Connection[]; joints: Connection[];
+  } {
+    const ids = this.idsRemovedWith(componentId);
+    const keepable: Connection[] = [];
+    const doomed: Connection[] = [];
+    const joints: Connection[] = [];
+    for (const conn of this.plantState.connections) {
+      const touchesFrom = ids.has(conn.fromComponentId);
+      const touchesTo = ids.has(conn.toComponentId);
+      if (!touchesFrom && !touchesTo) continue;
+      const otherId = touchesFrom ? conn.toComponentId : conn.fromComponentId;
+      const other = this.plantState.components.get(otherId);
+      const doomedComponent = this.plantState.components.get(touchesFrom ? conn.fromComponentId : conn.toComponentId);
+      const nested = !!other && !!doomedComponent &&
+        (other.containedBy === doomedComponent.id || doomedComponent.containedBy === other.id);
+      if (!((conn.length ?? 0) > 0) && !(touchesFrom && touchesTo)) joints.push(conn);
+      else if (touchesFrom && touchesTo) doomed.push(conn);
+      else if (!other || nested) doomed.push(conn);
+      else if (!connectionRoute(conn, this.plantState)) doomed.push(conn);
+      else keepable.push(conn);
+    }
+    return { keepable, doomed, joints };
+  }
+
+  /**
+   * Leave a component's pipe runs standing when it is deleted: each keepable
+   * connection becomes a pipe COMPONENT along the very route it was drawn
+   * along, still attached at its far end and with a free end where the
+   * component used to be.
+   *
+   * The stock ledger nets to zero by construction: deleting the connection
+   * refunds its length and the pipe is charged exactly that same length.
+   * Returns how many runs were left standing.
+   */
+  detachConnectionsAsPipes(componentId: string): number {
+    const { keepable } = this.attachedPipeRuns(componentId);
+    const ids = this.idsRemovedWith(componentId);
+    let kept = 0;
+
+    for (const conn of keepable) {
+      const route = connectionRoute(conn, this.plantState);
+      if (!route || route.length < 2) continue;
+      const survivingIsFrom = !ids.has(conn.fromComponentId);
+      const survivorId = survivingIsFrom ? conn.fromComponentId : conn.toComponentId;
+      const survivorPortId = survivingIsFrom ? conn.fromPortId : conn.toPortId;
+      const survivor = this.plantState.components.get(survivorId);
+      if (!survivor) continue;
+      const survivorElevation = (survivingIsFrom ? conn.fromElevation : conn.toElevation)
+        ?? this.getPortRelativeElevation(
+          survivor, survivor.ports.find(p => p.id === survivorPortId)!);
+
+      const length = conn.length ?? routeLength(route);
+      const flowArea = conn.flowArea ?? 0.05;
+      const diameter = Math.sqrt(flowArea * 4 / Math.PI);
+      const fluid = survivor.fluid;
+
+      // The pipe is drawn along the run as it stands; its INLET end is
+      // route[0], so a run whose surviving end is `to` keeps its direction
+      // and joins the survivor at its right-hand port.
+      const label = `${(this.plantState.components.get(componentId)?.label) || componentId} line`;
+      const pipeId = this.createComponent({
+        type: 'pipe',
+        name: label,
+        position: { x: route[0].x, y: route[0].y },
+        properties: {
+          name: label,
+          length,
+          route: route.map(p => ({ x: p.x, y: p.y })),
+          diameter,
+          pressureRating: this.effectivePressureRating(survivor as any, survivorPortId) || 155,
+          elevation: (survivor.elevation ?? 0) + survivorElevation,
+          initialPhase: fluid?.phase ?? 'liquid',
+          initialPressure: fluid ? fluid.pressure / 1e5 : 1,
+          initialTemperature: fluid ? fluid.temperature - 273.15 : 25,
+          initialQuality: fluid?.quality ?? 0,
+        },
+      });
+
+      // Whatever happens next, the old connection goes: its component is
+      // about to disappear. Deleting it first frees the survivor's port and
+      // hands its metres back, which is exactly what the new pipe just cost.
+      this.deleteConnectionObject(conn);
+      if (!pipeId) {
+        console.warn(`[Construction] Could not leave the run ${conn.fromComponentId} -> ` +
+          `${conn.toComponentId} standing; it was removed with its component.`);
+        continue;
+      }
+
+      const pipe = this.plantState.components.get(pipeId) as PipeComponent;
+      const pipePortId = survivingIsFrom ? `${pipeId}-left` : `${pipeId}-right`;
+      if (this.createConnection(pipePortId, survivorPortId, pipe.diameter / 2,
+          survivorElevation, flowArea, 0)) {
+        kept++;
+      } else {
+        console.warn(`[Construction] Ground pipe '${pipeId}' could not be reattached to ` +
+          `'${survivorPortId}'; it stands with two free ends.`);
+        kept++;
+      }
+    }
+    if (kept > 0) console.log(`[Construction] Left ${kept} pipe run(s) standing as ground pipe`);
+    return kept;
+  }
+
   /**
    * Delete a component and all its connections
    */
@@ -3150,17 +3377,8 @@ export class ConstructionManager {
       return false;
     }
 
-    // Collect all component IDs to delete (includes sub-components for reactor vessels)
-    const idsToDelete = new Set<string>([componentId]);
-
-    // For reactor vessels, also include the core barrel
-    if (component.type === 'reactorVessel') {
-      const rv = component as ReactorVesselComponent;
-      if (rv.coreBarrelId) idsToDelete.add(rv.coreBarrelId);
-      // Legacy support for old save files
-      if ((rv as any).insideBarrelId) idsToDelete.add((rv as any).insideBarrelId);
-      if ((rv as any).outsideBarrelId) idsToDelete.add((rv as any).outsideBarrelId);
-    }
+    // Everything that goes with it (a reactor vessel's core barrel, ...)
+    const idsToDelete = this.idsRemovedWith(componentId);
 
     // Remove all connections involving any of these components
     const connectionsToRemove = this.plantState.connections.filter(
@@ -3264,6 +3482,25 @@ export class ConstructionManager {
       return false;
     }
 
+    return this.removeConnectionAt(connIndex);
+  }
+
+  /**
+   * Delete THIS connection, not "one between these two components". Two runs
+   * can join the same pair of components (a supply and a return), so a
+   * selection on the grid names the connection object itself.
+   */
+  deleteConnectionObject(connection: Connection): boolean {
+    const index = this.plantState.connections.indexOf(connection);
+    if (index === -1) {
+      console.error(`[Construction] Cannot delete: that connection is not in the plant`);
+      return false;
+    }
+    return this.removeConnectionAt(index);
+  }
+
+  /** Free both ports, refund the run's metres, and take it out of the plant. */
+  private removeConnectionAt(connIndex: number): boolean {
     const conn = this.plantState.connections[connIndex];
 
     // Clear connectedTo references on the ports

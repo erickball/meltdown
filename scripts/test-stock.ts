@@ -28,7 +28,10 @@ import {
   applyConnectionLengthEdit, stockedPipeSpecId, paletteKeyForStockLine,
   stockLineDisplayName, findStockLine,
 } from '../src/game/stock';
-import type { PlantState, PlantComponent, Connection } from '../src/types';
+import type { PlantState, PlantComponent, Connection, PipeComponent } from '../src/types';
+import {
+  groundRunRoute, pipePieceRoute, routeLength,
+} from '../src/render/grid-geometry';
 
 let failures = 0;
 function check(label: string, ok: boolean, detail?: string): void {
@@ -412,6 +415,180 @@ console.log('\n--- An old save migrates to generic lines ---');
   check('the old pump pile reads as a generic line',
     componentsRemaining(legacy, 'pump') === 3);
   check('and is an array now', Array.isArray(getStock(legacy)!.components));
+}
+
+// ---------------------------------------------------------------------------
+// 12. Ground pipe: the grid's pipe tool
+// ---------------------------------------------------------------------------
+console.log('\n--- Ground pipe costs its run once; joining costs nothing ---');
+{
+  const yard = emptyPlant();
+  const gcm = new ConstructionManager(yard);
+  gcm.createComponent({
+    type: 'warehouse', name: 'Yard', position: { x: 0, y: 30 },
+    properties: { name: 'Yard', width: 6, depth: 4, stockPipeMeters: 300, stockLines: [{ type: 'pump', count: 2 }] },
+  });
+  const gPumpId = gcm.createComponent({
+    type: 'pump', name: 'GP', position: { x: 12.5, y: 10.5 },
+    properties: { name: 'GP', ratedFlow: 100, ratedHead: 50, elevation: 0 },
+  })!;
+  const startMetres = pipeMetersRemaining(yard)!;
+  check('the yard starts with 300 m', near(startMetres, 300), String(startMetres));
+
+  // A run swept over four tiles: 4 m of pipe, charged once
+  const runRoute = groundRunRoute(
+    [{ x: 8.5, y: 10.5 }, { x: 9.5, y: 10.5 }, { x: 10.5, y: 10.5 }], 'EW');
+  check('the swept run is 3 m end to end', near(routeLength(runRoute), 3), String(routeLength(runRoute)));
+  const laid = gcm.layGroundPipe({
+    name: 'Run 1', diameter: 0.3, pressureRating: 16, elevation: 0,
+    initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+  }, runRoute);
+  check('the run is laid', laid !== null);
+  check('it cost exactly its own length, once',
+    near(pipeMetersRemaining(yard)!, startMetres - 3), String(pipeMetersRemaining(yard)));
+  check('it made no connections yet', laid!.joined === 0 && yard.connections.length === 0);
+  const runPipe = yard.components.get(laid!.id) as PipeComponent;
+  check('the pipe is drawn along the route it was given',
+    !!runPipe.route && runPipe.route.length >= 2 &&
+    near(runPipe.route[0].x, 8) && near(runPipe.route[runPipe.route.length - 1].x, 11),
+    JSON.stringify(runPipe.route));
+  check('and its ends ARE the route ends (no eastward offset)',
+    near(runPipe.position.x, 8) && near(runPipe.position.y, 10.5) &&
+    near(runPipe.endPosition!.x, 11) && near(runPipe.endPosition!.y, 10.5),
+    `${runPipe.position.x},${runPipe.position.y} -> ${runPipe.endPosition!.x},${runPipe.endPosition!.y}`);
+  check('its length is the route length', near(runPipe.length, 3), String(runPipe.length));
+
+  // A second piece butted onto its east end: charged for itself only, and
+  // the join it makes has no length, so it costs nothing extra.
+  const beforeJoin = pipeMetersRemaining(yard)!;
+  const piece = gcm.layGroundPipe({
+    name: 'Piece', diameter: 0.3, pressureRating: 16, elevation: 0,
+    initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+  }, pipePieceRoute({ x: 11.5, y: 10.5 }, 'EW'));
+  check('the piece is laid', piece !== null);
+  check('it joined the run it was butted against', piece!.joined === 1, String(piece!.joined));
+  check('auto-connecting charged nothing beyond the 1 m piece',
+    near(pipeMetersRemaining(yard)!, beforeJoin - 1), String(pipeMetersRemaining(yard)));
+  check('the join is a zero-length run',
+    yard.connections.length === 1 && (yard.connections[0].length ?? 0) === 0,
+    yard.connections.map(c => String(c.length)).join(','));
+  check('and it really is the two pipe ends',
+    yard.connections.some(c =>
+      (c.fromComponentId === piece!.id && c.toComponentId === laid!.id) ||
+      (c.toComponentId === piece!.id && c.fromComponentId === laid!.id)));
+  // A run that lands on something starts at THAT thing's conditions, not the
+  // tool's cold default: splicing into a hot line must not be a step change.
+  {
+    const run = yard.components.get(laid!.id) as PipeComponent;
+    run.fluid = { temperature: 560, pressure: 7.5e6, phase: 'liquid', quality: 0, flowRate: 3 };
+    const hot = gcm.layGroundPipe({
+      name: 'Hot splice', diameter: 0.3, pressureRating: 16, elevation: 0,
+      initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+    }, pipePieceRoute({ x: 7.5, y: 10.5 }, 'EW'));
+    const spliced = yard.components.get(hot!.id) as PipeComponent;
+    check('a spliced run takes the conditions of what it lands on, not 25 C at 1 bar',
+      hot!.joined === 1 && near(spliced.fluid!.temperature, 560) && near(spliced.fluid!.pressure, 7.5e6),
+      `${spliced.fluid!.temperature} K, ${spliced.fluid!.pressure} Pa`);
+    check('and it starts at rest', near(spliced.fluid!.flowRate, 0));
+    gcm.deleteComponent(hot!.id);
+    run.fluid = { temperature: 298, pressure: 1e5, phase: 'liquid', quality: 0, flowRate: 0 };
+  }
+
+  // A piece dropped against the pump's discharge nozzle (which anchors on the
+  // EAST edge of its tile) connects to it on contact, and also costs nothing
+  // beyond its own metre.
+  const beforeNozzle = pipeMetersRemaining(yard)!;
+  const atNozzle = gcm.layGroundPipe({
+    name: 'Nozzle piece', diameter: 0.3, pressureRating: 16, elevation: 0,
+    initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+  }, pipePieceRoute({ x: 13.5, y: 10.5 }, 'EW'));
+  check('a piece landing on a nozzle joins it', atNozzle !== null && atNozzle.joined === 1,
+    String(atNozzle?.joined));
+  check('the nozzle join is on the pump', yard.connections.some(c =>
+    c.fromComponentId === gPumpId || c.toComponentId === gPumpId));
+  check('and it too cost only its own metre',
+    near(pipeMetersRemaining(yard)!, beforeNozzle - 1), String(pipeMetersRemaining(yard)));
+
+  // Deleting the pieces hands their metres back and takes their joins with them
+  const beforeDelete = pipeMetersRemaining(yard)!;
+  gcm.deleteComponent(piece!.id);
+  gcm.deleteComponent(atNozzle!.id);
+  check('deleting ground pipe refunds its length',
+    near(pipeMetersRemaining(yard)!, beforeDelete + 2), String(pipeMetersRemaining(yard)));
+  check('its zero-length joins refunded nothing extra and are gone',
+    yard.connections.length === 0);
+  check('the pump nozzle is free again',
+    !yard.components.get(gPumpId)!.ports.some(p => p.connectedTo));
+
+  // Deleting the run itself puts the yard back exactly where it started
+  gcm.deleteComponent(laid!.id);
+  check('the yard is whole again after both runs come back',
+    near(pipeMetersRemaining(yard)!, startMetres), String(pipeMetersRemaining(yard)));
+}
+
+console.log('\n--- Deleting one run by identity, and keeping pipes on a deletion ---');
+{
+  const yard = emptyPlant();
+  const dcm = new ConstructionManager(yard);
+  dcm.createComponent({
+    type: 'warehouse', name: 'Yard', position: { x: 0, y: 30 },
+    properties: {
+      name: 'Yard', width: 6, depth: 4, stockPipeMeters: 500,
+      stockLines: [{ type: 'tank', count: 2 }, { type: 'pump', count: 1 }],
+    },
+  });
+  const t1 = dcm.createComponent({
+    type: 'tank', name: 'T1', position: { x: 0, y: 0 }, properties: tankProps('T1'),
+  })!;
+  const t2 = dcm.createComponent({
+    type: 'tank', name: 'T2', position: { x: 40, y: 0 }, properties: tankProps('T2'),
+  })!;
+  const p1 = dcm.createComponent({
+    type: 'pump', name: 'PD', position: { x: 20, y: 0 },
+    properties: { name: 'PD', ratedFlow: 100, ratedHead: 50, elevation: 0 },
+  })!;
+  const portOf = (id: string, suffix: string) =>
+    yard.components.get(id)!.ports.find(p => p.id.endsWith(suffix))!.id;
+
+  dcm.createConnection(portOf(t1, '-right'), portOf(p1, '-inlet'), undefined, undefined, 0.05, 20);
+  dcm.createConnection(portOf(p1, '-outlet'), portOf(t2, '-left'), undefined, undefined, 0.05, 20);
+  check('two runs laid, 460 m left', near(pipeMetersRemaining(yard)!, 460), String(pipeMetersRemaining(yard)));
+
+  // Two runs between the same pair would be ambiguous by component id; the
+  // grid selects the connection OBJECT.
+  const first = yard.connections[0];
+  check('deleting THIS run removes exactly it', dcm.deleteConnectionObject(first) &&
+    yard.connections.length === 1 && yard.connections[0] !== first);
+  check('and refunds its 20 m', near(pipeMetersRemaining(yard)!, 480), String(pipeMetersRemaining(yard)));
+  check('deleting it twice is refused, not a double refund',
+    !dcm.deleteConnectionObject(first) && near(pipeMetersRemaining(yard)!, 480));
+
+  // Put it back and delete the pump, keeping the pipes
+  dcm.createConnection(portOf(t1, '-right'), portOf(p1, '-inlet'), undefined, undefined, 0.05, 20);
+  check('back to 460 m', near(pipeMetersRemaining(yard)!, 460));
+  const runs = dcm.attachedPipeRuns(p1);
+  check('both of the pump\'s runs can be left standing',
+    runs.keepable.length === 2 && runs.doomed.length === 0,
+    `${runs.keepable.length} keepable, ${runs.doomed.length} doomed`);
+
+  const beforeKeep = pipeMetersRemaining(yard)!;
+  const kept = dcm.detachConnectionsAsPipes(p1);
+  dcm.deleteComponent(p1);
+  check('two runs were left standing', kept === 2, String(kept));
+  check('keeping the pipes is stock-neutral',
+    near(pipeMetersRemaining(yard)!, beforeKeep), String(pipeMetersRemaining(yard)));
+  const standing = [...yard.components.values()].filter(c => c.type === 'pipe') as PipeComponent[];
+  check('they are standing as ground pipe', standing.length === 2, String(standing.length));
+  check('each is still attached at its far end and free at the other',
+    standing.every(pipe => pipe.ports.filter(p => p.connectedTo).length === 1),
+    standing.map(p => p.ports.filter(x => x.connectedTo).length).join(','));
+  check('each carries the route the run was drawn along',
+    standing.every(pipe => !!pipe.route && pipe.route.length >= 2));
+
+  // ...and taking them away again returns every metre
+  for (const pipe of standing) dcm.deleteComponent(pipe.id);
+  check('removing the standing pipe returns all of it',
+    near(pipeMetersRemaining(yard)!, 500), String(pipeMetersRemaining(yard)));
 }
 
 console.log(failures === 0

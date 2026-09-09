@@ -514,6 +514,46 @@ function sameNodeGeometry(a: FlowNode, b: FlowNode): boolean {
 }
 
 /**
+ * How far through the scenario the run has got is LIVE STATE, not design.
+ *
+ * The rebuild re-reads the plant's scenario block and starts with nothing
+ * fired, so without this every event whose time has already passed fires
+ * again on the very next step - which is exactly what happened on the spent
+ * fuel pool level: one earthquake per closed construction dialog.
+ *
+ * The events themselves come from the plant, which a live edit does not
+ * touch, so the two lists must match. If they ever do not, say so loudly and
+ * fall back to the only other statement of progress there is (everything
+ * whose time has already come has already happened) rather than silently
+ * replaying the sequence.
+ */
+function carryScenarioProgress(fresh: SimulationState, saved: SimulationState): void {
+  if (!fresh.scenario) return;
+  if (!saved.scenario) {
+    console.error(
+      `[Resume] the running simulation carried no scenario state but the rebuilt one has ` +
+      `${fresh.scenario.events.length} event(s) - scenario progress cannot be carried across, ` +
+      `so events already past will fire again. The plant gained a scenario block mid-run.`);
+    return;
+  }
+  const key = (ev: { time: number; message?: string; actions: unknown }) =>
+    `${ev.time}|${ev.message ?? ''}|${JSON.stringify(ev.actions)}`;
+  const before = saved.scenario.events.map(key).join(' / ');
+  const after = fresh.scenario.events.map(key).join(' / ');
+  if (before === after) {
+    fresh.scenario.fired = saved.scenario.fired;
+    return;
+  }
+  const fired = fresh.scenario.events.filter(ev => ev.time <= saved.time).length;
+  console.error(
+    `[Resume] the plant's scenario changed across the rebuild (${saved.scenario.events.length} ` +
+    `event(s) before, ${fresh.scenario.events.length} after), so the fired count could not be ` +
+    `carried over directly. Treating the ${fired} event(s) already due at t=${saved.time.toFixed(1)} s ` +
+    `as fired.`);
+  fresh.scenario.fired = fired;
+}
+
+/**
  * Mutates `fresh` (a factory build reflecting the CURRENT plant) so that
  * every element owned by an unedited component carries the saved live state.
  * Returns human-readable notes about what was and wasn't resumed.
@@ -653,6 +693,7 @@ export function transplantSimulationState(
   if (saved.atmosphereRelease) fresh.atmosphereRelease = saved.atmosphereRelease;
   if (saved.environmentalRelease) fresh.environmentalRelease = saved.environmentalRelease;
   if (saved.surfaceWater && fresh.surfaceWater) fresh.surfaceWater = saved.surfaceWater;
+  carryScenarioProgress(fresh, saved);
   if (saved.liquidBasePressures) {
     fresh.liquidBasePressures = fresh.liquidBasePressures ?? new Map();
     for (const [nodeId, pressure] of saved.liquidBasePressures) {

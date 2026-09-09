@@ -99,6 +99,78 @@ resulting connection (or auto-created pipe) carries the route.
 Moving: components snap to the lattice; a pipe with a drawn route moves as one
 piece and its route with it.
 
+### The pipe tool
+
+Selecting pipe from the palette (or from a supply yard's pipe line) arms the
+**pipe tool**, which on the grid is connection mode and ground-pipe placement
+at once - on the grid those are one job:
+
+- A press on a **connection point** starts a run to another port, exactly as
+  the Connect tool does, and finishes in the connection dialog.
+- A press **anywhere else** lays pipe on the ground there. A bare click drops
+  one section, one tile long, in the tool's current rotation; a press-sweep-
+  release lays the whole swept path as ONE pipe component along the route
+  drawn. (One component per gesture, not one per tile: a pipe component is a
+  flow node, and a tile-per-node run would put fifty nodes where the player
+  drew one line.)
+- **R**, and the on-screen Rotate button, turn the section between east-west
+  and north-south. The preview draws the actual polyline the placement will
+  build (`pipePieceRoute`), so preview and placed piece coincide exactly.
+- While the tool is armed a drag on the canvas lays pipe rather than panning.
+  Click the palette button again (or pick another tool) to disarm it.
+
+A ground pipe's route ENDS are carried half a tile past the terminal cell
+centres, out to the tile boundary, so a piece fills its tile. That is what
+makes ground pipe connectable without a tolerance: the end of one section
+lands on exactly the point the next section's end lands on, and on exactly the
+point a component's port anchors to on that footprint edge.
+
+**Free ends that touch connect themselves.** When a run is laid, each of its
+loose ends is joined to another pipe's loose end at the same point facing back
+at it, or to a free component port anchored there whose face is turned towards
+it (`findFreeEndJoins`). Exact coincidence only - a tolerance would let a run
+grab a nozzle it merely passes near. A newly laid run that lands on something
+takes that thing's fluid conditions as its initial state, so splicing a
+section into a hot loop is not a step change nobody asked for.
+
+Two sections meeting at a CORNER do not join: their ends are on different tile
+edges and genuinely do not touch. Draw the corner as one sweep instead.
+
+### What pipe costs
+
+| Gesture | Charged |
+|---|---|
+| Ground pipe (click or sweep) | its own route length, once, off `pipeMeters`, through the same `createComponent` path as any other part |
+| An end joining another end or a nozzle | nothing - the join is a zero-length connection, because the ends are touching and there is no pipe between them |
+| A run drawn port to port | unchanged: the length the connection dialog confirms (or, with "create pipe", the auto-pipe's own length, once) |
+| Deleting any of it | the same amount back on the racks |
+
+So nothing is charged twice, and `ConstructionManager.layGroundPipe` is the
+one place that says so.
+
+### Removing pipe
+
+- A click on a run selects it (halo + label); a second click opens the edit
+  dialog, which carries a **Delete Pipe** button.
+- **Delete** removes what is selected - a run first, then a component.
+- Deleting a component with pipe on it asks a question rather than warning:
+  *Delete all* / *Keep pipes* / *Cancel* (D / K / C or Escape, with the
+  focused button on Enter). **Keep pipes** leaves each attached run standing
+  as ground pipe along the very route it was drawn along, still attached at
+  its far end and with a free end where the component was; the ledger nets to
+  zero because the run's metres come back and the pipe that replaces it costs
+  exactly the same. A run that has nothing at its far end to stay attached to
+  (the far end goes with the same deletion, the line runs to open air, it is
+  an opening into the vessel the component sits inside) cannot be left
+  standing, and the dialog says so instead of quietly doing less than it
+  offered. A connection with NO length is not a run at all - it is two things
+  touching - so only the joint goes and the section butted onto the component
+  stays where it is.
+
+All of this works in construction mode and, through the live-edit path, while
+the plant is running.
+
+
 Selecting a pipe run: a click on a connection's run (where no component is
 hit) selects it - halo plus a label with its ends, bore and length, and
 while simulating the mass flow and phase. Clicking the selected run again
@@ -108,9 +180,11 @@ replaced.
 
 ## Not done yet
 
-- Rotation. Footprints are never rotated; a component's `rotation` is
-  ignored on the grid (it is effectively unused for anything but legacy
-  pipes elsewhere too).
+- Rotation of anything but a ground pipe section. Equipment footprints are
+  never rotated; a component's `rotation` is ignored on the grid (it is
+  effectively unused for anything but legacy pipes elsewhere too). The pipe
+  tool's N/S - E/W rotation is a property of the piece being drawn, not a
+  stored `rotation` on the pipe: the route already says which way it lies.
 - Elevation is shown by lifting the sprite and a label, but the pipe runs
   themselves have no elevation profile on the grid.
 - Preset plants were laid out for the 2.5D camera and overlap on the grid in
