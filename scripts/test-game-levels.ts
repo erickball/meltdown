@@ -23,6 +23,7 @@ import * as path from 'path';
 
 import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
 import { nodeLiquidLevel } from '../src/simulation';
+import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
 import {
   createSimulationFromPlant,
   setSimulationRandomSeed,
@@ -217,11 +218,13 @@ async function runCheck(key: string, check: LevelCheck, simSecondsOverride?: num
 // This level is not judged on megawatts, so it gets its own checks: what has
 // to be true is that the crisis is real, that the level's two obstacles bite
 // the way the design says they do, and that a plant which answers them holds
-// the fuel covered for the full six hours.
+// the fuel covered for the full eight hours.
 //
-//   1. NOBODY HOME. Nothing is built. The crack must uncover the racks well
-//      inside the level, and keep them uncovered past the grace period - i.e.
-//      the level's `level` hazard fires and the player loses.
+//   1. NOBODY HOME. Nothing is built. The tear must uncover the racks well
+//      inside the level, and the accident must then RUN: the pool boils dry,
+//      the cladding oxidises, and the radiological release passes the level's
+//      limit before the clock runs out. Uncovery itself is no longer a loss -
+//      the run continues so the player can watch (and still fix) it.
 //   2. THE SUCTION-LIFT TRAP. A pump standing on the pool bench, 13 m above
 //      the sea, must NOT deliver: the atmosphere cannot push water that high
 //      and its intake flashes.
@@ -241,6 +244,10 @@ const SFP_LEVEL = 'src/game-mode/levels/spent-fuel-pool.json';
 const SFP_RACK_TOP = 4.16;
 /** Grace the level allows below the rack top before it is a loss. */
 const SFP_GRACE = 1200;
+/** The level's clock (LevelDef goal `survive`). */
+const SFP_CLOCK = 28800;
+/** The level's release limit (LevelDef.maxRelease). */
+const SFP_MAX_RELEASE = 1.0;
 
 type PlantJsonRW = {
   components: Array<[string, Record<string, unknown>]>;
@@ -295,30 +302,44 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
   const only = process.env.SFP_ONLY;
   const wants = (n: string) => !only || only.includes(n);
 
-  // -- 1. Nobody home: the crack alone must lose the level ------------------
+  // -- 1. Nobody home: the tear alone must lose the level ------------------
+  // The loss is no longer "the water went below the racks". It is what a real
+  // one is judged on: the pool boils dry, the cladding burns, and activity
+  // reaches the environment. The level's maxRelease is the line.
   if (wants('1')) {
     const sim = buildSimFromPlantJson(sfpPlant() as never);
     const level0 = sfpLevel(sim.state);
+    const clad = () => sim.state.thermalNodes.get('pool-clad')!;
     let firstUncovered = -1;
-    let uncoveredSince = -1;
-    let lossAt = -1;
-    while (sim.state.time < 7000 && lossAt < 0) {
-      run(sim, 20, 0.25);
+    let dryAt = -1;
+    let ignitedAt = -1;        // clad past 900 C, where an air fire sustains
+    let lostAt = -1;
+    let peakOx = 0;
+    while (sim.state.time < SFP_CLOCK && lostAt < 0) {
+      run(sim, 20, 0.5);
       sim.state.pendingEvents = [];
       const lvl = sfpLevel(sim.state);
-      if (lvl < SFP_RACK_TOP) {
-        if (firstUncovered < 0) firstUncovered = sim.state.time;
-        if (uncoveredSince < 0) uncoveredSince = sim.state.time;
-        if (sim.state.time - uncoveredSince >= SFP_GRACE) lossAt = sim.state.time;
-      } else {
-        uncoveredSince = -1;
-      }
+      if (lvl < SFP_RACK_TOP && firstUncovered < 0) firstUncovered = sim.state.time;
+      if (lvl <= 0.01 && dryAt < 0) dryAt = sim.state.time;
+      if (sfpCladC(sim.state) > 900 && ignitedAt < 0) ignitedAt = sim.state.time;
+      peakOx = Math.max(peakOx, getCladdingOxidationPower().get('pool-clad') ?? 0);
+      const rel = sim.state.environmentalRelease as Record<string, number> | undefined;
+      const severity = 60 * (rel?.CsI ?? 0) + 0.02 * (rel?.Xe ?? 0);
+      if (severity >= SFP_MAX_RELEASE) lostAt = sim.state.time;
     }
+    const rel = sim.state.environmentalRelease as Record<string, number> | undefined;
     console.log(`  [1] unfed: level ${level0.toFixed(2)} m -> ${sfpLevel(sim.state).toFixed(2)} m; ` +
-      `racks uncovered at t=${firstUncovered.toFixed(0)} s, level lost at t=${lossAt.toFixed(0)} s, ` +
-      `clad ${sfpCladC(sim.state).toFixed(0)} C`);
+      `racks uncovered t=${firstUncovered.toFixed(0)} s, boiled dry t=${dryAt.toFixed(0)} s, ` +
+      `clad past 900 C t=${ignitedAt.toFixed(0)} s (peak oxidation ${(peakOx / 1e6).toFixed(1)} MW), ` +
+      `release limit t=${lostAt.toFixed(0)} s; clad ${sfpCladC(sim.state).toFixed(0)} C, ` +
+      `${((clad().oxidation?.oxidizedFraction ?? 0) * 100).toFixed(2)}% of the cladding gone, ` +
+      `${(rel?.CsI ?? 0).toExponential(2)} mol CsI out`);
     if (firstUncovered < 0) fail('an unfed pool must uncover its racks inside the level');
-    if (lossAt < 0) fail(`an unfed pool must stay uncovered past the ${SFP_GRACE} s grace period`);
+    if (dryAt < 0) fail('an unfed pool must BOIL DRY inside the level, not just uncover');
+    if (ignitedAt < 0) fail('dry racks must heat past 900 C inside the level');
+    if (!(peakOx > 1e6)) fail(`cladding oxidation must become a real heat source, peaked at ${(peakOx / 1e6).toFixed(2)} MW`);
+    if (lostAt < 0) fail('an unfed pool must pass the release limit before the clock runs out');
+    if (lostAt > 0 && dryAt > 0 && !(lostAt > dryAt)) fail('the release must follow the dry-out, not precede it');
   }
 
   // -- 2 & 3. The suction lift ---------------------------------------------
@@ -350,7 +371,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     }
   }
 
-  // -- 4. Six hours: sea pump either side of the wave, tanks through it -----
+  // -- 4. Eight hours: sea pump either side of the wave, tanks through it ---
   if (wants('4')) {
     const plant = sfpPlant();
     plant.components.push(
@@ -399,7 +420,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     let floodedAt = -1;
     let recoveredAt = -1;
     let lastLog = 0;
-    while (sim.state.time < 21600) {
+    while (sim.state.time < 28800) {
       run(sim, 20, 0.5);
       sim.state.pendingEvents = [];
       const lvl = sfpLevel(sim.state);
@@ -422,7 +443,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
           `shore ${shore.flooded ? 'FLOODED' : 'dry'} (${shore.effectiveSpeed.toFixed(2)})`);
       }
     }
-    console.log(`  [4] six hours: min pool level ${minLevel.toFixed(2)} m (racks at ${SFP_RACK_TOP} m), ` +
+    console.log(`  [4] eight hours: min pool level ${minLevel.toFixed(2)} m (racks at ${SFP_RACK_TOP} m), ` +
       `peak clad ${maxClad.toFixed(0)} C, longest uncovery ${worstUncovered.toFixed(0)} s, ` +
       `shore pump drowned at t=${floodedAt.toFixed(0)} s and restarted at t=${recoveredAt.toFixed(0)} s`);
     if (!(worstUncovered < SFP_GRACE)) fail(`the answer must keep the racks covered, uncovered for ${worstUncovered.toFixed(0)} s`);

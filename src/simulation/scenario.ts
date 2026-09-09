@@ -10,6 +10,7 @@
 
 import { SimulationState } from './types';
 import { ScenarioAction, ScenarioEvent, ScenarioSpec } from './scenario-types';
+import { applyScriptedBurst } from './operators/burst-operator';
 
 export function initScenarioState(spec: ScenarioSpec | undefined): SimulationState['scenario'] {
   if (!spec || !spec.events || spec.events.length === 0) return undefined;
@@ -49,6 +50,16 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
       const n = state.flowNodes.get(a.id);
       if (!n) throw new Error(`[Scenario] turbine node '${a.id}' not found`);
       n.governorValve = a.value;
+      return;
+    }
+    case 'burst': {
+      applyScriptedBurst(state, a.id, {
+        area: a.area,
+        fraction: a.fraction,
+        elevation: a.elevation,
+        openingHeight: a.openingHeight,
+        message: a.breachMessage,
+      });
       return;
     }
     case 'water-level': {

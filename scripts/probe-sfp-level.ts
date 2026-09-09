@@ -43,11 +43,11 @@ while (sim.state.time < seconds) {
   run(sim, Math.min(step, seconds - sim.state.time), dt);
   if (sim.state.time >= next) {
     next = sim.state.time + 600;
-    const leakConn = sim.state.flowConnections.find(c => c.id === 'flow-crack-atmosphere')!;
+    const leakConn = sim.state.flowConnections.find(c => c.id === 'break-pool');
     const puddle = Array.from(sim.state.surfaceWater!.volumes.values()).reduce((s, v) => s + v, 0);
     console.log(
       `${sim.state.time.toFixed(0).padStart(9)}  ${nodeLiquidLevel(pool()).toFixed(2).padStart(8)}  ` +
-      `${leakConn.massFlowRate.toFixed(1).padStart(10)}  ${(pool().fluid.temperature - 273.15).toFixed(1).padStart(10)}  ` +
+      `${(leakConn?.massFlowRate ?? 0).toFixed(1).padStart(10)}  ${(pool().fluid.temperature - 273.15).toFixed(1).padStart(10)}  ` +
       `${(clad().temperature - 273.15).toFixed(1).padStart(10)}  ${puddle.toFixed(1).padStart(14)}`);
   }
   sim.state.pendingEvents = [];

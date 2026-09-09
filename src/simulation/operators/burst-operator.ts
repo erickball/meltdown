@@ -216,7 +216,7 @@ export class BurstCheckOperator implements ConstraintOperator {
       if (burstState.isBurst) {
         // Use absolute gauge pressure for break growth
         const effectivePressure = burstState.isCollapse ? -gaugePressure : gaugePressure;
-        this.updateBreakSize(burstState, effectivePressure, newState, config);
+        updateBreakSize(burstState, effectivePressure, newState, config);
       }
     }
 
@@ -359,7 +359,7 @@ export class BurstCheckOperator implements ConstraintOperator {
     );
 
     // Create break flow connection
-    this.createBreakConnection(burstState, state, config);
+    createBreakConnection(burstState, state, config);
 
     // Queue event for GameLoop to emit
     if (!state.pendingEvents) state.pendingEvents = [];
@@ -392,132 +392,264 @@ export class BurstCheckOperator implements ConstraintOperator {
       `ΔP=${(pressure / 1e5).toFixed(1)} bar, break=${(burstState.currentBreakFraction * 100).toFixed(1)}%`
     );
   }
+}
 
-  /**
-   * Create a break flow connection from the burst node to its container.
-   */
-  private createBreakConnection(
-    burstState: BurstState,
-    state: SimulationState,
-    config: BurstConfig
-  ): void {
-    const node = state.flowNodes.get(burstState.nodeId);
-    if (!node) return;
+/**
+ * Create a break flow connection from the burst node to its container.
+ *
+ * Module level (not a method) because a scenario can open a break too - see
+ * `applyScriptedBurst` - and both routes must produce the SAME flow path.
+ */
+function createBreakConnection(
+  burstState: BurstState,
+  state: SimulationState,
+  config: BurstConfig
+): void {
+  const node = state.flowNodes.get(burstState.nodeId);
+  if (!node) return;
 
-    // Determine discharge target - always the container
-    let targetNodeId: string;
-    if ((burstState.isTubeSide || burstState.isNestedBoundary) && burstState.shellNodeId) {
-      // A nested boundary discharges into the volume around it, not to
-      // containment: tubes into the shell, a duct liner into its annulus
-      targetNodeId = burstState.shellNodeId;
-    } else if (node.containerId) {
-      // Contained component breaks to container
-      targetNodeId = node.containerId;
-    } else {
-      // Uncontained component breaks to atmosphere
-      targetNodeId = 'atmosphere';
+  // Determine discharge target - always the container
+  let targetNodeId: string;
+  if ((burstState.isTubeSide || burstState.isNestedBoundary) && burstState.shellNodeId) {
+    // A nested boundary discharges into the volume around it, not to
+    // containment: tubes into the shell, a duct liner into its annulus
+    targetNodeId = burstState.shellNodeId;
+  } else if (node.containerId) {
+    // Contained component breaks to container
+    targetNodeId = node.containerId;
+  } else {
+    // Uncontained component breaks to atmosphere
+    targetNodeId = 'atmosphere';
+  }
+
+  const breakConnId = `break-${burstState.nodeId}`;
+
+  // Check if break connection already exists (shouldn't happen on first burst)
+  let breakConn = state.flowConnections.find(c => c.id === breakConnId);
+
+  if (!breakConn) {
+    // Calculate break area based on node's flow area
+    const breakArea = node.flowArea * burstState.currentBreakFraction;
+
+    // Calculate fromElevation relative to node bottom
+    // Use the pseudorandom break elevation if set, otherwise fall back to node midpoint
+    const fromElev = burstState.breakElevation !== undefined
+      ? burstState.breakElevation - node.elevation
+      : (node.height ?? 0) / 2;
+
+    // Generate random direction for the break (0 to 2π)
+    // Use a different seed offset than break size to get independent randomness
+    const breakDirection = seededRandom(burstState.breakSizeSeed + 7777) * Math.PI * 2;
+
+    breakConn = {
+      id: breakConnId,
+      fromNodeId: burstState.nodeId,
+      toNodeId: targetNodeId,
+      flowArea: breakArea,
+      hydraulicDiameter: Math.sqrt(4 * breakArea / Math.PI),
+      length: 0.1,                         // Short path for break
+      elevation: 0,                        // Net elevation change (break to target)
+      fromElevation: fromElev,             // Elevation of break relative to node bottom
+      resistanceCoeff: 2.0,                // Sharp-edged orifice
+      massFlowRate: 0,
+      isBreakConnection: true,
+      burstSourceNodeId: burstState.nodeId,
+      breakFraction: burstState.currentBreakFraction,
+      breakDischargeCoeff: config.breakDischargeCoeff,
+      breakDirection,                      // Random direction for rendering
+      fromOpeningHeight: burstState.breakOpeningHeight,
+    };
+    state.flowConnections.push(breakConn);
+  }
+}
+
+/**
+ * Update break size for an already-burst/collapsed component.
+ * Breaks can grow if pressure continues to increase, but cannot shrink.
+ */
+function updateBreakSize(
+  burstState: BurstState,
+  pressure: number,
+  state: SimulationState,
+  config: BurstConfig
+): void {
+  // Use appropriate threshold based on failure mode
+  const thresholdPressure = burstState.isCollapse
+    ? burstState.collapsePressure
+    : burstState.burstPressure;
+  let newBreakFraction = calculateBreakFraction(
+    pressure,
+    thresholdPressure,
+    config,
+    burstState.breakSizeSeed
+  );
+
+  // Melt-through holes grow with the melted-away head fraction, not
+  // just overpressure (a depressurized vessel still drains through the
+  // hole the corium is candling open)
+  if (burstState.isMeltThrough) {
+    const head = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
+    if (head && head.initialMass && head.initialMass > 0) {
+      const headLost = 1 - head.mass / head.initialMass;
+      newBreakFraction = Math.max(
+        newBreakFraction,
+        Math.min(config.maxBreakFraction, headLost)
+      );
     }
+  }
 
+  // Break can only grow, not shrink
+  if (newBreakFraction > burstState.currentBreakFraction) {
+    const oldFraction = burstState.currentBreakFraction;
+    burstState.currentBreakFraction = newBreakFraction;
+
+    // Update break connection flow area
     const breakConnId = `break-${burstState.nodeId}`;
+    const breakConn = state.flowConnections.find(c => c.id === breakConnId);
+    if (breakConn) {
+      const node = state.flowNodes.get(burstState.nodeId);
+      if (node) {
+        const breakArea = node.flowArea * burstState.currentBreakFraction;
+        breakConn.flowArea = breakArea;
+        breakConn.hydraulicDiameter = Math.sqrt(4 * breakArea / Math.PI);
+        breakConn.breakFraction = burstState.currentBreakFraction;
+      }
+    }
 
-    // Check if break connection already exists (shouldn't happen on first burst)
-    let breakConn = state.flowConnections.find(c => c.id === breakConnId);
-
-    if (!breakConn) {
-      // Calculate break area based on node's flow area
-      const breakArea = node.flowArea * burstState.currentBreakFraction;
-
-      // Calculate fromElevation relative to node bottom
-      // Use the pseudorandom break elevation if set, otherwise fall back to node midpoint
-      const fromElev = burstState.breakElevation !== undefined
-        ? burstState.breakElevation - node.elevation
-        : (node.height ?? 0) / 2;
-
-      // Generate random direction for the break (0 to 2π)
-      // Use a different seed offset than break size to get independent randomness
-      const breakDirection = seededRandom(burstState.breakSizeSeed + 7777) * Math.PI * 2;
-
-      breakConn = {
-        id: breakConnId,
-        fromNodeId: burstState.nodeId,
-        toNodeId: targetNodeId,
-        flowArea: breakArea,
-        hydraulicDiameter: Math.sqrt(4 * breakArea / Math.PI),
-        length: 0.1,                         // Short path for break
-        elevation: 0,                        // Net elevation change (break to target)
-        fromElevation: fromElev,             // Elevation of break relative to node bottom
-        resistanceCoeff: 2.0,                // Sharp-edged orifice
-        massFlowRate: 0,
-        isBreakConnection: true,
-        burstSourceNodeId: burstState.nodeId,
-        breakFraction: burstState.currentBreakFraction,
-        breakDischargeCoeff: config.breakDischargeCoeff,
-        breakDirection,                      // Random direction for rendering
-      };
-      state.flowConnections.push(breakConn);
+    // Log significant break growth
+    if (newBreakFraction - oldFraction > 0.05) {
+      console.log(
+        `[BurstCheck] Break grew: ${burstState.componentLabel} ` +
+        `${(oldFraction * 100).toFixed(1)}% → ${(newBreakFraction * 100).toFixed(1)}%`
+      );
     }
   }
+}
 
-  /**
-   * Update break size for an already-burst/collapsed component.
-   * Breaks can grow if pressure continues to increase, but cannot shrink.
-   */
-  private updateBreakSize(
-    burstState: BurstState,
-    pressure: number,
-    state: SimulationState,
-    config: BurstConfig
-  ): void {
-    // Use appropriate threshold based on failure mode
-    const thresholdPressure = burstState.isCollapse
-      ? burstState.collapsePressure
-      : burstState.burstPressure;
-    let newBreakFraction = calculateBreakFraction(
-      pressure,
-      thresholdPressure,
-      config,
-      burstState.breakSizeSeed
-    );
+// ============================================================================
+// Scripted bursts
+// ============================================================================
 
-    // Melt-through holes grow with the melted-away head fraction, not
-    // just overpressure (a depressurized vessel still drains through the
-    // hole the corium is candling open)
-    if (burstState.isMeltThrough) {
-      const head = state.thermalNodes.get(`${burstState.componentId}-lowerhead`);
-      if (head && head.initialMass && head.initialMass > 0) {
-        const headLost = 1 - head.mass / head.initialMass;
-        newBreakFraction = Math.max(
-          newBreakFraction,
-          Math.min(config.maxBreakFraction, headLost)
-        );
-      }
-    }
+/**
+ * What a scenario asks for when it opens a break by hand.
+ *
+ * A pressure burst and an earthquake tearing a liner are the same hole: the
+ * only thing a script supplies that the pressure check works out for itself
+ * is the SIZE and the PLACE. Everything after that - the break connection,
+ * the discharge target (the containing building, else the open air), the
+ * flow, the drawing, and liquid landing in the terrain basin under the
+ * component - is the machinery that was already there.
+ */
+export interface ScriptedBurstSpec {
+  /** Break area (m2). Exactly one of `area` or `fraction`. */
+  area?: number;
+  /** Break area as a fraction of the node's own flow area. */
+  fraction?: number;
+  /** Height of the break above the component's own base (m). Default: the base. */
+  elevation?: number;
+  /** Vertical extent of the opening (m); the draw is averaged over it. */
+  openingHeight?: number;
+  /** Reported in the event banner instead of the generic burst wording. */
+  message?: string;
+}
 
-    // Break can only grow, not shrink
-    if (newBreakFraction > burstState.currentBreakFraction) {
-      const oldFraction = burstState.currentBreakFraction;
-      burstState.currentBreakFraction = newBreakFraction;
-
-      // Update break connection flow area
-      const breakConnId = `break-${burstState.nodeId}`;
-      const breakConn = state.flowConnections.find(c => c.id === breakConnId);
-      if (breakConn) {
-        const node = state.flowNodes.get(burstState.nodeId);
-        if (node) {
-          const breakArea = node.flowArea * burstState.currentBreakFraction;
-          breakConn.flowArea = breakArea;
-          breakConn.hydraulicDiameter = Math.sqrt(4 * breakArea / Math.PI);
-          breakConn.breakFraction = burstState.currentBreakFraction;
-        }
-      }
-
-      // Log significant break growth
-      if (newBreakFraction - oldFraction > 0.05) {
-        console.log(
-          `[BurstCheck] Break grew: ${burstState.componentLabel} ` +
-          `${(oldFraction * 100).toFixed(1)}% → ${(newBreakFraction * 100).toFixed(1)}%`
-        );
-      }
+/**
+ * Open a break on a named component, whatever its pressure is doing.
+ *
+ * The component must have a burst state (every pressure-bearing component
+ * gets one at build time), and it is addressed by component id or by node
+ * id - a scenario names components, the way a valve or pump action does.
+ */
+export function applyScriptedBurst(
+  state: SimulationState,
+  id: string,
+  spec: ScriptedBurstSpec
+): void {
+  if (!state.burstStates || state.burstStates.size === 0) {
+    throw new Error(
+      `[Scenario] burst '${id}': this plant has no burst states at all, so ` +
+      `there is nothing to tear. Only pressure-bearing components get one.`);
+  }
+  let burstState = state.burstStates.get(id);
+  if (!burstState) {
+    for (const [, bs] of state.burstStates) {
+      if (bs.componentId === id) { burstState = bs; break; }
     }
   }
+  if (!burstState) {
+    const known = Array.from(state.burstStates.values())
+      .map(b => b.componentId).join(', ');
+    throw new Error(
+      `[Scenario] burst '${id}': no such component. Components that can be ` +
+      `burst here: ${known}`);
+  }
+  const node = state.flowNodes.get(burstState.nodeId);
+  if (!node) {
+    throw new Error(
+      `[Scenario] burst '${id}': burst state names flow node ` +
+      `'${burstState.nodeId}', which does not exist.`);
+  }
+  if ((spec.area === undefined) === (spec.fraction === undefined)) {
+    throw new Error(
+      `[Scenario] burst '${id}': give exactly one of area (m2) or fraction ` +
+      `(of the node's ${node.flowArea.toFixed(3)} m2 flow area), not both and ` +
+      `not neither.`);
+  }
+  const fraction = spec.fraction !== undefined
+    ? spec.fraction
+    : (spec.area as number) / node.flowArea;
+  if (!(fraction > 0)) {
+    throw new Error(`[Scenario] burst '${id}': break size ${fraction} is not positive.`);
+  }
+
+  const config = state.burstConfig ?? DEFAULT_BURST_CONFIG;
+  const elevation = spec.elevation ?? 0;
+  burstState.breakElevation = node.elevation + elevation;
+  burstState.breakOpeningHeight = spec.openingHeight;
+  burstState.isScripted = true;
+  burstState.currentBreakFraction = Math.max(burstState.currentBreakFraction, fraction);
+  const wasBurst = burstState.isBurst;
+  burstState.isBurst = true;
+  if (!wasBurst) burstState.burstTime = state.time;
+
+  if (wasBurst) {
+    // Already open: move/resize the hole that exists rather than adding a
+    // second one (the connection id is per node).
+    const conn = state.flowConnections.find(c => c.id === `break-${burstState.nodeId}`);
+    if (conn) {
+      const area = node.flowArea * burstState.currentBreakFraction;
+      conn.flowArea = area;
+      conn.hydraulicDiameter = Math.sqrt(4 * area / Math.PI);
+      conn.breakFraction = burstState.currentBreakFraction;
+      conn.fromElevation = elevation;
+      conn.fromOpeningHeight = spec.openingHeight;
+    }
+  } else {
+    createBreakConnection(burstState, state, config);
+    const conn = state.flowConnections.find(c => c.id === `break-${burstState.nodeId}`);
+    // A tear has a height; a hole does not. Either way the connection reads
+    // it the same way every other offtake does.
+    if (conn) conn.fromOpeningHeight = spec.openingHeight;
+  }
+
+  const area = node.flowArea * burstState.currentBreakFraction;
+  if (!state.pendingEvents) state.pendingEvents = [];
+  state.pendingEvents.push({
+    type: 'component-burst',
+    message: spec.message ??
+      `BREACH: ${burstState.componentLabel} is open to the outside - ` +
+      `${area.toFixed(3)} m2 at ${elevation.toFixed(1)} m above its base`,
+    data: {
+      nodeId: burstState.nodeId,
+      componentId: burstState.componentId,
+      breakFraction: burstState.currentBreakFraction,
+      breakElevation: burstState.breakElevation,
+      scripted: true,
+    },
+  });
+  console.log(
+    `[Scenario] SCRIPTED BURST: ${burstState.componentLabel} at t=${state.time.toFixed(1)}s, ` +
+    `${area.toFixed(4)} m2 (${(burstState.currentBreakFraction * 100).toFixed(2)}% of the node's ` +
+    `flow area) at +${elevation.toFixed(2)} m` +
+    (spec.openingHeight ? `, ${spec.openingHeight.toFixed(2)} m tall` : ''));
 }

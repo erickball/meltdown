@@ -160,8 +160,15 @@ export function getLiquidFraction(component: any, fluid: Fluid, isSimulating: bo
   if (!isSimulating && component.fillLevel !== undefined) {
     return component.fillLevel;
   }
-  // In simulation mode or if no fillLevel, derive from mass quality
-  // Pass fluid for NCG-aware pressure correction
+  // Running: the simulation node's OWN liquid level, copied across by
+  // syncSimulationToVisuals. That is the number the physics, the controllers
+  // and the career hazards all read, so a level readout cannot disagree with
+  // the model that drives it.
+  if (fluid.liquidLevelFraction !== undefined) return fluid.liquidLevelFraction;
+  // No synced level (a fluid the sync does not reach, or a preview): fall
+  // back to the phase split derived from mass quality. This route amplifies
+  // any noise in the quality by v_g/v_f, so it is a last resort, not the
+  // normal path.
   const massQuality = fluid.quality ?? 0.5;
   const vaporVolumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
   return 1 - vaporVolumeFraction;

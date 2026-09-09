@@ -131,6 +131,19 @@ for any node.
 - **No wall node.** A buried pool is surrounded by concrete and soil, not by
   the air the generic outer-wall path would connect it to, so it is
   adiabatic through its walls: all the rack power goes into the water.
-- **No fission-product inventory.** The racks oxidise and melt through the
-  generic machinery, but they carry no `fissionProducts` block, so a damaged
-  pool releases hydrogen and not activity.
+- ~~**No fission-product inventory.**~~ ADDED 2026-09-08. The pool states its
+  DECAY HEAT, not a reactor power, so the inventory is derived from the heat
+  plus one stated assumption - `fuelAgeDays` (default 30, a freshly offloaded
+  core). Way-Wigner run backwards gives the rated power this fuel came off,
+  and the core model's 700 / 250 mol per GWt gives the moles: 8 MW at 30 days
+  is the tail of a 4.55 GWt core, so 3184 mol of noble gas and 1137 mol of
+  CsI-class volatiles. Release then runs through the same CORSOR machinery a
+  core uses.
+- **The pool's decay heat does not follow its released fission products.**
+  `fuelPower` is a declared constant (that is the component's design), so a
+  pool that has released half its volatiles still makes its full stated heat.
+  A core's does follow them.
+- **The cladding burns in AIR as well as steam** (2026-09-08): both reactions
+  run in parallel on their own oxidant's concentration, with kinetics and
+  transport in series. See `docs/zircaloy-air-oxidation.md` - including the
+  natural-draft gap that stops a drained pool from actually drawing air in.

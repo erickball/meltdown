@@ -21,7 +21,36 @@ export type ScenarioAction =
   /** Set a turbine node's governor valve directly (0 shut .. 1 open). */
   | { kind: 'turbine-governor'; id: string; value: number }
   /** Move a water body's surface (m above datum) to a level, over `over` seconds (a tsunami). */
-  | { kind: 'water-level'; id: string; surface: number; over?: number };
+  | { kind: 'water-level'; id: string; surface: number; over?: number }
+  /**
+   * Tear a hole in a component, whatever its pressure is doing.
+   *
+   * This is the SAME break a pressure burst opens - the same break
+   * connection, discharging to the containing building or, for an
+   * uncontained component, to the open air and onto the ground - so a
+   * scripted failure looks and behaves like a real one. What the script
+   * supplies is only what the pressure check would otherwise work out for
+   * itself: how big the hole is and where it sits. An earthquake cracking
+   * a fuel-pool liner is not an overpressure event, and nothing should have
+   * to pretend it is.
+   */
+  | {
+      kind: 'burst'; id: string;
+      /** Break area (m2). Give exactly one of `area` or `fraction`. */
+      area?: number;
+      /** Break area as a fraction of the component's own flow area. */
+      fraction?: number;
+      /** Height of the break above the component's base (m). Default 0 - the floor. */
+      elevation?: number;
+      /**
+       * Vertical extent of the opening (m). A tall tear draws a blend of
+       * what stands across it, so the leak crossfades from water to vapour
+       * and dies away as the level sweeps past, with no threshold anywhere.
+       */
+      openingHeight?: number;
+      /** Banner text, in place of the generic breach wording. */
+      breachMessage?: string;
+    };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */

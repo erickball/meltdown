@@ -26,6 +26,17 @@ export interface Fluid {
   ncg?: GasComposition; // mol - moles of each NCG species
   mass?: number;        // kg - total fluid mass
   volume?: number;      // m³ - volume (for NCG fraction calculation)
+  /**
+   * Fraction of the component's height standing in liquid (0-1), copied
+   * straight from the simulation node's own liquid level. The renderer
+   * used to re-derive this from (quality, pressure) through the steam
+   * tables, which multiplies any wobble in the mass quality by v_g/v_f -
+   * ~15000 at pool conditions - so a part-in-1e5 ripple in a node's
+   * specific energy showed up as a 10 cm wobble in a level readout that
+   * the physics does not have. Written by syncSimulationToVisuals; absent
+   * in construction mode, where fillLevel is the level.
+   */
+  liquidLevelFraction?: number;
 }
 
 export type ComponentType =
@@ -166,6 +177,16 @@ export interface PoolComponent extends ComponentBase {
   rackBottomElevation: number; // m - bottom of the active fuel above the pool floor
   /** Initial rack metal temperature (K). Defaults to the water temperature. */
   rackTemperature?: number;
+  /**
+   * How long the stored fuel has been out of the reactor (days). Nothing in
+   * the thermal model uses it - `fuelPower` is the heat, stated directly -
+   * but the RADIOLOGICAL inventory has to come from somewhere, and decay
+   * heat plus an age is enough to say what reactor power this fuel came off
+   * and therefore how much caesium and xenon is standing in the racks.
+   * Defaults to 30 days: a freshly offloaded core, which is both the worst
+   * case and the reason a pool ever gets into trouble.
+   */
+  fuelAgeDays?: number;
   pressureRating?: number;  // bar - liner/wall rating
 }
 

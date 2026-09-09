@@ -1,8 +1,12 @@
 # Level 1: HOT AND DRY (the spent fuel pool)
 
 The first career level. No reactor, no turbine, no money: a spent fuel pool on
-a bench above the sea, an earthquake that cracks its liner, and six hours to
-keep the fuel under water with what is in the yard.
+a bench above the sea, an earthquake that cracks its liner, and eight hours
+to keep the fuel under water with what is in the yard.
+
+**Updated 2026-09-08** - see the section "Uncovery is not the loss" at the end:
+the crack is now a scripted burst, the clock is eight hours, running the racks
+dry no longer ends the level, and the run-dry divergence is fixed.
 
 Files:
 
@@ -198,13 +202,79 @@ Everything below is in `scripts/gen-spent-fuel-pool.ts` unless said otherwise.
   level, so a shore pump does not see the extra suction head the real wave
   would give it. This is a pre-existing limitation of the terrain model ("a
   puddle cannot be pumped from"), not something this level introduced.
-* **A pump or a valve run dry against air diverges.** Take a node down to near
-  vacuum, let it draw air, and the mixture energy split ends up asking for
-  water below the triple point; the bracket collapses and the solver gives up.
-  Seen twice while tuning: an unfed pool at t ~ 16.5 ks (2.9 h *after* the
-  level is already lost), and a make-up pump left running after its tanks
-  emptied. Loud, pre-existing, and outside this level's scope - but a player
-  who keeps watching a lost level will hit it.
+* ~~**A pump or a valve run dry against air diverges.**~~ FIXED 2026-09-08 -
+  see below. It was three things and none of them was in water-properties.
 * The control-rod / boron / SCRAM panel and the "MW to Grid" readout are up
   for a plant with no reactor and no turbine. Harmless, and pre-existing for
   any such sandbox plant, but it is noise on a level aimed at newcomers.
+
+---
+
+## Uncovery is not the loss (2026-09-08)
+
+Erick asked for four things after playing it. What changed:
+
+**1. The level readout stopped jittering.** It was the DISPLAY, not the
+physics: the pool level moves 0.006 mm per 0.05 s and its mass is constant to
+seven figures, but `getLiquidFraction` re-derived the phase split from the mass
+quality through the steam tables. At pool conditions the quality is 1.7e-5 and
+v_g/v_f is ~15000, so solver-tolerance noise in a quantity that is a hundred-
+thousandth of the state came out as a **9.4 cm swing, 7.6 cm frame to frame**.
+The node's own liquid level is now synced onto `Fluid.liquidLevelFraction` and
+the renderer uses it: **0.35 mm span, 0.01 mm frame to frame**. Two true-zero
+fixes came with it - the atmosphere node's dry-air fractions are renormalised
+(they summed to 0.9996, so "1 atm" was 40 Pa short of it) and the pool's own IC
+air is `101325 - P_sat`, which took the start-up vent ring from +-8.4 kg/s to
++-0.04 kg/s.
+
+**2. The crack is a scripted BURST.** No more crack pipe and crack valve: the
+earthquake fires `{ kind: 'burst', id: 'pool', area: 0.0170, elevation: 0.4,
+openingHeight: 0.8 }`, which drives the same machinery a pressure rupture does
+- one BurstState, one `break-pool` connection, the same discharge to open air
+and onto the pad, the same rendering. The leak reproduces the old two-
+connection path to within 0.3% (144.2 / 133.5 / 122.8 kg/s at t = 2700 / 3300 /
+3900 s, against 143.9 / 133.3 / 122.6). Deleting the crack valve also removed a
+liquid-solid 2 m3 node that used to crush dt in the first second of the level.
+
+**3. Running the racks dry no longer ends the level.** The `level` hazard is
+gone. The run continues: the pool boils dry, the racks heat, the cladding
+burns, and the level is lost on `maxRelease` = 1.0 of the CsI/Xe release index
+(about 0.017 mol of caesium-iodine, ~8 TBq - "a genuine release ... this one
+makes the news"), with a 1800 C clad-melt backstop. The pool now has a real
+radiological inventory: derived from its declared decay heat and a new
+`fuelAgeDays` (default 30 days) by running Way-Wigner backwards to the rated
+power the fuel came off, then the core model's 700 / 250 mol per GWt. 8 MW at
+30 days = a 4.55 GWt core = 3184 mol of noble gas and 1137 mol of CsI-class
+volatiles.
+
+**The clock went from six hours to eight.** At six hours a do-nothing run WON -
+dry, on fire, forty minutes before the consequence arrived. Eight hours puts
+the release inside the level. That in turn exposed the sea tank emptying
+(3600 t at 350 kg/s), so it now carries an explicit `volume: 200000` while
+keeping its drawn size.
+
+**Unfed timeline** (`SFP_ONLY=1 npx tsx scripts/test-game-levels.ts sfp`):
+
+| t | what |
+| --- | --- |
+| 2400 s | liner tears, 144 kg/s |
+| 5040 s | racks uncovered |
+| 18,120 s | pool boils dry |
+| 22,320 s | cladding past 900 C, 6.1 MW of oxidation against 8 MW of decay heat |
+| 24,020 s | release limit - **level lost**, clad 1174 C, 1.65% of the cladding consumed |
+| 28,800 s | clock, if anyone had fed it |
+
+**4. The cladding burns in air as well as steam** - `docs/zircaloy-air-oxidation.md`.
+On this level it burns mostly in STEAM, because a one-node pool with no
+hydrostatic gas column has no chimney and cannot draw air back in after boiling
+purges it. That gap is written up in the oxidation doc; it is the next thing to
+fix if air ingress matters.
+
+**The run-dry divergence is fixed**, and none of it was in water-properties:
+`fluidHeatCapacity` re-deriving the water state from an ill-conditioned
+subtraction, `computeRatesNorm` dividing the mass rate by the water mass alone
+instead of the node's whole fluid inventory, and `solveMixtureState` not
+recognising the pure-gas limit when the water mass falls below one
+representable unit of the node's energy. The unfed level now runs to t =
+52,680 s instead of dying at 22,440 s (it ends there in a 4700 C rack, which is
+well past anything the model claims to represent).

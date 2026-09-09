@@ -724,6 +724,27 @@ export function primaryControllerSignal(
   return undefined;
 }
 
+/**
+ * The fraction of a node's height that stands in liquid (0-1) - the same
+ * number `nodeLiquidLevel` reports, expressed against the node's height so
+ * a drawing can use it directly.
+ *
+ * Single-phase nodes are exact (a liquid node is full, a vapour node is
+ * empty) rather than divided out, so a solid-liquid node cannot read as
+ * 100.3% full through its own compressibility.
+ */
+export function nodeLiquidLevelFraction(node: FlowNode): number {
+  const phase = node.fluid.phase;
+  if (phase === 'vapor') return 0;
+  if (phase === 'liquid') return 1;
+  const height = node.height;
+  if (height !== undefined && height > 0) return nodeLiquidLevel(node) / height;
+  // No height declared: fall back to the volume fraction, which is what a
+  // drawing of a shapeless node can show anyway.
+  const liquidMass = node.fluid.mass * (1 - (node.fluid.quality ?? 0));
+  return node.volume > 0 ? (liquidMass / approxLiquidDensity(node)) / node.volume : 0;
+}
+
 export function nodeLiquidLevel(node: FlowNode): number {
   const phase = node.fluid.phase;
   if (phase === 'vapor') return 0;

@@ -44,6 +44,7 @@ import {
   commitLivePlantEdit,
   revertLivePlantEdit,
   LiveEditSnapshot,
+  nodeLiquidLevelFraction,
 } from './simulation';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
@@ -4320,6 +4321,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // instead of defaulting to steam-white
         component.primaryFluid.ncg = primaryNode.fluid.ncg;
         component.primaryFluid.volume = primaryNode.volume;
+        component.primaryFluid.liquidLevelFraction = nodeLiquidLevelFraction(primaryNode);
       }
 
       // Extra tube bundles: each is its own flow path and can be in a
@@ -4342,6 +4344,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           fluids[b].separation = bundleNode.separation;
           fluids[b].ncg = bundleNode.fluid.ncg;
           fluids[b].volume = bundleNode.volume;
+          fluids[b].liquidLevelFraction = nodeLiquidLevelFraction(bundleNode);
         });
       }
 
@@ -4358,6 +4361,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.secondaryFluid.separation = secondaryNode.separation;
         component.secondaryFluid.ncg = secondaryNode.fluid.ncg;
         component.secondaryFluid.volume = secondaryNode.volume;
+        component.secondaryFluid.liquidLevelFraction = nodeLiquidLevelFraction(secondaryNode);
       }
       continue;
     }
@@ -4384,6 +4388,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         cv.annulusFluid.separation = annulusNode.separation;
         cv.annulusFluid.ncg = annulusNode.fluid.ncg;
         cv.annulusFluid.volume = annulusNode.volume;
+        cv.annulusFluid.liquidLevelFraction = nodeLiquidLevelFraction(annulusNode);
       }
     }
 
@@ -4419,6 +4424,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.separation = vesselNode.separation;
           component.fluid.ncg = vesselNode.fluid.ncg;
           component.fluid.volume = vesselNode.volume;
+          component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(vesselNode);
         }
         // Core barrel syncs automatically via normal component loop (it has its own fluid)
         // Sync fuel temperature from core barrel's thermal node
@@ -4446,6 +4452,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.separation = insideNode.separation;
           component.fluid.ncg = insideNode.fluid.ncg;
           component.fluid.volume = insideNode.volume;
+          component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(insideNode);
         }
       }
       // Sync fluid from outside barrel region (downcomer) to outsideBarrelFluid
@@ -4468,6 +4475,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           rv.outsideBarrelFluid.separation = outsideNode.separation;
           rv.outsideBarrelFluid.ncg = outsideNode.fluid.ncg;
           rv.outsideBarrelFluid.volume = outsideNode.volume;
+          rv.outsideBarrelFluid.liquidLevelFraction = nodeLiquidLevelFraction(outsideNode);
         }
       }
       // Sync fuel temperature if present
@@ -4491,6 +4499,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // Sync NCG and volume for proper visualization
         component.fluid.ncg = simNode.fluid.ncg;
         component.fluid.volume = simNode.volume;
+        component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(simNode);
       } else if (!warnedMissingSimNodes.has(component.id)) {
         // Warn once per component, not every frame
         console.warn(`[Sync] ${component.id}: no simNode found for '${simNodeId}'`);
