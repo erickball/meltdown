@@ -979,3 +979,141 @@ body {
   color: #4a7 !important;
   font-weight: bold;
 }
+
+/* ---- History dialog: grouped timeline ---- */
+.history-list {
+  font-size: 11px;
+}
+
+.history-note {
+  color: #9ab;
+  padding: 4px 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid #7af;
+  background: rgba(100, 150, 255, 0.08);
+}
+
+.history-group {
+  margin: 2px 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+}
+
+.history-group > summary {
+  cursor: pointer;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 3px;
+}
+
+.history-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.history-group > summary::before {
+  content: '▸';
+  color: #7af;
+  width: 10px;
+  flex: none;
+}
+
+.history-group[open] > summary::before {
+  content: '▾';
+}
+
+.history-group > summary:hover {
+  background: rgba(100, 150, 255, 0.2);
+}
+
+.history-group-current > summary {
+  border-left: 2px solid #7af;
+}
+
+.history-range {
+  flex: 1;
+}
+
+.history-count {
+  color: #888;
+  font-size: 10px;
+}
+
+.history-events {
+  display: inline-flex;
+  gap: 2px;
+  font-size: 11px;
+}
+
+.history-more {
+  color: #888;
+  font-size: 10px;
+}
+
+.history-group-body {
+  padding-left: 12px;
+  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  margin-left: 8px;
+}
+
+.history-item {
+  padding: 4px 8px;
+  margin: 2px 0;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  display: flex;
+  justify-content: space-between;
+}
+
+.history-item:hover {
+  background: rgba(100, 150, 255, 0.2);
+}
+
+.history-item.history-current {
+  background: rgba(100, 150, 255, 0.3);
+  border-color: #7af;
+}
+
+.history-tag {
+  color: #7af;
+  font-size: 9px;
+  margin-left: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.history-step {
+  color: #888;
+}
+
+.history-event {
+  padding: 3px 8px;
+  margin: 2px 0;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 180, 80, 0.08);
+  border-left: 2px solid #fa6;
+  color: #fc9;
+}
+
+.history-event:hover {
+  background: rgba(255, 180, 80, 0.2);
+}
+
+.history-event-icon {
+  flex: none;
+}
+
+.history-event-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

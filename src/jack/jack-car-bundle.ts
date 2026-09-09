@@ -30,7 +30,7 @@
 
 import type { PlantState } from '../types';
 import type { SimulationState } from '../simulation/types';
-import type { StateSnapshot, SnapshotKind, FlowRatesContext } from '../game/state-history';
+import type { StateSnapshot, SnapshotKind, FlowRatesContext, HistoryEpoch, HistoryEvent } from '../game/state-history';
 import {
   SIM_STATE_VERSION,
   serializePlantDesign,
@@ -55,6 +55,9 @@ export interface HistoryExport {
   dtLogStep: number[];
   dtLogTime: number[];
   dtLogDt: number[];
+  /** Plant designs over time and the event log (absent in older histories). */
+  epochs?: HistoryEpoch[];
+  events?: HistoryEvent[];
 }
 
 /** Everything the app hands over to build a bundle (see JackHost). */
@@ -91,6 +94,8 @@ export interface BundleSnapshot {
   isSecondMarker: boolean;
   flowRates: FlowRatesContext;
   state: SimulationState;
+  epoch: number;
+  seq: number;
 }
 
 /** The decoded bundle. */
@@ -107,6 +112,8 @@ export interface CarBundle {
     dtLogStep: number[];
     dtLogTime: number[];
     dtLogDt: number[];
+    epochs: HistoryEpoch[];
+    events: HistoryEvent[];
   } | null;
   summary: Omit<CarBundleSummary, 'bytes'>;
 }
@@ -126,7 +133,8 @@ export interface BundlePlan {
 export function mustKeepIndices(snapshots: ReadonlyArray<Pick<StateSnapshot, 'kind'>>): number[] {
   const out: number[] = [];
   for (let i = 0; i < snapshots.length; i++) {
-    if (snapshots[i].kind === 'initial' || snapshots[i].kind === 'input' || i === snapshots.length - 1) {
+    const k = snapshots[i].kind;
+    if (k === 'initial' || k === 'input' || k === 'rebuild' || i === snapshots.length - 1) {
       out.push(i);
     }
   }
@@ -241,7 +249,7 @@ interface WireBundle {
   createdAt: string;
   plant: Record<string, unknown>;
   simState: SimulationState;
-  history: { snapshots: BundleSnapshot[]; dtLog: WireDtLog } | null;
+  history: { snapshots: BundleSnapshot[]; dtLog: WireDtLog; epochs?: HistoryEpoch[]; events?: HistoryEvent[] } | null;
   summary: Omit<CarBundleSummary, 'bytes'>;
 }
 
@@ -285,6 +293,8 @@ function toBundleSnapshot(s: StateSnapshot): BundleSnapshot {
     isSecondMarker: s.isSecondMarker,
     flowRates: s.flowRates,
     state: s.state,
+    epoch: s.epoch,
+    seq: s.seq,
   };
 }
 
@@ -351,7 +361,12 @@ export async function buildCarBundle(
 
   const assemble = (plan: BundlePlan | null): WireBundle => {
     const history = h && plan
-      ? { snapshots: plan.snapshotIndices.map(i => toBundleSnapshot(h.snapshots[i])), dtLog: packDtLog(h, plan.dtStart) }
+      ? {
+          snapshots: plan.snapshotIndices.map(i => toBundleSnapshot(h.snapshots[i])),
+          dtLog: packDtLog(h, plan.dtStart),
+          epochs: h.epochs ?? [],
+          events: h.events ?? [],
+        }
       : null;
     const replayFrom = h && plan ? replayFromTime(h, plan) : null;
     const trimmed = h && plan
@@ -509,7 +524,14 @@ export async function decodeCarBundle(base64: string): Promise<CarBundle> {
     createdAt: wire.createdAt,
     plant: wire.plant,
     simState: wire.simState,
-    history: wire.history ? { snapshots: wire.history.snapshots, ...unpackDtLog(wire.history.dtLog) } : null,
+    history: wire.history
+      ? {
+          snapshots: wire.history.snapshots,
+          ...unpackDtLog(wire.history.dtLog),
+          epochs: wire.history.epochs ?? [],
+          events: wire.history.events ?? [],
+        }
+      : null,
     summary: wire.summary,
   };
 }

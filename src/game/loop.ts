@@ -45,7 +45,7 @@ import {
 } from '../simulation';
 import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
-import { StateHistory, StateSnapshot } from './state-history';
+import { StateHistory, StateSnapshot, HistoryEpoch, HistoryEvent, SnapshotKind } from './state-history';
 import { cloneSimulationState } from '../simulation/solver';
 
 export type IntegrationMethod = 'euler' | 'rk45';
@@ -104,6 +104,12 @@ export interface GameEvent {
   message: string;
   data?: Record<string, unknown>;
 }
+
+/** Event types the rewind history keeps as timeline markers. The rest
+ *  (speed warnings, auto-slowdown, transient alarms) are notifications. */
+export const HISTORY_EVENT_TYPES: ReadonlySet<GameEventType> = new Set<GameEventType>([
+  'scram', 'scram-reset', 'component-burst', 'scenario', 'shake', 'simulation-error',
+]);
 
 export class GameLoop {
   private rk45Solver: RK45Solver | null = null;
@@ -284,7 +290,7 @@ export class GameLoop {
   /**
    * Reset simulation to a new state
    */
-  resetState(newState: SimulationState): void {
+  resetState(newState: SimulationState, design: unknown = null): void {
     this.state = newState;
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
@@ -303,7 +309,7 @@ export class GameLoop {
 
     // Clear state history on reset and record initial state (step 0)
     this.stateHistory.clear();
-    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined);
+    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined, design);
     this.lastSnapshotStep = 0;
 
     console.log('[GameLoop] Simulation state reset');
@@ -667,6 +673,14 @@ export class GameLoop {
    * Emit a game event
    */
   private emitEvent(event: GameEvent): void {
+    // The rewind history keeps the notable ones (ruptures, scrams, scenario
+    // events, ...) so the timeline can show what happened between which
+    // states. Logged before the notification de-duplication below: two
+    // components bursting within a second are two events.
+    if (HISTORY_EVENT_TYPES.has(event.type)) {
+      this.stateHistory.recordEvent(this.stateHistory.getPositionStep(), event.time, event.type, event.message);
+    }
+
     // Prevent duplicate events in quick succession
     const recentSimilar = this.recentEvents.find(
       e => e.type === event.type && this.state.time - e.time < 1.0
@@ -701,16 +715,14 @@ export class GameLoop {
    * Set/replace the simulation state
    * Used when switching from construction mode with a new plant configuration
    */
-  setSimulationState(newState: SimulationState): void {
+  setSimulationState(newState: SimulationState, design: unknown = null): void {
     this.state = newState;
     // Reset tracking variables
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
 
     // A different plant is a different run: its wall clock starts at zero and
-    // the old plant's speed samples say nothing about this one. (A simulation
-    // resumed after a construction visit keeps its simulated time but starts a
-    // fresh wall clock - the tooltip on the readout says so.)
+    // the old plant's speed samples say nothing about this one.
     this.runningWallTime = 0;
     this.speedSamples = [];
 
@@ -723,12 +735,79 @@ export class GameLoop {
       this.rk45Solver.reset();
     }
 
-    // Clear state history and record initial state (step 0)
+    // Clear state history and record initial state (step 0) - the design it
+    // was built from is what the t=0 button puts back after later rebuilds
     this.stateHistory.clear();
-    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined);
+    this.stateHistory.recordSnapshot(this.state, 0, 'initial', undefined, design);
     this.lastSnapshotStep = 0;
 
     console.log(`[GameLoop] Simulation state updated with ${newState.flowNodes.size} flow nodes`);
+  }
+
+  /**
+   * Replace the state with a rebuilt one (the plant was edited - in
+   * construction mode or live - and the simulation re-created around the
+   * edit at the SAME simulated time). Unlike setSimulationState this keeps
+   * the rewind history: the old design's states stay seekable as an earlier
+   * epoch (see HistoryEpoch), the rebuilt state opens a new epoch at the
+   * current position, and step numbering continues. `design` is the
+   * serialized plant the new state describes; `label` names the edit.
+   *
+   * Recording the rebuild while positioned in the past branches the
+   * timeline there, like any other input.
+   */
+  rebuildSimulationState(newState: SimulationState, design: unknown, label: string): void {
+    if (Math.abs(newState.time - this.state.time) > 1e-6) {
+      throw new Error(
+        `[GameLoop] rebuildSimulationState: the rebuilt state is at t=${newState.time} but the ` +
+        `simulation is at t=${this.state.time}. A rebuild must keep the simulated time; a state at ` +
+        `a different time is a new run (use setSimulationState).`);
+    }
+    this.state = newState;
+    this.previousPower = newState.neutronics?.power ?? 0;
+    this.previousMaxTemp = this.getMaxFuelTemperature();
+    // A resumed simulation keeps its simulated time but starts a fresh wall
+    // clock - the tooltip on the readout says so
+    this.runningWallTime = 0;
+    this.speedSamples = [];
+    this.recentEvents = [];
+
+    const step = this.stateHistory.getPositionStep();
+    this.stateHistory.recordRebuild(this.state, step, design, label);
+
+    // The solver's cross-step context (last accepted flow rates) describes
+    // the old node set; clear it, but keep step numbers increasing - they
+    // order the history and must never repeat
+    if (this.rk45Solver) {
+      this.rk45Solver.reset();
+      this.rk45Solver.resumeStepCounter(this.stateHistory.headStep());
+    }
+    this.lastSnapshotStep = this.stateHistory.headStep();
+
+    console.log(
+      `[GameLoop] Simulation rebuilt (${label}) at t=${newState.time.toFixed(3)} s, step ${step}: ` +
+      `epoch ${this.stateHistory.getInfo().currentEpoch} of the rewind history`);
+  }
+
+  /**
+   * Called when a seek lands in a different epoch than the one before it:
+   * the restored state describes another plant design, and whoever owns
+   * the plant must put that design back (main.ts restores the components
+   * and connections from `epoch.design`). Runs AFTER the state and the
+   * history position are updated.
+   */
+  public onEpochChange?: (epoch: HistoryEpoch, previousEpochId: number) => void;
+
+  private notifyEpochChange(previousEpochId: number): void {
+    const now = this.stateHistory.currentEpoch();
+    if (!now || now.id === previousEpochId) return;
+    if (!this.onEpochChange) {
+      console.warn(
+        `[GameLoop] Seek moved from epoch ${previousEpochId} to epoch ${now.id} (${now.label}) with no ` +
+        `onEpochChange handler: the restored state describes a different plant design than the one on screen.`);
+      return;
+    }
+    this.onEpochChange(now, previousEpochId);
   }
 
   /**
@@ -1189,12 +1268,14 @@ export class GameLoop {
    * Returns true if successful, false if already at the beginning.
    */
   stepBack(): boolean {
+    const epochBefore = this.stateHistory.currentEpoch()?.id ?? 0;
     const snapshot = this.stateHistory.navigateBack();
     if (!snapshot) {
       console.log('[GameLoop] No history to step back to');
       return false;
     }
     this.adoptSnapshot(snapshot);
+    this.notifyEpochChange(epochBefore);
     console.log(`[GameLoop] Navigated back to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
     return true;
   }
@@ -1204,12 +1285,14 @@ export class GameLoop {
    * Returns true if successful, false if already at the end.
    */
   stepForward(): boolean {
+    const epochBefore = this.stateHistory.currentEpoch()?.id ?? 0;
     const snapshot = this.stateHistory.navigateForward();
     if (!snapshot) {
       console.log('[GameLoop] Already at end of history');
       return false;
     }
     this.adoptSnapshot(snapshot);
+    this.notifyEpochChange(epochBefore);
     console.log(`[GameLoop] Navigated forward to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
     return true;
   }
@@ -1219,14 +1302,40 @@ export class GameLoop {
    * Returns the actual time navigated to, or null if invalid index.
    */
   navigateToHistoryIndex(index: number): number | null {
+    const epochBefore = this.stateHistory.currentEpoch()?.id ?? 0;
     const snapshot = this.stateHistory.navigateToIndex(index);
     if (!snapshot) {
       console.log('[GameLoop] Invalid history index');
       return null;
     }
     this.adoptSnapshot(snapshot);
+    this.notifyEpochChange(epochBefore);
     console.log(`[GameLoop] Navigated to t=${snapshot.simTime.toFixed(3)}s (step ${snapshot.stepNumber})`);
     return snapshot.simTime;
+  }
+
+  /**
+   * Back to the very beginning of the run: the first recorded state, which
+   * is the simulation as it was first built - before any edit, rupture or
+   * scenario event, with the plant design of that time put back on screen
+   * (via onEpochChange). Running from there discards everything recorded
+   * after it, like any other branch. Returns what it landed on, or null
+   * with no history; `exact` is false when the run's first state has been
+   * lost (a history loaded from an older save) and the oldest survivor was
+   * used instead.
+   */
+  seekToStart(): { time: number; exact: boolean } | null {
+    const first = this.stateHistory.firstSnapshot();
+    if (!first) return null;
+    const time = this.navigateToHistoryIndex(first.index);
+    if (time === null) return null;
+    const exact = first.kind === 'initial';
+    if (!exact) {
+      console.warn(
+        `[GameLoop] The run's initial state is not in the history; landed on the oldest ` +
+        `surviving snapshot at t=${time.toFixed(3)} s instead.`);
+    }
+    return { time, exact };
   }
 
   /**
@@ -1235,6 +1344,7 @@ export class GameLoop {
    * Returns the actual time restored to, or null if no history.
    */
   restoreToTime(targetTime: number): number | null {
+    const epochBefore = this.stateHistory.currentEpoch()?.id ?? 0;
     const restoredState = this.stateHistory.restoreToTime(targetTime);
     if (!restoredState) {
       console.log('[GameLoop] No history to restore from');
@@ -1250,6 +1360,7 @@ export class GameLoop {
         (this.rk45Solver as any).config.maxDt
       );
     }
+    this.notifyEpochChange(epochBefore);
     console.log(`[GameLoop] Navigated to t=${restoredState.time.toFixed(3)}s (requested ${targetTime.toFixed(3)}s)`);
     return restoredState.time;
   }
@@ -1270,6 +1381,7 @@ export class GameLoop {
    */
   seekToStep(targetStep: number): number | null {
     if (!this.rk45Solver) return null;
+    const epochBefore = this.stateHistory.currentEpoch()?.id ?? 0;
     const plan = this.stateHistory.planSeek(targetStep);
     if (!plan) return null;
 
@@ -1303,11 +1415,12 @@ export class GameLoop {
     state.pendingEvents = [];
 
     this.state = state;
-    this.stateHistory.setPosition(landedStep, state.time);
+    this.stateHistory.setPosition(landedStep, state.time, plan.baseIndex);
     (this.rk45Solver as any).currentDt = Math.min(
       0.001,
       (this.rk45Solver as any).config.maxDt
     );
+    this.notifyEpochChange(epochBefore);
     return state.time;
   }
 
@@ -1372,22 +1485,28 @@ export class GameLoop {
   /**
    * Get information about available state history.
    */
-  getHistoryInfo(): {
-    count: number;
-    oldestTime: number;
-    newestTime: number;
-    currentIndex: number;
-    currentTime: number;
-    currentStepNumber: number;
-  } {
+  getHistoryInfo(): ReturnType<StateHistory['getInfo']> {
     return this.stateHistory.getInfo();
   }
 
   /**
    * Get list of all snapshots for UI display.
    */
-  getSnapshotList(): Array<{ index: number; simTime: number; stepNumber: number; isSecondMarker: boolean }> {
+  getSnapshotList(): Array<{
+    index: number; simTime: number; stepNumber: number; isSecondMarker: boolean;
+    kind: SnapshotKind; epoch: number; seq: number;
+  }> {
     return this.stateHistory.getSnapshotList();
+  }
+
+  /** The history's event log (ruptures, scrams, scenario events, rebuilds). */
+  getHistoryEvents(): HistoryEvent[] {
+    return this.stateHistory.getEvents();
+  }
+
+  /** The plant-design epochs of the history, without their designs. */
+  getHistoryEpochs(): ReturnType<StateHistory['getEpochSummaries']> {
+    return this.stateHistory.getEpochSummaries();
   }
 
   /**

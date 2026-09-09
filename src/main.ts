@@ -1,3 +1,6 @@
+import { deserializePlantDesign } from './simulation/serialization';
+import type { HistoryEpoch } from './game/state-history';
+import { buildTimeline, formatBandTime, eventIcon } from './game/history-timeline';
 import { PlantCanvas, ViewMode } from './render/canvas';
 import { PipeOrientation } from './render/grid-geometry';
 import { installPageZoomReset } from './page-zoom';
@@ -992,14 +995,29 @@ function init() {
     });
   }
 
-  // Reset button - jump to t=0
+  // Reset button - back to the very beginning of the run: the simulation as
+  // it was first built, with the plant design of that time put back if the
+  // plant has been edited since (an epoch change, see restoreDesignFromHistory)
   if (resetSimBtn) {
     resetSimBtn.addEventListener('click', () => {
-      const restoredTime = gameLoop.restoreToTime(0);
-      if (restoredTime !== null) {
+      try {
+        const landed = gameLoop.seekToStart();
+        if (landed === null) {
+          showNotification('No history available', 'warning');
+          return;
+        }
         refreshDisplayAfterRestore();
-      } else {
-        showNotification('No history available', 'warning');
+        if (!landed.exact) {
+          showNotification(
+            `The run's initial state is no longer in the history - landed on the oldest ` +
+            `recorded state instead (t = ${formatClock(landed.time)})`, 'warning', 8000);
+        } else {
+          showNotification('Back at the start of the run. Resuming from here discards the recorded history after it.', 'info', 6000);
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        showNotification('Could not return to the start: ' + msg.substring(0, 160), 'error', 15000);
+        console.error(error);
       }
     });
   }
@@ -1016,50 +1034,101 @@ function init() {
       return;
     }
 
-    // Build snapshot list HTML
-    // Show most recent first, highlight current position
+    // The recorded range as at most ten expandable time bands, each cut
+    // again when opened, down to the snapshots themselves; events
+    // (ruptures, scrams, scenario steps, plant rebuilds) sit between the
+    // snapshots they fall between. Newest first at every level. The path
+    // to the current position starts expanded.
     const currentIdx = historyInfo.currentIndex >= 0 ? historyInfo.currentIndex : snapshots.length - 1;
-
-    let html = '<div style="font-size: 11px;">';
-    // Show in reverse order (newest first)
-    for (let i = snapshots.length - 1; i >= 0; i--) {
-      const s = snapshots[i];
-      const isCurrent = i === currentIdx;
-      const isMarker = s.isSecondMarker;
-      const bgColor = isCurrent ? 'rgba(100, 150, 255, 0.3)' : (isMarker ? 'rgba(255, 255, 255, 0.05)' : 'transparent');
-      const border = isCurrent ? '1px solid #7af' : 'none';
-      const markerIcon = isMarker ? '⏱' : '';
-
-      html += `<div class="history-item" data-index="${i}" style="
-        padding: 4px 8px;
-        margin: 2px 0;
-        cursor: pointer;
-        background: ${bgColor};
-        border: ${border};
-        border-radius: 3px;
-        display: flex;
-        justify-content: space-between;
-      " onmouseover="this.style.background='rgba(100,150,255,0.2)'" onmouseout="this.style.background='${bgColor}'">
-        <span>${markerIcon} t = ${s.simTime.toFixed(3)}s</span>
-        <span style="color: #888;">step ${s.stepNumber}</span>
-      </div>`;
+    const positionOnSnapshot = snapshots[currentIdx] &&
+      Math.abs(snapshots[currentIdx].simTime - historyInfo.currentTime) < 1e-9;
+    const root = buildTimeline(snapshots, gameLoop.getHistoryEvents(), {
+      maxGroups: 10,
+      leafMax: 12,
+      currentIndex: positionOnSnapshot ? currentIdx : undefined,
+      currentTime: historyInfo.currentTime,
+    });
+    if (!root) {
+      showNotification('No history available', 'warning');
+      return;
     }
+    const esc = (s: string): string =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const eventSummary = (events: typeof root.events): string => {
+      if (events.length === 0) return '';
+      const shown = events.slice(0, 3).map(e => `<span title="${esc(e.message)}">${eventIcon(e.type)}</span>`).join('');
+      const more = events.length > 3 ? `<span class="history-more">+${events.length - 3}</span>` : '';
+      return `<span class="history-events">${shown}${more}</span>`;
+    };
+    const renderRows = (items: NonNullable<typeof root.items>): string => {
+      let out = '';
+      for (let i = items.length - 1; i >= 0; i--) {
+        const it = items[i];
+        if (it.kind === 'snapshot') {
+          const s = it.snapshot;
+          const isCurrent = positionOnSnapshot && s.index === currentIdx;
+          const tag = s.kind === 'initial' ? '<span class="history-tag">start</span>'
+            : s.kind === 'rebuild' ? '<span class="history-tag">rebuilt</span>'
+            : s.kind === 'input' ? '<span class="history-tag">input</span>' : '';
+          out += `<div class="history-item${isCurrent ? ' history-current' : ''}" data-index="${s.index}" ` +
+            `title="Restore this state${s.kind === 'input' ? ' (recorded right after a control input)' : ''}">` +
+            `<span>${s.isSecondMarker ? '⏱ ' : ''}t = ${s.simTime.toFixed(3)} s${tag}</span>` +
+            `<span class="history-step">step ${s.stepNumber}</span></div>`;
+        } else {
+          const e = it.event;
+          out += `<div class="history-event" data-step="${e.step}" ` +
+            `title="Happened between the state below and the state above. Click to go to the first state that has it.">` +
+            `<span class="history-event-icon">${eventIcon(e.type)}</span>` +
+            `<span class="history-event-text">${esc(e.message)}</span>` +
+            `<span class="history-step">t = ${e.simTime.toFixed(2)} s</span></div>`;
+        }
+      }
+      return out;
+    };
+    const renderGroup = (g: typeof root, depth: number): string => {
+      const label = g.tEnd === Infinity
+        ? `from ${formatBandTime(g.tStart, g.span)}`
+        : `${formatBandTime(g.tStart, g.span)} – ${formatBandTime(g.tEnd, g.span)}`;
+      const open = g.containsCurrent;
+      const body = g.children
+        ? [...g.children].reverse().map(c => renderGroup(c, depth + 1)).join('')
+        : renderRows(g.items!);
+      return `<details class="history-group${g.containsCurrent ? ' history-group-current' : ''}"${open ? ' open' : ''}>` +
+        `<summary title="${g.snapshotCount} recorded state${g.snapshotCount === 1 ? '' : 's'} in this span - click to expand">` +
+        `<span class="history-range">${label}</span>` +
+        `<span class="history-count">${g.snapshotCount}</span>${eventSummary(g.events)}</summary>` +
+        `<div class="history-group-body">${body}</div></details>`;
+    };
+    const epochs = gameLoop.getHistoryEpochs();
+    let html = '<div class="history-list">';
+    if (epochs.length > 1) {
+      html += `<div class="history-note" title="The plant was edited while this history was recorded. Rewinding past an edit puts the earlier design back on screen; resuming from there discards the edit.">` +
+        `🔧 ${epochs.length - 1} plant edit${epochs.length > 2 ? 's' : ''} in this history</div>`;
+    }
+    html += root.children ? [...root.children].reverse().map(c => renderGroup(c, 0)).join('') : renderRows(root.items!);
     html += '</div>';
 
     historyDialogBody.innerHTML = html;
 
-    // Add click handlers to items
-    const items = historyDialogBody.querySelectorAll('.history-item');
-    items.forEach(item => {
+    // Clicks: a snapshot row restores it; an event row seeks to the first
+    // state that contains it
+    historyDialogBody.querySelectorAll('.history-item').forEach(item => {
       item.addEventListener('click', () => {
         const index = parseInt(item.getAttribute('data-index') || '0', 10);
-        const time = gameLoop.navigateToHistoryIndex(index);
-        if (time !== null) {
-          refreshDisplayAfterRestore();
-          closeHistoryDialog();
-        }
+        seekAndRefresh(() => gameLoop.navigateToHistoryIndex(index), 'That state is no longer available');
+        closeHistoryDialog();
       });
     });
+    historyDialogBody.querySelectorAll('.history-event').forEach(item => {
+      item.addEventListener('click', () => {
+        const step = parseInt(item.getAttribute('data-step') || '0', 10);
+        seekAndRefresh(() => gameLoop.seekToStep(step), 'That moment is no longer in the history');
+        closeHistoryDialog();
+      });
+    });
+    // Scroll the current state into view
+    const current = historyDialogBody.querySelector('.history-current') as HTMLElement | null;
+    if (current) current.scrollIntoView({ block: 'center' });
 
     // Set input to current time
     if (historyTimeInput) {
@@ -1359,7 +1428,7 @@ function init() {
       const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
       setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
       const newSimState = createSimulationFromPlant(plantState);
-      gameLoop.resetState(newSimState);
+      gameLoop.resetState(newSimState, serializePlantState(plantState));
       // SCRAM is automatically cleared since we have a fresh simulation state
       gameMode?.onSimReset();
       updateScramDisplay();
@@ -2187,6 +2256,65 @@ function init() {
     plantCanvas.centerOnPlant();
   }
 
+  /**
+   * A seek landed in a different epoch of the rewind history: the restored
+   * state describes the plant as it was designed THEN (before or after an
+   * edit), so the design on screen must follow. Swaps the plant's contents
+   * in place - the PlantState object itself is shared by every panel and
+   * closure - without touching the history, the resume snapshot or the
+   * camera, then re-derives everything main.ts keeps from the plant
+   * (scram setpoints, panels, selection).
+   */
+  function restoreDesignFromHistory(epoch: HistoryEpoch, previousEpochId: number): void {
+    if (epoch.design == null) {
+      // The history cannot say what this epoch's plant looked like (a history
+      // saved before designs were recorded). The state is restored; the
+      // plant on screen is not - say so loudly rather than pretend.
+      const msg =
+        `Rewound into a stretch of the history (epoch ${epoch.id}: ${epoch.label}) whose plant design ` +
+        `was not recorded. The simulation state is restored, but the plant on screen is still the ` +
+        `epoch-${previousEpochId} design and may not match it.`;
+      console.error('[History] ' + msg);
+      showNotification(msg, 'error', 15000);
+      return;
+    }
+    if (pendingLiveEdit) {
+      // A live-edit gesture was open against the plant we are about to
+      // replace; it cannot be committed onto another design
+      console.warn('[History] Dropping an open live-edit gesture: the plant design changed under it.');
+      abandonLiveEdit(pendingLiveEdit);
+    }
+    const design = deserializePlantDesign(epoch.design as Record<string, unknown>);
+    plantState.components.clear();
+    for (const [id, component] of design.components) plantState.components.set(id, component);
+    plantState.connections = design.connections;
+    plantState.scenario = design.scenario;
+    plantState.terrain = design.terrain;
+    migrateReactorVessels(plantState);
+    migratePipeEndpoints(plantState);
+    constructionManager.normalizeLoadedPlant();
+
+    gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+    if (selectedComponentId && !plantState.components.has(selectedComponentId)) {
+      selectedComponentId = null;
+      if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
+    }
+    // The renderer keys its per-connection cache on the connections array,
+    // which was just replaced - the next frame rebuilds it. Repaint the
+    // plant-derived panels now; refreshDisplayAfterRestore (run by every
+    // seek path after this) does the state-derived ones.
+    updateReactorControlsVisibility();
+    updateConstructionCostPanel();
+    console.log(
+      `[History] Plant design restored from epoch ${epoch.id} (${epoch.label}) - ` +
+      `${plantState.components.size} components, ${plantState.connections.length} connections ` +
+      `(was epoch ${previousEpochId})`);
+    showNotification(
+      `Rewound past an edit: the plant is back to its design ${epoch.id === 0 ? 'at the start of the run' : `after "${epoch.label}"`}`,
+      'info', 6000);
+  }
+  gameLoop.onEpochChange = restoreDesignFromHistory;
+
   // Migrate pipes to have endPosition and endElevation for 3D rendering
   function migratePipeEndpoints(state: PlantState): void {
     for (const [_id, component] of state.components) {
@@ -2400,7 +2528,7 @@ function init() {
         showNotification('Design loaded; the saved simulation state was skipped (simulation mode unavailable right now).', 'warning');
         return;
       }
-      gameLoop.setSimulationState(restored);
+      gameLoop.setSimulationState(restored, serializePlantState(plantState));
       plantCanvas.setSimState(restored);
       syncSimulationToVisuals(restored, plantState);
       updatePauseButton();
@@ -2826,7 +2954,6 @@ function init() {
   // edit sites below behave exactly as they did before.
 
   /** Told the user once that a live edit clears the rewind history. */
-  let liveEditHistoryWarned = false;
 
   /**
    * Whether the plant may be built while it runs. Sandbox: yes. Career mode:
@@ -2937,27 +3064,17 @@ function init() {
       return false;
     }
 
-    // The rewind history describes a plant that no longer exists: its
-    // snapshots carry the OLD node set, so replaying or seeking into them
-    // would step a state the current plant cannot produce. Truncate it here
-    // (setSimulationState clears it and restarts step numbering at the
-    // current simulated time) rather than let a seek quietly resurrect the
-    // pre-edit plant.
-    if (!liveEditHistoryWarned) {
-      liveEditHistoryWarned = true;
-      console.warn(
-        '[LiveEdit] Rewind history TRUNCATED at this edit. Editing the plant while it runs ' +
-        'changes the shape of the state vector, so snapshots taken before the edit describe ' +
-        'a plant that no longer exists and cannot be replayed against the new one. ' +
-        'Simulated time is unchanged and history starts accumulating again from here. ' +
-        'This message appears once per session.');
-    }
-
+    // The rewind history keeps the pre-edit plant as an earlier epoch: the
+    // rebuilt state opens a new one at the current position (its snapshots
+    // carry a different node set, so no replay ever crosses the edit), and
+    // seeking back past the edit puts the old design back on screen
+    // (restoreDesignFromHistory). Step numbering continues.
+    //
     // The clock is stopped from here until the finally below. Anything that
     // throws while repainting the panels must NOT leave it stopped - a plant
     // frozen by a display bug is the worst possible failure of a live edit.
     try {
-      gameLoop.setSimulationState(result.state);
+      gameLoop.rebuildSimulationState(result.state, serializePlantState(plantState), what);
       gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
       plantCanvas.setSimState(result.state);
       refreshDisplayAfterRestore();
@@ -2971,7 +3088,7 @@ function init() {
 
     console.log(`[LiveEdit] ${what}: ${result.notes.join('; ')}`);
     showNotification(
-      `${what} applied to the running plant - ${result.notes[0]} (rewind history restarts here)`,
+      `${what} applied to the running plant - ${result.notes[0]}`,
       'info', 6000);
     return true;
   }
@@ -3332,7 +3449,13 @@ function init() {
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
       if (placementHintDiv) placementHintDiv.style.display = 'none';
 
-      gameLoop.setSimulationState(newSimState);
+      // A resumed simulation continues the rewind history as a new epoch
+      // (the pre-visit plant stays seekable); a fresh build starts one
+      if (resumed) {
+        gameLoop.rebuildSimulationState(newSimState, serializePlantState(plantState), 'Returned from construction mode');
+      } else {
+        gameLoop.setSimulationState(newSimState, serializePlantState(plantState));
+      }
 
       // Start paused so the user can look the plant over (and step through)
       // before time starts moving; career mode resumes explicitly when the
