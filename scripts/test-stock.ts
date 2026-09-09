@@ -476,6 +476,23 @@ console.log('\n--- Ground pipe costs its run once; joining costs nothing ---');
     yard.connections.some(c =>
       (c.fromComponentId === piece!.id && c.toComponentId === laid!.id) ||
       (c.toComponentId === piece!.id && c.fromComponentId === laid!.id)));
+  // A run that lands on something starts at THAT thing's conditions, not the
+  // tool's cold default: splicing into a hot line must not be a step change.
+  {
+    const run = yard.components.get(laid!.id) as PipeComponent;
+    run.fluid = { temperature: 560, pressure: 7.5e6, phase: 'liquid', quality: 0, flowRate: 3 };
+    const hot = gcm.layGroundPipe({
+      name: 'Hot splice', diameter: 0.3, pressureRating: 16, elevation: 0,
+      initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+    }, pipePieceRoute({ x: 7.5, y: 10.5 }, 'EW'));
+    const spliced = yard.components.get(hot!.id) as PipeComponent;
+    check('a spliced run takes the conditions of what it lands on, not 25 C at 1 bar',
+      hot!.joined === 1 && near(spliced.fluid!.temperature, 560) && near(spliced.fluid!.pressure, 7.5e6),
+      `${spliced.fluid!.temperature} K, ${spliced.fluid!.pressure} Pa`);
+    check('and it starts at rest', near(spliced.fluid!.flowRate, 0));
+    gcm.deleteComponent(hot!.id);
+    run.fluid = { temperature: 298, pressure: 1e5, phase: 'liquid', quality: 0, flowRate: 0 };
+  }
 
   // A piece dropped against the pump's discharge nozzle (which anchors on the
   // EAST edge of its tile) connects to it on contact, and also costs nothing

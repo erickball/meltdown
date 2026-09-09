@@ -3122,7 +3122,25 @@ export class ConstructionManager {
     let joined = 0;
     const bore = pipe.diameter || 0.3;
     const flowArea = Math.PI * (bore / 2) * (bore / 2);
-    for (const { end, join } of findFreeEndJoins(this.plantState, pipe)) {
+    const joins = findFreeEndJoins(this.plantState, pipe);
+
+    // A run that lands on something starts at THAT thing's conditions rather
+    // than at the tool's cold, atmospheric default. Splicing a section into a
+    // hot loop and having it appear full of 25 C water would be a step change
+    // nobody asked for; a section on open ground keeps what it was given.
+    // (Same IC conventions as the factory: `fluid.pressure` is the steam
+    // partial pressure and `initialNcg` rides on top - see resume.ts.)
+    const neighbour = joins.length > 0 ? joins[0].join.component : undefined;
+    if (neighbour?.fluid) {
+      pipe.fluid = { ...neighbour.fluid, flowRate: 0 };
+      const ncg = (neighbour as Record<string, any>).initialNcg;
+      if (ncg) (pipe as Record<string, any>).initialNcg = { ...ncg };
+      console.log(`[Construction] Ground pipe '${id}' starts at '${neighbour.id}' conditions: ` +
+        `${(pipe.fluid.pressure / 1e5).toFixed(2)} bar, ${(pipe.fluid.temperature - 273.15).toFixed(1)} C, ` +
+        `${pipe.fluid.phase}`);
+    }
+
+    for (const { end, join } of joins) {
       // The two ends touch, so the joining connection has no length of its
       // own - and therefore no cost. Its elevation on the pipe side is the
       // pipe's centreline, as an auto-pipe's stub connections use.
