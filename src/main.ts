@@ -53,6 +53,9 @@ import {
   stockedPipeSpecId, stockLineDisplayName, pipeSpecDisplayName,
   paletteKeyForStockLine,
 } from './game/stock';
+import {
+  BuildQueue, Buildable, componentBuildMassKg, connectionBuildMassKg,
+} from './game/build-queue';
 import { getPipeSpecById } from './construction/component-presets';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
@@ -363,6 +366,10 @@ function init() {
   let gameMode: GameModeManager | null = null;
 
   // Bridge simulation state to visual components
+  // Parts being installed run on the player's clock, not the plant's (a
+  // level at 60x would otherwise install a pump in a simulated minute).
+  gameLoop.onWallFrame = (wallSeconds: number) => buildQueue.tick(wallSeconds);
+
   gameLoop.onStateUpdate = (state: SimulationState, metrics: SolverMetrics) => {
     // Career-mode bookkeeping (revenue, objectives, random events)
     gameMode?.onSimUpdate(state);
@@ -1994,10 +2001,11 @@ function init() {
   // Connection delete callback
   setConnectionDeleteCallback((fromId: string, toId: string) => {
     if (confirm(`Delete connection between ${fromId} and ${toId}?`)) {
-      let deleted = false;
-      liveEdit(`Removing the pipe ${fromId} \u2192 ${toId}`, () => {
-        deleted = constructionManager.deleteConnection(fromId, toId);
-      });
+      const label = `the pipe ${fromId} \u2192 ${toId}`;
+      const deleted = removeConnectionRun(
+        plantState.connections.find(
+          c => c.fromComponentId === fromId && c.toComponentId === toId),
+        label, () => constructionManager.deleteConnection(fromId, toId));
       if (deleted) {
         updateConstructionCostPanel();
         // Refresh the component detail panel
@@ -2144,6 +2152,8 @@ function init() {
     // a superseded snapshot rather than resuming the old plant onto this one)
     resumeSnapshot = null;
     pendingLiveEdit = null;
+    // Jobs describe parts of a plant that is about to stop existing
+    buildQueue.clear();
     plantState.components.clear();
     plantState.connections = [];
 
@@ -2968,6 +2978,167 @@ function init() {
     return true;
   }
 
+
+  // ==========================================================================
+  // Building takes time
+  // ==========================================================================
+  //
+  // A part placed while the plant runs is NOT dropped into the simulation the
+  // moment its dialog is confirmed. It goes into `buildQueue` as a ghost -
+  // present in the plant so it can be seen, selected and cancelled, excluded
+  // from the simulation by the factory - and the live edit that actually puts
+  // it in the plant runs once, when its timer fires. Taking a part back to
+  // the yard is the same job in reverse. See src/game/build-queue.ts for the
+  // rate and where it comes from.
+
+  const buildQueue = new BuildQueue();
+
+  /**
+   * Whether a build should be timed. Only while the plant is running: in
+   * construction mode the plant is stopped and there is nothing to be late
+   * for, so a build there lands immediately as it always has.
+   */
+  function buildsAreTimed(): boolean {
+    return currentMode === 'simulation' && liveBuildAllowed() &&
+      (gameLoop.getState()?.flowNodes.size ?? 0) > 0;
+  }
+
+  /** Everything in the plant right now, to diff a construction call against. */
+  function capturePlantParts(): { components: Set<string>; connections: Set<Connection> } {
+    return {
+      components: new Set(plantState.components.keys()),
+      connections: new Set(plantState.connections),
+    };
+  }
+
+  function newPartsSince(before: { components: Set<string>; connections: Set<Connection> }) {
+    const components: PlantComponent[] = [];
+    for (const [id, c] of plantState.components) {
+      if (!before.components.has(id)) components.push(c);
+    }
+    const connections = plantState.connections.filter(c => !before.connections.has(c));
+    return { components, connections };
+  }
+
+  /**
+   * Hold a freshly created part as a ghost until it is built.
+   *
+   * The construction manager has already made the plant change and charged
+   * the yard for it, and the caller is holding an open live-edit snapshot.
+   * Returns true when the queue took the job, in which case the caller must
+   * NOT commit that snapshot - the part is not in the simulation yet.
+   */
+  function queueNewParts(
+    label: string,
+    parts: { components: PlantComponent[]; connections: Connection[] },
+    liveSnap: PendingLiveEdit | null
+  ): boolean {
+    if (!buildsAreTimed()) return false;
+    if (parts.components.length === 0 && parts.connections.length === 0) return false;
+    abandonLiveEdit(liveSnap);
+    const massKg = parts.components.reduce((s, c) => s + componentBuildMassKg(c), 0)
+      + parts.connections.reduce((s, c) => s + connectionBuildMassKg(c), 0);
+    const job = buildQueue.enqueue({
+      kind: 'build',
+      label,
+      massKg,
+      targets: [...parts.components, ...parts.connections] as Buildable[],
+      finish: (apply) => {
+        liveEdit(`Building ${label}`, apply);
+        showNotification(`${label} is built and in service.`, 'info', 4000);
+      },
+      abandon: (apply) => {
+        apply();
+        for (const conn of parts.connections) {
+          constructionManager.deleteConnection(conn.fromComponentId, conn.toComponentId);
+        }
+        for (const c of parts.components) constructionManager.deleteComponent(c.id);
+        showNotification(`${label} cancelled - the parts are back in the yard.`, 'info', 4000);
+        updateConstructionCostPanel();
+      },
+    });
+    showNotification(
+      `Building ${label}: ${job.seconds.toFixed(0)} s (${Math.round(job.massKg)} kg to install). ` +
+      `It joins the plant when it is finished.`, 'info', 5000);
+    updateConstructionCostPanel();
+    return true;
+  }
+
+  /**
+   * Remove a component: instantly with the plant stopped, otherwise as a
+   * timed return to the yard. A part still under construction is CANCELLED
+   * instead, which refunds it at once - nothing has been installed to undo.
+   */
+  function removeComponentPart(
+    componentId: string, label: string, before?: () => void
+  ): void {
+    const component = plantState.components.get(componentId);
+    const pending = component ? buildQueue.jobFor(component as Buildable) : null;
+    if (pending) {
+      buildQueue.cancel(pending.id);
+      updateConstructionCostPanel();
+      return;
+    }
+    if (!component || !buildsAreTimed()) {
+      liveEdit(`Removing ${label}`, () => {
+        before?.();
+        constructionManager.deleteComponent(componentId);
+      });
+      return;
+    }
+    const job = buildQueue.enqueue({
+      kind: 'return',
+      label,
+      massKg: componentBuildMassKg(component),
+      targets: [component as Buildable],
+      finish: (apply) => {
+        liveEdit(`Returning ${label}`, () => {
+          apply();
+          before?.();
+          constructionManager.deleteComponent(componentId);
+        });
+        showNotification(`${label} is back in the yard.`, 'info', 4000);
+        updateConstructionCostPanel();
+      },
+      abandon: (apply) => apply(),
+    });
+    showNotification(
+      `Returning ${label}: ${job.seconds.toFixed(0)} s. It keeps running until it is out.`,
+      'info', 5000);
+  }
+
+  /** The same, for a run of pipe. */
+  function removeConnectionRun(
+    conn: Connection | undefined, label: string, del: () => boolean
+  ): boolean {
+    const pending = conn ? buildQueue.jobFor(conn as unknown as Buildable) : null;
+    if (pending) {
+      buildQueue.cancel(pending.id);
+      updateConstructionCostPanel();
+      return true;
+    }
+    if (!conn || !buildsAreTimed()) {
+      let deleted = false;
+      liveEdit(`Removing ${label}`, () => { deleted = del(); });
+      return deleted;
+    }
+    buildQueue.enqueue({
+      kind: 'return',
+      label,
+      massKg: connectionBuildMassKg(conn),
+      targets: [conn as unknown as Buildable],
+      finish: (apply) => {
+        liveEdit(`Returning ${label}`, () => {
+          apply();
+          del();
+        });
+        updateConstructionCostPanel();
+      },
+      abandon: (apply) => apply(),
+    });
+    return true;
+  }
+
   /** A live edit with no dialog in the middle: snapshot, mutate, rebuild. */
   function liveEdit(what: string, mutate: () => void): void {
     const pending = beginLiveEdit();
@@ -3033,6 +3204,10 @@ function init() {
     if (gameMode && !gameMode.beforeModeSwitch(mode)) {
       return;
     }
+    // Stopping the plant is when the outstanding work gets done: nothing is
+    // left half-installed on a map the player is about to rebuild, and the
+    // clock that was paying for it has stopped.
+    if (mode === 'construction') buildQueue.finishAll();
     const previousMode = currentMode;
     currentMode = mode;
 
@@ -3369,8 +3544,12 @@ function init() {
       return;
     }
     const name = `Pipe ${constructionManager.getNextIdNumber()}`;
+    // The same shape as a placement: snapshot, lay it, then either hand it
+    // to the build queue as a ghost or commit it straight away.
+    const liveSnap = beginLiveEdit();
+    const partsBefore = capturePlantParts();
     let laid: { id: string; joined: number } | null = null;
-    liveEdit(`Laying ${name}`, () => {
+    try {
       laid = constructionManager.layGroundPipe({
         name,
         diameter: spec?.diameter ?? 0.3,
@@ -3380,15 +3559,28 @@ function init() {
         initialPressure: 1,
         initialTemperature: 25,
       }, route);
-    });
-    updateConstructionCostPanel();
+    } catch (error) {
+      if (liveSnap) {
+        revertLivePlantEdit(plantState, liveSnap.snapshot);
+        abandonLiveEdit(liveSnap);
+      }
+      throw error;
+    }
     const result = laid as { id: string; joined: number } | null;
     if (!result) {
+      abandonLiveEdit(liveSnap);
+      updateConstructionCostPanel();
       const refused = constructionManager.takeStockRefusal();
       showNotification(refused ?? 'Could not lay that pipe', refused ? 'warning' : 'error');
       return;
     }
     const metres = formatMetres(routePlanLength(route));
+    if (queueNewParts(`${metres} m of pipe`, newPartsSince(partsBefore), liveSnap)) {
+      updateConstructionCostPanel();
+      return;
+    }
+    commitLiveEdit(liveSnap, `Laying ${name}`);
+    updateConstructionCostPanel();
     showNotification(result.joined > 0
       ? `Laid ${metres} m of pipe; ${result.joined} end${result.joined === 1 ? '' : 's'} connected on contact.`
       : `Laid ${metres} m of pipe. Its ends are free - run it up to a nozzle or another pipe end to connect it.`,
@@ -3414,10 +3606,10 @@ function init() {
     const to = plantState.components.get(plantConn.toComponentId);
     const label = `${from?.label || plantConn.fromComponentId} \u2192 ${to?.label || plantConn.toComponentId}`;
     const metres = plantConn.length ?? 0;
-    let deleted = false;
-    liveEdit(`Removing the pipe ${label}`, () => {
-      deleted = constructionManager.deleteConnectionObject(plantConn);
-    });
+    // Through the build queue, like every other removal: instant with the
+    // plant stopped, a timed return while it runs.
+    const deleted = removeConnectionRun(plantConn, `the pipe ${label}`,
+      () => constructionManager.deleteConnectionObject(plantConn));
     if (!deleted) {
       showNotification(`Could not remove the pipe ${label}`, 'error');
       return;
@@ -3442,12 +3634,14 @@ function init() {
     showComponentDeleteDialog(label, keepable.length, doomed.length, joints.length, (choice) => {
       if (!choice) return;
       const wasController = component.type === 'controller';
-      liveEdit(`Removing ${label}`, () => {
-        // Leave the runs standing FIRST: once the component is gone there is
-        // no route left to leave them along.
-        if (choice === 'keep') constructionManager.detachConnectionsAsPipes(componentId);
-        constructionManager.deleteComponent(componentId);
-      });
+      // Taking a part out takes as long as putting it in, so this goes
+      // through the build queue: instant with the plant stopped, a timed
+      // return while it runs. Leaving the runs standing happens FIRST -
+      // once the component is gone there is no route left to leave them
+      // along - so it rides inside the same transaction.
+      removeComponentPart(componentId, label, choice === 'keep'
+        ? () => constructionManager.detachConnectionsAsPipes(componentId)
+        : undefined);
       if (wasController) {
         gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
       }
@@ -4050,6 +4244,7 @@ function init() {
         // already running. A new component always starts from its factory
         // initial conditions; every other component carries on untouched.
         const liveSnap = beginLiveEdit();
+        const partsBefore = capturePlantParts();
         let placed = false;
 
         // If placing inside a container, use the container's position
@@ -4178,8 +4373,14 @@ function init() {
             }
 
             // Absorb the new component into the running simulation (a no-op
-            // in construction mode, where the mode switch does it instead)
-            if (placed) commitLiveEdit(liveSnap, `Placing ${config.name || config.type}`);
+            // in construction mode, where the mode switch does it instead) -
+            // unless the plant is running, in which case the part goes into
+            // the build queue as a ghost and joins the simulation when its
+            // timer runs out.
+            const label = config.name || config.type;
+            if (placed && queueNewParts(label, newPartsSince(partsBefore), liveSnap)) {
+              // held by the queue; the plant already has the ghost
+            } else if (placed) commitLiveEdit(liveSnap, `Placing ${label}`);
             else abandonLiveEdit(liveSnap);
 
             // Clear component selection after placing
@@ -4269,6 +4470,7 @@ function init() {
     // Snapshot before the dialog opens (see beginLiveEdit); the new run is
     // built at zero flow and every other component keeps its live state.
     const liveSnap = beginLiveEdit();
+    const partsBefore = capturePlantParts();
 
     connectionDialog.show(
       from.component,
@@ -4304,7 +4506,11 @@ function init() {
             );
           }
 
-          if (success) {
+          const runLabel =
+            `the run ${config.fromComponent.label} \u2192 ${config.toComponent.label}`;
+          if (success && queueNewParts(runLabel, newPartsSince(partsBefore), liveSnap)) {
+            // Laid as a ghost; it carries nothing until the pipefitters finish
+          } else if (success) {
             commitLiveEdit(liveSnap,
               `Connecting ${config.fromComponent.label} to ${config.toComponent.label}`);
             showNotification(`Connected ${config.fromComponent.label} to ${config.toComponent.label}`, 'info');
@@ -4556,6 +4762,10 @@ function init() {
   (window as any).__meltdownDebug.jackTool = (name: string, input: Record<string, unknown>) =>
     executeJackTool(name, input, jackHost, () => {});
   (window as any).__meltdownDebug.getPlotDrawnWindow = getPlotDrawnWindow;
+  // Headless-test hook: the running clock, so a test can wind a level forward
+  // to the minute it wants to look at instead of waiting for it in real time.
+  (window as any).__meltdownDebug.gameLoop = gameLoop;
+  (window as any).__meltdownDebug.buildQueue = buildQueue;
   // Headless-test hook: load a plant JSON (the same shape save/load and the
   // scripts/test-plants fixtures use) without going through the save slots
   (window as any).__meltdownDebug.loadPlantData = (data: unknown) => {

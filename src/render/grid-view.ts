@@ -16,6 +16,8 @@ import {
 } from '../game/stock';
 import { SimulationState } from '../simulation';
 import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
+import { poolReadout, poolStateLabel } from './pool-readout';
+import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
@@ -61,6 +63,9 @@ export interface GridFrameState {
   pipeOrientation: PipeOrientation;
   connectionFluid: (conn: Connection, from: PlantComponent) => Fluid | undefined;
 }
+
+/** How faint a part that is not built yet (or is going away) is drawn. */
+const GHOST_ALPHA = 0.42;
 
 export interface PortHit {
   component: PlantComponent;
@@ -797,17 +802,23 @@ export class GridView {
 
     // Ground layer: building floors and switchyards, in plan
     for (const c of order) {
+      const ghost = buildGhost(c);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       if (c.type === 'building') this.renderBuilding(ctx, c as BuildingComponent, f);
       else if (c.type === 'switchyard') this.renderSwitchyard(ctx, c as SwitchyardComponent, f);
       else if (c.type === 'pool') this.renderPool(ctx, c as PoolComponent, f);
       else if (c.type === 'warehouse') this.renderWarehouse(ctx, c as WarehouseComponent, f);
       else if (waterBodyOf(c as never)) this.renderWaterIntake(ctx, c, f);
+      if (ghost) ctx.globalAlpha = 1;
     }
 
     // Foundation pads under every standing component
     for (const c of order) {
       if (this.isGroundLayer(c) || c.type === 'pipe') continue;
+      const ghost = buildGhost(c);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.renderPad(ctx, c, f);
+      if (ghost) ctx.globalAlpha = 1;
     }
 
     this.renderRoutes(ctx, f);
@@ -815,8 +826,13 @@ export class GridView {
     // Standing sprites, back to front
     for (const c of order) {
       if (this.isGroundLayer(c) || c.type === 'pipe') continue;
+      const ghost = buildGhost(c);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.renderSprite(ctx, c, f);
+      if (ghost) ctx.globalAlpha = 1;
     }
+
+    this.renderBuildProgress(ctx, f);
 
     this.renderSignalLines(ctx, f);
 
@@ -1134,117 +1150,310 @@ export class GridView {
   }
 
   /**
-   * A spent-fuel pool in plan: a square hole with a concrete coping, the
-   * water seen from above (deeper water is darker and bluer), the racks as a
-   * grid of assembly cells under it, and the level read off the rim as both
-   * a bar and a number.
+   * A spent-fuel pool as a cut-away three-quarter view.
    *
-   * The level is the one thing the player has to watch, so it is drawn twice
-   * - as depth of colour over the whole basin and as a gauge on the rim -
-   * and the racks stop being blue and start glowing the moment the water
-   * stops covering them, which is exactly when the physics stops cooling
-   * them with liquid.
+   * A pool is read as ONE question - is there water over the fuel - and a
+   * flat plan square plus a separate bar answered it twice, badly: the plan
+   * cannot show depth at all, so the level lived in a gauge on the rim while
+   * the picture stayed the same colour. Here the basin is drawn as an open
+   * box in oblique projection with the SOUTH and WEST walls sectioned away,
+   * so the water is a solid with a top surface AND a visible depth against
+   * the cut, and the racks stand on the floor inside it. The level is then
+   * something you see rather than something you read off a scale beside the
+   * picture (the number stays, next to it).
+   *
+   * The projection is a cabinet oblique confined to the component's own
+   * footprint: nothing is drawn outside it but the coping, so ports, hit
+   * testing and pipe routing are exactly as they were.
+   *
+   *   P(u, v, w) -> screen
+   *     u  0..1  west  -> east   across the footprint
+   *     v  0..1  north -> south  into the picture (toward the viewer)
+   *     w  0..1  floor -> rim
+   *
+   * The viewer is above, south and west, so the visible interior faces are
+   * the NORTH wall, the EAST wall and the floor - the two walls facing the
+   * camera are the ones taken away.
+   *
+   * Nothing here decides anything: `poolReadout` is the single source the
+   * selected-component panel reads too, so the picture and the numbers
+   * cannot drift apart.
    */
   private renderPool(ctx: CanvasRenderingContext2D, pool: PoolComponent, f: GridFrameState): void {
     const rect = footprintRect(pool.position, componentFootprint(pool));
     const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
     const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
-    const w = br.x - tl.x, h = br.y - tl.y;
-    const copingPx = Math.max(3, Math.min(w, h) * 0.05, (pool.wallThickness || 1.5) * this.cam.ppm);
-    const depth = pool.depth || 12;
+    const W = br.x - tl.x, H = br.y - tl.y;
+    if (!(W > 2 && H > 2)) return;
+    // The coping is the real wall thickness, but a thick wall on a small
+    // basin would swamp the picture, so it stops at a sixth of the opening.
+    // The deck around the opening is the real wall thickness, as a fraction
+    // of the pool's own plan side; a thick wall on a small basin would swamp
+    // the picture, so it stops at a sixth of the opening.
+    const cop = Math.min(0.16, Math.max(0.03,
+      (pool.wallThickness || 1.5) / Math.max(pool.side || 12, 1e-6)));
+    const copingPx = cop * (br.x - tl.x);
     const origin = this.worldToScreen({ x: 0, y: 0 });
 
-    // Concrete coping around the opening
+    const r = poolReadout(pool, f.simState, !f.constructionMode);
+    const lf = Math.max(0, Math.min(1, r.level / Math.max(r.depth, 1e-6)));
+
+    // --- the oblique frame -------------------------------------------------
+    // SH is how far the far edge slides west of the near edge, Hz the drawn
+    // height of the wall and Dy what is left of the footprint for the floor.
+    // Hz + Dy = H and the shear is taken out of W, so the whole box lands
+    // inside the footprint whatever its aspect.
+    const SH = W * 0.12;
+    const Hz = H * 0.42;
+    const Dy = H - Hz;
+    const P = (u: number, v: number, w: number): Point => ({
+      x: tl.x + u * (W - SH) + v * SH,
+      y: tl.y + Hz + v * Dy - w * Hz,
+    });
+    const poly = (pts: Point[]) => {
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.closePath();
+    };
+    const fillPoly = (pts: Point[], style: string | CanvasGradient) => {
+      ctx.fillStyle = style;
+      poly(pts);
+      ctx.fill();
+    };
+
+    // Rim corners (w = 1) and floor corners (w = 0)
+    const rNW = P(0, 0, 1), rNE = P(1, 0, 1), rSE = P(1, 1, 1);
+    const fNW = P(0, 0, 0), fNE = P(1, 0, 0), fSE = P(1, 1, 0), fSW = P(0, 1, 0);
+
+    // --- coping on the two walls that are still standing -------------------
+    // The deck is a slab in the SAME projection as the basin, so its width is
+    // the wall thickness expressed as a fraction of the pool's side and then
+    // pushed through the two axes - not a fixed number of screen pixels,
+    // which would make the north deck and the east deck disagree about how
+    // thick the same wall is.
+    const nOut = { x: -cop * SH, y: -cop * Dy };
+    const sOut = { x: cop * SH, y: cop * Dy };
+    const eOut = { x: cop * (W - SH), y: 0 };
+    const wOut = { x: -cop * (W - SH), y: 0 };
+    const add = (p: Point, ...ds: Point[]) =>
+      ds.reduce((a, d) => ({ x: a.x + d.x, y: a.y + d.y }), p);
+
     ctx.fillStyle = this.art.pattern(ctx, 'concrete', this.cam.ppm, origin);
-    ctx.fillRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+    poly([add(rNW, nOut), add(rNE, nOut, eOut), add(rSE, eOut), rSE, rNE, rNW]);
+    ctx.fill();
     ctx.strokeStyle = 'rgba(50, 50, 50, 0.55)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+    ctx.stroke();
 
-    // The basin itself, and the water standing in it. `level` is the
-    // liquid's height above the floor, from the same volume fraction the
-    // simulation keeps.
-    const liquidFraction = getLiquidFraction(pool, pool.fluid ?? ({} as Fluid), !f.constructionMode);
-    const level = liquidFraction * depth;
-    ctx.fillStyle = '#2b2f31';                       // dry liner
-    ctx.fillRect(tl.x, tl.y, w, h);
-
-    // Racks, drawn under the water
-    const cells = Math.max(2, Math.min(14, Math.round(Math.sqrt(pool.assemblyCount || 800) / 2)));
-    const rackInset = Math.min(w, h) * 0.12;
-    const rackX = tl.x + rackInset, rackY = tl.y + rackInset;
-    const rackW = w - 2 * rackInset, rackH = h - 2 * rackInset;
-    const rackTop = (pool.rackBottomElevation ?? 0.5) + (pool.rackHeight || 3.66);
-    const covered = level >= rackTop;
-    const glow = poolRackGlow((pool as { rackTemperature?: number }).rackTemperature
-      ?? pool.fluid?.temperature ?? 300);
-    if (rackW > 2 && rackH > 2) {
-      ctx.fillStyle = glow > 0.02
-        ? `rgb(${Math.round(90 + 165 * glow)}, ${Math.round(95 + 60 * glow)}, ${Math.round(105 - 60 * glow)})`
-        : '#4a5257';
-      ctx.fillRect(rackX, rackY, rackW, rackH);
-      ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    // --- the two sectioned walls ------------------------------------------
+    // Hatched concrete along the cut, the ordinary drawing convention for
+    // "this has been sawn through so you can see inside".
+    const cutBands: Point[][] = [
+      [fSW, fSE, add(fSE, sOut), add(fSW, sOut)],
+      [fNW, fSW, add(fSW, wOut), add(fNW, wOut)],
+    ];
+    for (const band of cutBands) {
+      fillPoly(band, 'rgba(150, 146, 138, 0.95)');
+      ctx.save();
+      poly(band);
+      ctx.clip();
+      ctx.strokeStyle = 'rgba(70, 68, 64, 0.7)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      for (let i = 1; i < cells; i++) {
-        const x = rackX + (rackW * i) / cells;
-        const y = rackY + (rackH * i) / cells;
-        ctx.moveTo(x, rackY); ctx.lineTo(x, rackY + rackH);
-        ctx.moveTo(rackX, y); ctx.lineTo(rackX + rackW, y);
+      const step = Math.max(4, copingPx * 0.5);
+      const x0 = Math.min(...band.map(p => p.x)) - H, x1 = Math.max(...band.map(p => p.x)) + H;
+      const yA = Math.min(...band.map(p => p.y)), yB = Math.max(...band.map(p => p.y));
+      for (let x = x0; x < x1; x += step) {
+        ctx.moveTo(x, yB); ctx.lineTo(x + (yB - yA), yA);
+      }
+      ctx.stroke();
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(40, 40, 40, 0.8)';
+      ctx.lineWidth = 1;
+      poly(band);
+      ctx.stroke();
+    }
+
+    // --- the empty basin: two inner walls and the floor --------------------
+    fillPoly([rNW, rNE, fNE, fNW], '#3b4247');          // north wall, in shade
+    fillPoly([rNE, rSE, fSE, fNE], '#4a5359');          // east wall, lit
+    fillPoly([fNW, fNE, fSE, fSW], '#2b3033');          // floor
+    // Liner seams, so the empty basin does not read as a flat grey hole
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.28)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let k = 1; k < 4; k++) {
+      const u = k / 4, v = k / 4;
+      const a = P(u, 0, 1), b = P(u, 0, 0), c = P(u, 1, 0);
+      ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
+      const d = P(0, v, 0), e = P(1, v, 0);
+      ctx.moveTo(d.x, d.y); ctx.lineTo(e.x, e.y);
+    }
+    ctx.stroke();
+
+    // --- racks -------------------------------------------------------------
+    // The stored assemblies, standing on the floor between rackBottom and
+    // rackTop. Each column is drawn twice: the part under water before the
+    // water goes on (so it is seen THROUGH it) and the part standing out of
+    // it afterwards, which is exactly where the heat-transfer model stops
+    // wetting the rack surface.
+    const wBot = Math.max(0, Math.min(1, r.rackBottom / Math.max(r.depth, 1e-6)));
+    const wTop = Math.max(wBot, Math.min(1, r.rackTop / Math.max(r.depth, 1e-6)));
+    const glow = poolRackGlow(r.cladK ?? r.waterK);
+    const cells = Math.max(2, Math.min(8, Math.round(Math.sqrt(pool.assemblyCount || 800) / 4)));
+    const inset = 0.10;
+    const pitch = (1 - 2 * inset) / cells;
+    const gap = pitch * 0.16;
+
+    const rackShade = (base: number) => {
+      // Steel grey, going orange-white with the cladding temperature. The
+      // three faces differ only in how much light they get.
+      const rC = Math.round((104 + 161 * glow) * base);
+      const gC = Math.round((114 + 44 * glow) * base);
+      const bC = Math.round((122 - 82 * glow) * base);
+      return `rgb(${Math.max(0, Math.min(255, rC))}, ${Math.max(0, Math.min(255, gC))}, ` +
+        `${Math.max(0, Math.min(255, bC))})`;
+    };
+    const drawRacks = (wLo: number, wHi: number) => {
+      if (!(wHi > wLo) || pitch * Math.min(W, Dy) < 1.5) return;
+      for (let j = 0; j < cells; j++) {            // north to south: painter order
+        const v0 = inset + j * pitch + gap / 2, v1 = inset + (j + 1) * pitch - gap / 2;
+        for (let i = cells - 1; i >= 0; i--) {     // east first: the lit face
+          const u0 = inset + i * pitch + gap / 2, u1 = inset + (i + 1) * pitch - gap / 2;
+          fillPoly([P(u0, v0, wHi), P(u1, v0, wHi), P(u1, v1, wHi), P(u0, v1, wHi)], rackShade(1.15));
+          fillPoly([P(u0, v1, wHi), P(u1, v1, wHi), P(u1, v1, wLo), P(u0, v1, wLo)], rackShade(0.85));
+          fillPoly([P(u1, v0, wHi), P(u1, v1, wHi), P(u1, v1, wLo), P(u1, v0, wLo)], rackShade(0.62));
+        }
+      }
+    };
+    drawRacks(wBot, Math.min(wTop, lf));
+
+    // --- the water ---------------------------------------------------------
+    // One solid: a top surface, and the two faces the section exposes. The
+    // depth of the near face IS the level - that is the whole point of
+    // cutting the wall away.
+    if (lf > 1e-4) {
+      const hot = r.waterK > 368;                  // steaming rather than still
+      const surf = hot ? '150, 190, 205' : '58, 128, 178';
+      const body = hot ? '120, 165, 185' : '24, 78, 128';
+      const topQuad = [P(0, 0, lf), P(1, 0, lf), P(1, 1, lf), P(0, 1, lf)];
+      fillPoly(topQuad, `rgba(${surf}, 0.34)`);
+      // A brighter band along the far edge reads as the light on the surface
+      const sheen = ctx.createLinearGradient(0, P(0, 0, lf).y, 0, P(0, 1, lf).y);
+      sheen.addColorStop(0, `rgba(235, 245, 250, 0.28)`);
+      sheen.addColorStop(0.45, 'rgba(235, 245, 250, 0.03)');
+      sheen.addColorStop(1, 'rgba(235, 245, 250, 0.10)');
+      fillPoly(topQuad, sheen);
+
+      const cutFace = (pts: Point[], darken: number) => {
+        const yTop = Math.min(...pts.map(p => p.y)), yBot = Math.max(...pts.map(p => p.y));
+        const g = ctx.createLinearGradient(0, yTop, 0, yBot);
+        g.addColorStop(0, `rgba(${body}, ${(0.46 * darken).toFixed(3)})`);
+        g.addColorStop(1, `rgba(${body}, ${(0.74 * darken).toFixed(3)})`);
+        fillPoly(pts, g);
+      };
+      cutFace([P(0, 1, lf), P(1, 1, lf), P(1, 1, 0), P(0, 1, 0)], 1.0);   // south cut
+      cutFace([P(0, 0, lf), P(0, 1, lf), P(0, 1, 0), P(0, 0, 0)], 0.85);  // west cut
+      // The free surface itself, drawn as a line all the way round the cut
+      ctx.strokeStyle = 'rgba(215, 240, 250, 0.9)';
+      ctx.lineWidth = Math.max(1, Math.min(2.5, H * 0.008));
+      ctx.beginPath();
+      const s0 = P(0, 0, lf), s1 = P(0, 1, lf), s2 = P(1, 1, lf);
+      ctx.moveTo(s0.x, s0.y); ctx.lineTo(s1.x, s1.y); ctx.lineTo(s2.x, s2.y);
+      ctx.stroke();
+    }
+
+    drawRacks(Math.max(wBot, lf), wTop);
+
+    // --- where the top of the fuel is --------------------------------------
+    // The one line that matters, drawn on the section at the height of the
+    // top of the active fuel: water above it means the racks are covered.
+    if (H > 40) {
+      // Round both cut faces, so it is visible whichever way the pool is
+      // being looked at and whatever the level is doing.
+      const t0 = P(0, 0, wTop), t1 = P(0, 1, wTop), t2 = P(1, 1, wTop);
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = 'rgba(255, 105, 70, 0.95)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(t0.x, t0.y); ctx.lineTo(t1.x, t1.y); ctx.lineTo(t2.x, t2.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // --- a metre scale up the near cut -------------------------------------
+    // The level is drawn, so what it needs beside it is a ruler, not a bar.
+    if (Hz > 34) {
+      const sx = P(1, 1, 0).x;
+      ctx.strokeStyle = 'rgba(230, 235, 240, 0.55)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const stepM = r.depth > 24 ? 5 : r.depth > 10 ? 2 : 1;
+      for (let m = 0; m <= r.depth + 1e-6; m += stepM) {
+        const p = P(1, 1, m / r.depth);
+        ctx.moveTo(sx, p.y);
+        ctx.lineTo(sx - Math.max(3, W * 0.03), p.y);
       }
       ctx.stroke();
     }
 
-    // Water over the whole basin: opacity grows with how much stands there,
-    // so a full pool reads deep blue and a drained one reads bare liner
-    if (level > 0) {
-      const shade = Math.min(0.82, 0.25 + 0.6 * (level / Math.max(depth, 1e-6)));
-      const hot = (pool.fluid?.temperature ?? 300) > 368;   // near boiling
-      ctx.fillStyle = hot
-        ? `rgba(150, 190, 205, ${shade.toFixed(3)})`
-        : `rgba(30, 95, 150, ${shade.toFixed(3)})`;
-      ctx.fillRect(tl.x, tl.y, w, h);
-    }
-    ctx.strokeStyle = covered ? 'rgba(180, 210, 230, 0.8)' : 'rgba(230, 140, 60, 0.9)';
+    // --- outline and selection --------------------------------------------
+    ctx.strokeStyle = r.state === 'covered'
+      ? 'rgba(180, 210, 230, 0.75)' : 'rgba(230, 140, 60, 0.95)';
     ctx.lineWidth = 2;
-    ctx.strokeRect(tl.x, tl.y, w, h);
-
-    // Level gauge on the rim (west edge), reading up from the floor
-    const gaugeW = Math.max(4, Math.min(12, copingPx * 0.8));
-    const gx = tl.x - copingPx + 1;
-    ctx.fillStyle = 'rgba(20, 20, 20, 0.55)';
-    ctx.fillRect(gx, tl.y, gaugeW, h);
-    const fillPx = h * Math.max(0, Math.min(1, level / Math.max(depth, 1e-6)));
-    ctx.fillStyle = covered ? '#4ea3e0' : '#e08a3c';
-    ctx.fillRect(gx, tl.y + h - fillPx, gaugeW, fillPx);
-    // Where the top of the fuel is: below this line the racks are uncovering
-    const rackLinePx = h * Math.max(0, Math.min(1, rackTop / Math.max(depth, 1e-6)));
-    ctx.strokeStyle = 'rgba(255, 90, 60, 0.95)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(gx, tl.y + h - rackLinePx);
-    ctx.lineTo(gx + gaugeW, tl.y + h - rackLinePx);
+    poly([rNW, rNE, rSE, fSE, fSW, fNW]);
     ctx.stroke();
 
-    // Label and numeric level
+    // --- readouts ----------------------------------------------------------
     const fontPx = Math.max(9, Math.min(16, this.cam.ppm * 0.45));
     ctx.font = `bold ${fontPx}px sans-serif`;
     ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = 'rgba(20, 20, 20, 0.8)';
-    ctx.fillText(pool.label || pool.id, tl.x + 3, tl.y - copingPx + 2);
-    ctx.font = `${fontPx}px monospace`;
     ctx.textBaseline = 'bottom';
-    ctx.fillStyle = covered ? 'rgba(235, 240, 245, 0.95)' : 'rgba(255, 170, 90, 0.98)';
-    const over = level - rackTop;
-    ctx.fillText(
-      `${formatGaugeValue(level)} m  (${over >= 0 ? '+' : ''}${formatGaugeValue(over)} m over fuel)`,
-      tl.x + 3, tl.y + h - 3);
+    ctx.fillStyle = 'rgba(20, 20, 20, 0.85)';
+    ctx.fillText(pool.label || pool.id, rNW.x + 2, rNW.y - 3);
 
-    if (pool.id === f.selectedComponentId) {
-      ctx.lineWidth = 3;
+    if (H > 60 && W > 70) {
+      // BELOW the section, never on it: the depth of water drawn against the
+      // cut IS the level readout, and a plate parked over it would hide the
+      // one thing this drawing exists to show.
+      const state = poolStateLabel(r.state);
+      const lines: Array<{ text: string; color: string }> = [
+        { text: `${formatGaugeValue(r.level)} m  (${r.overFuel >= 0 ? '+' : ''}` +
+            `${formatGaugeValue(r.overFuel)} m over fuel)`, color: 'rgba(240, 245, 250, 0.97)' },
+        { text: state.text + (r.cladK !== null
+            ? `   rack ${(r.cladK - 273.15).toFixed(0)} °C` : ''), color: state.color },
+      ];
+      if (r.reacting) {
+        lines.push({
+          text: `oxidation ${(r.oxidationW / 1e6).toFixed(1)} MW  ` +
+            `(${(r.oxidizedFraction * 100).toFixed(1)}% clad)`,
+          color: '#ff9a4a',
+        });
+      }
+      const lh = fontPx * 1.25;
+      const plateH = lh * lines.length + 6;
+      const px = tl.x + 2;
+      const py = tl.y + H + copingPx + 3;
+      let plateW = 0;
+      ctx.font = `${fontPx}px monospace`;
+      for (const l of lines) plateW = Math.max(plateW, ctx.measureText(l.text).width);
+      ctx.fillStyle = 'rgba(12, 16, 20, 0.62)';
+      ctx.fillRect(px - 3, py - 2, plateW + 8, plateH);
+      ctx.textBaseline = 'top';
+      lines.forEach((l, k) => {
+        ctx.fillStyle = l.color;
+        ctx.fillText(l.text, px, py + 2 + k * lh);
+      });
+    }
+
+    if (pool.id === f.selectedComponentId || pool.id === f.hoveredComponentId) {
+      ctx.lineWidth = pool.id === f.selectedComponentId ? 3 : 2;
       ctx.strokeStyle = COLORS.selectionHighlight;
-      ctx.strokeRect(tl.x - copingPx, tl.y - copingPx, w + 2 * copingPx, h + 2 * copingPx);
+      poly([add(rNW, nOut), add(rNE, nOut, eOut), add(rSE, eOut),
+            add(fSE, eOut, sOut), add(fSW, sOut, wOut), add(fNW, wOut)]);
+      ctx.stroke();
     }
   }
 
@@ -1590,6 +1799,49 @@ export class GridView {
     return a.containedBy === b.id || b.containedBy === a.id;
   }
 
+  /**
+   * Rings over everything still being installed (or taken away).
+   *
+   * Drawn after the plant, before the overlays, so a ghost reads as
+   * something that is going to be there rather than something that is
+   * broken. The ring is the only moving part - the ghosting itself is a
+   * flat alpha on the ordinary drawing, so a part looks like what it will
+   * be, only fainter.
+   */
+  private renderBuildProgress(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    for (const c of f.plantState.components.values()) {
+      const g = buildGhost(c);
+      if (!g) continue;
+      const b = this.componentScreenBounds(c);
+      if (!b) continue;
+      // Hoarding round the site: a dashed box on the tiles the part will
+      // stand on, so a faint sprite still reads as work in progress.
+      if (c.type !== 'pipe') {
+        const rect = footprintRect(c.position, componentFootprint(c));
+        const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
+        const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+        ctx.save();
+        ctx.setLineDash([6, 4]);
+        ctx.lineWidth = 1.5;
+        ctx.strokeStyle = g.kind === 'build'
+          ? 'rgba(90, 200, 255, 0.8)' : 'rgba(255, 175, 70, 0.8)';
+        ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+        ctx.restore();
+      }
+      drawBuildProgress(ctx, b.topCenter.x, b.topCenter.y + b.height / 2,
+        Math.min(b.width, b.height) * 0.36, g.progress, g.kind);
+    }
+    const layout = this.currentLayout(f.plantState);
+    for (const [run, pts] of layout.display) {
+      if (!isConnection(run)) continue;
+      const g = buildGhost(run);
+      if (!g || pts.length < 2) continue;
+      const mid = pts[Math.floor(pts.length / 2)];
+      const s = this.worldToScreen(mid);
+      drawBuildProgress(ctx, s.x, s.y, Math.max(9, this.cam.ppm * 0.5), g.progress, g.kind);
+    }
+  }
+
   private renderRoutes(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     const { plantState } = f;
     const layout = this.currentLayout(plantState);
@@ -1600,7 +1852,10 @@ export class GridView {
       if (isConnection(run)) continue;
       const pipe = run;
       const color = pipe.fluid ? getFluidColor(pipe.fluid) : COLORS.steel;
+      const ghost = buildGhost(pipe);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
+      if (ghost) ctx.globalAlpha = 1;
     }
     for (const [run, pts] of layout.display) {
       if (!isConnection(run)) continue;
@@ -1611,7 +1866,10 @@ export class GridView {
       const color = fluid ? getFluidColor(fluid) : '#667788';
       const touchesSelection = conn === f.selectedConnection || (f.selectedComponentId !== null &&
         (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId));
+      const ghost = buildGhost(conn);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForArea(conn.flowArea), touchesSelection);
+      if (ghost) ctx.globalAlpha = 1;
     }
   }
 

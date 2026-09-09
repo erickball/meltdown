@@ -858,7 +858,44 @@ export function ratedPowerFromDecayHeat(decayHeat: number, coolingSeconds: numbe
   return decayHeat / fraction;
 }
 
-export function createSimulationFromPlant(plantState: PlantState): SimulationState {
+/**
+ * The plant MINUS anything that is still being built.
+ *
+ * A part placed while the plant runs stands on the map as a ghost until its
+ * build timer runs out (src/game/build-queue.ts). It is a real entry in the
+ * plant so it can be drawn, selected and cancelled - but it is not plant
+ * yet, so no simulation may be built around it, and neither may any run that
+ * lands on it. Filtering once here is what keeps every other pass in this
+ * file from having to know that unfinished parts exist.
+ *
+ * The components themselves are NOT copied, only the map, so everything the
+ * factory stamps back onto a component (simNodeId, ...) still lands on the
+ * real object.
+ */
+function withoutUnbuiltParts(plantState: PlantState): PlantState {
+  let anyGhost = false;
+  for (const [, c] of plantState.components) {
+    if ((c as { underConstruction?: boolean }).underConstruction) { anyGhost = true; break; }
+  }
+  if (!anyGhost) {
+    const ghostRun = plantState.connections.some(
+      c => (c as { underConstruction?: boolean }).underConstruction);
+    if (!ghostRun) return plantState;
+  }
+  const components = new Map(plantState.components);
+  const ghosts = new Set<string>();
+  for (const [id, c] of components) {
+    if ((c as { underConstruction?: boolean }).underConstruction) ghosts.add(id);
+  }
+  for (const id of ghosts) components.delete(id);
+  const connections = plantState.connections.filter(conn =>
+    !(conn as { underConstruction?: boolean }).underConstruction &&
+    !ghosts.has(conn.fromComponentId) && !ghosts.has(conn.toComponentId));
+  return { ...plantState, components, connections };
+}
+
+export function createSimulationFromPlant(plantStateIn: PlantState): SimulationState {
+  const plantState = withoutUnbuiltParts(plantStateIn);
   const state = createSimulationState();
   buildTerrain = plantState.terrain;
   if (plantState.terrain) {
