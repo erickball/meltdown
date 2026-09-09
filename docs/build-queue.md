@@ -129,9 +129,19 @@ The UI path is unchanged up to the point where a placement used to commit.
 `beginLiveEdit()` still opens the gesture and the construction manager still
 makes the plant change; then `queueNewParts()` diffs the plant
 (`capturePlantParts` / `newPartsSince`), abandons the snapshot instead of
-committing it, and enqueues the job. `removeComponentPart()` and
-`removeConnectionPart()` are the same idea for deletions and are what the
-Delete key, the delete button and the connection delete callback all call.
+committing it, and enqueues the job. Three sites create parts and all three
+go through it: the component placement dialog, the connection dialog, and
+`layGroundPipeRun()` — the pipe tool's ground pipe, which is how most pipe
+actually gets laid.
+
+Removals are `removeComponentPart(id, label, before?)` and
+`removeConnectionRun(conn, label, del)`. The first is called from
+`requestComponentDelete()`, master's ask-first dialog, and its optional
+`before` step is what lets "leave the attached runs standing" happen inside
+the same transaction as the removal. The second takes the run and the
+function that deletes it rather than a pair of ids, so the connection-delete
+callback and `deletePlantConnection()` (the pipe tool's own run delete) both
+answer to one rule.
 
 `buildsAreTimed()` gates the whole thing: **construction mode builds are
 still instant** (the plant is stopped and there is nothing to be late for),
