@@ -437,6 +437,17 @@ function createBreakConnection(
       ? burstState.breakElevation - node.elevation
       : (node.height ?? 0) / 2;
 
+    // Where the break opens on the OTHER side. A hole has no length, so both
+    // ends are the same physical point (hence elevation: 0 below); the target
+    // must be told where that point is in ITS own reference, or it answers at
+    // its mid-height and invents a column that is not there. For a break to
+    // the atmosphere, whose reference is the terrain datum, that is the
+    // absolute elevation of the tear - which is what puts the outside air's
+    // hydrostatic column against the node's own gas column and lets a hot
+    // drained vessel draw air IN through a low tear while it vents high up.
+    const targetElevation = state.flowNodes.get(targetNodeId)?.elevation ?? 0;
+    const toElev = node.elevation + fromElev - targetElevation;
+
     // Generate random direction for the break (0 to 2π)
     // Use a different seed offset than break size to get independent randomness
     const breakDirection = seededRandom(burstState.breakSizeSeed + 7777) * Math.PI * 2;
@@ -450,6 +461,7 @@ function createBreakConnection(
       length: 0.1,                         // Short path for break
       elevation: 0,                        // Net elevation change (break to target)
       fromElevation: fromElev,             // Elevation of break relative to node bottom
+      toElevation: toElev,                 // The same point, in the target's reference
       resistanceCoeff: 2.0,                // Sharp-edged orifice
       massFlowRate: 0,
       isBreakConnection: true,

@@ -781,6 +781,19 @@ function absoluteBase(component: { position: { x: number; y: number }; elevation
  */
 export const ENVIRONMENT_NODE_ID = 'atmosphere';
 
+/**
+ * The elevation the atmosphere node's own state is stated at: the terrain
+ * datum, z = 0. `createAtmosphereNode` gives the node this elevation, and
+ * because the node holds no liquid its 101325 Pa lives at its base (see
+ * pressureAtConnection) - so the outside air is 1 atm at the datum and
+ * 101325 - rho_air*g*z at height z, with rho_air the node's own density.
+ *
+ * It is also why an environment endpoint's "local" connection elevation is
+ * its ABSOLUTE elevation: local elevations are measured from the node's own
+ * reference, and for this node that reference is the datum.
+ */
+export const ENVIRONMENT_REFERENCE_ELEVATION = 0;
+
 /** Mid-height of a node, the reference a port without an elevation of its own sits at (as in pressureAtConnection). */
 function nodeMidHeight(node: FlowNode | undefined): number {
   if (!node) return 0;
@@ -3919,8 +3932,19 @@ function createFlowConnectionFromPlantConnection(
   // Connection point elevations, measured from each node's own reference -
   // the same points gravity was priced between above, so the head inside a
   // node and the head along the line between two nodes agree.
-  const connFromElevation = localFrom;
-  const connToElevation = localTo;
+  //
+  // The ENVIRONMENT end's reference is the terrain datum
+  // (ENVIRONMENT_REFERENCE_ELEVATION), so its local elevation is its
+  // ABSOLUTE one and pressureAtConnection prices the standard-air column
+  // from the datum to the opening. That is the term that cancels the gas
+  // column inside the plant: an opening 20 m up sees 101325 - rho_air*g*20
+  // outside and the building's own gas column inside, and when the two gases
+  // match the difference is zero at every height - no draft through a cold
+  // vented building, a real chimney through a hot one.
+  const connFromElevation = fromComponent
+    ? localFrom : fromPoint - ENVIRONMENT_REFERENCE_ELEVATION;
+  const connToElevation = toComponent
+    ? localTo : toPoint - ENVIRONMENT_REFERENCE_ELEVATION;
 
   // Auto-detect phase tolerance for condenser bottom connections
   // If fromPhaseTolerance isn't set, and this is a condenser with a low elevation connection,
@@ -4779,7 +4803,7 @@ function createAtmosphereNode(): FlowNode {
     volume,
     hydraulicDiameter: 100,
     flowArea: 1e6,
-    elevation: 0,
+    elevation: ENVIRONMENT_REFERENCE_ELEVATION,
     isBoundary: true,                // Fixed boundary - state never updated by physics
   };
 }
