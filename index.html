@@ -146,6 +146,8 @@
         <div class="construction-info" style="margin-top: 10px; font-size: 11px; color: #888;">
           <div id="selected-component">No component selected</div>
           <div id="placement-hint" style="display: none;">Click to place</div>
+          <button id="pipe-rotate-btn" class="mode-btn" style="display: none; margin-top: 6px;"
+                  title="Turn the pipe section you are about to drop a quarter turn, between east-west and north-south. The preview shows which way it will lie. Keyboard: R. A section only meets a neighbour end to end, so the rotation decides which of the four tiles around it a piece can join.">Rotate section (R)</button>
         </div>
         <!-- Save/Load Section -->
         <hr />
@@ -329,6 +331,8 @@
           <!-- Dynamic content will be inserted here -->
         </div>
         <div class="dialog-footer">
+          <button id="connection-dialog-delete" class="btn-danger" style="display: none; margin-right: auto;"
+                  title="Remove this pipe run. Its metres go straight back on the warehouse racks, the same as deleting any other part puts it back on the shelf.">Delete Pipe</button>
           <button id="connection-dialog-cancel" class="btn-secondary">Cancel</button>
           <button id="connection-dialog-confirm" class="btn-primary">Create Connection</button>
         </div>

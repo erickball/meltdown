@@ -25,6 +25,7 @@ import {
   portAnchors, portAnchor, connectionRoute, pipeRoute, routeLength, completeRoute, rubberBand,
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
+  PipeOrientation, pipePieceRoute, groundRunRoute, findFreeEndJoins, snapPlacementCenter,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
@@ -56,6 +57,8 @@ export interface GridFrameState {
   /** The player may place/connect right now (true in both modes since live edits). */
   buildMode: boolean;
   placementPreview: { componentType: string; position: Point } | null;
+  /** Which way the pipe tool is holding a ground pipe piece (see pipePieceRoute). */
+  pipeOrientation: PipeOrientation;
   connectionFluid: (conn: Connection, from: PlantComponent) => Fluid | undefined;
 }
 
@@ -65,9 +68,14 @@ export interface PortHit {
   anchor: PortAnchor;
 }
 
-/** A pipe being laid from a port. */
+/**
+ * A pipe being laid. It starts either from a PORT (the run becomes a plant
+ * connection between two ports, through the connection dialog) or from open
+ * GROUND (`from` is null: the run becomes a standalone pipe component whose
+ * loose ends join whatever they land on).
+ */
 export interface RoutingState {
-  from: PortHit;
+  from: PortHit | null;
   /** Vertices laid so far (cell centres); the last one is the loose end. */
   waypoints: Point[];
   cursorCell: Point | null;
@@ -79,6 +87,8 @@ export interface RoutingState {
   pressScreen: Point | null;
   /** The source component's footprint: a sweep never lays pipe back through it. */
   sourceRect: PlanRect | null;
+  /** Ground runs only: which way a single-cell piece lies when the sweep never left its cell. */
+  orientation: PipeOrientation;
 }
 
 /** A pipe component or a plant connection: the things drawn as runs. */
@@ -373,7 +383,7 @@ export class GridView {
   // ---------------------------------------------------------------------
 
   snapPlacement(componentType: string, pos: Point): Point {
-    return snapCenter(pos, footprintForType(componentType));
+    return snapPlacementCenter(componentType, pos);
   }
 
   snapComponent(component: PlantComponent, pos: Point): Point {
@@ -670,7 +680,7 @@ export class GridView {
   // Routing interaction
   // ---------------------------------------------------------------------
 
-  startRouting(from: PortHit): void {
+  startRouting(from: PortHit, orientation: PipeOrientation = 'EW'): void {
     this.routing = {
       from,
       waypoints: [from.anchor.out ?? from.anchor.point],
@@ -680,7 +690,48 @@ export class GridView {
       pressScreen: null,
       sourceRect: from.component.type === 'pipe' ? null
         : footprintRect(from.component.position, componentFootprint(from.component)),
+      orientation,
     };
+  }
+
+  /**
+   * Start a run on open ground (the pipe tool pressed where there is no
+   * port). There is no source component and no footprint to keep out of, so
+   * the sweep is free to go anywhere; the run becomes a pipe component.
+   */
+  startGroundRouting(world: Point, orientation: PipeOrientation): void {
+    this.routing = {
+      from: null,
+      waypoints: [cellCenter(world)],
+      cursorCell: cellCenter(world),
+      target: null,
+      dragging: false,
+      pressScreen: null,
+      sourceRect: null,
+      orientation,
+    };
+  }
+
+  /** True while a run started on open ground rather than at a port. */
+  get routingFromGround(): boolean {
+    return this.routing !== null && this.routing.from === null;
+  }
+
+  /**
+   * The route a ground run has swept, its ends carried out to the tile
+   * boundaries so they can meet a neighbour (groundRunRoute). Clears the
+   * routing state.
+   */
+  finishGroundRouting(): Point[] {
+    const r = this.routing!;
+    const route = groundRunRoute(r.waypoints, r.orientation);
+    this.routing = null;
+    return route;
+  }
+
+  /** The joins a pipe's loose ends make, for the caller that just laid it. */
+  freeEndJoins(plantState: PlantState, pipe: PipeComponent) {
+    return findFreeEndJoins(plantState, pipe);
   }
 
   /** Track the cursor: which cell it is over and whether it rests on a finishing port. */
@@ -688,7 +739,9 @@ export class GridView {
     if (!this.routing) return;
     const world = this.screenToWorld(screen);
     this.routing.cursorCell = cellCenter(world);
-    this.routing.target = this.portAt(screen, plantState, this.routing.from.component.id);
+    this.routing.target = this.routing.from
+      ? this.portAt(screen, plantState, this.routing.from.component.id)
+      : null;
     if (this.routing.dragging && !this.insideSource(this.routing.cursorCell)) {
       this.routing.waypoints = extendRoute(this.routing.waypoints, this.routing.cursorCell);
     }
@@ -706,9 +759,17 @@ export class GridView {
     this.routing.waypoints = extendRoute(this.routing.waypoints, this.routing.cursorCell);
   }
 
-  /** The finished route into a target port, and its plan length. */
+  /**
+   * The finished route into a target port, and its plan length. Only a run
+   * that started AT a port finishes this way; a ground run has no source
+   * port to complete from (finishGroundRouting).
+   */
   finishRouting(target: PortHit): { route: Point[]; length: number } {
     const r = this.routing!;
+    if (!r.from) {
+      throw new Error('[Grid] finishRouting was called on a run laid from open ground. ' +
+        'A ground run becomes a pipe component through finishGroundRouting.');
+    }
     const route = completeRoute([r.from.anchor.point, ...r.waypoints], target.anchor);
     this.routing = null;
     return { route, length: routeLength(route) };
@@ -762,7 +823,9 @@ export class GridView {
     if (f.selectedConnection) this.renderConnectionLabel(ctx, f, f.selectedConnection);
     if (f.showPorts) this.renderPorts(ctx, f);
     if (this.routing) this.renderRouting(ctx, f);
-    if (f.placementPreview && f.buildMode) this.renderPlacementPreview(ctx, f);
+    // While a run is being drawn, THAT is the preview - a pipe-tool section
+    // preview under the cursor as well would just be two ghosts.
+    if (f.placementPreview && f.buildMode && !this.routing) this.renderPlacementPreview(ctx, f);
   }
 
   private renderGround(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
@@ -1653,7 +1716,7 @@ export class GridView {
         lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
       }
     }
-    if (f.buildMode) lines.push('click again to edit');
+    if (f.buildMode) lines.push('click again to edit \u00b7 Delete removes it');
 
     ctx.save();
     ctx.font = '12px sans-serif';
@@ -1786,11 +1849,13 @@ export class GridView {
   private renderRouting(ctx: CanvasRenderingContext2D, _f: GridFrameState): void {
     const r = this.routing!;
     const w = Math.max(4, this.cam.ppm * 0.3);
-    const laid = [r.from.anchor.point, ...r.waypoints];
+    const laid = r.from
+      ? [r.from.anchor.point, ...r.waypoints]
+      : groundRunRoute(r.waypoints, r.orientation);
     let preview: Point[] = [];
     if (r.target) {
       preview = completeRoute(laid, r.target.anchor).slice(laid.length - 1);
-    } else if (r.cursorCell) {
+    } else if (r.cursorCell && r.from !== null) {
       preview = rubberBand(r.waypoints, r.cursorCell);
     }
 
@@ -1837,6 +1902,10 @@ export class GridView {
 
   private renderPlacementPreview(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     const { componentType, position } = f.placementPreview!;
+    if (componentType === 'pipe') {
+      this.renderPipePiecePreview(ctx, f, position);
+      return;
+    }
     const fp = footprintForType(componentType);
     const center = snapCenter(position, fp);
     const rect = footprintRect(center, fp);
@@ -1861,5 +1930,76 @@ export class GridView {
     ctx.fillStyle = 'rgba(20, 24, 30, 0.85)';
     ctx.fillText(`${fp.w} × ${fp.d} tiles${clash ? ' (overlaps)' : ''}`, (tl.x + br.x) / 2, tl.y - 4);
     ctx.restore();
+  }
+
+  /**
+   * The ground pipe piece about to be placed: the exact polyline
+   * `pipePieceRoute` will hand the construction manager, over the tile it
+   * fills, with a marker on each end that would join something. Preview and
+   * placement read the same function, so they cannot drift apart.
+   */
+  private renderPipePiecePreview(ctx: CanvasRenderingContext2D, f: GridFrameState, position: Point): void {
+    const route = pipePieceRoute(position, f.pipeOrientation);
+    const a = this.worldToScreen(route[0]);
+    const b = this.worldToScreen(route[route.length - 1]);
+    const cell = cellCenter(position);
+    const tl = this.worldToScreen({ x: cell.x - TILE_M / 2, y: cell.y - TILE_M / 2 });
+    const br = this.worldToScreen({ x: cell.x + TILE_M / 2, y: cell.y + TILE_M / 2 });
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(90, 220, 130, 0.18)';
+    ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.strokeStyle = 'rgba(90, 220, 130, 0.85)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+    ctx.setLineDash([]);
+
+    const w = Math.max(4, this.cam.ppm * 0.3);
+    ctx.lineCap = 'butt';
+    ctx.strokeStyle = 'rgba(20, 24, 30, 0.55)';
+    ctx.lineWidth = w + 3;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    ctx.strokeStyle = 'rgba(150, 235, 175, 0.95)';
+    ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+
+    // Ends that would connect to something the moment the piece lands
+    const ends: Array<[Point, Side]> = [
+      [route[0], f.pipeOrientation === 'EW' ? 'W' : 'N'],
+      [route[route.length - 1], f.pipeOrientation === 'EW' ? 'E' : 'S'],
+    ];
+    for (const [end, side] of ends) {
+      if (!this.joinAt(f.plantState, end, side)) continue;
+      const s = this.worldToScreen(end);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, Math.max(5, w * 0.7), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255, 235, 120, 0.9)';
+      ctx.fill();
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /**
+   * What a loose end at this point facing this way would join. The preview
+   * asks this about a piece that does not exist yet; once it is placed the
+   * caller asks `findFreeEndJoins` about the real pipe, which is the same
+   * rule over real ports.
+   */
+  private joinAt(plantState: PlantState, point: Point, side: Side): { component: PlantComponent; port: Port } | null {
+    const facing: Side = side === 'N' ? 'S' : side === 'S' ? 'N' : side === 'E' ? 'W' : 'E';
+    for (const component of plantState.components.values()) {
+      if (!component.ports || (component as any).isHydraulicOnly) continue;
+      for (const anchor of portAnchors(component)) {
+        if (anchor.port.connectedTo) continue;
+        if (!samePoint(anchor.point, point)) continue;
+        if (anchor.side !== facing) continue;
+        return { component, port: anchor.port };
+      }
+    }
+    return null;
   }
 }

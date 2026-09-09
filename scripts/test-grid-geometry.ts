@@ -7,6 +7,8 @@ import {
   autoRoute, completeRoute, extendRoute, rubberBand, routeLength, simplifyRoute, reanchorRoute,
   connectionRoute, pipeRoute, cellCenter, distanceToPolyline, pointAlongRoute, portAnchorFacing,
   searchRoute, routeObstacles, laneOffsetRoutes, Obstacle,
+  pipePieceRoute, groundRunRoute, pipeFreeEnds, joinForFreeEnd, findFreeEndJoins,
+  oppositeOrientation, PipeOrientation, snapPlacementCenter,
 } from '../src/render/grid-geometry';
 import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point } from '../src/types';
 
@@ -274,6 +276,120 @@ console.log('Pipes');
   pipe.route = [{ x: 2, y: 0.5 }, { x: 2, y: 4.5 }, { x: 6, y: 4.5 }, { x: 6, y: 3.5 }];
   check('a drawn route wins over the endpoints', pipeRoute(pipe) === pipe.route);
   check('drawn route length', near(routeLength(pipe.route), 9));
+}
+
+console.log('Ground pipe: preview and placement coincide');
+{
+  // The pipe tool previews the piece with pipePieceRoute and the placement
+  // builds from the very same call, so this checks the OTHER half of the
+  // coincidence: that the point the click is snapped to is the point the
+  // preview was drawn about, for both rotations. (The bug this replaces:
+  // a pipe's `position` is its inlet END, but placement snapped it as if it
+  // were a 10 x 1 footprint's CENTRE, so the piece landed half a length
+  // east of its preview box.)
+  for (const raw of [{ x: 4.2, y: -0.9 }, { x: 0.0, y: 0.0 }, { x: -3.7, y: 12.49 }]) {
+    const snapped = snapPlacementCenter('pipe', raw);
+    const cell = cellCenter(raw);
+    check(`pipe placement snaps to the cell centre (${raw.x}, ${raw.y})`,
+      samePt(snapped, cell), `${fmt([snapped])} vs ${fmt([cell])}`);
+    for (const o of ['EW', 'NS'] as PipeOrientation[]) {
+      const previewed = pipePieceRoute(raw, o);       // drawn about the raw cursor
+      const placed = pipePieceRoute(snapped, o);      // built from the snapped point
+      check(`preview and placed piece coincide, ${o} at (${raw.x}, ${raw.y})`,
+        previewed.length === placed.length && previewed.every((p, i) => samePt(p, placed[i])),
+        `${fmt(previewed)} vs ${fmt(placed)}`);
+    }
+  }
+
+  const ew = pipePieceRoute({ x: 4.2, y: -0.9 }, 'EW');
+  check('an east-west piece fills its tile along x',
+    ew.length === 2 && near(ew[0].y, -0.5) && near(ew[1].y, -0.5) && near(ew[0].x, 4) && near(ew[1].x, 5), fmt(ew));
+  const ns = pipePieceRoute({ x: 4.2, y: -0.9 }, 'NS');
+  check('a north-south piece fills its tile along y',
+    ns.length === 2 && near(ns[0].x, 4.5) && near(ns[1].x, 4.5) && near(ns[0].y, -1) && near(ns[1].y, 0), fmt(ns));
+  check('both rotations are one tile long', near(routeLength(ew), TILE_M) && near(routeLength(ns), TILE_M));
+  check('rotation is an involution', oppositeOrientation(oppositeOrientation('EW')) === 'EW');
+
+  // A swept run: ends carried out to the tile boundary, interior on centres
+  const run = groundRunRoute([{ x: 0.5, y: 0.5 }, { x: 1.5, y: 0.5 }, { x: 2.5, y: 0.5 }, { x: 2.5, y: 1.5 }], 'EW');
+  check('a swept run starts on the first tile boundary', near(run[0].x, 0) && near(run[0].y, 0.5), fmt(run));
+  check('a swept run ends on the last tile boundary', near(run[run.length - 1].x, 2.5) && near(run[run.length - 1].y, 2), fmt(run));
+  check('a swept run is orthogonal', run.every((p, i) => i === 0 || near(p.x, run[i - 1].x) || near(p.y, run[i - 1].y)), fmt(run));
+  check('a swept run costs its drawn length', near(routeLength(run), 4), String(routeLength(run)));
+  const single = groundRunRoute([{ x: 4.2, y: -0.9 }], 'NS');
+  check('a sweep that never left its cell is one piece in the tool rotation',
+    single.length === 2 && samePt(single[0], ns[0]) && samePt(single[1], ns[1]), fmt(single));
+}
+
+console.log('Ground pipe: free ends that touch');
+{
+  const plant: PlantState = { components: new Map(), connections: [] } as unknown as PlantState;
+  const groundPipe = (id: string, route: Point[]): PipeComponent => {
+    const length = routeLength(route);
+    const p: PipeComponent = {
+      id, type: 'pipe', position: { ...route[0] }, endPosition: { ...route[route.length - 1] },
+      rotation: 0, diameter: 0.3, thickness: 0.01, length, route, elevation: 0, endElevation: 0,
+      ports: [
+        { id: `${id}-left`, position: { x: 0, y: 0 }, direction: 'both' },
+        { id: `${id}-right`, position: { x: length, y: 0 }, direction: 'both' },
+      ],
+    };
+    plant.components.set(id, p);
+    return p;
+  };
+
+  const a = groundPipe('pa', pipePieceRoute({ x: 10.5, y: 10.5 }, 'EW'));   // x 10..11
+  check('a fresh piece has two free ends', pipeFreeEnds(a).length === 2);
+  const ends = pipeFreeEnds(a);
+  check('its ends face out along the pipe',
+    ends.some(e => e.side === 'W' && near(e.point.x, 10)) && ends.some(e => e.side === 'E' && near(e.point.x, 11)),
+    ends.map(e => `${e.side}@${e.point.x}`).join(' '));
+  check('a lone piece touches nothing', findFreeEndJoins(plant, a).length === 0);
+
+  // The next tile east, same rotation: the two ends are the same point
+  const b = groundPipe('pb', pipePieceRoute({ x: 11.5, y: 10.5 }, 'EW'));
+  const joins = findFreeEndJoins(plant, b);
+  check('a piece laid end-on to another finds exactly one join', joins.length === 1,
+    joins.map(j => j.join.port.id).join(','));
+  check('and it is the neighbour end it touches', joins[0]?.join.port.id === 'pa-right', joins[0]?.join.port.id);
+
+  // A piece one tile NORTH of A only shares a corner, not an end
+  const c = groundPipe('pc', pipePieceRoute({ x: 11.5, y: 9.5 }, 'NS'));
+  check('a piece round the corner does not join (its ends are elsewhere)',
+    findFreeEndJoins(plant, c).every(j => j.join.port.id !== 'pa-right'),
+    findFreeEndJoins(plant, c).map(j => j.join.port.id).join(','));
+  plant.components.delete('pc');
+
+  // A pump's east nozzle: a piece in the tile just outside it lands on the
+  // very point the nozzle anchors to, and joins it.
+  const pmp = pump('pump-1', 12.5, 10.5);   // 1 x 1 footprint, x 12..13
+  plant.components.set(pmp.id, pmp);
+  const outlet = portAnchors(pmp).find(x => x.port.id === 'pump-1-outlet')!;
+  check('the pump outlet anchors on the middle of its east edge',
+    outlet.side === 'E' && near(outlet.point.x, 13) && near(outlet.point.y, 10.5),
+    `${outlet.side}@${outlet.point.x},${outlet.point.y}`);
+
+  const d = groundPipe('pd', pipePieceRoute({ x: 13.5, y: 10.5 }, 'EW'));   // x 13..14
+  const dWest = pipeFreeEnds(d).find(e => e.side === 'W')!;
+  check('a piece whose end lands on a facing nozzle joins it',
+    joinForFreeEnd(plant, dWest)?.port.id === 'pump-1-outlet',
+    String(joinForFreeEnd(plant, dWest)?.port.id));
+  check('and findFreeEndJoins reports exactly that one end',
+    findFreeEndJoins(plant, d).length === 1 &&
+    findFreeEndJoins(plant, d)[0].join.port.id === 'pump-1-outlet');
+
+  // A port already in use is not grabbed
+  pmp.ports.find(p => p.id === 'pump-1-outlet')!.connectedTo = 'somewhere';
+  check('a nozzle that is already piped is not joined', joinForFreeEnd(plant, dWest) === null);
+  pmp.ports.find(p => p.id === 'pump-1-outlet')!.connectedTo = undefined;
+
+  // Facing matters: an end pointing the same way as the nozzle is not a join
+  const wrongWay = { component: d, port: d.ports[0], point: { ...outlet.point }, side: 'E' as const };
+  check('an end facing the same way as the nozzle is not a join', joinForFreeEnd(plant, wrongWay) === null);
+
+  // A pipe two tiles away shares nothing
+  const far = groundPipe('pf', pipePieceRoute({ x: 20.5, y: 20.5 }, 'EW'));
+  check('a piece nowhere near anything joins nothing', findFreeEndJoins(plant, far).length === 0);
 }
 
 if (failures > 0) {
