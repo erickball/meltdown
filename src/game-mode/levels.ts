@@ -60,27 +60,35 @@ export const LEVELS: LevelDef[] = [
     liveBuild: true,
 
     goals: [
-      { kind: 'survive', seconds: 21600, label: 'Keep the fuel covered for six hours' },
+      { kind: 'survive', seconds: 28800, label: 'Keep the fuel covered for eight hours' },
     ],
-    // Nothing here is pressurised or contained: any real fuel damage vents
-    // straight to the sky, so the release limit is set where a first sign of
-    // damage already counts.
-    maxRelease: 0.01,
+    // UNCOVERING THE FUEL IS NOT THE LOSS. It used to be - a level hazard on
+    // the pool level ended the run twenty minutes after the water went below
+    // the racks - and that hid the actual accident behind a rule. The run now
+    // continues: the pool boils dry, the racks heat up, the cladding starts to
+    // burn, and what ends it is what a real accident is judged on, which is
+    // what gets OUT.
+    //
+    // 60 x (mol CsI) + 0.02 x (mol Xe) is the release index
+    // (game-mode/consequences.ts); 1.0 is "a genuine release ... this one makes
+    // the news", about 0.017 mol of caesium-iodine, roughly 8 TBq. It is
+    // reached a few minutes after the cladding passes ~1000 C - once the fuel
+    // is actually being destroyed, and not before. Nothing between uncovery and
+    // that point ends the level: the player can watch the whole thing develop,
+    // and can still stop it with water.
+    maxRelease: 1.0,
     hazards: [
+      // A backstop for a pool with nothing left to release: the racks
+      // themselves have melted. Zircaloy melts at about 1850 C, so by 1800 C
+      // the assemblies are collapsing into the bottom of the pool whatever
+      // the fence monitors say.
       {
-        kind: 'level', nodeId: 'pool', minMetres: 4.16, graceSeconds: 1200,
-        label: 'Pool level',
-        consequence:
-          'The racks stand 4.16 m tall. Water below that leaves fuel in steam, ' +
-          'and steam does not carry 8 megawatts away.',
-      },
-      {
-        kind: 'temperature', nodeId: 'pool-clad', limitC: 600,
+        kind: 'temperature', nodeId: 'pool-clad', limitC: 1800,
         label: 'Cladding temperature',
         consequence:
-          'Zircaloy has almost no strength left at 600 \u00b0C, and its reaction with ' +
-          'steam turns self-sustaining not far above 800 \u00b0C. Past that the fuel ' +
-          'makes its own heat and hydrogen and nobody is putting it back.',
+          'The cladding reached its melting point. The racks are collapsing into ' +
+          'the bottom of the pool, and everything the fuel was holding goes up ' +
+          'with the smoke.',
       },
     ],
 
@@ -96,16 +104,18 @@ export const LEVELS: LevelDef[] = [
       { who: 'inspector', mood: 'neutral', text: 'Inspector Pruitt. The seismologists are unhappy. If that liner cracks, your pool becomes a bathtub with the plug out.' },
       { who: 'grubb', mood: 'angry', text: 'The yard has three hundred metres of pipe, two pumps and a couple of valves. That is the whole company. There is no budget, there is no bank, there is a YARD.' },
       { who: 'grubb', mood: 'neutral', text: 'Water: two site tanks up here on the bench, and the sea. The tanks are close and they are FINITE. The sea is not finite, but it is down there and you are up here.' },
-      { who: 'inspector', mood: 'unimpressed', text: 'Keep the fuel covered for six hours and I will write this up as an event, not an accident. Uncover it and we will both be explaining ourselves for years.' },
+      { who: 'inspector', mood: 'unimpressed', text: 'Keep the fuel covered for eight hours and I will write this up as an event, not an accident. Uncover it and we will both be explaining ourselves for years.' },
+      { who: 'grubb', mood: 'angry', text: 'And do not think the job stops when the water goes under the fuel. It boils dry, the zirconium catches fire, and THEN we are on the news. Nobody rings a bell for you.' },
       { who: 'grubb', mood: 'happy', text: 'Build while it runs - no shutting anything down, nothing to shut down. Go.' },
     ],
     debrief: [
-      { who: 'grubb', mood: 'happy', text: 'Six hours. The water is still over the fuel and the fuel is still in one piece.' },
+      { who: 'grubb', mood: 'happy', text: 'Eight hours. The water is still over the fuel and the fuel is still in one piece.' },
       { who: 'inspector', mood: 'neutral', text: 'Level held, cladding cool, and the only thing you lost was a tank of demineralised water and some pipe. I am recording this as an event.' },
       { who: 'grubb', mood: 'happy', text: 'An EVENT. You hear that? Not an accident. That is the nicest word anyone at that agency has ever said to me.' },
     ],
     hints: [
       'Watch the pool level readout - the racks are 4.16 m tall, and everything below that number is trouble.',
+      'Uncovering the fuel does not end the job. The pool boils dry, the cladding burns in the steam and then in the air, and you lose when activity actually gets out. Water put back late is still water put back.',
       'The crack passes about 100 kg/s once the level is down near the racks. A make-up pump much bigger than that just empties the tanks faster.',
       'A pump can only SUCK water up about ten metres before its intake boils. It can PUSH it as high as its head allows.',
       'When the wave comes, anything standing on the shore is under water and stays stopped until it drains. Make the tanks last.',

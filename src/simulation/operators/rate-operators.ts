@@ -24,7 +24,6 @@ import * as Water from '../water-properties';
 import { solveMixtureState, type MixtureState } from '../mixture-properties';
 import { simulationConfig } from '../types';
 import {
-  ncgPartialPressure,
   totalMoles,
   totalMass as ncgTotalMass,
   emptyGasComposition,
@@ -53,6 +52,7 @@ import {
   drawCompositionAt,
   DrawComposition,
   approxVaporDensity,
+  approxLiquidDensity,
   CLOSED_FLOW_DECAY_TAU,
   pressureAtConnection,
 } from './connection-hydraulics';
@@ -316,13 +316,24 @@ export function fluidHeatCapacity(node: FlowNode): number {
     if (n > 0) C += n * mixtureCv(node.fluid.ncg);
   }
   if (node.fluid.mass > 0) {
-    let steamEnergy = node.fluid.internalEnergy;
-    if (node.fluid.ncg) {
-      const n = totalMoles(node.fluid.ncg);
-      if (n > 0) steamEnergy = Math.max(0, steamEnergy - n * mixtureCv(node.fluid.ncg) * node.fluid.temperature);
-    }
-    const w = Water.calculateState(node.fluid.mass, steamEnergy, node.volume);
-    C += node.fluid.mass * Water.effectiveSpecificHeat(w);
+    // The water's effective specific heat needs only its PHASE and its
+    // TEMPERATURE, and the accepted mixture solve has already written both
+    // onto the node. It used to be re-derived by inverting the steam tables
+    // on (U_total - n Cv T)/m - a subtraction of two nearly equal numbers
+    // divided by a tiny mass, which is exactly the ill-conditioned form
+    // mixture-properties.ts warns about. In a node that has boiled itself
+    // down to grams of steam under thousands of moles of hydrogen it
+    // produced specific volumes of 1e16 m3/kg and threw straight out of the
+    // water tables, killing a run that was otherwise perfectly healthy.
+    // Same quantity, no inversion, nothing to cancel.
+    C += node.fluid.mass * Water.effectiveSpecificHeat({
+      temperature: node.fluid.temperature,
+      pressure: node.fluid.pressure,
+      density: node.volume > 0 ? node.fluid.mass / node.volume : 0,
+      phase: node.fluid.phase,
+      quality: node.fluid.quality ?? 0,
+      specificEnergy: node.fluid.internalEnergy / node.fluid.mass,
+    });
   }
   return C;
 }
@@ -521,7 +532,7 @@ export class ConvectionRateOperator implements RateOperator {
 
       // Split the surface into liquid-wetted and vapor-exposed portions by
       // the node's liquid level (tubes above the water line barely transfer).
-      const { liquidArea, vaporArea } = this.effectiveSurfaceAreas(conn, flowNode);
+      const { liquidArea, vaporArea } = effectiveSurfaceAreas(conn, flowNode);
 
       const dT = thermalNode.temperature - flowNode.fluid.temperature;
       // Two lengths, because the correlations want different ones. D_heater
@@ -578,50 +589,6 @@ export class ConvectionRateOperator implements RateOperator {
    * dependent HX work introduced; previously only the obsolete Euler path
    * applied it).
    */
-  private effectiveSurfaceAreas(
-    conn: ConvectionConnection,
-    flowNode: FlowNode
-  ): { liquidArea: number; vaporArea: number } {
-    const phase = flowNode.fluid.phase;
-    if (conn.tubeHeight === undefined || conn.tubeBottomElevation === undefined) {
-      if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
-      if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
-      // Two-phase without geometry: split by liquid volume fraction
-      const quality = flowNode.fluid.quality ?? 0;
-      const rho_f = Water.saturatedLiquidDensity(flowNode.fluid.temperature);
-      const rho_g = Water.saturatedVaporDensity(flowNode.fluid.temperature);
-      const liquidVolFrac =
-        ((1 - quality) / rho_f) / ((1 - quality) / rho_f + quality / rho_g);
-      return {
-        liquidArea: conn.surfaceArea * liquidVolFrac,
-        vaporArea: conn.surfaceArea * (1 - liquidVolFrac),
-      };
-    }
-
-    if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
-    if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
-
-    const quality = flowNode.fluid.quality ?? 0;
-    const liquidMass = flowNode.fluid.mass * (1 - quality);
-    const liquidVolume = liquidMass / Water.saturatedLiquidDensity(flowNode.fluid.temperature);
-    const liquidLevel = calculateLiquidLevelWithObstructions(flowNode, liquidVolume);
-
-    const tubeBottom = conn.tubeBottomElevation;
-    let submergedFraction: number;
-    if (liquidLevel <= tubeBottom) {
-      submergedFraction = 0;
-    } else if (liquidLevel >= tubeBottom + conn.tubeHeight) {
-      submergedFraction = 1;
-    } else {
-      submergedFraction = (liquidLevel - tubeBottom) / conn.tubeHeight;
-    }
-
-    return {
-      liquidArea: conn.surfaceArea * submergedFraction,
-      vaporArea: conn.surfaceArea * (1 - submergedFraction),
-    };
-  }
-
   /**
    * Wetted-surface heat transfer coefficient: single-phase convection -
    * Dittus-Boelter blended with Churchill-Chu on the liquid's own Rayleigh
@@ -3350,6 +3317,146 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
   reset(): void {}
 }
 
+/**
+ * Split a rod or tube surface into the share standing in liquid and the
+ * share standing in gas, from the flow node's own liquid level.
+ *
+ * Module level because the oxidation operator needs exactly the same split:
+ * the part of a fuel rod under water reacts with water, the part above it
+ * reacts with whatever gas is in the room. Two different answers to "how
+ * much of this rod is wet" would be two different rods.
+ */
+export function effectiveSurfaceAreas(
+  conn: ConvectionConnection,
+  flowNode: FlowNode
+): { liquidArea: number; vaporArea: number } {
+  const phase = flowNode.fluid.phase;
+  if (conn.tubeHeight === undefined || conn.tubeBottomElevation === undefined) {
+    if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
+    if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
+    // Two-phase without geometry: split by liquid volume fraction
+    const quality = flowNode.fluid.quality ?? 0;
+    const rho_f = Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+    const rho_g = Water.saturatedVaporDensity(flowNode.fluid.temperature);
+    const liquidVolFrac =
+      ((1 - quality) / rho_f) / ((1 - quality) / rho_f + quality / rho_g);
+    return {
+      liquidArea: conn.surfaceArea * liquidVolFrac,
+      vaporArea: conn.surfaceArea * (1 - liquidVolFrac),
+    };
+  }
+
+  if (phase === 'liquid') return { liquidArea: conn.surfaceArea, vaporArea: 0 };
+  if (phase === 'vapor') return { liquidArea: 0, vaporArea: conn.surfaceArea };
+
+  const quality = flowNode.fluid.quality ?? 0;
+  const liquidMass = flowNode.fluid.mass * (1 - quality);
+  const liquidVolume = liquidMass / Water.saturatedLiquidDensity(flowNode.fluid.temperature);
+  const liquidLevel = calculateLiquidLevelWithObstructions(flowNode, liquidVolume);
+
+  const tubeBottom = conn.tubeBottomElevation;
+  let submergedFraction: number;
+  if (liquidLevel <= tubeBottom) {
+    submergedFraction = 0;
+  } else if (liquidLevel >= tubeBottom + conn.tubeHeight) {
+    submergedFraction = 1;
+  } else {
+    submergedFraction = (liquidLevel - tubeBottom) / conn.tubeHeight;
+  }
+
+  return {
+    liquidArea: conn.surfaceArea * submergedFraction,
+    vaporArea: conn.surfaceArea * (1 - submergedFraction),
+  };
+}
+
+// ============================================================================
+// Zirconium oxidation constants
+// ============================================================================
+
+const ZR_MOLAR_MASS = 0.09122;     // kg/mol
+const ZR_DENSITY = 6500;           // kg/m3
+const H2O_MOLAR_MASS = 0.018015;   // kg/mol
+const R_GAS_J = 8.314;             // J/mol-K
+
+/** Zr + 2 H2O -> ZrO2 + 2 H2, per mol Zr (J). */
+const STEAM_REACTION_ENTHALPY = 586e3;
+/**
+ * Zr + O2 -> ZrO2, per mol Zr (J). 262 kcal/mol - Benjamin et al.,
+ * NUREG/CR-0649 Section 3.2, and the same number as the standard enthalpy of
+ * formation of zirconia. Nearly twice the steam reaction, which is the whole
+ * reason a DRY rack is worse than a steaming one.
+ */
+const AIR_REACTION_ENTHALPY = 1096e3;
+
+/** Specific enthalpy leaving with steam that the reaction consumed (J/kg). */
+const STEAM_ENTHALPY_OUT = 2.0e6;
+
+/**
+ * Oxide already on the metal when a run starts, as METAL thickness consumed
+ * (m). A parabolic law is singular at zero thickness and cladding is never
+ * bare: spent fuel carries 15-20 um of waterside corrosion oxide out of the
+ * reactor, and Benjamin et al. used 1.5 um as the conservative value for
+ * their spent-fuel heat-up calculations. 1 um of metal is about 1.6 um of
+ * oxide, so this is that conservative choice.
+ */
+const INITIAL_OXIDE_THICKNESS = 1e-6;
+
+/**
+ * Zr + steam parabolic constant, d(X^2)/dt in m2/s with X the metal
+ * thickness consumed.
+ *
+ * Baker-Just (1962), the conservative licensing correlation:
+ *   (m/A)^2 = 3.33e7 * t * exp(-45500/(R T)),  m/A in mg Zr/cm2, R cal/mol-K.
+ * Converting mg Zr/cm2 to metres of metal (1.53846e-6 m per mg/cm2 at 6500
+ * kg/m3) squares to 2.36686e-12, so A = 2.36686e-12 * 3.33e7 = 7.8817e-5.
+ *
+ * NOTE: the previous code carried 3.33e-3 m2/s here, having converted
+ * "33.3 cm2/s" to m2/s by 1e-4. That is not what the correlation's constant
+ * means - its units are (mg/cm2)^2/s - and it made this reaction 42x too
+ * fast in k, i.e. 6.5x too fast in rate. Fixed together with the air
+ * reaction below, because two rate laws that are meant to run in parallel
+ * have to be on the same footing to be compared at all.
+ */
+function steamParabolicConstant(T: number): number {
+  return 7.8817e-5 * Math.exp(-190372 / (R_GAS_J * T));
+}
+
+/**
+ * Zr + air parabolic constant, same units.
+ *
+ * Benjamin et al., NUREG/CR-0649 (Sandia, 1979), Fig. 6: three fitted
+ * branches of 2W dW/dt = K0 exp(-Ea/RT) with W in mg O2/cm2 and Ea in
+ * cal/mol. One mg of O2 per cm2 corresponds to 4.3857e-6 m of metal
+ * (M_Zr/M_O2 = 2.8507, over 6500 kg/m3), so d(X^2)/dt = 1.9235e-11 K0
+ * exp(-Ea/RT), and Ea x 4.184 puts the exponent in J/mol.
+ *
+ * The two breakpoints are the source's, not ours, and it says what they
+ * are: the alpha/beta change in the Zr-O solid solution at 920 C, and the
+ * monoclinic-to-tetragonal change in ZrO2 at 1155 C. The first pair join
+ * continuously (they agree to 0.1% at 1193 K, which is how the fit was
+ * made); the third branch steps UP by about 5x at 1428 K. That step is the
+ * correlation's own and is reproduced rather than smoothed away - but it is
+ * nearly invisible in a fire, where above ~1100 C it is the oxygen supply
+ * and not the kinetics that governs.
+ */
+function airParabolicConstant(T: number): number {
+  if (T <= 1193.15) return 2.2120e-8 * Math.exp(-114391 / (R_GAS_J * T));   // <= 920 C
+  if (T <= 1428.15) return 1.1079e-3 * Math.exp(-221710 / (R_GAS_J * T));   // <= 1155 C
+  return 1.1926e-6 * Math.exp(-121658 / (R_GAS_J * T));                     // above
+}
+
+/**
+ * Chemical power (W) released by each cladding node's oxidation, from the
+ * last rate evaluation. For displays only - the flames the grid view draws
+ * over a burning rack scale with it - never for physics.
+ */
+const lastOxidationPower = new Map<string, number>();
+
+export function getCladdingOxidationPower(): ReadonlyMap<string, number> {
+  return lastOxidationPower;
+}
+
 // ============================================================================
 // Cladding Oxidation Rate Operator
 // ============================================================================
@@ -3357,178 +3464,235 @@ export class ChokedFlowDisplayOperator implements ConstraintOperator {
 /**
  * Cladding Oxidation Rate Operator
  *
- * Models high-temperature zirconium oxidation by steam:
- *   Zr + 2H₂O → ZrO₂ + 2H₂ + heat (586 kJ/mol Zr)
+ * Zirconium burns in anything that carries oxygen. Two reactions run in
+ * PARALLEL on the same metal, each on its own oxidant's partial pressure -
+ * there is no regime switch anywhere in here, because a rack half in steam
+ * and half in air is doing both at once:
  *
- * This reaction becomes significant above ~1200K and accelerates dramatically
- * at higher temperatures (runaway oxidation above ~1500K).
+ *   Zr + 2 H2O -> ZrO2 + 2 H2    586 kJ/mol Zr   (and hydrogen)
+ *   Zr +   O2  -> ZrO2          1096 kJ/mol Zr   (and nothing to burn later)
  *
- * The Baker-Just correlation is used for oxidation rate:
- *   dW²/dt = A × exp(-Q/RT)
- * where W is oxide thickness, A = 33.3 cm²/s, Q = 45,500 cal/mol
+ * The air reaction releases nearly twice the heat per mole of metal and,
+ * above ~900 C, runs faster as well. That combination is what makes a
+ * DRAINED spent fuel pool - racks standing in open air with no water left to
+ * boil - a worse place than a flooded one, and it is why this operator has
+ * to see the node's gas composition rather than assume steam.
  *
- * Physics included:
- * 1. Temperature-dependent Arrhenius kinetics
- * 2. Steam availability (oxidation limited by steam partial pressure)
- * 3. Exothermic heat addition to cladding
- * 4. H₂ generation added to coolant NCG inventory
- * 5. Oxidation progress tracking (0-100% of cladding consumed)
+ * ## Rate law
  *
- * References:
- * - Baker, L., Just, L.C. (1962) - Baker-Just correlation
- * - Cathcart-Pawel correlation (alternative, similar results)
+ * Both reactions grow a protective oxide, so both are parabolic in the
+ * thickness of metal already consumed, X:
+ *
+ *     d(X^2)/dt = k(T)      =>      dX/dt = k(T) / (2 X)
+ *
+ * X starts at a real pre-existing film rather than zero (spent cladding
+ * carries 15-20 um of waterside corrosion oxide out of the reactor;
+ * Benjamin et al. used 1.5 um as the conservative value, which is what
+ * INITIAL_OXIDE_THICKNESS is). Without it the parabolic law is singular at
+ * t = 0.
+ *
+ * ## Oxidant supply, in series with the kinetics
+ *
+ * Growing the oxide consumes oxidant, and the oxidant has to arrive through
+ * the gas. Those are two resistances in series, so the flux is their
+ * harmonic mean:
+ *
+ *     J = 1 / ( 1/J_kinetic + 1/J_transport ),   J_transport = h_m * C_bulk
+ *
+ * exactly as the graphite oxidation operator does it. Nothing switches:
+ * when the gas is rich the kinetics govern, when the gas is thin the
+ * boundary layer governs, and when the oxygen is gone C_bulk is zero and so
+ * is the rate. OXYGEN STARVATION IS NOT A RULE HERE - it is what this
+ * expression does on its own. So is ignition: nothing in this file knows
+ * about an ignition temperature. A rack ignites when the heat this releases
+ * outruns what the rack can lose, which is a property of the heat balance,
+ * not of the rate law.
+ *
+ * Benjamin et al. did the same thing with a min() of the two rates and the
+ * heat/mass-transfer analogy for the transport term; the harmonic mean is
+ * the smooth version of that min.
+ *
+ * ## Where the surface is
+ *
+ * The submerged part of a rack sits against liquid water: unlimited steam
+ * supply at the surface, so it is purely kinetics-limited, and no oxygen.
+ * The emerged part sits in the node's gas and reacts with whatever is in
+ * it. The split is the same liquid-level split the convection model uses.
+ *
+ * ## Constants and their sources
+ *
+ * STEAM - Baker-Just (1962), the conservative licensing correlation:
+ *   (m/A)^2 = 3.33e7 t exp(-45500/RT), m/A in mg Zr/cm2, R in cal/mol-K.
+ *
+ * AIR - Benjamin et al., "Spent Fuel Heatup Following Loss of Water During
+ * Storage", NUREG/CR-0649 (Sandia, 1979), Section 3.2 and Figure 6 - the
+ * study this whole scenario comes from. Three fitted branches:
+ *   2W dW/dt = K0 exp(-Ea/RT), W in mg O2/cm2, Ea in cal/mol,
+ *   K0 = 1.15e3, Ea = 27340   (T <= 920 C)
+ *   K0 = 5.76e7, Ea = 52990   (920 C < T <= 1155 C)
+ *   K0 = 6.20e4, Ea = 29077   (T > 1155 C)
+ *
+ * Both are converted here to metal-recession form, d(X^2)/dt in m2/s. See
+ * docs/zircaloy-air-oxidation.md for the arithmetic.
+ *
+ * NOT MODELLED: nitriding as a separate reaction. Benjamin's constants are
+ * fitted to Zircaloy in AIR, so the nitrogen's effect on the oxide is inside
+ * them; what is missing is the separate ZrN inventory and its re-oxidation,
+ * and the breakaway transition that KIT's later work resolves.
  */
 export class CladdingOxidationRateOperator implements RateOperator {
   name = 'CladdingOxidation';
 
-  // Physical constants
-  private static readonly ZR_MOLAR_MASS = 0.09122; // kg/mol (91.22 g/mol)
-  private static readonly H2O_MOLAR_MASS = 0.01802; // kg/mol
-
-  // Baker-Just correlation constants (parabolic rate law)
-  // dW²/dt = A × exp(-Q/RT) where W is oxide thickness
-  // A = 33.3 cm²/s = 3.33e-3 m²/s
-  // Q = 45500 cal/mol = 190370 J/mol
-  private static readonly A_BAKER_JUST = 3.33e-3; // m²/s
-  private static readonly Q_ACTIVATION = 190370;  // J/mol
-  private static readonly R_GAS = 8.314;          // J/mol-K
-
-  // Reaction enthalpy: Zr + 2H₂O → ZrO₂ + 2H₂ releases 586 kJ/mol Zr
-  private static readonly OXIDATION_ENTHALPY = 586000; // J/mol Zr
-
-  // Temperature threshold below which oxidation is negligible
-  private static readonly T_THRESHOLD = 1100; // K (~827°C)
-
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
 
-    // Find all cladding nodes with oxidation tracking
     for (const [id, node] of state.thermalNodes) {
       if (!node.oxidation) continue;
-
       const ox = node.oxidation;
+      if (ox.oxidizedFraction >= 1 || ox.totalZrMass <= 0) continue;
 
-      // Skip if already fully oxidized
-      if (ox.oxidizedFraction >= 0.9999) continue;
-
-      // Get cladding temperature
       const T = node.temperature;
-
-      // Skip if below threshold temperature
-      if (T < CladdingOxidationRateOperator.T_THRESHOLD) continue;
-
-      // Get associated coolant node for steam availability and H₂ release
       const coolantNode = state.flowNodes.get(ox.associatedCoolantNode);
-      if (!coolantNode) continue;
-
-      // Check steam availability
-      // For two-phase or vapor, steam is available
-      // For liquid, very little steam (use saturation pressure at surface, but much reduced)
-      let P_steam: number;
-      let steamFactor: number;
-      if (coolantNode.fluid.phase === 'liquid') {
-        // Limited steam from liquid surface evaporation
-        // Use saturation pressure at coolant temperature, but reduce significantly
-        // because steam must diffuse from liquid surface to hot cladding
-        const P_sat = Water.saturationPressure(coolantNode.fluid.temperature);
-        // Effective steam pressure is much lower than saturation due to diffusion limits
-        // Use a factor of 0.01 to represent this mass transfer limitation
-        P_steam = P_sat * 0.01;
-        // Steam factor based on 1 bar reference for full reaction rate
-        steamFactor = Math.min(1, P_steam / 1e5);
-      } else {
-        // Vapor or two-phase: steam pressure is total - NCG
-        const P_ncg = coolantNode.fluid.ncg && coolantNode.volume > 0
-          ? ncgPartialPressure(coolantNode.fluid.ncg, coolantNode.fluid.temperature, coolantNode.volume)
-          : 0;
-        P_steam = Math.max(0, coolantNode.fluid.pressure - P_ncg);
-        // Steam factor: full rate at 1 bar, reduced below
-        steamFactor = Math.min(1, P_steam / 1e5);
+      if (!coolantNode) {
+        throw new Error(
+          `[CladdingOxidation] Node '${id}' names coolant node ` +
+          `'${ox.associatedCoolantNode}', which does not exist. Both the oxidant ` +
+          `supply and the hydrogen release depend on it; there is no default.`
+        );
       }
 
-      if (steamFactor < 0.01) continue; // No steam, no reaction
-
-      // Baker-Just parabolic rate law: dW²/dt = A × exp(-Q/RT)
-      // where W is oxide layer thickness
-      // For mass-based calculation: dm_oxide/dt ~ (surface area) × rate
-      const A = CladdingOxidationRateOperator.A_BAKER_JUST;
-      const Q = CladdingOxidationRateOperator.Q_ACTIVATION;
-      const R = CladdingOxidationRateOperator.R_GAS;
-
-      // Arrhenius rate constant (m²/s)
-      const k_rate = A * Math.exp(-Q / (R * T));
-
-      // Current oxide thickness fraction determines remaining Zr surface
-      // As oxidation progresses, rate slows due to diffusion through oxide layer
-      // Parabolic law already accounts for this: rate ∝ 1/W
-      const W_fraction = ox.oxidizedFraction;
-      const remaining_factor = Math.sqrt(1 - W_fraction);
-
-      // Mass oxidation rate (kg Zr/s)
-      // Surface area is proportional to node.surfaceArea
-      // Convert from parabolic thickness rate to mass rate:
-      // dm/dt = ρ_Zr × surfaceArea × dW/dt
-      // where dW/dt = k_rate / (2W) for parabolic law
-      // For simplicity, use empirical rate scaled by surface area
-      const ZR_DENSITY = 6500; // kg/m³
-      const characteristic_thickness = node.characteristicLength; // clad thickness ~0.6mm
-
-      // Rate of oxide thickness growth (m/s)
-      // From parabolic law: W × dW/dt = k_rate/2, so dW/dt = k_rate/(2W)
-      // At W→0, we cap the rate to avoid singularity
-      const W_current = Math.max(characteristic_thickness * W_fraction, 1e-6);
-      const dW_dt = k_rate / (2 * W_current);
-
-      // Cap the rate to prevent numerical issues (max ~1 mm/s at extreme T)
-      const dW_dt_capped = Math.min(dW_dt, 1e-3);
-
-      // Mass of Zr oxidized per second (kg/s)
-      // dm_Zr/dt = ρ_Zr × surfaceArea × dW/dt × steam_availability
-      const dm_Zr_dt = ZR_DENSITY * node.surfaceArea * dW_dt_capped * steamFactor * remaining_factor;
-
-      // Convert to oxidation fraction rate
-      // dFraction/dt = dm_Zr_dt / total_Zr_mass
-      const dOxidizedFraction_dt = dm_Zr_dt / ox.totalZrMass;
-
-      // Store oxidation rate for this thermal node
-      const existingRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
-      existingRates.dOxidizedFraction = dOxidizedFraction_dt;
-
-      // Calculate heat release (exothermic reaction)
-      // Moles of Zr oxidized per second
-      const mol_Zr_dt = dm_Zr_dt / CladdingOxidationRateOperator.ZR_MOLAR_MASS;
-      const Q_release = mol_Zr_dt * CladdingOxidationRateOperator.OXIDATION_ENTHALPY; // W
-
-      // Add heat to cladding (increases temperature; latent plateau applies)
-      existingRates.dTemperature += Q_release / nodeHeatCapacity(node);
-      rates.thermalNodes.set(id, existingRates);
-
-      // Calculate H₂ production rate
-      // Stoichiometry: 1 mol Zr → 2 mol H₂
-      const mol_H2_dt = 2 * mol_Zr_dt;
-
-      // Add H₂ to coolant NCG inventory
-      const coolantRates = rates.flowNodes.get(ox.associatedCoolantNode) || { dMass: 0, dEnergy: 0 };
-      if (!coolantRates.dNcg) {
-        coolantRates.dNcg = emptyGasComposition();
+      // --- Where the surface is -----------------------------------------
+      // The convection connection carries the rod geometry and the same
+      // liquid-level split the heat transfer uses.
+      const conn = state.convectionConnections.find(c => c.thermalNodeId === id);
+      if (!conn) {
+        throw new Error(
+          `[CladdingOxidation] Cladding node '${id}' has no convection connection, ` +
+          `so there is no rod geometry and no liquid level to say which part of it ` +
+          `stands in water. A clad node without one is a build error.`
+        );
       }
-      coolantRates.dNcg.H2 += mol_H2_dt;
+      const { liquidArea, vaporArea } = effectiveSurfaceAreas(conn, coolantNode);
+      const rodDiameter = conn.characteristicDiameter ?? coolantNode.hydraulicDiameter;
+
+      // --- Oxide thickness already grown --------------------------------
+      const X = Math.max(node.characteristicLength * ox.oxidizedFraction,
+        INITIAL_OXIDE_THICKNESS);
+      // Metal left to attack: the core shrinks as the oxide eats inward.
+      const remaining = Math.sqrt(Math.max(0, 1 - ox.oxidizedFraction));
+      if (remaining <= 0) continue;
+
+      /** Oxide-limited metal recession velocity (m/s) for a rate constant. */
+      const recession = (k: number) => (k * remaining) / (2 * X);
+
+      // --- The gas at the surface ---------------------------------------
+      const ncg = coolantNode.fluid.ncg ?? emptyGasComposition();
+      const T_gas = coolantNode.fluid.temperature;
+      const P = coolantNode.fluid.pressure;
+      const volume = coolantNode.volume;
+      const quality = coolantNode.fluid.quality ?? 0;
+      const steamVaporMass = coolantNode.fluid.phase === 'two-phase'
+        ? coolantNode.fluid.mass * quality
+        : (coolantNode.fluid.phase === 'vapor' ? coolantNode.fluid.mass : 0);
+      const steamMoles = Math.max(0, steamVaporMass / H2O_MOLAR_MASS);
+
+      // Bulk concentrations of the two oxidants IN THE GAS SPACE, straight
+      // from the inventory that is actually there. Taking them from the
+      // node's pressure instead would let a node that has boiled itself down
+      // to a few grams still supply steam at its last known pressure - the
+      // reaction would consume steam the node does not have. Reading the
+      // moles makes consumption first order in what is present, so depletion
+      // is a smooth exponential run-down and starvation needs no rule
+      // (the graphite oxidation operator does the same thing for the same
+      // reason).
+      const liquidVolume = coolantNode.fluid.phase === 'vapor'
+        ? 0
+        : (coolantNode.fluid.mass * (1 - quality)) / approxLiquidDensity(coolantNode);
+      const gasVolume = Math.max(0, volume - liquidVolume);
+      const C_steam = gasVolume > 0 ? steamMoles / gasVolume : 0;
+      const C_O2 = gasVolume > 0 ? Math.max(0, ncg.O2 ?? 0) / gasVolume : 0;
+
+      // External mass transfer, the same Sherwood correlation the graphite
+      // operator uses: Sh = 2 + 0.6 Re^0.5 Sc^(1/3). The leading 2 is the
+      // stagnant limit, so oxidant still reaches a rod with every pump dead -
+      // which is the condition a drained pool runs in.
+      let totalMassFlow = 0;
+      for (const fc of state.flowConnections) {
+        if (fc.fromNodeId === coolantNode.id || fc.toNodeId === coolantNode.id) {
+          totalMassFlow += Math.abs(fc.massFlowRate);
+        }
+      }
+      const rho_g = approxVaporDensity(coolantNode);
+      const mu_g = mixtureViscosity(ncg, T_gas);
+      const passageArea = conn.flowPassageArea ?? coolantNode.flowArea;
+      const velocity = passageArea > 0 && rho_g > 0 ? totalMassFlow / (rho_g * passageArea) : 0;
+      const Re = mu_g > 0 && rodDiameter > 0 ? (rho_g * velocity * rodDiameter) / mu_g : 0;
+
+      const massTransferCoeff = (species: 'H2O' | 'O2'): number => {
+        if (!(rodDiameter > 0) || !(T_gas > 0) || !(P > 0)) return 0;
+        const D = diffusivityInMixture(species, ncg, steamMoles, T_gas, P);
+        const Sc = mu_g > 0 && rho_g > 0 ? mu_g / (rho_g * D) : 1;
+        const Sh = 2 + 0.6 * Math.sqrt(Math.max(0, Re)) * Math.cbrt(Math.max(1e-6, Sc));
+        return (Sh * D) / rodDiameter;   // m/s
+      };
+
+      /** Series (harmonic) combination of a kinetic and a transport flux. */
+      const seriesFlux = (jKin: number, jTransport: number): number =>
+        jKin > 0 && jTransport > 0 ? 1 / (1 / jKin + 1 / jTransport) : 0;
+
+      // --- The two reactions ---------------------------------------------
+      // mol Zr/s consumed by each, kept separate because their heats differ
+      // by a factor of two.
+      const molPerArea = (v: number) => (ZR_DENSITY * v) / ZR_MOLAR_MASS; // mol Zr/(m2 s)
+
+      // Steam: on the wetted surface it is kinetics all the way (there is a
+      // whole pool of water against it); on the dry surface it competes for
+      // whatever steam shares the gas.
+      const vSteam = recession(steamParabolicConstant(T));
+      const jZrSteamKin = molPerArea(vSteam);
+      const molZrSteam =
+        jZrSteamKin * liquidArea +
+        seriesFlux(2 * jZrSteamKin, massTransferCoeff('H2O') * C_steam) / 2 * vaporArea;
+
+      // Air: only where the metal is actually in the gas.
+      const vAir = recession(airParabolicConstant(T));
+      const jZrAirKin = molPerArea(vAir);
+      const molZrAir = seriesFlux(jZrAirKin, massTransferCoeff('O2') * C_O2) * vaporArea;
+
+      const molZrTotal = molZrSteam + molZrAir;
+      if (!(molZrTotal > 0) || !Number.isFinite(molZrTotal)) continue;
+
+      const dm_Zr_dt = molZrTotal * ZR_MOLAR_MASS;   // kg/s
+
+      // --- Book it ---------------------------------------------------------
+      const nodeRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+      nodeRates.dOxidizedFraction = dm_Zr_dt / ox.totalZrMass;
+
+      const heat = molZrSteam * STEAM_REACTION_ENTHALPY + molZrAir * AIR_REACTION_ENTHALPY;
+      nodeRates.dTemperature += heat / nodeHeatCapacity(node);
+      rates.thermalNodes.set(id, nodeRates);
+      lastOxidationPower.set(id, heat);
+
+      const coolantRates = rates.flowNodes.get(ox.associatedCoolantNode)
+        || { dMass: 0, dEnergy: 0 };
+      if (!coolantRates.dNcg) coolantRates.dNcg = emptyGasComposition();
+
+      // Steam side: 2 mol H2O in, 2 mol H2 out, per mol Zr. The water leaves
+      // the node's mass with its specific enthalpy; the hydrogen joins the
+      // non-condensables, where the combustion operator can find it.
+      const molH2O = 2 * molZrSteam;
+      coolantRates.dNcg.H2 += molH2O;
+      const steamMassRate = molH2O * H2O_MOLAR_MASS;
+      coolantRates.dMass -= steamMassRate;
+      coolantRates.dEnergy -= steamMassRate * STEAM_ENTHALPY_OUT;
+
+      // Air side: 1 mol O2 in per mol Zr, and nothing comes back out - the
+      // oxide is a solid. The node loses moles, its pressure falls, and it
+      // pulls more air in through whatever opening it has. That is the draft
+      // a fire feeds on, and it is not written anywhere; it is just Dalton.
+      coolantRates.dNcg.O2 -= molZrAir;
+
       rates.flowNodes.set(ox.associatedCoolantNode, coolantRates);
-
-      // Steam consumption: 2 mol H₂O per mol Zr
-      // This removes mass and energy from coolant
-      const mol_H2O_dt = 2 * mol_Zr_dt;
-      const dm_steam = mol_H2O_dt * CladdingOxidationRateOperator.H2O_MOLAR_MASS; // kg/s consumed
-
-      // For now, we don't explicitly track steam mass removal
-      // (The steam tables will naturally reduce pressure as mass drops)
-      // But we should add this for mass conservation
-      coolantRates.dMass -= dm_steam;
-
-      // Energy for steam consumption (latent heat of vaporization ~2.26 MJ/kg at 100°C)
-      // At high temperature it's less, but use conservative estimate
-      const h_fg = 2.0e6; // J/kg (approximate at high T)
-      coolantRates.dEnergy -= dm_steam * h_fg;
     }
 
     return rates;

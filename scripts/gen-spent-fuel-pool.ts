@@ -199,6 +199,22 @@ const PSAT_15C = 1706;
 const PSAT_12C = 1403;
 
 /**
+ * Dry air (bar of each species) filling a partial pressure of `pa` pascals,
+ * on the same renormalised N2/O2/Ar split the environment node uses. A gas
+ * space that is open to the air has to START at the air's pressure, or the
+ * line joining them carries a real transient that nobody asked for.
+ */
+function AIR_TO(pa: number): Record<string, number> {
+  const N2 = 0.7808, O2 = 0.2095, AR = 0.0093, SUM = N2 + O2 + AR;
+  const bar = pa / 1e5;
+  return {
+    N2: Number((bar * N2 / SUM).toFixed(5)),
+    O2: Number((bar * O2 / SUM).toFixed(5)),
+    Ar: Number((bar * AR / SUM).toFixed(5)),
+  };
+}
+
+/**
  * The sea component stands ON the shelf but is DRAWN as the terrain water
  * body (see `waterBody` below), so its west nozzle is the thing the player
  * sees and drags a pipe to: put that nozzle a couple of metres off the
@@ -223,29 +239,18 @@ const components: Array<[string, Record<string, unknown>]> = [
     pressureRating: 2,
     ports: [
       { id: 'pool-vent', position: { x: 0, y: -4.5 }, direction: 'both' },
-      { id: 'pool-crack', position: { x: 0, y: 4.5 }, direction: 'both' },
       { id: 'pool-makeup-w', position: { x: -4.5, y: 0 }, direction: 'both' },
       { id: 'pool-makeup-e', position: { x: 4.5, y: 0 }, direction: 'both' },
     ],
     fluid: { temperature: 318.15, pressure: PSAT_45C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
-    initialNcg: { N2: 0.712, O2: 0.190 },
+    // The pool is open to the sky, so its gas is air at ambient pressure LESS
+    // its own vapour partial: N2/O2/Ar summing to 101325 - PSAT_45C. Getting
+    // this wrong by even 1.5 kPa leaves the pool 1.5 kPa under the atmosphere
+    // it is vented to, and the vent rings like a Helmholtz resonator (+-8 kg/s
+    // at t=0, still audible ten minutes later) on the way to equilibrium.
+    initialNcg: AIR_TO(101325 - PSAT_45C),
   }],
 
-  // The liner crack: a shut valve at the pool floor whose far side is open
-  // air. The earthquake opens it (scenario, below).
-  ['crack', {
-    id: 'crack', type: 'valve', label: 'Liner Crack',
-    position: { x: 50, y: 92 }, rotation: 0,
-    elevation: -(POOL_DEPTH - 0.1),  // its node sits level with the pool floor
-    diameter: 0.3, volume: 2.0,      // a hole, not a pressure part: give it room
-    valveType: 'gate', opening: 0,
-    ports: [
-      { id: 'crack-in', position: { x: -0.5, y: 0 }, direction: 'both' },
-      { id: 'crack-out', position: { x: 0.5, y: 0 }, direction: 'both' },
-    ],
-    fluid: { temperature: 318.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
-    pressureRating: 100,
-  }],
 
   ['tank-a', {
     id: 'tank-a', type: 'tank', label: 'Demineralised Water Tank',
@@ -280,6 +285,14 @@ const components: Array<[string, Record<string, unknown>]> = [
     id: 'sea', type: 'tank', label: 'The Sea',
     position: { x: SEA_X, y: 75 }, rotation: 0, elevation: 0,
     width: SEA_WIDTH, height: 8, wallThickness: 0.05,
+    // The sea is not a 3,600 tonne pond. `volume` overrides the drawn
+    // cylinder's own capacity, so the picture stays the size the map has
+    // room for while the water in it is effectively unlimited: a 350 kg/s
+    // pump running for the whole level draws 10,000 t and takes the surface
+    // down 40 cm. Before this it emptied in under three hours, and the pool
+    // that depended on it started falling again with nothing on screen to
+    // say why.
+    volume: 200000,
     fillLevel: 0.5,
     waterBody: 'sea',
     pressureRating: 2,
@@ -318,21 +331,9 @@ const connections = [
     fromElevation: POOL_DEPTH,
     flowArea: 1.0, length: 10, resistanceCoeff: 2,
   },
-  // The crack: 0.4 m up the pool wall with a 0.8 m opening, so the draw
-  // crossfades liquid -> vapour as the level sweeps past it and the leak
-  // dies away on its own.
-  {
-    fromComponentId: 'pool', fromPortId: 'pool-crack',
-    toComponentId: 'crack', toPortId: 'crack-in',
-    fromElevation: 0.4, fromOpeningHeight: 0.8, toElevation: 0.3,
-    flowArea: 0.024, length: 1, resistanceCoeff: 2,
-  },
-  {
-    fromComponentId: 'crack', fromPortId: 'crack-out',
-    toComponentId: 'atmosphere', toPortId: 'environment',
-    fromElevation: 0.3,
-    flowArea: 0.024, length: 1, resistanceCoeff: 2,
-  },
+  // The liner crack itself is not a component: the earthquake opens it as a
+  // scripted BURST on the pool (see the scenario below), which is the same
+  // break machinery a pressure rupture uses.
 ];
 
 // ---------------------------------------------------------------------------
@@ -340,22 +341,44 @@ const connections = [
 // ---------------------------------------------------------------------------
 
 const QUAKE = 2400;          // s - the liner cracks
+
+/**
+ * The tear the earthquake leaves. 0.4 m up the pool wall with a 0.8 m
+ * opening, so it spans the floor to knee height: while the pool is deep it
+ * runs full of water, and as the level sweeps down through the opening the
+ * draw crossfades to vapour and the leak dies away on its own - no
+ * threshold, no valve, no special case. CRACK_AREA is set so the leak is
+ * ~144 kg/s when the liner goes.
+ */
+const CRACK_AREA = 0.0170;   // m2
+const CRACK_ELEVATION = 0.4; // m above the pool floor
+const CRACK_OPENING = 0.8;   // m of tear height
 const TSUNAMI_WARN = 2700;   // s - the warning, no physics
 const WAVE_IN = 3600;        // s - the sea starts climbing
 const WAVE_OUT = 8400;       // s - it starts falling back
-const LEVEL_END = 21600;     // s - 6 sim hours
+// 8 sim hours. Long enough that a pool nobody feeds does not merely uncover
+// its racks inside the level - it boils dry (~5.1 h), the cladding starts to
+// burn (~6.0 h) and the release limit goes at ~6.7 h. A six-hour clock let a
+// do-nothing run WIN, with the fuel dry and on fire, forty minutes before the
+// consequence arrived.
+const LEVEL_END = 28800;     // s - 8 sim hours
 
 const scenario = {
   description:
     'An earthquake cracks the spent fuel pool liner; the tsunami behind it floods the shore ' +
-    'for about 80 minutes. Keep the fuel covered for six hours.',
+    'for about 80 minutes. Keep the fuel covered for eight hours.',
   events: [
     {
       time: QUAKE,
       message: 'EARTHQUAKE. The pool liner has cracked - level is falling.',
       actions: [
         { kind: 'shake', seconds: 3, amplitude: 16 },
-        { kind: 'valve', id: 'crack', position: 1 },
+        {
+          kind: 'burst', id: 'pool',
+          area: CRACK_AREA, elevation: CRACK_ELEVATION, openingHeight: CRACK_OPENING,
+          breachMessage: 'EARTHQUAKE: the pool liner has split at the floor. ' +
+            'Water is running out onto the pad.',
+        },
       ],
     },
     {

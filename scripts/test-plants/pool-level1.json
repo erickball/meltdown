@@ -34,14 +34,6 @@
       "direction": "both"
      },
      {
-      "id": "pool-crack",
-      "position": {
-       "x": 0,
-       "y": 6.0
-      },
-      "direction": "both"
-     },
-     {
       "id": "pool-makeup",
       "position": {
        "x": -6.0,
@@ -61,50 +53,6 @@
      "N2": 0.78,
      "O2": 0.21
     }
-   }
-  ],
-  [
-   "crack",
-   {
-    "id": "crack",
-    "type": "valve",
-    "label": "Liner Crack",
-    "position": {
-     "x": 50,
-     "y": 68
-    },
-    "rotation": 0,
-    "elevation": -11.9,
-    "diameter": 0.3,
-    "volume": 2.0,
-    "valveType": "gate",
-    "opening": 0,
-    "ports": [
-     {
-      "id": "crack-in",
-      "position": {
-       "x": -0.5,
-       "y": 0
-      },
-      "direction": "both"
-     },
-     {
-      "id": "crack-out",
-      "position": {
-       "x": 0.5,
-       "y": 0
-      },
-      "direction": "both"
-     }
-    ],
-    "fluid": {
-     "temperature": 303.15,
-     "pressure": 101325,
-     "phase": "liquid",
-     "quality": 0,
-     "flowRate": 0
-    },
-    "pressureRating": 100
    }
   ],
   [
@@ -236,28 +184,6 @@
    "fromElevation": 12.0,
    "flowArea": 1.0,
    "length": 10,
-   "resistanceCoeff": 2
-  },
-  {
-   "fromComponentId": "pool",
-   "fromPortId": "pool-crack",
-   "toComponentId": "crack",
-   "toPortId": "crack-in",
-   "fromElevation": 0.4,
-   "fromOpeningHeight": 0.8,
-   "toElevation": 0.3,
-   "flowArea": 0.07,
-   "length": 1,
-   "resistanceCoeff": 2
-  },
-  {
-   "fromComponentId": "crack",
-   "fromPortId": "crack-out",
-   "toComponentId": "atmosphere",
-   "toPortId": "environment",
-   "fromElevation": 0.3,
-   "flowArea": 0.07,
-   "length": 1,
    "resistanceCoeff": 2
   },
   {
@@ -533,16 +459,19 @@
   ]
  },
  "scenario": {
-  "description": "Level 1: an earthquake cracks the spent-fuel pool liner at t=120 s. The pool drains, the racks uncover and heat up; make-up water is the answer.",
+  "description": "Level 1: an earthquake tears the spent-fuel pool liner at t=120 s (a scripted burst, the same break a pressure rupture opens). The pool drains, the racks uncover and heat up; make-up water is the answer.",
   "events": [
    {
     "time": 120,
     "message": "Earthquake - the pool liner has cracked",
     "actions": [
      {
-      "kind": "valve",
-      "id": "crack",
-      "position": 1
+      "kind": "burst",
+      "id": "pool",
+      "area": 0.0496,
+      "elevation": 0.4,
+      "openingHeight": 0.8,
+      "breachMessage": "EARTHQUAKE: the pool liner has split at the floor."
      }
     ]
    }

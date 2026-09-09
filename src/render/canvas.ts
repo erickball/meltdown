@@ -15,6 +15,9 @@ import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
+import { drawFires, collectCladdingFires } from './fire-fx';
+import { drawBreaks, collectBreaks } from './break-fx';
+import { getCladdingOxidationPower } from '../simulation/operators/rate-operators';
 import { CameraShake } from './camera-shake';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
@@ -737,6 +740,43 @@ export class PlantCanvas {
    * Returns the top-center position and scale, suitable for attaching gauges.
    * This uses the same calculation as isPointInProjectedComponent for consistency.
    */
+  /**
+   * Flames over any cladding that is oxidising hard enough to see.
+   *
+   * Both views use the same drawing and the same intensity - what differs is
+   * only the rectangle the flames rise from, which each view answers with its
+   * own component bounds. Nothing here decides whether something is burning;
+   * `getCladdingOxidationPower()` is the chemical power the physics released.
+   */
+  private renderFires(
+    ctx: CanvasRenderingContext2D,
+    getScreenBounds: (comp: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null
+  ): void {
+    const powers = getCladdingOxidationPower();
+    if (powers.size === 0) return;
+    const sources = collectCladdingFires(
+      this.plantState.components.keys(), powers,
+      (componentId) => {
+        const comp = this.plantState.components.get(componentId);
+        if (!comp) return null;
+        const b = getScreenBounds(comp);
+        if (!b) return null;
+        const w = b.width ?? 40;
+        const h = b.height ?? 40;
+        // A band across the middle of what is burning: in the side view that
+        // is the upper half of the object, and in plan it is the middle of
+        // its footprint - both of which read as "the whole thing is alight"
+        // rather than "something is on fire behind it".
+        return {
+          x: b.topCenter.x - w / 2,
+          y: b.topCenter.y + h * 0.2,
+          w,
+          h: Math.max(4, h * 0.5),
+        };
+      });
+    drawFires(ctx, sources, performance.now());
+  }
+
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
     if (this.viewMode === 'grid') return this.grid.componentScreenBounds(component);
 
@@ -2213,6 +2253,11 @@ export class PlantCanvas {
       // Draw break connections (red dashed lines for LOCA flows)
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
       renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
+
+      // Cladding that is burning. The intensity is the chemical power the
+      // oxidation operator released, so the flames rise as the reaction runs
+      // away and die back as the metal or the oxygen is used up.
+      this.renderFires(ctx, getScreenBounds);
     }
 
     mark('gauges+overlays');
@@ -3534,6 +3579,12 @@ export class PlantCanvas {
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
       renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
+
+      // Plan-view break: a torn gap on the wall the break faces, with the
+      // discharge running out across the ground (break-fx.ts).
+      drawBreaks(ctx, collectBreaks(this.plantState, this.simState,
+        (wp) => this.grid.worldToScreen(wp), this.grid.cam.ppm), performance.now());
+      this.renderFires(ctx, getScreenBounds);
     }
 
     if (shake) ctx.restore();

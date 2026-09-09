@@ -1685,6 +1685,7 @@ export class ConstructionManager {
           cladThickness: props.cladThickness ?? 0.6,
           rackHeight: props.rackHeight ?? 3.66,
           rackBottomElevation: props.rackBottomElevation ?? 0.5,
+          fuelAgeDays: props.fuelAgeDays ?? 30,
           pressureRating: props.pressureRating ?? 2,
           ports: poolPorts,
           fluid: poolFluid,
@@ -3339,7 +3340,8 @@ export class ConstructionManager {
     // pressure follows the water temperature.
     if (component.type === 'pool') {
       for (const field of ['side', 'depth', 'wallThickness', 'assemblyCount',
-                           'rodsPerAssembly', 'rackHeight', 'rackBottomElevation'] as const) {
+                           'rodsPerAssembly', 'rackHeight', 'rackBottomElevation',
+                           'fuelAgeDays'] as const) {
         if (properties[field] !== undefined) component[field] = properties[field];
       }
       if (properties.fuelPower !== undefined) component.fuelPower = properties.fuelPower * 1e6;

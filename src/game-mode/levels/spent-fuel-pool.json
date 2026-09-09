@@ -34,14 +34,6 @@
       "direction": "both"
      },
      {
-      "id": "pool-crack",
-      "position": {
-       "x": 0,
-       "y": 4.5
-      },
-      "direction": "both"
-     },
-     {
       "id": "pool-makeup-w",
       "position": {
        "x": -4.5,
@@ -66,53 +58,10 @@
      "flowRate": 0
     },
     "initialNcg": {
-     "N2": 0.712,
-     "O2": 0.19
+     "N2": 0.71653,
+     "O2": 0.19226,
+     "Ar": 0.00853
     }
-   }
-  ],
-  [
-   "crack",
-   {
-    "id": "crack",
-    "type": "valve",
-    "label": "Liner Crack",
-    "position": {
-     "x": 50,
-     "y": 92
-    },
-    "rotation": 0,
-    "elevation": -10.4,
-    "diameter": 0.3,
-    "volume": 2,
-    "valveType": "gate",
-    "opening": 0,
-    "ports": [
-     {
-      "id": "crack-in",
-      "position": {
-       "x": -0.5,
-       "y": 0
-      },
-      "direction": "both"
-     },
-     {
-      "id": "crack-out",
-      "position": {
-       "x": 0.5,
-       "y": 0
-      },
-      "direction": "both"
-     }
-    ],
-    "fluid": {
-     "temperature": 318.15,
-     "pressure": 101325,
-     "phase": "liquid",
-     "quality": 0,
-     "flowRate": 0
-    },
-    "pressureRating": 100
    }
   ],
   [
@@ -210,6 +159,7 @@
     "width": 34,
     "height": 8,
     "wallThickness": 0.05,
+    "volume": 200000,
     "fillLevel": 0.5,
     "waterBody": "sea",
     "pressureRating": 2,
@@ -279,28 +229,6 @@
    "fromElevation": 10.5,
    "flowArea": 1,
    "length": 10,
-   "resistanceCoeff": 2
-  },
-  {
-   "fromComponentId": "pool",
-   "fromPortId": "pool-crack",
-   "toComponentId": "crack",
-   "toPortId": "crack-in",
-   "fromElevation": 0.4,
-   "fromOpeningHeight": 0.8,
-   "toElevation": 0.3,
-   "flowArea": 0.024,
-   "length": 1,
-   "resistanceCoeff": 2
-  },
-  {
-   "fromComponentId": "crack",
-   "fromPortId": "crack-out",
-   "toComponentId": "atmosphere",
-   "toPortId": "environment",
-   "fromElevation": 0.3,
-   "flowArea": 0.024,
-   "length": 1,
    "resistanceCoeff": 2
   }
  ],
@@ -806,7 +734,7 @@
   ]
  },
  "scenario": {
-  "description": "An earthquake cracks the spent fuel pool liner; the tsunami behind it floods the shore for about 80 minutes. Keep the fuel covered for six hours.",
+  "description": "An earthquake cracks the spent fuel pool liner; the tsunami behind it floods the shore for about 80 minutes. Keep the fuel covered for eight hours.",
   "events": [
    {
     "time": 2400,
@@ -818,9 +746,12 @@
       "amplitude": 16
      },
      {
-      "kind": "valve",
-      "id": "crack",
-      "position": 1
+      "kind": "burst",
+      "id": "pool",
+      "area": 0.017,
+      "elevation": 0.4,
+      "openingHeight": 0.8,
+      "breachMessage": "EARTHQUAKE: the pool liner has split at the floor. Water is running out onto the pad."
      }
     ]
    },
