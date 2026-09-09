@@ -66,7 +66,7 @@ import { ConstructionManager } from './construction/construction-manager';
 import { ConnectionDialog, ConnectionConfig, ConnectionEditResult } from './construction/connection-dialog';
 import { estimatePlantComponentCost, formatCost } from './construction/cost-estimation';
 import { JackManager } from './jack/jack-manager';
-import { executeJackTool } from './jack/jack-tools-exec';
+import { executeJackTool, fileCarReport } from './jack/jack-tools-exec';
 import { refreshLivePlots, getOpenPlotInputs, restorePlots } from './jack/jack-history';
 import { closeAllPlots, getPlotDrawnWindow } from './jack/jack-plot';
 import { saveHistoryRecord, loadHistoryRecord, deleteHistoryRecord } from './game/history-store';
@@ -469,17 +469,42 @@ function init() {
       const d = event.data as { seconds?: number; amplitude?: number } | undefined;
       plantCanvas.startShake(d?.seconds ?? 2, d?.amplitude);
     } else if (event.type === 'simulation-error') {
-      // Show error dialog for simulation errors
-      showErrorDialog('Simulation Error', event.message);
+      // Show error dialog for simulation errors. The loop hands the thrown
+      // error along with the message, so a bug report filed from the dialog
+      // carries its stack trace.
+      showErrorDialog('Simulation Error', event.message, {
+        error: (event.data as { error?: unknown } | undefined)?.error,
+      });
       // Update pause button to show paused state
       updatePauseButton();
     }
   };
 
   /**
-   * Show an error dialog to the user
+   * What the error dialog's "File bug report" button needs to turn a failure
+   * into a Corrective Action Report. Everything is optional: the message
+   * alone is worth reporting, an `error` just lets the report carry a stack.
    */
-  function showErrorDialog(title: string, message: string): void {
+  interface ErrorReportInfo {
+    /** CAR severity. Defaults to 'high' - this dialog only opens on a failure. */
+    severity?: 'low' | 'medium' | 'high';
+    /** The thrown error, so the report can carry its stack trace. */
+    error?: unknown;
+  }
+
+  /** The dialog builds its panes with innerHTML, and error text contains '<'. */
+  const escapeHtml = (s: string) =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  /**
+   * Show an error dialog to the user.
+   *
+   * Everything that opens this dialog is something no user asked for, so the
+   * dialog offers to file it: the button leads to the same Corrective Action
+   * Report path Jack uses (consent dialog, reproduction bundle and all),
+   * reached without having to describe the crash to him first.
+   */
+  function showErrorDialog(title: string, message: string, report: ErrorReportInfo = {}): void {
     // Create dialog if it doesn't exist
     let dialog = document.getElementById('error-dialog') as HTMLDivElement;
     if (!dialog) {
@@ -502,30 +527,127 @@ function init() {
       document.body.appendChild(dialog);
     }
 
-    dialog.innerHTML = `
-      <h3 style="color: #f88; margin: 0 0 10px 0;">${title}</h3>
-      <p style="color: #ddd; margin: 0 0 15px 0; font-size: 12px; white-space: pre-wrap; word-break: break-word;">${message}</p>
-      <p style="color: #888; margin: 0 0 15px 0; font-size: 11px;">Use the history controls (⏮ ⏭) to go back to a stable state, or reduce simulation speed.</p>
-      <button id="error-dialog-close" style="
-        background: #644;
-        color: #fff;
-        border: 1px solid #a66;
-        border-radius: 4px;
-        padding: 8px 20px;
-        cursor: pointer;
-        font-family: inherit;
-      ">OK</button>
-    `;
+    const buttonStyle =
+      'background: #644; color: #fff; border: 1px solid #a66; border-radius: 4px; ' +
+      'padding: 8px 20px; cursor: pointer; font-family: inherit;';
+    const btn = (id: string, label: string, tip: string) =>
+      `<button id="${id}" style="${buttonStyle}" title="${tip}">${label}</button>`;
 
-    dialog.style.display = 'block';
+    // --- Pane 1: the error, with the offer to report it ---------------------
+    const showError = () => {
+      dialog.innerHTML = `
+        <h3 style="color: #f88; margin: 0 0 10px 0;">${escapeHtml(title)}</h3>
+        <p style="color: #ddd; margin: 0 0 15px 0; font-size: 12px; white-space: pre-wrap; word-break: break-word;">${escapeHtml(message)}</p>
+        <p style="color: #888; margin: 0 0 15px 0; font-size: 11px;">Use the history controls (⏮ ⏭) to go back to a stable state, or reduce simulation speed.</p>
+        <div style="display: flex; gap: 10px;">
+          ${btn('error-dialog-close', 'OK', 'Dismiss this message')}
+          ${btn('error-dialog-report', 'File bug report',
+                'Send this error to the developers, together with your plant and the ' +
+                'simulation history, so they can reproduce it. You see the whole report ' +
+                'and approve it before anything leaves your machine.')}
+        </div>
+      `;
+      const closeBtn = dialog.querySelector<HTMLButtonElement>('#error-dialog-close');
+      if (closeBtn) closeBtn.onclick = () => { dialog.style.display = 'none'; };
+      const reportBtn = dialog.querySelector<HTMLButtonElement>('#error-dialog-report');
+      if (reportBtn) reportBtn.onclick = showCompose;
+    };
 
-    // Close button handler
-    const closeBtn = document.getElementById('error-dialog-close');
-    if (closeBtn) {
-      closeBtn.onclick = () => {
-        dialog.style.display = 'none';
+    // --- Pane 2: the one thing the report cannot collect by itself ----------
+    // What the user was doing. Optional: a report with no note still carries
+    // the error, the plant and the history, which is most of the value.
+    const showCompose = () => {
+      dialog.innerHTML = `
+        <h3 style="color: #f88; margin: 0 0 10px 0;">File a bug report</h3>
+        <p style="color: #ddd; margin: 0 0 12px 0; font-size: 12px;">
+          The error text, your plant design and the simulation history travel with this report.
+          The next screen shows you everything that would be sent, and nothing goes out until
+          you approve it there.
+        </p>
+        <label for="error-dialog-note" style="color: #bbb; display: block; font-size: 11px; margin: 0 0 4px 0;">
+          What were you doing when this happened? (optional)
+        </label>
+        <textarea id="error-dialog-note" rows="4"
+          placeholder="e.g. opened the main steam isolation valve at full power"
+          style="width: 100%; box-sizing: border-box; background: #221a1a; color: #eee;
+                 border: 1px solid #a66; border-radius: 4px; padding: 6px;
+                 font-family: inherit; font-size: 12px; resize: vertical;"></textarea>
+        <div style="display: flex; gap: 10px; margin-top: 12px;">
+          ${btn('error-dialog-send', 'Send report', 'Build the report and show it to you for approval')}
+          ${btn('error-dialog-back', 'Cancel', 'Go back without reporting anything')}
+        </div>
+        <p id="error-dialog-status" style="color: #888; font-size: 11px; margin: 10px 0 0 0;"></p>
+      `;
+      const note = dialog.querySelector<HTMLTextAreaElement>('#error-dialog-note');
+      const sendBtn = dialog.querySelector<HTMLButtonElement>('#error-dialog-send');
+      const backBtn = dialog.querySelector<HTMLButtonElement>('#error-dialog-back');
+      const status = dialog.querySelector<HTMLParagraphElement>('#error-dialog-status');
+      note?.focus();
+      if (backBtn) backBtn.onclick = showError;
+      if (sendBtn) sendBtn.onclick = async () => {
+        sendBtn.disabled = true;
+        if (backBtn) backBtn.disabled = true;
+        if (status) status.textContent = 'Packing up the plant and the simulation history...';
+        try {
+          const result = await fileErrorReport(title, message, note?.value.trim() ?? '', report);
+          dialog.style.display = 'none';
+          if (!result.ok) {
+            showNotification(`Bug report not sent: ${result.error}`, 'error', 15000);
+          } else if (result.status === 'filed') {
+            showNotification(
+              `Bug report filed${result.carId ? ` (${result.carId})` : ''} - thank you.`, 'info', 10000);
+          } else if (result.status === 'parked') {
+            showNotification(result.note, 'warning', 20000);
+          }
+          // 'declined' means the user said no on the consent screen; they know.
+        } catch (e) {
+          // The report failed, but the error it was about is still behind this
+          // pane - keep the dialog up so they can read it or try again.
+          console.error('[CAR] Filing the bug report failed:', e);
+          if (status) {
+            status.textContent =
+              `Could not file the report: ${e instanceof Error ? e.message : String(e)}`;
+          }
+          sendBtn.disabled = false;
+          if (backBtn) backBtn.disabled = false;
+        }
       };
-    }
+    };
+
+    showError();
+    dialog.style.display = 'block';
+  }
+
+  /**
+   * Turn one error dialog into a Corrective Action Report: the same call
+   * Jack's file_car tool makes, so the user gets the same consent dialog and
+   * the report carries the same reproduction bundle.
+   */
+  function fileErrorReport(
+    title: string,
+    message: string,
+    note: string,
+    report: ErrorReportInfo
+  ): ReturnType<typeof fileCarReport> {
+    const thrown = report.error;
+    const stack = thrown instanceof Error && thrown.stack ? thrown.stack : null;
+    const firstLine = message.split('\n')[0].trim();
+    const description =
+      `${title}. Reported by the user from the error dialog.\n\n${message}\n\n` +
+      (note
+        ? `What the user was doing: ${note}\n`
+        : 'The user did not add a description of what they were doing.\n') +
+      (stack ? `\nStack trace:\n${stack}\n` : '');
+    return fileCarReport(
+      {
+        title: `${title}: ${firstLine}`.slice(0, 300),
+        description,
+        severity: report.severity ?? 'high',
+      },
+      jackHost,
+      () => {},
+      { source: 'user', extraContext: { reportedFrom: 'error dialog' } }
+    );
   }
 
   // Set up UI callbacks
@@ -2933,7 +3055,10 @@ function init() {
       showErrorDialog(
         'Cannot apply that change to the running plant',
         `${what} could not be turned into a simulation, so the change was undone and ` +
-        `the plant is still running as it was.\n\n${message}`);
+        `the plant is still running as it was.\n\n${message}`,
+        // The plant survived the failed edit, so this is wrong behavior with a
+        // workaround (build the same thing in construction mode), not a stopper.
+        { severity: 'medium', error });
       return false;
     }
 
@@ -3294,7 +3419,8 @@ function init() {
         console.error('[Simulation] Failed to build the simulation from this plant:', error);
         showErrorDialog(
           'Cannot start the simulation',
-          `The plant could not be turned into a simulation, so we are staying in construction mode.\n\n${message}`);
+          `The plant could not be turned into a simulation, so we are staying in construction mode.\n\n${message}`,
+          { error });
         return;
       }
 

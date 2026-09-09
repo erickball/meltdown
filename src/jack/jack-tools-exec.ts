@@ -465,11 +465,40 @@ function carEndpoint(): string {
   return PROD_CAR_ENDPOINT;
 }
 
-async function fileCarReport(
+/**
+ * The outcome of one CAR, in the three ways it can end. `status` is what a
+ * caller should branch on: `carId` is null both when the user declined and
+ * when the site office could not be reached, so it cannot tell them apart.
+ */
+export interface FileCarResult {
+  ok: true;
+  status: 'filed' | 'declined' | 'parked';
+  carId: string | null;
+  note: string;
+}
+
+/**
+ * File a Corrective Action Report. Jack calls this through his `file_car`
+ * tool, and the simulation error dialog calls it directly (main.ts) so a
+ * user who has just been shown a crash can report it without going through
+ * the chat. Both paths get the same consent dialog and the same
+ * reproduction bundle - the report's route in does not change what leaves
+ * the machine, or who approves it.
+ *
+ * `input` carries the file_car tool's fields (title, description, severity,
+ * component).
+ */
+export async function fileCarReport(
   input: Record<string, unknown>,
   host: JackHost,
-  record: (description: string) => void
-): Promise<unknown> {
+  record: (description: string) => void = () => {},
+  opts: {
+    /** Who is filing, so the consent dialog can say so truthfully. */
+    source?: 'jack' | 'user';
+    /** Merged into the auto-collected context block (e.g. where it came from). */
+    extraContext?: Record<string, unknown>;
+  } = {}
+): Promise<FileCarResult | { ok: false; error: string }> {
   const title = String(input.title ?? '').slice(0, 300);
   const description = String(input.description ?? '').slice(0, 8000);
   if (!title || !description) return err('file_car needs a title and a description');
@@ -481,6 +510,7 @@ async function fileCarReport(
     componentCount: host.plantState.components.size,
     build: typeof __BUILD_COMMIT__ === 'string' ? __BUILD_COMMIT__ : 'unknown',
     userAgent: navigator.userAgent,
+    ...(opts.extraContext ?? {}),
   };
 
   // The reproduction bundle (plant design + live state + rewind history) is
@@ -510,6 +540,7 @@ async function fileCarReport(
     context,
     attachment: bundle ? describeBundle(bundle.summary) : null,
     attachmentError,
+    source: opts.source ?? 'jack',
   });
   if (!consent.approved) {
     // Declined means declined: not sent, and NOT parked in localStorage
@@ -517,6 +548,7 @@ async function fileCarReport(
     record(`CAR not filed - user declined to send: ${title}`);
     return {
       ok: true,
+      status: 'declined',
       carId: null,
       note:
         'The user declined to send this report, so nothing was submitted. ' +
@@ -559,6 +591,7 @@ async function fileCarReport(
     if (consent.auto) notifyAutoFiled(title, 'sent');
     return {
       ok: true,
+      status: 'filed',
       carId: data.carId ?? null,
       note: (consent.auto
         ? 'CAR filed with the site office. It was sent without asking, under the ' +
@@ -581,6 +614,7 @@ async function fileCarReport(
     if (consent.auto) notifyAutoFiled(title, 'parked');
     return {
       ok: true,
+      status: 'parked',
       carId: null,
       note: `Couldn't reach the site office (${String(e)}); the report is parked in this browser (localStorage 'meltdown_pending_cars')` +
         (attached ? ', without the plant/simulation bundle.' : '.'),

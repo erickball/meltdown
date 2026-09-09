@@ -37,6 +37,12 @@ export interface CarConsentRequest {
   attachment?: string[] | null;
   /** Why no bundle could be built, when one was expected. Shown, not sent. */
   attachmentError?: string | null;
+  /**
+   * Who is asking. Jack writes most reports, but the simulation error dialog
+   * lets the user file one directly, and telling them "Jack wants to file
+   * this" about their own report would be a lie about what they just did.
+   */
+  source?: 'jack' | 'user';
 }
 
 export interface CarConsentDecision {
@@ -129,6 +135,7 @@ const CONTEXT_LABELS: Record<string, string> = {
   componentCount: 'Number of components in your plant',
   build: 'Game build (git commit)',
   userAgent: 'Browser user-agent',
+  reportedFrom: 'Filed from',
 };
 
 function formatContextValue(value: unknown): string {
@@ -186,8 +193,11 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
 
     const blurb = document.createElement('div');
     blurb.textContent =
-      "Jack wants to file this report with the developers. It will be sent over " +
-      "the internet and stored. Nothing is sent unless you approve it here.";
+      (req.source === 'user'
+        ? 'This report goes to the developers. '
+        : 'Jack wants to file this report with the developers. ') +
+      'It will be sent over the internet and stored. Nothing is sent unless ' +
+      'you approve it here.';
     blurb.style.cssText = 'color: #99aacc; margin-bottom: 14px; font-size: 12px;';
     panel.appendChild(blurb);
 
