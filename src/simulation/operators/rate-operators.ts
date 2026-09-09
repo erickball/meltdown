@@ -1861,32 +1861,24 @@ export class FlowRateOperator implements RateOperator {
         }
       }
 
-      // Specific enthalpy of what's actually flowing: the composition's
-      // mass weights blend the same per-zone prices a pure draw would get,
-      // so a finite opening crossfades where a point sample would step.
-      const h_up =
-        (comp.wLiquid > 0 ? comp.wLiquid * this.getSpecificEnthalpy(upstreamNode, 'liquid') : 0) +
-        (comp.wMixture > 0 ? comp.wMixture * this.getSpecificEnthalpy(upstreamNode, 'mixture') : 0) +
-        (comp.wVapor > 0 ? comp.wVapor * this.getSpecificEnthalpy(upstreamNode, 'vapor') : 0);
-
       // The connection's mass flow is TOTAL mixture flow (the momentum
       // solvers use bulk density including NCG), so when the flowing phase
       // carries gas, the flow must be SPLIT between water and NCG by the
       // mass composition of what is actually flowing. Liquid draws leave the
-      // NCG behind in the vapor space (waterShare = 1). A helium-filled node
+      // NCG behind in the vapor space (water share 1). A helium-filled node
       // (~no water) transports ~pure gas; a steam node transports ~pure
       // water; both fall out of the same split with no special cases.
       const upNcg = upstreamNode.fluid.ncg;
-      let waterShare = 1;
       let gasMassInSpace = 0;
+      let shareOf = (_zone: 'liquid' | 'vapor' | 'mixture'): number => 1;
       if (upNcg && totalMoles(upNcg) > 0 && (comp.wVapor > 0 || comp.wMixture > 0)) {
         gasMassInSpace = ncgTotalMass(upNcg);
         // Steam sharing the flowing space with the gas: the vapor space's
         // steam for vapor draws from a two-phase node, all water otherwise.
-        // Liquid-zone flow carries no gas (share 1); the zones blend by the
-        // same mass weights as the enthalpy above.
+        // Liquid-zone flow carries no gas (share 1).
         const gm = gasMassInSpace;
-        const shareOf = (zone: 'vapor' | 'mixture'): number => {
+        shareOf = (zone) => {
+          if (zone === 'liquid') return 1;
           const steamMassInSpace =
             zone === 'vapor' && upstreamNode.fluid.phase === 'two-phase'
               ? upstreamNode.fluid.mass * (upstreamNode.fluid.quality ?? 0)
@@ -1894,14 +1886,35 @@ export class FlowRateOperator implements RateOperator {
           const totalInSpace = gm + steamMassInSpace;
           return totalInSpace > 0 ? steamMassInSpace / totalInSpace : 1;
         };
-        waterShare = comp.wLiquid
-          + (comp.wMixture > 0 ? comp.wMixture * shareOf('mixture') : 0)
-          + (comp.wVapor > 0 ? comp.wVapor * shareOf('vapor') : 0);
       }
 
-      // Water portion: mass flow * specific enthalpy of the flowing phase
+      // Per zone: the zone's share of the total flow (mass weight), the
+      // water fraction of what that zone carries, and the water's specific
+      // enthalpy there. The water leaving through the opening is the sum
+      // over zones of (weight x water share), and its energy the sum of
+      // (weight x water share x enthalpy) - each zone's water priced at
+      // that zone's enthalpy. (Until 2026-09-09 the enthalpies were blended
+      // by the bare zone weights and multiplied by the summed water share,
+      // which priced a gas zone's WHOLE mass at the steam enthalpy while
+      // only its steam share left as water: an air-blanketed node drawing
+      // across its interface lost ~45 kJ per kg more than it held and cooled
+      // 5 K/s until it froze - the pump node of CAR BZ1bOwQ0oLXY0q8jG1hU.)
+      let waterShare = 0;
+      let waterEnthalpyFlux = 0;  // per kg of total flow
+      const zones: Array<['liquid' | 'mixture' | 'vapor', number]> = [
+        ['liquid', comp.wLiquid], ['mixture', comp.wMixture], ['vapor', comp.wVapor],
+      ];
+      for (const [zone, weight] of zones) {
+        if (!(weight > 0)) continue;
+        const zoneWater = weight * shareOf(zone);
+        waterShare += zoneWater;
+        waterEnthalpyFlux += zoneWater * this.getSpecificEnthalpy(upstreamNode, zone);
+      }
+      const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
+
+      // Water portion: mass flow * specific enthalpy of the flowing water
       const waterFlow = absMassFlow * waterShare;
-      const energyFlow = waterFlow * h_up;
+      const energyFlow = absMassFlow * waterEnthalpyFlux;
 
       // Store flow phase on connection for debug display
       conn.currentFlowPhase = flowPhase;
@@ -2036,10 +2049,16 @@ export class FlowRateOperator implements RateOperator {
     const constant = mVap * (U_REF - 273 * CV_VAP) - mLiq * C_F * 273.15;
     const T = (node.fluid.internalEnergy - constant) / Math.max(coeff, 1e-9);
     if (!(T > 50)) {
-      console.error(`[ncgEffectiveT] ${node.id}: effective T=${T.toFixed(1)}K - energy accounting broken ` +
-        `(totalU=${(node.fluid.internalEnergy / 1e6).toFixed(4)}MJ, ncg=${n.toFixed(1)}mol, ` +
-        `m=${node.fluid.mass.toFixed(3)}kg, phase=${node.fluid.phase}, x=${quality.toFixed(3)})`);
-      return 50;
+      // No substitute value: billing the gas at a made-up 50 K let a node
+      // whose books were already broken keep trading energy for thousands
+      // of seconds (the frozen pump of CAR BZ1bOwQ0oLXY0q8jG1hU sat at the
+      // 150 K floor for 2000 s). Stop here so the cause is still in view.
+      throw new Error(
+        `[ncgEffectiveT] ${node.id}: effective mixture temperature ${T.toFixed(1)} K - the node's ` +
+        `energy accounting is broken (totalU=${(node.fluid.internalEnergy / 1e6).toFixed(4)} MJ, ` +
+        `ncg=${n.toFixed(1)} mol, m=${node.fluid.mass.toFixed(3)} kg, phase=${node.fluid.phase}, ` +
+        `x=${quality.toFixed(3)}). Something removed more energy from this node than it held.`
+      );
     }
     return T;
   }
@@ -2082,13 +2101,13 @@ export class FlowRateOperator implements RateOperator {
           const ncgEnergy = ncgMoles * Cv_ncg * T_eff;
           waterEnergy = totalU - ncgEnergy;
 
-          if (waterEnergy < 0) {
-            console.error(`[getSpecificEnthalpy] ${node.id}: Negative water energy!`);
-            console.error(`  totalU=${(totalU/1e6).toFixed(4)}MJ, ncgEnergy=${(ncgEnergy/1e6).toFixed(4)}MJ`);
-            console.error(`  T_eff=${T_eff.toFixed(1)}K, stored T=${T.toFixed(1)}K`);
-            console.error(`  ncgMoles=${ncgMoles.toFixed(1)}, waterMass=${node.fluid.mass.toFixed(3)}kg`);
-            waterEnergy = 0;
-          }
+          // Water energy below the reference is real for ice (the
+          // ice-vapour states below the triple line carry u < 0), so it is
+          // priced as it is. This used to clamp negative water energy to
+          // zero, which billed a draw from a frozen node at MORE energy per
+          // kg than the node held and drove it further down; a node whose
+          // books are actually broken is caught by ncgEffectiveT above,
+          // which throws instead of substituting a temperature.
 
           // NCG volume from ideal gas: V_ncg = n * R * T / P
           const R_GAS = 8.314;  // J/(mol·K)

@@ -110,12 +110,22 @@ export function pickReplayBase(bundle: CarBundle, fromTime: number | null): Bund
     if (base === null || s.stepNumber >= base.stepNumber) base = s;  // latest qualifying
   }
   if (base === null) {
-    const earliest = h.snapshots.filter(s => s.stepNumber + 1 >= firstLoggedStep)
-      .reduce<number | null>((m, s) => (m === null || s.simTime < m ? s.simTime : m), null);
-    throw new Error(
-      `[car-replay] No replayable snapshot at or before t = ${fromTime}; the kept step log ` +
-      `starts at step ${firstLoggedStep}, earliest replayable snapshot is at t = ${earliest ?? 'none'}`
-    );
+    // Asked for a time before the replayable span (e.g. --from 0 on a bundle
+    // whose log starts late): start from the earliest replayable snapshot.
+    for (const s of h.snapshots) {
+      if (s.stepNumber + 1 < firstLoggedStep) continue;
+      if (base === null || s.stepNumber < base.stepNumber) base = s;
+    }
+    if (base === null) {
+      throw new Error(
+        `[car-replay] No snapshot can replay through the kept step log (it starts at step ${firstLoggedStep})`
+      );
+    }
+    if (fromTime !== null) {
+      console.log(`[car-replay] No snapshot at or before t = ${fromTime}; starting from the earliest ` +
+        `replayable one at t = ${base.simTime.toFixed(3)} s`);
+    }
+    return base;
   }
   if (fromTime === null) {
     // Earliest replayable, not latest

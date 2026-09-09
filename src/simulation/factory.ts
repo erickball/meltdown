@@ -41,6 +41,7 @@ import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
+import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
 import type { TerrainSpec } from '../terrain-types';
 import { createSurfaceWaterState } from './operators/surface-water';
@@ -1733,6 +1734,22 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       // pump head is applied in the correct direction
       const fromComponent = plantState.components.get(connection.fromComponentId);
       const toComponent = plantState.components.get(connection.toComponentId);
+
+      // That rule only holds if every pump connection is oriented the way
+      // the pump pumps: inlet port on the to-side, outlet port on the
+      // from-side. The construction side orients connections by their pump
+      // ports (connection-orientation.ts) at creation and on load; a plant
+      // that reaches the factory with a line leaving a pump's INLET would
+      // have that line taken for the discharge and the pump run backwards -
+      // which is exactly what happened before this check existed. Refuse it.
+      if (runsAgainstPump(connection, plantState.components)) {
+        throw new Error(
+          `[Factory] Connection ${connection.fromComponentId}:${connection.fromPortId} -> ` +
+          `${connection.toComponentId}:${connection.toPortId} runs against its pump: a pump's inlet ` +
+          `port must be the to-side and its outlet port the from-side. Load the plant through the ` +
+          `app (or apply orientConnectionByPumpPorts) so it is oriented by its ports.`
+        );
+      }
 
       if (fromComponent?.type === 'pump') {
         const pumpState = state.components.pumps.get(fromComponent.id);

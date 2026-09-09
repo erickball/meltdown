@@ -56,6 +56,7 @@ import {
 } from '../simulation/gas-properties';
 import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
+import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 
 /**
@@ -2448,6 +2449,14 @@ export class ConstructionManager {
       ...(route && route.length >= 2 ? { route } : {})
     };
 
+    // A pump's suction line points INTO the pump and its discharge OUT of
+    // it, whichever end the user started drawing at: the factory applies
+    // the pump head along the connection leaving the outlet port, so the
+    // orientation is a property of the ports, not of the drawing gesture.
+    if (orientConnectionByPumpPorts(connection, this.plantState.components)) {
+      console.log(`[Construction] Connection oriented through the pump: ${connection.fromPortId} -> ${connection.toPortId}`);
+    }
+
     this.plantState.connections.push(connection);
 
     // Turn pump endpoints to face what they're connected to (re-picks the
@@ -2640,6 +2649,16 @@ export class ConstructionManager {
       const toPort = portById.get(conn.toPortId);
       if (fromPort) fromPort.connectedTo = conn.toPortId;
       if (toPort) toPort.connectedTo = conn.fromPortId;
+    }
+
+    // Pump connections point the way the pump pumps (see
+    // connection-orientation.ts). Saves from before this rule - and any
+    // hand-written JSON - can carry a suction line drawn from the pump.
+    for (const conn of this.plantState.connections) {
+      if (orientConnectionByPumpPorts(conn, this.plantState.components)) {
+        console.log(`[Construction] Reversed connection ${conn.toComponentId}:${conn.toPortId} -> ` +
+          `${conn.fromComponentId}:${conn.fromPortId} to run through its pump inlet -> outlet`);
+      }
     }
 
     // A tank or a pool with a bare plan side gets a nozzle on it.
