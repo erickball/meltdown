@@ -170,7 +170,11 @@ export function samePoint(a: Point, b: Point): boolean {
  * the footprint and one on the bottom from the front (south) - the same
  * reading the 3/4-view sprite gives, whose top is drawn up-screen.
  */
-function portSide(port: Port, size: { width: number; height: number }): Side {
+export function portSide(port: Port, size: { width: number; height: number }): Side {
+  // A nozzle that points at or away from the viewer projects onto the
+  // centreline, so its front-view position cannot say which side it is on.
+  // Those nozzles declare their side (see Port.planSide).
+  if (port.planSide) return port.planSide;
   const nx = size.width > 0 ? port.position.x / (size.width / 2) : 0;
   const ny = size.height > 0 ? port.position.y / (size.height / 2) : 0;
   if (Math.abs(nx) < EPS && Math.abs(ny) < EPS) return 'S';
@@ -286,7 +290,9 @@ const MIRRORS_LATERAL_PORTS = new Set(['tank', 'vessel', 'reactorVessel', 'coreB
  */
 export function portAnchorFacing(component: PlantComponent, portId: string, partnerRef: Point): PortAnchor | null {
   const a = portAnchor(component, portId);
-  if (!a || !MIRRORS_LATERAL_PORTS.has(component.type)) return a;
+  // A nozzle that names its own side stays on it - the whole point of
+  // declaring a side is that the drawing does not get to move it.
+  if (!a || a.port.planSide || !MIRRORS_LATERAL_PORTS.has(component.type)) return a;
   if (a.side !== 'E' && a.side !== 'W') return a;
   const dx = partnerRef.x - component.position.x;
   if (Math.abs(dx) < EPS) return a;

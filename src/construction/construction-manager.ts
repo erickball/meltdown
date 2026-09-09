@@ -22,7 +22,8 @@ import {
   Port,
   Point,
   Fluid,
-  ExtractionPort
+  ExtractionPort,
+  waterBodyOf
 } from '../types';
 import { ComponentConfig } from './component-config';
 import { parseStockLines } from './component-properties';
@@ -31,6 +32,8 @@ import {
   refundDeletedComponent, storedTypeForPaletteKey, describeStock,
 } from '../game/stock';
 import { getComponentVisualHeight } from '../render/components';
+import { getComponentSize } from '../render/component-size';
+import { portSide, Side } from '../render/grid-geometry';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -392,6 +395,23 @@ export class ConstructionManager {
             id: `${id}-right`,
             position: { x: halfWidth, y: 0 },    // Right center
             direction: 'both'
+          },
+          // The other two side nozzles, at the SAME height as left/right (a
+          // front-view y of 0, i.e. a stored connection elevation of
+          // height/2). They point at and away from the viewer, so their
+          // front-view position is the centreline and they have to name the
+          // plan side they stand on - see Port.planSide.
+          {
+            id: `${id}-north`,
+            position: { x: 0, y: 0 },
+            direction: 'both',
+            planSide: 'N' as const,
+          },
+          {
+            id: `${id}-south`,
+            position: { x: 0, y: 0 },
+            direction: 'both',
+            planSide: 'S' as const,
           }
         ];
 
@@ -1656,6 +1676,11 @@ export class ConstructionManager {
           { id: `${id}-drain`, position: { x: 0, y: half }, direction: 'both' },
           { id: `${id}-makeup-w`, position: { x: -half, y: 0 }, direction: 'both' },
           { id: `${id}-makeup-e`, position: { x: half, y: 0 }, direction: 'both' },
+          // North and south make-up nozzles at the same depth as east/west.
+          // They face the viewer, so they name their plan side rather than
+          // trying to say it with a front-view x (see Port.planSide).
+          { id: `${id}-makeup-n`, position: { x: 0, y: 0 }, direction: 'both', planSide: 'N' as const },
+          { id: `${id}-makeup-s`, position: { x: 0, y: 0 }, direction: 'both', planSide: 'S' as const },
         ];
         // Open to the air, so the steam pressure is simply what water at the
         // pool's temperature exerts - the dialog has no pressure to set.
@@ -2526,6 +2551,57 @@ export class ConstructionManager {
    * - pump ports sit on the drawn nozzles for the pump's orientation, and
    *   the orientation faces the pump's connected partners
    */
+  /**
+   * Give a loaded tank or pool a side nozzle on every plan side it has none
+   * on.
+   *
+   * The plan view has four sides and a player piping into a pool from the
+   * south should not have to route round to the east face to do it. Which
+   * sides are already taken is read with the SAME rule the grid view reads
+   * it with (`portSide`), so a tank built in the app - which already has
+   * left and right nozzles at mid-height and top and bottom ones at its ends
+   * - gains nothing, while a preset tank carrying a single outlet gains the
+   * three sides it is missing.
+   *
+   * Purely additive: every existing port id, and therefore every existing
+   * connection, is untouched. The new ports carry the standard elevation
+   * convention (front-view y = 0, i.e. a stored connection elevation of
+   * height/2) and declare their plan side, because a nozzle pointing at the
+   * viewer has no lateral offset to read one from.
+   *
+   * A tank drawn as a body of water has no vessel and no nozzle ring - its
+   * one port is where a pipe meets the shore - so it is left alone.
+   */
+  private addMissingSideNozzles(component: PlantComponent): void {
+    if (component.type !== 'tank' && component.type !== 'pool') return;
+    if (waterBodyOf(component as never)) return;
+    const size = getComponentSize(component);
+    const taken = new Set<Side>();
+    for (const port of component.ports) taken.add(portSide(port, size));
+
+    const prefix = component.type === 'pool' ? `${component.id}-makeup` : component.id;
+    const names: Record<Side, string> = component.type === 'pool'
+      ? { N: `${prefix}-n`, E: `${prefix}-e`, S: `${prefix}-s`, W: `${prefix}-w` }
+      : { N: `${prefix}-north`, E: `${prefix}-east`, S: `${prefix}-south`, W: `${prefix}-west` };
+    const halfW = size.width / 2;
+
+    for (const side of ['N', 'E', 'S', 'W'] as Side[]) {
+      if (taken.has(side)) continue;
+      const id = names[side];
+      if (component.ports.some(p => p.id === id)) continue;
+      component.ports.push({
+        id,
+        // North and south face the viewer, so they project onto the
+        // centreline; east and west keep their lateral offset so the
+        // elevation view still draws them on the shell.
+        position: { x: side === 'E' ? halfW : side === 'W' ? -halfW : 0, y: 0 },
+        direction: 'both',
+        planSide: side,
+      });
+      console.log(`[Construction] '${component.id}': added ${side} side nozzle '${id}'`);
+    }
+  }
+
   normalizeLoadedPlant(): void {
     const portById = new Map<string, Port>();
     for (const [, component] of this.plantState.components) {
@@ -2536,6 +2612,11 @@ export class ConstructionManager {
       const toPort = portById.get(conn.toPortId);
       if (fromPort) fromPort.connectedTo = conn.toPortId;
       if (toPort) toPort.connectedTo = conn.fromPortId;
+    }
+
+    // A tank or a pool with a bare plan side gets a nozzle on it.
+    for (const [, component] of this.plantState.components) {
+      this.addMissingSideNozzles(component);
     }
 
     for (const [, component] of this.plantState.components) {

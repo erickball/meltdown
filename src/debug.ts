@@ -37,7 +37,8 @@ import { pressureAtConnection } from './simulation/operators/connection-hydrauli
 import {
   formatMetres, stockedLines, stockLineDisplayName, pipeSpecDisplayName,
 } from './game/stock';
-import type { PlantStock } from './types';
+import { poolReadout, poolStateLabel } from './render/pool-readout';
+import type { PlantStock, PoolComponent } from './types';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -1460,6 +1461,87 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">High Fuel Temp:</span><span class="detail-value">${Math.round((setpoints?.highFuelTemp ?? 0.95) * 100)}%</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Low Coolant Flow:</span><span class="detail-value">${setpoints?.lowCoolantFlow ?? 10} kg/s</span></div>`;
       html += '</div>';
+      break;
+    }
+    case 'pool': {
+      // A spent-fuel pool is read as ONE question - is there water over the
+      // fuel - so the panel leads with that and then shows the numbers it is
+      // derived from. Everything here comes from poolReadout(), which is the
+      // same source the cut-away drawing on the grid uses; the picture and
+      // the panel cannot drift apart.
+      const pool = component as unknown as PoolComponent;
+      const r = poolReadout(pool, simState, true);
+      const state = poolStateLabel(r.state);
+      const K = (k: number | null) => k === null ? '--' : `${(k - 273.15).toFixed(0)} °C`;
+
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="Derived from the numbers below: covered while water stands over the ` +
+        `top of the active fuel, uncovering once the level is inside the fuel band, ` +
+        `and burning once the cladding's chemical power has passed the decay heat - ` +
+        `the point at which the fire is the larger heat source and drives itself.">` +
+        `Fuel:</span><span class="detail-value" style="color: ${state.color}; ` +
+        `font-weight: bold;">${state.text}</span></div>`;
+
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Stored Fuel</div>';
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="The Zircaloy cladding of the stored assemblies - one lumped rack ` +
+        `node. This is what oxidises, and what the drawing glows with.">` +
+        `Rack (clad):</span><span class="detail-value">${K(r.cladK)}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="Inside the UO2 pellets, across the same rod conductance a reactor ` +
+        `core uses. It runs a little above the cladding because the heat is made ` +
+        `here.">Pellets:</span><span class="detail-value">${K(r.pelletK)}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="Decay heat of the stored assemblies. Constant in this model - the ` +
+        `pool does not know how to shut itself off.">Decay power:</span>` +
+        `<span class="detail-value">${(r.decayW / 1e6).toFixed(2)} MW</span></div>`;
+      // Only once there is something to say: the reaction runs at some
+      // immeasurably small rate at every temperature, and a row reading
+      // "0.00 MW / 0.00 %" says less than no row at all. `reacting` is the
+      // same question the flames ask (fire-fx), and 1e-5 is one unit of the
+      // last digit this row prints.
+      if (r.reacting || r.oxidizedFraction >= 1e-5) {
+        const oxColor = r.oxidationW >= r.decayW ? '#ff5a3c' : '#ffa24a';
+        html += `<div class="detail-row"><span class="detail-label" ` +
+          `title="Chemical power the cladding released this step, reacting with steam ` +
+          `and with air at once. Once it passes the decay power the fire drives ` +
+          `itself.">Oxidation:</span><span class="detail-value" ` +
+          `style="color: ${oxColor};">${(r.oxidationW / 1e6).toFixed(2)} MW</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label" ` +
+          `title="Fraction of the cladding metal consumed. The hydrogen and the ` +
+          `fission-product release both follow it.">Cladding consumed:</span>` +
+          `<span class="detail-value" style="color: ${oxColor};">` +
+          `${(r.oxidizedFraction * 100).toFixed(2)} %</span></div>`;
+      }
+      html += '</div>';
+
+      html += '<div class="detail-section">';
+      html += '<div class="detail-section-title">Water</div>';
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="Depth of liquid standing on the pool floor.">Level:</span>` +
+        `<span class="detail-value">${r.level.toFixed(2)} m of ${r.depth.toFixed(1)} m` +
+        `</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="Water above the TOP of the active fuel. Negative means the racks are ` +
+        `standing out of the water and the uncovered part is cooled by steam or air ` +
+        `instead.">Over fuel:</span><span class="detail-value" ` +
+        `style="color: ${r.overFuel >= 0 ? '#7f7' : '#f77'};">` +
+        `${r.overFuel >= 0 ? '+' : ''}${r.overFuel.toFixed(2)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label" ` +
+        `title="How much of the active fuel band is under water. The heat-transfer ` +
+        `model splits the rack surface at exactly this line.">Fuel covered:</span>` +
+        `<span class="detail-value">${(r.coveredFraction * 100).toFixed(0)} %</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Top of fuel:</span>` +
+        `<span class="detail-value">${r.rackTop.toFixed(2)} m above the floor</span></div>`;
+      html += '</div>';
+
+      html += `<div class="detail-row"><span class="detail-label">Basin:</span>` +
+        `<span class="detail-value">${(pool.side || 0).toFixed(1)} x ` +
+        `${(pool.side || 0).toFixed(1)} x ${r.depth.toFixed(1)} m</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label">Assemblies:</span>` +
+        `<span class="detail-value">${pool.assemblyCount ?? 0}</span></div>`;
+      volume = (pool.side || 0) * (pool.side || 0) * r.depth;
       break;
     }
     case 'warehouse': {

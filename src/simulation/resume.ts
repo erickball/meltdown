@@ -372,6 +372,13 @@ const VOLATILE_COMPONENT_KEYS = new Set([
   'simNodeId', 'simPumpId', 'simValveId',
   'tubeSections', 'bundleFluids', 'opFlowFraction',
   'stock',
+  // Build-queue bookkeeping (src/game/build-queue.ts). `buildProgress` moves
+  // every frame and `pendingRemoval` is set on a part that is still running
+  // normally, so counting either would re-initialize a live component the
+  // moment anything else was edited. `underConstruction` is stripped for the
+  // same reason from the other side: the factory has never seen the ghost,
+  // so there is nothing to carry over whether it reads as changed or not.
+  'underConstruction', 'pendingRemoval', 'buildProgress',
 ]);
 
 /**
@@ -434,7 +441,7 @@ export function captureResumeSnapshot(sim: SimulationState, plant: PlantState): 
   }
   const connectionICs = new Map<string, string>();
   const connIds = assignFlowConnectionIds(plant.connections);
-  plant.connections.forEach((conn, i) => connectionICs.set(connIds[i], stableStringify(conn)));
+  plant.connections.forEach((conn, i) => connectionICs.set(connIds[i], stableStringify(conn, true)));
 
   return { saved: sim, refBuild, componentICs, connectionICs };
 }
@@ -607,7 +614,7 @@ export function transplantSimulationState(
   const savedConns = new Map(saved.flowConnections.map(conn => [conn.id, conn]));
   const currentConnIds = assignFlowConnectionIds(plant.connections);
   const currentConnJson = new Map<string, string>();
-  plant.connections.forEach((conn, i) => currentConnJson.set(currentConnIds[i], stableStringify(conn)));
+  plant.connections.forEach((conn, i) => currentConnJson.set(currentConnIds[i], stableStringify(conn, true)));
   for (const freshConn of fresh.flowConnections) {
     const savedConn = savedConns.get(freshConn.id);
     if (!savedConn) continue;

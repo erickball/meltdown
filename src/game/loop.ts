@@ -155,6 +155,19 @@ export class GameLoop {
 
   // Callbacks
   public onStateUpdate?: (state: SimulationState, metrics: SolverMetrics) => void;
+
+  /**
+   * Called once a frame with the WALL-CLOCK interval since the last one, in
+   * seconds, while the clock is running.
+   *
+   * This is not simulation time and must never be used as any: it is for
+   * things that happen at the player's pace rather than the plant's - the
+   * build queue, which measures how long a part takes to install in real
+   * seconds so that a level running at 60x does not install a pump in one
+   * simulated minute. It is skipped while paused, so pausing stops the
+   * builders as well as the plant.
+   */
+  public onWallFrame?: (wallSeconds: number) => void;
   public onEvent?: (event: GameEvent) => void;
 
   constructor(
@@ -325,6 +338,10 @@ export class GameLoop {
     }
 
     if (!this.isPaused && frameDt > 0) {
+      // Anything that runs at the player's pace, before the plant's own time
+      // moves at all (see onWallFrame).
+      this.onWallFrame?.(frameDt);
+
       // Simulation time to advance. In deterministic mode the frame interval is
       // capped first; on the interactive path it is used as measured.
       //
