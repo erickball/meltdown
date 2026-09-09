@@ -137,3 +137,4 @@ draw (ice does not evaporate up the pipe with the steam), the debug panel
 | `WaterState.iceFraction`, `quality` redefined as non-liquid fraction; Wood's speed of sound uses the vapour fraction | adds physics |
 | `T_MIN_MODEL = 150`, `RHO_ICE`, `CP_ICE`, `H_FUSION`, `CV_VAPOR_COLD` | physical constants, sources in the comments; `CV_VAPOR_COLD` is the one deliberate approximation (7% high, see above) |
 | triple-point row cached as `tripleAnchor` with a check that the table's first row is the triple point | search anchor, fails loudly |
+| `effectiveSpecificHeat`: a frost node (phase vapour with ice) takes the two-phase latent-heat buffer, which is on the sublimation line there | consistency with the existing two-phase buffer (that buffer's `/10` is a pre-existing heuristic, not touched) |
