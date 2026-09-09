@@ -37,6 +37,9 @@ src/simulation/find-*.ts
 *.png
 *.html
 
+# Downloaded bug reports (scripts/car.ts fetch) - a user's plant and sim state
+cars/
+
 # Generated data files from scripts
 scripts/*.json
 scripts/*.csv

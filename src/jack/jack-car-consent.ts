@@ -28,17 +28,30 @@ export interface CarConsentRequest {
   severity: unknown;
   component?: string;
   context: Record<string, unknown>;
+  /**
+   * Plain-language lines describing the reproduction bundle that would be
+   * attached (jack-car-bundle.ts describeBundle), or null when there is
+   * none to offer. The bundle itself is a compressed blob that cannot be
+   * shown verbatim, so these lines are what the user approves.
+   */
+  attachment?: string[] | null;
+  /** Why no bundle could be built, when one was expected. Shown, not sent. */
+  attachmentError?: string | null;
 }
 
 export interface CarConsentDecision {
   approved: boolean;
   /** False when the user kept the report but declined the context block. */
   includeContext: boolean;
+  /** False when the user kept the report but declined the reproduction bundle. */
+  includeAttachment: boolean;
   /** True when a stored "don't ask again" approved this without a dialog. */
   auto: boolean;
 }
 
-const DENIED: CarConsentDecision = { approved: false, includeContext: false, auto: false };
+const DENIED: CarConsentDecision = {
+  approved: false, includeContext: false, includeAttachment: false, auto: false,
+};
 
 // ---------------------------------------------------------------------------
 // Stored "don't ask again" preference
@@ -50,6 +63,13 @@ interface AutoSendPref {
   autoSend: true;
   /** The context choice the user made when they ticked "don't ask again". */
   includeContext: boolean;
+  /**
+   * The bundle choice made alongside it. A preference stored before bundles
+   * existed has no such field, and that reads as NO: a standing approval
+   * covers what was on screen when it was given, and the bundle (the user's
+   * whole plant and history) was not.
+   */
+  includeAttachment: boolean;
   /** When it was granted, so the toast can say how long it has been on. */
   since: string;
 }
@@ -65,6 +85,7 @@ function readAutoSendPref(): AutoSendPref | null {
     return {
       autoSend: true,
       includeContext: pref.includeContext !== false,
+      includeAttachment: pref.includeAttachment === true,
       since: typeof pref.since === 'string' ? pref.since : '',
     };
   } catch {
@@ -72,11 +93,12 @@ function readAutoSendPref(): AutoSendPref | null {
   }
 }
 
-function writeAutoSendPref(includeContext: boolean): void {
+function writeAutoSendPref(includeContext: boolean, includeAttachment: boolean): void {
   try {
     const pref: AutoSendPref = {
       autoSend: true,
       includeContext,
+      includeAttachment,
       since: new Date().toISOString(),
     };
     localStorage.setItem(PREF_KEY, JSON.stringify(pref));
@@ -105,6 +127,7 @@ const CONTEXT_LABELS: Record<string, string> = {
   simTime: 'Simulation time (s)',
   selectedComponent: 'Selected component',
   componentCount: 'Number of components in your plant',
+  build: 'Game build (git commit)',
   userAgent: 'Browser user-agent',
 };
 
@@ -128,6 +151,7 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
     return Promise.resolve({
       approved: true,
       includeContext: standing.includeContext,
+      includeAttachment: standing.includeAttachment && !!req.attachment,
       auto: true,
     });
   }
@@ -253,6 +277,59 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
       });
     }
 
+    // --- the separately-declinable reproduction bundle -------------------
+    // The bundle is the user's whole plant and simulation history in one
+    // compressed blob. It cannot be printed verbatim like the fields above,
+    // so what the user approves is this exact description of its contents
+    // and size (built from the real bundle, not an estimate).
+    const attachToggle = document.createElement('input');
+    attachToggle.type = 'checkbox';
+    attachToggle.checked = !!req.attachment;
+    attachToggle.id = 'jack-car-consent-attachment';
+
+    if (req.attachment) {
+      const label = document.createElement('label');
+      label.htmlFor = attachToggle.id;
+      label.title =
+        'A compressed copy of your plant design, the current simulation state and ' +
+        'the rewind history, so the developers can replay exactly what happened. ' +
+        'The report can be filed without it.';
+      label.style.cssText =
+        'display: flex; align-items: center; gap: 7px; margin: 14px 0 4px; ' +
+        'font-size: 11px; color: #7788aa; text-transform: uppercase; ' +
+        'letter-spacing: 0.5px; cursor: pointer;';
+      label.appendChild(attachToggle);
+      const labelText = document.createElement('span');
+      labelText.textContent = 'Also attach the plant and simulation history';
+      label.appendChild(labelText);
+      panel.appendChild(label);
+
+      const attachBox = document.createElement('div');
+      attachBox.style.cssText = `
+        background: #12161c; border: 1px solid #2a3340; border-radius: 4px;
+        padding: 7px 9px; font-size: 11px; color: #b8c4d0;
+      `;
+      for (const line of req.attachment) {
+        const row = document.createElement('div');
+        row.textContent = line;
+        row.style.cssText = 'padding: 2px 0; word-break: break-word;';
+        attachBox.appendChild(row);
+      }
+      panel.appendChild(attachBox);
+      attachToggle.addEventListener('change', () => {
+        attachBox.style.opacity = attachToggle.checked ? '1' : '0.35';
+      });
+    } else if (req.attachmentError) {
+      // Nothing to approve, but the user should know the report goes out
+      // without the one thing that makes it reproducible
+      const note = document.createElement('div');
+      note.textContent =
+        `No plant/simulation bundle could be attached: ${req.attachmentError}`;
+      note.style.cssText =
+        'margin-top: 14px; font-size: 11px; color: #d9a066; word-break: break-word;';
+      panel.appendChild(note);
+    }
+
     // --- "don't ask again" -----------------------------------------------
     // Only settable here, with the full report on screen, and it takes effect
     // only if this report is actually approved (see the Send handler).
@@ -264,8 +341,9 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
     dontAskLabel.htmlFor = dontAskToggle.id;
     dontAskLabel.title =
       'Send this and future bug reports without showing this dialog, keeping ' +
-      'whatever choice you made above about the technical context. Each ' +
-      'automatic send still shows a notice with a button to start asking again.';
+      'whatever choices you made above about the technical context and the ' +
+      'attached plant/simulation history. Each automatic send still shows a ' +
+      'notice with a button to start asking again.';
     dontAskLabel.style.cssText =
       'display: flex; align-items: flex-start; gap: 7px; margin-top: 16px; ' +
       'font-size: 11px; color: #99aacc; cursor: pointer; line-height: 1.4;';
@@ -323,8 +401,9 @@ export function requestCarConsent(req: CarConsentRequest): Promise<CarConsentDec
     sendBtn.addEventListener('click', () => {
       // Persist the standing approval only on an actual send. Ticking the box
       // and then declining must not leave auto-send armed.
-      if (dontAskToggle.checked) writeAutoSendPref(contextToggle.checked);
-      finish({ approved: true, includeContext: contextToggle.checked, auto: false });
+      const includeAttachment = !!req.attachment && attachToggle.checked;
+      if (dontAskToggle.checked) writeAutoSendPref(contextToggle.checked, includeAttachment);
+      finish({ approved: true, includeContext: contextToggle.checked, includeAttachment, auto: false });
     });
     // Backdrop click cancels, but only when the press STARTED on the backdrop
     // (matches ConnectionDialog: dragging a text selection out must not cancel)

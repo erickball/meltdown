@@ -16,6 +16,8 @@ import {
   execPlotHistory,
 } from './jack-history';
 import { requestCarConsent, notifyAutoFiled } from './jack-car-consent';
+import { buildCarBundle, describeBundle, CAR_BUNDLE_BUDGET } from './jack-car-bundle';
+import type { CarBundleSummary } from './jack-car-bundle';
 
 const barFromPa = (pa: number) => Number((pa / 1e5).toFixed(3));
 const cFromK = (k: number) => Number((k - 273.15).toFixed(2));
@@ -477,18 +479,37 @@ async function fileCarReport(
     simTime: sim?.time ?? null,
     selectedComponent: host.getSelectedComponentId(),
     componentCount: host.plantState.components.size,
+    build: typeof __BUILD_COMMIT__ === 'string' ? __BUILD_COMMIT__ : 'unknown',
     userAgent: navigator.userAgent,
   };
 
+  // The reproduction bundle (plant design + live state + rewind history) is
+  // built BEFORE the dialog so the user approves its real contents and
+  // size, not an estimate. A bundle that cannot be built is reported in the
+  // dialog and in the tool result; the report itself still goes out.
+  let bundle: { base64: string; summary: CarBundleSummary } | null = null;
+  let attachmentError: string | null = null;
+  const source = host.captureReproSource();
+  if (source) {
+    try {
+      bundle = await buildCarBundle(source, CAR_BUNDLE_BUDGET);
+    } catch (e) {
+      attachmentError = e instanceof Error ? e.message : String(e);
+      console.error('[CAR] Could not build the reproduction bundle:', e);
+    }
+  }
+
   // Nothing leaves the machine without the user seeing it first. The dialog
   // shows the full payload verbatim; the user can also keep the report but
-  // withhold the auto-collected context block.
+  // withhold the auto-collected context block and/or the bundle.
   const consent = await requestCarConsent({
     title,
     description,
     severity: input.severity,
     component: typeof input.component === 'string' ? input.component : undefined,
     context,
+    attachment: bundle ? describeBundle(bundle.summary) : null,
+    attachmentError,
   });
   if (!consent.approved) {
     // Declined means declined: not sent, and NOT parked in localStorage
@@ -510,28 +531,46 @@ async function fileCarReport(
     component: typeof input.component === 'string' ? input.component : undefined,
     ...(consent.includeContext ? { context } : {}),
   };
+  const attached = consent.includeAttachment && bundle ? bundle : null;
+  const attachmentNote = attached
+    ? ` The reproduction bundle went with it (${describeBundle(attached.summary).join('; ')}).`
+    : bundle
+      ? ' The user chose not to attach the plant/simulation bundle.'
+      : attachmentError
+        ? ` No plant/simulation bundle could be attached (${attachmentError}).`
+        : ' No simulation has been built yet, so no plant/simulation bundle was attached.';
   try {
     const resp = await fetch(carEndpoint(), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(
+        attached
+          ? { ...payload, bundle: { encoding: 'gzip+base64', summary: attached.summary, data: attached.base64 } }
+          : payload
+      ),
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const data = (await resp.json()) as { carId?: string };
-    record(`Jack filed CAR ${data.carId ?? '?'}: ${title}`);
+    if (!resp.ok) {
+      let detail = '';
+      try { detail = ((await resp.json()) as { error?: string }).error ?? ''; } catch { /* no body */ }
+      throw new Error(`HTTP ${resp.status}${detail ? ` (${detail})` : ''}`);
+    }
+    const data = (await resp.json()) as { carId?: string; bundleChunks?: number };
+    record(`Jack filed CAR ${data.carId ?? '?'}: ${title}${attached ? ' (with reproduction bundle)' : ''}`);
     if (consent.auto) notifyAutoFiled(title, 'sent');
     return {
       ok: true,
       carId: data.carId ?? null,
-      note: consent.auto
+      note: (consent.auto
         ? 'CAR filed with the site office. It was sent without asking, under the ' +
           "user's standing \"don't ask again\" choice - they were shown a notice " +
           'with a button to start asking again. Mention it was filed, briefly.'
-        : 'CAR filed with the site office.',
+        : 'CAR filed with the site office.') + attachmentNote,
     };
   } catch (e) {
     // Offline / endpoint not deployed: park the report locally so it isn't
-    // lost, and tell the model honestly what happened.
+    // lost, and tell the model honestly what happened. The bundle is NOT
+    // parked - it is megabytes, far past what localStorage holds, and it
+    // describes a moment that has passed by the time anything is retried.
     try {
       const key = 'meltdown_pending_cars';
       const pending = JSON.parse(localStorage.getItem(key) ?? '[]') as unknown[];
@@ -543,7 +582,8 @@ async function fileCarReport(
     return {
       ok: true,
       carId: null,
-      note: `Couldn't reach the site office (${String(e)}); the report is parked in this browser (localStorage 'meltdown_pending_cars').`,
+      note: `Couldn't reach the site office (${String(e)}); the report is parked in this browser (localStorage 'meltdown_pending_cars')` +
+        (attached ? ', without the plant/simulation bundle.' : '.'),
     };
   }
 }

@@ -1,6 +1,7 @@
 import type { PlantState } from '../types';
 import type { ConstructionManager } from '../construction/construction-manager';
 import type { SimulationState } from '../simulation/types';
+import type { CarBundleSource } from './jack-car-bundle';
 
 /**
  * Everything Jack needs from the rest of the app, gathered in one object
@@ -21,6 +22,13 @@ export interface JackHost {
   getSelectedComponentId: () => string | null;
   /** Refresh the construction cost panel after Jack edits the plant */
   refreshCostPanel: () => void;
+  /**
+   * The plant design, live sim state and rewind history for a bug report's
+   * reproduction bundle (jack-car-bundle.ts), or null when no simulation
+   * has been built yet. The history is handed out BY REFERENCE and must
+   * only be read.
+   */
+  captureReproSource: () => CarBundleSource | null;
 }
 
 /** One entry in the recent-edits journal shown to Jack as context. */

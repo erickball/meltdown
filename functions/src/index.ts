@@ -2,7 +2,8 @@ import { onRequest, Request } from "firebase-functions/v2/https";
 import type { Response } from "express";
 import { defineSecret } from "firebase-functions/params";
 import { initializeApp } from "firebase-admin/app";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore, FieldValue, Timestamp } from "firebase-admin/firestore";
+import { createHash } from "node:crypto";
 import Anthropic from "@anthropic-ai/sdk";
 import { JACK_SYSTEM_PROMPT } from "./jack-prompt.js";
 import { JACK_TOOLS } from "./jack-tools.js";
@@ -210,13 +211,30 @@ export const jackChat = onRequest(
 );
 
 // Corrective Action Reports: Jack's in-character bug reports, persisted to
-// Firestore ("jack-cars" collection) for review in the Firebase console
-// during development. No auth (same anonymous posture as jackChat); size
-// caps and a per-document shape check keep abuse boring.
-const MAX_CAR_BYTES = 20_000;
+// Firestore ("jack-cars" collection) and read on our side with
+// scripts/car.ts. No auth (same anonymous posture as jackChat); size caps
+// and a per-document shape check keep abuse boring.
+//
+// A report may carry a reproduction bundle (src/jack/jack-car-bundle.ts): a
+// gzip+base64 blob of the plant design, live sim state and rewind history.
+// Firestore documents top out at 1 MiB, so the blob is stored as ordered
+// slices in the report's "car-chunks" subcollection and the report itself
+// holds only the metadata (length, chunk count, sha256, summary).
+//
+// Nothing here is meant to accumulate. Every report and every chunk carries
+// `expireAt`, and the Firestore TTL policy on that field (enabled with
+// `gcloud firestore fields ttls update expireAt --collection-group=...`)
+// deletes them after CAR_TTL_DAYS. The normal path is shorter: `scripts/car.ts
+// close <id>` deletes a report the moment it has been dealt with.
+const MAX_CAR_REPORT_BYTES = 20_000;
+// Must match CAR_BUNDLE_BUDGET on the client (jack-car-bundle.ts).
+const MAX_BUNDLE_CHARS = 6_000_000;
+// Base64 chars per chunk document; well under Firestore's 1 MiB document cap.
+const BUNDLE_CHUNK_CHARS = 750_000;
+const CAR_TTL_DAYS = 90;
 
 export const fileCar = onRequest(
-  { timeoutSeconds: 30, memory: "256MiB", maxInstances: 2, cors: false },
+  { timeoutSeconds: 60, memory: "512MiB", maxInstances: 2, cors: false },
   async (req, res) => {
     if (!applyCors(req, res)) return;
 
@@ -225,21 +243,76 @@ export const fileCar = onRequest(
       res.status(400).json({ error: "body must include title and description strings" });
       return;
     }
-    if (JSON.stringify(body).length > MAX_CAR_BYTES) {
+    const { bundle, ...report } = body;
+    if (JSON.stringify(report).length > MAX_CAR_REPORT_BYTES) {
       res.status(400).json({ error: "report too large" });
       return;
     }
 
+    let bundleData: string | null = null;
+    let bundleSummary: unknown = null;
+    if (bundle !== undefined) {
+      if (
+        typeof bundle !== "object" || bundle === null ||
+        bundle.encoding !== "gzip+base64" || typeof bundle.data !== "string"
+      ) {
+        res.status(400).json({ error: "bundle must be { encoding: 'gzip+base64', data: <base64> }" });
+        return;
+      }
+      if (bundle.data.length > MAX_BUNDLE_CHARS) {
+        res.status(400).json({
+          error: `bundle too large (${bundle.data.length} chars, limit ${MAX_BUNDLE_CHARS})`,
+        });
+        return;
+      }
+      if (!/^[A-Za-z0-9+/]*={0,2}$/.test(bundle.data)) {
+        res.status(400).json({ error: "bundle data is not base64" });
+        return;
+      }
+      bundleData = bundle.data;
+      bundleSummary =
+        typeof bundle.summary === "object" && bundle.summary !== null
+          ? JSON.parse(JSON.stringify(bundle.summary).slice(0, 4000))
+          : null;
+    }
+
     const db = getFirestore();
-    const doc = await db.collection("jack-cars").add({
-      title: String(body.title).slice(0, 300),
-      description: String(body.description).slice(0, 8000),
-      severity: ["low", "medium", "high"].includes(body.severity) ? body.severity : "medium",
-      component: typeof body.component === "string" ? body.component.slice(0, 200) : null,
-      context: typeof body.context === "object" && body.context !== null ? body.context : null,
+    const expireAt = Timestamp.fromMillis(Date.now() + CAR_TTL_DAYS * 86_400_000);
+    const docRef = db.collection("jack-cars").doc();
+
+    // Chunks go in first, so a reader never finds a report whose bundle is
+    // still arriving; the report document is the commit.
+    let bundleMeta: Record<string, unknown> | null = null;
+    if (bundleData !== null) {
+      const chunks = Math.ceil(bundleData.length / BUNDLE_CHUNK_CHARS);
+      for (let i = 0; i < chunks; i++) {
+        await docRef.collection("car-chunks").doc(String(i).padStart(4, "0")).set({
+          index: i,
+          data: bundleData.slice(i * BUNDLE_CHUNK_CHARS, (i + 1) * BUNDLE_CHUNK_CHARS),
+          expireAt,
+        });
+      }
+      bundleMeta = {
+        encoding: "gzip+base64",
+        chars: bundleData.length,
+        chunks,
+        chunkChars: BUNDLE_CHUNK_CHARS,
+        sha256: createHash("sha256").update(bundleData).digest("hex"),
+        summary: bundleSummary,
+      };
+    }
+
+    await docRef.set({
+      title: String(report.title).slice(0, 300),
+      description: String(report.description).slice(0, 8000),
+      severity: ["low", "medium", "high"].includes(report.severity) ? report.severity : "medium",
+      component: typeof report.component === "string" ? report.component.slice(0, 200) : null,
+      context: typeof report.context === "object" && report.context !== null ? report.context : null,
+      bundle: bundleMeta,
       origin: req.headers.origin ?? null,
       created: FieldValue.serverTimestamp(),
+      expireAt,
     });
-    res.json({ ok: true, carId: doc.id });
+    res.json({ ok: true, carId: docRef.id, bundleChunks: bundleMeta ? bundleMeta.chunks : 0 });
   }
 );

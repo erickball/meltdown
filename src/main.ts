@@ -23,6 +23,7 @@ import {
   setSimulationRandomSeed,
   serializeSimulationState,
   deserializeSimulationState,
+  serializePlantDesign,
   SimulationState,
   SolverMetrics,
   setWaterPropsDebug,
@@ -2136,14 +2137,10 @@ function init() {
   const STORAGE_PREFIX = 'meltdown_config_';
   const openSaveLoadBtn = document.getElementById('open-save-load-btn') as HTMLButtonElement;
 
-  // Serialize PlantState to JSON-compatible object
+  // Serialize PlantState to JSON-compatible object (shared with Jack's
+  // bug-report bundle, so a report carries exactly what a save file does)
   function serializePlantState(state: PlantState): object {
-    return {
-      components: Array.from(state.components.entries()),
-      connections: state.connections,
-      ...(state.scenario ? { scenario: state.scenario } : {}),
-      ...(state.terrain ? { terrain: state.terrain } : {}),
-    };
+    return serializePlantDesign(state);
   }
 
   // Deserialize JSON object back to PlantState
@@ -4757,6 +4754,20 @@ function init() {
     getMode: () => currentMode,
     getSelectedComponentId: () => selectedComponentId,
     refreshCostPanel: () => updateConstructionCostPanel(),
+    // Bug-report reproduction bundle: the same design + state a save file
+    // carries, plus the rewind history. Nothing to attach before the sim
+    // has been built at least once.
+    captureReproSource: () => {
+      const sim = gameLoop.getState();
+      if (!sim || sim.flowNodes.size === 0) return null;
+      return {
+        build: typeof __BUILD_COMMIT__ === 'string' ? __BUILD_COMMIT__ : 'unknown',
+        mode: currentMode,
+        plant: plantState,
+        simState: sim,
+        history: gameLoop.exportHistory(),
+      };
+    },
   };
   new JackManager(jackHost);
   // Headless-test hook: run one of Jack's tools directly (no LLM round trip)

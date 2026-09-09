@@ -12,6 +12,7 @@
  */
 
 import { SimulationState } from './types';
+import type { PlantState, PlantComponent } from '../types';
 import { cloneSimulationState } from './solver';
 
 export const SIM_STATE_VERSION = 1;
@@ -79,4 +80,62 @@ export function deserializeSimulationState(data: Record<string, unknown>): Simul
   } as unknown as SimulationState;
   delete (state as unknown as Record<string, unknown>).version;
   return state;
+}
+
+// ---------------------------------------------------------------------------
+// Plant design + generic Map-aware JSON
+//
+// A running-sim snapshot only means something next to the design that built
+// it, so both the in-app save and Jack's bug-report bundle carry the design
+// in this one shape (component entries, connections, optional scenario and
+// terrain).
+// ---------------------------------------------------------------------------
+
+/** The plant design as plain JSON: what a save file / preset / import holds. */
+export function serializePlantDesign(plant: PlantState): Record<string, unknown> {
+  return {
+    components: Array.from(plant.components.entries()),
+    connections: plant.connections,
+    ...(plant.scenario ? { scenario: plant.scenario } : {}),
+    ...(plant.terrain ? { terrain: plant.terrain } : {}),
+  };
+}
+
+/** Inverse of serializePlantDesign (a fresh PlantState; nothing shared). */
+export function deserializePlantDesign(data: Record<string, unknown>): PlantState {
+  if (!Array.isArray(data.components)) {
+    throw new Error('[serialization] Plant design has no components array');
+  }
+  const plant = {
+    components: new Map(data.components as Array<[string, PlantComponent]>),
+    connections: Array.isArray(data.connections) ? data.connections : [],
+  } as unknown as PlantState;
+  if (data.scenario) plant.scenario = data.scenario as PlantState['scenario'];
+  if (data.terrain) plant.terrain = data.terrain as PlantState['terrain'];
+  return plant;
+}
+
+/**
+ * JSON replacer/reviver pair that spells every Map as {"__map": [entries]}.
+ * Lets a whole nest of sim states, history snapshots and solver contexts be
+ * stringified in one pass without cloning each state first (the history's
+ * snapshots are already detached copies, and JSON.stringify never mutates).
+ * The revived object has real Maps back, so a sim state that went through
+ * this pair is usable directly - no per-field conversion list to keep in
+ * sync with SimulationState.
+ */
+export function mapAwareReplacer(this: unknown, _key: string, value: unknown): unknown {
+  if (value instanceof Map) return { __map: Array.from(value.entries()) };
+  return value;
+}
+
+export function mapAwareReviver(_key: string, value: unknown): unknown {
+  if (
+    value !== null && typeof value === 'object' && !Array.isArray(value) &&
+    Array.isArray((value as { __map?: unknown }).__map) &&
+    Object.keys(value as object).length === 1
+  ) {
+    return new Map((value as { __map: Array<[unknown, unknown]> }).__map);
+  }
+  return value;
 }

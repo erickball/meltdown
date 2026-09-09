@@ -127,7 +127,12 @@ export {
 } from './hx-bundles';
 
 // Running-simulation snapshots (save/load a sim in progress)
-export { serializeSimulationState, deserializeSimulationState } from './serialization';
+export {
+  serializeSimulationState,
+  deserializeSimulationState,
+  serializePlantDesign,
+  deserializePlantDesign,
+} from './serialization';
 
 // Water properties (including debug and profiling functions)
 export {

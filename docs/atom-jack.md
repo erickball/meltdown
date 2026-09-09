@@ -77,6 +77,55 @@ localStorage.setItem('jack-endpoint',
 The emulator needs the secret locally: put `ANTHROPIC_API_KEY=...` in
 `functions/.secret.local` (gitignored).
 
+## Bug reports (CARs)
+
+Jack files Corrective Action Reports with the `file_car` tool: the
+`fileCar` function stores them in Firestore collection `jack-cars`. The user
+sees the whole report in a consent dialog (`src/jack/jack-car-consent.ts`)
+before anything is sent.
+
+Once a simulation has been built, a report can carry a **reproduction
+bundle** (`src/jack/jack-car-bundle.ts`): the plant design, the live sim
+state and the rewind history (snapshots + accepted-dt log), gzipped and
+base64'd, capped at 6 MB. Inside the cap the whole history travels; over it,
+frame snapshots are thinned first and then the dt log is trimmed from the
+old end, so what remains always replays exactly up to the reported moment,
+and the summary shown to the user says what was left out. The blob is
+stored as ~750 KB slices in the report's `car-chunks` subcollection.
+
+On our side:
+
+```sh
+npx tsx scripts/car.ts list              # open reports, newest first
+npx tsx scripts/car.ts fetch <id>        # -> cars/<id>/{report.json, bundle.gz, design.json}
+npx tsx scripts/repro-car.ts cars/<id> --from 0 --run 60   # replay + continue headless
+npx tsx scripts/car.ts close <id>        # delete the report and its chunks
+```
+
+`design.json` is in the app's save format: the Import button loads it and
+resumes paused at the reported moment. `repro-car.ts --from T` replays the
+recorded trajectory from the latest snapshot at or before T and checks that
+it lands on the reported state, printing the drift against every recorded
+checkpoint on the way; `--run S` then continues with the live solver. On
+the same JavaScript engine and build the replay is bit-identical. A bundle
+recorded in a browser and replayed in Node differs at round-off level from
+the first step (different math libraries), which the flow solver amplifies
+(~1e-3 relative after a few seconds of a PWR startup transient) - the same
+physics, not a bug, and the drift table shows the difference between that
+smooth growth and a jump at one checkpoint. The bundle names the git
+commit that produced it (`__BUILD_COMMIT__`, stamped by `vite.config.ts`);
+another build may load the bundle but need not reproduce the numbers.
+
+Reports are meant to be closed once dealt with, so other people's plants do
+not pile up. As a backstop, every report and chunk carries `expireAt`
+(90 days) and the Firestore TTL policy on that field deletes what nobody
+closed:
+
+```sh
+gcloud firestore fields ttls update expireAt --collection-group=jack-cars --enable-ttl --project=unityriskresearch
+gcloud firestore fields ttls update expireAt --collection-group=car-chunks --enable-ttl --project=unityriskresearch
+```
+
 ## Abuse posture
 
 The endpoint is public (the game has no auth). Protections: origin allowlist
