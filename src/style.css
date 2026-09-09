@@ -906,7 +906,8 @@ body {
 }
 
 .btn-primary,
-.btn-secondary {
+.btn-secondary,
+.btn-danger {
   padding: 8px 20px;
   border: none;
   border-radius: 4px;
@@ -931,6 +932,27 @@ body {
 
 .btn-secondary:hover {
   background: #556677;
+}
+
+/* The pipe tool's placement hint is a sentence, and the toolbar has no
+   max-width - it grows to fit its widest line. Cap the hint so it WRAPS
+   instead of stretching the whole toolbar across the plant. */
+#placement-hint {
+  max-width: 230px;
+  line-height: 1.35;
+}
+
+#pipe-rotate-btn {
+  max-width: 230px;
+}
+
+.btn-danger {
+  background: #8a3a3a;
+  color: #ffe8e8;
+}
+
+.btn-danger:hover {
+  background: #a04545;
 }
 
 /* View mode selector (2D / 2.5D / Grid) - a compact segmented control */

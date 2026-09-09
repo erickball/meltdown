@@ -65,7 +65,7 @@ export function sideVector(side: Side): Point {
   }
 }
 
-function oppositeSide(side: Side): Side {
+export function oppositeSide(side: Side): Side {
   return side === 'N' ? 'S' : side === 'S' ? 'N' : side === 'E' ? 'W' : 'E';
 }
 
@@ -832,6 +832,146 @@ export function distanceToPolyline(p: Point, pts: Point[]): number {
     if (d < best) best = d;
   }
   return best;
+}
+
+// ---------------------------------------------------------------------------
+// Ground pipe: runs laid on open ground, and the loose ends that meet
+// ---------------------------------------------------------------------------
+
+/** Which way a single ground pipe piece lies. */
+export type PipeOrientation = 'EW' | 'NS';
+
+export function oppositeOrientation(o: PipeOrientation): PipeOrientation {
+  return o === 'EW' ? 'NS' : 'EW';
+}
+
+/** Half a tile from `from`, directly away from `toward`. */
+function carryOut(from: Point, toward: Point): Point {
+  const dx = from.x - toward.x, dy = from.y - toward.y;
+  const len = Math.hypot(dx, dy);
+  if (len < EPS) return { x: from.x, y: from.y };
+  return { x: from.x + (dx / len) * TILE_M / 2, y: from.y + (dy / len) * TILE_M / 2 };
+}
+
+/**
+ * The route a run drawn through these cells occupies.
+ *
+ * The interior follows cell centres, as every other route on the grid does,
+ * but the two ENDS are carried half a tile past the terminal centres, out to
+ * the cell boundary. That is deliberate, and it is what makes ground pipe
+ * connectable: a piece FILLS its tile, so its loose end lands on exactly the
+ * point the neighbouring tile's piece ends on, and on exactly the point a
+ * component's port anchors to on that footprint edge. Ends meet by being the
+ * same point, with no tolerance to tune.
+ *
+ * A single cell has no direction of its own, so it takes the orientation the
+ * pipe tool is holding.
+ */
+export function groundRunRoute(cells: Point[], orientation: PipeOrientation): Point[] {
+  const centres = simplifyRoute(cells.map(cellCenter));
+  if (centres.length === 0) return [];
+  if (centres.length === 1) {
+    const c = centres[0];
+    const h = TILE_M / 2;
+    return orientation === 'EW'
+      ? [{ x: c.x - h, y: c.y }, { x: c.x + h, y: c.y }]
+      : [{ x: c.x, y: c.y - h }, { x: c.x, y: c.y + h }];
+  }
+  const head = carryOut(centres[0], centres[1]);
+  const tail = carryOut(centres[centres.length - 1], centres[centres.length - 2]);
+  return simplifyRoute([head, ...centres, tail]);
+}
+
+/**
+ * Where a component of this PALETTE type lands when it is placed at a plan
+ * point. A ground pipe piece is placed BY CELL - its route fills the tile the
+ * cursor is over - while everything else centres its footprint on whole
+ * tiles. A pipe's `position` is its inlet END, not the middle of a footprint,
+ * so snapping one as a footprint centre put the placed piece half its length
+ * east of the preview box (the default pipe footprint is 10 x 1 tiles).
+ */
+export function snapPlacementCenter(componentType: string, pos: Point): Point {
+  if (componentType === 'pipe') return cellCenter(pos);
+  return snapCenter(pos, footprintForType(componentType));
+}
+
+/**
+ * The route a single ground pipe piece placed over a plan point occupies.
+ * The placement preview and the placement itself both call this, so what is
+ * drawn and what is built are the same polyline by construction.
+ */
+export function pipePieceRoute(pos: Point, orientation: PipeOrientation): Point[] {
+  return groundRunRoute([pos], orientation);
+}
+
+/** A pipe end with nothing on it, at the point where it could meet something. */
+export interface FreeEnd {
+  component: PipeComponent;
+  port: Port;
+  point: Point;
+  /** The way the end faces, pointing away from the pipe body. */
+  side: Side;
+}
+
+/** Every unconnected end of a pipe component. */
+export function pipeFreeEnds(pipe: PipeComponent): FreeEnd[] {
+  return portAnchors(pipe)
+    .filter(a => !a.port.connectedTo)
+    .map(a => ({ component: pipe, port: a.port, point: a.point, side: a.side }));
+}
+
+/** Where a loose end would be joined: a port on some other component. */
+export interface EndJoin {
+  component: PlantComponent;
+  port: Port;
+}
+
+/**
+ * What a loose pipe end touches: another pipe's loose end at exactly the same
+ * point facing back at it, or a component's free port anchored on that point
+ * with its face turned towards it.
+ *
+ * Exact coincidence, deliberately. The ends of ground pipe land on tile
+ * boundaries and so do port anchors, so two things meant to meet meet
+ * exactly. A tolerance here would let a run grab a nozzle it merely passes
+ * near, which is worse than having to lay one more tile.
+ */
+export function joinForFreeEnd(plantState: PlantState, end: FreeEnd): EndJoin | null {
+  const facing = oppositeSide(end.side);
+  for (const component of plantState.components.values()) {
+    if (component.id === end.component.id) continue;
+    if (!component.ports || (component as any).isHydraulicOnly) continue;
+    for (const anchor of portAnchors(component)) {
+      if (anchor.port.connectedTo) continue;
+      if (!samePoint(anchor.point, end.point)) continue;
+      if (anchor.side !== facing) continue;
+      return { component, port: anchor.port };
+    }
+  }
+  return null;
+}
+
+/** A loose end of a pipe and what it touches. */
+export interface FreeEndJoin {
+  end: FreeEnd;
+  join: EndJoin;
+}
+
+/**
+ * Every join a newly laid pipe's loose ends make. At most one per end, and
+ * never twice into the same port (a one-tile piece dropped across a single
+ * nozzle must not try to connect both of its ends to it).
+ */
+export function findFreeEndJoins(plantState: PlantState, pipe: PipeComponent): FreeEndJoin[] {
+  const out: FreeEndJoin[] = [];
+  const taken = new Set<string>();
+  for (const end of pipeFreeEnds(pipe)) {
+    const join = joinForFreeEnd(plantState, end);
+    if (!join || taken.has(join.port.id)) continue;
+    taken.add(join.port.id);
+    out.push({ end, join });
+  }
+  return out;
 }
 
 export function translateRoute(pts: Point[], dx: number, dy: number): Point[] {

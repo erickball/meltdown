@@ -1,4 +1,5 @@
 import { PlantCanvas, ViewMode } from './render/canvas';
+import { PipeOrientation } from './render/grid-geometry';
 import { installPageZoomReset } from './page-zoom';
 import { getComponentVisualHeight } from './render/components';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
@@ -52,6 +53,7 @@ import {
   stockedPipeSpecId, stockLineDisplayName, pipeSpecDisplayName,
   paletteKeyForStockLine,
 } from './game/stock';
+import { getPipeSpecById } from './construction/component-presets';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
 import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions, auditComponentEditSync } from './construction/component-config';
@@ -1372,6 +1374,12 @@ function init() {
   let pendingLiveEdit: PendingLiveEdit | null = null;
   let selectedComponentType: string | null = null;
   /**
+   * Which way the pipe tool is holding a single ground pipe section: east-west
+   * or north-south. R and the on-screen Rotate button turn it, and the
+   * placement preview draws exactly the piece that will be built.
+   */
+  let pipeOrientation: PipeOrientation = 'EW';
+  /**
    * The equipment design the selected palette button hands out, when it is a
    * supply-yard line. Null for an ordinary palette button, where the player
    * still picks a design in the placement dialog.
@@ -1633,26 +1641,30 @@ function init() {
       return;
     }
 
-    // Delete key removes the selected component (but not Backspace - that's
-    // for text editing). Works in both modes: while the plant is running the
-    // simulation is rebuilt around the removal.
+    // R turns the ground pipe section the pipe tool is holding
+    if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey && plantCanvas.isPipeTool()) {
+      e.preventDefault();
+      pipeOrientation = plantCanvas.rotatePipeOrientation();
+      refreshPipeTool();
+      return;
+    }
+
+    // Delete key removes what is selected (but not Backspace - that's for
+    // text editing). Works in both modes: while the plant is running the
+    // simulation is rebuilt around the removal. A selected pipe RUN goes
+    // first: it is the thing the click most recently picked out.
+    if (e.key === 'Delete' && (currentMode === 'construction' || liveBuildAllowed())) {
+      const selectedRun = plantCanvas.getSelectedConnection();
+      if (selectedRun) {
+        e.preventDefault();
+        deletePlantConnection(selectedRun);
+        return;
+      }
+    }
     if (e.key === 'Delete' && selectedComponentId &&
         (currentMode === 'construction' || liveBuildAllowed())) {
       e.preventDefault();
-      const component = constructionManager.getComponent(selectedComponentId);
-      const label = component?.label || selectedComponentId;
-      if (confirm(`Delete component "${label}"? This will also remove all its connections.`)) {
-        const doomedId = selectedComponentId;
-        const wasController = component?.type === 'controller';
-        liveEdit(`Removing ${label}`, () => constructionManager.deleteComponent(doomedId));
-        if (wasController) {
-          gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-        }
-        plantCanvas.clearSelection();
-        selectedComponentId = null;
-        updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
-        updateConstructionCostPanel();
-      }
+      requestComponentDelete(selectedComponentId);
       return;
     }
 
@@ -1838,27 +1850,7 @@ function init() {
   });
 
   setComponentDeleteCallback((componentId: string) => {
-    if (confirm(`Delete component "${componentId}"? This will also remove all its connections.`)) {
-      // Check if this is a controller before deleting
-      const wasController = plantState.components.get(componentId)?.type === 'controller';
-      const label = plantState.components.get(componentId)?.label || componentId;
-
-      // Live: the simulation is rebuilt without the component and its
-      // connections; everything else keeps running from where it was
-      liveEdit(`Removing ${label}`, () => constructionManager.deleteComponent(componentId));
-
-      // If we deleted a controller, update the scram setpoints
-      if (wasController) {
-        gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
-      }
-
-      // Clear selection
-      plantCanvas.clearSelection();
-      // Hide component detail panel
-      updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
-      // Update construction cost
-      updateConstructionCostPanel();
-    }
+    requestComponentDelete(componentId);
   });
 
   // Connection edit callback - find plant connection from simulation connection ID
@@ -1974,7 +1966,10 @@ function init() {
       } else {
         abandonLiveEdit(liveSnap);
       }
-    });
+    },
+    // Delete: the dialog closes and releases its own snapshot first, then
+    // this runs as an edit of its own (see ConnectionDialog.handleDelete).
+    () => deletePlantConnection(plantConn));
   }
 
   // Connection delete callback
@@ -2020,6 +2015,8 @@ function init() {
     }
     if (viewAngleControl) viewAngleControl.style.display = mode === 'perspective' ? '' : 'none';
     if (gridViewHint) gridViewHint.style.display = mode === 'grid' ? '' : 'none';
+    // Ground pipe is a grid affordance; leaving the grid disarms the tool
+    refreshPipeTool();
     if (persist) saveSettings({ ...loadSettings(), viewMode: mode });
   }
   for (const [m, id] of viewModeButtons) {
@@ -2056,6 +2053,10 @@ function init() {
   // finished route here. The dialog's length field is seeded with the drawn
   // plan length plus the climb between the two ports; the route is kept
   // with the connection (or the pipe it creates) for drawing.
+  // Grid view: a press on open ground with the pipe tool armed lays pipe
+  // there - a bare click drops one section, a sweep lays the whole run.
+  plantCanvas.onGroundPipe = (route) => layGroundPipeRun(route);
+
   plantCanvas.onRouteComplete = (from, to, route, planLength) => {
     if (from.component.id === to.component.id) {
       showNotification('Cannot connect component to itself', 'warning');
@@ -3229,6 +3230,7 @@ function init() {
     if (placementHintDiv) {
       placementHintDiv.style.display = 'block';
     }
+    refreshPipeTool();
   }
 
   /**
@@ -3240,7 +3242,164 @@ function init() {
     document.querySelectorAll('.component-btn').forEach(b => b.classList.remove('selected'));
     selectedComponentType = null;
     selectedComponentDesign = null;
+    refreshPipeTool();
   }
+
+  /**
+   * The pipe tool. Selecting pipe from the palette (or from the supply yard)
+   * on the grid does two things at once, because on the grid they are one
+   * job: connection points become visible and clickable, so a press on one
+   * starts a run to another port exactly as the Connect tool does, AND a
+   * press anywhere else lays pipe on the ground there.
+   *
+   * Only on the grid: ground pipe is laid tile by tile, and the perspective
+   * view has no tile lattice to lay it on. There the Pipe button keeps its
+   * old behaviour (the placement dialog).
+   */
+  function refreshPipeTool(): void {
+    const armed = selectedComponentType === 'pipe' &&
+      constructionSubMode === 'place' &&
+      plantCanvas.getViewMode() === 'grid' &&
+      (currentMode === 'construction' || liveBuildAllowed());
+    plantCanvas.setPipeTool(armed, pipeOrientation);
+    // The pipe tool IS connection mode while it is armed. Leaving connect
+    // mode's own state alone: this only turns the port markers on.
+    plantCanvas.setShowPorts(armed || constructionSubMode === 'connect');
+
+    const rotateBtn = document.getElementById('pipe-rotate-btn') as HTMLButtonElement | null;
+    if (rotateBtn) {
+      rotateBtn.style.display = armed ? '' : 'none';
+      rotateBtn.textContent = pipeOrientation === 'EW'
+        ? 'Rotate section (R): east-west'
+        : 'Rotate section (R): north-south';
+    }
+    if (placementHintDiv) {
+      placementHintDiv.textContent = armed
+        ? 'Click a connection point to run pipe to another one. Click open ground to drop a section, or drag to lay a run - ends that meet connect themselves. R turns the section.'
+        : 'Click to place';
+    }
+  }
+
+  /**
+   * A run laid on open ground with the pipe tool: it becomes a standalone
+   * pipe COMPONENT along the route drawn, and any loose end that lands on
+   * another loose end (or on a nozzle facing it) is connected on contact.
+   *
+   * The stock rule, in one place: ground pipe costs its own route length off
+   * the racks, once, and the joins it makes are zero-length connections that
+   * cost nothing - the ends are touching, there is no pipe between them. A
+   * run drawn port to port is unchanged: it costs the length the connection
+   * dialog confirms. Nothing is charged twice.
+   */
+  function layGroundPipeRun(route: Point[]): void {
+    if (currentMode !== 'construction' && !liveBuildAllowed()) return;
+    // The yard hands out one line size when it names one; without a yard the
+    // pipe is the palette's own default service line.
+    const specId = stockedPipeSpecId(plantState);
+    const spec = specId ? getPipeSpecById(specId) : null;
+    if (specId && !spec) {
+      showNotification(`The warehouse names a pipe specification '${specId}' that does not exist.`, 'error');
+      return;
+    }
+    const name = `Pipe ${constructionManager.getNextIdNumber()}`;
+    let laid: { id: string; joined: number } | null = null;
+    liveEdit(`Laying ${name}`, () => {
+      laid = constructionManager.layGroundPipe({
+        name,
+        diameter: spec?.diameter ?? 0.3,
+        pressureRating: spec?.pressureRating ?? 155,
+        elevation: 0,
+        initialPhase: 'liquid',
+        initialPressure: 1,
+        initialTemperature: 25,
+      }, route);
+    });
+    updateConstructionCostPanel();
+    const result = laid as { id: string; joined: number } | null;
+    if (!result) {
+      const refused = constructionManager.takeStockRefusal();
+      showNotification(refused ?? 'Could not lay that pipe', refused ? 'warning' : 'error');
+      return;
+    }
+    const metres = formatMetres(routePlanLength(route));
+    showNotification(result.joined > 0
+      ? `Laid ${metres} m of pipe; ${result.joined} end${result.joined === 1 ? '' : 's'} connected on contact.`
+      : `Laid ${metres} m of pipe. Its ends are free - run it up to a nozzle or another pipe end to connect it.`,
+      'info');
+  }
+
+  /** Plan length of a drawn route (metres). */
+  function routePlanLength(route: Point[]): number {
+    let total = 0;
+    for (let i = 1; i < route.length; i++) {
+      total += Math.hypot(route[i].x - route[i - 1].x, route[i].y - route[i - 1].y);
+    }
+    return total;
+  }
+
+  /**
+   * Remove one pipe run and put its metres back on the racks. Used by the
+   * Delete key on a selected run and by the connection dialog's Delete
+   * button, so both answer to the same rule.
+   */
+  function deletePlantConnection(plantConn: Connection): void {
+    const from = plantState.components.get(plantConn.fromComponentId);
+    const to = plantState.components.get(plantConn.toComponentId);
+    const label = `${from?.label || plantConn.fromComponentId} \u2192 ${to?.label || plantConn.toComponentId}`;
+    const metres = plantConn.length ?? 0;
+    let deleted = false;
+    liveEdit(`Removing the pipe ${label}`, () => {
+      deleted = constructionManager.deleteConnectionObject(plantConn);
+    });
+    if (!deleted) {
+      showNotification(`Could not remove the pipe ${label}`, 'error');
+      return;
+    }
+    plantCanvas.clearSelection();
+    updateConstructionCostPanel();
+    updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+    showNotification(getStock(plantState)
+      ? `Removed the pipe ${label}; ${formatMetres(metres)} m back in the warehouse.`
+      : `Removed the pipe ${label}.`, 'info');
+  }
+
+  /**
+   * Delete a component, asking first what should happen to the pipe runs
+   * attached to it.
+   */
+  function requestComponentDelete(componentId: string): void {
+    const component = constructionManager.getComponent(componentId);
+    if (!component) return;
+    const label = component.label || componentId;
+    const { keepable, doomed, joints } = constructionManager.attachedPipeRuns(componentId);
+    showComponentDeleteDialog(label, keepable.length, doomed.length, joints.length, (choice) => {
+      if (!choice) return;
+      const wasController = component.type === 'controller';
+      liveEdit(`Removing ${label}`, () => {
+        // Leave the runs standing FIRST: once the component is gone there is
+        // no route left to leave them along.
+        if (choice === 'keep') constructionManager.detachConnectionsAsPipes(componentId);
+        constructionManager.deleteComponent(componentId);
+      });
+      if (wasController) {
+        gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+      }
+      plantCanvas.clearSelection();
+      selectedComponentId = null;
+      updateComponentDetail(null, plantState, gameLoop?.getState() || {} as SimulationState);
+      updateConstructionCostPanel();
+      // Say what went back on the racks - for a pipe that IS the point of
+      // deleting it, and a yard that is not counting says nothing.
+      const returned = getStock(plantState) === null ? '' :
+        component.type === 'pipe'
+          ? ` ${formatMetres((component as PipeComponent).length ?? 0)} m of pipe back in the warehouse.`
+          : ' Back on the warehouse shelf.';
+      showNotification(choice === 'keep' && keepable.length > 0
+        ? `Removed ${label}; ${keepable.length} pipe run${keepable.length === 1 ? '' : 's'} left standing with a free end.`
+        : `Removed ${label}.${returned}`, 'info');
+    });
+  }
+
 
   constructionButtons.forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -3776,6 +3935,11 @@ function init() {
     }
 
     if (constructionSubMode === 'place' && selectedComponentType) {
+      // The pipe tool already handled this press on the canvas itself: it
+      // either started a port-to-port run or laid ground pipe (onGroundPipe).
+      // Falling through here would open the pipe dialog on top of it.
+      if (plantCanvas.isPipeTool()) return;
+
       // Component placement mode - convert screen to world coordinates
       // (perspective projection in 2.5D, snapped to whole tiles on the grid)
       const worldPos = plantCanvas.snapPlacementPosition(
@@ -4112,7 +4276,8 @@ function init() {
     connectModeBtn?.classList.toggle('active', mode === 'connect');
     moveModeBtn?.classList.toggle('active', mode === 'move');
 
-    // Show ports when in connect mode
+    // Show ports when in connect mode (the pipe tool shows them too - see
+    // refreshPipeTool, called at the end of this function)
     plantCanvas.setShowPorts(mode === 'connect');
 
     // In move mode the canvas must not select on mousedown (it's the start
@@ -4155,7 +4320,14 @@ function init() {
       }
     }
 
+    refreshPipeTool();
   }
+
+  // Rotate the ground pipe section being placed (same as the R key)
+  document.getElementById('pipe-rotate-btn')?.addEventListener('click', () => {
+    pipeOrientation = plantCanvas.rotatePipeOrientation();
+    refreshPipeTool();
+  });
 
   // Connect mode button handler
   if (connectModeBtn) {
@@ -4972,6 +5144,143 @@ function updateSlowSimBubble(metrics: SolverMetrics, targetSpeed: number): void 
 }
 
 // Show a dialog asking if user wants to place component inside a container
+/**
+ * Ask what should happen to the pipe runs attached to a component that is
+ * about to be deleted. A question, not a warning: both answers are
+ * reasonable, and which one is right depends on what the player is doing.
+ *
+ *  - "Delete all"  takes the runs with the component. Their metres, and the
+ *                  component, go back on the warehouse shelves.
+ *  - "Keep pipes"  leaves each run standing as GROUND PIPE along the very
+ *                  route it was drawn along - still attached at its far end,
+ *                  with a free end where the component used to be, ready for
+ *                  the replacement to be plumbed straight back in. The stock
+ *                  ledger nets to zero: the run's metres come back and the
+ *                  pipe that replaces it costs exactly the same.
+ *
+ * A run can only be left standing when there is something at its other end
+ * to stay attached to. One whose far end goes with the same deletion, one to
+ * open air, and an opening into the vessel the component sits inside all
+ * have nothing to hold them up; the dialog counts those separately and says
+ * so rather than silently doing less than it offered.
+ *
+ * Keyboard: D deletes everything, K keeps the pipes, Escape or C cancels;
+ * the focused button also answers to Enter.
+ */
+function showComponentDeleteDialog(
+  label: string,
+  keepable: number,
+  doomed: number,
+  joints: number,
+  callback: (choice: 'all' | 'keep' | null) => void
+): void {
+  const total = keepable + doomed;
+  // A joint carries no pipe: whatever is butted onto the component keeps
+  // standing where it is, whichever answer is given.
+  const jointNote = joints > 0
+    ? `<p style="margin: 0 0 16px 0; font-size: 12px; color: #889;">` +
+      `${joints} section${joints === 1 ? '' : 's'} of pipe ${joints === 1 ? 'is' : 'are'} ` +
+      `butted straight onto it. ${joints === 1 ? 'That section stays' : 'Those stay'} exactly ` +
+      `where ${joints === 1 ? 'it is' : 'they are'} - only the joint goes.</p>`
+    : '';
+
+  const overlay = document.createElement('div');
+  overlay.id = 'component-delete-dialog';
+  overlay.style.cssText = `
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+  `;
+
+  const dialog = document.createElement('div');
+  dialog.style.cssText = `
+    background: #1a1e24; border: 1px solid #445566; border-radius: 8px;
+    padding: 20px; max-width: 460px; color: #d0d8e0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  `;
+
+  const runs = (n: number) => `${n} pipe run${n === 1 ? '' : 's'}`;
+  const btn = (id: string, text: string, primary: boolean, title: string, disabled = false) => `
+    <button id="${id}" ${disabled ? 'data-disabled="1"' : ''} title="${title}" style="
+      padding: 8px 16px;
+      background: ${disabled ? '#2a2f36' : primary ? '#8a3a3a' : '#334455'};
+      border: 1px solid ${disabled ? '#3a4048' : primary ? '#b05555' : '#556677'};
+      border-radius: 4px;
+      color: ${disabled ? '#66707a' : primary ? '#ffe8e8' : '#d0d8e0'};
+      cursor: ${disabled ? 'not-allowed' : 'pointer'};
+    ">${text}</button>`;
+
+  const keepTitle = keepable > 0
+    ? `Leave ${runs(keepable)} standing on the ground, still attached at the far end, ` +
+      `with a free end where ${label} was. The metres stay spent; nothing extra is charged.`
+    : `Nothing here can be left standing: ${total === 0 ? 'no pipe is attached' :
+        'every attached run has nothing at its other end to hold it up - its far end goes ' +
+        'with this deletion, it runs to open air, or it is an opening into the vessel this ' +
+        'component sits inside'}.`;
+
+  const body = total === 0
+    ? (joints > 0 ? '' :
+        `<p style="margin: 0 0 20px 0; line-height: 1.5;">Nothing is piped to it.</p>`) + jointNote
+    : `<p style="margin: 0 0 12px 0; line-height: 1.5;">` +
+      `<strong>${label}</strong> has ${runs(total)} attached. Delete ${total === 1 ? 'it' : 'them'} too?</p>` +
+      (doomed > 0 && keepable > 0
+        ? `<p style="margin: 0 0 16px 0; font-size: 12px; color: #c99;">` +
+          `${runs(keepable)} can be left standing as loose pipe. The other ` +
+          `${doomed} cannot - ${doomed === 1 ? 'it has' : 'they have'} nothing at the far ` +
+          `end to stay attached to - and will be removed either way.</p>`
+        : doomed > 0
+          ? `<p style="margin: 0 0 16px 0; font-size: 12px; color: #c99;">` +
+            `None of them can be left standing: ${doomed === 1 ? 'it has' : 'they have'} ` +
+            `nothing at the far end to stay attached to (the far end goes with this ` +
+            `deletion, the line runs to open air, or it is an opening into the vessel ` +
+            `this component sits inside).</p>`
+          : `<p style="margin: 0 0 16px 0; font-size: 12px; color: #889;">` +
+            `Kept pipes stay exactly where they are drawn, attached at the far end, with a ` +
+            `free end here. Deleted pipe goes back on the warehouse racks.</p>`) + jointNote;
+
+  dialog.innerHTML = `
+    <h3 style="margin: 0 0 15px 0; color: #7af;">Delete ${label}?</h3>
+    ${body}
+    <div style="display: flex; gap: 10px; justify-content: flex-end;">
+      ${btn('cdel-cancel', 'Cancel <u>(C)</u>', false, 'Leave everything as it is. Escape does the same.')}
+      ${total > 0 ? btn('cdel-keep', '<u>K</u>eep pipes', false, keepTitle, keepable === 0) : ''}
+      ${btn('cdel-all', total > 0 ? '<u>D</u>elete all' : '<u>D</u>elete', true,
+        `Remove ${label}${total > 0 ? ` and ${runs(total)}` : ''}. Everything goes back on the warehouse shelves.`)}
+    </div>
+  `;
+
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+
+  let answered = false;
+  const finish = (choice: 'all' | 'keep' | null) => {
+    if (answered) return;
+    answered = true;
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+    callback(choice);
+  };
+
+  const keepBtn = dialog.querySelector('#cdel-keep') as HTMLButtonElement | null;
+  const keepEnabled = !!keepBtn && keepBtn.dataset.disabled !== '1';
+  (dialog.querySelector('#cdel-cancel') as HTMLButtonElement).addEventListener('click', () => finish(null));
+  (dialog.querySelector('#cdel-all') as HTMLButtonElement).addEventListener('click', () => finish('all'));
+  keepBtn?.addEventListener('click', () => { if (keepEnabled) finish('keep'); });
+
+  const onKey = (e: KeyboardEvent) => {
+    const key = e.key.toLowerCase();
+    if (e.key === 'Escape' || key === 'c') { e.preventDefault(); e.stopPropagation(); finish(null); }
+    else if (key === 'd') { e.preventDefault(); e.stopPropagation(); finish('all'); }
+    else if (key === 'k' && keepEnabled) { e.preventDefault(); e.stopPropagation(); finish('keep'); }
+  };
+  // Capture, so the canvas shortcuts underneath never see these keys
+  document.addEventListener('keydown', onKey, true);
+
+  overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+  (dialog.querySelector('#cdel-all') as HTMLButtonElement).focus();
+}
+
 function showContainmentDialog(
   containerName: string,
   componentType: string,
