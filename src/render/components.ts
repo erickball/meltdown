@@ -34,6 +34,7 @@ import {
   massQualityToVolumeFraction,
   getSaturationTemp,
   getNcgVisualization,
+  steamPressureOf,
   RGB,
   GasColorInfo,
 } from './colors';
@@ -211,8 +212,9 @@ function renderStratifiedTwoPhase(
   const massQuality = fluid.quality ?? 0.5;
   const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
 
-  // Saturation temperature for coloring
-  const T_sat = getSaturationTemp(fluid.pressure);
+  // Saturation temperature for coloring - set by the steam partial pressure,
+  // which the fluid states outright (see steamPressureOf)
+  const T_sat = getSaturationTemp(steamPressureOf(fluid));
 
   // Get base colors at saturation
   const { liquid: liquidColor, vapor: vaporColor } = getTwoPhaseColors(fluid);
@@ -229,6 +231,7 @@ function renderStratifiedTwoPhase(
       const vaporFluid: Fluid = {
         temperature: T_sat,
         pressure: fluid.pressure,
+        steamPressure: fluid.steamPressure,
         phase: 'vapor',
         flowRate: 0,
         ncg: fluid.ncg,
@@ -253,6 +256,7 @@ function renderStratifiedTwoPhase(
       const liquidFluid: Fluid = {
         temperature: T_sat,
         pressure: fluid.pressure,
+        steamPressure: fluid.steamPressure,
         phase: 'liquid',
         flowRate: 0,
       };
@@ -702,10 +706,6 @@ function calculateNcgFraction(fluid: Fluid): number {
   const ncgViz = getNcgVisualization(fluid.ncg);
   if (!ncgViz || ncgViz.totalMoles <= 0) return 0;
 
-  // NOTE: fluid.pressure is TOTAL pressure (steam + NCG) from constraint operator
-  // We need to calculate NCG partial pressure and find its fraction of total
-  const P_total = fluid.pressure; // Already includes NCG (in Pa)
-
   // NCG partial pressure from moles using ideal gas law: P = nRT/V
   // Use fluid.volume if available (simulation mode), otherwise V=1 (construction mode)
   const ncgMoles = ncgViz.totalMoles;
@@ -714,6 +714,12 @@ function calculateNcgFraction(fluid: Fluid): number {
   const V = fluid.volume || 1; // m³
 
   const P_ncg = (ncgMoles * R * T) / V; // Pa
+  // Dalton: the total is the steam partial the fluid declares plus the gas it
+  // is carrying. Reading fluid.pressure as the total is only right when the
+  // per-frame sync wrote it; the construction write-back leaves the STEAM
+  // partial there, and a bar of air over 17 mbar of steam then read as a
+  // 58x "fraction".
+  const P_total = steamPressureOf(fluid) + P_ncg;
 
   if (P_total <= 0) return 0;
 
@@ -765,7 +771,7 @@ export function renderFluidWithNcg(
         // With significant NCG, render liquid portion only (vapor handled by NCG overlay)
         // For two-phase, still need to render the liquid zone
         if (liquidHeight > 0) {
-          const T_sat = getSaturationTemp(fluid.pressure);
+          const T_sat = getSaturationTemp(steamPressureOf(fluid));
           const { liquid: liquidColor } = getTwoPhaseColors(fluid);
           const massQuality = fluid.quality ?? 0.5;
           const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
@@ -778,6 +784,7 @@ export function renderFluidWithNcg(
             const liquidFluid: Fluid = {
               temperature: T_sat,
               pressure: fluid.pressure,
+              steamPressure: fluid.steamPressure,
               phase: 'liquid',
               flowRate: 0,
             };
@@ -845,10 +852,10 @@ export function renderFluidWithNcg(
     const R = 8.314; // J/(mol·K)
     const T = fluid.temperature || 400; // K
     const V = fluid.volume || 1; // m³
-    const P_total = fluid.pressure;
     const ncgMoles = ncgViz ? ncgViz.totalMoles : 0;
     const P_ncg = (ncgMoles * R * T) / V;
-    const P_steam = Math.max(0, P_total - P_ncg);
+    const P_steam = steamPressureOf(fluid);
+    const P_total = P_steam + P_ncg;
 
     // Convert steam pressure to moles: n = PV/RT
     const steamMoles = (P_steam * V) / (R * T);

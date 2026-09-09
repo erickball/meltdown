@@ -17,26 +17,41 @@ import {
 } from '../simulation/gas-properties';
 
 /**
- * Get the steam partial pressure from a fluid state.
- * For fluids with NCG, total pressure = steam + NCG, so we subtract NCG.
- * This is needed for saturation calculations which depend on steam pressure, not total.
- *
- * @param totalPressure - Total pressure (Pa)
- * @param ncg - NCG composition (if any)
- * @param temperature - Temperature (K)
- * @param volume - Volume (m³)
+ * The NCG partial pressure (Pa) a display fluid's stamped moles represent,
+ * or 0 when it carries no gas. P = nRT/V, over the volume the producer of
+ * those moles used.
  */
-function getSteamPartialPressure(
-  totalPressure: number,
-  ncg: GasComposition | undefined,
-  temperature: number,
-  volume: number
-): number {
-  if (!ncg || volume <= 0) return totalPressure;
-  const ncgMoles = totalMoles(ncg);
-  if (ncgMoles <= 0) return totalPressure;
-  const P_ncg = ncgMoles * R_GAS * temperature / volume;
-  return Math.max(0, totalPressure - P_ncg);
+export function ncgPartialPressure(fluid: Fluid): number {
+  if (!fluid.ncg || !fluid.volume || fluid.volume <= 0) return 0;
+  const moles = totalMoles(fluid.ncg);
+  if (moles <= 0) return 0;
+  return moles * R_GAS * fluid.temperature / fluid.volume;
+}
+
+/**
+ * The pressure the steam tables are to be evaluated at for a display fluid.
+ *
+ * `Fluid.steamPressure` says so outright and is the only thing trusted here:
+ * `Fluid.pressure` is a TOTAL when the per-frame sync wrote it and a STEAM
+ * PARTIAL when the construction write-back or the gas-fill display helper
+ * did (that is the initial-condition convention the factory reads), and with
+ * NCG moles on the side nothing distinguishes the two. Subtracting the NCG
+ * partial from a pressure that never included it is what took a tank holding
+ * 17 mbar of steam under a bar of air to -0.98 bar, out of the steam tables
+ * and into a throw that stopped the canvas for the session.
+ *
+ * A fluid nobody has labelled is taken at its own pressure - which is right
+ * for the fluids that carry no gas at all, and those are the only ones the
+ * label is optional for.
+ */
+export function steamPressureOf(fluid: Fluid): number {
+  if (fluid.steamPressure !== undefined) return fluid.steamPressure;
+  return fluid.pressure;
+}
+
+/** Total pressure (Pa) of a display fluid: steam partial + NCG partial. */
+export function totalPressureOf(fluid: Fluid): number {
+  return steamPressureOf(fluid) + ncgPartialPressure(fluid);
 }
 
 // Temperature color mapping for fluids
@@ -180,11 +195,9 @@ export function massQualityToVolumeFraction(
 ): number {
   const x = Math.max(0, Math.min(1, quality));
 
-  // Use steam partial pressure for saturation calculations when NCG is present
-  let steamPressure = pressure;
-  if (fluid?.ncg && fluid.volume && fluid.volume > 0) {
-    steamPressure = getSteamPartialPressure(pressure, fluid.ncg, fluid.temperature, fluid.volume);
-  }
+  // Saturation is set by the STEAM pressure, not the total: the fluid says
+  // which its own pressure is (see steamPressureOf).
+  const steamPressure = fluid ? steamPressureOf(fluid) : pressure;
 
   const v_f = getSaturatedLiquidVolume(steamPressure);
   const v_g = getSaturatedVaporVolume(steamPressure);
@@ -207,7 +220,7 @@ export function setDebugFluidColor(enabled: boolean): void {
 
 export function getFluidColor(fluid: Fluid): string {
   const T = fluid.temperature;
-  const T_sat = getSaturationTemp(fluid.pressure);
+  const T_sat = getSaturationTemp(steamPressureOf(fluid));
 
   // Check for NCG-dominated vapor/gas mixtures
   // When NCG is present in vapor phase, blend steam color with NCG color
@@ -227,8 +240,10 @@ export function getFluidColor(fluid: Fluid): string {
     // This prevents abrupt color changes when steam transitions to two-phase
     if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
       const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
-      const P_total = fluid.pressure;
-      const ncgFraction = Math.min(1, Math.max(0, P_ncg / P_total));
+      // Dalton: the total is what the steam and the gas each contribute, so
+      // the fraction cannot exceed 1 and needs no clamp to say so.
+      const P_total = steamPressureOf(fluid) + P_ncg;
+      const ncgFraction = P_total > 0 ? P_ncg / P_total : 0;
 
       if (debugFluidColor && debugFluidColorCount++ < 20) {
         console.log(`[getFluidColor] TWO-PHASE: T=${T?.toFixed(1)}K, P=${(P_total/1e5)?.toFixed(3)}bar, ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume?.toFixed(1)}m³, P_ncg=${(P_ncg/1e5).toFixed(3)}bar, ncgFrac=${ncgFraction.toFixed(3)}, quality=${quality.toFixed(3)}`);
@@ -259,10 +274,10 @@ export function getFluidColor(fluid: Fluid): string {
     if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
       // Calculate NCG partial pressure: P_ncg = n * R * T / V
       const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
-      const P_total = fluid.pressure;
+      const P_total = steamPressureOf(fluid) + P_ncg;
 
       // NCG fraction by partial pressure (which equals mole fraction for ideal gases)
-      const ncgFraction = Math.min(1, Math.max(0, P_ncg / P_total));
+      const ncgFraction = P_total > 0 ? P_ncg / P_total : 0;
 
       if (debugFluidColor && debugFluidColorCount++ < 20) {
         console.log(`[getFluidColor] VAPOR: T=${T?.toFixed(1)}K, P=${(P_total/1e5)?.toFixed(3)}bar, ncgMoles=${ncgMoles.toFixed(1)}, vol=${fluid.volume?.toFixed(1)}m³, P_ncg=${(P_ncg/1e5).toFixed(3)}bar, ncgFrac=${ncgFraction.toFixed(3)}`);
@@ -355,7 +370,7 @@ export function getTwoPhaseColors(fluid: Fluid): { liquid: RGB; vapor: RGB; qual
   // Pass fluid for NCG-aware pressure correction
   const volumeFraction = massQualityToVolumeFraction(massQuality, fluid.pressure, fluid);
   // Get temperature-dependent saturation colors (converge near critical point)
-  const T_sat = getSaturationTemp(fluid.pressure);
+  const T_sat = getSaturationTemp(steamPressureOf(fluid));
   return {
     liquid: getSaturatedLiquidColor(T_sat),
     vapor: getSaturatedVaporColor(T_sat),

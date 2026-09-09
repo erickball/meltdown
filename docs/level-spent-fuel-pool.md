@@ -78,18 +78,26 @@ Nothing else. No pumps, no make-up line: the player builds all of it, live.
 
 Eight sim hours at 60x = **eight real minutes**. Re-timed 2026-09-08: the
 night's earthquake is what took the power out before the player arrived, and
-what happens on watch is the AFTERSHOCK, twenty seconds in. Everything after it
-keeps the intervals it was tuned with (warning +300 s, wave +1200 s), so the
-gap the tanks have to cover is unchanged in shape and much shorter in fact.
+what happens on watch is the AFTERSHOCK. Everything after it keeps the
+intervals it was tuned with (warning +300 s, wave +1200 s), so the gap the
+tanks have to cover is unchanged in shape and much shorter in fact.
+
+**The aftershock is timed in WALL seconds** (corrected 2026-09-09): twenty
+seconds of the player's own time, which at this level's 60x is `QUAKE = 1200`
+simulated seconds. Written as 20 simulated seconds it landed a third of a
+second after TAKE THE WATCH and read as instantaneous. `QUAKE` is in simulated
+seconds, so it is 20 x `LevelDef.simSpeed`; change the speed and it wants
+changing with it. `scripts/test-game-levels.ts sfp` check [0b] pins the wall
+number, the two offsets, and that nothing is due at t=0.
 
 | sim t | real t | event |
 | --- | --- | --- |
 | 0 | 0:00 | Start. Pool 8.35 m, 45 C, warming 2.9 mK/s. Nothing leaking. |
-| **20** | 0:00 | **AFTERSHOCK** - a scripted burst tears the liner. Leak starts at ~144 kg/s. |
-| 320 | 0:05 | Tsunami warning (message only). |
-| **1220** | 0:20 | **The wave**: sea ramps 0 -> +12.6 m over 180 s. The shore (+1.7 m) is under at ~t=1260. |
-| 1400 | 0:23 | Peak. Everything below the +13 m bench is under water. |
-| 1520 | 0:25 | The sea drains back to 0 over 240 s; the shore is workable again by ~t=1740. |
+| **1200** | 0:20 | **AFTERSHOCK** - a scripted burst tears the liner. Leak starts at ~144 kg/s. |
+| 1500 | 0:25 | Tsunami warning (message only). |
+| **2400** | 0:40 | **The wave**: sea ramps 0 -> +12.6 m over 180 s. The shore (+1.7 m) is under at ~t=2440. |
+| 2580 | 0:43 | Peak. Everything below the +13 m bench is under water. |
+| 2700 | 0:45 | The sea drains back to 0 over 240 s; the shore is workable again by ~t=2920. |
 | 28800 | 8:00 | **Win**, if the fuel is still covered. |
 
 The wave carries floating debris (`src/render/debris-fx.ts`, drawn by the grid
@@ -204,7 +212,7 @@ Everything below is in `scripts/gen-spent-fuel-pool.ts` unless said otherwise.
 | `fuelPower` | 8.0 MW | how fast an uncovered rack heats: 170 t of fuel+clad is 5.2e7 J/K, so 8 MW is ~155 K per 1000 s once genuinely dry. |
 | `assemblyCount` | 250 | fuel+clad mass, hence that same rate |
 | tank `fillLevel` | 0.78 / 0.80 (1217 t) | how long the player can ride the wave. 142 t is what the answer key now uses - the short wave leaves a lot of margin. |
-| `QUAKE` / `TSUNAMI_WARN` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 20 / 320 / 1220 / 1520 / 28800 s | pacing. The warning and the wave are written as offsets from `QUAKE`, so moving the aftershock moves the sequence with it. |
+| `QUAKE` / `TSUNAMI_WARN` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 1200 / 1500 / 2400 / 2700 / 28800 s | pacing. `QUAKE` is 20 s of WALL time at the level's 60x. The warning and the wave are written as offsets from `QUAKE`, so moving the aftershock moves the sequence with it. |
 | `WAVE_PEAK` / `WAVE_RISE` / `WAVE_HOLD` / `WAVE_FALL` | 12.6 m / 180 / 120 / 240 s | how far up the hill the sea gets and how long anything down there stays stopped. The peak must stay UNDER the 13 m bench or the pool floods too. |
 | `simSpeed` | 60 | eight sim hours in eight real minutes |
 | hazard `graceSeconds` | 1200 s (20 real s at 60x) | how forgiving a dip below the racks is |
@@ -313,10 +321,13 @@ well past anything the model claims to represent).
 From a play session. The level itself is unchanged in structure; the pacing,
 the wave and three pieces of UI around it are not.
 
-**The aftershock is at t = 20 s.** Forty minutes of watching an intact pool
-was forty minutes of nothing; the player now arrives, presses TAKE THE WATCH
-and hears the liner go. The scenario's messages call it an AFTERSHOCK, which
-is also what the briefing says to expect.
+**The aftershock is twenty seconds in.** Forty minutes of watching an intact
+pool was forty minutes of nothing; the player now arrives, presses TAKE THE
+WATCH, has a moment to look at the plant, and hears the liner go. The
+scenario's messages call it an AFTERSHOCK, which is also what the briefing
+says to expect. (This shipped as `QUAKE = 20` - twenty SIMULATED seconds,
+which at 60x is a third of a second of watching. Corrected to 1200 s on
+2026-09-09; see the timeline table above.)
 
 **The wave is bigger and much faster.** +12.6 m (was +5), rising over 180 s,
 held 120 s, drained over 240 s (was a 300 s rise and an 80-minute stand). It
@@ -332,6 +343,41 @@ half, and the shore is workable again almost immediately.
 | [2] bench pump | -0.0 kg/s, suction node two-phase at 0.174 bar |
 | [3] shore pump | 352.4 kg/s into the pool |
 | [4] the answer | sea pump from t=30 s, tank line open 1200..2400 s: min pool level **8.28 m**, peak clad 46 C, no uncovery, shore pump drowned t=1260 s and restarted t=1740 s, tanks gave up 142 t |
+
+## 2026-09-09, the aftershock in wall seconds (branch `fix-freeze`)
+
+`QUAKE` moved from 20 to **1200 s** - the twenty seconds it was always meant
+to be, measured on the clock the player sits through rather than the plant's.
+Nothing else about the level changed: the offsets carried the rest of the
+sequence with them and all four checks pass untouched, with every milestone
+1180 s later than the line above.
+
+| check | result |
+| --- | --- |
+| [0b] timeline | aftershock t=1200 s = 20 s of wall time at 60x, shake + burst, warning +300 s, wave +1200 s |
+| [1] unfed | racks uncovered t=3840 s, boiled dry t=18,520 s, clad past 900 C t=22,560 s (3.8 MW of oxidation), release limit **t=23,620 s**, 1.96% of the cladding gone |
+| [2] bench pump | -0.0 kg/s, suction node two-phase at 0.173 bar |
+| [3] shore pump | 352.4 kg/s into the pool |
+| [4] the answer | min pool level **8.36 m**, peak clad 46 C, no uncovery, shore pump drowned t=2440 s and restarted t=2920 s |
+
+The level is still not re-tuned for the wall-clock cost of BUILDING (see the
+2026-09-09 note in [[build-queue]]): the 300 m service line is 30 s of the
+player's time and the aftershock now lands before it can be finished, which is
+probably right but has not been played.
+
+**The canvas used to freeze the moment the level loaded** and that is what
+made the aftershock look instantaneous - the picture stopped on an intact
+pool while the simulation went on draining it, so the first thing that ever
+changed on screen was the toast saying the liner had gone. Root cause was not
+in this level: a cold air-blanketed tank hands the renderer 17 mbar of steam
+under a bar of air, the colour code read the tank's steam pressure as a TOTAL
+and subtracted the air from it, and the resulting negative pressure threw out
+of the steam tables mid-frame. `PlantCanvas.render` armed its next animation
+frame at the END of the drawing code, so that one throw ended the loop for
+the session. Both halves fixed on this branch: `Fluid.steamPressure` (see
+`src/types.ts`) makes every producer say which pressure it is carrying, and
+both animation loops now arm the next frame in a `finally` without swallowing
+the error. Regression: `scripts/test-display-fluid.ts`.
 
 **The earthquake used to fire again every time a dialog was closed.** A live
 edit rebuilds the simulation from the plant, and the rebuild called

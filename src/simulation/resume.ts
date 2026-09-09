@@ -82,7 +82,7 @@ function liquidVolumeFraction(node: FlowNode): number {
  * total: a 30 C spent-fuel pool, or an air-blanketed CST, came back from a
  * mode switch as saturated water at 100 C.
  */
-function steamPartialPressurePa(node: FlowNode): number {
+export function steamPartialPressurePa(node: FlowNode): number {
   const f = node.fluid;
   if (!f.ncg) return f.pressure;
   if (!(node.volume > 0)) return f.pressure;
@@ -134,6 +134,11 @@ function writeFluidIC(c: Record<string, any>, node: FlowNode): void {
   c.fluid.separation = node.separation;
   c.fluid.ncg = node.fluid.ncg;
   c.fluid.volume = node.volume;
+  // The pressure just written is the STEAM partial, not the total the
+  // per-frame sync leaves there. Say so, or the renderer subtracts the NCG a
+  // second time and asks the steam tables for a negative pressure (see
+  // Fluid.steamPressure).
+  c.fluid.steamPressure = c.fluid.pressure;
 }
 
 // ============================================================================
