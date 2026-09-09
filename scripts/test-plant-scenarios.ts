@@ -18,6 +18,10 @@ import {
   assertStateSane,
 } from './lib/sim-harness';
 import { triggerScram, nodeLiquidLevel } from '../src/simulation';
+import { saturationPressure } from '../src/simulation/water-properties';
+import {
+  pressureAtConnection, nodeGasSpaceDensity,
+} from '../src/simulation/operators/connection-hydraulics';
 import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
 import { terrainHeightAt } from '../src/simulation/terrain';
 import * as fs from 'fs';
@@ -700,6 +704,218 @@ test('Zircaloy fire: dry racks burn faster in air, and the fire eats its own oxy
   assert(air.endOxPower < 0.5 * air.peakOxPower,
     `oxygen starvation should take the fire back down from its peak ` +
     `(${(air.peakOxPower / 1e6).toFixed(2)} MW), still at ${(air.endOxPower / 1e6).toFixed(2)} MW`);
+});
+
+// ---------------------------------------------------------------------------
+// Hydrostatic gas columns: no draft when the gas matches the air outside,
+// a chimney when it does not
+// ---------------------------------------------------------------------------
+
+/**
+ * A tall empty building vented to open air at the floor AND at the roof, so
+ * the two openings and the outside air close a loop. Its gas is EXACTLY the
+ * atmosphere's (createAtmosphereNode's recipe: 50% RH at 20 C, dry-air mole
+ * fractions renormalised over N2/O2/Ar), so at `tempK` = 293.15 the column
+ * inside and the column outside are the same gas and the loop must carry
+ * nothing at all, 20 m of height notwithstanding. Warm the same gas and the
+ * building becomes a chimney - same geometry, same composition, same
+ * pressure at the floor.
+ */
+function ventedBuilding(tempK: number) {
+  const P_steam = saturationPressure(293.15) * 0.5;
+  const P_dry = (101325 - P_steam) / 1e5;               // bar
+  const sum = 0.7808 + 0.2095 + 0.0093;
+  return {
+    components: [
+      ['bui', {
+        id: 'bui', type: 'tank', label: 'Vented Building',
+        position: { x: 40, y: 40 }, rotation: 0, elevation: 0,
+        width: 8, height: 20, wallThickness: 0.05, fillLevel: 0, pressureRating: 2,
+        ports: [
+          { id: 'bui-low', position: { x: -4, y: 9.5 }, direction: 'both' },
+          { id: 'bui-high', position: { x: -4, y: -9.5 }, direction: 'both' },
+        ],
+        fluid: { temperature: tempK, pressure: P_steam, phase: 'vapor', quality: 1, flowRate: 0 },
+        initialNcg: {
+          N2: P_dry * 0.7808 / sum,
+          O2: P_dry * 0.2095 / sum,
+          Ar: P_dry * 0.0093 / sum,
+        },
+      }],
+    ],
+    connections: [
+      {
+        fromComponentId: 'bui', fromPortId: 'bui-low',
+        toComponentId: 'atmosphere', toPortId: 'environment',
+        fromElevation: 0.5, flowArea: 0.5, length: 1, resistanceCoeff: 2,
+      },
+      {
+        fromComponentId: 'bui', fromPortId: 'bui-high',
+        toComponentId: 'atmosphere', toPortId: 'environment',
+        fromElevation: 19.5, flowArea: 0.5, length: 1, resistanceCoeff: 2,
+      },
+    ],
+  };
+}
+
+test('Gas columns: a cold vented building has no draft, a warm one is a chimney', () => {
+  // Both openings join the same pair of nodes, so they are told apart by the
+  // elevation of the opening, not by the connection id. + = out of the building.
+  const vent = (sim: ReturnType<typeof buildSimFromPlantJson>, elevation: number) =>
+    sim.state.flowConnections.find(
+      c => c.fromNodeId === 'bui' && c.toNodeId === 'atmosphere' &&
+        c.fromElevation === elevation)!;
+  /** The head the momentum equation sees across one opening, inside minus outside. */
+  const head = (sim: ReturnType<typeof buildSimFromPlantJson>, elevation: number) => {
+    const c = vent(sim, elevation);
+    return pressureAtConnection(sim.state.flowNodes.get('bui')!, c.fromElevation) -
+      pressureAtConnection(sim.state.flowNodes.get('atmosphere')!, c.toElevation);
+  };
+
+  const cold = buildSimFromPlantJson(ventedBuilding(293.15) as never);
+  const column = nodeGasSpaceDensity(cold.state.flowNodes.get('bui')!, 0) * 9.81 * 19;
+
+  // THE EXACT STATEMENT. The building's gas is the atmosphere's gas, so the
+  // column inside and the column outside are the same column and the head is
+  // zero at BOTH openings - not small, zero to the last bit of a 101325 Pa
+  // number. This is the property that makes the pair of terms correct: either
+  // one alone would leave ~200 Pa of standing draft here.
+  const head0 = Math.max(Math.abs(head(cold, 0.5)), Math.abs(head(cold, 19.5)));
+  console.log(`      [draft]  cold building at t=0: head ${head0.toExponential(2)} Pa across a ` +
+    `${column.toFixed(1)} Pa column (${(head0 / column).toExponential(2)} of it)`);
+  assert(head0 < 1e-6,
+    `identical gas inside and out must cancel exactly, left ${head0.toExponential(3)} Pa`);
+
+  // And once it is running. The residual here is NOT the gas columns: it is
+  // that the building's own initial state does not survive a round trip
+  // through the mixture solve (the factory says so out loud -
+  // "[createFluidState] ... falling back to the ideal-gas/linear-cv estimate.
+  // This node will start with a temperature step" - because the steam tables
+  // do not reach 0.012 bar), so it settles ~4 mK warm and ~4e-5 lighter than
+  // the boundary, which is never re-solved. That is 5 mPa on a 224 Pa column.
+  run(cold, 200.0, 0.05);
+  const lo = vent(cold, 0.5).massFlowRate, hi = vent(cold, 19.5).massFlowRate;
+  const settledHead = Math.max(Math.abs(head(cold, 0.5)), Math.abs(head(cold, 19.5)));
+  console.log(`      [draft]  cold building settled: head ${settledHead.toExponential(2)} Pa ` +
+    `(${(settledHead / column).toExponential(2)} of the column), vents ` +
+    `${lo.toExponential(2)} / ${hi.toExponential(2)} kg/s`);
+  assert(settledHead < 1e-3 * column,
+    `a cold vented building must not develop a real draft: ${settledHead.toExponential(3)} Pa ` +
+    `on a ${column.toFixed(1)} Pa column`);
+  assertStateSane(cold.state);
+
+  // Same building, same composition, same 1 atm at its floor - 100 C instead
+  // of 20 C. Now the inside column is lighter than the outside one and the
+  // building draws air in at the floor and pushes it out at the roof.
+  const warm = buildSimFromPlantJson(ventedBuilding(373.15) as never);
+  run(warm, 20.0, 0.02);
+  const warmLow = vent(warm, 0.5).massFlowRate, warmHigh = vent(warm, 19.5).massFlowRate;
+  console.log(`      [draft]  warm building: floor ${warmLow.toFixed(3)} kg/s, ` +
+    `roof ${warmHigh.toFixed(3)} kg/s, head ${head(warm, 19.5).toFixed(1)} Pa at the roof`);
+  assert(warmLow < -0.05,
+    `a warm building should draw air IN at the floor, got ${warmLow.toFixed(3)} kg/s`);
+  assert(warmHigh > 0.05,
+    `a warm building should vent OUT at the roof, got ${warmHigh.toFixed(3)} kg/s`);
+  assert(Math.abs(warmHigh) > 20 * Math.abs(hi),
+    `the real chimney must dwarf the cold residual: ${warmHigh.toFixed(3)} vs ${hi.toExponential(2)} kg/s`);
+  assertStateSane(warm.state);
+});
+
+test('Natural draft feeds a Zircaloy fire: a floor tear plus a rim vent keeps the oxygen coming', () => {
+  // The same drained, hot pool as the Zircaloy-fire test above, run twice.
+  // The ONLY difference is where the second opening is: at the floor (the
+  // earthquake tear, 0.4 m up) or up at the rim beside the vent (11.5 m).
+  // Nothing else changes - same racks, same air, same areas, same
+  // resistances - so what separates the two runs is the height of the
+  // opening and therefore the hydrostatic column behind it.
+  const tornPool = (tearElevation: number) => {
+    const plant = JSON.parse(fs.readFileSync(
+      path.join(PLANT_DIR, 'pool-level1.json'), 'utf-8')) as {
+        components: Array<[string, Record<string, unknown>]>;
+        scenario?: unknown;
+      };
+    const pool = plant.components.find(c => c[0] === 'pool')![1];
+    pool.fillLevel = 0;
+    pool.rackTemperature = 1023.15;      // 750 C - hot, nowhere near melting
+    pool.initialNcg = { N2: 0.78, O2: 0.21 };
+    (pool.fluid as Record<string, unknown>).temperature = 373.15;
+    plant.scenario = {
+      description: 'the liner tears',
+      events: [{
+        time: 1, message: 'tear', actions: [{
+          kind: 'burst', id: 'pool', area: 0.0496,
+          elevation: tearElevation, openingHeight: 0.8,
+        }],
+      }],
+    };
+    return buildSimFromPlantJson(plant as never);
+  };
+
+  const measure = (sim: ReturnType<typeof buildSimFromPlantJson>) => {
+    const node = () => sim.state.flowNodes.get('pool')!;
+    const o2Start = node().fluid.ncg!.O2;
+    let peakOxPower = 0;
+    let airIn = 0, samples = 0;
+    for (let i = 0; i < 300; i++) {
+      run(sim, 1, 0.02);
+      sim.state.pendingEvents = [];
+      peakOxPower = Math.max(peakOxPower, getCladdingOxidationPower().get('pool-clad') ?? 0);
+      if (i >= 200) {
+        const tear = sim.state.flowConnections.find(c => c.id === 'break-pool');
+        airIn += tear ? Math.max(0, -tear.massFlowRate) : 0;
+        samples++;
+      }
+    }
+    const n = node();
+    const moles = Object.values(n.fluid.ncg!).reduce((s, v) => s + (v as number), 0);
+    const tear = sim.state.flowConnections.find(c => c.id === 'break-pool')!;
+    const vent = sim.state.flowConnections.find(
+      c => c.fromNodeId === 'pool' && c.toNodeId === 'atmosphere' && !c.isBreakConnection)!;
+    return {
+      o2Start, peakOxPower,
+      o2Fraction: moles > 0 ? n.fluid.ncg!.O2 / moles : 0,
+      tearFlow: tear.massFlowRate,          // + = out of the pool
+      ventFlow: vent.massFlowRate,
+      airIn: samples > 0 ? airIn / samples : 0,   // mean inflow over the last 100 s
+      endOxPower: getCladdingOxidationPower().get('pool-clad') ?? 0,
+      gasT: n.fluid.temperature,
+      decay: sim.state.thermalNodes.get('pool-pellets')!.heatGeneration,
+    };
+  };
+
+  const floor = measure(tornPool(0.4));
+  const rim = measure(tornPool(11.5));
+
+  const line = (tag: string, m: ReturnType<typeof measure>) =>
+    console.log(`      [draft] ${tag}: tear ${m.tearFlow.toFixed(3)} kg/s, vent ${m.ventFlow.toFixed(3)} kg/s, ` +
+      `mean air in ${m.airIn.toFixed(3)} kg/s, gas ${(m.gasT - 273.15).toFixed(0)} C, ` +
+      `O2 ${(m.o2Fraction * 100).toFixed(2)}% of the gas, ` +
+      `oxidation ${(m.endOxPower / 1e6).toFixed(2)} MW (peak ${(m.peakOxPower / 1e6).toFixed(2)}, ` +
+      `decay ${(m.decay / 1e6).toFixed(1)})`);
+  line('floor tear', floor);
+  line('  rim tear', rim);
+
+  // The chimney: air in at the tear, gas out at the rim vent.
+  assert(floor.tearFlow < -0.01,
+    `the floor tear should draw air IN, got ${floor.tearFlow.toFixed(3)} kg/s`);
+  assert(floor.ventFlow > 0.01,
+    `the rim vent should carry the hot gas OUT, got ${floor.ventFlow.toFixed(3)} kg/s`);
+  // Height is the whole difference between the two runs.
+  assert(floor.airIn > 1.5 * rim.airIn,
+    `an 11 m chimney must out-breathe a 0.5 m one: ${floor.airIn.toFixed(3)} vs ` +
+    `${rim.airIn.toFixed(3)} kg/s of air`);
+  // The oxygen fraction in the pool stays near zero and that is the RIGHT
+  // answer, not a failure to breathe: 0.3 kg/s of air carries ~2 mol/s of O2
+  // into racks whose kinetics at 750 C would take ten times that, so every
+  // molecule reacts on arrival. The fire is transport-limited, which is
+  // exactly what a real air-ingress fire is, and the measure of it is the
+  // POWER the delivery sustains.
+  assert(floor.endOxPower > 1.15 * rim.endOxPower,
+    `the drafted pool must sustain more oxidation than the undrafted one: ` +
+    `${(floor.endOxPower / 1e6).toFixed(3)} vs ${(rim.endOxPower / 1e6).toFixed(3)} MW`);
+  assert(floor.endOxPower > floor.decay,
+    `a fed fire should still outrun the decay heat after 300 s: ` +
+    `${(floor.endOxPower / 1e6).toFixed(2)} vs ${(floor.decay / 1e6).toFixed(2)} MW`);
 });
 
 report('Plant Scenario Regression Suite');
