@@ -49,6 +49,10 @@
             <button class="speed-preset" data-speed="10">10x</button>
             <button class="speed-preset" data-speed="100">100x</button>
           </div>
+          <!-- Reactor controls: shown only when the plant HAS a reactor (a
+               vessel/barrel/fuel assembly or a turbine). updateReactorControlsVisibility()
+               in main.ts derives that from the plant, not from any mode or level flag. -->
+          <div id="reactor-controls">
           <hr />
           <h3>Control Rods
             <button id="rod-mode-btn" class="sim-btn" style="display: none !important; margin-left: 8px; padding: 3px 8px !important; font-size: 11px !important; text-transform: none; vertical-align: middle;"
@@ -77,6 +81,7 @@
                  title="Core damage state: fuel melt fraction and fission products released from overheated fuel. Environment lines show the fraction of the core's radionuclide inventory that has escaped the plant.">
             </div>
           </div>
+          </div>
           <hr />
           <div class="slowdown-control"
                title="Automatically drops the simulation to 1x when reactor power or peak fuel temperature changes by more than this fraction in one second, so big events don't flash past. A notification explains each slowdown.">
@@ -86,54 +91,6 @@
             </label>
             <input type="range" id="slowdown-threshold" min="5" max="400" value="50" step="5" />
           </div>
-          <details style="margin-top: 10px;">
-            <summary style="cursor: pointer; color: #7af;">Advanced Solver Settings</summary>
-            <div class="solver-settings" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
-              <div style="margin-bottom: 8px;">
-                <button id="replay-back-btn" class="sim-btn" title="Back one solver step (replayed exactly from history)">&lsaquo;</button>
-                <button id="replay-forward-btn" class="sim-btn" title="Forward one solver step (replayed exactly from history)">&rsaquo;</button>
-                <button id="run-one-step-btn" class="sim-btn" title="Advance the simulation by exactly one solver step">Run 1 Step</button>
-              </div>
-              <div class="timestep-control" style="margin-bottom: 8px;">
-                <label for="max-timestep" style="font-size: 11px;">
-                  Max timestep: <span id="max-timestep-value">500</span>ms
-                </label>
-                <input type="range" id="max-timestep" min="1" max="1000" value="500" step="10" style="width: 100%;" />
-              </div>
-              <div class="slider-control" style="margin-bottom: 8px;">
-                <label for="min-timestep" style="font-size: 11px;">
-                  Min timestep: <span id="min-timestep-value">1</span>µs
-                </label>
-                <input type="range" id="min-timestep" min="0" max="5" value="0" step="0.1" style="width: 100%;" />
-                <div class="slider-labels" style="font-size: 9px;"><span>1µs</span><span>100ms</span></div>
-              </div>
-              <div class="slider-control" style="margin-bottom: 8px;">
-                <label for="k-max" style="font-size: 11px;" title="Caps the numerical bulk modulus used by the pressure solver. Lower values soften liquid nodes (larger stable timesteps, slightly springier pressure response); 2200 MPa = physical stiffness of water (no cap).">
-                  K_max: <span id="k-max-value">2200</span> MPa
-                </label>
-                <input type="range" id="k-max" min="25" max="2200" value="2200" step="25" style="width: 100%;" />
-                <div class="slider-labels" style="font-size: 9px;"><span>25 MPa</span><span>2200 MPa</span></div>
-              </div>
-              <div style="margin-top: 8px;">
-                <label style="font-size: 11px;" title="Semi-implicit correction that removes water-hammer stiffness from liquid-filled nodes, allowing much larger timesteps. Corrections scale with node stiffness, so soft (vapor/two-phase) nodes are unaffected. Disable to integrate all pressure dynamics explicitly (much slower when liquid loops are present).">
-                  <input type="checkbox" id="pressure-solver-enabled" checked />
-                  Enable pressure solver
-                </label>
-              </div>
-              <div style="margin-top: 8px;">
-                <label style="font-size: 11px;" title="Fully implicit (RELAP-style) momentum: end-of-step flows are solved together with the pressure corrections, so acoustic modes in liquid loops are unconditionally damped and the timestep is limited only by thermal and transport accuracy (typically 10-50x faster). Fast transients slower than the timestep are still resolved; sub-timestep water hammer is smoothed to its net effect. Disable to integrate flow momentum explicitly with RK45 - the reference scheme for water-hammer studies (much slower). Requires the pressure solver.">
-                  <input type="checkbox" id="implicit-momentum-enabled" checked />
-                  Implicit flow momentum
-                </label>
-              </div>
-              <div style="margin-top: 8px;">
-                <label style="font-size: 11px;" title="Every frame is integrated to completion instead of yielding after 30 ms, so the trajectory depends only on the timesteps taken and not on how fast your machine is. The cost is frame rate: one long blocking computation per frame. On a heavy plant expect a few frames per second and the simulation running well below the speed you asked for - it is working, just not repainting often. Leave it off for normal play; turn it on when you need a run you can reproduce.">
-                  <input type="checkbox" id="deterministic-mode" />
-                  Deterministic mode
-                </label>
-              </div>
-            </div>
-          </details>
         </div>
 
         <!-- Construction Controls Section -->
@@ -242,11 +199,64 @@
           <input type="checkbox" id="edge-pan-toggle" style="cursor: pointer;" />
           Edge-scroll panning
         </label>
+          <!-- Advanced solver settings live at the BOTTOM of the toolbar: they
+             are the last thing anyone needs and the first thing that got in the
+             way of the controls above. Shown/hidden with the simulation
+             controls (main.ts), which is why it carries its own id. -->
+        <hr />
+        <details id="advanced-solver-section" style="margin-top: 10px; display: none;">
+          <summary style="cursor: pointer; color: #7af;">Advanced Solver Settings</summary>
+          <div class="solver-settings" style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,0.2); border-radius: 4px;">
+            <div style="margin-bottom: 8px;">
+              <button id="replay-back-btn" class="sim-btn" title="Back one solver step (replayed exactly from history)">&lsaquo;</button>
+              <button id="replay-forward-btn" class="sim-btn" title="Forward one solver step (replayed exactly from history)">&rsaquo;</button>
+              <button id="run-one-step-btn" class="sim-btn" title="Advance the simulation by exactly one solver step">Run 1 Step</button>
+            </div>
+            <div class="timestep-control" style="margin-bottom: 8px;">
+              <label for="max-timestep" style="font-size: 11px;">
+                Max timestep: <span id="max-timestep-value">500</span>ms
+              </label>
+              <input type="range" id="max-timestep" min="1" max="1000" value="500" step="10" style="width: 100%;" />
+            </div>
+            <div class="slider-control" style="margin-bottom: 8px;">
+              <label for="min-timestep" style="font-size: 11px;">
+                Min timestep: <span id="min-timestep-value">1</span>µs
+              </label>
+              <input type="range" id="min-timestep" min="0" max="5" value="0" step="0.1" style="width: 100%;" />
+              <div class="slider-labels" style="font-size: 9px;"><span>1µs</span><span>100ms</span></div>
+            </div>
+            <div class="slider-control" style="margin-bottom: 8px;">
+              <label for="k-max" style="font-size: 11px;" title="Caps the numerical bulk modulus used by the pressure solver. Lower values soften liquid nodes (larger stable timesteps, slightly springier pressure response); 2200 MPa = physical stiffness of water (no cap).">
+                K_max: <span id="k-max-value">2200</span> MPa
+              </label>
+              <input type="range" id="k-max" min="25" max="2200" value="2200" step="25" style="width: 100%;" />
+              <div class="slider-labels" style="font-size: 9px;"><span>25 MPa</span><span>2200 MPa</span></div>
+            </div>
+            <div style="margin-top: 8px;">
+              <label style="font-size: 11px;" title="Semi-implicit correction that removes water-hammer stiffness from liquid-filled nodes, allowing much larger timesteps. Corrections scale with node stiffness, so soft (vapor/two-phase) nodes are unaffected. Disable to integrate all pressure dynamics explicitly (much slower when liquid loops are present).">
+                <input type="checkbox" id="pressure-solver-enabled" checked />
+                Enable pressure solver
+              </label>
+            </div>
+            <div style="margin-top: 8px;">
+              <label style="font-size: 11px;" title="Fully implicit (RELAP-style) momentum: end-of-step flows are solved together with the pressure corrections, so acoustic modes in liquid loops are unconditionally damped and the timestep is limited only by thermal and transport accuracy (typically 10-50x faster). Fast transients slower than the timestep are still resolved; sub-timestep water hammer is smoothed to its net effect. Disable to integrate flow momentum explicitly with RK45 - the reference scheme for water-hammer studies (much slower). Requires the pressure solver.">
+                <input type="checkbox" id="implicit-momentum-enabled" checked />
+                Implicit flow momentum
+              </label>
+            </div>
+            <div style="margin-top: 8px;">
+              <label style="font-size: 11px;" title="Every frame is integrated to completion instead of yielding after 30 ms, so the trajectory depends only on the timesteps taken and not on how fast your machine is. The cost is frame rate: one long blocking computation per frame. On a heavy plant expect a few frames per second and the simulation running well below the speed you asked for - it is working, just not repainting often. Leave it off for normal play; turn it on when you need a run you can reproduce.">
+                <input type="checkbox" id="deterministic-mode" />
+                Deterministic mode
+              </label>
+            </div>
+          </div>
+        </details>
       </div>
       <div id="status-bar">
         <span id="mouse-pos">X: 0, Y: 0</span>
-        <span id="sim-time">Time: 0.0s</span>
-        <span id="wall-time" title="Wall-clock time this run has spent actually running. Paused time is not counted, and the clock restarts whenever the simulation is rebuilt - including on the way back from a construction visit, which keeps its simulated time but starts a fresh wall clock.">Wall: 0.0s</span>
+        <span id="sim-time" title="Simulated plant time: seconds, and the same time in decimal hours (the unit scenarios, level clocks and decay-heat curves are written in), followed by the number of solver steps taken to get here.">Time: 0.000 s (0 h), 0 steps</span>
+        <span id="wall-time" title="Wall-clock time this run has spent actually running, in seconds (m:ss past a minute) and in decimal hours. Paused time is not counted, and the clock restarts whenever the simulation is rebuilt - including on the way back from a construction visit, which keeps its simulated time but starts a fresh wall clock.">Wall: 0.0 s (0 h)</span>
         <span id="sim-speed" title="Simulated seconds per real second, averaged over the last 2 seconds of wall time (a single frame's ratio jumps around too much to read). If the simulation cannot keep up, the speed it is trying to reach follows in brackets.">Speed: 1x</span>
         <span id="perf-info">dt: 0ms</span>
       </div>

@@ -50,8 +50,8 @@ export const LEVELS: LevelDef[] = [
     basePowerPrice: 0,
     interestAPR: 0,
 
-    // Six sim hours at 60x is six real minutes. The plant is tiny (one pool,
-    // three tanks, whatever the player puts up) so the solver keeps up.
+    // Eight sim hours at 60x is eight real minutes. The plant is tiny (one
+    // pool, three tanks, whatever the player puts up) so the solver keeps up.
     simSpeed: 60,
     // The tile grid is the only view that draws terrain, and this level IS
     // its terrain.
@@ -97,28 +97,29 @@ export const LEVELS: LevelDef[] = [
     // plant's own scenario block, on a fixed clock.
     events: { warmupSeconds: Infinity, meanIntervalSeconds: Infinity, pool: [] },
 
+    // Grubb, and only Grubb: the man is leaving in a hurry and the player has
+    // an aftershock coming in twenty seconds. Everything the level needs said
+    // is here, and nothing else is. The last line is the button (see
+    // manager.startLevel: a live-build level with no economy runs the briefing
+    // straight into TAKE THE WATCH).
     briefing: [
-      { who: 'grubb', mood: 'neutral', text: 'Kid. Before you ask: no, this is not a power plant. It is a swimming pool with two hundred and fifty spent fuel assemblies at the bottom of it.' },
-      { who: 'grubb', mood: 'neutral', text: 'Eight megawatts of decay heat, and the only thing standing between that and the evening news is nine metres of water. The cooling pumps went with the switchyard last night.' },
-      { who: 'grubb', mood: 'happy', text: 'Good news: with that much water it warms up slower than my coffee. You have got time. Not a lot of it.' },
-      { who: 'inspector', mood: 'neutral', text: 'Inspector Pruitt. The seismologists are unhappy. If that liner cracks, your pool becomes a bathtub with the plug out.' },
-      { who: 'grubb', mood: 'angry', text: 'The yard has three hundred metres of pipe, two pumps and a couple of valves. That is the whole company. There is no budget, there is no bank, there is a YARD.' },
-      { who: 'grubb', mood: 'neutral', text: 'Water: two site tanks up here on the bench, and the sea. The tanks are close and they are FINITE. The sea is not finite, but it is down there and you are up here.' },
-      { who: 'inspector', mood: 'unimpressed', text: 'Keep the fuel covered for eight hours and I will write this up as an event, not an accident. Uncover it and we will both be explaining ourselves for years.' },
-      { who: 'grubb', mood: 'angry', text: 'And do not think the job stops when the water goes under the fuel. It boils dry, the zirconium catches fire, and THEN we are on the news. Nobody rings a bell for you.' },
-      { who: 'grubb', mood: 'happy', text: 'Build while it runs - no shutting anything down, nothing to shut down. Go.' },
+      { who: 'grubb', mood: 'neutral', text: 'An earthquake last night took the power out. I need you to take care of things here while I go coordinate getting the cooling system back on line.' },
+      { who: 'grubb', mood: 'neutral', text: 'Before you ask: no, it is not a power plant.' },
+      { who: 'grubb', mood: 'neutral', text: 'All you have to do is keep the fuel covered.' },
+      { who: 'grubb', mood: 'angry', text: 'And watch out for aftershocks.' },
+      { who: 'grubb', mood: 'neutral', text: 'There is a stockyard with pipe and a couple of pumps in it. That is the whole company.' },
+      { who: 'grubb', mood: 'happy', text: 'Eight hours and I am back. She is yours, kid.' },
     ],
     debrief: [
-      { who: 'grubb', mood: 'happy', text: 'Eight hours. The water is still over the fuel and the fuel is still in one piece.' },
-      { who: 'inspector', mood: 'neutral', text: 'Level held, cladding cool, and the only thing you lost was a tank of demineralised water and some pipe. I am recording this as an event.' },
-      { who: 'grubb', mood: 'happy', text: 'An EVENT. You hear that? Not an accident. That is the nicest word anyone at that agency has ever said to me.' },
+      { who: 'grubb', mood: 'happy', text: 'Eight hours. Water still over the fuel, fuel still in one piece.' },
+      { who: 'grubb', mood: 'neutral', text: 'Cooling is back on the line in the morning. Go home.' },
     ],
     hints: [
       'Watch the pool level readout - the racks are 4.16 m tall, and everything below that number is trouble.',
       'Uncovering the fuel does not end the job. The pool boils dry, the cladding burns in the steam and then in the air, and you lose when activity actually gets out. Water put back late is still water put back.',
       'The crack passes about 100 kg/s once the level is down near the racks. A make-up pump much bigger than that just empties the tanks faster.',
       'A pump can only SUCK water up about ten metres before its intake boils. It can PUSH it as high as its head allows.',
-      'When the wave comes, anything standing on the shore is under water and stays stopped until it drains. Make the tanks last.',
+      'When the wave comes it runs nearly to the top of the hill: anything below the bench goes under and stays stopped until it drains, which takes a few minutes. Make the tanks last that long.',
     ],
   },
   // =========================================================================

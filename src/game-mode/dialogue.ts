@@ -29,16 +29,23 @@ export class DialogueOverlay {
   private animTick = 0;
   private onDone: (() => void) | null = null;
   private keyHandler: ((e: KeyboardEvent) => void) | null = null;
+  /**
+   * What the last line's prompt says instead of "CLICK TO CONTINUE" - the
+   * scene's own final button (e.g. TAKE THE WATCH), so a briefing that leads
+   * straight into the job says so where the player is already clicking.
+   */
+  private finalPrompt: string | null = null;
 
   constructor(private tunes: ChipTunes) {}
 
   get isOpen(): boolean { return this.overlay !== null; }
 
-  show(lines: DialogueLine[], onDone: () => void): void {
+  show(lines: DialogueLine[], onDone: () => void, finalPrompt?: string): void {
     this.dismiss();
     this.lines = lines;
     this.lineIndex = 0;
     this.onDone = onDone;
+    this.finalPrompt = finalPrompt ?? null;
     this.buildDom();
     this.startLine();
   }
@@ -133,7 +140,12 @@ export class DialogueOverlay {
     this.nameEl.textContent = name;
     this.nameEl.style.color = color;
     this.textEl.textContent = '';
-    if (this.promptEl) this.promptEl.style.visibility = 'hidden';
+    if (this.promptEl) {
+      this.promptEl.style.visibility = 'hidden';
+      const last = this.lineIndex === this.lines.length - 1 && this.finalPrompt !== null;
+      this.promptEl.textContent = last ? `▶ ${this.finalPrompt}` : '▼ CLICK TO CONTINUE';
+      this.promptEl.classList.toggle('gm-dialogue-prompt-final', last);
+    }
     this.charIndex = 0;
 
     if (this.typeTimer !== null) clearInterval(this.typeTimer);

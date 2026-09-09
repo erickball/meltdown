@@ -1,7 +1,7 @@
 import { PlantCanvas, ViewMode } from './render/canvas';
 import { PipeOrientation } from './render/grid-geometry';
 import { installPageZoomReset } from './page-zoom';
-import { getComponentVisualHeight } from './render/components';
+import { getComponentVisualHeight, formatGaugeValue } from './render/components';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
 import pwrPresetData from './presets/pwr.json';
@@ -369,7 +369,7 @@ function init() {
     // Update time display
     const timeDisplay = document.getElementById('sim-time');
     if (timeDisplay) {
-      timeDisplay.textContent = `Time: ${state.time.toFixed(3)}s (${metrics.totalSteps} steps)`;
+      timeDisplay.textContent = `Time: ${formatClock(state.time)}, ${metrics.totalSteps} steps`;
     }
 
     // Wall clock and achieved speed
@@ -727,9 +727,23 @@ function init() {
     return speed.toFixed(3);
   }
 
-  /** Wall clock, compact: 12.3s below a minute, then 3:05, then 1:02:33. */
+  /**
+   * A clock reading for the status bar: seconds at about three figures of
+   * resolution, then the same time in decimal hours, which is the unit the
+   * levels, the scenarios and the decay-heat curves are all written in.
+   * `formatGaugeValue` does the hours (three significant figures, trailing
+   * zeros dropped); the seconds cannot go through it, because its
+   * toPrecision(3) would round 1234 s to 1230 s.
+   */
+  function formatClock(seconds: number): string {
+    const abs = Math.abs(seconds);
+    const decimals = abs >= 1000 ? 0 : abs >= 100 ? 1 : abs >= 10 ? 2 : 3;
+    return `${seconds.toFixed(decimals)} s (${formatGaugeValue(seconds / 3600)} h)`;
+  }
+
+  /** Wall clock, compact: 12.3 s below a minute, then 3:05, then 1:02:33. */
   function formatWallTime(seconds: number): string {
-    if (seconds < 60) return `${seconds.toFixed(1)}s`;
+    if (seconds < 60) return `${seconds.toFixed(1)} s`;
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
     const s = Math.floor(seconds % 60);
@@ -740,7 +754,9 @@ function init() {
 
   function updateWallTimeDisplay(): void {
     const el = document.getElementById('wall-time');
-    if (el) el.textContent = `Wall: ${formatWallTime(gameLoop.getRunningWallTime())}`;
+    if (!el) return;
+    const wall = gameLoop.getRunningWallTime();
+    el.textContent = `Wall: ${formatWallTime(wall)} (${formatGaugeValue(wall / 3600)} h)`;
   }
 
   /**
@@ -844,7 +860,7 @@ function init() {
     // Update time display - use step number from history, not solver
     const timeDisplay = document.getElementById('sim-time');
     if (timeDisplay) {
-      timeDisplay.textContent = `Time: ${state.time.toFixed(3)}s (${historyInfo.currentStepNumber} steps)`;
+      timeDisplay.textContent = `Time: ${formatClock(state.time)}, ${historyInfo.currentStepNumber} steps`;
     }
     updateWallTimeDisplay();
     updateAchievedSpeedDisplay();
@@ -1357,6 +1373,9 @@ function init() {
   const modeConstructionBtn = document.getElementById('mode-construction') as HTMLButtonElement;
   const modeSimulationBtn = document.getElementById('mode-simulation') as HTMLButtonElement;
   const simControls = document.getElementById('sim-controls') as HTMLDivElement;
+  // Advanced solver settings sit at the bottom of the toolbar but belong to
+  // the simulation controls, so they come and go with them.
+  const advancedSolverSection = document.getElementById('advanced-solver-section') as HTMLDetailsElement | null;
   const constructionControls = document.getElementById('construction-controls') as HTMLDivElement;
   const constructionButtons = document.querySelectorAll('.component-btn');
   const selectedComponentDiv = document.getElementById('selected-component') as HTMLDivElement;
@@ -2935,6 +2954,8 @@ function init() {
       plantCanvas.setSimState(result.state);
       refreshDisplayAfterRestore();
       updateConstructionCostPanel();
+      // A reactor (or a turbine) can be built while the plant runs
+      updateReactorControlsVisibility();
     } finally {
       if (wasRunning) gameLoop.resume();
       updatePauseButton();
@@ -2960,6 +2981,50 @@ function init() {
       throw error;
     }
     commitLiveEdit(pending, what);
+  }
+
+  /**
+   * Does this plant have anything a reactor operator would operate? A reactor
+   * vessel, a core barrel or a fuel assembly - or a turbine, which is what
+   * puts megawatts on the grid.
+   *
+   * Read off the PLANT, not off the mode and not off a career-level flag: a
+   * spent fuel pool, a test loop or a boiler house has no rods to pull, no
+   * boron to add, nothing to scram and nothing to sell, and a panel full of
+   * controls that do nothing is worse than no panel. Build a reactor while it
+   * runs and the panel comes straight back (every live edit refreshes this).
+   *
+   * A spent fuel pool holds fuel and is deliberately NOT a reactor: it has no
+   * control rods, and its `pool` type is not in the list.
+   */
+  function plantHasReactorControls(): boolean {
+    // Compared as strings: 'fuelAssembly' and 'turbine' are ComponentTypes
+    // that no current PlantComponent interface claims, and a plant loaded
+    // from JSON may still carry them.
+    const OPERATED = new Set(['reactorVessel', 'coreBarrel', 'fuelAssembly', 'turbine', 'turbine-generator']);
+    for (const component of plantState.components.values()) {
+      if (OPERATED.has(component.type as string)) return true;
+      // A standalone core is stored as a fuelled vessel (see stock.ts)
+      const fuelled = component as { fuelRodCount?: number; thermalPower?: number };
+      if ((component.type === 'vessel' || component.type === 'tank') &&
+          ((fuelled.fuelRodCount ?? 0) > 0 || (fuelled.thermalPower ?? 0) > 0)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Show or hide the reactor operator's controls (rods, boron, SCRAM) and the
+   * MW-to-grid readout to match the plant. The MW panel is a simulation-mode
+   * readout, so it stays down in construction mode whatever the plant is.
+   */
+  function updateReactorControlsVisibility(): void {
+    const show = plantHasReactorControls();
+    const panel = document.getElementById('reactor-controls');
+    if (panel) panel.style.display = show ? 'block' : 'none';
+    const mwPanel = document.getElementById('mw-to-grid-panel');
+    if (mwPanel) mwPanel.style.display = show && currentMode === 'simulation' ? 'block' : 'none';
   }
 
   function setMode(mode: 'construction' | 'simulation'): void {
@@ -2992,6 +3057,7 @@ function init() {
 
       // Hide simulation controls, show construction controls
       if (simControls) simControls.style.display = 'none';
+      if (advancedSolverSection) advancedSolverSection.style.display = 'none';
       if (constructionControls) constructionControls.style.display = 'block';
       if (editSection) editSection.style.display = 'block';
       // The overnight-cost readout is a money panel: a level with no economy
@@ -3001,9 +3067,9 @@ function init() {
         updateConstructionCostPanel();
       }
 
-      // Hide MW to grid panel in construction mode
-      const mwPanel = document.getElementById('mw-to-grid-panel');
-      if (mwPanel) mwPanel.style.display = 'none';
+      // MW to grid is a simulation-mode readout (and only for a plant that
+      // has a turbine at all)
+      updateReactorControlsVisibility();
 
       // Enable construction mode visuals (grid, outlines)
       plantCanvas.setConstructionMode(true);
@@ -3068,6 +3134,7 @@ function init() {
       // design-stage readout, and career mode bills construction separately.
       const canBuildLive = liveBuildAllowed();
       if (simControls) simControls.style.display = 'block';
+      if (advancedSolverSection) advancedSolverSection.style.display = 'block';
       if (constructionControls) constructionControls.style.display = canBuildLive ? 'block' : 'none';
       if (constructionCostPanel) constructionCostPanel.style.display = 'none';
       if (editSection) editSection.style.display = canBuildLive ? 'block' : 'none';
@@ -3077,9 +3144,9 @@ function init() {
       setConstructionSubMode('place');
       setBuildToolsAvailable(false);
 
-      // Show MW to grid panel in simulation mode
-      const mwPanel = document.getElementById('mw-to-grid-panel');
-      if (mwPanel) mwPanel.style.display = 'block';
+      // MW to grid and the rod/boron/SCRAM panel, for a plant that has a
+      // reactor or a turbine to operate
+      updateReactorControlsVisibility();
 
       // Draw the plant as a running plant (gauges, fluid levels), but keep
       // the placement/routing affordances live
@@ -4028,8 +4095,24 @@ function init() {
         // A yard part is placed to the design the yard stocks: the dialog
         // shows it, locks every field but the name, and stamps it on the
         // component so the refund goes back to the line it came from.
+        // ...and if it is a yard part, there is nothing left to ask: it is
+        // placed on the click, named and standing on the ground. The dialog
+        // stays for generic parts, where the design is still the player's.
         const yardDesign = selectedComponentDesign ?? undefined;
-        componentDialog.show(
+        const openPlacementForm = yardDesign
+          ? (type: string, pos: { x: number; y: number },
+             cb: (config: ComponentConfig | null) => void,
+             cores?: Array<{ id: string; label: string }>,
+             gens?: Array<{ id: string; label: string }>,
+             name?: string) =>
+              componentDialog.showYardPlacement(type, pos, cb, cores, gens, name, yardDesign)
+          : (type: string, pos: { x: number; y: number },
+             cb: (config: ComponentConfig | null) => void,
+             cores?: Array<{ id: string; label: string }>,
+             gens?: Array<{ id: string; label: string }>,
+             name?: string) =>
+              componentDialog.show(type, pos, cb, cores, gens, name, undefined);
+        openPlacementForm(
           selectedComponentType!,
           placementPos,
           (config: ComponentConfig | null) => {
@@ -4111,7 +4194,7 @@ function init() {
             // Placement cancelled
             abandonLiveEdit(liveSnap);
           }
-        }, availableCores, availableGenerators, defaultName, yardDesign);
+        }, availableCores, availableGenerators, defaultName);
       };
 
       console.log(`[Placement] ${selectedComponentType} click at world (${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}): ` +

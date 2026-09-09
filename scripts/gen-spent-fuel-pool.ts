@@ -27,9 +27,9 @@
  *   - a pump standing on the pad is ~13 m above the sea surface, well past
  *     what an atmosphere can push up an intake (~10.3 m before NPSH), so its
  *     suction line flashes and it delivers nothing;
- *   - the scripted tsunami takes the sea to +5 m, which is above the whole
- *     shore bench, so anything built down there is under water until it
- *     recedes.
+ *   - the scripted tsunami takes the sea to +12.6 m, a few tens of centimetres
+ *     under the pad itself, so anything built anywhere but the bench is under
+ *     water until it drains back - which it does within about ten minutes.
  *
  * THE NOISE (added 2026-09-08) exists to stop the site reading as a ramp
  * between two shelves, and it is applied in the two ways that cannot damage
@@ -340,10 +340,14 @@ const connections = [
 // The sequence
 // ---------------------------------------------------------------------------
 
-const QUAKE = 2400;          // s - the liner cracks
+// The night's earthquake is history by the time the player arrives (it is
+// what took the power out); what happens ON WATCH is the aftershock that
+// opens the liner, and it happens almost at once - there is nothing to learn
+// from watching an intact pool sit there.
+const QUAKE = 20;            // s - the aftershock cracks the liner
 
 /**
- * The tear the earthquake leaves. 0.4 m up the pool wall with a 0.8 m
+ * The tear the aftershock leaves. 0.4 m up the pool wall with a 0.8 m
  * opening, so it spans the floor to knee height: while the pool is deep it
  * runs full of water, and as the level sweeps down through the opening the
  * draw crossfades to vapour and the leak dies away on its own - no
@@ -353,30 +357,48 @@ const QUAKE = 2400;          // s - the liner cracks
 const CRACK_AREA = 0.0170;   // m2
 const CRACK_ELEVATION = 0.4; // m above the pool floor
 const CRACK_OPENING = 0.8;   // m of tear height
-const TSUNAMI_WARN = 2700;   // s - the warning, no physics
-const WAVE_IN = 3600;        // s - the sea starts climbing
-const WAVE_OUT = 8400;       // s - it starts falling back
+// The quake is now the first thing that happens, so everything after it keeps
+// the intervals it was tuned with rather than its old absolute times: the
+// warning five minutes later, the wave fifteen minutes after the warning.
+const TSUNAMI_WARN = QUAKE + 300;    // s - the warning, no physics
+const WAVE_IN = TSUNAMI_WARN + 900;  // s - the sea starts climbing
+/**
+ * How high the wave runs, and how fast it comes and goes.
+ *
+ * +12.6 m is just under the +13 m bench: the water climbs the whole hillside
+ * and stops a few tens of centimetres short of the pad, so ANY pump not on
+ * the bench goes under - and the only dry ground left is the one place a pump
+ * cannot lift the sea from. A tsunami is a long wave, minutes rather than the
+ * hour and a half this used to take, so it stands at the peak briefly and
+ * then drains back to sea level inside six minutes. The draining is also what
+ * strands the debris it carried up the hillside.
+ */
+const WAVE_PEAK = 12.6;      // m - just below the +13 m bench
+const WAVE_RISE = 180;       // s - sea level to the peak
+const WAVE_HOLD = 120;       // s - held at the peak
+const WAVE_FALL = 240;       // s - peak back to sea level
+const WAVE_OUT = WAVE_IN + WAVE_RISE + WAVE_HOLD;  // s - it starts falling back
 // 8 sim hours. Long enough that a pool nobody feeds does not merely uncover
-// its racks inside the level - it boils dry (~5.1 h), the cladding starts to
-// burn (~6.0 h) and the release limit goes at ~6.7 h. A six-hour clock let a
-// do-nothing run WIN, with the fuel dry and on fire, forty minutes before the
-// consequence arrived.
+// its racks inside the level - with the tear now opening at 20 s it boils dry
+// at 4.4 h, the cladding starts to burn at 5.5 h and the release limit goes at
+// 6.0 h. A six-hour clock let a do-nothing run WIN, with the fuel dry and on
+// fire, before the consequence arrived.
 const LEVEL_END = 28800;     // s - 8 sim hours
 
 const scenario = {
   description:
-    'An earthquake cracks the spent fuel pool liner; the tsunami behind it floods the shore ' +
-    'for about 80 minutes. Keep the fuel covered for eight hours.',
+    'An earthquake cracks the spent fuel pool liner; the tsunami behind it runs most of the ' +
+    'way up the hill and drains back inside ten minutes. Keep the fuel covered for eight hours.',
   events: [
     {
       time: QUAKE,
-      message: 'EARTHQUAKE. The pool liner has cracked - level is falling.',
+      message: 'AFTERSHOCK. The pool liner has cracked - level is falling.',
       actions: [
         { kind: 'shake', seconds: 3, amplitude: 16 },
         {
           kind: 'burst', id: 'pool',
           area: CRACK_AREA, elevation: CRACK_ELEVATION, openingHeight: CRACK_OPENING,
-          breachMessage: 'EARTHQUAKE: the pool liner has split at the floor. ' +
+          breachMessage: 'AFTERSHOCK: the pool liner has split at the floor. ' +
             'Water is running out onto the pad.',
         },
       ],
@@ -388,13 +410,14 @@ const scenario = {
     },
     {
       time: WAVE_IN,
-      message: 'The wave is coming in - the shore is going under.',
-      actions: [{ kind: 'water-level', id: 'sea', surface: 5, over: 300 }],
+      message: 'THE WAVE IS COMING IN. It is running right up the hill - everything below ' +
+        'the bench goes under.',
+      actions: [{ kind: 'water-level', id: 'sea', surface: WAVE_PEAK, over: WAVE_RISE }],
     },
     {
       time: WAVE_OUT,
-      message: 'The sea is falling back. The shore will be workable again shortly.',
-      actions: [{ kind: 'water-level', id: 'sea', surface: 0, over: 400 }],
+      message: 'The sea is draining back down the hill, and taking half the beach with it.',
+      actions: [{ kind: 'water-level', id: 'sea', surface: 0, over: WAVE_FALL }],
     },
   ],
 };
@@ -462,4 +485,6 @@ console.log(`  terrain ${COLS} x ${ROWS} cells of ${CELL} m; relief ${hMin.toFix
 console.log(`  bench ${PAD_HEIGHT} m, shore at (200,75) ${shoreH.toFixed(2)} m, sea shelf ${seaGround.toFixed(1)} m`);
 console.log(`  shoreline at y=75 is x=${shorelineX(75).toFixed(1)} m; sea nozzle at x=${SEA_PORT_X}, body at x=${SEA_X}`);
 console.log(`  rack top at ${(RACK_BOTTOM + RACK_HEIGHT).toFixed(2)} m above the pool floor`);
-console.log(`  timeline: quake ${QUAKE} s (3 s of shake), wave in ${WAVE_IN} s, out ${WAVE_OUT} s, end ${LEVEL_END} s`);
+console.log(`  timeline: quake ${QUAKE} s (3 s of shake), tsunami warning ${TSUNAMI_WARN} s, ` +
+  `wave in ${WAVE_IN} s rising to ${WAVE_PEAK} m by ${WAVE_IN + WAVE_RISE} s, ` +
+  `falling from ${WAVE_OUT} s, back to sea level ${WAVE_OUT + WAVE_FALL} s, end ${LEVEL_END} s`);
