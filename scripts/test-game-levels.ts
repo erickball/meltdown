@@ -50,6 +50,7 @@ import {
   getTurbineCondenserState,
 } from '../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
+import { LEVELS } from '../src/game-mode/levels';
 
 interface PlantJson {
   components?: Array<[string, PlantComponent]>;
@@ -251,6 +252,12 @@ const SFP_GRACE = 1200;
 const SFP_CLOCK = 28800;
 /** The level's release limit (LevelDef.maxRelease). */
 const SFP_MAX_RELEASE = 1.0;
+/**
+ * How long the player sits and watches before the liner goes, in WALL
+ * seconds. The scenario is written in simulated seconds, so the number in
+ * gen-spent-fuel-pool.ts is this times the level's simSpeed.
+ */
+const SFP_QUAKE_WALL_S = 20;
 
 type PlantJsonRW = {
   components: Array<[string, Record<string, unknown>]>;
@@ -343,6 +350,41 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     }
     console.log(`  [0] yard: ${yard.components.map(l => `${l.count}x ${l.design ?? l.type}`).join(', ')}` +
       `, pipe ${yard.pipeSpec}`);
+  }
+
+  // -- 0b. The clock the player actually sits through ----------------------
+  // The aftershock is timed in WALL seconds, not simulated ones: 20 s at the
+  // level's own 60x. Long enough to look at the plant and find the controls,
+  // and short enough that nothing is learnt from watching an intact pool. It
+  // read as instantaneous when the sim time was the number that got set.
+  {
+    const level = LEVELS.find(l => l.id === 'spent-fuel-pool');
+    if (!level) fail('no level with id spent-fuel-pool');
+    const speed = level?.simSpeed ?? 1;
+    const events = (sfpPlant() as unknown as { scenario?: { events: Array<{ time: number; message: string; actions: Array<{ kind: string }> }> } }).scenario?.events ?? [];
+    const quake = events[0];
+    if (!quake) fail('the level ships no scenario events');
+    else {
+      const wall = quake.time / speed;
+      const kinds = quake.actions.map(a => a.kind).sort().join('+');
+      console.log(`  [0b] aftershock t=${quake.time} s = ${wall.toFixed(0)} s of wall time at ${speed}x (${kinds})`);
+      if (Math.abs(wall - SFP_QUAKE_WALL_S) > 0.5) {
+        fail(`the aftershock should land ${SFP_QUAKE_WALL_S} s of wall time in, it lands at ${wall.toFixed(1)} s`);
+      }
+      if (kinds !== 'burst+shake') fail(`the aftershock should shake the view and burst the pool, it does ${kinds}`);
+      if (!(events.every(e => e.time > 0))) fail('no scenario event may be due at t=0 - it would fire on the first step');
+      for (let i = 1; i < events.length; i++) {
+        if (!(events[i].time > events[i - 1].time)) fail(`event ${i} is not after the one before it`);
+      }
+      // The rest of the sequence is written as offsets from the quake, so
+      // moving it moves them: warning +300 s, wave in +1200 s.
+      if (events[1] && events[1].time - quake.time !== 300) {
+        fail(`the tsunami warning should be 300 s after the quake, it is ${events[1].time - quake.time} s`);
+      }
+      if (events[2] && events[2].time - quake.time !== 1200) {
+        fail(`the wave should arrive 1200 s after the quake, it is ${events[2].time - quake.time} s`);
+      }
+    }
   }
 
   // -- 1. Nobody home: the tear alone must lose the level ------------------

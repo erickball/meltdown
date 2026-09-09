@@ -342,9 +342,16 @@ const connections = [
 
 // The night's earthquake is history by the time the player arrives (it is
 // what took the power out); what happens ON WATCH is the aftershock that
-// opens the liner, and it happens almost at once - there is nothing to learn
-// from watching an intact pool sit there.
-const QUAKE = 20;            // s - the aftershock cracks the liner
+// opens the liner, and it happens early - there is nothing to learn from
+// watching an intact pool sit there.
+//
+// TWENTY SECONDS OF WALL TIME, at the level's own 60x: the player gets long
+// enough to look at the plant and find the controls before the liner goes,
+// and that is measured in the seconds they actually sit through, not in the
+// plant's clock. This number is in SIMULATED seconds, so it is 20 x the
+// level's simSpeed. Change `simSpeed` in the LevelDef and this wants
+// changing with it.
+const QUAKE = 1200;          // s - the aftershock cracks the liner (20 s of wall time at 60x)
 
 /**
  * The tear the aftershock leaves. 0.4 m up the pool wall with a 0.8 m
@@ -357,8 +364,8 @@ const QUAKE = 20;            // s - the aftershock cracks the liner
 const CRACK_AREA = 0.0170;   // m2
 const CRACK_ELEVATION = 0.4; // m above the pool floor
 const CRACK_OPENING = 0.8;   // m of tear height
-// The quake is now the first thing that happens, so everything after it keeps
-// the intervals it was tuned with rather than its old absolute times: the
+// Everything after the quake keeps the intervals it was tuned with rather
+// than absolute times, so moving QUAKE moves the whole sequence with it: the
 // warning five minutes later, the wave fifteen minutes after the warning.
 const TSUNAMI_WARN = QUAKE + 300;    // s - the warning, no physics
 const WAVE_IN = TSUNAMI_WARN + 900;  // s - the sea starts climbing
