@@ -734,11 +734,11 @@
   ]
  },
  "scenario": {
-  "description": "An earthquake cracks the spent fuel pool liner; the tsunami behind it floods the shore for about 80 minutes. Keep the fuel covered for eight hours.",
+  "description": "An earthquake cracks the spent fuel pool liner; the tsunami behind it runs most of the way up the hill and drains back inside ten minutes. Keep the fuel covered for eight hours.",
   "events": [
    {
-    "time": 2400,
-    "message": "EARTHQUAKE. The pool liner has cracked - level is falling.",
+    "time": 20,
+    "message": "AFTERSHOCK. The pool liner has cracked - level is falling.",
     "actions": [
      {
       "kind": "shake",
@@ -751,36 +751,36 @@
       "area": 0.017,
       "elevation": 0.4,
       "openingHeight": 0.8,
-      "breachMessage": "EARTHQUAKE: the pool liner has split at the floor. Water is running out onto the pad."
+      "breachMessage": "AFTERSHOCK: the pool liner has split at the floor. Water is running out onto the pad."
      }
     ]
    },
    {
-    "time": 2700,
+    "time": 320,
     "message": "Tsunami warning: get off the shore. The wave is about fifteen minutes out.",
     "actions": []
    },
    {
-    "time": 3600,
-    "message": "The wave is coming in - the shore is going under.",
+    "time": 1220,
+    "message": "THE WAVE IS COMING IN. It is running right up the hill - everything below the bench goes under.",
     "actions": [
      {
       "kind": "water-level",
       "id": "sea",
-      "surface": 5,
-      "over": 300
+      "surface": 12.6,
+      "over": 180
      }
     ]
    },
    {
-    "time": 8400,
-    "message": "The sea is falling back. The shore will be workable again shortly.",
+    "time": 1520,
+    "message": "The sea is draining back down the hill, and taking half the beach with it.",
     "actions": [
      {
       "kind": "water-level",
       "id": "sea",
       "surface": 0,
-      "over": 400
+      "over": 240
      }
     ]
    }
