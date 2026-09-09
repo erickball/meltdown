@@ -163,17 +163,18 @@ export class GameLoop {
   public onStateUpdate?: (state: SimulationState, metrics: SolverMetrics) => void;
 
   /**
-   * Called once a frame with the WALL-CLOCK interval since the last one, in
-   * seconds, while the clock is running.
+   * Called with the simulated clock every time it MOVES - after a frame,
+   * after a manual step, and after a seek into the history.
    *
-   * This is not simulation time and must never be used as any: it is for
-   * things that happen at the player's pace rather than the plant's - the
-   * build queue, which measures how long a part takes to install in real
-   * seconds so that a level running at 60x does not install a pump in one
-   * simulated minute. It is skipped while paused, so pausing stops the
-   * builders as well as the plant.
+   * It carries the absolute simulated time rather than an interval, because
+   * its consumer (the build queue) keys its progress to that clock: a job is
+   * as far along as `time - startedAt`, so a seek backwards is not a negative
+   * interval to be ignored but a real statement about where the run is. Being
+   * driven from the plant's clock is also what makes installing a part stop
+   * when the simulation stops, and cost the same amount of the accident at
+   * any speed.
    */
-  public onWallFrame?: (wallSeconds: number) => void;
+  public onSimAdvance?: (simTime: number) => void;
   public onEvent?: (event: GameEvent) => void;
 
   constructor(
@@ -332,7 +333,7 @@ export class GameLoop {
    *
    * The next frame is armed in a `finally`, not at the end of the work: the
    * physics is inside a try/catch that pauses and reports, but everything
-   * OUTSIDE it - onWallFrame (the build queue), and the onStateUpdate the
+   * OUTSIDE it - onSimAdvance (the build queue), and the onStateUpdate the
    * catch itself calls - was not, so a throw there stopped the clock for the
    * rest of the session with nothing but a console line to say so. The
    * exception still propagates; only the loop survives it.
@@ -358,10 +359,6 @@ export class GameLoop {
     }
 
     if (!this.isPaused && frameDt > 0) {
-      // Anything that runs at the player's pace, before the plant's own time
-      // moves at all (see onWallFrame).
-      this.onWallFrame?.(frameDt);
-
       // Simulation time to advance. In deterministic mode the frame interval is
       // capped first; on the interactive path it is used as measured.
       //
@@ -476,6 +473,12 @@ export class GameLoop {
         // Still notify listeners so UI can update (show paused state, etc.)
         this.onStateUpdate?.(this.state, this.getSolverMetrics());
       }
+
+      // Everything that runs on the plant's clock without being physics -
+      // the build queue. Outside the try, so a throw here is not reported as
+      // a simulation error, and after it, so it sees the time the frame
+      // actually reached (which is unchanged if the frame threw).
+      this.onSimAdvance?.(this.state.time);
     }
   }
 
@@ -1080,6 +1083,7 @@ export class GameLoop {
 
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);
+    this.onSimAdvance?.(this.state.time);
   }
 
   /**
@@ -1112,6 +1116,7 @@ export class GameLoop {
 
     // Notify listeners
     this.onStateUpdate?.(this.state, result.metrics);
+    this.onSimAdvance?.(this.state.time);
 
     return result.dt;
   }
@@ -1260,6 +1265,10 @@ export class GameLoop {
         (this.rk45Solver as any).config.maxDt
       );
     }
+    // Every seek lands here, so this is the one place a rewind has to be
+    // announced: work that had not been ordered yet at the time we landed on
+    // is abandoned by whoever is listening.
+    this.onSimAdvance?.(this.state.time);
   }
 
   /**

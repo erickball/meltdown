@@ -17,21 +17,23 @@ Taking a part back to the yard is the same job in reverse.
 One rate, in both directions, for everything:
 
 ```
-seconds = massKg × SECONDS_PER_KG
+simSeconds = massKg × SIM_SECONDS_PER_KG
 ```
 
-`SECONDS_PER_KG` is not a number anybody picked. It is anchored on the pipe
-the player lays most — the level-1 supply yard's service-water line,
+`SIM_SECONDS_PER_KG` is not a number anybody picked. It is anchored on the
+pipe the player lays most — the level-1 supply yard's service-water line,
 `spec-12in-service` (0.3 m bore, 16 bar) — and on the statement that **one
-grid segment of that pipe should take about 0.1 s of wall clock**:
+grid segment of that pipe should feel like about 0.1 s of the player's own
+time on the level it was tuned on**, which runs at 60x:
 
 | | |
 |---|---|
 | ASME wall for 0.3 m at 16 bar | 1.8 mm → the 3 mm handling minimum |
 | steel mass, +20% for elbows/tees/flanges | **26.90 kg/m** |
 | one grid segment | 1 m (`TILE_M`) |
-| **SECONDS_PER_KG** | `0.1 / 26.90` = **3.717e-3 s/kg** |
-| equivalently | **269 kg installed per second** |
+| the feel, at the anchoring level's 60x | 0.1 s of wall clock = **6 simulated seconds** |
+| **SIM_SECONDS_PER_KG** | `0.1 × 60 / 26.90` = **0.2230 s/kg** |
+| equivalently | **3.72 simulated minutes per tonne** |
 
 The mass per metre comes from `pipeSteelMassPerMetre` in
 `src/construction/cost-estimation.ts` — the *same* arithmetic the cost
@@ -46,21 +48,45 @@ civil works. None of them is tuned to produce a particular build time.
 
 What that gives, at the level-1 scale:
 
-| part | mass | build |
-|---|---|---|
-| 1 m of 12″ service water | 26.9 kg | 0.10 s |
-| the yard's 300 m of it | 8.1 t | 30 s |
-| a 40 m run | 1.1 t | 4.0 s |
-| Low-Pressure Service Water Pump (200 kg/s, 60 m) | 2.53 t | 9.4 s |
-| a 0.3 m gate valve at 16 bar | 0.22 t | 0.8 s |
-| an 8 x 8 m, 10 bar tank | 120 t | 7.4 min |
-| level 1's 9 x 9 x 10.5 m concrete pool | 1650 t | 1 h 42 min |
+All of these are **simulated** times; the third column is what they cost the
+player at level 1's 60x, which is the feel the rate was set by.
 
-**Wall clock, not simulated time.** A level runs at 60x, so a minute of
-building would be an hour of the accident; the delay is meant to cost the
-*player* time to think, not to cost the plant an hour. The queue is ticked
-from `GameLoop.onWallFrame`, which hands it the frame's real interval and is
-skipped while paused — so pausing stops the builders along with the plant.
+| part | mass | build (plant time) | at 60x |
+|---|---|---|---|
+| 1 m of 12″ service water | 26.9 kg | 6.0 s | 0.10 s |
+| the yard's 300 m of it | 8.1 t | 30 min | 30 s |
+| a 40 m run | 1.1 t | 4.0 min | 4.0 s |
+| Low-Pressure Service Water Pump (200 kg/s, 60 m) | 2.53 t | 9.4 min | 9.4 s |
+| a 0.3 m gate valve at 16 bar | 0.22 t | 49 s | 0.8 s |
+| an 8 x 8 m, 10 bar tank | 120 t | 7.4 h | 7.4 min |
+| level 1's 9 x 9 x 10.5 m concrete pool | 1650 t | 4.3 days | 1 h 42 min |
+
+**Simulated time, not wall clock.** Installing a pump is work the *plant*
+waits for. Measuring it on the player's clock instead meant the same job cost
+a different amount of the accident depending on how fast the clock happened to
+be turned up: at 1x a pump was nine seconds of plant time and at 600x it was
+an hour and a half. Now it is 9.4 minutes of plant time at any speed, and the
+*feel* at 60x — the speed the rate was chosen at — is exactly what it was.
+
+The queue is ticked from `GameLoop.onSimAdvance`, which fires wherever
+simulated time moves: at the end of a frame, after a manual step, and after a
+seek into the rewind history. It is not called while paused, so pausing stops
+the builders along with the plant, and it carries the **absolute** simulated
+time rather than an interval.
+
+**Rewinding.** Progress is not accumulated frame by frame; a job records
+`startedAt` and is `simTime - startedAt` along. So seeking backwards runs the
+rings backwards with the rest of the run, and seeking back past a job's start
+**abandons and refunds** it — at that point in the run nobody had ordered it
+yet. A job whose start is still in the past simply loses progress and carries
+on. Nothing else in the queue is time-dependent, so that one rule is the whole
+of its rewind behaviour.
+
+`enqueue` takes the job's start time from the queue's own clock, and that is
+exact rather than a frame stale: every path that creates a part runs inside a
+live edit, and a live edit stops the clock for the whole gesture (see
+[[mode-switch-resume]]), so no simulated time passes between the last tick and
+the enqueue.
 
 ## What a ghost is
 
@@ -156,9 +182,10 @@ plant clears the queue.
   notification when a job is taken and when it lands. There is no list of
   outstanding jobs and no explicit cancel button — cancelling is deleting the
   ghost.
-- Civil works priced by their concrete are hours of work under this law (the
-  level's own pool is 1 h 42 min), and even a large tank is minutes. That is
-  arguably right, and it never bites in practice because those are placed in
+- Civil works priced by their concrete are *days* of plant time under this law
+  (the level's own pool is 4.3 days, an hour and three quarters of the
+  player's time at 60x), and even a large tank is hours. That is arguably
+  right, and it never bites in practice because those are placed in
   construction mode, where builds are instant - but nothing stops a player
   from trying it live, and there is no warning if they do.
 - Jobs run in parallel, with no crew limit: five parts placed at once all

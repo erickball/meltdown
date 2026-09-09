@@ -371,9 +371,12 @@ function init() {
   let gameMode: GameModeManager | null = null;
 
   // Bridge simulation state to visual components
-  // Parts being installed run on the player's clock, not the plant's (a
-  // level at 60x would otherwise install a pump in a simulated minute).
-  gameLoop.onWallFrame = (wallSeconds: number) => buildQueue.tick(wallSeconds);
+  // Parts being installed run on the PLANT's clock: a pump takes the same
+  // amount of the accident however fast the player has the clock turned up,
+  // installing stops when the simulation stops, and rewinding the run rewinds
+  // the builders with it (see src/game/build-queue.ts). onSimAdvance fires
+  // wherever simulated time moves - a frame, a manual step, or a seek.
+  gameLoop.onSimAdvance = (simTime: number) => buildQueue.tick(simTime);
 
   gameLoop.onStateUpdate = (state: SimulationState, metrics: SolverMetrics) => {
     // Career-mode bookkeeping (revenue, objectives, random events)
@@ -3298,8 +3301,9 @@ function init() {
       },
     });
     showNotification(
-      `Building ${label}: ${job.seconds.toFixed(0)} s (${Math.round(job.massKg)} kg to install). ` +
-      `It joins the plant when it is finished.`, 'info', 5000);
+      `Building ${label}: ${formatClock(job.simSeconds)} of plant time ` +
+      `(${Math.round(job.massKg)} kg to install). It joins the plant when it is finished.`,
+      'info', 5000);
     updateConstructionCostPanel();
     return true;
   }
@@ -3343,8 +3347,8 @@ function init() {
       abandon: (apply) => apply(),
     });
     showNotification(
-      `Returning ${label}: ${job.seconds.toFixed(0)} s. It keeps running until it is out.`,
-      'info', 5000);
+      `Returning ${label}: ${formatClock(job.simSeconds)} of plant time. ` +
+      `It keeps running until it is out.`, 'info', 5000);
   }
 
   /** The same, for a run of pipe. */
