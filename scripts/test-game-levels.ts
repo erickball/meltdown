@@ -258,6 +258,14 @@ const SFP_MAX_RELEASE = 1.0;
  * gen-spent-fuel-pool.ts is this times the level's simSpeed.
  */
 const SFP_QUAKE_WALL_S = 20;
+/**
+ * The gap between the aftershock and the wave, and between the warning and
+ * the water. Fifty-four minutes is what the two site tanks have to cover on
+ * their own: the shore is unusable until the sea has been and gone, so the
+ * gravity feed is the whole of the make-up until then.
+ */
+const SFP_WAVE_AFTER_QUAKE_S = 54 * 60;
+const SFP_WARN_BEFORE_WAVE_S = 15 * 60;
 
 type PlantJsonRW = {
   components: Array<[string, Record<string, unknown>]>;
@@ -377,13 +385,20 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         if (!(events[i].time > events[i - 1].time)) fail(`event ${i} is not after the one before it`);
       }
       // The rest of the sequence is written as offsets from the quake, so
-      // moving it moves them: warning +300 s, wave in +1200 s.
-      if (events[1] && events[1].time - quake.time !== 300) {
-        fail(`the tsunami warning should be 300 s after the quake, it is ${events[1].time - quake.time} s`);
+      // moving it moves them: the wave 54 minutes after the aftershock, and
+      // the warning a quarter of an hour before the water. The 54 minutes is
+      // the gap the two site tanks have to cover on their own.
+      if (events[2] && events[2].time - quake.time !== SFP_WAVE_AFTER_QUAKE_S) {
+        fail(`the wave should arrive ${SFP_WAVE_AFTER_QUAKE_S} s after the quake, ` +
+          `it is ${events[2].time - quake.time} s`);
       }
-      if (events[2] && events[2].time - quake.time !== 1200) {
-        fail(`the wave should arrive 1200 s after the quake, it is ${events[2].time - quake.time} s`);
+      if (events[1] && events[2] && events[2].time - events[1].time !== SFP_WARN_BEFORE_WAVE_S) {
+        fail(`the tsunami warning should be ${SFP_WARN_BEFORE_WAVE_S} s before the wave, ` +
+          `it is ${events[2].time - events[1].time} s`);
       }
+      console.log(`  [0b] wave t=${events[2]?.time} s (${((events[2].time - quake.time) / 60).toFixed(0)} ` +
+        `min after the aftershock), warning t=${events[1]?.time} s ` +
+        `(${((events[2].time - events[1].time) / 60).toFixed(0)} min before the water)`);
     }
   }
 
@@ -484,24 +499,30 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
       sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
       sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));
-    // The operator's actions, as scenario events instead of live edits. The
-    // sea pump goes on as soon as the liner cracks and REFILLS the pool -
-    // that head is the buffer the tanks then only have to top up while the
-    // wave has the pump stopped. The tank line is opened just before the wave
-    // lands and shut once the sea pump is dry and back on the load. The times
-    // track the level's own clock (scripts/gen-spent-fuel-pool.ts): quake 20 s,
-    // wave in 1220 s, back to sea level 1760 s.
+    // The operator's actions, as scenario events instead of live edits, and
+    // in the order the fifty-four-minute gap forces: the TANK LINE FIRST,
+    // because it is the only make-up there is while the tsunami is on its way,
+    // and the SEA PUMP ONLY AFTER THE WATER HAS GONE BACK DOWN, because
+    // anything running on the shore before that is drowned by it. The tanks
+    // therefore have to carry the leak on their own from the tear to the far
+    // side of the wave - which is the point of the gap. Times track the
+    // level's own clock (scripts/gen-spent-fuel-pool.ts): aftershock 1200 s,
+    // wave in 4440 s, back to sea level 4980 s.
     plant.scenario!.events.push(
-      { time: 30, message: 'Sea pump on the line', actions: [
-        { kind: 'pump', id: 'shore-pump', running: true, speed: 1 },
-      ] },
-      { time: 1200, message: 'Wave inbound: tank make-up opened', actions: [
+      { time: 1260, message: 'Liner is gone: opening the tank make-up', actions: [
         { kind: 'valve', id: 'tank-valve', position: 1 },
       ] },
-      { time: 2400, message: 'Sea pump has the load; securing the tank line', actions: [
+      { time: 5100, message: 'The sea is back down: sea pump on the line', actions: [
+        { kind: 'pump', id: 'shore-pump', running: true, speed: 1 },
+      ] },
+      { time: 5700, message: 'Sea pump has the load; securing the tank line', actions: [
         { kind: 'valve', id: 'tank-valve', position: 0 },
       ] });
     const sim = buildSimFromPlantJson(plant as never);
+    const tankMass = () => sim.state.flowNodes.get('tank-a')!.fluid.mass +
+      sim.state.flowNodes.get('tank-b')!.fluid.mass;
+    const tanks0 = tankMass();
+    let minTanks = tanks0;
     let minLevel = Infinity;
     let maxClad = -Infinity;
     let uncoveredSince = -1;
@@ -514,6 +535,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       sim.state.pendingEvents = [];
       const lvl = sfpLevel(sim.state);
       minLevel = Math.min(minLevel, lvl);
+      minTanks = Math.min(minTanks, tankMass());
       maxClad = Math.max(maxClad, sfpCladC(sim.state));
       if (lvl < SFP_RACK_TOP) {
         if (uncoveredSince < 0) uncoveredSince = sim.state.time;
@@ -528,13 +550,20 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         lastLog = sim.state.time;
         console.log(`      t=${sim.state.time.toFixed(0).padStart(5)}s  pool ${lvl.toFixed(2)} m  ` +
           `clad ${sfpCladC(sim.state).toFixed(0)} C  ` +
-          `tanks ${((sim.state.flowNodes.get('tank-a')!.fluid.mass + sim.state.flowNodes.get('tank-b')!.fluid.mass) / 1000).toFixed(0)} t  ` +
+          `tanks ${(tankMass() / 1000).toFixed(0)} t  ` +
           `shore ${shore.flooded ? 'FLOODED' : 'dry'} (${shore.effectiveSpeed.toFixed(2)})`);
       }
     }
     console.log(`  [4] eight hours: min pool level ${minLevel.toFixed(2)} m (racks at ${SFP_RACK_TOP} m), ` +
       `peak clad ${maxClad.toFixed(0)} C, longest uncovery ${worstUncovered.toFixed(0)} s, ` +
-      `shore pump drowned at t=${floodedAt.toFixed(0)} s and restarted at t=${recoveredAt.toFixed(0)} s`);
+      `shore pump drowned at t=${floodedAt.toFixed(0)} s and restarted at t=${recoveredAt.toFixed(0)} s; ` +
+      `tanks ${(tanks0 / 1000).toFixed(0)} t -> ${(minTanks / 1000).toFixed(0)} t ` +
+      `(${((tanks0 - minTanks) / 1000).toFixed(0)} t drawn, ` +
+      `${(100 * minTanks / tanks0).toFixed(0)}% left)`);
+    if (!(minTanks > 0.05 * tanks0)) {
+      fail(`the tanks must still hold a margin at the end, they fell to ` +
+        `${(minTanks / 1000).toFixed(0)} t of ${(tanks0 / 1000).toFixed(0)} t`);
+    }
     if (!(worstUncovered < SFP_GRACE)) fail(`the answer must keep the racks covered, uncovered for ${worstUncovered.toFixed(0)} s`);
     if (!(maxClad < 600)) fail(`cladding must stay below the 600 C limit, peaked at ${maxClad.toFixed(0)} C`);
     if (!(floodedAt > 0)) fail('the tsunami must drown a pump standing on the shore');
