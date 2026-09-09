@@ -132,6 +132,13 @@ export class GameModeManager {
   // (the player watches it unfold) before the boss steps in. This guards
   // against re-arming and against other end conditions preempting it.
   private releaseArmed = false;
+  /**
+   * The player pressed KEEP GOING on a result screen. The verdict stands (the
+   * unlock and the best score were recorded when it arrived) but the plant is
+   * theirs to keep running, so all goal and failure bookkeeping is frozen and
+   * the same screen can never come back.
+   */
+  private continuing: 'complete' | 'failed' | null = null;
   // Hazards (physical limits that end the level). A 'level' hazard is only a
   // failure once it has stood breached for its grace period, so the moment
   // each breach began is kept here, keyed by hazard, and cleared the instant
@@ -271,6 +278,7 @@ export class GameModeManager {
     this.runPeakFuelTemp = 0;
     this.runPeakMWe = 0;
     this.releaseArmed = false;
+    this.continuing = null;
     this.pendingCasualties = [];
     this.survivedCasualties = 0;
     this.speedHintShown = false;
@@ -318,10 +326,18 @@ export class GameModeManager {
       this.host.setMode('construction');
     } else {
       this.setPhase('briefing');
+      // A level with nothing to buy and nothing to shut down has no
+      // construction STAGE to stop at: the briefing's last line carries the
+      // button that starts the watch, and pressing it puts the player straight
+      // on the running plant. Every other level still lands in construction,
+      // where the design (and the loan) come first.
+      const straightToWatch = !!level.liveBuild && this.economyOff;
       this.dialogue.show(level.briefing, () => {
         this.setPhase('construction');
         this.host.setMode('construction');
-      });
+        // Same task, no frame in between: there is no intermediate screen.
+        if (straightToWatch) this.onPrimaryAction();
+      }, straightToWatch ? 'TAKE THE WATCH' : undefined);
     }
   }
 
@@ -349,13 +365,19 @@ export class GameModeManager {
         // job, and everything after that is built with the plant running.
         this.hud.setPhase(
           this.builtOnce ? 'OUTAGE' : (this.level?.liveBuild ? 'STANDING BY' : 'CONSTRUCTION'),
-          this.builtOnce ? 'RESUME OPERATION' : (this.level?.liveBuild ? 'TAKE THE WATCH' : 'BUILD IT'));
+          this.primaryActionLabel());
         this.operatorPanel.hide();
         this.refreshConstructionHud();
         break;
       case 'operation':
-        // No outage button where there is no outage.
-        this.hud.setPhase('OPERATING', this.level?.liveBuild ? null : 'OUTAGE');
+        // No outage button where there is no outage. A run continued past its
+        // own verdict says so, so the player is never left wondering whether
+        // the result counted.
+        this.hud.setPhase(
+          this.continuing === 'complete' ? 'OPERATING (LEVEL COMPLETE)'
+            : this.continuing === 'failed' ? 'OPERATING (LEVEL FAILED)'
+            : 'OPERATING',
+          this.level?.liveBuild ? null : 'OUTAGE');
         if (!this.level?.liveBuild) this.hud.setPrimaryEnabled(true);
         break;
       case 'debrief':
@@ -375,9 +397,11 @@ export class GameModeManager {
 
     if (mode === 'simulation') {
       if (this.phase !== 'operation') {
+        // Name the button that is actually on the HUD: on a live-build level
+        // it says TAKE THE WATCH, and telling the player to press BUILD IT
+        // sent them looking for a button that is not there.
         this.host.showNotification(
-          this.builtOnce ? 'Press RESUME OPERATION when the outage work is done.'
-            : 'Press BUILD IT to take out the loan and build the plant first.', 'warning');
+          `Press ${this.primaryActionLabel()} to start the job.`, 'warning');
         return false;
       }
       return true;
@@ -442,6 +466,12 @@ export class GameModeManager {
   // ==========================================================================
   // Primary action button
   // ==========================================================================
+
+  /** What the HUD's primary button says right now - and what to call it in a message. */
+  private primaryActionLabel(): string {
+    if (this.builtOnce) return 'RESUME OPERATION';
+    return this.level?.liveBuild ? 'TAKE THE WATCH' : 'BUILD IT';
+  }
 
   private onPrimaryAction(): void {
     if (!this.level || !this.ledger) return;
@@ -920,6 +950,7 @@ export class GameModeManager {
 
   private checkEndConditions(state: SimulationState): void {
     if (!this.level || !this.ledger || this.phase !== 'operation') return;
+    if (this.continuing) return;   // the verdict is in; the plant is just running now
     if (this.releaseArmed) return; // release failure is already counting down
 
     // radiological release
@@ -1056,9 +1087,44 @@ export class GameModeManager {
       this.choiceOverlay('LEVEL COMPLETE', summary, [
         ...(this.levelIndex + 1 < LEVELS.length
           ? [{ label: 'NEXT ASSIGNMENT', action: () => this.startLevel(this.levelIndex + 1) }] : []),
+        this.keepGoingChoice('complete'),
         { label: 'TITLE SCREEN', action: () => this.showTitle() },
       ]);
     });
+  }
+
+  /**
+   * KEEP GOING: hand the plant back with the result standing.
+   *
+   * The career bookkeeping already happened when the result arrived - the
+   * unlock, the best score, the save - and none of it changes here. What
+   * changes is that the goals and the failure checks are frozen, so the same
+   * screen cannot arrive twice, and the simulation carries on from exactly
+   * where it stopped: same simulated time, same state, same speed, and on a
+   * live-build level still buildable.
+   */
+  private keepGoing(verdict: 'complete' | 'failed'): void {
+    if (!this.level) return;
+    this.continuing = verdict;
+    this.eventEngine?.disarm();   // no new scripted trouble after the verdict
+    this.setPhase('operation');
+    this.host.setConstructionAvailable?.(!this.level.liveBuild, NO_OUTAGE_REASON);
+    this.host.gameLoop.resume();
+    this.host.showNotification(
+      verdict === 'complete'
+        ? 'Level complete - the result is recorded. The plant is yours to keep running.'
+        : 'Level failed - the result is recorded. The plant is yours to keep running.',
+      'info');
+  }
+
+  /** The KEEP GOING choice, offered on every result screen, won or lost. */
+  private keepGoingChoice(verdict: 'complete' | 'failed'): { label: string; action: () => void; tooltip: string } {
+    return {
+      label: 'KEEP GOING',
+      tooltip: 'Close this and carry on running the plant as it stands. The result above is ' +
+        'already recorded and does not change, and this screen will not come back.',
+      action: () => this.keepGoing(verdict),
+    };
   }
 
   /** Snapshot the plant as built so a failed level can be retried from it. */
@@ -1111,6 +1177,7 @@ export class GameModeManager {
               action: () => this.startReference(),
             }]
           : []),
+        this.keepGoingChoice('failed'),
         { label: 'TITLE SCREEN', action: () => this.showTitle() },
       ], diagnostics);
     });

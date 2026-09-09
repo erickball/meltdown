@@ -12,6 +12,8 @@
  *   - the rebuilt state integrates for another N seconds without throwing
  *   - deleting the added component (and its connection) does the same in
  *     reverse
+ *   - a scenario's PROGRESS survives the rebuild: an event already fired does
+ *     not fire again, and the ones still to come fire exactly once
  *
  * Usage: npx tsx scripts/test-live-edit.ts [plant.json] [runSeconds]
  */
@@ -314,6 +316,103 @@ check('the broken edit was undone in the plant',
   `${controllerId ? (plant.components.get(controllerId) as Record<string, any>).pid.actuator.targetId : '?'} vs ${targetBefore}`);
 check('the reverted plant still builds',
   (() => { try { createSimulationFromPlant(plant); return true; } catch { return false; } })());
+
+// --- Scenario progress survives a live edit ------------------------------
+// The bug this pins down: a live edit rebuilds the simulation from the plant,
+// and the rebuild re-read the plant's scenario block with NOTHING fired - so
+// every event whose time had already passed fired all over again. On the
+// spent fuel pool level that was one earthquake per closed dialog.
+console.log('\n--- Scenario progress is not replayed by a live edit ---');
+{
+  const valveOf = (state: SimulationState) => state.components.valves.get('sv-1')!.position;
+
+  const scenarioPlant: PlantState = {
+    components: new Map<string, PlantComponent>(), connections: [],
+    simTime: 0, simSpeed: 1, isPaused: true,
+    scenario: {
+      description: 'two timed valve moves',
+      events: [
+        { time: 1, message: 'first event', actions: [{ kind: 'valve', id: 'sv-1', position: 0.5 }] },
+        { time: 4, message: 'second event', actions: [{ kind: 'valve', id: 'sv-1', position: 0.25 }] },
+      ],
+    },
+  } as unknown as PlantState;
+  const water = { temperature: 293.15, pressure: 2339, phase: 'two-phase', quality: 0.0001, flowRate: 0 };
+  const air = { N2: 0.78, O2: 0.21 };
+  const tank = (id: string, x: number, elevation: number, fillLevel: number) => ({
+    id, type: 'tank', label: id, position: { x, y: 0 }, rotation: 0, elevation,
+    width: 6, height: 6, wallThickness: 0.05, fillLevel, pressureRating: 2,
+    ports: [{ id: `${id}-out`, position: { x: 3, y: 0 }, direction: 'both' }],
+    fluid: { ...water }, initialNcg: { ...air },
+  });
+  for (const c of [
+    tank('sv-src', 0, 10, 0.8),
+    tank('sv-dst', 40, 0, 0.1),
+    {
+      id: 'sv-1', type: 'valve', label: 'Scenario valve',
+      position: { x: 20, y: 0 }, rotation: 0, elevation: 0,
+      diameter: 0.2, volume: 0.2, valveType: 'gate', opening: 0,
+      ports: [
+        { id: 'sv-1-in', position: { x: -0.5, y: 0 }, direction: 'both' },
+        { id: 'sv-1-out', position: { x: 0.5, y: 0 }, direction: 'both' },
+      ],
+      // Liquid at atmospheric: a two-phase valve node at the tanks' own
+      // vapour pressure starts as vapour at 0.012 bar and the factory has to
+      // fall back on ideal gas to state it, which is a loud (and here
+      // pointless) warning.
+      fluid: { temperature: 293.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
+      pressureRating: 20,
+    },
+  ]) scenarioPlant.components.set(c.id, c as unknown as PlantComponent);
+  scenarioPlant.connections.push(
+    { fromComponentId: 'sv-src', fromPortId: 'sv-src-out', toComponentId: 'sv-1', toPortId: 'sv-1-in',
+      fromElevation: 0.2, toElevation: 0.2, length: 20, flowArea: 0.03 } as unknown as Connection,
+    { fromComponentId: 'sv-1', fromPortId: 'sv-1-out', toComponentId: 'sv-dst', toPortId: 'sv-dst-out',
+      fromElevation: 0.2, toElevation: 0.2, length: 20, flowArea: 0.03 } as unknown as Connection);
+
+  setSimulationRandomSeed(0);
+  let sim = createSimulationFromPlant(scenarioPlant);
+  check('the scenario plant starts with nothing fired', sim.scenario?.fired === 0,
+    `fired=${sim.scenario?.fired}`);
+
+  // Past the first event, short of the second
+  sim = advance(sim, 2);
+  check('the first event fired', sim.scenario?.fired === 1, `fired=${sim.scenario?.fired}`);
+  check('the first event moved the valve', valveOf(sim) === 0.5, `position=${valveOf(sim)}`);
+
+  // A live edit: exactly what closing a construction dialog does.
+  const timeBeforeEdit = sim.time;
+  setSimulationRandomSeed(0);
+  const edited = applyLivePlantEdit(sim, scenarioPlant, () => {
+    (scenarioPlant.components.get('sv-dst') as PlantComponent).label = 'renamed by the player';
+  }).state;
+  check('the rebuild kept the simulated time', edited.time === timeBeforeEdit,
+    `${edited.time} vs ${timeBeforeEdit}`);
+  check('scenario progress carried across the rebuild', edited.scenario?.fired === 1,
+    `fired=${edited.scenario?.fired}`);
+
+  // Mark the valve so a REPLAY of the first event would be unmistakable, then
+  // run on - still short of the second event.
+  edited.components.valves.get('sv-1')!.position = 0.77;
+  edited.pendingEvents = [];
+  const afterEdit = advance(edited, 1.5);
+  const replayed = (afterEdit.pendingEvents ?? []).filter(e => e.type === 'scenario');
+  check('the fired event did not fire again after the edit', valveOf(afterEdit) === 0.77,
+    `position=${valveOf(afterEdit)}`);
+  check('no scenario event was announced twice', replayed.length === 0,
+    replayed.map(e => e.message).join(', '));
+
+  // ...and the event still to come fires, once.
+  afterEdit.pendingEvents = [];
+  const afterSecond = advance(afterEdit, 2.5);
+  const fired = (afterSecond.pendingEvents ?? []).filter(e => e.type === 'scenario');
+  check('the later event still fired', afterSecond.scenario?.fired === 2,
+    `fired=${afterSecond.scenario?.fired}`);
+  check('the later event fired exactly once', fired.length === 1,
+    fired.map(e => e.message).join(', '));
+  check('the later event moved the valve', valveOf(afterSecond) === 0.25,
+    `position=${valveOf(afterSecond)}`);
+}
 
 console.log(failures === 0
   ? '\n=== ALL PASS ===\n'

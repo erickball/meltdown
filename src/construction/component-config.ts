@@ -1386,6 +1386,35 @@ export class ComponentDialog {
   }
 
   /**
+   * Place a fully specified yard part with NO dialog: the design already says
+   * what the thing is, and the only two questions the form would ask - what to
+   * call it and how high to put it - have right answers (the auto-generated
+   * name, and standing on the ground). One click, one pump.
+   *
+   * The form is still built and submitted through the ordinary confirm path,
+   * so the config, the validation and the design stamp are the dialog's own -
+   * it simply never gets a chance to paint, because show() and handleConfirm()
+   * run in the same task. If validation DOES refuse the yard's design, the
+   * dialog is left open showing why, which is exactly the loud failure that
+   * case deserves.
+   */
+  showYardPlacement(
+    componentType: string,
+    position: { x: number; y: number },
+    callback: (config: ComponentConfig | null) => void,
+    availableCores: Array<{ id: string; label: string }> | undefined,
+    availableGenerators: Array<{ id: string; label: string }> | undefined,
+    defaultName: string | undefined,
+    fixedDesignId: string
+  ): void {
+    this.show(componentType, position, callback, availableCores, availableGenerators,
+      defaultName, fixedDesignId);
+    const elevation = document.getElementById('option-elevation') as HTMLInputElement | null;
+    if (elevation) elevation.value = '0';   // on the ground where it was put
+    this.handleConfirm();
+  }
+
+  /**
    * (Re)build the create-mode form: type defaults overridden by the currently
    * selected preset design. Called on open and whenever the design dropdown
    * changes - rebuilding the whole form keeps every behavior (two-phase
