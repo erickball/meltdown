@@ -9,7 +9,10 @@
 
 import { calculateState, distanceToSaturationLine, saturationPressure, saturationTemperature,
   saturatedLiquidDensity, saturatedVaporDensity, saturatedLiquidEnergy,
-  saturatedVaporEnergy } from './water-properties.js';
+  saturatedVaporEnergy, sublimationPressure, latentHeatSublimation, latentHeat,
+  MODEL_MIN_TEMPERATURE } from './water-properties.js';
+import { solveMixtureState } from './mixture-properties.js';
+import { mixtureCv } from './gas-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import {
   computeReactivityComponents, neutronSourceRate, normalizedNeutronSource,
@@ -232,6 +235,126 @@ test('a two-phase root stays continuous at parts-per-million quality', () => {
     `quality steps unevenly - largest increment ${maxStep.toExponential(3)} is ` +
     `${(maxStep / firstStep).toFixed(1)}x the first (${firstStep.toExponential(3)}), ` +
     `which means the two-phase temperature is quantised`);
+});
+
+// ----------------------------------------------------------------------------
+// Below the triple point: the ice-vapour region (docs/ice-vapor-region.md)
+// ----------------------------------------------------------------------------
+
+test('the sublimation curve and the ice line meet the saturation table at the triple point', () => {
+  const T_t = 273.16;
+  // IAPWS-08 is exact at the triple point; the table's first row is the same
+  // point, so the two equilibrium-pressure branches must agree to the bit
+  // the correlation carries.
+  assertClose(sublimationPressure(T_t) / 611.657, 1, 1e-6, 'P_sub(T_t)/P_t');
+  assertClose(saturationPressure(T_t - 1e-9) / saturationPressure(T_t + 1e-9), 1, 1e-6,
+    'saturationPressure across the triple point');
+  // Latent heat of sublimation falls out of the three curves; textbook 2834 kJ/kg,
+  // and equal to h_fg + h_fus there.
+  assertClose(latentHeatSublimation(T_t) / 1e3, 2834, 8, 'h_sub(T_t) kJ/kg');
+  assertClose(latentHeatSublimation(T_t) / 1e3, 2500.9 + 333.5, 8, 'h_sub = h_fg + h_fus');
+  // The accessors continue onto the sublimation line: condensed phase is ice.
+  assertClose(saturatedLiquidDensity(250), 917, 1e-9, 'condensed-phase density at 250 K is ice');
+  assert(saturatedLiquidEnergy(250) < -300e3, `ice at 250 K must sit below -300 kJ/kg, got ${saturatedLiquidEnergy(250)}`);
+  assert(latentHeat(250) > latentHeat(T_t + 0.01),
+    'sublimation (u_g - u_ice) must exceed vaporisation just above the triple point');
+  // P_sub is monotone and steep: 8%/K at the triple point.
+  const slope = (sublimationPressure(T_t) - sublimationPressure(T_t - 1)) / sublimationPressure(T_t);
+  assert(slope > 0.07 && slope < 0.10, `dP_sub/P per K at the triple point should be ~0.08, got ${slope.toFixed(4)}`);
+});
+
+test('a (u,v) walk from liquid-vapour through the triple triangle into ice-vapour is continuous', () => {
+  // Fixed specific volume of 10 m3/kg (a gas space with a little water), and
+  // walk the specific energy downward: liquid-vapour dome -> triple triangle
+  // (T and P pinned, ice fraction rising) -> ice-vapour tie lines (T falling
+  // below 273.16 K on the sublimation curve). Every output must move
+  // continuously; the phase reports 'two-phase' while any liquid remains and
+  // 'vapor' (the aerosol convention) once only ice and vapour are left.
+  const v = 10;
+  const T_t = 273.16;
+  const du = 2e3;
+  let prev: ReturnType<typeof calculateState> | null = null;
+  let sawDome = false, sawTriangle = false, sawIceVapor = false;
+  for (let u = 300e3; u >= -360e3; u -= du) {
+    const s = calculateState(1.0, u, v);
+    assert(Number.isFinite(s.temperature) && Number.isFinite(s.pressure), `non-finite state at u=${u}`);
+    assert(s.iceFraction >= 0 && s.iceFraction <= s.quality + 1e-12,
+      `ice fraction ${s.iceFraction} outside [0, quality=${s.quality}] at u=${u}`);
+    if (s.temperature > T_t + 1e-9) {
+      sawDome = true;
+      assert(s.iceFraction === 0, `ice above the triple point at u=${u}`);
+    } else if (Math.abs(s.temperature - T_t) <= 1e-9) {
+      sawTriangle = true;
+      assertClose(s.pressure, 611.657, 1e-3, 'triple-line pressure');
+    } else {
+      sawIceVapor = true;
+      assert(s.phase === 'vapor' && s.quality === 1,
+        `ice-vapour must report the aerosol convention (vapor, x=1), got ${s.phase} x=${s.quality} at u=${u}`);
+      assert(s.iceFraction > 0 && s.iceFraction < 1, `ice-vapour ice fraction ${s.iceFraction} at u=${u}`);
+      assertClose(s.pressure / sublimationPressure(s.temperature), 1, 1e-4,
+        `ice-vapour pressure is not the sublimation pressure at T=${s.temperature}`);
+      assert(s.temperature >= MODEL_MIN_TEMPERATURE, `below the model floor at u=${u}`);
+    }
+    if (prev) {
+      assert(s.temperature <= prev.temperature + 1e-9, `T rose while u fell at u=${u}`);
+      assert(prev.temperature - s.temperature < 2.0,
+        `T stepped ${(prev.temperature - s.temperature).toFixed(3)} K over ${du / 1e3} kJ/kg at u=${u}`);
+      const dP = Math.abs(s.pressure - prev.pressure) / Math.max(s.pressure, prev.pressure);
+      assert(dP < 0.2, `P stepped ${(100 * dP).toFixed(1)}% over ${du / 1e3} kJ/kg at u=${u}`);
+      assert(s.iceFraction >= prev.iceFraction - 1e-9, `ice fraction fell while cooling at u=${u}`);
+      assert(Math.abs(s.iceFraction - prev.iceFraction) < 0.05,
+        `ice fraction stepped ${(s.iceFraction - prev.iceFraction).toFixed(4)} at u=${u}`);
+    }
+    prev = s;
+  }
+  assert(sawDome && sawTriangle && sawIceVapor,
+    `walk must cross all three regions (dome=${sawDome} triangle=${sawTriangle} ice-vapour=${sawIceVapor})`);
+});
+
+test('trace moisture in helium blown down from 900 K / 70 bar to 2 bar is frost at ~217 K, not a throw', () => {
+  // Isentropic expansion of helium (gamma 5/3) by 35x cools it by (2/70)^0.4:
+  // 900 K -> 217.1 K. The gas space is the Xe-100 SG shell (64.65 m3); the
+  // helium that remains at 2 bar and the trace water it carries share that
+  // temperature, and the water is an ice-vapour aerosol on the sublimation
+  // line. Build the node's total energy from the model's own curves at that
+  // temperature and ask the mixture split to find it again.
+  const V = 64.65;
+  const T = 900 * Math.pow(2 / 70, 0.4);
+  const R = 8.31446;
+  const nHe = 2e5 * V / (R * T);                 // helium left at 2 bar
+  const mWater = 0.001 * nHe * 0.004;            // 0.1% of the gas mass
+  const v = V / mWater;
+  const u_ice = saturatedLiquidEnergy(T);        // ice line below the triple point
+  const u_g = saturatedVaporEnergy(T);
+  const v_g = 1 / saturatedVaporDensity(T);
+  const x = (v - 1 / saturatedLiquidDensity(T)) / (v_g - 1 / saturatedLiquidDensity(T));
+  assert(x > 0 && x < 1, `state must sit on an ice-vapour tie line: x_v=${x}`);
+  const uWater = u_ice + x * (u_g - u_ice);
+  // Gas energy in the split's own convention (moles x per-mole Cv x T with its
+  // species table), so the only thing being tested is whether it finds the
+  // state back.
+  const U = mWater * uWater + nHe * mixtureCv({ He: nHe } as any) * T;
+  const r = solveMixtureState(mWater, U, V, { He: nHe } as any, 300);
+  assertClose(r.temperature, T, 0.01, 'blown-down helium temperature');
+  assertClose(r.steamPressure / sublimationPressure(r.temperature), 1, 1e-4,
+    'steam partial pressure is the sublimation pressure at the solved T');
+  assertClose(r.iceFraction, 1 - x, 1e-3, 'ice fraction');
+  assert(r.phase === 'vapor' && r.quality === 1, `aerosol convention: got ${r.phase} x=${r.quality}`);
+  assertClose(r.pressure / 2e5, 1, 1e-3, 'total pressure is the helium pressure');
+});
+
+test('bulk freezing and states colder than the model floor throw loudly', () => {
+  // A tank of liquid water below the triple line: denser than ice, not a fog.
+  let threw = '';
+  try { calculateState(1.0, saturatedLiquidEnergy(273.16) - 400e3, 1.0e-3); }
+  catch (e) { threw = (e as Error).message; }
+  assert(/BULK FREEZING/.test(threw), `bulk freezing must throw its own message, got: ${threw.slice(0, 80)}`);
+  // Colder than the lowest ice-vapour tie line the model carries.
+  threw = '';
+  try { calculateState(1.0, -700e3, 100); }
+  catch (e) { threw = (e as Error).message; }
+  assert(/BELOW THE MODEL'S LOWEST TEMPERATURE/.test(threw),
+    `sub-floor state must throw its own message, got: ${threw.slice(0, 80)}`);
 });
 
 test('Superheated steam at 500K, 1 bar', () => {
