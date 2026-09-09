@@ -3558,7 +3558,11 @@ export function addEnergy(mass: number, energy: number, volume: number, added: n
 
 export function effectiveSpecificHeat(state: WaterState): number {
   if (state.phase === 'liquid') return liquidCv(state.temperature);
-  if (state.phase === 'vapor') return vaporCv(state.temperature);
+  // A frost node reports phase 'vapor' (the aerosol convention) but is a
+  // condensed-vapour equilibrium like a two-phase node: heat goes into
+  // subliming ice at nearly constant temperature, so it gets the same
+  // latent-heat buffer, with latentHeat already on the sublimation line there.
+  if (state.phase === 'vapor' && !(state.iceFraction > 0)) return vaporCv(state.temperature);
   return latentHeat(state.temperature) / 10;
 }
 
