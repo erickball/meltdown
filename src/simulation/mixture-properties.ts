@@ -46,11 +46,18 @@ import { mixtureCv, totalMoles, type GasComposition } from './gas-properties';
 const R_GAS = 8.31446;  // J/(mol·K) - must match gas-properties
 
 /** Bracket for the water's specific internal energy, J/kg.
- *  Low end: saturated liquid at the triple point (T ~ 273 K).
+ *  Low end: ICE at the water model's lowest temperature (150 K), which is
+ *    -586 kJ/kg - NEGATIVE, because IAPWS puts u = 0 at saturated liquid at
+ *    the triple point and everything colder is below that. This used to read
+ *    +1 kJ/kg ("saturated liquid at the triple point"), and that single number
+ *    is most of why a gas node whose moisture had frozen could not be solved:
+ *    the root the secant was looking for lay outside its own bracket, so the
+ *    search ran into the floor and threw "No physical water state anywhere in
+ *    u = 1.0..9500.0 kJ/kg". A helium loop blowing down from 70 to 2 bar cools
+ *    to ~217 K, where the frost sits near -250 kJ/kg.
  *  High end: steam hot enough that calculateState itself rejects it (5000 K).
  *  These bound the PHYSICS, not the numerics - the solve never needs to be
  *  told how much water there is. */
-const U_SPECIFIC_MIN = 1.0e3;
 const U_SPECIFIC_MAX = 9.5e6;
 
 export interface MixtureState {
@@ -59,7 +66,11 @@ export interface MixtureState {
   steamPressure: number;    // Pa - water's partial pressure
   gasPressure: number;      // Pa - NCG partial pressure
   phase: 'liquid' | 'vapor' | 'two-phase';
-  quality: number;          // vapour mass fraction of the WATER
+  /** NON-LIQUID mass fraction of the WATER (vapour + ice). Identical to the
+   *  vapour quality above the triple point; see FluidState.quality. */
+  quality: number;
+  /** Solid (ice) mass fraction of the WATER, 0 at or above the triple point. */
+  iceFraction: number;
   waterEnergy: number;      // J
   gasEnergy: number;        // J
   iterations: number;       // secant iterations used (0 = no gas present)
@@ -93,6 +104,7 @@ export function solveMixtureState(
       gasPressure: 0,
       phase: ws.phase,
       quality: ws.quality,
+      iceFraction: ws.iceFraction,
       waterEnergy: totalEnergy,
       gasEnergy: 0,
       iterations: 0,
@@ -114,6 +126,7 @@ export function solveMixtureState(
       gasPressure: P,
       phase: 'vapor',
       quality: 1,
+      iceFraction: 0,
       waterEnergy: 0,
       gasEnergy: totalEnergy,
       iterations: 0,
@@ -125,14 +138,19 @@ export function solveMixtureState(
   // physics and independent of how much water there is (grams of humidity in
   // a helium loop search the same interval as a flooded vessel).
   //
-  // Not every u in that interval is a real state at THIS specific volume:
-  // below the triple-point isotherm the water would be ice, and a dilute
-  // node (v beyond the saturation line's reach, ~206 m³/kg) has no
-  // sub-saturation states at all. calculateState throws on those, and the
+  // Not every u in that interval is a real state at THIS specific volume: at
+  // liquid-like densities the sub-triple states are bulk ice, which the model
+  // does not carry, so calculateState throws below the triple line there. The
   // throw is INFORMATION - it says the trial u is off the cold end of the
   // physical band - so the search uses it to tighten the bracket rather than
   // swallowing it.
-  let lo = U_SPECIFIC_MIN;
+  //
+  // At DILUTE densities (a gas space with trace moisture, which is the case
+  // that matters here) the band is now continuous all the way down: below the
+  // triple line the water is an ice-vapour aerosol on the sublimation curve,
+  // and the only floor is the model's lowest temperature. That is what makes
+  // a blown-down helium loop solvable - the root really is inside the bracket.
+  let lo = Water.modelMinSpecificEnergy();
   let hi = U_SPECIFIC_MAX;
 
   let water: Water.WaterState | null = null;   // state at the current iterate
@@ -191,6 +209,15 @@ export function solveMixtureState(
     // Sweep the physical band for any feasible point before giving up.
     for (let e = 3; e <= 6.98 && !first; e += 0.1) {
       const u = Math.pow(10, e);
+      const f = probe(u);
+      if (f !== null) first = { u, f };
+    }
+    // Cold tail: the decade ladder above starts at +1 kJ/kg and so cannot see
+    // the sub-triple half of the band at all, where u is negative. Walk it
+    // linearly from the ice floor up to zero. (Runs only when the warm sweep
+    // found nothing, so it costs nothing in normal operation.)
+    for (let s = 0; s <= 1.0001 && !first; s += 0.02) {
+      const u = lo + s * (0 - lo);
       const f = probe(u);
       if (f !== null) first = { u, f };
     }
@@ -279,6 +306,7 @@ export function solveMixtureState(
     gasPressure,
     phase: ws.phase,
     quality: ws.quality,
+    iceFraction: ws.iceFraction,
     waterEnergy: waterMass * u1,
     gasEnergy,
     iterations,

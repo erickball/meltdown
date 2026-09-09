@@ -427,9 +427,20 @@ export function updateDebugPanel(
         html += ` <span style="color: #8cf;">(P<sub>stm</sub>=${formatPressure(steamPBar)})</span>`;
       }
       html += `, <span class="${massClass}">${massKg.toFixed(0)}kg</span>, `;
-      html += `${node.fluid.phase}`;
+      // Frost: below the triple point the water carries a solid fraction and
+      // rides with the gas as an aerosol, so it reports phase 'vapor'. Say so
+      // rather than letting it read as ordinary dry steam.
+      const iceFrac = node.fluid.iceFraction ?? 0;
+      if (iceFrac > 0) {
+        html += `<span title="Ice-vapour aerosol below the triple point: the frost is well mixed with the gas, has no level, and a draw takes the mixture. Pressure shown is the sublimation pressure.">frost (${node.fluid.phase})</span>`;
+      } else {
+        html += `${node.fluid.phase}`;
+      }
       if (node.fluid.phase === 'two-phase') {
         html += ` x=${(node.fluid.quality * 100).toFixed(1)}%`;
+      }
+      if (iceFrac > 0) {
+        html += ` <span class="debug-warning" title="Mass fraction of this node's water that is solid ice">ice=${(iceFrac * 100).toFixed(1)}%</span>`;
       }
       if ((node.depositedCsI ?? 0) > 1e-6) {
         html += ` <span class="debug-warning" title="CsI aerosol plated out onto this component's surfaces">CsI dep ${node.depositedCsI!.toFixed(3)}mol</span>`;

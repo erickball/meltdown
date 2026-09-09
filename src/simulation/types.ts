@@ -26,7 +26,24 @@ export interface FluidState {
   temperature: number;    // K
   pressure: number;       // Pa - total pressure (steam + NCG partial pressures)
   phase: 'liquid' | 'vapor' | 'two-phase';
-  quality: number;        // Vapor mass fraction (0-1), only meaningful for two-phase
+  /**
+   * NON-LIQUID mass fraction (0-1): vapour plus solid. Above the triple point
+   * there is no solid, so this is the ordinary vapour quality and `1 - quality`
+   * is the liquid fraction whose volume sets a level - which is how every
+   * consumer here reads it.
+   *
+   * Below the triple point the condensate is ICE and it rides with the gas as
+   * an aerosol (no level, no stratification, a draw takes the mixture), so a
+   * frost node reports quality = 1 with the solid in `iceFraction`. The true
+   * vapour fraction is always `quality - iceFraction`.
+   */
+  quality: number;
+  /**
+   * Solid (ice) mass fraction of the water, 0 for every state at or above the
+   * triple point. Always <= quality. Set by the fluid-state constraint from
+   * the water properties' sub-triple branch; see docs/ice-vapor-region.md.
+   */
+  iceFraction?: number;
 
   // NON-CONDENSIBLE GASES (optional)
   // When present, total pressure = steam partial pressure + NCG partial pressure
@@ -178,11 +195,14 @@ export interface FlowNode {
   coolingWaterFlow?: number;        // kg/s - cooling water mass flow rate
   condenserUA?: number;             // W/K - overall heat transfer coefficient × area
 
-  // Ice/freezing latent heat buffer
-  // When temperature would drop below 273.15K, energy goes into latent heat instead
-  // iceFraction = 0 means no ice, iceFraction = 1 means fully frozen
-  // Latent heat of fusion for water: 334 kJ/kg
-  iceFraction?: number;             // 0-1, fraction of mass that is frozen
+  // (The node-level ice buffer that used to live here is gone. It was a
+  // latent-heat accumulator that pinned T at 273.15 K, forced phase to
+  // 'liquid', and FABRICATED energy to make the books balance
+  // - `internalEnergy += energyDeficit` - which is why a node whose water had
+  // gone cold read as "pinned at 273.16 K" forever. Ice is now a real (u, v)
+  // state; the solid fraction lives on the fluid as FluidState.iceFraction and
+  // comes out of the water properties' sub-triple branch. See
+  // docs/ice-vapor-region.md.)
 
   // Phase separation factor (calculated by FlowRateOperator)
   // 0 = fully mixed (uniform quality throughout)

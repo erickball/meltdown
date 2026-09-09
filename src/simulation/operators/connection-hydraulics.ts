@@ -725,6 +725,7 @@ export function nodeSoundSpeed(node: FlowNode, flowPhase: 'liquid' | 'vapor' | '
     density: rho,
     phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
     quality: quality,
+    iceFraction: fluid.iceFraction ?? 0,
     specificEnergy: fluid.internalEnergy / fluid.mass,
   };
 
@@ -761,6 +762,7 @@ export function nodeCriticalPressureRatio(node: FlowNode, flowPhase: 'liquid' | 
     density: rho,
     phase: flowPhase === 'mixture' ? 'two-phase' : flowPhase,
     quality: quality,
+    iceFraction: fluid.iceFraction ?? 0,
     specificEnergy: fluid.internalEnergy / fluid.mass,
   };
 

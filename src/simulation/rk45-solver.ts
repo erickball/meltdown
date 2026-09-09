@@ -21,6 +21,7 @@ import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig,
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
 import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass } from './gas-properties';
+import { MODEL_MIN_TEMPERATURE, modelMinPressure, minimumSpecificEnergy } from './water-properties';
 
 // ============================================================================
 // State Rates - Derivatives for all state variables
@@ -1034,9 +1035,24 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
       return { safe: false, reason: `${id}: Non-finite mass or energy` };
     }
 
-    // Check for negative internal energy (impossible)
-    if (node.fluid.internalEnergy < 0) {
-      return { safe: false, reason: `${id}: Negative internal energy` };
+    // Energy below what the water model can hold at this density.
+    //
+    // This used to read `internalEnergy < 0`, which is only "impossible" in a
+    // reference where u = 0 at absolute zero. IAPWS puts u = 0 at SATURATED
+    // LIQUID AT THE TRIPLE POINT, so ice is at -334 kJ/kg and colder frost
+    // lower still: a gas space carrying frozen moisture legitimately has
+    // negative water energy, and this test rejected every such step. The real
+    // floor is the coldest state the tables admit at this specific volume.
+    if (node.fluid.mass > 0) {
+      const u_floor = minimumSpecificEnergy(node.volume / node.fluid.mass);
+      if (node.fluid.internalEnergy < node.fluid.mass * u_floor) {
+        return { safe: false, reason: `${id}: specific energy ` +
+          `${(node.fluid.internalEnergy / node.fluid.mass / 1e3).toFixed(1)} kJ/kg is below ` +
+          `the model floor ${(u_floor / 1e3).toFixed(1)} kJ/kg at ` +
+          `v=${(node.volume / node.fluid.mass).toExponential(3)} m³/kg` };
+      }
+    } else if (node.fluid.internalEnergy < 0) {
+      return { safe: false, reason: `${id}: Negative internal energy with no water mass` };
     }
 
     // Check specific volume isn't astronomically high (indicates near-vacuum
@@ -1105,8 +1121,14 @@ export function checkStateSanity(
     const oldNode = oldState.flowNodes.get(id);
     if (!oldNode) continue;
 
-    // Check for invalid pressure (below triple point ~611 Pa)
-    if (!isFinite(newNode.fluid.pressure) || newNode.fluid.pressure < 600) {
+    // Check for invalid pressure. The floor is the water model's own lowest
+    // equilibrium pressure - ice at MODEL_MIN_TEMPERATURE, ~6e-6 Pa - not the
+    // triple point. 611 Pa is only a floor for vapour in equilibrium with
+    // LIQUID; frost at 217 K sits at 1.8 Pa, and a trace of steam in a gas
+    // loop can be far below even that. With the old value every step that
+    // took a node's water below the triple point was rejected, which is
+    // exactly the "pinned at 273.16 K" symptom.
+    if (!isFinite(newNode.fluid.pressure) || newNode.fluid.pressure < modelMinPressure()) {
       console.warn(`[RK45 Sanity] ${id}: Invalid pressure ${newNode.fluid.pressure}`);
       return 1000; // Definitely reject
     }
@@ -1233,23 +1255,22 @@ export function checkStateSanity(
     // Only check for vapor-like densities (v > 0.01 m³/kg = 10 L/kg)
     // Liquid water has v ≈ 0.001 m³/kg, so anything > 0.01 should have significant vapor energy
     if (v_specific > 0.01) {
-      const V_F_TRIPLE = 0.001;    // m³/kg - saturated liquid at triple point
-      const V_G_TRIPLE = 206;      // m³/kg - saturated vapor at triple point
-      const U_G_TRIPLE = 2375000;  // J/kg - saturated vapor internal energy at triple point
-
-      // Estimate quality at triple point for this specific volume
-      const x_est = Math.min(1, Math.max(0, (v_specific - V_F_TRIPLE) / (V_G_TRIPLE - V_F_TRIPLE)));
-
-      // Minimum u at this v (on the saturation dome at triple point temperature)
-      const u_min = x_est * U_G_TRIPLE;
-
-      if (u_specific < u_min * 0.9) {  // Allow 10% margin for numerical error
-        const deficit = (u_min - u_specific) / u_min;
-        console.warn(`[RK45 Sanity] ${id}: Energy too low for vapor density. ` +
+      // The floor is the water model's own: the ice-vapour tie line at
+      // MODEL_MIN_TEMPERATURE. It used to be built by hand from the triple
+      // point (u_min = x*u_g_triple, with a 10% margin), which put the floor
+      // at +1150 kJ/kg for a node at 100 m³/kg when the true floor there is
+      // -584 kJ/kg - so every step that cooled a gas space's moisture past the
+      // triple point was penalised, and the node could not be stepped below
+      // it. Sub-triple states are REAL states now; only genuinely
+      // unrepresentable energy is a fault.
+      const u_min = minimumSpecificEnergy(v_specific);
+      if (u_specific < u_min) {
+        const scale = Math.max(1e3, Math.abs(u_min));
+        const deficit = (u_min - u_specific) / scale;
+        console.warn(`[RK45 Sanity] ${id}: Energy below the water model's floor. ` +
           `u=${(u_specific/1e3).toFixed(1)} kJ/kg < u_min=${(u_min/1e3).toFixed(1)} kJ/kg ` +
-          `(v=${(v_specific*1e3).toFixed(1)} L/kg, x_est=${(x_est*100).toFixed(1)}%)`);
-        // Scale badness based on how far below minimum we are
-        const badness = 1 + deficit * 10;  // 10% below = badness 2, 50% below = badness 6
+          `(v=${v_specific.toExponential(3)} m³/kg)`);
+        const badness = 1 + deficit * 10;
         maxBadness = Math.max(maxBadness, badness);
       }
     }
@@ -1258,7 +1279,7 @@ export function checkStateSanity(
     // states (steam in contact with molten fuel can approach fuel temperature,
     // ~3400K) - it exists to catch NaN/divergence, not physical extremes.
     if (!isFinite(newNode.fluid.temperature) ||
-        newNode.fluid.temperature < 250 ||
+        newNode.fluid.temperature < MODEL_MIN_TEMPERATURE ||
         newNode.fluid.temperature > 5000) {
       console.warn(`[RK45 Sanity] ${id}: Invalid temperature ${newNode.fluid.temperature}`);
       return 1000;

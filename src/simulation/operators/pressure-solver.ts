@@ -75,6 +75,7 @@ import {
   saturatedLiquidEnergy,
   saturatedVaporEnergy,
   latentHeat,
+  iceCv,
   liquidCv,
   vaporCv,
 } from '../water-properties';
@@ -1479,30 +1480,55 @@ export class PressureSolver {
     const CvGas = nMoles > 0 ? nMoles * ncgMixtureCv(ncg!) : 0; // J/K
     const phase = node.fluid.phase;
 
-    if (phase !== 'liquid' && phase !== 'two-phase') {
+    // A node with ICE in it is a condensed/vapour EQUILIBRIUM just as much as
+    // a two-phase node is - heating it sublimes frost at nearly constant
+    // temperature, so its dP/dU is set by dP_sub/dT and the latent heat, not
+    // by the gas heat capacity. It reports phase 'vapor' (the aerosol
+    // convention), so test the ice fraction as well as the phase, and let the
+    // one saturated formula below cover both.
+    const iceFrac = node.fluid.iceFraction ?? 0;
+    if (phase !== 'liquid' && phase !== 'two-phase' && !(iceFrac > 0)) {
       const C_th = m_w * vaporCv(T) + CvGas;
       return P / (T * C_th);
     }
 
-    // Saturation-table evaluations stay inside [triple point, critical point]
-    const T_s = Math.min(Math.max(T, 273.16), 646.5);
-    const T_hi = Math.min(Math.max(T_s + 0.5, 274.16), 646.5);
+    // Saturation-table evaluations stay inside the TABLE's top (a two-phase
+    // node cannot exist above it anyway - it is a whisker below the critical
+    // point). There is no lower bound any more: the equilibrium line continues
+    // onto the SUBLIMATION curve below the triple point, and every accessor
+    // used here (saturationPressure, saturatedLiquidDensity, latentHeat)
+    // follows it. The old floor `Math.max(T, 273.16)` made a frost node's
+    // compliance be evaluated at the triple point, which reports a pressure
+    // slope 340x too small at 217 K and 611 Pa of phantom vapour pressure.
+    const T_s = Math.min(T, 646.5);
+    const T_hi = Math.min(T_s + 0.5, 646.5);
     const T_lo = T_hi - 1;
 
-    // Two-phase branch
+    // Condensed + vapour branch (liquid-vapour above the triple point,
+    // ice-vapour below it; on the triple line itself, both at once).
     const dPsat_dT = (saturationPressure(T_hi) - saturationPressure(T_lo)) / (T_hi - T_lo);
+    // quality is the NON-liquid fraction, so the vapour is what is left after
+    // the ice comes out of it. Above the triple point iceFrac is 0 and this is
+    // the old expression exactly.
     const x = node.fluid.quality ?? 0;
-    const m_v = m_w * x;
-    const m_l = m_w - m_v;
+    const m_v = m_w * Math.max(0, x - iceFrac);
+    const m_ice = m_w * iceFrac;
+    const m_l = m_w - m_v - m_ice;
     const R_WATER = 461.5; // J/(kg·K)
-    const V_vap = Math.max(0, V - m_l / saturatedLiquidDensity(T_s));
+    // Volume the vapour actually has: whatever the condensed phases - liquid
+    // at rho_f, ice at rho_ice - are not occupying. saturatedLiquidDensity
+    // returns the ICE density below the triple point, which is why the two
+    // terms can share one accessor.
+    const rho_condensed = saturatedLiquidDensity(T_s);
+    const V_vap = Math.max(0, V - (m_l + m_ice) / rho_condensed);
     const dmv_dT = (dPsat_dT * V_vap) / (R_WATER * T_s) - m_v / T_s;
     const C_eff =
-      m_l * liquidCv(T_s) + m_v * vaporCv(T_s) + dmv_dT * latentHeat(T_s) + CvGas;
+      m_l * liquidCv(T_s) + m_v * vaporCv(T_s) + m_ice * iceCv(T_s)
+      + dmv_dT * latentHeat(T_s) + CvGas;
     if (!(C_eff > 0)) {
       throw new Error(
         `[PressureSolver] Non-positive two-phase heat capacity for '${node.id}': ` +
-        `C_eff=${C_eff} J/K (m_l=${m_l}, m_v=${m_v}, dmv_dT=${dmv_dT}, ` +
+        `C_eff=${C_eff} J/K (m_l=${m_l}, m_v=${m_v}, m_ice=${m_ice}, dmv_dT=${dmv_dT}, ` +
         `V_vap=${V_vap}, T=${T} K, x=${x}) - heating a two-phase node must raise its pressure`
       );
     }
@@ -1569,14 +1595,24 @@ export class PressureSolver {
     const bulk = this.bulkEnthalpy(node);
     if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') return bulk;
 
-    const T_s = Math.min(Math.max(node.fluid.temperature, 273.16), 646.5);
+    // Table top only. The lower clamp that used to sit here (273.16 K) is
+    // gone: the equilibrium line continues onto the sublimation curve, and the
+    // accessors follow it. In practice this branch only runs for phase
+    // 'two-phase', which below the triple point means the triple line itself
+    // (T = 273.16 K exactly), so the clamp was never doing anything but hiding
+    // the question.
+    const T_s = Math.min(node.fluid.temperature, 646.5);
     const P_sat = saturationPressure(T_s);
     if (flowPhase === 'liquid') {
       return saturatedLiquidEnergy(T_s) + P_sat / saturatedLiquidDensity(T_s);
     }
     // Vapor draw: saturated steam sharing the vapor space with NCG (which
     // carries its enthalpy at Cp, flow work included)
-    const m_v = node.fluid.mass * (node.fluid.quality ?? 0);
+    // quality is the non-liquid fraction; the ice does not evaporate up the
+    // standpipe with the steam, so take it back out. Zero above the triple
+    // point, so this is the old expression there.
+    const m_v = node.fluid.mass
+      * Math.max(0, (node.fluid.quality ?? 0) - (node.fluid.iceFraction ?? 0));
     const m_g = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
     if (m_v + m_g <= 0) return bulk;
     const h_g = saturatedVaporEnergy(T_s) + P_sat / saturatedVaporDensity(T_s);

@@ -13,6 +13,13 @@
  * 4. No triangulation: Uses direct interpolation from nearby grid points
  *
  * Phase detection follows the principle: u < u_sat(v) → two-phase
+ *
+ * 5. BELOW THE TRIPLE POINT the same (u,v) description continues onto the
+ *    ice-vapour tie lines and through the triple line. See the "Sub-Triple-
+ *    Point Region" section for the ice line, the vapour-over-ice line, the
+ *    IAPWS-08 sublimation curve, and the triple triangle. (Extension approved
+ *    by the user 2026-09-08; a helium loop blowing down from 70 to 2 bar
+ *    cools its trace moisture to ~217 K, which is frost, not liquid.)
  */
 
 // ============================================================================
@@ -23,8 +30,48 @@ const T_CRIT = 647.096;     // K
 const P_CRIT = 22.064e6;    // Pa
 const RHO_CRIT = 322;       // kg/m³
 const T_TRIPLE = 273.16;    // K
+const P_TRIPLE = 611.657;   // Pa - IAPWS triple-point pressure
 const R_WATER = 461.5;      // J/kg-K
 const CV_LIQUID = 4186;     // J/kg-K
+
+// -- Sub-triple-point (ice) constants ----------------------------------------
+//
+// The lowest temperature this model admits. Below it the solve throws rather
+// than extrapolating: the sublimation-pressure equation is only certified to
+// 50 K, the ice caloric fit below is a two-term expansion about the triple
+// point, and nothing in this sandbox gets colder than a deep helium blowdown
+// (~200 K) or a cryogenic-free ambient. 150 K leaves ~50 K of headroom below
+// anything reachable and keeps the vapour-over-ice line's specific volume
+// (1.1e10 m³/kg at 150 K) inside double precision with room to spare.
+const T_MIN_MODEL = 150;    // K
+
+// Ice Ih density, held CONSTANT. Real ice contracts by ~2% between the triple
+// point and 150 K (beta_v ~ 1.6e-4 /K), which is negligible next to the
+// vapour specific volume that actually sets the tie line's quality split -
+// v_g/v_ice is 1.9e5 at the triple point and grows to 1e13 at 150 K - and a
+// constant keeps the ice line exactly vertical in (u,v), so no bracket can
+// ever be non-monotone in v. 917 kg/m³ is ice Ih at the triple point.
+const RHO_ICE = 917;              // kg/m³
+const V_ICE = 1 / RHO_ICE;        // 1.09051e-3 m³/kg
+const H_FUSION = 333.5e3;         // J/kg - enthalpy of fusion at the triple point
+const CP_ICE = 2.05e3;            // J/kg-K - ice Ih, held constant (2.10 at 273 K)
+// Caloric slope of the vapour-over-ice line. This is EXACTLY the cv_steam that
+// idealGasApproximation uses for dilute vapour, and it has to be, because that
+// path OWNS the region immediately above the vapour-over-ice line (v there is
+// always > 206 m³/kg, far past the grid). Sharing the constant makes both T and
+// P exactly continuous across the line: the ideal-gas path's T = T_t +
+// (u - u_g(T_t))/cv is the exact inverse of u_g(T) = u_g(T_t) - cv*(T_t - T),
+// and its Z is anchored at the same triple-point vapour state that Z_g is, so
+// P comes out to P_sub(T) on the line itself.
+//
+// The ideal-gas cv of cold steam is really ~1400 J/kg-K (cp 1860 minus R), so
+// this is 7% high. That buys the seam: with 1400 here the two descriptions
+// disagreed by 2.8 K and ~20% in P at v = 1e4 m³/kg, a step discontinuity in
+// the state function right where a blown-down gas loop crosses - and the RK45
+// error controller and the pressure solver's compliance both break on a step
+// (see the long note at the top of mixture-properties.ts). The cost is 0.2% on
+// the vapour's energy at 217 K, which is nothing next to h_sub.
+const CV_VAPOR_COLD = 1500;       // J/kg-K
 
 // ============================================================================
 // Data Types
@@ -35,7 +82,19 @@ export interface WaterState {
   pressure: number;       // Pa
   density: number;        // kg/m³
   phase: 'liquid' | 'two-phase' | 'vapor';
-  quality: number;        // 0-1 for two-phase, 0 for liquid, 1 for vapor
+  /**
+   * NON-LIQUID mass fraction: vapour + solid. Above the triple point there is
+   * no solid, so this is the ordinary vapour quality and every consumer that
+   * reads `1 - quality` as "the liquid fraction whose volume sets the level"
+   * is still exactly right. Below the triple point the ice rides with the gas
+   * (see the AEROSOL convention in the sub-triple section), so an ice-vapour
+   * node reports quality = 1 and puts the solid in `iceFraction`; the true
+   * vapour fraction is always `quality - iceFraction`.
+   */
+  quality: number;
+  /** Solid (ice) mass fraction, 0 for every state at or above the triple
+   *  point. Always <= quality. */
+  iceFraction: number;
   specificEnergy: number; // J/kg
 }
 
@@ -110,6 +169,13 @@ interface GridData {
 let saturationDome: SaturationDomeData | null = null;
 let gridPoints: GridPoint[] = [];
 let dataLoaded = false;
+
+/** The triple-point row of the saturation table, plus the vapour
+ *  compressibility there. Every sub-triple curve is anchored to it.
+ *  Set by buildSaturationTables(). */
+let tripleAnchor: {
+  u_f: number; v_f: number; u_g: number; v_g: number; P: number; Z_g: number;
+} | null = null;
 
 // Spatial index for grid lookup (by region)
 interface SpatialIndex {
@@ -386,6 +452,28 @@ function buildSaturationTables(): void {
         `findTempBracket cannot bracket such a table.`);
     }
   }
+
+  // Triple-point row, cached for the sub-triple branch. Every sub-triple
+  // curve is anchored to THESE numbers rather than to literals, so the
+  // ice-vapour and liquid-vapour descriptions meet exactly at 273.16 K.
+  const tp = rawData[0];
+  if (Math.abs(tp.T_K - T_TRIPLE) > 1e-6) {
+    throw new Error(`[WaterProps v4] Saturation table's first row is at T=${tp.T_K} K, not the ` +
+      `triple point ${T_TRIPLE} K. The sub-triple branch anchors every ice curve to that row.`);
+  }
+  tripleAnchor = {
+    u_f: tp.u_f * 1000,
+    v_f: tp.v_f,
+    u_g: tp.u_g * 1000,
+    v_g: tp.v_g,
+    P: tp.P_MPa * 1e6,
+    // Compressibility of saturated vapour AT the triple point. The
+    // vapour-over-ice line is an ideal gas at P_sub(T) with Z frozen at this
+    // value, which makes v_g(T_triple) come out to the table's own 205.997
+    // m³/kg instead of the ideal-gas 206.09 - i.e. the two descriptions share
+    // the point exactly. Z = 0.99943, so this really is an ideal gas.
+    Z_g: (tp.P_MPa * 1e6 * tp.v_g) / (R_WATER * tp.T_K),
+  };
 
   satT0 = satT[0];
   satBucketScale = SAT_BUCKETS / (satT[n - 1] - satT[0]);
@@ -1186,6 +1274,374 @@ function findTwoPhaseState(u: number, v: number): {
     P: P_sat_from_T(best.T),
     quality,
   };
+}
+
+// ============================================================================
+// Sub-Triple-Point Region: Ice-Vapour, the Triple Line, and Sublimation
+// ============================================================================
+//
+// WHY THIS EXISTS. Water colder than 273.16 K is not a corner case in a
+// sandbox that runs gas-cooled plants: a helium loop blowing down from 70 to
+// 2 bar expands its gas by a factor of 35, which is an isentropic temperature
+// ratio of about 4 - 900 K in, ~217 K out. Whatever moisture the loop carried
+// is frost at that point. Before this section the module simply had nothing
+// there: the dome test returned "outside", the (u,v) solve refused, and the
+// final validation threw for any T below the triple point, so a node driven to
+// the dome's floor could not go lower and the solver rejected every step that
+// tried. That is the "hx-1-shell pinned at 273.16 K" report.
+//
+// THE GEOMETRY. In (u, v) the sub-triple description is three curves and one
+// triangle, all anchored to the saturation table's own triple-point row:
+//
+//   ICE LINE          v = V_ICE (constant, see RHO_ICE)
+//                     u_ice(T) = u_f(T_t) - h_fus - cp_ice*(T_t - T)
+//   VAPOUR-OVER-ICE   v_g(T) = Z_g * R_v * T / P_sub(T)
+//                     u_g(T) = u_g(T_t) - cv_v*(T_t - T)
+//   SUBLIMATION       P_sub(T), IAPWS-08 (below)
+//
+//   TRIPLE TRIANGLE   the three phases coexist ONLY at T = 273.16 K, so in
+//                     (u,v) the triple "line" is the triangle whose vertices
+//                     are the ice, saturated-liquid and saturated-vapour
+//                     states at the triple point:
+//                        A = (V_ICE,  u_ice(T_t))     ice
+//                        B = (v_f,    u_f(T_t))       liquid
+//                        C = (v_g,    u_g(T_t))       vapour
+//                     Its B-C edge is EXACTLY the liquid-vapour dome's bottom
+//                     edge (the same u_bottom(v) expression isInsideTwoPhaseDome
+//                     uses, so no sliver of state space belongs to both or to
+//                     neither), its A-C edge is the ice-vapour tie line at the
+//                     triple point, and its A-B edge is the ice-liquid tie
+//                     line. Inside it T and P are pinned at 273.16 K /
+//                     611.657 Pa and the three phase fractions are the
+//                     barycentric coordinates - warming through the triangle
+//                     is melting at constant temperature.
+//
+//   ICE-VAPOUR        everything below the A-C edge and right of the ice
+//                     line: the tie lines swept from T_MIN_MODEL to T_t.
+//
+// Above the A-C edge is the triangle, above the B-C edge is the liquid-vapour
+// dome, so quality and phase are continuous across the dome's old floor.
+//
+// THE AEROSOL CONVENTION. An ice-vapour node is a well-mixed frost fog: no
+// stratification, no liquid level, a draw takes the mixture, and the ice moves
+// with the gas. It is therefore reported as phase 'vapor' with quality = 1 and
+// the solid in `iceFraction`, which is exactly the vapour treatment at every
+// consumer that asks "is this stratified / where is the level / what does a
+// port at this elevation draw". A new phase VALUE was the alternative and
+// would have been worse: `phase === 'vapor'` is tested in ~240 places, and a
+// value none of them know would silently route a frost node into whichever
+// branch happens to be the `else`.
+
+/**
+ * Sublimation pressure of ice Ih, IAPWS R14-08 (rev. 2011), eq. 6:
+ *
+ *   ln(P_sub/P_t) = (1/theta) * SUM a_i * theta^b_i,   theta = T/T_t
+ *
+ * Wagner, Riethmann, Feistel & Harvey, "New Equations for the Sublimation
+ * Pressure and Melting Pressure of H2O Ice Ih", J. Phys. Chem. Ref. Data 40,
+ * 043103 (2011). Certified 50 K <= T <= 273.16 K, and exact at the triple
+ * point (the three a_i sum to zero there).
+ *
+ * A Clausius-Clapeyron fit would have been the shortcut and is ~15% low on
+ * P_sub by 200 K, because h_sub is not constant - it falls from 2834 to
+ * ~2790 kJ/kg over that range. The correlation costs three pow() calls and
+ * has no such drift.
+ */
+export function sublimationPressure(T_K: number): number {
+  const theta = T_K / T_TRIPLE;
+  const s = -0.212144006e2 * Math.pow(theta, 0.333333333e-2)
+          + 0.273203819e2 * Math.pow(theta, 0.120666667e1)
+          - 0.610598130e1 * Math.pow(theta, 0.170333333e1);
+  return P_TRIPLE * Math.exp(s / theta);
+}
+
+/** Inverse of sublimationPressure. P_sub is strictly increasing in T. */
+function temperatureFromSublimationPressure(P: number): number {
+  let lo = T_MIN_MODEL;
+  let hi = T_TRIPLE;
+  const P_lo = sublimationPressure(lo);
+  if (!(P >= P_lo)) {
+    throw new Error(
+      `[WaterProps v4] Sublimation pressure ${P.toExponential(3)} Pa is below the model's ` +
+      `floor ${P_lo.toExponential(3)} Pa (ice at ${T_MIN_MODEL} K). Nothing in this ` +
+      `simulation should be that cold - check the caller's temperature/pressure bookkeeping.`);
+  }
+  for (let i = 0; i < 200; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (!(mid > lo && mid < hi)) break;
+    if (sublimationPressure(mid) <= P) lo = mid; else hi = mid;
+    if (hi - lo <= 1e-12 * hi) break;
+  }
+  return 0.5 * (lo + hi);
+}
+
+/** Specific internal energy of ice Ih on the sublimation line (J/kg).
+ *  Reference: u = u_f(273.16) from the saturation table (IAPWS sets it to
+ *  zero), minus the enthalpy of fusion, minus sensible cooling of the solid.
+ *  So u_ice is NEGATIVE everywhere - which is what makes a "negative internal
+ *  energy is impossible" test wrong below the triple point. */
+function iceEnergyAtT(T: number): number {
+  return tripleAnchor!.u_f - H_FUSION - CP_ICE * (T_TRIPLE - T);
+}
+
+/** Specific internal energy of water vapour on the sublimation line (J/kg). */
+function vaporOverIceEnergyAtT(T: number): number {
+  return tripleAnchor!.u_g - CV_VAPOR_COLD * (T_TRIPLE - T);
+}
+
+/** Specific volume of water vapour on the sublimation line (m³/kg). */
+function vaporOverIceVolumeAtT(T: number): number {
+  return (tripleAnchor!.Z_g * R_WATER * T) / sublimationPressure(T);
+}
+
+/**
+ * Latent heat of sublimation as an ENTHALPY difference (J/kg):
+ *   h_sub = (u_g + P v_g) - (u_ice + P v_ice)
+ * 2834 kJ/kg at the triple point, which is the textbook value and is also
+ * exactly h_fg + h_fus there (2500.9 + 333.5). Nothing in this module assumes
+ * that number - it falls out of the three curves above.
+ */
+export function latentHeatSublimation(T: number): number {
+  loadDataSync();
+  const P = sublimationPressure(T);
+  const v_g = vaporOverIceVolumeAtT(T);
+  return (vaporOverIceEnergyAtT(T) + P * v_g) - (iceEnergyAtT(T) + P * V_ICE);
+}
+
+/** The model's lowest temperature, and the pressure of ice there. Consumers
+ *  that need a physical floor for a sanity guard should use these instead of
+ *  the triple point. */
+export const MODEL_MIN_TEMPERATURE = T_MIN_MODEL;
+export function modelMinPressure(): number {
+  return sublimationPressure(T_MIN_MODEL);
+}
+/** The lowest specific internal energy any state in this model can have
+ *  (J/kg): ice at T_MIN_MODEL. NEGATIVE - IAPWS puts u = 0 at saturated
+ *  liquid at the triple point, so everything colder is below zero. Any search
+ *  bracket over the water's specific energy has to start here. */
+export function modelMinSpecificEnergy(): number {
+  loadDataSync();
+  return iceEnergyAtT(T_MIN_MODEL);
+}
+
+/** The ice-vapour tie line evaluated at one temperature: both quality
+ *  estimates for the query state, and the tie line's own endpoints. */
+interface IceVaporTie {
+  P: number;
+  v_ice: number; v_g: number;
+  u_ice: number; u_g: number;
+  x_v: number; x_u: number; diff: number;
+}
+
+function iceVaporTieAt(T: number, u: number, v: number): IceVaporTie {
+  const P = sublimationPressure(T);
+  const v_g = (tripleAnchor!.Z_g * R_WATER * T) / P;
+  const u_ice = iceEnergyAtT(T);
+  const u_g = vaporOverIceEnergyAtT(T);
+  const x_v = (v - V_ICE) / (v_g - V_ICE);
+  const x_u = (u - u_ice) / (u_g - u_ice);
+  return { P, v_ice: V_ICE, v_g, u_ice, u_g, x_v, x_u, diff: x_v - x_u };
+}
+
+/**
+ * The lowest specific internal energy this model admits at specific volume v
+ * (J/kg). At the ice-vapour end that is the tie line at T_MIN_MODEL; for
+ * vapour too dilute for that tie line to reach, the vapour line's own energy
+ * there; and for anything denser than ice, the triple point's u_f, because
+ * bulk freezing is not modelled at all.
+ *
+ * Sanity guards elsewhere used to build this floor from the triple point
+ * (u_min = x*u_g_triple), which is the reason a node whose water had gone to
+ * frost saw every step rejected: the true floor at v = 100 m³/kg is
+ * -584 kJ/kg, not +1150.
+ */
+export function minimumSpecificEnergy(v: number): number {
+  loadDataSync();
+  if (v <= V_ICE) return tripleAnchor!.u_f;
+  const tie = iceVaporTieAt(T_MIN_MODEL, 0, v);
+  if (tie.x_v >= 1) return tie.u_g;
+  return tie.u_ice + tie.x_v * (tie.u_g - tie.u_ice);
+}
+
+/** Barycentric decomposition of a point inside the triple triangle. */
+interface TripleLineState {
+  T: number; P: number;
+  iceFraction: number; liquidFraction: number; vaporFraction: number;
+}
+
+/**
+ * Is (u, v) inside the triple triangle A(ice) B(liquid) C(vapour)?
+ *
+ * The B-C test reuses the liquid-vapour dome's own u_bottom(v) expression
+ * verbatim, so the triangle's roof and the dome's floor are the same line to
+ * the last bit. The A-C and A-B edges are the ice-vapour and ice-liquid tie
+ * lines at the triple point.
+ */
+function findTripleLineState(u: number, v: number): TripleLineState | null {
+  const a = tripleAnchor!;
+  const v_A = V_ICE, u_A = iceEnergyAtT(T_TRIPLE);
+  const v_B = a.v_f, u_B = a.u_f;
+  const v_C = a.v_g, u_C = a.u_g;
+
+  // Outside the triangle's v extent - cheapest possible rejection, and it is
+  // what keeps every compressed-liquid query (v < v_f) out of the arithmetic.
+  if (v < v_B || v > v_C) return null;
+
+  // Roof: the dome's bottom edge, same expression as isInsideTwoPhaseDome.
+  const t_BC = (v - v_B) / (v_C - v_B);
+  if (u > u_B + t_BC * (u_C - u_B)) return null;
+
+  // Floor on the dilute side: the ice-vapour tie line at the triple point.
+  const t_AC = (v - v_A) / (v_C - v_A);
+  if (u < u_A + t_AC * (u_C - u_A)) return null;
+
+  // Dense side: the ice-liquid tie line. Written as a cross product so no
+  // range logic is needed for a query whose u lies outside [u_A, u_B].
+  // The interior is on C's side of A-B, which is the positive side.
+  const crossAB = (v_A - v_B) * (u - u_B) - (u_A - u_B) * (v - v_B);
+  if (crossAB < 0) return null;
+
+  // Barycentric coordinates: mass fractions of ice, liquid and vapour.
+  const det = (v_B - v_A) * (u_C - u_A) - (v_C - v_A) * (u_B - u_A);
+  const liquidFraction = ((v - v_A) * (u_C - u_A) - (v_C - v_A) * (u - u_A)) / det;
+  const vaporFraction = ((v_B - v_A) * (u - u_A) - (v - v_A) * (u_B - u_A)) / det;
+  const iceFraction = 1 - liquidFraction - vaporFraction;
+  return {
+    T: T_TRIPLE,
+    P: a.P,
+    iceFraction,
+    liquidFraction,
+    vaporFraction,
+  };
+}
+
+/** What the sub-triple geometry says about a point that is NOT inside the
+ *  liquid-vapour dome and NOT inside the triple triangle. */
+type SubTripleVerdict =
+  /** Warmer than the triple point at this v: not our business. */
+  | { kind: 'above-triple' }
+  /** Frost fog: ice + vapour in equilibrium on the sublimation line. */
+  | { kind: 'ice-vapor'; T: number; P: number; vaporFraction: number }
+  /** Beyond the vapour-over-ice line: single-phase vapour whose pressure is
+   *  below P_sub(T). Not sub-triple two-phase; hand it to the vapour path. */
+  | { kind: 'superheated-over-ice' }
+  /** Colder than the model's floor. */
+  | { kind: 'below-model-floor'; T_tie: number; u_tie: number }
+  /** Denser than ice and below the triple line: a pipe of water going solid. */
+  | { kind: 'bulk-freezing' };
+
+/**
+ * Locate (u, v) against the ice-vapour tie lines.
+ *
+ * The residual diff(T) = x_v(T) - x_u(T) is STRICTLY INCREASING in T for any
+ * v > V_ICE, which is worth spelling out because it is what makes one
+ * bisection sufficient and unambiguous: v_g(T) shrinks as T rises (P_sub grows
+ * 8%/K at the triple point against 0.4%/K for T) so x_v rises, while u_ice(T)
+ * rises and (u_g - u_ice)(T) shrinks so x_u falls. One root at most, ever.
+ *
+ * A sign change alone is NOT enough to call a point two-phase, though - a very
+ * dilute superheated vapour brackets a root too, at a quality above 1. The
+ * verdict is therefore taken from the ROOT'S QUALITY, which is the purely
+ * geometric statement "does the point lie ON a tie line, between its two
+ * ends", not from the residual's sign.
+ */
+function classifySubTriple(u: number, v: number): SubTripleVerdict {
+  if (v <= V_ICE) {
+    // Denser than ice: no tie line reaches here, so the only question is
+    // whether the state is below the triple point at all. The 273.16 K
+    // boundary on this side is the triangle's ice-liquid edge between v_f and
+    // v_ice, and denser than v_f there is no ice-liquid mixture - the 273.16 K
+    // compressed-liquid isotherm takes over, and it is very nearly vertical in
+    // (u,v) (u rises ~2 kJ/kg from saturation to 100 MPa), so u_f(T_triple) is
+    // the boundary. That last step is the only approximation in this whole
+    // section, and all it decides is WHICH loud error a state gets: both sides
+    // of it are outside what the model represents.
+    const a = tripleAnchor!;
+    let u_boundary: number;
+    if (v >= a.v_f) {
+      const t = (v - a.v_f) / (V_ICE - a.v_f);
+      u_boundary = a.u_f + t * (iceEnergyAtT(T_TRIPLE) - a.u_f);
+    } else {
+      u_boundary = a.u_f;
+    }
+    return u < u_boundary ? { kind: 'bulk-freezing' } : { kind: 'above-triple' };
+  }
+
+  let tie_lo = iceVaporTieAt(T_MIN_MODEL, u, v);
+  let tie_hi = iceVaporTieAt(T_TRIPLE, u, v);
+
+  // Root above the triple point: nothing sub-triple here.
+  if (tie_hi.diff < 0) return { kind: 'above-triple' };
+
+  // Root below the model's floor - or off the dilute end of the coldest tie
+  // line, which is a different thing entirely. x_v(T_MIN) tells them apart:
+  // at or inside the tie line's vapour end the state really is colder than
+  // T_MIN; beyond it, the tie line simply does not reach this specific volume
+  // and the state is single-phase vapour.
+  if (tie_lo.diff > 0) {
+    if (tie_lo.x_v <= 1) {
+      return {
+        kind: 'below-model-floor',
+        T_tie: T_MIN_MODEL,
+        u_tie: tie_lo.u_ice + tie_lo.x_v * (tie_lo.u_g - tie_lo.u_ice),
+      };
+    }
+    return { kind: 'superheated-over-ice' };
+  }
+
+  // ------------------------------------------------------------------------
+  // Same bisection findTwoPhaseState uses, with the ice line in place of the
+  // liquid line, and the same relative TWO-OUTPUT stopping rule: bound the
+  // spread of both quality estimates AND of the pressure across the bracket,
+  // each relative to its own magnitude. The reason is the same one written up
+  // at length there - a tolerance on T alone cannot work when the two outputs
+  // have opposite sensitivities to it - and it is sharper down here, because
+  // dP_sub/P_sub is 8%/K at the triple point and 25%/K at 150 K, an order of
+  // magnitude stiffer in pressure than the liquid-vapour line.
+  // ------------------------------------------------------------------------
+  const EPS_REL = 1e-5;
+  const MAX_ITER = 200;
+  let T_lo = T_MIN_MODEL;
+  let T_hi = T_TRIPLE;
+  let best = Math.abs(tie_lo.diff) <= Math.abs(tie_hi.diff)
+    ? { T: T_lo, tie: tie_lo } : { T: T_hi, tie: tie_hi };
+  let converged = false;
+
+  for (let iter = 0; iter < MAX_ITER; iter++) {
+    const xTol = EPS_REL * Math.abs(
+      0.25 * (tie_lo.x_v + tie_lo.x_u + tie_hi.x_v + tie_hi.x_u));
+    if (Math.abs(tie_hi.x_u - tie_lo.x_u) <= xTol &&
+        Math.abs(tie_hi.x_v - tie_lo.x_v) <= xTol &&
+        Math.abs(tie_hi.P - tie_lo.P) <= EPS_REL * 0.5 * (tie_lo.P + tie_hi.P)) {
+      converged = true;
+      break;
+    }
+    if (T_hi - T_lo <= 4 * Number.EPSILON * T_hi) { converged = true; break; }
+    const T_mid = 0.5 * (T_lo + T_hi);
+    if (!(T_mid > T_lo && T_mid < T_hi)) { converged = true; break; }
+
+    const tie_mid = iceVaporTieAt(T_mid, u, v);
+    if (Math.abs(tie_mid.diff) < Math.abs(best.tie.diff)) best = { T: T_mid, tie: tie_mid };
+    if (tie_mid.diff === 0) { best = { T: T_mid, tie: tie_mid }; converged = true; break; }
+    if (tie_lo.diff * tie_mid.diff < 0) { T_hi = T_mid; tie_hi = tie_mid; }
+    else { T_lo = T_mid; tie_lo = tie_mid; }
+  }
+
+  if (!converged) {
+    throw new Error(
+      `[WaterProps v4] Ice-vapour root did not converge in ${MAX_ITER} iterations at ` +
+      `u=${(u / 1e3).toFixed(9)} kJ/kg, v=${v.toExponential(12)} m³/kg. Bracket ` +
+      `[${T_lo.toFixed(12)}, ${T_hi.toFixed(12)}] K, residual x_v-x_u = ` +
+      `${tie_lo.diff.toExponential(3)} .. ${tie_hi.diff.toExponential(3)}. ` +
+      `diff(T) is strictly increasing by construction, so a bisection cannot ` +
+      `fail here without a broken sublimation curve.`);
+  }
+
+  const x = 0.5 * (best.tie.x_v + best.tie.x_u);
+  // Beyond the vapour end of the tie line: the state is a vapour at a
+  // pressure below P_sub(T), i.e. genuinely superheated over ice.
+  if (x > 1) return { kind: 'superheated-over-ice' };
+  return { kind: 'ice-vapor', T: best.T, P: best.tie.P, vaporFraction: x };
 }
 
 // ============================================================================
@@ -2125,7 +2581,12 @@ export function soundSpeed(state: WaterState): number {
   // Two-phase sound speed can be VERY low (down to ~20 m/s) due to
   // the compressibility of vapor combined with the inertia of liquid
 
-  const x = state.quality;  // Mass quality
+  // Mass fraction of VAPOUR. quality is the non-liquid fraction, so on the
+  // triple line (ice + liquid + vapour at 273.16 K) the ice has to come back
+  // out of it - it belongs with the condensed phase in Wood's equation, not
+  // with the gas. Identical to `state.quality` for every state at or above the
+  // triple point, where iceFraction is zero.
+  const x = state.quality - state.iceFraction;
 
   // Get saturation properties
   const T_sat = state.temperature;
@@ -2355,15 +2816,6 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
     v_ref = triple.v_g;  // m³/kg at the triple point (~206)
   }
 
-  // Check that u is above saturation (superheated)
-  if (u < satProps.u_g && inLowPressureRegion) {
-    throw new Error(
-      `[WaterProps v4] idealGasApproximation called for sub-saturation energy: ` +
-      `u=${u_kJ.toFixed(2)} kJ/kg < u_g=${(satProps.u_g/1000).toFixed(2)} kJ/kg at v=${v.toFixed(4)} m³/kg. ` +
-      `This state should be two-phase, not ideal gas.`
-    );
-  }
-
   // Temperature from energy: T = T_sat + (u - u_g) / cv.
   // NOTE: a temperature-dependent cv (the CV_A + CV_B*T form that
   // superheatedVaporExtrapolation uses) is the better caloric model in
@@ -2385,6 +2837,38 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
 
   // Calculate pressure using the calibrated Z
   const P = Z * rho * R_WATER * T;
+
+  // The state must be ABOVE the equilibrium line, or it is a condensed
+  // mixture and does not belong on this path. Which line that is depends on
+  // where we are: vaporisation above the triple point, SUBLIMATION below it.
+  //
+  // This test used to read `u < u_g(T_sat)` and fire before T was even
+  // computed, with the reference pinned at the triple point for anything more
+  // dilute than v_g there. That is wrong below 273.16 K: at v = 1e4 m³/kg the
+  // vapour-over-ice line sits at 231 K and 2317 kJ/kg, so the whole band
+  // 2317..2375 kJ/kg is legitimate cold vapour and the old form rejected all
+  // of it - the last thing standing between a blown-down helium loop and its
+  // own frost point. Comparing PRESSURES against the line the state is
+  // actually near needs no inversion of v_g(T) and covers both regimes.
+  //
+  // NOTE the equilibrium pressure is evaluated at the STATE'S OWN T, not at
+  // the reference's. For v > 206 m³/kg the reference is the triple point, and
+  // its 611.657 Pa says nothing about a 400 K vapour out at v = 261 m³/kg -
+  // whose saturation pressure is 2.5 bar.
+  if (inLowPressureRegion) {
+    const P_equilibrium = T < T_TRIPLE ? sublimationPressure(T) : P_sat_from_T(T);
+    if (P > P_equilibrium * (1 + 1e-9)) {
+      throw new Error(
+        `[WaterProps v4] idealGasApproximation called for a CONDENSED state: ` +
+        `u=${u_kJ.toFixed(3)} kJ/kg, v=${v.toFixed(4)} m³/kg gives T=${T.toFixed(3)} K, ` +
+        `P=${P.toExponential(4)} Pa, which is above the equilibrium ` +
+        `${T < T_TRIPLE ? 'sublimation' : 'saturation'} pressure ` +
+        `${P_equilibrium.toExponential(4)} Pa there. This state is two-phase ` +
+        `(or ice-vapour), not a single-phase gas - the dome/sub-triple ` +
+        `classification in calculateState should have caught it first.`
+      );
+    }
+  }
 
   return { T, P };
 }
@@ -2591,6 +3075,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
         density: rho,
         phase: 'two-phase',
         quality: twoPhase.quality,
+        iceFraction: 0,
         specificEnergy: u,
       };
     }
@@ -2641,30 +3126,88 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     );
   }
 
-  // Check for states below the triple point pressure, which are ice-vapor mixes.
-  const v_f_min = rawData[0].v_f;  // ~0.001 m³/kg at triple point
-  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
-
-  // Saturation data is in kJ/kg, convert to J/kg for comparison with u
-  const u_f_min = rawData[0].u_f * 1000;  // ~0 J/kg at triple point
+  // ------------------------------------------------------------------------
+  // Below the triple point. This used to be a flat throw ("IMPOSSIBLE STATE:
+  // below triple point (ice-vapor region)"), which is what pinned a node whose
+  // water had gone to frost at 273.16 K - every step that tried to take it
+  // lower was rejected. It is now the real sub-triple description: the triple
+  // triangle, the ice-vapour tie lines, and single-phase vapour over ice. See
+  // the "Sub-Triple-Point Region" section.
+  //
+  // Nothing at or above the triple point can reach any of this: the whole
+  // sub-triple set has u < u_g(T_triple) (the triangle's vapour vertex is its
+  // highest-energy point, and the vapour-over-ice line only falls from there),
+  // so one comparison keeps the entire branch off the hot path.
+  // ------------------------------------------------------------------------
   const u_g_triple = rawData[0].u_g * 1000;  // ~2375 kJ/kg at triple point
+  if (u < u_g_triple) {
+    // Three phases at once: T and P are pinned, the fractions are barycentric.
+    const triple = findTripleLineState(u, v);
+    if (triple) {
+      return {
+        temperature: triple.T,
+        pressure: triple.P,
+        density: rho,
+        phase: triple.liquidFraction > 0 ? 'two-phase' : 'vapor',
+        // Non-liquid fraction, so `1 - quality` is the liquid whose volume
+        // sets a level. The vapour part is quality - iceFraction.
+        quality: triple.iceFraction + triple.vaporFraction,
+        iceFraction: triple.iceFraction,
+        specificEnergy: u,
+      };
+    }
 
-  // Check if it's below the triple point pressure (bottom edge of dome):
-  // Linear interpolation between (v_f, u_f) and (v_g, u_g) at triple point
-  const t = (v - v_f_min) / (v_g_max - v_f_min);
-  const u_bottom = u_f_min + t * (u_g_triple - u_f_min);
-  if (u < u_bottom) {
-    const x_est = (v - v_f_min) / (v_g_max - v_f_min);
-    if (x_est < 1.0) { // later maybe we change this so high-quality ice-vapor mix acts like vapor.
+    const verdict = classifySubTriple(u, v);
+    if (verdict.kind === 'ice-vapor') {
+      // AEROSOL: well mixed, no level, the ice rides with the gas. Reported as
+      // vapour with quality 1 so every level/draw/stratification consumer
+      // treats it as the gas node it behaves like, with the solid declared
+      // separately in iceFraction.
+      return {
+        temperature: verdict.T,
+        pressure: verdict.P,
+        density: rho,
+        phase: 'vapor',
+        quality: 1,
+        iceFraction: 1 - verdict.vaporFraction,
+        specificEnergy: u,
+      };
+    }
+    if (verdict.kind === 'below-model-floor') {
       throw new Error(
-        `[WaterProps v4] IMPOSSIBLE STATE: below triple point (ice-vapor region).\n` +
-        `  v=${(v * 1e6).toFixed(2)} mL/kg, u=${(u / 1e3).toFixed(2)} kJ/kg\n` +
-        `  At this specific volume, minimum energy for two-phase is u_bottom=${(u_bottom / 1e3).toFixed(2)} kJ/kg.\n` +
-        `  Estimated quality x=${(x_est * 100).toFixed(1)}% (ice-vapor mix at triple point).\n` +
-        `  This state has vapor-like density but not enough energy to be vapor.\n` +
-        `  Check mass/energy balance - likely more mass left than energy, or NCG calculation error.`
+        `[WaterProps v4] BELOW THE MODEL'S LOWEST TEMPERATURE (${T_MIN_MODEL} K).\n` +
+        `  v=${v.toExponential(6)} m³/kg, u=${(u / 1e3).toFixed(3)} kJ/kg\n` +
+        `  The coldest ice-vapour tie line this model carries (T=${verdict.T_tie} K, ` +
+        `P_sub=${sublimationPressure(verdict.T_tie).toExponential(3)} Pa) holds ` +
+        `u=${(verdict.u_tie / 1e3).toFixed(3)} kJ/kg at this specific volume, and this ` +
+        `state is colder still.\n` +
+        `  The sub-triple branch stops at ${T_MIN_MODEL} K on purpose: the IAPWS-08 ` +
+        `sublimation equation is certified to 50 K but the ice caloric fit here is an ` +
+        `expansion about the triple point, and nothing in this simulation should be ` +
+        `colder than a deep gas blowdown (~200 K).\n` +
+        `  Check the caller's energy bookkeeping - this is almost always energy ` +
+        `leaving a node faster than mass.`
       );
     }
+    if (verdict.kind === 'bulk-freezing') {
+      throw new Error(
+        `[WaterProps v4] BULK FREEZING IS NOT MODELLED.\n` +
+        `  v=${(v * 1e6).toFixed(3)} mL/kg, u=${(u / 1e3).toFixed(3)} kJ/kg, ` +
+        `rho=${rho.toFixed(1)} kg/m³\n` +
+        `  This state is below the triple line at liquid/ice density (denser than ice, ` +
+        `v_ice=${(V_ICE * 1e6).toFixed(3)} mL/kg) - a tank or pipe of liquid water going ` +
+        `solid. The sub-triple branch covers the ice-VAPOUR region (a frost aerosol in a ` +
+        `gas space), not a solid plug: freezing a liquid inventory changes the flow ` +
+        `network's topology (blockage, and ice expands by 9% against the pipe), which ` +
+        `this model has no representation for.\n` +
+        `  If a plant is meant to freeze a line, that is a feature to build, not a state ` +
+        `to interpolate.`
+      );
+    }
+    // 'above-triple' and 'superheated-over-ice' both fall through to the
+    // single-phase branch below - the latter is an ordinary (very dilute)
+    // vapour that happens to sit below 273 K, and the ideal-gas path already
+    // owns that region.
   }
 
   // Primary criterion is density - liquid is much denser than vapor
@@ -2814,8 +3357,19 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   // Ceiling admits severe-accident superheat (steam near molten fuel). Above
   // ~2500K dissociation makes the ideal-gas extension overestimate T, which
   // is qualitatively acceptable for the sandbox; NaN/divergence still throws.
-  if (T < T_TRIPLE || T > 5000) {
-    throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg)`);
+  //
+  // FLOOR: the model's lowest temperature, not the triple point. A vapour can
+  // legitimately be colder than 273.16 K as long as its pressure is below the
+  // sublimation pressure there - a helium loop's trace moisture after a
+  // blowdown to 2 bar is exactly that, at ~217 K and a few pascals - and it is
+  // the SINGLE-PHASE branch that lands here, so admitting it does not touch
+  // the two-phase or ice-vapour paths (both return above). This floor used to
+  // read T_TRIPLE, and it is why a node whose water had gone cold could not be
+  // stepped below the dome's bottom edge at all.
+  if (T < T_MIN_MODEL || T > 5000) {
+    throw new Error(`[WaterProps v4] Temperature out of range: T=${T.toFixed(2)} K ` +
+      `(u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath}). ` +
+      `The model floor is ${T_MIN_MODEL} K - see the sub-triple section for why.`);
   }
 
   lastCalculationPath = calculationPath;
@@ -2831,6 +3385,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
     density: rho,
     phase,
     quality: phase === 'vapor' ? 1 : 0,
+    iceFraction: 0,
     specificEnergy: u,
   };
 }
@@ -2839,14 +3394,38 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
 // Exported Saturation Functions
 // ============================================================================
 
+/**
+ * Equilibrium vapour pressure of water over its condensed phase (Pa).
+ *
+ * Above the triple point that is the saturation line from the tables; below
+ * it, the condensed phase is ICE and the equilibrium pressure is the
+ * sublimation pressure. Continuing the line is not a nicety: findTempBracket
+ * clamps to the table's first row, so this function used to return 611.657 Pa
+ * for ANY temperature below 273.16 K, which is 340x the true value at 217 K.
+ * Every consumer that asks "what is the water partial pressure at this wall"
+ * (the frost point, the condensation model's interface composition) was
+ * therefore told a cold wall was in equilibrium with 611 Pa of vapour and
+ * would not deposit.
+ */
 export function saturationPressure(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return sublimationPressure(T);
   return P_sat_from_T(T);
 }
 
+/**
+ * Temperature at which water's equilibrium vapour pressure is P (K) - i.e.
+ * the dew point above the triple point and the FROST POINT below it.
+ *
+ * Below P_triple the table's binary search would extrapolate linearly in P off
+ * its first row, which is meaningless (P_sub falls exponentially); invert the
+ * sublimation curve instead.
+ */
 export function saturationTemperature(P: number): number {
   loadDataSync();
   if (!saturationDome) throw new Error('Saturation dome not loaded');
+
+  if (P < tripleAnchor!.P) return temperatureFromSublimationPressure(P);
 
   // Binary search on raw data
   const rawData = saturationDome.raw_data;
@@ -2865,30 +3444,52 @@ export function saturationTemperature(P: number): number {
   return rawData[lo].T_K + t * (rawData[hi].T_K - rawData[lo].T_K);
 }
 
+// The four saturated-property accessors below continue onto the SUBLIMATION
+// line for T < T_triple, where the condensed phase is ice: density RHO_ICE,
+// energy u_ice(T), and the vapour on the vapour-over-ice line. Without the
+// branch findTempBracket clamps them all to the triple-point row, which tells
+// a caller working at 217 K that the condensate is liquid water at 1000 kg/m³
+// with u = 0 - a fabrication, and one that quietly loses the heat of fusion.
+
 export function saturatedLiquidDensity(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return RHO_ICE;
   const v_f = v_f_from_T(T);
   return 1 / v_f;
 }
 
 export function saturatedVaporDensity(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return 1 / vaporOverIceVolumeAtT(T);
   const v_g = v_g_from_T(T);
   return 1 / v_g;
 }
 
 export function saturatedLiquidEnergy(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return iceEnergyAtT(T);
   return u_f_from_T(T);
 }
 
 export function saturatedVaporEnergy(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return vaporOverIceEnergyAtT(T);
   return u_g_from_T(T);
 }
 
+/**
+ * Latent heat of the phase change at T, as an INTERNAL-energy difference
+ * between the vapour and the condensed phase (J/kg).
+ *
+ * Above the triple point that is u_g - u_f (vaporisation, ~2375 kJ/kg at 273 K
+ * falling to zero at the critical point). Below it the condensed phase is ice
+ * and the change is SUBLIMATION: u_g - u_ice, ~2708 kJ/kg. Without this branch
+ * the table clamp made a depositing wall pay only the heat of vaporisation and
+ * left the heat of fusion (333 kJ/kg, 12% of the total) unaccounted for.
+ */
 export function latentHeat(T: number): number {
   loadDataSync();
+  if (T < T_TRIPLE) return vaporOverIceEnergyAtT(T) - iceEnergyAtT(T);
   return u_g_from_T(T) - u_f_from_T(T);
 }
 
@@ -2922,6 +3523,14 @@ export function liquidCv(_T: number): number {
 
 export function vaporCv(T: number): number {
   return 1400 + 0.47 * Math.max(0, T - 373);
+}
+
+/** Specific heat of ice Ih (J/kg-K). Held constant, like liquidCv - the real
+ *  value runs from 2.10 kJ/kg-K at the triple point to ~1.4 at 150 K, and this
+ *  is the same 2.05 the ice line's caloric model uses, so a node's heat
+ *  capacity and its energy never disagree about the solid. */
+export function iceCv(_T?: number): number {
+  return CP_ICE;
 }
 
 export async function preloadWaterProperties(): Promise<void> {

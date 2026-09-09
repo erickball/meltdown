@@ -862,6 +862,7 @@ export class FlowOperator implements PhysicsOperator {
           : fluid.mass / node.volume,
       phase: phase === 'two-phase' ? 'two-phase' : phase,
       quality: fluid.phase === 'two-phase' ? fluid.quality : (phase === 'vapor' ? 1 : 0),
+      iceFraction: fluid.iceFraction ?? 0,
       specificEnergy: fluid.internalEnergy / fluid.mass,
     };
   }

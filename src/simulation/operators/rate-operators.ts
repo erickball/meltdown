@@ -907,6 +907,13 @@ function wallAdjacentGas(
   // ~20% of a four-loop step.
   if (T_wall >= T_bulk) return dry;
 
+  // Dew point above the triple point; FROST POINT below it. Both come out of
+  // the same accessor now that the equilibrium line continues onto the
+  // sublimation curve, so there is no cold-wall branch here - which matters,
+  // because the previous behaviour was worse than missing: saturationPressure
+  // clamped to the table's first row, so a wall at 217 K was reported as
+  // sitting in equilibrium with 611 Pa of vapour instead of 1.8 Pa, and a
+  // trace-moisture gas loop's walls therefore never deposited at all.
   const yBulk = nSteam / (nSteam + nNcg);
   const dewPoint = Water.saturationTemperature(yBulk * P);
   if (T_wall >= dewPoint) return dry;
@@ -2558,14 +2565,14 @@ export class TurbineCondenserRateOperator implements RateOperator {
 export class FluidStateConstraintOperator implements ConstraintOperator {
   name = 'FluidState';
 
-  // Latent heat of fusion for water: 334 kJ/kg
-  private static readonly LATENT_HEAT_FUSION = 334000; // J/kg
-  // Freezing point
-  private static readonly T_FREEZE = 273.15; // K
-  // Specific heat of liquid water near freezing
-  private static readonly CP_WATER = 4186; // J/kg-K
-  // Maximum allowed ice fraction before throwing error
-  private static readonly MAX_ICE_FRACTION = 0.5;
+  // (No freezing constants here any more. This class used to carry its own
+  // ice model - LATENT_HEAT_FUSION / T_FREEZE / CP_WATER / MAX_ICE_FRACTION -
+  // which pinned any node heading below 273.15 K at exactly that temperature,
+  // relabelled it 'liquid', and then ADDED the missing energy back into
+  // fluid.internalEnergy so the books would close. Ice is real (u, v) physics
+  // now: the water properties' sub-triple branch returns an ice-vapour state
+  // with its own temperature, sublimation pressure and solid fraction, and the
+  // mixture solve carries it through untouched.)
 
   applyConstraints(state: SimulationState): SimulationState {
     return this.applyImpl(cloneSimulationState(state));
@@ -2617,75 +2624,6 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         console.error(`  This usually means a pump can't push against downstream pressure.`);
 
         throw new Error(`[FluidState] Node '${nodeId}' has physically impossible density ${density.toFixed(0)} kg/m³. Mass is accumulating faster than it can leave.`);
-      }
-
-      // Initialize ice fraction if not present
-      if (flowNode.iceFraction === undefined) {
-        flowNode.iceFraction = 0;
-      }
-
-      // First, calculate what the water state would be with current internal energy
-      let effectiveEnergy = flowNode.fluid.internalEnergy;
-
-      // If we have ice, we need to account for the latent heat locked in the ice
-      // The internal energy stored in the FluidState doesn't include the latent heat buffer
-      // So we add it back when calculating the effective temperature
-      if (flowNode.iceFraction > 0) {
-        // Ice is present - we're at the freezing point
-        // Any energy added/removed goes into melting/freezing, not temperature change
-        const iceEnergy = flowNode.iceFraction * flowNode.fluid.mass * FluidStateConstraintOperator.LATENT_HEAT_FUSION;
-
-        // Calculate what temperature would be if all the ice melted
-        const energyIfMelted = effectiveEnergy + iceEnergy;
-        const waterStateIfMelted = Water.calculateState(
-          flowNode.fluid.mass,
-          energyIfMelted,
-          flowNode.volume
-        );
-
-        if (waterStateIfMelted.temperature >= FluidStateConstraintOperator.T_FREEZE) {
-          // Enough energy to melt all ice - calculate how much ice actually melts
-          // Energy available for melting = U - U_at_0C
-          const U_at_0C = flowNode.fluid.mass * FluidStateConstraintOperator.CP_WATER * (FluidStateConstraintOperator.T_FREEZE - 273.15);
-          // This is approximate - we use the current stored energy to figure out how much to melt
-          const energyAboveFreezing = flowNode.fluid.internalEnergy - U_at_0C;
-
-          if (energyAboveFreezing > 0) {
-            // Melt some ice
-            const energyToMelt = Math.min(iceEnergy, energyAboveFreezing);
-            const iceMelted = energyToMelt / FluidStateConstraintOperator.LATENT_HEAT_FUSION / flowNode.fluid.mass;
-            flowNode.iceFraction = Math.max(0, flowNode.iceFraction - iceMelted);
-
-            // If all ice melted, proceed with normal calculation
-            if (flowNode.iceFraction <= 0) {
-              flowNode.iceFraction = 0;
-              // Continue with normal water state calculation below
-            } else {
-              // Still have ice - stay at freezing point
-              flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
-              flowNode.fluid.phase = 'liquid';
-              flowNode.fluid.quality = 0;
-              flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
-              continue; // Skip to next node
-            }
-          } else {
-            // Not enough energy to melt ice - stay at 0°C with current ice fraction
-            flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
-            flowNode.fluid.phase = 'liquid';
-            flowNode.fluid.quality = 0;
-            flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
-            continue;
-          }
-        } else {
-          // Even melting all ice wouldn't get above 0°C - freeze more
-          // This shouldn't happen if we're maintaining proper energy balance
-          console.warn(`[FluidState] ${nodeId}: Temperature would be ${waterStateIfMelted.temperature.toFixed(1)}K even after melting all ice`);
-          flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
-          flowNode.fluid.phase = 'liquid';
-          flowNode.fluid.quality = 0;
-          flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
-          continue;
-        }
       }
 
       // Calculate water state normally
@@ -2744,40 +2682,19 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         Water.setDebugNodeId(null);
       }
 
-      // Check if temperature would go below freezing. A node holding gas but
-      // no water has nothing to freeze, so the ice buffer does not apply.
-      if (flowNode.fluid.mass > 0 && mix.temperature < FluidStateConstraintOperator.T_FREEZE) {
-        // Calculate energy deficit below freezing
-        // Energy at 0°C (approximately) = mass * cp * (0°C - some reference)
-        // We want to know how much energy below 0°C we are
-        const dT_below_freezing = FluidStateConstraintOperator.T_FREEZE - mix.temperature;
-        const energyDeficit = flowNode.fluid.mass * FluidStateConstraintOperator.CP_WATER * dT_below_freezing;
-
-        // Convert energy deficit to ice fraction
-        const additionalIceFraction = energyDeficit / (flowNode.fluid.mass * FluidStateConstraintOperator.LATENT_HEAT_FUSION);
-        flowNode.iceFraction = Math.min(1, flowNode.iceFraction + additionalIceFraction);
-
-        // Check if we've frozen too much
-        if (flowNode.iceFraction > FluidStateConstraintOperator.MAX_ICE_FRACTION) {
-          console.error(`[FluidState] FREEZING ERROR in ${nodeId}: Ice fraction ${(flowNode.iceFraction * 100).toFixed(1)}% exceeds ${FluidStateConstraintOperator.MAX_ICE_FRACTION * 100}% limit! ` +
-            `T_calc=${mix.temperature.toFixed(1)}K, mass=${flowNode.fluid.mass.toFixed(1)}kg`);
-          // Still set values so we can see what's happening
-        }
-
-        // Clamp temperature at freezing point
-        flowNode.fluid.temperature = FluidStateConstraintOperator.T_FREEZE;
-        flowNode.fluid.phase = 'liquid';
-        flowNode.fluid.quality = 0;
-        flowNode.fluid.pressure = Water.saturationPressure(FluidStateConstraintOperator.T_FREEZE);
-
-        // Adjust internal energy to match 0°C (the deficit is now in the ice fraction)
-        // This keeps the energy balance consistent
-        flowNode.fluid.internalEnergy += energyDeficit;
-      } else {
-        // Normal operation - update temperature and phase from the mixture solve
+      // The mixture solve's answer is the answer. There is no freezing
+      // override here any more: below the triple point the water properties
+      // return a real ice-vapour (or triple-line) state with its own
+      // temperature and sublimation pressure, and the solid fraction rides
+      // along in fluid.iceFraction. What used to be here pinned T at 273.15 K,
+      // called the result 'liquid', and then added the missing energy back
+      // into fluid.internalEnergy so the books would close - a fabrication
+      // that showed up as nodes stuck at 273.16 K with no way down.
+      {
         flowNode.fluid.temperature = mix.temperature;
         flowNode.fluid.phase = mix.phase;
         flowNode.fluid.quality = mix.quality;
+        flowNode.fluid.iceFraction = mix.iceFraction;
 
         // Determine pressure based on phase. mix.steamPressure is the water's
         // partial pressure; mix.gasPressure is the NCG's (Dalton).
@@ -2810,11 +2727,19 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
 
       // Sanity checks - log warnings but do NOT clamp values
       // Clamping hides problems; we need to see what's causing invalid states
-      if (!isFinite(flowNode.fluid.temperature) || flowNode.fluid.temperature < 200 || flowNode.fluid.temperature > 4500) {
+      // Floor is the water model's own lowest temperature, not 200 K: a gas
+      // space that has blown down carries its moisture as frost well below
+      // that (a helium loop from 70 to 2 bar lands near 217 K).
+      if (!isFinite(flowNode.fluid.temperature) ||
+          flowNode.fluid.temperature < Water.MODEL_MIN_TEMPERATURE ||
+          flowNode.fluid.temperature > 4500) {
         console.warn(`[FluidState] Invalid temperature in ${nodeId}: ${flowNode.fluid.temperature}K, mass=${flowNode.fluid.mass.toFixed(1)}kg, U=${(flowNode.fluid.internalEnergy/1e6).toFixed(2)}MJ`);
       }
-      // Triple point pressure is 611.657 Pa - warn if we get close to or below it
-      if (!isFinite(flowNode.fluid.pressure) || flowNode.fluid.pressure < 650 || flowNode.fluid.pressure > 50e6) {
+      // Pressure floor: ice at the model's lowest temperature. The old 650 Pa
+      // was the triple point, which is only a floor for water in equilibrium
+      // with LIQUID - a frost aerosol at 217 K sits at 1.8 Pa, and a trace of
+      // steam in a gas loop lower still.
+      if (!isFinite(flowNode.fluid.pressure) || flowNode.fluid.pressure < Water.modelMinPressure() || flowNode.fluid.pressure > 50e6) {
         console.warn(`[FluidState] Invalid pressure in ${nodeId}: ${flowNode.fluid.pressure}Pa, mass=${flowNode.fluid.mass.toFixed(1)}kg, vol=${flowNode.volume.toFixed(3)}m³, ρ=${(flowNode.fluid.mass/flowNode.volume).toFixed(1)}kg/m³`);
       }
     }
