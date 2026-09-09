@@ -756,12 +756,12 @@
     ]
    },
    {
-    "time": 1500,
+    "time": 3540,
     "message": "Tsunami warning: get off the shore. The wave is about fifteen minutes out.",
     "actions": []
    },
    {
-    "time": 2400,
+    "time": 4440,
     "message": "THE WAVE IS COMING IN. It is running right up the hill - everything below the bench goes under.",
     "actions": [
      {
@@ -773,7 +773,7 @@
     ]
    },
    {
-    "time": 2700,
+    "time": 4740,
     "message": "The sea is draining back down the hill, and taking half the beach with it.",
     "actions": [
      {

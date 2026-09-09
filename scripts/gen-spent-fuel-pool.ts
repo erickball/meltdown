@@ -364,11 +364,19 @@ const QUAKE = 1200;          // s - the aftershock cracks the liner (20 s of wal
 const CRACK_AREA = 0.0170;   // m2
 const CRACK_ELEVATION = 0.4; // m above the pool floor
 const CRACK_OPENING = 0.8;   // m of tear height
-// Everything after the quake keeps the intervals it was tuned with rather
-// than absolute times, so moving QUAKE moves the whole sequence with it: the
-// warning five minutes later, the wave fifteen minutes after the warning.
-const TSUNAMI_WARN = QUAKE + 300;    // s - the warning, no physics
-const WAVE_IN = TSUNAMI_WARN + 900;  // s - the sea starts climbing
+// Everything after the quake is written as an offset from it rather than as
+// an absolute time, so moving QUAKE moves the whole sequence with it.
+//
+// FIFTY-FOUR MINUTES between the aftershock and the wave. That is the gap the
+// player has to cover with the two site tanks, and it is what makes them a
+// real decision rather than a formality: the tsunami is on its way while the
+// pool drains, the shore is a death trap until it has been and gone, and a
+// pump built down there before it lands is a pump that will be under water
+// when it is needed. The warning comes a quarter of an hour before the water
+// does - long enough to get off the beach, not long enough to finish
+// something down there.
+const WAVE_IN = QUAKE + 54 * 60;     // s - the sea starts climbing
+const TSUNAMI_WARN = WAVE_IN - 900;  // s - the warning, no physics
 /**
  * How high the wave runs, and how fast it comes and goes.
  *

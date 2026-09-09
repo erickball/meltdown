@@ -90,14 +90,23 @@ seconds, so it is 20 x `LevelDef.simSpeed`; change the speed and it wants
 changing with it. `scripts/test-game-levels.ts sfp` check [0b] pins the wall
 number, the two offsets, and that nothing is due at t=0.
 
+**The wave is 54 minutes behind the aftershock** (changed 2026-09-09; it was
+20). That gap is the level: it is long enough that the tanks are a real
+inventory decision rather than a formality, long enough that a pump built at
+the shore before the water arrives is a pump that will be under it, and long
+enough to build anything the player wants to build - which matters now that
+building costs simulated time (see [[build-queue]]). `WAVE_IN` is written as
+`QUAKE + 54*60` and the warning as `WAVE_IN - 900`, so the whole sequence
+still moves with the aftershock.
+
 | sim t | real t | event |
 | --- | --- | --- |
 | 0 | 0:00 | Start. Pool 8.35 m, 45 C, warming 2.9 mK/s. Nothing leaking. |
 | **1200** | 0:20 | **AFTERSHOCK** - a scripted burst tears the liner. Leak starts at ~144 kg/s. |
-| 1500 | 0:25 | Tsunami warning (message only). |
-| **2400** | 0:40 | **The wave**: sea ramps 0 -> +12.6 m over 180 s. The shore (+1.7 m) is under at ~t=2440. |
-| 2580 | 0:43 | Peak. Everything below the +13 m bench is under water. |
-| 2700 | 0:45 | The sea drains back to 0 over 240 s; the shore is workable again by ~t=2920. |
+| 3540 | 0:59 | Tsunami warning (message only), a quarter of an hour ahead of the water. |
+| **4440** | 1:14 | **The wave**: sea ramps 0 -> +12.6 m over 180 s. The shore (+1.7 m) is under at ~t=4480. |
+| 4620 | 1:17 | Peak. Everything below the +13 m bench is under water. |
+| 4740 | 1:19 | The sea drains back to 0 over 240 s; the shore is workable again by ~t=4960. |
 | 28800 | 8:00 | **Win**, if the fuel is still covered. |
 
 The wave carries floating debris (`src/render/debris-fx.ts`, drawn by the grid
@@ -211,8 +220,8 @@ Everything below is in `scripts/gen-spent-fuel-pool.ts` unless said otherwise.
 | crack `flowArea` | 0.024 m2 | the whole drain schedule. Uncovery time scales ~1/area. |
 | `fuelPower` | 8.0 MW | how fast an uncovered rack heats: 170 t of fuel+clad is 5.2e7 J/K, so 8 MW is ~155 K per 1000 s once genuinely dry. |
 | `assemblyCount` | 250 | fuel+clad mass, hence that same rate |
-| tank `fillLevel` | 0.78 / 0.80 (1217 t) | how long the player can ride the wave. 142 t is what the answer key now uses - the short wave leaves a lot of margin. |
-| `QUAKE` / `TSUNAMI_WARN` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 1200 / 1500 / 2400 / 2700 / 28800 s | pacing. `QUAKE` is 20 s of WALL time at the level's 60x. The warning and the wave are written as offsets from `QUAKE`, so moving the aftershock moves the sequence with it. |
+| tank `fillLevel` | 0.78 / 0.80 (1217 t) | how long the player can ride out the 54 minutes to the wave and the ten it takes to pass. The answer key draws 474 t of it and finishes with 61% left; shrink the tanks if that wants to be tighter. |
+| `QUAKE` / `TSUNAMI_WARN` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 1200 / 3540 / 4440 / 4740 / 28800 s | pacing. `QUAKE` is 20 s of WALL time at the level's 60x; `WAVE_IN` is `QUAKE + 54*60` and `TSUNAMI_WARN` is `WAVE_IN - 900`, so moving the aftershock moves the sequence with it. The 54 minutes is what the tanks have to cover. |
 | `WAVE_PEAK` / `WAVE_RISE` / `WAVE_HOLD` / `WAVE_FALL` | 12.6 m / 180 / 120 / 240 s | how far up the hill the sea gets and how long anything down there stays stopped. The peak must stay UNDER the 13 m bench or the pool floods too. |
 | `simSpeed` | 60 | eight sim hours in eight real minutes |
 | hazard `graceSeconds` | 1200 s (20 real s at 60x) | how forgiving a dip below the racks is |
@@ -399,3 +408,50 @@ holds a reactor vessel, core barrel, fuel assembly or turbine
 (`plantHasReactorControls` in main.ts). Derived from the plant, so it is right
 in the sandbox too, and a reactor built while the plant runs brings the panel
 straight back.
+
+## 2026-09-09, an hour of tanks, and building on the plant's clock
+
+Two changes from a play session, on branch `build-simtime`.
+
+**The tsunami is 54 minutes behind the aftershock** (`WAVE_IN = QUAKE + 54*60`,
+the warning at `WAVE_IN - 900`). At twenty minutes the tanks were a formality -
+the answer key drew 142 t of 1217 and the shore was workable again almost at
+once. An hour of gravity feed against a 100-150 kg/s tear is a real inventory,
+and it is also the room the player now needs to *build* in, since a build costs
+simulated time rather than the player's.
+
+**Building runs on the plant's clock** ([[build-queue]]): 0.223 simulated
+seconds a kilogram, which is the same 0.1 s a metre of service-water line the
+rate was always anchored on, measured at this level's own 60x. So the numbers
+that matter here are unchanged in the player's seconds and honest in the
+plant's: the yard's 300 m of pipe is 30 minutes of plant time (30 s at 60x) and
+its pump is 9.4 minutes (9.4 s). A build in progress now pauses when the
+simulation pauses and rewinds when the run does.
+
+**The answer key changed shape.** It used to run the sea pump from t=30 s,
+which pre-filled the pool and left the tanks topping up a full pool through a
+short wave. It now does what the geometry actually forces:
+
+| t | action |
+| --- | --- |
+| 1260 s | the liner is gone: open the tank make-up valve (gravity, no pump) |
+| 5100 s | the sea is back down: start the shore pump |
+| 5700 s | the sea pump has the load: shut the tank line |
+
+Re-measured (`npx tsx scripts/test-game-levels.ts sfp`):
+
+| check | result |
+| --- | --- |
+| [0b] timeline | aftershock t=1200 s = 20 s of wall time at 60x, shake + burst; wave t=4440 s (54 min after), warning t=3540 s (15 min before the water) |
+| [1] unfed | racks uncovered t=3840 s, boiled dry t=18,520 s, clad past 900 C t=22,560 s (3.8 MW of oxidation), release limit **t=23,620 s**, 1.96% of the cladding gone - unchanged, the wave never touched it |
+| [2] bench pump | -0.0 kg/s, suction node two-phase at 0.173 bar |
+| [3] shore pump | 352.4 kg/s into the pool |
+| [4] the answer | min pool level **6.68 m** (racks at 4.16 m), peak clad 49 C, no uncovery, shore pump drowned t=4480 s and restarted t=4960 s, **tanks 1216 t -> 743 t: 474 t drawn, 61% left** |
+
+The tank line alone passes ~110 kg/s against a tear that starts at ~144, so the
+pool goes on falling for the whole hour - 8.35 m down to 6.68 m at the worst of
+it - and then recovers to the rim once the sea pump is on. That is the shape the
+level wanted: the gravity feed slows the loss but does not stop it, and the sea
+is still the only thing that ends the accident. Check [4] now also asserts the
+tanks finish with a margin (>5% of what they started with), so a future change
+that quietly drains them fails rather than passing on the pool level alone.

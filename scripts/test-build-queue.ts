@@ -6,8 +6,9 @@
  * factory for what the simulation is actually built out of - with no DOM
  * anywhere, and asserts the contract in docs/build-queue.md:
  *
- *   - the rate is the one stated: 0.1 s of wall clock per metre of the
- *     level's service-water line, and everything else follows from mass
+ *   - the rate is the one stated: 6 simulated seconds per metre of the
+ *     level's service-water line (0.1 s of the player's own time at the 60x
+ *     the level runs at), and everything else follows from mass
  *   - stock is charged ONCE, at the start of a build
  *   - a part under construction is in the plant but NOT in the simulation
  *   - the part joins the simulation exactly once, when the timer completes,
@@ -16,7 +17,8 @@
  *   - cancelling refunds immediately and takes the part back out
  *   - a return keeps the part running until its timer completes, and refunds
  *     at the end
- *   - the queue moves on WALL time, not simulated time
+ *   - the queue moves on SIMULATED time: it is told an absolute clock, so
+ *     rewinding the run past a job's start abandons and refunds it
  *
  * Usage: npx tsx scripts/test-build-queue.ts
  */
@@ -25,7 +27,7 @@ import { ConstructionManager } from '../src/construction/construction-manager';
 import { componentsRemaining, pipeMetersRemaining, findWarehouse } from '../src/game/stock';
 import {
   BuildQueue, Buildable, componentBuildMassKg, connectionBuildMassKg,
-  SECONDS_PER_KG,
+  SIM_SECONDS_PER_KG,
 } from '../src/game/build-queue';
 import { pipeSteelMassPerMetre } from '../src/construction/cost-estimation';
 import { createSimulationFromPlant } from '../src/simulation/factory';
@@ -85,16 +87,20 @@ console.log('\n=== Build queue ===\n');
 // ---------------------------------------------------------------------------
 // 1. The rate is the stated one
 // ---------------------------------------------------------------------------
-console.log('--- The law: 0.1 s per metre of the service-water line ---');
+console.log('--- The law: 6 simulated seconds per metre of the service-water line ---');
 {
   const kgPerM = pipeSteelMassPerMetre(0.3, 16);
   check('12" service-water pipe weighs ~27 kg/m', kgPerM > 26 && kgPerM < 28,
     `${kgPerM.toFixed(2)} kg/m`);
-  check('one metre of it takes 0.1 s', near(kgPerM * SECONDS_PER_KG, 0.1, 1e-12),
-    `${(kgPerM * SECONDS_PER_KG).toFixed(6)} s`);
-  check('the rate is 3.717e-3 s/kg (269 kg a second)',
-    near(SECONDS_PER_KG, 3.717e-3, 1e-6),
-    `${SECONDS_PER_KG.toExponential(3)} s/kg`);
+  check('one metre of it takes 6 simulated seconds',
+    near(kgPerM * SIM_SECONDS_PER_KG, 6, 1e-12),
+    `${(kgPerM * SIM_SECONDS_PER_KG).toFixed(6)} s`);
+  check('which is 0.1 s of the player\'s own time at the level\'s 60x',
+    near(kgPerM * SIM_SECONDS_PER_KG / 60, 0.1, 1e-12),
+    `${(kgPerM * SIM_SECONDS_PER_KG / 60).toFixed(6)} s`);
+  check('the rate is 0.223 s/kg (4.48 kg a simulated second)',
+    near(SIM_SECONDS_PER_KG, 0.2230, 1e-4),
+    `${SIM_SECONDS_PER_KG.toFixed(5)} s/kg`);
 
   // A yard pump lands in the seconds, not the minutes: the whole point of
   // deriving from mass rather than from cost.
@@ -103,10 +109,11 @@ console.log('--- The law: 0.1 s per metre of the service-water line ---');
     type: 'pump', name: 'P', position: { x: 20, y: 0 }, properties: { ...PUMP_PROPS },
   })!;
   const mass = componentBuildMassKg(plant.components.get(id)!);
-  const secs = mass * SECONDS_PER_KG;
+  const secs = mass * SIM_SECONDS_PER_KG;
   check('a 200 kg/s, 60 m service pump is 2-4 t', mass > 2000 && mass < 4000,
     `${Math.round(mass)} kg`);
-  check('so it takes 5-20 s to install', secs > 5 && secs < 20, `${secs.toFixed(1)} s`);
+  check('so it takes 5-20 minutes of plant time to install',
+    secs > 300 && secs < 1200, `${(secs / 60).toFixed(1)} min`);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +149,9 @@ console.log('\n--- A build is charged at the start and lands at the end ---');
     finish: (apply) => { apply(); finished++; },
     abandon: (apply) => { apply(); abandoned++; },
   });
-  check('the job has a positive duration', job.seconds > 0, `${job.seconds}`);
+  check('the job has a positive duration', job.simSeconds > 0, `${job.simSeconds}`);
+  check('and it was ordered at the queue\'s current sim time', job.startedAt === 0,
+    `${job.startedAt}`);
   check('the pump is marked under construction',
     (pump as Buildable).underConstruction === true);
   check('the pump is in the PLANT', plant.components.has(pumpId));
@@ -150,15 +159,15 @@ console.log('\n--- A build is charged at the start and lands at the end ---');
     createSimulationFromPlant(plant).flowNodes.size === nodesBefore,
     `${createSimulationFromPlant(plant).flowNodes.size} vs ${nodesBefore}`);
 
-  queue.tick(job.seconds * 0.4);
-  check('progress tracks the wall clock',
+  queue.tick(job.simSeconds * 0.4);
+  check('progress tracks the simulated clock',
     near((pump as Buildable).buildProgress ?? -1, 0.4, 1e-9),
     `${(pump as Buildable).buildProgress}`);
   check('nothing has landed yet', finished === 0);
   check('still out of the simulation halfway through',
     createSimulationFromPlant(plant).flowNodes.size === nodesBefore);
 
-  queue.tick(job.seconds * 0.6 + 1e-9);
+  queue.tick(job.simSeconds + 1e-9);
   check('the build finished exactly once', finished === 1, `${finished}`);
   check('and was never abandoned', abandoned === 0);
   check('the ghost marks are gone',
@@ -171,7 +180,7 @@ console.log('\n--- A build is charged at the start and lands at the end ---');
     `${after.flowNodes.size} vs ${nodesBefore + 1}`);
   check('the yard was not charged again', componentsRemaining(plant, 'pump') === 1);
 
-  queue.tick(1000);
+  queue.tick(job.simSeconds + 1000);
   check('ticking past the end does not run it again', finished === 1, `${finished}`);
   check('the queue is empty', queue.jobs.length === 0);
 }
@@ -201,7 +210,7 @@ console.log('\n--- Cancelling a build in progress refunds at once ---');
     finish: (apply) => { apply(); finished++; },
     abandon: (apply) => { apply(); cm.deleteComponent(pumpId); },
   });
-  queue.tick(job.seconds * 0.5);
+  queue.tick(job.simSeconds * 0.5);
   check('the cancel is accepted', queue.cancel(job.id));
   check('the part is out of the plant', !plant.components.has(pumpId));
   check('the yard has it back', componentsRemaining(plant, 'pump') === 2,
@@ -244,13 +253,13 @@ console.log('\n--- A run of pipe is held as a ghost, and so is its node count --
     finish: (apply) => { apply(); finished++; },
     abandon: (apply) => apply(),
   });
-  check('a 40 m run takes ~4 s', job.seconds > 3 && job.seconds < 5,
-    `${job.seconds.toFixed(2)} s`);
+  check('a 40 m run takes ~4 minutes of plant time',
+    job.simSeconds > 180 && job.simSeconds < 300, `${job.simSeconds.toFixed(1)} s`);
   const ghosted = createSimulationFromPlant(plant);
   check('the ghost run carries nothing',
     ghosted.flowConnections.length === connsBefore &&
     ghosted.flowNodes.size === nodesBefore);
-  queue.tick(job.seconds);
+  queue.tick(job.simSeconds);
   check('it lands once', finished === 1);
   check('and the simulation has it',
     createSimulationFromPlant(plant).flowConnections.length === connsBefore + 1);
@@ -281,17 +290,17 @@ console.log('\n--- A return runs until it is out, then refunds ---');
     abandon: (apply) => apply(),
   });
   check('it is marked for removal', (pump as Buildable).pendingRemoval === true);
-  queue.tick(job.seconds * 0.5);
+  queue.tick(job.simSeconds * 0.5);
   check('it is still in the simulation while it comes out',
     createSimulationFromPlant(plant).flowNodes.size === withPump);
   check('and the yard has not been credited yet',
     componentsRemaining(plant, 'pump') === 1);
-  queue.tick(job.seconds * 0.5 + 1e-9);
+  queue.tick(job.simSeconds + 1e-9);
   check('the removal happened once', done === 1, `${done}`);
   check('the part is gone', !plant.components.has(pumpId));
   check('the yard was refunded at the end', componentsRemaining(plant, 'pump') === 2);
   check('a return takes the same time as the build',
-    near(job.seconds, componentBuildMassKg(pump) * SECONDS_PER_KG, 1e-9));
+    near(job.simSeconds, componentBuildMassKg(pump) * SIM_SECONDS_PER_KG, 1e-9));
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +330,68 @@ console.log('\n--- Stopping the plant finishes what is outstanding ---');
   check('the queue is empty', queue.jobs.length === 0);
   check('both are in the simulation',
     ids.every(id => createSimulationFromPlant(plant).components.pumps.has(id)));
+}
+
+// ---------------------------------------------------------------------------
+// 7. The clock is the PLANT's, and it can run backwards
+// ---------------------------------------------------------------------------
+console.log('\n--- The queue runs on simulated time, and a rewind undoes it ---');
+{
+  const { plant, cm } = plantWithYard();
+  const queue = new BuildQueue();
+
+  // The plant has been running a while before anything is ordered.
+  queue.tick(5000);
+  check('the queue holds the plant clock', near(queue.time, 5000));
+
+  const pumpId = cm.createComponent({
+    type: 'pump', name: 'Late Pump', position: { x: 20, y: 0 },
+    properties: { ...PUMP_PROPS },
+  })!;
+  const pump = plant.components.get(pumpId)!;
+  let finished = 0, abandoned = 0;
+  const job = queue.enqueue({
+    kind: 'build', label: 'Late Pump', massKg: componentBuildMassKg(pump),
+    targets: [pump as Buildable],
+    finish: (apply) => { apply(); finished++; },
+    abandon: (apply) => { apply(); cm.deleteComponent(pumpId); abandoned++; },
+  });
+  check('the job starts at the plant clock, not at zero', near(job.startedAt, 5000),
+    `${job.startedAt}`);
+  check('the yard was charged', componentsRemaining(plant, 'pump') === 1);
+
+  // A tick with no time in it is not progress: the plant paused.
+  queue.tick(5000);
+  check('a paused plant makes no progress',
+    near((pump as Buildable).buildProgress ?? -1, 0), `${(pump as Buildable).buildProgress}`);
+
+  queue.tick(5000 + job.simSeconds * 0.75);
+  check('progress is simTime - startedAt',
+    near((pump as Buildable).buildProgress ?? -1, 0.75, 1e-9),
+    `${(pump as Buildable).buildProgress}`);
+
+  // Seek back inside the job: the ring runs backwards, the job stands.
+  queue.tick(5000 + job.simSeconds * 0.25);
+  check('a seek back inside the job rewinds the ring',
+    near((pump as Buildable).buildProgress ?? -1, 0.25, 1e-9),
+    `${(pump as Buildable).buildProgress}`);
+  check('and does not finish or abandon it', finished === 0 && abandoned === 0);
+  check('the job is still outstanding', queue.jobs.length === 1);
+
+  // Seek back BEFORE it was ordered: at that point in the run nobody had
+  // asked for it, so it is abandoned and the yard gets it back.
+  queue.tick(4000);
+  check('seeking past the start abandons the job', abandoned === 1, `${abandoned}`);
+  check('it never landed', finished === 0);
+  check('the part is out of the plant', !plant.components.has(pumpId));
+  check('and the yard has it back', componentsRemaining(plant, 'pump') === 2,
+    `${componentsRemaining(plant, 'pump')}`);
+  check('the queue is empty', queue.jobs.length === 0);
+
+  // Running forward again does not resurrect it.
+  queue.tick(9000);
+  check('running forward again does not resurrect it',
+    finished === 0 && !plant.components.has(pumpId));
 }
 
 // ---------------------------------------------------------------------------
