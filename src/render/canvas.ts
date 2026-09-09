@@ -15,13 +15,18 @@ import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
+import { PipeOrientation, oppositeOrientation } from './grid-geometry';
 import { drawFires, collectCladdingFires } from './fire-fx';
-import { drawBreaks, collectBreaks } from './break-fx';
+import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
+import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getCladdingOxidationPower } from '../simulation/operators/rate-operators';
 import { CameraShake } from './camera-shake';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
 export type ViewMode = 'perspective' | 'grid';
+
+/** How faint a part that is not built yet (or is going away) is drawn. */
+const GHOST_ALPHA = 0.42;
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -63,6 +68,14 @@ export class PlantCanvas {
   private selectedComponentId: string | null = null;
   /** Grid view: the pipe run the user clicked (a connection has no id, so the object itself). */
   private selectedConnection: Connection | null = null;
+  /**
+   * The pipe tool is armed: a press on a connection point starts a run to
+   * another port (as Connect mode does), and a press anywhere else lays pipe
+   * on the ground. Grid view only - the other views have no tile lattice to
+   * lay ground pipe on.
+   */
+  private pipeTool: boolean = false;
+  private pipeOrientation: PipeOrientation = 'EW';
   private hoveredComponentId: string | null = null;
   private moveMode: boolean = false;
   private isMovingComponent: boolean = false;
@@ -123,6 +136,12 @@ export class PlantCanvas {
   public onComponentMove?: (componentId: string, newPosition: Point) => void;
   /** Grid view: a pipe was laid from one port to another (plan length in metres). */
   public onRouteComplete?: (from: PortHit, to: PortHit, route: Point[], planLength: number) => void;
+  /**
+   * A run laid on open ground with the pipe tool: a plan polyline that
+   * becomes a standalone pipe component (main.ts). A bare click hands over a
+   * single tile's piece, a sweep hands over the whole swept path.
+   */
+  public onGroundPipe?: (route: Point[]) => void;
   /** Grid view: a pipe run was clicked (`again` = it was already the selected one). */
   public onConnectionSelect?: (connection: Connection | null, again: boolean) => void;
 
@@ -394,8 +413,18 @@ export class PlantCanvas {
       const up = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const press = this.grid.routing.pressScreen;
       const moved = !press || Math.hypot(up.x - press.x, up.y - press.y) > 6;
-      const hit = moved ? this.grid.portAt(up, this.plantState, this.grid.routing.from.component.id) : null;
-      if (hit) this.completeRoute(hit);
+      const from = this.grid.routing.from;
+      if (!from) {
+        // Ground run: the release IS the placement. A press that never moved
+        // leaves the single starting cell, which is one piece in the tool's
+        // current rotation.
+        const route = this.grid.finishGroundRouting();
+        this.canvas.style.cursor = 'crosshair';
+        if (route.length >= 2) this.onGroundPipe?.(route);
+      } else {
+        const hit = moved ? this.grid.portAt(up, this.plantState, from.component.id) : null;
+        if (hit) this.completeRoute(hit);
+      }
     }
     if (this.activePointers.size === 0) {
       this.isDragging = false;
@@ -775,6 +804,24 @@ export class PlantCanvas {
         };
       });
     drawFires(ctx, sources, performance.now());
+  }
+
+  /**
+   * Every open break, resolved to the view that is on screen.
+   *
+   * The rectangle a break is placed on is the one the component is DRAWN in
+   * (the same bounds the gauges hang off), and `plan` tells break-fx whether
+   * the view has a height axis to put the break's elevation on. One call per
+   * frame; the marker, the tear, the spray and the discharge line then all
+   * read the same anchors.
+   */
+  private currentBreaks() {
+    const boundsFor = (comp: PlantComponent): ScreenBox | null => {
+      const b = this.getComponentScreenBounds(comp);
+      if (!b || b.width === undefined || b.height === undefined) return null;
+      return { x: b.topCenter.x - b.width / 2, y: b.topCenter.y, w: b.width, h: b.height };
+    };
+    return collectBreaks(this.plantState, this.simState, boundsFor, this.viewMode === 'grid');
   }
 
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
@@ -1934,6 +1981,12 @@ export class PlantCanvas {
     for (const component of sortedComponents) {
       ctx.save();
 
+      // A part still being installed (or being taken back to the yard) is
+      // drawn as itself, faint: it is not in the simulation yet, and the
+      // ring drawn over it afterwards says how long that will last.
+      const ghost = buildGhost(component);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
+
       const elevation = getComponentElevation(component);
       const size = this.getComponentSize(component);
       const halfW = size.width / 2;
@@ -2178,6 +2231,16 @@ export class PlantCanvas {
       this.renderBelowGradeOverlay(ctx, component);
     }
 
+    // Progress rings, over every ghost, once the plant is drawn
+    for (const component of sortedComponents) {
+      const g = buildGhost(component);
+      if (!g) continue;
+      const b = this.getComponentScreenBounds(component);
+      if (!b || b.width === undefined || b.height === undefined) continue;
+      drawBuildProgress(ctx, b.topCenter.x, b.topCenter.y + b.height / 2,
+        Math.max(9, Math.min(b.width, b.height) * 0.34), g.progress, g.kind);
+    }
+
     mark('components');
     profile['components'] -= profile['keys'] ?? 0;
     // Draw connections (on top of components so labels are visible)
@@ -2247,12 +2310,21 @@ export class PlantCanvas {
       // Draw thermometers on large hydraulic nodes
       renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
 
-      // Draw burst overlays (crack symbols and warning borders)
-      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      // Every break, resolved once: the marker, the discharge line and the
+      // spray all hang off the same anchor.
+      const breaks = this.currentBreaks();
+      const anchorFor = breakAnchorLookup(breaks);
+
+      // Draw burst overlays (the warning border and the burst marker)
+      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds, anchorFor);
 
       // Draw break connections (red dashed lines for LOCA flows)
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
-      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
+      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY, anchorFor);
+
+      // The hole and what is coming out of it - the same drawing the grid
+      // uses, on the same anchor, scaled by the break's own mass flow.
+      drawBreaks(ctx, breaks, performance.now());
 
       // Cladding that is burning. The intensity is the chemical power the
       // oxidation operator released, so the flames rise as the reaction runs
@@ -3465,6 +3537,38 @@ export class PlantCanvas {
     return this.grid.routing !== null;
   }
 
+  /**
+   * Arm or disarm the pipe tool. Armed, a press on a connection point starts
+   * a port-to-port run and a press on open ground lays pipe there; disarmed,
+   * presses fall through to selection and panning as before.
+   */
+  public setPipeTool(active: boolean, orientation?: PipeOrientation): void {
+    this.pipeTool = active;
+    if (orientation) this.pipeOrientation = orientation;
+    if (!active && this.grid.routingFromGround) this.cancelRouting();
+  }
+
+  public isPipeTool(): boolean {
+    return this.pipeTool;
+  }
+
+  public getPipeOrientation(): PipeOrientation {
+    return this.pipeOrientation;
+  }
+
+  /** Turn the piece being placed a quarter turn (N/S <-> E/W). */
+  public setPipeOrientation(orientation: PipeOrientation): void {
+    this.pipeOrientation = orientation;
+    if (this.grid.routing && this.grid.routingFromGround) {
+      this.grid.routing.orientation = orientation;
+    }
+  }
+
+  public rotatePipeOrientation(): PipeOrientation {
+    this.setPipeOrientation(oppositeOrientation(this.pipeOrientation));
+    return this.pipeOrientation;
+  }
+
   /** Every port's on-screen position in the current view (test and assistant hook). */
   public listPortScreenPositions(): Array<{ componentId: string; portId: string; x: number; y: number }> {
     const out: Array<{ componentId: string; portId: string; x: number; y: number }> = [];
@@ -3509,10 +3613,14 @@ export class PlantCanvas {
       }
       return false;
     }
-    if (e.button !== 0 || !this.showPorts || !this.buildMode) return false;
+    if (e.button !== 0 || (!this.showPorts && !this.pipeTool) || !this.buildMode) return false;
 
     if (this.grid.routing) {
-      const hit = this.grid.portAt({ x, y }, this.plantState, this.grid.routing.from.component.id);
+      const from = this.grid.routing.from;
+      // A ground run is a single press-sweep-release gesture: it has no
+      // waiting state for a second press to add to.
+      if (!from) return true;
+      const hit = this.grid.portAt({ x, y }, this.plantState, from.component.id);
       if (hit) {
         this.completeRoute(hit);
       } else {
@@ -3525,8 +3633,16 @@ export class PlantCanvas {
     }
 
     const hit = this.grid.portAt({ x, y }, this.plantState);
-    if (!hit) return false;
-    this.grid.startRouting(hit);
+    if (!hit) {
+      // Nothing to connect to here. With the pipe tool armed, this is where
+      // ground pipe goes; otherwise the press is not about pipes at all.
+      if (!this.pipeTool) return false;
+      this.grid.startGroundRouting(this.grid.screenToWorld({ x, y }), this.pipeOrientation);
+      this.grid.routing!.dragging = true;
+      this.grid.routing!.pressScreen = { x, y };
+      return true;
+    }
+    this.grid.startRouting(hit, this.pipeOrientation);
     this.grid.routing!.dragging = true;
     this.grid.routing!.pressScreen = { x, y };
     this.highlightedPort = { componentId: hit.component.id, portId: hit.port.id };
@@ -3535,6 +3651,7 @@ export class PlantCanvas {
 
   private completeRoute(target: PortHit): void {
     const from = this.grid.routing!.from;
+    if (!from) return;   // a ground run finishes in handlePointerUp, not here
     const { route, length } = this.grid.finishRouting(target);
     this.highlightedPort = null;
     this.onRouteComplete?.(from, target, route, length);
@@ -3559,6 +3676,7 @@ export class PlantCanvas {
       constructionMode: this.constructionMode,
       buildMode: this.buildMode,
       placementPreview: this.placementPreview,
+      pipeOrientation: this.pipeOrientation,
       connectionFluid: (conn, from) => this.getConnectionFluid(conn, from),
     });
 
@@ -3576,14 +3694,15 @@ export class PlantCanvas {
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
       renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
-      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      const breaks = this.currentBreaks();
+      const anchorFor = breakAnchorLookup(breaks);
+      renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds, anchorFor);
       const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
-      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY);
+      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY, anchorFor);
 
       // Plan-view break: a torn gap on the wall the break faces, with the
       // discharge running out across the ground (break-fx.ts).
-      drawBreaks(ctx, collectBreaks(this.plantState, this.simState,
-        (wp) => this.grid.worldToScreen(wp), this.grid.cam.ppm), performance.now());
+      drawBreaks(ctx, breaks, performance.now());
       this.renderFires(ctx, getScreenBounds);
     }
 

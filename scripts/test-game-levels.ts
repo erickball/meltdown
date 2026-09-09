@@ -446,15 +446,17 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     // sea pump goes on as soon as the liner cracks and REFILLS the pool -
     // that head is the buffer the tanks then only have to top up while the
     // wave has the pump stopped. The tank line is opened just before the wave
-    // lands and shut once the sea pump is dry and back on the load.
+    // lands and shut once the sea pump is dry and back on the load. The times
+    // track the level's own clock (scripts/gen-spent-fuel-pool.ts): quake 20 s,
+    // wave in 1220 s, back to sea level 1760 s.
     plant.scenario!.events.push(
-      { time: 2410, message: 'Sea pump on the line', actions: [
+      { time: 30, message: 'Sea pump on the line', actions: [
         { kind: 'pump', id: 'shore-pump', running: true, speed: 1 },
       ] },
-      { time: 3700, message: 'Wave inbound: tank make-up opened', actions: [
+      { time: 1200, message: 'Wave inbound: tank make-up opened', actions: [
         { kind: 'valve', id: 'tank-valve', position: 1 },
       ] },
-      { time: 9600, message: 'Sea pump has the load; securing the tank line', actions: [
+      { time: 2400, message: 'Sea pump has the load; securing the tank line', actions: [
         { kind: 'valve', id: 'tank-valve', position: 0 },
       ] });
     const sim = buildSimFromPlantJson(plant as never);

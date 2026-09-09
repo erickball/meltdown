@@ -65,6 +65,24 @@ export interface Port {
   position: Point;      // Relative to component origin
   direction: 'in' | 'out' | 'both';
   connectedTo?: string; // Port ID of connected component
+  /**
+   * Which side of the plan footprint this nozzle stands on, when the
+   * front-view position cannot say.
+   *
+   * `position` is a point in the component's FRONT elevation (x lateral, y
+   * vertical), and the grid view normally reads the side off it: a nozzle
+   * left of centre is west, one above centre is north. A nozzle pointing at
+   * or away from the viewer projects onto the centreline, so its front-view
+   * position is (0, y) and the reading is ambiguous - which is exactly the
+   * case for the north and south side nozzles of an upright vessel or a
+   * pool. Those declare their side here.
+   *
+   * Purely a drawing/routing statement: the physics never reads it, and the
+   * stored connection elevation still follows the one convention
+   * (`height/2 - port.position.y`), so a declared-side nozzle sits at the
+   * same height as the east/west nozzle beside it.
+   */
+  planSide?: 'N' | 'E' | 'S' | 'W';
 }
 
 /**

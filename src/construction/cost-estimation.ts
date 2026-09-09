@@ -99,6 +99,33 @@ function pipeSteelMass(
 }
 
 /**
+ * Steel mass of one metre of pipe, at the ASME wall its rating asks for.
+ *
+ * The build queue prices work by installed mass and anchors its whole rate
+ * on this number for the yard's service-water line, so it has to be the
+ * SAME arithmetic the cost estimate uses - hence this wrapper rather than a
+ * second copy of the formula.
+ */
+export function pipeSteelMassPerMetre(diameter: number, pressureRating: number): number {
+  const wall = Math.max(calculateWallThickness(pressureRating, diameter / 2, 137e6, 1.0), 0.003);
+  return pipeSteelMass(diameter, wall, 1);
+}
+
+/**
+ * Steel mass of a cylindrical shell at the ASME wall its rating asks for.
+ * Same reason as above: one formula, two readers.
+ */
+export function vesselSteelMass(
+  innerDiameter: number,
+  height: number,
+  pressureRating: number,
+  hasDomes: boolean = true
+): number {
+  const wall = Math.max(calculateWallThickness(pressureRating, innerDiameter / 2), 0.006);
+  return cylindricalVesselSteelMass(innerDiameter, height, wall, hasDomes);
+}
+
+/**
  * Calculate wall thickness using ASME formula
  * t = P*R / (S*E - 0.6*P)
  */

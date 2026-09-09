@@ -200,6 +200,18 @@
   animation: gm-blink 0.9s steps(1) infinite;
 }
 
+.gm-dialogue-prompt-final {
+  /* The last line of a briefing that leads straight into the job: the prompt
+     stops being a hint and becomes the button the player is about to press. */
+  font-size: 13px;
+  font-weight: bold;
+  color: #0d1b12;
+  background: #6fdc8c;
+  border: 2px outset #b6f3c6;
+  padding: 4px 10px;
+  animation: none;
+}
+
 .gm-dialogue-skip {
   background: #24405c;
   border: 2px outset #6a8ac0;

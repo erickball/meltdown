@@ -39,6 +39,7 @@ import {
 } from './colors';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
+import type { BreakAnchor } from './break-fx';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
 
 /**
@@ -4763,6 +4764,13 @@ export function renderFlowConnectionArrows(
   getConnectionScreenPos?: (fromComp: PlantComponent, toComp: PlantComponent, plantConn: Connection) => ConnectionScreenEndpoints | null
 ): void {
   for (const conn of simState.flowConnections) {
+    // A break is not a run of pipe with a direction to explain. It is drawn
+    // by renderBreakConnections and break-fx - the tear, the marker and the
+    // spray, all on one anchor - and it has no ports for this to hang an
+    // arrow off, which is what used to produce a stray red line to nowhere
+    // and a "Could not find port positions for break-<node>" every frame.
+    if (conn.isBreakConnection) continue;
+
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
     const toNode = simState.flowNodes.get(conn.toNodeId);
     if (!fromNode || !toNode) continue;
@@ -5960,14 +5968,22 @@ function renderCrackSymbol(
 }
 
 /**
- * Render burst overlays (crack symbols and warning borders) for all burst components.
+ * Render burst overlays (the warning border and the burst marker) for all
+ * burst components.
+ *
+ * `anchorFor` is where the break actually IS on the component, resolved once
+ * per frame by break-fx.ts and shared with the torn gap, the spray and the
+ * discharge line - so the marker lands on the hole rather than on the
+ * component's centreline. Without it the marker falls back to the component
+ * centre, which is what it always did.
  */
 export function renderBurstOverlays(
   ctx: CanvasRenderingContext2D,
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null,
+  anchorFor?: (nodeId: string) => BreakAnchor | null
 ): void {
   // Skip if no burst states
   if (!simState.burstStates || simState.burstStates.size === 0) {
@@ -6044,32 +6060,16 @@ export function renderBurstOverlays(
     );
     ctx.restore();
 
-    // Draw crack symbol at break location
-    // For pipes, position at break location along length; for others, use break elevation
-    // Note: screenPos is topCenter (top of component), so default crackY is at component center
-    let crackX = screenPos.x;
-    let crackY = screenPos.y + height / 2;  // Default to center of component
-
-    if (burstState.breakLocation !== undefined && component.type === 'pipe') {
-      // Pipe: break location is along the length (X direction)
+    // The burst marker goes exactly where the break is drawn - the anchor
+    // break-fx resolved for the tear and the spray. There is no second
+    // opinion about where the hole is any more.
+    const anchor = anchorFor?.(nodeId) ?? null;
+    let crackX = anchor ? anchor.x : screenPos.x;
+    let crackY = anchor ? anchor.y : screenPos.y + height / 2;
+    if (!anchor && burstState.breakLocation !== undefined && component.type === 'pipe') {
+      // No resolved anchor (no break connection yet): a pipe at least knows
+      // where along its length it went.
       crackX = screenPos.x + (burstState.breakLocation - 0.5) * width;
-    }
-
-    // Get break elevation to position crack vertically
-    // breakElevation is absolute elevation; we need to convert to screen Y offset
-    if (burstState.breakElevation !== undefined) {
-      const flowNode = simState.flowNodes.get(nodeId);
-      if (flowNode) {
-        const nodeHeight = flowNode.height ?? 1;
-        const nodeElevation = flowNode.elevation ?? 0;
-        // Calculate fractional position within the component (0 = bottom, 1 = top)
-        const breakFraction = (burstState.breakElevation - nodeElevation) / nodeHeight;
-        // screenPos is topCenter (top of component); Y increases downward in screen space
-        // breakFraction=1 (top) -> crackY = screenPos.y (top)
-        // breakFraction=0 (bottom) -> crackY = screenPos.y + height (bottom)
-        const clampedFraction = Math.max(0, Math.min(1, breakFraction));
-        crackY = screenPos.y + (1 - clampedFraction) * height;
-      }
     }
 
     renderCrackSymbol(ctx, crackX, crackY, rScale * 1.2);
@@ -6080,7 +6080,10 @@ export function renderBurstOverlays(
     ctx.font = `bold ${12 * rScale}px sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const breakPct = (burstState.currentBreakFraction * 100).toFixed(0);
+    // A hairline that passes 140 kg/s is still worth naming: a tear of
+    // 0.02% of a 9 m pool rounded to "0% break", which reads as no break.
+    const pct = burstState.currentBreakFraction * 100;
+    const breakPct = pct >= 1 ? pct.toFixed(0) : pct.toPrecision(1);
     ctx.fillText(`${breakPct}% break`, crackX, crackY + 15 * rScale);
     ctx.restore();
   }
@@ -6101,7 +6104,8 @@ export function renderBreakConnections(
   view: ViewState,
   _getNodeScreenPos?: (nodeId: string) => Point | null,  // Deprecated, kept for API compatibility
   getScreenBounds?: ScreenBoundsGetter,
-  getGroundY?: GroundYGetter
+  getGroundY?: GroundYGetter,
+  anchorFor?: (nodeId: string) => BreakAnchor | null
 ): void {
   for (const conn of simState.flowConnections) {
     if (!conn.isBreakConnection) continue;
@@ -6152,20 +6156,17 @@ export function renderBreakConnections(
     const compHeight = fromBounds?.height ?? 50;
     const maxDimension = Math.max(compWidth, compHeight);
 
-    // Adjust FROM position based on break elevation (from the flow connection's fromElevation)
-    // fromElevation is relative to node bottom, so we need to convert to screen Y offset
-    // Note: fromScreenPos starts at topCenter (top of component)
-    if (conn.fromElevation !== undefined && fromNode.height) {
-      const nodeHeight = fromNode.height;
-      // Calculate fractional position within the component (0 = bottom, 1 = top)
-      const breakFraction = conn.fromElevation / nodeHeight;
-      // fromScreenPos is topCenter (top of component); Y increases downward in screen space
-      // breakFraction=1 (top) -> fromScreenPos.y stays at topCenter.y
-      // breakFraction=0 (bottom) -> fromScreenPos.y = topCenter.y + compHeight
+    // Where the break IS: the anchor break-fx resolved, which is also where
+    // the tear and the spray are drawn. Without one (no bounds this frame)
+    // fall back to the old centre-of-component reading.
+    const anchor = anchorFor?.(conn.fromNodeId) ?? null;
+    if (anchor) {
+      fromScreenPos = { x: anchor.x, y: anchor.y };
+    } else if (conn.fromElevation !== undefined && fromNode.height) {
+      const breakFraction = conn.fromElevation / fromNode.height;
       const clampedFraction = Math.max(0, Math.min(1, breakFraction));
       fromScreenPos.y = fromScreenPos.y + (1 - clampedFraction) * compHeight;
     } else {
-      // No break elevation specified, default to center of component
       fromScreenPos.y = fromScreenPos.y + compHeight / 2;
     }
 
@@ -6206,46 +6207,11 @@ export function renderBreakConnections(
     ctx.stroke();
     ctx.restore();
 
-    // Draw flow arrow (if there's significant flow)
-    const flowRate = Math.abs(conn.massFlowRate);
-    if (flowRate >= 1) {
-      // Calculate angle from "from" to "to" in screen space
-      const dx = toScreenPos.x - fromScreenPos.x;
-      const dy = toScreenPos.y - fromScreenPos.y;
-      const angle = Math.atan2(dy, dx) + (conn.massFlowRate < 0 ? Math.PI : 0);
-
-      // Calculate arrow size based on mass flow rate (square root scaling)
-      // Match the scaling used by regular flow arrows
-      const massFlow = Math.min(10000, flowRate);
-      const baseArrowSize = Math.max(8, 8 + Math.sqrt(massFlow) * 0.72);
-      const perspectiveScale = fromBounds?.scale ?? 1;
-      const perspectiveMultiplier = Math.max(0.3, Math.min(2.5, perspectiveScale));
-      const arrowSize = baseArrowSize * perspectiveMultiplier;
-
-      // Draw arrow at midpoint
-      ctx.save();
-      ctx.translate(midX, midY);
-      ctx.rotate(angle);
-
-      // Arrow color: orange/red for break flow
-      ctx.fillStyle = 'rgba(255, 80, 30, 1.0)';
-
-      // Draw arrow shape (pointing right when angle=0) - same as regular flow arrows
-      ctx.beginPath();
-      ctx.moveTo(arrowSize, 0);
-      ctx.lineTo(-arrowSize / 2, -arrowSize / 2);
-      ctx.lineTo(-arrowSize / 4, 0);
-      ctx.lineTo(-arrowSize / 2, arrowSize / 2);
-      ctx.closePath();
-      ctx.fill();
-
-      // Draw outline
-      ctx.strokeStyle = 'rgba(100, 0, 0, 0.8)';
-      ctx.lineWidth = 1;
-      ctx.stroke();
-
-      ctx.restore();
-    }
+    // NO flow arrow. A break is not a pipe with a direction to explain - it
+    // is a hole, and what comes out of it is drawn as spray (break-fx's
+    // drawSpray, in both views), scaled by this same mass flow. An arrow on
+    // top of the spray said the same thing twice and pointed at the middle
+    // of a dashed line rather than at the hole.
 
     // Draw flow rate label for break connection
     const breakScale = readoutScale(view.zoom / 50);
@@ -6262,7 +6228,8 @@ export function renderBreakConnections(
     ctx.fillText(flowLabel, midX, midY - 15 * breakScale);
     ctx.restore();
 
-    // Draw crack symbol at the break source
-    renderCrackSymbol(ctx, fromScreenPos.x, fromScreenPos.y, breakScale);
+    // The burst marker at the source is renderBurstOverlays' job - it draws
+    // it at this same anchor, so drawing a second one here would only stack
+    // two symbols on one hole.
   }
 }

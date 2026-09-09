@@ -286,9 +286,67 @@ export function findCheckValveForConnection(
 // ============================================================================
 
 /**
- * Pressure at a connection point inside a node: the node's pressure (which
- * lives at the liquid surface of a two-phase node and at the top of a
- * liquid-full one) plus the weight of the liquid standing above the port.
+ * Density of the gas standing in a node's gas space, from the node's OWN
+ * inventory - never re-derived from its pressure (a node that has boiled
+ * down to grams still reports its last pressure).
+ *
+ * The two species use the two volumes their own partial pressures are priced
+ * over, so this density and the node's reported pressure are the same
+ * statement:
+ *  - water vapour occupies the vapour space V - V_liquid (for a two-phase
+ *    node m*x / (V - V_liq) IS the saturated vapour density at its
+ *    temperature, by construction);
+ *  - the NCG's partial pressure is priced over the FULL node volume - the
+ *    documented simplification in mixture-properties.ts - so its density in
+ *    the mixture is priced the same way. Spreading it over the vapour space
+ *    instead would make a pool's 1 atm air headspace read five times denser
+ *    than air, contradicting the 1 atm the same node reports.
+ * When there is no liquid the two volumes are the same and this is just the
+ * node's bulk density, which is the case every gas loop and every drained
+ * building lives in.
+ */
+export function nodeGasSpaceDensity(node: FlowNode, liquidVolume: number): number {
+  const vaporFraction = node.fluid.phase === 'vapor'
+    ? 1
+    : Math.max(0, Math.min(1, node.fluid.quality ?? 0));
+  const vaporSpace = node.volume - liquidVolume;
+  const steamDensity = vaporSpace > 0 ? (node.fluid.mass * vaporFraction) / vaporSpace : 0;
+  const ncgDensity = node.fluid.ncg && node.volume > 0
+    ? ncgTotalMass(node.fluid.ncg) / node.volume
+    : 0;
+  return steamDensity + ncgDensity;
+}
+
+/**
+ * Pressure at a connection point inside a node.
+ *
+ * ONE formula for every node, and the datum it is measured from is the
+ * node's LIQUID SURFACE: the level of a two-phase node, the top of a
+ * liquid-full one, the base of an all-gas one. `node.fluid.pressure` is the
+ * pressure AT that surface. Below it the liquid standing above the port is
+ * added; above it the gas standing below the port is subtracted:
+ *
+ *   P(z) = P_node + rho_liquid * g * (L - z)     z <  L
+ *        = P_node - rho_gas    * g * (z - L)     z >= L
+ *
+ * The two branches meet at the surface, so the answer is continuous as a
+ * node fills or drains. A node that holds no liquid therefore carries its
+ * pressure at its own BASE - which is the elevation its ports are measured
+ * from and the elevation the connection-to-connection `elevation` changes
+ * are measured between, so the columns inside the nodes and the columns
+ * along the lines between them form one continuous ladder: around any closed
+ * loop of uniform density the hydrostatic terms sum to zero, and what is
+ * left when the densities differ is a real buoyancy head.
+ *
+ * The GAS column is what makes natural draft. A hot node's gas is lighter
+ * than the outside air, so an opening low down sees a lower pressure than
+ * ambient at that height and an opening high up a higher one, and the node
+ * breathes: air in at the bottom, hot gas out at the top. The same term is
+ * the driving head of a gas-cooled reactor's natural circulation, where a
+ * hot leg and a cold leg standing over the same height carry different
+ * weights of helium. It cancels EXACTLY against the outside air's own column
+ * (see the atmosphere endpoint in factory.ts) when the gas inside matches
+ * the gas outside, so a cold vented building has no standing draft.
  *
  * The liquid surface comes from the node's REAL vertical extent
  * (`node.height`, the component's drawn height; zero for well-mixed pipes,
@@ -300,7 +358,10 @@ export function findCheckValveForConnection(
  * and gave squat tanks tens of metres of head they never had.
  *
  * A port drawn outside the node's extent (a valve pot with a port 3 m up)
- * still draws from somewhere inside it, as in drawCompositionAt.
+ * still draws from somewhere inside it, as in drawCompositionAt. The one
+ * exception is the BOUNDARY node - the outside air - which has no walls to
+ * be outside of: its column runs to whatever elevation the opening is at,
+ * above or below the terrain datum its own base sits on.
  */
 export function pressureAtConnection(node: FlowNode, connectionElevation?: number): number {
   const g = 9.81;
@@ -310,24 +371,36 @@ export function pressureAtConnection(node: FlowNode, connectionElevation?: numbe
 
   const elev = connectionElevation === undefined
     ? nodeHeight / 2
-    : Math.max(0, Math.min(nodeHeight, connectionElevation));
+    : node.isBoundary
+      ? connectionElevation
+      : Math.max(0, Math.min(nodeHeight, connectionElevation));
 
+  // Where the liquid surface is, what stands under it, and what room is left
+  // above it - one answer per phase, all from the node's own inventory.
+  let liquidLevel: number;
+  let rho_liquid: number;
+  let liquidVolume: number;
   if (node.fluid.phase === 'two-phase') {
     const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
-    const rho_liquid = approxLiquidDensity(node);
-    const liquidVolume = Math.min(node.volume, node.fluid.mass * (1 - quality) / rho_liquid);
-    const liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
-    if (elev < liquidLevel) {
-      return baseP + rho_liquid * g * (liquidLevel - elev);
-    }
-    return baseP;  // In the gas space
+    rho_liquid = approxLiquidDensity(node);
+    liquidVolume = Math.min(node.volume, node.fluid.mass * (1 - quality) / rho_liquid);
+    liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
   } else if (node.fluid.phase === 'liquid') {
-    // Liquid-full: base pressure is at the top, everything below carries the column
-    const rho = node.fluid.mass / node.volume;
-    return baseP + rho * g * (nodeHeight - elev);
+    // Liquid-full: the surface is the top of the node
+    rho_liquid = node.fluid.mass / node.volume;
+    liquidVolume = node.volume;
+    liquidLevel = nodeHeight;
+  } else {
+    rho_liquid = 0;
+    liquidVolume = 0;
+    liquidLevel = 0;
   }
 
-  return baseP;  // Vapor - no adjustment
+  if (elev < liquidLevel) return baseP + rho_liquid * g * (liquidLevel - elev);
+
+  const gasColumn = elev - liquidLevel;
+  if (gasColumn === 0) return baseP;
+  return baseP - nodeGasSpaceDensity(node, liquidVolume) * g * gasColumn;
 }
 
 /**

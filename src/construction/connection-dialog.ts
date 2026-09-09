@@ -43,6 +43,9 @@ export class ConnectionDialog {
   private confirmButton: HTMLElement;
   private cancelButton: HTMLElement;
   private closeButton: HTMLElement;
+  /** Shown only in edit mode: takes the run out of the plant and its metres back to the yard. */
+  private deleteButton: HTMLElement;
+  private currentDeleteCallback: (() => void) | null = null;
   private currentCallback: ((config: ConnectionConfig | null) => void) | null = null;
   private currentEditCallback: ((result: ConnectionEditResult | null) => void) | null = null;
   private isEditMode: boolean = false;
@@ -117,8 +120,10 @@ export class ConnectionDialog {
     this.confirmButton = document.getElementById('connection-dialog-confirm')!;
     this.cancelButton = document.getElementById('connection-dialog-cancel')!;
     this.closeButton = this.dialog.querySelector('.connection-dialog-close')!;
+    this.deleteButton = document.getElementById('connection-dialog-delete')!;
 
     // Set up event handlers
+    this.deleteButton.addEventListener('click', () => this.handleDelete());
     this.confirmButton.addEventListener('click', () => this.handleConfirm());
     this.cancelButton.addEventListener('click', () => this.handleCancel());
     this.closeButton.addEventListener('click', () => this.handleCancel());
@@ -166,6 +171,10 @@ export class ConnectionDialog {
 
     // Build form
     this.buildForm();
+
+    // A run that does not exist yet has nothing to delete
+    this.currentDeleteCallback = null;
+    this.deleteButton.style.display = 'none';
 
     // Show dialog
     this.dialog.style.display = 'flex';
@@ -713,8 +722,23 @@ export class ConnectionDialog {
     this.isEditMode = false;
   }
 
+  /**
+   * Take the run out of the plant. The dialog closes and releases its own
+   * pending edit FIRST (handleCancel), because the deletion the caller then
+   * performs is an edit of its own - two overlapping live-edit snapshots of
+   * the same plant would drop one of them.
+   */
+  private handleDelete() {
+    const onDelete = this.currentDeleteCallback;
+    this.currentDeleteCallback = null;
+    this.handleCancel();
+    onDelete?.();
+  }
+
   private handleCancel() {
     this.dialog.style.display = 'none';
+    this.deleteButton.style.display = 'none';
+    this.currentDeleteCallback = null;
 
     if (this.isEditMode) {
       if (this.currentEditCallback) {
@@ -738,10 +762,12 @@ export class ConnectionDialog {
     connection: Connection,
     fromComponent: PlantComponent,
     toComponent: PlantComponent,
-    callback: (result: ConnectionEditResult | null) => void
+    callback: (result: ConnectionEditResult | null) => void,
+    onDelete?: () => void
   ) {
     this.isEditMode = true;
     this.currentEditCallback = callback;
+    this.currentDeleteCallback = onDelete ?? null;
     this.fromComponent = fromComponent;
     this.toComponent = toComponent;
 
@@ -753,6 +779,7 @@ export class ConnectionDialog {
 
     // Build edit form
     this.buildEditForm(connection, fromComponent, toComponent);
+    this.deleteButton.style.display = this.currentDeleteCallback ? '' : 'none';
 
     // Show dialog
     this.dialog.style.display = 'flex';
