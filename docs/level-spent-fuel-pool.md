@@ -52,9 +52,11 @@ Two obstacles fall straight out of the ground:
   The atmosphere can push water up about 10.3 m before it boils, less the
   pump's NPSH: the intake flashes and it delivers nothing. Measured: **-0.0
   kg/s, suction node two-phase at 0.175 bar.**
-* **The tsunami.** The sea goes to +5 m, which is above the whole shore bench
-  (+1.4..+2.0), so anything built down there is under water. A flooded pump
-  coasts down and cannot restart until the water is gone.
+* **The tsunami.** The sea goes to **+12.6 m**, which is above everything
+  except the +13 m bench itself, so a pump anywhere but the bench is under
+  water - and the bench is the one place a pump cannot lift the sea from. A
+  flooded pump coasts down and cannot restart until the water is gone, which
+  here takes minutes, not hours.
 
 ## The plant as it starts
 
@@ -74,18 +76,34 @@ Nothing else. No pumps, no make-up line: the player builds all of it, live.
 
 ## Timeline
 
-Six sim hours at 60x = **six real minutes**.
+Eight sim hours at 60x = **eight real minutes**. Re-timed 2026-09-08: the
+night's earthquake is what took the power out before the player arrived, and
+what happens on watch is the AFTERSHOCK, twenty seconds in. Everything after it
+keeps the intervals it was tuned with (warning +300 s, wave +1200 s), so the
+gap the tanks have to cover is unchanged in shape and much shorter in fact.
 
 | sim t | real t | event |
 | --- | --- | --- |
 | 0 | 0:00 | Start. Pool 8.35 m, 45 C, warming 2.9 mK/s. Nothing leaking. |
-| 2400 | 0:40 | **EARTHQUAKE** - the crack valve opens. Leak starts at ~144 kg/s. |
-| 2700 | 0:45 | Tsunami warning (message only). |
-| 3600 | 1:00 | **The wave**: sea ramps 0 -> +5 m over 300 s. Shore floods from ~t=3720. |
-| 8400 | 2:20 | The sea falls back to 0 over 400 s; the shore is dry again by ~t=8680. |
-| 21600 | 6:00 | **Win**, if the fuel is still covered. |
+| **20** | 0:00 | **AFTERSHOCK** - a scripted burst tears the liner. Leak starts at ~144 kg/s. |
+| 320 | 0:05 | Tsunami warning (message only). |
+| **1220** | 0:20 | **The wave**: sea ramps 0 -> +12.6 m over 180 s. The shore (+1.7 m) is under at ~t=1260. |
+| 1400 | 0:23 | Peak. Everything below the +13 m bench is under water. |
+| 1520 | 0:25 | The sea drains back to 0 over 240 s; the shore is workable again by ~t=1740. |
+| 28800 | 8:00 | **Win**, if the fuel is still covered. |
+
+The wave carries floating debris (`src/render/debris-fx.ts`, drawn by the grid
+view): logs, drums, crates and a boat, seeded along the water's edge when the
+body first stands more than 0.5 m above its own level, each riding at its own
+draught so it climbs the slope as the water rises - and stranded where it
+grounds when the water goes, which leaves the hillside littered above the old
+shoreline. Decoration only; the simulation neither writes it nor reads it.
 
 ### Unfed (measured, `SFP_ONLY=1`)
+
+*The two tables below were measured on the OLD clock (quake at 2400 s). The
+shape is unchanged; subtract 2380 s for the times as they now stand, and see
+the re-measured numbers at the bottom of this document.*
 
 | t (s) | pool level (m) | leak (kg/s) | water (C) | clad (C) |
 | --- | --- | --- | --- | --- |
@@ -185,9 +203,10 @@ Everything below is in `scripts/gen-spent-fuel-pool.ts` unless said otherwise.
 | crack `flowArea` | 0.024 m2 | the whole drain schedule. Uncovery time scales ~1/area. |
 | `fuelPower` | 8.0 MW | how fast an uncovered rack heats: 170 t of fuel+clad is 5.2e7 J/K, so 8 MW is ~155 K per 1000 s once genuinely dry. |
 | `assemblyCount` | 250 | fuel+clad mass, hence that same rate |
-| tank `fillLevel` | 0.78 / 0.80 (1217 t) | how long the player can ride the wave. 602 t is what the answer key uses. |
-| `QUAKE` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 2400 / 3600 / 8400 / 21600 s | pacing. The gap `WAVE_OUT + 300 - QUAKE` is what the tanks must cover. |
-| `simSpeed` | 60 | six sim hours in six real minutes |
+| tank `fillLevel` | 0.78 / 0.80 (1217 t) | how long the player can ride the wave. 142 t is what the answer key now uses - the short wave leaves a lot of margin. |
+| `QUAKE` / `TSUNAMI_WARN` / `WAVE_IN` / `WAVE_OUT` / `LEVEL_END` | 20 / 320 / 1220 / 1520 / 28800 s | pacing. The warning and the wave are written as offsets from `QUAKE`, so moving the aftershock moves the sequence with it. |
+| `WAVE_PEAK` / `WAVE_RISE` / `WAVE_HOLD` / `WAVE_FALL` | 12.6 m / 180 / 120 / 240 s | how far up the hill the sea gets and how long anything down there stays stopped. The peak must stay UNDER the 13 m bench or the pool floods too. |
+| `simSpeed` | 60 | eight sim hours in eight real minutes |
 | hazard `graceSeconds` | 1200 s (20 real s at 60x) | how forgiving a dip below the racks is |
 | terrain `infiltration` | default 1e-4 m/s | at ~2e-5 the bench would hold a visible puddle instead of drinking the leak - but then a make-up pump standing on the bench would eventually be flooded by it, which is why it is left at the default |
 
@@ -288,3 +307,49 @@ recognising the pure-gas limit when the water mass falls below one
 representable unit of the node's energy. The unfed level now runs to t =
 52,680 s instead of dying at 22,440 s (it ends there in a 4700 C rack, which is
 well past anything the model claims to represent).
+
+## 2026-09-08, second pass (branch `sfp-script`)
+
+From a play session. The level itself is unchanged in structure; the pacing,
+the wave and three pieces of UI around it are not.
+
+**The aftershock is at t = 20 s.** Forty minutes of watching an intact pool
+was forty minutes of nothing; the player now arrives, presses TAKE THE WATCH
+and hears the liner go. The scenario's messages call it an AFTERSHOCK, which
+is also what the briefing says to expect.
+
+**The wave is bigger and much faster.** +12.6 m (was +5), rising over 180 s,
+held 120 s, drained over 240 s (was a 300 s rise and an 80-minute stand). It
+now covers everything except the bench, and it is gone in under ten minutes -
+so the tanks have to carry the make-up for minutes rather than an hour and a
+half, and the shore is workable again almost immediately.
+
+**Re-measured** (`npx tsx scripts/test-game-levels.ts sfp`):
+
+| check | result |
+| --- | --- |
+| [1] unfed | racks uncovered t=2660 s, boiled dry t=15,780 s, clad past 900 C t=19,960 s (6.1 MW of oxidation), release limit **t=21,680 s**, 1.65% of the cladding gone |
+| [2] bench pump | -0.0 kg/s, suction node two-phase at 0.174 bar |
+| [3] shore pump | 352.4 kg/s into the pool |
+| [4] the answer | sea pump from t=30 s, tank line open 1200..2400 s: min pool level **8.28 m**, peak clad 46 C, no uncovery, shore pump drowned t=1260 s and restarted t=1740 s, tanks gave up 142 t |
+
+**The earthquake used to fire again every time a dialog was closed.** A live
+edit rebuilds the simulation from the plant, and the rebuild called
+`initScenarioState` afresh - `fired: 0` - so every event whose time had passed
+fired again on the next step. Scenario progress is live state, and
+`carryScenarioProgress` in `src/simulation/resume.ts` now carries it across the
+transplant (matching the event lists, and saying so loudly if they ever
+differ). Regression: the last block of `scripts/test-live-edit.ts`.
+
+**Placing from the yard no longer opens a dialog.** A stock line that names a
+design has nothing left to ask: `ComponentDialog.showYardPlacement` builds the
+same form, fills it from the design, puts the part on the ground with its
+auto-generated name and submits it in the same task, so nothing paints. Generic
+lines (no design) still open the full dialog.
+
+**Reactor controls are hidden on a plant that has no reactor.** The rod /
+boron / SCRAM panel and the MW-to-grid readout come up only when the plant
+holds a reactor vessel, core barrel, fuel assembly or turbine
+(`plantHasReactorControls` in main.ts). Derived from the plant, so it is right
+in the sandbox too, and a reactor built while the plant runs brings the panel
+straight back.

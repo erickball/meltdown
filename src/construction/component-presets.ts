@@ -192,7 +192,7 @@ const builtinPresets: ComponentPreset[] = [
     properties: { nqa1: false, type: 'butterfly', diameter: 0.6, pressureRating: 10 },
   },
   {
-    id: 'valve-service-water', type: 'valve', name: 'Service Water Isolation (Gate)',
+    id: 'valve-service-water', type: 'valve', name: 'Service Water Isolation Valve (Gate)',
     description: 'Line-sized gate valve for a low-pressure service or make-up water run. Bore matches the 12-inch service water line spec; rated for a low-head pump shutoff, not for primary or steam pressure.',
     properties: { nqa1: false, type: 'gate', diameter: 0.3, pressureRating: 16 },
   },

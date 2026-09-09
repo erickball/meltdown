@@ -28,8 +28,9 @@ import {
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
-import { TerrainModel, buildTerrainModel, surfaceAtVolume, cellAt as terrainCellAt } from '../simulation/terrain';
+import { TerrainModel, buildTerrainModel, surfaceAtVolume, terrainHeightAt, cellAt as terrainCellAt } from '../simulation/terrain';
 import { contourPolylines, ContourSet } from './terrain-contours';
+import { renderFloodDebris } from './debris-fx';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -905,6 +906,33 @@ export class GridView {
         }
       }
       ctx.stroke();
+    }
+
+    // Whatever the water has picked up and carried: floating while it is up,
+    // left lying on the hillside once it drains away. All of it is in
+    // debris-fx.ts - this is the only call site.
+    for (const b of model.basins) {
+      if (!b.water) continue;
+      const surface = surfaceOf.get(b.id);
+      if (surface === undefined) continue;
+      const basinId = b.id;
+      renderFloodDebris(ctx, {
+        bodyId: b.water.id,
+        baseline: b.water.surface,
+        surface,
+        simTime: sim?.time ?? 0,
+        heightAt: (p) => terrainHeightAt(spec, p),
+        wetCells: () => {
+          const out: Point[] = [];
+          for (let c = 0; c < heights.length; c++) {
+            if (model.basinOf[c] !== basinId || heights[c] >= surface) continue;
+            out.push({ x: origin.x + (c % cols) * cellSize, y: origin.y + Math.floor(c / cols) * cellSize });
+          }
+          return out;
+        },
+        toScreen: (p) => this.worldToScreen(p),
+        ppm: this.cam.ppm,
+      });
     }
 
     // Contours: polylines of the interpolated ground (terrain-contours.ts),
