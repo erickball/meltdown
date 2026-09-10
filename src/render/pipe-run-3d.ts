@@ -127,25 +127,13 @@ export function screenMidpoint(pts: Point[]): { point: Point; dir: Point } {
   return { point: pts[0] ?? { x: 0, y: 0 }, dir: { x: 1, y: 0 } };
 }
 
-/** Shortest screen distance from a point to a polyline. */
-export function distanceToScreenPolyline(p: Point, pts: Point[]): number {
-  let best = Infinity;
-  for (let i = 1; i < pts.length; i++) {
-    const a = pts[i - 1], b = pts[i];
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const len2 = dx * dx + dy * dy;
-    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
-    best = Math.min(best, Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)));
-  }
-  return best;
-}
-
 /**
  * Draw a run the way the grid draws one - dark wall, fluid-coloured body, a
  * sheen along its upper side, collars at the bends, flanges at the ends -
- * with the width following the perspective from vertex to vertex.
+ * with the width following the perspective from vertex to vertex. `halo`,
+ * when given, is the colour of a selection halo laid under the whole run.
  */
-export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], color: string, highlight: boolean): void {
+export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], color: string, halo: string | null): void {
   if (pts.length < 2) return;
 
   // Consecutive legs drawn (nearly) the same width share one path, so a run
@@ -171,8 +159,8 @@ export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], col
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  if (highlight) {
-    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
+  if (halo) {
+    ctx.strokeStyle = halo;
     pass(w => w + 8);
   }
   ctx.strokeStyle = '#2a2e33';

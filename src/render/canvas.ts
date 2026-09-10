@@ -1,7 +1,8 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, PipeComponent, waterBodyOf, paintDepthY } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
-import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, getComponentVisualHeight } from './components';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
+import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -16,7 +17,7 @@ import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
 import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute } from './grid-geometry';
-import { Point3, RunVertex, liftRoute, slopeRoute, drawPipeRun, screenMidpoint, distanceToScreenPolyline } from './pipe-run-3d';
+import { Point3, RunVertex, liftRoute, slopeRoute, drawPipeRun, screenMidpoint } from './pipe-run-3d';
 import { drawFires, collectCladdingFires } from './fire-fx';
 import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
@@ -95,6 +96,11 @@ export class PlantCanvas {
   private selectedComponentId: string | null = null;
   /** Grid view: the pipe run the user clicked (a connection has no id, so the object itself). */
   private selectedConnection: Connection | null = null;
+  // What this frame drew, for picking a flow path out with a click: every
+  // connection's run in the 2.5D view (screen polyline) and every flow arrow
+  // in either view. Rebuilt each frame.
+  private perspectiveRuns: Array<{ conn: Connection; pts: Point[]; halfWidth?: number }> = [];
+  private flowArrowHits: Array<{ conn: Connection; x: number; y: number; size: number }> = [];
   /**
    * The pipe tool is armed: a press on a connection point starts a run to
    * another port (as Connect mode does), and a press anywhere else lays pipe
@@ -312,6 +318,22 @@ export class PlantCanvas {
     const clickedComponent = this.getComponentAtScreen({ x, y });
 
     if (e.button === 0) { // Left click
+      // A flow arrow is drawn over everything, so it wins over the component
+      // beneath it: clicking one picks out the flow path it belongs to. In the
+      // 2.5D view the connection curves are drawn over the components they
+      // join too, so a click right on a drawn line picks the line; the
+      // component's body anywhere else still picks the component.
+      if (!this.moveMode && !this.placementPreview) {
+        const arrowConn = this.arrowAt({ x, y }) ??
+          (this.viewMode === 'grid' ? null : this.perspectiveRunAt({ x, y }));
+        if (arrowConn) {
+          const again = arrowConn === this.selectedConnection;
+          this.selectedComponentId = null;
+          this.onComponentSelect?.(null);
+          this.selectConnection(arrowConn, again);
+          return;
+        }
+      }
       if (clickedComponent) {
         // In move mode, mousedown is the start of a click-and-drag, not a
         // selection: the construction-mode move handler (main.ts) owns the
@@ -323,10 +345,10 @@ export class PlantCanvas {
         this.selectConnection(null);
         this.onComponentSelect?.(clickedComponent.id);
       } else {
-        // Grid view: a click on a pipe run selects the connection (not while
-        // placing a component, when the click is about to place it there)
-        if (this.viewMode === 'grid' && !this.moveMode && !this.placementPreview) {
-          const conn = this.grid.connectionAt({ x, y }, this.plantState);
+        // A click on a drawn run selects the connection, in either view (not
+        // while placing a component, when the click is about to place it there)
+        if (!this.moveMode && !this.placementPreview) {
+          const conn = this.getConnectionAtScreen({ x, y });
           if (conn) {
             const again = conn === this.selectedConnection;
             this.selectedComponentId = null;
@@ -664,7 +686,7 @@ export class PlantCanvas {
       const run = this.pipeComponentRun(component as PipeComponent);
       if (!run) return false;
       const halfWidth = Math.max(...run.map(v => v.w)) / 2;
-      return distanceToScreenPolyline(screenPos, run) <= Math.max(halfWidth, PlantCanvas.MIN_CLICK_TARGET_PX / 2);
+      return distanceToPolylinePx(screenPos, run) <= Math.max(halfWidth, PlantCanvas.MIN_CLICK_TARGET_PX / 2);
     }
 
     // Define 4 corners in local space (ground footprint)
@@ -2055,7 +2077,10 @@ export class PlantCanvas {
       if (component.type === 'pipe') {
         const pipe = component as PipeComponent;
         const run = this.pipeComponentRun(pipe);
-        if (run) drawPipeRun(ctx, run, pipe.fluid ? getFluidColor(pipe.fluid) : '#111', component.id === this.selectedComponentId);
+        if (run) {
+          drawPipeRun(ctx, run, pipe.fluid ? getFluidColor(pipe.fluid) : '#111',
+            component.id === this.selectedComponentId ? 'rgba(100, 150, 255, 0.8)' : null);
+        }
         ctx.restore();
         this.renderBelowGradeOverlay(ctx, component);
         continue;
@@ -2174,6 +2199,7 @@ export class PlantCanvas {
     mark('components');
     profile['components'] -= profile['keys'] ?? 0;
     // Draw connections (on top of components so labels are visible)
+    this.perspectiveRuns = [];
     for (const connection of this.plantState.connections) {
       const fromComponent = this.plantState.components.get(connection.fromComponentId);
       const toComponent = this.plantState.components.get(connection.toComponentId);
@@ -2194,8 +2220,26 @@ export class PlantCanvas {
             const ghost = buildGhost(connection);
             if (ghost) ctx.globalAlpha = GHOST_ALPHA;
             const fluid = this.getConnectionFluid(connection, fromComponent);
-            drawPipeRun(ctx, run.pts, fluid ? this.getFluidColorForConnection(fluid) : '#667788', touchesSelection);
+            // The selected flow path gets a cyan halo end to end; a line
+            // joining the selected component, a yellow one
+            const selected = connection === this.selectedConnection;
+            const halo = selected ? 'rgba(80, 220, 255, 0.9)' : touchesSelection ? 'rgba(255, 255, 120, 0.85)' : null;
+            drawPipeRun(ctx, run.pts, fluid ? this.getFluidColorForConnection(fluid) : '#667788', halo);
+            if (selected) {
+              // ...and a ring on each nozzle it joins, so both ends are unmistakable
+              ctx.save();
+              ctx.strokeStyle = 'rgba(80, 220, 255, 0.95)';
+              ctx.lineWidth = 2.5;
+              for (const end of [run.pts[0], run.pts[run.pts.length - 1]]) {
+                ctx.beginPath();
+                ctx.arc(end.x, end.y, Math.max(7, end.w), 0, Math.PI * 2);
+                ctx.stroke();
+              }
+              ctx.restore();
+            }
             if (ghost) ctx.globalAlpha = 1;
+            // Remember the drawn run, so a click on it can pick this flow path out
+            this.perspectiveRuns.push({ conn: connection, pts: run.pts, halfWidth: Math.max(...run.pts.map(p => p.w)) / 2 });
           } else {
             this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
           }
@@ -2232,7 +2276,9 @@ export class PlantCanvas {
       // elevation offsets) come from the projection
       const getPortScreenPos = (comp: PlantComponent, port: { position: Point }) => this.getPortScreenPosition(comp, port);
       const getConnScreenPos = (fromComp: PlantComponent, toComp: PlantComponent, conn: Connection) => this.getConnectionScreenEndpoints(fromComp, toComp, conn);
-      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos);
+      this.flowArrowHits = [];
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos,
+        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }));
     } else {
       // Debug: log once if simState is not set
       if (!this._simStateWarningLogged) {
@@ -2272,6 +2318,10 @@ export class PlantCanvas {
       // away and die back as the metal or the oxygen is used up.
       this.renderFires(ctx, getScreenBounds);
     }
+
+    // The selected flow path's label, over everything the plant draws
+    this.drawSelectedArrowRing(ctx);
+    this.drawSelectedFlowPathLabel(ctx, rect.width, rect.height);
 
     mark('gauges+overlays');
     this.lastFrameMs = performance.now() - frameStart;
@@ -2611,8 +2661,17 @@ export class PlantCanvas {
       ctx.stroke();
     };
 
+    // Remember the drawn run, so a click on it can pick this flow path out
+    this.perspectiveRuns.push({ conn: connection, pts: sampleConnectionCurve(adjustedFromScreen, adjustedToScreen) });
+
     ctx.lineCap = 'round';
-    if (highlight) {
+    const selected = connection === this.selectedConnection;
+    if (selected) {
+      // Selected flow path: a wide cyan halo along its whole length
+      ctx.strokeStyle = 'rgba(80, 220, 255, 0.9)';
+      ctx.lineWidth = 11;
+      strokeConnection();
+    } else if (highlight) {
       // Selected component: draw a bright halo under the connection so every
       // attached line is unambiguous
       ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
@@ -2622,6 +2681,16 @@ export class PlantCanvas {
     ctx.strokeStyle = fluid ? this.getFluidColorForConnection(fluid) : '#667788';
     ctx.lineWidth = 4;
     strokeConnection();
+    if (selected) {
+      // ...and a ring on each nozzle it joins, so both ends are unmistakable
+      ctx.strokeStyle = 'rgba(80, 220, 255, 0.95)';
+      ctx.lineWidth = 2.5;
+      for (const end of [adjustedFromScreen, adjustedToScreen]) {
+        ctx.beginPath();
+        ctx.arc(end.x, end.y, 7, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+    }
   }
 
   /**
@@ -3406,6 +3475,19 @@ export class PlantCanvas {
     const toNormalized = toComponent.type === 'pipe' ? toScale : toScale / 50;
     const avgScale = (fromNormalized + toNormalized) / 2;
 
+    // An opening between a component and its own container whose two
+    // nozzles land on one point: the arrow sits there, pointing out of the
+    // inner component (see openingArrowEndpoints)
+    if (Math.hypot(toScreen.x - fromScreen.x, toScreen.y - fromScreen.y) < 1 &&
+        (fromComponent.containedBy === toComponent.id || toComponent.containedBy === fromComponent.id)) {
+      const inner = fromComponent.containedBy === toComponent.id ? fromComponent : toComponent;
+      const b = this.getComponentScreenBounds(inner);
+      if (b && b.height !== undefined) {
+        return openingArrowEndpoints(fromScreen, { x: b.topCenter.x, y: b.topCenter.y + b.height / 2 },
+          inner === fromComponent, 12 * avgScale, avgScale);
+      }
+    }
+
     return {
       fromPos: fromScreen,
       toPos: toScreen,
@@ -3712,9 +3794,69 @@ export class PlantCanvas {
     return this.selectedConnection;
   }
 
-  /** The connection whose drawn pipe run is under a screen point (grid view only). */
+  /**
+   * The flow path under a screen point, in either view: a flow arrow first
+   * (drawn on top), then the drawn run - the grid's lattice routes, or the
+   * 2.5D view's curves as last drawn.
+   */
   public getConnectionAtScreen(screenPos: Point): Connection | null {
-    return this.viewMode === 'grid' ? this.grid.connectionAt(screenPos, this.plantState) : null;
+    const arrow = this.arrowAt(screenPos);
+    if (arrow) return arrow;
+    if (this.viewMode === 'grid') return this.grid.connectionAt(screenPos, this.plantState);
+    return this.perspectiveRunAt(screenPos);
+  }
+
+  /** The 2.5D view's drawn connection run under a screen point (nearest wins). */
+  private perspectiveRunAt(screenPos: Point): Connection | null {
+    let best: Connection | null = null;
+    let bestD = Infinity;
+    for (const run of this.perspectiveRuns) {
+      const d = distanceToPolylinePx(screenPos, run.pts);
+      // Within the line's own half width, and never less than 6 px of room
+      // for the pointer (a stub is 4 px wide)
+      if (d <= Math.max(6, run.halfWidth ?? 0) && d < bestD) { bestD = d; best = run.conn; }
+    }
+    return best;
+  }
+
+  /** The flow arrow under a screen point, if any (nearest wins). */
+  private arrowAt(screenPos: Point): Connection | null {
+    let best: Connection | null = null;
+    let bestD = Infinity;
+    for (const a of this.flowArrowHits) {
+      const d = Math.hypot(screenPos.x - a.x, screenPos.y - a.y);
+      if (d <= a.size + 4 && d < bestD) { bestD = d; best = a.conn; }
+    }
+    return best;
+  }
+
+  /** A ring round the selected flow path's arrow, where it has one. */
+  private drawSelectedArrowRing(ctx: CanvasRenderingContext2D): void {
+    const conn = this.selectedConnection;
+    if (!conn) return;
+    const hit = this.flowArrowHits.find(a => a.conn === conn);
+    if (!hit) return;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(80, 220, 255, 0.95)';
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(hit.x, hit.y, hit.size + 5, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /** The selected flow path's label in the 2.5D view (the grid draws its own). */
+  private drawSelectedFlowPathLabel(ctx: CanvasRenderingContext2D, width: number, height: number): void {
+    const conn = this.selectedConnection;
+    if (!conn || !this.plantState.connections.includes(conn)) return;
+    const run = this.perspectiveRuns.find(r => r.conn === conn);
+    const hit = this.flowArrowHits.find(a => a.conn === conn);
+    const anchor = hit ? { x: hit.x, y: hit.y }
+      : run && run.pts.length > 0 ? run.pts[Math.floor(run.pts.length / 2)] : null;
+    if (!anchor) return;
+    const lines = connectionLabelLines(conn, this.plantState, this.simState,
+      (c, from) => this.getConnectionFluid(c, from), this.buildMode);
+    if (lines) drawConnectionLabel(ctx, anchor, lines, width, height);
   }
 
   private selectConnection(conn: Connection | null, again: boolean = false): void {
@@ -3916,7 +4058,10 @@ export class PlantCanvas {
         this.grid.portScreenPosition(comp, (port as Port).id);
       const getConnScreenPos = (_from: PlantComponent, _to: PlantComponent, conn: Connection) =>
         this.grid.connectionScreenEndpoints(conn, this.plantState);
-      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos);
+      this.flowArrowHits = [];
+      renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos,
+        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }));
+      this.drawSelectedArrowRing(ctx);
 
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
@@ -3937,4 +4082,40 @@ export class PlantCanvas {
 
     renderColorLegend(ctx, width, height);
   }
+}
+
+/**
+ * Points along the curve renderConnectionPerspective strokes for a
+ * connection (two quadratic segments through the midpoint), for hit testing.
+ */
+function sampleConnectionCurve(from: Point, to: Point): Point[] {
+  const midX = (from.x + to.x) / 2;
+  const midY = (from.y + to.y) / 2;
+  const segs: Array<[Point, Point, Point]> = [
+    [from, { x: midX, y: from.y }, { x: midX, y: midY }],
+    [{ x: midX, y: midY }, { x: midX, y: to.y }, to],
+  ];
+  const pts: Point[] = [];
+  for (const [p0, c, p1] of segs) {
+    for (let i = pts.length === 0 ? 0 : 1; i <= 10; i++) {
+      const t = i / 10;
+      const u = 1 - t;
+      pts.push({ x: u * u * p0.x + 2 * u * t * c.x + t * t * p1.x, y: u * u * p0.y + 2 * u * t * c.y + t * t * p1.y });
+    }
+  }
+  return pts;
+}
+
+/** Screen distance from a point to a polyline. */
+function distanceToPolylinePx(p: Point, pts: Point[]): number {
+  if (pts.length === 1) return Math.hypot(p.x - pts[0].x, p.y - pts[0].y);
+  let best = Infinity;
+  for (let i = 1; i < pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 > 0 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+    best = Math.min(best, Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy)));
+  }
+  return best;
 }

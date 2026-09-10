@@ -15,7 +15,7 @@ Multiple Claude sessions often run in this repo at the same time, sharing this w
 - When the work is complete and `npm test` passes: merge the latest master into your branch, re-run tests if the merge touched anything, then merge the branch into master and push to origin. The goal is that master (the source of the deployed version) always accumulates every finished feature/fix from every session. Do not leave finished work stranded on a feature branch or unpushed.
 - Resolve merge conflicts yourself. Only ask the user if a resolution genuinely requires a judgment call about intended behavior.
 - This applies to work YOU complete. Do not auto-merge pre-existing experimental branches (game-mode, atom-jack, xe100, iso-zoom, ...) - those are parked deliberately.
-- After merging, clean up: remove your worktree and delete the merged feature branch.
+- After merging, clean up: remove your worktree and delete the merged feature branch. Remove it with `powershell -File scripts\cleanup-worktrees.ps1 -Path <worktree>`: dev servers and test runs started from a worktree outlive their task and keep its files locked, and the script stops them before deleting (`-Sweep` clears folders a failed removal left behind).
 
 ## WATER PROPERTIES NOTES
 - Our saturated steam table data goes all the way from the triple point to the critical point.

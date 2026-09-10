@@ -15,7 +15,8 @@ import {
   PIPE_METRES_PER_STICK,
 } from '../game/stock';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow, openingArrowEndpoints } from './components';
+import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import { poolReadout, poolStateLabel } from './pool-readout';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getFluidColor, COLORS } from './colors';
@@ -24,11 +25,13 @@ import { readoutScale } from './readout-scale';
 import {
   TILE_M, Footprint, PlanRect, PortAnchor, Side,
   componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
-  portAnchors, portAnchor, connectionRoute, pipeRoute, routeLength, completeRoute, rubberBand,
+  portAnchors, portAnchor, portAnchorFacing, pipeRoute, routeLength, completeRoute, rubberBand,
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
   PipeOrientation, pipePieceRoute, groundRunRoute, findFreeEndJoins, snapPlacementCenter,
   isGroundLayerComponent,
+  partnerReference, sideFacing, wallAnchor, autoRoute, reanchorRoute, portSide, simplifyRoute,
+  ENVIRONMENT_ID, Obstacle,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
@@ -71,7 +74,14 @@ const GHOST_ALPHA = 0.42;
 export interface PortHit {
   component: PlantComponent;
   port: Port;
+  /**
+   * Where a route to or from this port meets the plan lattice. For a port on
+   * something drawn inside a container's section view this is the
+   * container's wall, not the port itself (see sectionRootOf).
+   */
   anchor: PortAnchor;
+  /** The outermost container whose section view the port is drawn in, if any. */
+  frameRoot?: PlantComponent;
 }
 
 /**
@@ -108,6 +118,33 @@ type Run = Connection | PipeComponent;
 interface RouteLayout {
   routes: Map<Run, Point[]>;
   display: Map<Run, Point[]>;
+  /**
+   * The parts of connections drawn inside a container's section view, in
+   * SCREEN pixels (they live on the container's sprite, which is a picture,
+   * not a place on the plan), grouped by the container so they can be drawn
+   * right after its sprite and under the sprites of what it holds.
+   */
+  sections: Map<string, SectionRun[]>;
+  /** The same runs by connection, for hit tests, labels and flow arrows. */
+  sectionParts: Map<Connection, Point[][]>;
+}
+
+/** One drawn run inside a section view: a screen polyline and the connection it belongs to. */
+interface SectionRun {
+  conn: Connection;
+  pts: Point[];
+}
+
+/**
+ * One end of a connection as the plan lattice sees it. A port on the lattice
+ * is its own anchor; a port drawn inside a container's section view reaches
+ * the lattice at the container's wall, and `internal` is the run from the
+ * port to that wall (screen pixels, see RouteLayout.sections).
+ */
+interface LatticeEnd {
+  anchor: PortAnchor;
+  root: PlantComponent | null;
+  internal: Point[] | null;
 }
 
 function isConnection(run: Run): run is Connection {
@@ -120,10 +157,16 @@ interface SpriteLayout {
   rect: PlanRect;
   zoom: number;
   centerX: number;
-  /** Screen y of the sprite's bottom edge (the south footprint edge). */
+  /**
+   * Screen y of the sprite's bottom edge: the south footprint edge for a
+   * sprite standing on the plan, or the component's elevation on its
+   * container's sprite for one drawn inside a section view.
+   */
   baseY: number;
   halfHpx: number;
   halfWpx: number;
+  /** The container whose section view this sprite is drawn in, if any. */
+  frame: PlantComponent | null;
 }
 
 /** Small fittings are drawn no smaller than this many tiles across, so a valve is visible. */
@@ -152,6 +195,15 @@ export class GridView {
   /** Automatic routes are a search; keep them until their inputs change. */
   private routeCache = new Map<Run, { key: string; pts: Point[] }>();
   private layout: RouteLayout | null = null;
+  /**
+   * The plant the last frame was drawn from. Sprite layout needs to walk a
+   * component's containment chain, and some callers (screen boxes, port
+   * positions) hand over only the component, so the plant is remembered
+   * here; every entry point that receives one refreshes it.
+   */
+  private plant: PlantState | null = null;
+  /** Section frame per component id, for the plant above; cleared with it. */
+  private frameCache = new Map<string, PlantComponent | null>();
   /**
    * Everything derived from the plant's height field, rebuilt when the field
    * object changes: the basins, the contour polylines (world coordinates, so
@@ -195,11 +247,23 @@ export class GridView {
    * one expensive step.
    */
   private buildLayout(plantState: PlantState): RouteLayout {
+    this.setPlant(plantState);
     const obstacles = routeObstacles(plantState);
     const obsKey = obstaclesKey(obstacles);
     const routes = new Map<Run, Point[]>();
+    const sections = new Map<string, SectionRun[]>();
+    const sectionParts = new Map<Connection, Point[][]>();
     const runs: RouteRun[] = [];
     const seen = new Set<Run>();
+    const addSection = (root: PlantComponent, conn: Connection, pts: Point[]) => {
+      if (pts.length < 2) return;
+      let list = sections.get(root.id);
+      if (!list) { list = []; sections.set(root.id, list); }
+      list.push({ conn, pts });
+      let parts = sectionParts.get(conn);
+      if (!parts) { parts = []; sectionParts.set(conn, parts); }
+      parts.push(pts);
+    };
 
     for (const c of plantState.components.values()) {
       if (c.type !== 'pipe' || (c as any).isHydraulicOnly) continue;
@@ -211,17 +275,57 @@ export class GridView {
     for (const conn of plantState.connections) {
       const from = plantState.components.get(conn.fromComponentId);
       const to = plantState.components.get(conn.toComponentId);
-      if (!from || !to || this.isContainmentPair(from, to)) continue;
+      if (!from && !to) continue;
+
+      // An opening between a component and a container that is not drawn as
+      // a sprite (a building, a pool) has nowhere to be drawn
+      if (from && to && this.isContainmentPair(from, to)) {
+        const container = from.containedBy === to.id ? to : from;
+        if (!this.isSectionFrame(container)) continue;
+      }
+
+      // Both ends drawn in the same section view: the whole run lives there
+      if (from && to) {
+        const spaceA = this.sectionRootOf(from) ?? from;
+        const spaceB = this.sectionRootOf(to) ?? to;
+        if (spaceA === spaceB && this.isSectionFrame(spaceA)) {
+          const a = this.spritePortPosition(from, conn.fromPortId);
+          const b = this.spritePortPosition(to, conn.toPortId);
+          if (a && b) addSection(spaceA, conn, simplifyRoute([a, { x: a.x, y: b.y }, b]));
+          continue;
+        }
+      }
+
+      // Otherwise each end reaches the lattice (at its own port, or at its
+      // container's wall) and the lattice route runs between them
+      let endA: LatticeEnd | null;
+      let endB: LatticeEnd | null;
+      if (from && to) {
+        endA = this.latticeEnd(from, conn.fromPortId, to, conn.toPortId);
+        endB = this.latticeEnd(to, conn.toPortId, from, conn.fromPortId);
+      } else if (from && conn.toComponentId === ENVIRONMENT_ID) {
+        endA = this.latticeEnd(from, conn.fromPortId);
+        endB = null;
+      } else if (to && conn.fromComponentId === ENVIRONMENT_ID) {
+        endA = null;
+        endB = this.latticeEnd(to, conn.toPortId);
+      } else {
+        continue;
+      }
+      if ((from && !endA) || (to && !endB)) continue;
+      for (const end of [endA, endB]) {
+        if (end?.root && end.internal) addSection(end.root, conn, end.internal);
+      }
+
       const endsKey = JSON.stringify([
-        from.position, to.position, conn.fromPortId, conn.toPortId, conn.route ?? null,
-        from.type === 'pipe' ? pipeRoute(from as PipeComponent) : null,
-        to.type === 'pipe' ? pipeRoute(to as PipeComponent) : null,
+        endA?.anchor.point ?? null, endA?.anchor.side ?? null, endB?.anchor.point ?? null, endB?.anchor.side ?? null,
+        conn.route ?? null,
       ]);
       const key = `${obsKey}|${endsKey}`;
       seen.add(conn);
       let cached = this.routeCache.get(conn);
       if (!cached || cached.key !== key) {
-        const pts = connectionRoute(conn, plantState, obstacles);
+        const pts = this.latticeRoute(endA?.anchor ?? null, endB?.anchor ?? null, conn, obstacles);
         if (!pts) continue;
         cached = { key, pts };
         this.routeCache.set(conn, cached);
@@ -233,7 +337,147 @@ export class GridView {
     for (const k of this.routeCache.keys()) {
       if (!seen.has(k)) this.routeCache.delete(k);
     }
-    return { routes, display: laneOffsetRoutes(runs) as Map<Run, Point[]> };
+    return { routes, display: laneOffsetRoutes(runs) as Map<Run, Point[]>, sections, sectionParts };
+  }
+
+  /** The plan polyline between two lattice anchors (a missing one is the open air: a short stub). */
+  private latticeRoute(a: PortAnchor | null, b: PortAnchor | null, conn: Connection, obstacles: Obstacle[]): Point[] | null {
+    const stub = (anchor: PortAnchor): Point[] | null => {
+      if (!anchor.out) return null;
+      const v = sideVector(anchor.side);
+      return [anchor.point, anchor.out, { x: anchor.out.x + v.x * TILE_M, y: anchor.out.y + v.y * TILE_M }];
+    };
+    if (a && !b) return stub(a);
+    if (b && !a) return stub(b);
+    if (!a || !b) return null;
+    if (conn.route && conn.route.length >= 2) return reanchorRoute(conn.route, a, b);
+    return autoRoute(a, b, obstacles);
+  }
+
+  // ---------------------------------------------------------------------
+  // Section views
+  //
+  // A standing sprite is the component's front elevation drawn on its plan
+  // footprint, so within that drawing screen-y is height. A component
+  // contained by such a sprite is therefore drawn ON it, at its real
+  // elevation and lateral offset - the container's sprite is a section view
+  // - and a connection between two things in the same section view is drawn
+  // there too. A connection that leaves the container is split at the wall:
+  // inside, a run from the port to the penetration at the outside end's
+  // elevation; outside, an ordinary lattice route from the wall onward.
+  // Buildings, pools and the other ground-layer things are floors, not
+  // frames: what they hold stands on the plan as before.
+  // ---------------------------------------------------------------------
+
+  private setPlant(plantState: PlantState): void {
+    if (this.plant !== plantState) this.frameCache.clear();
+    this.plant = plantState;
+  }
+
+  /** Whether a component is drawn as a standing sprite that others can be drawn inside. */
+  private isSectionFrame(c: PlantComponent): boolean {
+    return c.type !== 'pipe' && !(c as any).isHydraulicOnly && !this.isGroundLayer(c);
+  }
+
+  /** The nearest container drawn as a sprite, whose section view the component is drawn in. */
+  private sectionFrameOf(c: PlantComponent): PlantComponent | null {
+    if (!c.containedBy || !this.plant) return null;
+    const cached = this.frameCache.get(c.id);
+    if (cached !== undefined) return cached;
+    let frame: PlantComponent | null = null;
+    const seen = new Set<string>([c.id]);
+    let cur: PlantComponent | undefined = c;
+    while (cur?.containedBy && !seen.has(cur.containedBy)) {
+      seen.add(cur.containedBy);
+      cur = this.plant.components.get(cur.containedBy);
+      if (cur && this.isSectionFrame(cur)) { frame = cur; break; }
+    }
+    this.frameCache.set(c.id, frame);
+    return frame;
+  }
+
+  /** The outermost container whose section view the component is drawn in, or null if it stands on the plan. */
+  private sectionRootOf(c: PlantComponent): PlantComponent | null {
+    let root: PlantComponent | null = null;
+    let frame = this.sectionFrameOf(c);
+    while (frame) {
+      root = frame;
+      frame = this.sectionFrameOf(frame);
+    }
+    return root;
+  }
+
+  /** A port's screen position on the sprite it is drawn on (a sprite's own ports, or those of what it holds). */
+  private spritePortPosition(c: PlantComponent, portId: string): Point | null {
+    const port = c.ports?.find(p => p.id === portId);
+    if (!port || !this.isSectionFrame(c)) return null;
+    const L = this.spriteLayout(c);
+    return { x: L.centerX + port.position.x * L.zoom, y: L.baseY - L.halfHpx + port.position.y * L.zoom };
+  }
+
+  /** Height above grade of a port: the component's elevation plus the port's rise above the drawn bottom. */
+  private portElevation(c: PlantComponent, portId: string): number {
+    const base = c.elevation ?? 0;
+    if (c.type === 'pipe') {
+      const pipe = c as PipeComponent;
+      const port = pipe.ports.find(p => p.id === portId);
+      const atEnd = port ? port.position.x > pipe.length / 2 : false;
+      return atEnd ? (pipe.endElevation ?? base) : base;
+    }
+    const port = c.ports?.find(p => p.id === portId);
+    if (!port) return base;
+    return base + getComponentSize(c).height / 2 - port.position.y;
+  }
+
+  /**
+   * One end of a connection as the lattice sees it. Given the partner, the
+   * wall penetration faces the partner and sits at the partner's own port
+   * height (a pipe meets the vessel where the pipe is); with no partner (a
+   * vent to the open air, or a route being drawn) it takes the side the port
+   * itself faces and the port's own height.
+   */
+  private latticeEnd(c: PlantComponent, portId: string, partner?: PlantComponent, partnerPortId?: string): LatticeEnd | null {
+    const port = c.ports?.find(p => p.id === portId);
+    if (!port) return null;
+    const root = this.sectionRootOf(c);
+    if (!root) {
+      // A vessel's side nozzle faces its partner - or the wall of the
+      // container the partner is drawn inside
+      const anchor = partner && partnerPortId !== undefined
+        ? portAnchorFacing(c, portId, this.sectionRootOf(partner)?.position ?? partnerReference(partner, partnerPortId))
+        : portAnchor(c, portId);
+      return anchor ? { anchor, root: null, internal: null } : null;
+    }
+    const partnerRoot = partner ? this.sectionRootOf(partner) : null;
+    const along = partner && partnerPortId !== undefined
+      ? (partnerRoot ? partnerRoot.position : partnerReference(partner, partnerPortId))
+      : c.position;
+    const side = partner ? sideFacing(root, along) : portSide(port, getComponentSize(c));
+    const anchor = wallAnchor(root, port, side, along);
+    // Penetration height: the outside end's port, unless that end is inside
+    // a section view of its own (then each end keeps its own height)
+    const z = partner && partnerPortId !== undefined && !partnerRoot
+      ? this.portElevation(partner, partnerPortId)
+      : this.portElevation(c, portId);
+    const internal = this.internalRun(c, portId, root, anchor, z);
+    return internal ? { anchor, root, internal } : null;
+  }
+
+  /**
+   * The run inside a section view from a port to the wall: down (or up) from
+   * the port to the penetration height, across to the wall, then down the
+   * wall to where the lattice route picks it up on the plan.
+   */
+  private internalRun(c: PlantComponent, portId: string, root: PlantComponent, wall: PortAnchor, z: number): Point[] | null {
+    const p = this.spritePortPosition(c, portId);
+    if (!p) return null;
+    const RL = this.spriteLayout(root);
+    const yWall = RL.baseY - (z - (root.elevation ?? 0)) * RL.zoom;
+    const plan = this.worldToScreen(wall.point);
+    const xWall = wall.side === 'E' ? RL.centerX + RL.halfWpx
+      : wall.side === 'W' ? RL.centerX - RL.halfWpx
+      : plan.x;
+    return simplifyRoute([p, { x: p.x, y: yWall }, { x: xWall, y: yWall }, { x: xWall, y: plan.y }, plan]);
   }
 
   /** The last frame's layout (built now if there is none yet). */
@@ -352,6 +596,7 @@ export class GridView {
    * closer than the default scale). With no plant, look at the origin.
    */
   centerOn(plantState: PlantState): void {
+    this.setPlant(plantState);
     this.terrainDataFor(plantState.terrain);
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const c of plantState.components.values()) {
@@ -445,13 +690,28 @@ export class GridView {
     const visualH = getComponentVisualHeight(component);
     const largest = Math.max(size.width, visualH);
     const spriteScale = largest > 0 && largest < MIN_SPRITE_TILES * TILE_M ? (MIN_SPRITE_TILES * TILE_M) / largest : 1;
+    const frame = this.sectionFrameOf(component);
+    if (frame) {
+      // Drawn inside the container's section view: at the container's
+      // scale, offset laterally by the plan offset and vertically by the
+      // difference in elevation (both stored above grade). No depth axis -
+      // a section has none.
+      const FL = this.spriteLayout(frame);
+      return {
+        fp, rect, zoom: FL.zoom, frame,
+        centerX: FL.centerX + (component.position.x - frame.position.x) * FL.zoom,
+        baseY: FL.baseY - ((component.elevation ?? 0) - (frame.elevation ?? 0)) * FL.zoom,
+        halfHpx: (size.height / 2) * FL.zoom,
+        halfWpx: (size.width / 2) * FL.zoom,
+      };
+    }
     const zoom = this.cam.ppm * spriteScale;
-    // Everything sits on its pad regardless of elevation (the elevation is
-    // labelled instead): a raised duct floating above the pipes that meet it
-    // reads as detached, not as high
+    // A sprite standing on the plan sits on its pad regardless of elevation
+    // (the elevation is labelled instead): a raised duct floating above the
+    // pipes that meet it reads as detached, not as high
     const south = this.worldToScreen({ x: component.position.x, y: rect.y1 });
     return {
-      fp, rect, zoom,
+      fp, rect, zoom, frame: null,
       centerX: south.x,
       baseY: south.y,
       halfHpx: (size.height / 2) * zoom,
@@ -508,23 +768,75 @@ export class GridView {
   }
 
   portScreenPosition(component: PlantComponent, portId: string): { x: number; y: number; radius: number } | null {
+    if (this.sectionFrameOf(component)) {
+      const s = this.spritePortPosition(component, portId);
+      return s ? { x: s.x, y: s.y, radius: this.portRadius() } : null;
+    }
     const a = portAnchor(component, portId);
     if (!a) return null;
     const s = this.worldToScreen(a.point);
     return { x: s.x, y: s.y, radius: this.portRadius() };
   }
 
+  /**
+   * Every port of a component with where it is drawn and which way its
+   * marker faces: on the plan at the footprint edge, or on the container's
+   * sprite for a component drawn inside a section view.
+   */
+  private drawnPorts(component: PlantComponent): Array<{ port: Port; screen: Point; side: Side }> {
+    if (!this.sectionFrameOf(component)) {
+      return portAnchors(component).map(a => ({ port: a.port, screen: this.worldToScreen(a.point), side: a.side }));
+    }
+    const size = getComponentSize(component);
+    const out: Array<{ port: Port; screen: Point; side: Side }> = [];
+    for (const port of component.ports ?? []) {
+      const screen = this.spritePortPosition(component, port.id);
+      if (screen) out.push({ port, screen, side: portSide(port, size) });
+    }
+    return out;
+  }
+
   private portRadius(): number {
     return Math.max(5, Math.min(14, this.cam.ppm * 0.22));
   }
 
+  /**
+   * Everything drawn for one connection, as screen polylines: the lattice
+   * route (if any) and the runs inside section views (test and assistant
+   * hook; the renderer draws from the same layout).
+   */
+  connectionScreenPolylines(conn: Connection, plantState: PlantState): { lattice: Point[] | null; sections: Point[][] } {
+    this.setPlant(plantState);
+    const layout = this.currentLayout(plantState);
+    const route = layout.display.get(conn);
+    return {
+      lattice: route ? route.map(p => this.worldToScreen(p)) : null,
+      sections: layout.sectionParts.get(conn) ?? [],
+    };
+  }
+
   /** Where a flow arrow for a connection belongs: the middle of its route, along it. */
   connectionScreenEndpoints(conn: Connection, plantState: PlantState): ConnectionScreenEndpoints | null {
+    this.setPlant(plantState);
     const layout = this.currentLayout(plantState);
-    const pts = layout.display.get(conn) ?? connectionRoute(conn, plantState);
-    if (!pts) return null;
-    const len = routeLength(pts);
     const scale = this.cam.ppm / 50;
+    const pts = layout.display.get(conn);
+    if (!pts) {
+      // No lattice run: the whole connection is drawn inside a section view
+      const parts = layout.sectionParts.get(conn);
+      if (!parts || parts.length === 0) return this.openingEndpoints(conn, plantState, scale);
+      const run = parts[0];
+      const lenPx = routeLength(run);
+      if (lenPx < 1e-6) return { fromPos: run[0], toPos: run[0], scale };
+      const mid = pointAlongRoute(run, 0.5);
+      const half = Math.min(TILE_M * 0.5 * this.cam.ppm, lenPx / 4);
+      return {
+        fromPos: { x: mid.point.x - mid.dir.x * half, y: mid.point.y - mid.dir.y * half },
+        toPos: { x: mid.point.x + mid.dir.x * half, y: mid.point.y + mid.dir.y * half },
+        scale,
+      };
+    }
+    const len = routeLength(pts);
     if (len < 1e-6) {
       // Zero-length stub (a pipe laid in grid view starts exactly at the
       // port): point the arrow along the pipe it feeds
@@ -558,6 +870,23 @@ export class GridView {
       toPos: this.worldToScreen({ x: mid.point.x + mid.dir.x * half, y: mid.point.y + mid.dir.y * half }),
       scale,
     };
+  }
+
+  /**
+   * An opening between a component and its container whose two nozzles
+   * coincide in the section view, so no run is drawn: its arrow sits on the
+   * inner component's nozzle (see openingArrowEndpoints).
+   */
+  private openingEndpoints(conn: Connection, plantState: PlantState, scale: number): ConnectionScreenEndpoints | null {
+    const from = plantState.components.get(conn.fromComponentId);
+    const to = plantState.components.get(conn.toComponentId);
+    if (!from || !to || !this.isContainmentPair(from, to)) return null;
+    const inner = from.containedBy === to.id ? from : to;
+    const point = this.spritePortPosition(inner, inner === from ? conn.fromPortId : conn.toPortId);
+    const box = this.spriteScreenBox(inner);
+    if (!point || !box) return null;
+    const center = { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+    return openingArrowEndpoints(point, center, inner === from, Math.min(TILE_M * 0.5 * this.cam.ppm, 12), scale);
   }
 
   // ---------------------------------------------------------------------
@@ -599,6 +928,7 @@ export class GridView {
   }
 
   componentAt(screen: Point, plantState: PlantState): PlantComponent | null {
+    this.setPlant(plantState);
     const world = this.screenToWorld(screen);
     const order = this.drawOrder(plantState);
     for (let i = order.length - 1; i >= 0; i--) {
@@ -657,10 +987,12 @@ export class GridView {
    * cannot be hit.
    */
   connectionAt(screen: Point, plantState: PlantState): Connection | null {
+    this.setPlant(plantState);
     const world = this.screenToWorld(screen);
     let best: Connection | null = null;
     let bestD = Infinity;
-    for (const [run, pts] of this.currentLayout(plantState).display) {
+    const layout = this.currentLayout(plantState);
+    for (const [run, pts] of layout.display) {
       if (!isConnection(run)) continue;
       const halfWidth = Math.max(this.lineWidthForArea(run.flowArea) / 2, 6) / this.cam.ppm;
       const d = distanceToPolyline(world, pts);
@@ -669,24 +1001,37 @@ export class GridView {
         best = run;
       }
     }
+    // Runs inside section views are screen polylines
+    for (const [conn, parts] of layout.sectionParts) {
+      const halfWidthPx = Math.max(this.lineWidthForArea(conn.flowArea) / 2, 6);
+      for (const pts of parts) {
+        const d = distanceToPolyline(screen, pts) / this.cam.ppm;
+        if (d * this.cam.ppm <= halfWidthPx && d < bestD) {
+          bestD = d;
+          best = conn;
+        }
+      }
+    }
     return best;
   }
 
   portAt(screen: Point, plantState: PlantState, exclude?: string): PortHit | null {
+    this.setPlant(plantState);
     const r = this.portRadius() + 3;
     let best: PortHit | null = null;
     let bestKey = Infinity;
     for (const component of plantState.components.values()) {
       if (!component.ports || (component as any).isHydraulicOnly) continue;
       if (exclude && component.id === exclude) continue;
-      for (const anchor of portAnchors(component)) {
-        const s = this.worldToScreen(anchor.point);
-        const d = Math.hypot(screen.x - s.x, screen.y - s.y);
+      for (const drawn of this.drawnPorts(component)) {
+        const d = Math.hypot(screen.x - drawn.screen.x, screen.y - drawn.screen.y);
         if (d > r) continue;
-        const key = d + (anchor.port.connectedTo ? 1000 : 0);
+        const key = d + (drawn.port.connectedTo ? 1000 : 0);
         if (key < bestKey) {
+          const end = this.latticeEnd(component, drawn.port.id);
+          if (!end) continue;
           bestKey = key;
-          best = { component, port: anchor.port, anchor };
+          best = { component, port: drawn.port, anchor: end.anchor, frameRoot: end.root ?? undefined };
         }
       }
     }
@@ -705,7 +1050,10 @@ export class GridView {
       target: null,
       dragging: false,
       pressScreen: null,
-      sourceRect: from.component.type === 'pipe' ? null
+      // A run from a port drawn inside a container starts at the container's
+      // wall, so it is the container's footprint the sweep keeps out of
+      sourceRect: from.frameRoot ? footprintRect(from.frameRoot.position, componentFootprint(from.frameRoot))
+        : from.component.type === 'pipe' ? null
         : footprintRect(from.component.position, componentFootprint(from.component)),
       orientation,
     };
@@ -806,6 +1154,8 @@ export class GridView {
     // moved the camera (a resize, a restored setting, a future caller)
     this.terrainDataFor(f.plantState.terrain);
     this.clampToTerrain();
+    this.setPlant(f.plantState);
+    this.frameCache.clear();
     this.layout = this.buildLayout(f.plantState);
     const order = this.drawOrder(f.plantState);
 
@@ -824,9 +1174,10 @@ export class GridView {
       if (ghost) ctx.globalAlpha = 1;
     }
 
-    // Foundation pads under every standing component
+    // Foundation pads under every component standing on the plan (one drawn
+    // inside a container's section view stands on nothing)
     for (const c of order) {
-      if (this.isGroundLayer(c) || c.type === 'pipe') continue;
+      if (this.isGroundLayer(c) || c.type === 'pipe' || this.sectionFrameOf(c)) continue;
       const ghost = buildGhost(c);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.renderPad(ctx, c, f);
@@ -835,13 +1186,17 @@ export class GridView {
 
     this.renderRoutes(ctx, f);
 
-    // Standing sprites, back to front
+    // Standing sprites, back to front. The runs inside a container's section
+    // view go on right after its sprite, under the sprites of what it holds
+    // (which the draw order puts later: deeper containment draws later)
     for (const c of order) {
       if (this.isGroundLayer(c) || c.type === 'pipe') continue;
       const ghost = buildGhost(c);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
       this.renderSprite(ctx, c, f);
       if (ghost) ctx.globalAlpha = 1;
+      const inside = this.layout?.sections.get(c.id);
+      if (inside) this.renderSectionRuns(ctx, f, inside);
     }
 
     this.renderBuildProgress(ctx, f);
@@ -1788,8 +2143,10 @@ export class GridView {
     renderComponent(ctx, c, view, isSelected, true, f.plantState.connections, !f.constructionMode, f.plantState);
     ctx.restore();
 
+    // A sprite drawn inside a section view is drawn AT its elevation, so
+    // only a sprite standing on the plan needs the label
     const elevation = c.elevation ?? 0;
-    if (elevation !== 0) {
+    if (elevation !== 0 && !L.frame) {
       ctx.font = `${Math.round(10 * readoutScale(this.cam.ppm / 50))}px monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
@@ -1885,6 +2242,23 @@ export class GridView {
     }
   }
 
+  /** The runs inside one container's section view (screen polylines already). */
+  private renderSectionRuns(ctx: CanvasRenderingContext2D, f: GridFrameState, runs: SectionRun[]): void {
+    const { plantState } = f;
+    for (const { conn, pts } of runs) {
+      const from = plantState.components.get(conn.fromComponentId) ?? plantState.components.get(conn.toComponentId);
+      if (!from) continue;
+      const fluid = f.connectionFluid(conn, from);
+      const color = fluid ? getFluidColor(fluid) : '#667788';
+      const touchesSelection = conn === f.selectedConnection || (f.selectedComponentId !== null &&
+        (conn.fromComponentId === f.selectedComponentId || conn.toComponentId === f.selectedComponentId));
+      const ghost = buildGhost(conn);
+      if (ghost) ctx.globalAlpha = GHOST_ALPHA;
+      this.drawPipe(ctx, pts, color, this.lineWidthForArea(conn.flowArea), touchesSelection);
+      if (ghost) ctx.globalAlpha = 1;
+    }
+  }
+
   /** A pipe run: shadow, dark wall, fluid-coloured body, a sheen, elbows at bends, flanges at the ends. */
   private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean): void {
     if (pts.length < 2) return;
@@ -1965,58 +2339,20 @@ export class GridView {
     const to = plantState.components.get(conn.toComponentId);
     // One end may be the environment, which is not a component
     if (!from && !to) return;
-    const route = this.currentLayout(plantState).display.get(conn);
-    if (!route) return;
-    const mid = pointAlongRoute(route, 0.5).point;
-    const s = this.worldToScreen(mid);
-
-    const name = (c: PlantComponent | undefined) => c ? (c.label || c.id) : 'Open air';
-    const lines: string[] = [`${name(from)} \u2192 ${name(to)}`];
-    const bore = conn.flowArea && conn.flowArea > 0 ? Math.sqrt(4 * conn.flowArea / Math.PI) : undefined;
-    const geometry: string[] = [];
-    if (bore !== undefined) geometry.push(`\u2300 ${formatGaugeValue(bore)} m`);
-    if (conn.length !== undefined) geometry.push(`L ${formatGaugeValue(conn.length)} m`);
-    if (geometry.length > 0) lines.push(geometry.join('  \u00b7  '));
-    if (simState) {
-      const flowId = flowConnectionIdForPlantConnection(conn, plantState);
-      const flow = flowId ? simState.flowConnections.find(fc => fc.id === flowId) : undefined;
-      if (flow) {
-        const fluid = f.connectionFluid(conn, (from ?? to)!);
-        const phase = fluid ? fluid.phase : '';
-        lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
-      }
+    const layout = this.currentLayout(plantState);
+    const route = layout.display.get(conn);
+    const inside = layout.sectionParts.get(conn);
+    let s: Point;
+    if (route) {
+      s = this.worldToScreen(pointAlongRoute(route, 0.5).point);
+    } else if (inside && inside.length > 0) {
+      s = pointAlongRoute(inside[0], 0.5).point;   // already screen pixels
+    } else {
+      return;
     }
-    if (f.buildMode) lines.push('click again to edit \u00b7 Delete removes it');
 
-    ctx.save();
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    const pad = 6;
-    const lineH = 15;
-    const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + pad * 2;
-    const h = lines.length * lineH + pad * 2 - 3;
-    let x = s.x + 14;
-    let y = s.y - h / 2;
-    if (x + w > f.width - 4) x = s.x - 14 - w;
-    y = Math.max(4, Math.min(f.height - h - 4, y));
-    ctx.fillStyle = 'rgba(20, 24, 30, 0.9)';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    lines.forEach((l, i) => {
-      ctx.fillStyle = i === 0 ? '#fff' : '#cfd6e0';
-      ctx.font = i === 0 ? 'bold 12px sans-serif' : '12px sans-serif';
-      ctx.fillText(l, x + pad, y + pad + i * lineH);
-    });
-    // Leader from the run to the box
-    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
-    ctx.beginPath();
-    ctx.moveTo(s.x, s.y);
-    ctx.lineTo(x < s.x ? x + w : x, s.y);
-    ctx.stroke();
-    ctx.restore();
+    const lines = connectionLabelLines(conn, plantState, simState, f.connectionFluid, f.buildMode);
+    if (lines) drawConnectionLabel(ctx, s, lines, f.width, f.height);
   }
 
   /** Controller wires and switchyard-to-generator lines. */
@@ -2095,15 +2431,15 @@ export class GridView {
     const radius = this.portRadius();
     for (const component of f.plantState.components.values()) {
       if (!component.ports || (component as any).isHydraulicOnly) continue;
-      for (const anchor of portAnchors(component)) {
-        const s = this.worldToScreen(anchor.point);
+      for (const drawn of this.drawnPorts(component)) {
+        const s = drawn.screen;
         if (s.x < -20 || s.x > f.width + 20 || s.y < -20 || s.y > f.height + 20) continue;
         const highlighted = !!f.highlightedPort &&
-          f.highlightedPort.componentId === component.id && f.highlightedPort.portId === anchor.port.id;
+          f.highlightedPort.componentId === component.id && f.highlightedPort.portId === drawn.port.id;
         const isTarget = !!this.routing?.target &&
-          this.routing.target.component.id === component.id && this.routing.target.port.id === anchor.port.id;
+          this.routing.target.component.id === component.id && this.routing.target.port.id === drawn.port.id;
         const r = highlighted || isTarget ? radius * 1.4 : radius;
-        this.drawPortMarker(ctx, s, anchor.side, anchor.port, r, highlighted || isTarget);
+        this.drawPortMarker(ctx, s, drawn.side, drawn.port, r, highlighted || isTarget);
         if (highlighted || isTarget) {
           ctx.beginPath();
           ctx.arc(s.x, s.y, r * 1.3 + Math.sin(Date.now() * 0.004) * radius * 0.3, 0, Math.PI * 2);

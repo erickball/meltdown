@@ -37,13 +37,16 @@ Layers, back to front (`GridView.render`):
 4. Pipes: pipe components and connections as routed runs (laned where they
    share a corridor) with a dark wall, a fluid-coloured body (the same
    donor-node colour logic as the other views), a sheen, elbows at bends and
-   flanges at the ends. Openings between a component and its container are
-   internal and are not drawn.
+   flanges at the ends. Runs inside a container's section view (below) are
+   drawn later, on the container's sprite; openings into a container that is
+   not a sprite (a building, a pool) are not drawn.
 5. Sprites: the component's existing front-view drawing standing on its pad,
    rising north from the south edge of the footprint, painter-sorted by south
-   edge and containment. Raised components float on columns above the pad
-   with a cast shadow; sunken ones are shaded with soil. Small fittings are
-   drawn no smaller than 0.8 tile so a valve is visible.
+   edge and containment. A sprite standing on the plan sits on its pad
+   whatever its elevation (the elevation is a label). Small fittings are
+   drawn no smaller than 0.8 tile so a valve is visible. Right after each
+   container's sprite come the runs inside its section view, then (by the
+   containment sort) the sprites of what it holds.
 6. Controller wires and generator lines, connection points (connect mode),
    the pipe being laid, and the placement preview.
 
@@ -51,6 +54,46 @@ The shared overlays (gauges, thermometers, flow arrows, burst symbols, break
 lines, elevation nudge arrows) draw on top through the same callbacks the
 2.5D view uses; `scale` is px-per-metre / 50 so the readout size law is
 unchanged.
+
+### Section views
+
+A standing sprite is a front elevation drawn on a plan footprint, so within
+that drawing screen-y is height. The grid uses that in one rule: **a
+container's sprite is a section view; the tile lattice is a plan view.**
+
+- A component contained by a sprite (a core barrel in a vessel, the bundle
+  and circulators in the Xe-100 SG vessel) is drawn ON the container's
+  sprite at the container's scale, offset laterally by its plan offset and
+  vertically by its elevation above the container's. No pad, no elevation
+  label. A section has no depth axis, so two contained things at the same
+  x but different plan y overlap, as they would on a real section drawing.
+  Buildings, pools and the other ground-layer things are floors, not
+  frames: what they hold stands on the plan as before. Nested containers
+  resolve to the nearest sprite ancestor (`sectionFrameOf`); the outermost
+  one is the "root" the lattice sees (`sectionRootOf`).
+- A connection whose two ends share a root is drawn in that section view
+  only: an orthogonal run between the two ports' positions on the sprite.
+  That includes openings between a component and its own container.
+- A connection that leaves a container is split at the wall. Outside, an
+  ordinary lattice route from the partner to a `wallAnchor` on the
+  container's footprint edge facing the partner (the same rule mirrored
+  vessel nozzles use). Inside, a run from the port to the penetration at the
+  outside end's port height, across to the sprite's edge, then down the wall
+  to the plan anchor where the lattice route picks it up - so a circulator
+  under the SG dome is seen discharging down the vessel to the cross-vessel.
+  The rise from plan anchor to penetration is the seam between the two
+  frames; it reads as an external pipe climbing to its nozzle.
+- The ports of a contained component are drawn and picked on the sprite
+  (`drawnPorts`); a route laid from one starts at the root's wall
+  (`PortHit.frameRoot`, `anchor` = the wall anchor), on the side the port
+  itself faces. The container's own port markers stay plan anchors on its
+  footprint edge, since that is where an outside pipe is laid to.
+- Section runs are screen polylines rebuilt with the layout each frame
+  (`RouteLayout.sections` by root, `sectionParts` by connection); hit tests,
+  the selected-run label and the flow arrows read them.
+
+Checked headlessly by `scripts/test-grid-sections.ts` on the Xe-100 plant
+layout.
 
 ### Textures
 
