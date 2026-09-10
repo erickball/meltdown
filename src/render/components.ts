@@ -22,7 +22,9 @@ import {
   Point,
   PlantState,
   Connection,
+  RadiantSurface,
   pumpVisualHeight,
+  radiantRingOf,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
 import { PIPE_METRES_PER_STICK, formatMetres, stockedLines } from '../game/stock';
@@ -997,6 +999,12 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
     return;
   }
 
+  const ring = radiantRingOf(tank);
+  if (ring) {
+    renderStandpipeRing(ctx, tank, ring, view, isSimulating);
+    return;
+  }
+
   // Calculate wall thickness from pressure rating if available, otherwise use stored value
   let wallThickness = tank.wallThickness;
   if (tank.pressureRating !== undefined && tank.pressureRating > 0) {
@@ -1027,6 +1035,78 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   ctx.strokeStyle = COLORS.steelHighlight;
   ctx.lineWidth = 1;
   ctx.strokeRect(-w / 2, -h / 2, w, h);
+}
+
+/**
+ * A radiant tank, front view: the bank of standpipes it lumps into one node,
+ * standing on the circle its radiantSurface describes, with a ring header
+ * across the bottom and the top.
+ *
+ * Only the back half of the ring is drawn. The front half would stand
+ * between the viewer and the vessel the panels exist to watch; leaving it
+ * out is the cut-away every other vessel drawing already is. The painter
+ * sorts the ring behind whatever stands at its centre (paintDepthY), so
+ * the vessel covers the middle of the bank and the tubes show either side,
+ * crowding together toward the edges the way a cylinder of them does.
+ *
+ * How many tubes there are is the model's own: the tank's water volume
+ * divided by one tube's bore times the bank height. So the picture has as
+ * many standpipes as the inventory the physics is carrying would fill.
+ */
+function renderStandpipeRing(
+  ctx: CanvasRenderingContext2D, tank: TankComponent, ring: RadiantSurface, view: ViewState, isSimulating: boolean
+): void {
+  const zoom = view.zoom;
+  const R = ring.diameter / 2 * zoom;
+  const h = tank.height * zoom;
+  const bore = ring.hydraulicDiameter ?? ring.diameter;
+  const od = bore + 2 * ring.thickness;
+  // Same volume the factory gives the node (factory.ts createFlowNodes)
+  const stored = (tank as { volume?: number }).volume;
+  const volume = stored !== undefined ? stored : Math.PI * Math.pow(tank.width / 2, 2) * tank.height;
+  const perTube = Math.PI / 4 * bore * bore * tank.height;
+  const count = Math.max(1, Math.round(volume / perTube));
+
+  // Tubes whose centre is behind the ring's centre line, farthest first so
+  // the nearer ones (toward the edges) overlap them
+  const xs: number[] = [];
+  for (let k = 0; k < count; k++) {
+    const theta = (2 * Math.PI * (k + 0.5)) / count;
+    if (Math.sin(theta) > 0) xs.push(R * Math.cos(theta));
+  }
+  xs.sort((a, b) => Math.abs(a) - Math.abs(b));
+
+  // Drawn no thinner than a hairline of steel round a hairline of water, so
+  // what is in the tubes stays visible at plant scale
+  const tubeW = Math.max(2, od * zoom);
+  const wallPx = Math.max(0.5, ring.thickness * zoom);
+  const boreW = Math.max(1, tubeW - 2 * wallPx);
+
+  ctx.fillStyle = COLORS.steel;
+  for (const x of xs) ctx.fillRect(x - tubeW / 2, -h / 2, tubeW, h);
+
+  ctx.save();
+  ctx.beginPath();
+  for (const x of xs) ctx.rect(x - boreW / 2, -h / 2, boreW, h);
+  ctx.clip();
+  if (tank.fluid) {
+    const liquidFraction = getLiquidFraction(tank, tank.fluid, isSimulating);
+    renderFluidWithNcg(ctx, tank.fluid, -R, -h / 2, 2 * R, h, liquidFraction, tank.fluid.separation ?? 1);
+  } else {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-R, -h / 2, 2 * R, h);
+  }
+  ctx.restore();
+
+  // Ring headers the tubes rise out of and into
+  const headerH = Math.max(2, 2.5 * od * zoom);
+  for (const y of [-h / 2, h / 2 - headerH]) {
+    ctx.fillStyle = COLORS.steel;
+    ctx.fillRect(-R - tubeW / 2, y, 2 * R + tubeW, headerH);
+    ctx.strokeStyle = COLORS.steelHighlight;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-R - tubeW / 2, y, 2 * R + tubeW, headerH);
+  }
 }
 
 /**
@@ -4334,13 +4414,15 @@ function renderPorts(ctx: CanvasRenderingContext2D, component: PlantComponent, v
 export function getComponentBounds(component: PlantComponent, view: ViewState): { x: number; y: number; width: number; height: number } {
   // Return bounding box in local coordinates (pre-rotation)
   switch (component.type) {
-    case 'tank':
+    case 'tank': {
+      const tankW = radiantRingOf(component)?.diameter ?? component.width;
       return {
-        x: -component.width * view.zoom / 2 - 5,
+        x: -tankW * view.zoom / 2 - 5,
         y: -component.height * view.zoom / 2 - 5,
-        width: component.width * view.zoom + 10,
+        width: tankW * view.zoom + 10,
         height: component.height * view.zoom + 10,
       };
+    }
     case 'pipe':
       return {
         x: -5,

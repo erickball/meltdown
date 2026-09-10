@@ -114,6 +114,18 @@ export function componentFootprint(component: PlantComponent): Footprint {
   return footprintFromSize(component.type, getComponentSize(component));
 }
 
+/**
+ * Things that ARE the ground where they stand: a building's floor, a
+ * switchyard's apron, a pool (a hole in it), a warehouse yard, and a tank
+ * that is really a body of open water. They get no foundation pad; every
+ * other component except a pipe stands on one, in both views.
+ */
+export function isGroundLayerComponent(component: PlantComponent): boolean {
+  return component.type === 'building' || component.type === 'switchyard' ||
+    component.type === 'pool' || component.type === 'warehouse' ||
+    waterBodyOf(component as never) !== undefined;
+}
+
 /** Footprint for a palette type (placement preview, before the component exists). */
 export function footprintForType(componentType: string): Footprint {
   const size = getDefaultComponentSize(componentType);

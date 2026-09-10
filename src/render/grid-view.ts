@@ -9,7 +9,7 @@
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
  */
-import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock, waterBodyOf } from '../types';
+import { Point, PlantState, PlantComponent, Connection, Fluid, Port, PipeComponent, BuildingComponent, ViewState, ControllerComponent, SwitchyardComponent, PoolComponent, WarehouseComponent, PlantStock, waterBodyOf, radiantRingOf, paintDepthY } from '../types';
 import {
   stockedLines, stockLineDisplayName, typeDisplayName, pipeSpecDisplayName,
   PIPE_METRES_PER_STICK,
@@ -28,6 +28,7 @@ import {
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
   PipeOrientation, pipePieceRoute, groundRunRoute, findFreeEndJoins, snapPlacementCenter,
+  isGroundLayerComponent,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
@@ -241,6 +242,16 @@ export class GridView {
     return this.layout;
   }
 
+  /**
+   * Every run's laned plan route, rebuilt now from the route cache. The 2.5D
+   * view lays its pipes along these, so both views show the same piping.
+   * Openings between a component and its container have no route.
+   */
+  planRuns(plantState: PlantState): Map<Connection | PipeComponent, Point[]> {
+    this.layout = this.buildLayout(plantState);
+    return this.layout.display;
+  }
+
   // ---------------------------------------------------------------------
   // Camera
   // ---------------------------------------------------------------------
@@ -408,9 +419,7 @@ export class GridView {
     // switchyard's apron, a pool (a hole in it), and a tank that is really a
     // body of open water - the terrain has already painted that one, so it
     // gets no pad and no sprite, only its nozzle.
-    return component.type === 'building' || component.type === 'switchyard' ||
-      component.type === 'pool' || component.type === 'warehouse' ||
-      waterBodyOf(component as never) !== undefined;
+    return isGroundLayerComponent(component);
   }
 
   /**
@@ -574,6 +583,9 @@ export class GridView {
     };
     const southEdge = (c: PlantComponent): number => {
       if (c.type === 'pipe') return Math.max(...pipeRoute(c as PipeComponent).map(p => p.y));
+      // A standpipe ring draws only its back half, so it stands behind the
+      // vessel it wraps, not level with it (paintDepthY)
+      if (radiantRingOf(c as never)) return paintDepthY(c as never);
       return footprintRect(c.position, componentFootprint(c)).y1;
     };
     return comps.sort((a, b) => {

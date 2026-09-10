@@ -1038,7 +1038,7 @@
         "label": "RCCS Cavity Panels (lower)",
         "position": {
           "x": 44,
-          "y": 75
+          "y": 78
         },
         "rotation": 0,
         "elevation": 14,
@@ -1093,7 +1093,7 @@
         "label": "RCCS Cavity Panels (upper)",
         "position": {
           "x": 44,
-          "y": 75
+          "y": 78
         },
         "rotation": 0,
         "elevation": 24,

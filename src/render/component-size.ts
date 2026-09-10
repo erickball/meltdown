@@ -1,4 +1,4 @@
-import { PlantComponent } from '../types';
+import { PlantComponent, radiantRingOf } from '../types';
 import { getComponentVisualHeight } from './components';
 
 /**
@@ -13,8 +13,12 @@ import { getComponentVisualHeight } from './components';
  */
 export function getComponentSize(component: PlantComponent): { width: number; height: number } {
   switch (component.type) {
-    case 'tank':
-      return { width: (component as any).width, height: (component as any).height };
+    case 'tank': {
+      // A tank that is a radiant surface is drawn as its ring of standpipes,
+      // as wide as the circle they stand on (see radiantRingOf)
+      const ring = radiantRingOf(component as never);
+      return { width: ring ? ring.diameter : (component as any).width, height: (component as any).height };
+    }
     case 'pipe':
       return { width: (component as any).length, height: (component as any).diameter };
     case 'pump': {

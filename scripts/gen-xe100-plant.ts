@@ -416,7 +416,8 @@ add('val-prel-1', {
 const RCCS_LIFT = RPV_LIFT;
 const rccsPanel = (id: string, elevation: number, pressure: number, half: string) => add(id, {
   type: 'tank', label: `RCCS Cavity Panels (${half})`,
-  position: { x: RPV_X, y: 75 }, rotation: 0, elevation,
+  // On the vessel's centre, so the ring of standpipes is drawn around it
+  position: { x: RPV_X, y: 78 }, rotation: 0, elevation,
   width: 0.66, height: 10, wallThickness: 0.006,
   fillLevel: 1, pressureRating: 16,
   radiantSurface: {

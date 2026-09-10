@@ -757,6 +757,31 @@ export function waterBodyOf(component: { type: string; waterBody?: string }): st
 }
 
 /**
+ * The ring of standpipes a tank is drawn as, if it is one: a tank that
+ * declares a radiantSurface is a bank of tubes standing on a circle of that
+ * surface's diameter around its own position (a reactor cavity cooling
+ * panel wrapping the vessel it faces). The tank's own width only sets its
+ * WATER inventory, so it is not the drawn width - see RadiantSurface.
+ */
+export function radiantRingOf(component: { type: string; waterBody?: string; radiantSurface?: RadiantSurface }): RadiantSurface | undefined {
+  if (component.type !== 'tank' || waterBodyOf(component) !== undefined) return undefined;
+  return component.radiantSurface;
+}
+
+/**
+ * The plan depth (y) the painter's sort stands a component's drawing at.
+ * Every drawing is a front view at its own position, except a standpipe
+ * ring, which leaves out the tubes in front of the vessel it wraps: what is
+ * drawn is the back half of the ring, whose tubes stand on average 2R/pi
+ * behind the centre. That is what puts the ring behind a vessel at the same
+ * position instead of in front of it.
+ */
+export function paintDepthY(component: { type: string; position: Point; waterBody?: string; radiantSurface?: RadiantSurface }): number {
+  const ring = radiantRingOf(component);
+  return component.position.y + (ring ? ring.diameter / Math.PI : 0);
+}
+
+/**
  * Where a pump's motor sits above its base when the pump does not say: shaft
  * height on a horizontal machine, about half a metre. See
  * PumpComponent.motorElevation for what the number does.

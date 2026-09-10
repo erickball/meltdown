@@ -313,9 +313,13 @@ add('val-prel-1', {
 // cosmetic either: a node's ports have to sit at the same local elevation or
 // the hydrostatic term they carry does not cancel around the loop, and what
 // is left over is a standing head no density difference put there.
+//
+// The panels stand on the vessel's own centre: the views draw a radiant tank
+// as its ring of standpipes around its position, so this is what puts the
+// ring around the RPV.
 const rccsPanel = (id: string, elevation: number, pressure: number, half: string) => add(id, {
   type: 'tank', label: `RCCS Cavity Panels (${half})`,
-  position: { x: 36, y: 75 }, rotation: 0, elevation,
+  position: { x: 36, y: 78 }, rotation: 0, elevation,
   width: 0.66, height: 10, wallThickness: 0.006,
   fillLevel: 1, pressureRating: 16,
   // The metal that sees the vessel. Emissivities: 0.9 for the painted panel

@@ -1,7 +1,7 @@
-import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, waterBodyOf } from '../types';
+import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, PipeComponent, waterBodyOf, paintDepthY } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
-import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection } from './components';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, getComponentVisualHeight } from './components';
 import {
   IsometricConfig,
   DEFAULT_ISOMETRIC,
@@ -10,12 +10,13 @@ import {
   getComponentElevation,
   renderDebugGrid,
 } from './isometric';
-import { getFluidColor, COLORS, renderColorLegend } from './colors';
+import { getFluidColor, renderColorLegend } from './colors';
 import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
-import { PipeOrientation, oppositeOrientation } from './grid-geometry';
+import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute } from './grid-geometry';
+import { Point3, RunVertex, liftRoute, slopeRoute, drawPipeRun, screenMidpoint, distanceToScreenPolyline } from './pipe-run-3d';
 import { drawFires, collectCladdingFires } from './fire-fx';
 import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
@@ -27,6 +28,25 @@ export type ViewMode = 'perspective' | 'grid';
 
 /** How faint a part that is not built yet (or is going away) is drawn. */
 const GHOST_ALPHA = 0.42;
+
+/** How far a foundation pad stands proud of grade, m. */
+const PAD_THICKNESS_M = 0.2;
+/** Height of one braced bay of a support scaffold, m (bays are shared out evenly). */
+const SCAFFOLD_BAY_M = 3;
+
+/**
+ * What a standing component rests on in the 2.5D view: its footprint (the
+ * grid view's, so the two views found things on the same slab), the height
+ * it is carried up from, and the height of its own base. `onGround` means
+ * it rests on grade and gets a concrete pad; `top > base` means there is a
+ * gap to bridge with a steel scaffold.
+ */
+interface Foundation {
+  rect: PlanRect;
+  base: number;
+  top: number;
+  onGround: boolean;
+}
 
 export class PlantCanvas {
   private canvas: HTMLCanvasElement;
@@ -55,6 +75,13 @@ export class PlantCanvas {
   // plan view this class used to draw was retired in favour of the grid.)
   private viewMode: ViewMode = 'perspective';
   private grid = new GridView();
+  /**
+   * Every pipe run's plan route this frame (the grid view's laned layout),
+   * which the 2.5D view lifts into 3D to draw its piping.
+   */
+  private planRuns: Map<Connection | PipeComponent, Point[]> = new Map();
+  /** Each connection's screen run, worked out once per 2.5D frame (cleared with planRuns). */
+  private runMemo = new Map<Connection, { pts: RunVertex[]; scale: number } | null>();
   /** Ground motion (a scenario `shake` action): a render-transform jolt, nothing more. */
   private shake = new CameraShake();
 
@@ -514,8 +541,8 @@ export class PlantCanvas {
       if (a.containedBy && !b.containedBy) return -1;
       if (!a.containedBy && b.containedBy) return 1;
 
-      // Second priority: depth sorting
-      return a.position.y - b.position.y;
+      // Second priority: depth sorting (the same depth the painter uses)
+      return paintDepthY(a) - paintDepthY(b);
     });
 
     for (const component of components) {
@@ -631,21 +658,21 @@ export class PlantCanvas {
       ]);
     }
 
-    // For pipes, local coords go from (0, -halfH) to (length, halfH)
-    // For others, centered: (-halfW, -halfH) to (halfW, halfH)
-    let localLeft = -halfW;
-    let localRight = halfW;
+    // A pipe is its drawn run: a hit is within half its width (or the
+    // minimum grab) of the polyline it is drawn along
     if (component.type === 'pipe') {
-      localLeft = 0;
-      localRight = size.width;
+      const run = this.pipeComponentRun(component as PipeComponent);
+      if (!run) return false;
+      const halfWidth = Math.max(...run.map(v => v.w)) / 2;
+      return distanceToScreenPolyline(screenPos, run) <= Math.max(halfWidth, PlantCanvas.MIN_CLICK_TARGET_PX / 2);
     }
 
     // Define 4 corners in local space (ground footprint)
     const localCorners = [
-      { x: localLeft, y: -halfH },   // front-left
-      { x: localRight, y: -halfH },  // front-right
-      { x: localRight, y: halfH },   // back-right
-      { x: localLeft, y: halfH },    // back-left
+      { x: -halfW, y: -halfH },  // front-left
+      { x: halfW, y: -halfH },   // front-right
+      { x: halfW, y: halfH },    // back-right
+      { x: -halfW, y: halfH },   // back-left
     ];
 
     // Transform to world and project to screen
@@ -660,106 +687,42 @@ export class PlantCanvas {
       return false;
     }
 
-    const frontLeft = screenCorners[0].pos;
-    const frontRight = screenCorners[1].pos;
-    const backRight = screenCorners[2].pos;
-    const backLeft = screenCorners[3].pos;
-
-    // Calculate the visual bounds - must match the rendering translation logic
-    const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
-    const projectedZoom = frontWidth / size.width;
-    const visualHalfH = halfH * projectedZoom;
-
     let visualQuad: Point[];
-
-    if (component.type === 'pipe') {
-      // For pipes with endpoint data, use projected endpoints for hit testing
-      const pipe = component as import('../types').PipeComponent;
-      if (pipe.endPosition && pipe.endElevation !== undefined) {
-        // Project both endpoints
-        const startScreen = this.worldToScreenPerspective(
-          { x: pipe.position.x, y: pipe.position.y },
-          pipe.elevation ?? 0
-        );
-        const endScreen = this.worldToScreenPerspective(
-          pipe.endPosition,
-          pipe.endElevation
-        );
-
-        if (startScreen.scale > 0 && endScreen.scale > 0) {
-          // Calculate pipe visual thickness, with a minimum grab width so a
-          // small-bore line is still clickable (drawing is unaffected)
-          const avgScale = (startScreen.scale + endScreen.scale) / 2;
-          const visualThickness = Math.max(
-            halfH * avgScale * 50, // Match rendering zoom
-            PlantCanvas.MIN_CLICK_TARGET_PX / 2
-          );
-
-          // Calculate perpendicular offset for pipe width
-          const dx = endScreen.pos.x - startScreen.pos.x;
-          const dy = endScreen.pos.y - startScreen.pos.y;
-          const len = Math.hypot(dx, dy);
-          const perpX = -dy / len * visualThickness;
-          const perpY = dx / len * visualThickness;
-
-          // Quad corners: start-left, start-right, end-right, end-left
-          visualQuad = [
-            { x: startScreen.pos.x + perpX, y: startScreen.pos.y + perpY },
-            { x: startScreen.pos.x - perpX, y: startScreen.pos.y - perpY },
-            { x: endScreen.pos.x - perpX, y: endScreen.pos.y - perpY },
-            { x: endScreen.pos.x + perpX, y: endScreen.pos.y + perpY },
-          ];
-          return this.isPointInQuad(screenPos, visualQuad);
-        }
-      }
-
-      // Fallback for pipes without endpoint data (should not happen)
-      console.error(`[isPointInProjectedComponent] Pipe ${component.id} has no endpoint data`);
-      const visualTop = backLeft.y - 2 * visualHalfH;
-      const visualBottom = backLeft.y;
-      visualQuad = [
-        { x: backLeft.x, y: visualTop },      // top-left
-        { x: backRight.x, y: visualTop },     // top-right
-        { x: backRight.x, y: visualBottom },  // bottom-right
-        { x: backLeft.x, y: visualBottom },   // bottom-left
-      ];
-    } else {
-      // Other components: mirror the draw path exactly (see the render loop):
-      // project the component CENTER at its elevation, zoom from the center
-      // scale, verticalScale on the height, visual center one half-height
-      // above the projected point, then screen-space rotation (pumps mirror
-      // instead of rotating).
-      const centerScreen = this.worldToScreenPerspective(
-        { x: component.position.x, y: component.position.y },
-        elevation
-      );
-      if (centerScreen.scale <= 0) return false;
-      const { verticalScale } = this.getViewTransform();
-      const centerZoom = centerScreen.scale * 50;
-      const visualHalfW = halfW * centerZoom;
-      const centerVisualHalfH = halfH * centerZoom * verticalScale;
-      const cx = centerScreen.pos.x;
-      const cy = centerScreen.pos.y - centerVisualHalfH;
-      const rot = component.type === 'pump' ? 0 : component.rotation;
-      const rc = Math.cos(rot);
-      const rs = Math.sin(rot);
-      const corner = (sx: number, sy: number): Point => ({
-        x: cx + sx * rc - sy * rs,
-        y: cy + sx * rs + sy * rc,
-      });
-      // Grow the hit box - not the drawing - to a minimum target. A 0.1 m
-      // relief valve projects to two or three pixels and was effectively
-      // unclickable, and worse on a touchscreen.
-      const minHalf = PlantCanvas.MIN_CLICK_TARGET_PX / 2;
-      const hitHalfW = Math.max(visualHalfW, minHalf);
-      const hitHalfH = Math.max(centerVisualHalfH, minHalf);
-      visualQuad = [
-        corner(-hitHalfW, -hitHalfH),  // top-left
-        corner(hitHalfW, -hitHalfH),   // top-right
-        corner(hitHalfW, hitHalfH),    // bottom-right
-        corner(-hitHalfW, hitHalfH),   // bottom-left
-      ];
-    }
+    // Other components: mirror the draw path exactly (see the render loop):
+    // project the component CENTER at its elevation, zoom from the center
+    // scale, verticalScale on the height, visual center one half-height
+    // above the projected point, then screen-space rotation (pumps mirror
+    // instead of rotating).
+    const centerScreen = this.worldToScreenPerspective(
+      { x: component.position.x, y: component.position.y },
+      elevation
+    );
+    if (centerScreen.scale <= 0) return false;
+    const { verticalScale } = this.getViewTransform();
+    const centerZoom = centerScreen.scale * 50;
+    const visualHalfW = halfW * centerZoom;
+    const centerVisualHalfH = halfH * centerZoom * verticalScale;
+    const cx = centerScreen.pos.x;
+    const cy = centerScreen.pos.y - centerVisualHalfH;
+    const rot = component.type === 'pump' ? 0 : component.rotation;
+    const rc = Math.cos(rot);
+    const rs = Math.sin(rot);
+    const corner = (sx: number, sy: number): Point => ({
+      x: cx + sx * rc - sy * rs,
+      y: cy + sx * rs + sy * rc,
+    });
+    // Grow the hit box - not the drawing - to a minimum target. A 0.1 m
+    // relief valve projects to two or three pixels and was effectively
+    // unclickable, and worse on a touchscreen.
+    const minHalf = PlantCanvas.MIN_CLICK_TARGET_PX / 2;
+    const hitHalfW = Math.max(visualHalfW, minHalf);
+    const hitHalfH = Math.max(centerVisualHalfH, minHalf);
+    visualQuad = [
+      corner(-hitHalfW, -hitHalfH),  // top-left
+      corner(hitHalfW, -hitHalfH),   // top-right
+      corner(hitHalfW, hitHalfH),    // bottom-right
+      corner(-hitHalfW, hitHalfH),   // bottom-left
+    ];
 
     return this.isPointInQuad(screenPos, visualQuad);
   }
@@ -888,17 +851,19 @@ export class PlantCanvas {
           pipe.endElevation
         );
 
-        if (startScreen.scale > 0 && endScreen.scale > 0) {
+        const run = this.pipeComponentRun(pipe);
+        if (startScreen.scale > 0 && endScreen.scale > 0 && run) {
           const avgScale = (startScreen.scale + endScreen.scale) / 2;
           const visualThickness = halfH * avgScale * 50;
-          const midX = (startScreen.pos.x + endScreen.pos.x) / 2;
-          const midY = (startScreen.pos.y + endScreen.pos.y) / 2;
-          const pipeScreenLength = Math.hypot(endScreen.pos.x - startScreen.pos.x, endScreen.pos.y - startScreen.pos.y);
-          // Top of pipe is at midY - visualThickness
+          // The middle of the run as drawn - on a route that turns, not the
+          // midpoint of its two ends
+          const mid = screenMidpoint(run);
+          const xs = run.map(v => v.x);
+          // Top of pipe is at the midpoint less visualThickness
           return {
-            topCenter: { x: midX, y: midY - visualThickness },
+            topCenter: { x: mid.point.x, y: mid.point.y - visualThickness },
             scale: avgScale,
-            width: pipeScreenLength,
+            width: Math.max(Math.max(...xs) - Math.min(...xs), visualThickness * 2),
             height: visualThickness * 2,
           };
         }
@@ -1634,8 +1599,11 @@ export class PlantCanvas {
       if (isContainedBy(b, a.id)) return -1; // b is inside a (directly or indirectly), draw b last
 
       // Second priority: depth sorting
-      return (b.position.y - a.position.y);
+      return paintDepthY(b) - paintDepthY(a);
     });
+    this.planRuns = this.grid.planRuns(this.plantState);
+    this.runMemo.clear();
+    const foundations = this.foundationsFor(sortedComponents);
 
     mark('sort');
     // Draw shadows first
@@ -1651,6 +1619,23 @@ export class PlantCanvas {
         );
       }
     }
+
+    // Foundation pads under everything standing on grade - the same slabs
+    // the grid view draws - under the shadows, which fall across them. One
+    // batch for the built plant; a part still going up gets its own, faint.
+    const pads: PlanRect[] = [];
+    for (const component of sortedComponents) {
+      const foundation = foundations.get(component.id);
+      if (!foundation?.onGround) continue;
+      if (buildGhost(component)) {
+        ctx.globalAlpha = GHOST_ALPHA;
+        this.renderPads(ctx, [foundation.rect]);
+        ctx.globalAlpha = 1;
+      } else {
+        pads.push(foundation.rect);
+      }
+    }
+    this.renderPads(ctx, pads);
 
     // Sun direction vector (direction light travels, from sun toward ground)
     // Sun at 45 degrees elevation, behind objects and slightly to the left
@@ -2065,10 +2050,25 @@ export class PlantCanvas {
         continue;
       }
 
+      // A pipe is drawn along its plan route, the way the grid lays it,
+      // turning square, sloping from one end's elevation to the other's
+      if (component.type === 'pipe') {
+        const pipe = component as PipeComponent;
+        const run = this.pipeComponentRun(pipe);
+        if (run) drawPipeRun(ctx, run, pipe.fluid ? getFluidColor(pipe.fluid) : '#111', component.id === this.selectedComponentId);
+        ctx.restore();
+        this.renderBelowGradeOverlay(ctx, component);
+        continue;
+      }
+
+      // A raised component stands on a scaffold from whatever is under it:
+      // the far faces go behind the component, the near face in front
+      const foundation = foundations.get(component.id);
+      if (foundation && foundation.top > foundation.base) this.renderScaffold(ctx, foundation, 'back');
+
       // Get the projected corner positions
       const frontLeft = screenCorners[0].pos;
       const frontRight = screenCorners[1].pos;
-      const backLeft = screenCorners[3].pos;
 
       // Use front edge width for zoom (may be overridden for non-pipe components)
       const frontWidth = Math.hypot(frontRight.x - frontLeft.x, frontRight.y - frontLeft.y);
@@ -2088,136 +2088,26 @@ export class PlantCanvas {
       // visual base (used to anchor the elevation label at the base)
       let labelBaseOffsetY = 0;
 
-      if (component.type === 'pipe') {
-        // For pipes with endpoint data, project both endpoints and draw between them
-        const pipe = component as import('../types').PipeComponent;
-        if (pipe.endPosition && pipe.endElevation !== undefined) {
-          // Project start point (position, elevation)
-          const startScreen = this.worldToScreenPerspective(
-            { x: pipe.position.x, y: pipe.position.y },
-            pipe.elevation ?? 0
-          );
-          // Project end point
-          const endScreen = this.worldToScreenPerspective(
-            pipe.endPosition,
-            pipe.endElevation
-          );
+      // Other components draw centered at their position
+      // Project the actual center point (component.position) to screen space
+      const centerScreen = this.worldToScreenPerspective(
+        { x: component.position.x, y: component.position.y },
+        elevation
+      );
 
-          if (startScreen.scale > 0 && endScreen.scale > 0) {
-            // Calculate screen-space length and rotation
-            const screenDx = endScreen.pos.x - startScreen.pos.x;
-            const screenDy = endScreen.pos.y - startScreen.pos.y;
-            const screenLength = Math.hypot(screenDx, screenDy);
-            const screenRotation = Math.atan2(screenDy, screenDx);
+      // Use center-based zoom for consistent sizing
+      const centerZoom = centerScreen.scale * 50;
+      const visualHalfH = halfH * centerZoom * verticalScale;
 
-            // Calculate perspective-scaled diameters at each end
-            // The raw perspective is subtle due to perspectiveOffset flattening,
-            // so we exaggerate the taper ratio to make it more visually apparent.
-            // taperExaggeration of 2.0 means: if far end would be 90% of near end,
-            // it becomes 80% instead (difference doubled).
-            const taperExaggeration = 2.0;
-            const avgScale = (startScreen.scale + endScreen.scale) / 2;
-            const rawRatio = endScreen.scale / startScreen.scale;
-            const exaggeratedRatio = 1 - (1 - rawRatio) * taperExaggeration;
-            // Clamp to reasonable range (don't let it go negative or too extreme)
-            const clampedRatio = Math.max(0.3, Math.min(1.5, exaggeratedRatio));
+      // Position so the component's center is at the projected center point
+      // Snap the drawing origin to a device pixel: a cached sprite blits
+      // 1:1 without resampling, and the vector path lands on the same grid
+      translateX = Math.round(centerScreen.pos.x * dpr) / dpr;
+      translateY = Math.round((centerScreen.pos.y - visualHalfH) * dpr) / dpr;
+      labelBaseOffsetY = visualHalfH;
 
-            const startZoom = avgScale * 50;
-            const endZoom = startZoom * clampedRatio;
-
-            // Wall thickness (use pressure rating if available)
-            const wallThickness = pipe.thickness;
-            const startOuterD = (pipe.diameter + wallThickness * 2) * startZoom;
-            const startInnerD = pipe.diameter * startZoom;
-            const endOuterD = (pipe.diameter + wallThickness * 2) * endZoom;
-            const endInnerD = pipe.diameter * endZoom;
-
-            // Position at start point, rotate toward end point
-            ctx.translate(startScreen.pos.x, startScreen.pos.y);
-            ctx.rotate(screenRotation);
-
-            // Draw tapered pipe (trapezoid) - outer wall
-            ctx.fillStyle = COLORS.steel;
-            ctx.beginPath();
-            ctx.moveTo(0, -startOuterD / 2);           // top-left (start)
-            ctx.lineTo(screenLength, -endOuterD / 2);  // top-right (end)
-            ctx.lineTo(screenLength, endOuterD / 2);   // bottom-right (end)
-            ctx.lineTo(0, startOuterD / 2);            // bottom-left (start)
-            ctx.closePath();
-            ctx.fill();
-
-            // Draw tapered inner pipe (fluid space)
-            if (pipe.fluid) {
-              ctx.fillStyle = getFluidColor(pipe.fluid);
-            } else {
-              ctx.fillStyle = '#111';
-            }
-            ctx.beginPath();
-            ctx.moveTo(0, -startInnerD / 2);
-            ctx.lineTo(screenLength, -endInnerD / 2);
-            ctx.lineTo(screenLength, endInnerD / 2);
-            ctx.lineTo(0, startInnerD / 2);
-            ctx.closePath();
-            ctx.fill();
-
-            // Draw pipe edges (top and bottom lines)
-            ctx.strokeStyle = COLORS.steelHighlight;
-            ctx.lineWidth = 1;
-            ctx.beginPath();
-            ctx.moveTo(0, -startOuterD / 2);
-            ctx.lineTo(screenLength, -endOuterD / 2);
-            ctx.moveTo(0, startOuterD / 2);
-            ctx.lineTo(screenLength, endOuterD / 2);
-            ctx.stroke();
-
-            // Selection highlight
-            const isSelected = component.id === this.selectedComponentId;
-            if (isSelected) {
-              ctx.strokeStyle = 'rgba(100, 150, 255, 0.8)';
-              ctx.lineWidth = 2;
-              ctx.beginPath();
-              ctx.moveTo(-2, -startOuterD / 2 - 2);
-              ctx.lineTo(screenLength + 2, -endOuterD / 2 - 2);
-              ctx.lineTo(screenLength + 2, endOuterD / 2 + 2);
-              ctx.lineTo(-2, startOuterD / 2 + 2);
-              ctx.closePath();
-              ctx.stroke();
-            }
-
-            ctx.restore();
-            this.renderBelowGradeOverlay(ctx, component);
-            continue; // Skip the normal rendering path
-          }
-        }
-
-        // Fallback for pipes without endpoint data (should not happen)
-        console.error(`[render] Pipe ${component.id} has no endpoint data`);
-        const visualHalfH = halfH * projectedZoom;
-        translateX = backLeft.x;
-        translateY = backLeft.y - visualHalfH;
-        labelBaseOffsetY = visualHalfH;
-      } else {
-        // Other components draw centered at their position
-        // Project the actual center point (component.position) to screen space
-        const centerScreen = this.worldToScreenPerspective(
-          { x: component.position.x, y: component.position.y },
-          elevation
-        );
-
-        // Use center-based zoom for consistent sizing
-        const centerZoom = centerScreen.scale * 50;
-        const visualHalfH = halfH * centerZoom * verticalScale;
-
-        // Position so the component's center is at the projected center point
-        // Snap the drawing origin to a device pixel: a cached sprite blits
-        // 1:1 without resampling, and the vector path lands on the same grid
-        translateX = Math.round(centerScreen.pos.x * dpr) / dpr;
-        translateY = Math.round((centerScreen.pos.y - visualHalfH) * dpr) / dpr;
-        labelBaseOffsetY = visualHalfH;
-
-        // Override projectedZoom with center-based zoom for this component
-        projectedZoom = centerZoom;
-      }
+      // Override projectedZoom with center-based zoom for this component
+      projectedZoom = centerZoom;
 
       ctx.translate(translateX, translateY);
       // Skip rotation for pumps - they handle orientation internally via mirroring
@@ -2226,8 +2116,8 @@ export class PlantCanvas {
       }
 
       // Vertical compression based on view angle (looking from above = compressed).
-      // Skipped for pipes since they're thin horizontal elements and compression looks wrong
-      const componentVerticalScale = component.type !== 'pipe' ? verticalScale : 1;
+      // Pipes never get here: they are drawn as runs above
+      const componentVerticalScale = verticalScale;
       const isSelected = component.id === this.selectedComponentId;
       const isSimulating = !this.constructionMode;
       // Create projection function for components that need world-to-screen mapping
@@ -2258,6 +2148,12 @@ export class PlantCanvas {
       renderElevationLabel(ctx, component, labelBaseOffsetY, projectedZoom / 50);
 
       ctx.restore();
+
+      if (foundation && foundation.top > foundation.base) {
+        if (ghost) ctx.globalAlpha = GHOST_ALPHA;
+        this.renderScaffold(ctx, foundation, 'front');
+        if (ghost) ctx.globalAlpha = 1;
+      }
 
       // Bury the part of this component that sits below grade. Done inside
       // the depth-sorted loop so a component nearer the camera still draws
@@ -2290,8 +2186,19 @@ export class PlantCanvas {
           const touchesSelection = this.selectedComponentId !== null &&
             (connection.fromComponentId === this.selectedComponentId ||
              connection.toComponentId === this.selectedComponentId);
-          // Perspective-aware connection rendering with actual connection elevations
-          this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
+          // A pipe along the grid's route, lifted to the nozzles' heights;
+          // a line with no route (an opening into the component's own
+          // container, a cross-vessel mating face) is the short stub it was
+          const run = this.connectionRunScreen(connection, fromComponent, fromPort, toComponent, toPort);
+          if (run) {
+            const ghost = buildGhost(connection);
+            if (ghost) ctx.globalAlpha = GHOST_ALPHA;
+            const fluid = this.getConnectionFluid(connection, fromComponent);
+            drawPipeRun(ctx, run.pts, fluid ? this.getFluidColorForConnection(fluid) : '#667788', touchesSelection);
+            if (ghost) ctx.globalAlpha = 1;
+          } else {
+            this.renderConnectionPerspective(ctx, fromComponent, fromPort, toComponent, toPort, connection, touchesSelection);
+          }
         }
       }
     }
@@ -2717,6 +2624,272 @@ export class PlantCanvas {
     strokeConnection();
   }
 
+  /**
+   * A connection's pipe run on screen: the grid view's plan route, lifted
+   * into 3D between the two nozzles as drawn (liftRoute), projected, with
+   * the pipe's bore giving its width at every vertex. Null when the line has
+   * no route (an opening between a component and its container), when a
+   * cross-vessel mates face to face with its target, or when any of it is
+   * behind the camera.
+   */
+  private connectionRunScreen(
+    connection: Connection,
+    fromComponent: PlantComponent,
+    storedFromPort: { position: Point },
+    toComponent: PlantComponent,
+    storedToPort: { position: Point }
+  ): { pts: RunVertex[]; scale: number } | null {
+    // Drawn and then asked again for its flow arrow in the same frame
+    if (this.runMemo.has(connection)) return this.runMemo.get(connection)!;
+    const run = this.computeConnectionRun(connection, fromComponent, storedFromPort, toComponent, storedToPort);
+    this.runMemo.set(connection, run);
+    return run;
+  }
+
+  private computeConnectionRun(
+    connection: Connection,
+    fromComponent: PlantComponent,
+    storedFromPort: { position: Point },
+    toComponent: PlantComponent,
+    storedToPort: { position: Point }
+  ): { pts: RunVertex[]; scale: number } | null {
+    const crossVessel = fromComponent.type === 'crossVessel' ? fromComponent
+      : toComponent.type === 'crossVessel' ? toComponent : undefined;
+    const mateId = crossVessel ? (crossVessel as { targetComponentId?: string }).targetComponentId : undefined;
+    if (mateId && (mateId === fromComponent.id || mateId === toComponent.id)) return null;
+    const plan = this.planRuns.get(connection);
+    if (!plan || plan.length < 2) return null;
+    const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
+    const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
+    const a = this.nozzle3D(fromComponent, fromPort, connection.fromElevation ?? 0);
+    const b = this.nozzle3D(toComponent, toPort, connection.toElevation ?? 0);
+    if (!a || !b) return null;
+    const path = liftRoute(a, this.leaveAxis(fromComponent, plan[0]), plan,
+      b, this.leaveAxis(toComponent, plan[plan.length - 1]));
+    const bore = connection.flowArea && connection.flowArea > 0 ? Math.sqrt(4 * connection.flowArea / Math.PI) : 0.3;
+    const pts = this.projectRun(path, bore);
+    return pts ? { pts, scale: (a.scale + b.scale) / 2 } : null;
+  }
+
+  /**
+   * Where a connection meets a component in 3D: the nozzle as the component
+   * drawing places it (lateral offset on the drawing, at the component's own
+   * plan depth) at the connection's stored elevation - so the projected
+   * point is exactly where the drawn nozzle is. A pipe's nozzle is its end.
+   */
+  private nozzle3D(component: PlantComponent, port: { position: Point }, connElevation: number): (Point3 & { scale: number }) | null {
+    if (component.type === 'pipe') {
+      const pipe = component as PipeComponent;
+      const atEnd = port.position.x > pipe.length / 2;
+      const plan = atEnd && pipe.endPosition ? pipe.endPosition : pipe.position;
+      const end = atEnd && pipe.endElevation !== undefined ? pipe.endElevation : (pipe.elevation ?? 0);
+      // A connection elevation is measured from the component's bottom, and
+      // a pipe's bottom is half a bore under its centreline
+      const z = end + connElevation - (pipe.diameter || 0) / 2;
+      const s = this.worldToScreenPerspective(plan, z);
+      return s.scale > 0 ? { x: plan.x, y: plan.y, z, scale: s.scale } : null;
+    }
+    const elevation = getComponentElevation(component);
+    const center = this.worldToScreenPerspective(component.position, elevation);
+    const portScreen = this.getPortScreenPosition(component, port);
+    if (center.scale <= 0 || !portScreen) return null;
+    return {
+      x: component.position.x + (portScreen.x - center.pos.x) / (center.scale * 50),
+      y: component.position.y,
+      z: elevation + connElevation,
+      scale: center.scale,
+    };
+  }
+
+  /** Which plan axis a route leaves a component's footprint along, from the edge its anchor is on. */
+  private leaveAxis(component: PlantComponent, anchor: Point): 'x' | 'y' {
+    if (component.type === 'pipe') return 'x';
+    const r = footprintRect(component.position, componentFootprint(component));
+    const nx = Math.abs(anchor.x - component.position.x) / ((r.x1 - r.x0) / 2);
+    const ny = Math.abs(anchor.y - component.position.y) / ((r.y1 - r.y0) / 2);
+    return nx >= ny ? 'x' : 'y';
+  }
+
+  /** A pipe component on screen: its plan route (as the grid lays it), sloping from one end's elevation to the other's. */
+  private pipeComponentRun(pipe: PipeComponent): RunVertex[] | null {
+    const plan = this.planRuns.get(pipe) ?? pipeRoute(pipe);
+    const startZ = pipe.elevation ?? 0;
+    const path = slopeRoute(plan, startZ, pipe.endElevation ?? startZ);
+    return this.projectRun(path, pipe.diameter || 0.3);
+  }
+
+  /** Project a 3D run; its drawn width is the bore at each vertex's scale, never under 3 px. */
+  private projectRun(path: Point3[], bore: number): RunVertex[] | null {
+    const pts: RunVertex[] = [];
+    for (const p of path) {
+      const s = this.worldToScreenPerspective({ x: p.x, y: p.y }, p.z);
+      if (s.scale <= 0) return null;
+      pts.push({ x: s.pos.x, y: s.pos.y, w: Math.max(3, bore * s.scale * 50) });
+    }
+    return pts.length >= 2 ? pts : null;
+  }
+
+  /**
+   * What every standing component rests on. A component rests on the
+   * highest top, among the other standing components whose footprint holds
+   * its centre, that is no higher than its own base - or on grade if there
+   * is none (or that top is at or below grade). Buildings, yards, pools and
+   * water are the ground itself; pipes carry no foundation; and anything
+   * inside a vessel is carried by the vessel.
+   */
+  private foundationsFor(components: PlantComponent[]): Map<string, Foundation> {
+    const standing = components
+      .filter(c => c.type !== 'pipe' && !isGroundLayerComponent(c))
+      .filter(c => {
+        const container = c.containedBy ? this.plantState.components.get(c.containedBy) : undefined;
+        return !container || container.type === 'building';
+      })
+      .map(c => {
+        const base = getComponentElevation(c);
+        return { c, rect: footprintRect(c.position, componentFootprint(c)), base, top: base + getComponentVisualHeight(c) };
+      });
+    const out = new Map<string, Foundation>();
+    for (const s of standing) {
+      const { x, y } = s.c.position;
+      let support = -Infinity;
+      for (const o of standing) {
+        if (o === s || o.top > s.base || o.top <= support) continue;
+        if (x >= o.rect.x0 && x <= o.rect.x1 && y >= o.rect.y0 && y <= o.rect.y1) support = o.top;
+      }
+      const onGround = !(support > 0);
+      out.set(s.c.id, { rect: s.rect, base: onGround ? 0 : support, top: s.base, onGround });
+    }
+    return out;
+  }
+
+  /**
+   * Concrete slabs under components standing on grade - the 2.5D twin of
+   * the grid's foundation pads: the same footprints, standing out past them
+   * by the same margin, and a little proud of grade so the near edge reads.
+   * Drawn as a batch, one path per face colour, since they are all concrete
+   * lying on the same ground.
+   */
+  private renderPads(ctx: CanvasRenderingContext2D, rects: PlanRect[]): void {
+    const t = PAD_THICKNESS_M;
+    const P = (x: number, y: number, z: number) => this.worldToScreenPerspective({ x, y }, z).pos;
+    const sides: Point[][] = [], nears: Point[][] = [], tops: Point[][] = [], footprints: Point[][] = [];
+    for (const r of rects) {
+      const out = Math.min(1.5, Math.min(r.x1 - r.x0, r.y1 - r.y0) * 0.09);
+      const x0 = r.x0 - out, x1 = r.x1 + out, y0 = r.y0 - out, y1 = r.y1 + out;
+      const corners = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+      const top = corners.map(([x, y]) => this.worldToScreenPerspective({ x, y }, t));
+      const grade = corners.map(([x, y]) => this.worldToScreenPerspective({ x, y }, 0));
+      if (top.some(p => p.scale <= 0) || grade.some(p => p.scale <= 0)) continue;
+      // The side faces the camera can see: a face is toward the viewer when
+      // its near end projects farther out than its far end
+      if (grade[1].pos.x < grade[2].pos.x) sides.push([grade[1].pos, grade[2].pos, top[2].pos, top[1].pos]);
+      if (grade[0].pos.x > grade[3].pos.x) sides.push([grade[0].pos, grade[3].pos, top[3].pos, top[0].pos]);
+      nears.push([grade[0].pos, grade[1].pos, top[1].pos, top[0].pos]);
+      tops.push(top.map(p => p.pos));
+      // A hairline on the footprint itself, so the slab reads as a border
+      // around the thing rather than as a bigger thing (as on the grid)
+      footprints.push([P(r.x0, r.y0, t), P(r.x1, r.y0, t), P(r.x1, r.y1, t), P(r.x0, r.y1, t)]);
+    }
+    const path = (quads: Point[][]) => {
+      ctx.beginPath();
+      for (const q of quads) {
+        ctx.moveTo(q[0].x, q[0].y);
+        for (let i = 1; i < q.length; i++) ctx.lineTo(q[i].x, q[i].y);
+        ctx.closePath();
+      }
+    };
+    ctx.save();
+    path(sides); ctx.fillStyle = '#8f918c'; ctx.fill();
+    path(nears); ctx.fillStyle = '#7e807b'; ctx.fill();
+    path(tops); ctx.fillStyle = '#a9aba6'; ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)'; ctx.stroke();
+    path(footprints); ctx.strokeStyle = 'rgba(0, 0, 0, 0.16)'; ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * A thin steel scaffold carrying a raised component up from whatever is
+   * under it: a column at each footprint corner, a ring of beams at every
+   * bay, X-bracing in every panel and an open deck at the top. `back` draws
+   * the deck, the far face and the far halves of the sides (before the
+   * component); `front` the near face and near halves (after it).
+   */
+  private renderScaffold(ctx: CanvasRenderingContext2D, f: Foundation, part: 'back' | 'front'): void {
+    const r = f.rect;
+    const cy = (r.y0 + r.y1) / 2;
+    const bays = Math.max(1, Math.round((f.top - f.base) / SCAFFOLD_BAY_M));
+    const P = (p: Point, z: number) => this.worldToScreenPerspective(p, z);
+    const mid = P({ x: (r.x0 + r.x1) / 2, y: cy }, f.base);
+    if (mid.scale <= 0) return;
+    const pxPerM = mid.scale * 50;
+    const faces: Array<[Point, Point]> = part === 'back'
+      ? [
+        [{ x: r.x0, y: r.y1 }, { x: r.x1, y: r.y1 }],
+        [{ x: r.x0, y: cy }, { x: r.x0, y: r.y1 }],
+        [{ x: r.x1, y: cy }, { x: r.x1, y: r.y1 }],
+      ]
+      : [
+        [{ x: r.x0, y: r.y0 }, { x: r.x0, y: cy }],
+        [{ x: r.x1, y: r.y0 }, { x: r.x1, y: cy }],
+        [{ x: r.x0, y: r.y0 }, { x: r.x1, y: r.y0 }],
+      ];
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    if (part === 'back') {
+      const deck = [P({ x: r.x0, y: r.y0 }, f.top), P({ x: r.x1, y: r.y0 }, f.top), P({ x: r.x1, y: r.y1 }, f.top), P({ x: r.x0, y: r.y1 }, f.top)];
+      if (deck.every(p => p.scale > 0)) {
+        ctx.beginPath();
+        ctx.moveTo(deck[0].pos.x, deck[0].pos.y);
+        for (let i = 1; i < 4; i++) ctx.lineTo(deck[i].pos.x, deck[i].pos.y);
+        ctx.closePath();
+        ctx.fillStyle = 'rgba(70, 76, 82, 0.35)';
+        ctx.fill();
+      }
+    }
+    const braceW = Math.max(0.6, 0.05 * pxPerM);
+    const columnW = Math.max(1, 0.15 * pxPerM);
+    // Every face's members of one kind go in one path: three strokes a part
+    const faceLevels: Array<Array<{ a: Point; b: Point }>> = [];
+    for (const [a, b] of faces) {
+      const levels: Array<{ a: Point; b: Point }> = [];
+      for (let k = 0; k <= bays; k++) {
+        const z = f.base + (f.top - f.base) * k / bays;
+        const pa = P(a, z), pb = P(b, z);
+        if (pa.scale <= 0 || pb.scale <= 0) { levels.length = 0; break; }
+        levels.push({ a: pa.pos, b: pb.pos });
+      }
+      if (levels.length > 0) faceLevels.push(levels);
+    }
+    ctx.strokeStyle = '#8b9199';
+    ctx.lineWidth = braceW;
+    ctx.beginPath();
+    for (const levels of faceLevels) {
+      for (let k = 0; k < bays; k++) {
+        ctx.moveTo(levels[k].a.x, levels[k].a.y); ctx.lineTo(levels[k + 1].b.x, levels[k + 1].b.y);
+        ctx.moveTo(levels[k].b.x, levels[k].b.y); ctx.lineTo(levels[k + 1].a.x, levels[k + 1].a.y);
+      }
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#5d636a';
+    ctx.lineWidth = braceW * 1.5;
+    ctx.beginPath();
+    for (const levels of faceLevels) {
+      for (const l of levels) { ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); }
+    }
+    ctx.stroke();
+    ctx.strokeStyle = '#4b5158';
+    ctx.lineWidth = columnW;
+    ctx.beginPath();
+    for (const levels of faceLevels) {
+      ctx.moveTo(levels[0].a.x, levels[0].a.y); ctx.lineTo(levels[bays].a.x, levels[bays].a.y);
+      ctx.moveTo(levels[0].b.x, levels[0].b.y); ctx.lineTo(levels[bays].b.x, levels[bays].b.y);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Get fluid color for connection rendering - uses same coloring as fluid nodes
   private getFluidColorForConnection(fluid: any): string {
     if (!fluid) return '#667788';
@@ -3134,6 +3307,19 @@ export class PlantCanvas {
     const storedFromPort = fromComponent.ports?.find(p => p.id === connection.fromPortId);
     const storedToPort = toComponent.ports?.find(p => p.id === connection.toPortId);
     if (!storedFromPort || !storedToPort) return null;
+
+    // A routed run: the arrow sits half way along the pipe as drawn,
+    // pointing along the leg it lands on
+    const run = this.connectionRunScreen(connection, fromComponent, storedFromPort, toComponent, storedToPort);
+    if (run) {
+      const mid = screenMidpoint(run.pts);
+      const half = 4;
+      return {
+        fromPos: { x: mid.point.x - mid.dir.x * half, y: mid.point.y - mid.dir.y * half },
+        toPos: { x: mid.point.x + mid.dir.x * half, y: mid.point.y + mid.dir.y * half },
+        scale: run.scale,
+      };
+    }
 
     // Vessel side ports draw on the edge facing the partner, matching
     // renderConnectionPerspective
