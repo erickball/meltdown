@@ -305,12 +305,41 @@ export function portAnchorFacing(component: PlantComponent, portId: string, part
 }
 
 /** The point a partner's route comes from: a pipe's end, otherwise the component centre. */
-function partnerReference(component: PlantComponent, portId: string): Point {
+export function partnerReference(component: PlantComponent, portId: string): Point {
   if (component.type === 'pipe') {
     const a = portAnchor(component, portId);
     if (a) return a.point;
   }
   return component.position;
+}
+
+/** The footprint side of `container` that faces a plan point (east on a tie). */
+export function sideFacing(container: PlantComponent, ref: Point): Side {
+  return sideOfVector(ref.x - container.position.x, ref.y - container.position.y);
+}
+
+/**
+ * Where a line to something INSIDE a container meets the container's wall in
+ * plan: the edge cell on `side` nearest `along`. A contained component's own
+ * port is drawn on its container's sprite (the section view), so the plan
+ * lattice only ever sees the container's wall; the penetration is put on the
+ * side facing the partner, the same rule a vessel's mirrored side nozzles
+ * follow (portAnchorFacing).
+ */
+export function wallAnchor(container: PlantComponent, port: Port, side: Side, along: Point): PortAnchor {
+  const fp = componentFootprint(container);
+  const rect = footprintRect(container.position, fp);
+  const clampIndex = (raw: number, count: number) => Math.max(0, Math.min(count - 1, Math.floor(raw)));
+  let point: Point;
+  if (side === 'E' || side === 'W') {
+    const k = clampIndex((along.y - rect.y0) / TILE_M, fp.d);
+    point = { x: side === 'E' ? rect.x1 : rect.x0, y: rect.y0 + (k + 0.5) * TILE_M };
+  } else {
+    const k = clampIndex((along.x - rect.x0) / TILE_M, fp.w);
+    point = { x: rect.x0 + (k + 0.5) * TILE_M, y: side === 'N' ? rect.y0 : rect.y1 };
+  }
+  const v = sideVector(side);
+  return { port, point, side, out: { x: point.x + v.x * TILE_M / 2, y: point.y + v.y * TILE_M / 2 } };
 }
 
 // ---------------------------------------------------------------------------
