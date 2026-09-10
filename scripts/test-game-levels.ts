@@ -25,7 +25,7 @@ import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
 import {
   getPresetById, getPipeSpecById, pipeSpecFlowArea,
 } from '../src/construction/component-presets';
-import { nodeLiquidLevel, cellAt } from '../src/simulation';
+import { nodeLiquidLevel, nodeLiquidLevelFraction, cellAt } from '../src/simulation';
 import { waveCasualties } from '../src/simulation/wave-casualties';
 import type { PlantState } from '../src/types';
 import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
@@ -328,6 +328,17 @@ function sfpPump(id: string, label: string, x: number, y: number) {
   }] as [string, Record<string, unknown>];
 }
 
+/**
+ * Where a line meets the yard pump: the app pins a pump's connection
+ * elevations to its drawn nozzles (height/2 - port.y, see
+ * hasPinnedPortElevations), and with the ports at y = 0 both nozzles are at
+ * the casing top - which is where a casing vents its air as it primes.
+ */
+function sfpPumpNozzle(): number {
+  const diameter = 0.2 + Math.sqrt(SFP_PUMP.ratedFlow / 1000) * 0.4;
+  return diameter * 1.3 * 2.2 / 2;
+}
+
 /** The sea's intake: its one port, at the depth the level puts it. */
 function sfpSeaIntakeElevation(): number {
   const sea = sfpPlant().components.find(c => c[0] === 'sea')![1] as { height: number; ports: Array<{ position: { y: number } }> };
@@ -489,8 +500,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y));
     (plant.components.find(c => c[0] === spot.id)![1] as Record<string, unknown>).running = true;
     plant.connections.push(
-      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, seaIntake, 0.3, spot.suction, SFP_PIPE_AREA),
-      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, sfpPoolPortElevation('pool-makeup-e'), spot.discharge, SFP_PIPE_AREA));
+      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, seaIntake, sfpPumpNozzle(), spot.suction, SFP_PIPE_AREA),
+      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', sfpPumpNozzle(), sfpPoolPortElevation('pool-makeup-e'), spot.discharge, SFP_PIPE_AREA));
     plant.scenario = undefined;   // no earthquake: this is about the pump alone
     const sim = buildSimFromPlantJson(plant as never);
     run(sim, 120, 0.02);
@@ -506,7 +517,11 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     if (spot.deliver) {
       if (!(q > 40)) fail(`a pump standing in the sea should push water up to the pool, got ${q.toFixed(1)} kg/s`);
       if (!(q < 90)) fail(`the pump is meant to be modest - well under the tear's ~105 kg/s at the racks, got ${q.toFixed(1)} kg/s`);
-      if (casing.fluid.phase !== 'liquid') fail(`a pump standing in the sea should have primed, casing is ${casing.fluid.phase}`);
+      // Primed = full of water. A casing can keep a bubble of its air (a
+      // fraction of a percent of it) and still read 'two-phase'; what the
+      // impeller cares about is the liquid it stands in.
+      const filled = nodeLiquidLevelFraction(casing);
+      if (!(filled > 0.98)) fail(`a pump standing in the sea should have primed, casing is ${casing.fluid.phase} at ${(100 * filled).toFixed(1)}% liquid`);
       if (pump.flooded) fail('a pump in 2 m of water has its motor 4 m above the sea - it must not be drowned');
     } else {
       // Nothing DELIVERED. A little may run the other way: the pool stands
@@ -551,8 +566,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         pressureRating: 20,
       }] as [string, Record<string, unknown>]);
     plant.connections.push(
-      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', seaIntake, 0.3, 12, SFP_PIPE_AREA),
-      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, sfpPoolPortElevation('pool-makeup-e'), 200, SFP_PIPE_AREA),
+      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', seaIntake, sfpPumpNozzle(), 12, SFP_PIPE_AREA),
+      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', sfpPumpNozzle(), sfpPoolPortElevation('pool-makeup-e'), 200, SFP_PIPE_AREA),
       sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
       sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
       sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));

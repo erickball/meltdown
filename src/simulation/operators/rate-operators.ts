@@ -1833,33 +1833,11 @@ export class FlowRateOperator implements RateOperator {
       // This prevents unrealistic phase separation when flow exceeds what the
       // interface can supply. (Approved fallback - discussed with user)
       //
-      // Conservative limit: 10x per second max drain rate for a single phase.
-      // This is deliberately a last-resort backstop, not a physical model -
-      // real volumes can drain fast, and phase replenishment (boiling,
-      // flashing) is already part of the energy bookkeeping.
-      // If drain rate exceeds this, switch to mixture mode which draws from
-      // the whole mass proportionally.
-      if (upstreamNode.fluid.phase === 'two-phase' && flowPhase !== 'mixture') {
-        const quality = upstreamNode.fluid.quality ?? 0;
-        const totalMass = upstreamNode.fluid.mass;
-        const maxDrainRate = 10; // per second - can drain the phase 10x per second max
-
-        let demote = false;
-        if (flowPhase === 'vapor') {
-          const vaporMass = totalMass * quality;
-          // If trying to drain vapor faster than limit, use mixture
-          demote = vaporMass < 1e-6 || absMassFlow > maxDrainRate * vaporMass;
-        } else if (flowPhase === 'liquid') {
-          const liquidMass = totalMass * (1 - quality);
-          // If trying to drain liquid faster than limit, use mixture
-          demote = liquidMass < 1e-6 || absMassFlow > maxDrainRate * liquidMass;
-        }
-        if (demote) {
-          flowPhase = 'mixture';
-          comp = { phase: 'mixture', fLiquid: 0, fMixture: 1, fVapor: 0,
-            wLiquid: 0, wMixture: 1, wVapor: 0, rho: comp.rho };
-        }
-      }
+      // A pure draw that its zone cannot supply (drained more than ten times
+      // a second, or empty) has already come back as the mixture from
+      // drawCompositionAt - the same answer the momentum solve priced the
+      // line with. It used to be decided here, after the solve, and the two
+      // disagreed (see zoneCanSupply in connection-hydraulics.ts).
 
       // The connection's mass flow is TOTAL mixture flow (the momentum
       // solvers use bulk density including NCG), so when the flowing phase
@@ -2109,10 +2087,12 @@ export class FlowRateOperator implements RateOperator {
           // books are actually broken is caught by ncgEffectiveT above,
           // which throws instead of substituting a temperature.
 
-          // NCG volume from ideal gas: V_ncg = n * R * T / P
-          const R_GAS = 8.314;  // J/(mol·K)
-          const ncgVolume = ncgMoles * R_GAS * T_eff / P;
-          waterVolume = Math.max(0.001, waterVolume - ncgVolume);
+          // The water keeps the WHOLE volume: the gas shares the vapour
+          // space with the steam (Dalton), it does not take a slice of the
+          // node for itself. (This used to subtract an ideal-gas "NCG
+          // volume" at the total pressure - an Amagat split the mixture
+          // solve never used - so a draw's enthalpy was priced at a water
+          // state the node was not in.)
         }
       }
 
@@ -2682,6 +2662,7 @@ export class FluidStateConstraintOperator implements ConstraintOperator {
         flowNode.fluid.phase = mix.phase;
         flowNode.fluid.quality = mix.quality;
         flowNode.fluid.iceFraction = mix.iceFraction;
+        flowNode.fluid.gasVolume = mix.gasVolume;
 
         // Determine pressure based on phase. mix.steamPressure is the water's
         // partial pressure; mix.gasPressure is the NCG's (Dalton).

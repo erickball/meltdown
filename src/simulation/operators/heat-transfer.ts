@@ -20,6 +20,7 @@ import { SimulationState, FlowNode, FluidState, ConvectionConnection, simulation
 import { PhysicsOperator, cloneSimulationState } from '../solver';
 import * as Water from '../water-properties';
 import { superheatedFromTP } from '../water-inverse';
+import { vapourSpace } from '../mixture-properties';
 import { type GasSpecies, emptyGasComposition, R_GAS, ALL_GAS_SPECIES, totalMoles, mixtureCv } from '../gas-properties';
 import { calculateLiquidLevelWithObstructions } from './rate-operators';
 import { pumpHeadPressure } from './pump-curve';
@@ -1237,7 +1238,8 @@ export function createFluidState(
         quality,
       };
 
-      // Add NCG if specified
+      // Add NCG if specified (a gas-only node: the gas has the whole volume)
+      fluidState.gasVolume = volume;
       if (ncgPartialPressures && Object.keys(ncgPartialPressures).length > 0) {
         const ncg = emptyGasComposition();
         let hasNcg = false;
@@ -1290,19 +1292,39 @@ export function createFluidState(
     quality,
   };
 
+  // The room the gas has: what the liquid leaves it. A declared partial
+  // pressure means that pressure IN THAT ROOM, so the moles follow from the
+  // vapour space, not the node - a 78%-full tank with "0.79 bar of N2" holds
+  // 0.79 bar of N2 over its water, and a liquid-full node with a gas partial
+  // holds only the little the gas can squeeze room for (see vapourSpace).
+  const liquidMass = phase === 'vapor' ? 0 : mass * (1 - Math.max(0, Math.min(1, phase === 'liquid' ? 0 : quality)));
+  const liquidVolume0 = liquidMass > 0 ? liquidMass / Water.saturatedLiquidDensity(temperature) : 0;
+  fluidState.gasVolume = vapourSpace(liquidVolume0, volume, 0, temperature);
+
   // Add NCG if specified
   if (ncgPartialPressures && Object.keys(ncgPartialPressures).length > 0) {
-    // Convert partial pressures (bar) to moles using ideal gas law: n = PV/RT
+    // Convert partial pressures (bar) to moles using ideal gas law over the
+    // vapour space: n = P V_gas / RT. The gas's own pressure opens a little
+    // more room by compressing the liquid (V_gas = free + V_liq0 P_gas / K,
+    // the same balance vapourSpace solves the other way round).
     const ncg = emptyGasComposition();
     let hasNcg = false;
     let totalNcgPressure = 0; // Pa
+    for (const species of ALL_GAS_SPECIES) {
+      const P_bar = ncgPartialPressures[species as GasSpecies];
+      if (P_bar && P_bar > 0) totalNcgPressure += P_bar * 1e5;
+    }
+    const free = Math.max(0, volume - liquidVolume0);
+    const gasVolume = liquidVolume0 > 0
+      ? free + liquidVolume0 * totalNcgPressure / Water.bulkModulus(temperature - 273.15)
+      : volume;
+    totalNcgPressure = 0;
 
     for (const species of ALL_GAS_SPECIES) {
       const P_bar = ncgPartialPressures[species as GasSpecies];
       if (P_bar && P_bar > 0) {
         const P_Pa = P_bar * 1e5; // bar to Pa
-        // n = PV / RT
-        const moles = (P_Pa * volume) / (R_GAS * temperature);
+        const moles = (P_Pa * gasVolume) / (R_GAS * temperature);
         ncg[species as GasSpecies] = moles;
         totalNcgPressure += P_Pa;
         hasNcg = true;
@@ -1311,6 +1333,7 @@ export function createFluidState(
 
     if (hasNcg) {
       fluidState.ncg = ncg;
+      fluidState.gasVolume = gasVolume;
       // Add NCG partial pressure to total pressure (Dalton's law)
       // This makes the pressure field consistent with what constraint operator expects
       fluidState.pressure += totalNcgPressure;

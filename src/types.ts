@@ -25,7 +25,14 @@ export interface Fluid {
   // NCG (non-condensible gases) - for rendering simulation state
   ncg?: GasComposition; // mol - moles of each NCG species
   mass?: number;        // kg - total fluid mass
-  volume?: number;      // m³ - volume (for NCG fraction calculation)
+  volume?: number;      // m³ - the node's volume
+  /**
+   * The node's vapour space, m³ (simulation `FluidState.gasVolume`): the room
+   * the stamped NCG moles are priced over. Absent on a construction-mode
+   * fluid, whose moles were stamped over `volume` by the display fill and
+   * read back over the same (colors.ts ncgPartialPressure).
+   */
+  gasVolume?: number;
   /**
    * Fraction of the component's height standing in liquid (0-1), copied
    * straight from the simulation node's own liquid level. The renderer

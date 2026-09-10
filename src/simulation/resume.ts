@@ -46,6 +46,7 @@ import { SimulationState, FlowNode } from './types';
 import { PlantState } from '../types';
 import { NcgPartialPressures } from './operators';
 import { R_GAS, GasComposition } from './gas-properties';
+import { nodeGasVolume } from './mixture-properties';
 import * as Water from './water-properties';
 import { hxBundleCount, hxTubeNodeId } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
@@ -72,23 +73,23 @@ function liquidVolumeFraction(node: FlowNode): number {
  * Live steam partial pressure: node total pressure minus the NCG partial
  * pressure (Dalton).
  *
- * Over the node's TOTAL volume, because that is where both of the books this
- * has to agree with put it: the live mixture solve prices the gas as
- * n R T / V_node (mixture-properties.ts, deliberately - see its header), and
- * the factory's initialNcg bar->moles conversion uses V_node too, as does
- * ncgToInitialBar below. Pricing it over the VAPOUR space instead - which
- * this used to do - puts the NCG partial above the node's own total pressure
- * for anything half full of air, and the write-back then fell back to the
- * total: a 30 C spent-fuel pool, or an air-blanketed CST, came back from a
- * mode switch as saturated water at 100 C.
+ * Over the node's VAPOUR SPACE (nodeGasVolume), because that is where every
+ * book this has to agree with prices it since 2026-09-10: the live mixture
+ * solve (mixture-properties.ts), the factory's initialNcg bar->moles
+ * conversion in createFluidState, and ncgToInitialBar below. (An earlier
+ * version priced it over the vapour space while the solve used the whole
+ * node, and the mismatch put the NCG partial above the total for anything
+ * half full of air; the fallback below is the canary for any such
+ * disagreement coming back.)
  */
 export function steamPartialPressurePa(node: FlowNode): number {
   const f = node.fluid;
   if (!f.ncg) return f.pressure;
   if (!(node.volume > 0)) return f.pressure;
+  // The gas's pressure over its own room (the vapour space), not the node
   let P_ncg = 0;
   for (const moles of Object.values(f.ncg)) {
-    if (moles && moles > 0) P_ncg += (moles * R_GAS * f.temperature) / node.volume;
+    if (moles && moles > 0) P_ncg += (moles * R_GAS * f.temperature) / nodeGasVolume(node);
   }
   const P_steam = f.pressure - P_ncg;
   if (!(P_steam > 0)) {
@@ -107,15 +108,20 @@ export function steamPartialPressurePa(node: FlowNode): number {
  * pressures in bar over the TOTAL given volume (the exact inverse of
  * createFluidState's n = P*V/RT). Returns undefined when there is no NCG.
  */
+/**
+ * Moles back to the partial pressures (bar) the component dialog speaks.
+ * `gasVolume` is the node's VAPOUR SPACE (nodeGasVolume), the room the gas
+ * actually has - the same room createFluidState converts the other way over.
+ */
 function ncgToInitialBar(
-  ncg: Partial<GasComposition> | undefined, temperature: number, volume: number
+  ncg: Partial<GasComposition> | undefined, temperature: number, gasVolume: number
 ): NcgPartialPressures | undefined {
   if (!ncg) return undefined;
   const out: Record<string, number> = {};
   let any = false;
   for (const [species, moles] of Object.entries(ncg)) {
     if (moles && moles > 1e-12) {
-      out[species] = (moles * R_GAS * temperature) / volume / 1e5;
+      out[species] = (moles * R_GAS * temperature) / gasVolume / 1e5;
       any = true;
     }
   }
@@ -134,6 +140,7 @@ function writeFluidIC(c: Record<string, any>, node: FlowNode): void {
   c.fluid.separation = node.separation;
   c.fluid.ncg = node.fluid.ncg;
   c.fluid.volume = node.volume;
+  c.fluid.gasVolume = nodeGasVolume(node);
   // The pressure just written is the STEAM partial, not the total the
   // per-frame sync leaves there. Say so, or the renderer subtracts the NCG a
   // second time and asks the steam tables for a negative pressure (see
@@ -155,7 +162,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         if (!node) break;
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         if (node.heaterPower !== undefined) c.initialHeaterPower = node.heaterPower;
         break;
@@ -165,7 +172,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
       case 'coreBarrel': {
         if (!node) break;
         writeFluidIC(c, node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         break;
       }
@@ -173,7 +180,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
       case 'pump': {
         if (!node) break;
         writeFluidIC(c, node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         // A pump delivered dry that has since filled from its suction is
         // primed now, and re-initializes as such if something else about it
@@ -190,7 +197,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
       case 'valve': {
         if (!node) break;
         writeFluidIC(c, node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         const valveState = sim.components.valves.get(id);
         if (valveState) c.opening = valveState.position;
@@ -208,7 +215,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         if (!node) break; // legacy sibling-architecture vessels have no own node
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         break;
       }
@@ -217,7 +224,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         if (!node) break;
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         break;
       }
@@ -226,7 +233,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         if (!node) break;
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         break;
       }
@@ -235,7 +242,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         if (!node) break;
         writeFluidIC(c, node);
         c.fillLevel = liquidVolumeFraction(node);
-        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
+        const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, nodeGasVolume(node));
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         // Buildings alone store TOTAL pressure; the factory subtracts the
         // NCG spec (bar over total volume) to recover the steam pressure,
@@ -250,7 +257,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         const inner = sim.flowNodes.get(`${id}-inner`);
         if (inner) {
           writeFluidIC(c, inner);
-          const ncg = ncgToInitialBar(inner.fluid.ncg, inner.fluid.temperature, inner.volume);
+          const ncg = ncgToInitialBar(inner.fluid.ncg, inner.fluid.temperature, nodeGasVolume(inner));
           if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
         }
         const annulus = sim.flowNodes.get(`${id}-annulus`);
@@ -260,7 +267,7 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
           c.annulusFluid.pressure = steamPartialPressurePa(annulus);
           c.annulusFluid.phase = annulus.fluid.phase;
           c.annulusFluid.quality = annulus.fluid.quality;
-          const ncgA = ncgToInitialBar(annulus.fluid.ncg, annulus.fluid.temperature, annulus.volume);
+          const ncgA = ncgToInitialBar(annulus.fluid.ncg, annulus.fluid.temperature, nodeGasVolume(annulus));
           if (ncgA) c.annulusInitialNcg = ncgA; else delete c.annulusInitialNcg;
         }
         break;

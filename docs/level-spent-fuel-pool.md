@@ -529,3 +529,31 @@ Measured (`npx tsx scripts/test-game-levels.ts sfp`):
 **Still open:** the phantom-gas fill (the proper fix is the vapour-space
 partial pressure, its own piece of work); the fill slam past ~0.4 bar of
 head; the pump's drawn height is ~1 m while its motor stands 6 m up.
+
+---
+
+## 2026-09-10, the air is modelled (worktree `gas-space`)
+
+Erick approved pricing a node's non-condensible gas over its vapour space
+instead of the whole node (see "The gas lives in the vapour space" in
+[pump-placement.md](pump-placement.md)). Two things it did to this level:
+
+* **The yard pump primes for real.** A dry casing standing in the sea floods
+  at ~115 kg/s, its air vents up the discharge through the check valve, it
+  is liquid-full in a minute with under a mole of air left, no slam (peak
+  1.7 bar at 2 m, 3.3 bar at 4.6 m), and the started pump lifts ~75 kg/s to
+  the rim. The sea-floor shelf no longer has to protect a phantom.
+* **The storage tanks got roof vents.** An unvented tank draining now pulls
+  a vacuum over its own water - as a real sealed tank would - and the
+  gravity feed quit after 250 t. Both tanks vent to the atmosphere at their
+  roofs (`tank-a-vent`, `tank-b-vent` in the generator).
+
+Measured (`npx tsx scripts/test-game-levels.ts sfp`):
+
+| check | result |
+| --- | --- |
+| [1] unfed | uncovered 3800 s, dry 16,620 s, clad past 900 C 19,720 s, release limit 20,620 s |
+| [2] bench / shore | 0.0 kg/s, casing still 1.013 bar of air |
+| [3] in the sea (x=236, 2 m) | 67 kg/s at t=120 s (still ramping), casing >98% liquid, motor 4.3 m up |
+| [2] too far out (x=282, 7 m) | drowned; 0.0 kg/s |
+| [4] the answer (tank valve 30%) | min pool level **4.50 m** (racks 4.16), no uncovery, peak clad 47 C, sea pump 72-112 kg/s, tanks 1216 t -> 158 t (13% left), puddle peaked ~440 m3 |

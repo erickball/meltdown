@@ -77,9 +77,9 @@ import { H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM, H_TUBE_NATURAL } from '../
  * short-circuits to the stored state, so this costs nothing in the ordinary
  * case.
  *
- * The gas is treated as sharing the whole tube volume (mixture-properties'
- * standing simplification), so the section volumes still close over the full
- * tube: the two conventions match.
+ * The gas shares the VAPOUR space with the steam (Dalton), so the water
+ * sub-problem is still the pure-water problem in the whole tube volume and
+ * the section volumes close over the full tube: the two conventions match.
  */
 export function tubeWaterState(node: FlowNode): { pressure: number; energy: number; gasPressure: number } {
   // An empty node has no state to solve - the closure handles it by having

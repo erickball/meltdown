@@ -11,7 +11,7 @@ import { calculateState, distanceToSaturationLine, saturationPressure, saturatio
   saturatedLiquidDensity, saturatedVaporDensity, saturatedLiquidEnergy,
   saturatedVaporEnergy, sublimationPressure, latentHeatSublimation, latentHeat,
   MODEL_MIN_TEMPERATURE } from './water-properties.js';
-import { solveMixtureState } from './mixture-properties.js';
+import { solveMixtureState, vapourSpace } from './mixture-properties.js';
 import { mixtureCv } from './gas-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import {
@@ -2036,7 +2036,10 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
 
   const he = createGasComposition({ He: 4000 });      // mol
   const gasEnergy = 4000 * mixtureCv(he) * pure.temperature;
-  const gasPressure = (4000 * 8.31446 * pure.temperature) / geom.tubeVolume;
+  // The gas shares the vapour space with the steam, not the whole tube
+  const liquidVolume0 = mass * (1 - pure.quality) / saturatedLiquidDensity(pure.temperature);
+  const gasPressure = (4000 * 8.31446 * pure.temperature) /
+    vapourSpace(liquidVolume0, geom.tubeVolume, 4000, pure.temperature);
   const node = {
     id: 'tube', volume: geom.tubeVolume,
     fluid: {

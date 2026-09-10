@@ -19,13 +19,20 @@ import {
 /**
  * The NCG partial pressure (Pa) a display fluid's stamped moles represent,
  * or 0 when it carries no gas. P = nRT/V, over the volume the producer of
- * those moles used.
+ * those moles used: the vapour space when the simulation stamped them
+ * (Fluid.gasVolume), the whole volume for a construction-mode display fill.
  */
+export function ncgGasVolume(fluid: Fluid): number {
+  const v = fluid.gasVolume ?? fluid.volume;
+  return v && v > 0 ? v : 0;
+}
+
 export function ncgPartialPressure(fluid: Fluid): number {
-  if (!fluid.ncg || !fluid.volume || fluid.volume <= 0) return 0;
+  const V = ncgGasVolume(fluid);
+  if (!fluid.ncg || V <= 0) return 0;
   const moles = totalMoles(fluid.ncg);
   if (moles <= 0) return 0;
-  return moles * R_GAS * fluid.temperature / fluid.volume;
+  return moles * R_GAS * fluid.temperature / V;
 }
 
 /**
@@ -238,8 +245,8 @@ export function getFluidColor(fluid: Fluid): string {
 
     // If NCG is present, blend with NCG color based on partial pressure fraction
     // This prevents abrupt color changes when steam transitions to two-phase
-    if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
-      const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
+    if (ncgMoles > 0 && fluid.ncg && ncgGasVolume(fluid) > 0) {
+      const P_ncg = ncgMoles * R_GAS * T / ncgGasVolume(fluid);
       // Dalton: the total is what the steam and the gas each contribute, so
       // the fraction cannot exceed 1 and needs no clamp to say so.
       const P_total = steamPressureOf(fluid) + P_ncg;
@@ -271,9 +278,9 @@ export function getFluidColor(fluid: Fluid): string {
 
     // If NCG is present, blend with NCG color based on partial pressure fraction
     // Using pressure ratio instead of mole ratio because fluid.mass may not be set
-    if (ncgMoles > 0 && fluid.ncg && fluid.volume && fluid.volume > 0) {
-      // Calculate NCG partial pressure: P_ncg = n * R * T / V
-      const P_ncg = ncgMoles * R_GAS * T / fluid.volume;
+    if (ncgMoles > 0 && fluid.ncg && ncgGasVolume(fluid) > 0) {
+      // Calculate NCG partial pressure: P_ncg = n * R * T / V (the vapour space)
+      const P_ncg = ncgMoles * R_GAS * T / ncgGasVolume(fluid);
       const P_total = steamPressureOf(fluid) + P_ncg;
 
       // NCG fraction by partial pressure (which equals mole fraction for ideal gases)

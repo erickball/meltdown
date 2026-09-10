@@ -100,6 +100,7 @@
 import { SimulationState } from '../types';
 import { RateOperator, StateRates, createZeroRates } from '../rk45-solver';
 import { emptyGasComposition, totalMoles, H2_FLAMMABILITY } from '../gas-properties';
+import { nodeGasVolume } from '../mixture-properties';
 
 /** Smooth logistic gate: ~0 below (x0 - few*width), ~1 above (x0 + few*width) */
 function gateAbove(x: number, x0: number, width: number): number {
@@ -205,8 +206,10 @@ export class HydrogenCombustionRateOperator implements RateOperator {
       if (g < 1e-9) continue;
 
       // --- Ignition kinetics: chain-branching criterion --------------------
-      // Concentrations in mol/cm3 (the rate constants' units).
-      const volumeCm3 = node.volume * 1e6;
+      // Concentrations in mol/cm3 (the rate constants' units), in the gas
+      // space the reactants actually occupy (nodeGasVolume), not the node.
+      const volumeCm3 = nodeGasVolume(node) * 1e6;
+      if (!(volumeCm3 > 0)) continue;
       const cO2 = ncg.O2 / volumeCm3;
       // Effective third-body concentration: every species weighted by how
       // well it carries off the termination collision, steam included.

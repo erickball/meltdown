@@ -851,32 +851,39 @@ test('Natural draft feeds a Zircaloy fire: a floor tear plus a rim vent keeps th
     return buildSimFromPlantJson(plant as never);
   };
 
+  // The fire breathes in gulps: oxygen arrives, burns, heats the gas, which
+  // pushes out, cools, and draws in again - a limit cycle of a few seconds
+  // that swings both openings through several kg/s either way. A reading at
+  // one instant, or the inflow half of one opening's cycle, is a sample of
+  // the phase of that cycle (a step-size change moved it 2x). The chimney is
+  // the NET flow the cycle rides on: air in through the tear and gas out
+  // through the vent, averaged over many cycles.
   const measure = (sim: ReturnType<typeof buildSimFromPlantJson>) => {
     const node = () => sim.state.flowNodes.get('pool')!;
     const o2Start = node().fluid.ncg!.O2;
     let peakOxPower = 0;
-    let airIn = 0, samples = 0;
-    for (let i = 0; i < 300; i++) {
+    let netIn = 0, netVent = 0, samples = 0;
+    for (let i = 0; i < 400; i++) {
       run(sim, 1, 0.02);
       sim.state.pendingEvents = [];
       peakOxPower = Math.max(peakOxPower, getCladdingOxidationPower().get('pool-clad') ?? 0);
       if (i >= 200) {
         const tear = sim.state.flowConnections.find(c => c.id === 'break-pool');
-        airIn += tear ? Math.max(0, -tear.massFlowRate) : 0;
+        const vent = sim.state.flowConnections.find(
+          c => c.fromNodeId === 'pool' && c.toNodeId === 'atmosphere' && !c.isBreakConnection)!;
+        netIn += tear ? -tear.massFlowRate : 0;
+        netVent += vent.massFlowRate;
         samples++;
       }
     }
     const n = node();
     const moles = Object.values(n.fluid.ncg!).reduce((s, v) => s + (v as number), 0);
-    const tear = sim.state.flowConnections.find(c => c.id === 'break-pool')!;
-    const vent = sim.state.flowConnections.find(
-      c => c.fromNodeId === 'pool' && c.toNodeId === 'atmosphere' && !c.isBreakConnection)!;
     return {
       o2Start, peakOxPower,
       o2Fraction: moles > 0 ? n.fluid.ncg!.O2 / moles : 0,
-      tearFlow: tear.massFlowRate,          // + = out of the pool
-      ventFlow: vent.massFlowRate,
-      airIn: samples > 0 ? airIn / samples : 0,   // mean inflow over the last 100 s
+      tearFlow: -netIn / samples,           // mean over the last 200 s, + = out of the pool
+      ventFlow: netVent / samples,          // mean over the last 200 s, + = out
+      airIn: netIn / samples,               // mean NET inflow through the tear
       endOxPower: getCladdingOxidationPower().get('pool-clad') ?? 0,
       gasT: n.fluid.temperature,
       decay: sim.state.thermalNodes.get('pool-pellets')!.heatGeneration,
@@ -887,21 +894,22 @@ test('Natural draft feeds a Zircaloy fire: a floor tear plus a rim vent keeps th
   const rim = measure(tornPool(11.5));
 
   const line = (tag: string, m: ReturnType<typeof measure>) =>
-    console.log(`      [draft] ${tag}: tear ${m.tearFlow.toFixed(3)} kg/s, vent ${m.ventFlow.toFixed(3)} kg/s, ` +
-      `mean air in ${m.airIn.toFixed(3)} kg/s, gas ${(m.gasT - 273.15).toFixed(0)} C, ` +
+    console.log(`      [draft] ${tag}: mean tear ${m.tearFlow.toFixed(3)} kg/s, mean vent ${m.ventFlow.toFixed(3)} kg/s, ` +
+      `net air in ${m.airIn.toFixed(3)} kg/s, gas ${(m.gasT - 273.15).toFixed(0)} C, ` +
       `O2 ${(m.o2Fraction * 100).toFixed(2)}% of the gas, ` +
       `oxidation ${(m.endOxPower / 1e6).toFixed(2)} MW (peak ${(m.peakOxPower / 1e6).toFixed(2)}, ` +
       `decay ${(m.decay / 1e6).toFixed(1)})`);
   line('floor tear', floor);
   line('  rim tear', rim);
 
-  // The chimney: air in at the tear, gas out at the rim vent.
+  // The chimney: air in at the tear, gas out at the rim vent, on average.
   assert(floor.tearFlow < -0.01,
-    `the floor tear should draw air IN, got ${floor.tearFlow.toFixed(3)} kg/s`);
+    `the floor tear should draw air IN on average, got ${floor.tearFlow.toFixed(3)} kg/s`);
   assert(floor.ventFlow > 0.01,
-    `the rim vent should carry the hot gas OUT, got ${floor.ventFlow.toFixed(3)} kg/s`);
-  // Height is the whole difference between the two runs.
-  assert(floor.airIn > 1.5 * rim.airIn,
+    `the rim vent should carry the hot gas OUT on average, got ${floor.ventFlow.toFixed(3)} kg/s`);
+  // Height is the whole difference between the two runs: the 11 m chimney
+  // must add a net draft the two-openings-at-one-level case does not have.
+  assert(floor.airIn > 1.3 * rim.airIn && floor.airIn - rim.airIn > 0.04,
     `an 11 m chimney must out-breathe a 0.5 m one: ${floor.airIn.toFixed(3)} vs ` +
     `${rim.airIn.toFixed(3)} kg/s of air`);
   // The oxygen fraction in the pool stays near zero and that is the RIGHT

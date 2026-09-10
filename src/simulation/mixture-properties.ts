@@ -32,16 +32,30 @@
  * compliance is meaningless across the step). One code path for every water
  * fraction is what keeps it smooth.
  *
- * KNOWN SIMPLIFICATION (unchanged from before this module existed): the gas
- * partial pressure uses the FULL node volume rather than the vapour space
- * V − V_liquid. That over-states the vapour room available to the gas when a
- * lot of liquid coexists with it, but the alternative divides by zero for a
- * water-solid node holding gas (a PWR accumulator, a flooded containment), so
- * changing it is a separate piece of work with its own blast radius.
+ * THE GAS LIVES IN THE VAPOUR SPACE (2026-09-10). The gas partial pressure
+ * is n R T over the room the liquid leaves it, not over the whole node. The
+ * steam and the gas share that room (Dalton), so the water sub-problem is
+ * still the pure-water problem in the full volume - its own vapour occupies
+ * V − V_liquid, and so does the gas. Before this the gas was priced over V:
+ * a casing filling with water never compressed its air and never had to
+ * vent it, an accumulator never depressurised as it discharged, and a
+ * liquid-full node carried its gas as a phantom partial pressure for ever.
+ *
+ * The liquid-full case is what used to make this "divide by zero": a node
+ * whose water fills it at saturation density leaves the gas no room at all.
+ * What happens physically is that the gas compresses the liquid - by its
+ * own pressure, through the liquid's bulk modulus - until the room it has
+ * made holds it at that pressure. The steam tables' compressed-liquid model
+ * is exactly that linear compression (P = P_sat + K (v_f − v)/v_f, see
+ * water-properties-v4), so the balance closes in one quadratic
+ * (`vapourSpace` below) that is exact against the tables in the liquid
+ * regime, reduces to V − V_liquid when the liquid's compression does not
+ * matter, and is continuous through the dome edge between the two.
  */
 
 import * as Water from './water-properties-v4';
 import { mixtureCv, totalMoles, type GasComposition } from './gas-properties';
+import type { FlowNode } from './types';
 
 const R_GAS = 8.31446;  // J/(mol·K) - must match gas-properties
 
@@ -65,6 +79,11 @@ export interface MixtureState {
   pressure: number;         // Pa - total (Dalton)
   steamPressure: number;    // Pa - water's partial pressure
   gasPressure: number;      // Pa - NCG partial pressure
+  /** The vapour space, m³: the room the liquid leaves the steam and the gas
+   *  to share. The whole node for a gas-only node; V − V_liquid for a
+   *  two-phase one; a pocket the gas has opened by compressing the liquid
+   *  for a liquid-full one (0 with no gas). See vapourSpace(). */
+  gasVolume: number;
   phase: 'liquid' | 'vapor' | 'two-phase';
   /** NON-LIQUID mass fraction of the WATER (vapour + ice). Identical to the
    *  vapour quality above the triple point; see FluidState.quality. */
@@ -74,6 +93,70 @@ export interface MixtureState {
   waterEnergy: number;      // J
   gasEnergy: number;        // J
   iterations: number;       // secant iterations used (0 = no gas present)
+}
+
+/**
+ * The room the liquid leaves the gas, and what the gas's pressure does to it.
+ *
+ * `liquidVolume0` is the liquid at saturation density, m_liquid · v_f(T).
+ * With no gas the vapour space is V − liquidVolume0 (zero, not negative, for
+ * a compressed liquid). With n moles of gas at temperature T the gas presses
+ * on the liquid at P_gas = n R T / V_gas and the liquid gives way by
+ * liquidVolume0 · P_gas / K (K the liquid's bulk modulus), so
+ *
+ *     V_gas = (V − liquidVolume0) + liquidVolume0 · n R T / (K · V_gas)
+ *
+ * whose positive root is returned. For a liquid-full node (V ≤ liquidVolume0)
+ * the first term is zero or negative and the gas sits in a pocket it has
+ * squeezed open: 316 mol of air in an 8 m³ water-full casing gets 0.05 m³
+ * at 146 bar, which is what it takes - and why a casing vents its air up
+ * the discharge long before that. A node with no liquid has the whole
+ * volume. Everything here is continuous through the dome edge (both
+ * branches give V − liquidVolume0 → 0 there).
+ */
+export function vapourSpace(
+  liquidVolume0: number, volume: number, gasMoles: number, temperature: number
+): number {
+  if (!(liquidVolume0 > 0)) return volume;
+  const free = volume - liquidVolume0;
+  if (!(gasMoles > 0)) return Math.max(0, free);
+  const K = Water.bulkModulus(temperature - 273.15);
+  const give = liquidVolume0 * gasMoles * R_GAS * temperature / K;
+  const disc = Math.sqrt(free * free + 4 * give);
+  // The positive root, in the form that does not cancel: a trace of gas in
+  // a compressed liquid has free < 0 and give ~ 1e-17, and (free + disc)
+  // is the difference of two nearly equal numbers - it came out as exactly
+  // zero, and everything priced over it was infinite.
+  return free >= 0 ? 0.5 * (free + disc) : 2 * give / (disc - free);
+}
+
+/** Liquid volume at saturation density for a water state (the aerosol
+ *  convention puts sub-triple ice in the gas: it is not liquid). */
+function liquidVolumeAtSaturation(waterMass: number, quality: number, phase: string, temperature: number): number {
+  if (phase === 'vapor') return 0;
+  const liquidMass = waterMass * (1 - Math.max(0, Math.min(1, quality)));
+  if (!(liquidMass > 0)) return 0;
+  return liquidMass / Water.saturatedLiquidDensity(temperature);
+}
+
+/**
+ * A node's vapour space, m³. The fluid-state constraint stores the solved
+ * value on the fluid (`gasVolume`); a node that has not been through the
+ * solve since it was built or loaded gets the same quadratic from its fields.
+ */
+export function nodeGasVolume(node: FlowNode): number {
+  const f = node.fluid;
+  const moles = f.ncg ? totalMoles(f.ncg) : 0;
+  // A stored value is the solve's answer for the inventory it was solved
+  // with. Between a transport step and the next solve a liquid-full node
+  // can hold its FIRST moles of gas against a stored 0 (the pocket they
+  // open has not been solved yet) - recompute rather than divide by it.
+  if (f.gasVolume !== undefined && Number.isFinite(f.gasVolume) && (f.gasVolume > 0 || !(moles > 0))) {
+    return f.gasVolume;
+  }
+  return vapourSpace(
+    liquidVolumeAtSaturation(f.mass, f.quality ?? 0, f.phase, f.temperature),
+    node.volume, moles, f.temperature);
 }
 
 /**
@@ -102,6 +185,8 @@ export function solveMixtureState(
       pressure: ws.pressure,
       steamPressure: ws.pressure,
       gasPressure: 0,
+      gasVolume: vapourSpace(
+        liquidVolumeAtSaturation(waterMass, ws.quality, ws.phase, ws.temperature), volume, 0, ws.temperature),
       phase: ws.phase,
       quality: ws.quality,
       iceFraction: ws.iceFraction,
@@ -141,6 +226,7 @@ export function solveMixtureState(
       pressure: P,
       steamPressure: 0,
       gasPressure: P,
+      gasVolume: volume,
       phase: 'vapor',
       quality: 1,
       iceFraction: 0,
@@ -314,13 +400,28 @@ export function solveMixtureState(
 
   const T = ws.temperature;
   const gasEnergy = gasHeatCapacity * T;
-  const gasPressure = (gasMoles * R_GAS * T) / volume;
+  // The gas's pressure over the room the liquid leaves it. For a liquid-full
+  // node the tables' ws.pressure already carries the compression the water
+  // has at v = V/m; the gas pocket compresses it further by V_gas, so the
+  // gas adds K·V_gas/V_liquid0 on top - which is n R T / V_gas by the
+  // quadratic (vapourSpace). Written that way so that the no-gas limit
+  // lands exactly on the tables, not one rounding off them.
+  const liquidVolume0 = liquidVolumeAtSaturation(waterMass, ws.quality, ws.phase, T);
+  const gasVolume = vapourSpace(liquidVolume0, volume, gasMoles, T);
+  let gasPressure: number;
+  if (liquidVolume0 > 0) {
+    const free = Math.max(0, volume - liquidVolume0);
+    gasPressure = Water.bulkModulus(T - 273.15) * (gasVolume - free) / liquidVolume0;
+  } else {
+    gasPressure = (gasMoles * R_GAS * T) / gasVolume;
+  }
 
   return {
     temperature: T,
     pressure: ws.pressure + gasPressure,
     steamPressure: ws.pressure,
     gasPressure,
+    gasVolume,
     phase: ws.phase,
     quality: ws.quality,
     iceFraction: ws.iceFraction,

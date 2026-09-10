@@ -187,7 +187,13 @@ test('a mostly-air pump pot draining its water does not chill', () => {
   const story = `${(drainedFraction * 100).toFixed(1)}% of ${m0.toFixed(0)} kg left in 20 s; T fell ` +
     `${(T0 - minT).toFixed(3)} K from ${(T0 - 273.15).toFixed(2)} C, now ${(end.fluid.temperature - 273.15).toFixed(2)} C`;
   assert(drainedFraction > 0.2, `the pot drained (${story})`);
-  assert(T0 - minT < 0.5, `pot stayed at its temperature (${story})`);
+  // What a draining pot legitimately loses: the steam its gas space holds
+  // (Dalton: ~0.5 kg over 6.5 m3 at 320 K, priced properly since the gas
+  // was moved to the vapour space on 2026-09-10) leaves with the froth at
+  // its latent heat - about a megajoule, most of it off the last of the
+  // water, a couple of kelvin. The report's 5 K/s, 45 kJ per kg, is what
+  // must not come back.
+  assert(T0 - minT < 3, `pot stayed near its temperature (${story})`);
 });
 
 report('Pump line (CAR BZ1bOwQ0oLXY0q8jG1hU)');

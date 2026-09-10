@@ -9,6 +9,7 @@ import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
 import { getPresetById, getPipeSpecById, pipeSpecFlowArea } from '../src/construction/component-presets';
 import { nodeLiquidLevelFraction, steamPartialPressurePa } from '../src/simulation';
 import { totalMoles } from '../src/simulation/gas-properties';
+import { drawCompositionAt, calculateSeparation } from '../src/simulation/operators/connection-hydraulics';
 
 const x = parseFloat(process.argv[2] || '236');
 const seconds = parseFloat(process.argv[3] || '60');
@@ -22,9 +23,13 @@ const pool = plant.components.find((c: [string, unknown]) => c[0] === 'pool')[1]
 const seaIntake = sea.height / 2 - sea.ports[0].position.y;
 const poolPort = process.env.POOL_PORT ? parseFloat(process.env.POOL_PORT) : pool.depth / 2 - pool.ports.find((p: { id: string }) => p.id === 'pool-makeup-e').position.y;
 const ratedFlow = preset.ratedFlow as number;
+const pumpDiameter = 0.2 + Math.sqrt(ratedFlow / 1000) * 0.4;
+// The nozzles are pinned to the drawn machine (height/2 - port.y); with the
+// ports at y = 0 that is the casing top, which is where a casing vents
+const nozzle = pumpDiameter * 1.3 * 2.2 / 2;
 plant.components.push(['pmp', {
   id: 'pmp', type: 'pump', label: 'probe pump', position: { x, y: 75 }, rotation: 0, elevation: 0,
-  diameter: 0.2 + Math.sqrt(ratedFlow / 1000) * 0.4, running: process.env.STOPPED ? false : true, speed: 1,
+  diameter: pumpDiameter, running: process.env.STOPPED ? false : true, speed: 1,
   ratedFlow, ratedHead: preset.ratedHead, orientation: 'left-right', npshRequired: preset.npshRequired,
   motorElevation: preset.motorElevation, initialFill: preset.initialFill, dischargeCheck: preset.dischargeCheck,
   ports: [
@@ -36,13 +41,13 @@ plant.components.push(['pmp', {
 }]);
 plant.connections.push(
   { fromComponentId: 'sea', fromPortId: 'sea-out', toComponentId: 'pmp', toPortId: 'pmp-inlet',
-    fromElevation: seaIntake, toElevation: -0.07, length: Math.max(10, x - 229), flowArea: area });
+    fromElevation: seaIntake, toElevation: nozzle, length: Math.max(10, x - 229), flowArea: area });
 // OPEN_DISCHARGE=1 leaves the discharge nozzle with no line on it (the factory
 // opens it to the air), to see how the casing fills when it is not dead-ended
 if (!process.env.OPEN_DISCHARGE) {
   plant.connections.push(
     { fromComponentId: 'pmp', fromPortId: 'pmp-outlet', toComponentId: 'pool', toPortId: 'pool-makeup-e',
-      fromElevation: 0.36, toElevation: poolPort, length: x - 54 + 12, flowArea: area });
+      fromElevation: nozzle, toElevation: poolPort, length: x - 54 + 12, flowArea: area });
 }
 plant.scenario = undefined;
 
@@ -67,6 +72,11 @@ while (t < seconds) {
   const c = casing();
   maxP = Math.max(maxP, c.fluid.pressure);
   const toPool = process.env.OPEN_DISCHARGE ? flowRate(sim.state, 'pmp', 'atmosphere') : flowRate(sim.state, 'pmp', 'pool');
+  if (process.env.DRAW) {
+    const dc = sim.state.flowConnections.find(cn => cn.fromNodeId === 'pmp')!;
+    const d = drawCompositionAt(c, dc.fromElevation, dc.massFlowRate, dc.fromPhaseTolerance, dc.fromOpeningHeight);
+    console.log(`     draw@${dc.fromElevation?.toFixed(3)} tol=${dc.fromPhaseTolerance} sep=${calculateSeparation(c, dc.massFlowRate).toFixed(2)} -> ${d.phase} wL=${d.wLiquid.toFixed(2)} wV=${d.wVapor.toFixed(2)} rho=${d.rho.toFixed(1)} h=${c.height} gasV=${(c.fluid.gasVolume ?? -1).toFixed(2)} x=${c.fluid.quality.toExponential(2)}`);
+  }
   console.log(`${t.toFixed(1).padStart(6)}  ${(c.fluid.pressure / 1e5).toFixed(3).padStart(8)}  ${(steamPartialPressurePa(c) / 1e5).toFixed(3).padStart(7)}  ${(c.fluid.ncg ? totalMoles(c.fluid.ncg) : 0).toFixed(0).padStart(7)}  ${c.fluid.phase.padEnd(9)}  ${(100 * nodeLiquidLevelFraction(c)).toFixed(0).padStart(4)}  ${c.fluid.mass.toFixed(0).padStart(5)}  ${flowRate(sim.state, 'sea', 'pmp').toFixed(1).padStart(11)}  ${toPool.toFixed(1).padStart(12)}  ${p().effectiveSpeed.toFixed(2)}  ${p().flooded ? 'Y' : 'n'}        ${(maxP / 1e5).toFixed(2)}`);
 }
 const bursts = sim.state.burstStates ? [...sim.state.burstStates.values()].filter(b => (b as { burst?: boolean }).burst) : [];

@@ -708,7 +708,7 @@ function calculateNcgFraction(fluid: Fluid): number {
   const ncgMoles = ncgViz.totalMoles;
   const R = 8.314; // J/(mol·K)
   const T = fluid.temperature || 400; // K
-  const V = fluid.volume || 1; // m³
+  const V = fluid.gasVolume ?? fluid.volume ?? 1; // m³ - the vapour space when the simulation stamped the moles
 
   const P_ncg = (ncgMoles * R * T) / V; // Pa
   // Dalton: the total is the steam partial the fluid declares plus the gas it
@@ -848,7 +848,7 @@ export function renderFluidWithNcg(
     // Steam partial pressure = P_total - P_ncg
     const R = 8.314; // J/(mol·K)
     const T = fluid.temperature || 400; // K
-    const V = fluid.volume || 1; // m³
+    const V = fluid.gasVolume ?? fluid.volume ?? 1; // m³ - the vapour space when the simulation stamped the moles
     const ncgMoles = ncgViz ? ncgViz.totalMoles : 0;
     const P_ncg = (ncgMoles * R * T) / V;
     const P_steam = steamPressureOf(fluid);

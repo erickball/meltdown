@@ -4052,6 +4052,14 @@ function createFlowConnectionFromPlantConnection(
   // but switches to mixture/vapor when the hotwell is nearly empty.
   // Using 0.01m (1cm) as minimum liquid level for "pure liquid" draw.
   let fromPhaseTolerance = connection.fromPhaseTolerance;
+  // A pump casing is not a tank: its top-discharge nozzle takes what is at
+  // the top of the casing with no sloshing band around the interface (the
+  // default 10 cm smear is a fifth of a half-metre casing, and it left the
+  // last fifth of a filling casing's air with no way out). Gas until the
+  // casing is full, liquid from then on - which is how a casing primes.
+  if (fromPhaseTolerance === undefined && fromComponent?.type === 'pump') {
+    fromPhaseTolerance = 0;
+  }
   if (fromPhaseTolerance === undefined && fromComponent?.type === 'condenser') {
     // Check if connection is at the bottom (fromElevation near 0 or undefined)
     const connElev = connFromElevation ?? 0;

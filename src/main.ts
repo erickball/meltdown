@@ -65,6 +65,7 @@ import {
 import { getPipeSpecById } from './construction/component-presets';
 import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback } from './debug';
 import { waveCasualties, WaveCasualty } from './simulation/wave-casualties';
+import { nodeGasVolume } from './simulation/mixture-properties';
 import { addWreck } from './render/debris-fx';
 import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions, auditComponentEditSync } from './construction/component-config';
@@ -5271,6 +5272,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // instead of defaulting to steam-white
         component.primaryFluid.ncg = primaryNode.fluid.ncg;
         component.primaryFluid.volume = primaryNode.volume;
+        component.primaryFluid.gasVolume = nodeGasVolume(primaryNode);
         component.primaryFluid.steamPressure = steamPartialPressurePa(primaryNode);
         component.primaryFluid.liquidLevelFraction = nodeLiquidLevelFraction(primaryNode);
       }
@@ -5295,6 +5297,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           fluids[b].separation = bundleNode.separation;
           fluids[b].ncg = bundleNode.fluid.ncg;
           fluids[b].volume = bundleNode.volume;
+          fluids[b].gasVolume = nodeGasVolume(bundleNode);
           fluids[b].steamPressure = steamPartialPressurePa(bundleNode);
           fluids[b].liquidLevelFraction = nodeLiquidLevelFraction(bundleNode);
         });
@@ -5313,6 +5316,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.secondaryFluid.separation = secondaryNode.separation;
         component.secondaryFluid.ncg = secondaryNode.fluid.ncg;
         component.secondaryFluid.volume = secondaryNode.volume;
+        component.secondaryFluid.gasVolume = nodeGasVolume(secondaryNode);
         component.secondaryFluid.steamPressure = steamPartialPressurePa(secondaryNode);
         component.secondaryFluid.liquidLevelFraction = nodeLiquidLevelFraction(secondaryNode);
       }
@@ -5341,6 +5345,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         cv.annulusFluid.separation = annulusNode.separation;
         cv.annulusFluid.ncg = annulusNode.fluid.ncg;
         cv.annulusFluid.volume = annulusNode.volume;
+        cv.annulusFluid.gasVolume = nodeGasVolume(annulusNode);
         cv.annulusFluid.steamPressure = steamPartialPressurePa(annulusNode);
         cv.annulusFluid.liquidLevelFraction = nodeLiquidLevelFraction(annulusNode);
       }
@@ -5378,6 +5383,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.separation = vesselNode.separation;
           component.fluid.ncg = vesselNode.fluid.ncg;
           component.fluid.volume = vesselNode.volume;
+          component.fluid.gasVolume = nodeGasVolume(vesselNode);
         component.fluid.steamPressure = steamPartialPressurePa(vesselNode);
           component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(vesselNode);
         }
@@ -5407,6 +5413,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           component.fluid.separation = insideNode.separation;
           component.fluid.ncg = insideNode.fluid.ncg;
           component.fluid.volume = insideNode.volume;
+          component.fluid.gasVolume = nodeGasVolume(insideNode);
         component.fluid.steamPressure = steamPartialPressurePa(insideNode);
           component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(insideNode);
         }
@@ -5431,6 +5438,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
           rv.outsideBarrelFluid.separation = outsideNode.separation;
           rv.outsideBarrelFluid.ncg = outsideNode.fluid.ncg;
           rv.outsideBarrelFluid.volume = outsideNode.volume;
+          rv.outsideBarrelFluid.gasVolume = nodeGasVolume(outsideNode);
         rv.outsideBarrelFluid.steamPressure = steamPartialPressurePa(outsideNode);
           rv.outsideBarrelFluid.liquidLevelFraction = nodeLiquidLevelFraction(outsideNode);
         }
@@ -5456,6 +5464,7 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         // Sync NCG and volume for proper visualization
         component.fluid.ncg = simNode.fluid.ncg;
         component.fluid.volume = simNode.volume;
+        component.fluid.gasVolume = nodeGasVolume(simNode);
         component.fluid.steamPressure = steamPartialPressurePa(simNode);
         component.fluid.liquidLevelFraction = nodeLiquidLevelFraction(simNode);
       } else if (!warnedMissingSimNodes.has(component.id)) {

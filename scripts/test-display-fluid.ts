@@ -34,6 +34,7 @@ import {
 } from '../src/simulation';
 import type { Fluid, PlantComponent, PlantState } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
+import { nodeGasVolume } from '../src/simulation/mixture-properties';
 
 const LEVEL = 'src/game-mode/levels/spent-fuel-pool.json';
 
@@ -157,6 +158,7 @@ test('a synced fluid reconstructs its node total from steam + gas', () => {
       flowRate: 0,
       ncg: node.fluid.ncg,
       volume: node.volume,
+      gasVolume: nodeGasVolume(node),
     };
     checked++;
     const total = totalPressureOf(displayed);

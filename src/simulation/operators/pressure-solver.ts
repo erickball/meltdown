@@ -91,6 +91,7 @@ import {
   emptyGasComposition,
 } from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
+import { nodeGasVolume } from '../mixture-properties';
 import {
   computeConnectionHydraulics,
   computeChokeLimit,
@@ -1532,7 +1533,9 @@ export class PressureSolver {
         `V_vap=${V_vap}, T=${T} K, x=${x}) - heating a two-phase node must raise its pressure`
       );
     }
-    const b_twoPhase = (dPsat_dT + (nMoles * R_GAS) / V) / C_eff;
+    // The gas's dP/dT is over the room it has (the vapour space, including
+    // any pocket it has squeezed open), not the node
+    const b_twoPhase = (dPsat_dT + (nMoles * R_GAS) / (nMoles > 0 ? nodeGasVolume(node) : V)) / C_eff;
 
     // Pure liquid takes NO energy coupling (β = 0). The physical tangent is
     // the thermal-expansion response K·β_T/(m·c_v), but for liquid the

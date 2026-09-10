@@ -40,6 +40,7 @@ import {
 import { poolReadout, poolStateLabel } from './render/pool-readout';
 import { pumpMotorElevation } from './types';
 import { nodeLiquidLevelFraction } from './simulation';
+import { nodeGasVolume } from './simulation/mixture-properties';
 import type { PlantStock, PoolComponent } from './types';
 
 // Store previous pressures to show transitions
@@ -104,7 +105,7 @@ function formatPressure(pBar: number): string {
  * Converts moles to partial pressure using ideal gas law: P = nRT/V
  * Returns HTML string for the NCG section, or empty string if no NCGs present.
  */
-function formatNcgPressures(ncg: GasComposition, temperature: number, volume: number): string {
+function formatNcgPressures(ncg: GasComposition, temperature: number, gasVolume: number): string {
   const total = totalMoles(ncg);
   if (total <= 0) return '';
 
@@ -112,14 +113,14 @@ function formatNcgPressures(ncg: GasComposition, temperature: number, volume: nu
   html += '<div style="color: #aaf; font-size: 10px; margin-bottom: 4px;">NCG Partial Pressures</div>';
 
   // Calculate total NCG pressure
-  const P_total_ncg = (total * R_GAS * temperature) / volume; // Pa
+  const P_total_ncg = (total * R_GAS * temperature) / gasVolume; // Pa - over the vapour space
   html += `<div class="detail-row"><span class="detail-label">Total NCG:</span><span class="detail-value" style="color: #faa;">${formatPressure(P_total_ncg / 1e5)} bar</span></div>`;
 
   // Show individual species
   for (const species of ALL_GAS_SPECIES) {
     const moles = ncg[species];
     if (moles > 0) {
-      const P_species = (moles * R_GAS * temperature) / volume; // Pa
+      const P_species = (moles * R_GAS * temperature) / gasVolume; // Pa
       const P_bar = P_species / 1e5;
       const props = GAS_PROPERTIES[species];
       html += `<div class="detail-row"><span class="detail-label">${props.formula}:</span><span class="detail-value">${formatPressure(P_bar)} bar</span></div>`;
@@ -411,8 +412,8 @@ export function updateDebugPanel(
       const ncgMoles = node.fluid.ncg ? totalMoles(node.fluid.ncg) : 0;
       let steamPBar = pBar;
       let ncgPBar = 0;
-      if (ncgMoles > 0 && node.volume > 0) {
-        ncgPBar = (ncgMoles * R_GAS * node.fluid.temperature) / node.volume / 1e5;
+      if (ncgMoles > 0 && nodeGasVolume(node) > 0) {
+        ncgPBar = (ncgMoles * R_GAS * node.fluid.temperature) / nodeGasVolume(node) / 1e5;
         steamPBar = Math.max(0, pBar - ncgPBar);
       }
 
@@ -556,7 +557,7 @@ export function updateDebugPanel(
           const moles = node.fluid.ncg[gas];
           if (moles && moles > 0.01) {
             const frac = moles / ncgMoles;
-            const partialP = (moles * R_GAS * node.fluid.temperature) / node.volume / 1e5;
+            const partialP = (moles * R_GAS * node.fluid.temperature) / nodeGasVolume(node) / 1e5;
             species.push(`${gas}:${(frac * 100).toFixed(0)}%/${formatPressure(partialP)}bar`);
           }
         }
@@ -1798,7 +1799,7 @@ export function updateComponentDetail(
     const totalPressure = flowNode.fluid.pressure;
     const ncgMoles = flowNode.fluid.ncg ? totalMoles(flowNode.fluid.ncg) : 0;
     if (ncgMoles > 0) {
-      const ncgPressure = (ncgMoles * R_GAS * flowNode.fluid.temperature) / flowNode.volume;
+      const ncgPressure = (ncgMoles * R_GAS * flowNode.fluid.temperature) / nodeGasVolume(flowNode);
       const steamPressure = Math.max(0, totalPressure - ncgPressure);
       html += `<div class="detail-row"><span class="detail-label">Total Pressure:</span><span class="detail-value" style="color: #ff7;">${formatPressure(totalPressure / 1e5)} bar${designPressureNote(totalPressure, component.pressureRating as number | undefined)}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Steam P:</span><span class="detail-value">${formatPressure(steamPressure / 1e5)} bar</span></div>`;
@@ -1826,7 +1827,7 @@ export function updateComponentDetail(
 
     // Show NCG (Non-Condensible Gas) information if present
     if (flowNode.fluid.ncg) {
-      const ncgHtml = formatNcgPressures(flowNode.fluid.ncg, flowNode.fluid.temperature, flowNode.volume);
+      const ncgHtml = formatNcgPressures(flowNode.fluid.ncg, flowNode.fluid.temperature, nodeGasVolume(flowNode));
       if (ncgHtml) {
         html += ncgHtml;
       }

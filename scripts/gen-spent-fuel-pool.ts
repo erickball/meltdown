@@ -337,7 +337,10 @@ const components: Array<[string, Record<string, unknown>]> = [
     width: 14, height: 7, wallThickness: 0.05,
     fillLevel: 0.78,                 // 841 m3 of a 1078 m3 tank
     pressureRating: 2,
-    ports: [{ id: 'tank-a-out', position: { x: 7, y: 0 }, direction: 'both' }],
+    ports: [
+      { id: 'tank-a-out', position: { x: 7, y: 0 }, direction: 'both' },
+      { id: 'tank-a-vent', position: { x: 0, y: -3.5 }, direction: 'both' },
+    ],
     fluid: { temperature: 288.15, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     initialNcg: { N2: 0.786, O2: 0.210 },
   }],
@@ -347,7 +350,10 @@ const components: Array<[string, Record<string, unknown>]> = [
     width: 10, height: 6, wallThickness: 0.05,
     fillLevel: 0.80,                 // 377 m3 of a 471 m3 tank
     pressureRating: 2,
-    ports: [{ id: 'tank-b-out', position: { x: 5, y: 0 }, direction: 'both' }],
+    ports: [
+      { id: 'tank-b-out', position: { x: 5, y: 0 }, direction: 'both' },
+      { id: 'tank-b-vent', position: { x: 0, y: -3 }, direction: 'both' },
+    ],
     fluid: { temperature: 288.15, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     initialNcg: { N2: 0.786, O2: 0.210 },
   }],
@@ -415,6 +421,23 @@ const connections = [
   // The liner crack itself is not a component: the earthquake opens it as a
   // scripted BURST on the pool (see the scenario below), which is the same
   // break machinery a pressure rupture uses.
+  //
+  // The storage tanks BREATHE. Atmospheric tanks have a vent on the roof, and
+  // without one a tank that drains pulls a vacuum over its own water until
+  // the gravity feed stops: with the gas priced over the vapour space (as it
+  // is since 2026-09-10) an unvented 1000 t tank gave up 250 t and quit.
+  {
+    fromComponentId: 'tank-a', fromPortId: 'tank-a-vent',
+    toComponentId: 'atmosphere', toPortId: 'environment',
+    fromElevation: 7,
+    flowArea: 0.05, length: 3, resistanceCoeff: 2,
+  },
+  {
+    fromComponentId: 'tank-b', fromPortId: 'tank-b-vent',
+    toComponentId: 'atmosphere', toPortId: 'environment',
+    fromElevation: 6,
+    flowArea: 0.05, length: 3, resistanceCoeff: 2,
+  },
 ];
 
 // ---------------------------------------------------------------------------

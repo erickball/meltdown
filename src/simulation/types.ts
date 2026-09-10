@@ -50,6 +50,15 @@ export interface FluidState {
   // Steam partial pressure is computed from steam tables as before
   // NCG partial pressure = n_ncg * R * T / V_vapor (Dalton's law)
   ncg?: GasComposition;   // mol - moles of each NCG species in this node
+  /**
+   * The vapour space, m³: the room the liquid leaves the steam and the gas
+   * (mixture-properties.ts `vapourSpace`). Written by the fluid-state
+   * constraint from the solved state and by createFluidState at build; every
+   * gas partial pressure, gas density and bar<->mole conversion reads it
+   * through `nodeGasVolume`, which recomputes it for a node that has not
+   * been solved yet.
+   */
+  gasVolume?: number;
 }
 
 // ============================================================================

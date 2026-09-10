@@ -130,34 +130,60 @@ debris that floats off and strands with the rest. Rewinding past the wave
 brings the component back, since the removal is an ordinary plant edit in
 the history.
 
-## Known limits (both are the same gap)
+## The gas lives in the vapour space (2026-09-10)
 
-**Gas partial pressure over the full node volume.** `mixture-properties.ts`
-prices a node's non-condensible gas at n R T / V with V the WHOLE node, not
-the vapour space (its header calls this a known simplification with its own
-blast radius). Two consequences for a dry casing filling with water:
+The section that used to stand here described a phantom: the mixture solver
+priced a node's non-condensible gas at n R T over the WHOLE node, so a
+casing filling with water never compressed its air, never vented it, and
+slammed liquid-solid at the end; a liquid-full node then carried its air as
+a partial pressure that never went away. Erick approved modelling the air
+properly, and `mixture-properties.ts` now does:
 
-* the air is never compressed and never has to leave. The casing fills at a
-  constant pressure, and once full the moles are still there as a phantom
-  partial pressure (about a bar) that the pressure solver carries along.
-  The through-flow physics comes out right - the casing's absolute pressure
-  is set by its lines - but the air ledger is not.
-* the fill does not slow as the air compresses, so a casing with a lot of
-  head behind it (the yard's lines make its pot 8 m3 - see below) fills
-  fast and hits liquid-solid hard: through a 12" line with more than ~0.4
-  bar behind it the slam bursts a 16 bar casing. Level 1's sea shelf is
-  kept under 3.5 m of water for this reason; off the shelf the water is
-  over the motor anyway. With the gas space priced properly the fill would
-  stop at the compressed air, and the pump would prime by pushing the air
-  out through its discharge once started - and no slam.
+* the gas partial pressure is n R T over the vapour space, the room the
+  liquid leaves it. The steam shares that room (Dalton), so the water
+  sub-problem is unchanged;
+* a liquid-full node has no room at saturation density, so the gas
+  compresses the liquid through its bulk modulus until the pocket it opens
+  holds it. The steam tables' compressed-liquid model is that same linear
+  compression, so one quadratic (`vapourSpace`) is exact against the tables
+  in the liquid regime, is V - V_liquid when the compression does not
+  matter, and is continuous through the dome edge;
+* `FluidState.gasVolume` carries the solved vapour space; every partial
+  pressure, gas density and bar<->mole conversion reads it through
+  `nodeGasVolume` (the factory's `initialNcg` conversion, the write-back,
+  sound speed and choking, combustion and graphite-oxidation
+  concentrations, the display), and `scripts/probe-ncg-roundtrip.ts` checks
+  the build and the solve agree.
 
-The proper fix is the vapour-space partial pressure with the liquid's own
-compressibility closing the liquid-full case. It changes every
-gas-blanketed node (accumulators would finally depressurise as they
-discharge) and wants its ICs re-based, so it is its own piece of work.
+Three things had to move with it for a casing to prime:
+
+* the pump's discharge draw has no interface smear (`fromPhaseTolerance =
+  0` on a pump's discharge line): a casing vents through its top nozzle
+  until it is full, with no sloshing band - the default 10 cm was a fifth of
+  a half-metre casing;
+* the "a zone cannot be drained more than ten times a second" backstop
+  counts the gas in the vapour space, and lives in `drawCompositionAt`
+  (`zoneCanSupply`) where the momentum solve and the transport both read it
+  - it used to demote the transport alone, after the line had been priced
+  as gas;
+* the two-phase head-loss law starts from the liquid law's own value
+  (`pumpHeadFactor`): a cold casing holding a bubble of air is not
+  cavitating, and the old 15% step at the dome edge is gone.
+
+Measured with `scripts/probe-sfp-priming.ts` (level 1's yard pump, dry,
+stopped, started at 60 s): in 2 m of water the casing floods at ~115 kg/s
+with its air venting through the discharge check, is liquid-full at 60 s
+with under 1 mol of air left, peak 1.7 bar (was a 20 bar slam past ~0.4 bar
+of head), and the started pump lifts 75 kg/s to the rim; in 4.6 m of water
+the same, peak 3.3 bar, no burst.
 
 **The pot is mostly pipe.** Connections carry no inventory, so the factory
 lumps a line's water into the node at each end; a pump on 300 m of 12" pipe
 therefore shows an 8 m3 casing (the casing itself is 0.004 x rated flow,
 0.5 m3 here). That inventory is real - it is the line's - and it is what
-makes the fill above take half a minute.
+makes the fill above take a minute. The pump's panel says so.
+
+**Still approximate:** the moment a liquid-full casing's pump starts is a
+one-step pressure spike (the liquid closure has no compressibility), and
+the last bubble leaving can dip the casing briefly below 1 atm. Neither
+bursts anything.

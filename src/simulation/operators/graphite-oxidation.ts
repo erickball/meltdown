@@ -46,6 +46,7 @@
  */
 
 import { SimulationState } from '../types';
+import { nodeGasVolume } from '../mixture-properties';
 import { RateOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
   NBG_18,
@@ -142,7 +143,8 @@ export class GraphiteOxidationRateOperator implements RateOperator {
 
       // --- Gas state -----------------------------------------------------
       const ncg = gasNode.fluid.ncg ?? emptyGasComposition();
-      const volume = gasNode.volume;
+      // The gas space the oxidant is in (the whole node for a gas loop)
+      const volume = nodeGasVolume(gasNode);
       const T_gas = gasNode.fluid.temperature;
       const P = gasNode.fluid.pressure;
 

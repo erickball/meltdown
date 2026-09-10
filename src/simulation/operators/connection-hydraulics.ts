@@ -33,6 +33,7 @@ import {
   saturatedLiquidDensity, saturatedVaporDensity, surfaceTension, saturationPressure,
 } from '../water-properties';
 import { pumpHeadPressure, pumpHeadSlopeMagnitude } from './pump-curve';
+import { nodeGasVolume } from '../mixture-properties';
 
 // ============================================================================
 // Phase Separation Calculation (shared utility)
@@ -290,17 +291,15 @@ export function findCheckValveForConnection(
  * inventory - never re-derived from its pressure (a node that has boiled
  * down to grams still reports its last pressure).
  *
- * The two species use the two volumes their own partial pressures are priced
- * over, so this density and the node's reported pressure are the same
- * statement:
- *  - water vapour occupies the vapour space V - V_liquid (for a two-phase
- *    node m*x / (V - V_liq) IS the saturated vapour density at its
- *    temperature, by construction);
- *  - the NCG's partial pressure is priced over the FULL node volume - the
- *    documented simplification in mixture-properties.ts - so its density in
- *    the mixture is priced the same way. Spreading it over the vapour space
- *    instead would make a pool's 1 atm air headspace read five times denser
- *    than air, contradicting the 1 atm the same node reports.
+ * Both species live in the vapour space, and both are priced there, so this
+ * density and the node's reported pressure are the same statement:
+ *  - water vapour occupies V - V_liquid (for a two-phase node
+ *    m*x / (V - V_liq) IS the saturated vapour density at its temperature,
+ *    by construction);
+ *  - the NCG has the same room (nodeGasVolume: the vapour space, or the
+ *    pocket it has squeezed open in a liquid-full node), which is also where
+ *    its partial pressure is priced (mixture-properties.ts), so a pool's
+ *    1 atm air headspace reads as air.
  * When there is no liquid the two volumes are the same and this is just the
  * node's bulk density, which is the case every gas loop and every drained
  * building lives in.
@@ -311,8 +310,11 @@ export function nodeGasSpaceDensity(node: FlowNode, liquidVolume: number): numbe
     : Math.max(0, Math.min(1, node.fluid.quality ?? 0));
   const vaporSpace = node.volume - liquidVolume;
   const steamDensity = vaporSpace > 0 ? (node.fluid.mass * vaporFraction) / vaporSpace : 0;
-  const ncgDensity = node.fluid.ncg && node.volume > 0
-    ? ncgTotalMass(node.fluid.ncg) / node.volume
+  // The gas is in the vapour space too (a liquid-full node's gas is in the
+  // pocket it has squeezed open, dense with it)
+  const gasVolume = nodeGasVolume(node);
+  const ncgDensity = node.fluid.ncg && gasVolume > 0
+    ? ncgTotalMass(node.fluid.ncg) / gasVolume
     : 0;
   return steamDensity + ncgDensity;
 }
@@ -455,6 +457,19 @@ export function pumpHeadFactor(
 
   if (phase === 'vapor') return 1.0;
 
+  // The liquid law, from the liquid's own subcooling: 1 with NPSH in hand,
+  // falling to the base factor as the suction reaches its vapour pressure.
+  // Evaluated for a two-phase pot too, because "two-phase" says only that
+  // the pot holds some gas space - a cold casing with a bubble of air at
+  // its top is not cavitating, and its impeller, drawing from the bottom,
+  // sees subcooled liquid. What the two-phase branch below adds is the
+  // loss to VOID displacing the liquid the impeller works on.
+  const npshAvailable = (suctionNode.fluid.pressure - saturationPressure(suctionNode.fluid.temperature)) / (pumpRho * g);
+  const npshRequired = pump.npshRequired ?? 5;
+  const liquidFactor = npshAvailable >= npshRequired
+    ? 1.0
+    : baseFactor + (1.0 - baseFactor) * Math.max(0, npshAvailable / npshRequired);
+
   if (phase === 'two-phase') {
     // Void fraction from what the pot actually holds - the liquid volume its
     // mass and quality account for against its total volume (the same book
@@ -464,18 +479,17 @@ export function pumpHeadFactor(
       ? Math.min(suctionNode.volume, suctionNode.fluid.mass * (1 - quality) / approxLiquidDensity(suctionNode))
       : 0;
     const alpha = suctionNode.volume > 0 ? 1 - liquidVolume / suctionNode.volume : 1;
-    // Quadratic through (0, baseFactor), (1/2, midVoidFactor), (1, 1)
-    const midVoidFactor = baseFactor * (pumpType === 'centrifugal' ? 0.25 : 0.6);
-    const chord = baseFactor * (1 - alpha) + alpha;
-    const sag = 4 * ((baseFactor + 1) / 2 - midVoidFactor);
+    // Quadratic through (0, liquidFactor), (1/2, midVoidFactor), (1, 1):
+    // continuous with the liquid law at alpha = 0 whatever the subcooling
+    // (it used to start every two-phase pot at the saturated value, a 15%
+    // step at the dome edge for a pot that was merely holding a little air)
+    const midVoidFactor = liquidFactor * (pumpType === 'centrifugal' ? 0.25 : 0.6);
+    const chord = liquidFactor * (1 - alpha) + alpha;
+    const sag = 4 * ((liquidFactor + 1) / 2 - midVoidFactor);
     return chord - sag * alpha * (1 - alpha);
   }
 
-  const npshAvailable = (suctionNode.fluid.pressure - saturationPressure(suctionNode.fluid.temperature)) / (pumpRho * g);
-  const npshRequired = pump.npshRequired ?? 5;
-  if (npshAvailable >= npshRequired) return 1.0;
-  const npshRatio = Math.max(0, npshAvailable / npshRequired);
-  return baseFactor + (1.0 - baseFactor) * npshRatio;
+  return liquidFactor;
 }
 
 /**
@@ -507,20 +521,21 @@ export function nodeBulkDensity(node: FlowNode): number {
  * Get approximate vapor-space density at node conditions: ideal-gas steam at
  * its partial pressure plus the NCG mixture at its own. For a pure-steam
  * node this is the old PM/(RT); for a helium-filled node it is the helium
- * density (0.018 kg/mol water would overestimate helium ~4.5x). Two-phase
- * nodes use the whole node volume for the NCG share - consistent with the
- * FluidState solver's vapor-space approximation.
+ * density (0.018 kg/mol water would overestimate helium ~4.5x). The NCG is
+ * priced over the vapour space it actually has (nodeGasVolume), the same
+ * room the mixture solve prices its partial pressure over.
  */
 export function approxVaporDensity(node: FlowNode): number {
   const T = node.fluid.temperature;
   const R = 8.314; // J/mol-K
   let P_ncg = 0;
   let rho_ncg = 0;
-  if (node.fluid.ncg && node.volume > 0) {
+  const gasVolume = node.fluid.ncg ? nodeGasVolume(node) : 0;
+  if (node.fluid.ncg && gasVolume > 0) {
     const n = totalMoles(node.fluid.ncg);
     if (n > 0) {
-      P_ncg = (n * R * T) / node.volume;
-      rho_ncg = ncgTotalMass(node.fluid.ncg) / node.volume;
+      P_ncg = (n * R * T) / gasVolume;
+      rho_ncg = ncgTotalMass(node.fluid.ncg) / gasVolume;
     }
   }
   const P_steam = Math.max(0, node.fluid.pressure - P_ncg);
@@ -640,9 +655,24 @@ export function drawCompositionAt(
   }
   const fMixture = Math.max(0, 1 - fLiquid - fVapor);
 
-  // Pure draws skip straight to the label.
-  if (fMixture === 0 && fVapor === 0) return fillPure(node, 'liquid', out, needRho);
-  if (fMixture === 0 && fLiquid === 0) return fillPure(node, 'vapor', out, needRho);
+  // Pure draws skip straight to the label - if the zone can supply the
+  // flow. A zone that would be drained more than ten times a second (or
+  // that holds nothing) cannot be what is flowing: the draw is the mixture.
+  // This is decided HERE, where the momentum solve and the transport both
+  // read it, so the line is priced at the density of what actually moves.
+  // (It used to be applied to the transport alone, after the momentum solve
+  // had priced the line as gas: a primed casing with a millimetre of air at
+  // its top pushed a few kg/s of "gas" up a line that was carrying water.)
+  if (fMixture === 0 && fVapor === 0) {
+    return zoneCanSupply(node, 'liquid', massFlowRate)
+      ? fillPure(node, 'liquid', out, needRho)
+      : fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
+  }
+  if (fMixture === 0 && fLiquid === 0) {
+    return zoneCanSupply(node, 'vapor', massFlowRate)
+      ? fillPure(node, 'vapor', out, needRho)
+      : fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
+  }
 
   if (isOtsg) {
     // The boiling section is a real zone with its own mean state - the
@@ -727,6 +757,23 @@ function fillComp(
   return out;
 }
 
+/**
+ * Whether a two-phase node's zone holds enough to be what a flow of this
+ * size is made of. The vapour zone is the steam AND any gas sharing the
+ * space; the liquid zone is the liquid. A last-resort backstop rather than
+ * a physical model (a real zone can drain fast, and boiling or flashing
+ * replenishes it through the energy books): the limit is ten times the
+ * zone's mass per second, and an empty zone supplies nothing.
+ */
+function zoneCanSupply(node: FlowNode, zone: 'liquid' | 'vapor', massFlowRate: number): boolean {
+  const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
+  const zoneMass = zone === 'vapor'
+    ? node.fluid.mass * quality + (node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0)
+    : node.fluid.mass * (1 - quality);
+  const maxDrainRate = 10; // per second
+  return zoneMass >= 1e-6 && Math.abs(massFlowRate) <= maxDrainRate * zoneMass;
+}
+
 function fillPure(
   node: FlowNode, phase: 'liquid' | 'vapor',
   out: DrawComposition | undefined, needRho: boolean,
@@ -763,7 +810,8 @@ export function nodeSoundSpeed(node: FlowNode, flowPhase: 'liquid' | 'vapor' | '
   const fluid = node.fluid;
   const T = fluid.temperature;
   const P = fluid.pressure;
-  const V = node.volume;
+  // The gas and the steam share the vapour space, not the node
+  const V = nodeGasVolume(node);
 
   // Check if NCG is present
   const ncg = fluid.ncg;
@@ -859,11 +907,12 @@ export function nodeCriticalFluxFactor(
   const ncg = fluid.ncg;
   const ncgMoles = ncg ? totalMoles(ncg) : 0;
 
-  if (ncgMoles > 0 && node.volume > 0) {
+  const gasVolume = nodeGasVolume(node);
+  if (ncgMoles > 0 && gasVolume > 0) {
     const T = fluid.temperature;
-    const P_ncg = (ncgMoles * R_GAS * T) / node.volume;
+    const P_ncg = (ncgMoles * R_GAS * T) / gasVolume;
     const P_steam = Math.max(0, fluid.pressure - P_ncg);
-    const steamMoles = (P_steam * node.volume) / (R_GAS * T);
+    const steamMoles = (P_steam * gasVolume) / (R_GAS * T);
     if (steamMoles < ncgMoles * 0.02) return ncgCriticalFluxFactor(ncg!);
     return steamNcgCriticalFluxFactor(ncg!, steamMoles, T);
   }

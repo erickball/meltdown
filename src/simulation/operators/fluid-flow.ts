@@ -20,6 +20,7 @@ import { calculateLiquidLevelWithObstructions } from './rate-operators';
 
 import { soundSpeed, criticalPressureRatio, WaterState } from '../water-properties-v4';
 import { totalMoles, steamNcgSoundSpeed, ncgSoundSpeed, R_GAS } from '../gas-properties';
+import { nodeGasVolume } from '../mixture-properties';
 import { pressureAtConnection, pumpHeadFactor } from './connection-hydraulics';
 
 // ============================================================================
@@ -901,6 +902,8 @@ export class FlowOperator implements PhysicsOperator {
     const T = fluid.temperature;
     const P = fluid.pressure;
     const V = upstreamNode.volume;
+    // The gas and the steam share the vapour space, not the node
+    const V_gas = nodeGasVolume(upstreamNode);
 
     // Check if NCG is present
     const ncg = fluid.ncg;
@@ -909,15 +912,15 @@ export class FlowOperator implements PhysicsOperator {
     let c: number;  // Sound speed
     let rho: number;  // Density for mass flux calculation
 
-    if (ncgMoles > 0 && V > 0) {
+    if (ncgMoles > 0 && V_gas > 0) {
       // NCG is present - need to calculate mixture sound speed
       // First, estimate steam moles from partial pressure
       // P_steam = P_total - P_ncg
-      const P_ncg = ncgMoles * R_GAS * T / V;
+      const P_ncg = ncgMoles * R_GAS * T / V_gas;
       const P_steam = Math.max(0, P - P_ncg);
 
       // Estimate steam moles: n = PV/RT
-      const steamMoles = P_steam * V / (R_GAS * T);
+      const steamMoles = P_steam * V_gas / (R_GAS * T);
 
       if (steamMoles < ncgMoles * 0.02) {
         // Negligible steam - use pure NCG sound speed
