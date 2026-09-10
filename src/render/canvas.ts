@@ -2420,6 +2420,14 @@ export class PlantCanvas {
       // Readouts are keyed at the precision they are drawn with
       const rp = getReactorPowerState();
       key += `|${rp.coreId}|${formatCorePowerLabel(rp.thermalPower)}`;
+    } else if (component.type === 'valve' && (component as import('../types').ValveComponent).valveType === 'check') {
+      // The check-valve painter orients its flapper by the lines on the
+      // valve (checkValveFlowSign), so re-plumbing it must repaint
+      for (const c of this.plantState.connections) {
+        if (c.fromComponentId === component.id || c.toComponentId === component.id) {
+          key += `|${c.fromComponentId}.${c.fromPortId}>${c.toComponentId}.${c.toPortId}`;
+        }
+      }
     } else if (component.type === 'turbine-generator') {
       key += `|${Math.round(getTurbineCondenserState().turbinePower / 1e6)}`;
     } else if (component.type === 'condenser') {

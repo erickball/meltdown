@@ -919,7 +919,7 @@ export function renderComponent(
       renderVessel(ctx, component, view, isSimulating);
       break;
     case 'valve':
-      renderValve(ctx, component, view);
+      renderValve(ctx, component, view, connections);
       break;
     case 'heatExchanger':
       renderHeatExchanger(ctx, component, view);
@@ -2174,14 +2174,14 @@ function renderPebbleBed(
   ctx.restore();
 }
 
-function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState): void {
+function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, connections?: Connection[]): void {
   const d = valve.diameter * view.zoom;
 
   // Different rendering based on valve type with different size multipliers
   if (valve.valveType === 'check') {
     // Check valves: 30% larger
     const bodySize = d * 1.5 * 1.3;
-    renderCheckValve(ctx, valve, view, d * 1.3, bodySize);
+    renderCheckValve(ctx, valve, view, d * 1.3, bodySize, connections);
   } else if (valve.valveType === 'relief' || valve.valveType === 'porv') {
     // Relief valves and PORVs: 30% larger
     const bodySize = d * 1.5 * 1.3;
@@ -2235,7 +2235,7 @@ function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponen
   ctx.fillText(`${Math.round(valve.opening * 100)}%`, 0, -d / 2 - 35);
 }
 
-function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
+function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number, connections?: Connection[]): void {
   // Check valve body - bowtie shape like standard valve
   ctx.fillStyle = COLORS.steel;
   ctx.beginPath();
@@ -2262,6 +2262,15 @@ function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, 
   // Check valve flapper/disc with hinge animation
   // When closed: diagonal at ~45 degrees (blocking flow)
   // When open: swings to nearly horizontal (~10 degrees from horizontal)
+  //
+  // The flapper's arrow points the way the valve passes flow: from its
+  // inlet port to its outlet port. The drawing frame shares the ports'
+  // local x axis (the caller rotates the context by component.rotation,
+  // the same rotation the ports get), so a valve whose outlet sits at
+  // lower local x than its inlet is drawn mirrored. Before this every
+  // check valve pointed right, whichever way it was plumbed.
+  ctx.save();
+  if (checkValveFlowSign(valve, connections) < 0) ctx.scale(-1, 1);
   const arrowLen = bodySize * 1.2;  // 25% longer arrow
   const hingeX = -arrowLen / 3;     // Move hinge more toward center
   const hingeY = arrowLen / 4;      // Move hinge upward (smaller Y = higher)
@@ -2311,12 +2320,35 @@ function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, 
     flapperEndY - headSize * Math.sin(headAngle) - headSize * 0.5 * Math.cos(headAngle)
   );
   ctx.stroke();
+  ctx.restore();
 
   // Label
   ctx.fillStyle = '#fff';
   ctx.font = `${9 * readoutScale(view.zoom / 50)}px monospace`;
   ctx.textAlign = 'center';
   ctx.fillText('CHK', 0, d / 2 + 12);
+}
+
+/**
+ * +1 when a check valve passes flow toward local +x (outlet port at higher
+ * local x than the inlet), -1 when it passes flow toward -x.
+ *
+ * The physics seats the valve against reverse flow on its CONNECTION, whose
+ * from->to order is the passing direction, so the plumbing is the authority:
+ * the inlet is the port a connection arrives at (valve is the `to` end) and
+ * the outlet the port one leaves from (valve is the `from` end). A valve
+ * with fewer than two lines on it falls back to its declared port directions,
+ * then to port order (first = inlet, second = outlet).
+ */
+export function checkValveFlowSign(valve: ValveComponent, connections?: Connection[]): 1 | -1 {
+  const ports = valve.ports ?? [];
+  const portById = (id: string | undefined) => ports.find(p => p.id === id);
+  let inlet = portById(connections?.find(c => c.toComponentId === valve.id)?.toPortId);
+  let outlet = portById(connections?.find(c => c.fromComponentId === valve.id)?.fromPortId);
+  if (!inlet) inlet = ports.find(p => p.direction === 'in' && p !== outlet) ?? ports.find(p => p !== outlet);
+  if (!outlet) outlet = ports.find(p => p.direction === 'out' && p !== inlet) ?? ports.find(p => p !== inlet);
+  if (!inlet || !outlet || inlet === outlet) return 1;
+  return outlet.position.x < inlet.position.x ? -1 : 1;
 }
 
 function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
