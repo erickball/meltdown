@@ -2273,15 +2273,31 @@ export class TurbineCondenserRateOperator implements RateOperator {
     // Find turbines dynamically by looking for nodes that have "turbine-generator" in the ID
     // Skip extraction nodes (they have parentTurbineId set)
     for (const [turbineNodeId, turbineNode] of state.flowNodes) {
-      // A main turbine node is one the factory stamped as such; extraction
-      // nodes carry parentTurbineId instead. Never match on the label: a
-      // "Turbine Stop Valve" upstream of the machine used to be expanded
-      // as a turbine of its own, from header pressure down to the real
-      // turbine's exhaust, and it sat at saturation for the whole run.
+      // A machine is the node the factory stamped as its exhaust; its stage
+      // (extraction) nodes carry parentTurbineId and are handled as part of
+      // it below. Never match on the label: a "Turbine Stop Valve" upstream
+      // of the machine used to be expanded as a turbine of its own, from
+      // header pressure down to the real turbine's exhaust, and it sat at
+      // saturation for the whole run.
       if (!turbineNode.steamTurbine) continue;
       if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
 
-      // Find flow INTO the turbine, and the steam header it comes from.
+      // The stage chain: extraction nodes in falling pressure order, then
+      // the exhaust node. Steam enters the first of them from outside (the
+      // header), passes each nozzle row into the next, and the exhaust node
+      // discharges to the condenser. A bleed leaves its stage node sideways
+      // carrying that stage's outlet state, so it needs no accounting of its
+      // own here - the stage's books already hold it at the right state.
+      const stages: FlowNode[] = [];
+      for (const [, node] of state.flowNodes) {
+        if (node.parentTurbineId === turbineNodeId && node.extractionPressure) stages.push(node);
+      }
+      stages.sort((a, b) => (b.extractionPressure ?? 0) - (a.extractionPressure ?? 0));
+      const chain = [...stages, turbineNode];
+      const inMachine = (id: string) => id === turbineNodeId || stages.some(s => s.id === id);
+      const firstId = chain[0].id;
+
+      // Find flow INTO the machine, and the steam header it comes from.
       //
       // The expansion has to start from the state of the steam ENTERING the
       // machine - the header upstream of the throttle - not from the turbine
@@ -2296,8 +2312,8 @@ export class TurbineCondenserRateOperator implements RateOperator {
       let outletNodeId: string | null = null;
 
       for (const conn of state.flowConnections) {
-        // Flow into turbine
-        if (conn.toNodeId === turbineNodeId && conn.massFlowRate > 0) {
+        // Flow into the machine's first node from outside it
+        if (conn.toNodeId === firstId && conn.massFlowRate > 0 && !inMachine(conn.fromNodeId)) {
           inletMassFlow += conn.massFlowRate;
           const donor = state.flowNodes.get(conn.fromNodeId);
           if (donor) {
@@ -2309,13 +2325,10 @@ export class TurbineCondenserRateOperator implements RateOperator {
             inletP = Math.max(inletP, donor.fluid.pressure);
           }
         }
-        // Flow out of the turbine's main exhaust. Extraction nodes are fed
-        // from the header, not from here, but a plant is free to wire one
-        // either way and mistaking a bleed for the exhaust would set the
-        // expansion's back-pressure to the bleed's.
+        // Flow out of the machine's exhaust to something outside it
         if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
           const sink = state.flowNodes.get(conn.toNodeId);
-          if (sink && !sink.parentTurbineId) outletNodeId = conn.toNodeId;
+          if (sink && !inMachine(conn.toNodeId)) outletNodeId = conn.toNodeId;
         }
       }
 
@@ -2334,75 +2347,20 @@ export class TurbineCondenserRateOperator implements RateOperator {
 
       const h_in = inletEnthalpyNum / inletMassFlow;
 
-      // Find all extraction nodes belonging to this turbine
-      const extractionNodes: Array<{
-        nodeId: string;
-        node: typeof turbineNode;
-        pressure: number;
-        extractionFlow: number;
-      }> = [];
-
-      for (const [nodeId, node] of state.flowNodes) {
-        if (node.parentTurbineId === turbineNodeId && node.extractionPressure) {
-          // The bleed rate is what ENTERS the extraction line, not what
-          // leaves it. Steam is worked on by the stages above the bleed
-          // point on its way IN; charging the work to the outflow instead
-          // meant a heater that stopped taking steam - a flooded shell, a
-          // shut drain - left its extraction line accumulating unexpanded
-          // live steam, which then arrived at the heater hundreds of
-          // degrees too hot the moment flow resumed.
-          let extractionFlow = 0;
-          for (const conn of state.flowConnections) {
-            if (conn.toNodeId === nodeId && conn.massFlowRate > 0) {
-              extractionFlow += conn.massFlowRate;
-            } else if (conn.fromNodeId === nodeId && conn.massFlowRate < 0) {
-              extractionFlow -= conn.massFlowRate;
-            }
-          }
-
-          extractionNodes.push({
-            nodeId,
-            node,
-            // Where the bleed point ACTUALLY sits, but no lower than the port
-            // the machine was built with. A heater's shell pressure is set by
-            // how fast it condenses, and crediting work down to a nameplate
-            // the shell has drifted ABOVE is how the energy books and the
-            // physics come apart - so a backed-up shell still gets the work
-            // its own pressure allows, which is less.
-            //
-            // Below the port, though, the machine has nothing left to expand
-            // through: the steam leaves the blading at the port's pressure and
-            // the extraction line THROTTLES the rest of the way. Throttling is
-            // isenthalpic - it does no work - so charging the difference as
-            // stage work invents energy out of the heater. And it is a
-            // runaway, not an offset: a shell that sags gets charged more work
-            // per kilogram, which cools it further, which sags it more. That
-            // is what collapsed the Xe-100 feedwater heater from 44 bar to 1.5
-            // in eight seconds and let the 165-bar header blow through it.
-            pressure: Math.max(node.fluid.pressure, node.extractionPressure ?? 0),
-            extractionFlow,
-          });
+      // The steam arriving at each chain node from the stage above it (the
+      // header for the first): what that stage's blading worked on, and
+      // therefore what the node is charged the stage work for.
+      const arriving = chain.map((node, k) => {
+        if (k === 0) return inletMassFlow;
+        let flow = 0;
+        for (const conn of state.flowConnections) {
+          if (conn.toNodeId === node.id && conn.fromNodeId === chain[k - 1].id) flow += Math.max(0, conn.massFlowRate);
+          else if (conn.fromNodeId === node.id && conn.toNodeId === chain[k - 1].id) flow += Math.max(0, -conn.massFlowRate);
         }
-      }
-
-      // Sort extraction nodes by pressure (high to low) - expansion order
-      extractionNodes.sort((a, b) => b.pressure - a.pressure);
-
-      // Staged expansion. Extraction steam is tapped from the header in the
-      // plant graph (this turbine is one node, so there is no intermediate
-      // point to tap), but it physically passes through every stage above its
-      // own pressure - so the machine's throughput is the exhaust flow PLUS
-      // the bleeds, and each bleed drops out after the stage it leaves at.
-      // Only bleeds that sit strictly inside the machine's own pressure range
-      // are stages of it; one above the header or below the exhaust is a line
-      // the plant has wired somewhere else and is none of this expansion's
-      // business.
-      const bleeds = extractionNodes.filter(e => e.pressure < P_in && e.pressure > P_out);
+        return flow;
+      });
 
       let inletState = stateAtPh(P_in, h_in);
-
-      let offeredFlow = inletMassFlow;
-      for (const e of bleeds) offeredFlow += e.extractionFlow;
 
       // A turbine is a fixed set of choked nozzles, and Stodola's cone law
       // says what they pass: proportional to inlet pressure, falling with the
@@ -2417,6 +2375,7 @@ export class TurbineCondenserRateOperator implements RateOperator {
       // applied to the power AND to each stream's energy debit, so the books
       // stay closed whichever way the flow solver behaves.
       let swallowFrac = 1;
+      const offeredFlow = inletMassFlow;
       if (turbineNode.ratedSteamFlow && turbineNode.ratedSteamFlow > 0 && offeredFlow > 0) {
         const Pdesign = turbineNode.designInletPressure || P_in;
         const swallow = turbineNode.ratedSteamFlow * (P_in / Pdesign) *
@@ -2424,45 +2383,29 @@ export class TurbineCondenserRateOperator implements RateOperator {
         swallowFrac = Math.min(1, swallow / offeredFlow);
       }
 
-      let stageFlow = offeredFlow * swallowFrac;
+      // Staged expansion down the chain. A stage node expands to ITS OWN
+      // pressure - the interstage pressure its downstream nozzle row sets,
+      // which follows the flow - and the exhaust node to the condenser's.
+      // Each node is charged the work of the stage it terminates, on the
+      // steam that arrived through it; the steam reaching the next node has
+      // already had that work taken out, so the chain's books close stage by
+      // stage. A stage whose pressure sits above its inlet (a startup, a
+      // backed-up bleed) has nothing to expand through and passes the state
+      // on untouched.
       let turbinePower = 0;
-      // Cumulative work per kilogram down to each stage outlet, so each
-      // stream can be charged for exactly the stages it passed through.
-      const workToStage = new Map<string, number>();
-      let cumulativeWork = 0;
-
-      const stages: Array<{ nodeId: string; pressure: number; extractionFlow: number }> = [
-        ...bleeds,
-        { nodeId: turbineNodeId, pressure: P_out, extractionFlow: 0 },
-      ];
-
-      for (const stage of stages) {
-        const result = expandStage(inletState, stage.pressure, this.turbineEfficiency);
-        turbinePower += stageFlow * result.work;
-        cumulativeWork += result.work;
-        workToStage.set(stage.nodeId, cumulativeWork);
-        // Whatever is bled off here leaves the machine at this stage's outlet
-        stageFlow = Math.max(0, stageFlow - stage.extractionFlow * swallowFrac);
+      for (let k = 0; k < chain.length; k++) {
+        const node = chain[k];
+        const P_stage = k === chain.length - 1 ? P_out : node.fluid.pressure;
+        if (!(P_stage < inletState.P)) continue;
+        const result = expandStage(inletState, P_stage, this.turbineEfficiency);
+        const charged = arriving[k] * swallowFrac;
+        turbinePower += charged * result.work;
+        const nodeRates = rates.flowNodes.get(node.id);
+        if (nodeRates) nodeRates.dEnergy -= charged * result.work;
         inletState = result.outlet;
       }
-      const workOnThroughFlow = cumulativeWork;
 
       totalTurbinePower += turbinePower;
-
-      // Remove the work from the nodes that hold the steam it was taken from.
-      // Each of those nodes received HEADER enthalpy by advection, so taking
-      // the stage work back out is what lands it at the right state - the
-      // exhaust for the through-flow, the bleed conditions for an extraction.
-      const turbineRates = rates.flowNodes.get(turbineNodeId);
-      if (turbineRates) {
-        turbineRates.dEnergy -= inletMassFlow * swallowFrac * workOnThroughFlow;
-      }
-      for (const e of bleeds) {
-        if (e.extractionFlow <= 0) continue;
-        const extRates = rates.flowNodes.get(e.nodeId);
-        const work = workToStage.get(e.nodeId) ?? 0;
-        if (extRates) extRates.dEnergy -= e.extractionFlow * swallowFrac * work;
-      }
     }
 
     // Find condensers dynamically. A condenser is defined by carrying the

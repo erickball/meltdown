@@ -363,13 +363,8 @@ pipe('pipe-fw-1', 'Feedwater Line',
 // ---------------------------------------------------------------------------
 // Turbine stop valve: the header ends here, the machine starts here
 // ---------------------------------------------------------------------------
-// The factory sizes every connection that touches a PIPE component from the
-// pipe's bore (area, length and hydraulic diameter), whatever the connection
-// says - so the governed turbine-inlet line cannot leave the header pipe
-// directly: it would inherit the 0.35 m bore and pass ~270 kg/s. A stop
-// valve is what sits there in a real turbine anyway; the governed line
-// leaves it with the throttle area it needs, and shutting it is a turbine
-// trip.
+// What sits between a real header and a real machine, and the trip lever
+// for scenarios: shutting it isolates the turbine.
 add('val-tsv-1', {
   type: 'valve', label: 'Turbine Stop Valve',
   valveType: 'gate',
@@ -384,9 +379,8 @@ add('val-tsv-1', {
 // ---------------------------------------------------------------------------
 // Steam dump / MSSV, now off the main steam line
 // ---------------------------------------------------------------------------
-// Its inlet tap inherits the header bore (see val-tsv-1), so the dump
-// capacity is set by the OUTLET line alone: 0.003 m2 chokes at ~60 kg/s,
-// the capacity the two per-bundle taps used to give.
+// Tapped off the header through a 0.003 m2 line (~60 kg/s choked, the
+// capacity the two per-bundle taps used to give); the outlet matches it.
 add('val-msv-1', {
   type: 'valve', label: 'Steam Dump / MSSV',
   valveType: 'relief',
@@ -488,13 +482,14 @@ add('val-leak-1', {
 // ---------------------------------------------------------------------------
 // Secondary: turbine (with an extraction port), condenser, pumps, heater
 // ---------------------------------------------------------------------------
-// The turbine carries a real extraction port. The factory builds it its own
-// flow node (`turbine-1-extraction-1`) at the extraction pressure; the plant
-// wires the header INTO that node through the extraction valve and the
-// heater draws from it, and the expansion operator credits the stages above
-// the bleed point with the work on what enters. This machine is one node at
-// exhaust conditions, so the bleed cannot be tapped from the casing itself -
-// the extraction node IS the intermediate stage.
+// The turbine carries an extraction port, which makes it a two-stage
+// machine: the header enters the first stage (the factory's
+// `turbine-1-extraction-1` node, seeded at the 25 bar design interstage
+// pressure and holding a second of rated flow), a fixed nozzle row sized
+// for the design through-flow drops it to the exhaust node, and the heater
+// bleed leaves the first stage sideways through the extraction port - so
+// the extraction line comes off the turbine, at the stage's own outlet
+// state, and its pressure droops with load as a real one does.
 add('turbine-1', {
   type: 'turbine-generator', label: 'Turbine-Generator',
   position: { x: 78, y: 74 }, rotation: 0, elevation: 0,
@@ -599,20 +594,23 @@ add('fwh-1', {
   nqa1: false,
 });
 
-// Extraction valve: on the line from the main steam header INTO the
-// turbine's extraction node. It is listed as the `from` end of its outlet
-// connection last, so that is the connection it throttles, and the body
-// rides at header pressure.
+// Extraction valve: on the bleed line from the turbine's first stage to the
+// heater shell. The body rides at the stage's ~25 bar, so the line is a
+// real low-pressure extraction line (0.02 m2, a 16" pipe) and the valve
+// starts well open: at 25 bar even a wide-open 0.02 m2 line only passes
+// the ~25 kg/s the heater needs on the 8 bar it has to the shell. It is
+// listed as the `from` end of its outlet connection last, so that is the
+// connection it throttles.
 add('val-bleed-1', {
   type: 'valve', label: 'FWH Extraction Valve',
   valveType: 'gate',
   material: 'stainless-304',
-  position: { x: 72, y: 79 }, rotation: 0, elevation: 4,
-  diameter: 0.1, opening: 0.1,
-  volume: 0.1,
+  position: { x: 74, y: 84 }, rotation: 0, elevation: 2,
+  diameter: 0.16, opening: 0.6,
+  volume: 0.3,
   ports: ports([['val-bleed-1-in', -0.1, 0], ['val-bleed-1-out', 0.1, 0]]),
-  fluid: { temperature: 700, pressure: 165e5, phase: 'vapor', quality: 1, flowRate: 0 },
-  nqa1: false, pressureRating: 200,
+  fluid: { temperature: 500, pressure: P_EXTRACTION, phase: 'vapor', quality: 1, flowRate: 0 },
+  nqa1: false, pressureRating: 60,
 });
 
 add('val-fwhdr-1', {
@@ -655,7 +653,7 @@ controller('ctl-fwh-1', 'FW Heater Outlet Temp', 20, 74, {
   sensor: { kind: 'node-temperature', targetId: 'fwh-1-tube' },
   setpoint: T_FEED,
   aggressiveness: 1.0,
-  actuator: { kind: 'valve-position', targetId: 'val-bleed-1', min: 0, max: 0.8, rateLimit: 0.02 },
+  actuator: { kind: 'valve-position', targetId: 'val-bleed-1', min: 0, max: 1.0, rateLimit: 0.02 },
 });
 
 controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
@@ -742,37 +740,38 @@ for (const [n, port] of [[1, 'hx-1-tube-2'], [2, 'hx-1-tube-2-b2']] as const) {
       flowArea: 0.03, length: 4, resistanceCoeff: 1, fromPhaseTolerance: 0 });
   connect(`val-msiv-${n}`, `val-msiv-${n}-out`, 'pipe-ms-1', 'pipe-ms-1-left',
     { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 0,
-      resistanceCoeff: 1 });
+      flowArea: 0.03, length: 3, resistanceCoeff: 1 });
 }
-// Main steam line -> stop valve (header bore) -> turbine. The governed line
-// out of the stop valve is 0.012 m2 = the two 0.006 bundle lines the
-// single-header version used, passing ~52 kg/s (design steam less the
-// heater extraction) at the 165 bar design drop.
+// Main steam line -> stop valve (header bore, no area stated so it takes
+// the pipe's) -> turbine first stage. ALL the steam enters here now, the
+// bleed included, so the governed line is 0.02 m2: the single-header
+// version passed ~52 kg/s through 2 x 0.006 to the turbine plus ~25 through
+// 2 x 0.002 to the bleed, and this is that total, chosen so the design 77
+// kg/s passes at the 165 bar design drop and the governor's 0.25 start.
 connect('pipe-ms-1', 'pipe-ms-1-right', 'val-tsv-1', 'val-tsv-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - EXTRACTION_FLOW, fromElevation: 0, toElevation: 0,
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0,
     resistanceCoeff: 1 });
 connect('val-tsv-1', 'val-tsv-1-out', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - EXTRACTION_FLOW, fromElevation: 0, toElevation: 0,
-    flowArea: 0.012, length: 3, resistanceCoeff: 2 });
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0,
+    flowArea: 0.02, length: 3, resistanceCoeff: 2 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - EXTRACTION_FLOW, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
 
-// Steam dump / MSSV off the main steam line (inlet at header bore, outlet
-// sized for the ~60 kg/s choked capacity the two per-bundle taps gave)
+// Steam dump / MSSV off the main steam line (~60 kg/s choked, the capacity
+// the two per-bundle taps gave)
 connect('pipe-ms-1', 'pipe-ms-1-right', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 0, toElevation: 0, resistanceCoeff: 2 });
+  { fromElevation: 0, toElevation: 0, flowArea: 0.003, length: 4, resistanceCoeff: 2 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.003, length: 10, resistanceCoeff: 2 });
 
-// Heater extraction: header -> extraction valve -> turbine extraction node
-// -> heater shell. The extraction node is where the stage work comes off.
-// The tap off the header inherits its bore; the valve meters on its outlet.
-connect('pipe-ms-1', 'pipe-ms-1-right', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, resistanceCoeff: 6 });
-connect('val-bleed-1', 'val-bleed-1-out', 'turbine-1', 'extraction-1',
-  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 3, resistanceCoeff: 2 });
-connect('turbine-1', 'extraction-1', 'fwh-1', 'fwh-1-shell-1',
-  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 8, resistanceCoeff: 2 });
+// Heater extraction: turbine first stage -> extraction valve -> heater
+// shell. The initial flow on the extraction port is what the factory sizes
+// the stage nozzle around (rated flow less this bleed passes on to the
+// exhaust). The valve meters on its outlet connection (listed last).
+connect('turbine-1', 'extraction-1', 'val-bleed-1', 'val-bleed-1-in',
+  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.02, length: 10, resistanceCoeff: 2 });
+connect('val-bleed-1', 'val-bleed-1-out', 'fwh-1', 'fwh-1-shell-1',
+  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.02, length: 12, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 // Secondary: condensate and feed train
@@ -791,14 +790,13 @@ connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
 // FW check valve -> feedwater line -> feed isolation valves -> bundle
 // orifices (K = 600 each: the split between bundles is set by geometry,
-// not by whichever bundle happens to be boiling less). Lines touching the
-// feed pipe take its 0.25 m bore.
+// not by whichever bundle happens to be boiling less).
 connect('val-fwcv-1', 'val-fwcv-1-out', 'pipe-fw-1', 'pipe-fw-1-left',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, resistanceCoeff: 1 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 3, resistanceCoeff: 1 });
 for (const [n, port] of [[1, 'hx-1-tube-1'], [2, 'hx-1-tube-1-b2']] as const) {
   connect('pipe-fw-1', 'pipe-fw-1-right', `val-fwiv-${n}`, `val-fwiv-${n}-in`,
     { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 0,
-      resistanceCoeff: 1 });
+      flowArea: 0.03, length: 4, resistanceCoeff: 1 });
   connect(`val-fwiv-${n}`, `val-fwiv-${n}-out`, 'hx-1', port,
     { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 1,
       flowArea: 0.015, length: 6, resistanceCoeff: 600 });

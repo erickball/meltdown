@@ -98,8 +98,7 @@ import {
   ConnectionHydraulics,
   DrawComposition,
   ChokeLimit,
-  CLOSED_FLOW_DECAY_TAU,
-} from './connection-hydraulics';
+  CLOSED_FLOW_DECAY_TAU, governorPositionFor } from './connection-hydraulics';
 
 /** Status of the last pressure solve */
 export interface PressureSolverStatus {
@@ -1664,7 +1663,7 @@ export class PressureSolver {
     if (checkValve && conn.massFlowRate <= 0) return 0;
 
     // Governor valve on turbine inlet (mirrors FlowMomentumRateOperator)
-    const governorValve = toNode.governorValve;
+    const governorValve = governorPositionFor(state, conn, toNode);
     if (governorValve !== undefined && governorValve < 0.01) return 0;
 
     const A = conn.flowArea || 0.1;

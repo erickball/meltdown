@@ -51,7 +51,7 @@ function header() {
   console.log(
     '    t(s)  HeA(kg/s) HeB(kg/s)  Tcore_in  Tcore_out  P_he(bar)  ' +
     'stm1  stm2  T_hdr(C)  P_hdr(bar)  m_tube(kg)  m1 L1/L2/L3 T3(C)        Pwr(MW)    gv  fwspd  ' +
-    'extr(kg/s) T_fwh_out  P_rx(bar) P_sg(bar)  T_sgvessel'
+    'extr(kg/s) P_stg(bar) T_fwh_out  P_rx(bar) P_sg(bar)  T_sgvessel'
   );
 }
 
@@ -72,7 +72,8 @@ function line(state: SimulationState) {
     `${(state.neutronics.power / 1e6).toFixed(1).padStart(9)} ` +
     `${(state.flowNodes.get('turbine-1')?.governorValve ?? 1).toFixed(3).padStart(5)} ` +
     `${(state.components.pumps.get('fw-pump-1')?.speed ?? NaN).toFixed(3).padStart(6)} ` +
-    `${flow(state, 'flow-val-bleed-1-turbine-1').toFixed(1).padStart(10)} ` +
+    `${flow(state, 'flow-turbine-1-val-bleed-1').toFixed(1).padStart(10)} ` +
+    `${P(state, 'turbine-1-extraction-1').toFixed(1).padStart(10)} ` +
     `${T(state, 'fwh-1-tube').toFixed(1).padStart(9)} ` +
     `${P(state, 'bui-rx').toFixed(3).padStart(10)} ` +
     `${P(state, 'bui-sg').toFixed(3).padStart(9)} ` +

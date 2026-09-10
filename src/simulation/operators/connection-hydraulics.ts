@@ -1021,7 +1021,7 @@ export function connectionRestriction(
     }
   }
 
-  const governorValve = toNode.governorValve;
+  const governorValve = governorPositionFor(state, conn, toNode);
   const governorPosition = governorValve !== undefined && governorValve < 1.0
     ? governorValve
     : 1.0;
@@ -1037,6 +1037,44 @@ export function connectionRestriction(
     valveClosed: valveOpenFraction < 0.01,
     governorClosed: governorValve !== undefined && governorValve < 0.01,
   };
+}
+
+/**
+ * Geometric discharge coefficient of a nozzle or throat that is not a break
+ * (vena contracta): the factor computeChokeLimit applies to the sonic flux,
+ * and therefore the one the factory sizes a turbine's stage nozzles with.
+ */
+export const NOZZLE_DISCHARGE_COEFF = 0.85;
+
+/**
+ * The steam turbine a node belongs to: its own id for a machine's exhaust
+ * node (factory-stamped `steamTurbine`), its parent's for a stage
+ * (extraction) node, undefined for anything else.
+ */
+export function turbineMachineId(node: FlowNode): string | undefined {
+  return node.steamTurbine ? node.id : node.parentTurbineId;
+}
+
+/**
+ * The governor position throttling a connection, or undefined when none
+ * does. The governor is the machine's INLET valve: it throttles every line
+ * that enters the machine from outside - the header into the first stage,
+ * or into the exhaust node of a stage-less machine - and never the nozzle
+ * rows between stages, which are fixed geometry. The position itself lives
+ * on the machine's exhaust node (the component's own node), where the
+ * controllers and scenario actions set it. A node that is not part of a
+ * turbine - a turbine-driven pump's steam node - carries its own.
+ */
+export function governorPositionFor(
+  state: SimulationState,
+  conn: FlowConnection,
+  toNode: FlowNode
+): number | undefined {
+  const machine = turbineMachineId(toNode);
+  if (!machine) return toNode.governorValve;
+  const fromNode = state.flowNodes.get(conn.fromNodeId);
+  if (fromNode && turbineMachineId(fromNode) === machine) return undefined;
+  return state.flowNodes.get(machine)?.governorValve;
 }
 
 export interface ChokeLimit {
@@ -1076,7 +1114,7 @@ export function computeChokeLimit(
   // Geometric discharge coefficient (vena contracta), now genuinely just
   // geometry: the compressibility that these numbers used to stand in for is
   // carried by fluxFactor above.
-  const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : 0.85);
+  const dischargeCoeff = conn.breakDischargeCoeff ?? (conn.isBreakConnection ? 0.62 : NOZZLE_DISCHARGE_COEFF);
   const m_dot_choked = dischargeCoeff * m_dot_sonic;
 
   const critRatio = nodeCriticalPressureRatio(upstreamNode, flowPhase);

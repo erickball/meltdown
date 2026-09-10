@@ -1742,14 +1742,14 @@
         "valveType": "gate",
         "material": "stainless-304",
         "position": {
-          "x": 72,
-          "y": 79
+          "x": 74,
+          "y": 84
         },
         "rotation": 0,
-        "elevation": 4,
-        "diameter": 0.1,
-        "opening": 0.1,
-        "volume": 0.1,
+        "elevation": 2,
+        "diameter": 0.16,
+        "opening": 0.6,
+        "volume": 0.3,
         "ports": [
           {
             "id": "val-bleed-1-in",
@@ -1769,14 +1769,14 @@
           }
         ],
         "fluid": {
-          "temperature": 700,
-          "pressure": 16500000,
+          "temperature": 500,
+          "pressure": 2500000,
           "phase": "vapor",
           "quality": 1,
           "flowRate": 0
         },
         "nqa1": false,
-        "pressureRating": 200
+        "pressureRating": 60
       }
     ],
     [
@@ -1917,7 +1917,7 @@
             "kind": "valve-position",
             "targetId": "val-bleed-1",
             "min": 0,
-            "max": 0.8,
+            "max": 1,
             "rateLimit": 0.02
           }
         }
@@ -2161,6 +2161,8 @@
       "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.03,
+      "length": 3,
       "resistanceCoeff": 1
     },
     {
@@ -2186,6 +2188,8 @@
       "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.03,
+      "length": 3,
       "resistanceCoeff": 1
     },
     {
@@ -2194,7 +2198,7 @@
       "toComponentId": "val-tsv-1",
       "toPortId": "val-tsv-1-in",
       "initialFlowPhase": "vapor",
-      "initialFlowRate": 52,
+      "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
       "resistanceCoeff": 1
@@ -2205,10 +2209,10 @@
       "toComponentId": "turbine-1",
       "toPortId": "inlet",
       "initialFlowPhase": "vapor",
-      "initialFlowRate": 52,
+      "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.012,
+      "flowArea": 0.02,
       "length": 3,
       "resistanceCoeff": 2
     },
@@ -2231,6 +2235,8 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.003,
+      "length": 4,
       "resistanceCoeff": 2
     },
     {
@@ -2245,40 +2251,29 @@
       "resistanceCoeff": 2
     },
     {
-      "fromComponentId": "pipe-ms-1",
-      "fromPortId": "pipe-ms-1-right",
+      "fromComponentId": "turbine-1",
+      "fromPortId": "extraction-1",
       "toComponentId": "val-bleed-1",
       "toPortId": "val-bleed-1-in",
       "initialFlowPhase": "vapor",
       "initialFlowRate": 25,
       "fromElevation": 0,
       "toElevation": 0,
-      "resistanceCoeff": 6
+      "flowArea": 0.02,
+      "length": 10,
+      "resistanceCoeff": 2
     },
     {
       "fromComponentId": "val-bleed-1",
       "fromPortId": "val-bleed-1-out",
-      "toComponentId": "turbine-1",
-      "toPortId": "extraction-1",
-      "initialFlowPhase": "vapor",
-      "initialFlowRate": 25,
-      "fromElevation": 0,
-      "toElevation": 0,
-      "flowArea": 0.004,
-      "length": 3,
-      "resistanceCoeff": 2
-    },
-    {
-      "fromComponentId": "turbine-1",
-      "fromPortId": "extraction-1",
       "toComponentId": "fwh-1",
       "toPortId": "fwh-1-shell-1",
       "initialFlowPhase": "vapor",
       "initialFlowRate": 25,
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.004,
-      "length": 8,
+      "flowArea": 0.02,
+      "length": 12,
       "resistanceCoeff": 2
     },
     {
@@ -2363,6 +2358,8 @@
       "initialFlowRate": 77,
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.05,
+      "length": 3,
       "resistanceCoeff": 1
     },
     {
@@ -2374,6 +2371,8 @@
       "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.03,
+      "length": 4,
       "resistanceCoeff": 1
     },
     {
@@ -2398,6 +2397,8 @@
       "initialFlowRate": 38.5,
       "fromElevation": 0,
       "toElevation": 0,
+      "flowArea": 0.03,
+      "length": 4,
       "resistanceCoeff": 1
     },
     {
