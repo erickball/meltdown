@@ -102,6 +102,74 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
 }
 
 /**
+ * Where a new event goes in a time-ordered list: after every event at or
+ * before its time, searching from `from` on. The same rule on the plant's
+ * scenario block (from 0) and on the running one (from the fired count)
+ * keeps the two lists in the same order, which is what lets a rebuild carry
+ * the fired count across (resume.ts carryScenarioProgress compares them).
+ */
+function insertionIndex(events: ScenarioEvent[], time: number, from: number): number {
+  let i = from;
+  while (i < events.length && events[i].time <= time) i++;
+  return i;
+}
+
+function sameEvent(a: ScenarioEvent, b: ScenarioEvent): boolean {
+  return a.time === b.time && a.message === b.message &&
+    JSON.stringify(a.actions) === JSON.stringify(b.actions);
+}
+
+/**
+ * Add an event to a plant's own scenario block (the design - what is saved
+ * and exported), creating the block if the plant has none.
+ */
+export function addPlantScenarioEvent(plant: { scenario?: ScenarioSpec }, ev: ScenarioEvent): void {
+  if (!plant.scenario) plant.scenario = { events: [] };
+  const events = plant.scenario.events;
+  events.splice(insertionIndex(events, ev.time, 0), 0, ev);
+}
+
+/** Take an event back out of a plant's scenario block. Returns whether it was there. */
+export function removePlantScenarioEvent(plant: { scenario?: ScenarioSpec }, ev: ScenarioEvent): boolean {
+  const events = plant.scenario?.events;
+  if (!events) return false;
+  const i = events.findIndex(e => sameEvent(e, ev));
+  if (i < 0) return false;
+  events.splice(i, 1);
+  if (events.length === 0) delete plant.scenario;
+  return true;
+}
+
+/**
+ * Add an event to the RUNNING scenario, among the events still to fire. An
+ * event scheduled for a time already past is a request to act now, and is
+ * refused as a mistake rather than fired late.
+ */
+export function scheduleScenarioEvent(state: SimulationState, ev: ScenarioEvent): void {
+  if (!(ev.time > state.time)) {
+    throw new Error(
+      `[Scenario] cannot schedule an event at t=${ev.time} s: the simulation is already at ` +
+      `t=${state.time.toFixed(1)} s. Act now instead.`);
+  }
+  if (!state.scenario) state.scenario = { events: [], fired: 0 };
+  const sc = state.scenario;
+  sc.events.splice(insertionIndex(sc.events, ev.time, sc.fired), 0, ev);
+}
+
+/** Take a not-yet-fired event out of the running scenario. Returns whether it was there. */
+export function unscheduleScenarioEvent(state: SimulationState, ev: ScenarioEvent): boolean {
+  const sc = state.scenario;
+  if (!sc) return false;
+  for (let i = sc.fired; i < sc.events.length; i++) {
+    if (sameEvent(sc.events[i], ev)) {
+      sc.events.splice(i, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Fire every event whose time has come. Mutates the state (component
  * settings, the fired counter) and queues a 'scenario' pending event per
  * fired event for the UI. Returns the events fired, in order.

@@ -186,6 +186,11 @@ export function heatExchangerPorts(opts: {
   // U-tube nozzle offset: ±30% of the shell half-width for a single bundle
   // (unchanged), ±60% of the slot half-width once bundles subdivide it.
   const uTubeOffset = bundleCount > 1 ? slotHalf * 0.6 : transverseHalf * 0.3;
+  // The header is drawn as a semi-ellipse (radius slotHalf across the shell,
+  // plenumLength along it), so off its axis the surface is shallower than the
+  // tip: sit a U-tube's nozzles ON that surface rather than out in the air
+  // where the tip would be.
+  const uTubeDepth = plenumLength * Math.sqrt(1 - (uTubeOffset / slotHalf) ** 2);
 
   const ports: Port[] = [];
   for (let b = 0; b < bundleCount; b++) {
@@ -194,8 +199,8 @@ export function heatExchangerPorts(opts: {
     if (isVertical) {
       if (hxType === 'utube') {
         ports.push(
-          { id: `${id}-tube-1${sfx}`, position: { x: c - uTubeOffset, y: halfH + plenumLength }, direction: 'both' },
-          { id: `${id}-tube-2${sfx}`, position: { x: c + uTubeOffset, y: halfH + plenumLength }, direction: 'both' },
+          { id: `${id}-tube-1${sfx}`, position: { x: c - uTubeOffset, y: halfH + uTubeDepth }, direction: 'both' },
+          { id: `${id}-tube-2${sfx}`, position: { x: c + uTubeOffset, y: halfH + uTubeDepth }, direction: 'both' },
         );
       } else {
         ports.push(
@@ -206,8 +211,8 @@ export function heatExchangerPorts(opts: {
     } else {
       if (hxType === 'utube') {
         ports.push(
-          { id: `${id}-tube-1${sfx}`, position: { x: -halfW - plenumLength, y: c - uTubeOffset }, direction: 'both' },
-          { id: `${id}-tube-2${sfx}`, position: { x: -halfW - plenumLength, y: c + uTubeOffset }, direction: 'both' },
+          { id: `${id}-tube-1${sfx}`, position: { x: -halfW - uTubeDepth, y: c - uTubeOffset }, direction: 'both' },
+          { id: `${id}-tube-2${sfx}`, position: { x: -halfW - uTubeDepth, y: c + uTubeOffset }, direction: 'both' },
         );
       } else {
         ports.push(

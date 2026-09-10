@@ -2837,8 +2837,39 @@ export class PlantCanvas {
    * is none (or that top is at or below grade). Buildings, yards, pools and
    * water are the ground itself; pipes carry no foundation; and anything
    * inside a vessel is carried by the vessel.
+   *
+   * Two things are carried without one. A small fitting on a line - one tile
+   * of footprint, with a connection on it (a valve, an orifice, a small
+   * pump) - hangs off its piping. And anything whose footprint reaches into
+   * a building's wall, below the top of that wall (a duct passing through
+   * it), is carried by the wall. A cross-vessel is a protrusion of its
+   * parent vessel's pressure boundary, so the vessels it joins carry it. Up
+   * in the air none of these gets scaffold or pad; standing on something it
+   * keeps its pad like anything else.
    */
   private foundationsFor(components: PlantComponent[]): Map<string, Foundation> {
+    const piped = new Set<string>();
+    for (const conn of this.plantState.connections) {
+      piped.add(conn.fromComponentId);
+      piped.add(conn.toComponentId);
+    }
+    const buildings = components.filter(c => c.type === 'building') as import('../types').BuildingComponent[];
+    const inWall = (r: PlanRect, base: number): boolean => buildings.some(b => {
+      if (base > b.height) return false;
+      const t = b.wallThickness;
+      if (b.shape === 'cylinder') {
+        const R = (b.diameter || 40) / 2;
+        const { x: cx, y: cy } = b.position;
+        const nearest = Math.hypot(Math.max(r.x0 - cx, 0, cx - r.x1), Math.max(r.y0 - cy, 0, cy - r.y1));
+        const farthest = Math.hypot(Math.max(Math.abs(r.x0 - cx), Math.abs(r.x1 - cx)), Math.max(Math.abs(r.y0 - cy), Math.abs(r.y1 - cy)));
+        return nearest <= R && farthest >= R - t;
+      }
+      const hw = (b.width || 40) / 2, hl = (b.length || 40) / 2;
+      const o = { x0: b.position.x - hw, x1: b.position.x + hw, y0: b.position.y - hl, y1: b.position.y + hl };
+      const overlapsOuter = r.x0 <= o.x1 && r.x1 >= o.x0 && r.y0 <= o.y1 && r.y1 >= o.y0;
+      const insideInner = r.x0 > o.x0 + t && r.x1 < o.x1 - t && r.y0 > o.y0 + t && r.y1 < o.y1 - t;
+      return overlapsOuter && !insideInner;
+    });
     const standing = components
       .filter(c => c.type !== 'pipe' && !isGroundLayerComponent(c))
       .filter(c => {
@@ -2847,7 +2878,11 @@ export class PlantCanvas {
       })
       .map(c => {
         const base = getComponentElevation(c);
-        return { c, rect: footprintRect(c.position, componentFootprint(c)), base, top: base + getComponentVisualHeight(c) };
+        const fp = componentFootprint(c);
+        return {
+          c, rect: footprintRect(c.position, fp), base, top: base + getComponentVisualHeight(c),
+          hangs: fp.w === 1 && fp.d === 1 && piped.has(c.id),
+        };
       });
     const out = new Map<string, Foundation>();
     for (const s of standing) {
@@ -2858,7 +2893,9 @@ export class PlantCanvas {
         if (x >= o.rect.x0 && x <= o.rect.x1 && y >= o.rect.y0 && y <= o.rect.y1) support = o.top;
       }
       const onGround = !(support > 0);
-      out.set(s.c.id, { rect: s.rect, base: onGround ? 0 : support, top: s.base, onGround });
+      const base = onGround ? 0 : support;
+      if (s.base > base && (s.hangs || s.c.type === 'crossVessel' || inWall(s.rect, s.base))) continue;
+      out.set(s.c.id, { rect: s.rect, base, top: s.base, onGround });
     }
     return out;
   }

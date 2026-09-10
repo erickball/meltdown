@@ -64,7 +64,10 @@ import {
   BuildQueue, Buildable, componentBuildMassKg, connectionBuildMassKg,
 } from './game/build-queue';
 import { getPipeSpecById } from './construction/component-presets';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback, setElectricalCommandCallback } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback, setScriptedBreakCallbacks, setElectricalCommandCallback } from './debug';
+import { applyScriptedBurst } from './simulation/operators/burst-operator';
+import { addPlantScenarioEvent, removePlantScenarioEvent, scheduleScenarioEvent, unscheduleScenarioEvent } from './simulation/scenario';
+import type { ScenarioEvent } from './simulation/scenario-types';
 import { powerSupplyChoices, autoWirePlant } from './construction/electrical-wiring';
 import { applyElectricalCommand, solveElectrical, CommandResult } from './simulation/electrical';
 import type { ElecStatus } from './render/electrical-components';
@@ -375,6 +378,8 @@ function init() {
     initialSimSpeed: 1.0,
     autoSlowdownEnabled: true,
   });
+  // Headless probes read the running state through the debug handle too
+  (window as any).__meltdownDebug.gameLoop = gameLoop;
 
   // Career mode manager (constructed later, once the plant/save helpers
   // below exist; null until then and forever in pure-sandbox flows)
@@ -2176,6 +2181,61 @@ function init() {
       'info', 6000);
     if (selectedComponentId) updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
   });
+
+  // Scripted Break section of a component's panel. "Now" tears the hole in
+  // the running plant as an input the history records; "at t" adds a burst
+  // event to the plant's own scenario (saved and exported with the design)
+  // AND to the running one, in the same order in both so a rebuild carries
+  // the fired count across. A sandbox tool: a career level scripts its own.
+  setScriptedBreakCallbacks(
+    (componentId, order) => {
+      if (gameMode?.active) {
+        showNotification('Scripted breaks are a sandbox tool - not available in a career level', 'warning');
+        return;
+      }
+      const state = gameLoop.getState();
+      const bs = state?.burstStates?.get(order.nodeId);
+      if (!state || !bs) {
+        showNotification(`${order.nodeId} has no pressure boundary in the running simulation`, 'warning');
+        return;
+      }
+      if (!(order.area > 0) || !isFinite(order.elevation) || !(order.openingHeight >= 0)) {
+        showNotification('Scripted break: give a positive area, an elevation, and a tear height of 0 or more', 'warning');
+        return;
+      }
+      const spec = {
+        area: order.area,
+        elevation: order.elevation,
+        ...(order.openingHeight > 0 ? { openingHeight: order.openingHeight } : {}),
+      };
+      try {
+        if (order.time === undefined) {
+          gameLoop.updateState(s => { applyScriptedBurst(s, order.nodeId, spec); return s; });
+        } else {
+          const ev: ScenarioEvent = {
+            time: order.time,
+            message: `Scripted break: ${bs.componentLabel}, ${(order.area * 1e4).toFixed(1)} cm² at ${order.elevation.toFixed(1)} m`,
+            actions: [{ kind: 'burst', id: order.nodeId, ...spec }],
+          };
+          gameLoop.updateState(s => { scheduleScenarioEvent(s, ev); return s; });
+          addPlantScenarioEvent(plantState, ev);
+          showNotification(`Break in ${bs.componentLabel} scheduled for t = ${order.time.toFixed(0)} s (saved with the plant)`, 'info', 4000);
+        }
+      } catch (e) {
+        showNotification(e instanceof Error ? e.message : String(e), 'error');
+        return;
+      }
+      updateComponentDetail(componentId, plantState, gameLoop.getState());
+    },
+    (componentId, eventIndex) => {
+      const ev = gameLoop.getState()?.scenario?.events[eventIndex];
+      if (!ev) return;
+      gameLoop.updateState(s => { unscheduleScenarioEvent(s, ev); return s; });
+      removePlantScenarioEvent(plantState, ev);
+      showNotification(`Cancelled the break scheduled for t = ${ev.time.toFixed(0)} s`, 'info', 3000);
+      updateComponentDetail(componentId, plantState, gameLoop.getState());
+    },
+  );
 
   // Connection edit callback - find plant connection from simulation connection ID
   setConnectionEditCallback((simConnId: string) => {

@@ -1089,10 +1089,11 @@ export function updateComponentDetail(
 
   panel.classList.remove('hidden');
 
-  // A slider in this panel is being dragged: rebuilding the DOM under it
-  // would end the drag. The refresh loop comes back in a quarter second.
+  // A slider in this panel is being dragged, or a field is being typed in:
+  // rebuilding the DOM under it would end the drag or eat the keystrokes.
+  // The refresh loop comes back in a quarter second.
   const active = document.activeElement as HTMLElement | null;
-  if (active && active.tagName === 'INPUT' && (active as HTMLInputElement).type === 'range' && panel.contains(active)) {
+  if (active && (active.tagName === 'INPUT' || active.tagName === 'SELECT') && panel.contains(active)) {
     return;
   }
 
@@ -2230,6 +2231,8 @@ export function updateComponentDetail(
   const hasEditableCore = component.type === 'reactorVessel' && barrel &&
     (barrel.actualFuelRodCount || barrel.fuelForm === 'pebbles' || barrel.thermalPower);
 
+  html += renderScriptedBreakSection(componentId, simState);
+
   const isBuilding = component.type === 'building';
   html += '<div class="detail-section" style="margin-top: 15px; padding-top: 10px; border-top: 1px solid #445;">';
   html += `<button id="edit-component-btn" style="background: #357; color: #fff; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; margin-right: 8px; font-size: 12px;">${component.type === 'reactorVessel' ? 'Edit Vessel' : 'Edit'}</button>`;
@@ -2273,6 +2276,8 @@ export function updateComponentDetail(
     });
   }
 
+  bindScriptedBreakSection(componentId, simState);
+
   if (moveBtn) {
     moveBtn.addEventListener('click', () => {
       if (componentMoveCallback) {
@@ -2307,6 +2312,206 @@ export function updateComponentDetail(
 
   // Set up connection button handlers
   setupConnectionButtonHandlers();
+}
+
+// ============================================================================
+// Scripted break: tear a hole in any pressure boundary, now or at a set time
+// ============================================================================
+
+/**
+ * What the panel asks for. `time` undefined means now; otherwise the break
+ * is added to the plant's scenario (saved with the design) and fires when
+ * the simulation reaches it. Either way it is the burst machinery's own
+ * break (applyScriptedBurst), so it discharges, draws and grows exactly as a
+ * pressure rupture of the same size and place would.
+ */
+export interface ScriptedBreakOrder {
+  nodeId: string;
+  /** Break area, m2 */
+  area: number;
+  /** Height of the break above the node's base, m */
+  elevation: number;
+  /** Vertical extent of the opening, m (0 = a hole) */
+  openingHeight: number;
+  time?: number;
+}
+
+/** The panel's unsent form, per component, so the quarter-second refresh keeps what was typed. */
+interface BreakDraft {
+  nodeId: string;
+  areaCm2: string;
+  elevation: string;
+  openingHeight: string;
+  when: 'now' | 'at';
+  time: string;
+}
+const breakDrafts = new Map<string, BreakDraft>();
+const breakSectionsOpen = new Set<string>();
+
+let scriptedBreakCallback: ((componentId: string, order: ScriptedBreakOrder) => void) | null = null;
+let scriptedBreakCancelCallback: ((componentId: string, eventIndex: number) => void) | null = null;
+
+/** Set the callbacks for the Scripted Break section (apply/schedule, and cancel a scheduled one). */
+export function setScriptedBreakCallbacks(
+  apply: (componentId: string, order: ScriptedBreakOrder) => void,
+  cancel: (componentId: string, eventIndex: number) => void,
+): void {
+  scriptedBreakCallback = apply;
+  scriptedBreakCancelCallback = cancel;
+}
+
+function breakBoundaries(componentId: string, simState: SimulationState) {
+  const out: Array<{ nodeId: string; label: string; isBurst: boolean; fraction: number; elevation?: number }> = [];
+  for (const bs of simState.burstStates?.values() ?? []) {
+    if (bs.componentId !== componentId) continue;
+    if (!simState.flowNodes.has(bs.nodeId)) continue;
+    out.push({
+      nodeId: bs.nodeId, label: bs.componentLabel, isBurst: bs.isBurst,
+      fraction: bs.currentBreakFraction, elevation: bs.breakElevation,
+    });
+  }
+  return out;
+}
+
+/** Scheduled (not yet fired) scripted bursts on any of these nodes, with their index in the running scenario. */
+function scheduledBreaks(nodeIds: string[], simState: SimulationState) {
+  const sc = simState.scenario;
+  const out: Array<{ index: number; time: number; nodeId: string; area?: number; elevation?: number }> = [];
+  if (!sc) return out;
+  for (let i = sc.fired; i < sc.events.length; i++) {
+    for (const a of sc.events[i].actions) {
+      if (a.kind === 'burst' && nodeIds.includes(a.id)) {
+        out.push({ index: i, time: sc.events[i].time, nodeId: a.id, area: a.area, elevation: a.elevation });
+      }
+    }
+  }
+  return out;
+}
+
+function renderScriptedBreakSection(componentId: string, simState: SimulationState): string {
+  const boundaries = breakBoundaries(componentId, simState);
+  if (boundaries.length === 0) return '';
+
+  let draft = breakDrafts.get(componentId);
+  if (!draft || !boundaries.some(b => b.nodeId === draft!.nodeId)) {
+    const node = simState.flowNodes.get(boundaries[0].nodeId)!;
+    draft = {
+      nodeId: boundaries[0].nodeId,
+      areaCm2: '10',
+      elevation: ((node.height ?? 0) / 2).toFixed(1),
+      openingHeight: '0',
+      when: 'now',
+      time: (Math.ceil(simState.time / 10) * 10 + 60).toFixed(0),
+    };
+    breakDrafts.set(componentId, draft);
+  }
+  const chosen = boundaries.find(b => b.nodeId === draft!.nodeId)!;
+  const node = simState.flowNodes.get(chosen.nodeId)!;
+  const inputStyle = 'width: 70px; background: #223; color: #ddd; border: 1px solid #445; border-radius: 3px; padding: 2px 4px;';
+
+  let html = `<details id="break-section" class="detail-section"${breakSectionsOpen.has(componentId) ? ' open' : ''}>`;
+  html += `<summary class="detail-section-title" style="cursor: pointer;" title="Tear a hole in this component's pressure boundary, now or at a set simulation time. It is the same break an overpressure rupture opens: it discharges into whatever contains the component (the open air if nothing does), and a tube break discharges into the shell around it.">Scripted Break</summary>`;
+
+  if (boundaries.length > 1) {
+    html += `<div class="detail-row"><span class="detail-label" title="Which pressure boundary breaks. A tube bundle breaks into the shell around it; a shell or vessel breaks into the room.">Boundary:</span>` +
+      `<select id="break-node" style="background: #223; color: #ddd; border: 1px solid #445; border-radius: 3px;">` +
+      boundaries.map(b => `<option value="${b.nodeId}"${b.nodeId === chosen.nodeId ? ' selected' : ''}>${b.label}</option>`).join('') +
+      `</select></div>`;
+  }
+  if (chosen.isBurst) {
+    const area = node.flowArea * chosen.fraction;
+    const at = chosen.elevation !== undefined ? ` at ${(chosen.elevation - node.elevation).toFixed(1)} m` : '';
+    html += `<div class="detail-row" style="color: #f96; font-size: 10px;" title="Breaking it again moves and resizes the existing hole (a hole never shrinks).">Already open: ${(area * 1e4).toFixed(1)} cm²${at}</div>`;
+  }
+
+  html += `<div class="detail-row"><span class="detail-label" title="Area of the hole. For scale: a 19 mm tube severed clean through leaks from both ends, about 4 cm²; a 30 cm pipe guillotined through, about 1400 cm².">Area (cm²):</span>` +
+    `<input id="break-area" type="number" min="0" step="any" value="${draft.areaCm2}" style="${inputStyle}"></div>`;
+  html += `<div class="detail-row" style="color: #8899aa; font-size: 10px;" id="break-area-note">${breakAreaNote(parseFloat(draft.areaCm2), node.flowArea)}</div>`;
+  html += `<div class="detail-row"><span class="detail-label" title="Height of the hole above the bottom of this boundary. Low on a vessel, liquid pours out; high up, vapour or gas escapes.">Elevation (m):</span>` +
+    `<input id="break-elevation" type="number" step="any" value="${draft.elevation}" style="${inputStyle}">` +
+    `<span style="color: #8899aa; font-size: 10px; margin-left: 4px;">of ${(node.height ?? 0).toFixed(1)} m</span></div>`;
+  html += `<div class="detail-row"><span class="detail-label" title="Vertical extent of the opening (a tear rather than a hole). A tall tear draws a blend of whatever stands across it, so the leak crossfades from liquid to vapour as the level sweeps past. 0 = a hole at one height.">Tear height (m):</span>` +
+    `<input id="break-opening" type="number" min="0" step="any" value="${draft.openingHeight}" style="${inputStyle}"></div>`;
+  html += `<div class="detail-row" style="gap: 6px; align-items: center;">` +
+    `<select id="break-when" style="background: #223; color: #ddd; border: 1px solid #445; border-radius: 3px;" title="Break now, or schedule it. A scheduled break is saved with the plant and fires when simulation time reaches it.">` +
+    `<option value="now"${draft.when === 'now' ? ' selected' : ''}>Now</option>` +
+    `<option value="at"${draft.when === 'at' ? ' selected' : ''}>At t =</option></select>` +
+    `<input id="break-time" type="number" min="0" step="any" value="${draft.time}" style="${inputStyle}${draft.when === 'now' ? ' visibility: hidden;' : ''}" title="Simulation time the break fires at (s)">` +
+    `<button id="break-apply-btn" style="background: #833; color: #fff; border: none; padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold;">${draft.when === 'now' ? 'BREAK' : 'SCHEDULE'}</button></div>`;
+
+  const scheduled = scheduledBreaks(boundaries.map(b => b.nodeId), simState);
+  for (const s of scheduled) {
+    const label = boundaries.find(b => b.nodeId === s.nodeId)?.label ?? s.nodeId;
+    const size = s.area !== undefined ? `${(s.area * 1e4).toFixed(1)} cm²` : 'break';
+    html += `<div class="detail-row" style="font-size: 10px; align-items: center;">` +
+      `<span style="flex: 1;">t = ${s.time.toFixed(0)} s: ${size} in ${label} at ${(s.elevation ?? 0).toFixed(1)} m</span>` +
+      `<button class="break-cancel-btn" data-index="${s.index}" style="background: #445; color: #fff; border: none; padding: 1px 6px; border-radius: 3px; cursor: pointer;" title="Cancel this scheduled break (removes it from the plant's scenario)">&#10005;</button></div>`;
+  }
+  html += '</details>';
+  return html;
+}
+
+function breakAreaNote(areaCm2: number, nodeFlowArea: number): string {
+  if (!(areaCm2 > 0)) return 'Give a positive area.';
+  const area = areaCm2 * 1e-4;
+  const d = Math.sqrt(4 * area / Math.PI);
+  return `a ${(d * 1000).toFixed(0)} mm round hole; ${(100 * area / nodeFlowArea).toPrecision(2)}% of this node's ${(nodeFlowArea * 1e4).toFixed(0)} cm² flow area`;
+}
+
+function bindScriptedBreakSection(componentId: string, simState: SimulationState): void {
+  const section = document.getElementById('break-section') as HTMLDetailsElement | null;
+  const draft = breakDrafts.get(componentId);
+  if (!section || !draft) return;
+  section.addEventListener('toggle', () => {
+    if (section.open) breakSectionsOpen.add(componentId);
+    else breakSectionsOpen.delete(componentId);
+  });
+
+  const field = (id: string) => document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+  const nodeSel = field('break-node');
+  const area = field('break-area');
+  const elev = field('break-elevation');
+  const opening = field('break-opening');
+  const when = field('break-when');
+  const time = field('break-time');
+  const apply = document.getElementById('break-apply-btn');
+  const note = document.getElementById('break-area-note');
+
+  nodeSel?.addEventListener('change', () => {
+    draft.nodeId = nodeSel.value;
+    const node = simState.flowNodes.get(draft.nodeId);
+    if (node) draft.elevation = ((node.height ?? 0) / 2).toFixed(1);
+    nodeSel.blur();   // lets the refresh redraw for the new boundary
+  });
+  area?.addEventListener('input', () => {
+    draft.areaCm2 = area.value;
+    const node = simState.flowNodes.get(draft.nodeId);
+    if (note && node) note.textContent = breakAreaNote(parseFloat(area.value), node.flowArea);
+  });
+  elev?.addEventListener('input', () => { draft.elevation = elev.value; });
+  opening?.addEventListener('input', () => { draft.openingHeight = opening.value; });
+  time?.addEventListener('input', () => { draft.time = time.value; });
+  when?.addEventListener('change', () => {
+    draft.when = when.value === 'at' ? 'at' : 'now';
+    if (time) (time as HTMLInputElement).style.visibility = draft.when === 'now' ? 'hidden' : 'visible';
+    if (apply) apply.textContent = draft.when === 'now' ? 'BREAK' : 'SCHEDULE';
+  });
+
+  apply?.addEventListener('click', () => {
+    const order: ScriptedBreakOrder = {
+      nodeId: draft.nodeId,
+      area: parseFloat(draft.areaCm2) * 1e-4,
+      elevation: parseFloat(draft.elevation),
+      openingHeight: parseFloat(draft.openingHeight || '0'),
+      ...(draft.when === 'at' ? { time: parseFloat(draft.time) } : {}),
+    };
+    scriptedBreakCallback?.(componentId, order);
+  });
+  document.querySelectorAll<HTMLButtonElement>('#break-section .break-cancel-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      scriptedBreakCancelCallback?.(componentId, parseInt(btn.dataset.index ?? '-1', 10));
+    });
+  });
 }
 
 // Callbacks for edit/delete actions

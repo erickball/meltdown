@@ -172,6 +172,14 @@ interface SpriteLayout {
   frame: PlantComponent | null;
 }
 
+/** A sprite's elevation label, gathered while the sprites draw (renderElevationLabels). */
+interface ElevationLabel {
+  elevation: number;
+  /** Screen point of the top centre of the text. */
+  x: number;
+  y: number;
+}
+
 /** Small fittings are drawn no smaller than this many tiles across, so a valve is visible. */
 const MIN_SPRITE_TILES = 0.8;
 const MIN_CLICK_TARGET_PX = 24;
@@ -1193,15 +1201,17 @@ export class GridView {
     // Standing sprites, back to front. The runs inside a container's section
     // view go on right after its sprite, under the sprites of what it holds
     // (which the draw order puts later: deeper containment draws later)
+    const labels: ElevationLabel[] = [];
     for (const c of order) {
       if (this.isGroundLayer(c) || c.type === 'pipe') continue;
       const ghost = buildGhost(c);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
-      this.renderSprite(ctx, c, f);
+      this.renderSprite(ctx, c, f, labels);
       if (ghost) ctx.globalAlpha = 1;
       const inside = this.layout?.sections.get(c.id);
       if (inside) this.renderSectionRuns(ctx, f, inside);
     }
+    this.renderElevationLabels(ctx, labels);
 
     this.renderBuildProgress(ctx, f);
 
@@ -2134,8 +2144,34 @@ export class GridView {
     }
   }
 
-  /** The component's front-view drawing standing on its pad. */
-  private renderSprite(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
+  /**
+   * The elevation labels under the sprites, lowest first. Every sprite
+   * stands on its pad whatever its elevation, so parts stacked in one place
+   * (the two RCCS panel sections round the vessel) would print their
+   * elevations over each other: a label that would land on one already
+   * drawn is left out, so the pile shows the elevation of its bottom.
+   */
+  private renderElevationLabels(ctx: CanvasRenderingContext2D, labels: ElevationLabel[]): void {
+    const size = Math.round(10 * readoutScale(this.cam.ppm / 50));
+    ctx.save();
+    ctx.font = `${size}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = '#000';
+    const drawn: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
+    for (const l of [...labels].sort((a, b) => a.elevation - b.elevation)) {
+      const text = `${l.elevation.toFixed(1)} m`;
+      const half = ctx.measureText(text).width / 2;
+      const box = { x0: l.x - half, x1: l.x + half, y0: l.y, y1: l.y + size };
+      if (drawn.some(d => box.x0 < d.x1 && d.x0 < box.x1 && box.y0 < d.y1 && d.y0 < box.y1)) continue;
+      drawn.push(box);
+      ctx.fillText(text, l.x, l.y);
+    }
+    ctx.restore();
+  }
+
+  /** The component's front-view drawing standing on its pad; its elevation label goes on `labels`. */
+  private renderSprite(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState, labels: ElevationLabel[]): void {
     const L = this.spriteLayout(c);
     if (L.centerX + L.halfWpx < -50 || L.centerX - L.halfWpx > f.width + 50 ||
         L.baseY < -50 || L.baseY - 2 * L.halfHpx > f.height + 50) return;
@@ -2150,13 +2186,7 @@ export class GridView {
     // A sprite drawn inside a section view is drawn AT its elevation, so
     // only a sprite standing on the plan needs the label
     const elevation = c.elevation ?? 0;
-    if (elevation !== 0 && !L.frame) {
-      ctx.font = `${Math.round(10 * readoutScale(this.cam.ppm / 50))}px monospace`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = '#000';
-      ctx.fillText(`${elevation.toFixed(1)} m`, L.centerX, L.baseY + 2);
-    }
+    if (elevation !== 0 && !L.frame) labels.push({ elevation, x: L.centerX, y: L.baseY + 2 });
   }
 
   private lineWidthForArea(flowArea: number | undefined): number {
