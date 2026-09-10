@@ -21,7 +21,10 @@ import { PlantState } from '../src/types';
 const TYPES = [
   'tank', 'pressurizer', 'pipe', 'valve', 'check-valve', 'relief-valve',
   'porv', 'pump', 'heat-exchanger', 'condenser', 'turbine-generator',
-  'turbine-driven-pump', 'pool', 'building', 'warehouse',
+  'turbine-driven-pump', 'pool', 'building',
+  'bus', 'transformer', 'breaker', 'diesel-generator', 'battery',
+  // Last: once a warehouse stands, every later part has to come out of it
+  'warehouse',
 ];
 
 function editableOptions(defKey: string): ComponentOption[] {

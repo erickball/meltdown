@@ -360,6 +360,26 @@ export function componentBuildMassKg(component: PlantComponent): number {
       // Transformers dominate; 1.5 t per (MW)^0.7.
       return 1500 * Math.pow(Math.max(num(c.transformerRating, 100), 1e-6), 0.7);
 
+    case 'transformer':
+      // Oil-filled power transformer: ~20 t at 10 MVA, ~110 t at 100 MVA.
+      return 3500 * Math.pow(Math.max(num(c.ratingMVA, 10), 1e-6), 0.75);
+
+    case 'bus':
+      // A lineup of metal-clad switchgear cubicles.
+      return 2500;
+
+    case 'breaker':
+      // One breaker cubicle.
+      return 400;
+
+    case 'diesel-generator':
+      // Medium-speed engine, generator and skid: ~12 kg per kW.
+      return 12 * Math.max(num(c.ratingKW, 4000), 1e-6);
+
+    case 'battery':
+      // Lead-acid cells with their racks: ~35 kg per kWh.
+      return 35 * Math.max(num(c.capacityKWh, 250), 1e-6);
+
     case 'pool': {
       // Reinforced concrete: floor plus four walls, at 2400 kg/m3.
       const side = num(c.side, 12), depth = num(c.depth, 12), t = num(c.wallThickness, 1.5);

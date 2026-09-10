@@ -146,6 +146,9 @@ export interface ComponentOption {
   // Excluded from the dialog<->model round-trip audit: the model legitimately
   // recomputes this field from other inputs (document why at each use)
   syncExempt?: boolean;
+  // Shown only when the plant has the electrical model on (the power supply
+  // fields). With it off the field is not in the form and nothing is submitted.
+  electricalOnly?: boolean;
 }
 
 export const componentDefinitions: Record<string, {
@@ -1263,6 +1266,130 @@ export const componentDefinitions: Record<string, {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Electrical distribution (offered only when the plant uses the electrical
+// model; see simulation/electrical.ts for what each field does)
+// ---------------------------------------------------------------------------
+
+const VOLTAGE_HELP =
+  'Nominal voltage, V. A supply and whatever it feeds must agree exactly. ' +
+  'Common AC levels: 13800, 6900, 4160, 480, 208, 120 V. DC control buses: 250 or 125 V.';
+
+/** The "fed from" select every powered component carries. */
+function powerSupplyOption(label: string, help: string): ComponentOption {
+  return {
+    name: 'powerSupply', type: 'select', label, default: '', options: [],
+    dynamicOptions: 'powerSupplies', electricalOnly: true,
+    help: `${help} The list shows compatible supplies first, nearest first; the wire is drawn and routed for you.`,
+  };
+}
+
+componentDefinitions['bus'] = {
+  displayName: 'Bus',
+  options: [
+    { name: 'name', type: 'text', label: 'Name', default: 'Bus' },
+    { name: 'voltage', type: 'number', label: 'Voltage', default: 4160, min: 12, max: 35000, step: 1, unit: 'V',
+      help: VOLTAGE_HELP },
+    { name: 'dc', type: 'checkbox', label: 'DC bus', default: false,
+      help: 'A DC bus is fed from a battery (with its charger) and carries control power: controller cabinets, the protection system, PORV solenoids.' },
+    powerSupplyOption('Normal Supply', 'Where this bus normally gets its power: a transformer, a breaker, a battery, or another bus.'),
+    { name: 'backupPowerSupply', type: 'select', label: 'Backup Supply', default: '', options: [],
+      dynamicOptions: 'backupPowerSupplies', electricalOnly: true,
+      help: 'A second feed, usually the emergency diesel. When both are live they share the load in proportion to what each can deliver. A diesel set to auto-start starts by itself when this bus goes dead.' },
+  ]
+};
+
+componentDefinitions['transformer'] = {
+  displayName: 'Transformer',
+  options: [
+    { name: 'name', type: 'text', label: 'Name', default: 'Transformer' },
+    { name: 'ratingMVA', type: 'number', label: 'Rating', default: 10, min: 0.01, max: 2000, step: 0.1, unit: 'MVA',
+      help: 'Continuous rating. Power factor is not modelled, so 1 MVA carries 1 MW. Its overcurrent relay rides through a short overload and trips on a sustained one (10% over trips in about 50 s, double load in about 9 s).' },
+    { name: 'primaryVoltage', type: 'number', label: 'Primary Voltage', default: 345000, min: 12, max: 1000000, step: 1, unit: 'V',
+      help: `Must match what feeds it (a switchyard is at its transmission voltage, e.g. 345000 V). ${VOLTAGE_HELP}` },
+    { name: 'secondaryVoltage', type: 'number', label: 'Secondary Voltage', default: 4160, min: 12, max: 1000000, step: 1, unit: 'V',
+      help: `What it delivers to the buses it feeds. ${VOLTAGE_HELP}` },
+    powerSupplyOption('Primary Fed From', 'The switchyard, bus or breaker on the transformer\'s primary side.'),
+  ]
+};
+
+componentDefinitions['breaker'] = {
+  displayName: 'Breaker',
+  options: [
+    { name: 'name', type: 'text', label: 'Name', default: 'Breaker' },
+    { name: 'ratingKW', type: 'number', label: 'Rating', default: 2000, min: 1, max: 100000, step: 10, unit: 'kW',
+      help: 'Continuous rating. Trips open on a sustained overload (inverse-time: the further over, the sooner). Reclosing onto the same overload trips again almost at once - the relay remembers its heat.' },
+    { name: 'closed', type: 'checkbox', label: 'Closed', default: true,
+      help: 'Initial position. While the plant runs, open and close it from its panel.' },
+    powerSupplyOption('Fed From', 'A breaker passes on whatever voltage feeds it.'),
+  ]
+};
+
+componentDefinitions['diesel-generator'] = {
+  displayName: 'Diesel Generator',
+  options: [
+    { name: 'name', type: 'text', label: 'Name', default: 'Emergency Diesel' },
+    { name: 'ratingKW', type: 'number', label: 'Rating', default: 4000, min: 10, max: 30000, step: 10, unit: 'kW',
+      help: 'Continuous electrical output. Overloading it trips it (and a tripped diesel stops).' },
+    { name: 'voltage', type: 'number', label: 'Output Voltage', default: 4160, min: 120, max: 35000, step: 1, unit: 'V',
+      help: `AC. ${VOLTAGE_HELP}` },
+    { name: 'startTime', type: 'number', label: 'Start Time', default: 10, min: 0, max: 600, step: 1, unit: 's',
+      help: 'From the start signal to carrying load. Nuclear plant emergency diesels are required to reach rated speed and voltage in about 10 s.' },
+    { name: 'fuelHours', type: 'number', label: 'Fuel Supply', default: 168, min: 0.1, max: 5000, step: 1, unit: 'h at rated load',
+      help: 'Day tank plus storage, as hours at full load (US plants keep about seven days). Idling burns about a quarter of the full-load rate, so at light load it lasts longer.' },
+    { name: 'fuelLevel', type: 'number', label: 'Fuel On Hand', default: 100, min: 0, max: 100, step: 1, unit: '%',
+      help: 'How full the tanks are when the plant starts.' },
+    { name: 'autoStart', type: 'checkbox', label: 'Auto-start on dead bus', default: true,
+      help: 'Start by itself when a bus it feeds loses its other supply, as an emergency diesel does on a loss of offsite power. It keeps running when the grid comes back until you stop it.' },
+    { name: 'running', type: 'checkbox', label: 'Running at start', default: false,
+      help: 'Already up to speed when the plant is loaded.' },
+  ]
+};
+
+componentDefinitions['battery'] = {
+  displayName: 'Battery',
+  options: [
+    { name: 'name', type: 'text', label: 'Name', default: 'Station Battery' },
+    { name: 'voltage', type: 'number', label: 'Voltage', default: 125, min: 12, max: 1000, step: 1, unit: 'V DC',
+      help: 'DC. Feeds a DC bus of the same voltage.' },
+    { name: 'capacityKWh', type: 'number', label: 'Capacity', default: 250, min: 0.01, max: 100000, step: 1, unit: 'kWh',
+      help: 'Stored energy when full. A station battery is sized to carry its DC loads for a few hours with no charger (the station blackout coping time).' },
+    { name: 'dischargeKW', type: 'number', label: 'Discharge Rating', default: 100, min: 0.01, max: 100000, step: 1, unit: 'kW',
+      help: 'The most the cells can deliver. More than that (with the charger) trips the battery\'s output breaker.' },
+    { name: 'chargerKW', type: 'number', label: 'Charger Rating', default: 50, min: 0.01, max: 100000, step: 1, unit: 'kW',
+      help: 'The charger carries the DC load first while it has AC power; the cells make up the rest, and whatever the charger has spare recharges them, tapering off as they fill.' },
+    { name: 'initialCharge', type: 'number', label: 'State of Charge', default: 100, min: 0, max: 100, step: 1, unit: '%',
+      help: 'How full the battery is when the plant starts.' },
+    powerSupplyOption('Charger Fed From', 'The low-voltage AC bus or breaker the charger runs from.'),
+  ]
+};
+
+// Every component that needs power gets a "fed from" select (shown only with
+// the electrical model on). The help says what losing it does.
+const POWERED_DEFINITIONS: Record<string, [string, string]> = {
+  'pump': ['Motor Power Supply',
+    'The bus or breaker the motor is fed from. Motors of 200 kW and up need medium-voltage AC (1-35 kV, e.g. 4160 V); smaller ones low-voltage AC (e.g. 480 V). With no live supply the pump coasts down, and it runs back up when the power returns.'],
+  'valve': ['Motor Operator Supply',
+    'Low-voltage AC (e.g. 480 V). Without power the valve stays where it is (fail as-is): neither a controller nor the operator can stroke it.'],
+  'porv': ['Solenoid Supply',
+    'DC control power. The PORV is held open by its solenoid: with no DC power it closes and cannot relieve.'],
+  'pressurizer': ['Heater Supply',
+    'Low-voltage AC (e.g. 480 V). Heaters on a dead bus heat nothing. (Only a pressurizer with heaters needs one.)'],
+  'scram-controller': ['Cabinet Power',
+    'DC control power. The protection system is de-energize-to-trip: losing this power scrams the reactor.'],
+  'pid-controller': ['Cabinet Power',
+    'DC control power. A cabinet without power stops scanning, and its actuator stays where it was.'],
+  'reactor-vessel': ['Rod Drive Supply',
+    'Low-voltage AC for the control rod drive mechanisms, which hold the rods out electrically: losing this power drops the rods (scram).'],
+  'core': ['Rod Drive Supply',
+    'Low-voltage AC for the control rod drive mechanisms, which hold the rods out electrically: losing this power drops the rods (scram).'],
+};
+for (const [key, [label, help]] of Object.entries(POWERED_DEFINITIONS)) {
+  const def = componentDefinitions[key];
+  if (!def) throw new Error(`[component-config] POWERED_DEFINITIONS names '${key}', which has no dialog definition`);
+  def.options.push(powerSupplyOption(label, help));
+}
+
 export class ComponentDialog {
   private dialog: HTMLElement;
   private titleElement: HTMLElement;
@@ -1298,6 +1425,14 @@ export class ComponentDialog {
    */
   setDynamicChoices(choices: Record<string, Array<{ id: string; label: string }>>): void {
     this.dynamicChoices = choices;
+  }
+
+  // Whether the plant uses the electrical model: options marked
+  // electricalOnly (the power supply selects) appear only when it does.
+  private electricalEnabled = false;
+
+  setElectricalEnabled(enabled: boolean): void {
+    this.electricalEnabled = enabled;
   }
 
   constructor() {
@@ -1442,6 +1577,7 @@ export class ComponentDialog {
 
   private buildForm(options: ComponentOption[], availableCores?: Array<{ id: string; label: string }>, defaultName?: string) {
     this.bodyElement.innerHTML = '';
+    options = options.filter(o => this.electricalEnabled || !o.electricalOnly);
 
     // Separate calculated options from input options
     const inputOptions = options.filter(o => o.type !== 'calculated');
@@ -2917,6 +3053,7 @@ export class ComponentDialog {
    */
   private buildFormWithValues(options: ComponentOption[], component: Record<string, any>) {
     this.bodyElement.innerHTML = '';
+    options = options.filter(o => this.electricalEnabled || !o.electricalOnly);
 
     // Separate calculated options from input options
     const inputOptions = options.filter(o => o.type !== 'calculated');

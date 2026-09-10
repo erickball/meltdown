@@ -64,7 +64,10 @@ import {
   BuildQueue, Buildable, componentBuildMassKg, connectionBuildMassKg,
 } from './game/build-queue';
 import { getPipeSpecById } from './construction/component-presets';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback, setElectricalCommandCallback } from './debug';
+import { powerSupplyChoices, autoWirePlant } from './construction/electrical-wiring';
+import { applyElectricalCommand, solveElectrical, CommandResult } from './simulation/electrical';
+import type { ElecStatus } from './render/electrical-components';
 import { waveCasualties, WaveCasualty } from './simulation/wave-casualties';
 import { nodeGasVolume } from './simulation/mixture-properties';
 import { addWreck } from './render/debris-fx';
@@ -91,6 +94,8 @@ const SETTINGS_KEY = 'meltdown_settings';
 interface AppSettings {
   deterministicMode?: boolean;
   viewMode?: ViewMode;
+  /** Draw the power wiring (electrical model). Absent = shown. */
+  showWires?: boolean;
 }
 
 function loadSettings(): AppSettings {
@@ -701,6 +706,17 @@ function init() {
   edgePanToggle?.addEventListener('change', () => {
     plantCanvas.setEdgePanEnabled(edgePanToggle.checked);
   });
+
+  // Power wiring on/off (a viewing preference, remembered across sessions)
+  const wiresToggle = document.getElementById('show-wires-toggle') as HTMLInputElement | null;
+  if (wiresToggle) {
+    wiresToggle.checked = loadSettings().showWires ?? true;
+    plantCanvas.setShowWires(wiresToggle.checked);
+    wiresToggle.addEventListener('change', () => {
+      plantCanvas.setShowWires(wiresToggle.checked);
+      saveSettings({ ...loadSettings(), showWires: wiresToggle.checked });
+    });
+  }
 
   // Keep the bottom edge-scroll trigger ABOVE the full-width status bar (in
   // visible canvas) rather than the 1px strip beneath it.
@@ -1948,10 +1964,14 @@ function init() {
       }
     }
 
-    // PID controllers need plant-derived target lists for their dropdowns
-    if (component.type === 'controller' && (component as any).controllerType === 'pid') {
-      componentDialog.setDynamicChoices(getPidDynamicChoices(plantState));
-    }
+    // Plant-derived lists for the dialog's selects: PID targets, and with the
+    // electrical model on, the supplies this part could be fed from
+    componentDialog.setElectricalEnabled(!!plantState.electrical?.enabled);
+    componentDialog.setDynamicChoices({
+      ...(component.type === 'controller' && (component as any).controllerType === 'pid'
+        ? getPidDynamicChoices(plantState) : {}),
+      ...electricalDialogChoices(component as unknown as Record<string, any>),
+    });
 
     // Get available generators for switchyard dropdowns
     const availableGenerators: Array<{ id: string; label: string }> = [];
@@ -2113,6 +2133,48 @@ function init() {
     const p = gameLoop.getState().components.pumps.get(componentId)!;
     showNotification(`${componentId}: ${p.running ? `running, setpoint ${(p.speed * 100).toFixed(0)}%` : 'stopped'}`, 'info', 3000);
     updateComponentDetail(componentId, plantState, gameLoop.getState());
+  });
+
+  // Electrical panel buttons: breaker open/close, diesel start/stop, trip
+  // reset, the grid at a switchyard. Applied to the running plant as an input
+  // the history records, and re-solved at once so the panel and the physics
+  // see the new lineup even while paused.
+  setElectricalCommandCallback((componentId, cmd) => {
+    let result: CommandResult = { ok: false, message: 'There is no running plant to operate' };
+    gameLoop.updateState(state => {
+      result = applyElectricalCommand(state, componentId, cmd);
+      if (result.ok) solveElectrical(state, 0);
+      return state;
+    });
+    showNotification(result.message, result.ok ? 'info' : 'warning', 5000);
+    updateComponentDetail(componentId, plantState, gameLoop.getState());
+  });
+
+  // The plant-level switch for the electrical model, and the auto-wire helper
+  const electricalToggle = document.getElementById('electrical-model-toggle') as HTMLInputElement | null;
+  electricalToggle?.addEventListener('change', () => {
+    const on = electricalToggle.checked;
+    liveEdit(on ? 'Turning on the electric power model' : 'Turning off the electric power model', () => {
+      if (on) plantState.electrical = { enabled: true };
+      else delete plantState.electrical;
+    });
+    syncElectricalUI();
+    if (on) {
+      showNotification(
+        'Electric power model on: pumps, motor-operated valves, PORVs, controller cabinets, heaters and rod drives ' +
+        'now need a live supply of the right voltage. Build the distribution from the Electrical parts, then ' +
+        '"Auto-wire unpowered parts" or pick a supply in each part\'s Edit dialog.', 'info', 10000);
+    }
+    if (selectedComponentId) updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
+  });
+  document.getElementById('electrical-autowire-btn')?.addEventListener('click', () => {
+    let wired: string[] = [];
+    liveEdit('Auto-wiring power supplies', () => { wired = autoWirePlant(plantState); });
+    showNotification(wired.length > 0
+      ? `Wired ${wired.length} part(s) to the nearest supply of the right voltage.`
+      : 'Nothing left to wire: every part that needs power has a supply, or none of the right voltage exists yet.',
+      'info', 6000);
+    if (selectedComponentId) updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
   });
 
   // Connection edit callback - find plant connection from simulation connection ID
@@ -2405,6 +2467,8 @@ function init() {
     plantState.scenario = data.scenario ?? undefined;
     // Ground, likewise: a flat plant must not keep the previous one's hills
     plantState.terrain = data.terrain ?? undefined;
+    // And the electrical model: on for this plant only if it says so
+    plantState.electrical = data.electrical ?? undefined;
 
     // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
     migrateReactorVessels(plantState);
@@ -2420,6 +2484,7 @@ function init() {
     // aiming at the part of the canvas the floating panels leave visible.
     refreshViewportInsets();
     plantCanvas.centerOnPlant();
+    syncElectricalUI();
   }
 
   /**
@@ -2456,11 +2521,13 @@ function init() {
     plantState.connections = design.connections;
     plantState.scenario = design.scenario;
     plantState.terrain = design.terrain;
+    plantState.electrical = design.electrical;
     migrateReactorVessels(plantState);
     migratePipeEndpoints(plantState);
     constructionManager.normalizeLoadedPlant();
 
     gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
+    syncElectricalUI();
     if (selectedComponentId && !plantState.components.has(selectedComponentId)) {
       selectedComponentId = null;
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
@@ -3493,6 +3560,62 @@ function init() {
   }
 
   /** A live edit with no dialog in the middle: snapshot, mutate, rebuild. */
+  /**
+   * A part about to be placed, as far as the electrical rules care: its
+   * stored type, its dialog defaults and the model fields that decide what
+   * supply it needs (a PORV wants DC, a big pump motor medium voltage, ...).
+   */
+  function electricalTargetFor(paletteKey: string, position: Point): Record<string, any> {
+    const target: Record<string, any> = { position };
+    for (const o of componentDefinitions[paletteKey]?.options ?? []) target[o.name] = o.default;
+    // After the defaults: a dialog option called 'type' is a valve/pump flavour
+    target.type = storedTypeForPaletteKey(paletteKey);
+    if (paletteKey === 'valve') target.valveType = 'gate';
+    if (paletteKey === 'porv') target.valveType = 'porv';
+    if (paletteKey === 'check-valve') target.valveType = 'check';
+    if (paletteKey === 'relief-valve') target.valveType = 'relief';
+    if (paletteKey === 'scram-controller') target.controllerType = 'scram';
+    if (paletteKey === 'pid-controller') target.controllerType = 'pid';
+    if (paletteKey === 'pressurizer') target.heaterCapacity = (target.heaterPower ?? 0) * 1e6;
+    if (paletteKey === 'core') target.fuelRodCount = 1;
+    return target;
+  }
+
+  /**
+   * The supply lists for the dialog's "fed from" selects (empty with the
+   * electrical model off, where those fields are not shown). A new part is
+   * wired to the first entry: the nearest compatible supply. A bus's backup
+   * list puts diesels first, and offers no backup at all when there is no
+   * diesel to back it.
+   */
+  function electricalDialogChoices(target: Record<string, any>): Record<string, Array<{ id: string; label: string }>> {
+    if (!plantState.electrical?.enabled) return {};
+    const choices = powerSupplyChoices(plantState, target);
+    const strip = (list: typeof choices) => list.map(c => ({ id: c.id, label: c.label }));
+    if (target.type !== 'bus') return { powerSupplies: strip(choices) };
+    const isDiesel = (c: { id: string; compatible: boolean }) =>
+      c.compatible && plantState.components.get(c.id)?.type === 'diesel-generator';
+    const diesels = choices.filter(isDiesel);
+    const others = choices.filter(c => !isDiesel(c));
+    return {
+      // Normal supply: the grid-side pieces first, a diesel only after them
+      powerSupplies: strip([...others.filter(c => c.compatible), ...diesels, ...others.filter(c => !c.compatible)]),
+      backupPowerSupplies: diesels.length > 0
+        ? strip([...diesels, ...others])
+        : [{ id: '', label: 'None' }, ...strip(others)],
+    };
+  }
+
+  /** Bring the electrical controls in line with the plant on screen. */
+  function syncElectricalUI(): void {
+    const on = !!plantState.electrical?.enabled;
+    const toggle = document.getElementById('electrical-model-toggle') as HTMLInputElement | null;
+    if (toggle) toggle.checked = on;
+    const autowire = document.getElementById('electrical-autowire-btn');
+    if (autowire) autowire.style.display = on ? '' : 'none';
+    applyPaletteFilter();
+  }
+
   function liveEdit(what: string, mutate: () => void): void {
     const pending = beginLiveEdit();
     try {
@@ -4634,10 +4757,15 @@ function init() {
           }
         }
 
-        // PID controllers need plant-derived target lists for their dropdowns
-        if (selectedComponentType === 'pid-controller') {
-          componentDialog.setDynamicChoices(getPidDynamicChoices(plantState));
-        }
+        // Plant-derived lists for the dialog's selects: PID targets, and with
+        // the electrical model on, the supplies this part could be fed from
+        // (nearest compatible first, which is what the new part is wired to
+        // unless the player picks another)
+        componentDialog.setElectricalEnabled(!!plantState.electrical?.enabled);
+        componentDialog.setDynamicChoices({
+          ...(selectedComponentType === 'pid-controller' ? getPidDynamicChoices(plantState) : {}),
+          ...electricalDialogChoices(electricalTargetFor(selectedComponentType!, placementPos)),
+        });
 
         // Generate default name with number matching the ID that will be assigned
         const definition = componentDefinitions[selectedComponentType!];
@@ -5028,12 +5156,15 @@ function init() {
     // have and a design choice the yard has already made, so they stand down -
     // all but Warehouse, which costs nothing out of the yard it edits.
     const yardActive = getStock(plantState) !== null;
+    const electricalOn = !!plantState.electrical?.enabled;
     container.querySelectorAll<HTMLButtonElement>('.component-btn').forEach(btn => {
       const t = btn.dataset.component ?? '';
       const hiddenByLevel = filtering && !paletteFilterTypes!.includes(t);
       const hiddenByYard = yardActive && !btn.classList.contains('yard-btn') && t !== 'warehouse';
+      // Electrical equipment is only offered when the plant uses the model
+      const hiddenByElectrical = btn.dataset.electrical === '1' && !electricalOn;
       // class, not inline style: .component-btn carries display:block !important
-      btn.classList.toggle('palette-hidden', hiddenByLevel || hiddenByYard);
+      btn.classList.toggle('palette-hidden', hiddenByLevel || hiddenByYard || hiddenByElectrical);
     });
     container.querySelectorAll('details').forEach(d => {
       const anyVisible = Array.from(d.querySelectorAll<HTMLButtonElement>('.component-btn'))
@@ -5150,6 +5281,11 @@ function init() {
     updateConstructionCostPanel();
     restoreSimStateIfPresent(data as Record<string, unknown>);
   };
+
+  // Electrical controls and palette for the plant we start with. Here, not at
+  // the listeners above: it runs the palette filter, whose state is declared
+  // further down this function.
+  syncElectricalUI();
 
   // Start in construction mode
   setMode('construction');
@@ -5520,6 +5656,27 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
         component.opening = valveState.position;
       }
     }
+  }
+
+  // Electrical equipment: what the drawings show (energized lamp, breaker
+  // position, engine running, charge). Display only - resume.ts strips it.
+  const elec = simState.electrical;
+  for (const [id, comp] of plantState.components) {
+    const e = elec?.elements[id];
+    const holder = comp as unknown as { elecStatus?: ElecStatus };
+    if (!e) {
+      if (holder.elecStatus) delete holder.elecStatus;
+      continue;
+    }
+    holder.elecStatus = {
+      energized: e.energized,
+      closed: e.closed,
+      running: e.running,
+      tripped: e.tripped,
+      soc: e.capacityJ ? e.energyJ! / e.capacityJ : undefined,
+      loading: isFinite(e.ratingW) && e.ratingW > 0 ? e.demandW / e.ratingW : undefined,
+      fault: e.fault,
+    };
   }
 
   // Sync control rod position to vessel/coreBarrel visual

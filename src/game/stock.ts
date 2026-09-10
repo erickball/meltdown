@@ -183,6 +183,11 @@ const PALETTE_TO_STORED: Record<string, ComponentType> = {
   'generator': 'tank',         // legacy: drawn differently, stored as a tank
   'scram-controller': 'controller',
   'pid-controller': 'controller',
+  'bus': 'bus',
+  'transformer': 'transformer',
+  'breaker': 'breaker',
+  'diesel-generator': 'diesel-generator',
+  'battery': 'battery',
 };
 
 /**
@@ -263,6 +268,11 @@ export function typeDisplayName(type: ComponentType, plural = false): string {
     'crossVessel': ['cross-vessel', 'cross-vessels'],
     'pool': ['pool', 'pools'],
     'warehouse': ['warehouse', 'warehouses'],
+    'bus': ['bus', 'buses'],
+    'transformer': ['transformer', 'transformers'],
+    'breaker': ['breaker', 'breakers'],
+    'diesel-generator': ['diesel generator', 'diesel generators'],
+    'battery': ['battery', 'batteries'],
   };
   const pair = names[type];
   return pair ? pair[plural ? 1 : 0] : type;

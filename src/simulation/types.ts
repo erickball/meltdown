@@ -257,6 +257,11 @@ export interface FlowNode {
   heaterPower?: number;
   // Installed heater capacity (W) - upper bound for heater actuators.
   heaterCapacity?: number;
+  // false = the heaters' electrical supply is dead, so heaterPower heats
+  // nothing (the setting is kept; the heat comes back with the power).
+  // Absent = powered, which is every plant without the electrical model.
+  // Written by the electrical solve (simulation/electrical.ts).
+  heaterPowered?: boolean;
 
   // Internal obstructions that reduce available cross-sectional area at certain elevations
   // Used for accurate liquid level calculation when components are inside this node
@@ -779,6 +784,116 @@ export interface SimulationState {
   // the water standing on it (see operators/surface-water.ts)
   terrain?: TerrainModel;
   surfaceWater?: SurfaceWaterState;
+  // The plant's electrical network, when the plant turns the electrical model
+  // on (PlantState.electrical). Absent = every load is powered, which is what
+  // every plant was before the model existed. See simulation/electrical.ts.
+  electrical?: ElectricalState;
+}
+
+// ============================================================================
+// Electrical power (optional; see simulation/electrical.ts)
+// ============================================================================
+
+/**
+ * Voltage class of a supply or a load. A load runs only from a supply of its
+ * own class: 'dc' is a battery-backed DC bus (control power), 'lv' is AC at
+ * 1 kV and below (480 V motor control centres), 'mv' is AC above 1 kV up to
+ * 35 kV (4.16-13.8 kV switchgear for big motors), 'hv' is transmission
+ * voltage, which nothing is connected to directly.
+ */
+export type VoltageClass = 'dc' | 'lv' | 'mv' | 'hv';
+
+export type ElecElementKind = 'offsite' | 'bus' | 'transformer' | 'breaker' | 'diesel' | 'battery';
+
+/**
+ * A piece of the distribution network: something power flows THROUGH or
+ * comes FROM. Sources are 'offsite' (the switchyard's connection to the
+ * grid), 'diesel' and 'battery'; 'bus', 'transformer' and 'breaker' carry
+ * power from their feeds to whatever is fed from them.
+ *
+ * The configuration fields are copied from the plant at build time; the
+ * runtime fields below them are what the solve owns and what the history
+ * snapshots carry.
+ */
+export interface ElecElement {
+  id: string;
+  kind: ElecElementKind;
+  label: string;
+  /** Upstream element ids this is fed from, normal supply first. */
+  feeds: string[];
+  /** Output voltage (V). A breaker takes its feed's, resolved every solve. */
+  voltage: number;
+  /** Output is DC (batteries and the buses they feed). */
+  dc: boolean;
+  /** Transformer primary voltage (V): the feed must match it. */
+  inputVoltage?: number;
+  /** Continuous rating (W). Infinity for a bus, which has no rating of its own. */
+  ratingW: number;
+
+  // --- configuration and state by kind ---
+  /** offsite: the grid is there. */
+  available?: boolean;
+  /** breaker: contacts closed. A trip opens them. */
+  closed?: boolean;
+  /** diesel: the engine is running (it may still be coming up to speed). */
+  running?: boolean;
+  /** diesel: seconds from a start signal to carrying load. */
+  startTime?: number;
+  /** diesel: seconds since the start signal. */
+  startElapsed?: number;
+  /** diesel: start on a dead bus it feeds, without an operator. */
+  autoStart?: boolean;
+  /** diesel: fuel left, as joules of rated-output-equivalent. */
+  fuelJ?: number;
+  fuelCapacityJ?: number;
+  /** battery: energy stored in the cells (J) and their capacity. */
+  energyJ?: number;
+  capacityJ?: number;
+  /** battery: most the cells can deliver (W). */
+  dischargeW?: number;
+  /** battery: charger output (W). The charger carries the DC load first. */
+  chargerW?: number;
+
+  // --- solved each accepted step ---
+  energized: boolean;
+  /** Power delivered out of this element (W). */
+  demandW: number;
+  /** battery: into the cells (W) / out of the cells (W). */
+  chargeW?: number;
+  cellsW?: number;
+  /**
+   * Protective relay thermal state: a first-order lag of (demand/rating)^2,
+   * so its steady value at rated load is exactly 1 and the element trips
+   * when it passes 1 (inverse-time overcurrent). Cools while unloaded.
+   */
+  overload: number;
+  tripped: boolean;
+  /** A configuration problem (wrong voltage, missing supply), for the panel. */
+  fault?: string;
+}
+
+export type ElecLoadKind = 'pump' | 'mov' | 'porv' | 'controller' | 'rps' | 'heater' | 'rod-drive';
+
+/** Something that needs power to work. Keyed by its plant component id. */
+export interface ElecLoad {
+  id: string;
+  kind: ElecLoadKind;
+  label: string;
+  supplyId?: string;
+  voltageClass: VoltageClass;
+  /** Nameplate electrical rating (W), for display and the class choice. */
+  ratedW: number;
+  // --- solved each accepted step ---
+  demandW: number;
+  powered: boolean;
+  fault?: string;
+}
+
+export interface ElectricalState {
+  elements: Record<string, ElecElement>;
+  loads: Record<string, ElecLoad>;
+  /** Element ids, every feed before whatever it feeds. */
+  order: string[];
 }
 
 export interface ComponentStates {
@@ -920,6 +1035,9 @@ export interface ControllerState {
   lastAux?: number;
   /** most recent auto-derived gains, for display/debugging */
   lastAutoGains?: { kp: number; ki: number };
+  /** false = the cabinet has no power: it neither scans nor moves its
+   *  actuator, which stays where it was (fail as-is). Absent = powered. */
+  powered?: boolean;
 }
 
 export interface PumpState {
@@ -942,6 +1060,13 @@ export interface PumpState {
   motorElevation: number;
   /** Standing in water above its motor: the motor is drowned (surface-water.ts). */
   flooded?: boolean;
+  /**
+   * false = the motor's supply is dead: the pump coasts down exactly as a
+   * drowned one does, with `running` (the operator's switch) left as it was,
+   * and runs back up when the power returns. Absent = powered.
+   * Written by the electrical solve (simulation/electrical.ts).
+   */
+  powered?: boolean;
   /**
    * A nozzle with no line on it faces the air: the factory gives it a
    * connection to the environment at the nozzle. Such a pump never starts by
@@ -980,6 +1105,13 @@ export interface ValveState {
   reliefOpen?: boolean;             // latch state between pop and reseat pressures
   liftCount?: number;               // cumulative pops (each lift risks sticking open;
                                     // averaged-cycling mode increments fractionally)
+  /**
+   * false = the actuator has no power. A motor-operated valve stays where it
+   * is (fail as-is); a PORV's solenoid drops out and it closes. Absent =
+   * powered (spring relief valves never read it). Written by the electrical
+   * solve (simulation/electrical.ts).
+   */
+  powered?: boolean;
 }
 
 export interface CheckValveState {

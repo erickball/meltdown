@@ -51,6 +51,7 @@ import * as Water from './water-properties';
 import { hxBundleCount, hxTubeNodeId } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 import { createSimulationFromPlant } from './factory';
+import { carryElectricalState, writeElectricalToPlant } from './electrical';
 
 // ============================================================================
 // Small helpers
@@ -153,6 +154,8 @@ function writeFluidIC(c: Record<string, any>, node: FlowNode): void {
 // ============================================================================
 
 export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantState): void {
+  // Breaker positions, diesel run state and fuel, battery charge, the grid
+  writeElectricalToPlant(sim, plant);
   for (const [id, component] of plant.components) {
     const c = component as Record<string, any>;
     const node = sim.flowNodes.get(id);
@@ -395,6 +398,9 @@ const VOLATILE_COMPONENT_KEYS = new Set([
   // same reason from the other side: the factory has never seen the ghost,
   // so there is nothing to carry over whether it reads as changed or not.
   'underConstruction', 'pendingRemoval', 'buildProgress',
+  // Electrical status the renderers draw from (energized lamp, breaker
+  // position, charge bar), resynced from the simulation every frame.
+  'elecStatus',
 ]);
 
 /**
@@ -665,6 +671,8 @@ export function transplantSimulationState(
     // auto-tuned gains, scan clock
     fresh.components.controllers.set(ctlId, savedCtl);
   }
+  // --- Electrical network: breakers, trips, fuel, charge (re-solves) ---
+  carryElectricalState(fresh, saved, id => dirty.has(id));
 
   // --- Flow connections: carry momentum (mass flow) where both ends resumed ---
   const savedConns = new Map(saved.flowConnections.map(conn => [conn.id, conn]));

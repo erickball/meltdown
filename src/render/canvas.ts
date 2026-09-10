@@ -23,6 +23,7 @@ import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getCladdingOxidationPower } from '../simulation/operators/rate-operators';
 import { CameraShake } from './camera-shake';
+import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
 export type ViewMode = 'perspective' | 'grid';
@@ -69,6 +70,8 @@ export class PlantCanvas {
    *  display-flow.ts. */
   private pipeContents = new PipeContentsTracker();
   private showPorts: boolean = false;
+  // Power wiring (electrical model only): drawn unless the player hides it
+  private showWires: boolean = true;
   private highlightedPort: { componentId: string; portId: string } | null = null;
   private isometric: IsometricConfig = { ...DEFAULT_ISOMETRIC };
   // 'perspective' is the 2.5D view, drawn by this class; 'grid' delegates
@@ -2016,6 +2019,35 @@ export class PlantCanvas {
       }
     }
 
+    // Power wiring (electrical model only): hair-thin twisted pairs run along
+    // the ground between each supply and what it feeds, drawn before the
+    // equipment so each cable disappears under the part it enters. A short
+    // riser at each end climbs to a raised component's base.
+    if (this.showWires && this.plantState.electrical?.enabled) {
+      const elec = this.simState?.electrical;
+      for (const run of wireRuns(this.plantState)) {
+        const from = this.plantState.components.get(run.fromId);
+        const to = this.plantState.components.get(run.toId);
+        if (!from || !to || run.pts.length < 2) continue;
+        const pts: Point[] = [];
+        let scaleSum = 0;
+        let visible = true;
+        const push = (p: Point, elevation: number) => {
+          const s = this.worldToScreenPerspective(p, elevation);
+          if (s.scale <= 0) visible = false;
+          pts.push(s.pos);
+          scaleSum += s.scale;
+        };
+        push(run.pts[0], from.elevation ?? 0);
+        for (const p of run.pts) push(p, 0);
+        push(run.pts[run.pts.length - 1], to.elevation ?? 0);
+        if (!visible) continue;
+        const pitchPx = (scaleSum / pts.length) * 50 * TWIST_PITCH_M;
+        const energized = elec ? (elec.elements[run.fromId]?.energized ?? false) : null;
+        drawTwistedPair(ctx, pts, pitchPx, energized);
+      }
+    }
+
     mark('floors+shadows');
     // Draw components with perspective projection
     // Project all 4 corners individually for proper ground-plane alignment
@@ -3597,6 +3629,11 @@ export class PlantCanvas {
     this.plantState = state;
   }
 
+  /** Show or hide the power wiring (only drawn when the plant uses the electrical model). */
+  public setShowWires(show: boolean): void {
+    this.showWires = show;
+  }
+
   public setShowPorts(show: boolean): void {
     this.showPorts = show;
     if (!show) {
@@ -4041,6 +4078,7 @@ export class PlantCanvas {
         ? this.selectedConnection : null,
       hoveredComponentId: this.hoveredComponentId,
       showPorts: this.showPorts,
+      showWires: this.showWires,
       highlightedPort: this.highlightedPort,
       constructionMode: this.constructionMode,
       buildMode: this.buildMode,

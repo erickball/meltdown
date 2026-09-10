@@ -773,6 +773,58 @@ export function estimateControllerCost(props: {
  * like the most expensive thing on the site. This is the shed, the apron and
  * the racking only.
  */
+/**
+ * Electrical distribution equipment, installed. Order-of-magnitude industry
+ * figures: medium-voltage switchgear ~$60k a cubicle, power transformers
+ * ~$25k/MVA plus a fixed ~$150k, a breaker cubicle ~$40k, emergency diesels
+ * ~$800/kW installed, stationary lead-acid batteries ~$600/kWh with racks
+ * and charger. Wires are free (the player's ask): cable is not priced.
+ */
+export function estimateElectricalEquipmentCost(
+  componentType: string, props: Record<string, any>, nqa1: boolean
+): CostEstimate {
+  let equipment: number;
+  let label: string;
+  switch (componentType) {
+    case 'bus': {
+      const mv = (props.voltage ?? 4160) > 1000;
+      equipment = (mv ? 60000 : 25000) * 4;
+      label = mv ? 'Metal-clad switchgear (4 cubicles)' : 'Motor control centre';
+      break;
+    }
+    case 'transformer':
+      equipment = 150000 + 25000 * (props.ratingMVA ?? 10);
+      label = 'Power transformer';
+      break;
+    case 'breaker':
+      equipment = 40000;
+      label = 'Breaker cubicle';
+      break;
+    case 'diesel-generator':
+      equipment = 800 * (props.ratingKW ?? 4000);
+      label = 'Diesel generator set, fuel storage';
+      break;
+    case 'battery':
+      equipment = 600 * (props.capacityKWh ?? 250) + 300 * (props.chargerKW ?? 50);
+      label = 'Battery, racks and charger';
+      break;
+    default:
+      throw new Error(`[Cost] estimateElectricalEquipmentCost: '${componentType}' is not electrical equipment`);
+  }
+  const installationCost = equipment * 0.35;
+  const subtotal = equipment + installationCost;
+  const nqa1Premium = nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
+  return {
+    materialCost: equipment,
+    fabricationCost: 0,
+    installationCost,
+    subtotal,
+    nqa1Premium,
+    total: subtotal + nqa1Premium,
+    breakdown: { [label]: equipment, 'Installation': installationCost },
+  };
+}
+
 export function estimateWarehouseCost(props: {
   width: number;   // m
   depth: number;   // m
@@ -1192,6 +1244,13 @@ export function estimateComponentCost(
         reliabilityClass: props.reliabilityClass || 'standard',
         nqa1,
       });
+
+    case 'bus':
+    case 'transformer':
+    case 'breaker':
+    case 'diesel-generator':
+    case 'battery':
+      return estimateElectricalEquipmentCost(componentType, props, nqa1);
 
     case 'building': {
       // Calculate volume based on shape

@@ -104,6 +104,7 @@ export function serializePlantDesign(plant: PlantState): Record<string, unknown>
     connections: plant.connections,
     ...(plant.scenario ? { scenario: plant.scenario } : {}),
     ...(plant.terrain ? { terrain: plant.terrain } : {}),
+    ...(plant.electrical ? { electrical: plant.electrical } : {}),
   }));
 }
 
@@ -121,6 +122,7 @@ export function deserializePlantDesign(input: Record<string, unknown>): PlantSta
   } as unknown as PlantState;
   if (data.scenario) plant.scenario = data.scenario as PlantState['scenario'];
   if (data.terrain) plant.terrain = data.terrain as PlantState['terrain'];
+  if (data.electrical) plant.electrical = data.electrical as PlantState['electrical'];
   return plant;
 }
 

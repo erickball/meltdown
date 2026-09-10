@@ -39,6 +39,7 @@ import {
 } from '../../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../../src/types';
 import type { SimulationState } from '../../src/simulation/types';
+import { ElectricalOperator } from '../../src/simulation/electrical';
 
 // ============================================================================
 // Test framework
@@ -134,6 +135,7 @@ export function buildSimFromPlantJson(
     connections?: PlantConnection[];
     scenario?: unknown;
     terrain?: unknown;
+    electrical?: unknown;
   },
   solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {}
 ): Sim {
@@ -142,6 +144,7 @@ export function buildSimFromPlantJson(
     connections: data.connections ?? [],
     scenario: data.scenario,
     terrain: data.terrain,
+    electrical: data.electrical,
   } as PlantState;
   setSimulationRandomSeed(0);
   return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
@@ -263,6 +266,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   solver.addConstraintOperator(new BurstCheckOperator());
   solver.addConstraintOperator(new ChokedFlowDisplayOperator());
   // Sampled process controllers act last, on the accepted state (finalOnly)
+  solver.addConstraintOperator(new ElectricalOperator());
   solver.addConstraintOperator(new ControlSystemOperator());
   solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
   solver.addConstraintOperator(new OtsgLedgerCheckOperator());

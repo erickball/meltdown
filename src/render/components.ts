@@ -43,6 +43,7 @@ import {
 } from './colors';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
+import { renderElectricalComponent } from './electrical-components';
 import type { BreakAnchor } from './break-fx';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
 
@@ -955,6 +956,13 @@ export function renderComponent(
       break;
     case 'warehouse':
       renderWarehouse(ctx, component as WarehouseComponent, view);
+      break;
+    case 'bus':
+    case 'transformer':
+    case 'breaker':
+    case 'diesel-generator':
+    case 'battery':
+      renderElectricalComponent(ctx, component, view);
       break;
   }
 

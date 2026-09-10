@@ -48,6 +48,7 @@ export type { ScramSetpoints } from '../simulation/operators/neutronics';
 import { StateHistory, StateSnapshot, HistoryEpoch, HistoryEvent, SnapshotKind } from './state-history';
 import { cloneSimulationState } from '../simulation/solver';
 import { wireSavedRelocation } from '../simulation/operators/corium';
+import { ElectricalOperator } from '../simulation/electrical';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -98,7 +99,8 @@ export type GameEventType =
   | 'component-burst'
   | 'scenario'
   | 'shake'
-  | 'washed-away';
+  | 'washed-away'
+  | 'electrical';
 
 export interface GameEvent {
   type: GameEventType;
@@ -111,6 +113,7 @@ export interface GameEvent {
  *  (speed warnings, auto-slowdown, transient alarms) are notifications. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<GameEventType> = new Set<GameEventType>([
   'scram', 'scram-reset', 'component-burst', 'scenario', 'shake', 'simulation-error', 'washed-away',
+  'electrical',
 ]);
 
 export class GameLoop {
@@ -228,6 +231,9 @@ export class GameLoop {
       this.rk45Solver.addConstraintOperator(new BurstCheckOperator()); // Check for component ruptures
       this.rk45Solver.addConstraintOperator(new FlowDynamicsConstraintOperator()); // Only computes steady-state for display
       this.rk45Solver.addConstraintOperator(new ChokedFlowDisplayOperator()); // Sets conn.isChoked for debug display
+      // Electrical network (postAccept): which loads have power. Ahead of the
+      // control system so a cabinet that just lost its supply does not scan.
+      this.rk45Solver.addConstraintOperator(new ElectricalOperator());
       this.rk45Solver.addConstraintOperator(new ControlSystemOperator()); // Auto-tuned process controllers (finalOnly)
       this.rk45Solver.addConstraintOperator(new SurfaceWaterConstraintOperator());
       this.rk45Solver.addConstraintOperator(new OtsgLedgerCheckOperator()); // OTSG economizer ledger vs the wall (finalOnly)

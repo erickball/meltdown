@@ -1,4 +1,6 @@
 import { initScenarioState } from './scenario';
+import { buildElectricalState, solveElectrical } from './electrical';
+import { MOTOR_PUMP_EFFICIENCY } from './electrical-rules';
 /**
  * Simulation State Factory
  *
@@ -2127,6 +2129,17 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
   // Timed accident sequence, if the preset ships one
   state.scenario = initScenarioState(plantState.scenario);
 
+  // Electrical network, when the plant uses it: solved once here so the very
+  // first step already knows which motors have power. A motor that has none
+  // is not turning when the plant is loaded, whatever its switch says.
+  state.electrical = buildElectricalState(plantState);
+  if (state.electrical) {
+    solveElectrical(state, 0);
+    for (const pump of state.components.pumps.values()) {
+      if (pump.powered === false) pump.effectiveSpeed = 0;
+    }
+  }
+
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 
   return state;
@@ -2874,8 +2887,14 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       };
     }
 
-    // Non-hydraulic by design: the supply yard holds parts, not fluid
+    // Non-hydraulic by design: the supply yard holds parts, not fluid, and
+    // the electrical network is wiring (see simulation/electrical.ts)
     case 'warehouse':
+    case 'bus':
+    case 'transformer':
+    case 'breaker':
+    case 'diesel-generator':
+    case 'battery':
       return null;
 
     default:
@@ -2934,7 +2953,8 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     effectiveSpeed: isRunning ? (pump.speed ?? 1.0) : 0,
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
-    efficiency: 0.85,
+    // Shared with the motor sizing in electrical-rules.ts
+    efficiency: MOTOR_PUMP_EFFICIENCY,
     motorElevation: 0,     // Set by the caller, which knows the ground
     connectedFlowPath: '', // Set later when connections are processed
     rampUpTime: 5.0,

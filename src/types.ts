@@ -87,7 +87,13 @@ export type ComponentType =
   | 'building'
   | 'crossVessel'
   | 'pool'
-  | 'warehouse';
+  | 'warehouse'
+  // Electrical distribution (only built/used when PlantState.electrical is on)
+  | 'bus'
+  | 'transformer'
+  | 'breaker'
+  | 'diesel-generator'
+  | 'battery';
 
 export interface Port {
   id: string;
@@ -184,6 +190,15 @@ export interface ComponentBase {
   // warehouse stock line; it is what makes a refund go back to the line the
   // part came out of, and what the info panel names.
   design?: string;
+  /**
+   * The electrical element this part is fed from: a bus or breaker for a
+   * load (pump motor, motor-operated valve, controller cabinet, heaters, rod
+   * drives), or the upstream element for a piece of the distribution network
+   * itself (a transformer's primary, a battery's charger). Only read when
+   * the plant has the electrical model on (PlantState.electrical); the wire
+   * is drawn from it. See simulation/electrical.ts.
+   */
+  powerSupplyId?: string;
   // Simulation linkage
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
@@ -648,6 +663,14 @@ export interface SwitchyardComponent extends ComponentBase {
   reliabilityClass: SwitchyardReliabilityClass;
   // Connected generator(s) - required for MW to grid calculation
   connectedGeneratorId?: string;  // ID of turbine-generator this feeds
+  /**
+   * The grid is there to draw from (electrical model only). Absent = true.
+   * False is a loss of offsite power: the switchyard stops feeding the
+   * plant's transformers. The generator's output is exported, not used for
+   * house loads - a real unit trips its turbine on a load rejection rather
+   * than islanding onto its own auxiliaries.
+   */
+  offsiteAvailable?: boolean;
 
   // === FUTURE FAILURE MODES (not yet implemented) ===
   // These comments document failure mechanisms for future implementation:
@@ -804,6 +827,79 @@ export function pumpVisualHeight(pump: { diameter?: number }): number {
   return (pump.diameter || 0.3) * 1.3 * 2.2;
 }
 
+// ============================================================================
+// Electrical distribution (see simulation/electrical.ts)
+//
+// None of these has ports, a flow node or a thermal node: they are wired to
+// each other and to the loads by `powerSupplyId`, and the solve decides what
+// is energized and how much each piece carries. Power is treated as real
+// power only (no phases, no power factor - an MVA is an MW here).
+// ============================================================================
+
+/** A switchgear or motor-control-centre bus at one voltage. */
+export interface BusComponent extends ComponentBase {
+  type: 'bus';
+  width: number;        // m - drawn lineup width
+  height: number;       // m - cabinet height
+  voltage: number;      // V nominal
+  dc: boolean;          // a DC bus (battery-backed control power)
+  /** A second feed (an emergency diesel, a bus tie). Both carry load when live. */
+  backupPowerSupplyId?: string;
+}
+
+/** A step-down (or step-up) transformer, fed on its primary from `powerSupplyId`. */
+export interface TransformerComponent extends ComponentBase {
+  type: 'transformer';
+  width: number;
+  height: number;
+  ratingMVA: number;
+  primaryVoltage: number;   // V - must match what feeds it
+  secondaryVoltage: number; // V - what it delivers
+}
+
+/** A circuit breaker: passes its feed through when closed; trips open on overload. */
+export interface BreakerComponent extends ComponentBase {
+  type: 'breaker';
+  width: number;
+  height: number;
+  ratingKW: number;
+  closed: boolean;          // initial position (the running plant's is sim state)
+}
+
+/** An emergency diesel generator: a source that needs a start and fuel. */
+export interface DieselGeneratorComponent extends ComponentBase {
+  type: 'diesel-generator';
+  width: number;
+  height: number;
+  ratingKW: number;
+  voltage: number;          // V - output (AC)
+  startTime: number;        // s - start signal to carrying load
+  fuelHours: number;        // h - day-tank + storage at rated load
+  fuelFraction: number;     // 0-1 - fuel on hand at the start
+  autoStart: boolean;       // starts by itself when a bus it feeds goes dead
+  running: boolean;         // initial state
+}
+
+/** A station battery with its charger. DC out; the charger is fed from `powerSupplyId`. */
+export interface BatteryComponent extends ComponentBase {
+  type: 'battery';
+  width: number;
+  height: number;
+  voltage: number;          // V - DC
+  capacityKWh: number;
+  dischargeKW: number;      // most the cells can deliver
+  chargerKW: number;        // charger output
+  chargeFraction: number;   // 0-1 - state of charge at the start
+}
+
+/**
+ * Plant-wide switch for the electrical model. Off (or absent) is every plant
+ * before it existed: every pump, valve and controller simply works.
+ */
+export interface ElectricalSettings {
+  enabled: boolean;
+}
+
 export type PlantComponent =
   | TankComponent
   | PipeComponent
@@ -821,7 +917,12 @@ export type PlantComponent =
   | BuildingComponent
   | CrossVesselComponent
   | PoolComponent
-  | WarehouseComponent;
+  | WarehouseComponent
+  | BusComponent
+  | TransformerComponent
+  | BreakerComponent
+  | DieselGeneratorComponent
+  | BatteryComponent;
 
 export interface PlantState {
   components: Map<string, PlantComponent>;
@@ -832,6 +933,8 @@ export interface PlantState {
   // Optional ground: a height field over the plan plus water bodies (see
   // terrain-types.ts). A component's `elevation` is above the local ground.
   terrain?: TerrainSpec;
+  // Optional electrical power model. Off/absent = everything is powered.
+  electrical?: ElectricalSettings;
   simTime: number;
   simSpeed: number;
   isPaused: boolean;

@@ -28,12 +28,14 @@ import {
 } from '../types';
 import { ComponentConfig } from './component-config';
 import { parseStockLines } from './component-properties';
+import { clearPowerReferences } from './electrical-wiring';
+import { ELECTRICAL_PART_TYPES } from '../simulation/electrical-rules';
 import {
   chargeForComponent, chargeForPipe, checkCharge, spend, refund,
   refundDeletedComponent, storedTypeForPaletteKey, describeStock,
 } from '../game/stock';
 import { getComponentVisualHeight } from '../render/components';
-import { getComponentSize } from '../render/component-size';
+import { getComponentSize, getDefaultComponentSize } from '../render/component-size';
 import {
   portSide, Side, connectionRoute, findFreeEndJoins, routeLength,
 } from '../render/grid-geometry';
@@ -1672,6 +1674,65 @@ export class ConstructionManager {
         break;
       }
 
+      case 'bus':
+      case 'transformer':
+      case 'breaker':
+      case 'diesel-generator':
+      case 'battery': {
+        // Electrical distribution: no ports, no flow node. Wired by
+        // powerSupplyId (set below from the dialog); see simulation/electrical.ts.
+        const size = getDefaultComponentSize(config.type);
+        const base: Record<string, any> = {
+          id,
+          type: config.type,
+          label: props.name || config.name || config.type,
+          position: { x: worldX, y: worldY },
+          rotation: 0,
+          elevation: props.elevation ?? 0,
+          width: size.width,
+          height: size.height,
+          ports: [],
+        };
+        switch (config.type) {
+          case 'bus':
+            Object.assign(base, { voltage: props.voltage ?? 4160, dc: !!props.dc });
+            break;
+          case 'transformer':
+            Object.assign(base, {
+              ratingMVA: props.ratingMVA ?? 10,
+              primaryVoltage: props.primaryVoltage ?? 345000,
+              secondaryVoltage: props.secondaryVoltage ?? 4160,
+            });
+            break;
+          case 'breaker':
+            Object.assign(base, { ratingKW: props.ratingKW ?? 2000, closed: props.closed ?? true });
+            break;
+          case 'diesel-generator':
+            Object.assign(base, {
+              ratingKW: props.ratingKW ?? 4000,
+              voltage: props.voltage ?? 4160,
+              startTime: props.startTime ?? 10,
+              fuelHours: props.fuelHours ?? 168,
+              fuelFraction: (props.fuelLevel ?? 100) / 100,
+              autoStart: props.autoStart ?? true,
+              running: props.running ?? false,
+            });
+            break;
+          case 'battery':
+            Object.assign(base, {
+              voltage: props.voltage ?? 125,
+              capacityKWh: props.capacityKWh ?? 250,
+              dischargeKW: props.dischargeKW ?? 100,
+              chargerKW: props.chargerKW ?? 50,
+              chargeFraction: (props.initialCharge ?? 100) / 100,
+            });
+            break;
+        }
+        this.plantState.components.set(id, base as unknown as PlantComponent);
+        console.log(`[Construction] Created ${config.type} '${id}'`);
+        break;
+      }
+
       case 'warehouse': {
         // A supply yard: no ports, no flow node, no thermal node. It exists
         // to HOLD the level's parts list and to show it on the map.
@@ -1945,6 +2006,14 @@ export class ConstructionManager {
       default:
         console.error(`[Construction] Unknown component type: ${config.type}`);
         return null;
+    }
+
+    // Electrical wiring from the dialog (the fields exist only with the
+    // electrical model on). Blank = unwired: no field stored.
+    {
+      const wired = this.plantState.components.get(id) as Record<string, any> | undefined;
+      if (wired && props.powerSupply) wired.powerSupplyId = props.powerSupply;
+      if (wired && props.backupPowerSupply) wired.backupPowerSupplyId = props.backupPowerSupply;
     }
 
     // Set containedBy if specified (component placed inside a container)
@@ -3480,6 +3549,8 @@ export class ConstructionManager {
     for (const id of idsToDelete) {
       this.plantState.components.delete(id);
     }
+    // Anything that was fed from them is now unwired (their wires go too)
+    clearPowerReferences(this.plantState, idsToDelete);
 
     console.log(`[Construction] Deleted ${idsToDelete.size} component(s) and ${connectionsToRemove.length} connection(s)`);
     return true;
@@ -3644,6 +3715,28 @@ export class ConstructionManager {
     // Apply property updates with unit conversions
     if (properties.name !== undefined) {
       component.label = properties.name;
+    }
+    // Electrical wiring (any component). Blank = unwired: the field goes.
+    if (properties.powerSupply !== undefined) {
+      if (properties.powerSupply) component.powerSupplyId = properties.powerSupply;
+      else delete component.powerSupplyId;
+    }
+    if (properties.backupPowerSupply !== undefined) {
+      if (properties.backupPowerSupply) component.backupPowerSupplyId = properties.backupPowerSupply;
+      else delete component.backupPowerSupplyId;
+    }
+    // Electrical equipment: stored under the dialog's own names, except the
+    // two percentages, which the model keeps as fractions
+    if (ELECTRICAL_PART_TYPES.has(component.type)) {
+      for (const key of ['voltage', 'ratingMVA', 'primaryVoltage', 'secondaryVoltage', 'ratingKW',
+                         'startTime', 'fuelHours', 'capacityKWh', 'dischargeKW', 'chargerKW']) {
+        if (properties[key] !== undefined) component[key] = properties[key];
+      }
+      for (const key of ['dc', 'closed', 'autoStart', 'running']) {
+        if (properties[key] !== undefined) component[key] = !!properties[key];
+      }
+      if (properties.fuelLevel !== undefined) component.fuelFraction = properties.fuelLevel / 100;
+      if (properties.initialCharge !== undefined) component.chargeFraction = properties.initialCharge / 100;
     }
     if (properties.elevation !== undefined) {
       component.elevation = properties.elevation;

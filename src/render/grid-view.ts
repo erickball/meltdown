@@ -38,6 +38,7 @@ import { TerrainSpec } from '../terrain-types';
 import { TerrainModel, buildTerrainModel, surfaceAtVolume, terrainHeightAt, cellAt as terrainCellAt } from '../simulation/terrain';
 import { contourPolylines, ContourSet } from './terrain-contours';
 import { renderFloodDebris } from './debris-fx';
+import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -58,6 +59,8 @@ export interface GridFrameState {
   selectedConnection: Connection | null;
   hoveredComponentId: string | null;
   showPorts: boolean;
+  /** Draw the power wiring (only when the plant uses the electrical model). */
+  showWires: boolean;
   highlightedPort: { componentId: string; portId: string } | null;
   constructionMode: boolean;
   /** The player may place/connect right now (true in both modes since live edits). */
@@ -1185,6 +1188,7 @@ export class GridView {
     }
 
     this.renderRoutes(ctx, f);
+    this.renderWires(ctx, f);
 
     // Standing sprites, back to front. The runs inside a container's section
     // view go on right after its sprite, under the sprites of what it holds
@@ -2353,6 +2357,22 @@ export class GridView {
 
     const lines = connectionLabelLines(conn, plantState, simState, f.connectionFluid, f.buildMode);
     if (lines) drawConnectionLabel(ctx, s, lines, f.width, f.height);
+  }
+
+  /**
+   * Power wiring (electrical model only): hair-thin twisted pairs along the
+   * ground, under the sprites, live copper or dead grey by their supply.
+   */
+  private renderWires(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    if (!f.showWires || !f.plantState.electrical?.enabled) return;
+    const elec = f.simState?.electrical;
+    const origin = this.worldToScreen({ x: 0, y: 0 });
+    const ppm = this.worldToScreen({ x: 1, y: 0 }).x - origin.x;
+    const pitchPx = ppm * TWIST_PITCH_M;
+    for (const run of wireRuns(f.plantState)) {
+      const pts = run.pts.map(p => this.worldToScreen(p));
+      drawTwistedPair(ctx, pts, pitchPx, elec ? (elec.elements[run.fromId]?.energized ?? false) : null);
+    }
   }
 
   /** Controller wires and switchyard-to-generator lines. */

@@ -11,6 +11,7 @@
 import { SimulationState } from './types';
 import { ScenarioAction, ScenarioEvent, ScenarioSpec } from './scenario-types';
 import { applyScriptedBurst } from './operators/burst-operator';
+import { applyElectricalCommand, ElectricalCommand } from './electrical';
 
 export function initScenarioState(spec: ScenarioSpec | undefined): SimulationState['scenario'] {
   if (!spec || !spec.events || spec.events.length === 0) return undefined;
@@ -81,6 +82,18 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
       body.to = a.surface;
       body.t0 = state.time;
       body.over = a.over ?? 0;
+      return;
+    }
+    case 'offsite-power':
+    case 'breaker':
+    case 'diesel': {
+      const cmd: ElectricalCommand = a.kind === 'offsite-power'
+        ? (a.available ? 'offsite-restored' : 'offsite-lost')
+        : a.kind === 'breaker'
+          ? (a.closed ? 'close' : 'open')
+          : (a.running ? 'start' : 'stop');
+      const result = applyElectricalCommand(state, a.id, cmd);
+      if (!result.ok) throw new Error(`[Scenario] ${a.kind} '${a.id}': ${result.message}`);
       return;
     }
     default:

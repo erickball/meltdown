@@ -42,6 +42,8 @@ import { pumpMotorElevation } from './types';
 import { nodeLiquidLevelFraction } from './simulation';
 import { nodeGasVolume } from './simulation/mixture-properties';
 import type { PlantStock, PoolComponent } from './types';
+import { electricalDetailHtml, wireElectricalButtons } from './electrical-panel';
+import type { ElectricalCommand } from './simulation/electrical';
 
 // Store previous pressures to show transitions
 let previousPressures: Map<string, number> = new Map();
@@ -1663,6 +1665,10 @@ export function updateComponentDetail(
     }
   }
 
+  // Electrical model: what this is fed from and whether it has power, or
+  // (for the network's own pieces) its state and the operator's buttons
+  html += electricalDetailHtml(componentId, simState);
+
   // Volume - prefer simulation node volume, fall back to calculated
   // (Skip for reactor vessels since volumes are shown in geometry section)
   if (component.type !== 'reactorVessel') {
@@ -2208,7 +2214,8 @@ export function updateComponentDetail(
   }
 
   // ========== NO SIMULATION LINKAGE ==========
-  if (!simNodeId && !simPumpId && !simValveId && heatConnections.length === 0) {
+  if (!simNodeId && !simPumpId && !simValveId && heatConnections.length === 0 &&
+      !simState.electrical?.elements[componentId]) {
     html += '<div class="detail-section">';
     html += '<div style="font-size: 10px; color: #888; font-style: italic;">No simulation linkage</div>';
     html += '</div>';
@@ -2236,6 +2243,9 @@ export function updateComponentDetail(
   html += '</div>';
 
   content.innerHTML = html;
+
+  // Electrical buttons (breaker open/close, diesel start/stop, trip reset, grid)
+  if (electricalCommandCallback) wireElectricalButtons(content, componentId, electricalCommandCallback);
 
   // Set up button handlers
   const editBtn = document.getElementById('edit-component-btn');
@@ -2302,6 +2312,12 @@ export function updateComponentDetail(
 // Callbacks for edit/delete actions
 let componentEditCallback: ((componentId: string) => void) | null = null;
 let pumpControlCallback: ((componentId: string, order: { running?: boolean; speed?: number }) => void) | null = null;
+
+// Electrical panel buttons -> the app (applied to the running plant as an input)
+let electricalCommandCallback: ((componentId: string, cmd: ElectricalCommand) => void) | null = null;
+export function setElectricalCommandCallback(callback: (componentId: string, cmd: ElectricalCommand) => void): void {
+  electricalCommandCallback = callback;
+}
 
 /** Set callback for the pump START/STOP button and speed slider. */
 export function setPumpControlCallback(

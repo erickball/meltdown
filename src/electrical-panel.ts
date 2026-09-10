@@ -1,0 +1,162 @@
+/**
+ * The electrical section of the selected-component panel: what a load is
+ * fed from and whether it has power, and for the network's own pieces their
+ * state, loading and the operator's buttons (breaker open/close, diesel
+ * start/stop, trip reset, the grid at a switchyard).
+ *
+ * Buttons carry data-elec-cmd; wireElectricalButtons hands their clicks to
+ * the app, which applies them to the running plant as a recorded input.
+ */
+
+import type { SimulationState, ElecElement, ElecLoad } from './simulation/types';
+import type { ElectricalCommand } from './simulation/electrical';
+import { formatVoltage, formatPower, VOLTAGE_CLASS_LABEL } from './simulation/electrical-rules';
+
+function row(label: string, value: string, title = '', color = ''): string {
+  return `<div class="detail-row"><span class="detail-label"${title ? ` title="${title}"` : ''}>${label}:</span>` +
+    `<span class="detail-value"${color ? ` style="color: ${color};"` : ''}>${value}</span></div>`;
+}
+
+function button(cmd: ElectricalCommand, text: string, title: string, bg = '#357'): string {
+  return `<button data-elec-cmd="${cmd}" title="${title}" style="background: ${bg}; color: #fff; border: none; ` +
+    `padding: 5px 12px; border-radius: 4px; cursor: pointer; font-size: 11px; margin: 2px 6px 2px 0;">${text}</button>`;
+}
+
+function hours(seconds: number): string {
+  if (!isFinite(seconds)) return 'indefinitely';
+  if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)} h`;
+  if (seconds >= 60) return `${(seconds / 60).toFixed(0)} min`;
+  return `${seconds.toFixed(0)} s`;
+}
+
+function faultRow(fault: string | undefined): string {
+  return fault
+    ? `<div class="detail-row" style="color: #fc8; font-size: 10px;" title="A wiring problem: this piece cannot use the supply it is connected to. Edit it (or its supply) to fix.">&#9888; ${fault}</div>`
+    : '';
+}
+
+function elementHtml(e: ElecElement, state: SimulationState): string {
+  const els = state.electrical!.elements;
+  let html = '';
+  const status = e.tripped ? 'TRIPPED' : e.energized ? 'ENERGIZED' : 'DEAD';
+  const color = e.tripped ? '#fb4' : e.energized ? '#7f7' : '#f77';
+  html += row('Status', status, 'Energized: this piece has power to give. Tripped: its overload relay opened it; reset it (or close the breaker) to try again.', color);
+  html += faultRow(e.fault);
+  if (e.voltage > 0) html += row('Voltage', formatVoltage(e.voltage, e.dc));
+
+  if (e.kind === 'battery') {
+    const available = (e.energyJ! > 0 ? e.dischargeW! : 0) + (e.feeds.length > 0 && e.chargeW !== undefined ? e.chargerW! : 0);
+    html += row('Load', formatPower(e.demandW), 'DC power delivered to what this battery feeds.');
+    html += row('Charge', `${(100 * e.energyJ! / e.capacityJ!).toFixed(1)}%`, 'State of charge of the cells.',
+      e.energyJ! / e.capacityJ! > 0.2 ? '' : '#f77');
+    if ((e.cellsW ?? 0) > 0) {
+      html += row('Discharging', `${formatPower(e.cellsW!)} - empty in ${hours(e.energyJ! / e.cellsW!)}`,
+        'The cells are carrying what the charger cannot (or all of it, with the charger dead).', '#fc8');
+    } else if ((e.chargeW ?? 0) > 0) {
+      html += row('Charging', formatPower(e.chargeW!), 'Spare charger output going into the cells; it tapers off as they fill.');
+    }
+    html += row('Can deliver', formatPower(available), 'Cells (if charged) plus charger (if its AC supply is live).');
+  } else if (isFinite(e.ratingW)) {
+    const pct = 100 * e.demandW / e.ratingW;
+    html += row('Load', `${formatPower(e.demandW)} of ${formatPower(e.ratingW)} (${pct.toFixed(0)}%)`,
+      'Power delivered against the continuous rating.', pct > 100 ? '#f77' : pct > 90 ? '#fc8' : '');
+  } else {
+    html += row('Load', formatPower(e.demandW), 'Power delivered to everything this bus feeds.');
+  }
+  if (isFinite(e.ratingW) || e.kind === 'battery') {
+    const heat = 100 * e.overload;
+    html += row('Relay heat', `${heat.toFixed(0)}%`,
+      'Overcurrent relay thermal element. It settles at (load/rating)^2, so a piece run at its rating sits at 100%; it trips when it goes past 100% and cools while unloaded. Reclosing while it is still hot trips again almost at once.',
+      heat > 90 ? '#f77' : heat > 60 ? '#fc8' : '');
+  }
+
+  // Where it gets its power
+  e.feeds.forEach((f, i) => {
+    const feed = els[f];
+    const name = feed ? feed.label : `${f} (missing)`;
+    html += row(i === 0 ? (e.kind === 'battery' ? 'Charger fed from' : 'Fed from') : 'Backup',
+      `${name}${feed ? (feed.energized ? '' : ' (dead)') : ''}`, '', feed?.energized ? '' : '#f99');
+  });
+
+  // Kind-specific state and buttons
+  const buttons: string[] = [];
+  switch (e.kind) {
+    case 'offsite':
+      html += row('Grid', e.available ? 'available' : 'LOST', 'Offsite power at this switchyard. The generator\'s output is exported; house loads draw from the grid through the transformers fed from here.', e.available ? '#7f7' : '#f77');
+      buttons.push(e.available
+        ? button('offsite-lost', 'Lose offsite power', 'Disconnect the grid here: a loss of offsite power. Every transformer fed from this switchyard goes dead; emergency diesels set to auto-start will start.', '#744')
+        : button('offsite-restored', 'Restore offsite power', 'Reconnect the grid.', '#264'));
+      break;
+    case 'breaker':
+      html += row('Position', e.closed ? 'CLOSED' : 'OPEN', '', e.closed ? '#7f7' : '#f77');
+      buttons.push(e.closed
+        ? button('open', 'Open', 'Open the breaker: everything fed through it goes dead.', '#744')
+        : button('close', 'Close', 'Close the breaker (this also resets an overload trip).', '#264'));
+      break;
+    case 'diesel': {
+      const starting = !!e.running && e.startElapsed! < e.startTime!;
+      html += row('Engine', e.running ? (starting ? `STARTING (${e.startElapsed!.toFixed(0)}/${e.startTime} s)` : 'RUNNING') : 'STOPPED',
+        'A diesel carries load only once it is up to speed.', e.running ? (starting ? '#fc8' : '#7f7') : '#aaa');
+      const burnW = 0.25 * e.ratingW + 0.75 * e.demandW;
+      html += row('Fuel', `${(100 * e.fuelJ! / e.fuelCapacityJ!).toFixed(1)}%${e.running ? ` - ${hours(e.fuelJ! / burnW)} at this load` : ''}`,
+        'Fuel on hand. Idling burns about a quarter of the full-load rate.', e.fuelJ! / e.fuelCapacityJ! > 0.1 ? '' : '#f77');
+      html += row('Auto-start', e.autoStart ? 'on' : 'off', 'Starts by itself when a bus it feeds goes dead.');
+      buttons.push(e.running
+        ? button('stop', 'Stop', 'Stop the engine.', '#744')
+        : button('start', 'Start', 'Start the engine; it carries load after its start time.', '#264'));
+      break;
+    }
+  }
+  if (e.tripped && e.kind !== 'breaker') {
+    buttons.push(button('reset', 'Reset trip', 'Reset the overload trip. If the load that tripped it is still there, the relay is still hot and it trips again almost at once.', '#665'));
+  }
+  if (buttons.length > 0) html += `<div class="detail-row" style="flex-wrap: wrap;">${buttons.join('')}</div>`;
+  return html;
+}
+
+function loadHtml(l: ElecLoad, state: SimulationState): string {
+  const supply = l.supplyId ? state.electrical!.elements[l.supplyId] : undefined;
+  let html = '';
+  html += row('Power', l.powered ? 'POWERED' : 'NO POWER',
+    `Needs ${VOLTAGE_CLASS_LABEL[l.voltageClass]}.`, l.powered ? '#7f7' : '#f77');
+  html += row('Fed from', supply ? `${supply.label}${supply.energized ? '' : ' (dead)'}` : (l.supplyId ? `${l.supplyId} (missing)` : 'nothing'),
+    'Change it with Edit.', supply?.energized ? '' : '#f99');
+  if (l.fault && l.fault !== 'not connected to a power supply') html += faultRow(l.fault);
+  if (l.ratedW > 0 || l.demandW > 0) {
+    html += row('Drawing', `${formatPower(l.demandW)}${l.ratedW > 0 ? ` (rated ${formatPower(l.ratedW)})` : ''}`,
+      l.kind === 'pump' ? 'Motor input: hydraulic power on the pump curve plus losses, scaled by speed cubed. A running pump against a closed discharge still draws its losses.' : '');
+  }
+  if (!l.powered) {
+    const effect: Record<ElecLoad['kind'], string> = {
+      pump: 'The pump coasts down; it restarts by itself when the power returns.',
+      mov: 'The valve stays where it is: nothing can stroke it.',
+      porv: 'The PORV\'s solenoid has dropped out: it is shut and cannot relieve.',
+      controller: 'The cabinet does not scan; its actuator stays where it was.',
+      rps: 'The protection system has tripped the reactor (de-energize to trip).',
+      heater: 'The heaters heat nothing.',
+      'rod-drive': 'The rod drives let go: the rods are in (scram).',
+    };
+    html += `<div class="detail-row" style="color: #f99; font-size: 10px;">${effect[l.kind]}</div>`;
+  }
+  return html;
+}
+
+/** The electrical section for one component, or '' when it has none. */
+export function electricalDetailHtml(componentId: string, state: SimulationState): string {
+  const E = state.electrical;
+  if (!E) return '';
+  const e = E.elements[componentId];
+  const l = E.loads[componentId];
+  if (!e && !l) return '';
+  return '<div class="detail-section"><div class="detail-section-title">Electrical</div>' +
+    (e ? elementHtml(e, state) : loadHtml(l, state)) + '</div>';
+}
+
+/** Hand the panel's electrical buttons to the app. */
+export function wireElectricalButtons(
+  root: HTMLElement, componentId: string, onCommand: (componentId: string, cmd: ElectricalCommand) => void
+): void {
+  root.querySelectorAll<HTMLButtonElement>('button[data-elec-cmd]').forEach(btn => {
+    btn.addEventListener('click', () => onCommand(componentId, btn.dataset.elecCmd as ElectricalCommand));
+  });
+}

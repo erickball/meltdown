@@ -134,6 +134,9 @@ export class ControlSystemOperator implements ConstraintOperator {
         //
         // Real DCS loops scan on a fixed period for exactly this reason, and
         // the lambda tuning below is already written in seconds against one.
+        // A cabinet without power does not scan. Its clock stops with it, so
+        // the first scan after the power returns measures the whole outage.
+        if (ctl.powered === false) continue;
         const since = state.time - (ctl.lastScanTime ?? -Infinity);
         if (since < (ctl.scanPeriod ?? DEFAULT_SCAN_PERIOD)) continue;
         ctl.lastScanTime = state.time;
@@ -150,6 +153,11 @@ export class ControlSystemOperator implements ConstraintOperator {
       // limit is applied: from the command to the device.
       for (const [, ctl] of newState.components.controllers) {
         if (ctl.actuator.kind === 'control-rods') continue;
+        // Nothing drives the actuator without power - neither a dead cabinet
+        // nor a motor-operated valve on a dead bus: it stays where it is.
+        if (ctl.powered === false) continue;
+        if (ctl.actuator.kind === 'valve-position' &&
+            newState.components.valves.get(ctl.actuator.targetId)?.powered === false) continue;
         this.slewActuator(newState, ctl, dt);
       }
     }
@@ -188,7 +196,12 @@ export class ControlSystemOperator implements ConstraintOperator {
       }
 
       let demandOpen: boolean;
-      switch (relief.controlMode) {
+      // A PORV is held open by its solenoid: with no DC power it closes,
+      // whatever the pressure or the operator's switch says. (Spring safety
+      // valves are not loads and never carry the flag.)
+      if (valve.powered === false) {
+        demandOpen = false;
+      } else switch (relief.controlMode) {
         case 'open': demandOpen = true; break;
         case 'closed': demandOpen = false; break;
         default: {

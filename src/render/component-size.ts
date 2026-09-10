@@ -78,6 +78,15 @@ export function getComponentSize(component: PlantComponent): { width: number; he
     case 'crossVessel':
       // Cross-vessel: length is horizontal extent, outerDiameter is the height/depth
       return { width: (component as any).length || 3, height: (component as any).outerDiameter || 1 };
+    case 'bus':
+    case 'transformer':
+    case 'breaker':
+    case 'diesel-generator':
+    case 'battery': {
+      // Electrical equipment is drawn as a front view of its stored box
+      const d = getDefaultComponentSize(component.type);
+      return { width: (component as any).width || d.width, height: (component as any).height || d.height };
+    }
     default:
       console.warn(`[getComponentSize] Unknown component type: ${(component as any).type}, using default size`);
       return { width: 1, height: 1 };
@@ -130,6 +139,17 @@ export function getDefaultComponentSize(componentType: string): { width: number;
       return { width: 3.4, height: 3.4 };
     case 'cross-vessel':
       return { width: 3, height: 1 };
+    // Electrical equipment (front view: width across, height up)
+    case 'bus':
+      return { width: 3, height: 2.3 };        // switchgear lineup
+    case 'transformer':
+      return { width: 3, height: 3 };
+    case 'breaker':
+      return { width: 0.8, height: 2 };        // one cubicle
+    case 'diesel-generator':
+      return { width: 6, height: 3 };
+    case 'battery':
+      return { width: 2.4, height: 1.8 };      // rack of cells
     default:
       return { width: 2, height: 2 };
   }

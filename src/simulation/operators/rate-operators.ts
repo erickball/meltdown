@@ -1337,9 +1337,10 @@ export class HeatGenerationRateOperator implements RateOperator {
 
     // Electric heaters immersed in flow nodes (pressurizer heaters etc.):
     // heaterPower is set by a heater-power controller actuator or the user.
+    // Heaters on a dead bus heat nothing (electrical.ts; absent = powered).
     for (const [id, node] of state.flowNodes) {
       if (node.isBoundary) continue;
-      const q = node.heaterPower ?? 0;
+      const q = node.heaterPowered === false ? 0 : (node.heaterPower ?? 0);
       if (q > 0) {
         const existing = rates.flowNodes.get(id);
         if (existing) {
@@ -2890,8 +2891,10 @@ export class PumpSpeedRateOperator implements RateOperator {
       }
 
       // A drowned motor cannot run: a flooded pump coasts down like a tripped
-      // one, and stays down until the water is gone (surface-water.ts)
-      if (pump.running && !pump.flooded) {
+      // one, and stays down until the water is gone (surface-water.ts). A
+      // motor whose bus is dead coasts the same way, and runs back up when
+      // the power returns (electrical.ts; absent = powered).
+      if (pump.running && !pump.flooded && pump.powered !== false) {
         const targetSpeed = pump.speed;
         if (pump.effectiveSpeed < targetSpeed) {
           // Ramp up: constant rate to reach target in rampUpTime

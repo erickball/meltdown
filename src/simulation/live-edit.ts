@@ -100,6 +100,8 @@ export function revertLivePlantEdit(plant: PlantState, snapshot: LiveEditSnapsho
   else (plant as { scenario?: unknown }).scenario = backup.scenario;
   if (backup.terrain === undefined) delete (plant as { terrain?: unknown }).terrain;
   else (plant as { terrain?: unknown }).terrain = backup.terrain;
+  if (backup.electrical === undefined) delete (plant as { electrical?: unknown }).electrical;
+  else (plant as { electrical?: unknown }).electrical = backup.electrical;
 }
 
 /**

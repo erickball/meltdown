@@ -81,7 +81,7 @@ export function sideOfVector(dx: number, dy: number): Side {
 
 const CYLINDRICAL_UPRIGHT = new Set(['tank', 'vessel', 'reactorVessel', 'coreBarrel']);
 const PLAN_NATIVE = new Set(['building', 'switchyard', 'warehouse']);
-const ONE_TILE = new Set(['pump', 'valve', 'controller']);
+const ONE_TILE = new Set(['pump', 'valve', 'controller', 'breaker']);
 
 function tiles(metres: number): number {
   return Math.max(1, Math.ceil(metres / TILE_M - EPS));

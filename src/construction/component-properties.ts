@@ -172,6 +172,18 @@ export function parseStockLines(value: unknown): StockLine[] {
  * Returns defaultValue when the component genuinely has no such property.
  */
 export function readComponentOption(optionName: string, component: Record<string, any>, defaultValue: any): any {
+  // Electrical supply fields, on every component that has them. Blank = not
+  // wired (the model stores no field at all).
+  if (optionName === 'powerSupply') return component.powerSupplyId ?? '';
+  if (optionName === 'backupPowerSupply') return component.backupPowerSupplyId ?? '';
+  // Stored as fractions, edited as %
+  if (component.type === 'diesel-generator' && optionName === 'fuelLevel') {
+    return (component.fuelFraction ?? 1) * 100;
+  }
+  if (component.type === 'battery' && optionName === 'initialCharge') {
+    return (component.chargeFraction ?? 1) * 100;
+  }
+
   // Warehouse stock lives in a nested block; the dialog edits the same shape
   // the model stores, so the read is the stored value straight back.
   if (component.type === 'warehouse') {

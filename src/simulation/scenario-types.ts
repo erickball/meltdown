@@ -60,7 +60,16 @@ export type ScenarioAction =
    * peak camera offset in screen pixels at the start of the jolt, which then
    * decays to nothing.
    */
-  | { kind: 'shake'; seconds: number; amplitude?: number };
+  | { kind: 'shake'; seconds: number; amplitude?: number }
+  /**
+   * Electrical model only (PlantState.electrical): lose or restore the grid
+   * at a switchyard (a loss of offsite power).
+   */
+  | { kind: 'offsite-power'; id: string; available: boolean }
+  /** Open or close a breaker. Closing also clears an overload trip. */
+  | { kind: 'breaker'; id: string; closed: boolean }
+  /** Start or stop a diesel generator. */
+  | { kind: 'diesel'; id: string; running: boolean };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */

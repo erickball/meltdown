@@ -10,7 +10,20 @@
  */
 
 import { cloneSurfaceWaterState } from './operators/surface-water';
-import { SimulationState, SolverMetrics } from './types';
+import { SimulationState, SolverMetrics, ElectricalState, ElecElement, ElecLoad } from './types';
+
+/**
+ * The electrical network's runtime state, deep enough that nothing the solve
+ * mutates is shared with the original: every element and load object is
+ * copied; the feed lists and the order are configuration and are shared.
+ */
+export function cloneElectricalState(e: ElectricalState): ElectricalState {
+  const elements: Record<string, ElecElement> = {};
+  for (const id in e.elements) elements[id] = { ...e.elements[id] };
+  const loads: Record<string, ElecLoad> = {};
+  for (const id in e.loads) loads[id] = { ...e.loads[id] };
+  return { elements, loads, order: e.order };
+}
 
 // ============================================================================
 // Solver Profiling
@@ -1219,6 +1232,8 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     pendingEvents: state.pendingEvents ? [...state.pendingEvents] : undefined,
     // Scenario progress is state (events are immutable, the counter moves)
     scenario: state.scenario ? { events: state.scenario.events, fired: state.scenario.fired } : undefined,
+    // The electrical network's runtime (breakers, charge, fuel, relays)
+    electrical: state.electrical ? cloneElectricalState(state.electrical) : undefined,
   };
 
   addCloneTime(performance.now() - t0);

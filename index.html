@@ -97,6 +97,15 @@
         <div class="construction-controls" id="construction-controls">
           <hr />
           <h3>Components</h3>
+        <div id="electrical-model-controls" style="margin: 0 0 8px; font-size: 11px;">
+          <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;"
+                 title="Turn on electrical power requirements for THIS plant (saved with it). With it on, pumps, motor-operated valves, PORVs, controller cabinets, pressurizer heaters and control rod drives only work while they are fed from a live supply of the right voltage, and the Electrical parts (transformers, buses, breakers, diesel generators, batteries) appear in the palette. Off (the default) means everything simply has power.">
+            <input type="checkbox" id="electrical-model-toggle" style="cursor: pointer;" />
+            &#9889; Electric power model
+          </label>
+          <button id="electrical-autowire-btn" class="mode-btn" style="display: none; margin-top: 4px; font-size: 11px;"
+                  title="Connect every part that needs power and has no supply to the nearest supply of the right voltage (network pieces first, then loads). Parts with no compatible supply anywhere are left unwired - check their panels.">Auto-wire unpowered parts</button>
+        </div>
         <div class="component-categories"
              title="Pick a component, then click the site to place it. This works while the plant is running too: the new component starts from its own initial conditions and everything already running carries straight on at the same simulated time. The rewind history is kept: rewinding past the edit shows the plant as it was before it.">
           <details open id="yard-palette-group" style="display: none;">
@@ -132,6 +141,14 @@
             <summary>Power</summary>
             <button data-component="switchyard" class="component-btn">Switchyard</button>
             <button data-component="turbine-generator" class="component-btn">Turbine-Generator</button>
+          </details>
+          <details open>
+            <summary title="Electrical distribution. Shown only when this plant uses the electrical power model (the checkbox above). Each part is fed from another through its supply setting; the wires are drawn and routed for you.">Electrical</summary>
+            <button data-component="transformer" data-electrical="1" class="component-btn" title="Steps voltage down (or up): fed on its primary from the switchyard, a bus or a breaker; delivers its secondary voltage to the buses fed from it. Trips on a sustained overload.">Transformer</button>
+            <button data-component="bus" data-electrical="1" class="component-btn" title="Switchgear or motor-control-centre bus at one voltage. Loads are fed from a bus (or a breaker on one). It can have a normal and a backup supply - typically the grid through a transformer, and an emergency diesel.">Bus</button>
+            <button data-component="breaker" data-electrical="1" class="component-btn" title="Circuit breaker: passes its supply through when closed. Open and close it from its panel while the plant runs; it trips open on a sustained overload.">Breaker</button>
+            <button data-component="diesel-generator" data-electrical="1" class="component-btn" title="Emergency diesel generator: an AC source that needs a start (about 10 s to carry load) and fuel. Set to auto-start, it starts by itself when a bus it feeds goes dead.">Diesel Generator</button>
+            <button data-component="battery" data-electrical="1" class="component-btn" title="Station battery with its charger: DC source for the control-power bus. The charger carries the DC load while it has AC power; when the AC goes, the cells do, until they are flat.">Battery</button>
           </details>
           <details open>
             <summary>Site</summary>
@@ -198,6 +215,11 @@
                title="Pan the camera by moving the mouse to the edge of the view, like an RTS. Push all the way to the very edge even where a panel is in the way.">
           <input type="checkbox" id="edge-pan-toggle" style="cursor: pointer;" />
           Edge-scroll panning
+        </label>
+        <label style="display: flex; align-items: center; gap: 6px; margin-top: 4px; font-size: 11px; cursor: pointer;"
+               title="Draw the power wiring between each supply and what it feeds (only plants using the electrical power model have any). Live wires are copper-coloured, dead ones grey. Up close each cable is a twisted pair; zoomed out it reads as a dotted line.">
+          <input type="checkbox" id="show-wires-toggle" style="cursor: pointer;" checked />
+          Show power wiring
         </label>
           <!-- Advanced solver settings live at the BOTTOM of the toolbar: they
              are the last thing anyone needs and the first thing that got in the
