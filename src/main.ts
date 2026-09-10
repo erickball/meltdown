@@ -13,6 +13,7 @@ import htgrPresetData from './presets/htgr.json';
 import xe100PresetData from './presets/xe100.json';
 import xe100SboPresetData from './presets/xe100-sbo.json';
 import xe100SgtrPresetData from './presets/xe100-sgtr.json';
+import xe100PlantPresetData from './presets/xe100-plant.json';
 import twoLoopPresetData from './presets/two-loop.json';
 import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
@@ -2941,6 +2942,17 @@ function init() {
           'toward the dump setpoint) followed by an SG tube rupture at t = 550 s: 165-bar steam ' +
           'into 60-bar helium, carried to the hot graphite where it gasifies to H₂ and CO. ' +
           'Both events fire automatically; notifications mark them.',
+      },
+      {
+        label: 'Xe-100 (Plant Layout)', data: xe100PlantPresetData,
+        tooltip: 'The Xe-100 module arranged as the real plant is: everything above grade, the ' +
+          'steam generator on the ground floor of its own hall and the reactor vessel raised ' +
+          'beside it, the coaxial duct passing through their shared wall from just under the ' +
+          'core into the top of the SG vessel. Helium flows DOWN through the pebble bed; two ' +
+          'circulators in parallel sit on top of the bundle inside the SG vessel. Each bundle ' +
+          'has steam and feedwater isolation valves onto outboard headers, the MSSV hangs off ' +
+          'the steam line, the turbine has a stop valve, and the feedwater heater bleeds from a ' +
+          'turbine extraction port.',
       },
       {
         label: 'Two-Loop PWR', data: twoLoopPresetData,

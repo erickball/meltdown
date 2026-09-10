@@ -13,3 +13,6 @@ public/uv_grid_data_v13_filtered.json text eol=lf
 # with LF, so without this every regeneration reads as a 1581-line diff and
 # the real change is invisible.
 src/presets/xe100.json text eol=lf
+
+# Same again for the plant-layout Xe-100 written by scripts/gen-xe100-plant.ts.
+src/presets/xe100-plant.json text eol=lf
