@@ -216,6 +216,21 @@ export class BuildQueue {
     return true;
   }
 
+  /**
+   * Drop a job WITHOUT its abandon hook: the parts are not going back on the
+   * shelf - a wave took them (see simulation/wave-casualties.ts). The
+   * caller removes the components themselves.
+   */
+  discard(jobId: string): boolean {
+    const job = this.queue.find(j => j.id === jobId);
+    if (!job) return false;
+    this.queue = this.queue.filter(j => j !== job);
+    console.log(`[BuildQueue] Discarded ${job.label} at ` +
+      `${(100 * job.elapsed / Math.max(job.simSeconds, 1e-9)).toFixed(0)}% - the parts are lost`);
+    this.clearMarks(job);
+    return true;
+  }
+
   /** The job holding this part, if any. */
   jobFor(target: Buildable): BuildJob | null {
     return this.queue.find(j => j.targets.includes(target)) ?? null;

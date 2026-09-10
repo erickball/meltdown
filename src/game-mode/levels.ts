@@ -117,9 +117,11 @@ export const LEVELS: LevelDef[] = [
     hints: [
       'Watch the pool level readout - the racks are 4.16 m tall, and everything below that number is trouble.',
       'Uncovering the fuel does not end the job. The pool boils dry, the cladding burns in the steam and then in the air, and you lose when activity actually gets out. Water put back late is still water put back.',
-      'The crack passes about 100 kg/s once the level is down near the racks. A make-up pump much bigger than that just empties the tanks faster.',
-      'A pump can only SUCK water up about ten metres before its intake boils. It can PUSH it as high as its head allows.',
-      'When the wave comes it runs nearly to the top of the hill: anything below the bench goes under and stays stopped until it drains, which takes a few minutes. Make the tanks last that long.',
+      'The crack passes about 100 kg/s once the level is down near the racks. The tanks are the only make-up that can beat it - and a valve is what makes 1200 tonnes last eight hours instead of three.',
+      "The yard's pumps come DRY. A pump full of air cannot pull water up to itself: stand it IN the sea, bowl under the water, and the sea fills it. Its motor is on a six-metre column - keep that above the surface, so not too far out.",
+      "The sea pump lifts to the pool's rim, which is above its rated head: expect a few tens of kg/s, not a flood. It is the make-up that never runs out, not the one that keeps up.",
+      'When the wave comes it runs nearly to the top of the hill, and whatever it closes over it TAKES - a pump standing in the sea is a pump you no longer have. Build it after the water has gone back down.',
+      'A pump with a line missing on either side starts stopped: its open nozzle faces the air. Select it to START it, or to run it slower.',
     ],
   },
   // =========================================================================

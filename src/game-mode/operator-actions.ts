@@ -68,6 +68,32 @@ export class OperatorActionsPanel {
     this.render();
   }
 
+  /**
+   * A pump order from the component's own panel (debug.ts) - the same walk
+   * to the field as the START/STOP button here, so the two panels obey one
+   * rule. `speed` is a fraction of rated; a speed order on a stopped pump
+   * starts it.
+   */
+  orderPump(componentId: string, order: { running?: boolean; speed?: number }): void {
+    const what = order.running !== undefined
+      ? `${order.running ? 'start' : 'stop'} ${componentId}`
+      : `set ${componentId} speed to ${((order.speed ?? 0) * 100).toFixed(0)}%`;
+    this.queueField(componentId, what, (s) => {
+      const p = s.components.pumps.get(componentId);
+      if (!p) return;
+      if (order.speed !== undefined) {
+        p.speed = order.speed;
+        if (order.speed > 0 && order.running === undefined) p.running = true;
+      }
+      if (order.running !== undefined) {
+        p.running = order.running;
+        if (order.running && p.speed <= 0) p.speed = 1.0;
+      }
+    });
+    this.lastRenderKey = '';
+    this.render();
+  }
+
   private queueField(componentId: string, description: string, apply: (s: SimulationState) => void): void {
     const t = this.host.getSimState().time;
     // one field action per component at a time; a new order replaces the old

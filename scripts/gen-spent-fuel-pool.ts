@@ -19,17 +19,29 @@
  *   100..110 m    plateau rim, +14 m (the pad's lip)
  *   110..176 m    the hillside, +14 m down to +2 m
  *   176..218 m    the shore bench, +2.0 m down to +1.4 m
- *   218..234 m    the beach face, +1.4 m down to -4 m
- *   x >=  234 m   the sea shelf, flat -4 m, declared as the water body `sea`
- *                 with its surface at 0 m (so 4 m of water over the shelf).
+ *   218..234 m    the beach face, +1.4 m down to -2 m
+ *   x >=  234 m   the sea floor, falling away offshore from -2 m to -9 m at
+ *                 the map's edge, declared as the water body `sea` with its
+ *                 surface at 0 m. How deep the water is depends on how far
+ *                 out you go, which is the whole question of where to stand
+ *                 the intake pump.
  *
- * The two obstacles the level is built around fall straight out of that:
+ * The obstacles the level is built around fall straight out of that and out
+ * of the yard's pump (a vertical wet-pit machine delivered DRY, its motor on
+ * a 6 m column - see `pump-service-water-lp` in component-presets.ts):
  *   - a pump standing on the pad is ~13 m above the sea surface, well past
  *     what an atmosphere can push up an intake (~10.3 m before NPSH), so its
  *     suction line flashes and it delivers nothing;
+ *   - a pump standing on the shore is full of air and cannot prime itself,
+ *     so it delivers nothing either. It has to stand IN the sea, deep enough
+ *     for the water to flood its bowl and shallow enough that its motor is
+ *     still above the surface: somewhere on the first few tens of metres of
+ *     sea floor;
  *   - the scripted tsunami takes the sea to +12.6 m, a few tens of centimetres
  *     under the pad itself, so anything built anywhere but the bench is under
- *     water until it drains back - which it does within about ten minutes.
+ *     water until it drains back - and a wave that closes over a component
+ *     TAKES it (src/simulation/wave-casualties.ts): a pump built in the sea
+ *     before the wave is a pump the yard no longer has.
  *
  * THE NOISE (added 2026-09-08) exists to stop the site reading as a ramp
  * between two shelves, and it is applied in the two ways that cannot damage
@@ -68,6 +80,36 @@ const ROWS = 16;
 const PAD_C0 = 2, PAD_C1 = 10;    // x = 20 .. 100 m
 const PAD_R0 = 4, PAD_R1 = 12;    // y = 40 .. 120 m
 const PAD_HEIGHT = 13.0;
+/**
+ * The pad is a shallow DISH, not a plane: PAD_DISH metres lower at the pool
+ * than at its edges, falling off as the square of the distance from the pool
+ * out to PAD_DISH_RADIUS. Water leaving the pool collects around the pool
+ * instead of spreading one centimetre deep over the whole pad (a perfectly
+ * flat pad is one basin, and any puddle on it wets all 8100 m2 at once).
+ * The tanks and the yard stand outside the dish, on the flat 13.0 m rim, so
+ * their datums are untouched; only the pool's ground is lower, and the wave
+ * (12.6 m) still stops short of the pool's rim.
+ */
+const PAD_DISH = 0.3;
+const PAD_DISH_RADIUS = 40;
+const POOL_X = 50, POOL_Y = 75;
+/**
+ * The sea floor: a shelf that shelves gently from the water's edge, then
+ * drops away. The sea gets deeper the farther out you go: an intake pump's
+ * bowl has to be under water and its motor above it, so where it can stand
+ * is a band of the sea floor, not a point. The shelf is kept under ~3.5 m so
+ * that anywhere on it a dry pump floods gently enough to prime without
+ * slamming its casing (a casing that fills through a 12" line with more
+ * than ~0.4 bar behind it hits liquid-solid hard - see the level doc); off
+ * the shelf's edge the water is over the motor anyway.
+ */
+const SEA_FLOOR_EDGE = -2.0;
+const SEA_SHELF_DEPTH = -3.5;
+const SEA_SHELF_RUN = 28;      // m of gentle shelf past the beach face (x = 234..262)
+const SEA_FLOOR_DEEP = -9.0;
+const SEA_FLOOR_RUN = 56;      // m from the shelf start to the map's deep water (x = 234..290)
+/** The sea tank's base, absolute: half full and 8 m tall puts its surface at 0. */
+const SEA_BASE = -4.0;
 
 /** One number that makes the whole landscape repeatable. */
 const SEED = 20260908;
@@ -111,8 +153,9 @@ function profile(x: number): number {
   if (x <= 110) return 14.0;
   if (x <= 176) return lerp(14.0, 2.0, (x - 110) / 66);
   if (x <= 218) return lerp(2.0, 1.4, (x - 176) / 42);
-  if (x <= 234) return lerp(1.4, -4.0, (x - 218) / 16);
-  return -4.0;
+  if (x <= 234) return lerp(1.4, SEA_FLOOR_EDGE, (x - 218) / 16);
+  if (x <= 234 + SEA_SHELF_RUN) return lerp(SEA_FLOOR_EDGE, SEA_SHELF_DEPTH, (x - 234) / SEA_SHELF_RUN);
+  return lerp(SEA_SHELF_DEPTH, SEA_FLOOR_DEEP, clamp01((x - 234 - SEA_SHELF_RUN) / (SEA_FLOOR_RUN - SEA_SHELF_RUN)));
 }
 
 /** Distance from the flat bench, in cells (0 inside it). */
@@ -143,10 +186,18 @@ function warpTaper(x: number): number {
   return 1 - clamp01((x - 218) / 30);
 }
 
+/** The pad's dish: how far below PAD_HEIGHT the ground is at (x, y). */
+function padDip(x: number, y: number): number {
+  const r = Math.hypot(x - POOL_X, y - POOL_Y) / PAD_DISH_RADIUS;
+  return r >= 1 ? 0 : PAD_DISH * (1 - r * r);
+}
+
 /** Ground height (m) at a cell centre. */
 function heightAt(col: number, row: number): number {
   const x = col * CELL, y = row * CELL;
-  if (col >= PAD_C0 && col <= PAD_C1 && row >= PAD_R0 && row <= PAD_R1) return PAD_HEIGHT;
+  if (col >= PAD_C0 && col <= PAD_C1 && row >= PAD_R0 && row <= PAD_R1) {
+    return Number((PAD_HEIGHT - padDip(x, y)).toFixed(3));
+  }
 
   const damp = padTaper(col, row);
   // Lateral wander: bends the coastline and every contour with it
@@ -170,6 +221,13 @@ const terrain = {
   cols: COLS,
   rows: ROWS,
   heights,
+  // How fast standing water soaks into the ground, m/s. The model's default
+  // (1e-4) drinks 810 kg/s off the pad, more than the crack ever passes, so
+  // no puddle ever stood. At 3e-5 the leak keeps ~4800 m2 of the dish wet:
+  // a puddle a few tens of centimetres deep around the pool that grows over
+  // the first hours and shrinks as the leak falls off. A pump standing in it
+  // is fine - its motor is half a metre up.
+  infiltration: 3e-5,
   waters: [{ id: 'sea', seed: { x: 270, y: 75 }, surface: 0 }],
 };
 
@@ -224,23 +282,44 @@ function AIR_TO(pa: number): Record<string, number> {
 const SEA_WIDTH = 34;
 const SEA_PORT_X = Math.round(shorelineX(75) + 3);
 const SEA_X = SEA_PORT_X + SEA_WIDTH / 2;
+/**
+ * The sea floor slopes, so the tank's `elevation` (above LOCAL ground, like
+ * every component's) is whatever puts its base at SEA_BASE.
+ */
+const SEA_ELEVATION = Number((SEA_BASE - terrainHeightAt(terrain, { x: SEA_X, y: 75 })).toFixed(3));
+/**
+ * Where the intake is: 2 m under the surface. A nozzle AT the surface (the
+ * old y: 0, mid-height of a half-full tank) drew half air across the
+ * interface; the sea's water is drawn from below it.
+ */
+const SEA_INTAKE_DEPTH = 2;
 
 const components: Array<[string, Record<string, unknown>]> = [
   ['pool', {
     id: 'pool', type: 'pool', label: 'Spent Fuel Pool',
-    position: { x: 50, y: 75 }, rotation: 0,
+    position: { x: POOL_X, y: POOL_Y }, rotation: 0,
     elevation: -POOL_DEPTH,          // sunk to grade: the rim is at pad level
     side: POOL_SIDE, depth: POOL_DEPTH, wallThickness: 1.2,
     fillLevel: 0.8,                  // 8.4 m of water over a 10.5 m basin
-    fuelPower: 8.0e6,
+    // 10 MW of decay heat: 170 t of fuel and clad is 5.2e7 J/K, so a dry
+    // rack climbs ~190 K per 1000 s. (Was 8 MW; raised 2026-09-09 to put more
+    // urgency behind an uncovered rack.)
+    fuelPower: 10.0e6,
     assemblyCount: 250, rodsPerAssembly: 264,
     rodDiameter: 9.5, cladThickness: 0.6,
     rackHeight: RACK_HEIGHT, rackBottomElevation: RACK_BOTTOM,
     pressureRating: 2,
+    // The make-up nozzles are AT THE RIM, above the water, as a real pool's
+    // make-up lines discharge (anti-siphon): a line into the water would be a
+    // siphon the moment its pump stopped - a 12" line from a pool ten metres
+    // above the sea drains it at ~440 kg/s through an idle pump, which is
+    // the very thing that happened in one of Jack's bug reports. Discharging
+    // above the water also means a pump has to lift to the rim whatever the
+    // level is, so its delivery does not grow as the pool empties.
     ports: [
       { id: 'pool-vent', position: { x: 0, y: -4.5 }, direction: 'both' },
-      { id: 'pool-makeup-w', position: { x: -4.5, y: 0 }, direction: 'both' },
-      { id: 'pool-makeup-e', position: { x: 4.5, y: 0 }, direction: 'both' },
+      { id: 'pool-makeup-w', position: { x: -4.5, y: -POOL_DEPTH / 2 }, direction: 'both' },
+      { id: 'pool-makeup-e', position: { x: 4.5, y: -POOL_DEPTH / 2 }, direction: 'both' },
     ],
     fluid: { temperature: 318.15, pressure: PSAT_45C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     // The pool is open to the sky, so its gas is air at ambient pressure LESS
@@ -283,7 +362,7 @@ const components: Array<[string, Record<string, unknown>]> = [
   // physics is untouched - this is still an ordinary tank node.
   ['sea', {
     id: 'sea', type: 'tank', label: 'The Sea',
-    position: { x: SEA_X, y: 75 }, rotation: 0, elevation: 0,
+    position: { x: SEA_X, y: 75 }, rotation: 0, elevation: SEA_ELEVATION,
     width: SEA_WIDTH, height: 8, wallThickness: 0.05,
     // The sea is not a 3,600 tonne pond. `volume` overrides the drawn
     // cylinder's own capacity, so the picture stays the size the map has
@@ -296,7 +375,7 @@ const components: Array<[string, Record<string, unknown>]> = [
     fillLevel: 0.5,
     waterBody: 'sea',
     pressureRating: 2,
-    ports: [{ id: 'sea-out', position: { x: -SEA_WIDTH / 2, y: 0 }, direction: 'both' }],
+    ports: [{ id: 'sea-out', position: { x: -SEA_WIDTH / 2, y: SEA_INTAKE_DEPTH }, direction: 'both' }],
     fluid: { temperature: 285.15, pressure: PSAT_12C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     initialNcg: { N2: 0.786, O2: 0.210 },
   }],
@@ -307,9 +386,11 @@ const components: Array<[string, Record<string, unknown>]> = [
     width: 12, depth: 8,
     // Fully specified: the yard hands out ONE pump design and ONE line size,
     // so placing from it asks the player where the part goes, not what it is.
-    // The pump is the low-pressure service water machine (200 kg/s at 60 m):
-    // enough to lift from the shore ~15 m below the pool rim and beat the
-    // ~144 kg/s crack, not enough to fill the pool in a moment.
+    // The pump is the wet-pit service water machine (120 kg/s at 12 m, dry,
+    // motor on a 6 m column): it only works standing in the sea, and from
+    // there it lifts ~65 kg/s to the pool's rim (12.7 m up: above its rated
+    // head, so it runs well down its curve) - less than the tear passes, so
+    // the tanks have to carry the difference for the whole watch.
     stock: {
       pipeMeters: 300,
       pipeSpec: 'spec-12in-service',
@@ -447,8 +528,27 @@ const cell = (c: number, r: number) => heights[r * COLS + c];
 
 for (let r = PAD_R0; r <= PAD_R1; r++) {
   for (let c = PAD_C0; c <= PAD_C1; c++) {
-    if (cell(c, r) !== PAD_HEIGHT) problems.push(`bench cell ${c},${r} is ${cell(c, r)} m, not ${PAD_HEIGHT}`);
+    const h = cell(c, r);
+    if (!(h <= PAD_HEIGHT && h >= PAD_HEIGHT - PAD_DISH)) {
+      problems.push(`bench cell ${c},${r} is ${h} m, outside the dish ${PAD_HEIGHT - PAD_DISH}..${PAD_HEIGHT}`);
+    }
   }
+}
+// The dish must stay above the wave, or the tsunami fills the pool from above
+if (!(PAD_HEIGHT - PAD_DISH > 12.6)) problems.push(`the dish bottom ${PAD_HEIGHT - PAD_DISH} m is not above the 12.6 m wave`);
+// The tanks and the yard stand on the rim of the dish, within a few
+// centimetres of the pad's datum (the bilinear ground between cells lets
+// the dish's edge reach them faintly; that is the ground they stand on, and
+// the factory reads it, so there is no phantom head - just a datum a
+// hand's breadth off the nominal 13.0)
+for (const [what, x, y] of [['tank-a', 85, 55], ['tank-b', 85, 100], ['the yard', 60, 115]] as const) {
+  if (!(at(x, y) <= PAD_HEIGHT && at(x, y) >= PAD_HEIGHT - 0.05)) {
+    problems.push(`${what} stands on ${at(x, y).toFixed(3)} m, not the ${PAD_HEIGHT} m rim`);
+  }
+}
+// The pool sits in the bottom of the dish
+if (Math.abs(at(POOL_X, POOL_Y) - (PAD_HEIGHT - PAD_DISH)) > 0.02) {
+  problems.push(`the pool's ground is ${at(POOL_X, POOL_Y).toFixed(3)} m, not the dish bottom ${PAD_HEIGHT - PAD_DISH}`);
 }
 // The bench is a closed depression: every cell touching it must stand above it
 for (let r = PAD_R0 - 1; r <= PAD_R1 + 1; r++) {
@@ -465,10 +565,19 @@ for (let r = PAD_R0 - 1; r <= PAD_R1 + 1; r++) {
 if (at(95, 75) !== PAD_HEIGHT) problems.push(`the trapped pump's ground is ${at(95, 75)} m, not ${PAD_HEIGHT}`);
 const shoreH = at(200, 75);
 if (!(shoreH >= 1.4 && shoreH <= 2.0)) problems.push(`the shore pump's ground is ${shoreH.toFixed(2)} m, outside 1.4..2.0`);
-// The sea tank's own ground: its half-full 8 m body puts the water at 0 m
-// only if it stands on the flat -4 m shelf
+// The sea tank's base: its half-full 8 m body puts the water at 0 m only if
+// the base is at SEA_BASE, wherever the sloping floor under it happens to be
 const seaGround = at(SEA_X, 75);
-if (Math.abs(seaGround + 4) > 1e-6) problems.push(`the sea tank stands on ${seaGround.toFixed(3)} m, not the -4 m shelf`);
+if (Math.abs(seaGround + SEA_ELEVATION - SEA_BASE) > 1e-3) {
+  problems.push(`the sea tank's base is at ${(seaGround + SEA_ELEVATION).toFixed(3)} m, not ${SEA_BASE}`);
+}
+// The sea floor falls away offshore: a wet-pit pump needs a band of it
+// between "bowl under water" and "motor under water" (6 m column)
+if (!(at(236, 75) > -3 && at(236, 75) < 0)) problems.push(`the water's edge shelf is ${at(236, 75).toFixed(2)} m, not the shallows`);
+for (let x = 234; x <= 234 + SEA_SHELF_RUN; x += 2) {
+  if (!(at(x, 75) > -3.8)) problems.push(`the shelf at x=${x} is ${at(x, 75).toFixed(2)} m deep - a dry pump slams filling in more than ~3.7 m`);
+}
+if (!(at(280, 75) < -6)) problems.push(`the sea at x=280 is only ${at(280, 75).toFixed(2)} m deep - the map should get too deep for the pump`);
 
 // Nothing below sea level may drain anywhere but the sea, or it would render
 // as a dry hole in the water (and hold a puddle the player cannot reach).
@@ -497,8 +606,10 @@ const hMin = Math.min(...heights), hMax = Math.max(...heights);
 console.log(`Wrote ${OUT}`);
 console.log(`  terrain ${COLS} x ${ROWS} cells of ${CELL} m; relief ${hMin.toFixed(1)} .. ${hMax.toFixed(1)} m ` +
   `(seed ${SEED}, warp ${WARP_AMP} m, relief noise ${VERT_AMP} m)`);
-console.log(`  bench ${PAD_HEIGHT} m, shore at (200,75) ${shoreH.toFixed(2)} m, sea shelf ${seaGround.toFixed(1)} m`);
-console.log(`  shoreline at y=75 is x=${shorelineX(75).toFixed(1)} m; sea nozzle at x=${SEA_PORT_X}, body at x=${SEA_X}`);
+console.log(`  bench ${PAD_HEIGHT} m (dish ${PAD_DISH} m deep at the pool), shore at (200,75) ${shoreH.toFixed(2)} m, ` +
+  `sea floor ${at(236, 75).toFixed(1)} m at the edge, ${at(290, 75).toFixed(1)} m at the map's edge`);
+console.log(`  shoreline at y=75 is x=${shorelineX(75).toFixed(1)} m; sea nozzle at x=${SEA_PORT_X} ` +
+  `(${SEA_INTAKE_DEPTH} m down), body at x=${SEA_X} on ${seaGround.toFixed(2)} m (elevation ${SEA_ELEVATION})`);
 console.log(`  rack top at ${(RACK_BOTTOM + RACK_HEIGHT).toFixed(2)} m above the pool floor`);
 console.log(`  timeline: quake ${QUAKE} s (3 s of shake), tsunami warning ${TSUNAMI_WARN} s, ` +
   `wave in ${WAVE_IN} s rising to ${WAVE_PEAK} m by ${WAVE_IN + WAVE_RISE} s, ` +

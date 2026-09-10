@@ -904,8 +904,22 @@ export interface PumpState {
   rampUpTime: number;               // seconds - time to reach full speed from stopped
   coastDownTime: number;            // seconds - time to coast to stop when tripped
   npshRequired: number;             // m - NPSH required by pump (NPSHr)
-  /** Standing in water above its base: the motor is drowned (surface-water.ts). */
+  /**
+   * Absolute elevation of the motor, m (the pump's base plus
+   * PumpComponent.motorElevation). Water standing above it drowns the motor
+   * (surface-water.ts sets `flooded`); a wave above it takes the pump.
+   */
+  motorElevation: number;
+  /** Standing in water above its motor: the motor is drowned (surface-water.ts). */
   flooded?: boolean;
+  /**
+   * A nozzle with no line on it faces the air: the factory gives it a
+   * connection to the environment at the nozzle. Such a pump never starts by
+   * itself (see openPumpPortsToAir); it can be started from its panel and
+   * will then pump onto the ground, or suck air.
+   */
+  openInlet?: boolean;
+  openOutlet?: boolean;
   pumpType: 'centrifugal' | 'positive';  // Type affects cavitation behavior
   // Steam-turbine-driven pump (e.g. turbine-driven AFW): the pump has no
   // motor - its speed follows the steam flow through its drive turbine node.

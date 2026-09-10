@@ -38,6 +38,8 @@ import {
   formatMetres, stockedLines, stockLineDisplayName, pipeSpecDisplayName,
 } from './game/stock';
 import { poolReadout, poolStateLabel } from './render/pool-readout';
+import { pumpMotorElevation } from './types';
+import { nodeLiquidLevelFraction } from './simulation';
 import type { PlantStock, PoolComponent } from './types';
 
 // Store previous pressures to show transitions
@@ -1084,6 +1086,13 @@ export function updateComponentDetail(
 
   panel.classList.remove('hidden');
 
+  // A slider in this panel is being dragged: rebuilding the DOM under it
+  // would end the drag. The refresh loop comes back in a quarter second.
+  const active = document.activeElement as HTMLElement | null;
+  if (active && active.tagName === 'INPUT' && (active as HTMLInputElement).type === 'range' && panel.contains(active)) {
+    return;
+  }
+
   let html = '';
 
   // Get simulation linkage from component properties
@@ -1190,15 +1199,49 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Rated Flow:</span><span class="detail-value">${(component.ratedFlow as number)?.toFixed(0)} kg/s</span></div>`;
       const orientation = (component.orientation as string) || 'left-right';
       html += `<div class="detail-row"><span class="detail-label">Orientation:</span><span class="detail-value">${orientation}</span></div>`;
+      html += `<div class="detail-row"><span class="detail-label" title="Height of the motor above the pump's base. Standing water above it drowns the pump; a wave above it carries the pump away.">Motor height:</span><span class="detail-value">${pumpMotorElevation(component as { motorElevation?: number }).toFixed(1)} m</span></div>`;
 
       // Get pump simulation state
       const pumpState = simState.components.pumps.get(componentId);
       if (pumpState) {
+        // ---- Controls: start/stop and the speed setpoint. In a career
+        // level the order goes to the field crew (a walk of some seconds);
+        // in the sandbox it is immediate. Both through pumpControlCallback.
+        const pct = Math.round((pumpState.speed || 0) * 100);
+        html += '<div class="detail-section">';
+        html += '<div class="detail-section-title">Control</div>';
+        html += `<div class="detail-row" style="gap: 8px; align-items: center;">` +
+          `<button id="pump-toggle-btn" style="background: ${pumpState.running ? '#744' : '#264'}; color: #fff; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: bold;" ` +
+          `title="${pumpState.running ? 'Stop the pump (it coasts down)' : 'Start the pump at its speed setpoint (it ramps up)'}">${pumpState.running ? 'STOP' : 'START'}</button>` +
+          `<label style="display: flex; align-items: center; gap: 6px; flex: 1;" title="Speed setpoint, % of rated. Head scales with the square of speed, so 50% speed is a quarter of the head.">` +
+          `Speed <input type="range" id="pump-speed-input" min="10" max="100" step="5" value="${Math.max(10, Math.min(100, pct))}" style="flex: 1;">` +
+          `<span id="pump-speed-readout" style="min-width: 36px; text-align: right;">${pct}%</span></label></div>`;
+        const openNotes: string[] = [];
+        if (pumpState.openInlet) openNotes.push('suction open to the air (no line): it draws air');
+        if (pumpState.openOutlet) openNotes.push('discharge open to the air (no line): it pours onto the ground under the pump');
+        if (openNotes.length > 0) {
+          html += `<div class="detail-row" style="color: #fc8; font-size: 10px;" title="A pump with a nozzle in the air never starts by itself. Connect a line to it, or start it here anyway.">&#9888; ${openNotes.join('; ')}</div>`;
+        }
+        if (pumpState.flooded) {
+          html += `<div class="detail-row" style="color: #f77; font-size: 10px;" title="Water stands above the motor. The pump coasts down and cannot run until the water is gone.">&#9888; DROWNED - water above the motor (${pumpState.motorElevation.toFixed(1)} m)</div>`;
+        }
+        if (component.dischargeCheck) {
+          html += `<div class="detail-row" style="color: #8899aa; font-size: 10px;" title="A non-return flap on the discharge: nothing runs back through the pump when it is stopped.">Discharge check valve fitted</div>`;
+        }
+        html += '</div>';
+
         html += '<div class="detail-section">';
         html += '<div class="detail-section-title">Operating Status</div>';
         html += `<div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value" style="color: ${pumpState.running ? '#7f7' : '#f77'};">${pumpState.running ? 'RUNNING' : 'STOPPED'}</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Speed:</span><span class="detail-value">${(pumpState.effectiveSpeed * 100).toFixed(1)}%</span></div>`;
-        html += `<div class="detail-row"><span class="detail-label">Head:</span><span class="detail-value">${(pumpState.ratedHead * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label" title="Actual speed, % of rated (ramps toward the setpoint)">Speed:</span><span class="detail-value">${(pumpState.effectiveSpeed * 100).toFixed(1)}%${Math.abs(pumpState.effectiveSpeed - pumpState.speed) > 0.005 && pumpState.running ? ` <span style="color: #888; font-size: 9px;">(setpoint ${(pumpState.speed * 100).toFixed(0)}%)</span>` : ''}</span></div>`;
+        html += `<div class="detail-row"><span class="detail-label" title="Shutoff head at this speed: 1.25 x rated head x speed squared">Shutoff head:</span><span class="detail-value">${(1.25 * pumpState.ratedHead * pumpState.effectiveSpeed * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
+        {
+          const casing = simState.flowNodes.get(componentId);
+          if (casing) {
+            const dry = casing.fluid.phase === 'vapor';
+            html += `<div class="detail-row"><span class="detail-label" title="What the casing holds. A pump full of air develops next to no head and cannot draw water up to itself; it fills only if its suction floods it.">Casing:</span><span class="detail-value" style="color: ${dry ? '#f96' : '#8cf'};">${dry ? 'DRY (air)' : casing.fluid.phase === 'two-phase' ? `part air (${(100 * (1 - nodeLiquidLevelFraction(casing))).toFixed(0)}% gas)` : 'primed (liquid)'}</span></div>`;
+          }
+        }
 
         // Calculate and show pressure rise using actual fluid density
         if (pumpState.connectedFlowPath && pumpState.effectiveSpeed > 0) {
@@ -2195,6 +2238,26 @@ export function updateComponentDetail(
   const moveBtn = document.getElementById('move-component-btn');
   const deleteBtn = document.getElementById('delete-component-btn');
 
+  // Pump controls
+  const pumpToggle = document.getElementById('pump-toggle-btn') as HTMLButtonElement | null;
+  const pumpSpeed = document.getElementById('pump-speed-input') as HTMLInputElement | null;
+  const pumpSpeedReadout = document.getElementById('pump-speed-readout');
+  if (pumpToggle) {
+    pumpToggle.addEventListener('click', () => {
+      const pump = simState.components.pumps.get(componentId);
+      pumpControlCallback?.(componentId, { running: !(pump?.running ?? false) });
+    });
+  }
+  if (pumpSpeed) {
+    pumpSpeed.addEventListener('input', () => {
+      if (pumpSpeedReadout) pumpSpeedReadout.textContent = `${pumpSpeed.value}%`;
+    });
+    pumpSpeed.addEventListener('change', () => {
+      pumpControlCallback?.(componentId, { speed: parseInt(pumpSpeed.value, 10) / 100 });
+      pumpSpeed.blur();
+    });
+  }
+
   if (moveBtn) {
     moveBtn.addEventListener('click', () => {
       if (componentMoveCallback) {
@@ -2233,6 +2296,14 @@ export function updateComponentDetail(
 
 // Callbacks for edit/delete actions
 let componentEditCallback: ((componentId: string) => void) | null = null;
+let pumpControlCallback: ((componentId: string, order: { running?: boolean; speed?: number }) => void) | null = null;
+
+/** Set callback for the pump START/STOP button and speed slider. */
+export function setPumpControlCallback(
+  callback: (componentId: string, order: { running?: boolean; speed?: number }) => void
+): void {
+  pumpControlCallback = callback;
+}
 let coreEditCallback: ((reactorVesselId: string) => void) | null = null;
 let componentMoveCallback: ((componentId: string) => void) | null = null;
 let componentDeleteCallback: ((componentId: string) => void) | null = null;

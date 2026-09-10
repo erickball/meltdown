@@ -45,7 +45,7 @@ export interface DebrisScene {
   ppm: number;
 }
 
-type DebrisKind = 'log' | 'drum' | 'boat' | 'crate';
+type DebrisKind = 'log' | 'drum' | 'boat' | 'crate' | 'wreck';
 
 interface DebrisPiece {
   x: number;
@@ -74,6 +74,30 @@ const WAVE_TRIGGER = 0.5;
 const COUNT = 44;
 
 const fields = new Map<string, DebrisField>();
+
+/**
+ * A piece of plant the wave took (see simulation/wave-casualties.ts): a wreck
+ * dropped into the body's field at the spot the component stood, to float
+ * off and strand with the rest. The field is created empty if the view has
+ * not seeded one yet (the perspective view never draws terrain); the next
+ * render seeds the ordinary debris around it.
+ */
+export function addWreck(bodyId: string, p: Point2, simTime: number, size = 3): void {
+  let field = fields.get(bodyId);
+  if (!field) {
+    field = { pieces: [], lastTime: simTime };
+    fields.set(bodyId, field);
+  }
+  const i = field.pieces.length + 101;
+  field.pieces.push({
+    x: p.x, y: p.y, kind: 'wreck',
+    draught: 0.4 + rand(i, 5) * 0.4,
+    speed: 0.3 + rand(i, 6) * 0.6,
+    angle: rand(i, 7) * Math.PI * 2,
+    size,
+    stranded: false,
+  });
+}
 
 /** Deterministic [0,1) from two integers - the same field every run. */
 function rand(i: number, salt: number): number {
@@ -190,6 +214,24 @@ function drawPiece(ctx: CanvasRenderingContext2D, piece: DebrisPiece, scene: Deb
       ctx.strokeStyle = 'rgba(35, 25, 10, 0.8)';
       ctx.fillRect(-L / 2, -w / 2, L, w);
       ctx.strokeRect(-L / 2, -w / 2, L, w);
+      break;
+    }
+    case 'wreck': {
+      // A machine on its side: a grey block with its motor stub, a hazard
+      // stripe, and the pipe stubs that came away with it
+      const w = Math.max(3, L * 0.6);
+      ctx.fillStyle = afloat ? '#6d7480' : '#5a606a';
+      ctx.strokeStyle = 'rgba(20, 22, 28, 0.85)';
+      ctx.fillRect(-L / 2, -w / 2, L, w);
+      ctx.strokeRect(-L / 2, -w / 2, L, w);
+      ctx.fillStyle = afloat ? '#c9a227' : '#a5851f';
+      ctx.fillRect(-L / 2, -w / 2, L * 0.18, w);
+      ctx.fillStyle = afloat ? '#4a5160' : '#3d434f';
+      ctx.fillRect(L * 0.1, -w * 0.9, L * 0.3, w * 0.4);
+      ctx.beginPath();
+      ctx.moveTo(-L / 2, w * 0.2); ctx.lineTo(-L * 0.75, w * 0.35);
+      ctx.moveTo(L / 2, -w * 0.1); ctx.lineTo(L * 0.8, -w * 0.3);
+      ctx.stroke();
       break;
     }
     case 'boat': {

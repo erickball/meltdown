@@ -25,7 +25,9 @@ import { buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
 import {
   getPresetById, getPipeSpecById, pipeSpecFlowArea,
 } from '../src/construction/component-presets';
-import { nodeLiquidLevel } from '../src/simulation';
+import { nodeLiquidLevel, cellAt } from '../src/simulation';
+import { waveCasualties } from '../src/simulation/wave-casualties';
+import type { PlantState } from '../src/types';
 import { getCladdingOxidationPower } from '../src/simulation/operators/rate-operators';
 import {
   createSimulationFromPlant,
@@ -266,6 +268,8 @@ const SFP_QUAKE_WALL_S = 20;
  */
 const SFP_WAVE_AFTER_QUAKE_S = 54 * 60;
 const SFP_WARN_BEFORE_WAVE_S = 15 * 60;
+/** How far the answer opens the tank valve once the sea pump carries its share (SFP_THROTTLE=x to tune). */
+const SFP_ANSWER_TANK_THROTTLE = process.env.SFP_THROTTLE ? parseFloat(process.env.SFP_THROTTLE) : 0.3;
 
 type PlantJsonRW = {
   components: Array<[string, Record<string, unknown>]>;
@@ -297,7 +301,12 @@ const SFP_PIPE_AREA = (() => {
   return pipeSpecFlowArea(spec);
 })();
 
-/** A make-up pump as the yard hands it over, at a plan position. */
+/**
+ * A make-up pump as the yard hands it over, at a plan position: on the
+ * local ground (elevation 0 - the sea floor when the spot is in the sea),
+ * with the design's motor column and casing fill (DRY: it holds air until
+ * its suction floods it).
+ */
 function sfpPump(id: string, label: string, x: number, y: number) {
   const ratedFlow = SFP_PUMP.ratedFlow;
   return [id, {
@@ -307,6 +316,9 @@ function sfpPump(id: string, label: string, x: number, y: number) {
     running: false, speed: 1,
     ratedFlow, ratedHead: SFP_PUMP.ratedHead, orientation: 'left-right',
     npshRequired: SFP_PUMP.npshRequired,
+    motorElevation: SFP_PUMP.motorElevation,
+    initialFill: (SFP_PUMP as Record<string, unknown>).initialFill,
+    dischargeCheck: (SFP_PUMP as Record<string, unknown>).dischargeCheck,
     ports: [
       { id: `${id}-inlet`, position: { x: -0.5, y: 0 }, direction: 'in' },
       { id: `${id}-outlet`, position: { x: 0.5, y: 0 }, direction: 'out' },
@@ -314,6 +326,24 @@ function sfpPump(id: string, label: string, x: number, y: number) {
     fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
     pressureRating: SFP_PUMP.pressureRating,
   }] as [string, Record<string, unknown>];
+}
+
+/** The sea's intake: its one port, at the depth the level puts it. */
+function sfpSeaIntakeElevation(): number {
+  const sea = sfpPlant().components.find(c => c[0] === 'sea')![1] as { height: number; ports: Array<{ position: { y: number } }> };
+  return sea.height / 2 - sea.ports[0].position.y;
+}
+
+/**
+ * Where a line into the pool lands: the connection dialog's default for the
+ * named port (depth/2 - port.y above the pool floor), which is what a player
+ * who accepts the dialog gets.
+ */
+function sfpPoolPortElevation(portId: string): number {
+  const pool = sfpPlant().components.find(c => c[0] === 'pool')![1] as { depth: number; ports: Array<{ id: string; position: { y: number } }> };
+  const port = pool.ports.find(p => p.id === portId);
+  if (!port) throw new Error(`[sfp] the pool has no port '${portId}'`);
+  return pool.depth / 2 - port.position.y;
 }
 
 function sfpLine(
@@ -442,34 +472,55 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     if (lostAt > 0 && dryAt > 0 && !(lostAt > dryAt)) fail('the release must follow the dry-out, not precede it');
   }
 
-  // -- 2 & 3. The suction lift ---------------------------------------------
+  // -- 2 & 3. Where the pump can stand ------------------------------------
   // The same pump, same pipe, same pool: only the ground under it differs.
+  // The yard's pump is a wet-pit machine delivered DRY (a casing full of
+  // air): on the bench or on the shore the sea cannot reach up into it and
+  // it pumps nothing; standing in the sea it floods, primes and delivers;
+  // too far out and the sea is over its motor before it starts.
+  const seaIntake = sfpSeaIntakeElevation();
   for (const spot of (wants('2') ? [
-    { name: 'pool bench (+13 m)', id: 'trap', x: 95, y: 75, suction: 150, discharge: 45, deliver: false },
-    { name: 'shore (+1.7 m)', id: 'shore', x: 200, y: 75, suction: 45, discharge: 155, deliver: true },
+    { name: 'pool bench (+13 m)', id: 'trap', x: 95, y: 75, suction: 150, discharge: 45, deliver: false, drowned: false },
+    { name: 'shore (+1.7 m)', id: 'shore', x: 200, y: 75, suction: 30, discharge: 170, deliver: false, drowned: false },
+    { name: 'in the sea (x=236, ~2 m of water)', id: 'wet', x: 236, y: 75, suction: 12, discharge: 200, deliver: true, drowned: false },
+    { name: 'too far out (x=282, ~7 m of water)', id: 'deep', x: 282, y: 75, suction: 60, discharge: 250, deliver: false, drowned: true },
   ] : [])) {
     const plant = sfpPlant();
     plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y));
     (plant.components.find(c => c[0] === spot.id)![1] as Record<string, unknown>).running = true;
     plant.connections.push(
-      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, 0.5, 0.3, spot.suction, SFP_PIPE_AREA),
-      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, 10.5, spot.discharge, SFP_PIPE_AREA));
+      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, seaIntake, 0.3, spot.suction, SFP_PIPE_AREA),
+      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', 0.3, sfpPoolPortElevation('pool-makeup-e'), spot.discharge, SFP_PIPE_AREA));
     plant.scenario = undefined;   // no earthquake: this is about the pump alone
     const sim = buildSimFromPlantJson(plant as never);
     run(sim, 120, 0.02);
     const q = flowRate(sim.state, spot.id, 'pool');
-    const suction = sim.state.flowNodes.get(spot.id)!;
+    const casing = sim.state.flowNodes.get(spot.id)!;
+    const pump = sim.state.components.pumps.get(spot.id)!;
+    const ground = casing.groundHeight ?? 0;
     console.log(`  [${spot.deliver ? 3 : 2}] ${spot.name}: ${q.toFixed(1)} kg/s to the pool, ` +
-      `pump node ${suction.fluid.phase} at ${(suction.fluid.pressure / 1e5).toFixed(3)} bar ` +
+      `casing ${casing.fluid.phase} at ${(casing.fluid.pressure / 1e5).toFixed(3)} bar, ground ${ground.toFixed(2)} m, ` +
+      `motor at ${pump.motorElevation.toFixed(2)} m${pump.flooded ? ' DROWNED' : ''}, speed ${pump.effectiveSpeed.toFixed(2)} ` +
       `(${getPresetById(SFP_YARD_PUMP_DESIGN)!.name}, ${SFP_PUMP.ratedFlow} kg/s at ` +
       `${SFP_PUMP.ratedHead} m, on ${getPipeSpecById(SFP_YARD_PIPE_SPEC)!.label})`);
-    if (spot.deliver && !(q > 40)) fail(`a shore pump should push water up to the pool, got ${q.toFixed(1)} kg/s`);
-    if (!spot.deliver && !(Math.abs(q) < 2)) {
-      fail(`a pump 13 m above the sea cannot draw it, got ${q.toFixed(1)} kg/s`);
-    }
-    if (!spot.deliver && !(suction.fluid.phase === 'two-phase' && suction.fluid.pressure < 0.3e5)) {
-      fail(`the trapped pump's suction should have flashed, got ${suction.fluid.phase} at ` +
-        `${(suction.fluid.pressure / 1e5).toFixed(3)} bar`);
+    if (spot.deliver) {
+      if (!(q > 40)) fail(`a pump standing in the sea should push water up to the pool, got ${q.toFixed(1)} kg/s`);
+      if (!(q < 90)) fail(`the pump is meant to be modest - well under the tear's ~105 kg/s at the racks, got ${q.toFixed(1)} kg/s`);
+      if (casing.fluid.phase !== 'liquid') fail(`a pump standing in the sea should have primed, casing is ${casing.fluid.phase}`);
+      if (pump.flooded) fail('a pump in 2 m of water has its motor 4 m above the sea - it must not be drowned');
+    } else {
+      // Nothing DELIVERED. A little may run the other way: the pool stands
+      // ten metres above the sea, and a pump - running or not - is an open
+      // path between them (the impeller's reverse resistance is all that
+      // slows it). That is real: the yard's gate valves are the answer.
+      if (!(q < 2)) fail(`the pump at the ${spot.name} should deliver nothing, got ${q.toFixed(1)} kg/s`);
+      if (q < -0.5) console.log(`      (${(-q).toFixed(1)} kg/s runs BACK from the pool through the idle pump to the sea)`);
+      if (spot.drowned) {
+        if (!pump.flooded) fail('a pump standing in 7 m of water has its motor under the surface - it must be drowned');
+        if (!(pump.effectiveSpeed < 0.05)) fail(`a drowned pump must coast down, speed ${pump.effectiveSpeed.toFixed(2)}`);
+      } else if (casing.fluid.phase === 'liquid') {
+        fail(`a dry pump on dry ground cannot prime itself - its casing should still hold air, got ${casing.fluid.phase}`);
+      }
     }
   }
 
@@ -477,7 +528,13 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
   if (wants('4')) {
     const plant = sfpPlant();
     plant.components.push(
-      sfpPump('shore-pump', 'Sea Pump', 200, 75),
+      // Standing in the sea (there is nowhere else it works), stopped until
+      // the wave has been and gone. It is there from the start so that the
+      // wave rule can be checked against it (a pump the wave closes over is
+      // one the app removes: src/simulation/wave-casualties.ts decides, and
+      // this test asks it), but it is only started afterwards - the answer
+      // a player gives is to BUILD it afterwards, which comes to the same.
+      sfpPump('shore-pump', 'Sea Pump', 236, 75),
       // The tank line needs no pump: both tanks stand on the bench with the
       // pool sunk 10.5 m below their feet, so they feed it by gravity. What
       // it needs is a valve, because 1200 t of gravity feed left open runs
@@ -494,8 +551,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         pressureRating: 20,
       }] as [string, Record<string, unknown>]);
     plant.connections.push(
-      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', 0.5, 0.3, 45, SFP_PIPE_AREA),
-      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, 10.5, 155, SFP_PIPE_AREA),
+      sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', seaIntake, 0.3, 12, SFP_PIPE_AREA),
+      sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', 0.3, sfpPoolPortElevation('pool-makeup-e'), 200, SFP_PIPE_AREA),
       sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
       sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
       sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));
@@ -508,6 +565,14 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     // side of the wave - which is the point of the gap. Times track the
     // level's own clock (scripts/gen-spent-fuel-pool.ts): aftershock 1200 s,
     // wave in 4440 s, back to sea level 4980 s.
+    // The sea pump cannot beat the tear on its own (it is rated for a few
+    // tens of kg/s against a full pool, ~90 against an empty one, and the
+    // tear passes ~105 kg/s at the rack top), so the tanks are not a bridge
+    // to the pump - they are the other half of the make-up for the whole
+    // watch, and the play is to THROTTLE them to the shortfall so that 1200
+    // tonnes lasts eight hours. Times track the level's own clock
+    // (scripts/gen-spent-fuel-pool.ts): aftershock 1200 s, wave in 4440 s,
+    // back to sea level 4980 s.
     plant.scenario!.events.push(
       { time: 1260, message: 'Liner is gone: opening the tank make-up', actions: [
         { kind: 'valve', id: 'tank-valve', position: 1 },
@@ -515,8 +580,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       { time: 5100, message: 'The sea is back down: sea pump on the line', actions: [
         { kind: 'pump', id: 'shore-pump', running: true, speed: 1 },
       ] },
-      { time: 5700, message: 'Sea pump has the load; securing the tank line', actions: [
-        { kind: 'valve', id: 'tank-valve', position: 0 },
+      { time: 5700, message: 'Sea pump has what it can carry; throttling the tank line to the shortfall', actions: [
+        { kind: 'valve', id: 'tank-valve', position: SFP_ANSWER_TANK_THROTTLE },
       ] });
     const sim = buildSimFromPlantJson(plant as never);
     const tankMass = () => sim.state.flowNodes.get('tank-a')!.fluid.mass +
@@ -529,7 +594,13 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     let worstUncovered = 0;
     let floodedAt = -1;
     let recoveredAt = -1;
+    let takenAt = -1;
     let lastLog = 0;
+    const plantForWave = {
+      components: new Map(plant.components as Array<[string, never]>),
+      connections: plant.connections, terrain: plant.terrain, scenario: plant.scenario,
+    } as unknown as PlantState;
+    let maxPuddle = 0;
     while (sim.state.time < 28800) {
       run(sim, 20, 0.5);
       sim.state.pendingEvents = [];
@@ -546,28 +617,36 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       const shore = sim.state.components.pumps.get('shore-pump')!;
       if (shore.flooded && floodedAt < 0) floodedAt = sim.state.time;
       if (floodedAt > 0 && !shore.flooded && recoveredAt < 0) recoveredAt = sim.state.time;
+      if (takenAt < 0 && waveCasualties(plantForWave, sim.state).some(c => c.id === 'shore-pump')) takenAt = sim.state.time;
+      // The leak's puddle on the pad (the basin under the pool)
+      const padBasin = sim.state.terrain!.basinOf[cellAt(sim.state.terrain!.spec, { x: 50, y: 75 })];
+      maxPuddle = Math.max(maxPuddle, sim.state.surfaceWater!.volumes.get(padBasin) ?? 0);
       if (sim.state.time - lastLog >= 1800) {
         lastLog = sim.state.time;
         console.log(`      t=${sim.state.time.toFixed(0).padStart(5)}s  pool ${lvl.toFixed(2)} m  ` +
           `clad ${sfpCladC(sim.state).toFixed(0)} C  ` +
-          `tanks ${(tankMass() / 1000).toFixed(0)} t  ` +
-          `shore ${shore.flooded ? 'FLOODED' : 'dry'} (${shore.effectiveSpeed.toFixed(2)})`);
+          `tanks ${(tankMass() / 1000).toFixed(0)} t (${flowRate(sim.state, 'tank-valve', 'pool').toFixed(0)} kg/s)  ` +
+          `sea pump ${shore.flooded ? 'DROWNED' : 'clear'} (${shore.effectiveSpeed.toFixed(2)}, ${flowRate(sim.state, 'shore-pump', 'pool').toFixed(0)} kg/s)  ` +
+          `puddle ${(sim.state.surfaceWater!.volumes.get(padBasin) ?? 0).toFixed(0)} m3`);
       }
     }
     console.log(`  [4] eight hours: min pool level ${minLevel.toFixed(2)} m (racks at ${SFP_RACK_TOP} m), ` +
       `peak clad ${maxClad.toFixed(0)} C, longest uncovery ${worstUncovered.toFixed(0)} s, ` +
-      `shore pump drowned at t=${floodedAt.toFixed(0)} s and restarted at t=${recoveredAt.toFixed(0)} s; ` +
+      `sea pump drowned at t=${floodedAt.toFixed(0)} s (the wave would take it at t=${takenAt.toFixed(0)} s) ` +
+      `and clear again at t=${recoveredAt.toFixed(0)} s; ` +
       `tanks ${(tanks0 / 1000).toFixed(0)} t -> ${(minTanks / 1000).toFixed(0)} t ` +
       `(${((tanks0 - minTanks) / 1000).toFixed(0)} t drawn, ` +
-      `${(100 * minTanks / tanks0).toFixed(0)}% left)`);
+      `${(100 * minTanks / tanks0).toFixed(0)}% left); the leak's puddle peaked at ${maxPuddle.toFixed(0)} m3`);
+    if (!(takenAt > 0)) fail('the wave must close over a pump standing in the sea (its motor is 6 m up)');
+    if (!(maxPuddle > 50)) fail(`the leak should stand as a puddle on the pad, it peaked at ${maxPuddle.toFixed(0)} m3`);
     if (!(minTanks > 0.05 * tanks0)) {
       fail(`the tanks must still hold a margin at the end, they fell to ` +
         `${(minTanks / 1000).toFixed(0)} t of ${(tanks0 / 1000).toFixed(0)} t`);
     }
     if (!(worstUncovered < SFP_GRACE)) fail(`the answer must keep the racks covered, uncovered for ${worstUncovered.toFixed(0)} s`);
     if (!(maxClad < 600)) fail(`cladding must stay below the 600 C limit, peaked at ${maxClad.toFixed(0)} C`);
-    if (!(floodedAt > 0)) fail('the tsunami must drown a pump standing on the shore');
-    if (!(recoveredAt > floodedAt)) fail('the shore pump must restart once the sea has gone back down');
+    if (!(floodedAt > 0)) fail('the tsunami must drown a pump standing in the sea');
+    if (!(recoveredAt > floodedAt)) fail('the sea pump must clear once the sea has gone back down');
   }
 
   console.log(`\n[sfp] -> ${pass ? 'PASS' : 'FAIL'}`);

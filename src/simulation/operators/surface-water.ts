@@ -86,6 +86,19 @@ export function isFlooded(state: SimulationState, node: FlowNode | undefined): b
   return surface !== undefined && surface > node.elevation;
 }
 
+/**
+ * True when the water over the pump stands above its MOTOR. The base can be
+ * under water and the pump fine - a wet-pit intake pump is built that way -
+ * it is the motor that must stay dry.
+ */
+export function isPumpDrowned(
+  state: SimulationState, pump: { motorElevation: number }, node: FlowNode | undefined
+): boolean {
+  if (!node || !node.position) return false;
+  const surface = surfaceUnder(state, node.position);
+  return surface !== undefined && surface > pump.motorElevation;
+}
+
 export class SurfaceWaterRateOperator implements RateOperator {
   name = 'SurfaceWater';
 
@@ -184,9 +197,9 @@ export class SurfaceWaterConstraintOperator implements ConstraintOperator {
       if (!moved) break;
     }
 
-    // Who is under water
+    // Whose motor is under water
     for (const [id, pump] of state.components.pumps) {
-      pump.flooded = isFlooded(state, state.flowNodes.get(id));
+      pump.flooded = isPumpDrowned(state, pump, state.flowNodes.get(id));
     }
     return state;
   }

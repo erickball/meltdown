@@ -381,6 +381,13 @@
   letter-spacing: 1px;
 }
 
+/* The level's clock sits on the title line, so it survives a collapse */
+.gm-hud-clock {
+  color: #9fd;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+}
+
 .gm-hud-phase {
   color: #8cf;
   border: 1px solid #345;
@@ -444,9 +451,9 @@
   padding-right: 72px;
 }
 
-/* Collapsed HUD: one line with the essentials (level, money, primary
-   action, SHOW button); everything else folds away so it can't cover the
-   cost readout / selection panel. */
+/* Collapsed HUD: one line with the essentials (level, clock, money, primary
+   action, SHOW button); everything else - the event log included - folds
+   away behind the SHOW button, which carries the count of events waiting. */
 .gm-hud-collapsed .gm-hud-phase,
 .gm-hud-collapsed .gm-hud-loan,
 .gm-hud-collapsed .gm-hud-mw,
@@ -454,6 +461,7 @@
 .gm-hud-collapsed .gm-hud-abandon,
 .gm-hud-collapsed .gm-hud-goals,
 .gm-hud-collapsed .gm-hud-ticker,
+.gm-hud-collapsed .gm-hud-events,
 .gm-hud-collapsed .gm-hud-hints {
   display: none;
 }
@@ -466,8 +474,8 @@
   font-size: 12px;
 }
 
-/* Running major-events log: persistent, per-entry dismiss. Stays visible even
-   when the HUD is collapsed so a burst can't vanish unread. */
+/* Running major-events log: persistent, per-entry dismiss. Folded away with
+   the rest when the HUD is collapsed; the SHOW button says how many wait. */
 .gm-hud-events {
   margin-top: 4px;
   max-height: 130px;

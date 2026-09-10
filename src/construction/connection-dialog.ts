@@ -1,6 +1,8 @@
 // Connection configuration dialog for creating connections between components
 
 import { PlantComponent, Port, Connection } from '../types';
+import type { TerrainSpec } from '../terrain-types';
+import { terrainHeightAt } from '../simulation/terrain';
 import { getComponentVisualHeight } from '../render/components';
 import { hasPinnedPortElevations } from './component-properties';
 import { PIPE_SPECS, findMatchingPipeSpec, pipeSpecFlowArea } from './component-presets';
@@ -12,6 +14,13 @@ const OPENING_HEIGHT_TIP =
   "vessel's liquid / froth / vapor profile over this span, so a moving level " +
   "hands off between phases gradually instead of stepping. Empty or 0 samples " +
   "a single point at the connection elevation.";
+
+// Shared tooltip for every "Absolute: x m" readout
+const ABSOLUTE_TIP =
+  "Absolute elevations are measured from the map's datum (sea level on a map " +
+  "with a sea): the ground under the component, plus the component's own " +
+  "elevation above that ground, plus the port's height on the component. " +
+  "Relative elevations are measured from the component's own base.";
 
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
@@ -62,6 +71,33 @@ export class ConnectionDialog {
    */
   private pipeStockProvider: (() => number | null) | null = null;
   private yardPipeSpecProvider: (() => string | null) | null = null;
+  /**
+   * The plant's terrain, if it has one. A component's `elevation` is measured
+   * from the ground under it, and the ground is not at 0 everywhere: the
+   * "absolute" numbers this dialog prints are `ground + elevation + port`,
+   * referenced to the terrain's own datum (sea level on a map with a sea).
+   * Without this the sea's nozzle read "+4 m" while standing on a -4 m shelf.
+   */
+  private terrainProvider: (() => TerrainSpec | undefined) | null = null;
+
+  /** Where to read the plant's terrain from (undefined = flat ground at 0). */
+  setTerrainProvider(provider: () => TerrainSpec | undefined): void {
+    this.terrainProvider = provider;
+  }
+
+  /** Height of the ground under a component (0 on a plant with no terrain). */
+  private groundUnder(component: PlantComponent): number {
+    return terrainHeightAt(this.terrainProvider?.() ?? undefined, component.position);
+  }
+
+  /**
+   * Absolute elevation of a component's base: the ground under it plus its
+   * own `elevation` (which is above local ground). Every absolute number in
+   * this dialog is built on this.
+   */
+  private baseElevation(component: PlantComponent): number {
+    return this.groundUnder(component) + ((component as any).elevation ?? 0);
+  }
 
   /** Tell the dialog where to read the remaining pipe stock. */
   setPipeStockProvider(provider: () => number | null): void {
@@ -205,9 +241,10 @@ export class ConnectionDialog {
     const toPortX = this.toComponent!.position.x + this.toPort!.position.x;
     const toPortY = this.toComponent!.position.y + this.toPort!.position.y;
 
-    // Get component base elevations
-    const fromComponentElev = (this.fromComponent! as any).elevation ?? 0;
-    const toComponentElev = (this.toComponent! as any).elevation ?? 0;
+    // Get component base elevations (absolute: ground under it + its own
+    // elevation above that ground)
+    const fromComponentElev = this.baseElevation(this.fromComponent!);
+    const toComponentElev = this.baseElevation(this.toComponent!);
 
     // Calculate absolute elevations of each port
     const fromAbsoluteElev = fromComponentElev + fromElevation;
@@ -317,6 +354,7 @@ export class ConnectionDialog {
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
     fromElevHelp.id = 'from-elevation-help';
+    fromElevHelp.title = ABSOLUTE_TIP;
     fromElevHelp.textContent = fromIsPinned
       ? `Fixed at the ${this.fromComponent!.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`
       : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + fromElevation).toFixed(1)} m`;
@@ -348,6 +386,7 @@ export class ConnectionDialog {
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
     toElevHelp.id = 'to-elevation-help';
+    toElevHelp.title = ABSOLUTE_TIP;
     toElevHelp.textContent = toIsPinned
       ? `Fixed at the ${this.toComponent!.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`
       : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + toElevation).toFixed(1)} m`;
@@ -798,9 +837,12 @@ export class ConnectionDialog {
     const fromHeight = this.getComponentHeight(fromComponent);
     const toHeight = this.getComponentHeight(toComponent);
 
-    // Get component base elevations
-    const fromComponentElev = (fromComponent as any).elevation ?? 0;
-    const toComponentElev = (toComponent as any).elevation ?? 0;
+    // Get component base elevations (absolute: ground under it + its own
+    // elevation above that ground)
+    const fromComponentElev = this.baseElevation(fromComponent);
+    const toComponentElev = this.baseElevation(toComponent);
+    const fromGround = this.groundUnder(fromComponent);
+    const toGround = this.groundUnder(toComponent);
 
     // Current values
     const currentFromElev = connection.fromElevation ?? 0;
@@ -817,12 +859,12 @@ export class ConnectionDialog {
         <div>
           <div style="color: #99aacc;">From: ${fromComponent.label || fromComponent.id}</div>
           <div style="color: #667788;">Component height: ${fromHeight.toFixed(1)} m</div>
-          <div style="color: #667788;">Base elevation: ${fromComponentElev.toFixed(1)} m</div>
+          <div style="color: #667788;" title="${ABSOLUTE_TIP}">Base elevation: ${fromComponentElev.toFixed(1)} m (ground ${fromGround.toFixed(1)} m)</div>
         </div>
         <div>
           <div style="color: #99aacc;">To: ${toComponent.label || toComponent.id}</div>
           <div style="color: #667788;">Component height: ${toHeight.toFixed(1)} m</div>
-          <div style="color: #667788;">Base elevation: ${toComponentElev.toFixed(1)} m</div>
+          <div style="color: #667788;" title="${ABSOLUTE_TIP}">Base elevation: ${toComponentElev.toFixed(1)} m (ground ${toGround.toFixed(1)} m)</div>
         </div>
       </div>
     `;
@@ -854,6 +896,7 @@ export class ConnectionDialog {
 
     const fromElevHelp = document.createElement('div');
     fromElevHelp.className = 'help-text';
+    fromElevHelp.title = ABSOLUTE_TIP;
     const fromElevHelpText = (relElev: number) => fromIsPinned
       ? `Fixed at the ${fromComponent.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`
       : `Relative: 0 to ${fromHeight.toFixed(1)} m | Absolute: ${(fromComponentElev + relElev).toFixed(1)} m`;
@@ -905,6 +948,7 @@ export class ConnectionDialog {
 
     const toElevHelp = document.createElement('div');
     toElevHelp.className = 'help-text';
+    toElevHelp.title = ABSOLUTE_TIP;
     const toElevHelpText = (relElev: number) => toIsPinned
       ? `Fixed at the ${toComponent.type === 'pump' ? 'pump nozzle' : 'valve port'} | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`
       : `Relative: 0 to ${toHeight.toFixed(1)} m | Absolute: ${(toComponentElev + relElev).toFixed(1)} m`;

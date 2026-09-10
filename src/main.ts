@@ -51,6 +51,7 @@ import {
   LiveEditSnapshot,
   nodeLiquidLevelFraction,
   steamPartialPressurePa,
+  terrainHeightAt,
 } from './simulation';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
@@ -62,7 +63,9 @@ import {
   BuildQueue, Buildable, componentBuildMassKg, connectionBuildMassKg,
 } from './game/build-queue';
 import { getPipeSpecById } from './construction/component-presets';
-import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback } from './debug';
+import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDamageIndicator, setComponentEditCallback, setCoreEditCallback, setComponentMoveCallback, setComponentDeleteCallback, setConnectionEditCallback, setPlantConnectionEditCallback, setConnectionDeleteCallback, setPumpControlCallback } from './debug';
+import { waveCasualties, WaveCasualty } from './simulation/wave-casualties';
+import { addWreck } from './render/debris-fx';
 import { GameModeManager } from './game-mode';
 import { ComponentDialog, ComponentConfig, componentDefinitions, auditComponentEditSync } from './construction/component-config';
 import { ConstructionManager } from './construction/construction-manager';
@@ -381,6 +384,8 @@ function init() {
   gameLoop.onStateUpdate = (state: SimulationState, metrics: SolverMetrics) => {
     // Career-mode bookkeeping (revenue, objectives, random events)
     gameMode?.onSimUpdate(state);
+    // A wave that has closed over something the player built takes it
+    checkWaveCasualties(state);
     // Update time display
     const timeDisplay = document.getElementById('sim-time');
     if (timeDisplay) {
@@ -469,6 +474,8 @@ function init() {
     } else if (event.type === 'scenario') {
       // A preset's scripted accident sequence just acted on the plant
       showNotification('Scenario: ' + event.message, 'warning', 15000);
+    } else if (event.type === 'washed-away') {
+      showNotification(event.message, 'error', 15000);
     } else if (event.type === 'shake') {
       // Ground motion: the view jolts, the plant does not. No banner - the
       // scenario event that ordered it carries the words.
@@ -1613,6 +1620,9 @@ function init() {
   // no idea a warehouse exists - it just shows a number when there is one.
   connectionDialog.setPipeStockProvider(() => pipeMetersRemaining(plantState));
   connectionDialog.setYardPipeSpecProvider(() => stockedPipeSpecId(plantState));
+  // Absolute elevations in the dialog are ground + elevation + port, so it
+  // needs the ground
+  connectionDialog.setTerrainProvider(() => plantState.terrain);
   const constructionManager = new ConstructionManager(plantState);
 
   // Construction cost panel elements
@@ -2075,6 +2085,34 @@ function init() {
     requestComponentDelete(componentId);
   });
 
+  // START/STOP and the speed slider on a pump's panel. In a career level the
+  // order goes to the operator panel's field crew (a walk of some seconds);
+  // in the sandbox it lands at once, as an input the history records.
+  setPumpControlCallback((componentId: string, order: { running?: boolean; speed?: number }) => {
+    if (gameMode?.orderPump(componentId, order)) return;
+    const pump = gameLoop.getState()?.components.pumps.get(componentId);
+    if (!pump) {
+      showNotification(`${componentId} has no pump in the running simulation`, 'warning');
+      return;
+    }
+    gameLoop.updateState(state => {
+      const p = state.components.pumps.get(componentId);
+      if (!p) return state;
+      if (order.speed !== undefined) {
+        p.speed = order.speed;
+        if (order.speed > 0 && order.running === undefined) p.running = true;
+      }
+      if (order.running !== undefined) {
+        p.running = order.running;
+        if (order.running && p.speed <= 0) p.speed = 1.0;
+      }
+      return state;
+    });
+    const p = gameLoop.getState().components.pumps.get(componentId)!;
+    showNotification(`${componentId}: ${p.running ? `running, setpoint ${(p.speed * 100).toFixed(0)}%` : 'stopped'}`, 'info', 3000);
+    updateComponentDetail(componentId, plantState, gameLoop.getState());
+  });
+
   // Connection edit callback - find plant connection from simulation connection ID
   setConnectionEditCallback((simConnId: string) => {
     // Simulation connection IDs are typically formatted as "fromNodeId->toNodeId"
@@ -2286,7 +2324,8 @@ function init() {
       return;
     }
     const portAbsElevation = (c: PlantComponent, port: Port) =>
-      (c.elevation ?? 0) + getComponentVisualHeight(c) / 2 - port.position.y;
+      terrainHeightAt(plantState.terrain, c.position) + (c.elevation ?? 0) +
+      getComponentVisualHeight(c) / 2 - port.position.y;
     const rise = Math.abs(portAbsElevation(from.component, from.port) - portAbsElevation(to.component, to.port));
     if (connectionStatus) {
       connectionStatus.textContent = `Pipe laid: ${planLength.toFixed(1)} m along the grid`;
@@ -3306,6 +3345,63 @@ function init() {
       'info', 5000);
     updateConstructionCostPanel();
     return true;
+  }
+
+  /**
+   * The wave takes what it closes over (src/simulation/wave-casualties.ts
+   * decides what; this carries it out). Checked on every state update, and
+   * acted on OUTSIDE the loop's own update because removing a component is
+   * a live edit - a rebuild of the simulation - which cannot happen in the
+   * middle of the step that noticed it. Nothing is refunded: a part at the
+   * bottom of the sea is not back on the shelf, and a part still being
+   * built there is lost with it. Rewinding past the wave brings them back,
+   * since the removal is an ordinary plant edit in the history.
+   */
+  let waveCasualtiesQueued = false;
+  function checkWaveCasualties(state: SimulationState): void {
+    if (waveCasualtiesQueued || currentMode !== 'simulation') return;
+    const lost = waveCasualties(plantState, state);
+    if (lost.length === 0) return;
+    waveCasualtiesQueued = true;
+    window.setTimeout(() => {
+      waveCasualtiesQueued = false;
+      try {
+        washAway(lost, state.time);
+      } catch (error) {
+        console.error('[Wave] Could not remove the components the wave took:', error);
+        showNotification('The wave reached the plant, and removing what it took failed: ' +
+          (error instanceof Error ? error.message : String(error)).substring(0, 160), 'error', 15000);
+      }
+    }, 0);
+  }
+
+  function washAway(lost: WaveCasualty[], simTime: number): void {
+    // Still there? (the player may have rewound, or deleted it, meanwhile)
+    const taken = lost.filter(c => plantState.components.has(c.id));
+    if (taken.length === 0) return;
+    for (const c of taken) {
+      const component = plantState.components.get(c.id);
+      const job = component ? buildQueue.jobFor(component as Buildable) : null;
+      if (job) buildQueue.discard(job.id);
+    }
+    liveEdit(`The wave took ${taken.map(c => c.label).join(', ')}`, () => {
+      for (const c of taken) {
+        if (plantState.components.has(c.id)) constructionManager.destroyComponent(c.id);
+      }
+    });
+    for (const c of taken) {
+      addWreck(c.bodyId, c.position, simTime);
+      gameLoop.reportEvent('washed-away',
+        `THE WAVE TOOK ${c.label.toUpperCase()}: the sea stood ${(c.surface - c.washAwayElevation).toFixed(1)} m over it. ` +
+        `It is gone - nothing of it goes back to the yard.`,
+        { componentId: c.id, bodyId: c.bodyId });
+    }
+    if (selectedComponentId && !plantState.components.has(selectedComponentId)) {
+      plantCanvas.clearSelection();
+      selectedComponentId = null;
+      updateComponentDetail(null, plantState, gameLoop.getState());
+    }
+    updateConstructionCostPanel();
   }
 
   /**

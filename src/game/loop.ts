@@ -96,7 +96,8 @@ export type GameEventType =
   | 'simulation-error'
   | 'component-burst'
   | 'scenario'
-  | 'shake';
+  | 'shake'
+  | 'washed-away';
 
 export interface GameEvent {
   type: GameEventType;
@@ -108,7 +109,7 @@ export interface GameEvent {
 /** Event types the rewind history keeps as timeline markers. The rest
  *  (speed warnings, auto-slowdown, transient alarms) are notifications. */
 export const HISTORY_EVENT_TYPES: ReadonlySet<GameEventType> = new Set<GameEventType>([
-  'scram', 'scram-reset', 'component-burst', 'scenario', 'shake', 'simulation-error',
+  'scram', 'scram-reset', 'component-burst', 'scenario', 'shake', 'simulation-error', 'washed-away',
 ]);
 
 export class GameLoop {
@@ -670,6 +671,15 @@ export class GameLoop {
     const fuelId = this.state.neutronics.fuelNodeId ?? 'fuel';
     const fuelNode = this.state.thermalNodes.get(fuelId);
     return fuelNode?.temperature ?? 0;
+  }
+
+  /**
+   * Report something that happened to the plant from OUTSIDE the solver (the
+   * wave taking a component, decided by the app): logged, notified and kept
+   * in the history like any event the loop raises itself.
+   */
+  reportEvent(type: GameEventType, message: string, data?: Record<string, unknown>): void {
+    this.emitEvent({ type, time: this.state.time, message, data });
   }
 
   /**

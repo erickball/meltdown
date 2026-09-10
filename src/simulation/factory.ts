@@ -36,7 +36,8 @@ import {
   H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM,
 } from './otsg';
 import * as Water from './water-properties';
-import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface } from '../types';
+import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface,
+  PumpComponent, pumpMotorElevation, pumpVisualHeight } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
@@ -924,6 +925,9 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     if (component.type === 'pump') {
       const pumpState = createPumpStateFromComponent(component);
       if (pumpState) {
+        // Where the motor is, in the world: the ground, the pump's own
+        // elevation above it, and the motor's height on the machine
+        pumpState.motorElevation = absoluteBase(component) + pumpMotorElevation(component as PumpComponent);
         state.components.pumps.set(pumpState.id, pumpState);
         // Link plant component to pump state for debug panel
         (component as any).simPumpId = pumpState.id;
@@ -1689,6 +1693,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         rampUpTime: 10.0,
         coastDownTime: 10.0,
         npshRequired: 4,
+        motorElevation: absoluteBase(component) + pumpMotorElevation(tdPump),
         pumpType: 'centrifugal',
         steamDriven: { steamNodeId: id, ratedSteamFlow },
       });
@@ -1813,6 +1818,11 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       }
     }
   }
+
+  // A pump nozzle with no line on it faces the open air
+  openPumpPortsToAir(plantState, state);
+  // Discharge non-return flaps
+  fitPumpDischargeChecks(plantState, state);
 
   // Wall thermal-node pass (EXPERIMENT, env-gated): give pressure-boundary
   // components a real steel wall node - inner convection to their own fluid,
@@ -2182,12 +2192,19 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // the connection pipe-inventory lumping pass - see that pass in
       // createSimulationFromPlant.
       const ratedFlow = pump.ratedFlow || 100;
-      const temp = pump.fluid?.temperature || 350;
-      const pressure = Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
 
       // Gas circulators: honor a vapor-phase spec and an NCG fill (partial
-      // pressures in bar), like tanks/pipes
-      const pumpPhase = pump.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+      // pressures in bar), like tanks/pipes. A pump built DRY (delivered
+      // from the yard, never primed) holds ambient air - the same air the
+      // environment node is made of - instead of the liquid it is meant to
+      // pump: its own head on that air is a few hundred pascals, so it
+      // fills only if the suction floods it.
+      const dry = pump.initialFill === 'dry';
+      const air = dry ? ambientAir() : null;
+      const pumpPhase = dry || pump.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
+      const temp = air ? air.temperature : (pump.fluid?.temperature || 350);
+      const pressure = air ? air.steamPressure : Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
+      const initialNcg = air ? air.ncg : pump.initialNcg;
 
       // The 0.002 * ratedFlow scale is a RESIDENCE-TIME inventory (casing +
       // piping run) sized for water. A gas circulator moving the same kg/s
@@ -2203,10 +2220,12 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       let volume = pump.volume !== undefined
         ? pump.volume
         : Math.max(0.3, 0.004 * ratedFlow);
-      if (pump.volume === undefined && pumpPhase === 'vapor') {
+      // A dry pump is still a water pump: its casing is sized for the water
+      // it will hold, not for the air it happens to start with
+      if (pump.volume === undefined && pumpPhase === 'vapor' && !dry) {
         let rhoGas = Math.max(0.1, (pressure * 0.018) / (8.314 * temp)); // steam
-        if (pump.initialNcg) {
-          for (const [species, bar] of Object.entries(pump.initialNcg as Record<string, number>)) {
+        if (initialNcg) {
+          for (const [species, bar] of Object.entries(initialNcg as Record<string, number>)) {
             const M = GAS_PROPERTIES[species as GasSpecies]?.molecularWeight ?? 0.028;
             rhoGas += ((bar as number) * 1e5 * M) / (8.314 * temp);
           }
@@ -2217,12 +2236,12 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         id: component.id,
         label: component.label || 'Pump',
         fluid: createFluidState(
-          temp, pressure, pumpPhase, pumpPhase === 'vapor' ? 1 : 0, volume, pump.initialNcg
+          temp, pressure, pumpPhase, pumpPhase === 'vapor' ? 1 : 0, volume, initialNcg
         ),
         volume,
         hydraulicDiameter: pump.diameter || 0.3,
         flowArea: Math.PI * Math.pow((pump.diameter || 0.3) / 2, 2),
-        height: 0,  // Pumps are well-mixed
+        height: pumpCasingHeight(pump),
         elevation,
       };
     }
@@ -2797,6 +2816,32 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
 }
 
 /**
+ * The vertical extent of a pump's fluid pot: from its base up to its
+ * DISCHARGE nozzle. A pump used to be a zero-height, well-mixed pot, which
+ * priced every draw from it as the mixture - so a casing holding any air at
+ * all could never get rid of it: the discharge line was priced at the
+ * mixture's density, the air could not climb it, and a dry pump standing
+ * in the sea sat air-bound for ever. A real casing vents through its
+ * discharge, which is why the discharge is on TOP (end-suction /
+ * top-discharge is the standard centrifugal layout, and a vertical wet-pit
+ * pump's column head is the top of the machine): with the pot spanning
+ * base-to-discharge, the discharge draws from the top of the casing - gas
+ * first, while there is gas - and the suction from the bottom. The pot
+ * fills, the air leaves up the line, and the pump primes.
+ *
+ * The nozzle heights are the same pinned port elevations every line to a
+ * pump uses (height/2 - port.y on the drawn machine). A pump whose ports
+ * put the discharge at or below its base keeps the old zero height.
+ */
+function pumpCasingHeight(pump: { diameter?: number; ports?: Array<{ position: { y: number } }> }): number {
+  const ports = pump.ports ?? [];
+  if (ports.length === 0) return 0;
+  const half = pumpVisualHeight(pump) / 2;
+  const top = Math.max(...ports.map(p => half - p.position.y));
+  return top > 0 ? top : 0;
+}
+
+/**
  * Create pump state from a pump component
  */
 function createPumpStateFromComponent(component: PlantComponent): PumpState | null {
@@ -2821,6 +2866,7 @@ function createPumpStateFromComponent(component: PlantComponent): PumpState | nu
     ratedHead: pump.ratedHead || 150,
     ratedFlow: pump.ratedFlow || 1000,
     efficiency: 0.85,
+    motorElevation: 0,     // Set by the caller, which knows the ground
     connectedFlowPath: '', // Set later when connections are processed
     rampUpTime: 5.0,
     coastDownTime: 30.0,
@@ -4830,11 +4876,15 @@ function createMcciNodes(plantState: PlantState, state: SimulationState): void {
  * so nothing about it is ever integrated - the composition only decides what
  * comes back through a line that opens inward.
  */
-function createAtmosphereNode(): FlowNode {
+/**
+ * The air outside: 20 C, 1 atm, 50% relative humidity, as steam partial
+ * pressure plus dry-air partial pressures (bar). The environment node is made
+ * of this, and so is anything built open to it (a dry pump casing).
+ */
+export function ambientAir(): { temperature: number; steamPressure: number; ncg: NcgPartialPressures } {
   const T_AMBIENT = 293.15;             // K (20 °C)
   const P_AMBIENT = 101325;             // Pa (1 atm total)
   const RELATIVE_HUMIDITY = 0.5;
-  const volume = 1e12;                  // Effectively infinite
   const P_steam = Water.saturationPressure(T_AMBIENT) * RELATIVE_HUMIDITY;
   const P_dryAir = P_AMBIENT - P_steam;
   // Dry-air mole fractions (N2 / O2 / Ar make up 99.96% of it), RENORMALISED
@@ -4845,15 +4895,111 @@ function createAtmosphereNode(): FlowNode {
   // not modelled, so their share belongs to the three that are.
   const AIR_N2 = 0.7808, AIR_O2 = 0.2095, AIR_AR = 0.0093;
   const AIR_SUM = AIR_N2 + AIR_O2 + AIR_AR;
-  const air: NcgPartialPressures = {
-    N2: (P_dryAir * AIR_N2 / AIR_SUM) / 1e5,
-    O2: (P_dryAir * AIR_O2 / AIR_SUM) / 1e5,
-    Ar: (P_dryAir * AIR_AR / AIR_SUM) / 1e5,
+  return {
+    temperature: T_AMBIENT,
+    steamPressure: P_steam,
+    ncg: {
+      N2: (P_dryAir * AIR_N2 / AIR_SUM) / 1e5,
+      O2: (P_dryAir * AIR_O2 / AIR_SUM) / 1e5,
+      Ar: (P_dryAir * AIR_AR / AIR_SUM) / 1e5,
+    },
   };
+}
+
+/**
+ * Every pump nozzle that has no line on it gets a connection to the
+ * environment AT the nozzle (no head across it): an open suction draws air,
+ * an open discharge pours onto the ground under the pump, where the
+ * surface-water operator turns it into a puddle. A pump missing a line on
+ * either side does not start by itself, whatever its design says - a pump
+ * with a nozzle in the air is one nobody has finished installing - but it
+ * keeps its setpoint and can be started from its panel.
+ */
+function openPumpPortsToAir(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    if (component.type !== 'pump') continue;
+    const pump = component as PumpComponent;
+    const pumpState = state.components.pumps.get(id);
+    if (!pumpState) continue;
+    const inletPort = pump.ports[0];
+    const outletPort = pump.ports[1];
+    if (!inletPort || !outletPort) continue;
+    // By component, not by port id: the connection pass above resolves a
+    // pump's lines the same way (a line INTO the pump is its suction, a line
+    // OUT of it its discharge - runsAgainstPump has already refused the
+    // other orientation), and test plants do not always name ports.
+    const hasInlet = plantState.connections.some(c => c.toComponentId === id);
+    const hasOutlet = plantState.connections.some(c => c.fromComponentId === id);
+    if (hasInlet && hasOutlet) continue;
+
+    // The nozzle's height on the machine, exactly as a real line would be
+    // pinned to it (height/2 - port.y, see hasPinnedPortElevations)
+    const nozzleElevation = (port: { position: { y: number } }) => pumpVisualHeight(pump) / 2 - port.position.y;
+    const nozzleArea = Math.PI * Math.pow((pump.diameter || 0.3) / 2, 2);
+    const open = (connection: Connection, which: 'openInlet' | 'openOutlet') => {
+      const flowConnection = createFlowConnectionFromPlantConnection(connection, plantState, state);
+      if (!flowConnection) {
+        throw new Error(`[Factory] Could not open pump ${id}'s ${which === 'openInlet' ? 'suction' : 'discharge'} to the air`);
+      }
+      state.flowConnections.push(flowConnection);
+      pumpState[which] = true;
+      if (which === 'openOutlet' && !pumpState.connectedFlowPath) pumpState.connectedFlowPath = flowConnection.id;
+    };
+    if (!hasOutlet) {
+      open({
+        fromComponentId: id, fromPortId: outletPort.id,
+        toComponentId: ENVIRONMENT_NODE_ID, toPortId: 'environment',
+        fromElevation: nozzleElevation(outletPort),
+        flowArea: nozzleArea, length: 1, resistanceCoeff: 1,   // an open nozzle: one exit loss
+      } as Connection, 'openOutlet');
+    }
+    if (!hasInlet) {
+      open({
+        fromComponentId: ENVIRONMENT_NODE_ID, fromPortId: 'environment',
+        toComponentId: id, toPortId: inletPort.id,
+        toElevation: nozzleElevation(inletPort),
+        flowArea: nozzleArea, length: 1, resistanceCoeff: 1,   // an open bell: one entry loss
+      } as Connection, 'openInlet');
+    }
+    if (pumpState.running) {
+      console.info(`[Factory] Pump ${id} has ${!hasInlet && !hasOutlet ? 'no lines' : !hasInlet ? 'no suction line' : 'no discharge line'}: ` +
+        `built stopped (its open nozzle faces the air). Start it from its panel to run it anyway.`);
+      pumpState.running = false;
+      pumpState.effectiveSpeed = 0;
+    }
+  }
+}
+
+/**
+ * A pump built with `dischargeCheck` gets a check valve on the line its
+ * head drives (see PumpComponent.dischargeCheck). It is the same passive
+ * CheckValveState a check-valve component makes, keyed to the discharge
+ * flow path, so the solver treats it exactly as one: forward flow above a
+ * light cracking pressure, nothing backward. A stopped pump is then not a
+ * siphon from whatever stands above it.
+ */
+function fitPumpDischargeChecks(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    if (component.type !== 'pump' || !(component as PumpComponent).dischargeCheck) continue;
+    const pumpState = state.components.pumps.get(id);
+    if (!pumpState?.connectedFlowPath) continue;
+    if (!state.components.checkValves) state.components.checkValves = new Map();
+    const cvId = `${id}-discharge-check`;
+    state.components.checkValves.set(cvId, {
+      id: cvId,
+      connectedFlowPath: pumpState.connectedFlowPath,
+      crackingPressure: 5e3,   // Pa - a light flap, half a metre of water
+    });
+  }
+}
+
+function createAtmosphereNode(): FlowNode {
+  const volume = 1e12;                  // Effectively infinite
+  const air = ambientAir();
   return {
     id: ENVIRONMENT_NODE_ID,
     label: 'Atmosphere',
-    fluid: createFluidState(T_AMBIENT, P_steam, 'vapor', 1, volume, air),
+    fluid: createFluidState(air.temperature, air.steamPressure, 'vapor', 1, volume, air.ncg),
     volume,
     hydraulicDiameter: 100,
     flowArea: 1e6,

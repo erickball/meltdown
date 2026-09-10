@@ -93,19 +93,28 @@ export function deserializeSimulationState(data: Record<string, unknown>): Simul
 
 /** The plant design as plain JSON: what a save file / preset / import holds. */
 export function serializePlantDesign(plant: PlantState): Record<string, unknown> {
-  return {
+  // A DEEP copy, not a view. The history keeps one of these per epoch and
+  // restores it when the player rewinds past an edit; a design that shared
+  // its component objects with the live plant would be rewritten by every
+  // later edit - the supply yard's `stock` is mutated in place on each
+  // placement, so "back to t=0" used to put back a warehouse that had
+  // already been emptied.
+  return JSON.parse(JSON.stringify({
     components: Array.from(plant.components.entries()),
     connections: plant.connections,
     ...(plant.scenario ? { scenario: plant.scenario } : {}),
     ...(plant.terrain ? { terrain: plant.terrain } : {}),
-  };
+  }));
 }
 
 /** Inverse of serializePlantDesign (a fresh PlantState; nothing shared). */
-export function deserializePlantDesign(data: Record<string, unknown>): PlantState {
-  if (!Array.isArray(data.components)) {
+export function deserializePlantDesign(input: Record<string, unknown>): PlantState {
+  if (!Array.isArray(input.components)) {
     throw new Error('[serialization] Plant design has no components array');
   }
+  // Copy on the way out too: the caller installs these objects as the live
+  // plant, and the history's epoch must not follow the plant's later edits
+  const data = JSON.parse(JSON.stringify(input)) as Record<string, unknown>;
   const plant = {
     components: new Map(data.components as Array<[string, PlantComponent]>),
     connections: Array.isArray(data.connections) ? data.connections : [],

@@ -518,10 +518,16 @@ export const componentDefinitions: Record<string, {
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 2000, step: 10, unit: 'm', help: 'Charging/HPSI service needs ~1300-1600 m to overcome full primary pressure' },
       { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
-      { name: 'speed', type: 'number', label: 'Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM' },
+      { name: 'ratedRpm', type: 'number', label: 'Rated Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM', help: "Motor speed at 100%. Informational: the rated flow and head above are what the pump does at 100% speed. The running speed is set from the pump's panel once it is built." },
       { name: 'efficiency', type: 'number', label: 'Efficiency', default: 85, min: 50, max: 95, step: 5, unit: '%' },
-      { name: 'npshRequired', type: 'number', label: 'NPSH Required', default: 5, min: 1, max: 30, step: 1, unit: 'm' },
-      { name: 'initialState', type: 'select', label: 'Initial State', default: 'on', options: [
+      { name: 'npshRequired', type: 'number', label: 'NPSH Required', default: 5, min: 1, max: 30, step: 0.5, unit: 'm', help: "Net positive suction head the impeller needs: (suction pressure - vapour pressure) as metres of liquid. Below it the pump cavitates and loses head. A pump lifting from below has only the atmosphere's ~10 m to spend, less the lift and the friction, so a high-NPSHr pump must stand near or below its source." },
+      { name: 'motorElevation', type: 'number', label: 'Motor Height', default: 0.5, min: 0, max: 30, step: 0.5, unit: 'm', help: "Height of the motor above the pump's base - the part that drowns. Standing water above it stops the pump; a wave above it carries the pump away. A horizontal pump keeps its motor at shaft height (~0.5 m). A vertical wet-pit intake pump stands its motor on a column several metres above the bowl, so the bowl can sit under water while the motor stays dry." },
+      { name: 'initialFill', type: 'select', label: 'Casing Fill', default: 'primed', help: "What the casing holds when the pump is built. Primed: full of liquid, as a commissioned plant's pumps are. Dry: air - a pump delivered from the yard. A dry pump fills only if its suction is flooded (the source stands higher than its nozzle, or is pressurised); a centrifugal pump full of air cannot draw water up to itself.", options: [
+        { value: 'primed', label: 'Primed (full of liquid)' },
+        { value: 'dry', label: 'Dry (air - fills only from a flooded suction)' }
+      ]},
+      { name: 'dischargeCheck', type: 'checkbox', label: 'Discharge check valve', default: false, help: "A non-return flap on the discharge nozzle, as vertical wet-pit pumps and most service pumps carry. Without one a stopped pump is an open pipe: a line from a tank standing above the pump siphons back through it." },
+      { name: 'initialState', type: 'select', label: 'Initial State', default: 'on', help: "Whether the pump runs when the plant starts. A pump with a line missing on either side never starts by itself - its open nozzle simply faces the air - and can be started from its panel once built.", options: [
         { value: 'on', label: 'Running' },
         { value: 'off', label: 'Stopped' }
       ]},

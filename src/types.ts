@@ -319,9 +319,42 @@ export interface PumpComponent extends ComponentBase {
   type: 'pump';
   diameter: number;
   running: boolean;
-  speed: number;        // 0-1 (fraction of rated)
+  speed: number;        // 0-1 (fraction of rated) - the SETPOINT, not the motor's RPM
   ratedFlow: number;    // kg/s at full speed
   ratedHead: number;    // meters of head
+  /**
+   * The motor's speed at 100%, RPM. Informational: `speed` is a fraction of
+   * this. (Older plants stored the dialog's RPM as `speed = rpm / 3600`, so
+   * an 1800 RPM pump ran at half speed and 31% of its head; the dialog now
+   * keeps the two apart.)
+   */
+  ratedRpm?: number;
+  /**
+   * Height of the motor above the pump's base, m. The part of the machine
+   * that drowns: standing water above it stops the pump, and a wave above it
+   * carries the pump away. A horizontal pump keeps its motor at shaft height
+   * (the default, DEFAULT_PUMP_MOTOR_ELEVATION); a vertical wet-pit intake
+   * pump stands it on a column several metres above the bowl, which is what
+   * lets the bowl sit under water.
+   */
+  motorElevation?: number;
+  /**
+   * What the casing holds when the pump is built. 'primed' (the default):
+   * full of the liquid it pumps, as a commissioned plant's pumps are. 'dry':
+   * air at ambient - a pump delivered from the yard and set down; it fills
+   * only if its suction is flooded (a source standing higher than the
+   * nozzle, or a pressurised one), and a centrifugal pump full of air can
+   * neither draw water up to itself nor push it anywhere.
+   */
+  initialFill?: 'primed' | 'dry';
+  /**
+   * A non-return flap on the discharge nozzle, as vertical wet-pit pumps and
+   * most service pumps carry. Without one a stopped pump is an open pipe:
+   * a line from a tank standing above the pump siphons back through it (a
+   * 12" line from a pool ten metres up drains ~400 kg/s through an idle
+   * pump). Modelled as a check valve on the discharge line.
+   */
+  dischargeCheck?: boolean;
   // Which side the discharge nozzle faces. Suction is always below and the
   // motor always on top - the pump is never laid on its side. (Legacy saves
   // may carry 'bottom-top'/'top-bottom'; normalizeLoadedPlant folds those
@@ -714,6 +747,29 @@ export interface CrossVesselComponent extends ComponentBase {
  */
 export function waterBodyOf(component: { type: string; waterBody?: string }): string | undefined {
   return component.type === 'tank' && component.waterBody ? component.waterBody : undefined;
+}
+
+/**
+ * Where a pump's motor sits above its base when the pump does not say: shaft
+ * height on a horizontal machine, about half a metre. See
+ * PumpComponent.motorElevation for what the number does.
+ */
+export const DEFAULT_PUMP_MOTOR_ELEVATION = 0.5;
+
+/** Height of a pump's motor above the pump's base, m. */
+export function pumpMotorElevation(pump: { motorElevation?: number }): number {
+  return pump.motorElevation ?? DEFAULT_PUMP_MOTOR_ELEVATION;
+}
+
+/**
+ * The drawn height of a pump, m: the renderer's scale is diameter x 1.3 and
+ * the drawing spans 2.2 scale units (motor 0.9 + coupling 0.15 + casing 0.5
+ * + suction nozzle 0.35, centred at local y = 0, plus 0.3 of inlet pipe
+ * below). Port elevations are pinned to this height (height/2 - port.y), so
+ * the factory and the renderer both read it from here.
+ */
+export function pumpVisualHeight(pump: { diameter?: number }): number {
+  return (pump.diameter || 0.3) * 1.3 * 2.2;
 }
 
 export type PlantComponent =

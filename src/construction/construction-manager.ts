@@ -1,6 +1,7 @@
 // Construction manager for creating and managing components in construction mode
 
 import {
+  DEFAULT_PUMP_MOTOR_ELEVATION,
   PlantState,
   PlantComponent,
   TankComponent,
@@ -723,12 +724,22 @@ export class ConstructionManager {
           label: props.name || 'Pump',
           position: { x: worldX, y: worldY },
           rotation: pumpRotation,
+          // Above the local ground, like every other component (this used to
+          // be dropped for pumps, so a preset's basement elevation and the
+          // dialog's field were both silently ignored)
+          elevation: props.elevation ?? 0,
           diameter: calculatedDiameter,
           running: props.initialState === 'on',
-          speed: props.speed / 3600,  // Convert RPM to fraction
+          // The setpoint: a new pump runs at its rated speed. The motor's RPM
+          // is a separate, informational rating.
+          speed: 1.0,
+          ratedRpm: props.ratedRpm,
           ratedFlow: props.ratedFlow,
           ratedHead: props.ratedHead,
           pressureRating: props.pressureRating,
+          motorElevation: props.motorElevation ?? DEFAULT_PUMP_MOTOR_ELEVATION,
+          initialFill: props.initialFill === 'dry' ? 'dry' : 'primed',
+          dischargeCheck: props.dischargeCheck === true,
           ports: pumpPorts,
           fluid: pumpFluid
         };
@@ -3417,6 +3428,20 @@ export class ConstructionManager {
    * Delete a component and all its connections
    */
   deleteComponent(componentId: string): boolean {
+    return this.removeComponent(componentId, true);
+  }
+
+  /**
+   * Remove a component that has been DESTROYED (a wave took it): the same
+   * removal as deleteComponent, but nothing goes back on the warehouse shelf.
+   * A separate method rather than an option because callers wrap and
+   * re-export deleteComponent by its one-argument shape (Jack's journal).
+   */
+  destroyComponent(componentId: string): boolean {
+    return this.removeComponent(componentId, false);
+  }
+
+  private removeComponent(componentId: string, salvage: boolean): boolean {
     const component = this.plantState.components.get(componentId);
     if (!component) {
       console.error(`[Construction] Cannot delete: component ${componentId} not found`);
@@ -3448,8 +3473,10 @@ export class ConstructionManager {
 
     // Back on the shelf: this component, plus every run that went with it.
     // Sub-components that came free with the parent (a reactor vessel's core
-    // barrel) are not refunded - they were never charged.
-    refundDeletedComponent(this.plantState, component, connectionsToRemove);
+    // barrel) are not refunded - they were never charged. A destroyed
+    // component (salvage = false) refunds nothing: it is at the bottom of
+    // the sea.
+    if (salvage) refundDeletedComponent(this.plantState, component, connectionsToRemove);
 
     // Filter out the removed connections
     this.plantState.connections = this.plantState.connections.filter(
@@ -3834,14 +3861,25 @@ export class ConstructionManager {
       if (properties.type !== undefined) {
         component.pumpType = properties.type; // centrifugal / positive displacement
       }
-      if (properties.speed !== undefined) {
-        component.speed = properties.speed / 3600; // RPM to fraction of 3600
+      if (properties.ratedRpm !== undefined) {
+        // The motor's rating only; the running setpoint (`speed`) is the
+        // pump's own business and is not touched by an edit
+        component.ratedRpm = properties.ratedRpm;
       }
       if (properties.efficiency !== undefined) {
         component.efficiency = properties.efficiency / 100; // % to 0-1
       }
       if (properties.npshRequired !== undefined) {
         component.npshRequired = properties.npshRequired;
+      }
+      if (properties.motorElevation !== undefined) {
+        component.motorElevation = properties.motorElevation;
+      }
+      if (properties.initialFill !== undefined) {
+        component.initialFill = properties.initialFill === 'dry' ? 'dry' : 'primed';
+      }
+      if (properties.dischargeCheck !== undefined) {
+        component.dischargeCheck = properties.dischargeCheck === true;
       }
     }
     if (properties.orientation !== undefined && component.type === 'pump') {

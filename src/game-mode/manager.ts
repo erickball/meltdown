@@ -69,6 +69,15 @@ const NO_OUTAGE_REASON =
  * A duration in plain words: "2h 15m", "48 min", "90 s". Used wherever the
  * player is told how long something has left (or has been wrong for).
  */
+/** h:mm:ss of the plant's clock. */
+function formatHms(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+}
+
 function formatDuration(seconds: number): string {
   const s = Math.max(0, Math.round(seconds));
   if (s < 120) return `${s} s`;
@@ -598,7 +607,24 @@ export class GameModeManager {
       this.hud.ticker(event.message, true);
       this.hud.addEvent(event.message, simTime, true);
       this.tunes.sfx('alarm');
+    } else if (event.type === 'washed-away') {
+      // The wave took something the player built
+      this.hud.ticker(event.message, true);
+      this.hud.addEvent(event.message, simTime, true);
+      this.tunes.sfx('alarm');
     }
+  }
+
+  /**
+   * A pump order from the component's own panel. While a level is being
+   * operated it goes through the operator panel's walk to the field like
+   * every other field action; otherwise it is not ours (main.ts applies it
+   * directly). Returns whether it was taken.
+   */
+  orderPump(componentId: string, order: { running?: boolean; speed?: number }): boolean {
+    if (!this.active || this.phase !== 'operation') return false;
+    this.operatorPanel.orderPump(componentId, order);
+    return true;
   }
 
   onSimUpdate(state: SimulationState): void {
@@ -640,8 +666,25 @@ export class GameModeManager {
       const mwe = getTurbineCondenserState().turbinePower / 1e6;
       if (!this.economyOff) this.hud.setMoney(this.ledger.snapshot(this.operatedSeconds), mwe);
       this.hud.setGoals(this.goalProgress());
+      this.hud.setClock(this.levelClock());
       this.checkEndConditions(state);
     }
+  }
+
+  /**
+   * The level's clock: time on watch, and the length of the watch when the
+   * level has one (a survive goal). Stays on the HUD's title line even when
+   * the rest of the HUD is folded away.
+   */
+  private levelClock(): { text: string; title: string } {
+    const watch = this.level?.goals.find(g => g.kind === 'survive') as { seconds: number } | undefined;
+    const text = watch
+      ? `${formatHms(this.operatedSeconds)} / ${formatHms(watch.seconds)}`
+      : formatHms(this.operatedSeconds);
+    const title = watch
+      ? 'Time on watch (the plant\'s clock) / the length of the watch'
+      : 'Time on watch (the plant\'s clock)';
+    return { text, title };
   }
 
   /** Construction-phase HUD refresh (called on plant changes from main.ts). */

@@ -455,3 +455,77 @@ level wanted: the gravity feed slows the loss but does not stop it, and the sea
 is still the only thing that ends the accident. Check [4] now also asserts the
 tanks finish with a margin (>5% of what they started with), so a future change
 that quietly drains them fails rather than passing on the pool level alone.
+
+---
+
+## 2026-09-09, the pump has to stand in the sea (worktree `level1-adjustments`)
+
+Erick's asks, from playing it: the yard pump is too big and works from the
+shore, which makes no sense; the sea floor should deepen offshore and the pump
+should stand on it; the connection dialog's "absolute" elevations were not
+absolute; the wave should take what it reaches; the HUD should fold away but
+keep the clock and stay off the panels; a pump should start stopped, spew into
+a puddle if a line is missing, and be started from its panel; the leak should
+stand as a puddle; more decay heat; and a t=0 reset should refill the yard.
+The generic mechanics are in [pump-placement.md](pump-placement.md); this is
+what they did to the level.
+
+**The yard pump is now a wet-pit machine delivered DRY:** `pump-service-water-lp`
+= 120 kg/s at 12 m, NPSHr 1.5 m, motor on a 6 m column, casing full of air,
+discharge check valve. Full of air it cannot draw water up to itself, so on the
+bench or the shore it sits at 1 atm doing nothing (the old primed pump worked
+from the shore because a primed pump 1.7 m above the water is fine - the
+physics never disagreed with it; NPSH is not what stops it, priming is).
+Standing in the sea the water walks in, the air goes up the discharge, and it
+lifts ~84 kg/s to the pool's RIM. Too far out and the sea is over the motor:
+drowned before it starts. The discharge check is what lets a stopped pump sit
+in the sea without the pool's air seeping down the line into it, and without
+the pool siphoning back through it.
+
+**The map:** the beach face now ends at -2 m and a shelf shelves to -3.5 m
+over the next 28 m (x = 234..262), then the floor drops to -9 m at the map's
+edge. The shelf is kept under 3.7 m of water on purpose: a dry casing filling
+through a 12" line with more than ~0.4 bar behind it hits liquid-solid hard
+enough to burst (a phantom-gas artifact - see the placement doc); off the
+shelf the motor is under water anyway. The sea tank's `elevation` follows the
+sloping floor so its base stays at -4 m, and its nozzle is 2 m under the
+surface (it used to be AT the surface and drew half air).
+
+**The pool's make-up nozzles moved to the rim.** A nozzle under the water was
+a siphon the moment the pump stopped: a 12" line from the pool ten metres
+above the sea drained ~440 kg/s back through an idle pump. Real make-up lines
+discharge above the water for exactly this reason. Consequence: the sea pump
+lifts to 12.7 m whatever the level, so its delivery does not grow as the pool
+empties - it is the make-up that never runs out, not the one that keeps up.
+
+**The pad is a shallow dish** (0.3 m at the pool, flat at its edges where the
+tanks and the yard stand) and the terrain's infiltration is 3e-5 m/s: the
+leak now stands as a puddle around the pool that grows to ~500 m3 over the
+first hours and shrinks as the tear slows. On a flat pad at the default 1e-4
+no puddle ever stood (the whole 8100 m2 drank 810 kg/s).
+
+**Decay heat 10 MW** (was 8). Unfed: racks uncovered t=3840 s, dry t=16,640,
+clad past 900 C t=19,740, release limit **t=20,640 s** (was 23,620).
+
+**The answer changed shape again.** The sea pump cannot beat the tear on its
+own (~84 kg/s against ~105 at the rack top), so the tanks are not a bridge to
+it - they are the other half of the make-up for the whole watch, and the play
+is to THROTTLE them to the shortfall so that 1200 tonnes lasts eight hours.
+Check [4]: tank line open at 1260 s, sea pump on at 5100 s (it stood in the
+sea through the wave, stopped - the wave rule names it as a casualty at
+t=4520 s, which is why a player builds it AFTERWARDS), tank valve to
+`SFP_ANSWER_TANK_THROTTLE` at 5700 s.
+
+Measured (`npx tsx scripts/test-game-levels.ts sfp`):
+
+| check | result |
+| --- | --- |
+| [1] unfed | uncovered 3840 s, dry 16,640 s, clad past 900 C 19,740 s, release limit 20,640 s |
+| [2] bench / shore | 0.0 kg/s, casing still 1.013 bar of air (a stagnant hanging interface, nothing moves) |
+| [3] in the sea (x=236, 2 m) | 75.9 kg/s at t=120 s (84 steady), casing primed, motor 4.3 m above the sea |
+| [2] too far out (x=282, 7 m) | drowned before it starts; 0.0 kg/s |
+| [4] the answer | tank line open 1260 s, sea pump on 5100 s, tank valve to 30% at 5700 s: min pool level **4.32 m** (racks at 4.16), no uncovery, peak clad 50 C, sea pump ~84 kg/s from 5100 s to the end, tanks 1216 t -> 156 t (13% left), puddle peaked ~450 m3. At 50% the tanks ran dry at ~21,700 s and the racks uncovered for the last 50 min; at 35% they ended under the 5% margin. |
+
+**Still open:** the phantom-gas fill (the proper fix is the vapour-space
+partial pressure, its own piece of work); the fill slam past ~0.4 bar of
+head; the pump's drawn height is ~1 m while its motor stands 6 m up.

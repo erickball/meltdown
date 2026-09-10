@@ -29,47 +29,47 @@ const builtinPresets: ComponentPreset[] = [
   {
     id: 'pump-rcp-large', type: 'pump', name: 'Reactor Coolant Pump — Large',
     description: 'Main coolant circulation for a large PWR loop (~1100 MWe class, one per loop). Very high flow at moderate head, casing rated for full primary pressure.',
-    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 4700, ratedHead: 90, pressureRating: 175, speed: 1200, efficiency: 85, npshRequired: 25, initialState: 'on' },
+    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 4700, ratedHead: 90, pressureRating: 175, ratedRpm: 1200, efficiency: 85, npshRequired: 25, initialState: 'on' },
   },
   {
     id: 'pump-rcp-small', type: 'pump', name: 'Reactor Coolant Pump — Compact',
     description: 'Primary loop pump for a smaller PWR (2-loop / SMR class). Same duty as the large RCP at roughly half the flow.',
-    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 2400, ratedHead: 80, pressureRating: 175, speed: 1200, efficiency: 84, npshRequired: 15, initialState: 'on' },
+    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 2400, ratedHead: 80, pressureRating: 175, ratedRpm: 1200, efficiency: 84, npshRequired: 15, initialState: 'on' },
   },
   {
     id: 'pump-feedwater', type: 'pump', name: 'Main Feedwater Pump',
     description: 'Raises condensate/deaerator water to steam-generator pressure. High head; needs healthy suction pressure (deaerator or booster) to avoid cavitation.',
-    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 800, ratedHead: 700, pressureRating: 110, speed: 3600, efficiency: 82, npshRequired: 15, initialState: 'on' },
+    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 800, ratedHead: 700, pressureRating: 110, ratedRpm: 3600, efficiency: 82, npshRequired: 15, initialState: 'on' },
   },
   {
     id: 'pump-condensate', type: 'pump', name: 'Condensate Pump',
     description: 'Draws from the condenser hotwell at near-vacuum. Installed in a pit below the condenser so the hotwell level provides the little NPSH it needs.',
-    properties: { nqa1: false, type: 'centrifugal', elevation: -4, ratedFlow: 800, ratedHead: 250, pressureRating: 30, speed: 1200, efficiency: 80, npshRequired: 2, initialState: 'on' },
+    properties: { nqa1: false, type: 'centrifugal', elevation: -4, ratedFlow: 800, ratedHead: 250, pressureRating: 30, ratedRpm: 1200, efficiency: 80, npshRequired: 2, initialState: 'on' },
   },
   {
     id: 'pump-charging', type: 'pump', name: 'Charging Pump (CVCS)',
     description: 'Small positive-displacement pump that injects makeup/seal water against full primary pressure. Low flow, very high head.',
-    properties: { nqa1: true, type: 'positive', ratedFlow: 12, ratedHead: 1600, pressureRating: 210, speed: 900, efficiency: 75, npshRequired: 5, initialState: 'on' },
+    properties: { nqa1: true, type: 'positive', ratedFlow: 12, ratedHead: 1600, pressureRating: 210, ratedRpm: 900, efficiency: 75, npshRequired: 5, initialState: 'on' },
   },
   {
     id: 'pump-hpsi', type: 'pump', name: 'High-Pressure Safety Injection Pump',
     description: 'Emergency coolant injection against high primary pressure (small-break LOCA). Normally idle; start on demand.',
-    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 50, ratedHead: 1300, pressureRating: 180, speed: 3600, efficiency: 75, npshRequired: 5, initialState: 'off' },
+    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 50, ratedHead: 1300, pressureRating: 180, ratedRpm: 3600, efficiency: 75, npshRequired: 5, initialState: 'off' },
   },
   {
     id: 'pump-lpsi', type: 'pump', name: 'Low-Pressure Injection / RHR Pump',
     description: 'High-flow low-head pump for residual heat removal and large-break injection once primary pressure is down. Normally idle.',
-    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 300, ratedHead: 120, pressureRating: 45, speed: 1800, efficiency: 80, npshRequired: 4, initialState: 'off' },
+    properties: { nqa1: true, type: 'centrifugal', ratedFlow: 300, ratedHead: 120, pressureRating: 45, ratedRpm: 1800, efficiency: 80, npshRequired: 4, initialState: 'off' },
   },
   {
     id: 'pump-service-water', type: 'pump', name: 'Service / Cooling Water Pump',
     description: 'Moves large volumes of cooling water at low head (circulating water, component cooling, service water).',
-    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 1500, ratedHead: 30, pressureRating: 10, speed: 900, efficiency: 85, npshRequired: 4, initialState: 'on' },
+    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 1500, ratedHead: 30, pressureRating: 10, ratedRpm: 900, efficiency: 85, npshRequired: 4, initialState: 'on' },
   },
   {
-    id: 'pump-service-water-lp', type: 'pump', name: 'Low-Pressure Service Water Pump',
-    description: 'Yard-scale make-up and service water: a couple of hundred kg/s at modest head, enough to lift from a shore or basin intake ~15 m below the discharge and still push into an open tank. Low casing rating - it belongs on a 16 bar service line, not on anything pressurized.',
-    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 200, ratedHead: 60, pressureRating: 16, speed: 1800, efficiency: 80, npshRequired: 5, initialState: 'on' },
+    id: 'pump-service-water-lp', type: 'pump', name: 'Wet-Pit Service Water Pump',
+    description: 'A vertical intake pump: the bowl at the bottom of a 6 m column, the motor on top. It stands IN the water - the bowl under the surface, the motor above it - and the water fills it; delivered dry, it cannot prime itself, so on dry land it only pumps air. A hundred-odd kg/s at twelve metres of head: enough to push sea water up into a tank a few metres above it, not enough to fill a pool on a hill in a hurry. Low casing rating - it belongs on a 16 bar service line, not on anything pressurized.',
+    properties: { nqa1: false, type: 'centrifugal', ratedFlow: 120, ratedHead: 12, pressureRating: 16, ratedRpm: 1200, efficiency: 78, npshRequired: 1.5, motorElevation: 6, initialFill: 'dry', dischargeCheck: true, initialState: 'on' },
   },
 
   // ------------------------------------------------------------- tanks

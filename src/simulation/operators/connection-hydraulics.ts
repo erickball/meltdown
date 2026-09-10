@@ -907,6 +907,10 @@ export interface ConnectionHydraulics {
   dP_pump: number;           // pump head at current flow (Pa)
   dP_driving: number;        // dP_pressure + dP_gravity + dP_pump (Pa)
   dP_friction: number;       // friction at current flow, signed to oppose it (Pa)
+  /** A hanging interface: the line is stratified and nothing is driven
+   *  either way (see computeConnectionHydraulics). dP_gravity then equals
+   *  -(dP_pressure + dP_pump) and dP_driving is zero. */
+  stagnant: boolean;
   K_eff: number;             // effective resistance coefficient
   /** d(resisting pressure)/d(ṁ) ≥ 0: friction slope + falling pump-curve slope,
    *  in Pa per (kg/s). Used to linearize implicit/damped flow updates. */
@@ -1087,7 +1091,7 @@ export function computeConnectionHydraulics(
   // the fluid actually filling the pipe between the nodes.
   const g = 9.81;
   const dz = conn.elevation || 0; // positive = upward
-  const dP_gravity = -rho_flow * g * dz;
+  let dP_gravity = -rho_flow * g * dz;
 
   // Pump head - need to determine correct density for pump suction
   let dP_pump = 0;
@@ -1131,6 +1135,48 @@ export function computeConnectionHydraulics(
       if (pump.ratedFlow > 0) {
         pumpQuad = 0.25 * gH / (pump.ratedFlow * pump.ratedFlow);
       }
+    }
+  }
+
+  // === The hanging interface ===
+  //
+  // The line's contents are priced from whichever end is upstream of the
+  // CURRENT flow, which is undefined at zero flow when the two ends hold
+  // different phases with a large gravity head between them: a line rising
+  // from a liquid node to a gas node above it. Priced as the liquid (forward)
+  // the column cannot be lifted, so the driving term says "reverse"; priced
+  // as the gas (reverse) the gas is not pushed down into the liquid, so it
+  // says "forward". Flipping between the two moved a little of each phase
+  // every step - it bled a dry pump standing 15 m above the sea down to a
+  // vacuum, and seeped a pool's air down a discharge line into a pump below.
+  //
+  // What a real line does is stratify: the liquid stands part-way up it,
+  // the gas above, and the interface sits exactly where the column's weight
+  // balances the pressure difference. Nothing moves. That is the case where
+  // the pressure difference lies BETWEEN the two pure-phase heads - neither
+  // phase is driven in its own direction - and then the line's gravity head
+  // IS the pressure difference (that is what a hanging interface means), so
+  // the driving term is zero. Outside that band the flow is real and the
+  // current pricing stands; the transition at either edge is continuous (the
+  // driving term is zero at the edge either way).
+  let stagnant = false;
+  {
+    const otherNode = currentFlow >= 0 ? toNode : fromNode;
+    const otherElevation = currentFlow >= 0 ? conn.toElevation : conn.fromElevation;
+    const otherTolerance = currentFlow >= 0 ? conn.toPhaseTolerance : conn.fromPhaseTolerance;
+    const otherOpening = currentFlow >= 0 ? conn.toOpeningHeight : conn.fromOpeningHeight;
+    const otherDraw = drawCompositionAt(otherNode, otherElevation, -currentFlow, otherTolerance, otherOpening, undefined, true);
+    const gravityOther = -otherDraw.rho * g * dz;
+    // Driving terms with each end's own fluid in the line
+    const drivingHere = dP_pressure + dP_gravity + dP_pump;
+    const drivingOther = dP_pressure + gravityOther + dP_pump;
+    // Forward-pricing says "not forward" and reverse-pricing says "not
+    // reverse" (or the mirror image when the flow is currently reverse)
+    const forwardPriced = currentFlow >= 0 ? drivingHere : drivingOther;
+    const reversePriced = currentFlow >= 0 ? drivingOther : drivingHere;
+    if (forwardPriced < 0 && reversePriced > 0) {
+      stagnant = true;
+      dP_gravity = -(dP_pressure + dP_pump);
     }
   }
 
@@ -1196,6 +1242,7 @@ export function computeConnectionHydraulics(
     frictionQuadForward, frictionQuadReverse,
     pumpShutoff, pumpQuad,
     valveClosed, governorClosed,
+    stagnant,
     checkValve,
     crackingPressure: checkValve?.crackingPressure ?? 0,
     upstreamNode, downstreamNode,

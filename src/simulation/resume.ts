@@ -175,6 +175,10 @@ export function writeSimulationStateToPlant(sim: SimulationState, plant: PlantSt
         writeFluidIC(c, node);
         const ncg = ncgToInitialBar(node.fluid.ncg, node.fluid.temperature, node.volume);
         if (ncg) c.initialNcg = ncg; else delete c.initialNcg;
+        // A pump delivered dry that has since filled from its suction is
+        // primed now, and re-initializes as such if something else about it
+        // is edited; one that is still full of air is still dry
+        if (c.initialFill !== undefined) c.initialFill = node.fluid.phase === 'vapor' ? 'dry' : 'primed';
         const pumpState = sim.components.pumps.get(id);
         if (pumpState) {
           c.running = pumpState.running;

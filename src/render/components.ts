@@ -22,6 +22,7 @@ import {
   Point,
   PlantState,
   Connection,
+  pumpVisualHeight,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
 import { PIPE_METRES_PER_STICK, formatMetres, stockedLines } from '../game/stock';
@@ -68,13 +69,9 @@ import { describeControllerSignal, primaryControllerSignal } from '../simulation
  */
 export function getComponentVisualHeight(component: PlantComponent): number {
   switch (component.type) {
-    case 'pump': {
-      // Matches renderPump: scale = diameter * 1.3; the drawing spans 2.2
-      // scale units (motor 0.9 + coupling 0.15 + casing 0.5 + suction
-      // nozzle 0.35, centred at local y=0, plus 0.3 of inlet pipe below)
-      const d = (component as PumpComponent).diameter || 0.3;
-      return d * 1.3 * 2.2;
-    }
+    case 'pump':
+      // Matches renderPump (see pumpVisualHeight for the breakdown)
+      return pumpVisualHeight(component as PumpComponent);
     case 'valve':
       // The bounding height the renderer anchors the valve drawing with
       // (2x diameter leaves room for the stem/actuator above the body)

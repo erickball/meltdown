@@ -203,6 +203,7 @@ export function eventIcon(type: string): string {
     case 'scram-reset': return '🟢';
     case 'scenario': return '📜';
     case 'shake': return '🌍';
+    case 'washed-away': return '🌊';
     case 'simulation-error': return '⚠️';
     case 'rebuild': return '🔧';
     default: return '•';

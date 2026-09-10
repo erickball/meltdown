@@ -329,7 +329,7 @@ console.log('\n--- A stock line that names an equipment design ---');
     stockedPipeSpecId(yard) === 'spec-12in-service');
   check('the design line is named by its design, not its type',
     stockLineDisplayName('pump', 'pump-service-water-lp')
-      === 'Low-Pressure Service Water Pump',
+      === 'Wet-Pit Service Water Pump',
     stockLineDisplayName('pump', 'pump-service-water-lp'));
   check('a design line knows which palette form builds it',
     paletteKeyForStockLine({ type: 'valve', design: 'valve-service-water', count: 1 }) === 'valve');

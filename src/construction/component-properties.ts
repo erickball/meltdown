@@ -309,8 +309,11 @@ export function readComponentOption(optionName: string, component: Record<string
     return defaultValue;
   }
 
-  if (component.type === 'pump' && optionName === 'speed' && component.speed !== undefined) {
-    return component.speed * 3600; // stored as fraction of 3600 RPM
+  if (component.type === 'pump' && optionName === 'ratedRpm') {
+    if (component.ratedRpm !== undefined) return component.ratedRpm;
+    // Older plants stored the dialog's RPM as speed = rpm / 3600
+    if (component.speed !== undefined) return component.speed * 3600;
+    return defaultValue;
   }
 
   // tubeCount must read the real engineering count; component.tubeCount is
