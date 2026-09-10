@@ -1141,8 +1141,17 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         } else {
           const fuelNode = state.thermalNodes.get(`${id}-fuel`);
           const cladNode = state.thermalNodes.get(`${id}-clad`);
-          if (fuelNode) fuelNode.initialMass = fuelNode.mass;
-          if (cladNode) cladNode.initialMass = cladNode.mass;
+          if (fuelNode) {
+            fuelNode.initialMass = fuelNode.mass;
+            fuelNode.relocatesTo = `${id}-corium`;
+            // In-vessel melt outgasses into the core coolant, as the fuel
+            // does (no releaseTo); createMcciNodes adds the debris bed
+            fuelNode.meltLocations = [{ nodeId: `${id}-corium` }];
+          }
+          if (cladNode) {
+            cladNode.initialMass = cladNode.mass;
+            cladNode.relocatesTo = `${id}-corium`;
+          }
 
           const headRadius = ((vesselComp as any).innerDiameter ?? 4) / 2;
           const headThickness = (vesselComp as any).wallThickness ?? 0.2;
@@ -1289,6 +1298,62 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
           `${(700e-9 * ratedPower).toFixed(0)} mol of noble gas and ` +
           `${(250e-9 * ratedPower).toFixed(0)} mol of CsI-class volatiles in the racks`);
       }
+      // Melt and relocation. Racks hot enough to melt slump to the pool floor
+      // - there is no vessel between them and the concrete - so the melt goes
+      // straight to a debris bed on the floor and McciRateOperator attacks the
+      // floor slab under it: the same two nodes a core gets once its lower
+      // head has gone, with the pool's own flow node as the space above
+      // (quench while water covers the floor, radiation into the gas once it
+      // does not, and the concrete's gases vent into it). Without this a
+      // drained rack had nowhere to put its decay heat once the chimney
+      // through the pool could not carry it, and simply kept heating.
+      {
+        const pellets = state.thermalNodes.get(`${id}-pellets`)!;
+        const clad = state.thermalNodes.get(`${id}-clad`)!;
+        const debrisId = `${id}-corium-ex`;
+        pellets.initialMass = pellets.mass;
+        clad.initialMass = clad.mass;
+        pellets.relocatesTo = debrisId;
+        clad.relocatesTo = debrisId;
+        pellets.meltLocations = [{ nodeId: debrisId, releaseTo: id }];
+        const floorArea = (pool.side ?? 12) * (pool.side ?? 12);
+        const slab = pool.wallThickness ?? 1.2;   // m - the floor slab
+        state.thermalNodes.set(debrisId, {
+          id: debrisId,
+          label: `${component.label || 'Pool'} fuel debris on the floor`,
+          associatedVesselNode: id,
+          temperature: waterT,
+          mass: 1, // seed mass; relocation grows it (zero mass breaks dT/dt)
+          initialMass: 1,
+          specificHeat: 500,        // oxide/slag melt scale, as ex-vessel debris
+          thermalConductivity: 3,
+          characteristicLength: 0.2,
+          surfaceArea: floorArea,   // full-spread footprint (mass-scaled in use)
+          heatGeneration: 0,        // decay-heat share deposited by HeatGeneration
+          maxTemperature: 3200,
+          meltingPoint: 2400,       // corium-concrete mixture solidus scale
+          latentHeatFusion: 300e3,
+          metal: { zr: 0, fe: 0 },
+          slagMass: 0,
+        });
+        // The floor slab plus an equal notional layer of ground under it, so
+        // ablation carries on smoothly past melt-through (same inventory rule
+        // as a building basemat - see createMcciNodes)
+        state.thermalNodes.set(`${id}-basemat`, {
+          id: `${id}-basemat`,
+          label: `${component.label || 'Pool'} floor slab`,
+          temperature: waterT,
+          mass: floorArea * slab * 2 * CONCRETE_DENSITY,
+          initialMass: floorArea * slab * 2 * CONCRETE_DENSITY,
+          specificHeat: 880,        // concrete
+          thermalConductivity: 1.5,
+          characteristicLength: slab,
+          surfaceArea: floorArea,
+          heatGeneration: 0,
+          maxTemperature: 1500,
+        });
+      }
+
       // Pellet interior r/(4k), gas gap, half the clad wall - in series, the
       // same rod resistance the core uses.
       const hFuelToClad = 1 / (
@@ -4976,6 +5041,11 @@ function createMcciNodes(plantState: PlantState, state: SimulationState): void {
         heatGeneration: 0,
         maxTemperature: 1500,
       });
+    }
+    const fuel = state.thermalNodes.get(`${coreId}-fuel`);
+    if (fuel) {
+      fuel.meltLocations = [...(fuel.meltLocations ?? []),
+        { nodeId: `${coreId}-corium-ex`, releaseTo: buildingId }];
     }
     console.log(`[Factory] MCCI nodes: ${coreId}-corium-ex on ${buildingId} floor ` +
       `(${footprint.toFixed(0)} m², basemat ${((buildingComp as any).basematThickness ?? 3)} m)`);

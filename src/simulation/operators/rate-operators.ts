@@ -1307,8 +1307,8 @@ export class HeatGenerationRateOperator implements RateOperator {
         // power, as it should.
         let oxideTotal = node.mass; // in-core fuel is pure fuel oxide
         const meltNodes: Array<{ melt: (typeof node); oxide: number }> = [];
-        for (const suffix of ['-corium', '-corium-ex']) {
-          const melt = state.thermalNodes.get(id.replace(/-fuel$/, suffix));
+        for (const loc of node.meltLocations ?? []) {
+          const melt = state.thermalNodes.get(loc.nodeId);
           if (melt && melt.mass > 2) {
             const oxide = fuelOxideMass(melt);
             if (oxide > 0) {
@@ -3641,21 +3641,15 @@ export class FissionProductReleaseOperator implements RateOperator {
       const locations: Array<{ T: number; oxide: number; target: string }> = [
         { T: node.temperature, oxide: node.mass, target: fp.associatedCoolantNode },
       ];
-      const corium = state.thermalNodes.get(id.replace(/-fuel$/, '-corium'));
-      if (corium && corium.mass > 2) {
-        locations.push({
-          T: corium.temperature,
-          oxide: fuelOxideMass(corium),
-          target: fp.associatedCoolantNode,
-        });
-      }
-      const debris = state.thermalNodes.get(id.replace(/-fuel$/, '-corium-ex'));
-      if (debris && debris.mass > 2 && debris.associatedVesselNode) {
-        locations.push({
-          T: debris.temperature,
-          oxide: fuelOxideMass(debris),
-          target: debris.associatedVesselNode,
-        });
+      for (const loc of node.meltLocations ?? []) {
+        const melt = state.thermalNodes.get(loc.nodeId);
+        if (melt && melt.mass > 2) {
+          locations.push({
+            T: melt.temperature,
+            oxide: fuelOxideMass(melt),
+            target: loc.releaseTo ?? fp.associatedCoolantNode,
+          });
+        }
       }
       const oxideTotal = locations.reduce((s, l) => s + l.oxide, 0);
       if (oxideTotal <= 0) continue;

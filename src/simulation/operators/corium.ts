@@ -69,50 +69,57 @@ export class CoriumRelocationRateOperator implements RateOperator {
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
 
+    // Candling: every node that names a melt node to slump into
+    // (relocatesTo) loses mass to it once it is partly molten. A core's fuel
+    // and clad go to its in-vessel `-corium` pool; spent-fuel racks go
+    // straight to the debris bed on the pool floor.
+    const arrivals = new Map<string, { total: number; zr: number; mixing: number }>();
+    for (const [, source] of state.thermalNodes) {
+      if (!source.relocatesTo) continue;
+      const target = state.thermalNodes.get(source.relocatesTo);
+      if (!target) {
+        throw new Error(`[CoriumRelocation] ${source.id} relocates to '${source.relocatesTo}', ` +
+          `which does not exist - factory wiring is broken`);
+      }
+      const melt = meltFraction(source);
+      if (melt <= CoriumRelocationRateOperator.ONSET) continue;
+
+      const m0 = source.initialMass ?? source.mass;
+      const movable = source.mass - CoriumRelocationRateOperator.RESIDUAL * m0;
+      if (movable <= 0) continue;
+
+      const driver = Math.pow(melt - CoriumRelocationRateOperator.ONSET, 2);
+      const r = movable * driver / CoriumRelocationRateOperator.TAU;
+      if (r <= 0) continue;
+
+      const srcRates: ThermalNodeRates =
+        rates.thermalNodes.get(source.id) || { dTemperature: 0 };
+      srcRates.dMass = (srcRates.dMass ?? 0) - r;
+      rates.thermalNodes.set(source.id, srcRates);
+
+      let arrival = arrivals.get(target.id);
+      if (!arrival) { arrival = { total: 0, zr: 0, mixing: 0 }; arrivals.set(target.id, arrival); }
+      arrival.total += r;
+      // Relocating clad carries its unoxidized Zr along (the oxidized
+      // fraction is ZrO2 - already spent as an MCCI reductant)
+      if (source.oxidation) {
+        arrival.zr += r * Math.max(0, 1 - source.oxidation.oxidizedFraction);
+      }
+      arrival.mixing += r * source.specificHeat * (source.temperature - target.temperature);
+    }
+    for (const [targetId, arrival] of arrivals) {
+      const target = state.thermalNodes.get(targetId)!;
+      const tRates: ThermalNodeRates =
+        rates.thermalNodes.get(targetId) || { dTemperature: 0 };
+      tRates.dMass = (tRates.dMass ?? 0) + arrival.total;
+      if (arrival.zr > 0) tRates.dMetalZr = (tRates.dMetalZr ?? 0) + arrival.zr;
+      tRates.dTemperature += arrival.mixing / nodeHeatCapacity(target);
+      rates.thermalNodes.set(targetId, tRates);
+    }
+
     for (const [coriumId, corium] of state.thermalNodes) {
       if (!coriumId.endsWith('-corium')) continue;
       const coreId = coriumId.slice(0, -'-corium'.length);
-
-      let totalIn = 0;      // kg/s
-      let zrIn = 0;         // kg/s of unoxidized Zr riding with the clad
-      let mixingPower = 0;  // W of sensible heat carried relative to corium T
-
-      for (const suffix of ['-fuel', '-clad']) {
-        const source = state.thermalNodes.get(`${coreId}${suffix}`);
-        if (!source) continue;
-        const melt = meltFraction(source);
-        if (melt <= CoriumRelocationRateOperator.ONSET) continue;
-
-        const m0 = source.initialMass ?? source.mass;
-        const movable = source.mass - CoriumRelocationRateOperator.RESIDUAL * m0;
-        if (movable <= 0) continue;
-
-        const driver = Math.pow(melt - CoriumRelocationRateOperator.ONSET, 2);
-        const r = movable * driver / CoriumRelocationRateOperator.TAU;
-        if (r <= 0) continue;
-
-        const srcRates: ThermalNodeRates =
-          rates.thermalNodes.get(source.id) || { dTemperature: 0 };
-        srcRates.dMass = (srcRates.dMass ?? 0) - r;
-        rates.thermalNodes.set(source.id, srcRates);
-
-        totalIn += r;
-        // Relocating clad carries its unoxidized Zr along (the oxidized
-        // fraction is ZrO2 - already spent as an MCCI reductant)
-        if (suffix === '-clad' && source.oxidation) {
-          zrIn += r * Math.max(0, 1 - source.oxidation.oxidizedFraction);
-        }
-        mixingPower += r * source.specificHeat * (source.temperature - corium.temperature);
-      }
-
-      if (totalIn > 0) {
-        const corRates: ThermalNodeRates =
-          rates.thermalNodes.get(coriumId) || { dTemperature: 0 };
-        corRates.dMass = (corRates.dMass ?? 0) + totalIn;
-        if (zrIn > 0) corRates.dMetalZr = (corRates.dMetalZr ?? 0) + zrIn;
-        corRates.dTemperature += mixingPower / nodeHeatCapacity(corium);
-        rates.thermalNodes.set(coriumId, corRates);
-      }
 
       // ----------------------------------------------------------------
       // Pool heat transfer, with MASS-SCALED contact area: the pool's
@@ -228,6 +235,35 @@ export class CoriumRelocationRateOperator implements RateOperator {
     }
 
     return rates;
+  }
+}
+
+/**
+ * States saved before relocation was wired explicitly (relocatesTo /
+ * meltLocations) carry a core's melt nodes under the old naming convention
+ * only. Give them the wiring the factory now writes, so a loaded save keeps
+ * relocating. A pool from such a save has no floor debris bed at all - its
+ * racks cannot relocate until the plant is rebuilt, and that is said out loud.
+ */
+export function wireSavedRelocation(state: SimulationState): void {
+  for (const [id, node] of state.thermalNodes) {
+    if (id.endsWith('-fuel') && !node.relocatesTo) {
+      const coreId = id.slice(0, -'-fuel'.length);
+      const corium = state.thermalNodes.get(`${coreId}-corium`);
+      if (!corium) continue;
+      node.relocatesTo = corium.id;
+      const clad = state.thermalNodes.get(`${coreId}-clad`);
+      if (clad && !clad.relocatesTo) clad.relocatesTo = corium.id;
+      node.meltLocations = [{ nodeId: corium.id }];
+      const debris = state.thermalNodes.get(`${coreId}-corium-ex`);
+      if (debris?.associatedVesselNode) {
+        node.meltLocations.push({ nodeId: debris.id, releaseTo: debris.associatedVesselNode });
+      }
+    } else if (id.endsWith('-pellets') && !node.relocatesTo) {
+      console.warn(`[CoriumRelocation] ${id} comes from a save made before spent-fuel racks ` +
+        `could melt and relocate: it has no debris bed to slump onto, so it will not. ` +
+        `Rebuild the plant (construction mode and back) to give it one.`);
+    }
   }
 }
 

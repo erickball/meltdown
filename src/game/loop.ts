@@ -47,6 +47,7 @@ import type { ScramSetpoints } from '../simulation/operators/neutronics';
 export type { ScramSetpoints } from '../simulation/operators/neutronics';
 import { StateHistory, StateSnapshot, HistoryEpoch, HistoryEvent, SnapshotKind } from './state-history';
 import { cloneSimulationState } from '../simulation/solver';
+import { wireSavedRelocation } from '../simulation/operators/corium';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -729,6 +730,7 @@ export class GameLoop {
    * Used when switching from construction mode with a new plant configuration
    */
   setSimulationState(newState: SimulationState, design: unknown = null): void {
+    wireSavedRelocation(newState);
     this.state = newState;
     // Reset tracking variables
     this.previousPower = newState.neutronics?.power ?? 0;

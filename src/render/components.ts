@@ -4797,7 +4797,9 @@ export function renderFlowConnectionArrows(
   plantState: PlantState,
   view: ViewState,
   getPortScreenPos?: (component: PlantComponent, port: { position: Point }) => { x: number; y: number; radius: number } | null,
-  getConnectionScreenPos?: (fromComp: PlantComponent, toComp: PlantComponent, plantConn: Connection) => ConnectionScreenEndpoints | null
+  getConnectionScreenPos?: (fromComp: PlantComponent, toComp: PlantComponent, plantConn: Connection) => ConnectionScreenEndpoints | null,
+  // Told where each arrow went, so a click on one can pick its flow path out
+  onArrow?: (plantConn: Connection, x: number, y: number, size: number) => void
 ): void {
   for (const conn of simState.flowConnections) {
     // A break is not a run of pipe with a direction to explain. It is drawn
@@ -4927,6 +4929,10 @@ export function renderFlowConnectionArrows(
     const baseArrowSize = Math.max(8, 8 + Math.sqrt(massFlow) * 0.72);
     const perspectiveMultiplier = getPortScreenPos ? readoutScale(arrowScale) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
+    if (onArrow) {
+      const drawnFor = findPlantConnectionForFlowId(conn.id, plantState);
+      if (drawnFor) onArrow(drawnFor, screenPos.x, screenPos.y, arrowSize);
+    }
 
     // Flow velocity from the upstream node's bulk density: erosion/vibration
     // territory earns a pulsing halo around the arrow (orange = high, red =
@@ -6268,4 +6274,36 @@ export function renderBreakConnections(
     // it at this same anchor, so drawing a second one here would only stack
     // two symbols on one hole.
   }
+}
+
+/**
+ * Arrow endpoints for an opening between a component and its own container
+ * that is drawn at a single point (the two nozzles land on the same spot - a
+ * steam generator's shell outlet into the vessel around it). The arrow sits
+ * on that point and points OUT of the inner component when the connection
+ * runs inner -> container, INTO it the other way. Without this the pair had
+ * no length, so the arrow pointed east whatever the flow did, and the grid
+ * dropped the run altogether and drew the arrow at the two nozzles' outside
+ * positions instead - outside the vessel it is inside.
+ *
+ * A nozzle at the inner component's exact centre has no outward direction;
+ * the arrow then points up the screen.
+ */
+export function openingArrowEndpoints(
+  point: Point,
+  innerCenter: Point,
+  fromIsInner: boolean,
+  half: number,
+  scale: number
+): ConnectionScreenEndpoints {
+  let ux = point.x - innerCenter.x;
+  let uy = point.y - innerCenter.y;
+  const d = Math.hypot(ux, uy);
+  if (d > 1e-9) { ux /= d; uy /= d; } else { ux = 0; uy = -1; }
+  if (!fromIsInner) { ux = -ux; uy = -uy; }
+  return {
+    fromPos: { x: point.x - ux * half, y: point.y - uy * half },
+    toPos: { x: point.x + ux * half, y: point.y + uy * half },
+    scale,
+  };
 }

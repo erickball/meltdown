@@ -106,6 +106,18 @@ export interface ThermalNode {
   // transfer, and gas release targeting.
   associatedVesselNode?: string;
 
+  // Relocation (fuel and clad nodes that can melt and slump): the melt node
+  // this node candles into once it is partly molten
+  // (CoriumRelocationRateOperator). A core in a vessel relocates into its
+  // `-corium` pool; spent-fuel racks straight onto the pool floor.
+  relocatesTo?: string;
+
+  // Fuel nodes only: every melt node this fuel's oxide can end up in, and the
+  // flow node that location outgasses into (the fuel's own coolant node when
+  // absent). Decay heat and fission-product release are shared over the fuel
+  // node and these locations by fuel-oxide mass.
+  meltLocations?: Array<{ nodeId: string; releaseTo?: string }>;
+
   // Corium composition bookkeeping (corium/debris nodes only). The node's
   // total mass is the integrated state; these break it down so chemistry
   // and decay-heat weighting stay physical:

@@ -15,7 +15,8 @@ import {
   PIPE_METRES_PER_STICK,
 } from '../game/stock';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, flowConnectionIdForPlantConnection, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow, openingArrowEndpoints } from './components';
+import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import { poolReadout, poolStateLabel } from './pool-readout';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getFluidColor, COLORS } from './colors';
@@ -814,7 +815,7 @@ export class GridView {
     if (!pts) {
       // No lattice run: the whole connection is drawn inside a section view
       const parts = layout.sectionParts.get(conn);
-      if (!parts || parts.length === 0) return null;
+      if (!parts || parts.length === 0) return this.openingEndpoints(conn, plantState, scale);
       const run = parts[0];
       const lenPx = routeLength(run);
       if (lenPx < 1e-6) return { fromPos: run[0], toPos: run[0], scale };
@@ -860,6 +861,23 @@ export class GridView {
       toPos: this.worldToScreen({ x: mid.point.x + mid.dir.x * half, y: mid.point.y + mid.dir.y * half }),
       scale,
     };
+  }
+
+  /**
+   * An opening between a component and its container whose two nozzles
+   * coincide in the section view, so no run is drawn: its arrow sits on the
+   * inner component's nozzle (see openingArrowEndpoints).
+   */
+  private openingEndpoints(conn: Connection, plantState: PlantState, scale: number): ConnectionScreenEndpoints | null {
+    const from = plantState.components.get(conn.fromComponentId);
+    const to = plantState.components.get(conn.toComponentId);
+    if (!from || !to || !this.isContainmentPair(from, to)) return null;
+    const inner = from.containedBy === to.id ? from : to;
+    const point = this.spritePortPosition(inner, inner === from ? conn.fromPortId : conn.toPortId);
+    const box = this.spriteScreenBox(inner);
+    if (!point || !box) return null;
+    const center = { x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2 };
+    return openingArrowEndpoints(point, center, inner === from, Math.min(TILE_M * 0.5 * this.cam.ppm, 12), scale);
   }
 
   // ---------------------------------------------------------------------
@@ -2321,53 +2339,8 @@ export class GridView {
       return;
     }
 
-    const name = (c: PlantComponent | undefined) => c ? (c.label || c.id) : 'Open air';
-    const lines: string[] = [`${name(from)} \u2192 ${name(to)}`];
-    const bore = conn.flowArea && conn.flowArea > 0 ? Math.sqrt(4 * conn.flowArea / Math.PI) : undefined;
-    const geometry: string[] = [];
-    if (bore !== undefined) geometry.push(`\u2300 ${formatGaugeValue(bore)} m`);
-    if (conn.length !== undefined) geometry.push(`L ${formatGaugeValue(conn.length)} m`);
-    if (geometry.length > 0) lines.push(geometry.join('  \u00b7  '));
-    if (simState) {
-      const flowId = flowConnectionIdForPlantConnection(conn, plantState);
-      const flow = flowId ? simState.flowConnections.find(fc => fc.id === flowId) : undefined;
-      if (flow) {
-        const fluid = f.connectionFluid(conn, (from ?? to)!);
-        const phase = fluid ? fluid.phase : '';
-        lines.push(`${formatGaugeValue(flow.massFlowRate)} kg/s${phase ? `  \u00b7  ${phase}` : ''}`);
-      }
-    }
-    if (f.buildMode) lines.push('click again to edit \u00b7 Delete removes it');
-
-    ctx.save();
-    ctx.font = '12px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    const pad = 6;
-    const lineH = 15;
-    const w = Math.max(...lines.map(l => ctx.measureText(l).width)) + pad * 2;
-    const h = lines.length * lineH + pad * 2 - 3;
-    let x = s.x + 14;
-    let y = s.y - h / 2;
-    if (x + w > f.width - 4) x = s.x - 14 - w;
-    y = Math.max(4, Math.min(f.height - h - 4, y));
-    ctx.fillStyle = 'rgba(20, 24, 30, 0.9)';
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
-    lines.forEach((l, i) => {
-      ctx.fillStyle = i === 0 ? '#fff' : '#cfd6e0';
-      ctx.font = i === 0 ? 'bold 12px sans-serif' : '12px sans-serif';
-      ctx.fillText(l, x + pad, y + pad + i * lineH);
-    });
-    // Leader from the run to the box
-    ctx.strokeStyle = 'rgba(255, 255, 120, 0.85)';
-    ctx.beginPath();
-    ctx.moveTo(s.x, s.y);
-    ctx.lineTo(x < s.x ? x + w : x, s.y);
-    ctx.stroke();
-    ctx.restore();
+    const lines = connectionLabelLines(conn, plantState, simState, f.connectionFluid, f.buildMode);
+    if (lines) drawConnectionLabel(ctx, s, lines, f.width, f.height);
   }
 
   /** Controller wires and switchyard-to-generator lines. */
