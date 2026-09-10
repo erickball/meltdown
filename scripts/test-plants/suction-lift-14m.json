@@ -182,9 +182,7 @@
    "toComponentId": "sp",
    "toPortId": "sp-left",
    "fromElevation": 1,
-   "toElevation": 0.1,
-   "flowArea": 0.031415900000000004,
-   "length": 15
+   "toElevation": 0.1
   },
   {
    "fromComponentId": "sp",
@@ -192,9 +190,7 @@
    "toComponentId": "pump-1",
    "toPortId": "pump-1-inlet",
    "fromElevation": 0.1,
-   "toElevation": 0.3,
-   "flowArea": 0.031415900000000004,
-   "length": 2
+   "toElevation": 0.3
   },
   {
    "fromComponentId": "pump-1",

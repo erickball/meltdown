@@ -341,13 +341,16 @@ for (const spec of FILES) {
     data.components.push([pipeId, pipe]);
 
     const pipeRelElev = round2(diameter / 2);
-    const halfLen = round2(len / 2);
     const halfK = conn.resistanceCoeff !== undefined ? conn.resistanceCoeff / 2 : undefined;
+    // The stubs carry no area or length of their own: a connection touching
+    // a pipe inherits the pipe's bore and run in the factory, and an
+    // explicit value there would be honoured as a restriction (which the
+    // original connection's area is not, once the duct has been resized -
+    // see the turbine exhaust rule above).
     const connA = {
       fromComponentId: conn.fromComponentId, fromPortId: conn.fromPortId,
       toComponentId: pipeId, toPortId: `${pipeId}-left`,
       fromElevation: fromElev, toElevation: pipeRelElev,
-      flowArea: area, length: halfLen,
     };
     if (halfK !== undefined) connA.resistanceCoeff = halfK;
     if (conn.fromPhaseTolerance !== undefined) connA.fromPhaseTolerance = conn.fromPhaseTolerance;
@@ -355,7 +358,6 @@ for (const spec of FILES) {
       fromComponentId: pipeId, fromPortId: `${pipeId}-right`,
       toComponentId: conn.toComponentId, toPortId: conn.toPortId,
       fromElevation: pipeRelElev, toElevation: toElev,
-      flowArea: area, length: halfLen,
     };
     if (halfK !== undefined) connB.resistanceCoeff = halfK;
     if (conn.toPhaseTolerance !== undefined) connB.toPhaseTolerance = conn.toPhaseTolerance;

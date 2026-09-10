@@ -82,9 +82,9 @@
   ],
   "connections": [
     {"fromComponentId": "hot-1", "fromPortId": "hot-1-bottom", "toComponentId": "pipe-1", "toPortId": "pipe-1-in",
-     "fromElevation": 0.1, "toElevation": 0.5, "flowArea": 0.05, "length": 3},
+     "fromElevation": 0.1, "toElevation": 0.5},
     {"fromComponentId": "pipe-1", "fromPortId": "pipe-1-out", "toComponentId": "circ-1", "toPortId": "circ-1-inlet",
-     "fromElevation": 0.5, "toElevation": 0, "flowArea": 0.05, "length": 2},
+     "fromElevation": 0.5, "toElevation": 0},
     {"fromComponentId": "circ-1", "fromPortId": "circ-1-outlet", "toComponentId": "cool-1", "toPortId": "cool-1-in",
      "fromElevation": 0, "toElevation": 1, "flowArea": 0.04, "length": 6},
     {"fromComponentId": "cool-1", "fromPortId": "cool-1-out", "toComponentId": "hot-1", "toPortId": "hot-1-side",

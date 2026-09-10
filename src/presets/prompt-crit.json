@@ -815,8 +815,6 @@
       "toPortId": "pipe-rv-1-recirc-pump-1-left",
       "fromElevation": 1,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 2.5,
       "resistanceCoeff": 5
     },
     {
@@ -826,8 +824,6 @@
       "toPortId": "recirc-pump-1-inlet",
       "fromElevation": 0.38,
       "toElevation": 0,
-      "flowArea": 0.45,
-      "length": 2.5,
       "resistanceCoeff": 5
     },
     {
@@ -837,8 +833,6 @@
       "toPortId": "pipe-recirc-pump-1-cb-1-left",
       "fromElevation": 0,
       "toElevation": 0.4,
-      "flowArea": 0.5,
-      "length": 1.5,
       "resistanceCoeff": 5
     },
     {
@@ -848,8 +842,6 @@
       "toPortId": "cb-1-inlet",
       "fromElevation": 0.4,
       "toElevation": 0,
-      "flowArea": 0.5,
-      "length": 1.5,
       "resistanceCoeff": 5
     },
     {
@@ -883,9 +875,7 @@
       "toComponentId": "pipe-turbine-1-condenser-1",
       "toPortId": "pipe-turbine-1-condenser-1-left",
       "fromElevation": 0,
-      "toElevation": 1.21,
-      "flowArea": 0.35,
-      "length": 2.5
+      "toElevation": 1.21
     },
     {
       "fromComponentId": "pipe-turbine-1-condenser-1",
@@ -893,9 +883,7 @@
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
       "fromElevation": 1.21,
-      "toElevation": 5,
-      "flowArea": 0.35,
-      "length": 2.5
+      "toElevation": 5
     },
     {
       "fromComponentId": "condenser-1",
@@ -903,9 +891,7 @@
       "toComponentId": "pipe-condenser-1-cond-pump-1",
       "toPortId": "pipe-condenser-1-cond-pump-1-left",
       "fromElevation": 0.1,
-      "toElevation": 0.28,
-      "flowArea": 0.25,
-      "length": 1.5
+      "toElevation": 0.28
     },
     {
       "fromComponentId": "pipe-condenser-1-cond-pump-1",
@@ -913,9 +899,7 @@
       "toComponentId": "cond-pump-1",
       "toPortId": "cond-pump-1-inlet",
       "fromElevation": 0.28,
-      "toElevation": 0,
-      "flowArea": 0.25,
-      "length": 1.5
+      "toElevation": 0
     },
     {
       "fromComponentId": "cond-pump-1",

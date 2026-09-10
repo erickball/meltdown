@@ -46,6 +46,7 @@ import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
 import type { TerrainSpec } from '../terrain-types';
 import { createSurfaceWaterState } from './operators/surface-water';
+import { nodeSoundSpeed, nodeCriticalFluxFactor, NOZZLE_DISCHARGE_COEFF } from './operators/connection-hydraulics';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -1819,6 +1820,8 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     }
   }
 
+  // Nozzle rows between a turbine's stages
+  fitTurbineStageNozzles(plantState, state);
   // A pump nozzle with no line on it faces the open air
   openPumpPortsToAir(plantState, state);
   // Discharge non-return flaps
@@ -3755,22 +3758,50 @@ function createCrossVesselAnnulusNode(component: PlantComponent): FlowNode {
 }
 
 /**
- * Create extraction flow nodes for turbine extraction ports.
- * Each extraction port gets its own flow node at the extraction pressure.
+ * A turbine's extraction ports in falling pressure order: the order steam
+ * meets them, and the order of the stage chain.
+ */
+function turbineStages(component: PlantComponent | undefined): Array<{ id: string; pressure: number }> {
+  const ports = ((component as any)?.extractionPorts ?? []) as Array<{ id: string; pressure: number }>;
+  return [...ports].sort((a, b) => b.pressure - a.pressure);
+}
+
+/** The stage the header enters, if the machine has extraction ports. */
+function turbineFirstStage(component: PlantComponent | undefined): { id: string; pressure: number } | undefined {
+  return turbineStages(component)[0];
+}
+
+/**
+ * Create the stage (extraction) flow nodes of a turbine with extraction
+ * ports. Each is a stage of the machine: the header enters the highest-
+ * pressure one, each discharges through a fixed nozzle row into the next
+ * (fitTurbineStageNozzles) and the last into the exhaust node, and a bleed
+ * line leaves its stage sideways at the stage's outlet state. The node's
+ * pressure is the interstage pressure the nozzle row downstream of it sets,
+ * so it follows the flow as a real extraction pressure does; `pressure` on
+ * the port is the DESIGN value the nozzle is sized at.
  */
 function createTurbineExtractionNodes(component: PlantComponent): FlowNode[] {
   const turbine = component as any;
-  const extractionPorts = turbine.extractionPorts || [];
+  const extractionPorts = turbineStages(component);
   const elevation = absoluteBase(component);
 
   const nodes: FlowNode[] = [];
 
   for (const extraction of extractionPorts) {
     const extPressure = extraction.pressure;
-    // Extraction steam is partially expanded - use saturation temp at extraction pressure
-    // The actual enthalpy is computed dynamically in the rate operator
+    // Seeded as saturated vapour at the design interstage pressure; the
+    // expansion operator lands it at the stage's actual outlet state.
     const extTemp = saturationTemperature(extPressure);
-    const volume = 2; // m³ - small volume for extraction line
+    // Volume: the stage's steam inventory. A casing holds of order a
+    // second of rated flow between its nozzle rows, so size for one second
+    // at the stage's design density - the node then turns its inventory
+    // over well above the solver's step instead of pinning it. A machine
+    // with no rated flow keeps the 2 m3 the side-branch extraction node
+    // used to have.
+    const volume = turbine.ratedSteamFlow > 0
+      ? turbine.ratedSteamFlow / Water.saturatedVaporDensity(extTemp)
+      : 2;
 
     nodes.push({
       id: `${component.id}-${extraction.id}`,
@@ -3788,6 +3819,84 @@ function createTurbineExtractionNodes(component: PlantComponent): FlowNode[] {
   }
 
   return nodes;
+}
+
+/**
+ * Chain a turbine's stage nodes into its steam path.
+ *
+ * A machine with extraction ports is a cascade: the header enters the
+ * highest-pressure extraction node (the turbine's `inlet` port maps there),
+ * each stage discharges through a fixed nozzle row into the next, and the
+ * last into the machine's exhaust node. A bleed line leaves its stage node
+ * sideways, drawn from the turbine's extraction port, carrying that stage's
+ * outlet state - which is what an extraction is. (Until 2026-09-10 the
+ * extraction nodes hung off the header as side branches: the plant had to
+ * wire a second line from the header into the turbine's extraction port,
+ * and the bleed's state came from a work credit on that side stream.)
+ *
+ * The nozzle row leaving a stage is a choked area sized so the DESIGN
+ * through-flow (rated steam flow less the bleeds taken at and above that
+ * stage, read from the initial flow rates on its extraction lines) passes at
+ * the stage's design state. Stodola's cone law then makes the interstage
+ * pressure follow the flow, which is how extraction pressures droop at part
+ * load. The same discharge coefficient the choke model applies is used, so
+ * the nozzle passes exactly its design flow at its design state.
+ */
+function fitTurbineStageNozzles(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    if (component.type !== 'turbine-generator') continue;
+    const stages = turbineStages(component);
+    if (stages.length === 0) continue;
+    const turbine = component as any;
+    const rated = turbine.ratedSteamFlow;
+    if (!(rated > 0)) {
+      throw new Error(
+        `[Factory] Turbine '${id}' has extraction ports but no ratedSteamFlow - ` +
+        `its stage nozzles are sized from the rated flow`
+      );
+    }
+    // Design bleed leaving a stage: the initial flow on the plant lines at its port
+    const bleedAt = (portId: string): number => plantState.connections
+      .filter(c => (c.fromComponentId === id && c.fromPortId.endsWith(portId)) ||
+                   (c.toComponentId === id && c.toPortId.endsWith(portId)))
+      .reduce((sum, c) => sum + Math.abs((c as any).initialFlowRate ?? 0), 0);
+    const stageLength = (turbine.width || 10) / (stages.length + 1);
+
+    let through = rated;
+    for (let k = 0; k < stages.length; k++) {
+      const stageId = `${id}-${stages[k].id}`;
+      const stageNode = state.flowNodes.get(stageId);
+      if (!stageNode) throw new Error(`[Factory] Turbine '${id}': stage node '${stageId}' missing`);
+      through -= bleedAt(stages[k].id);
+      if (!(through > 0)) {
+        throw new Error(
+          `[Factory] Turbine '${id}': the bleeds taken at and above '${stages[k].id}' ` +
+          `(${(rated - through).toFixed(1)} kg/s) exceed the rated steam flow ${rated} kg/s`
+        );
+      }
+      const nextPort = k + 1 < stages.length ? stages[k + 1].id : 'outlet';
+      // Choked area for the design through-flow at the stage's seeded state
+      const rho = stageNode.fluid.mass / stageNode.volume;
+      const c = nodeSoundSpeed(stageNode, 'vapor');
+      const flux = nodeCriticalFluxFactor(stageNode, 'vapor');
+      const area = through / (NOZZLE_DISCHARGE_COEFF * flux * rho * c);
+      if (!isFinite(area) || !(area > 0)) {
+        throw new Error(`[Factory] Turbine '${id}': stage nozzle after '${stages[k].id}' sized to ${area} m2`);
+      }
+      const flowConnection = createFlowConnectionFromPlantConnection({
+        fromComponentId: id, fromPortId: stages[k].id,
+        toComponentId: id, toPortId: nextPort,
+        flowArea: area, length: stageLength, resistanceCoeff: 1,
+        fromElevation: 0, toElevation: 0,
+        initialFlowRate: through, initialFlowPhase: 'vapor',
+      } as unknown as Connection, plantState, state);
+      if (!flowConnection) throw new Error(`[Factory] Turbine '${id}': could not build the stage nozzle after '${stages[k].id}'`);
+      flowConnection.id = `flow-${stageId}-${nextPort === 'outlet' ? id : `${id}-${nextPort}`}`;
+      state.flowConnections.push(flowConnection);
+      console.log(`[Factory] Turbine ${id}: stage '${stages[k].id}' at ${(stages[k].pressure / 1e5).toFixed(1)} bar, ` +
+        `${stageNode.volume.toFixed(1)} m3, nozzle ${area.toFixed(4)} m2 for ${through.toFixed(1)} kg/s -> ${nextPort}`);
+    }
+  }
 }
 
 /**
@@ -3939,14 +4048,19 @@ function createFlowConnectionFromPlantConnection(
   // presets use bare names ('inlet', 'extraction-1') while construction-built
   // plants prefix the component id ('turbine-1-inlet') - and matching only
   // the bare form is how every construction-built turbine's exhaust and
-  // extraction lines used to silently map to nonexistent flow nodes. Inlet
-  // and outlet open into the machine's own node; each extraction port has
-  // its own flow node named `${componentId}-extraction-N` (see
-  // createTurbineExtractionNodes).
+  // extraction lines used to silently map to nonexistent flow nodes. The
+  // outlet opens into the machine's own (exhaust) node; each extraction
+  // port has its own flow node named `${componentId}-extraction-N`, and the
+  // INLET opens into the highest-pressure one of those - the first stage of
+  // the chain fitTurbineStageNozzles builds - or into the exhaust node of a
+  // machine with no extraction ports (see createTurbineExtractionNodes).
   const turbinePortNodeId = (componentId: string, portId: string): string | null => {
-    if (portId === 'inlet' || portId === 'outlet' ||
-        portId.endsWith('-inlet') || portId.endsWith('-outlet')) {
+    if (portId === 'outlet' || portId.endsWith('-outlet')) {
       return null;  // main turbine node
+    }
+    if (portId === 'inlet' || portId.endsWith('-inlet')) {
+      const first = turbineFirstStage(plantState.components.get(componentId));
+      return first ? `${componentId}-${first.id}` : null;
     }
     const extraction = portId.match(/extraction-\d+$/);
     if (extraction) return `${componentId}-${extraction[0]}`;
@@ -4017,17 +4131,26 @@ function createFlowConnectionFromPlantConnection(
   let hydraulicDiameter = 0.3;
   let length = connection.length ?? 1;
 
-  // Use pipe dimensions if connecting through pipes (overrides connection flowArea)
-  if (fromComponent?.type === 'pipe') {
-    const pipe = fromComponent as any;
-    flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
-    hydraulicDiameter = pipe.diameter;
-    length = pipe.length;
-  } else if (toComponent?.type === 'pipe') {
-    const pipe = toComponent as any;
-    flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
-    hydraulicDiameter = pipe.diameter;
-    length = pipe.length;
+  // A connection touching a PIPE component defaults to the pipe's own bore
+  // and run: the stub connections the construction UI lays around an
+  // auto-pipe carry no size of their own, and that is the pipe's size. But
+  // an explicit area or length on the connection is honoured - a small tap
+  // off a big header, an orifice, a nozzle block are all lines that leave a
+  // pipe at less than its bore. (Until 2026-09-10 the pipe overrode both
+  // unconditionally, so the Xe-100 plant preset's governed turbine-inlet
+  // line inherited a 0.35 m bore and passed 270 kg/s, and no throttle could
+  // ever sit on a line off a pipe.)
+  const pipeEnd = fromComponent?.type === 'pipe' ? fromComponent
+    : toComponent?.type === 'pipe' ? toComponent : undefined;
+  if (pipeEnd) {
+    const pipe = pipeEnd as any;
+    if (connection.flowArea === undefined) {
+      flowArea = Math.PI * Math.pow(pipe.diameter / 2, 2);
+      hydraulicDiameter = pipe.diameter;
+    } else {
+      hydraulicDiameter = Math.sqrt(4 * flowArea / Math.PI);
+    }
+    if (connection.length === undefined) length = pipe.length;
   }
 
   // Connection point elevations, measured from each node's own reference -

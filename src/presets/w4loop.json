@@ -3708,8 +3708,6 @@
       "toPortId": "pipe-cb-1-hx-1-left",
       "fromElevation": 10,
       "toElevation": 0.37,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3719,8 +3717,6 @@
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0.37,
       "toElevation": 1,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3730,8 +3726,6 @@
       "toPortId": "pipe-hx-1-pump-1-left",
       "fromElevation": 1,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3741,8 +3735,6 @@
       "toPortId": "pump-1-inlet",
       "fromElevation": 0.38,
       "toElevation": 0,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3752,8 +3744,6 @@
       "toPortId": "pipe-pump-1-rv-1-left",
       "fromElevation": 0,
       "toElevation": 0.36,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3763,8 +3753,6 @@
       "toPortId": "rv-1-cold-leg-1",
       "fromElevation": 0.36,
       "toElevation": 6,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3774,8 +3762,6 @@
       "toPortId": "pipe-cb-1-hx-2-left",
       "fromElevation": 10,
       "toElevation": 0.37,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3785,8 +3771,6 @@
       "toPortId": "hx-2-tube-1",
       "fromElevation": 0.37,
       "toElevation": 1,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3796,8 +3780,6 @@
       "toPortId": "pipe-hx-2-pump-2-left",
       "fromElevation": 1,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3807,8 +3789,6 @@
       "toPortId": "pump-2-inlet",
       "fromElevation": 0.38,
       "toElevation": 0,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3818,8 +3798,6 @@
       "toPortId": "pipe-pump-2-rv-1-left",
       "fromElevation": 0,
       "toElevation": 0.36,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3829,8 +3807,6 @@
       "toPortId": "rv-1-cold-leg-2",
       "fromElevation": 0.36,
       "toElevation": 6,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3840,8 +3816,6 @@
       "toPortId": "pipe-cb-1-hx-3-left",
       "fromElevation": 10,
       "toElevation": 0.37,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3851,8 +3825,6 @@
       "toPortId": "hx-3-tube-1",
       "fromElevation": 0.37,
       "toElevation": 1,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3862,8 +3834,6 @@
       "toPortId": "pipe-hx-3-pump-3-left",
       "fromElevation": 1,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3873,8 +3843,6 @@
       "toPortId": "pump-3-inlet",
       "fromElevation": 0.38,
       "toElevation": 0,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3884,8 +3852,6 @@
       "toPortId": "pipe-pump-3-rv-1-left",
       "fromElevation": 0,
       "toElevation": 0.36,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3895,8 +3861,6 @@
       "toPortId": "rv-1-cold-leg-3",
       "fromElevation": 0.36,
       "toElevation": 6,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3906,8 +3870,6 @@
       "toPortId": "pipe-cb-1-hx-4-left",
       "fromElevation": 10,
       "toElevation": 0.37,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3917,8 +3879,6 @@
       "toPortId": "hx-4-tube-1",
       "fromElevation": 0.37,
       "toElevation": 1,
-      "flowArea": 0.42,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3928,8 +3888,6 @@
       "toPortId": "pipe-hx-4-pump-4-left",
       "fromElevation": 1,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3939,8 +3897,6 @@
       "toPortId": "pump-4-inlet",
       "fromElevation": 0.38,
       "toElevation": 0,
-      "flowArea": 0.45,
-      "length": 3,
       "resistanceCoeff": 1.5
     },
     {
@@ -3950,8 +3906,6 @@
       "toPortId": "pipe-pump-4-rv-1-left",
       "fromElevation": 0,
       "toElevation": 0.36,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -3961,8 +3915,6 @@
       "toPortId": "rv-1-cold-leg-4",
       "fromElevation": 0.36,
       "toElevation": 6,
-      "flowArea": 0.4,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -4063,9 +4015,7 @@
       "toComponentId": "pipe-turbine-1-condenser-1",
       "toPortId": "pipe-turbine-1-condenser-1-left",
       "fromElevation": 0,
-      "toElevation": 1.5,
-      "flowArea": 1,
-      "length": 2.5
+      "toElevation": 1.5
     },
     {
       "fromComponentId": "pipe-turbine-1-condenser-1",
@@ -4073,9 +4023,7 @@
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
       "fromElevation": 1.5,
-      "toElevation": 5,
-      "flowArea": 1,
-      "length": 2.5
+      "toElevation": 5
     },
     {
       "fromComponentId": "condenser-1",
@@ -4083,9 +4031,7 @@
       "toComponentId": "pipe-condenser-1-cond-pump-1",
       "toPortId": "pipe-condenser-1-cond-pump-1-left",
       "fromElevation": 0.1,
-      "toElevation": 0.31,
-      "flowArea": 0.3,
-      "length": 1.5
+      "toElevation": 0.31
     },
     {
       "fromComponentId": "pipe-condenser-1-cond-pump-1",
@@ -4093,9 +4039,7 @@
       "toComponentId": "cond-pump-1",
       "toPortId": "cond-pump-1-inlet",
       "fromElevation": 0.31,
-      "toElevation": 0,
-      "flowArea": 0.3,
-      "length": 1.5
+      "toElevation": 0
     },
     {
       "fromComponentId": "hx-1",

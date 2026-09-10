@@ -915,8 +915,6 @@
       "toPortId": "pipe-cb-1-hx-1-left",
       "fromElevation": 10,
       "toElevation": 0.4,
-      "flowArea": 0.5,
-      "length": 5,
       "resistanceCoeff": 1.5
     },
     {
@@ -926,8 +924,6 @@
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0.4,
       "toElevation": 1,
-      "flowArea": 0.5,
-      "length": 5,
       "resistanceCoeff": 1.5
     },
     {
@@ -937,8 +933,6 @@
       "toPortId": "pipe-hx-1-pump-1-left",
       "fromElevation": 1,
       "toElevation": 0.4,
-      "flowArea": 0.5,
-      "length": 2.5,
       "resistanceCoeff": 1.5
     },
     {
@@ -948,8 +942,6 @@
       "toPortId": "pump-1-inlet",
       "fromElevation": 0.4,
       "toElevation": 0,
-      "flowArea": 0.5,
-      "length": 2.5,
       "resistanceCoeff": 1.5
     },
     {
@@ -959,8 +951,6 @@
       "toPortId": "pipe-pump-1-rv-1-left",
       "fromElevation": 0,
       "toElevation": 0.38,
-      "flowArea": 0.45,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -970,8 +960,6 @@
       "toPortId": "rv-1-cold-leg",
       "fromElevation": 0.38,
       "toElevation": 6,
-      "flowArea": 0.45,
-      "length": 4,
       "resistanceCoeff": 1.5
     },
     {
@@ -1000,9 +988,7 @@
       "toComponentId": "pipe-turbine-1-condenser-1",
       "toPortId": "pipe-turbine-1-condenser-1-left",
       "fromElevation": 0,
-      "toElevation": 1,
-      "flowArea": 0.3,
-      "length": 2.5
+      "toElevation": 1
     },
     {
       "fromComponentId": "pipe-turbine-1-condenser-1",
@@ -1010,9 +996,7 @@
       "toComponentId": "condenser-1",
       "toPortId": "condenser-1-inlet",
       "fromElevation": 1,
-      "toElevation": 5,
-      "flowArea": 0.3,
-      "length": 2.5
+      "toElevation": 5
     },
     {
       "fromComponentId": "condenser-1",
@@ -1020,9 +1004,7 @@
       "toComponentId": "pipe-condenser-1-cond-pump-1",
       "toPortId": "pipe-condenser-1-cond-pump-1-left",
       "fromElevation": 0.1,
-      "toElevation": 0.28,
-      "flowArea": 0.25,
-      "length": 1.5
+      "toElevation": 0.28
     },
     {
       "fromComponentId": "pipe-condenser-1-cond-pump-1",
@@ -1030,9 +1012,7 @@
       "toComponentId": "cond-pump-1",
       "toPortId": "cond-pump-1-inlet",
       "fromElevation": 0.28,
-      "toElevation": 0,
-      "flowArea": 0.25,
-      "length": 1.5
+      "toElevation": 0
     },
     {
       "fromComponentId": "cond-pump-1",
