@@ -2273,12 +2273,12 @@ export class TurbineCondenserRateOperator implements RateOperator {
     // Find turbines dynamically by looking for nodes that have "turbine-generator" in the ID
     // Skip extraction nodes (they have parentTurbineId set)
     for (const [turbineNodeId, turbineNode] of state.flowNodes) {
-      // Check if this is a main turbine node (not an extraction node)
-      const isTurbine = turbineNodeId.includes('turbine-generator') ||
-                        (turbineNode.label?.toLowerCase().includes('turbine') &&
-                         !turbineNode.parentTurbineId);
-
-      if (!isTurbine) continue;
+      // A main turbine node is one the factory stamped as such; extraction
+      // nodes carry parentTurbineId instead. Never match on the label: a
+      // "Turbine Stop Valve" upstream of the machine used to be expanded
+      // as a turbine of its own, from header pressure down to the real
+      // turbine's exhaust, and it sat at saturation for the whole run.
+      if (!turbineNode.steamTurbine) continue;
       if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
 
       // Find flow INTO the turbine, and the steam header it comes from.

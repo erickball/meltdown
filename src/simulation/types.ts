@@ -229,6 +229,15 @@ export interface FlowNode {
   // Affects flow resistance into the turbine
   governorValve?: number;
 
+  // This node IS a steam turbine: the expansion operator advects header
+  // enthalpy into it and takes the stage work back out. Stamped by the
+  // factory on turbine-generator nodes. The operator used to find its
+  // turbines by LABEL ("...turbine...") - which made a valve named
+  // "Turbine Stop Valve" a second turbine and charged it the whole
+  // expansion, and would do the same to a pipe labelled "Turbine to
+  // Condenser".
+  steamTurbine?: boolean;
+
   // Electric heater power currently deposited into this node's fluid (W).
   // Generic - any tank can have heaters (pressurizer heaters being the
   // canonical use). Set by a heater-power controller actuator (or the user);

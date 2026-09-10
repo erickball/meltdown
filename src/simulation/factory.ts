@@ -2399,6 +2399,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         height: 0,  // Turbines are well-mixed
         elevation,
         governorValve,
+        steamTurbine: true,
         // Swallowing capacity: what the first-stage nozzles pass at design
         // inlet conditions. The expansion operator needs it because a turbine
         // is a fixed set of choked nozzles - handing it whatever flow a
