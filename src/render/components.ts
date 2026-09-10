@@ -28,6 +28,7 @@ import {
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
 import { PIPE_METRES_PER_STICK, formatMetres, stockedLines } from '../game/stock';
+import { reactorBarrelExtent } from '../reactor-geometry';
 import {
   getFluidColor,
   getTwoPhaseColors,
@@ -1782,21 +1783,13 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   const barrelOuterR = (vessel.barrelDiameter / 2 + vessel.barrelThickness / 2) * view.zoom;
   const barrelInnerR = (vessel.barrelDiameter / 2) * view.zoom;
 
-  // Calculate dome intrusion at barrel radius
-  // The dome is hemispherical with radius = innerDiameter/2
-  // At the barrel's outer radius, the dome surface is at:
-  // z = R - sqrt(R² - r²) from the end of the cylinder
-  const vesselR = vessel.innerDiameter / 2;  // world units
-  const barrelOuterRWorld = vessel.barrelDiameter / 2 + vessel.barrelThickness / 2;
-  const domeIntrusion = vesselR - Math.sqrt(vesselR * vesselR - barrelOuterRWorld * barrelOuterRWorld);
-
-  // Barrel position relative to inner dome surface
-  // The inner dome center is at Y = -H/2 + outerR (top) or H/2 - outerR (bottom)
-  // Inner dome radius = vesselR, so at barrel outer radius, dome surface is at:
-  // Y = domeCenterY -/+ sqrt(vesselR² - barrelR²)
-  // The gap is measured from this dome surface to the barrel end
-  const effectiveBottomY = vessel.height / 2 - vessel.wallThickness - domeIntrusion - vessel.barrelBottomGap;
-  const effectiveTopY = -vessel.height / 2 + vessel.wallThickness + domeIntrusion + vessel.barrelTopGap;
+  // Barrel ends, measured from the inner dome surface at the barrel's outer
+  // radius (reactor-geometry.ts - shared with whatever places the core-barrel
+  // component, so its ports land on these ends). Screen y runs downward from
+  // the vessel's centre.
+  const barrelExtent = reactorBarrelExtent(vessel);
+  const effectiveBottomY = vessel.height / 2 - barrelExtent.bottom;
+  const effectiveTopY = vessel.height / 2 - barrelExtent.top;
   const barrelBottomY = effectiveBottomY * view.zoom;
   const barrelTopY = effectiveTopY * view.zoom;
   const barrelHeight = barrelBottomY - barrelTopY;

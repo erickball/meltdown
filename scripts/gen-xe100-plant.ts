@@ -31,6 +31,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { heatExchangerPorts } from '../src/construction/construction-manager';
+import { reactorBarrelExtent } from '../src/reactor-geometry';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -60,23 +62,49 @@ const AIR = { N2: 0.78, O2: 0.21, Ar: 0.009 };
 // ---------------------------------------------------------------------------
 // The SG vessel stands on the ground floor and the cross-vessel enters it
 // near the top; the RPV is raised so that the same duct leaves it just under
-// the core. Nothing else moved: the RPV, core, RCCS panels and tank keep
-// their relative geometry from gen-xe100.ts (which the RCCS thermosyphon
-// was verified with), all lifted by the same 14 m.
+// the core. The RCCS panels and tank keep their relative geometry from
+// gen-xe100.ts (which the RCCS thermosyphon was verified with), lifted with
+// the vessel.
 const SG_VESSEL_HEIGHT = 18;
 const SG_BUNDLE_BASE = 1.5;             // OTSG bundle stands on the vessel floor
 const SG_BUNDLE_HEIGHT = 14;
+const SG_BUNDLE_WIDTH = 2.8;
+const SG_PLENUM = 0.8;                  // tube-side headers, below and above the bundle
 const SG_BUNDLE_TOP = SG_BUNDLE_BASE + SG_BUNDLE_HEIGHT;   // 15.5 m
 const DUCT_OD = 1.8;
 const DUCT_CENTERLINE = SG_BUNDLE_TOP;  // hot gas enters the bundle at its top
 const DUCT_BASE = DUCT_CENTERLINE - DUCT_OD / 2;           // 14.6 m
 const CIRCULATOR_BASE = 16.0;           // above the bundle, under the vessel dome
-const RPV_LIFT = 14;                    // RPV base; the duct sits 0.4 m under the core bottom
+
+// The reactor vessel and its core barrel. The barrel is placed by the SAME
+// formula the vessel painter draws it with (reactor-geometry.ts): its gaps
+// are measured from the inner dome surface at the barrel's radius, and a
+// 4.4 m barrel in a 4.6 m vessel meets the heads 1.74 m up the curve. The
+// top gap is whatever leaves an 11 m barrel, so the core-barrel component
+// (whose height sets the core's volume) IS the barrel on screen and its top
+// and bottom ports sit on the drawn ends.
 const RPV_HEIGHT = 20;
-const BARREL_GAP = 1.5;
+const RPV_ID = 4.6, RPV_WALL = 0.22;
+const BARREL_DIAMETER = 4.4, BARREL_THICKNESS = 0.06;
+const BARREL_GAP = 1.5;                 // under the barrel
+const CORE_BARREL_HEIGHT = 11;
 const CORE_BOTTOM_IN_BARREL = 0.4;
+const rpvGeometry = (barrelTopGap: number) => ({
+  height: RPV_HEIGHT, wallThickness: RPV_WALL, innerDiameter: RPV_ID,
+  barrelDiameter: BARREL_DIAMETER, barrelThickness: BARREL_THICKNESS,
+  barrelBottomGap: BARREL_GAP, barrelTopGap,
+});
+const BARREL_TOP_GAP = reactorBarrelExtent(rpvGeometry(0)).height - CORE_BARREL_HEIGHT;
+const BARREL = reactorBarrelExtent(rpvGeometry(BARREL_TOP_GAP));   // from the RPV base
+// The downcomer node's volume, pinned at what the factory derived for the
+// old 1.5 m / 1.5 m gaps (it takes height less both gaps when no volume is
+// given), so re-seating the barrel changes the drawing and not the plant.
+const RPV_DOWNCOMER_VOLUME =
+  Math.PI * ((RPV_ID / 2) ** 2 - (BARREL_DIAMETER / 2 + BARREL_THICKNESS) ** 2) * (RPV_HEIGHT - 2 * 1.5);
+// RPV base: raised so the duct centerline sits 0.4 m under the fuel
+const RPV_LIFT = +(DUCT_CENTERLINE + 0.4 - CORE_BOTTOM_IN_BARREL - BARREL.bottom).toFixed(2);
 // Sanity: the duct centerline must sit a little BELOW the core bottom
-const CORE_BOTTOM_ABS = RPV_LIFT + BARREL_GAP + CORE_BOTTOM_IN_BARREL;   // 15.9 m
+const CORE_BOTTOM_ABS = RPV_LIFT + BARREL.bottom + CORE_BOTTOM_IN_BARREL;   // ~15.9 m
 if (!(DUCT_CENTERLINE < CORE_BOTTOM_ABS && DUCT_CENTERLINE > RPV_LIFT)) {
   throw new Error(`Duct centerline ${DUCT_CENTERLINE} m is not between the RPV base ${RPV_LIFT} and the core bottom ${CORE_BOTTOM_ABS}`);
 }
@@ -90,7 +118,7 @@ const SG_BLDG = { x: 57, y: 78, width: 14, length: 22, height: 26 };
 const SHARED_WALL_X = RX_BLDG.x + RX_BLDG.width / 2;          // 50
 if (SHARED_WALL_X !== SG_BLDG.x - SG_BLDG.width / 2) throw new Error('buildings do not share a wall');
 
-const RPV_X = 44, RPV_ID = 4.6, RPV_WALL = 0.22;
+const RPV_X = 44;
 const SG_X = 55, SG_WIDTH = 4.2;
 const RPV_OUTER_FACE = RPV_X + RPV_ID / 2 + RPV_WALL;          // 46.52
 const SG_OUTER_FACE = SG_X - SG_WIDTH / 2;                     // 52.9
@@ -146,11 +174,11 @@ function building(id: string, label: string, b: { x: number; y: number; width: n
 
 building('bui-rx', 'Reactor Building', RX_BLDG, [
   ['bui-rx-east', RX_BLDG.width / 2, 0],       // the penetration in the shared wall
-  ['bui-rx-vent-1', 2, -RX_BLDG.length / 2],   // primary safety valve discharge
   ['bui-rx-vent-2', -8, -RX_BLDG.length / 2],  // RCCS tank relief discharge
 ]);
 building('bui-sg', 'Steam Generator Building', SG_BLDG, [
   ['bui-sg-west', -SG_BLDG.width / 2, 0],
+  ['bui-sg-vent-1', -2, -SG_BLDG.length / 2],  // primary safety valve discharge
 ]);
 
 // ---------------------------------------------------------------------------
@@ -164,12 +192,14 @@ add('rv-1', {
   position: { x: RPV_X, y: 78 }, rotation: 0, elevation: RPV_LIFT,
   innerDiameter: RPV_ID, wallThickness: RPV_WALL, height: RPV_HEIGHT, pressureRating: 90,
   fillLevel: 0,
-  barrelDiameter: 4.4, barrelThickness: 0.06, barrelBottomGap: BARREL_GAP, barrelTopGap: BARREL_GAP,
+  barrelDiameter: BARREL_DIAMETER, barrelThickness: BARREL_THICKNESS,
+  barrelBottomGap: BARREL_GAP, barrelTopGap: BARREL_TOP_GAP,
+  volume: RPV_DOWNCOMER_VOLUME,
   coreBarrelId: 'cb-1',
+  // Port y is measured down from the vessel's centre
   ports: ports([
-    ['rv-1-cold-leg', -2.3, 0],     // annulus return, at the duct elevation
-    ['rv-1-core-in', 0, -2],        // top plenum -> core top
-    ['rv-1-top', 0.6, -2],          // safety valve tap on the dome
+    ['rv-1-cold-leg', -RPV_ID / 2, RPV_HEIGHT / 2 - (DUCT_CENTERLINE - RPV_LIFT)],   // annulus return, at the duct
+    ['rv-1-core-in', 0, RPV_HEIGHT / 2 - (BARREL.top + BARREL_TOP_GAP / 2)],        // top plenum, over the barrel
   ]),
   fluid: heFluid(T_CORE_IN),
   nqa1: true, containedBy: 'bui-rx', initialNcg: HE,
@@ -177,15 +207,16 @@ add('rv-1', {
 
 add('cb-1', {
   type: 'coreBarrel', label: 'Pebble Core',
-  position: { x: RPV_X, y: 78 }, rotation: 0, elevation: RPV_LIFT + BARREL_GAP,
-  innerDiameter: 2.4, thickness: 0.06, height: 11, bottomGap: BARREL_GAP, topGap: BARREL_GAP,
+  position: { x: RPV_X, y: 78 }, rotation: 0, elevation: RPV_LIFT + BARREL.bottom,
+  innerDiameter: 2.4, thickness: 0.06, height: CORE_BARREL_HEIGHT, bottomGap: BARREL_GAP, topGap: BARREL_TOP_GAP,
   fuelRodCount: 8, fuelTemperature: 900, fuelMeltingPoint: 2800,
   activeFuelHeight: 8.9, coreBottomElevation: CORE_BOTTOM_IN_BARREL,
   controlRodCount: 6, controlRodPosition: 0.85,
   initializeCritical: true, excessReactivity: 0.025,
   initialPower: THERMAL_POWER, controlRodWorth: 0.09,
-  // Inlet at the TOP, outlet at the BOTTOM: downward core flow
-  ports: ports([['cb-1-inlet', 0, -5.5], ['cb-1-outlet', 0, 5.5]]),
+  // On the barrel's ends. Helium enters the top and leaves the bottom
+  // (downward core flow), but the ports are named for where they are.
+  ports: ports([['cb-1-top', 0, -CORE_BARREL_HEIGHT / 2], ['cb-1-bottom', 0, CORE_BARREL_HEIGHT / 2]]),
   fluid: heFluid(T_CORE_OUT),
   nqa1: true, containedBy: 'rv-1',
   fuelForm: 'pebbles', pebbleDiameter: 60, pebbleCount: 220000,
@@ -206,29 +237,46 @@ add('tank-sg-1', {
     ['tank-sg-in', 1.8, 7.5],            // bundle discharge into the vessel space, low
     ['tank-sg-suction-a', -1.0, -7.5],   // circulator A suction, under the dome
     ['tank-sg-suction-b', 1.0, -7.5],    // circulator B suction
+    ['tank-sg-top', 0, -SG_VESSEL_HEIGHT / 2],   // primary safety valve nozzle on the head
   ]),
   fluid: heFluid(T_CORE_IN),
   nqa1: true, containedBy: 'bui-sg', initialNcg: HE,
 });
 
+// Tube-side nozzles on the bundles' own plenums, where the construction
+// manager puts them for any exchanger (heatExchangerPorts): each bundle has a
+// header below (feedwater in) and above (steam out), centred on its slot.
+// Port y runs down from the component's centre, so a nozzle's elevation above
+// the bundle base is height/2 - y: below the base for the lower header.
+const SG_TUBE_PORTS = heatExchangerPorts({
+  id: 'hx-1', isVertical: true, hxType: 'helical',
+  shellDiameter: SG_BUNDLE_WIDTH, shellLength: SG_BUNDLE_HEIGHT,
+  plenumLength: SG_PLENUM, bundleCount: 2,
+}).filter(p => p.id.includes('-tube-'));
+const nozzleElevation = (portList: Array<{ id: string; position: { y: number } }>, height: number, id: string) => {
+  const p = portList.find(q => q.id === id);
+  if (!p) throw new Error(`no port ${id} in ${portList.map(q => q.id).join(', ')}`);
+  return height / 2 - p.position.y;
+};
+const SG_FEED_NOZZLE = nozzleElevation(SG_TUBE_PORTS, SG_BUNDLE_HEIGHT, 'hx-1-tube-bottom');    // -0.8
+const SG_STEAM_NOZZLE = nozzleElevation(SG_TUBE_PORTS, SG_BUNDLE_HEIGHT, 'hx-1-tube-top');      // 14.8
+
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
   position: { x: SG_X, y: 78 }, rotation: 0, elevation: SG_BUNDLE_BASE,
-  width: 2.8, height: SG_BUNDLE_HEIGHT, hxType: 'helical', tubeCount: 300,
+  width: SG_BUNDLE_WIDTH, height: SG_BUNDLE_HEIGHT, hxType: 'helical', tubeCount: 300,
   tubeModel: 'moving-boundary', bundleCount: 2,
   initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.25, L3: 0.35, flowKgs: FEED_FLOW / 2 },
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
-  plenumLength: 0.8, tubeOD: 0.019,
-  ports: ports([
-    ['hx-1-tube-1', -0.6, 7],       // bundle 1 feedwater in (bottom)
-    ['hx-1-tube-2', 0.6, -7],       // bundle 1 main steam out (top)
-    ['hx-1-tube-1-b2', -0.2, 7],    // bundle 2 feedwater in (bottom)
-    ['hx-1-tube-2-b2', 0.2, -7],    // bundle 2 main steam out (top)
-    ['hx-1-shell-1', -1.8, -6],     // hot helium in (top, from the duct)
-    ['hx-1-shell-2', 1.8, 6],       // cold helium out (bottom, to vessel space)
-    ['hx-1-tube-leak', 1.8, 0],     // bundle 1 tube-side tap for the leak path
-  ]),
+  plenumLength: SG_PLENUM, tubeOD: 0.019,
+  ports: [
+    ...SG_TUBE_PORTS,               // hx-1-tube-bottom/-top (bundle 1), ...-b2 (bundle 2)
+    ...ports([
+      ['hx-1-shell-1', -1.8, -6],   // hot helium in (top, from the duct)
+      ['hx-1-shell-2', 1.8, 6],     // cold helium out (bottom, to vessel space)
+    ]),
+  ],
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
@@ -313,12 +361,12 @@ function isolationValve(id: string, label: string, x: number, y: number, elevati
     nqa1: true, containedBy: 'bui-sg', pressureRating: 250,
   });
 }
-// Steam isolation valves level with the bundle steam outlets (bundle top)
-const STEAM_OUTLET_ABS = SG_BUNDLE_BASE + 13.5;   // 15.0 m, the top tube nozzle
+// Steam isolation valves level with the bundle steam outlets (upper headers)
+const STEAM_OUTLET_ABS = SG_BUNDLE_BASE + SG_STEAM_NOZZLE;   // 16.3 m
 isolationValve('val-msiv-1', 'Main Steam Isolation Valve 1', 59, 73, STEAM_OUTLET_ABS, true);
 isolationValve('val-msiv-2', 'Main Steam Isolation Valve 2', 62, 73, STEAM_OUTLET_ABS, true);
-// Feed isolation valves level with the bundle feed nozzles
-const FEED_INLET_ABS = SG_BUNDLE_BASE + 1;        // 2.5 m
+// Feed isolation valves level with the bundle feed nozzles (lower headers)
+const FEED_INLET_ABS = SG_BUNDLE_BASE + SG_FEED_NOZZLE;      // 0.7 m
 isolationValve('val-fwiv-1', 'Feedwater Isolation Valve 1', 57, 86, FEED_INLET_ABS, false);
 isolationValve('val-fwiv-2', 'Feedwater Isolation Valve 2', 61, 86, FEED_INLET_ABS, false);
 
@@ -394,17 +442,20 @@ add('val-msv-1', {
 });
 
 // ---------------------------------------------------------------------------
-// Primary safety valve: vessel dome -> reactor building
+// Primary safety valve: SG vessel head -> SG building
 // ---------------------------------------------------------------------------
+// On the top of the steam generator vessel, the one big helium volume that
+// is not the reactor, discharging into the SG hall.
+const PREL_ELEVATION = SG_VESSEL_HEIGHT + 1;
 add('val-prel-1', {
   type: 'valve', label: 'Primary Safety Valve',
   valveType: 'relief',
-  position: { x: 43, y: 71 }, rotation: 0, elevation: RPV_LIFT + 18,
+  position: { x: SG_X, y: 74 }, rotation: 0, elevation: PREL_ELEVATION,
   diameter: 0.1, opening: 0, volume: 0.1,
   pressureRating: 120, setpoint: 75e5, blowdown: 0.03,
   ports: ports([['val-prel-1-in', -0.1, 0, 'in'], ['val-prel-1-out', 0.1, 0, 'out']]),
-  fluid: heFluid(T_CORE_IN),
-  nqa1: true, containedBy: 'bui-rx', initialNcg: HE,
+  fluid: heFluid(T_SG_HE_OUT),
+  nqa1: true, containedBy: 'bui-sg', initialNcg: HE,
 });
 
 // ---------------------------------------------------------------------------
@@ -463,22 +514,9 @@ add('val-rccs-1', {
   nqa1: true, containedBy: 'bui-rx',
 });
 
-// ---------------------------------------------------------------------------
-// SG tube leak valve: the SGTR fault injector (normally shut)
-// ---------------------------------------------------------------------------
-add('val-leak-1', {
-  type: 'valve', label: 'SG Tube Leak',
-  valveType: 'gate',
-  material: 'stainless-304',
-  position: { x: 51.5, y: 74 }, rotation: 0, elevation: 8,
-  // The leak LINE's inventory, not a bare 20 mm body: with the outlet shut
-  // the body hangs on the boiler tube as a dead leg, and the factory's
-  // 0.01 m3 floor rang 13 -> 21 bar in a step and pinned dt at 12 ms.
-  diameter: 0.02, opening: 0, volume: 0.3,
-  ports: ports([['val-leak-1-in', -0.1, 0, 'in'], ['val-leak-1-out', 0.1, 0, 'out']]),
-  fluid: { temperature: 640, pressure: P_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
-  nqa1: true, containedBy: 'bui-sg', pressureRating: 200,
-});
+// No tube-leak valve: a tube rupture is a scripted burst of a bundle's tube
+// node (hx-1-tube or hx-1-tube-b2), which discharges into the shell the way
+// any tube failure does.
 
 // ---------------------------------------------------------------------------
 // Secondary: turbine (with an extraction port), condenser, pumps, heater
@@ -573,10 +611,17 @@ add('val-fwcv-1', {
 
 // HP feedwater heater. No `extractionSource` here: the bleed point is the
 // turbine's own extraction node now.
+// U-tube: both tube nozzles on the one header under the tube sheet
+const FWH_HEIGHT = 7;
+const FWH_TUBE_PORTS = heatExchangerPorts({
+  id: 'fwh-1', isVertical: true, hxType: 'utube',
+  shellDiameter: 1.8, shellLength: FWH_HEIGHT, plenumLength: 0.5, bundleCount: 1,
+}).filter(p => p.id.includes('-tube-'));
+const FWH_TUBE_NOZZLE = nozzleElevation(FWH_TUBE_PORTS, FWH_HEIGHT, 'fwh-1-tube-1');   // -0.48
 add('fwh-1', {
   type: 'heatExchanger', label: 'HP Feedwater Heater',
   position: { x: 69, y: 101 }, rotation: 0, elevation: 0,
-  width: 1.8, height: 7, hxType: 'utube', tubeCount: 900,
+  width: 1.8, height: FWH_HEIGHT, hxType: 'utube', tubeCount: 900,
   tubeModel: 'lumped',
   material: 'low-alloy-steel',
   pressureRating: 40, tubePressureRating: 250, shellPressureRating: 40,
@@ -586,12 +631,13 @@ add('fwh-1', {
   shellFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   secondaryFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   fillLevel: 0.3,
-  ports: ports([
-    ['fwh-1-tube-1', -0.5, 3.5],
-    ['fwh-1-tube-2', 0.5, -3.5],
-    ['fwh-1-shell-1', -1.1, -3],
-    ['fwh-1-shell-2', 1.1, 3],
-  ]),
+  ports: [
+    ...FWH_TUBE_PORTS,              // fwh-1-tube-1 (feed in), fwh-1-tube-2 (feed out)
+    ...ports([
+      ['fwh-1-shell-1', -1.1, -3],
+      ['fwh-1-shell-2', 1.1, 3],
+    ]),
+  ],
   nqa1: false,
 });
 
@@ -695,15 +741,14 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
 // Primary loop connections (helium) - DOWNWARD core flow
 // ---------------------------------------------------------------------------
 const HE_FLOW_INIT = THERMAL_POWER / (5195 * (T_CORE_OUT - T_CORE_IN));
-const BARREL_HEIGHT = 11;
 // Top plenum -> core top, then down through the bed. The pebble bed's Ergun
 // resistance (K = 550 on the 1.76 m2 void free-area) rides on this
 // connection, as it did on the upflow version.
-connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-inlet',
-  { initialFlowRate: HE_FLOW_INIT, fromElevation: BARREL_GAP + BARREL_HEIGHT, toElevation: BARREL_HEIGHT,
+connect('rv-1', 'rv-1-core-in', 'cb-1', 'cb-1-top',
+  { initialFlowRate: HE_FLOW_INIT, fromElevation: BARREL.top + BARREL_TOP_GAP / 2, toElevation: CORE_BARREL_HEIGHT,
     flowArea: 1.76, length: 8.9, resistanceCoeff: 550 });
 // Core bottom -> hot gas duct inner pipe, at the duct centerline
-connect('cb-1', 'cb-1-outlet', 'cv-1', 'cv-1-inner-in',
+connect('cb-1', 'cb-1-bottom', 'cv-1', 'cv-1-inner-in',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 0, toElevation: DUCT_OD / 2, flowArea: 0.78, length: 3, resistanceCoeff: 1.5 });
 // Duct inner pipe -> bundle shell top
 connect('cv-1', 'cv-1-inner-out', 'hx-1', 'hx-1-shell-1',
@@ -735,9 +780,9 @@ connect('bui-rx', 'bui-rx-east', 'bui-sg', 'bui-sg-west',
 // Bundle steam outlets -> steam isolation valves -> main steam line. The
 // bundle lines and valves are full-bore (0.03 m2); the THROTTLE that sets
 // rated steam flow stays on the line into the turbine below, as before.
-for (const [n, port] of [[1, 'hx-1-tube-2'], [2, 'hx-1-tube-2-b2']] as const) {
+for (const [n, port] of [[1, 'hx-1-tube-top'], [2, 'hx-1-tube-top-b2']] as const) {
   connect('hx-1', port, `val-msiv-${n}`, `val-msiv-${n}-in`,
-    { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: 13.5, toElevation: 0,
+    { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0,
       flowArea: 0.03, length: 4, resistanceCoeff: 1, fromPhaseTolerance: 0 });
   connect(`val-msiv-${n}`, `val-msiv-${n}-out`, 'pipe-ms-1', 'pipe-ms-1-left',
     { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 0,
@@ -786,20 +831,20 @@ connect('val-cpcv-1', 'val-cpcv-1-out', 'fw-pump-1', 'fw-pump-1-inlet',
 connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fpcv-1', 'val-fpcv-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
 connect('val-fpcv-1', 'val-fpcv-1-out', 'fwh-1', 'fwh-1-tube-1',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: FWH_TUBE_NOZZLE, flowArea: 0.05, length: 2 });
 connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: FWH_TUBE_NOZZLE, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
 // FW check valve -> feedwater line -> feed isolation valves -> bundle
 // orifices (K = 600 each: the split between bundles is set by geometry,
 // not by whichever bundle happens to be boiling less).
 connect('val-fwcv-1', 'val-fwcv-1-out', 'pipe-fw-1', 'pipe-fw-1-left',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 3, resistanceCoeff: 1 });
-for (const [n, port] of [[1, 'hx-1-tube-1'], [2, 'hx-1-tube-1-b2']] as const) {
+for (const [n, port] of [[1, 'hx-1-tube-bottom'], [2, 'hx-1-tube-bottom-b2']] as const) {
   connect('pipe-fw-1', 'pipe-fw-1-right', `val-fwiv-${n}`, `val-fwiv-${n}-in`,
     { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 0,
       flowArea: 0.03, length: 4, resistanceCoeff: 1 });
   connect(`val-fwiv-${n}`, `val-fwiv-${n}-out`, 'hx-1', port,
-    { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 1,
+    { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: SG_FEED_NOZZLE,
       flowArea: 0.015, length: 6, resistanceCoeff: 600 });
 }
 
@@ -810,12 +855,12 @@ connect('val-fwhdr-1', 'val-fwhdr-1-out', 'condenser-1', 'condenser-1-inlet',
   { initialFlowPhase: 'liquid', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0.1, toElevation: 3, flowArea: 0.01, length: 8, resistanceCoeff: 8 });
 
 // ---------------------------------------------------------------------------
-// Primary safety valve: off the vessel dome, discharging into the building
+// Primary safety valve: off the SG vessel head, discharging into the SG hall
 // ---------------------------------------------------------------------------
-connect('rv-1', 'rv-1-top', 'val-prel-1', 'val-prel-1-in',
-  { fromElevation: 19, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
-connect('val-prel-1', 'val-prel-1-out', 'bui-rx', 'bui-rx-vent-1',
-  { fromElevation: 0, toElevation: RPV_LIFT + 20, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
+connect('tank-sg-1', 'tank-sg-top', 'val-prel-1', 'val-prel-1-in',
+  { fromElevation: SG_VESSEL_HEIGHT, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
+connect('val-prel-1', 'val-prel-1-out', 'bui-sg', 'bui-sg-vent-1',
+  { fromElevation: 0, toElevation: PREL_ELEVATION, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 // RCCS thermosyphon
@@ -833,14 +878,6 @@ connect('rccs-tank-1', 'rccs-tank-1-vent', 'val-rccs-1', 'val-rccs-1-in',
   { fromElevation: 16, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
 connect('val-rccs-1', 'val-rccs-1-out', 'bui-rx', 'bui-rx-vent-2',
   { fromElevation: 0, toElevation: RCCS_LIFT + 42, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
-
-// ---------------------------------------------------------------------------
-// Leak path: SG tube side -> leak valve -> SG shell side
-// ---------------------------------------------------------------------------
-connect('hx-1', 'hx-1-tube-leak', 'val-leak-1', 'val-leak-1-in',
-  { fromElevation: 5, toElevation: 0, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
-connect('val-leak-1', 'val-leak-1-out', 'hx-1', 'hx-1-shell-1',
-  { fromElevation: 0, toElevation: 5, flowArea: 3e-4, length: 0.5, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 const out = { components, connections };

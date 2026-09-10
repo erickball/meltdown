@@ -5412,9 +5412,18 @@ function initializeBurstStates(
           currentBreakFraction: 0,
           breakSizeSeed: simulationRandom() * 10000,
         });
-        // Set containerId on shell node if not set (breaks go to atmosphere)
-        if (!shellNode.containerId) {
-          shellNode.containerId = undefined; // Explicitly undefined = atmosphere
+        // The shell is the boundary against whatever holds the exchanger: it
+        // is gauged against, and breaks into, the container (an OTSG inside
+        // its pressure vessel vents into the vessel, not out of doors). No
+        // container = the open air.
+        if (!shellNode.containerId && component.containedBy) {
+          const containerComp = plantState.components.get(component.containedBy);
+          const containerNodeId = containerComp
+            ? ((containerComp as any).simNodeId || component.containedBy)
+            : undefined;
+          if (containerNodeId && state.flowNodes.has(containerNodeId)) {
+            shellNode.containerId = containerNodeId;
+          }
         }
       }
 
