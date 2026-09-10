@@ -1811,30 +1811,10 @@ export class ConstructionManager {
         buildingFluid.steamPressure = Math.max(
           buildingFluid.pressure - buildingNcgPa, MIN_STEAM_PRESSURE_PA);
 
-        // Create ports at cardinal directions at ground level
-        const portRadius = shape === 'cylinder' ? (diameter / 2) : (Math.max(buildingWidth, buildingLength) / 2);
-        const buildingPorts: Port[] = [
-          {
-            id: `${id}-north`,
-            position: { x: 0, y: -portRadius },
-            direction: 'both'
-          },
-          {
-            id: `${id}-south`,
-            position: { x: 0, y: portRadius },
-            direction: 'both'
-          },
-          {
-            id: `${id}-east`,
-            position: { x: portRadius, y: 0 },
-            direction: 'both'
-          },
-          {
-            id: `${id}-west`,
-            position: { x: -portRadius, y: 0 },
-            direction: 'both'
-          }
-        ];
+        // Ports at the four cardinal points of the wall, at ground level
+        const buildingPorts: Port[] = Object.entries(
+          buildingWallPortPositions(id, { shape, diameter, width: buildingWidth, length: buildingLength })
+        ).map(([portId, position]) => ({ id: portId, position, direction: 'both' as const }));
 
         const building = {
           id,
@@ -1862,40 +1842,7 @@ export class ConstructionManager {
         console.log(`[Construction] Created building: ${shape}, ${buildingHeight}m tall, ${props.pressureRating ?? 4} bar rating`);
 
         // Capture existing components that fall within this building's footprint
-        const halfW = shape === 'cylinder' ? diameter / 2 : buildingWidth / 2;
-        const halfD = shape === 'cylinder' ? diameter / 2 : buildingLength / 2;
-        let capturedCount = 0;
-
-        for (const [compId, comp] of this.plantState.components) {
-          // Skip the building itself, pipes, and components already contained by something
-          if (compId === id || comp.type === 'building' || comp.type === 'pipe' || comp.containedBy) {
-            continue;
-          }
-
-          // Check if component position is inside this building's footprint
-          const dx = comp.position.x - worldX;
-          const dy = comp.position.y - worldY;
-
-          let isInside = false;
-          if (shape === 'cylinder') {
-            // Circular footprint check
-            const distSq = dx * dx + dy * dy;
-            isInside = distSq <= halfW * halfW;
-          } else {
-            // Rectangular footprint check
-            isInside = Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
-          }
-
-          if (isInside) {
-            comp.containedBy = id;
-            capturedCount++;
-            console.log(`[Construction] Component '${compId}' is now contained by building '${id}'`);
-          }
-        }
-
-        if (capturedCount > 0) {
-          console.log(`[Construction] Building '${id}' captured ${capturedCount} existing component(s)`);
-        }
+        this.deriveBuildingContainment(id);
 
         break;
       }
@@ -2721,6 +2668,60 @@ export class ConstructionManager {
   }
 
   /**
+   * Make every component standing inside building `id`'s footprint contained
+   * by it, and release the ones it contained that the footprint no longer
+   * covers. Pipes are left alone (a pipe's position is only its start point,
+   * which says nothing about where the run goes), and so is anything already
+   * inside another container - a core barrel in a vessel belongs to the
+   * vessel, whatever the building around both of them does.
+   */
+  private deriveBuildingContainment(id: string): void {
+    const building = this.plantState.components.get(id) as Record<string, any> | undefined;
+    if (!building || building.type !== 'building') {
+      throw new Error(`[Construction] deriveBuildingContainment: '${id}' is not a building`);
+    }
+    for (const [compId, comp] of this.plantState.components) {
+      if (compId === id || comp.type === 'building' || comp.type === 'pipe') continue;
+      const inside = insideBuildingFootprint(building as BuildingGeometry, comp.position.x, comp.position.y);
+      if (comp.containedBy === id && !inside) {
+        delete comp.containedBy;
+        console.log(`[Construction] Component '${compId}' is outside building '${id}' now - no longer contained by it`);
+      } else if (!comp.containedBy && inside) {
+        comp.containedBy = id;
+        console.log(`[Construction] Component '${compId}' is now contained by building '${id}'`);
+      }
+    }
+  }
+
+  /**
+   * Re-derive what a building's shape and dimensions decide, after an edit:
+   * where its wall ports sit, the room its gas has (the same gas in a
+   * different room - partial pressures kept, moles scaled with the volume),
+   * and which components stand inside it. The simulation factory reads the
+   * shape and dimensions directly, so its volume follows on the next build.
+   */
+  private applyBuildingGeometry(id: string, building: Record<string, any>): void {
+    const positions = buildingWallPortPositions(id, building);
+    for (const port of (building.ports ?? []) as Port[]) {
+      const p = positions[port.id];
+      if (p) port.position = p;
+    }
+    const volume = buildingFootprint(building).area * (building.height || 25);
+    const fluid = building.fluid as Fluid | undefined;
+    if (fluid) {
+      if (fluid.ncg && fluid.volume && fluid.volume > 0) {
+        const k = volume / fluid.volume;
+        for (const species of ALL_GAS_SPECIES) {
+          const n = fluid.ncg[species as GasSpecies];
+          if (n) fluid.ncg[species as GasSpecies] = n * k;
+        }
+      }
+      fluid.volume = volume;
+    }
+    this.deriveBuildingContainment(id);
+  }
+
+  /**
    * Complain about components that claim to be inside a building but whose
    * plan position falls outside its footprint. The renderer draws them where
    * their coordinates say, so they appear standing outside the building they
@@ -2734,16 +2735,8 @@ export class ConstructionManager {
       const building = this.plantState.components.get(containerId) as Record<string, any> | undefined;
       if (!building || building.type !== 'building') continue;
 
-      const halfW = building.shape === 'cylinder'
-        ? (building.diameter || 40) / 2 : (building.width || 40) / 2;
-      const halfD = building.shape === 'cylinder'
-        ? (building.diameter || 40) / 2 : (building.length || 40) / 2;
-      const dx = component.position.x - building.position.x;
-      const dy = component.position.y - building.position.y;
-      const inside = building.shape === 'cylinder'
-        ? (dx * dx) / (halfW * halfW) + (dy * dy) / (halfD * halfD) <= 1
-        : Math.abs(dx) <= halfW && Math.abs(dy) <= halfD;
-      if (inside) continue;
+      if (insideBuildingFootprint(building as BuildingGeometry, component.position.x, component.position.y)) continue;
+      const { halfW, halfD } = buildingFootprint(building);
 
       console.error(
         `[Construction] '${id}' (${component.label || component.type}) is marked contained by ` +
@@ -3741,6 +3734,28 @@ export class ConstructionManager {
           saturationPressure(properties.initialTemperature + 273.15), MIN_STEAM_PRESSURE_PA);
       }
     }
+    // Building footprint: the shape picks which dimensions the footprint - and
+    // so the simulated volume, the wall ports and what stands inside - comes
+    // from. Nothing wrote it here, so an edit to 'rectangle' stored the new
+    // width and length and stayed a cylinder.
+    if (component.type === 'building') {
+      if (properties.buildingShape !== undefined) {
+        if (properties.buildingShape !== 'cylinder' && properties.buildingShape !== 'rectangle') {
+          throw new Error(
+            `[Construction] Building '${componentId}': shape '${properties.buildingShape}' ` +
+            `is neither 'cylinder' nor 'rectangle'`);
+        }
+        component.shape = properties.buildingShape;
+      }
+      // diameter, length and height arrive through the generic writes above
+      if (properties.width !== undefined) component.width = properties.width;
+      if (properties.steelFraction !== undefined) component.steelFraction = properties.steelFraction;
+      if (properties.buildingShape !== undefined || properties.diameter !== undefined ||
+          properties.width !== undefined || properties.length !== undefined ||
+          properties.height !== undefined) {
+        this.applyBuildingGeometry(componentId, component);
+      }
+    }
     // Pressurizer heaters: dialog edits MW, simulation reads heaterCapacity in W
     if (properties.heaterPower !== undefined) {
       component.heaterCapacity = properties.heaterPower * 1e6;
@@ -4591,4 +4606,61 @@ export class ConstructionManager {
     console.log(`[Construction] Added core to ${containerId}: ${fuelDesc}`);
     return { success: true };
   }
+}
+
+/** The fields of a building that decide its footprint. */
+export interface BuildingGeometry {
+  shape?: string;
+  diameter?: number;
+  width?: number;
+  length?: number;
+  position: { x: number; y: number };
+}
+
+/**
+ * A building's footprint in plan, from the dimensions its shape uses: a
+ * cylinder its diameter, a rectangle its width (x) and length (y), 40 m where
+ * one is missing. This is the one reading of that convention - creation,
+ * dialog edits, the wall ports and the containment check all go through it,
+ * with the same shape test and defaults the simulation factory uses for the
+ * volume, so none of them can disagree about where the walls are.
+ */
+export function buildingFootprint(building: Omit<BuildingGeometry, 'position'>): {
+  shape: 'cylinder' | 'rectangle'; halfW: number; halfD: number; area: number;
+} {
+  if (building.shape === 'cylinder') {
+    const r = (building.diameter || 40) / 2;
+    return { shape: 'cylinder', halfW: r, halfD: r, area: Math.PI * r * r };
+  }
+  const width = building.width || 40;
+  const length = building.length || 40;
+  return { shape: 'rectangle', halfW: width / 2, halfD: length / 2, area: width * length };
+}
+
+/** Whether a plan point lies inside a building's footprint (the wall counts). */
+export function insideBuildingFootprint(building: BuildingGeometry, x: number, y: number): boolean {
+  const f = buildingFootprint(building);
+  const dx = x - building.position.x;
+  const dy = y - building.position.y;
+  return f.shape === 'cylinder'
+    ? (dx * dx) / (f.halfW * f.halfW) + (dy * dy) / (f.halfD * f.halfD) <= 1
+    : Math.abs(dx) <= f.halfW && Math.abs(dy) <= f.halfD;
+}
+
+/**
+ * Where a building's four wall ports sit relative to its centre: ON the wall
+ * at each cardinal point. (A rectangle used to put all four at half its
+ * LONGER side, which stood one pair out in the yard.)
+ */
+export function buildingWallPortPositions(
+  id: string,
+  building: Omit<BuildingGeometry, 'position'>
+): Record<string, { x: number; y: number }> {
+  const { halfW, halfD } = buildingFootprint(building);
+  return {
+    [`${id}-north`]: { x: 0, y: -halfD },
+    [`${id}-south`]: { x: 0, y: halfD },
+    [`${id}-east`]: { x: halfW, y: 0 },
+    [`${id}-west`]: { x: -halfW, y: 0 },
+  };
 }

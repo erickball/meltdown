@@ -5141,10 +5141,14 @@ function init() {
   (window as any).__meltdownDebug.gameLoop = gameLoop;
   (window as any).__meltdownDebug.buildQueue = buildQueue;
   // Headless-test hook: load a plant JSON (the same shape save/load and the
-  // scripts/test-plants fixtures use) without going through the save slots
+  // scripts/test-plants fixtures use) without going through the save slots.
+  // A save's running-simulation snapshot comes back the way loading the save
+  // brings it back (paused at its time) - a fetched CAR's design.json carries
+  // one, and it is the state the report is about.
   (window as any).__meltdownDebug.loadPlantData = (data: unknown) => {
     deserializePlantState(data);
     updateConstructionCostPanel();
+    restoreSimStateIfPresent(data as Record<string, unknown>);
   };
 
   // Start in construction mode

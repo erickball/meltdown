@@ -1098,6 +1098,11 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
 // Tracks which node/check drove the most recent checkStateSanity() rejection,
 // for diagnostics - the aggregate score alone doesn't say what actually happened.
 export let lastSanityFailureReason = '';
+// Why the most recent step attempt returned its stage-failure error (1e10):
+// the operator that refused, the constraint that threw, the sanity check that
+// failed. A run that dies at minimum dt dies on one of these, and the final
+// error has to say which - the number 1e10 alone says nothing.
+export let lastStageFailureReason = '';
 
 export function checkStateSanity(
   oldState: SimulationState,
@@ -1293,6 +1298,8 @@ export function checkStateSanity(
         newNode.fluid.temperature < MODEL_MIN_TEMPERATURE ||
         newNode.fluid.temperature > 5000) {
       console.warn(`[RK45 Sanity] ${id}: Invalid temperature ${newNode.fluid.temperature}`);
+      lastSanityFailureReason = `${id}: temperature ${newNode.fluid.temperature} K is outside ` +
+        `the model's ${MODEL_MIN_TEMPERATURE}-5000 K range`;
       return 1000;
     }
   }
@@ -1481,6 +1488,13 @@ export class RK45Solver {
   private constraintOperators: ConstraintOperator[] = [];
   private config: RK45Config;
   private currentDt: number;
+  // Consecutive step rejections at minimum dt, ACROSS advance() calls. It
+  // used to be a local of advance(), so it restarted every frame: in the
+  // interactive path, where a frame ends on its wall-clock budget, a state
+  // that cannot be integrated at all got a couple of attempts per frame,
+  // never reached the limit, and froze the clock silently instead of
+  // throwing 'Simulation stuck'. Only an accepted step (or reset()) clears it.
+  private consecutiveRejectsAtMinDt = 0;
 
   // Semi-implicit pressure solver - runs BEFORE constraints to pre-condition flow rates
   private pressureSolver: PressureSolver | null = null;
@@ -1761,6 +1775,7 @@ export class RK45Solver {
    */
   reset(): void {
     this.currentDt = this.config.initialDt;
+    this.consecutiveRejectsAtMinDt = 0;
     this.totalSteps = 0;
     this.rejectedSteps = 0;
     this.rejectionStats.clear();
@@ -1861,6 +1876,7 @@ export class RK45Solver {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45 computeRates] Constraint operator threw, rejecting stage: ${message}`);
+        lastStageFailureReason = `a constraint operator threw on a stage: ${message}`;
         return null;
       }
     }
@@ -1910,6 +1926,7 @@ export class RK45Solver {
           `rejecting it: ${message}`);
         lastStageRefusalLog = now;
       }
+      lastStageFailureReason = `rate operator '${failingOp}' refused the stage: ${message}`;
       return null;
     }
 
@@ -2167,6 +2184,8 @@ export class RK45Solver {
                   `at dt=${(dt * 1e3).toFixed(1)}ms (explicit ceiling ${(explicitCeiling * 1e3).toFixed(1)}ms) - ` +
                   `rejecting before the stages`);
               }
+              lastStageFailureReason = `predicted pressure swing ${(swing * 100).toFixed(0)}% of scale ` +
+                `at dt=${(dt * 1e3).toFixed(3)} ms, beyond the explicit ceiling of ${(explicitCeiling * 1e3).toFixed(3)} ms`;
               return { newState: state, error: 1e10, k: [], errorRates: createZeroRates() };
             }
             this.explicitFallbackSteps++;
@@ -2175,6 +2194,7 @@ export class RK45Solver {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45] Implicit momentum solve failed, rejecting step: ${message}`);
+        lastStageFailureReason = `the implicit momentum solve failed: ${message}`;
         return { newState: state, error: 1e10, k: [], errorRates: createZeroRates() };
       }
       this.operatorTimes.set('PressureSolver', (this.operatorTimes.get('PressureSolver') || 0) + (performance.now() - t0));
@@ -2232,6 +2252,7 @@ export class RK45Solver {
           this.lastStageSanityWarn = now;
           console.warn(`[RK45] Intermediate stage failed pre-constraint sanity, rejecting: ${preCheck.reason}`);
         }
+        lastStageFailureReason = `an intermediate stage failed pre-constraint sanity: ${preCheck.reason}`;
         return {
           newState: state,
           error: 1e10,
@@ -2250,6 +2271,7 @@ export class RK45Solver {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45] Constraint operator threw on intermediate stage, rejecting: ${message}`);
+        lastStageFailureReason = `a constraint operator threw on an intermediate stage: ${message}`;
         return {
           newState: state,
           error: 1e10,
@@ -2295,6 +2317,7 @@ export class RK45Solver {
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         console.warn(`[RK45] Implicit advection failed, rejecting step: ${message}`);
+        lastStageFailureReason = `implicit advection failed: ${message}`;
         return { newState: state, error: 1e10, k, errorRates: solution5Rates };
       }
     }
@@ -2324,6 +2347,7 @@ export class RK45Solver {
     if (!finalCheck.safe) {
       // Final state is catastrophically bad
       console.warn(`[RK45] Final state sanity failed: ${finalCheck.reason}`);
+      lastStageFailureReason = `the step's final state failed sanity: ${finalCheck.reason}`;
       console.warn(`  dt=${(dt*1000).toFixed(4)}ms, state.time=${state.time.toFixed(4)}s`);
       // Log the rates that caused this
       for (const [id, r] of solution5Rates.flowNodes) {
@@ -2408,7 +2432,6 @@ export class RK45Solver {
     let stepsThisFrame = 0;
     let rejectsThisFrame = 0;
     let minDtUsed = this.currentDt;
-    let consecutiveRejectsAtMinDt = 0;
     const MAX_REJECTS_AT_MIN_DT = 50;
     let lastErrorRates: StateRates = createZeroRates();
     let lastAcceptedState: SimulationState = state;
@@ -2495,10 +2518,10 @@ export class RK45Solver {
 
         // Track consecutive rejects at minimum dt
         if (this.currentDt <= this.config.minDt * 1.01) {
-          consecutiveRejectsAtMinDt++;
-          if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+          this.consecutiveRejectsAtMinDt++;
+          if (this.consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
             throw new Error(
-              `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
+              `[RK45] Simulation stuck: ${this.consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
               `Pre-constraint sanity failed: ${preCheck.reason}. ` +
               `The physics is unstable and cannot be resolved by shrinking the timestep.`
             );
@@ -2526,10 +2549,10 @@ export class RK45Solver {
         this.currentDt = Math.max(stepDt * 0.1, this.config.minDt);
 
         if (this.currentDt <= this.config.minDt * 1.01) {
-          consecutiveRejectsAtMinDt++;
-          if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+          this.consecutiveRejectsAtMinDt++;
+          if (this.consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
             throw new Error(
-              `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
+              `[RK45] Simulation stuck: ${this.consecutiveRejectsAtMinDt} consecutive step rejections at minimum dt. ` +
               `Constraint operator threw: ${message}. ` +
               `The physics is unstable and cannot be resolved by shrinking the timestep.`
             );
@@ -2571,7 +2594,10 @@ export class RK45Solver {
             throw new Error(
               `[RK45] Simulation unstable: error ${effectiveError.toExponential(2)} at minimum dt ` +
               `(${(stepDt * 1000).toFixed(3)}ms). The physics has diverged and cannot be recovered. ` +
-              `This typically indicates a configuration problem or numerical instability.`
+              `This typically indicates a configuration problem or numerical instability. ` +
+              (error >= 1e10
+                ? `Last stage failure: ${lastStageFailureReason || '(none recorded)'}`
+                : `Last sanity rejection: ${lastSanityFailureReason || '(none recorded)'}`)
             );
           }
 
@@ -2603,7 +2629,7 @@ export class RK45Solver {
         lastAcceptedState = constrainedState;
 
         // Reset consecutive reject counter on successful step
-        consecutiveRejectsAtMinDt = 0;
+        this.consecutiveRejectsAtMinDt = 0;
 
         // Grow timestep for next step
         this.currentDt = this.computeOptimalDt(effectiveError, stepDt);
@@ -2633,10 +2659,10 @@ export class RK45Solver {
             this.lastSanityFailLog = now;
           }
           if (stepDt <= this.config.minDt * 1.01) {
-            consecutiveRejectsAtMinDt++;
-            if (consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
+            this.consecutiveRejectsAtMinDt++;
+            if (this.consecutiveRejectsAtMinDt >= MAX_REJECTS_AT_MIN_DT) {
               throw new Error(
-                `[RK45] Simulation stuck: ${consecutiveRejectsAtMinDt} consecutive non-finite error estimates at minimum dt. ` +
+                `[RK45] Simulation stuck: ${this.consecutiveRejectsAtMinDt} consecutive non-finite error estimates at minimum dt. ` +
                 `Some physics rate is producing NaN/Inf and cannot be resolved by shrinking the timestep.`
               );
             }

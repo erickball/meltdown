@@ -380,6 +380,25 @@ export function solveMixtureState(
     if (hi - lo < 1e-9 * Math.max(1, Math.abs(u1))) break;
   }
 
+  // The root is past the TOP of the water model: every water state the
+  // tables can price still leaves energy over (f < 0), and nothing above
+  // the last one could be priced at all (hi never came down from
+  // U_SPECIFIC_MAX - calculateState stops at 5000 K). The node is hotter
+  // than the model reaches. Handing back the last feasible state would pin
+  // the temperature at the ceiling and quietly drop the excess - up to the
+  // 1e-3 acceptance below, which is ~5 K of a 5000 K gas: a clamp. Say what
+  // happened instead.
+  if (Math.abs(f1) > tol && f1 < 0 && hi === U_SPECIFIC_MAX) {
+    const gasT = (totalEnergy - waterMass * u1) / gasHeatCapacity;
+    throw new Error(
+      `[Mixture] Hotter than the water model reaches: with its ${waterMass.toExponential(3)} kg of ` +
+      `water at the hottest state the tables can price (u = ${(u1 / 1e3).toFixed(1)} kJ/kg), the node ` +
+      `still has ${(-f1 / 1e6).toFixed(4)} MJ left over, which puts its ${gasMoles.toFixed(1)} mol of gas ` +
+      `near ${gasT.toFixed(0)} K. The steam tables stop at 5000 K. Something is heating this node ` +
+      `with nowhere for the heat to go (U_total=${(totalEnergy / 1e6).toFixed(4)} MJ, V=${volume.toFixed(3)} m³)`
+    );
+  }
+
   if (Math.abs(f1) > 1e-3 * Math.max(Math.abs(totalEnergy), 1)) {
     throw new Error(
       `[Mixture] Energy split failed to converge after ${iterations} iterations: ` +
