@@ -1239,6 +1239,10 @@ export function updateComponentDetail(
           const casing = simState.flowNodes.get(componentId);
           if (casing) {
             const dry = casing.fluid.phase === 'vapor';
+            // The pot is mostly pipe: connections carry no inventory, so the
+            // factory lumps each line's water into the node at its ends
+            const casingOnly = Math.max(0.3, 0.004 * ((component.ratedFlow as number) || 100));
+            html += `<div class="detail-row"><span class="detail-label" title="The pump's fluid pot. Lines carry no inventory of their own in this model, so the water in the connected piping is lumped into the pump's node - most of this volume is the pipe, not the casing (which is about ${casingOnly.toFixed(1)} m3 for this rated flow).">Pot volume:</span><span class="detail-value">${casing.volume.toFixed(1)} m³ <span style="color: #888; font-size: 9px;">(casing ~${casingOnly.toFixed(1)} + its lines)</span></span></div>`;
             html += `<div class="detail-row"><span class="detail-label" title="What the casing holds. A pump full of air develops next to no head and cannot draw water up to itself; it fills only if its suction floods it.">Casing:</span><span class="detail-value" style="color: ${dry ? '#f96' : '#8cf'};">${dry ? 'DRY (air)' : casing.fluid.phase === 'two-phase' ? `part air (${(100 * (1 - nodeLiquidLevelFraction(casing))).toFixed(0)}% gas)` : 'primed (liquid)'}</span></div>`;
           }
         }

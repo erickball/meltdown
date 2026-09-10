@@ -36,9 +36,14 @@ plant.components.push(['pmp', {
 }]);
 plant.connections.push(
   { fromComponentId: 'sea', fromPortId: 'sea-out', toComponentId: 'pmp', toPortId: 'pmp-inlet',
-    fromElevation: seaIntake, toElevation: -0.07, length: Math.max(10, x - 229), flowArea: area },
-  { fromComponentId: 'pmp', fromPortId: 'pmp-outlet', toComponentId: 'pool', toPortId: 'pool-makeup-e',
-    fromElevation: 0.36, toElevation: poolPort, length: x - 54 + 12, flowArea: area });
+    fromElevation: seaIntake, toElevation: -0.07, length: Math.max(10, x - 229), flowArea: area });
+// OPEN_DISCHARGE=1 leaves the discharge nozzle with no line on it (the factory
+// opens it to the air), to see how the casing fills when it is not dead-ended
+if (!process.env.OPEN_DISCHARGE) {
+  plant.connections.push(
+    { fromComponentId: 'pmp', fromPortId: 'pmp-outlet', toComponentId: 'pool', toPortId: 'pool-makeup-e',
+      fromElevation: 0.36, toElevation: poolPort, length: x - 54 + 12, flowArea: area });
+}
 plant.scenario = undefined;
 
 const sim = buildSimFromPlantJson(plant);
@@ -61,7 +66,8 @@ while (t < seconds) {
   t = sim.state.time;
   const c = casing();
   maxP = Math.max(maxP, c.fluid.pressure);
-  console.log(`${t.toFixed(1).padStart(6)}  ${(c.fluid.pressure / 1e5).toFixed(3).padStart(8)}  ${(steamPartialPressurePa(c) / 1e5).toFixed(3).padStart(7)}  ${(c.fluid.ncg ? totalMoles(c.fluid.ncg) : 0).toFixed(0).padStart(7)}  ${c.fluid.phase.padEnd(9)}  ${(100 * nodeLiquidLevelFraction(c)).toFixed(0).padStart(4)}  ${c.fluid.mass.toFixed(0).padStart(5)}  ${flowRate(sim.state, 'sea', 'pmp').toFixed(1).padStart(11)}  ${flowRate(sim.state, 'pmp', 'pool').toFixed(1).padStart(12)}  ${p().effectiveSpeed.toFixed(2)}  ${p().flooded ? 'Y' : 'n'}        ${(maxP / 1e5).toFixed(2)}`);
+  const toPool = process.env.OPEN_DISCHARGE ? flowRate(sim.state, 'pmp', 'atmosphere') : flowRate(sim.state, 'pmp', 'pool');
+  console.log(`${t.toFixed(1).padStart(6)}  ${(c.fluid.pressure / 1e5).toFixed(3).padStart(8)}  ${(steamPartialPressurePa(c) / 1e5).toFixed(3).padStart(7)}  ${(c.fluid.ncg ? totalMoles(c.fluid.ncg) : 0).toFixed(0).padStart(7)}  ${c.fluid.phase.padEnd(9)}  ${(100 * nodeLiquidLevelFraction(c)).toFixed(0).padStart(4)}  ${c.fluid.mass.toFixed(0).padStart(5)}  ${flowRate(sim.state, 'sea', 'pmp').toFixed(1).padStart(11)}  ${toPool.toFixed(1).padStart(12)}  ${p().effectiveSpeed.toFixed(2)}  ${p().flooded ? 'Y' : 'n'}        ${(maxP / 1e5).toFixed(2)}`);
 }
 const bursts = sim.state.burstStates ? [...sim.state.burstStates.values()].filter(b => (b as { burst?: boolean }).burst) : [];
 console.log(`bursts: ${bursts.length}`);
