@@ -16,12 +16,12 @@ import { saturationTemperature } from '../src/simulation/water-properties';
 import { PlantState } from '../src/types';
 
 // Types the generic edit path (main.ts setComponentEditCallback ->
-// updateComponent) covers. Cores, controllers, switchyards, and buildings go
-// through their own paths or need plant context, so they are not built here.
+// updateComponent) covers. Cores, controllers and switchyards go through
+// their own paths or need plant context, so they are not built here.
 const TYPES = [
   'tank', 'pressurizer', 'pipe', 'valve', 'check-valve', 'relief-valve',
   'porv', 'pump', 'heat-exchanger', 'condenser', 'turbine-generator',
-  'turbine-driven-pump', 'pool', 'warehouse',
+  'turbine-driven-pump', 'pool', 'building', 'warehouse',
 ];
 
 function editableOptions(defKey: string): ComponentOption[] {
