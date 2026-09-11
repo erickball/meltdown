@@ -69,7 +69,11 @@ export type ScenarioAction =
   /** Open or close a breaker. Closing also clears an overload trip. */
   | { kind: 'breaker'; id: string; closed: boolean }
   /** Start or stop a diesel generator. */
-  | { kind: 'diesel'; id: string; running: boolean };
+  | { kind: 'diesel'; id: string; running: boolean }
+  /** Open or close a turbine-generator's output breaker (closing onto a live grid needs it in step). */
+  | { kind: 'generator-breaker'; id: string; closed: boolean }
+  /** Trip a turbine-generator's turbine (stop valves shut), or reset the trip. */
+  | { kind: 'turbine-trip'; id: string; reset?: boolean };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */

@@ -86,12 +86,14 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
     }
     case 'offsite-power':
     case 'breaker':
-    case 'diesel': {
-      const cmd: ElectricalCommand = a.kind === 'offsite-power'
-        ? (a.available ? 'offsite-restored' : 'offsite-lost')
-        : a.kind === 'breaker'
-          ? (a.closed ? 'close' : 'open')
-          : (a.running ? 'start' : 'stop');
+    case 'diesel':
+    case 'generator-breaker':
+    case 'turbine-trip': {
+      const cmd: ElectricalCommand =
+        a.kind === 'offsite-power' ? (a.available ? 'offsite-restored' : 'offsite-lost')
+        : a.kind === 'breaker' || a.kind === 'generator-breaker' ? (a.closed ? 'close' : 'open')
+        : a.kind === 'diesel' ? (a.running ? 'start' : 'stop')
+        : (a.reset ? 'turbine-reset' : 'turbine-trip');
       const result = applyElectricalCommand(state, a.id, cmd);
       if (!result.ok) throw new Error(`[Scenario] ${a.kind} '${a.id}': ${result.message}`);
       return;

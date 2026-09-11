@@ -101,6 +101,27 @@ interface AppSettings {
   showWires?: boolean;
 }
 
+/**
+ * MW sent to the grid, for the HUD. With the electrical model on it is the
+ * generators' export - nothing while islanded, tripped or off line, and net
+ * of the house load; without it, the turbines' gross shaft output as before.
+ */
+function gridExportMW(sim: { electrical?: import('./simulation/types').ElectricalState } | null | undefined): number {
+  const E = sim?.electrical;
+  if (E) {
+    let watts = 0;
+    let generators = 0;
+    for (const id of E.order) {
+      const e = E.elements[id];
+      if (e.kind !== 'generator') continue;
+      generators++;
+      watts += e.exportW ?? 0;
+    }
+    if (generators > 0) return watts / 1e6;
+  }
+  return getTurbineCondenserState().turbinePower / 1e6;
+}
+
 function loadSettings(): AppSettings {
   try {
     const json = localStorage.getItem(SETTINGS_KEY);
@@ -415,8 +436,7 @@ function init() {
     // Update MW to grid display from turbine-condenser state
     const mwValueEl = document.getElementById('mw-value');
     if (mwValueEl) {
-      const tcState = getTurbineCondenserState();
-      const totalMW = tcState.turbinePower / 1e6;
+      const totalMW = gridExportMW(gameLoop.getState());
       mwValueEl.textContent = totalMW.toFixed(1) + ' MW';
       // Color based on power level
       if (totalMW <= 0) {
@@ -1043,8 +1063,7 @@ function init() {
     // computed value, which the next step corrects
     const mwValueEl = document.getElementById('mw-value');
     if (mwValueEl) {
-      const tcState = getTurbineCondenserState();
-      const totalMW = tcState.turbinePower / 1e6;
+      const totalMW = gridExportMW(gameLoop.getState());
       mwValueEl.textContent = totalMW.toFixed(1) + ' MW';
       mwValueEl.style.color = totalMW <= 0 ? '#888' : totalMW < 100 ? '#ff4' : '#4f4';
     }

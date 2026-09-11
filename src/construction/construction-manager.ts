@@ -4226,6 +4226,14 @@ export class ConstructionManager {
     if (properties.governorValve !== undefined) {
       component.governorValve = properties.governorValve / 100; // % to 0-1
     }
+    // Turbine-generator rotor and protection (electrical model); stored in
+    // the dialog's own units - the electrical build converts
+    if (component.type === 'turbine-generator') {
+      for (const key of ['terminalVoltage', 'inertiaH', 'speedDroop', 'overspeedTrip']) {
+        if (properties[key] !== undefined) component[key] = properties[key];
+      }
+      if (properties.speedGovernor !== undefined) component.speedGovernor = !!properties.speedGovernor;
+    }
     if (properties.stages !== undefined) {
       component.stages = properties.stages;
     }

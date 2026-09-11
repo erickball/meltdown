@@ -2229,30 +2229,188 @@ export class FlowRateOperator implements RateOperator {
 import { updateTurbineCondenserState } from './turbine-condenser';
 import { stateAtPh, expandStage } from '../turbine-expansion';
 
+/** Isentropic efficiency of every stage of every steam turbine. */
+export const TURBINE_ISENTROPIC_EFFICIENCY = 0.87;
+
+/**
+ * Specific enthalpy of the steam a donor node hands to the turbine.
+ *
+ * A moving-boundary boiler knows what is actually at its steam takeoff -
+ * the superheat section's state, not the bundle's (much colder) bulk
+ * average - and that is the enthalpy the flow machinery advects down the
+ * connection, so the expansion has to start from the same number or the
+ * turbine's energy books and the boiler's disagree.
+ */
+function donorSteamEnthalpy(donor: FlowNode, flowPhase?: string): number {
+  if (donor.otsg?.lastEval && flowPhase !== 'liquid') {
+    return donor.otsg.lastEval.hSteamOut;
+  }
+  const u = donor.fluid.internalEnergy / Math.max(1e-9, donor.fluid.mass);
+  const v = donor.volume / Math.max(1e-9, donor.fluid.mass);
+  return u + donor.fluid.pressure * v;
+}
+
+/** One steam turbine's expansion: its shaft power and what each stage node gives up for it. */
+export interface TurbineExpansion {
+  /** The machine's exhaust node id (the turbine-generator component's id). */
+  machineId: string;
+  /** Shaft power (W): the sum of the stage work. */
+  power: number;
+  /** [stage node id, work taken out of that node's steam (W)], in chain order. */
+  stageWork: Array<[string, number]>;
+}
+
+/**
+ * The staged expansion of every steam turbine in the plant, from the state
+ * as it stands. The rate operator takes each stage's work out of the steam;
+ * the electrical solve reads the shaft power to spin the generator's rotor.
+ * One function, so the two can never disagree about how much work there is.
+ */
+export function expandTurbines(state: SimulationState): TurbineExpansion[] {
+  const out: TurbineExpansion[] = [];
+  for (const [turbineNodeId, turbineNode] of state.flowNodes) {
+    // A machine is the node the factory stamped as its exhaust; its stage
+    // (extraction) nodes carry parentTurbineId and are handled as part of
+    // it below. Never match on the label: a "Turbine Stop Valve" upstream
+    // of the machine used to be expanded as a turbine of its own, from
+    // header pressure down to the real turbine's exhaust, and it sat at
+    // saturation for the whole run.
+    if (!turbineNode.steamTurbine) continue;
+    if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
+
+    // The stage chain: extraction nodes in falling pressure order, then
+    // the exhaust node. Steam enters the first of them from outside (the
+    // header), passes each nozzle row into the next, and the exhaust node
+    // discharges to the condenser. A bleed leaves its stage node sideways
+    // carrying that stage's outlet state, so it needs no accounting of its
+    // own here - the stage's books already hold it at the right state.
+    const stages: FlowNode[] = [];
+    for (const [, node] of state.flowNodes) {
+      if (node.parentTurbineId === turbineNodeId && node.extractionPressure) stages.push(node);
+    }
+    stages.sort((a, b) => (b.extractionPressure ?? 0) - (a.extractionPressure ?? 0));
+    const chain = [...stages, turbineNode];
+    const inMachine = (id: string) => id === turbineNodeId || stages.some(s => s.id === id);
+    const firstId = chain[0].id;
+
+    // Find flow INTO the machine, and the steam header it comes from.
+    //
+    // The expansion has to start from the state of the steam ENTERING the
+    // machine - the header upstream of the throttle - not from the turbine
+    // node's own state. The turbine node sits at exhaust conditions by
+    // construction (it receives header enthalpy and has its work taken out
+    // of it), so expanding "from" it threw away the entire pressure drop
+    // the machine is there to use: in the Xe-100 preset the node sat at
+    // 0.109 bar against a 165 bar boiler.
+    let inletMassFlow = 0;
+    let inletP = 0;
+    let inletEnthalpyNum = 0;
+    let outletNodeId: string | null = null;
+
+    for (const conn of state.flowConnections) {
+      // Flow into the machine's first node from outside it
+      if (conn.toNodeId === firstId && conn.massFlowRate > 0 && !inMachine(conn.fromNodeId)) {
+        inletMassFlow += conn.massFlowRate;
+        const donor = state.flowNodes.get(conn.fromNodeId);
+        if (donor) {
+          // Same enthalpy the flow machinery advects down this connection,
+          // so a moving-boundary boiler hands over its superheat instead of
+          // its (much colder) bulk state
+          inletEnthalpyNum += conn.massFlowRate *
+            donorSteamEnthalpy(donor, conn.currentFlowPhase);
+          inletP = Math.max(inletP, donor.fluid.pressure);
+        }
+      }
+      // Flow out of the machine's exhaust to something outside it
+      if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
+        const sink = state.flowNodes.get(conn.toNodeId);
+        if (sink && !inMachine(conn.toNodeId)) outletNodeId = conn.toNodeId;
+      }
+    }
+
+    if (inletMassFlow < 1 || !outletNodeId) continue;
+
+    const outletNode = state.flowNodes.get(outletNodeId);
+    if (!outletNode) continue;
+
+    // Skip if inlet is liquid
+    if (turbineNode.fluid.phase === 'liquid') continue;
+
+    const P_in = inletP;
+    const P_out = outletNode.fluid.pressure;
+
+    if (P_in <= P_out) continue;
+
+    const h_in = inletEnthalpyNum / inletMassFlow;
+
+    // The steam arriving at each chain node from the stage above it (the
+    // header for the first): what that stage's blading worked on, and
+    // therefore what the node is charged the stage work for.
+    const arriving = chain.map((node, k) => {
+      if (k === 0) return inletMassFlow;
+      let flow = 0;
+      for (const conn of state.flowConnections) {
+        if (conn.toNodeId === node.id && conn.fromNodeId === chain[k - 1].id) flow += Math.max(0, conn.massFlowRate);
+        else if (conn.fromNodeId === node.id && conn.toNodeId === chain[k - 1].id) flow += Math.max(0, -conn.massFlowRate);
+      }
+      return flow;
+    });
+
+    let inletState = stateAtPh(P_in, h_in);
+
+    // A turbine is a fixed set of choked nozzles, and Stodola's cone law
+    // says what they pass: proportional to inlet pressure, falling with the
+    // square root of inlet temperature. Steam offered beyond that cannot
+    // enter the blading, so it does no work - it passes through and lands
+    // in the condenser carrying its own enthalpy.
+    //
+    // Without this bound the momentum solver's startup transients (which
+    // briefly push thousands of kg/s through the inlet connection) came
+    // back out of the expansion as 7-22 GW power readings. `swallowFrac` is
+    // the share of every stream the machine can actually work on, and it is
+    // applied to the power AND to each stream's energy debit, so the books
+    // stay closed whichever way the flow solver behaves.
+    let swallowFrac = 1;
+    const offeredFlow = inletMassFlow;
+    if (turbineNode.ratedSteamFlow && turbineNode.ratedSteamFlow > 0 && offeredFlow > 0) {
+      const Pdesign = turbineNode.designInletPressure || P_in;
+      const swallow = turbineNode.ratedSteamFlow * (P_in / Pdesign) *
+        Math.sqrt(Water.saturationTemperature(Pdesign) / Math.max(1, inletState.T));
+      swallowFrac = Math.min(1, swallow / offeredFlow);
+    }
+
+    // Staged expansion down the chain. A stage node expands to ITS OWN
+    // pressure - the interstage pressure its downstream nozzle row sets,
+    // which follows the flow - and the exhaust node to the condenser's.
+    // Each node is charged the work of the stage it terminates, on the
+    // steam that arrived through it; the steam reaching the next node has
+    // already had that work taken out, so the chain's books close stage by
+    // stage. A stage whose pressure sits above its inlet (a startup, a
+    // backed-up bleed) has nothing to expand through and passes the state
+    // on untouched.
+    let turbinePower = 0;
+    const stageWork: Array<[string, number]> = [];
+    for (let k = 0; k < chain.length; k++) {
+      const node = chain[k];
+      const P_stage = k === chain.length - 1 ? P_out : node.fluid.pressure;
+      if (!(P_stage < inletState.P)) continue;
+      const result = expandStage(inletState, P_stage, TURBINE_ISENTROPIC_EFFICIENCY);
+      const charged = arriving[k] * swallowFrac;
+      turbinePower += charged * result.work;
+      stageWork.push([node.id, charged * result.work]);
+      inletState = result.outlet;
+    }
+
+    out.push({ machineId: turbineNodeId, power: turbinePower, stageWork });
+  }
+  return out;
+}
+
 export class TurbineCondenserRateOperator implements RateOperator {
   name = 'TurbineCondenser';
 
-  private turbineEfficiency = 0.87;
   private loggedOnce = false;
   private c_p_water = 4186; // J/kg-K for cooling water
-
-  /**
-   * Specific enthalpy of the steam a donor node hands to the turbine.
-   *
-   * A moving-boundary boiler knows what is actually at its steam takeoff -
-   * the superheat section's state, not the bundle's (much colder) bulk
-   * average - and that is the enthalpy the flow machinery advects down the
-   * connection, so the expansion has to start from the same number or the
-   * turbine's energy books and the boiler's disagree.
-   */
-  private donorSteamEnthalpy(donor: FlowNode, flowPhase?: string): number {
-    if (donor.otsg?.lastEval && flowPhase !== 'liquid') {
-      return donor.otsg.lastEval.hSteamOut;
-    }
-    const u = donor.fluid.internalEnergy / Math.max(1e-9, donor.fluid.mass);
-    const v = donor.volume / Math.max(1e-9, donor.fluid.mass);
-    return u + donor.fluid.pressure * v;
-  }
 
   computeRates(state: SimulationState): StateRates {
     const rates = createZeroRates();
@@ -2271,142 +2429,14 @@ export class TurbineCondenserRateOperator implements RateOperator {
     let totalTurbinePower = 0;
     let totalCondenserHeat = 0;
 
-    // Find turbines dynamically by looking for nodes that have "turbine-generator" in the ID
-    // Skip extraction nodes (they have parentTurbineId set)
-    for (const [turbineNodeId, turbineNode] of state.flowNodes) {
-      // A machine is the node the factory stamped as its exhaust; its stage
-      // (extraction) nodes carry parentTurbineId and are handled as part of
-      // it below. Never match on the label: a "Turbine Stop Valve" upstream
-      // of the machine used to be expanded as a turbine of its own, from
-      // header pressure down to the real turbine's exhaust, and it sat at
-      // saturation for the whole run.
-      if (!turbineNode.steamTurbine) continue;
-      if (turbineNode.parentTurbineId) continue; // Skip extraction nodes
-
-      // The stage chain: extraction nodes in falling pressure order, then
-      // the exhaust node. Steam enters the first of them from outside (the
-      // header), passes each nozzle row into the next, and the exhaust node
-      // discharges to the condenser. A bleed leaves its stage node sideways
-      // carrying that stage's outlet state, so it needs no accounting of its
-      // own here - the stage's books already hold it at the right state.
-      const stages: FlowNode[] = [];
-      for (const [, node] of state.flowNodes) {
-        if (node.parentTurbineId === turbineNodeId && node.extractionPressure) stages.push(node);
+    // Steam turbines: the staged expansion (expandTurbines). Each stage node
+    // is charged the work of the stage it terminates.
+    for (const expansion of expandTurbines(state)) {
+      for (const [nodeId, work] of expansion.stageWork) {
+        const nodeRates = rates.flowNodes.get(nodeId);
+        if (nodeRates) nodeRates.dEnergy -= work;
       }
-      stages.sort((a, b) => (b.extractionPressure ?? 0) - (a.extractionPressure ?? 0));
-      const chain = [...stages, turbineNode];
-      const inMachine = (id: string) => id === turbineNodeId || stages.some(s => s.id === id);
-      const firstId = chain[0].id;
-
-      // Find flow INTO the machine, and the steam header it comes from.
-      //
-      // The expansion has to start from the state of the steam ENTERING the
-      // machine - the header upstream of the throttle - not from the turbine
-      // node's own state. The turbine node sits at exhaust conditions by
-      // construction (it receives header enthalpy and has its work taken out
-      // of it), so expanding "from" it threw away the entire pressure drop
-      // the machine is there to use: in the Xe-100 preset the node sat at
-      // 0.109 bar against a 165 bar boiler.
-      let inletMassFlow = 0;
-      let inletP = 0;
-      let inletEnthalpyNum = 0;
-      let outletNodeId: string | null = null;
-
-      for (const conn of state.flowConnections) {
-        // Flow into the machine's first node from outside it
-        if (conn.toNodeId === firstId && conn.massFlowRate > 0 && !inMachine(conn.fromNodeId)) {
-          inletMassFlow += conn.massFlowRate;
-          const donor = state.flowNodes.get(conn.fromNodeId);
-          if (donor) {
-            // Same enthalpy the flow machinery advects down this connection,
-            // so a moving-boundary boiler hands over its superheat instead of
-            // its (much colder) bulk state
-            inletEnthalpyNum += conn.massFlowRate *
-              this.donorSteamEnthalpy(donor, conn.currentFlowPhase);
-            inletP = Math.max(inletP, donor.fluid.pressure);
-          }
-        }
-        // Flow out of the machine's exhaust to something outside it
-        if (conn.fromNodeId === turbineNodeId && conn.massFlowRate > 0) {
-          const sink = state.flowNodes.get(conn.toNodeId);
-          if (sink && !inMachine(conn.toNodeId)) outletNodeId = conn.toNodeId;
-        }
-      }
-
-      if (inletMassFlow < 1 || !outletNodeId) continue;
-
-      const outletNode = state.flowNodes.get(outletNodeId);
-      if (!outletNode) continue;
-
-      // Skip if inlet is liquid
-      if (turbineNode.fluid.phase === 'liquid') continue;
-
-      const P_in = inletP;
-      const P_out = outletNode.fluid.pressure;
-
-      if (P_in <= P_out) continue;
-
-      const h_in = inletEnthalpyNum / inletMassFlow;
-
-      // The steam arriving at each chain node from the stage above it (the
-      // header for the first): what that stage's blading worked on, and
-      // therefore what the node is charged the stage work for.
-      const arriving = chain.map((node, k) => {
-        if (k === 0) return inletMassFlow;
-        let flow = 0;
-        for (const conn of state.flowConnections) {
-          if (conn.toNodeId === node.id && conn.fromNodeId === chain[k - 1].id) flow += Math.max(0, conn.massFlowRate);
-          else if (conn.fromNodeId === node.id && conn.toNodeId === chain[k - 1].id) flow += Math.max(0, -conn.massFlowRate);
-        }
-        return flow;
-      });
-
-      let inletState = stateAtPh(P_in, h_in);
-
-      // A turbine is a fixed set of choked nozzles, and Stodola's cone law
-      // says what they pass: proportional to inlet pressure, falling with the
-      // square root of inlet temperature. Steam offered beyond that cannot
-      // enter the blading, so it does no work - it passes through and lands
-      // in the condenser carrying its own enthalpy.
-      //
-      // Without this bound the momentum solver's startup transients (which
-      // briefly push thousands of kg/s through the inlet connection) came
-      // back out of the expansion as 7-22 GW power readings. `swallowFrac` is
-      // the share of every stream the machine can actually work on, and it is
-      // applied to the power AND to each stream's energy debit, so the books
-      // stay closed whichever way the flow solver behaves.
-      let swallowFrac = 1;
-      const offeredFlow = inletMassFlow;
-      if (turbineNode.ratedSteamFlow && turbineNode.ratedSteamFlow > 0 && offeredFlow > 0) {
-        const Pdesign = turbineNode.designInletPressure || P_in;
-        const swallow = turbineNode.ratedSteamFlow * (P_in / Pdesign) *
-          Math.sqrt(Water.saturationTemperature(Pdesign) / Math.max(1, inletState.T));
-        swallowFrac = Math.min(1, swallow / offeredFlow);
-      }
-
-      // Staged expansion down the chain. A stage node expands to ITS OWN
-      // pressure - the interstage pressure its downstream nozzle row sets,
-      // which follows the flow - and the exhaust node to the condenser's.
-      // Each node is charged the work of the stage it terminates, on the
-      // steam that arrived through it; the steam reaching the next node has
-      // already had that work taken out, so the chain's books close stage by
-      // stage. A stage whose pressure sits above its inlet (a startup, a
-      // backed-up bleed) has nothing to expand through and passes the state
-      // on untouched.
-      let turbinePower = 0;
-      for (let k = 0; k < chain.length; k++) {
-        const node = chain[k];
-        const P_stage = k === chain.length - 1 ? P_out : node.fluid.pressure;
-        if (!(P_stage < inletState.P)) continue;
-        const result = expandStage(inletState, P_stage, this.turbineEfficiency);
-        const charged = arriving[k] * swallowFrac;
-        turbinePower += charged * result.work;
-        const nodeRates = rates.flowNodes.get(node.id);
-        if (nodeRates) nodeRates.dEnergy -= charged * result.work;
-        inletState = result.outlet;
-      }
-
-      totalTurbinePower += turbinePower;
+      totalTurbinePower += expansion.power;
     }
 
     // Find condensers dynamically. A condenser is defined by carrying the

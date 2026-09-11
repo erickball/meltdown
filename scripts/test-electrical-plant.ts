@@ -42,6 +42,9 @@ const plant = { components: new Map<string, PlantComponent>(data.components), co
   electrical: data.electrical, simTime: 0, simSpeed: 1, isPaused: false } as PlantState;
 const wired = autoWirePlant(plant);
 console.log(`auto-wired: ${wired.join(', ')}`);
+// The wired design as built, before any simulation writes its live state back
+// into these same component objects (the live edit in [2b] does exactly that)
+const pristine = JSON.stringify(data);
 
 console.log('\n[1] Wiring and the plant at rest on the grid');
 const sim = buildSimFromPlantJson(data);
@@ -103,6 +106,74 @@ check(pump().powered === true && pump().effectiveSpeed > speedAtRestore + 0.3,
 check(sim.state.flowNodes.get('pzr-1')!.heaterPowered === true, 'heaters powered again');
 check(E().elements.bat.chargeW! > 0, 'battery recharging');
 assertStateSane(sim.state);
+
+// ---------------------------------------------------------------------------
+// The generator: the same plant with its turbine-generator behind the
+// switchyard. Losing the grid now leaves the generator carrying the house
+// load by itself - which it does if its speed governor holds it, and which
+// ends in an overspeed trip if nothing does.
+// ---------------------------------------------------------------------------
+
+function generatorPlant(speedGovernor: boolean) {
+  const d = JSON.parse(pristine);
+  for (const [id, c] of d.components as Array<[string, Record<string, unknown>]>) {
+    if (id === 'sy') c.connectedGeneratorId = 'turbine-1';
+    if (id === 'turbine-1') c.speedGovernor = speedGovernor;
+  }
+  return buildSimFromPlantJson(d);
+}
+
+/** Run a loss of the grid, tracking the fastest the rotor went and any trip message. */
+function loseGrid(s: ReturnType<typeof generatorPlant>, seconds: number) {
+  let maxSpeed = 0;
+  applyElectricalCommand(s.state, 'sy', 'offsite-lost');
+  run(s, seconds, 0.05, st => { maxSpeed = Math.max(maxSpeed, st.electrical!.elements['turbine-1'].speed!); });
+  return maxSpeed;
+}
+
+console.log('\n[4] Generator on the grid, then islanded onto the house load (speed governor)');
+{
+  const s = generatorPlant(true);
+  const g = () => s.state.electrical!.elements['turbine-1'];
+  run(s, 20, 0.5);
+  check(g().synchronized === true && g().speed === 1, 'synchronized: the grid holds the rotor at rated speed');
+  const house = s.state.electrical!.elements.sy.demandW + g().demandW;
+  check(Math.abs(g().exportW! - (g().mechW! * g().genEfficiency! - house)) < 1e-6 * house,
+    `exports shaft power less the house load (${(g().mechW! / 1e6).toFixed(1)} MW shaft, ${(g().exportW! / 1e6).toFixed(1)} MW out)`);
+  const maxSpeed = loseGrid(s, 60);
+  check(maxSpeed > 1.001 && maxSpeed < g().overspeedTrip!,
+    `load rejection: rotor peaks at ${(100 * maxSpeed).toFixed(2)}%, below the ${(100 * g().overspeedTrip!).toFixed(0)}% trip`);
+  check(!g().turbineTripped && g().online === true && g().synchronized === false, 'islanded: on line, no grid, turbine running');
+  check(Math.abs(g().speed! - 1) < 0.01, `governor reset brings the island back to rated speed (${(100 * g().speed!).toFixed(2)}%)`);
+  check(s.state.electrical!.elements.sy.energized && s.state.components.pumps.get('pump-1')!.powered === true,
+    'the generator carries the house load: switchyard live, RCP powered');
+  check(!s.state.neutronics.scrammed, 'reactor still at power (rod drives never lost power)');
+  assertStateSane(s.state);
+
+  check(applyElectricalCommand(s.state, 'sy', 'offsite-restored').ok, 'grid back');
+  run(s, 10, 0.5);
+  check(g().synchronized === true && Math.abs(g().speed! - 1) < 1e-3, 'resynchronized: the grid pulls the rotor back into step');
+  check(g().exportW! > 0, `exporting again (${(g().exportW! / 1e6).toFixed(1)} MW)`);
+}
+
+console.log('\n[5] Loss of the grid with no speed governor: overspeed trip');
+{
+  const s = generatorPlant(false);
+  const g = () => s.state.electrical!.elements['turbine-1'];
+  run(s, 20, 0.5);
+  const maxSpeed = loseGrid(s, 30);
+  check(g().turbineTripped === true && maxSpeed >= g().overspeedTrip!,
+    `rotor ran up to ${(100 * maxSpeed).toFixed(2)}% and the turbine tripped on overspeed`);
+  check(g().online === false && s.state.flowNodes.get('turbine-1')!.turbineTripped === true,
+    'stop valves shut, generator breaker open');
+  check(g().speed! < maxSpeed, `rotor coasting down (${(100 * g().speed!).toFixed(2)}%)`);
+  check(!s.state.electrical!.elements.sy.energized && s.state.components.pumps.get('pump-1')!.powered === false,
+    'house loads dead with the generator gone');
+  check(s.state.neutronics.scrammed === true, `reactor tripped: ${s.state.neutronics.scramReason}`);
+  const close = applyElectricalCommand(s.state, 'turbine-1', 'close');
+  check(!close.ok, `breaker will not close on a tripped turbine: ${close.message}`);
+  assertStateSane(s.state);
+}
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) FAILED`);

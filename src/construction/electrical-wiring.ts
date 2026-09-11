@@ -35,6 +35,7 @@ export function plantOutputVoltage(
     case 'bus': return { voltage: c.voltage, dc: !!c.dc };
     case 'transformer': return { voltage: c.secondaryVoltage, dc: false };
     case 'diesel-generator': return { voltage: c.voltage, dc: false };
+    case 'turbine-generator': return { voltage: c.terminalVoltage ?? 22000, dc: false };
     case 'battery': return { voltage: c.voltage, dc: true };
     case 'breaker': return c.powerSupplyId ? plantOutputVoltage(plant, c.powerSupplyId, seen) : null;
     default: return null;

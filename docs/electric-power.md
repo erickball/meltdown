@@ -66,19 +66,62 @@ control system), and once at build:
    `ControllerState.powered`, `FlowNode.heaterPowered`; rod-drive or RPS loss
    scrams.
 
+## The turbine-generator
+
+With the model on, every turbine-generator is a source. It feeds its
+switchyard (through the main step-up transformer inside it,
+`connectedGeneratorId`) and anything wired straight to it at its terminal
+voltage (`terminalVoltage`, default 22 kV) - a unit auxiliary transformer,
+a generator bus or breaker.
+
+- **Synchronized** (breaker closed, switchyard has the grid): the grid holds
+  the rotor at rated speed (a speed error decays with a 1 s time constant -
+  the envelope of the synchronizing swing). The grid carries the
+  switchyard's house load; the generator exports shaft power × η_gen less
+  the house load. That export is what "MW to grid" shows.
+- **Islanded** (breaker closed, no grid): the switchyard is fed by its
+  generator, and the rotor follows the swing equation in energy form,
+  d/dt(H·P_rated·ω²) = P_shaft − P_elec/η_gen − 0.5 %·P_rated·ω³. P_shaft
+  is the turbine's own staged expansion (`expandTurbines`, shared with the
+  rate operator, so the steam's books and the rotor's agree). A full-power
+  load rejection spins the rotor up at about 1/(2H) of rated speed a second.
+- **Speed governor** (on by default, `speedDroop` 5 %): the control valves
+  go to `governor valve setting + (1 − ω)/droop + reset`, within their
+  travel, stroking with a 0.2 s lag - at 5 % droop a 1 % overspeed takes
+  20 % of travel off at once. The reset integrates (1 − ω)/(droop·10 s) so
+  an island settles back at rated speed; tied to the grid it walks back to
+  zero at 10 %/min (the loading rate). The hydraulics read one admission
+  (`governorPositionFor`): 0 when tripped, else `governorAdmission` (the
+  stroked valves) when there is a speed governor, else the governor valve.
+- **Protection**: overspeed (`overspeedTrip`, 110 %) trips the turbine - stop
+  valves shut (the machine admits nothing), generator breaker open, rotor
+  coasts on windage. Underfrequency (95 %) opens the generator breaker.
+  Closing the breaker onto a live grid needs speed within 1 % (synch check);
+  onto dead plant buses it closes at any speed.
+
+So a loss of offsite power at power either islands onto the house load
+(governor fast enough, turbine inventory small enough) or overspeeds and
+trips, whereupon the house loads go dead and the diesels start - which is
+the plant's own emergent answer, not a scripted one.
+
 ## Simplifications (deliberate)
 
 - Real power only: no phases, power factor, voltage drop, motor inrush.
-- Generator output is exported; house loads come from the grid (no islanding).
+- Frequency does not change what motors draw; an island at 104 % runs its
+  pumps at their normal speed.
+- Turbine power does not depend on rotor speed (fine within ±10 %).
+- No reactor trip on turbine trip - the plant's other protection has to
+  catch the pressure rise.
 - Motors restart by themselves when their bus returns (load sequencer).
 - Wires are free and carry no physics.
 
 ## Operating it
 
 Selecting a piece shows its state, loading and relay heat, with buttons:
-breaker Open/Close, diesel Start/Stop, Reset trip, and at a switchyard
-"Lose / Restore offsite power". Scenario actions: `offsite-power`,
-`breaker`, `diesel` (see `scenario-types.ts`).
+breaker Open/Close, diesel Start/Stop, Reset trip, at a switchyard
+"Lose / Restore offsite power", and at a turbine-generator its breaker and
+Trip / Reset turbine. Scenario actions: `offsite-power`, `breaker`,
+`diesel`, `generator-breaker`, `turbine-trip` (see `scenario-types.ts`).
 
 ## Drawing
 

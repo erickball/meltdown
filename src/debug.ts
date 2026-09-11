@@ -1651,14 +1651,14 @@ export function updateComponentDetail(
       html += `<div class="detail-row"><span class="detail-label">Reliability:</span><span class="detail-value">${reliabilityClass}</span></div>`;
       html += `<div class="detail-row"><span class="detail-label">Generator:</span><span class="detail-value" style="color: ${connectedGenId ? '#7f7' : '#f77'};">${connectedGenId || 'None'}</span></div>`;
 
-      // Show MW to grid if connected to a generator
-      // Note: Currently shows total turbine power, not per-generator
+      // Show MW to grid if connected to a generator. With the electrical
+      // model on, it is that generator's export (nothing while islanded or
+      // tripped); without it, the turbines' gross output
       if (connectedGenId && plantState) {
         const generator = plantState.components.get(connectedGenId) as Record<string, unknown> | undefined;
         if (generator && generator.type === 'turbine-generator') {
-          // Get power from turbine-condenser state (simulation calculated value)
-          const tcState = getTurbineCondenserState();
-          const mwToGrid = tcState.turbinePower / 1e6;
+          const genEl = simState.electrical?.elements[connectedGenId];
+          const mwToGrid = genEl ? (genEl.exportW ?? 0) / 1e6 : getTurbineCondenserState().turbinePower / 1e6;
           html += `<div class="detail-row"><span class="detail-label">MW to Grid:</span><span class="detail-value" style="color: ${mwToGrid > 0 ? '#4f4' : '#888'};">${mwToGrid.toFixed(1)} MW</span></div>`;
         }
       }

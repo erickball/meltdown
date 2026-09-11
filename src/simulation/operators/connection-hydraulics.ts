@@ -1074,7 +1074,21 @@ export function governorPositionFor(
   if (!machine) return toNode.governorValve;
   const fromNode = state.flowNodes.get(conn.fromNodeId);
   if (fromNode && turbineMachineId(fromNode) === machine) return undefined;
-  return state.flowNodes.get(machine)?.governorValve;
+  return turbineAdmission(state.flowNodes.get(machine));
+}
+
+/**
+ * What a steam turbine actually admits: nothing when it is tripped (the stop
+ * valves are shut); under a speed governor, the control valves where the
+ * governor has stroked them (the governor valve setting plus its speed
+ * correction - see simulation/electrical.ts); otherwise the governor valve.
+ * Neither flag exists on a plant without the electrical model, where this is
+ * the governor valve exactly as before.
+ */
+function turbineAdmission(machine: FlowNode | undefined): number | undefined {
+  if (!machine) return undefined;
+  if (machine.turbineTripped) return 0;
+  return machine.governorAdmission ?? machine.governorValve;
 }
 
 export interface ChokeLimit {

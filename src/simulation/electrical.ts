@@ -36,6 +36,27 @@
  *   untouched by a loss of power.
  * - Loss of power to the rod drives or the reactor protection cabinet trips
  *   the reactor: both are de-energize-to-trip.
+ *
+ * THE GENERATOR
+ * - A turbine-generator is a source: it feeds its switchyard (through the
+ *   main step-up transformer inside it) and anything wired to it directly,
+ *   such as a unit auxiliary transformer at its terminal voltage.
+ * - Tied to a live grid it is synchronized: the grid holds its rotor at
+ *   rated speed, it exports what the turbine makes less the house load, and
+ *   the house load is the grid's to carry.
+ * - Without the grid (the switchyard's offsite supply lost, or no grid at
+ *   all) the rotor's speed is the swing equation in energy form:
+ *   d/dt (H P_rated w^2) = P_shaft - P_electric/eta_gen - windage. P_shaft is
+ *   the turbine's own staged expansion (expandTurbines), so a full-power
+ *   load rejection spins the rotor up at about 1/(2H) per second.
+ * - The speed governor (optional, on by default) puts the control valves at
+ *   governor valve setting + (1 - w)/droop + reset, stroking with a 0.2 s
+ *   lag: at 5% droop a 1% overspeed takes 20% of valve travel off at once.
+ *   The reset integrates the speed error so an island settles back at rated
+ *   speed; tied to the grid it walks back to zero at a loading rate.
+ * - Protection: overspeed (110% by default) trips the turbine - stop valves
+ *   shut, generator breaker open - and underfrequency (95%) opens the
+ *   generator breaker. A tripped turbine coasts down on its windage.
  */
 
 import type { PlantState, PlantComponent } from '../types';
@@ -45,6 +66,7 @@ import type {
 import type { ConstraintOperator } from './rk45-solver';
 import { cloneSimulationState } from './solver';
 import { pumpHeadFraction } from './operators/pump-curve';
+import { expandTurbines } from './operators/rate-operators';
 import {
   loadSpecFor, voltageClassOf, formatVoltage, formatPower, VOLTAGE_CLASS_LABEL,
   MOTOR_EFFICIENCY, CONTROL_CABINET_W, ROD_DRIVE_W, ELECTRICAL_ELEMENT_TYPES,
@@ -65,6 +87,34 @@ export const RELAY_TIME_CONSTANT_S = 30;
  * scales with the load it carries.
  */
 export const DIESEL_NO_LOAD_FUEL_FRACTION = 0.25;
+
+/**
+ * Tied to the grid, a rotor off rated speed is pulled back into step by the
+ * synchronizing torque. The real motion is a lightly damped swing of about a
+ * second; this is its first-order envelope.
+ */
+export const SYNC_TIME_CONSTANT_S = 1.0;
+/**
+ * Windage and bearing losses of a turbine-generator at rated speed, as a
+ * fraction of its rating, scaling with speed cubed. At 0.5% a tripped 4 s
+ * machine coasts to half speed in about half an hour, as large sets do.
+ */
+export const WINDAGE_LOSS_FRACTION = 0.005;
+/** Speed governor reset time (s): how fast an island's speed is brought back to rated. */
+export const GOVERNOR_RESET_S = 10;
+/** Control valve stroke time constant under the speed governor (s): fast-acting EHC valves. */
+export const GOVERNOR_VALVE_STROKE_S = 0.2;
+/** Loading rate once tied to the grid (fraction of valve travel per s): 10% a minute. */
+export const LOAD_RAMP_PER_S = 0.10 / 60;
+
+/** The valves' own travel, shut to fully open. */
+function valveTravel(x: number): number {
+  return Math.max(0, Math.min(1, x));
+}
+/** Generator underfrequency relay: below this speed it opens its breaker. */
+export const UNDERFREQUENCY_TRIP = 0.95;
+/** Synch check: the breaker onto a live grid closes only within this speed error. */
+export const SYNC_CHECK_TOLERANCE = 0.01;
 
 // ============================================================================
 // Build
@@ -100,7 +150,9 @@ function elementFromComponent(component: PlantComponent): ElecElement | null {
   switch (component.type) {
     case 'switchyard':
       return {
-        ...blankElement(component), kind: 'offsite', feeds: [],
+        ...blankElement(component), kind: 'offsite',
+        // Its generator backs it when the grid is gone (house-load operation)
+        feeds: c.connectedGeneratorId ? [c.connectedGeneratorId] : [],
         voltage: positive(c.transmissionVoltage ?? 345, 'transmission voltage (kV)', id) * 1000,
         dc: false,
         ratingW: positive(c.transformerRating ?? 1200, 'transformer rating (MW)', id) * 1e6,
@@ -166,6 +218,39 @@ function elementFromComponent(component: PlantComponent): ElecElement | null {
         energyJ: capacityJ * fraction(c.chargeFraction ?? 1, 'state of charge', id),
         dischargeW,
         chargerW,
+      };
+    }
+    case 'turbine-generator': {
+      const shaftRatedW = positive(c.ratedPower ?? 1000e6, 'rated power', id);
+      const genEfficiency = fraction(c.generatorEfficiency ?? 0.98, 'generator efficiency', id);
+      if (!(genEfficiency > 0)) throw new Error(`[Electrical] '${id}': generator efficiency must be positive`);
+      const speed = num(c.rotorSpeed ?? 1, 'rotor speed', id);
+      if (speed < 0) throw new Error(`[Electrical] '${id}': rotor speed must not be negative, got ${speed}`);
+      const droop = positive(c.speedDroop ?? 5, 'speed droop (%)', id) / 100;
+      const govReset = num(c.governorReset ?? 0, 'governor reset', id);
+      if (govReset < -1 || govReset > 1) {
+        throw new Error(`[Electrical] '${id}': governor reset must be between -1 and 1, got ${govReset}`);
+      }
+      return {
+        ...blankElement(component), kind: 'generator', feeds: [],
+        voltage: positive(c.terminalVoltage ?? 22000, 'terminal voltage', id),
+        dc: false,
+        ratingW: shaftRatedW * genEfficiency,
+        shaftRatedW,
+        genEfficiency,
+        online: c.generatorOnline ?? true,
+        turbineTripped: c.turbineTripped ?? false,
+        speed,
+        inertiaH: positive(c.inertiaH ?? 4, 'inertia constant H (s)', id),
+        speedGovernor: c.speedGovernor ?? true,
+        droop,
+        overspeedTrip: positive(c.overspeedTrip ?? 110, 'overspeed trip (%)', id) / 100,
+        govReset,
+        // The control valves start where the governor asks for them
+        govValve: valveTravel((c.governorValve ?? 1) + govReset + (1 - speed) / droop),
+        mechW: 0,
+        exportW: 0,
+        synchronized: false,
       };
     }
     default:
@@ -306,8 +391,105 @@ function trip(state: SimulationState, e: ElecElement): void {
   e.tripped = true;
   if (e.kind === 'breaker') e.closed = false;
   if (e.kind === 'diesel') e.running = false;
+  if (e.kind === 'generator') e.online = false;
   const pct = isFinite(e.ratingW) ? ` at ${(100 * e.demandW / e.ratingW).toFixed(0)}% of its rating` : '';
   pushEvent(state, 'electrical', `${e.label} tripped on overload${pct}`);
+}
+
+/** Trip the turbine: stop valves shut (at once, on the machine node too), generator breaker open. */
+function tripTurbine(state: SimulationState, g: ElecElement, reason: string): void {
+  g.turbineTripped = true;
+  g.online = false;
+  const node = state.flowNodes.get(g.id);
+  if (node) node.turbineTripped = true;
+  pushEvent(state, 'electrical', `${g.label}: TURBINE TRIP (${reason}) - stop valves shut, generator breaker open`);
+}
+
+/** Is this generator tied to a live grid (online, and its switchyard has offsite power)? */
+function gridTied(E: ElectricalState, g: ElecElement): boolean {
+  if (!g.online) return false;
+  return E.order.some(x => {
+    const o = E.elements[x];
+    return o.kind === 'offsite' && o.feeds.includes(g.id) && !!o.available && !o.tripped;
+  });
+}
+
+/**
+ * The turbine-generators: rotor speed, speed governor and protection, then
+ * the admission flags the turbine's steam path reads. dt = 0 only refreshes
+ * the display numbers and the flags.
+ */
+function advanceGenerators(state: SimulationState, dt: number): void {
+  const E = state.electrical!;
+  const gens = E.order.map(id => E.elements[id]).filter(e => e.kind === 'generator');
+  if (gens.length === 0) return;
+  const shaft = new Map(expandTurbines(state).map(x => [x.machineId, x.power]));
+  for (const g of gens) {
+    const node = state.flowNodes.get(g.id);
+    if (!node || !node.steamTurbine) {
+      throw new Error(`[Electrical] Generator '${g.id}' has no steam turbine node in the simulation.`);
+    }
+    const Pm = shaft.get(g.id) ?? 0;
+    g.mechW = Pm;
+    const tied = gridTied(E, g);
+    g.synchronized = tied;
+
+    if (dt > 0) {
+      const H = g.inertiaH!, Pr = g.shaftRatedW!;
+      if (tied) {
+        // In step with the grid. Whatever the reset wound in on an island is
+        // walked back out at the loading rate, so the plant's own setting
+        // takes the valves back gradually rather than in one jump
+        g.speed = 1 + (g.speed! - 1) * Math.exp(-dt / SYNC_TIME_CONSTANT_S);
+        const r = g.govReset!;
+        g.govReset = Math.sign(r) * Math.max(0, Math.abs(r) - LOAD_RAMP_PER_S * dt);
+      } else {
+        // Swing equation, in energy form (exact for the step's net power)
+        const w = g.speed!;
+        const Pe = g.online ? g.demandW : 0;
+        const ke = H * Pr * w * w + (Pm - Pe / g.genEfficiency! - WINDAGE_LOSS_FRACTION * Pr * w * w * w) * dt;
+        if (!(ke >= 0)) {
+          throw new Error(
+            `[Electrical] '${g.id}': rotor kinetic energy went negative (${ke.toExponential(3)} J) - ` +
+            `the step (${dt} s) was too long for the swing equation at this load.`);
+        }
+        g.speed = Math.sqrt(ke / (H * Pr));
+        // Reset action: winds the valves down while fast, up while slow. A
+        // device, so it saturates at a full valve's travel either way.
+        if (g.speedGovernor) {
+          const next = g.govReset! + (1 - g.speed) / (g.droop! * GOVERNOR_RESET_S) * dt;
+          g.govReset = Math.max(-1, Math.min(1, next));
+        }
+      }
+
+      if (!g.turbineTripped && g.speed! > g.overspeedTrip!) {
+        tripTurbine(state, g, `overspeed at ${(100 * g.speed!).toFixed(1)}%`);
+      }
+      if (g.online && !tied && g.speed! < UNDERFREQUENCY_TRIP) {
+        g.online = false;
+        pushEvent(state, 'electrical',
+          `${g.label}: generator breaker opened on underfrequency (${(100 * g.speed!).toFixed(1)}% speed)`);
+      }
+
+      // The control valves stroke toward the governor's demand - the plant's
+      // own governor valve setting plus the speed correction - within their
+      // travel
+      const setting = node.governorValve ?? 1;
+      const target = valveTravel(setting + g.govReset! + (1 - g.speed!) / g.droop!);
+      g.govValve = target + (g.govValve! - target) * Math.exp(-dt / GOVERNOR_VALVE_STROKE_S);
+    }
+
+    // Export: what the generator makes less the house load it or the grid carries
+    let house = g.demandW;
+    for (const x of E.order) {
+      const o = E.elements[x];
+      if (o.kind === 'offsite' && o.feeds.includes(g.id)) house += o.demandW;
+    }
+    g.exportW = g.synchronized ? Pm * g.genEfficiency! - house : 0;
+
+    node.turbineTripped = !!g.turbineTripped;
+    node.governorAdmission = g.speedGovernor ? g.govValve : undefined;
+  }
 }
 
 /**
@@ -350,8 +532,16 @@ export function solveElectrical(state: SimulationState, dt: number): void {
     const through = live.reduce((sum, f) => sum + weight[f], 0);
 
     switch (e.kind) {
-      case 'offsite':
-        e.energized = !!e.available && !e.tripped;
+      case 'offsite': {
+        // The grid - or, with the grid gone, the generator behind the
+        // switchyard's step-up transformer, carrying the house load
+        const gridLive = !!e.available && !e.tripped;
+        e.energized = gridLive || (!e.tripped && live.length > 0);
+        weight[id] = gridLive ? e.ratingW : e.energized ? Math.min(e.ratingW, through) : 0;
+        break;
+      }
+      case 'generator':
+        e.energized = !!e.online && !e.turbineTripped;
         weight[id] = e.energized ? e.ratingW : 0;
         break;
       case 'diesel':
@@ -418,6 +608,8 @@ export function solveElectrical(state: SimulationState, dt: number): void {
       e.chargeW = chargerLive ? (e.chargerW! - fromCharger) * (1 - e.energyJ! / e.capacityJ!) : 0;
       input = fromCharger + e.chargeW;
     }
+    // A live grid carries the switchyard's load; its generator exports
+    if (e.kind === 'offsite' && e.available && !e.tripped) continue;
     if (input === 0) continue;
     if (!e.energized) {
       throw new Error(
@@ -470,6 +662,9 @@ export function solveElectrical(state: SimulationState, dt: number): void {
       }
     }
   }
+
+  // Rotors, speed governors, overspeed and underfrequency protection
+  advanceGenerators(state, dt);
 
   // Emergency diesels start on a dead bus they feed
   for (const id of E.order) {
@@ -557,10 +752,11 @@ export class ElectricalOperator implements ConstraintOperator {
 // ============================================================================
 
 export type ElectricalCommand =
-  | 'open' | 'close'          // breakers
+  | 'open' | 'close'          // breakers, and a generator's output breaker
   | 'start' | 'stop'          // diesels
   | 'reset'                   // clear an overload trip
-  | 'offsite-lost' | 'offsite-restored';  // the grid, at a switchyard
+  | 'offsite-lost' | 'offsite-restored'   // the grid, at a switchyard
+  | 'turbine-trip' | 'turbine-reset';     // a turbine-generator's stop valves
 
 export interface CommandResult { ok: boolean; message: string }
 
@@ -580,10 +776,31 @@ export function applyElectricalCommand(state: SimulationState, id: string, cmd: 
   }
   switch (cmd) {
     case 'open':
+      if (e.kind === 'generator') {
+        e.online = false;
+        return { ok: true, message: `${e.label}: generator breaker opened` };
+      }
       if (e.kind !== 'breaker') return { ok: false, message: `${e.label} is not a breaker` };
       e.closed = false;
       return { ok: true, message: `${e.label} opened` };
     case 'close':
+      if (e.kind === 'generator') {
+        if (e.turbineTripped) return { ok: false, message: `${e.label}: the turbine is tripped - reset it first` };
+        const E = state.electrical!;
+        const gridLive = E.order.some(x => {
+          const o = E.elements[x];
+          return o.kind === 'offsite' && o.feeds.includes(e.id) && !!o.available && !o.tripped;
+        });
+        // Synch check: onto a live grid only in step; onto a dead bus freely
+        if (gridLive && Math.abs(e.speed! - 1) > SYNC_CHECK_TOLERANCE) {
+          return { ok: false, message:
+            `${e.label}: synch check refused - running at ${(100 * e.speed!).toFixed(1)}% speed, ` +
+            `needs to be within ${100 * SYNC_CHECK_TOLERANCE}% of rated to close onto the grid` };
+        }
+        e.tripped = false;
+        e.online = true;
+        return { ok: true, message: `${e.label}: generator breaker closed${gridLive ? ' - synchronized to the grid' : ' onto the plant\'s own buses'}` };
+      }
       if (e.kind !== 'breaker') return { ok: false, message: `${e.label} is not a breaker` };
       e.tripped = false;
       e.closed = true;
@@ -613,6 +830,21 @@ export function applyElectricalCommand(state: SimulationState, id: string, cmd: 
       if (e.kind !== 'offsite') return { ok: false, message: `${e.label} is not a switchyard` };
       e.available = cmd === 'offsite-restored';
       return { ok: true, message: e.available ? `Offsite power restored at ${e.label}` : `Loss of offsite power at ${e.label}` };
+    case 'turbine-trip':
+      if (e.kind !== 'generator') return { ok: false, message: `${e.label} is not a turbine-generator` };
+      if (e.turbineTripped) return { ok: false, message: `${e.label} is already tripped` };
+      tripTurbine(state, e, 'manual trip');
+      return { ok: true, message: `${e.label}: turbine tripped` };
+    case 'turbine-reset': {
+      if (e.kind !== 'generator') return { ok: false, message: `${e.label} is not a turbine-generator` };
+      if (!e.turbineTripped) return { ok: false, message: `${e.label}: the turbine is not tripped` };
+      e.turbineTripped = false;
+      const node = state.flowNodes.get(e.id);
+      if (node) node.turbineTripped = false;
+      return { ok: true, message:
+        `${e.label}: turbine trip reset - stop valves open. The speed governor brings it to rated speed; ` +
+        `close the generator breaker to put it on load.` };
+    }
   }
 }
 
@@ -642,6 +874,11 @@ export function carryElectricalState(
     f.startElapsed = s.startElapsed;
     f.fuelJ = s.fuelJ;
     f.energyJ = s.energyJ;
+    f.online = s.online;
+    f.turbineTripped = s.turbineTripped;
+    f.speed = s.speed;
+    f.govReset = s.govReset;
+    f.govValve = s.govValve;
   }
   // Re-solve so the flags the physics reads match the carried state at once
   solveElectrical(fresh, 0);
@@ -666,6 +903,12 @@ export function writeElectricalToPlant(sim: SimulationState, plant: PlantState):
         c.fuelFraction = e.fuelJ! / e.fuelCapacityJ!;
         break;
       case 'battery': c.chargeFraction = e.energyJ! / e.capacityJ!; break;
+      case 'generator':
+        c.rotorSpeed = e.speed;
+        c.generatorOnline = !!e.online;
+        c.turbineTripped = !!e.turbineTripped;
+        c.governorReset = e.govReset;
+        break;
     }
   }
 }

@@ -563,6 +563,18 @@ export interface TurbineGeneratorComponent extends ComponentBase {
   inletFluid?: Fluid;     // The CASING's fluid state (live; resume writes back here)
   outletFluid?: Fluid;    // Exhaust conditions
   extractionPorts?: ExtractionPort[];  // Extraction points for feedwater heating, ordered high to low pressure
+  // --- Generator and rotor, read only with the electrical model on (see
+  // --- simulation/electrical.ts). Absent fields take the defaults noted.
+  terminalVoltage?: number;   // V - generator terminals (default 22000)
+  inertiaH?: number;          // s - rotor inertia constant (default 4)
+  speedGovernor?: boolean;    // default true
+  speedDroop?: number;        // % - governor droop (default 5)
+  overspeedTrip?: number;     // % speed - turbine trip (default 110)
+  // Initial conditions (the running plant's are sim state; resume writes back)
+  rotorSpeed?: number;        // fraction of rated (default 1)
+  generatorOnline?: boolean;  // output breaker closed (default true)
+  turbineTripped?: boolean;   // stop valves shut (default false)
+  governorReset?: number;     // speed governor's reset term, valve fraction (default 0)
 }
 
 export interface TurbineDrivenPumpComponent extends ComponentBase {

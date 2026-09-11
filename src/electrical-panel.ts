@@ -74,7 +74,7 @@ function elementHtml(e: ElecElement, state: SimulationState): string {
   e.feeds.forEach((f, i) => {
     const feed = els[f];
     const name = feed ? feed.label : `${f} (missing)`;
-    html += row(i === 0 ? (e.kind === 'battery' ? 'Charger fed from' : 'Fed from') : 'Backup',
+    html += row(i === 0 ? (e.kind === 'battery' ? 'Charger fed from' : e.kind === 'offsite' ? 'Generator' : 'Fed from') : 'Backup',
       `${name}${feed ? (feed.energized ? '' : ' (dead)') : ''}`, '', feed?.energized ? '' : '#f99');
   });
 
@@ -82,7 +82,7 @@ function elementHtml(e: ElecElement, state: SimulationState): string {
   const buttons: string[] = [];
   switch (e.kind) {
     case 'offsite':
-      html += row('Grid', e.available ? 'available' : 'LOST', 'Offsite power at this switchyard. The generator\'s output is exported; house loads draw from the grid through the transformers fed from here.', e.available ? '#7f7' : '#f77');
+      html += row('Grid', e.available ? 'available' : 'LOST', 'Offsite power at this switchyard. With the grid there, the generator\'s output is exported and house loads draw from the grid through the transformers fed from here. With it gone, the generator (if still on line) carries the house loads by itself - if its speed governor can hold it.', e.available ? '#7f7' : '#f77');
       buttons.push(e.available
         ? button('offsite-lost', 'Lose offsite power', 'Disconnect the grid here: a loss of offsite power. Every transformer fed from this switchyard goes dead; emergency diesels set to auto-start will start.', '#744')
         : button('offsite-restored', 'Restore offsite power', 'Reconnect the grid.', '#264'));
@@ -104,6 +104,33 @@ function elementHtml(e: ElecElement, state: SimulationState): string {
       buttons.push(e.running
         ? button('stop', 'Stop', 'Stop the engine.', '#744')
         : button('start', 'Start', 'Start the engine; it carries load after its start time.', '#264'));
+      break;
+    }
+    case 'generator': {
+      const mode = e.turbineTripped ? 'TURBINE TRIPPED'
+        : !e.online ? 'OFF LINE'
+        : e.synchronized ? 'SYNCHRONIZED' : 'ISLANDED';
+      html += row('Generator', mode,
+        'Synchronized: tied to the grid, which holds its speed. Islanded: carrying the plant\'s own loads with no grid - its speed is whatever the turbine and the load make it. Off line: breaker open.',
+        e.turbineTripped ? '#f77' : e.synchronized ? '#7f7' : e.online ? '#fc8' : '#aaa');
+      const pct = 100 * e.speed!;
+      html += row('Rotor speed', `${pct.toFixed(1)}%`,
+        `Fraction of rated (synchronous) speed. The turbine trips above ${(100 * e.overspeedTrip!).toFixed(0)}%; the generator breaker opens below 95%.`,
+        pct > 100 * e.overspeedTrip! - 3 || pct < 96 ? '#f77' : Math.abs(pct - 100) > 1 ? '#fc8' : '');
+      html += row('Shaft power', formatPower(e.mechW ?? 0), 'Work of the turbine\'s steam expansion.');
+      if (e.synchronized) {
+        html += row('To grid', formatPower(e.exportW ?? 0), 'Generator output less the house load.', (e.exportW ?? 0) > 0 ? '#7f7' : '#fc8');
+      }
+      html += row('Speed governor', e.speedGovernor
+        ? `control valves ${(100 * e.govValve!).toFixed(0)}% (droop ${(100 * e.droop!).toFixed(1)}%, reset ${(100 * e.govReset!).toFixed(0)}%)`
+        : 'none - nothing holds the speed off the grid',
+        'The control valves sit at the governor valve setting plus the speed correction: (1 - speed)/droop, plus a reset that winds in to hold an island at rated speed and winds back out at 10%/min once tied to the grid again.');
+      buttons.push(e.online
+        ? button('open', 'Open generator breaker', 'Take the generator off line: with no load, only the speed governor stands between the turbine and overspeed.', '#744')
+        : button('close', 'Close generator breaker', 'Put the generator on line. Onto a live grid the synch check wants speed within 1% of rated; onto dead plant buses it closes at any speed.', '#264'));
+      buttons.push(e.turbineTripped
+        ? button('turbine-reset', 'Reset turbine trip', 'Open the stop valves again. The speed governor brings the rotor to rated speed; then close the generator breaker.', '#264')
+        : button('turbine-trip', 'Trip turbine', 'Shut the stop valves now and open the generator breaker.', '#744'));
       break;
     }
   }

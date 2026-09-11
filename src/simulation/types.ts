@@ -263,6 +263,15 @@ export interface FlowNode {
   // Written by the electrical solve (simulation/electrical.ts).
   heaterPowered?: boolean;
 
+  // Steam turbine machine nodes, electrical model only (see electrical.ts):
+  // the turbine is tripped - its stop valves are shut and it admits nothing.
+  turbineTripped?: boolean;
+  // What the turbine admits under its speed governor: the governor valve
+  // setting plus the governor's speed correction, as the control valves have
+  // actually stroked to (0-1). Absent = no speed governor, and the governor
+  // valve alone sets the admission.
+  governorAdmission?: number;
+
   // Internal obstructions that reduce available cross-sectional area at certain elevations
   // Used for accurate liquid level calculation when components are inside this node
   // (e.g., a core barrel inside a reactor vessel annulus)
@@ -803,7 +812,7 @@ export interface SimulationState {
  */
 export type VoltageClass = 'dc' | 'lv' | 'mv' | 'hv';
 
-export type ElecElementKind = 'offsite' | 'bus' | 'transformer' | 'breaker' | 'diesel' | 'battery';
+export type ElecElementKind = 'offsite' | 'bus' | 'transformer' | 'breaker' | 'diesel' | 'battery' | 'generator';
 
 /**
  * A piece of the distribution network: something power flows THROUGH or
@@ -853,6 +862,33 @@ export interface ElecElement {
   dischargeW?: number;
   /** battery: charger output (W). The charger carries the DC load first. */
   chargerW?: number;
+
+  /** generator: output breaker closed (on the plant's buses, or the grid). */
+  online?: boolean;
+  /** generator: turbine tripped - stop valves shut. */
+  turbineTripped?: boolean;
+  /** generator: rotor speed, fraction of rated (synchronous). */
+  speed?: number;
+  /** generator: inertia constant H (s) - rotor energy at rated speed over rated power. */
+  inertiaH?: number;
+  /** generator: turbine shaft rating (W), the basis of H. ratingW is the electrical rating. */
+  shaftRatedW?: number;
+  genEfficiency?: number;
+  speedGovernor?: boolean;
+  /** generator: governor droop (fraction: 0.05 = valves shut at 105% speed). */
+  droop?: number;
+  /** generator: overspeed trip (fraction of rated speed). */
+  overspeedTrip?: number;
+  /** generator: the speed governor's reset term (valve fraction, -1..1): 0 on the grid. */
+  govReset?: number;
+  /** generator: where the control valves actually are under the speed governor (0-1). */
+  govValve?: number;
+  /** generator: shaft power from the turbine (W), display. */
+  mechW?: number;
+  /** generator: power sent to the grid (W), display. 0 unless synchronized. */
+  exportW?: number;
+  /** generator: tied to a live grid, which holds its speed. */
+  synchronized?: boolean;
 
   // --- solved each accepted step ---
   energized: boolean;

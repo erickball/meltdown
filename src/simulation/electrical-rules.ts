@@ -138,7 +138,7 @@ export function loadSpecFor(component: Record<string, any>): LoadSpec | null {
 
 /** Plant component types that are part of the distribution network. */
 export const ELECTRICAL_ELEMENT_TYPES: ReadonlySet<string> = new Set([
-  'switchyard', 'bus', 'transformer', 'breaker', 'diesel-generator', 'battery',
+  'switchyard', 'bus', 'transformer', 'breaker', 'diesel-generator', 'battery', 'turbine-generator',
 ]);
 
 /** The new electrical parts: no ports, no flow node, only built with the model on. */
@@ -187,6 +187,7 @@ export function supplyRequirementFor(component: Record<string, any>): SupplyRequ
     case 'battery': return { kind: 'class', voltageClass: 'lv' };
     case 'switchyard':
     case 'diesel-generator':
+    case 'turbine-generator':
       return null;
   }
   const load = loadSpecFor(component);
@@ -201,9 +202,11 @@ export function supplyRequirementFor(component: Record<string, any>): SupplyRequ
  */
 export function feederTypesFor(componentType: string): ReadonlySet<string> {
   switch (componentType) {
-    case 'bus': return new Set(['transformer', 'breaker', 'diesel-generator', 'battery', 'bus']);
-    case 'transformer': return new Set(['switchyard', 'bus', 'breaker']);
-    case 'breaker': return new Set(['switchyard', 'bus', 'transformer', 'diesel-generator', 'battery']);
+    // A turbine-generator feeds at its terminal voltage: a unit auxiliary
+    // transformer, a generator bus, a generator breaker
+    case 'bus': return new Set(['transformer', 'breaker', 'diesel-generator', 'battery', 'bus', 'turbine-generator']);
+    case 'transformer': return new Set(['switchyard', 'bus', 'breaker', 'turbine-generator']);
+    case 'breaker': return new Set(['switchyard', 'bus', 'transformer', 'diesel-generator', 'battery', 'turbine-generator']);
     case 'battery': return new Set(['bus', 'breaker']);
     default: return new Set(['bus', 'breaker']);
   }
