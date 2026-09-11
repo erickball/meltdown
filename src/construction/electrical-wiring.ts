@@ -10,7 +10,8 @@
 
 import type { PlantState, PlantComponent, Point } from '../types';
 import {
-  supplyRequirementFor, feederTypesFor, acceptsSupply, formatVoltage,
+  supplyRequirementFor, feederTypesFor, acceptsSupply, formatVoltage, describeRequirement,
+  SupplyRequirement,
 } from '../simulation/electrical-rules';
 
 /** The two supply fields a component can carry. */
@@ -152,6 +153,92 @@ export function wireLinks(plant: PlantState): WireLink[] {
     }
   }
   return links;
+}
+
+// ---------------------------------------------------------------------------
+// Can this part be powered, as the plant is wired?
+// ---------------------------------------------------------------------------
+
+/** Components that ARE sources, whatever (if anything) feeds them. */
+const SOURCE_TYPES: ReadonlySet<string> = new Set(['switchyard', 'diesel-generator', 'battery', 'turbine-generator']);
+
+/**
+ * Whether power could reach `id` from a source through the plant's wiring,
+ * every feed at a voltage its consumer accepts. This is the DESIGN, not the
+ * running plant: breaker positions, the grid and diesel fuel do not enter
+ * into it - that is what the running solve is for.
+ */
+function reachesSource(plant: PlantState, id: string, seen: Set<string> = new Set()): boolean {
+  const c = plant.components.get(id);
+  if (!c || seen.has(id)) return false;
+  seen.add(id);
+  if (SOURCE_TYPES.has(c.type)) return true;
+  const req = supplyRequirementFor(c as never);
+  if (!req) return false;
+  return feedsOf(c).some(f => {
+    const v = plantOutputVoltage(plant, f);
+    return !!v && acceptsSupply(req, v.voltage, v.dc) && reachesSource(plant, f, seen);
+  });
+}
+
+export interface SupplyStatus {
+  /** What the part accepts, in words ("medium-voltage AC (1-35 kV)", "4.16 kV AC"). */
+  needs: string;
+  /** The feed that works (or, when none does, the normal supply). */
+  supplyId?: string;
+  supplyLabel?: string;
+  supplyVoltage?: string;
+  /** Why the part cannot be powered as wired; undefined when it can. */
+  problem?: string;
+}
+
+function feedStatus(plant: PlantState, req: SupplyRequirement, needs: string, fid: string): SupplyStatus {
+  const s = plant.components.get(fid);
+  if (!s) return { needs, supplyId: fid, problem: `its supply '${fid}' no longer exists` };
+  const supplyLabel = s.label || s.id;
+  const v = plantOutputVoltage(plant, fid);
+  if (!v) return { needs, supplyId: fid, supplyLabel, problem: `${supplyLabel} is not fed from anything` };
+  const supplyVoltage = formatVoltage(v.voltage, v.dc);
+  if (!acceptsSupply(req, v.voltage, v.dc)) {
+    return { needs, supplyId: fid, supplyLabel, supplyVoltage,
+      problem: `${supplyLabel} is ${supplyVoltage}, but this needs ${needs}` };
+  }
+  if (!reachesSource(plant, fid)) {
+    return { needs, supplyId: fid, supplyLabel, supplyVoltage,
+      problem: `${supplyLabel} has no path back to a source (switchyard, diesel, battery or generator)` };
+  }
+  return { needs, supplyId: fid, supplyLabel, supplyVoltage };
+}
+
+/**
+ * Where a part that needs power gets it, and whether that can work as the
+ * plant is wired - null for a part that takes no supply at all. A bus with a
+ * backup is fine if either feed is.
+ */
+export function supplyStatus(plant: PlantState, component: Record<string, any>): SupplyStatus | null {
+  const req = supplyRequirementFor(component);
+  if (!req) return null;
+  const needs = describeRequirement(req);
+  const feeds = feedsOf(component as PlantComponent);
+  if (feeds.length === 0) return { needs, problem: `not connected - needs ${needs}` };
+  let first: SupplyStatus | undefined;
+  for (const fid of feeds) {
+    const st = feedStatus(plant, req, needs, fid);
+    if (!st.problem) return st;
+    first = first ?? st;
+  }
+  return first!;
+}
+
+/** Every part that needs a supply and has none, with what it needs (the auto-wire report). */
+export function unwiredParts(plant: PlantState): Array<{ id: string; label: string; needs: string }> {
+  const out: Array<{ id: string; label: string; needs: string }> = [];
+  for (const c of plant.components.values()) {
+    const req = supplyRequirementFor(c as never);
+    if (!req || feedsOf(c).length > 0) continue;
+    out.push({ id: c.id, label: c.label || c.id, needs: describeRequirement(req) });
+  }
+  return out;
 }
 
 /** Drop every supply reference to a removed component (its wires go with it). */

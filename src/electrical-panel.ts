@@ -9,8 +9,13 @@
  */
 
 import type { SimulationState, ElecElement, ElecLoad } from './simulation/types';
+import type { PlantState } from './types';
 import type { ElectricalCommand } from './simulation/electrical';
-import { formatVoltage, formatPower, VOLTAGE_CLASS_LABEL } from './simulation/electrical-rules';
+import { formatVoltage, formatPower } from './simulation/electrical-rules';
+import { supplyStatus } from './construction/electrical-wiring';
+
+/** The part of the plant the panel reads. */
+type PlantLike = { components: Map<string, unknown>; electrical?: { enabled: boolean } };
 
 function row(label: string, value: string, title = '', color = ''): string {
   return `<div class="detail-row"><span class="detail-label"${title ? ` title="${title}"` : ''}>${label}:</span>` +
@@ -141,14 +146,9 @@ function elementHtml(e: ElecElement, state: SimulationState): string {
   return html;
 }
 
-function loadHtml(l: ElecLoad, state: SimulationState): string {
-  const supply = l.supplyId ? state.electrical!.elements[l.supplyId] : undefined;
+/** What a running load draws, and what losing its power does. (Its supply is in powerSupplyRows.) */
+function loadHtml(l: ElecLoad): string {
   let html = '';
-  html += row('Power', l.powered ? 'POWERED' : 'NO POWER',
-    `Needs ${VOLTAGE_CLASS_LABEL[l.voltageClass]}.`, l.powered ? '#7f7' : '#f77');
-  html += row('Fed from', supply ? `${supply.label}${supply.energized ? '' : ' (dead)'}` : (l.supplyId ? `${l.supplyId} (missing)` : 'nothing'),
-    'Change it with Edit.', supply?.energized ? '' : '#f99');
-  if (l.fault && l.fault !== 'not connected to a power supply') html += faultRow(l.fault);
   if (l.ratedW > 0 || l.demandW > 0) {
     html += row('Drawing', `${formatPower(l.demandW)}${l.ratedW > 0 ? ` (rated ${formatPower(l.ratedW)})` : ''}`,
       l.kind === 'pump' ? 'Motor input: hydraulic power on the pump curve plus losses, scaled by speed cubed. A running pump against a closed discharge still draws its losses.' : '');
@@ -168,15 +168,66 @@ function loadHtml(l: ElecLoad, state: SimulationState): string {
   return html;
 }
 
-/** The electrical section for one component, or '' when it has none. */
-export function electricalDetailHtml(componentId: string, state: SimulationState): string {
+/**
+ * Operating Status rows for a part that needs power: what it is fed from (and
+ * at what voltage), or what it needs when nothing suitable is connected, and
+ * - with a running network that matches the wiring on screen - whether it has
+ * power right now. '' for a part that takes no supply, or with the model off.
+ *
+ * The wiring half is read from the plant, not the simulation, so it is right
+ * in construction mode too, straight after an edit.
+ */
+export function powerSupplyRows(componentId: string, plant: PlantLike, state: SimulationState): string {
+  if (!plant.electrical?.enabled) return '';
+  const c = plant.components.get(componentId) as Record<string, any> | undefined;
+  if (!c) return '';
+  const st = supplyStatus(plant as unknown as PlantState, c);
+  if (!st) return '';
+  let html = '';
+  html += row('Power supply',
+    st.supplyLabel ? `${st.supplyLabel}${st.supplyVoltage ? ` (${st.supplyVoltage})` : ''}` : 'none',
+    `What this part is fed from. It needs ${st.needs}. Change it with Edit, or use Auto-wire.`,
+    st.problem ? '#f99' : '');
+  if (!st.supplyLabel) html += row('Needs', st.needs, 'The kind of supply this part runs from.', '#fc8');
+  if (st.problem && st.supplyLabel) {
+    html += `<div class="detail-row" style="color: #fc8; font-size: 10px;" title="As wired, power cannot reach this part. Edit it (or its supply) to fix.">&#9888; ${st.problem}</div>`;
+  }
+  // Live state, only while the running network is wired the way the plant is
+  // now (after an unapplied edit, the simulation's answer is about the old wiring)
+  const load = state.electrical?.loads[componentId];
+  if (load && load.supplyId === c.powerSupplyId) {
+    html += row('Power', load.powered ? 'POWERED' : 'NO POWER',
+      'Whether the supply is live right now.', load.powered ? '#7f7' : '#f77');
+  }
+  return html;
+}
+
+function section(title: string, body: string): string {
+  return `<div class="detail-section"><div class="detail-section-title">${title}</div>${body}</div>`;
+}
+
+/**
+ * The electrical section for one component, or '' when it has none.
+ *
+ * A running piece of the network gets its state, loading and buttons. A part
+ * that needs power gets an Operating Status section with its supply rows
+ * (powerSupplyRows) and what it draws - unless the panel already has an
+ * Operating Status section that shows the supply (`supplyShownAbove`, a
+ * pump), in which case what is left goes under Electrical.
+ */
+export function electricalDetailHtml(
+  componentId: string, plant: PlantLike, state: SimulationState,
+  opts: { supplyShownAbove?: boolean } = {}
+): string {
+  if (!plant.electrical?.enabled) return '';
   const E = state.electrical;
-  if (!E) return '';
-  const e = E.elements[componentId];
-  const l = E.loads[componentId];
-  if (!e && !l) return '';
-  return '<div class="detail-section"><div class="detail-section-title">Electrical</div>' +
-    (e ? elementHtml(e, state) : loadHtml(l, state)) + '</div>';
+  const e = E?.elements[componentId];
+  if (e) return section('Electrical', elementHtml(e, state));
+  const l = E?.loads[componentId];
+  const supply = opts.supplyShownAbove ? '' : powerSupplyRows(componentId, plant, state);
+  const running = l ? loadHtml(l) : '';
+  if (!supply && !running) return '';
+  return section(opts.supplyShownAbove ? 'Electrical' : 'Operating Status', supply + running);
 }
 
 /** Hand the panel's electrical buttons to the app. */

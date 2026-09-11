@@ -210,5 +210,46 @@ console.log('Wall anchors');
     sideFacing(sg, { x: sg.position.x + 1, y: sg.position.y + 3 }) === 'S');
 }
 
+console.log('Plan routes');
+{
+  // SG vessel head -> primary safety valve, 4 m north of the head and 1 m
+  // above it: a straight run from where the head nozzle stands to the face of
+  // the valve turned to meet it (was a seven-leg tangle round the valve)
+  const prel = conn('tank-sg-1', 'tank-sg-top', 'val-prel-1', 'val-prel-1-in');
+  const runs = grid.planRuns(plant);
+  const ends = grid.planRunEnds().get(prel);
+  const r = runs.get(prel) ?? [];
+  const valve = comp('val-prel-1');
+  check('SG head to safety valve is one straight run', r.length === 2 &&
+    near(r[0].x, sg.position.x) && near(r[0].y, sg.position.y) && near(r[1].x, valve.position.x) && near(r[1].y, valve.position.y + 0.5),
+    r.map(fmt).join(' '));
+  check('the head end is a vertical nozzle, the valve end a turned valve face',
+    ends?.from?.vertical === 'up' && ends?.to?.side === 'S', JSON.stringify(ends));
+
+  // No routed connection in any preset has a diagonal leg (the lattice used to
+  // sit half a tile off every odd footprint centred on a whole metre)
+  const dir = path.join(HERE, '../src/presets');
+  for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) {
+    const data = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+    if (!Array.isArray(data.components) || !Array.isArray(data.connections)) continue;
+    const p = deserializePlantDesign(data);
+    const g = new GridView();
+    g.setViewportSize(1600, 1000);
+    g.centerOn(p);
+    let diagonal = 0, total = 0;
+    const bad: string[] = [];
+    for (const [k, pts] of g.planRuns(p)) {
+      if ((k as PlantComponent).type === 'pipe') continue;
+      total++;
+      if (pts.some((q, i) => i > 0 && Math.abs(q.x - pts[i - 1].x) > 1e-6 && Math.abs(q.y - pts[i - 1].y) > 1e-6)) {
+        diagonal++;
+        const c = k as Connection;
+        if (bad.length < 3) bad.push(`${c.fromComponentId}:${c.fromPortId} -> ${c.toComponentId}:${c.toPortId} ${pts.map(fmt).join(' ')}`);
+      }
+    }
+    check(`${file}: no diagonal legs in ${total} routed connections`, diagonal === 0, `${diagonal} diagonal; ${bad.join(' | ')}`);
+  }
+}
+
 console.log(failures === 0 ? '\nAll grid section checks passed' : `\n${failures} grid section check(s) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

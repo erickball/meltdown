@@ -123,6 +123,22 @@ breaker Open/Close, diesel Start/Stop, Reset trip, at a switchyard
 Trip / Reset turbine. Scenario actions: `offsite-power`, `breaker`,
 `diesel`, `generator-breaker`, `turbine-trip` (see `scenario-types.ts`).
 
+Selecting a part that needs power shows, in its Operating Status section,
+what it is fed from and at what voltage - or "none" and what it needs - and,
+while the plant runs, whether it has power now. The wiring half is read from
+the design (`supplyStatus` in `electrical-wiring.ts`), so it is right in
+construction mode straight after an edit.
+
+**No-power badges** (a lightning bolt in a no-symbol) sit over every part
+that has no power: while running, whatever the solve left unpowered (loads,
+and dead buses/transformers/breakers/batteries); while building, every part
+whose wiring cannot reach a source at a voltage it accepts - unwired, wrong
+voltage, a supply fed from nothing, or no path back to a switchyard, diesel,
+battery or generator (breaker positions, grid and fuel are not considered).
+
+**Auto-wire** reports what it could not connect: a list of every part still
+without a supply and the voltage it needs.
+
 ## Drawing
 
 Wires auto-route on the 1 m lattice around equipment (`src/render/wires.ts`),

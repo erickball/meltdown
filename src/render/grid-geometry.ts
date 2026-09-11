@@ -52,6 +52,13 @@ export interface PortAnchor {
   side: Side;
   /** Cell centre one tile outward from `point` (undefined for pipe ends, which routes meet directly). */
   out?: Point;
+  /**
+   * Set on a nozzle on the top or bottom of its component, for a connection
+   * (verticalNozzle): `point` is then where the nozzle stands in plan, inside
+   * the footprint, the pipe leaves it upward or downward rather than through
+   * a side, and `side` only says which way its partner lies.
+   */
+  vertical?: 'up' | 'down';
 }
 
 const EPS = 1e-6;
@@ -394,13 +401,106 @@ export function portAnchor(component: PlantComponent, portId: string): PortAncho
 const MIRRORS_LATERAL_PORTS = new Set(['tank', 'vessel', 'reactorVessel', 'coreBarrel']);
 
 /**
+ * Whether a port is a vertical nozzle - on the top or bottom of a standing
+ * component's drawing (a vessel head, a turbine's steam inlet, a pump's
+ * suction) - and which way it points. Such a nozzle is not on any side of
+ * the footprint: the pipe leaves it upward or downward from where it stands
+ * over the plan, and can head from there whichever way its partner lies.
+ * A nozzle that declares a plan side is a side nozzle; floors (buildings,
+ * pools) and pipes have no drawn top or bottom.
+ */
+export function verticalNozzle(component: PlantComponent, portId: string): 'up' | 'down' | null {
+  if (!isStandingSprite(component)) return null;
+  const port = component.ports?.find(p => p.id === portId);
+  if (!port || port.planSide) return null;
+  const size = getComponentSize(component);
+  const nx = size.width > 0 ? port.position.x / (size.width / 2) : 0;
+  const ny = size.height > 0 ? port.position.y / (size.height / 2) : 0;
+  // The same reading portSide makes: lateral wins a tie
+  if (Math.abs(ny) <= Math.abs(nx)) return null;
+  return ny < 0 ? 'up' : 'down';
+}
+
+const SIDES: Side[] = ['N', 'E', 'S', 'W'];
+const turnSide = (side: Side, quarterTurns: number): Side => SIDES[(SIDES.indexOf(side) + quarterTurns) % 4];
+
+/**
+ * The plan sides of an inline valve's two nozzles, with the valve turned to
+ * suit its piping. The nozzles are opposite each other, but which pair of
+ * footprint sides they stand on is how the valve was installed, not
+ * something the front-view drawing can say: of the four ways round, the one
+ * whose nozzles point most directly at what each connects to (the sum of
+ * the cosines, over the nozzles `refOf` gives a partner for). The drawn
+ * arrangement wins a tie, so a valve with nothing connected, or piped
+ * straight through as drawn, stays as it is. Null for anything that is not
+ * a two-nozzle valve with opposite nozzles.
+ */
+export function turnedValveSides(valve: PlantComponent, refOf: (portId: string) => Point | null): Map<string, Side> | null {
+  if (valve.type !== 'valve' || valve.ports?.length !== 2) return null;
+  const size = getComponentSize(valve);
+  const drawn = valve.ports.map(p => portSide(p, size));
+  if (drawn[0] !== oppositeSide(drawn[1])) return null;
+  const toward = valve.ports.map(p => {
+    const ref = refOf(p.id);
+    if (!ref) return null;
+    const dx = ref.x - valve.position.x, dy = ref.y - valve.position.y;
+    const len = Math.hypot(dx, dy);
+    return len > EPS ? { x: dx / len, y: dy / len } : null;
+  });
+  let best = 0;
+  let bestScore = -Infinity;
+  for (let k = 0; k < 4; k++) {
+    let score = 0;
+    for (let i = 0; i < 2; i++) {
+      const u = toward[i];
+      if (!u) continue;
+      const v = sideVector(turnSide(drawn[i], k));
+      score += v.x * u.x + v.y * u.y;
+    }
+    if (score > bestScore + EPS) { best = k; bestScore = score; }
+  }
+  return new Map(valve.ports.map((p, i) => [p.id, turnSide(drawn[i], best)]));
+}
+
+/** The far end of the connection on a port: the partner component and its port (null when unconnected or open to the air). */
+export function portPartner(plantState: PlantState, component: PlantComponent, portId: string): { partner: PlantComponent; partnerPortId: string } | null {
+  for (const k of plantState.connections) {
+    if (k.fromComponentId === component.id && k.fromPortId === portId) {
+      const partner = plantState.components.get(k.toComponentId);
+      return partner ? { partner, partnerPortId: k.toPortId } : null;
+    }
+    if (k.toComponentId === component.id && k.toPortId === portId) {
+      const partner = plantState.components.get(k.fromComponentId);
+      return partner ? { partner, partnerPortId: k.fromPortId } : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The obstacles a run steers round: a vertical nozzle's own footprint is not
+ * in its way, since the pipe leaves over the top of it (or under the bottom).
+ */
+export function obstaclesForRun(obstacles: Obstacle[], ends: Array<{ id: string; anchor: PortAnchor } | null>): Obstacle[] {
+  const own = new Set(ends.filter(e => e?.anchor.vertical).map(e => e!.id));
+  return own.size > 0 ? obstacles.filter(o => !own.has(o.id)) : obstacles;
+}
+
+/**
  * A port's anchor for a connection to a partner at `partnerRef`. A vessel's
  * side nozzle is not on a fixed side of the tank in this model - the drawing
  * puts it on the side facing whatever it connects to - so an east/west port
- * of an upright cylinder is mirrored to the edge facing the partner. Other
- * components keep their stored side.
+ * of an upright cylinder is mirrored to the edge facing the partner. A
+ * vertical nozzle (verticalNozzle) has no side: its anchor is where it stands
+ * over the plan. Other components keep their stored side.
  */
 export function portAnchorFacing(component: PlantComponent, portId: string, partnerRef: Point): PortAnchor | null {
+  const vertical = verticalNozzle(component, portId);
+  if (vertical) {
+    const port = component.ports.find(p => p.id === portId)!;
+    const point = { x: component.position.x + port.position.x, y: component.position.y };
+    return { port, point, side: sideOfVector(partnerRef.x - point.x, partnerRef.y - point.y), vertical };
+  }
   const a = portAnchor(component, portId);
   // A nozzle that names its own side stays on it - the whole point of
   // declaring a side is that the drawing does not get to move it.
@@ -518,16 +618,62 @@ function pathPreferringAxis(from: Point, to: Point, axis: 'x' | 'y'): Point[] {
  * into the second.
  */
 export function autoRoute(a: PortAnchor, b: PortAnchor, obstacles?: Obstacle[]): Point[] {
+  if (obstacles) {
+    const direct = directRoute(a, b, obstacles);
+    if (direct) return direct;
+  }
   const pts: Point[] = [a.point];
   if (a.out) pts.push(a.out);
   const start = pts[pts.length - 1];
   const end = b.out ?? b.point;
   const middle = obstacles
-    ? searchRoute(start, end, obstacles, sideVector(a.side))
+    ? searchRoute(start, end, obstacles, sideVector(a.side), b.out ? sideVector(oppositeSide(b.side)) : undefined)
     : pathPreferringAxis(start, end, leaveAxis(a.side));
   pts.push(...middle.slice(1));
   if (b.out) pts.push(b.point);
   return simplifyRoute(pts);
+}
+
+/**
+ * The plain way between two nozzles, when there is one: a straight run, or
+ * one bend, that leaves the first through its face and enters the second
+ * through its face without crossing any equipment. It needs no lattice, so
+ * two nozzles that line up are joined by a line that lines up, whatever
+ * cells their footprints happen to sit on. A vertical nozzle has no face and
+ * may be left or entered in any direction. Null when no such path is clear.
+ */
+function directRoute(a: PortAnchor, b: PortAnchor, obstacles: Obstacle[]): Point[] | null {
+  const along = (d: Point, v: Point) => Math.abs(d.x - v.x) < EPS && Math.abs(d.y - v.y) < EPS;
+  const leaves = (d: Point) => a.vertical !== undefined || along(d, sideVector(a.side));
+  const enters = (d: Point) => b.vertical !== undefined || along(d, sideVector(oppositeSide(b.side)));
+  const p = a.point, q = b.point;
+  const candidates: Point[][] = [];
+  if (Math.abs(p.x - q.x) < EPS || Math.abs(p.y - q.y) < EPS) {
+    candidates.push([p, q]);
+  } else {
+    const xFirst = [p, { x: q.x, y: p.y }, q];
+    const yFirst = [p, { x: p.x, y: q.y }, q];
+    candidates.push(...(a.vertical === undefined && leaveAxis(a.side) === 'y' ? [yFirst, xFirst] : [xFirst, yFirst]));
+  }
+  for (const path of candidates) {
+    let clear = true;
+    for (let i = 1; i < path.length && clear; i++) {
+      const len = Math.hypot(path[i].x - path[i - 1].x, path[i].y - path[i - 1].y);
+      const d = len > EPS ? { x: (path[i].x - path[i - 1].x) / len, y: (path[i].y - path[i - 1].y) / len } : { x: 0, y: 0 };
+      if (i === 1 && !leaves(d)) clear = false;
+      if (i === path.length - 1 && !enters(d)) clear = false;
+      if (clear && segmentCrossesObstacle(path[i - 1], path[i], obstacles)) clear = false;
+    }
+    if (clear) return path;
+  }
+  return null;
+}
+
+/** Whether an axis-aligned segment passes through the inside of any obstacle (running along an edge does not). */
+function segmentCrossesObstacle(p: Point, q: Point, obstacles: Obstacle[]): boolean {
+  const x0 = Math.min(p.x, q.x), x1 = Math.max(p.x, q.x);
+  const y0 = Math.min(p.y, q.y), y1 = Math.max(p.y, q.y);
+  return obstacles.some(o => x1 > o.x0 + EPS && x0 < o.x1 - EPS && y1 > o.y0 + EPS && y0 < o.y1 - EPS);
 }
 
 // ---------------------------------------------------------------------------
@@ -613,18 +759,31 @@ class MinHeap<T> {
 const DIRS: Point[] = [{ x: 1, y: 0 }, { x: -1, y: 0 }, { x: 0, y: 1 }, { x: 0, y: -1 }];
 
 /**
- * Orthogonal path between two points over the cell lattice (A* with a bend
- * penalty), avoiding obstacle footprints where it can. Points that are not
- * cell centres (a pipe end on a cell edge) are joined to the nearest cell
- * centre by a short leg. Never fails: obstacles only cost, so a port inside
- * a footprint still gets a route - out through the wall.
+ * Orthogonal path between two points over a cell lattice (A* with a bend
+ * penalty), avoiding obstacle footprints where it can.
+ *
+ * The lattice is laid from `start`: its cells are centred on the start
+ * point, so the run leaves it on a lattice line whatever cells the
+ * footprints sit on (a component centred on a whole metre with an odd-sized
+ * footprint has its edge cells centred on whole metres; one centred on a
+ * half metre, on halves). The end need not be on that lattice. The search
+ * stops at the last cell short of it and a square join finishes the run:
+ * across onto the end's line, then in along `endDir` (the direction the run
+ * must arrive travelling in, which the search also arrives on) - so the join
+ * never doubles back. Without an `endDir` the join carries straight on where
+ * it can. Never fails: obstacles only cost, so a port inside a footprint
+ * still gets a route - out through the wall.
  */
-export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], startDir?: Point): Point[] {
-  const s = cellCenter(start), e = cellCenter(end);
-  const si = Math.floor(s.x / TILE_M), sj = Math.floor(s.y / TILE_M);
-  const ei = Math.floor(e.x / TILE_M), ej = Math.floor(e.y / TILE_M);
-  const x0 = Math.min(si, ei) - SEARCH_MARGIN, x1 = Math.max(si, ei) + SEARCH_MARGIN;
-  const y0 = Math.min(sj, ej) - SEARCH_MARGIN, y1 = Math.max(sj, ej) + SEARCH_MARGIN;
+export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], startDir?: Point, endDir?: Point): Point[] {
+  const at = (i: number, j: number): Point => ({ x: start.x + i * TILE_M, y: start.y + j * TILE_M });
+  const fx = (end.x - start.x) / TILE_M, fy = (end.y - start.y) / TILE_M;
+  // The goal cell: along the arrival direction, the last lattice line short
+  // of the end; across it (or with no arrival direction), the nearest
+  const shortOf = (f: number, d: number) => d > EPS ? Math.floor(f + EPS) : d < -EPS ? Math.ceil(f - EPS) : Math.round(f);
+  const ei = endDir ? shortOf(fx, endDir.x) : Math.round(fx);
+  const ej = endDir ? shortOf(fy, endDir.y) : Math.round(fy);
+  const x0 = Math.min(0, ei) - SEARCH_MARGIN, x1 = Math.max(0, ei) + SEARCH_MARGIN;
+  const y0 = Math.min(0, ej) - SEARCH_MARGIN, y1 = Math.max(0, ej) + SEARCH_MARGIN;
   const W = x1 - x0 + 1, H = y1 - y0 + 1;
   const idx = (i: number, j: number, d: number) => ((j - y0) * W + (i - x0)) * 4 + d;
 
@@ -632,13 +791,15 @@ export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], sta
   const from = new Int32Array(W * H * 4).fill(-1);
   const heap = new MinHeap<number>();
   const h = (i: number, j: number) => Math.abs(i - ei) + Math.abs(j - ej);
-  const startD = startDir ? DIRS.findIndex(d => d.x === Math.sign(startDir.x) && d.y === Math.sign(startDir.y)) : -1;
+  const dirIndex = (v?: Point) => v ? DIRS.findIndex(d => d.x === Math.sign(v.x) && d.y === Math.sign(v.y)) : -1;
+  const startD = dirIndex(startDir);
+  const endD = dirIndex(endDir);
 
   // Start with every heading (a start direction, if given, is free; the rest pay a bend)
   for (let d = 0; d < 4; d++) {
     const g = startD < 0 || d === startD ? 0 : BEND_PENALTY;
-    best[idx(si, sj, d)] = g;
-    heap.push(g + h(si, sj), idx(si, sj, d));
+    best[idx(0, 0, d)] = g;
+    heap.push(g + h(0, 0), idx(0, 0, d));
   }
 
   let goal = -1;
@@ -648,13 +809,23 @@ export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], sta
     const cellIndex = (cur - d) / 4;
     const i = (cellIndex % W) + x0;
     const j = Math.floor(cellIndex / W) + y0;
-    if (i === ei && j === ej) { goal = cur; break; }
     const g = best[cur];
+    if (i === ei && j === ej) {
+      if (endD < 0 || d === endD) { goal = cur; break; }
+      // Arrived on the wrong heading: turn onto the arrival direction here,
+      // a bend like any other
+      const turned = idx(i, j, endD);
+      if (g + BEND_PENALTY < best[turned] - EPS) {
+        best[turned] = g + BEND_PENALTY;
+        from[turned] = cur;
+        heap.push(g + BEND_PENALTY, turned);
+      }
+    }
     for (let nd = 0; nd < 4; nd++) {
       const ni = i + DIRS[nd].x, nj = j + DIRS[nd].y;
       if (ni < x0 || ni > x1 || nj < y0 || nj > y1) continue;
-      const cost = g + 1 + (nd === d ? 0 : BEND_PENALTY) +
-        cellPenalty((ni + 0.5) * TILE_M, (nj + 0.5) * TILE_M, obstacles);
+      const c = at(ni, nj);
+      const cost = g + 1 + (nd === d ? 0 : BEND_PENALTY) + cellPenalty(c.x, c.y, obstacles);
       const ni_ = idx(ni, nj, nd);
       if (cost < best[ni_] - EPS) {
         best[ni_] = cost;
@@ -664,22 +835,37 @@ export function searchRoute(start: Point, end: Point, obstacles: Obstacle[], sta
     }
   }
 
-  const cells: Point[] = [];
   if (goal < 0) {
     // Out of the search box (cannot happen while both ends are inside it); one bend
     return manhattanPath(start, end, 'x');
   }
+  const pts: Point[] = [];
   for (let cur = goal; cur >= 0; cur = from[cur]) {
     const d = cur % 4;
     const cellIndex = (cur - d) / 4;
-    cells.push({ x: ((cellIndex % W) + x0 + 0.5) * TILE_M, y: (Math.floor(cellIndex / W) + y0 + 0.5) * TILE_M });
+    pts.push(at((cellIndex % W) + x0, Math.floor(cellIndex / W) + y0));
     if (from[cur] < 0) break;
   }
-  cells.reverse();
-  const pts: Point[] = [];
-  if (!samePoint(start, s)) pts.push(start);
-  pts.push(...cells);
-  if (!samePoint(end, e)) pts.push(end);
+  pts.reverse();
+
+  // The square join from the goal cell to the end
+  const g = pts[pts.length - 1];
+  if (!samePoint(g, end)) {
+    if (endDir) {
+      pts.push(Math.abs(endDir.x) > EPS ? { x: g.x, y: end.y } : { x: end.x, y: g.y }, end);
+    } else {
+      const prev = pts.length >= 2 ? pts[pts.length - 2] : null;
+      let axis: 'x' | 'y' = 'x';
+      if (prev) {
+        const legAxis: 'x' | 'y' = Math.abs(g.x - prev.x) > EPS ? 'x' : 'y';
+        const leg = legAxis === 'x' ? g.x - prev.x : g.y - prev.y;
+        const ahead = legAxis === 'x' ? end.x - g.x : end.y - g.y;
+        // Straight on if the end is ahead (or level); otherwise turn first
+        axis = leg * ahead >= -EPS ? legAxis : (legAxis === 'x' ? 'y' : 'x');
+      }
+      pts.push(...manhattanPath(g, end, axis).slice(1));
+    }
+  }
   return simplifyRoute(pts);
 }
 
@@ -937,11 +1123,32 @@ export function connectionRoute(conn: Connection, plantState: PlantState, obstac
     return environmentStub(fromComponent, conn.fromPortId);
   }
   if (!fromComponent || !toComponent) return null;
-  const a = portAnchorFacing(fromComponent, conn.fromPortId, partnerReference(toComponent, conn.toPortId));
-  const b = portAnchorFacing(toComponent, conn.toPortId, partnerReference(fromComponent, conn.fromPortId));
+  const a = connectionAnchor(plantState, fromComponent, conn.fromPortId, toComponent, conn.toPortId);
+  const b = connectionAnchor(plantState, toComponent, conn.toPortId, fromComponent, conn.fromPortId);
   if (!a || !b) return null;
   if (conn.route && conn.route.length >= 2) return reanchorRoute(conn.route, a, b);
-  return autoRoute(a, b, obstacles ?? routeObstacles(plantState));
+  return autoRoute(a, b, obstaclesForRun(obstacles ?? routeObstacles(plantState),
+    [{ id: fromComponent.id, anchor: a }, { id: toComponent.id, anchor: b }]));
+}
+
+/**
+ * Where a connection meets a component on the plan: a valve's nozzle on the
+ * side its turned valve puts it (turnedValveSides), anything else facing its
+ * partner (portAnchorFacing).
+ */
+function connectionAnchor(
+  plantState: PlantState, c: PlantComponent, portId: string, partner: PlantComponent, partnerPortId: string,
+): PortAnchor | null {
+  const sides = turnedValveSides(c, id => {
+    const far = portPartner(plantState, c, id);
+    // An opening into the valve's own container is not piped
+    if (!far || far.partner.containedBy === c.id || c.containedBy === far.partner.id) return null;
+    return partnerReference(far.partner, far.partnerPortId);
+  });
+  const side = sides?.get(portId);
+  const port = c.ports.find(p => p.id === portId);
+  if (side && port) return wallAnchor(c, port, side, c.position);
+  return portAnchorFacing(c, portId, partnerReference(partner, partnerPortId));
 }
 
 /** Point and unit direction at a fraction (0..1) of the route's length. */

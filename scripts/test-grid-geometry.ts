@@ -9,7 +9,9 @@ import {
   searchRoute, routeObstacles, laneOffsetRoutes, Obstacle,
   pipePieceRoute, groundRunRoute, pipeFreeEnds, joinForFreeEnd, findFreeEndJoins,
   oppositeOrientation, PipeOrientation, snapPlacementCenter, crossVesselMates, crossVesselJoint,
+  verticalNozzle, turnedValveSides,
 } from '../src/render/grid-geometry';
+import { liftRoute } from '../src/render/pipe-run-3d';
 import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point, annulusNozzleDrawElevation, connectionDrawElevation } from '../src/types';
 
 let failures = 0;
@@ -174,7 +176,62 @@ console.log('Partner-facing nozzles');
   const conn2: Connection = { fromComponentId: 'p', fromPortId: 'p-outlet', toComponentId: 'u', toPortId: 'u-left' };
   const r2 = connectionRoute(conn2, plant)!;
   check('pump ports keep their stored side', near(r2[0].x, 21), fmt(r2));
-  check('top/bottom nozzles never mirror', portAnchorFacing(t, 't-top', { x: 50, y: 0 })!.side === 'N');
+  const top = portAnchorFacing(t, 't-top', { x: 50, y: 0 })!;
+  check('a top nozzle is not on a side: it stands at its plan position, facing the partner',
+    top.vertical === 'up' && samePt(top.point, t.position) && top.side === 'E' && top.out === undefined, JSON.stringify(top));
+}
+
+console.log('Vertical nozzles, turned valves, plain runs');
+{
+  const isOrtho = (r: Point[]) => r.every((p, i) => i === 0 || near(p.x, r[i - 1].x) || near(p.y, r[i - 1].y));
+  const fmt3 = (pts: { x: number; y: number; z: number }[]) => pts.map(p => `(${p.x},${p.y},${p.z})`).join(' ');
+  // The Xe-100 plant layout's SG vessel head and primary safety valve: a
+  // 5x5 vessel centred on whole metres, and a one-tile valve 4 m north of
+  // its centre, 1 m above the head
+  const sg = tank('sg', 55, 78, 4.6, 19.5);
+  const valve: any = {
+    id: 'v', type: 'valve', position: { x: 55, y: 74 }, rotation: 0, diameter: 0.1, opening: 0,
+    ports: [
+      { id: 'v-in', position: { x: -0.1, y: 0 }, direction: 'in' },
+      { id: 'v-out', position: { x: 0.1, y: 0 }, direction: 'out' },
+    ],
+  };
+  const conn: Connection = { fromComponentId: 'sg', fromPortId: 'sg-top', toComponentId: 'v', toPortId: 'v-in' };
+  const plant: PlantState = {
+    components: new Map<string, any>([[sg.id, sg], [valve.id, valve]]),
+    connections: [conn], simTime: 0, simSpeed: 1, isPaused: true,
+  };
+  check('a head nozzle is vertical, pointing up', verticalNozzle(sg, 'sg-top') === 'up');
+  check('a bottom-head nozzle points down', verticalNozzle(sg, 'sg-bottom') === 'down');
+  check('a side nozzle is not vertical', verticalNozzle(sg, 'sg-left') === null);
+
+  const sides = turnedValveSides(valve, id => id === 'v-in' ? sg.position : null)!;
+  check('a valve turns its inlet to face the vessel south of it', sides.get('v-in') === 'S' && sides.get('v-out') === 'N',
+    JSON.stringify([...sides]));
+  const drawn = turnedValveSides(valve, () => null)!;
+  check('an unpiped valve keeps its drawn sides', drawn.get('v-in') === 'W' && drawn.get('v-out') === 'E');
+
+  const r = connectionRoute(conn, plant)!;
+  check('head to valve: one straight run from the nozzle to the valve face',
+    r.length === 2 && samePt(r[0], { x: 55, y: 78 }) && samePt(r[1], { x: 55, y: 74.5 }), fmt(r));
+  // Lifted into 3D: straight up out of the head to the valve's height, then across into it
+  const lifted = liftRoute({ x: 55, y: 78, z: 19.5 }, 'y', r, { x: 55, y: 74.1, z: 20.5 }, 'y', 'up', null);
+  check('lifted: a riser at the head nozzle, then one level run into the valve',
+    lifted.length === 3 && near(lifted[1].x, 55) && near(lifted[1].y, 78) && near(lifted[1].z, 20.5), fmt3(lifted));
+  const sideRun = liftRoute({ x: 0, y: 0, z: 0 }, 'x', [{ x: 1, y: 0 }, { x: 5, y: 0 }, { x: 5, y: 3 }], { x: 6, y: 3, z: 4 }, 'x');
+  check('side nozzles: the run keeps to the lower elevation and rises one vertex in from the higher end',
+    sideRun.length === 5 && near(sideRun[1].z, 0) && near(sideRun[2].x, 5) && near(sideRun[2].y, 0) && near(sideRun[2].z, 4), fmt3(sideRun));
+
+  // Off the old half-metre lattice: the search lattice is laid from the start
+  const aligned = searchRoute({ x: 55, y: 75 }, { x: 57.5, y: 72 }, [], { x: 0, y: -1 }, { x: 1, y: 0 });
+  check('a start on a whole metre leaves on its own line (no diagonal)',
+    isOrtho(aligned) && samePt(aligned[0], { x: 55, y: 75 }) && samePt(aligned[aligned.length - 1], { x: 57.5, y: 72 }), fmt(aligned));
+  const offset = searchRoute({ x: 55, y: 75 }, { x: 57.5, y: 72.5 }, [], { x: 0, y: -1 }, { x: 1, y: 0 });
+  const monotone = (k: 'x' | 'y', sign: number) => offset.every((p, i) => i === 0 || (p[k] - offset[i - 1][k]) * sign >= -1e-9);
+  check('an end half a tile off the lattice is joined square', isOrtho(offset) &&
+    samePt(offset[offset.length - 1], { x: 57.5, y: 72.5 }), fmt(offset));
+  check('the join arrives along the approach and never doubles back',
+    near(offset[offset.length - 2].y, 72.5) && monotone('x', 1) && monotone('y', -1), fmt(offset));
 }
 
 console.log('Obstacle avoidance');

@@ -26,6 +26,7 @@ import {
   TILE_M, Footprint, PlanRect, PortAnchor, Side,
   componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
   portAnchors, portAnchor, portAnchorFacing, pipeRoute, routeLength, completeRoute, rubberBand,
+  turnedValveSides, portPartner, obstaclesForRun,
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
   PipeOrientation, pipePieceRoute, groundRunRoute, runFromEndRoute, findFreeEndJoins, snapPlacementCenter,
@@ -39,6 +40,7 @@ import { TerrainModel, buildTerrainModel, surfaceAtVolume, terrainHeightAt, cell
 import { contourPolylines, ContourSet } from './terrain-contours';
 import { renderFloodDebris } from './debris-fx';
 import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
+import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -135,6 +137,20 @@ interface RouteLayout {
   sections: Map<string, SectionRun[]>;
   /** The same runs by connection, for hit tests, labels and flow arrows. */
   sectionParts: Map<Connection, Point[][]>;
+  /** Each routed connection's plan anchors (see RunEnds). */
+  ends: Map<Connection, RunEnds>;
+}
+
+/**
+ * Where a routed connection meets its components on the plan: the anchor at
+ * each end that stands on the plan, null at an end drawn inside a section
+ * view (whose route starts at the container's wall) or open to the air. The
+ * 2.5D view lifts the route from these - which way it leaves, whether the
+ * nozzle is a vertical one, which side a turned valve's nozzle is on.
+ */
+export interface RunEnds {
+  from: PortAnchor | null;
+  to: PortAnchor | null;
 }
 
 /** One drawn run inside a section view: a screen polyline and the connection it belongs to. */
@@ -269,6 +285,7 @@ export class GridView {
     const routes = new Map<Run, Point[]>();
     const sections = new Map<string, SectionRun[]>();
     const sectionParts = new Map<Connection, Point[][]>();
+    const ends = new Map<Connection, RunEnds>();
     const runs: RouteRun[] = [];
     const seen = new Set<Run>();
     const addSection = (root: PlantComponent, conn: Connection, pts: Point[]) => {
@@ -343,6 +360,9 @@ export class GridView {
       for (const end of [endA, endB]) {
         if (end?.root && end.internal) addSection(end.root, conn, end.internal);
       }
+      const planA = endA && !endA.root ? endA.anchor : null;
+      const planB = endB && !endB.root ? endB.anchor : null;
+      ends.set(conn, { from: planA, to: planB });
 
       const endsKey = JSON.stringify([
         endA?.anchor.point ?? null, endA?.anchor.side ?? null, endB?.anchor.point ?? null, endB?.anchor.side ?? null,
@@ -352,7 +372,10 @@ export class GridView {
       seen.add(conn);
       let cached = this.routeCache.get(conn);
       if (!cached || cached.key !== key) {
-        const pts = this.latticeRoute(endA?.anchor ?? null, endB?.anchor ?? null, conn, obstacles);
+        const pts = this.latticeRoute(endA?.anchor ?? null, endB?.anchor ?? null, conn, obstaclesForRun(obstacles, [
+          planA && from ? { id: from.id, anchor: planA } : null,
+          planB && to ? { id: to.id, anchor: planB } : null,
+        ]));
         if (!pts) continue;
         cached = { key, pts };
         this.routeCache.set(conn, cached);
@@ -364,7 +387,7 @@ export class GridView {
     for (const k of this.routeCache.keys()) {
       if (!seen.has(k)) this.routeCache.delete(k);
     }
-    return { routes, display: laneOffsetRoutes(runs) as Map<Run, Point[]>, sections, sectionParts };
+    return { routes, display: laneOffsetRoutes(runs) as Map<Run, Point[]>, sections, sectionParts, ends };
   }
 
   /** The plan polyline between two lattice anchors (a missing one is the open air: a short stub). */
@@ -470,10 +493,12 @@ export class GridView {
     if (!port) return null;
     const root = this.sectionRootOf(c);
     if (!root) {
-      // A vessel's side nozzle faces its partner - or the wall of the
-      // container the partner is drawn inside
+      // A valve is turned to suit its piping; a vessel's side nozzle faces
+      // its partner - or the wall of the container the partner is drawn
+      // inside; a vertical nozzle stands where it is
       const anchor = partner && partnerPortId !== undefined
-        ? portAnchorFacing(c, portId, this.sectionRootOf(partner)?.position ?? partnerReference(partner, partnerPortId))
+        ? this.turnedValveAnchor(c, portId) ??
+          portAnchorFacing(c, portId, this.sectionRootOf(partner)?.position ?? partnerReference(partner, partnerPortId))
         : portAnchor(c, portId);
       return anchor ? { anchor, root: null, internal: null } : null;
     }
@@ -490,6 +515,21 @@ export class GridView {
       : this.portElevation(c, portId);
     const internal = this.internalRun(c, portId, root, anchor, z);
     return internal ? { anchor, root, internal } : null;
+  }
+
+  /** A valve's nozzle on the side its turned valve puts it (turnedValveSides); null for anything else. */
+  private turnedValveAnchor(c: PlantComponent, portId: string): PortAnchor | null {
+    const plant = this.plant;
+    if (!plant) return null;
+    const sides = turnedValveSides(c, id => {
+      const far = portPartner(plant, c, id);
+      // An opening into the valve's own container is not piped
+      if (!far || this.isContainmentPair(c, far.partner)) return null;
+      return this.sectionRootOf(far.partner)?.position ?? partnerReference(far.partner, far.partnerPortId);
+    });
+    const side = sides?.get(portId);
+    const port = c.ports.find(p => p.id === portId);
+    return side && port ? wallAnchor(c, port, side, c.position) : null;
   }
 
   /**
@@ -540,6 +580,11 @@ export class GridView {
   planRuns(plantState: PlantState): Map<Connection | PipeComponent, Point[]> {
     this.layout = this.buildLayout(plantState);
     return this.layout.display;
+  }
+
+  /** The plan anchors of each routed connection in the last layout (see RunEnds). */
+  planRunEnds(): Map<Connection, RunEnds> {
+    return this.layout?.ends ?? new Map();
   }
 
   // ---------------------------------------------------------------------
@@ -1267,6 +1312,7 @@ export class GridView {
     this.renderElevationLabels(ctx, labels);
 
     this.renderBuildProgress(ctx, f);
+    this.renderNoPowerBadges(ctx, f);
 
     this.renderSignalLines(ctx, f);
 
@@ -2264,6 +2310,16 @@ export class GridView {
    * flat alpha on the ordinary drawing, so a part looks like what it will
    * be, only fainter.
    */
+  /** No-power badges over every part that needs power and has none (electrical model). */
+  private renderNoPowerBadges(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    for (const id of unpoweredParts(f.plantState, f.simState, f.constructionMode)) {
+      const c = f.plantState.components.get(id);
+      const b = c ? this.componentScreenBounds(c) : null;
+      if (!b) continue;
+      drawNoPowerBadge(ctx, b.topCenter.x, b.topCenter.y - NO_POWER_BADGE_RADIUS - 2, NO_POWER_BADGE_RADIUS);
+    }
+  }
+
   private renderBuildProgress(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     for (const c of f.plantState.components.values()) {
       const g = buildGhost(c);
