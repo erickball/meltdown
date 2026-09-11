@@ -3485,7 +3485,14 @@ function init() {
       massKg,
       targets: [...parts.components, ...parts.connections] as Buildable[],
       finish: (apply) => {
-        liveEdit(`Building ${label}`, apply);
+        liveEdit(`Building ${label}`, () => {
+          apply();
+          // A run of pipe laid onto another becomes part of it once it is
+          // built (not while it is a ghost - see fuseLaidPipe)
+          for (const c of parts.components) {
+            if (c.type === 'pipe') constructionManager.fuseLaidPipe(c.id);
+          }
+        });
         showNotification(`${label} is built and in service.`, 'info', 4000);
       },
       abandon: (apply) => {
@@ -4141,8 +4148,16 @@ function init() {
       updateConstructionCostPanel();
       return;
     }
+    // Built now (untimed), so it can become part of the pipe it was laid onto
+    const fusedId = constructionManager.fuseLaidPipe(result.id);
     commitLiveEdit(liveSnap, `Laying ${name}`);
     updateConstructionCostPanel();
+    const fused = fusedId ? plantState.components.get(fusedId) as PipeComponent | undefined : undefined;
+    if (fused) {
+      showNotification(`Extended ${fused.label || fused.id} by ${metres} m; it is now ` +
+        `${formatMetres(fused.length)} m of pipe.`, 'info');
+      return;
+    }
     showNotification(result.joined > 0
       ? `Laid ${metres} m of pipe; ${result.joined} end${result.joined === 1 ? '' : 's'} connected on contact.`
       : `Laid ${metres} m of pipe. Its ends are free - run it up to a nozzle or another pipe end to connect it.`,

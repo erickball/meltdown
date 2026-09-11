@@ -30,7 +30,7 @@ import {
 } from '../src/game/stock';
 import type { PlantState, PlantComponent, Connection, PipeComponent } from '../src/types';
 import {
-  groundRunRoute, pipePieceRoute, routeLength,
+  groundRunRoute, pipePieceRoute, routeLength, runFromEndRoute, pipeFreeEnds,
 } from '../src/render/grid-geometry';
 
 let failures = 0;
@@ -523,6 +523,106 @@ console.log('\n--- Ground pipe costs its run once; joining costs nothing ---');
   // Deleting the run itself puts the yard back exactly where it started
   gcm.deleteComponent(laid!.id);
   check('the yard is whole again after both runs come back',
+    near(pipeMetersRemaining(yard)!, startMetres), String(pipeMetersRemaining(yard)));
+}
+
+console.log('\n--- Pipe laid onto a pipe\'s loose end becomes part of it ---');
+{
+  const yard = emptyPlant();
+  const gcm = new ConstructionManager(yard);
+  gcm.createComponent({
+    type: 'warehouse', name: 'Yard', position: { x: 0, y: 30 },
+    properties: { name: 'Yard', width: 6, depth: 4, stockPipeMeters: 300, stockLines: [{ type: 'pump', count: 2 }] },
+  });
+  const pumpId = gcm.createComponent({
+    type: 'pump', name: 'FP', position: { x: 2.5, y: 10.5 },
+    properties: { name: 'FP', ratedFlow: 100, ratedHead: 50, elevation: 0 },
+  })!;
+  const startMetres = pipeMetersRemaining(yard)!;
+  const line = {
+    diameter: 0.3, pressureRating: 16, elevation: 0,
+    initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+  };
+
+  // A 3 m run from x = 8 to 11
+  const a = gcm.layGroundPipe({ name: 'A', ...line },
+    groundRunRoute([{ x: 8.5, y: 10.5 }, { x: 9.5, y: 10.5 }, { x: 10.5, y: 10.5 }], 'EW'))!;
+  const pipeA = () => yard.components.get(a.id) as PipeComponent;
+
+  // Swept on from its loose end: the route starts AT the end (x = 11) and
+  // its new loose end lands on the last cell's far boundary
+  const onward = runFromEndRoute([{ x: 11, y: 10.5 }, { x: 11.5, y: 10.5 }, { x: 12.5, y: 10.5 }]);
+  check('a run swept out of a pipe end starts at that end and ends on a tile boundary',
+    onward.length === 2 && near(onward[0].x, 11) && near(onward[1].x, 13), JSON.stringify(onward));
+  check('a sweep that never left the end is no run', runFromEndRoute([{ x: 11, y: 10.5 }]).length === 0);
+
+  const b = gcm.layGroundPipe({ name: 'B', ...line }, onward)!;
+  check('the continuation joins the end it starts from', b.joined === 1, String(b.joined));
+  check('fusing hands back the older pipe', gcm.fuseLaidPipe(b.id) === a.id);
+  check('the continuation is gone as a component of its own', !yard.components.has(b.id));
+  check('and so is the joint between them', yard.connections.length === 0,
+    String(yard.connections.length));
+  check('the older pipe grew by the run: 5 m, drawn from 8 to 13',
+    near(pipeA().length, 5) && near(pipeA().route![0].x, 8) &&
+    near(pipeA().route![pipeA().route!.length - 1].x, 13) && near(pipeA().endPosition!.x, 13),
+    `${pipeA().length} m, ${JSON.stringify(pipeA().route)}`);
+  check('its far port sits at its new length', pipeA().ports.some(p => near(p.position.x, 5)));
+  check('its new loose end is the continuation\'s end, free to meet the next piece',
+    pipeFreeEnds(pipeA()).some(e => near(e.point.x, 13)));
+  check('fusing charged nothing: the yard paid 3 m + 2 m, once',
+    near(pipeMetersRemaining(yard)!, startMetres - 5), String(pipeMetersRemaining(yard)));
+
+  // A run drawn TOWARD the pipe's start fuses onto that end instead
+  const c = gcm.layGroundPipe({ name: 'C', ...line },
+    groundRunRoute([{ x: 6.5, y: 10.5 }, { x: 7.5, y: 10.5 }], 'EW'))!;
+  check('a run ending on the pipe\'s start fuses there', gcm.fuseLaidPipe(c.id) === a.id);
+  check('the pipe now starts where the run started: 7 m from 6 to 13',
+    near(pipeA().length, 7) && near(pipeA().position.x, 6) && near(pipeA().route![0].x, 6) &&
+    near(pipeA().endPosition!.x, 13), `${pipeA().length} m from ${pipeA().position.x}`);
+
+  // A run from the pump's discharge nozzle (east edge of its tile, x = 3)
+  // to the pipe's start: fused, and the pump is joined to the older pipe's
+  // start, both sides of the join agreeing
+  const d = gcm.layGroundPipe({ name: 'D', ...line },
+    groundRunRoute([{ x: 3.5, y: 10.5 }, { x: 4.5, y: 10.5 }, { x: 5.5, y: 10.5 }], 'EW'))!;
+  check('the bridging run joins the pump nozzle and the pipe end', d.joined === 2, String(d.joined));
+  check('it fuses onto the pipe', gcm.fuseLaidPipe(d.id) === a.id);
+  check('which now runs 10 m from the pump (x = 3) to 13',
+    near(pipeA().length, 10) && near(pipeA().position.x, 3) && near(pipeA().endPosition!.x, 13),
+    `${pipeA().length} m from ${pipeA().position.x}`);
+  const pumpConn = yard.connections.find(cn => cn.fromComponentId === pumpId || cn.toComponentId === pumpId);
+  const aEnd = pipeA().ports.find(p => p.position.x < pipeA().length / 2)!;
+  check('the pump is now joined to the older pipe\'s start',
+    !!pumpConn && yard.connections.length === 1 &&
+    ((pumpConn.fromComponentId === a.id && pumpConn.fromPortId === aEnd.id) ||
+     (pumpConn.toComponentId === a.id && pumpConn.toPortId === aEnd.id)),
+    JSON.stringify(pumpConn));
+  const pumpPortId = pumpConn!.fromComponentId === pumpId ? pumpConn!.fromPortId : pumpConn!.toPortId;
+  const pumpPort = yard.components.get(pumpId)!.ports.find(p => p.id === pumpPortId)!;
+  check('both ports name each other', aEnd.connectedTo === pumpPortId && pumpPort.connectedTo === aEnd.id,
+    `${aEnd.connectedTo} / ${pumpPort.connectedTo}`);
+  check('no connection still names a fused-away run',
+    !yard.connections.some(cn => [b.id, c.id, d.id].includes(cn.fromComponentId) ||
+      [b.id, c.id, d.id].includes(cn.toComponentId)));
+
+  // A different line meets it through a joint (a reducer), not a fusion
+  const thin = gcm.layGroundPipe({ name: 'Thin', ...line, diameter: 0.2 },
+    pipePieceRoute({ x: 13.5, y: 10.5 }, 'EW'))!;
+  check('a smaller bore joins the end it touches', thin.joined === 1, String(thin.joined));
+  check('but is not fused into it', gcm.fuseLaidPipe(thin.id) === null && yard.components.has(thin.id));
+  gcm.deleteComponent(thin.id);
+
+  // Nothing fuses while it is still a ghost (timed builds fuse on completion)
+  const ghost = gcm.layGroundPipe({ name: 'Ghost', ...line }, pipePieceRoute({ x: 13.5, y: 10.5 }, 'EW'))!;
+  (yard.components.get(ghost.id) as { underConstruction?: boolean }).underConstruction = true;
+  check('a ghost run is not fused', gcm.fuseLaidPipe(ghost.id) === null);
+  (yard.components.get(ghost.id) as { underConstruction?: boolean }).underConstruction = undefined;
+  check('the same run, built, is', gcm.fuseLaidPipe(ghost.id) === a.id && near(pipeA().length, 11),
+    String(pipeA().length));
+
+  // Deleting the fused pipe hands back every metre of it
+  gcm.deleteComponent(a.id);
+  check('deleting the fused pipe puts the yard back where it started',
     near(pipeMetersRemaining(yard)!, startMetres), String(pipeMetersRemaining(yard)));
 }
 

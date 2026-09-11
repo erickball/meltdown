@@ -28,7 +28,7 @@ import {
   portAnchors, portAnchor, portAnchorFacing, pipeRoute, routeLength, completeRoute, rubberBand,
   extendRoute, pointAlongRoute, distanceToPolyline, sideVector, samePoint,
   routeObstacles, obstaclesKey, laneOffsetRoutes, RouteRun,
-  PipeOrientation, pipePieceRoute, groundRunRoute, findFreeEndJoins, snapPlacementCenter,
+  PipeOrientation, pipePieceRoute, groundRunRoute, runFromEndRoute, findFreeEndJoins, snapPlacementCenter,
   isGroundLayerComponent,
   partnerReference, sideFacing, wallAnchor, autoRoute, reanchorRoute, portSide, simplifyRoute,
   ENVIRONMENT_ID, Obstacle, crossVesselJoint, CrossVesselJoint,
@@ -1184,6 +1184,23 @@ export class GridView {
     const route = completeRoute([r.from.anchor.point, ...r.waypoints], target.anchor);
     this.routing = null;
     return { route, length: routeLength(route) };
+  }
+
+  /**
+   * A run swept out of a pipe's loose end and released on open ground: the
+   * route from that end through the swept cells, its new loose end on the
+   * last cell's far boundary (runFromEndRoute). Clears the routing state.
+   * Empty when nothing was swept.
+   */
+  finishRoutingOnGround(): Point[] {
+    const r = this.routing!;
+    if (!r.from || r.from.component.type !== 'pipe') {
+      throw new Error('[Grid] finishRoutingOnGround carries on a PIPE from its loose end; ' +
+        `this run started at ${r.from ? `'${r.from.component.id}' (${r.from.component.type})` : 'open ground'}.`);
+    }
+    const route = runFromEndRoute(r.waypoints);
+    this.routing = null;
+    return route;
   }
 
   cancelRouting(): void {

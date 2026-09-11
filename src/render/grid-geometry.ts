@@ -1030,6 +1030,20 @@ export function groundRunRoute(cells: Point[], orientation: PipeOrientation): Po
 }
 
 /**
+ * The route of a run swept out of a pipe's loose end and released on open
+ * ground. `waypoints` starts AT the end (a tile boundary, where the old
+ * pipe stops) and continues through cell centres; the new loose end is
+ * carried out to the far boundary of the last cell, as groundRunRoute does,
+ * so the next piece can meet it. Empty when the sweep never left the end.
+ */
+export function runFromEndRoute(waypoints: Point[]): Point[] {
+  const pts = simplifyRoute(waypoints);
+  if (pts.length < 2) return [];
+  const tail = carryOut(pts[pts.length - 1], pts[pts.length - 2]);
+  return simplifyRoute([...pts, tail]);
+}
+
+/**
  * Where a component of this PALETTE type lands when it is placed at a plan
  * point. A ground pipe piece is placed BY CELL - its route fills the tile the
  * cursor is over - while everything else centres its footprint on whole

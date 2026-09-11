@@ -37,8 +37,9 @@ import {
 import { getComponentVisualHeight } from '../render/components';
 import { getComponentSize, getDefaultComponentSize } from '../render/component-size';
 import {
-  portSide, Side, connectionRoute, findFreeEndJoins, routeLength,
+  portSide, Side, connectionRoute, findFreeEndJoins, routeLength, pipeRoute, simplifyRoute,
 } from '../render/grid-geometry';
+import { buildGhost } from '../game/build-queue';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -3342,7 +3343,12 @@ export class ConstructionManager {
     // nobody asked for; a section on open ground keeps what it was given.
     // (Same IC conventions as the factory: `fluid.pressure` is the steam
     // partial pressure and `initialNcg` rides on top - see resume.ts.)
-    const neighbour = joins.length > 0 ? joins[0].join.component : undefined;
+    // A pipe of the same line it will be fused into (fuseLaidPipe) is the
+    // neighbour that counts: the run becomes part of that very volume.
+    // Joins come start-end first, the order fusionPartner looks in.
+    const neighbour = joins.find(j => j.join.component.type === 'pipe' &&
+        this.sameLine(pipe, j.join.component as PipeComponent))?.join.component
+      ?? (joins.length > 0 ? joins[0].join.component : undefined);
     if (neighbour?.fluid) {
       pipe.fluid = { ...neighbour.fluid, flowRate: 0 };
       const ncg = (neighbour as Record<string, any>).initialNcg;
@@ -3364,6 +3370,130 @@ export class ConstructionManager {
       console.log(`[Construction] Ground pipe '${id}' joined ${joined} free end(s) on contact`);
     }
     return { id, joined };
+  }
+
+  /** Two pipes that are the same line: one could carry on as the other. */
+  private sameLine(a: PipeComponent, b: PipeComponent): boolean {
+    const x = a as Record<string, any>, y = b as Record<string, any>;
+    return a.diameter === b.diameter && a.thickness === b.thickness &&
+      a.pressureRating === b.pressureRating && a.containedBy === b.containedBy &&
+      (x.roughness ?? 0.0001) === (y.roughness ?? 0.0001) && !!x.nqa1 === !!y.nqa1;
+  }
+
+  /**
+   * The pipe a laid run carries on from: another pipe of the same line
+   * butted against it through a zero-length joint (two ends touching, no
+   * run between them). The run's START end is looked at first - that is the
+   * end the user drew from - then its far end.
+   *
+   * Not a pipe the run also meets at its other end (the pair would close on
+   * itself into a ring), and nothing still a ghost on either side.
+   */
+  private fusionPartner(laid: PipeComponent): {
+    joint: Connection; own: Port; other: PipeComponent; otherPort: Port;
+  } | null {
+    if (buildGhost(laid)) return null;
+    const ends = [...laid.ports].sort((p, q) => p.position.x - q.position.x);
+    const partnerOf = (port: Port): { conn: Connection; comp: PlantComponent; port: Port } | null => {
+      for (const conn of this.plantState.connections) {
+        const mine = conn.fromComponentId === laid.id && conn.fromPortId === port.id ? 'from'
+          : conn.toComponentId === laid.id && conn.toPortId === port.id ? 'to' : null;
+        if (!mine) continue;
+        const compId = mine === 'from' ? conn.toComponentId : conn.fromComponentId;
+        const portId = mine === 'from' ? conn.toPortId : conn.fromPortId;
+        const comp = this.plantState.components.get(compId);
+        const theirs = comp?.ports.find(p => p.id === portId);
+        if (comp && theirs) return { conn, comp, port: theirs };
+      }
+      return null;
+    };
+    const partners = ends.map(partnerOf);
+    for (let i = 0; i < ends.length; i++) {
+      const p = partners[i];
+      if (!p || p.comp.type !== 'pipe' || p.comp.id === laid.id) continue;
+      if ((p.conn.length ?? 0) !== 0 || buildGhost(p.conn) || buildGhost(p.comp)) continue;
+      const other = p.comp as PipeComponent;
+      if (!this.sameLine(laid, other)) continue;
+      if (partners.some((q, j) => j !== i && q?.comp.id === other.id)) continue;
+      return { joint: p.conn, own: ends[i], other, otherPort: p.port };
+    }
+    return null;
+  }
+
+  /**
+   * Make a newly built run of pipe part of the pipe it was laid onto: one
+   * pipe, one volume, instead of two pipes and a joint. The older pipe
+   * survives (its id, its label, its live contents) and grows by the run's
+   * length along the run's route; whatever the run's far end was joined to
+   * is joined to the older pipe's end instead.
+   *
+   * Call once the run is really built - with builds timed, when the job
+   * finishes, never while it is a ghost. The run's metres were charged when
+   * it was laid and are now in the older pipe, so removing the run refunds
+   * nothing (deleting the fused pipe later hands back the whole length).
+   * Its fluid is not merged: the run was started at its partner's
+   * conditions (layGroundPipe), and the fused pipe carries on from the
+   * older pipe's state over its new length.
+   *
+   * Returns the surviving pipe's id, or null when the run fuses with nothing.
+   */
+  fuseLaidPipe(pipeId: string): string | null {
+    const laid = this.plantState.components.get(pipeId);
+    if (!laid || laid.type !== 'pipe') return null;
+    const run = laid as PipeComponent;
+    const match = this.fusionPartner(run);
+    if (!match) return null;
+    const { joint, own, other, otherPort } = match;
+
+    const runAtEnd = own.position.x > run.length / 2;
+    const otherAtEnd = otherPort.position.x > other.length / 2;
+    const runRoute = pipeRoute(run);
+    // The run's route walked from the joint out to its far end
+    const outward = runAtEnd ? [...runRoute].reverse() : runRoute;
+    const farElevation = runAtEnd ? (run.elevation ?? 0) : (run.endElevation ?? run.elevation ?? 0);
+    const farPort = run.ports.find(p => p !== own)!;
+    const otherRoute = pipeRoute(other);
+    const otherEndPort = other.ports.find(p => p.position.x > other.length / 2);
+
+    this.deleteConnectionObject(joint);   // zero length: refunds nothing
+
+    const route = otherAtEnd
+      ? simplifyRoute([...otherRoute, ...outward.slice(1)])
+      : simplifyRoute([...[...outward].reverse(), ...otherRoute.slice(1)]);
+    other.route = route;
+    other.length += run.length;
+    if (otherAtEnd) {
+      other.endPosition = { x: route[route.length - 1].x, y: route[route.length - 1].y };
+      other.endElevation = farElevation;
+    } else {
+      other.position = { x: route[0].x, y: route[0].y };
+      other.elevation = farElevation;
+    }
+    if (otherEndPort) otherEndPort.position = { x: other.length, y: 0 };
+
+    // Whatever the run's far end was joined to now meets the older pipe
+    for (const conn of this.plantState.connections) {
+      let partnerId: string | null = null, partnerPortId: string | null = null;
+      if (conn.fromComponentId === run.id && conn.fromPortId === farPort.id) {
+        conn.fromComponentId = other.id;
+        conn.fromPortId = otherPort.id;
+        partnerId = conn.toComponentId; partnerPortId = conn.toPortId;
+      } else if (conn.toComponentId === run.id && conn.toPortId === farPort.id) {
+        conn.toComponentId = other.id;
+        conn.toPortId = otherPort.id;
+        partnerId = conn.fromComponentId; partnerPortId = conn.fromPortId;
+      } else {
+        continue;
+      }
+      otherPort.connectedTo = partnerPortId!;
+      const partnerPort = this.plantState.components.get(partnerId!)?.ports.find(p => p.id === partnerPortId);
+      if (partnerPort) partnerPort.connectedTo = otherPort.id;
+    }
+
+    this.plantState.components.delete(run.id);
+    console.log(`[Construction] Pipe '${run.id}' (${run.length.toFixed(1)} m) fused into '${other.id}', ` +
+      `now ${other.length.toFixed(1)} m`);
+    return other.id;
   }
 
   /** Every component id that goes away when this one is deleted (sub-components included). */

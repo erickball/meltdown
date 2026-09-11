@@ -478,7 +478,15 @@ export class PlantCanvas {
         if (route.length >= 2) this.onGroundPipe?.(route);
       } else {
         const hit = moved ? this.grid.portAt(up, this.plantState, from.component.id) : null;
-        if (hit) this.completeRoute(hit);
+        if (hit) {
+          this.completeRoute(hit);
+        } else if (moved && this.carriesOnPipe(from)) {
+          // Swept out of a pipe's loose end: the release lays the pipe on,
+          // exactly as a ground run's release does
+          const route = this.grid.finishRoutingOnGround();
+          this.highlightedPort = null;
+          if (route.length >= 2) this.onGroundPipe?.(route);
+        }
       }
     }
     if (this.activePointers.size === 0) {
@@ -4180,11 +4188,29 @@ export class PlantCanvas {
     return true;
   }
 
+  /**
+   * With the pipe tool, a run drawn from a pipe's loose end is more of that
+   * pipe (yard pipe, laid like a ground run, fused on - see
+   * ConstructionManager.fuseLaidPipe), not a port-to-port connection. Not
+   * for ports drawn inside a section view, whose anchor is the container's
+   * wall rather than the port itself.
+   */
+  private carriesOnPipe(hit: PortHit): boolean {
+    return this.pipeTool && hit.component.type === 'pipe' && !hit.port.connectedTo && !hit.frameRoot;
+  }
+
   private completeRoute(target: PortHit): void {
     const from = this.grid.routing!.from;
     if (!from) return;   // a ground run finishes in handlePointerUp, not here
     const { route, length } = this.grid.finishRouting(target);
     this.highlightedPort = null;
+    // Either end on a pipe's loose end: lay it as pipe, and let its ends
+    // join (and fuse with) what they touch - through the dialog it would be
+    // a separate connection or a second pipe beside the first
+    if ((this.carriesOnPipe(from) || this.carriesOnPipe(target)) && !from.frameRoot && !target.frameRoot) {
+      this.onGroundPipe?.(route);
+      return;
+    }
     this.onRouteComplete?.(from, target, route, length);
   }
 

@@ -22,6 +22,17 @@ const ABSOLUTE_TIP =
   "elevation above that ground, plus the port's height on the component. " +
   "Relative elevations are measured from the component's own base.";
 
+// A connection at least this big and this long is built as a real pipe (its
+// own node, holding its own inventory); anything smaller or shorter is a
+// direct connection that carries flow but no volume. 0.03 m² is a ~20 cm
+// bore: small instrument and drain lines stay direct, service lines don't.
+export const AUTO_PIPE_MIN_AREA = 0.03;   // m²
+export const AUTO_PIPE_MIN_LENGTH = 1;    // m
+
+function createsPipe(flowArea: number, length: number): boolean {
+  return flowArea > AUTO_PIPE_MIN_AREA && length > AUTO_PIPE_MIN_LENGTH;
+}
+
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
   toComponent: PlantComponent;
@@ -597,7 +608,7 @@ export class ConnectionDialog {
     pipeNote.innerHTML = `
       <div style="font-size: 12px; color: #7af; margin-bottom: 5px;">Automatic Pipe Creation</div>
       <div id="pipe-status" style="font-size: 11px; color: #99aacc;">
-        Pipes are automatically created for connections with flow area > 0.1 m² and length > 1 m
+        Pipes are automatically created for connections with flow area > ${AUTO_PIPE_MIN_AREA} m² and length > ${AUTO_PIPE_MIN_LENGTH} m
       </div>
     `;
     this.bodyElement.appendChild(pipeNote);
@@ -608,7 +619,7 @@ export class ConnectionDialog {
     const updatePipeStatus = () => {
       const area = parseFloat(flowAreaInput.value);
       const length = parseFloat(lengthInput.value);
-      const willCreatePipe = area > 0.1 && length > 1;
+      const willCreatePipe = createsPipe(area, length);
 
       if (willCreatePipe) {
         const diameter = Math.sqrt(area * 4 / Math.PI);
@@ -748,7 +759,7 @@ export class ConnectionDialog {
         toElevation,
         flowArea,
         length,
-        createPipe: flowArea > 0.1 && length > 1,
+        createPipe: createsPipe(flowArea, length),
         pressureRating
       };
 
