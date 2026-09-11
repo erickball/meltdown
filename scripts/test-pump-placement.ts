@@ -24,7 +24,8 @@ import { nodeLiquidLevelFraction } from '../src/simulation';
 import { waveCasualties, washAwayElevation } from '../src/simulation/wave-casualties';
 import { serializePlantDesign, deserializePlantDesign } from '../src/simulation/serialization';
 import { getStock, spend, chargeForComponent } from '../src/game/stock';
-import type { PlantComponent, PlantState, Connection } from '../src/types';
+import type { PlantComponent, PlantState, Connection, PumpComponent } from '../src/types';
+import { ConstructionManager } from '../src/construction/construction-manager';
 
 // ---------------------------------------------------------------------------
 // A little coast: 6 x 3 cells of 10 m, ground rising from a -3 m sea floor
@@ -233,6 +234,67 @@ test('A recorded plant design does not follow the yard as it empties', () => {
   spend(restored, chargeForComponent('pump', undefined));
   const again = deserializePlantDesign(recorded);
   assert(getStock(again)!.components.find(l => l.type === 'pump')!.count === 2, 'a restore is a fresh copy every time');
+});
+
+// ---------------------------------------------------------------------------
+// 5. A pump put INSIDE something starts with, and opens into, what is there
+// ---------------------------------------------------------------------------
+
+test('A pump placed in the sea is primed with sea water and its open nozzles are in the sea', () => {
+  // The sea as a water-body tank on the -3 m floor at x=50, half full of its
+  // 6 m: surface at 0. One pump on the -1.5 m step at x=45 (under water),
+  // one on the +2 m shelf at x=25 (above it), both built dry and contained
+  // by the sea, through the same ConstructionManager path the UI uses.
+  const plant = { components: new Map(), connections: [], terrain } as unknown as PlantState;
+  const cm = new ConstructionManager(plant);   // (starts by clearing the plant)
+  plant.components.set('sea', { ...tank('sea', 50, 0.5)[1], waterBody: 'sea' } as PlantComponent);
+  const place = (x: number) => cm.createComponent({
+    type: 'pump', name: `P${x}`, position: { x, y: 10 }, containedBy: 'sea',
+    properties: { name: `P${x}`, ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry' },
+  })!;
+  const wetId = place(45);
+  const highId = place(25);
+  const wet = plant.components.get(wetId) as PumpComponent;
+  const high = plant.components.get(highId) as PumpComponent;
+
+  const overWater = saturationPressure(288.15) + 1e5;   // steam + the 1 bar of air on the sea
+  console.log(`    pump in the water: ${wet.initialFill}, ${wet.fluid?.phase} at ` +
+    `${((wet.fluid?.pressure ?? 0) / 1e5).toFixed(3)} bar; pump above it: ${high.initialFill}`);
+  assert(wet.initialFill === 'primed' && wet.fluid?.phase === 'liquid',
+    `a pump standing under the surface is primed with the liquid, got ${wet.initialFill} / ${wet.fluid?.phase}`);
+  assert(wet.fluid!.pressure > overWater && wet.fluid!.pressure < overWater + 0.2e5,
+    `it starts at the pressure of its depth (a metre or so of water over 1 atm), got ${wet.fluid!.pressure} Pa`);
+  assert(high.initialFill === 'dry', 'a pump above the surface keeps its dry casing');
+
+  const sim = buildSimFromPlantJson({ components: Array.from(plant.components.entries()), connections: [], terrain });
+  const p = sim.state.components.pumps.get(wetId)!;
+  assert(p.openInlet === true && p.openOutlet === true && p.openInto === 'sea',
+    'with no lines, both its nozzles are open inside the sea');
+  const openLines = sim.state.flowConnections.filter(c => c.fromNodeId === wetId || c.toNodeId === wetId);
+  assert(openLines.length === 2 && openLines.every(c => c.fromNodeId === 'sea' || c.toNodeId === 'sea'),
+    `its open nozzles run to the sea node, not the air: ${openLines.map(c => `${c.fromNodeId}->${c.toNodeId}`).join(', ')}`);
+  assert(sim.state.flowNodes.get(wetId)!.fluid.phase === 'liquid', 'its casing is built full of liquid');
+
+  // Started from its panel it draws the sea and pumps it straight back
+  sim.state.components.pumps.get(wetId)!.running = true;
+  run(sim, 30, 0.02);
+  const casing = sim.state.flowNodes.get(wetId)!;
+  const q = flowRate(sim.state, 'sea', wetId);
+  console.log(`    started in the sea: ${q.toFixed(1)} kg/s drawn, casing ${casing.fluid.phase}`);
+  assert(casing.fluid.phase === 'liquid', `a primed pump under water stays full of it, got ${casing.fluid.phase}`);
+  assert(q > 10, `it should draw from the sea it stands in, got ${q.toFixed(1)} kg/s`);
+
+  // The one on the shelf has its nozzles in the air over the sea: it must
+  // not flood. (Its PRESSURE is not asserted: a small dry casing breathing a
+  // saturated gas space hunts the dew point, ~0.85-1.3 bar on a ~3 s cycle.
+  // That is a known defect of the gas exchange, not of this feature - two
+  // ordinary lines from the same gas space do exactly the same - see
+  // scripts/probe-dry-pump-dewpoint.ts. Assert it here once that is fixed.)
+  const dry = sim.state.flowNodes.get(highId)!;
+  console.log(`    above the sea after 30 s: casing ${dry.fluid.phase}, ` +
+    `${(dry.fluid.pressure / 1e5).toFixed(3)} bar, ${(100 * nodeLiquidLevelFraction(dry)).toFixed(1)}% liquid`);
+  assert(nodeLiquidLevelFraction(dry) < 0.05,
+    `a pump above the surface must not flood, casing ${(100 * nodeLiquidLevelFraction(dry)).toFixed(1)}% liquid`);
 });
 
 report('Pump placement');

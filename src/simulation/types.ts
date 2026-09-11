@@ -1104,13 +1104,16 @@ export interface PumpState {
    */
   powered?: boolean;
   /**
-   * A nozzle with no line on it faces the air: the factory gives it a
-   * connection to the environment at the nozzle. Such a pump never starts by
+   * A nozzle with no line on it is open to what the pump stands in: the
+   * environment, or the component it is inside (`openInto`). The factory
+   * gives it a connection there at the nozzle. Such a pump never starts by
    * itself (see openPumpPortsToAir); it can be started from its panel and
-   * will then pump onto the ground, or suck air.
+   * will then pump onto the ground or into its container, or draw from them.
    */
   openInlet?: boolean;
   openOutlet?: boolean;
+  /** Label of the container the open nozzles face; absent = the outside air. */
+  openInto?: string;
   pumpType: 'centrifugal' | 'positive';  // Type affects cavitation behavior
   // Steam-turbine-driven pump (e.g. turbine-driven AFW): the pump has no
   // motor - its speed follows the steam flow through its drive turbine node.

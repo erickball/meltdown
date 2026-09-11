@@ -178,6 +178,8 @@ export class PlantCanvas {
   public onComponentMove?: (componentId: string, newPosition: Point) => void;
   /** Grid view: a pipe was laid from one port to another (plan length in metres). */
   public onRouteComplete?: (from: PortHit, to: PortHit, route: Point[], planLength: number) => void;
+  /** Right-click with no pipe being laid: put down the tool in hand. True when there was one. */
+  public onCancelTool?: () => boolean;
   /**
    * A run laid on open ground with the pipe tool: a plan polyline that
    * becomes a standalone pipe component (main.ts). A bare click hands over a
@@ -222,9 +224,13 @@ export class PlantCanvas {
     this.canvas.addEventListener('pointerleave', this.handlePointerUp.bind(this));
     this.canvas.addEventListener('wheel', this.handleWheel.bind(this));
     this.canvas.addEventListener('contextmenu', (e) => {
-      // Right-click abandons a pipe being laid on the grid
+      // Right-click abandons a pipe being laid on the grid; with none being
+      // laid it puts down whatever tool is in hand (main.ts decides what that
+      // is). The browser's own menu only when there was nothing to put down.
       if (this.viewMode === 'grid' && this.grid.routing) {
         this.cancelRouting();
+        e.preventDefault();
+      } else if (this.onCancelTool?.()) {
         e.preventDefault();
       }
     });
@@ -483,9 +489,11 @@ export class PlantCanvas {
         const hit = moved ? this.grid.portAt(up, this.plantState, from.component.id) : null;
         if (hit) {
           this.completeRoute(hit);
-        } else if (moved && this.carriesOnPipe(from)) {
-          // Swept out of a pipe's loose end: the release lays the pipe on,
-          // exactly as a ground run's release does
+        } else if (moved && this.laysFromPort(from)) {
+          // Swept out of a free connection point and let go on open ground:
+          // the release lays the pipe there, joined at the port it came from
+          // and with its far end left open (more of the pipe, if it came out
+          // of a pipe's loose end - fuseLaidPipe)
           const route = this.grid.finishRoutingOnGround();
           this.highlightedPort = null;
           if (route.length >= 2) this.onGroundPipe?.(route);
@@ -4231,6 +4239,16 @@ export class PlantCanvas {
    */
   private carriesOnPipe(hit: PortHit): boolean {
     return this.pipeTool && hit.component.type === 'pipe' && !hit.port.connectedTo && !hit.frameRoot;
+  }
+
+  /**
+   * With the pipe tool, a run swept out of any free connection point can
+   * end on open ground: it is laid as yard pipe from that point with its far
+   * end open. Not from a port drawn inside a section view - its run starts
+   * at the container's wall, so the laid pipe would not touch the port.
+   */
+  private laysFromPort(hit: PortHit): boolean {
+    return this.pipeTool && !hit.port.connectedTo && !hit.frameRoot;
   }
 
   private completeRoute(target: PortHit): void {

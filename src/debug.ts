@@ -1221,10 +1221,15 @@ export function updateComponentDetail(
           `Speed <input type="range" id="pump-speed-input" min="10" max="100" step="5" value="${Math.max(10, Math.min(100, pct))}" style="flex: 1;">` +
           `<span id="pump-speed-readout" style="min-width: 36px; text-align: right;">${pct}%</span></label></div>`;
         const openNotes: string[] = [];
-        if (pumpState.openInlet) openNotes.push('suction open to the air (no line): it draws air');
-        if (pumpState.openOutlet) openNotes.push('discharge open to the air (no line): it pours onto the ground under the pump');
+        const into = pumpState.openInto;
+        if (pumpState.openInlet) openNotes.push(into
+          ? `suction open inside ${into} (no line): it draws whatever is there`
+          : 'suction open to the air (no line): it draws air');
+        if (pumpState.openOutlet) openNotes.push(into
+          ? `discharge open inside ${into} (no line): it pumps back into it`
+          : 'discharge open to the air (no line): it pours onto the ground under the pump');
         if (openNotes.length > 0) {
-          html += `<div class="detail-row" style="color: #fc8; font-size: 10px;" title="A pump with a nozzle in the air never starts by itself. Connect a line to it, or start it here anyway.">&#9888; ${openNotes.join('; ')}</div>`;
+          html += `<div class="detail-row" style="color: #fc8; font-size: 10px;" title="A pump with an open nozzle (no line on it) never starts by itself. Connect a line to it, or start it here anyway.">&#9888; ${openNotes.join('; ')}</div>`;
         }
         if (pumpState.flooded) {
           html += `<div class="detail-row" style="color: #f77; font-size: 10px;" title="Water stands above the motor. The pump coasts down and cannot run until the water is gone.">&#9888; DROWNED - water above the motor (${pumpState.motorElevation.toFixed(1)} m)</div>`;

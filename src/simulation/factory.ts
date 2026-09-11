@@ -5165,34 +5165,75 @@ function openPumpPortsToAir(plantState: PlantState, state: SimulationState): voi
     // pinned to it (height/2 - port.y, see hasPinnedPortElevations)
     const nozzleElevation = (port: { position: { y: number } }) => pumpVisualHeight(pump) / 2 - port.position.y;
     const nozzleArea = Math.PI * Math.pow((pump.diameter || 0.3) / 2, 2);
+
+    // What an open nozzle faces: the outside air, or - for a pump standing
+    // INSIDE something (a pit, a tank, the sea) - that container's fluid, at
+    // the nozzle's own height in it. A container end is priced like any
+    // other component end: its local elevation is measured from the
+    // container node's own reference.
+    const container = pump.containedBy ? plantState.components.get(pump.containedBy) : undefined;
+    let containerNodeId: string | null = null;
+    if (pump.containedBy) {
+      if (!container) {
+        throw new Error(`[Factory] Pump ${id} is contained by '${pump.containedBy}', which is not in the plant.`);
+      }
+      containerNodeId = (container as any).simNodeId || container.id;
+      if (!state.flowNodes.has(containerNodeId!)) {
+        throw new Error(`[Factory] Pump ${id} stands inside '${container.id}' (${container.type}) with an open ` +
+          `nozzle, but '${container.id}' has no single fluid node ('${containerNodeId}') for that nozzle to open ` +
+          `into. Connect a line to the pump, or place it in a tank, vessel, pool or building.`);
+      }
+    }
+    const pumpBase = state.flowNodes.get(id)?.elevation ?? absoluteBase(pump);
+    const faceOf = (port: { position: { y: number } }): { componentId: string; portId: string; elevation?: number } => {
+      if (!containerNodeId) return { componentId: ENVIRONMENT_NODE_ID, portId: 'environment' };
+      const containerRef = state.flowNodes.get(containerNodeId)!.elevation ?? absoluteBase(container!);
+      return {
+        componentId: container!.id, portId: `${id}-open-nozzle`,
+        elevation: pumpBase + nozzleElevation(port) - containerRef,
+      };
+    };
+    const facing = containerNodeId ? `inside ${container!.label || container!.id}` : 'the air';
+
     const open = (connection: Connection, which: 'openInlet' | 'openOutlet') => {
       const flowConnection = createFlowConnectionFromPlantConnection(connection, plantState, state);
       if (!flowConnection) {
-        throw new Error(`[Factory] Could not open pump ${id}'s ${which === 'openInlet' ? 'suction' : 'discharge'} to the air`);
+        throw new Error(`[Factory] Could not open pump ${id}'s ${which === 'openInlet' ? 'suction' : 'discharge'} to ${facing}`);
+      }
+      const faced = which === 'openInlet' ? flowConnection.fromNodeId : flowConnection.toNodeId;
+      if (containerNodeId && faced !== containerNodeId) {
+        throw new Error(`[Factory] Pump ${id}'s open ${which === 'openInlet' ? 'suction' : 'discharge'} was meant ` +
+          `to face '${containerNodeId}', the node of the '${container!.id}' it stands in, but the line was built ` +
+          `to '${faced}'.`);
       }
       state.flowConnections.push(flowConnection);
       pumpState[which] = true;
       if (which === 'openOutlet' && !pumpState.connectedFlowPath) pumpState.connectedFlowPath = flowConnection.id;
     };
+    if (container) pumpState.openInto = container.label || container.id;
     if (!hasOutlet) {
+      const face = faceOf(outletPort);
       open({
         fromComponentId: id, fromPortId: outletPort.id,
-        toComponentId: ENVIRONMENT_NODE_ID, toPortId: 'environment',
+        toComponentId: face.componentId, toPortId: face.portId,
         fromElevation: nozzleElevation(outletPort),
+        ...(face.elevation !== undefined ? { toElevation: face.elevation } : {}),
         flowArea: nozzleArea, length: 1, resistanceCoeff: 1,   // an open nozzle: one exit loss
       } as Connection, 'openOutlet');
     }
     if (!hasInlet) {
+      const face = faceOf(inletPort);
       open({
-        fromComponentId: ENVIRONMENT_NODE_ID, fromPortId: 'environment',
+        fromComponentId: face.componentId, fromPortId: face.portId,
         toComponentId: id, toPortId: inletPort.id,
+        ...(face.elevation !== undefined ? { fromElevation: face.elevation } : {}),
         toElevation: nozzleElevation(inletPort),
         flowArea: nozzleArea, length: 1, resistanceCoeff: 1,   // an open bell: one entry loss
       } as Connection, 'openInlet');
     }
     if (pumpState.running) {
       console.info(`[Factory] Pump ${id} has ${!hasInlet && !hasOutlet ? 'no lines' : !hasInlet ? 'no suction line' : 'no discharge line'}: ` +
-        `built stopped (its open nozzle faces the air). Start it from its panel to run it anyway.`);
+        `built stopped (its open nozzle faces ${facing}). Start it from its panel to run it anyway.`);
       pumpState.running = false;
       pumpState.effectiveSpeed = 0;
     }

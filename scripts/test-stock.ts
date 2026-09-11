@@ -626,6 +626,35 @@ console.log('\n--- Pipe laid onto a pipe\'s loose end becomes part of it ---');
     near(pipeMetersRemaining(yard)!, startMetres), String(pipeMetersRemaining(yard)));
 }
 
+console.log('\n--- A run swept out of a nozzle and let go on open ground ---');
+{
+  const yard = emptyPlant();
+  const gcm = new ConstructionManager(yard);
+  gcm.createComponent({
+    type: 'warehouse', name: 'Yard', position: { x: 0, y: 30 },
+    properties: { name: 'Yard', width: 6, depth: 4, stockPipeMeters: 300, stockLines: [{ type: 'pump', count: 1 }] },
+  });
+  const pumpId = gcm.createComponent({
+    type: 'pump', name: 'NP', position: { x: 12.5, y: 10.5 },
+    properties: { name: 'NP', ratedFlow: 100, ratedHead: 50, elevation: 0 },
+  })!;
+  // The route the canvas builds (finishRoutingOnGround): the nozzle's edge
+  // point (x = 13, the pump tile's east edge), its out-cell, the swept cells
+  const route = runFromEndRoute([{ x: 13, y: 10.5 }, { x: 13.5, y: 10.5 }, { x: 14.5, y: 10.5 }, { x: 15.5, y: 10.5 }]);
+  check('it runs from the nozzle to the far edge of the last cell swept',
+    near(route[0].x, 13) && near(route[route.length - 1].x, 16), JSON.stringify(route));
+  const run = gcm.layGroundPipe({
+    name: 'Open run', diameter: 0.3, pressureRating: 16, elevation: 0,
+    initialPhase: 'liquid', initialPressure: 1, initialTemperature: 25,
+  }, route)!;
+  check('the run is joined to the nozzle it came out of', run.joined === 1 &&
+    yard.connections.some(c => c.fromComponentId === pumpId || c.toComponentId === pumpId), String(run.joined));
+  const laid = yard.components.get(run.id) as PipeComponent;
+  check('and its far end is left open', pipeFreeEnds(laid).length === 1 &&
+    near(pipeFreeEnds(laid)[0].point.x, 16));
+  check('a nozzle is not a pipe: nothing to fuse with', gcm.fuseLaidPipe(run.id) === null);
+}
+
 console.log('\n--- Deleting one run by identity, and keeping pipes on a deletion ---');
 {
   const yard = emptyPlant();

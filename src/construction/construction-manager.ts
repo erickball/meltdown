@@ -40,6 +40,7 @@ import {
   portSide, Side, connectionRoute, findFreeEndJoins, routeLength, pipeRoute, simplifyRoute,
 } from '../render/grid-geometry';
 import { buildGhost } from '../game/build-queue';
+import { terrainHeightAt } from '../simulation/terrain';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -2028,6 +2029,7 @@ export class ConstructionManager {
       if (component) {
         component.containedBy = config.containedBy;
         console.log(`[Construction] Component '${id}' is contained by '${config.containedBy}'`);
+        if (component.type === 'pump') this.primeFromContainer(component as PumpComponent);
       }
     }
 
@@ -3267,6 +3269,51 @@ export class ConstructionManager {
         flowRate: 0
       };
     }
+  }
+
+  /**
+   * A pump put INSIDE something - a pump pit, a tank, the sea - starts with
+   * what it stands in. If its casing is under the container's liquid surface
+   * it is full of that liquid (primed), at the pressure of the depth its
+   * casing top stands at; one standing above the surface keeps the fill its
+   * design gives it (a dry casing holds air). Its open nozzles face that same
+   * container (factory: openPumpPortsToAir), so this is only the state it
+   * starts from - a casing half in the water fills or drains from there.
+   */
+  private primeFromContainer(pump: PumpComponent): void {
+    const container = pump.containedBy ? this.plantState.components.get(pump.containedBy) : undefined;
+    if (!container?.fluid) return;
+    const terrain = this.plantState.terrain;
+    const containerBase = terrainHeightAt(terrain, container.position) + (container.elevation ?? 0);
+    const surface = containerBase +
+      this.getComponentFillLevel(container) * this.getComponentHeight(container);
+    // The casing top is its highest nozzle (the discharge, on a standard
+    // top-discharge pump), at the pinned height/2 - port.y
+    const h = getComponentVisualHeight(pump);
+    const casingTop = terrainHeightAt(terrain, pump.position) + (pump.elevation ?? 0) +
+      Math.max(...pump.ports.map(p => h / 2 - p.position.y));
+    if (!(casingTop < surface)) {
+      console.log(`[Construction] Pump '${pump.id}' stands above the liquid in '${container.id}' ` +
+        `(casing top ${casingTop.toFixed(2)} m, surface ${surface.toFixed(2)} m): keeps its ` +
+        `${pump.initialFill ?? 'primed'} casing`);
+      return;
+    }
+    // Pressure over the liquid is the steam plus any gas above it (partial
+    // pressures in bar, the IC convention - resume.ts); buildings alone store
+    // their TOTAL in fluid.pressure. Below the surface, the column on top.
+    const T = container.fluid.temperature;
+    let overLiquid = container.fluid.pressure;
+    const ncg = (container as Record<string, any>).initialNcg as Record<string, number> | undefined;
+    if (ncg && container.type !== 'building') {
+      for (const bar of Object.values(ncg)) overLiquid += bar * 1e5;
+    }
+    const pressure = overLiquid + saturatedLiquidDensity(T) * 9.81 * (surface - casingTop);
+    pump.fluid = { temperature: T, pressure, phase: 'liquid', quality: 0, flowRate: 0 };
+    delete (pump as Record<string, any>).initialNcg;
+    pump.initialFill = 'primed';
+    console.log(`[Construction] Pump '${pump.id}' stands in the liquid of '${container.id}': primed at ` +
+      `${(T - 273.15).toFixed(1)} C, ${(pressure / 1e5).toFixed(3)} bar ` +
+      `(${(surface - casingTop).toFixed(2)} m under the surface)`);
   }
 
   private getComponentHeight(component: PlantComponent): number {

@@ -1232,18 +1232,19 @@ export class GridView {
   }
 
   /**
-   * A run swept out of a pipe's loose end and released on open ground: the
-   * route from that end through the swept cells, its new loose end on the
-   * last cell's far boundary (runFromEndRoute). Clears the routing state.
-   * Empty when nothing was swept.
+   * A run swept out of a connection point and released on open ground: the
+   * route from the port's anchor (a pipe's loose end, or a nozzle's edge
+   * point and then its out-cell) through the swept cells, its new loose end
+   * on the last cell's far boundary (runFromEndRoute). Clears the routing
+   * state. Empty when nothing was swept.
    */
   finishRoutingOnGround(): Point[] {
     const r = this.routing!;
-    if (!r.from || r.from.component.type !== 'pipe') {
-      throw new Error('[Grid] finishRoutingOnGround carries on a PIPE from its loose end; ' +
-        `this run started at ${r.from ? `'${r.from.component.id}' (${r.from.component.type})` : 'open ground'}.`);
+    if (!r.from) {
+      throw new Error('[Grid] finishRoutingOnGround finishes a run that started at a PORT; ' +
+        'a run from open ground finishes through finishGroundRouting.');
     }
-    const route = runFromEndRoute(r.waypoints);
+    const route = runFromEndRoute([r.from.anchor.point, ...r.waypoints]);
     this.routing = null;
     return route;
   }

@@ -19,7 +19,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock, waterBodyOf } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -4575,6 +4575,8 @@ function init() {
     }
     if (currentMode !== 'construction') return;
     if (constructionSubMode !== 'move') return;
+    // Only the left button drags; a right-click puts move mode down (onCancelTool)
+    if (e.button !== 0) return;
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -4830,9 +4832,15 @@ function init() {
         const partsBefore = capturePlantParts();
         let placed = false;
 
-        // If placing inside a container, use the container's position
+        // If placing inside a container, use the container's position -
+        // except in a body of open water (the sea), which is drawn as the
+        // terrain's water and spans whatever the map gives it: its position
+        // is only a reference point, so the part goes where it was clicked,
+        // standing on the bottom there at its own elevation.
+        const inWaterBody = !!containedBy && !!clickedComponent &&
+          waterBodyOf(clickedComponent) !== undefined;
         let placementPos = worldPos;
-        if (containedBy && clickedComponent) {
+        if (containedBy && clickedComponent && !inWaterBody) {
           placementPos = { ...clickedComponent.position };
         }
 
@@ -4921,8 +4929,9 @@ function init() {
               // Set containment if specified
               if (containedBy) {
                 config.containedBy = containedBy;
-                // Ensure position and elevation match container
-                if (clickedComponent) {
+                // Ensure position and elevation match container (not in open
+                // water - see placementPos above)
+                if (clickedComponent && !inWaterBody) {
                   config.position = { ...clickedComponent.position };
                   if (clickedComponent.elevation !== undefined) {
                     config.properties = config.properties || {};
@@ -5241,6 +5250,34 @@ function init() {
       }
     });
   }
+
+  // Right-click puts down whatever tool is in hand: move mode (a drag in
+  // progress goes back where it started), connect mode, or the part picked
+  // off the palette. True when there was something to put down, so the
+  // canvas leaves the browser's context menu alone otherwise.
+  plantCanvas.onCancelTool = () => {
+    if (constructionSubMode === 'move') {
+      if (isDraggingComponent && movingComponent && movePreDrag) revertMove(movingComponent, movePreDrag);
+      movePreDrag = null;
+      moveLocked = false;
+      armedMoveId = null;
+      setConstructionSubMode('place');
+      return true;
+    }
+    if (constructionSubMode === 'connect') {
+      setConstructionSubMode('place');
+      return true;
+    }
+    if (selectedComponentType) {
+      clearPaletteSelection();
+      if (selectedComponentDiv) selectedComponentDiv.textContent = 'Select a component to place';
+      if (placementHintDiv) placementHintDiv.style.display = 'none';
+      plantCanvas.setPlacementPreview(null, null);
+      canvas.style.cursor = 'default';
+      return true;
+    }
+    return false;
+  };
 
   // Construction-palette focus for early career levels: show only the
   // component types the level expects (plus a SHOW ALL toggle so nobody is
