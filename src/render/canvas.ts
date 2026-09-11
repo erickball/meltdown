@@ -15,8 +15,8 @@ import { getFluidColor, renderColorLegend } from './colors';
 import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
-import { GridView, PortHit } from './grid-view';
-import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute, crossVesselJoint } from './grid-geometry';
+import { GridView, PortHit, RunEnds } from './grid-view';
+import { PipeOrientation, oppositeOrientation, PlanRect, PortAnchor, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute, crossVesselJoint, sideVector } from './grid-geometry';
 import { Point3, RunVertex, liftRoute, slopeRoute, ductContinuation, drawPipeRun, screenMidpoint } from './pipe-run-3d';
 import { connectionDrawElevation } from '../types';
 import { steamPartialPressurePa } from '../simulation/resume';
@@ -87,6 +87,8 @@ export class PlantCanvas {
    * which the 2.5D view lifts into 3D to draw its piping.
    */
   private planRuns: Map<Connection | PipeComponent, Point[]> = new Map();
+  /** Where each of those runs meets its components on the plan (refreshed with planRuns). */
+  private planEnds: Map<Connection, RunEnds> = new Map();
   /** Each connection's screen run, worked out once per 2.5D frame (cleared with planRuns). */
   private runMemo = new Map<Connection, { pts: RunVertex[]; scale: number } | null>();
   /** Ground motion (a scenario `shake` action): a render-transform jolt, nothing more. */
@@ -1630,6 +1632,7 @@ export class PlantCanvas {
       return paintDepthY(b) - paintDepthY(a);
     });
     this.planRuns = this.grid.planRuns(this.plantState);
+    this.planEnds = this.grid.planRunEnds();
     this.runMemo.clear();
     const foundations = this.foundationsFor(sortedComponents);
 
@@ -2816,13 +2819,23 @@ export class PlantCanvas {
     if (joint || this.isCrossVesselTargetPair(fromComponent, toComponent)) return null;
     const plan = this.planRuns.get(connection);
     if (!plan || plan.length < 2) return null;
+    const ends = this.planEnds.get(connection);
+    const fromAnchor = ends?.from ?? null;
+    const toAnchor = ends?.to ?? null;
     const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
     const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
-    const a = this.nozzle3D(fromComponent, fromPort, connectionDrawElevation(connection, 'from', this.plantState.components));
-    const b = this.nozzle3D(toComponent, toPort, connectionDrawElevation(connection, 'to', this.plantState.components));
+    const a = this.plannedNozzle(fromComponent, fromAnchor,
+      this.nozzle3D(fromComponent, fromPort, connectionDrawElevation(connection, 'from', this.plantState.components)));
+    const b = this.plannedNozzle(toComponent, toAnchor,
+      this.nozzle3D(toComponent, toPort, connectionDrawElevation(connection, 'to', this.plantState.components)));
     if (!a || !b) return null;
-    const path = liftRoute(a, this.leaveAxis(fromComponent, plan[0]), plan,
-      b, this.leaveAxis(toComponent, plan[plan.length - 1]));
+    // The axis the route leaves each footprint along: the side its plan
+    // anchor is on (an end inside a section view: read off the route)
+    const axisOf = (c: PlantComponent, anchor: PortAnchor | null, end: Point): 'x' | 'y' =>
+      anchor ? (anchor.side === 'E' || anchor.side === 'W' ? 'x' : 'y') : this.leaveAxis(c, end);
+    const path = liftRoute(a, axisOf(fromComponent, fromAnchor, plan[0]), plan,
+      b, axisOf(toComponent, toAnchor, plan[plan.length - 1]),
+      fromAnchor?.vertical ?? null, toAnchor?.vertical ?? null);
     const bore = connection.flowArea && connection.flowArea > 0 ? Math.sqrt(4 * connection.flowArea / Math.PI) : 0.3;
     const pts = this.projectRun(path, bore);
     return pts ? { pts, scale: (a.scale + b.scale) / 2 } : null;
@@ -2882,6 +2895,18 @@ export class PlantCanvas {
       z: elevation + connElevation,
       scale: center.scale,
     };
+  }
+
+  /**
+   * A valve is turned in plan to suit its piping (turnedValveSides): its
+   * nozzle stands on the side its route leaves by, as far out from the body
+   * as the drawing puts it. Anything else stays where nozzle3D put it.
+   */
+  private plannedNozzle<T extends Point3>(c: PlantComponent, anchor: PortAnchor | null, p: T | null): T | null {
+    if (!p || !anchor || c.type !== 'valve') return p;
+    const v = sideVector(anchor.side);
+    const reach = Math.hypot(p.x - c.position.x, p.y - c.position.y);
+    return { ...p, x: c.position.x + v.x * reach, y: c.position.y + v.y * reach };
   }
 
   /** Which plan axis a route leaves a component's footprint along, from the edge its anchor is on. */

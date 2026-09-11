@@ -39,25 +39,35 @@ const EPS = 1e-6;
  * and into b along `bAxis` last (the axis of the footprint side the route
  * leaves by). A route shorter than two points is replaced by a plain
  * dog-leg between the nozzles.
+ *
+ * `aVertical` / `bVertical` mark a nozzle on the top or bottom of its
+ * component (verticalNozzle in grid-geometry), whose plan route starts right
+ * where it stands. When it points the way the pipe has to go - up out of a
+ * vessel head to a higher partner, down out of a bottom head to a lower one -
+ * the plumb leg is that nozzle's own riser, and the run travels at the
+ * partner's elevation.
  */
-export function liftRoute(a: Point3, aAxis: 'x' | 'y', plan: Point[], b: Point3, bAxis: 'x' | 'y'): Point3[] {
+export function liftRoute(
+  a: Point3, aAxis: 'x' | 'y', plan: Point[], b: Point3, bAxis: 'x' | 'y',
+  aVertical: 'up' | 'down' | null = null, bVertical: 'up' | 'down' | null = null,
+): Point3[] {
   const route = plan.length >= 2 ? plan : [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
   const n = route.length - 1;
-  const zRun = Math.min(a.z, b.z);
-  // Where the plumb legs stand: one route vertex in from each end (the cell
-  // just outside the footprint), or the middle of a two-point route
-  const i1 = Math.min(1, n);
-  const i2 = Math.max(n - 1, i1);
+  const aLow = a.z < b.z;
+  // The route vertex the plumb leg stands on: by default one vertex in from
+  // the higher end (the cell just outside its footprint, or the middle of a
+  // two-point route), so the run travels at the lower nozzle's elevation
+  let plumb = aLow ? Math.max(n - 1, Math.min(1, n)) : Math.min(1, n);
+  if ((aVertical === 'up' && aLow) || (aVertical === 'down' && !aLow)) plumb = 0;
+  else if ((bVertical === 'up' && !aLow) || (bVertical === 'down' && aLow)) plumb = n;
 
   const out: Point3[] = [a];
   const first = route[0];
   out.push(aAxis === 'x' ? { x: first.x, y: a.y, z: a.z } : { x: a.x, y: first.y, z: a.z });
   for (let i = 0; i <= n; i++) {
     const p = route[i];
-    const zIn = i <= i1 ? a.z : i <= i2 ? zRun : b.z;
-    const zOut = i < i1 ? a.z : i < i2 ? zRun : b.z;
-    out.push({ x: p.x, y: p.y, z: zIn });
-    if (Math.abs(zOut - zIn) > EPS) out.push({ x: p.x, y: p.y, z: zOut });
+    if (i <= plumb) out.push({ x: p.x, y: p.y, z: a.z });
+    if (i >= plumb) out.push({ x: p.x, y: p.y, z: b.z });
   }
   const last = route[n];
   out.push(bAxis === 'x' ? { x: last.x, y: b.y, z: b.z } : { x: b.x, y: last.y, z: b.z });
