@@ -153,8 +153,25 @@ function Move-Tag([string]$tag) {
   }
 }
 
+# An install counts as broken if any tool the build or tests run is missing
+# from node_modules\.bin - checking that the folder exists is not enough: a
+# worktree cleanup that followed a node_modules junction once left the main
+# checkout's folder standing with most of its contents gone.
+function Repair-Dependencies([string]$dir, [string[]]$tools, [string]$label) {
+  $missing = @($tools | Where-Object { -not (Test-Path (Join-Path $dir "node_modules\.bin\$_.cmd")) })
+  if ($missing.Count -eq 0) { return }
+  Write-Host ""
+  Write-Host "WARNING: $label node_modules is missing $($missing -join ', ') - reinstalling with npm ci" -ForegroundColor Yellow
+  npm --prefix $dir ci
+  Check "npm ci for $label"
+  $still = @($tools | Where-Object { -not (Test-Path (Join-Path $dir "node_modules\.bin\$_.cmd")) })
+  if ($still.Count -gt 0) { Fail "npm ci finished but $label node_modules still lacks $($still -join ', ')" }
+}
+
 Push-Location $repo
 try {
+  Repair-Dependencies $repo @('tsc', 'vite', 'tsx') 'the main checkout'
+
   # --- 3. tests -------------------------------------------------------------
   if ($Test) {
     Step "npm test"
@@ -172,11 +189,7 @@ try {
 
   # --- 5. functions ---------------------------------------------------------
   if ($deployFunctions) {
-    if (-not (Test-Path (Join-Path $repo 'functions\node_modules'))) {
-      Step "Installing functions dependencies"
-      npm --prefix functions ci
-      Check "npm ci in functions\"
-    }
+    Repair-Dependencies (Join-Path $repo 'functions') @('tsc') 'functions\'
     Step "Deploying functions"
     $env:FUNCTIONS_DISCOVERY_TIMEOUT = '60'
     npx firebase-tools deploy --only functions
