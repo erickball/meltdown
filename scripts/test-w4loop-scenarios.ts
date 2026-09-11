@@ -23,7 +23,9 @@ import type { ScramSetpoints } from '../src/simulation/operators/neutronics';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
-const PRESET = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'presets', 'w4loop.json');
+// PRESET=<file> runs the same scenarios against another copy of the plant
+// (e.g. a before/after comparison while the preset itself is being edited)
+const PRESET = process.env.PRESET ?? path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'presets', 'w4loop.json');
 
 const filter = (process.argv[2] || 'all').toLowerCase();
 const enabled = (name: string) => filter === 'all' || filter === name;

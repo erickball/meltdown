@@ -261,7 +261,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4.5,
         "height": 13,
         "hxType": "utube",
@@ -275,16 +275,16 @@
           {
             "id": "hx-1-tube-1",
             "position": {
-              "x": -0.6,
-              "y": 6
+              "x": -0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
           {
             "id": "hx-1-tube-2",
             "position": {
-              "x": 0.6,
-              "y": 6
+              "x": 0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -382,7 +382,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4.5,
         "height": 13,
         "hxType": "utube",
@@ -396,16 +396,16 @@
           {
             "id": "hx-2-tube-1",
             "position": {
-              "x": -0.6,
-              "y": 6
+              "x": -0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
           {
             "id": "hx-2-tube-2",
             "position": {
-              "x": 0.6,
-              "y": 6
+              "x": 0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -503,7 +503,7 @@
           "y": 90
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4.5,
         "height": 13,
         "hxType": "utube",
@@ -517,16 +517,16 @@
           {
             "id": "hx-3-tube-1",
             "position": {
-              "x": -0.6,
-              "y": 6
+              "x": -0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
           {
             "id": "hx-3-tube-2",
             "position": {
-              "x": 0.6,
-              "y": 6
+              "x": 0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -624,7 +624,7 @@
           "y": 90
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4.5,
         "height": 13,
         "hxType": "utube",
@@ -638,16 +638,16 @@
           {
             "id": "hx-4-tube-1",
             "position": {
-              "x": -0.6,
-              "y": 6
+              "x": -0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
           {
             "id": "hx-4-tube-2",
             "position": {
-              "x": 0.6,
-              "y": 6
+              "x": 0.675,
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -3004,7 +3004,7 @@
         "rotation": -0.5880026035475672,
         "diameter": 0.731,
         "thickness": 0.039,
-        "length": 16.69,
+        "length": 17.28,
         "pressureRating": 172,
         "ports": [
           {
@@ -3018,7 +3018,7 @@
           {
             "id": "pipe-cb-1-hx-1-right",
             "position": {
-              "x": 16.69,
+              "x": 17.28,
               "y": 0
             },
             "direction": "both"
@@ -3036,7 +3036,7 @@
           "x": 61.13,
           "y": 71.25
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -3081,7 +3081,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 58.51,
           "y": 74.49
@@ -3154,7 +3154,7 @@
         "rotation": -2.553590050042226,
         "diameter": 0.731,
         "thickness": 0.039,
-        "length": 16.69,
+        "length": 17.28,
         "pressureRating": 172,
         "ports": [
           {
@@ -3168,7 +3168,7 @@
           {
             "id": "pipe-cb-1-hx-2-right",
             "position": {
-              "x": 16.69,
+              "x": 17.28,
               "y": 0
             },
             "direction": "both"
@@ -3186,7 +3186,7 @@
           "x": 34.87,
           "y": 71.25
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -3231,7 +3231,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 37.49,
           "y": 74.49
@@ -3304,7 +3304,7 @@
         "rotation": 0.5880026035475672,
         "diameter": 0.731,
         "thickness": 0.039,
-        "length": 16.69,
+        "length": 17.28,
         "pressureRating": 172,
         "ports": [
           {
@@ -3318,7 +3318,7 @@
           {
             "id": "pipe-cb-1-hx-3-right",
             "position": {
-              "x": 16.69,
+              "x": 17.28,
               "y": 0
             },
             "direction": "both"
@@ -3336,7 +3336,7 @@
           "x": 61.13,
           "y": 88.75
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -3381,7 +3381,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 58.51,
           "y": 85.51
@@ -3454,7 +3454,7 @@
         "rotation": 2.553590050042226,
         "diameter": 0.731,
         "thickness": 0.039,
-        "length": 16.69,
+        "length": 17.28,
         "pressureRating": 172,
         "ports": [
           {
@@ -3468,7 +3468,7 @@
           {
             "id": "pipe-cb-1-hx-4-right",
             "position": {
-              "x": 16.69,
+              "x": 17.28,
               "y": 0
             },
             "direction": "both"
@@ -3486,7 +3486,7 @@
           "x": 34.87,
           "y": 88.75
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -3531,7 +3531,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 37.49,
           "y": 85.51
@@ -3716,7 +3716,7 @@
       "toComponentId": "hx-1",
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0.37,
-      "toElevation": 1,
+      "toElevation": -0.954,
       "resistanceCoeff": 1.5
     },
     {
@@ -3724,7 +3724,7 @@
       "fromPortId": "hx-1-tube-2",
       "toComponentId": "pipe-hx-1-pump-1",
       "toPortId": "pipe-hx-1-pump-1-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.38,
       "resistanceCoeff": 1.5
     },
@@ -3770,7 +3770,7 @@
       "toComponentId": "hx-2",
       "toPortId": "hx-2-tube-1",
       "fromElevation": 0.37,
-      "toElevation": 1,
+      "toElevation": -0.954,
       "resistanceCoeff": 1.5
     },
     {
@@ -3778,7 +3778,7 @@
       "fromPortId": "hx-2-tube-2",
       "toComponentId": "pipe-hx-2-pump-2",
       "toPortId": "pipe-hx-2-pump-2-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.38,
       "resistanceCoeff": 1.5
     },
@@ -3824,7 +3824,7 @@
       "toComponentId": "hx-3",
       "toPortId": "hx-3-tube-1",
       "fromElevation": 0.37,
-      "toElevation": 1,
+      "toElevation": -0.954,
       "resistanceCoeff": 1.5
     },
     {
@@ -3832,7 +3832,7 @@
       "fromPortId": "hx-3-tube-2",
       "toComponentId": "pipe-hx-3-pump-3",
       "toPortId": "pipe-hx-3-pump-3-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.38,
       "resistanceCoeff": 1.5
     },
@@ -3878,7 +3878,7 @@
       "toComponentId": "hx-4",
       "toPortId": "hx-4-tube-1",
       "fromElevation": 0.37,
-      "toElevation": 1,
+      "toElevation": -0.954,
       "resistanceCoeff": 1.5
     },
     {
@@ -3886,7 +3886,7 @@
       "fromPortId": "hx-4-tube-2",
       "toComponentId": "pipe-hx-4-pump-4",
       "toPortId": "pipe-hx-4-pump-4-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.38,
       "resistanceCoeff": 1.5
     },

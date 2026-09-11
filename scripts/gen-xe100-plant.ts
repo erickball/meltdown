@@ -620,7 +620,8 @@ const FWH_TUBE_PORTS = heatExchangerPorts({
 const FWH_TUBE_NOZZLE = nozzleElevation(FWH_TUBE_PORTS, FWH_HEIGHT, 'fwh-1-tube-1');   // -0.48
 add('fwh-1', {
   type: 'heatExchanger', label: 'HP Feedwater Heater',
-  position: { x: 69, y: 101 }, rotation: 0, elevation: 0,
+  // Raised by its header's depth so the header stands on the ground
+  position: { x: 69, y: 101 }, rotation: 0, elevation: 0.5,
   width: 1.8, height: FWH_HEIGHT, hxType: 'utube', tubeCount: 900,
   tubeModel: 'lumped',
   material: 'low-alloy-steel',

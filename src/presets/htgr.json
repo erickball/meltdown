@@ -184,7 +184,7 @@
           "y": 75
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4,
         "height": 13,
         "hxType": "helical",
@@ -198,16 +198,16 @@
           {
             "id": "hx-1-tube-1",
             "position": {
-              "x": -0.6,
-              "y": 6
+              "x": 0,
+              "y": 7.5
             },
             "direction": "both"
           },
           {
             "id": "hx-1-tube-2",
             "position": {
-              "x": 0.6,
-              "y": 6
+              "x": 0,
+              "y": -7.5
             },
             "direction": "both"
           },
@@ -569,7 +569,7 @@
         "rotation": -0.3217505543966428,
         "diameter": 0.798,
         "thickness": 0.064,
-        "length": 15.29,
+        "length": 15.96,
         "pressureRating": 250,
         "ports": [
           {
@@ -583,7 +583,7 @@
           {
             "id": "pipe-cb-1-hx-1-right",
             "position": {
-              "x": 15.29,
+              "x": 15.96,
               "y": 0
             },
             "direction": "both"
@@ -601,7 +601,7 @@
           "x": 53.1,
           "y": 75.63
         },
-        "endElevation": 1,
+        "endElevation": 0,
         "initialNcg": {
           "He": 70
         },
@@ -622,7 +622,7 @@
         "rotation": 2.181522291184105,
         "diameter": 0.798,
         "thickness": 0.064,
-        "length": 9.54,
+        "length": 17.75,
         "pressureRating": 250,
         "ports": [
           {
@@ -636,7 +636,7 @@
           {
             "id": "pipe-hx-1-pump-1-right",
             "position": {
-              "x": 9.54,
+              "x": 17.75,
               "y": 0
             },
             "direction": "both"
@@ -649,7 +649,7 @@
           "quality": 1,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 15,
         "endPosition": {
           "x": 48.41,
           "y": 84.41
@@ -841,7 +841,7 @@
       "toComponentId": "hx-1",
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0.4,
-      "toElevation": 1,
+      "toElevation": -1,
       "resistanceCoeff": 1.5
     },
     {
@@ -849,7 +849,7 @@
       "fromPortId": "hx-1-tube-2",
       "toComponentId": "pipe-hx-1-pump-1",
       "toPortId": "pipe-hx-1-pump-1-left",
-      "fromElevation": 1,
+      "fromElevation": 14,
       "toElevation": 0.4,
       "resistanceCoeff": 1.5
     },

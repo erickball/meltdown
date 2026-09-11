@@ -190,7 +190,7 @@
           "y": 75
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4,
         "height": 13,
         "hxType": "utube",
@@ -205,7 +205,7 @@
             "id": "hx-1-tube-1",
             "position": {
               "x": -0.6,
-              "y": 6
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -213,7 +213,7 @@
             "id": "hx-1-tube-2",
             "position": {
               "x": 0.6,
-              "y": 6
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -263,7 +263,7 @@
           "y": 73
         },
         "rotation": 0,
-        "elevation": 0,
+        "elevation": 1,
         "width": 4,
         "height": 13,
         "hxType": "utube",
@@ -278,7 +278,7 @@
             "id": "hx-2-tube-1",
             "position": {
               "x": 0.6,
-              "y": 6
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -286,7 +286,7 @@
             "id": "hx-2-tube-2",
             "position": {
               "x": -0.6,
-              "y": 6
+              "y": 7.454
             },
             "direction": "both"
           },
@@ -1110,7 +1110,7 @@
         "rotation": -0.3217505543966428,
         "diameter": 0.798,
         "thickness": 0.042,
-        "length": 15.29,
+        "length": 15.93,
         "pressureRating": 172,
         "ports": [
           {
@@ -1124,7 +1124,7 @@
           {
             "id": "pipe-cb-1-hx-1-right",
             "position": {
-              "x": 15.29,
+              "x": 15.93,
               "y": 0
             },
             "direction": "both"
@@ -1142,7 +1142,7 @@
           "x": 53.1,
           "y": 75.63
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -1160,7 +1160,7 @@
         "rotation": -2.356194490192345,
         "diameter": 0.798,
         "thickness": 0.042,
-        "length": 11.49,
+        "length": 12.32,
         "pressureRating": 172,
         "ports": [
           {
@@ -1174,7 +1174,7 @@
           {
             "id": "pipe-cb-1-hx-2-right",
             "position": {
-              "x": 11.49,
+              "x": 12.32,
               "y": 0
             },
             "direction": "both"
@@ -1192,7 +1192,7 @@
           "x": 34.41,
           "y": 74.41
         },
-        "endElevation": 1,
+        "endElevation": 0.05,
         "containedBy": "bui-1",
         "nqa1": true
       }
@@ -1237,7 +1237,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 48.36,
           "y": 84.48
@@ -1287,7 +1287,7 @@
           "quality": 0,
           "flowRate": 0
         },
-        "elevation": 1,
+        "elevation": 0.05,
         "endPosition": {
           "x": 36.81,
           "y": 85.4
@@ -1521,7 +1521,7 @@
       "toComponentId": "hx-1",
       "toPortId": "hx-1-tube-1",
       "fromElevation": 0.4,
-      "toElevation": 1
+      "toElevation": -0.954
     },
     {
       "fromComponentId": "cb-1",
@@ -1537,14 +1537,14 @@
       "toComponentId": "hx-2",
       "toPortId": "hx-2-tube-1",
       "fromElevation": 0.4,
-      "toElevation": 1
+      "toElevation": -0.954
     },
     {
       "fromComponentId": "hx-1",
       "fromPortId": "hx-1-tube-2",
       "toComponentId": "pipe-hx-1-pump-1",
       "toPortId": "pipe-hx-1-pump-1-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.4
     },
     {
@@ -1560,7 +1560,7 @@
       "fromPortId": "hx-2-tube-2",
       "toComponentId": "pipe-hx-2-pump-2",
       "toPortId": "pipe-hx-2-pump-2-left",
-      "fromElevation": 1,
+      "fromElevation": -0.954,
       "toElevation": 0.4
     },
     {

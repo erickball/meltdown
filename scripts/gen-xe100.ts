@@ -13,6 +13,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
+import { heatExchangerPorts } from '../src/construction/construction-manager';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -161,13 +162,32 @@ add('tank-sg-1', {
 //
 // Tubes are Alloy 800H: at 60 bar and SG temperatures low-alloy steel would
 // creep-rupture, and 800H is what real helical HTGR steam generators use.
+//
+// Tube nozzles on each bundle's own headers, where the construction manager
+// puts them for any exchanger (heatExchangerPorts): feed into the lower
+// header, steam out of the upper. This plant's port ids are kept (tube-1 =
+// feed, tube-2 = steam) because controllers name flow ids built from them.
+// A nozzle's elevation above the bundle base is height/2 - y: below the base
+// for the lower header.
+const SG_HEIGHT = 14, SG_PLENUM = 0.8;
+const SG_HEADERS = new Map(heatExchangerPorts({
+  id: 'hx-1', isVertical: true, hxType: 'helical',
+  shellDiameter: 2.8, shellLength: SG_HEIGHT, plenumLength: SG_PLENUM, bundleCount: 2,
+}).map(p => [p.id, p.position]));
+const sgHeader = (id: string): [number, number] => {
+  const p = SG_HEADERS.get(id);
+  if (!p) throw new Error(`no header nozzle ${id}`);
+  return [p.x, p.y];
+};
+const SG_FEED_NOZZLE = SG_HEIGHT / 2 - sgHeader('hx-1-tube-bottom')[1];   // -0.8
+const SG_STEAM_NOZZLE = SG_HEIGHT / 2 - sgHeader('hx-1-tube-top')[1];     // 14.8
 add('hx-1', {
   type: 'heatExchanger', label: 'Helical Once-Through SG',
   position: { x: 56, y: 74 }, rotation: 0, elevation: -9,
   // 300 tubes, not 5000: helical coil length now comes from bundle packing
   // (hx-bundles.ts), so tube count sets coil length as well as area - 5000
   // tubes packed into this shell made each coil absurdly short.
-  width: 2.8, height: 14, hxType: 'helical', tubeCount: 300,
+  width: 2.8, height: SG_HEIGHT, hxType: 'helical', tubeCount: 300,
   tubeModel: 'moving-boundary', bundleCount: 2,
   // Start AT the operating point: 165 bar with the economizer holding the
   // bottom quarter, boiling the middle, and the superheater running
@@ -178,12 +198,12 @@ add('hx-1', {
   initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.25, L3: 0.35, flowKgs: FEED_FLOW / 2 },
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
-  plenumLength: 0.8, tubeOD: 0.019,
+  plenumLength: SG_PLENUM, tubeOD: 0.019,
   ports: ports([
-    ['hx-1-tube-1', -0.6, 7],       // bundle 1 feedwater in (bottom)
-    ['hx-1-tube-2', 0.6, -7],       // bundle 1 main steam out (top)
-    ['hx-1-tube-1-b2', -0.2, 7],    // bundle 2 feedwater in (bottom)
-    ['hx-1-tube-2-b2', 0.2, -7],    // bundle 2 main steam out (top)
+    ['hx-1-tube-1', ...sgHeader('hx-1-tube-bottom')],       // bundle 1 feedwater in (lower header)
+    ['hx-1-tube-2', ...sgHeader('hx-1-tube-top')],          // bundle 1 main steam out (upper header)
+    ['hx-1-tube-1-b2', ...sgHeader('hx-1-tube-bottom-b2')], // bundle 2 feedwater in
+    ['hx-1-tube-2-b2', ...sgHeader('hx-1-tube-top-b2')],    // bundle 2 main steam out
     ['hx-1-shell-1', -1.8, -6],     // hot helium in (top, from the duct)
     ['hx-1-shell-2', 1.8, 6],       // cold helium out (bottom, to vessel space)
     // Must contain '-tube' (and carry no '-b{n}' suffix): that is how the
@@ -589,14 +609,27 @@ add('val-fwcv-1', {
 // on the shell side and brings the feed up to T_FEED before the SG sees it.
 // U-tube (not once-through): the shell holds a condensing pool with a level
 // to control, which is what the drain valve and ctl-fwhlvl-1 below are for.
+// Both tube nozzles on the one header under the tube sheet, and the heater
+// raised by that header's depth so the header stands on the ground.
+const FWH_HEIGHT = 7, FWH_PLENUM = 0.5;
+const FWH_HEADERS = new Map(heatExchangerPorts({
+  id: 'fwh-1', isVertical: true, hxType: 'utube',
+  shellDiameter: 1.8, shellLength: FWH_HEIGHT, plenumLength: FWH_PLENUM, bundleCount: 1,
+}).map(p => [p.id, p.position]));
+const fwhHeader = (id: string): [number, number] => {
+  const p = FWH_HEADERS.get(id);
+  if (!p) throw new Error(`no header nozzle ${id}`);
+  return [p.x, p.y];
+};
+const FWH_TUBE_NOZZLE = FWH_HEIGHT / 2 - fwhHeader('fwh-1-tube-1')[1];   // -0.48
 add('fwh-1', {
   type: 'heatExchanger', label: 'HP Feedwater Heater',
-  position: { x: 63, y: 99 }, rotation: 0, elevation: 0,
-  width: 1.8, height: 7, hxType: 'utube', tubeCount: 900,
+  position: { x: 63, y: 99 }, rotation: 0, elevation: FWH_PLENUM,
+  width: 1.8, height: FWH_HEIGHT, hxType: 'utube', tubeCount: 900,
   tubeModel: 'lumped',
   material: 'low-alloy-steel',
   pressureRating: 40, tubePressureRating: 250, shellPressureRating: 40,
-  plenumLength: 0.5, tubeOD: 0.019,
+  plenumLength: FWH_PLENUM, tubeOD: 0.019,
   // Names the turbine stage the bleed is tapped from, so the extraction
   // enthalpy follows the real expansion line rather than throttled inlet steam
   extractionSource: { turbineId: 'turbine-1', pressure: 25e5 },
@@ -634,8 +667,8 @@ add('fwh-1', {
   secondaryFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   fillLevel: 0.3,
   ports: ports([
-    ['fwh-1-tube-1', -0.5, 3.5],   // feed in (from the FW pump)
-    ['fwh-1-tube-2', 0.5, -3.5],   // heated feed out (to the check valve)
+    ['fwh-1-tube-1', ...fwhHeader('fwh-1-tube-1')],   // feed in (from the FW pump)
+    ['fwh-1-tube-2', ...fwhHeader('fwh-1-tube-2')],   // heated feed out (to the check valve)
     ['fwh-1-shell-1', -1.1, -3],   // extraction steam in
     ['fwh-1-shell-2', 1.1, 3],     // condensed drain out (bottom)
   ]),
@@ -958,9 +991,9 @@ connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
 // dries. A real once-through SG orifices each inlet hard so the split is set
 // by geometry instead of by the boiling state.
 connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 1, flowArea: 0.015, length: 8, resistanceCoeff: 600 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: SG_FEED_NOZZLE, flowArea: 0.015, length: 8, resistanceCoeff: 600 });
 connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1-b2',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: 1, flowArea: 0.015, length: 8, resistanceCoeff: 600 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW / 2, fromElevation: 0, toElevation: SG_FEED_NOZZLE, flowArea: 0.015, length: 8, resistanceCoeff: 600 });
 // Main steam out of the top of the bundle to the turbine.
 // In this model the turbine NODE floats near condenser pressure and the whole
 // throttling drop is taken across its inlet connection, so this area is what
@@ -973,10 +1006,10 @@ connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1-b2',
 // Both bundles discharge into the same main steam line, each through half the
 // area, so the two in parallel present the throttle the single bundle did.
 connect('hx-1', 'hx-1-tube-2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: 13.5, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('hx-1', 'hx-1-tube-2-b2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: 13.5, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - 25, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
@@ -992,7 +1025,7 @@ connect('val-cpcv-1', 'val-cpcv-1-out', 'fw-pump-1', 'fw-pump-1-inlet',
 connect('fw-pump-1', 'fw-pump-1-outlet', 'val-fpcv-1', 'val-fpcv-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
 connect('val-fpcv-1', 'val-fpcv-1-out', 'fwh-1', 'fwh-1-tube-1',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 2 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: FWH_TUBE_NOZZLE, flowArea: 0.05, length: 2 });
 
 // Steam dump: off the main steam line, discharging into the condenser
 // Dump capacity ~40 kg/s at the setpoint (choked) - about 70% of full
@@ -1008,10 +1041,10 @@ connect('val-fpcv-1', 'val-fpcv-1-out', 'fwh-1', 'fwh-1-tube-1',
 // that has to leave through SOMETHING while the turbine rolls, and 40 kg/s
 // of dump against ~150 MW of duty let the boiler compress to the dome top.
 connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
+  { fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('hx-1', 'hx-1-tube-2-b2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: 13.5, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
+  { fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.002, length: 10, resistanceCoeff: 2 });
@@ -1061,7 +1094,7 @@ connect('val-leak-1', 'val-leak-1-out', 'hx-1', 'hx-1-shell-1',
 // Feedwater heater: tube side in the feed train, shell side on turbine bleed
 // ---------------------------------------------------------------------------
 connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
-  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
+  { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: FWH_TUBE_NOZZLE, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
 // Extraction tap off the main steam line. 0.004 m2, not 0.0008: a single HP
 // heater lifting 77 kg/s of feed from condensate temperature to 200 C needs
 // ~53 MW = ~25 kg/s of extraction steam - a THIRD of the steam flow, which
@@ -1076,9 +1109,9 @@ connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
 // Tapped off BOTH bundles, like the MSV: a single-bundle tap carries the
 // whole extraction from one side and Ledinegg-tilts the pair.
 connect('hx-1', 'hx-1-tube-2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: 13.5, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
+  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
 connect('hx-1', 'hx-1-tube-2-b2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: 13.5, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
+  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
 connect('val-bleed-1', 'val-bleed-1-out', 'fwh-1', 'fwh-1-shell-1',
   { initialFlowPhase: 'vapor', initialFlowRate: 25, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 6, resistanceCoeff: 2 });
 // Shell drain cascades to the condenser. Valve-side elevations are pinned

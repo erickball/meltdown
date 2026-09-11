@@ -99,14 +99,18 @@ pump_pos = [(58, 75), (38, 75), (58, 85), (38, 85)]
 for i in range(1, 5):
     sx, sy = sg_pos[i - 1]
     px, py = pump_pos[i - 1]
+    # Raised 1 m so the 1 m lower header stands on the floor; both tube
+    # nozzles on that header (heatExchangerPorts: +-30% of the half-width
+    # across, on the semi-elliptical surface - 0.954 m below the tube sheet).
+    # scripts/fix-hx-plenum-nozzles.ts made the same change to w4loop.json.
     add({"id": f"hx-{i}", "type": "heatExchanger", "label": f"SG {'ABCD'[i-1]}",
-         "position": {"x": sx, "y": sy}, "rotation": 0, "elevation": 0,
+         "position": {"x": sx, "y": sy}, "rotation": 0, "elevation": 1,
          "width": 4.5, "height": 13, "hxType": "utube", "tubeCount": 5626,
          "pressureRating": 100, "tubePressureRating": 172, "shellPressureRating": 100,
          "plenumLength": 1, "tubeOD": 0.0175,
          "ports": [
-             {"id": f"hx-{i}-tube-1", "position": {"x": -0.6, "y": 6}, "direction": "both"},
-             {"id": f"hx-{i}-tube-2", "position": {"x": 0.6, "y": 6}, "direction": "both"},
+             {"id": f"hx-{i}-tube-1", "position": {"x": -0.675, "y": 7.454}, "direction": "both"},
+             {"id": f"hx-{i}-tube-2", "position": {"x": 0.675, "y": 7.454}, "direction": "both"},
              {"id": f"hx-{i}-shell-1", "position": {"x": -2, "y": -6}, "direction": "both"},
              {"id": f"hx-{i}-shell-2", "position": {"x": 2, "y": 0}, "direction": "both"}
          ],
@@ -124,8 +128,8 @@ for i in range(1, 5):
          "fluid": dict(PRIM), "nqa1": True, "containedBy": "bui-1"})
 
     # hot leg / SG / crossover / cold leg
-    conn("cb-1", "cb-1-outlet", f"hx-{i}", f"hx-{i}-tube-1", 10, 1, 0.42, 8, rc=3, flow=4400)
-    conn(f"hx-{i}", f"hx-{i}-tube-2", f"pump-{i}", f"pump-{i}-inlet", 1, 0, 0.45, 6, rc=3, flow=4400)
+    conn("cb-1", "cb-1-outlet", f"hx-{i}", f"hx-{i}-tube-1", 10, -0.954, 0.42, 8, rc=3, flow=4400)
+    conn(f"hx-{i}", f"hx-{i}-tube-2", f"pump-{i}", f"pump-{i}-inlet", -0.954, 0, 0.45, 6, rc=3, flow=4400)
     conn(f"pump-{i}", f"pump-{i}-outlet", "rv-1", f"rv-1-cold-leg-{i}", 0, 6, 0.4, 8, rc=3, flow=4400)
 
 # ---------------------------------------------------------------- pressurizer
