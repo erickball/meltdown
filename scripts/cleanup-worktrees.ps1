@@ -19,9 +19,12 @@
     touched, not even with -Path.
   - Only processes whose executable path or command line names the folder are
     stopped.
-  - Any junction/symlink directly inside the folder (a node_modules junction to
-    the main checkout, say) is unlinked BEFORE the recursive delete, which would
-    otherwise follow it and delete the target's contents.
+  - Every directory junction/symlink anywhere in the folder (a node_modules
+    junction to the main checkout, npm's functions\node_modules\meltdown link
+    back to the worktree root) is found without following any of them and
+    unlinked BEFORE git or the recursive delete run - both would otherwise
+    follow it and delete the target's contents. If some folder cannot be
+    listed, nothing is deleted.
 
 .PARAMETER Path
   One worktree folder to remove (registered or orphaned).
@@ -94,19 +97,45 @@ function Remove-WorktreeFolder([string]$dir) {
     if (-not $WhatIf) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
   }
 
-  # 2. Unregister it if git still knows it
-  if ($wt -and -not $WhatIf) {
-    git -C $repo worktree remove --force $full 2>$null | Out-Null
-  }
-
-  # 3. Unlink junctions/symlinks near the top so the delete cannot follow them
-  if (Test-Path $full) {
-    $links = Get-ChildItem -LiteralPath $full -Force -Directory -Recurse -Depth 1 -ErrorAction SilentlyContinue |
-      Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }
+  # 2. Unlink EVERY directory junction/symlink in the tree before anything
+  #    deletes it: both `git worktree remove` and Remove-Item follow them, and
+  #    they sit deep. functions\package.json depends on `meltdown: file:..`,
+  #    so installing the functions deps puts functions\node_modules\meltdown ->
+  #    the worktree root (a cycle git dies in with "Filename too long"), and a
+  #    link into the MAIN checkout would have its target's contents deleted.
+  #    The walk never descends into a link. A folder it cannot list stops the
+  #    removal, since a link could be hiding under it.
+  if (Test-Path -LiteralPath $full) {
+    $links = @(); $unlisted = @()
+    $stack = New-Object System.Collections.Stack
+    $stack.Push([IO.DirectoryInfo]$full)
+    while ($stack.Count -gt 0) {
+      # (not $dir: that is this function's [string] parameter, and assigning
+      # to it would turn the DirectoryInfo back into a string)
+      $walkDir = $stack.Pop()
+      try { $subdirs = $walkDir.GetDirectories() }
+      catch { $unlisted += "$($walkDir.FullName): $($_.Exception.Message)"; continue }
+      foreach ($d in $subdirs) {
+        if ($d.Attributes -band [IO.FileAttributes]::ReparsePoint) { $links += $d } else { $stack.Push($d) }
+      }
+    }
+    if ($unlisted.Count -gt 0) {
+      foreach ($u in $unlisted) { Write-Host "  cannot list $u" }
+      Write-Host "LEFT $full - not every folder could be checked for links, so nothing was deleted"
+      return
+    }
     foreach ($l in $links) {
       Write-Host "  unlink $($l.FullName) -> $($l.Target)"
       if (-not $WhatIf) { [IO.Directory]::Delete($l.FullName, $false) }
     }
+  }
+
+  # 3. Unregister it if git still knows it. A failure here (a locked file) is
+  #    reported, not fatal - step 4 deletes whatever git left behind. The
+  #    local 'Continue' keeps git's stderr from becoming a terminating error.
+  if ($wt -and -not $WhatIf) {
+    $gitOut = & { $ErrorActionPreference = 'Continue'; git -C $repo worktree remove --force $full 2>&1 }
+    if ($LASTEXITCODE -ne 0) { Write-Host "  git worktree remove failed: $("$gitOut".Trim())" }
   }
 
   # 4. Delete, retrying briefly for transient (antivirus / indexer) locks
@@ -116,7 +145,11 @@ function Remove-WorktreeFolder([string]$dir) {
     catch { if ($i -lt 6) { Start-Sleep -Seconds 2 } else { Write-Host "  FAILED: $($_.Exception.Message)" } }
   }
   if (Test-Path $full) { Write-Host "LEFT $full (still locked - see the message above)" }
-  else { Write-Host "removed $full" }
+  else {
+    Write-Host "removed $full"
+    # drop git's record of it too, in case step 3 failed before unregistering
+    & { $ErrorActionPreference = 'Continue'; git -C $repo worktree prune 2>&1 | Out-Null }
+  }
 }
 
 if ($Path) {
