@@ -126,6 +126,103 @@ export function isGroundLayerComponent(component: PlantComponent): boolean {
     waterBodyOf(component as never) !== undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Cross-vessels
+// ---------------------------------------------------------------------------
+
+/** Whether a component is drawn standing (a sprite others can be drawn inside) rather than as a floor or a line. */
+function isStandingSprite(c: PlantComponent): boolean {
+  return c.type !== 'pipe' && !(c as any).isHydraulicOnly && !isGroundLayerComponent(c);
+}
+
+/** Whether a component is drawn inside another standing one (a vessel) rather than on the plan. */
+function isInsideStandingSprite(c: PlantComponent, plantState: PlantState): boolean {
+  const seen = new Set<string>([c.id]);
+  let cur: PlantComponent | undefined = c;
+  while (cur?.containedBy && !seen.has(cur.containedBy)) {
+    seen.add(cur.containedBy);
+    cur = plantState.components.get(cur.containedBy);
+    if (cur && isStandingSprite(cur)) return true;
+  }
+  return false;
+}
+
+/**
+ * The vessels a cross-vessel is welded to. A cross-vessel is a protrusion of
+ * a vessel's pressure boundary laid wall to wall (types.ts), so each of its
+ * two ends mates with the vessel it butts against: a component standing on
+ * the plan whose footprint holds that end and whose drawn height spans the
+ * duct's axis. Where several do (a vessel inside the ring of panels around
+ * it), the end mates with the one whose side wall it is nearest.
+ */
+export function crossVesselMates(cv: PlantComponent, plantState: PlantState): PlantComponent[] {
+  const size = getComponentSize(cv);
+  const axisZ = (cv.elevation ?? 0) + size.height / 2;
+  const y = cv.position.y;
+  const mates: PlantComponent[] = [];
+  for (const endX of [cv.position.x - size.width / 2, cv.position.x + size.width / 2]) {
+    let best: PlantComponent | null = null;
+    let bestGap = Infinity;
+    for (const c of plantState.components.values()) {
+      if (c === cv || c.type === 'crossVessel' || !isStandingSprite(c) || isInsideStandingSprite(c, plantState)) continue;
+      const base = c.elevation ?? 0;
+      const width = getComponentSize(c).width;
+      if (axisZ < base || axisZ > base + getComponentSize(c).height) continue;
+      const r = footprintRect(c.position, componentFootprint(c));
+      if (endX < r.x0 - EPS || endX > r.x1 + EPS || y < r.y0 - EPS || y > r.y1 + EPS) continue;
+      const face = c.position.x + Math.sign(endX - c.position.x) * width / 2;
+      const gap = Math.abs(endX - face);
+      if (gap < bestGap) { best = c; bestGap = gap; }
+    }
+    if (best && !mates.includes(best)) mates.push(best);
+  }
+  return mates;
+}
+
+/**
+ * How a connection to a cross-vessel meets it, when the other end is at a
+ * vessel the duct is welded to (crossVesselMates):
+ *  - 'flush': the other end IS that vessel. The two nozzles meet at the weld
+ *    and there is no line between them to draw.
+ *  - 'inside': the other end is held (at any depth) inside that vessel. The
+ *    line runs inside the vessel, to the wall the duct enters by, and no
+ *    further.
+ * Null for any other connection - including one to a duct's
+ * `targetComponentId` when the duct is not drawn touching it (the 2.5D view
+ * keeps its own convention for that; the grid routes such a line as usual).
+ */
+export interface CrossVesselJoint {
+  crossVessel: PlantComponent;
+  crossVesselPortId: string;
+  other: PlantComponent;
+  otherPortId: string;
+  mate: PlantComponent;
+  kind: 'flush' | 'inside';
+}
+
+export function crossVesselJoint(conn: Connection, plantState: PlantState): CrossVesselJoint | null {
+  const from = plantState.components.get(conn.fromComponentId);
+  const to = plantState.components.get(conn.toComponentId);
+  if (!from || !to) return null;
+  const cvIsFrom = from.type === 'crossVessel';
+  if (!cvIsFrom && to.type !== 'crossVessel') return null;
+  const cv = cvIsFrom ? from : to;
+  const other = cvIsFrom ? to : from;
+  const joint = (mate: PlantComponent, kind: 'flush' | 'inside'): CrossVesselJoint => ({
+    crossVessel: cv, crossVesselPortId: cvIsFrom ? conn.fromPortId : conn.toPortId,
+    other, otherPortId: cvIsFrom ? conn.toPortId : conn.fromPortId, mate, kind,
+  });
+  const mates = crossVesselMates(cv, plantState);
+  const seen = new Set<string>();
+  let cur: PlantComponent | undefined = other;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    if (mates.includes(cur)) return joint(cur, cur === other ? 'flush' : 'inside');
+    cur = cur.containedBy ? plantState.components.get(cur.containedBy) : undefined;
+  }
+  return null;
+}
+
 /** Footprint for a palette type (placement preview, before the component exists). */
 export function footprintForType(componentType: string): Footprint {
   const size = getDefaultComponentSize(componentType);

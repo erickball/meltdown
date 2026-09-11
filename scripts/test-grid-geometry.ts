@@ -8,7 +8,7 @@ import {
   connectionRoute, pipeRoute, cellCenter, distanceToPolyline, pointAlongRoute, portAnchorFacing,
   searchRoute, routeObstacles, laneOffsetRoutes, Obstacle,
   pipePieceRoute, groundRunRoute, pipeFreeEnds, joinForFreeEnd, findFreeEndJoins,
-  oppositeOrientation, PipeOrientation, snapPlacementCenter,
+  oppositeOrientation, PipeOrientation, snapPlacementCenter, crossVesselMates, crossVesselJoint,
 } from '../src/render/grid-geometry';
 import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point } from '../src/types';
 
@@ -390,6 +390,47 @@ console.log('Ground pipe: free ends that touch');
   // A pipe two tiles away shares nothing
   const far = groundPipe('pf', pipePieceRoute({ x: 20.5, y: 20.5 }, 'EW'));
   check('a piece nowhere near anything joins nothing', findFreeEndJoins(plant, far).length === 0);
+}
+
+console.log('\nCross-vessel welds');
+{
+  // A duct laid wall to wall between vessel A (x -2..2) and vessel B (x 8..12);
+  // A stands inside a wider ring of panels on the same centre, and B holds a
+  // bundle. A second duct touching nothing names a pump as its target.
+  const a = tank('ta', 0, 0, 4, 10);
+  const ring = tank('ring', 0, 0, 8, 10);
+  const b = tank('tb', 10, 0, 4, 10);
+  const bundle: any = { ...tank('bundle', 10, 0, 2, 4), containedBy: 'tb', elevation: 3 };
+  const p = pump('pp', 20, 0);
+  const duct = (id: string, x: number, length: number, target?: string): any => ({
+    id, type: 'crossVessel', position: { x, y: 0 }, rotation: 0, elevation: 4,
+    length, outerDiameter: 1.5, wallThickness: 0.05, innerDiameter: 0.8, innerWallThickness: 0.02,
+    pressureRating: 90, orientation: 'horizontal', targetComponentId: target,
+    ports: [
+      { id: `${id}-in`, position: { x: -length / 2, y: 0 }, direction: 'both' },
+      { id: `${id}-out`, position: { x: length / 2, y: 0 }, direction: 'both' },
+      { id: `${id}-ann`, position: { x: length / 2, y: 0.5 }, direction: 'both' },
+    ],
+  });
+  const cv = duct('cv', 5, 6, 'bundle');
+  const cv2 = duct('cv2', 30, 2, 'pp');
+  const plant: PlantState = {
+    components: new Map<string, any>([[a.id, a], [ring.id, ring], [b.id, b], [bundle.id, bundle], [p.id, p], [cv.id, cv], [cv2.id, cv2]]),
+    connections: [], simTime: 0, simSpeed: 1, isPaused: true,
+  };
+  const mates = crossVesselMates(cv, plant).map(c => c.id);
+  check('a duct is welded to the vessel at each end', mates.length === 2 && mates.includes('ta') && mates.includes('tb'), mates.join(','));
+  check('the end inside a ring of panels mates with the vessel, not the ring', !mates.includes('ring'));
+  const flush = crossVesselJoint({ fromComponentId: 'cv', fromPortId: 'cv-in', toComponentId: 'ta', toPortId: 'ta-right' }, plant);
+  check('a line to the vessel itself is flush at the weld', flush?.kind === 'flush' && flush.mate.id === 'ta');
+  const inside = crossVesselJoint({ fromComponentId: 'bundle', fromPortId: 'bundle-top', toComponentId: 'cv', toPortId: 'cv-out' }, plant);
+  check('a line from inside a welded vessel runs inside it (even to the named target)',
+    inside?.kind === 'inside' && inside.mate.id === 'tb' && inside.crossVesselPortId === 'cv-out' && inside.otherPortId === 'bundle-top');
+  check('a line to anything else is not a weld',
+    crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv', toPortId: 'cv-ann' }, plant) === null);
+  check('a duct touching nothing is welded to nothing, not even its named target',
+    crossVesselMates(cv2, plant).length === 0 &&
+    crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv2', toPortId: 'cv2-in' }, plant) === null);
 }
 
 if (failures > 0) {

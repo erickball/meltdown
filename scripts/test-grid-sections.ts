@@ -125,70 +125,72 @@ check('a route from it starts at the vessel wall, not at the pump', !!hit?.frame
   `anchor ${hit ? fmt(hit.anchor.point) : 'none'} side ${hit?.anchor.side}`);
 
 console.log('Connections');
-// Vessel space -> circulator A: both in the SG section view, drawn there only
+// Vessel space -> circulator A: the circulator draws straight from the
+// vessel's own space, so this is an opening at its inlet - no pipe anywhere
 const suction = conn('tank-sg-1', 'tank-sg-suction-a', 'pump-1a', 'pump-1a-inlet');
 const suctionDrawn = grid.connectionScreenPolylines(suction, plant);
 check('suction opening has no lattice route', suctionDrawn.lattice === null);
-check('suction opening is one run in the section view', suctionDrawn.sections.length === 1);
-if (suctionDrawn.sections.length === 1) {
-  const run = suctionDrawn.sections[0];
-  const inlet = grid.portScreenPosition(pumpA, 'pump-1a-inlet')!;
-  check('  from the vessel port to the pump inlet', near(run[0].x, suctionPos.x, 0.5) && near(run[0].y, suctionPos.y, 0.5) &&
-    near(run[run.length - 1].x, inlet.x, 1e-6) && near(run[run.length - 1].y, inlet.y, 1e-6),
-    `run ${run.map(fmt).join(' ')}`);
-  check('  orthogonal', run.every((p, i) => i === 0 || near(p.x, run[i - 1].x, 1e-6) || near(p.y, run[i - 1].y, 1e-6)));
-}
+check('suction opening draws no run in the section view', suctionDrawn.sections.length === 0);
+const inlet = grid.portScreenPosition(pumpA, 'pump-1a-inlet')!;
 const arrow = grid.connectionScreenEndpoints(suction, plant);
-check('a flow arrow is placed on the section run', !!arrow && arrow.fromPos.x >= sgBox.left && arrow.fromPos.x <= sgBox.right &&
-  arrow.fromPos.y >= sgBox.top && arrow.fromPos.y <= sgBox.bottom,
-  arrow ? `${fmt(arrow.fromPos)} ${fmt(arrow.toPos)}` : 'none');
+const nearInlet = (p: Point) => Math.hypot(p.x - inlet.x, p.y - inlet.y) <= 24;
+check('its flow arrow sits on the pump inlet', !!arrow && nearInlet(arrow.fromPos) && nearInlet(arrow.toPos),
+  arrow ? `${fmt(arrow.fromPos)} ${fmt(arrow.toPos)} inlet ${fmt(inlet)}` : 'none');
 
-// Circulator A -> duct annulus: leaves the vessel, split at the wall
+// Circulator A -> duct annulus. The duct is welded to the SG vessel, so the
+// line is only the leg inside the vessel, to the duct's nozzle as drawn -
+// nothing is routed across the plan
 const discharge = conn('pump-1a', 'pump-1a-outlet', 'cv-1', 'cv-1-annulus-2');
 const dischargeDrawn = grid.connectionScreenPolylines(discharge, plant);
-check('discharge has a lattice route', dischargeDrawn.lattice !== null && dischargeDrawn.lattice.length >= 2);
+check('discharge to a welded duct has no lattice route', dischargeDrawn.lattice === null);
 check('discharge has one run inside the vessel', dischargeDrawn.sections.length === 1);
-if (dischargeDrawn.lattice && dischargeDrawn.sections.length === 1) {
+if (dischargeDrawn.sections.length === 1) {
   const inside = dischargeDrawn.sections[0];
-  const lattice = dischargeDrawn.lattice;
+  const end = inside[inside.length - 1];
+  const ductBox = grid.spriteScreenBox(duct)!;
   check('  the inside run starts at the pump outlet', near(inside[0].x, outletPos.x, 1e-6) && near(inside[0].y, outletPos.y, 1e-6),
     `starts ${fmt(inside[0])} outlet ${fmt(outletPos)}`);
-  const sgRect = footprintRect(sg.position, componentFootprint(sg));
-  const wall = wallAnchor(sg, pumpA.ports[1], sideFacing(sg, duct.position), duct.position);
-  const wallScreen = grid.worldToScreen(wall.point);
-  check('  the wall penetration faces the duct (west)', wall.side === 'W' && near(wall.point.x, sgRect.x0), `side ${wall.side}`);
-  check('  the inside run ends at the wall anchor', near(inside[inside.length - 1].x, wallScreen.x, 1e-6) &&
-    near(inside[inside.length - 1].y, wallScreen.y, 1e-6), `ends ${fmt(inside[inside.length - 1])} wall ${fmt(wallScreen)}`);
-  // The lattice route is laned for display, so its start may sit a lane off
-  // the anchor; it must still begin on the vessel's west edge cell
-  check('  the lattice route picks up at the wall', Math.abs(lattice[0].x - wallScreen.x) < grid.cam.ppm * 0.6 &&
-    Math.abs(lattice[0].y - wallScreen.y) < grid.cam.ppm * 0.6, `lattice starts ${fmt(lattice[0])} wall ${fmt(wallScreen)}`);
-  // Penetration height = the duct annulus port's elevation, on the vessel's sprite
-  const ductPort = duct.ports.find(p => p.id === 'cv-1-annulus-2')!;
-  const ductSize = getComponentSize(duct).height;
-  const zDuct = (duct.elevation ?? 0) + ductSize / 2 - ductPort.position.y;
-  const yPen = sgBox.bottom - (zDuct - (sg.elevation ?? 0)) * zoom;
+  check('  orthogonal', inside.every((p, i) => i === 0 || near(p.x, inside[i - 1].x, 1e-6) || near(p.y, inside[i - 1].y, 1e-6)));
+  // The annulus nozzle: on the duct's SG end, under its axis
+  check('  the run ends on the duct\'s annulus nozzle', near(end.x, ductBox.right, 0.5) &&
+    end.y > (ductBox.top + ductBox.bottom) / 2 && end.y <= ductBox.bottom,
+    `ends ${fmt(end)} duct ${fmtBox(ductBox)}`);
   const drop = inside.find((p, i) => i > 0 && near(p.x, inside[0].x, 1e-6) && !near(p.y, inside[0].y, 1e-6));
-  check('  the run drops from the pump to the duct\'s height', !!drop && near(drop.y, yPen, 0.5) && drop.y > outletPos.y,
-    `drop ${drop ? fmt(drop) : 'none'} expected y ${yPen.toFixed(1)} outlet y ${outletPos.y.toFixed(1)}`);
-  const atWall = inside.find(p => near(p.y, yPen, 0.5) && p.x < inside[0].x);
-  check('  then runs west to the vessel wall', !!atWall && near(atWall.x, sgBox.left, 0.5),
-    `at wall ${atWall ? fmt(atWall) : 'none'} sg left ${sgBox.left.toFixed(1)}`);
-  check('  the discharge run is clickable inside the vessel', grid.connectionAt({ x: inside[0].x, y: yPen }, plant) === discharge);
+  check('  the run drops from the pump to the nozzle\'s height', !!drop && near(drop.y, end.y, 1e-6) && drop.y > outletPos.y,
+    `drop ${drop ? fmt(drop) : 'none'} nozzle y ${end.y.toFixed(1)} outlet y ${outletPos.y.toFixed(1)}`);
+  check('  the discharge run is clickable inside the vessel', grid.connectionAt({ x: inside[0].x, y: end.y }, plant) === discharge);
+  check('  it carries a flow arrow', grid.connectionScreenEndpoints(discharge, plant) !== null);
 }
 
-// Bundle shell outlet -> vessel space (a component to its own container): drawn in the section view
+// Bundle shell outlet -> vessel space (a component to its own container): an
+// opening on the bundle's nozzle, wherever the vessel's own port is
 const shellOut = conn('hx-1', 'hx-1-shell-2', 'tank-sg-1', 'tank-sg-in');
 const shellDrawn = grid.connectionScreenPolylines(shellOut, plant);
-check('bundle-to-vessel opening is drawn in the section view (no lattice route)',
-  shellDrawn.lattice === null && shellDrawn.sections.length === 1);
+check('bundle-to-vessel opening draws nothing (no lattice route, no section run)',
+  shellDrawn.lattice === null && shellDrawn.sections.length === 0);
+const shellNozzle = grid.portScreenPosition(bundle, 'hx-1-shell-2')!;
+const shellArrow = grid.connectionScreenEndpoints(shellOut, plant);
+check('  its flow arrow sits on the bundle nozzle', !!shellArrow &&
+  Math.hypot(shellArrow.fromPos.x - shellNozzle.x, shellArrow.fromPos.y - shellNozzle.y) <= 24,
+  shellArrow ? `${fmt(shellArrow.fromPos)} nozzle ${fmt(shellNozzle)}` : 'none');
 
-// A vessel that stands on the plan keeps its plan behaviour: the RPV's cold
-// leg to the duct is a lattice route with nothing inside anything
+// The duct's other end is welded to the RPV: its annulus opens straight into
+// the vessel's cold leg, so there is no line at all
 const rv = comp('rv-1');
 const coldLeg = conn('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg');
 const coldDrawn = grid.connectionScreenPolylines(coldLeg, plant);
-check('a connection between two plan sprites has no section runs', coldDrawn.lattice !== null && coldDrawn.sections.length === 0);
+check('the duct welded flush to the RPV draws no line', coldDrawn.lattice === null && coldDrawn.sections.length === 0);
+// ...while the core outlet, inside the RPV, runs inside it to the duct's inner pipe
+const hotLeg = conn('cb-1', 'cb-1-bottom', 'cv-1', 'cv-1-inner-in');
+const hotDrawn = grid.connectionScreenPolylines(hotLeg, plant);
+check('the core outlet to the welded duct is one run inside the RPV', hotDrawn.lattice === null && hotDrawn.sections.length === 1);
+if (hotDrawn.sections.length === 1) {
+  const run = hotDrawn.sections[0];
+  const ductBox = grid.spriteScreenBox(duct)!;
+  const end = run[run.length - 1];
+  check('  ending on the duct\'s RPV end, on its axis', near(end.x, ductBox.left, 0.5) &&
+    near(end.y, (ductBox.top + ductBox.bottom) / 2, 0.5), `ends ${fmt(end)} duct ${fmtBox(ductBox)}`);
+}
 check('a plan sprite stands on its footprint', near(grid.spriteScreenBox(rv)!.bottom,
   grid.worldToScreen({ x: rv.position.x, y: footprintRect(rv.position, componentFootprint(rv)).y1 }).y, 1e-6));
 

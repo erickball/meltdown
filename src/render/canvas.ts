@@ -16,7 +16,7 @@ import { flowPhaseAt } from '../simulation/operators/connection-hydraulics';
 import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
-import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute } from './grid-geometry';
+import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute, crossVesselJoint } from './grid-geometry';
 import { Point3, RunVertex, liftRoute, slopeRoute, drawPipeRun, screenMidpoint } from './pipe-run-3d';
 import { drawFires, collectCladdingFires } from './fire-fx';
 import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
@@ -2246,7 +2246,7 @@ export class PlantCanvas {
              connection.toComponentId === this.selectedComponentId);
           // A pipe along the grid's route, lifted to the nozzles' heights;
           // a line with no route (an opening into the component's own
-          // container, a cross-vessel mating face) is the short stub it was
+          // container, a cross-vessel's welded end) is the short stub it was
           const run = this.connectionRunScreen(connection, fromComponent, fromPort, toComponent, toPort);
           if (run) {
             const ghost = buildGhost(connection);
@@ -2649,18 +2649,18 @@ export class PlantCanvas {
     let adjustedToScreen = toScreen.pos;
 
     // Special handling for cross-vessel connections
-    // Cross-vessels physically connect to their targets, so the connection should be very short
+    // Cross-vessels are welded to the vessels they butt against, so the connection should be very short
     // to avoid drawing a gap between them
     const isCrossVesselConnection = fromComponent.type === 'crossVessel' || toComponent.type === 'crossVessel';
     if (isCrossVesselConnection) {
       // For cross-vessel connections, make the connection line very short (5% of distance)
       // This creates a nearly seamless appearance
-      const fromIsCrossVessel = fromComponent.type === 'crossVessel';
-      const crossVessel = fromIsCrossVessel ? fromComponent : toComponent;
-      const targetId = (crossVessel as any).targetComponentId;
 
-      // If this connection is between cross-vessel and its designated target, minimize the line
-      if (targetId && (targetId === fromComponent.id || targetId === toComponent.id)) {
+      // If this connection is between cross-vessel and a vessel it is welded to,
+      // minimize the line. A line from inside that vessel is drawn in full; with
+      // no weld at all, the duct's designated target still mates face to face.
+      const joint = crossVesselJoint(connection, this.plantState);
+      if (joint ? joint.kind === 'flush' : this.isCrossVesselTargetPair(fromComponent, toComponent)) {
         const t = 0.05;
         const midX = (fromScreen.pos.x + toScreen.pos.x) / 2;
         const midY = (fromScreen.pos.y + toScreen.pos.y) / 2;
@@ -2729,9 +2729,9 @@ export class PlantCanvas {
    * A connection's pipe run on screen: the grid view's plan route, lifted
    * into 3D between the two nozzles as drawn (liftRoute), projected, with
    * the pipe's bore giving its width at every vertex. Null when the line has
-   * no route (an opening between a component and its container), when a
-   * cross-vessel mates face to face with its target, or when any of it is
-   * behind the camera.
+   * no route (an opening between a component and its container), when it
+   * meets a cross-vessel at a vessel the duct is welded to (crossVesselJoint),
+   * or when any of it is behind the camera.
    */
   private connectionRunScreen(
     connection: Connection,
@@ -2747,6 +2747,19 @@ export class PlantCanvas {
     return run;
   }
 
+  /**
+   * A cross-vessel and the component its `targetComponentId` names: drawn as
+   * mating face to face in this view, whether or not the duct is placed
+   * touching it (older plants' convention; crossVesselJoint covers ducts that
+   * really are welded to a vessel).
+   */
+  private isCrossVesselTargetPair(fromComponent: PlantComponent, toComponent: PlantComponent): boolean {
+    const crossVessel = fromComponent.type === 'crossVessel' ? fromComponent
+      : toComponent.type === 'crossVessel' ? toComponent : undefined;
+    const mateId = crossVessel ? (crossVessel as { targetComponentId?: string }).targetComponentId : undefined;
+    return !!mateId && (mateId === fromComponent.id || mateId === toComponent.id);
+  }
+
   private computeConnectionRun(
     connection: Connection,
     fromComponent: PlantComponent,
@@ -2754,10 +2767,9 @@ export class PlantCanvas {
     toComponent: PlantComponent,
     storedToPort: { position: Point }
   ): { pts: RunVertex[]; scale: number } | null {
-    const crossVessel = fromComponent.type === 'crossVessel' ? fromComponent
-      : toComponent.type === 'crossVessel' ? toComponent : undefined;
-    const mateId = crossVessel ? (crossVessel as { targetComponentId?: string }).targetComponentId : undefined;
-    if (mateId && (mateId === fromComponent.id || mateId === toComponent.id)) return null;
+    // A cross-vessel at a vessel it is welded to (or at its named target) is
+    // not piped across the plant: flush at the weld, or a short line inside
+    if (crossVesselJoint(connection, this.plantState) || this.isCrossVesselTargetPair(fromComponent, toComponent)) return null;
     const plan = this.planRuns.get(connection);
     if (!plan || plan.length < 2) return null;
     const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);

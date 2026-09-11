@@ -134,7 +134,7 @@
             "id": "rv-1-cold-leg",
             "position": {
               "x": -2.3,
-              "y": 6.539999999999999
+              "y": 7.1899999999999995
             },
             "direction": "both"
           },
@@ -2068,7 +2068,7 @@
       "toPortId": "rv-1-cold-leg",
       "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.25,
-      "toElevation": 3.460000000000001,
+      "toElevation": 2.8100000000000005,
       "flowArea": 1,
       "length": 3,
       "resistanceCoeff": 1.5

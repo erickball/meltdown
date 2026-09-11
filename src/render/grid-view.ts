@@ -31,7 +31,7 @@ import {
   PipeOrientation, pipePieceRoute, groundRunRoute, findFreeEndJoins, snapPlacementCenter,
   isGroundLayerComponent,
   partnerReference, sideFacing, wallAnchor, autoRoute, reanchorRoute, portSide, simplifyRoute,
-  ENVIRONMENT_ID, Obstacle,
+  ENVIRONMENT_ID, Obstacle, crossVesselJoint, CrossVesselJoint,
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
@@ -288,11 +288,22 @@ export class GridView {
       const to = plantState.components.get(conn.toComponentId);
       if (!from && !to) continue;
 
-      // An opening between a component and a container that is not drawn as
-      // a sprite (a building, a pool) has nowhere to be drawn
-      if (from && to && this.isContainmentPair(from, to)) {
-        const container = from.containedBy === to.id ? to : from;
-        if (!this.isSectionFrame(container)) continue;
+      // An opening between a component and its container is not a pipe: the
+      // inner component's nozzle opens straight into the container's own
+      // space, wherever the container's port happens to sit. Nothing is
+      // drawn; its arrow goes on that nozzle (openingEndpoints)
+      if (from && to && this.isContainmentPair(from, to)) continue;
+
+      // A line to a cross-vessel at a vessel the duct is welded to: flush at
+      // the weld there is nothing to draw; from inside that vessel, only the
+      // leg inside it, to the wall the duct enters by
+      const joint = from && to ? crossVesselJoint(conn, plantState) : null;
+      if (joint) {
+        if (joint.kind === 'inside') {
+          const pts = this.weldedRun(joint);
+          if (pts) addSection(joint.mate, conn, pts);
+        }
+        continue;
       }
 
       // Both ends drawn in the same section view: the whole run lives there
@@ -373,7 +384,9 @@ export class GridView {
   // contained by such a sprite is therefore drawn ON it, at its real
   // elevation and lateral offset - the container's sprite is a section view
   // - and a connection between two things in the same section view is drawn
-  // there too. A connection that leaves the container is split at the wall:
+  // there too (one between a component and the container itself is an
+  // opening into the container's space, with no run). A connection that
+  // leaves the container is split at the wall:
   // inside, a run from the port to the penetration at the outside end's
   // elevation; outside, an ordinary lattice route from the wall onward.
   // Buildings, pools and the other ground-layer things are floors, not
@@ -489,6 +502,18 @@ export class GridView {
       : wall.side === 'W' ? RL.centerX - RL.halfWpx
       : plan.x;
     return simplifyRoute([p, { x: p.x, y: yWall }, { x: xWall, y: yWall }, { x: xWall, y: plan.y }, plan]);
+  }
+
+  /**
+   * A line from inside a vessel to a cross-vessel welded to that vessel: from
+   * the port, up or down to the duct nozzle's height and across to the nozzle
+   * as the duct is drawn. Nothing runs outside - the duct starts at the wall.
+   */
+  private weldedRun(joint: CrossVesselJoint): Point[] | null {
+    const p = this.spritePortPosition(joint.other, joint.otherPortId);
+    const q = this.spritePortPosition(joint.crossVessel, joint.crossVesselPortId);
+    if (!p || !q) return null;
+    return simplifyRoute([p, { x: p.x, y: q.y }, q]);
   }
 
   /** The last frame's layout (built now if there is none yet). */
@@ -884,8 +909,8 @@ export class GridView {
   }
 
   /**
-   * An opening between a component and its container whose two nozzles
-   * coincide in the section view, so no run is drawn: its arrow sits on the
+   * An opening between a component and its container: no run is drawn (the
+   * inner nozzle opens into the container's space), so its arrow sits on the
    * inner component's nozzle (see openingArrowEndpoints).
    */
   private openingEndpoints(conn: Connection, plantState: PlantState, scale: number): ConnectionScreenEndpoints | null {
@@ -2334,14 +2359,14 @@ export class GridView {
     path(); ctx.stroke();
     ctx.restore();
 
-    // Elbows
-    ctx.fillStyle = '#3a3f45';
-    ctx.strokeStyle = '#1c1f23';
-    ctx.lineWidth = 1;
+    // Elbows: a weld collar round the bend, as the 2.5D runs draw it. Only a
+    // ring - a filled disc the size of a big duct's bore reads as a blob.
+    ctx.strokeStyle = 'rgba(28, 31, 35, 0.75)';
     for (let i = 1; i < pts.length - 1; i++) {
+      ctx.lineWidth = Math.max(1, w * 0.12);
       ctx.beginPath();
-      ctx.arc(pts[i].x, pts[i].y, w * 0.62, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
+      ctx.arc(pts[i].x, pts[i].y, w * 0.5 + 1, 0, Math.PI * 2);
+      ctx.stroke();
     }
 
     // Flanges at the ends, perpendicular to the last segment

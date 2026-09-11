@@ -74,6 +74,9 @@ const SG_BUNDLE_TOP = SG_BUNDLE_BASE + SG_BUNDLE_HEIGHT;   // 15.5 m
 const DUCT_OD = 1.8;
 const DUCT_CENTERLINE = SG_BUNDLE_TOP;  // hot gas enters the bundle at its top
 const DUCT_BASE = DUCT_CENTERLINE - DUCT_OD / 2;           // 14.6 m
+// The annulus nozzles at each end of the duct sit this far under its axis
+const ANNULUS_NOZZLE_DROP = 0.65;
+const ANNULUS_NOZZLE = DUCT_CENTERLINE - ANNULUS_NOZZLE_DROP;   // 14.85 m
 const CIRCULATOR_BASE = 16.0;           // above the bundle, under the vessel dome
 
 // The reactor vessel and its core barrel. The barrel is placed by the SAME
@@ -198,7 +201,8 @@ add('rv-1', {
   coreBarrelId: 'cb-1',
   // Port y is measured down from the vessel's centre
   ports: ports([
-    ['rv-1-cold-leg', -RPV_ID / 2, RPV_HEIGHT / 2 - (DUCT_CENTERLINE - RPV_LIFT)],   // annulus return, at the duct
+    // annulus return: level with the duct's annulus nozzle, which is welded to the vessel wall here
+    ['rv-1-cold-leg', -RPV_ID / 2, RPV_HEIGHT / 2 - (ANNULUS_NOZZLE - RPV_LIFT)],
     ['rv-1-core-in', 0, RPV_HEIGHT / 2 - (BARREL.top + BARREL_TOP_GAP / 2)],        // top plenum, over the barrel
   ]),
   fluid: heFluid(T_CORE_IN),
@@ -329,8 +333,8 @@ add('cv-1', {
   ports: ports([
     ['cv-1-inner-in', -DUCT_LENGTH / 2, 0],      // RPV end: hot gas in
     ['cv-1-inner-out', DUCT_LENGTH / 2, 0],      // SG end: hot gas out
-    ['cv-1-annulus-1', -DUCT_LENGTH / 2, 0.65],  // RPV end: cold return out
-    ['cv-1-annulus-2', DUCT_LENGTH / 2, 0.65],   // SG end: circulator discharge in
+    ['cv-1-annulus-1', -DUCT_LENGTH / 2, ANNULUS_NOZZLE_DROP],  // RPV end: cold return out
+    ['cv-1-annulus-2', DUCT_LENGTH / 2, ANNULUS_NOZZLE_DROP],   // SG end: circulator discharge in
   ]),
   fluid: heFluid(T_CORE_OUT),
   annulusFluid: heFluid(T_SG_HE_OUT),
@@ -762,11 +766,12 @@ for (const [pump, suction] of [['pump-1a', 'tank-sg-suction-a'], ['pump-1b', 'ta
   connect('tank-sg-1', suction, pump, `${pump}-inlet`,
     { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: CIRCULATOR_BASE, toElevation: 0, flowArea: 0.3, length: 2, resistanceCoeff: 1 });
   connect(pump, `${pump}-outlet`, 'cv-1', 'cv-1-annulus-2',
-    { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: 0, toElevation: DUCT_OD / 2 - 0.65, flowArea: 0.5, length: 2, resistanceCoeff: 1 });
+    { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: 0, toElevation: DUCT_OD / 2 - ANNULUS_NOZZLE_DROP, flowArea: 0.5, length: 2, resistanceCoeff: 1 });
 }
-// Duct annulus -> RPV cold leg, entering at the duct elevation just under the core
+// Duct annulus -> RPV cold leg, just under the core. The duct is welded to
+// the vessel, so both nozzles are the one opening at the same height.
 connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
-  { initialFlowRate: HE_FLOW_INIT, fromElevation: DUCT_OD / 2 - 0.65, toElevation: DUCT_CENTERLINE - RPV_LIFT,
+  { initialFlowRate: HE_FLOW_INIT, fromElevation: DUCT_OD / 2 - ANNULUS_NOZZLE_DROP, toElevation: ANNULUS_NOZZLE - RPV_LIFT,
     flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 
 // ---------------------------------------------------------------------------
