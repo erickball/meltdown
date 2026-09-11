@@ -39,6 +39,7 @@ import { TerrainModel, buildTerrainModel, surfaceAtVolume, terrainHeightAt, cell
 import { contourPolylines, ContourSet } from './terrain-contours';
 import { renderFloodDebris } from './debris-fx';
 import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
+import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
 
 export interface GridCamera {
   /** World point (metres) at the canvas centre. */
@@ -1250,6 +1251,7 @@ export class GridView {
     this.renderElevationLabels(ctx, labels);
 
     this.renderBuildProgress(ctx, f);
+    this.renderNoPowerBadges(ctx, f);
 
     this.renderSignalLines(ctx, f);
 
@@ -2247,6 +2249,16 @@ export class GridView {
    * flat alpha on the ordinary drawing, so a part looks like what it will
    * be, only fainter.
    */
+  /** No-power badges over every part that needs power and has none (electrical model). */
+  private renderNoPowerBadges(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
+    for (const id of unpoweredParts(f.plantState, f.simState, f.constructionMode)) {
+      const c = f.plantState.components.get(id);
+      const b = c ? this.componentScreenBounds(c) : null;
+      if (!b) continue;
+      drawNoPowerBadge(ctx, b.topCenter.x, b.topCenter.y - NO_POWER_BADGE_RADIUS - 2, NO_POWER_BADGE_RADIUS);
+    }
+  }
+
   private renderBuildProgress(ctx: CanvasRenderingContext2D, f: GridFrameState): void {
     for (const c of f.plantState.components.values()) {
       const g = buildGhost(c);
