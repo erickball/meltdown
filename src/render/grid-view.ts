@@ -508,11 +508,17 @@ export class GridView {
    * A line from inside a vessel to a cross-vessel welded to that vessel: from
    * the port, up or down to the duct nozzle's height and across to the nozzle
    * as the duct is drawn. Nothing runs outside - the duct starts at the wall.
+   * The nozzle is at the line's own elevation on the duct, so an annulus line
+   * meets the side of the inner pipe that faces its partner.
    */
   private weldedRun(joint: CrossVesselJoint): Point[] | null {
     const p = this.spritePortPosition(joint.other, joint.otherPortId);
-    const q = this.spritePortPosition(joint.crossVessel, joint.crossVesselPortId);
-    if (!p || !q) return null;
+    const port = this.spritePortPosition(joint.crossVessel, joint.crossVesselPortId);
+    if (!p || !port) return null;
+    const z = joint.crossVesselElevation;
+    const cv = joint.crossVessel;
+    const portRise = this.portElevation(cv, joint.crossVesselPortId) - (cv.elevation ?? 0);
+    const q = z === undefined ? port : { x: port.x, y: port.y + (portRise - z) * this.spriteLayout(cv).zoom };
     return simplifyRoute([p, { x: p.x, y: q.y }, q]);
   }
 

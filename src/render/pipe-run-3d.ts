@@ -83,6 +83,17 @@ export function slopeRoute(plan: Point[], startZ: number, endZ: number): Point3[
   return simplify3(out);
 }
 
+/**
+ * A cross-vessel's inner pipe carried on inside the vessel it is welded to,
+ * from the duct's nozzle to the one it feeds: straight on along the duct's
+ * axis (x) to the other nozzle's plan x, then across (y) and up or down (z)
+ * only as far as that nozzle is off the duct's line - no turn at all when it
+ * sits on it.
+ */
+export function ductContinuation(duct: Point3, other: Point3): Point3[] {
+  return simplify3([duct, { x: other.x, y: duct.y, z: duct.z }, { x: other.x, y: other.y, z: duct.z }, other]);
+}
+
 /** Drop repeated vertices and the middle of straight runs (they would draw as elbows). */
 function simplify3(pts: Point3[]): Point3[] {
   const dedup: Point3[] = [];

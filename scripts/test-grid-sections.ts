@@ -151,9 +151,10 @@ if (dischargeDrawn.sections.length === 1) {
   check('  the inside run starts at the pump outlet', near(inside[0].x, outletPos.x, 1e-6) && near(inside[0].y, outletPos.y, 1e-6),
     `starts ${fmt(inside[0])} outlet ${fmt(outletPos)}`);
   check('  orthogonal', inside.every((p, i) => i === 0 || near(p.x, inside[i - 1].x, 1e-6) || near(p.y, inside[i - 1].y, 1e-6)));
-  // The annulus nozzle: on the duct's SG end, under its axis
-  check('  the run ends on the duct\'s annulus nozzle', near(end.x, ductBox.right, 0.5) &&
-    end.y > (ductBox.top + ductBox.bottom) / 2 && end.y <= ductBox.bottom,
+  // The annulus nozzle: on the duct's SG end, on the TOP side of the inner
+  // pipe - the circulators stand above the duct's axis
+  check('  the run ends on the duct\'s annulus nozzle, on the side facing the pump', near(end.x, ductBox.right, 0.5) &&
+    end.y < (ductBox.top + ductBox.bottom) / 2 && end.y >= ductBox.top,
     `ends ${fmt(end)} duct ${fmtBox(ductBox)}`);
   const drop = inside.find((p, i) => i > 0 && near(p.x, inside[0].x, 1e-6) && !near(p.y, inside[0].y, 1e-6));
   check('  the run drops from the pump to the nozzle\'s height', !!drop && near(drop.y, end.y, 1e-6) && drop.y > outletPos.y,

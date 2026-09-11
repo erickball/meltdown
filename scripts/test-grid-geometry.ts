@@ -10,7 +10,7 @@ import {
   pipePieceRoute, groundRunRoute, pipeFreeEnds, joinForFreeEnd, findFreeEndJoins,
   oppositeOrientation, PipeOrientation, snapPlacementCenter, crossVesselMates, crossVesselJoint,
 } from '../src/render/grid-geometry';
-import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point } from '../src/types';
+import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point, annulusNozzleElevation } from '../src/types';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: string): void {
@@ -431,6 +431,12 @@ console.log('\nCross-vessel welds');
   check('a duct touching nothing is welded to nothing, not even its named target',
     crossVesselMates(cv2, plant).length === 0 &&
     crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv2', toPortId: 'cv2-in' }, plant) === null);
+  // The annulus nozzle (0.5 m off the axis of a 1.5 m duct standing at 4 m,
+  // axis at 4.75 m) faces its partner
+  const ann = cv.ports.find((p: any) => p.id === 'cv-ann');
+  check('an annulus nozzle faces a partner above the axis from the top', near(annulusNozzleElevation(cv, ann, 6), 0.75 + 0.5));
+  check('...and one below it from the bottom', near(annulusNozzleElevation(cv, ann, 3), 0.75 - 0.5));
+  check('...whichever way the port was stored', near(annulusNozzleElevation(cv, { position: { y: -0.5 } }, 3), 0.25));
 }
 
 if (failures > 0) {

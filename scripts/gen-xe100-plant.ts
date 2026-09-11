@@ -105,7 +105,9 @@ const BARREL = reactorBarrelExtent(rpvGeometry(BARREL_TOP_GAP));   // from the R
 const RPV_DOWNCOMER_VOLUME =
   Math.PI * ((RPV_ID / 2) ** 2 - (BARREL_DIAMETER / 2 + BARREL_THICKNESS) ** 2) * (RPV_HEIGHT - 2 * 1.5);
 // RPV base: raised so the duct centerline sits 0.4 m under the fuel
-const RPV_LIFT = +(DUCT_CENTERLINE + 0.4 - CORE_BOTTOM_IN_BARREL - BARREL.bottom).toFixed(2);
+// Not rounded: the barrel bottom (the core outlet) must sit exactly on the
+// duct's axis, so the hot duct runs straight into it
+const RPV_LIFT = DUCT_CENTERLINE + 0.4 - CORE_BOTTOM_IN_BARREL - BARREL.bottom;
 // Sanity: the duct centerline must sit a little BELOW the core bottom
 const CORE_BOTTOM_ABS = RPV_LIFT + BARREL.bottom + CORE_BOTTOM_IN_BARREL;   // ~15.9 m
 if (!(DUCT_CENTERLINE < CORE_BOTTOM_ABS && DUCT_CENTERLINE > RPV_LIFT)) {
@@ -765,8 +767,10 @@ connect('hx-1', 'hx-1-shell-2', 'tank-sg-1', 'tank-sg-in',
 for (const [pump, suction] of [['pump-1a', 'tank-sg-suction-a'], ['pump-1b', 'tank-sg-suction-b']] as const) {
   connect('tank-sg-1', suction, pump, `${pump}-inlet`,
     { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: CIRCULATOR_BASE, toElevation: 0, flowArea: 0.3, length: 2, resistanceCoeff: 1 });
+  // The circulators stand above the duct axis, so they discharge into the
+  // annulus on its TOP side (annulusNozzleElevation: the nozzle faces its partner)
   connect(pump, `${pump}-outlet`, 'cv-1', 'cv-1-annulus-2',
-    { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: 0, toElevation: DUCT_OD / 2 - ANNULUS_NOZZLE_DROP, flowArea: 0.5, length: 2, resistanceCoeff: 1 });
+    { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: 0, toElevation: DUCT_OD / 2 + ANNULUS_NOZZLE_DROP, flowArea: 0.5, length: 2, resistanceCoeff: 1 });
 }
 // Duct annulus -> RPV cold leg, just under the core. The duct is welded to
 // the vessel, so both nozzles are the one opening at the same height.

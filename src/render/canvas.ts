@@ -17,7 +17,7 @@ import { PipeContentsTracker } from './display-flow';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
 import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute, crossVesselJoint } from './grid-geometry';
-import { Point3, RunVertex, liftRoute, slopeRoute, drawPipeRun, screenMidpoint } from './pipe-run-3d';
+import { Point3, RunVertex, liftRoute, slopeRoute, ductContinuation, drawPipeRun, screenMidpoint } from './pipe-run-3d';
 import { drawFires, collectCladdingFires } from './fire-fx';
 import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
@@ -2767,9 +2767,17 @@ export class PlantCanvas {
     toComponent: PlantComponent,
     storedToPort: { position: Point }
   ): { pts: RunVertex[]; scale: number } | null {
-    // A cross-vessel at a vessel it is welded to (or at its named target) is
-    // not piped across the plant: flush at the weld, or a short line inside
-    if (crossVesselJoint(connection, this.plantState) || this.isCrossVesselTargetPair(fromComponent, toComponent)) return null;
+    const joint = crossVesselJoint(connection, this.plantState);
+    // The duct's inner (hot) pipe goes on inside the vessel it is welded to,
+    // to the nozzle it serves - a pipe, as it is in the plant
+    if (joint?.kind === 'inside' && !joint.crossVesselPortId.includes('annulus')) {
+      return this.ductContinuationRun(connection, joint.crossVessel === fromComponent,
+        fromComponent, storedFromPort, toComponent, storedToPort);
+    }
+    // Otherwise a cross-vessel at a vessel it is welded to (or at its named
+    // target) is not piped across the plant: flush at the weld, or a short
+    // line inside
+    if (joint || this.isCrossVesselTargetPair(fromComponent, toComponent)) return null;
     const plan = this.planRuns.get(connection);
     if (!plan || plan.length < 2) return null;
     const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
@@ -2779,6 +2787,32 @@ export class PlantCanvas {
     if (!a || !b) return null;
     const path = liftRoute(a, this.leaveAxis(fromComponent, plan[0]), plan,
       b, this.leaveAxis(toComponent, plan[plan.length - 1]));
+    const bore = connection.flowArea && connection.flowArea > 0 ? Math.sqrt(4 * connection.flowArea / Math.PI) : 0.3;
+    const pts = this.projectRun(path, bore);
+    return pts ? { pts, scale: (a.scale + b.scale) / 2 } : null;
+  }
+
+  /**
+   * A cross-vessel's inner pipe continued inside the vessel it is welded to
+   * (ductContinuation): from the duct's nozzle straight on along its axis,
+   * turning only as far as the other nozzle is off that line.
+   */
+  private ductContinuationRun(
+    connection: Connection,
+    ductIsFrom: boolean,
+    fromComponent: PlantComponent,
+    storedFromPort: { position: Point },
+    toComponent: PlantComponent,
+    storedToPort: { position: Point }
+  ): { pts: RunVertex[]; scale: number } | null {
+    const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
+    const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
+    const a = this.nozzle3D(fromComponent, fromPort, connection.fromElevation ?? 0);
+    const b = this.nozzle3D(toComponent, toPort, connection.toElevation ?? 0);
+    if (!a || !b) return null;
+    // Laid from the duct, then put in the connection's own from -> to order
+    // (the flow arrow reads its direction off the run)
+    const path = ductIsFrom ? ductContinuation(a, b) : ductContinuation(b, a).reverse();
     const bore = connection.flowArea && connection.flowArea > 0 ? Math.sqrt(4 * connection.flowArea / Math.PI) : 0.3;
     const pts = this.projectRun(path, bore);
     return pts ? { pts, scale: (a.scale + b.scale) / 2 } : null;

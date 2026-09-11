@@ -117,7 +117,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 12.04,
+        "elevation": 12.043116329012044,
         "innerDiameter": 4.6,
         "wallThickness": 0.22,
         "height": 20,
@@ -134,7 +134,7 @@
             "id": "rv-1-cold-leg",
             "position": {
               "x": -2.3,
-              "y": 7.1899999999999995
+              "y": 7.193116329012044
             },
             "direction": "both"
           },
@@ -172,7 +172,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 15.496883670987955,
+        "elevation": 15.5,
         "innerDiameter": 2.4,
         "thickness": 0.06,
         "height": 11,
@@ -1034,7 +1034,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 12.04,
+        "elevation": 12.043116329012044,
         "width": 0.66,
         "height": 10,
         "wallThickness": 0.006,
@@ -1089,7 +1089,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 22.04,
+        "elevation": 22.043116329012044,
         "width": 0.66,
         "height": 10,
         "wallThickness": 0.006,
@@ -1144,7 +1144,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 38.04,
+        "elevation": 38.043116329012044,
         "width": 4,
         "height": 16,
         "wallThickness": 0.012,
@@ -1204,7 +1204,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 54.04,
+        "elevation": 54.043116329012044,
         "diameter": 0.1,
         "opening": 0,
         "volume": 0.1,
@@ -2032,7 +2032,7 @@
       "toPortId": "cv-1-annulus-2",
       "initialFlowRate": 39.284241126672036,
       "fromElevation": 0,
-      "toElevation": 0.25,
+      "toElevation": 1.55,
       "flowArea": 0.5,
       "length": 2,
       "resistanceCoeff": 1
@@ -2056,7 +2056,7 @@
       "toPortId": "cv-1-annulus-2",
       "initialFlowRate": 39.284241126672036,
       "fromElevation": 0,
-      "toElevation": 0.25,
+      "toElevation": 1.55,
       "flowArea": 0.5,
       "length": 2,
       "resistanceCoeff": 1
@@ -2068,7 +2068,7 @@
       "toPortId": "rv-1-cold-leg",
       "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.25,
-      "toElevation": 2.8100000000000005,
+      "toElevation": 2.806883670987956,
       "flowArea": 1,
       "length": 3,
       "resistanceCoeff": 1.5
@@ -2464,7 +2464,7 @@
       "toComponentId": "bui-rx",
       "toPortId": "bui-rx-vent-2",
       "fromElevation": 0,
-      "toElevation": 54.04,
+      "toElevation": 54.043116329012044,
       "flowArea": 0.008,
       "length": 6,
       "resistanceCoeff": 2

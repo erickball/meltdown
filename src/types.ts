@@ -783,6 +783,21 @@ export interface CrossVesselComponent extends ComponentBase {
 }
 
 /**
+ * Where a line meets a cross-vessel's annulus: its elevation above the
+ * duct's bottom. The annulus wraps the inner pipe, so its nozzle can sit on
+ * either side of the axis. The port's offset from the axis says how far off
+ * (drawn under it until something is connected); the side is whichever faces
+ * the line's other end - above the axis for a partner higher than the axis,
+ * below otherwise.
+ */
+export function annulusNozzleElevation(cv: { elevation?: number; outerDiameter: number },
+                                       port: { position: { y: number } }, partnerZ: number): number {
+  const half = cv.outerDiameter / 2;
+  const offset = Math.abs(port.position.y);
+  return partnerZ > (cv.elevation ?? 0) + half ? half + offset : half - offset;
+}
+
+/**
  * The terrain water body a component is drawn as, if any (see
  * TankComponent.waterBody). One place to ask, so the renderers, the hit
  * tests and the route obstacles all agree.

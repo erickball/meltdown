@@ -198,6 +198,8 @@ export interface CrossVesselJoint {
   otherPortId: string;
   mate: PlantComponent;
   kind: 'flush' | 'inside';
+  /** The line's stored elevation at the duct's nozzle (above the duct's bottom): which side of the annulus it meets. */
+  crossVesselElevation: number | undefined;
 }
 
 export function crossVesselJoint(conn: Connection, plantState: PlantState): CrossVesselJoint | null {
@@ -211,6 +213,7 @@ export function crossVesselJoint(conn: Connection, plantState: PlantState): Cros
   const joint = (mate: PlantComponent, kind: 'flush' | 'inside'): CrossVesselJoint => ({
     crossVessel: cv, crossVesselPortId: cvIsFrom ? conn.fromPortId : conn.toPortId,
     other, otherPortId: cvIsFrom ? conn.toPortId : conn.fromPortId, mate, kind,
+    crossVesselElevation: cvIsFrom ? conn.fromElevation : conn.toElevation,
   });
   const mates = crossVesselMates(cv, plantState);
   const seen = new Set<string>();
