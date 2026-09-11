@@ -42,7 +42,7 @@ import { pumpMotorElevation } from './types';
 import { nodeLiquidLevelFraction } from './simulation';
 import { nodeGasVolume } from './simulation/mixture-properties';
 import type { PlantStock, PoolComponent } from './types';
-import { electricalDetailHtml, wireElectricalButtons } from './electrical-panel';
+import { electricalDetailHtml, powerSupplyRows, wireElectricalButtons } from './electrical-panel';
 import type { ElectricalCommand } from './simulation/electrical';
 
 // Store previous pressures to show transitions
@@ -1237,6 +1237,8 @@ export function updateComponentDetail(
         html += '<div class="detail-section">';
         html += '<div class="detail-section-title">Operating Status</div>';
         html += `<div class="detail-row"><span class="detail-label">Status:</span><span class="detail-value" style="color: ${pumpState.running ? '#7f7' : '#f77'};">${pumpState.running ? 'RUNNING' : 'STOPPED'}</span></div>`;
+        // Electrical model: the motor's supply (or what it needs)
+        html += powerSupplyRows(componentId, plantState, simState);
         html += `<div class="detail-row"><span class="detail-label" title="Actual speed, % of rated (ramps toward the setpoint)">Speed:</span><span class="detail-value">${(pumpState.effectiveSpeed * 100).toFixed(1)}%${Math.abs(pumpState.effectiveSpeed - pumpState.speed) > 0.005 && pumpState.running ? ` <span style="color: #888; font-size: 9px;">(setpoint ${(pumpState.speed * 100).toFixed(0)}%)</span>` : ''}</span></div>`;
         html += `<div class="detail-row"><span class="detail-label" title="Shutoff head at this speed: 1.25 x rated head x speed squared">Shutoff head:</span><span class="detail-value">${(1.25 * pumpState.ratedHead * pumpState.effectiveSpeed * pumpState.effectiveSpeed).toFixed(1)} m</span></div>`;
         {
@@ -1668,7 +1670,10 @@ export function updateComponentDetail(
 
   // Electrical model: what this is fed from and whether it has power, or
   // (for the network's own pieces) its state and the operator's buttons
-  html += electricalDetailHtml(componentId, simState);
+  // (A pump with a running state shows its supply in its own Operating Status.)
+  html += electricalDetailHtml(componentId, plantState, simState, {
+    supplyShownAbove: component.type === 'pump' && simState.components.pumps.has(componentId),
+  });
 
   // Volume - prefer simulation node volume, fall back to calculated
   // (Skip for reactor vessels since volumes are shown in geometry section)

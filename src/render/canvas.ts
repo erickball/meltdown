@@ -27,6 +27,7 @@ import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getCladdingOxidationPower } from '../simulation/operators/rate-operators';
 import { CameraShake } from './camera-shake';
 import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
+import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
 export type ViewMode = 'perspective' | 'grid';
@@ -2239,6 +2240,14 @@ export class PlantCanvas {
       if (!b || b.width === undefined || b.height === undefined) continue;
       drawBuildProgress(ctx, b.topCenter.x, b.topCenter.y + b.height / 2,
         Math.max(9, Math.min(b.width, b.height) * 0.34), g.progress, g.kind);
+    }
+
+    // No-power badges over every part that needs power and has none
+    for (const id of unpoweredParts(this.plantState, this.simState, this.constructionMode)) {
+      const c = this.plantState.components.get(id);
+      const b = c ? this.getComponentScreenBounds(c) : null;
+      if (!b) continue;
+      drawNoPowerBadge(ctx, b.topCenter.x, b.topCenter.y - NO_POWER_BADGE_RADIUS - 3, NO_POWER_BADGE_RADIUS);
     }
 
     mark('components');

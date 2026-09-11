@@ -5,6 +5,8 @@
 // Run: npx tsx scripts/test-electrical.ts
 import { buildElectricalState, solveElectrical, applyElectricalCommand, RELAY_TIME_CONSTANT_S } from '../src/simulation/electrical';
 import { pumpMotorRatedW } from '../src/simulation/electrical-rules';
+import { supplyStatus, unwiredParts } from '../src/construction/electrical-wiring';
+import { unpoweredParts } from '../src/render/power-badge';
 import type { PlantState, PlantComponent } from '../src/types';
 import type { SimulationState } from '../src/simulation/types';
 
@@ -245,6 +247,50 @@ console.log('\n[9] Breaker commands');
   check(applyElectricalCommand(s, 'brk', 'close').ok, 'close accepted');
   solveElectrical(s, 0.1);
   check(s.components.pumps.get('P1')!.powered === true, 'closed again, pump powered');
+}
+
+console.log('\n[10] Wiring as designed: supply status, the auto-wire report, the no-power badges');
+{
+  const at = (p: PlantState, id: string) => supplyStatus(p, p.components.get(id) as never);
+  const ok = station();
+  check(at(ok, 'P1')?.problem === undefined && at(ok, 'P1')?.supplyLabel === 'Pump breaker',
+    'pump on its breaker: can be powered, and names its supply');
+  check(at(ok, 'sy') === null && at(ok, 'dg') === null, 'sources take no supply');
+
+  const unwired = station({ C1: { powerSupplyId: undefined } });
+  check(at(unwired, 'C1')?.problem === 'not connected - needs DC control power',
+    `unwired cabinet: "${at(unwired, 'C1')?.problem}"`);
+  const report = unwiredParts(unwired);
+  check(report.length === 1 && report[0].id === 'C1' && report[0].needs === 'DC control power',
+    `auto-wire report lists it with what it needs: ${JSON.stringify(report)}`);
+
+  const wrong = station({ lv: { voltage: 4160 } });
+  check(/is 4\.16 kV AC, but this needs low-voltage AC/.test(at(wrong, 'V1')?.problem ?? ''),
+    `MOV on a 4.16 kV bus: "${at(wrong, 'V1')?.problem}"`);
+
+  // The MCC is 480 V as the valve wants, but its transformer's primary does
+  // not match the bus feeding it, so nothing reaches the MCC
+  const deadEnd = station({ tr2: { primaryVoltage: 13800 } });
+  check(/no path back to a source/.test(at(deadEnd, 'V1')?.problem ?? ''),
+    `MCC cut off upstream: "${at(deadEnd, 'V1')?.problem}"`);
+
+  // A bus whose normal feed cannot work is fine on its backup
+  const backup = station({ tr: { primaryVoltage: 138000 } });
+  check(!at(backup, 'mv')?.problem && at(backup, 'mv')?.supplyId === 'dg', 'bus with a broken normal feed runs from its diesel backup');
+
+  const badgesBuilding = unpoweredParts(unwired, null, true);
+  check(badgesBuilding.includes('C1') && !badgesBuilding.includes('P1'),
+    `building: badge on the unwired cabinet only (${badgesBuilding.join(', ')})`);
+  check(unpoweredParts({ ...unwired, electrical: { enabled: false } }, null, true).length === 0,
+    'no badges with the electrical model off');
+
+  const s = simFor(station());
+  solveElectrical(s, 0);
+  applyElectricalCommand(s, 'brk', 'open');
+  solveElectrical(s, 0.1);
+  const badgesRunning = unpoweredParts(station(), s, false);
+  check(badgesRunning.includes('P1') && badgesRunning.includes('brk') && !badgesRunning.includes('C1'),
+    `running: badges follow the solve - open breaker and its pump (${badgesRunning.join(', ')})`);
 }
 
 if (failures > 0) {

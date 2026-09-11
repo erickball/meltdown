@@ -68,7 +68,7 @@ import { updateDebugPanel, initDebugPanel, updateComponentDetail, updateCoreDama
 import { applyScriptedBurst } from './simulation/operators/burst-operator';
 import { addPlantScenarioEvent, removePlantScenarioEvent, scheduleScenarioEvent, unscheduleScenarioEvent } from './simulation/scenario';
 import type { ScenarioEvent } from './simulation/scenario-types';
-import { powerSupplyChoices, autoWirePlant } from './construction/electrical-wiring';
+import { powerSupplyChoices, autoWirePlant, unwiredParts } from './construction/electrical-wiring';
 import { applyElectricalCommand, solveElectrical, CommandResult } from './simulation/electrical';
 import type { ElecStatus } from './render/electrical-components';
 import { waveCasualties, WaveCasualty } from './simulation/wave-casualties';
@@ -2194,10 +2194,16 @@ function init() {
   document.getElementById('electrical-autowire-btn')?.addEventListener('click', () => {
     let wired: string[] = [];
     liveEdit('Auto-wiring power supplies', () => { wired = autoWirePlant(plantState); });
-    showNotification(wired.length > 0
-      ? `Wired ${wired.length} part(s) to the nearest supply of the right voltage.`
-      : 'Nothing left to wire: every part that needs power has a supply, or none of the right voltage exists yet.',
-      'info', 6000);
+    // Whatever is still unwired had nothing of its voltage to connect to
+    const stranded = unwiredParts(plantState);
+    if (stranded.length > 0) {
+      showAutoWireReport(wired.length, stranded);
+    } else {
+      showNotification(wired.length > 0
+        ? `Wired ${wired.length} part(s) to the nearest supply of the right voltage. Everything that needs power has a supply.`
+        : 'Nothing left to wire: every part that needs power has a supply.',
+        'info', 6000);
+    }
     if (selectedComponentId) updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
   });
 
@@ -6202,6 +6208,59 @@ function showComponentDeleteDialog(
 
   overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
   (dialog.querySelector('#cdel-all') as HTMLButtonElement).focus();
+}
+
+/**
+ * What auto-wire could not do: every part still without a supply, and the
+ * voltage it is waiting for. A dialog rather than a notification because the
+ * list is the point - it is the shopping list for the next transformer or bus.
+ */
+function showAutoWireReport(wiredCount: number, stranded: Array<{ label: string; needs: string }>): void {
+  const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const overlay = document.createElement('div');
+  overlay.style.cssText = `
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+  `;
+  const dialog = document.createElement('div');
+  dialog.style.cssText = `
+    background: #1a1e24; border: 1px solid #445566; border-radius: 8px;
+    padding: 20px; max-width: 460px; color: #d0d8e0;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  `;
+  const rows = stranded.map(p =>
+    `<li style="margin: 3px 0;"><strong>${escape(p.label)}</strong> <span style="color: #fc8;">needs ${escape(p.needs)}</span></li>`
+  ).join('');
+  dialog.innerHTML = `
+    <h3 style="margin: 0 0 12px 0; color: #7af;">Auto-wire</h3>
+    <p style="margin: 0 0 10px 0; line-height: 1.5;">
+      ${wiredCount > 0 ? `Wired ${wiredCount} part(s). ` : ''}${stranded.length} part(s) could not be connected:
+      there is nothing of the voltage they need to connect them to.
+    </p>
+    <ul style="margin: 0 0 12px 0; padding-left: 20px; max-height: 260px; overflow-y: auto; font-size: 12px;">${rows}</ul>
+    <p style="margin: 0 0 16px 0; font-size: 12px; color: #889; line-height: 1.4;">
+      Add a supply at that voltage - a bus fed through a transformer of the right secondary,
+      or a battery for DC control power - then auto-wire again.
+    </p>
+    <div style="display: flex; justify-content: flex-end;">
+      <button id="autowire-report-ok" style="padding: 8px 16px; background: #2a5a8a; border: 1px solid #4a8aba;
+        border-radius: 4px; color: #fff; cursor: pointer;">OK</button>
+    </div>
+  `;
+  overlay.appendChild(dialog);
+  document.body.appendChild(overlay);
+  const close = () => {
+    document.removeEventListener('keydown', onKey, true);
+    overlay.remove();
+  };
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape' || e.key === 'Enter') { e.preventDefault(); close(); }
+  };
+  document.addEventListener('keydown', onKey, true);
+  (dialog.querySelector('#autowire-report-ok') as HTMLButtonElement).addEventListener('click', close);
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
 }
 
 function showContainmentDialog(
