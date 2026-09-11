@@ -1,7 +1,7 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, PipeComponent, waterBodyOf, paintDepthY } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
-import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, gaugeNodesByComponent, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
 import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import {
   IsometricConfig,
@@ -18,6 +18,9 @@ import { getComponentSize, getDefaultComponentSize } from './component-size';
 import { GridView, PortHit } from './grid-view';
 import { PipeOrientation, oppositeOrientation, PlanRect, componentFootprint, footprintRect, isGroundLayerComponent, pipeRoute, crossVesselJoint } from './grid-geometry';
 import { Point3, RunVertex, liftRoute, slopeRoute, ductContinuation, drawPipeRun, screenMidpoint } from './pipe-run-3d';
+import { connectionDrawElevation } from '../types';
+import { steamPartialPressurePa } from '../simulation/resume';
+import { nodeGasVolume } from '../simulation/mixture-properties';
 import { drawFires, collectCladdingFires } from './fire-fx';
 import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
@@ -2049,6 +2052,9 @@ export class PlantCanvas {
     }
 
     mark('floors+shadows');
+    // Each component's gauges go on right after it (renderGaugesFor)
+    const gaugeNodes = this.simState ? gaugeNodesByComponent(this.simState, this.plantState) : null;
+    const gaugesDrawn = new Set<string>();
     // Draw components with perspective projection
     // Project all 4 corners individually for proper ground-plane alignment
     for (const component of sortedComponents) {
@@ -2115,6 +2121,7 @@ export class PlantCanvas {
         }
         ctx.restore();
         this.renderBelowGradeOverlay(ctx, component);
+        this.renderGaugesFor(ctx, component.id, gaugeNodes, gaugesDrawn);
         continue;
       }
 
@@ -2216,6 +2223,9 @@ export class PlantCanvas {
       // the depth-sorted loop so a component nearer the camera still draws
       // over the soil of one behind it.
       this.renderBelowGradeOverlay(ctx, component);
+
+      // Its gauges, at its own depth: what stands in front hides them too
+      this.renderGaugesFor(ctx, component.id, gaugeNodes, gaugesDrawn);
     }
 
     // Progress rings, over every ghost, once the plant is drawn
@@ -2320,14 +2330,10 @@ export class PlantCanvas {
     }
 
     mark('flow arrows');
-    // Draw pressure gauges on flow nodes
     if (this.simState) {
-      // Pass screen bounds getter function for proper gauge positioning
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
-      renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
-
-      // Draw thermometers on large hydraulic nodes
-      renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      // Gauges of anything the depth-sorted pass did not draw
+      this.renderGaugesFor(ctx, null, gaugeNodes, gaugesDrawn);
 
       // Every break, resolved once: the marker, the discharge line and the
       // spray all hang off the same anchor.
@@ -2574,8 +2580,9 @@ export class PlantCanvas {
     const toCompElevation = getComponentElevation(toComponent);
 
     // Connection elevation is relative to component bottom
-    const fromConnElevation = connection.fromElevation ?? 0;
-    const toConnElevation = connection.toElevation ?? 0;
+    // (as drawn: an annulus line's nozzle sits off the duct's axis)
+    const fromConnElevation = connectionDrawElevation(connection, 'from', this.plantState.components);
+    const toConnElevation = connectionDrawElevation(connection, 'to', this.plantState.components);
 
     // Calculate the port's visual elevation relative to component bottom
     // Port position.y is in local coordinates where Y=0 is component center
@@ -2748,6 +2755,35 @@ export class PlantCanvas {
   }
 
   /**
+   * The pressure gauges and thermometers of one component (`componentId`) -
+   * drawn right after it, at its depth - or, with null, of every component
+   * not drawn yet. `groups` is this frame's gaugeNodesByComponent.
+   */
+  private renderGaugesFor(
+    ctx: CanvasRenderingContext2D,
+    componentId: string | null,
+    groups: Map<string, string[]> | null,
+    drawn: Set<string>
+  ): void {
+    const simState = this.simState;
+    if (!groups || !simState) return;
+    const bounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
+    const draw = (id: string, nodeIds: string[]) => {
+      drawn.add(id);
+      renderPressureGauge(ctx, simState, this.plantState, this.view, bounds, nodeIds);
+      renderThermometers(ctx, simState, this.plantState, this.view, bounds, nodeIds);
+    };
+    if (componentId !== null) {
+      const nodeIds = groups.get(componentId);
+      if (nodeIds && !drawn.has(componentId)) draw(componentId, nodeIds);
+      return;
+    }
+    for (const [id, nodeIds] of groups) {
+      if (!drawn.has(id)) draw(id, nodeIds);
+    }
+  }
+
+  /**
    * A cross-vessel and the component its `targetComponentId` names: drawn as
    * mating face to face in this view, whether or not the duct is placed
    * touching it (older plants' convention; crossVesselJoint covers ducts that
@@ -2782,8 +2818,8 @@ export class PlantCanvas {
     if (!plan || plan.length < 2) return null;
     const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
     const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
-    const a = this.nozzle3D(fromComponent, fromPort, connection.fromElevation ?? 0);
-    const b = this.nozzle3D(toComponent, toPort, connection.toElevation ?? 0);
+    const a = this.nozzle3D(fromComponent, fromPort, connectionDrawElevation(connection, 'from', this.plantState.components));
+    const b = this.nozzle3D(toComponent, toPort, connectionDrawElevation(connection, 'to', this.plantState.components));
     if (!a || !b) return null;
     const path = liftRoute(a, this.leaveAxis(fromComponent, plan[0]), plan,
       b, this.leaveAxis(toComponent, plan[plan.length - 1]));
@@ -2807,8 +2843,8 @@ export class PlantCanvas {
   ): { pts: RunVertex[]; scale: number } | null {
     const fromPort = this.portForConnectionDrawing(fromComponent, storedFromPort, toComponent, storedToPort);
     const toPort = this.portForConnectionDrawing(toComponent, storedToPort, fromComponent, storedFromPort);
-    const a = this.nozzle3D(fromComponent, fromPort, connection.fromElevation ?? 0);
-    const b = this.nozzle3D(toComponent, toPort, connection.toElevation ?? 0);
+    const a = this.nozzle3D(fromComponent, fromPort, connectionDrawElevation(connection, 'from', this.plantState.components));
+    const b = this.nozzle3D(toComponent, toPort, connectionDrawElevation(connection, 'to', this.plantState.components));
     if (!a || !b) return null;
     // Laid from the duct, then put in the connection's own from -> to order
     // (the flow arrow reads its direction off the run)
@@ -3118,10 +3154,15 @@ export class PlantCanvas {
     const donor = this.simState.flowNodes.get(donorId);
     if (!donor) return componentFluid;
 
-    // getFluidColor needs the node volume to recover NCG partial pressure
+    // getFluidColor needs the node volume to recover NCG partial pressure,
+    // and the steam partial said outright: a node's own `pressure` is the
+    // TOTAL, which read as steam paints a helium line half steam (peach).
+    // Labelled the way the per-frame sync labels a component's fluid.
     const fluid: Fluid = {
       ...donor.fluid,
       volume: donor.volume,
+      gasVolume: nodeGasVolume(donor),
+      steamPressure: steamPartialPressurePa(donor),
       flowRate: flow.massFlowRate,
     };
 
@@ -3520,8 +3561,9 @@ export class PlantCanvas {
     const toCompElevation = getComponentElevation(toComponent);
 
     // Connection elevation is relative to component bottom
-    const fromConnElevation = connection.fromElevation ?? 0;
-    const toConnElevation = connection.toElevation ?? 0;
+    // (as drawn: an annulus line's nozzle sits off the duct's axis)
+    const fromConnElevation = connectionDrawElevation(connection, 'from', this.plantState.components);
+    const toConnElevation = connectionDrawElevation(connection, 'to', this.plantState.components);
 
     // Calculate the port's visual elevation relative to component bottom
     const fromSize = this.getComponentSize(fromComponent);
@@ -4151,6 +4193,9 @@ export class PlantCanvas {
     ctx.clearRect(0, 0, width, height);
     const shake = this.shake.offset(width, height);
     if (shake) CameraShake.apply(ctx, shake, width, height);
+    // Each sprite's gauges go on right after it, at its depth (afterSprite)
+    const gaugeNodes = this.simState ? gaugeNodesByComponent(this.simState, this.plantState) : null;
+    const gaugesDrawn = new Set<string>();
     this.grid.render(ctx, {
       width,
       height,
@@ -4168,6 +4213,7 @@ export class PlantCanvas {
       placementPreview: this.placementPreview,
       pipeOrientation: this.pipeOrientation,
       connectionFluid: (conn, from) => this.getConnectionFluid(conn, from),
+      afterSprite: (gctx, c) => this.renderGaugesFor(gctx, c.id, gaugeNodes, gaugesDrawn),
     });
 
     const components = Array.from(this.plantState.components.values())
@@ -4185,8 +4231,8 @@ export class PlantCanvas {
       this.drawSelectedArrowRing(ctx);
 
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
-      renderPressureGauge(ctx, this.simState, this.plantState, this.view, getScreenBounds);
-      renderThermometers(ctx, this.simState, this.plantState, this.view, getScreenBounds);
+      // Gauges of anything drawn without a sprite (floors, pipes)
+      this.renderGaugesFor(ctx, null, gaugeNodes, gaugesDrawn);
       const breaks = this.currentBreaks();
       const anchorFor = breakAnchorLookup(breaks);
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds, anchorFor);

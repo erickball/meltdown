@@ -783,18 +783,38 @@ export interface CrossVesselComponent extends ComponentBase {
 }
 
 /**
- * Where a line meets a cross-vessel's annulus: its elevation above the
- * duct's bottom. The annulus wraps the inner pipe, so its nozzle can sit on
- * either side of the axis. The port's offset from the axis says how far off
- * (drawn under it until something is connected); the side is whichever faces
- * the line's other end - above the axis for a partner higher than the axis,
- * below otherwise.
+ * Where a line's end is DRAWN on a cross-vessel's annulus, as an elevation
+ * above the duct's bottom. The line itself meets the annulus at the duct's
+ * axis - that is its stored, simulated elevation - but drawn there it would
+ * sit on the inner pipe's nozzle. So it is drawn off the axis by the port's
+ * offset, on the side facing the line's other end: above the axis for a
+ * partner higher than the axis, below otherwise.
  */
-export function annulusNozzleElevation(cv: { elevation?: number; outerDiameter: number },
-                                       port: { position: { y: number } }, partnerZ: number): number {
+export function annulusNozzleDrawElevation(cv: { elevation?: number; outerDiameter: number },
+                                           port: { position: { y: number } }, partnerZ: number): number {
   const half = cv.outerDiameter / 2;
   const offset = Math.abs(port.position.y);
   return partnerZ > (cv.elevation ?? 0) + half ? half + offset : half - offset;
+}
+
+/**
+ * Where one end of a connection is drawn on its component, as an elevation
+ * above the component's bottom: the stored elevation, except on a
+ * cross-vessel's annulus (annulusNozzleDrawElevation). Both views draw from
+ * this; the simulation reads the stored elevation.
+ */
+export function connectionDrawElevation(conn: Connection, end: 'from' | 'to',
+                                        components: Map<string, PlantComponent>): number {
+  const atFrom = end === 'from';
+  const stored = (atFrom ? conn.fromElevation : conn.toElevation) ?? 0;
+  const c = components.get(atFrom ? conn.fromComponentId : conn.toComponentId);
+  const portId = atFrom ? conn.fromPortId : conn.toPortId;
+  if (!c || c.type !== 'crossVessel' || !portId.includes('annulus')) return stored;
+  const port = c.ports?.find(p => p.id === portId);
+  if (!port) return stored;
+  const partner = components.get(atFrom ? conn.toComponentId : conn.fromComponentId);
+  const partnerZ = (partner?.elevation ?? 0) + ((atFrom ? conn.toElevation : conn.fromElevation) ?? 0);
+  return annulusNozzleDrawElevation(c as CrossVesselComponent, port, partnerZ);
 }
 
 /**

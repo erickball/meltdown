@@ -5179,6 +5179,32 @@ function findComponentForFlowNode(nodeId: string, plantState: PlantState): Plant
   return undefined;
 }
 
+/** The component a flow node's gauges hang off: its own, or the reactor vessel a core region sits in. */
+function gaugeBoundsComponent(component: PlantComponent, plantState: PlantState): PlantComponent {
+  const containedBy = (component as { containedBy?: string }).containedBy;
+  const parent = containedBy ? plantState.components.get(containedBy) : undefined;
+  return parent && parent.type === 'reactorVessel' ? parent : component;
+}
+
+/**
+ * Every flow node that can carry a gauge, grouped by the component its
+ * gauges hang off (gaugeBoundsComponent). The views draw each group right
+ * after that component, at its depth, so whatever stands in front of the
+ * component hides its gauges too.
+ */
+export function gaugeNodesByComponent(simState: SimulationState, plantState: PlantState): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const nodeId of simState.flowNodes.keys()) {
+    const component = findComponentForFlowNode(nodeId, plantState);
+    if (!component) continue;
+    const id = gaugeBoundsComponent(component, plantState).id;
+    let list = out.get(id);
+    if (!list) { list = []; out.set(id, list); }
+    list.push(nodeId);
+  }
+  return out;
+}
+
 /**
  * The design pressure (bar) a given flow node's gauge should measure against.
  * Handles ratings that don't live on the component's top-level pressureRating:
@@ -5227,10 +5253,14 @@ export function renderPressureGauge(
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number } | null
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number; width?: number } | null,
+  nodeIds?: Iterable<string>
 ): void {
-  // Draw a pressure gauge for each flow node that has a corresponding visual component
-  for (const [nodeId, node] of simState.flowNodes) {
+  // Draw a pressure gauge for each flow node that has a corresponding visual
+  // component - or for `nodeIds` only, one component's (gaugeNodesByComponent)
+  for (const nodeId of nodeIds ?? simState.flowNodes.keys()) {
+    const node = simState.flowNodes.get(nodeId);
+    if (!node) continue;
     // Find the component that corresponds to this flow node
     const component = findComponentForFlowNode(nodeId, plantState);
     if (!component) continue;
@@ -5289,6 +5319,14 @@ export function renderPressureGauge(
         if (isInnerDuct) {
           topY = screenBounds.topCenter.y + 10 * gaugeScale;
         }
+      }
+
+      // A ring of panels round another component (radiantRingOf) is drawn
+      // where that component stands, so its gauge comes off the ring's side,
+      // clear of it by its own radius, rather than its centre, where it
+      // would sit on (and behind) the other one's
+      if (radiantRingOf(component as never) && screenBounds.width !== undefined) {
+        gaugeX = screenBounds.topCenter.x - screenBounds.width / 2 - 20 * gaugeScale;
       }
 
       stemBottomPos = { x: gaugeX, y: topY };
@@ -5460,11 +5498,14 @@ export function renderThermometers(
   simState: SimulationState,
   plantState: PlantState,
   view: ViewState,
-  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number } | null
+  getScreenBounds?: (component: PlantComponent) => { topCenter: Point; scale: number; width?: number } | null,
+  nodeIds?: Iterable<string>
 ): void {
   if (!getScreenBounds) return;
 
-  for (const [nodeId, node] of simState.flowNodes) {
+  for (const nodeId of nodeIds ?? simState.flowNodes.keys()) {
+    const node = simState.flowNodes.get(nodeId);
+    if (!node) continue;
     const component = findComponentForFlowNode(nodeId, plantState);
     if (!component) continue;
 
@@ -5504,6 +5545,11 @@ export function renderThermometers(
       const isInnerDuct = nodeId.endsWith('-inner');
       anchorX += cv.length * view.zoom * scale * (isInnerDuct ? 0.15 : -0.15);
       if (isInnerDuct) topY += 10 * scale;
+    }
+
+    // Beside the gauge on a ring's side (see renderPressureGauge)
+    if (radiantRingOf(component as never) && screenBounds.width !== undefined) {
+      anchorX = screenBounds.topCenter.x - screenBounds.width / 2 - gaugeRadius;
     }
 
     // Place the thermometer just left of the pressure gauge

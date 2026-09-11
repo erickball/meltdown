@@ -69,6 +69,11 @@ export interface GridFrameState {
   /** Which way the pipe tool is holding a ground pipe piece (see pipePieceRoute). */
   pipeOrientation: PipeOrientation;
   connectionFluid: (conn: Connection, from: PlantComponent) => Fluid | undefined;
+  /**
+   * Drawn right after each standing sprite, at its depth: the component's
+   * gauges, so a sprite in front hides them the way it hides the component.
+   */
+  afterSprite?: (ctx: CanvasRenderingContext2D, component: PlantComponent) => void;
 }
 
 /** How faint a part that is not built yet (or is going away) is drawn. */
@@ -508,17 +513,16 @@ export class GridView {
    * A line from inside a vessel to a cross-vessel welded to that vessel: from
    * the port, up or down to the duct nozzle's height and across to the nozzle
    * as the duct is drawn. Nothing runs outside - the duct starts at the wall.
-   * The nozzle is at the line's own elevation on the duct, so an annulus line
+   * The nozzle is where the line is drawn meeting the duct, so an annulus line
    * meets the side of the inner pipe that faces its partner.
    */
   private weldedRun(joint: CrossVesselJoint): Point[] | null {
     const p = this.spritePortPosition(joint.other, joint.otherPortId);
     const port = this.spritePortPosition(joint.crossVessel, joint.crossVesselPortId);
     if (!p || !port) return null;
-    const z = joint.crossVesselElevation;
     const cv = joint.crossVessel;
     const portRise = this.portElevation(cv, joint.crossVesselPortId) - (cv.elevation ?? 0);
-    const q = z === undefined ? port : { x: port.x, y: port.y + (portRise - z) * this.spriteLayout(cv).zoom };
+    const q = { x: port.x, y: port.y + (portRise - joint.crossVesselDrawElevation) * this.spriteLayout(cv).zoom };
     return simplifyRoute([p, { x: p.x, y: q.y }, q]);
   }
 
@@ -1241,6 +1245,7 @@ export class GridView {
       if (ghost) ctx.globalAlpha = 1;
       const inside = this.layout?.sections.get(c.id);
       if (inside) this.renderSectionRuns(ctx, f, inside);
+      f.afterSprite?.(ctx, c);
     }
     this.renderElevationLabels(ctx, labels);
 

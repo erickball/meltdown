@@ -134,7 +134,7 @@
             "id": "rv-1-cold-leg",
             "position": {
               "x": -2.3,
-              "y": 7.193116329012044
+              "y": 6.543116329012044
             },
             "direction": "both"
           },
@@ -241,7 +241,7 @@
         "rotation": 0,
         "elevation": 0,
         "width": 4.2,
-        "height": 18,
+        "height": 19.5,
         "wallThickness": 0.15,
         "pressureRating": 90,
         "fillLevel": 0,
@@ -250,7 +250,7 @@
             "id": "tank-sg-in",
             "position": {
               "x": 1.8,
-              "y": 7.5
+              "y": 8.25
             },
             "direction": "both"
           },
@@ -258,7 +258,7 @@
             "id": "tank-sg-suction-a",
             "position": {
               "x": -1,
-              "y": -7.5
+              "y": -6.75
             },
             "direction": "both"
           },
@@ -266,7 +266,7 @@
             "id": "tank-sg-suction-b",
             "position": {
               "x": 1,
-              "y": -7.5
+              "y": -6.75
             },
             "direction": "both"
           },
@@ -274,7 +274,7 @@
             "id": "tank-sg-top",
             "position": {
               "x": 0,
-              "y": -9
+              "y": -9.75
             },
             "direction": "both"
           }
@@ -984,7 +984,7 @@
           "y": 74
         },
         "rotation": 0,
-        "elevation": 19,
+        "elevation": 20.5,
         "diameter": 0.1,
         "opening": 0,
         "volume": 0.1,
@@ -2032,7 +2032,7 @@
       "toPortId": "cv-1-annulus-2",
       "initialFlowRate": 39.284241126672036,
       "fromElevation": 0,
-      "toElevation": 1.55,
+      "toElevation": 0.9,
       "flowArea": 0.5,
       "length": 2,
       "resistanceCoeff": 1
@@ -2056,7 +2056,7 @@
       "toPortId": "cv-1-annulus-2",
       "initialFlowRate": 39.284241126672036,
       "fromElevation": 0,
-      "toElevation": 1.55,
+      "toElevation": 0.9,
       "flowArea": 0.5,
       "length": 2,
       "resistanceCoeff": 1
@@ -2067,8 +2067,8 @@
       "toComponentId": "rv-1",
       "toPortId": "rv-1-cold-leg",
       "initialFlowRate": 78.56848225334407,
-      "fromElevation": 0.25,
-      "toElevation": 2.806883670987956,
+      "fromElevation": 0.9,
+      "toElevation": 3.4568836709879562,
       "flowArea": 1,
       "length": 3,
       "resistanceCoeff": 1.5
@@ -2391,7 +2391,7 @@
       "fromPortId": "tank-sg-top",
       "toComponentId": "val-prel-1",
       "toPortId": "val-prel-1-in",
-      "fromElevation": 18,
+      "fromElevation": 19.5,
       "toElevation": 0,
       "flowArea": 0.008,
       "length": 3,
@@ -2403,7 +2403,7 @@
       "toComponentId": "bui-sg",
       "toPortId": "bui-sg-vent-1",
       "fromElevation": 0,
-      "toElevation": 19,
+      "toElevation": 20.5,
       "flowArea": 0.008,
       "length": 6,
       "resistanceCoeff": 2

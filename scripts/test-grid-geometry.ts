@@ -10,7 +10,7 @@ import {
   pipePieceRoute, groundRunRoute, pipeFreeEnds, joinForFreeEnd, findFreeEndJoins,
   oppositeOrientation, PipeOrientation, snapPlacementCenter, crossVesselMates, crossVesselJoint,
 } from '../src/render/grid-geometry';
-import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point, annulusNozzleElevation } from '../src/types';
+import { PlantState, TankComponent, PumpComponent, PipeComponent, Connection, Point, annulusNozzleDrawElevation, connectionDrawElevation } from '../src/types';
 
 let failures = 0;
 function check(name: string, ok: boolean, detail?: string): void {
@@ -409,7 +409,7 @@ console.log('\nCross-vessel welds');
     ports: [
       { id: `${id}-in`, position: { x: -length / 2, y: 0 }, direction: 'both' },
       { id: `${id}-out`, position: { x: length / 2, y: 0 }, direction: 'both' },
-      { id: `${id}-ann`, position: { x: length / 2, y: 0.5 }, direction: 'both' },
+      { id: `${id}-annulus`, position: { x: length / 2, y: 0.5 }, direction: 'both' },
     ],
   });
   const cv = duct('cv', 5, 6, 'bundle');
@@ -427,16 +427,24 @@ console.log('\nCross-vessel welds');
   check('a line from inside a welded vessel runs inside it (even to the named target)',
     inside?.kind === 'inside' && inside.mate.id === 'tb' && inside.crossVesselPortId === 'cv-out' && inside.otherPortId === 'bundle-top');
   check('a line to anything else is not a weld',
-    crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv', toPortId: 'cv-ann' }, plant) === null);
+    crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv', toPortId: 'cv-annulus' }, plant) === null);
   check('a duct touching nothing is welded to nothing, not even its named target',
     crossVesselMates(cv2, plant).length === 0 &&
     crossVesselJoint({ fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv2', toPortId: 'cv2-in' }, plant) === null);
   // The annulus nozzle (0.5 m off the axis of a 1.5 m duct standing at 4 m,
-  // axis at 4.75 m) faces its partner
-  const ann = cv.ports.find((p: any) => p.id === 'cv-ann');
-  check('an annulus nozzle faces a partner above the axis from the top', near(annulusNozzleElevation(cv, ann, 6), 0.75 + 0.5));
-  check('...and one below it from the bottom', near(annulusNozzleElevation(cv, ann, 3), 0.75 - 0.5));
-  check('...whichever way the port was stored', near(annulusNozzleElevation(cv, { position: { y: -0.5 } }, 3), 0.25));
+  // axis at 4.75 m) is DRAWN on the side facing its partner
+  const ann = cv.ports.find((p: any) => p.id === 'cv-annulus');
+  check('an annulus nozzle is drawn on top for a partner above the axis', near(annulusNozzleDrawElevation(cv, ann, 6), 0.75 + 0.5));
+  check('...and underneath for one below it', near(annulusNozzleDrawElevation(cv, ann, 3), 0.75 - 0.5));
+  check('...whichever way the port was stored', near(annulusNozzleDrawElevation(cv, { position: { y: -0.5 } }, 3), 0.25));
+  // ...while the line itself is stored (and simulated) at the axis
+  // (the pump stands at grade; its end of the line is 6 m up, above the 4.75 m axis)
+  const annLine: Connection = { fromComponentId: 'pp', fromPortId: 'pp-outlet', toComponentId: 'cv', toPortId: 'cv-annulus',
+    fromElevation: 6, toElevation: 0.75 };
+  check('a line stored at the annulus axis is drawn on the side facing its partner',
+    near(connectionDrawElevation(annLine, 'to', plant.components), 1.25) && near(annLine.toElevation!, 0.75),
+    `drawn at ${connectionDrawElevation(annLine, 'to', plant.components)}`);
+  check('...and the other end of it is drawn where it is stored', near(connectionDrawElevation(annLine, 'from', plant.components), 6));
 }
 
 if (failures > 0) {

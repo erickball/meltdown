@@ -57,7 +57,7 @@ import {
   ALL_GAS_SPECIES,
   GasSpecies
 } from '../simulation/gas-properties';
-import { PidControllerConfig, annulusNozzleElevation } from '../types';
+import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
@@ -2322,13 +2322,13 @@ export class ConstructionManager {
     const baseToElev = hasPinnedPortElevations(toComponent)
       ? this.getPortRelativeElevation(toComponent, toPort)
       : toElevation ?? this.getPortRelativeElevation(toComponent, toPort);
-    // A cross-vessel's annulus nozzle is on whichever side of the inner pipe
-    // faces the line's other end (annulusNozzleElevation)
+    // A line into a cross-vessel's annulus meets it at the duct's axis; its
+    // nozzle is only DRAWN off to one side (annulusNozzleDrawElevation)
     const calcFromElev = fromComponent.type === 'crossVessel' && fromPortId.includes('annulus')
-      ? annulusNozzleElevation(fromComponent as CrossVesselComponent, fromPort, (toComponent.elevation ?? 0) + baseToElev)
+      ? (fromComponent as CrossVesselComponent).outerDiameter / 2
       : baseFromElev;
     const calcToElev = toComponent.type === 'crossVessel' && toPortId.includes('annulus')
-      ? annulusNozzleElevation(toComponent as CrossVesselComponent, toPort, (fromComponent.elevation ?? 0) + baseFromElev)
+      ? (toComponent as CrossVesselComponent).outerDiameter / 2
       : baseToElev;
 
     // Special handling for cross-vessel annulus connections

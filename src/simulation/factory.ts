@@ -1651,6 +1651,10 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         innerNode.volume *= factor;
         innerNode.fluid.mass *= factor;
         innerNode.fluid.internalEnergy *= factor;
+        // ...and its vapour space with it: left at the `length` value, the
+        // gas was priced over 5 m3 of a 7.9 m3 Xe-100 duct - 95 bar of
+        // helium in a 60 bar node (nodeGasVolume feeds the pressure solve)
+        if (innerNode.fluid.gasVolume !== undefined) innerNode.fluid.gasVolume *= factor;
         if (innerNode.fluid.ncg) {
           for (const species of Object.keys(innerNode.fluid.ncg)) {
             innerNode.fluid.ncg[species as keyof typeof innerNode.fluid.ncg]! *= factor;
@@ -1954,6 +1958,9 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       node.volume += pipeVolume;
       node.fluid.mass *= factor;
       node.fluid.internalEnergy *= factor;
+      // The vapour space scales with the rest: left at the bare body's, a
+      // gas-filled circulator priced its helium at 63 bar in a 60 bar node
+      if (node.fluid.gasVolume !== undefined) node.fluid.gasVolume *= factor;
       if (node.fluid.ncg) {
         for (const species of Object.keys(node.fluid.ncg)) {
           node.fluid.ncg[species as keyof typeof node.fluid.ncg]! *= factor;

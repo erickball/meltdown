@@ -23,7 +23,7 @@
  *    kept as drawn. Where several runs share a cell they are laid side by
  *    side for drawing (laneOffsetRoutes) - the stored geometry is unchanged.
  */
-import { Point, PlantComponent, Port, Connection, PlantState, PipeComponent, waterBodyOf } from '../types';
+import { Point, PlantComponent, Port, Connection, PlantState, PipeComponent, waterBodyOf, connectionDrawElevation } from '../types';
 import { getComponentSize, getDefaultComponentSize } from './component-size';
 
 /** Tile edge length in metres. World coordinates are metres, so this is also the lattice pitch. */
@@ -198,8 +198,8 @@ export interface CrossVesselJoint {
   otherPortId: string;
   mate: PlantComponent;
   kind: 'flush' | 'inside';
-  /** The line's stored elevation at the duct's nozzle (above the duct's bottom): which side of the annulus it meets. */
-  crossVesselElevation: number | undefined;
+  /** Where the line is drawn meeting the duct, above its bottom (connectionDrawElevation: an annulus line on the side facing its partner). */
+  crossVesselDrawElevation: number;
 }
 
 export function crossVesselJoint(conn: Connection, plantState: PlantState): CrossVesselJoint | null {
@@ -213,7 +213,7 @@ export function crossVesselJoint(conn: Connection, plantState: PlantState): Cros
   const joint = (mate: PlantComponent, kind: 'flush' | 'inside'): CrossVesselJoint => ({
     crossVessel: cv, crossVesselPortId: cvIsFrom ? conn.fromPortId : conn.toPortId,
     other, otherPortId: cvIsFrom ? conn.toPortId : conn.fromPortId, mate, kind,
-    crossVesselElevation: cvIsFrom ? conn.fromElevation : conn.toElevation,
+    crossVesselDrawElevation: connectionDrawElevation(conn, cvIsFrom ? 'from' : 'to', plantState.components),
   });
   const mates = crossVesselMates(cv, plantState);
   const seen = new Set<string>();
