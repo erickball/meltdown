@@ -98,7 +98,10 @@ import {
   ConnectionHydraulics,
   DrawComposition,
   ChokeLimit,
-  CLOSED_FLOW_DECAY_TAU, governorPositionFor } from './connection-hydraulics';
+  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction } from './connection-hydraulics';
+
+/** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
+interface FlowGas { y: number; molPerKg: number }
 
 /** Status of the last pressure solve */
 export interface PressureSolverStatus {
@@ -276,6 +279,11 @@ export class PressureSolver {
     // rise over this timestep. Total mass includes NCG - for gas-filled nodes the
     // whole inventory responds to pressure, not just the steam fraction.
     const c = new Float64Array(n);
+    // Gas-cushion response per node (see gasCushion): its dome-edge blend and
+    // the pressure rise per mole of gas arriving, for the species weights
+    // the implicit closure gives gas-carrying flows.
+    const cushionBlend = new Float64Array(n);
+    const cushionPerMole = new Float64Array(n);
     for (let i = 0; i < n; i++) {
       const node = nodeList[i];
       const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
@@ -290,6 +298,17 @@ export class PressureSolver {
         );
       }
       c[i] = (rho * node.volume) / (K * dt);
+      // A condensed-phase node with a gas cushion over it: water arriving
+      // squeezes the cushion, and the cushion's partial pressure rises on
+      // top of whatever the water's own response is (Dalton - the pressures
+      // add, so the stiffnesses add). Zero with no gas, so a pure steam-water
+      // node keeps the buffered response above exactly.
+      const cushion = this.gasCushion(node);
+      if (cushion) {
+        c[i] = 1 / (1 / c[i] + cushion.perKgWater * dt);
+        cushionBlend[i] = cushion.blend;
+        cushionPerMole[i] = cushion.perMoleGas;
+      }
       // Moving-boundary boiler tubes publish their own dP/dm - the pressure
       // there is the partition's volume-packing solution, and a tube being
       // stuffed full stiffens LONG before the uniform mush read would (the
@@ -306,7 +325,8 @@ export class PressureSolver {
     }
 
     if (this.config.implicitMomentum) {
-      this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates, corrector);
+      this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates, corrector,
+        cushionBlend, cushionPerMole);
       return;
     }
 
@@ -716,8 +736,10 @@ export class PressureSolver {
     nodeList: FlowNode[],
     c: Float64Array,
     n: number,
-    lastEnergyRates?: Map<string, { dMass: number; dEnergy: number }>,
-    corrector?: { startFlows: Map<string, number> }
+    lastEnergyRates: Map<string, { dMass: number; dEnergy: number }> | undefined,
+    corrector: { startFlows: Map<string, number> } | undefined,
+    cushionBlend: Float64Array,
+    cushionPerMole: Float64Array
   ): void {
     interface ImplicitEntry {
       conn: FlowConnection;
@@ -739,7 +761,24 @@ export class PressureSolver {
       // confirmed by a reversed solved flow - never on the predictor's
       // extrapolation alone. See the seating pass after the solve.
       seated: boolean;
+      gas: FlowGas;    // what share of the flow is gas (species weights)
     }
+
+    // The gas a flow carries: its NCG mass fraction, split exactly as the
+    // advection will move it (zoneWaterShare for the explicit operator,
+    // whole-node concentrations for the implicit transport partition), and
+    // moles per kg of that gas.
+    const NO_GAS: FlowGas = { y: 0, molPerKg: 0 };
+    const flowGas = (conn: FlowConnection, h: ConnectionHydraulics): FlowGas => {
+      const up = h.upstreamNode;
+      const ncg = up.fluid.ncg;
+      const gasMass = ncg ? ncgTotalMass(ncg) : 0;
+      if (!(gasMass > 0)) return NO_GAS;
+      const y = conn.implicitAdvection
+        ? gasMass / (gasMass + up.fluid.mass)
+        : drawGasMassFraction(up, h.drawComp);
+      return { y, molPerKg: ncgTotalMoles(ncg!) / gasMass };
+    };
 
     // Energy-coupled compliance: beta_i = dP/dU at constant (m, V) and the
     // node's bulk specific enthalpy. A flow LEAVING a node changes its
@@ -787,7 +826,7 @@ export class PressureSolver {
     // zero) - folded into the RHS with the same donor-enthalpy weighting as
     // live connections.
     const fixedFlows: Array<{
-      flow: number; hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number;
+      flow: number; hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number; gas: FlowGas;
     }> = [];
     // Corrector mode: each participating connection's PREDICTOR flow, whose
     // transport the probe state already banked. Subtracted from the closure
@@ -846,8 +885,9 @@ export class PressureSolver {
         if (iFrom >= 0 || iTo >= 0) {
           const hDonor = useEnergy ? this.blendedDonorEnthalpy(h.upstreamNode, h.drawComp) : 0;
           const donorIsFrom = h.upstreamNode === fromNode;
-          fixedFlows.push({ flow: mNew, hDonor, donorIsFrom, iFrom, iTo });
-          if (corrector) banked.push({ flow: w1, hDonor, donorIsFrom, iFrom, iTo });
+          const gas = flowGas(conn, h);
+          fixedFlows.push({ flow: mNew, hDonor, donorIsFrom, iFrom, iTo, gas });
+          if (corrector) banked.push({ flow: w1, hDonor, donorIsFrom, iFrom, iTo, gas });
         }
         continue;
       }
@@ -931,16 +971,17 @@ export class PressureSolver {
 
       const choke = computeChokeLimit(
         conn, h.upstreamNode, h.downstreamNode, h.flowPhase, h.rho_flow, h.throatArea);
+      const gas = flowGas(conn, h);
       entries.push({
         conn, h, D, m0, mStar, hDonor, G0,
         CFwd: h.frictionQuadForward + h.pumpQuad,
         donorIsFrom: h.upstreamNode === fromNode,
-        iFrom, iTo, choke, capped: false, cappedFlow: 0, seated: false,
+        iFrom, iTo, choke, capped: false, cappedFlow: 0, seated: false, gas,
       });
       if (corrector && (iFrom >= 0 || iTo >= 0)) {
         banked.push({
           flow: conn.massFlowRate, hDonor,
-          donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo,
+          donorIsFrom: h.upstreamNode === fromNode, iFrom, iTo, gas,
         });
       }
     }
@@ -996,8 +1037,25 @@ export class PressureSolver {
     // RHS as the equivalent inflow c_i·β_i·q_i·dt. The weighted system is
     // mildly non-symmetric; partial pivoting handles it, and a genuinely
     // singular assembly still fails loudly in solveLinearSystem.
-    const phi = (i: number, hDonor: number): number =>
-      i < 0 || !useEnergy ? 1 : 1 + (hDonor - hNode[i]) * beta[i] * c[i] * dt;
+    //
+    // SPECIES WEIGHT. c_i prices a kilogram of WATER. At a node with a gas
+    // cushion (gasCushion) a kilogram of gas moves the pressure by a
+    // different amount - dP/dn per mole, 60,000x the water's in an
+    // air-blanketed pool - and that holds whichever way it crosses, so the
+    // gas share y of a flow is re-weighted in BOTH rows by the ratio of the
+    // two responses (blended across the dome edge exactly as the cushion
+    // is). y = 0, or a node without a cushion, gives weight 1: the closure
+    // above, unchanged.
+    const arrivalWeight = (i: number, g: FlowGas): number =>
+      i < 0 || !(g.y > 0) || !(cushionBlend[i] > 0) ? 1
+        : 1 + g.y * cushionBlend[i] * (cushionPerMole[i] * g.molPerKg * c[i] * dt - 1);
+    const donorWeight = (i: number, hDonor: number, g: FlowGas): number =>
+      i < 0 ? 1 : arrivalWeight(i, g) + (useEnergy ? (hDonor - hNode[i]) * beta[i] * c[i] * dt : 0);
+    const weightsOf = (f: {
+      hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number; gas: FlowGas;
+    }): [number, number] => f.donorIsFrom
+      ? [donorWeight(f.iFrom, f.hDonor, f.gas), arrivalWeight(f.iTo, f.gas)]
+      : [arrivalWeight(f.iFrom, f.gas), donorWeight(f.iTo, f.hDonor, f.gas)];
     let lastMatrix: Float64Array | null = null;
     const solveNetwork = (): Float64Array => {
       const M = new Float64Array(n * n);
@@ -1007,8 +1065,7 @@ export class PressureSolver {
         if (useEnergy) b[i] = c[i] * beta[i] * q[i] * dt;
       }
       for (const f of fixedFlows) {
-        const wFrom = f.donorIsFrom ? phi(f.iFrom, f.hDonor) : 1;
-        const wTo = f.donorIsFrom ? 1 : phi(f.iTo, f.hDonor);
+        const [wFrom, wTo] = weightsOf(f);
         if (f.iFrom >= 0) b[f.iFrom] -= wFrom * f.flow;
         if (f.iTo >= 0) b[f.iTo] += wTo * f.flow;
       }
@@ -1017,16 +1074,14 @@ export class PressureSolver {
       // Σφ·(ṁ¹ − ṁ_predictor) = c·δP, so δP is the pressure change BEYOND
       // the probe state - which already contains the predictor's transport.
       for (const f of banked) {
-        const wFrom = f.donorIsFrom ? phi(f.iFrom, f.hDonor) : 1;
-        const wTo = f.donorIsFrom ? 1 : phi(f.iTo, f.hDonor);
+        const [wFrom, wTo] = weightsOf(f);
         if (f.iFrom >= 0) b[f.iFrom] += wFrom * f.flow;
         if (f.iTo >= 0) b[f.iTo] -= wTo * f.flow;
       }
       for (const e of entries) {
         const flowFixed = e.capped || e.seated;
         const flow = flowFixed ? e.cappedFlow : e.mStar;
-        const wFrom = e.donorIsFrom ? phi(e.iFrom, e.hDonor) : 1;
-        const wTo = e.donorIsFrom ? 1 : phi(e.iTo, e.hDonor);
+        const [wFrom, wTo] = weightsOf(e);
         if (e.iFrom >= 0) b[e.iFrom] -= wFrom * flow;
         if (e.iTo >= 0) b[e.iTo] += wTo * flow;
         if (flowFixed) continue;
@@ -1443,6 +1498,64 @@ export class PressureSolver {
     if (blend <= 0) return K_liquid;
     if (blend >= 1) return P_sat;
     return Math.exp((1 - blend) * Math.log(K_liquid) + blend * Math.log(P_sat));
+  }
+
+  /**
+   * The gas cushion over a condensed phase, as the implicit closure sees it.
+   *
+   * getEffectiveBulkModulus prices a two-phase node at K = P_sat: water
+   * arriving compresses the vapour space, the steam there condenses, and the
+   * pressure is held by the evaporation buffer. Gas does not condense. With
+   * n moles of it sharing the vapour space, the gas's partial pressure
+   * P_gas = n·R·T/V_gas rises as the space shrinks, on top of the steam's
+   * response (Dalton: the pressures add). A spent-fuel pool under a 278 m³
+   * air blanket answers 0.34 Pa per kg of water, 70x stiffer than the steam
+   * buffer's 0.005, and 318 Pa per kg of air, 60,000x stiffer. Priced at the
+   * buffer, its vent flow overshot every step at dt = 1 s and flipped sign
+   * the next - a period-2 flip of the pool (±7 kPa, ±44 kg/s) that a
+   * consistent backward-Euler closure damps at any step.
+   *
+   * At fixed T, with the liquid giving way at its bulk modulus K:
+   *   R·T·dn = V_gas·dP + P_gas·dV_gas,   dV_gas = V_liq·dP/K - v_f·dm_w
+   * so both the water and the gas act on the same room
+   *   D = V_gas + P_gas·V_liq/K
+   * and the responses are dP/dm_w = v_f·P_gas/D and dP/dn = R·T/D. The first
+   * vanishes with the gas, so a pure steam-water node is untouched; the
+   * second stays finite (the first moles of air into a steam space raise its
+   * pressure by their partial pressure). Both fade across the same dome-edge
+   * zone as the bulk modulus, so a node flooding solid hands over to the
+   * liquid stiffness continuously. Temperature effects stay with the energy
+   * leg (β), exactly as for every other node.
+   *
+   * Null for a vapour node (γ·P is already the mixture's own response) and
+   * for a node with no vapour space.
+   */
+  private gasCushion(node: FlowNode): { blend: number; perKgWater: number; perMoleGas: number } | null {
+    const phase = node.fluid.phase;
+    if (phase !== 'liquid' && phase !== 'two-phase') return null;
+    const V_gas = nodeGasVolume(node);
+    if (!(V_gas > 0)) return null;
+    const m_w = node.fluid.mass;
+    const satDist = distanceToSaturationLine(node.fluid.internalEnergy / m_w, node.volume / m_w);
+    const BLEND_DISTANCE = 10; // mL/kg - the bulk modulus's dome-edge zone
+    const blend = Math.min(1, Math.max(0, (BLEND_DISTANCE - satDist.distance) / (2 * BLEND_DISTANCE)));
+    if (!(blend > 0)) return null;
+    const T = node.fluid.temperature;
+    const n = node.fluid.ncg ? ncgTotalMoles(node.fluid.ncg) : 0;
+    const P_gas = (n * R_GAS * T) / V_gas;
+    const V_liq = node.volume - V_gas;
+    const K_liq = numericalBulkModulus(T - 273.15, this.config.K_max);
+    const room = V_gas + (P_gas * V_liq) / K_liq;
+    const v_f = 1 / saturatedLiquidDensity(Math.min(T, 646.5));
+    const perKgWater = blend * v_f * P_gas / room;
+    const perMoleGas = (R_GAS * T) / room;
+    if (!(perKgWater >= 0) || !(perMoleGas > 0) || !isFinite(perMoleGas)) {
+      throw new Error(
+        `[PressureSolver] Invalid gas cushion for '${node.id}': dP/dm_w=${perKgWater} Pa/kg, ` +
+        `dP/dn=${perMoleGas} Pa/mol (V_gas=${V_gas} m³, V_liq=${V_liq} m³, n=${n} mol, T=${T} K)`
+      );
+    }
+    return { blend, perKgWater, perMoleGas };
   }
 
   /**

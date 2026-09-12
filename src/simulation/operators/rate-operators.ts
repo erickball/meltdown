@@ -54,6 +54,7 @@ import {
   approxVaporDensity,
   CLOSED_FLOW_DECAY_TAU,
   pressureAtConnection,
+  zoneWaterShare,
 } from './connection-hydraulics';
 
 // Shared per-connection hydraulics now live in connection-hydraulics.ts (one
@@ -1851,19 +1852,10 @@ export class FlowRateOperator implements RateOperator {
       let shareOf = (_zone: 'liquid' | 'vapor' | 'mixture'): number => 1;
       if (upNcg && totalMoles(upNcg) > 0 && (comp.wVapor > 0 || comp.wMixture > 0)) {
         gasMassInSpace = ncgTotalMass(upNcg);
-        // Steam sharing the flowing space with the gas: the vapor space's
-        // steam for vapor draws from a two-phase node, all water otherwise.
-        // Liquid-zone flow carries no gas (share 1).
-        const gm = gasMassInSpace;
-        shareOf = (zone) => {
-          if (zone === 'liquid') return 1;
-          const steamMassInSpace =
-            zone === 'vapor' && upstreamNode.fluid.phase === 'two-phase'
-              ? upstreamNode.fluid.mass * (upstreamNode.fluid.quality ?? 0)
-              : upstreamNode.fluid.mass;
-          const totalInSpace = gm + steamMassInSpace;
-          return totalInSpace > 0 ? steamMassInSpace / totalInSpace : 1;
-        };
+        // Steam sharing the flowing space with the gas (zoneWaterShare - the
+        // pressure solver weights the same split, so the two agree on how
+        // much gas a line carries).
+        shareOf = (zone) => zoneWaterShare(upstreamNode, zone);
       }
 
       // Per zone: the zone's share of the total flow (mass weight), the

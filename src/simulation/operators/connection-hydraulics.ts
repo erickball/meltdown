@@ -568,6 +568,34 @@ export interface DrawComposition {
   rho: number;
 }
 
+/**
+ * The WATER share of the mass one zone of `node` delivers. Liquid-zone flow
+ * leaves the gas behind in the vapour space (share 1). A vapour draw from a
+ * two-phase node carries the vapour space's steam and gas in proportion; a
+ * mixture draw, or any draw from a single-phase node, the whole inventory's.
+ * A helium-filled node (~no water) delivers ~pure gas and a steam node ~pure
+ * water, with no special cases.
+ */
+export function zoneWaterShare(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture'): number {
+  if (zone === 'liquid') return 1;
+  const ncg = node.fluid.ncg;
+  if (!ncg || !(totalMoles(ncg) > 0)) return 1;
+  const gasMass = ncgTotalMass(ncg);
+  const steamMass = zone === 'vapor' && node.fluid.phase === 'two-phase'
+    ? node.fluid.mass * (node.fluid.quality ?? 0)
+    : node.fluid.mass;
+  const total = gasMass + steamMass;
+  return total > 0 ? steamMass / total : 1;
+}
+
+/** Mass fraction of a draw that is non-condensible gas (the rest is water). */
+export function drawGasMassFraction(node: FlowNode, comp: DrawComposition): number {
+  const water = comp.wLiquid
+    + (comp.wMixture > 0 ? comp.wMixture * zoneWaterShare(node, 'mixture') : 0)
+    + (comp.wVapor > 0 ? comp.wVapor * zoneWaterShare(node, 'vapor') : 0);
+  return Math.max(0, 1 - water);
+}
+
 export function drawCompositionAt(
   node: FlowNode,
   connectionElevation?: number,
