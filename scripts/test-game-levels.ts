@@ -641,7 +641,11 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         console.log(`      t=${sim.state.time.toFixed(0).padStart(5)}s  pool ${lvl.toFixed(2)} m  ` +
           `clad ${sfpCladC(sim.state).toFixed(0)} C  ` +
           `tanks ${(tankMass() / 1000).toFixed(0)} t (${flowRate(sim.state, 'tank-valve', 'pool').toFixed(0)} kg/s)  ` +
-          `sea pump ${shore.flooded ? 'DROWNED' : 'clear'} (${shore.effectiveSpeed.toFixed(2)}, ${flowRate(sim.state, 'shore-pump', 'pool').toFixed(0)} kg/s)  ` +
+          `sea pump ${shore.flooded ? 'DROWNED' : 'clear'} (${shore.effectiveSpeed.toFixed(2)}, ${flowRate(sim.state, 'shore-pump', 'pool').toFixed(0)} kg/s, ` +
+          `casing ${(() => {
+            const c = sim.state.flowNodes.get('shore-pump')!;
+            return `${c.fluid.phase} ${(100 * (c.fluid.gasVolume ?? 0) / c.volume).toFixed(1)}% gas ${(c.fluid.pressure / 1e5).toFixed(3)} bar`;
+          })()})  ` +
           `puddle ${(sim.state.surfaceWater!.volumes.get(padBasin) ?? 0).toFixed(0)} m3`);
       }
     }
