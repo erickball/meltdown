@@ -191,9 +191,12 @@ test('a mostly-air pump pot draining its water does not chill', () => {
   // (Dalton: ~0.5 kg over 6.5 m3 at 320 K, priced properly since the gas
   // was moved to the vapour space on 2026-09-10) leaves with the froth at
   // its latent heat - about a megajoule, most of it off the last of the
-  // water, a couple of kelvin. The report's 5 K/s, 45 kJ per kg, is what
-  // must not come back.
-  assert(T0 - minT < 3, `pot stayed near its temperature (${story})`);
+  // water, a few kelvin. The report's 5 K/s, 45 kJ per kg, is what must
+  // not come back. (3 K until 2026-09-11, when a vapour draw off a
+  // two-phase node started costing the steam tables' h_g: h_g - h_f is
+  // 2391 kJ/kg at 320 K, where the old fit said 2200, so the same steam
+  // takes ~9% more latent heat with it - 3.16 K here.)
+  assert(T0 - minT < 4, `pot stayed near its temperature (${story})`);
 });
 
 report('Pump line (CAR BZ1bOwQ0oLXY0q8jG1hU)');
