@@ -99,7 +99,8 @@ export function renderIsometricGround(
   config: IsometricConfig,
   cameraDepth: number = 0,
   viewAngle: number = 30,
-  isoZoom: number = 1
+  isoZoom: number = 1,
+  shrubs: boolean = true
 ): void {
   if (!config.enabled) {
     return;
@@ -133,8 +134,9 @@ export function renderIsometricGround(
   ctx.fillStyle = duneGradient;
   ctx.fillRect(0, 0, width, height);
 
-  // Draw scattered shrubs/cacti with isometric projection
-  const shrubPositions = generateShrubPositions(view, width, height, cameraDepth, viewAngle, isoZoom);
+  // Draw scattered shrubs/cacti with isometric projection. They stand on a
+  // flat desert, so a plant with its own terrain (drawn over this) has none.
+  const shrubPositions = shrubs ? generateShrubPositions(view, width, height, cameraDepth, viewAngle, isoZoom) : [];
 
   for (const shrub of shrubPositions) {
     drawDesertShrub(ctx, shrub.x, shrub.y, shrub.size, shrub.type);

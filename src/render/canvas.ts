@@ -28,6 +28,8 @@ import { getCladdingOxidationPower } from '../simulation/operators/rate-operator
 import { CameraShake } from './camera-shake';
 import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
 import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
+import { TerrainScene, TerrainView, buildTerrainScene, viewDatum, basinSurfaces, renderTerrain3D, pickGround, visibleSurfaceAt, waterBodyAt } from './terrain-3d';
+import { terrainHeightAt } from '../simulation/terrain';
 
 /** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
 export type ViewMode = 'perspective' | 'grid';
@@ -64,6 +66,9 @@ export class PlantCanvas {
   public renderCache = { sprites: true, ground: true };
   public readonly spriteCache = new ComponentSpriteCache();
   private readonly groundCache = new LayerCache();
+  /** The plant's height field as this view draws it (terrain-3d.ts), and how many times it has been rebuilt (for the ground cache key). */
+  private terrain3D: TerrainScene | null = null;
+  private terrain3DSerial = 0;
   /** Wall time of the last 2.5D frame's drawing, ms, and its breakdown by section (for perf probes). */
   public lastFrameMs = 0;
   public frameProfile: Record<string, number> = {};
@@ -584,6 +589,10 @@ export class PlantCanvas {
     // Sort by depth: closer to camera (smaller Y) checked first
     // Also: contained components are on top, so check them first
     components.sort((a, b) => {
+      // The terrain's water is the ground: anything standing in it is on top
+      const wa = this.terrainWaterOf(a) ? 1 : 0, wb = this.terrainWaterOf(b) ? 1 : 0;
+      if (wa !== wb) return wa - wb;
+
       // First priority: contained components are on top
       if (a.containedBy && !b.containedBy) return -1;
       if (!a.containedBy && b.containedBy) return 1;
@@ -603,6 +612,14 @@ export class PlantCanvas {
 
   // Check if a screen point is inside a component's actual visual bounds on screen
   private isPointInProjectedComponent(screenPos: Point, component: PlantComponent): boolean {
+    // A tank that is the terrain's sea has no drawn body: the water is its hit area
+    const body = this.terrainWaterOf(component);
+    const scene = body ? this.terrainScene() : null;
+    if (body && scene) {
+      const p = this.pickTerrain(screenPos, scene);
+      return p !== null && waterBodyAt(scene, basinSurfaces(scene.model, this.simState?.surfaceWater), p) === body;
+    }
+
     const elevation = getComponentElevation(component);
     const size = this.getComponentSize(component);
     const halfW = size.width / 2;
@@ -836,6 +853,20 @@ export class PlantCanvas {
 
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
     if (this.viewMode === 'grid') return this.grid.componentScreenBounds(component);
+
+    // The terrain's sea has no drawn body: hang its gauges off the nozzle,
+    // where the player's pipe meets the water (as the grid does)
+    if (this.terrainWaterOf(component)) {
+      const pts = component.ports
+        .map(p => this.getPortScreenPosition(component, p))
+        .filter((p): p is { x: number; y: number; radius: number } => p !== null);
+      if (pts.length === 0) return null;
+      const x0 = Math.min(...pts.map(p => p.x - p.radius)), x1 = Math.max(...pts.map(p => p.x + p.radius));
+      const y0 = Math.min(...pts.map(p => p.y - p.radius)), y1 = Math.max(...pts.map(p => p.y + p.radius));
+      const at = this.worldToScreenPerspective(component.position, 0);
+      if (at.scale <= 0) return null;
+      return { topCenter: { x: (x0 + x1) / 2, y: y0 }, scale: at.scale, width: x1 - x0, height: y1 - y0 };
+    }
 
     // Isometric/perspective mode - replicate the visual bounds calculation
     const elevation = getComponentElevation(component);
@@ -1259,11 +1290,111 @@ export class PlantCanvas {
     return { verticalScale, perspectiveOffset, overallScale };
   }
 
-  // Calculate screen position using perspective projection
-  // worldPos: component's world position
-  // elevation: component's height above ground (0 for ground-level objects)
+  /**
+   * Screen position of a plan point at `elevation` above the ground under
+   * it. Every elevation in the plant is above LOCAL ground (the simulation
+   * reads it the same way - factory.ts absoluteBase), so on a plant with
+   * terrain the point is lifted by that ground's height over the view datum.
+   */
   private worldToScreenPerspective(worldPos: Point, elevation: number = 0): { pos: Point, scale: number } {
+    return this.projectPerspective(worldPos, elevation + this.groundLift(worldPos));
+  }
+
+  /** Metres the ground at a plan point stands above the view's grade (0 without terrain). */
+  private groundLift(p: Point): number {
+    const scene = this.terrainScene();
+    return scene ? terrainHeightAt(scene.spec, p) - scene.datum : 0;
+  }
+
+  /**
+   * The plant's height field as this view draws it, rebuilt when the field
+   * object changes. The datum is taken then, from where the components stand
+   * (see viewDatum), and held - so building on the beach does not drop the
+   * camera.
+   */
+  private terrainScene(): TerrainScene | null {
+    const spec = this.plantState.terrain;
+    if (!spec) return null;
+    if (this.terrain3D?.spec !== spec) {
+      const standing = Array.from(this.plantState.components.values())
+        .filter(c => !c.containedBy && !waterBodyOf(c as never))
+        .map(c => c.position);
+      this.terrain3D = buildTerrainScene(spec, viewDatum(spec, standing));
+      this.terrain3DSerial++;
+    }
+    return this.terrain3D;
+  }
+
+  /** The terrain water body a component IS, when the plant's terrain has it (then the ground draws it, not the component). */
+  private terrainWaterOf(component: PlantComponent): string | undefined {
+    const body = waterBodyOf(component as never);
+    if (!body) return undefined;
+    return this.plantState.terrain?.waters?.some(w => w.id === body) ? body : undefined;
+  }
+
+  /** The water body to pick out on the ground: a body-tank that is selected, else one that is hovered. */
+  private terrainWaterLit(): { body: string; selected: boolean } | null {
+    const of = (id: string | null) => {
+      const c = id ? this.plantState.components.get(id) : undefined;
+      return c ? this.terrainWaterOf(c) : undefined;
+    };
+    const selected = of(this.selectedComponentId);
+    if (selected) return { body: selected, selected: true };
+    const hovered = of(this.hoveredComponentId);
+    return hovered ? { body: hovered, selected: false } : null;
+  }
+
+  /**
+   * The camera as terrain-3d.ts needs it. The side lines bound what can be
+   * on screen from outside: a point is visible only if its lateral offset is
+   * under (half width + margin) / (scale x 50 x zoom), and the scale's cap of
+   * 3 close in only ever widens that - max(a, b) <= a + b gives a straight
+   * line that holds everywhere.
+   */
+  private terrainView(width: number, height: number): TerrainView {
+    const { perspectiveOffset, overallScale } = this.getViewTransform();
+    const centerX = width / 2;
+    const camX = -(this.view.offsetX - centerX) / 10;
+    const camY = -this.cameraDepth / 10;
+    const near = camY + Math.max(1, 1 - perspectiveOffset) + 1e-6;
+    const c = (width / 2 + 50) / (this.CAMERA_HEIGHT * this.PERSPECTIVE_X_SCALE * overallScale * this.isoZoom);
+    const k = -camY + perspectiveOffset + this.CAMERA_HEIGHT / 3;
+    const size = { width, height };
+    return {
+      project: (x, y, z) => this.projectPerspective({ x, y }, z, size).pos,
+      bounds: [[0, 1, -near], [1, c, -camX + c * k], [-1, c, camX + c * k]],
+      horizonY: this.projectPerspective({ x: camX, y: camY + 1e7 }, 0, size).pos.y,
+      width,
+      height,
+    };
+  }
+
+  /**
+   * The plan point under a screen point on a plant with terrain: the first
+   * ground (or water surface) the line of sight meets. Null in the sky.
+   */
+  private pickTerrain(screenPos: Point, scene: TerrainScene): Point | null {
     const rect = this.canvas.getBoundingClientRect();
+    const centerX = rect.width / 2;
+    const { perspectiveOffset, overallScale } = this.getViewTransform();
+    const camX = -(this.view.offsetX - centerX) / 10;
+    const camY = -this.cameraDepth / 10;
+    const unzoomedX = centerX + (screenPos.x - centerX) / this.isoZoom;
+    const surfaces = basinSurfaces(scene.model, this.simState?.surfaceWater);
+    // Screen x depends only on the lateral offset and the depth, so the
+    // line of sight in plan is exact
+    const rayAt = (d: number): Point => {
+      const finalScale = Math.min(this.CAMERA_HEIGHT / (d + perspectiveOffset), 3) * overallScale;
+      return { x: camX + (unzoomedX - centerX) / (finalScale * this.PERSPECTIVE_X_SCALE), y: camY + d };
+    };
+    return pickGround(Math.max(1, 1 - perspectiveOffset) + 1e-6, 1e5, screenPos.y, rayAt,
+      p => this.projectPerspective(p, visibleSurfaceAt(scene, surfaces, p) - scene.datum, rect).pos.y);
+  }
+
+  // Perspective projection of a plan point at height z above the view's
+  // grade. `rect` is the canvas size: a caller projecting thousands of points
+  // a frame (the terrain) passes it in rather than asking the DOM every time.
+  private projectPerspective(worldPos: Point, z: number, rect: { width: number; height: number } = this.canvas.getBoundingClientRect()): { pos: Point, scale: number } {
     const horizonY = rect.height * 0.25;
     const groundHeight = rect.height - horizonY;
     const centerX = rect.width / 2;
@@ -1314,7 +1445,7 @@ export class PlantCanvas {
     const baseScreenY = screenCenterY + (rawScreenY - screenCenterY) * stretchFactor;
 
     // Apply elevation offset (compressed by view angle for looking from above)
-    const elevationOffset = elevation * cappedScale * this.ELEVATION_SCALE * verticalScale * overallScale;
+    const elevationOffset = z * cappedScale * this.ELEVATION_SCALE * verticalScale * overallScale;
     const unzoomedY = baseScreenY - elevationOffset;
 
     // Zoom: uniform screen-space magnification of the finished projection
@@ -1329,6 +1460,12 @@ export class PlantCanvas {
   // Inverse perspective projection: convert screen coordinates to world coordinates
   // Used for component placement in isometric mode
   private screenToWorldPerspective(screenPos: Point): Point {
+    // On terrain the ground is not one plane: find what the eye meets
+    const scene = this.terrainScene();
+    if (scene) {
+      const hit = this.pickTerrain(screenPos, scene);
+      if (hit) return hit;
+    }
     const rect = this.canvas.getBoundingClientRect();
     const horizonY = rect.height * 0.25;
     const groundHeight = rect.height - horizonY;
@@ -1601,11 +1738,19 @@ export class PlantCanvas {
     const shake = this.shake.offset(rect.width, rect.height);
     if (shake) CameraShake.apply(ctx, shake, rect.width, rect.height);
 
-    // Draw the ground (cached until the camera or viewport moves)
-    const paintGround = (c: CanvasRenderingContext2D) =>
-      renderIsometricGround(c, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom);
+    // Draw the ground (cached until the camera or viewport moves, or the
+    // terrain's water moves or is picked out)
+    const scene = this.terrainScene();
+    const surfaces = scene ? basinSurfaces(scene.model, this.simState?.surfaceWater) : null;
+    const lit = scene ? this.terrainWaterLit() : null;
+    const groundKey = !scene || !surfaces ? cameraKey :
+      `${cameraKey}|t${this.terrain3DSerial}|${[...surfaces].map(([b, s]) => `${b}:${s.toFixed(3)}`).join(',')}|${lit ? `${lit.body}${lit.selected ? 1 : 0}` : ''}`;
+    const paintGround = (c: CanvasRenderingContext2D) => {
+      renderIsometricGround(c, this.view, rect.width, rect.height, this.isometric, this.cameraDepth, this.viewAngle, this.isoZoom, !scene);
+      if (scene && surfaces) renderTerrain3D(c, scene, this.terrainView(rect.width, rect.height), surfaces, lit);
+    };
     if (this.renderCache.ground) {
-      this.groundCache.draw(ctx, cameraKey, rect.width, rect.height, dpr, paintGround);
+      this.groundCache.draw(ctx, groundKey, rect.width, rect.height, dpr, paintGround);
     } else {
       paintGround(ctx);
     }
@@ -1924,7 +2069,7 @@ export class PlantCanvas {
     // drawing aid, not part of the operating view)
     if (this.showsBuildOverlays()) {
       for (const component of sortedComponents) {
-        this.renderGroundOutline(ctx, component);
+        if (!this.terrainWaterOf(component)) this.renderGroundOutline(ctx, component);
       }
     }
 
@@ -2085,6 +2230,14 @@ export class PlantCanvas {
       // ring drawn over it afterwards says how long that will last.
       const ghost = buildGhost(component);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
+
+      // A tank that IS the terrain's sea or lake: the ground drew the water,
+      // and that is all there is of it to see
+      if (this.terrainWaterOf(component)) {
+        ctx.restore();
+        this.renderGaugesFor(ctx, component.id, gaugeNodes, gaugesDrawn);
+        continue;
+      }
 
       const elevation = getComponentElevation(component);
       const size = this.getComponentSize(component);
