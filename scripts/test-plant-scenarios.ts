@@ -921,9 +921,19 @@ test('Natural draft feeds a Zircaloy fire: a floor tear plus a rim vent keeps th
   assert(floor.endOxPower > 1.15 * rim.endOxPower,
     `the drafted pool must sustain more oxidation than the undrafted one: ` +
     `${(floor.endOxPower / 1e6).toFixed(3)} vs ${(rim.endOxPower / 1e6).toFixed(3)} MW`);
-  assert(floor.endOxPower > floor.decay,
-    `a fed fire should still outrun the decay heat after 300 s: ` +
-    `${(floor.endOxPower / 1e6).toFixed(2)} vs ${(floor.decay / 1e6).toFixed(2)} MW`);
+  // And the draft really is what feeds it: after 300 s the fire burns at
+  // least most of what its air can sustain - net air in x 23.1% O2 by mass,
+  // at ~1.1 MJ per mol of O2 turned to ZrO2 - with the make-up line's steam
+  // on top. (This used to demand more than the 5 MW decay heat, which was
+  // only ever met while a spurious slosh through the stopped make-up pump
+  // ratcheted water into the pool: its gas pocket traded steam priced 264
+  // kJ/kg short until draws off two-phase nodes came from the steam tables.
+  // The supply-limited fire here is ~2.8 MW: ~1.85 MW from the air, ~0.9
+  // from the trickle of make-up steam.)
+  const o2LimitedPower = floor.airIn * 0.2314 / 0.032 * 1.1e6;
+  assert(floor.endOxPower > 0.8 * o2LimitedPower,
+    `a fed fire should burn what its draft delivers after 300 s: ${(floor.endOxPower / 1e6).toFixed(2)} MW ` +
+    `vs ${(o2LimitedPower / 1e6).toFixed(2)} MW of oxygen arriving on ${floor.airIn.toFixed(3)} kg/s of air`);
 });
 
 report('Plant Scenario Regression Suite');
