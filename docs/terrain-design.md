@@ -100,8 +100,23 @@ terrain water body that the tank IS:
   the whole body and outlines its shore.
 - gauges hang off the nozzle rather than off the (meaningless) footprint, and
   the footprint is not a routing obstacle - a pipe crosses water.
-- 2.5D, which has no terrain, draws the water SURFACE as a low band at the
-  component's own water line instead of a vessel.
+- 2.5D does the same: the terrain is drawn there as a lit surface with the
+  water standing on it (`src/render/terrain-3d.ts`), the tank itself is not
+  drawn, and the water is its hit area. Only a `waterBody` naming a body the
+  plant's terrain does not have falls back to a low band at the component's
+  own water line.
+
+### The 2.5D view
+
+Every point is drawn at its ground height plus its elevation (above local
+ground, as the simulation reads it), less a view datum: the median ground
+under the plant, fixed when the height field is loaded. The perspective
+projection was built around one ground plane and has no free camera height -
+level 1's +13 m bench drawn at its absolute height lay along the horizon - so
+the ground the plant stands on is drawn as that plane. The mesh runs on past
+the field at its edge heights, so the sea reaches the horizon; the waterline
+is cut per triangle, so a tsunami climbs the beach smoothly. Details in the
+file comment of terrain-3d.ts.
 
 Nothing about the physics changes: it is one tank node, and a sea can be
 pumped dry. The tank's `elevation`/`height`/`fillLevel` still have to put its
@@ -111,10 +126,11 @@ generator asserts it.
 ## Not yet
 
 - A terrain editor (levels ship their height field); hills as a build item.
-- The 2.5D view ignores terrain (a `waterBody` tank draws only its surface).
+- In 2.5D the terrain is painted before every component, so a hill in front
+  of a component does not hide it.
 - Ground water as a source: a puddle cannot be pumped.
 - A `waterBody` tank and the terrain body it draws as are still DECOUPLED:
   raising the body (a tsunami) does not raise the tank's level.
 - Flooding affects pumps only; a flooded tank or valve carries on.
-- The water fill is still per CELL, so a coastline reads blockier than the
-  contours that now curve over it.
+- The grid's water fill is still per CELL, so a coastline reads blockier than
+  the contours that now curve over it (2.5D cuts it along the contour).

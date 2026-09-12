@@ -42,6 +42,8 @@ import {
 import { buildGhost } from '../game/build-queue';
 import { terrainHeightAt } from '../simulation/terrain';
 import { ambientAir } from '../simulation/factory';
+import { pipeSegmentCount } from './pipe-rules';
+import { sliceRoute } from '../render/grid-geometry';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -2132,20 +2134,6 @@ export class ConstructionManager {
     console.log(`  End: (${endX.toFixed(2)}, ${endY.toFixed(2)}, elev=${endElevation.toFixed(2)})`);
     console.log(`  3D Distance: ${actualDistance.toFixed(2)}m, Pipe length: ${pipeLength.toFixed(2)}m`);
 
-    // Pipe ports are at the ends - bidirectional since flow is determined by physics
-    const pipePorts: Port[] = [
-      {
-        id: `${pipeId}-left`,
-        position: { x: 0, y: 0 },  // Left end of pipe
-        direction: 'both'
-      },
-      {
-        id: `${pipeId}-right`,
-        position: { x: pipeLength, y: 0 },  // Right end of pipe
-        direction: 'both'
-      }
-    ];
-
     // Compute average fluid properties from connected components - unless
     // the run is laid to a pump delivered dry, in which case it is dry too
     const dryAir = this.dryRunAir(fromComponent, toComponent);
@@ -2177,49 +2165,95 @@ export class ConstructionManager {
     this.lastStockRefusal = null;
     spend(this.plantState, pipeCharge);
 
-    const pipe: PipeComponent = {
-      id: pipeId,
-      type: 'pipe',
-      label: `Pipe ${fromComponent.id} to ${toComponent.id}`,
-      position: { x: startX, y: startY },
-      rotation,
-      diameter,
-      thickness: 0.01,
-      length: pipeLength,
-      pressureRating: pipePressureRating,
-      ports: pipePorts,
-      fluid: pipeFluid,
-      // 3D endpoint data for isometric rendering
-      elevation: startElevation,
-      endPosition: { x: endX, y: endY },
-      endElevation: endElevation,
-      // Grid view draws the pipe along the route the user laid
-      ...(route && route.length >= 2 ? { route } : {}),
-      ...(dryAir ? { initialNcg: dryAir.initialNcg } : {})
-    };
+    // A run that climbs is laid as a CHAIN of pipes, each rising no more than
+    // AUTO_PIPE_MAX_SEGMENT_RISE (pipe-rules.ts): one well-mixed pipe node
+    // sits at mid-run, so water arriving at a tall pipe's low end is priced as
+    // if it were already halfway up. Heights are compared ABSOLUTE - the
+    // ground under each end plus the elevation above it - because a line from
+    // a pump on the sea floor to a pool on its bench climbs the terrain too.
+    const terrain = this.plantState.terrain;
+    const startPoint = { x: startX, y: startY };
+    const endPoint = { x: endX, y: endY };
+    const zStart = terrainHeightAt(terrain, startPoint) + startElevation;
+    const zEnd = terrainHeightAt(terrain, endPoint) + endElevation;
+    const segments = pipeSegmentCount(zEnd - zStart);
+    // The plan route the chain is cut along: the one drawn, or the one the
+    // grid view draws for a single pipe between these two ends
+    const drawn = route && route.length >= 2 ? route : undefined;
+    const planRoute = drawn ?? pipeRoute({
+      position: startPoint, endPosition: endPoint, length: pipeLength, rotation,
+    } as PipeComponent);
+    const segmentLength = pipeLength / segments;
 
     // A pipe between two components that share a container runs inside that
     // container too: a break must release into the container's atmosphere
     // (not the environment) and gauge pressure is relative to the container.
     const commonContainer = this.findCommonContainer(fromComponent, toComponent);
     if (commonContainer) {
-      pipe.containedBy = commonContainer;
       console.log(`[Construction] Auto-pipe '${pipeId}' is contained by '${commonContainer}'`);
     }
 
-    this.plantState.components.set(pipeId, pipe);
+    const segmentIds: string[] = [];
+    for (let i = 0; i < segments; i++) {
+      const id = i === 0 ? pipeId : this.generateComponentId('pipe');
+      const f0 = i / segments, f1 = (i + 1) / segments;
+      // One pipe keeps exactly what it always had; a chain shares the route
+      // out between its links, and climbs evenly along it (as the renderer's
+      // slopeRoute draws a pipe)
+      const segRoute = segments === 1 ? drawn : sliceRoute(planRoute, f0, f1);
+      const a = segments === 1 ? startPoint : segRoute![0];
+      const b = segments === 1 ? endPoint : segRoute![segRoute!.length - 1];
+      const pipe: PipeComponent = {
+        id,
+        type: 'pipe',
+        label: segments === 1
+          ? `Pipe ${fromComponent.id} to ${toComponent.id}`
+          : `Pipe ${fromComponent.id} to ${toComponent.id} (${i + 1}/${segments})`,
+        position: { x: a.x, y: a.y },
+        rotation: segments === 1 ? rotation : Math.atan2(b.y - a.y, b.x - a.x),
+        diameter,
+        thickness: 0.01,
+        length: segmentLength,
+        pressureRating: pipePressureRating,
+        // Ports at the ends - bidirectional since flow is determined by physics
+        ports: [
+          { id: `${id}-left`, position: { x: 0, y: 0 }, direction: 'both' },
+          { id: `${id}-right`, position: { x: segmentLength, y: 0 }, direction: 'both' },
+        ],
+        fluid: { ...pipeFluid },
+        // 3D endpoint data (elevations above the ground under each end)
+        elevation: segments === 1
+          ? startElevation
+          : zStart + (zEnd - zStart) * f0 - terrainHeightAt(terrain, a),
+        endPosition: { x: b.x, y: b.y },
+        endElevation: segments === 1
+          ? endElevation
+          : zStart + (zEnd - zStart) * f1 - terrainHeightAt(terrain, b),
+        // Grid view draws the pipe along the route the user laid
+        ...(segRoute ? { route: segRoute } : {}),
+        ...(dryAir ? { initialNcg: { ...dryAir.initialNcg } } : {})
+      };
+      if (commonContainer) pipe.containedBy = commonContainer;
+      this.plantState.components.set(id, pipe);
+      segmentIds.push(id);
+    }
 
     // Pipe is small (height ≈ diameter), connection is at center
-    const pipeRelElev = pipe.diameter / 2;
+    const pipeRelElev = diameter / 2;
 
-    // Create connections from component to pipe and pipe to component
-    // Pass elevations relative to each component's bottom
-    // From component → pipe: fromElevation is relative to fromComponent, pipeRelElev is relative to pipe
-    this.createConnection(fromPortId, `${pipeId}-left`, fromElevation, pipeRelElev);
-    // Pipe → to component: pipeRelElev is relative to pipe, toElevation is relative to toComponent
-    this.createConnection(`${pipeId}-right`, toPortId, pipeRelElev, toElevation);
+    // Stubs: component -> first pipe, pipe -> pipe along the chain, last pipe
+    // -> component. Elevations are relative to each component's bottom. None
+    // carries a length of its own - the factory gives a stub half of each
+    // pipe it joins - so none is charged: the run was charged above, once.
+    this.createConnection(fromPortId, `${segmentIds[0]}-left`, fromElevation, pipeRelElev);
+    for (let i = 0; i + 1 < segmentIds.length; i++) {
+      this.createConnection(`${segmentIds[i]}-right`, `${segmentIds[i + 1]}-left`, pipeRelElev, pipeRelElev);
+    }
+    this.createConnection(`${segmentIds[segmentIds.length - 1]}-right`, toPortId, pipeRelElev, toElevation);
 
-    console.log(`[Construction] Created pipe '${pipeId}' with diameter ${diameter.toFixed(3)}m between components`);
+    console.log(`[Construction] Created ${segments === 1 ? `pipe '${pipeId}'`
+      : `${segments} pipes (${segmentIds.join(', ')}) climbing ${(zEnd - zStart).toFixed(1)} m`} ` +
+      `with diameter ${diameter.toFixed(3)}m between components`);
     return true;
   }
 
@@ -3456,6 +3490,14 @@ export class ConstructionManager {
   }
 
   /** Two pipes that are the same line: one could carry on as the other. */
+  /** Absolute height of the end of `pipe` AWAY from `jointPort`. */
+  private farEndHeight(pipe: PipeComponent, jointPort: Port): number {
+    const jointAtEnd = jointPort.position.x > pipe.length / 2;
+    const point = jointAtEnd ? pipe.position : (pipe.endPosition ?? pipe.position);
+    const elevation = jointAtEnd ? (pipe.elevation ?? 0) : (pipe.endElevation ?? pipe.elevation ?? 0);
+    return terrainHeightAt(this.plantState.terrain, point) + elevation;
+  }
+
   private sameLine(a: PipeComponent, b: PipeComponent): boolean {
     const x = a as Record<string, any>, y = b as Record<string, any>;
     return a.diameter === b.diameter && a.thickness === b.thickness &&
@@ -3497,6 +3539,9 @@ export class ConstructionManager {
       if ((p.conn.length ?? 0) !== 0 || buildGhost(p.conn) || buildGhost(p.comp)) continue;
       const other = p.comp as PipeComponent;
       if (!this.sameLine(laid, other)) continue;
+      // Never fuse back what the pipe rule laid as a chain: a pair whose
+      // combined run would climb more than one link may stays two pipes
+      if (pipeSegmentCount(this.farEndHeight(other, p.port) - this.farEndHeight(laid, ends[i])) > 1) continue;
       if (partners.some((q, j) => j !== i && q?.comp.id === other.id)) continue;
       return { joint: p.conn, own: ends[i], other, otherPort: p.port };
     }

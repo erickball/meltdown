@@ -1250,8 +1250,51 @@ export class PressureSolver {
     if (!corrector) this.lastSecantNodes.clear();
     for (let i = 0; i < n; i++) {
       const node = nodeList[i];
-      // NCG provides a real gas cushion - the liquid branch never applies,
-      // and a mixture node's pressure is not calculateState's to give.
+      // The gas CUSHION's own secant. gasCushion prices the pocket at its
+      // start-of-step size, and a pocket stiffens hyperbolically as it
+      // shrinks: a flooded 0.48 m3 pump casing with half a litre of air left
+      // under its top nozzle was admitted, in one step, enough water to
+      // collapse the pocket and compress the liquid behind it - trial
+      // pressures of 60-700 bar, 13% of its steps rejected. Over the water the
+      // step is about to add (dm, at v_f a kilogram) the pocket and the
+      // liquid share the room exactly, at the step's temperature:
+      //   n·R·T/(P_gas + x) = V_gas - v_f·dm + V_liq·x/K
+      // a quadratic in the rise x whose root is the tangent for small dm and
+      // the liquid's own stiffness once the pocket is gone. Taken only when
+      // materially stiffer, like the liquid-edge secant below.
+      const ncgMoles = node.fluid.ncg ? ncgTotalMoles(node.fluid.ncg) : 0;
+      const dmCushion = c[i] * dP[i] * dt;
+      if (ncgMoles > 0 && cushionBlend[i] > 0 && dmCushion > 0) {
+        const T = node.fluid.temperature;
+        const V_gas = nodeGasVolume(node);
+        const V_liq = node.volume - V_gas;
+        const P_gas = (ncgMoles * R_GAS * T) / V_gas;
+        const K_liq = numericalBulkModulus(T - 273.15, this.config.K_max);
+        const v_f = 1 / saturatedLiquidDensity(Math.min(T, 646.5));
+        const B = V_liq / K_liq;
+        const b = V_gas - v_f * dmCushion + B * P_gas;
+        const disc = Math.sqrt(b * b + 4 * B * P_gas * v_f * dmCushion);
+        // Two forms of the same root, each free of cancellation on its side
+        const rise = b >= 0
+          ? (2 * P_gas * v_f * dmCushion) / (b + disc)
+          : (disc - b) / (2 * B);
+        if (!(rise > 0) || !isFinite(rise)) {
+          throw new Error(
+            `[PressureSolver] Invalid gas-cushion secant for '${node.id}': rise=${rise} Pa for ` +
+            `${dmCushion} kg (V_gas=${V_gas} m³, V_liq=${V_liq} m³, P_gas=${P_gas} Pa, K=${K_liq} Pa)`
+          );
+        }
+        const cCushion = dmCushion / (rise * dt);
+        if (cCushion < 0.5 * c[i]) {
+          if (!corrector) this.lastSecantNodes.set(node.id, 'cushion');
+          c[i] = cCushion;
+          anyStiffened = true;
+        }
+      }
+
+      // NCG provides a real gas cushion (priced above) - the pure-liquid
+      // branch below never applies, and a mixture node's pressure is not
+      // calculateState's to give.
       const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
       if (ncgMass > 1e-6 * node.fluid.mass) continue;
 

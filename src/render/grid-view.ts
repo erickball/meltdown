@@ -38,8 +38,9 @@ import {
 } from './grid-geometry';
 import { GridArt } from './grid-art';
 import { TerrainSpec } from '../terrain-types';
-import { TerrainModel, buildTerrainModel, surfaceAtVolume, terrainHeightAt, cellAt as terrainCellAt } from '../simulation/terrain';
+import { TerrainModel, buildTerrainModel, terrainHeightAt, cellAt as terrainCellAt } from '../simulation/terrain';
 import { contourPolylines, ContourSet } from './terrain-contours';
+import { basinSurfaces } from './terrain-3d';
 import { renderFloodDebris } from './debris-fx';
 import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
 import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
@@ -1396,17 +1397,8 @@ export class GridView {
 
     // Water surface per basin: scripted bodies and stored puddles from the
     // simulation; before one exists, the bodies at their declared surfaces
-    const surfaceOf = new Map<number, number>();
     const sim = f.simState;
-    for (const b of model.basins) {
-      if (b.water) {
-        const live = sim?.surfaceWater?.bodies.get(b.water.id);
-        surfaceOf.set(b.id, live ? live.surface : b.water.surface);
-      } else {
-        const v = sim?.surfaceWater?.volumes.get(b.id) ?? 0;
-        if (v > 0) surfaceOf.set(b.id, surfaceAtVolume(model, b, v));
-      }
-    }
+    const surfaceOf = basinSurfaces(model, sim?.surfaceWater);
 
     // A water body that IS a component (see TankComponent.waterBody) lights
     // up when that component is picked, because the water is all the player

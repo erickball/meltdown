@@ -2,8 +2,8 @@
  * Generator for the SPENT FUEL POOL career level's plant JSON.
  *
  * This script is the SOURCE OF TRUTH for
- * `src/game-mode/levels/spent-fuel-pool.json`: the terrain is a 30 x 16 height
- * field (480 numbers) that nobody should be editing by hand, and the site's
+ * `src/game-mode/levels/spent-fuel-pool.json`: the terrain is a 46 x 32 height
+ * field (1472 numbers) that nobody should be editing by hand, and the site's
  * elevations only work because every structure stands on a deliberately FLAT
  * bench. Change the map here and re-run:
  *
@@ -20,8 +20,8 @@
  *   110..176 m    the hillside, +14 m down to +2 m
  *   176..218 m    the shore bench, +2.0 m down to +1.4 m
  *   218..234 m    the beach face, +1.4 m down to -2 m
- *   x >=  234 m   the sea floor, falling away offshore from -2 m to -9 m at
- *                 the map's edge, declared as the water body `sea` with its
+ *   x >=  234 m   the sea floor, falling away offshore from -2 m to -9 m by
+ *                 x = 290 m and flat beyond, declared as the water body `sea` with its
  *                 surface at 0 m. How deep the water is depends on how far
  *                 out you go, which is the whole question of where to stand
  *                 the intake pump.
@@ -73,8 +73,22 @@ const OUT = path.join(
 // ---------------------------------------------------------------------------
 
 const CELL = 10;
+/**
+ * The SITE: the 30 x 16 cells (x = 0..290, y = 0..150 m) every number and
+ * check below is written in. Cell indices in this file are site indices.
+ */
 const COLS = 30;
 const ROWS = 16;
+/**
+ * Open country round the site on every side, in cells (80 m), so the player
+ * has room to look round it. It is the same landscape carried on - the
+ * plateau inland, the coast running north and south, the deep sea flat
+ * offshore - and none of the site's cells change: they are computed from the
+ * same site indices, negative out here.
+ */
+const MARGIN = 8;
+const GRID_COLS = COLS + 2 * MARGIN;
+const GRID_ROWS = ROWS + 2 * MARGIN;
 /**
  * y is a NORTHING (+y north, up the grid's screen, away from the 2.5D
  * camera). The map was first laid out when the grid drew +y DOWN the screen;
@@ -225,15 +239,15 @@ function heightAt(col: number, row: number): number {
 }
 
 const heights: number[] = [];
-for (let r = 0; r < ROWS; r++) {
-  for (let c = 0; c < COLS; c++) heights.push(heightAt(c, r));
+for (let r = -MARGIN; r < ROWS + MARGIN; r++) {
+  for (let c = -MARGIN; c < COLS + MARGIN; c++) heights.push(heightAt(c, r));
 }
 
 const terrain = {
-  origin: { x: 0, y: 0 },
+  origin: { x: -MARGIN * CELL, y: -MARGIN * CELL },
   cellSize: CELL,
-  cols: COLS,
-  rows: ROWS,
+  cols: GRID_COLS,
+  rows: GRID_ROWS,
   heights,
   // How fast standing water soaks into the ground, m/s. The model's default
   // (1e-4) drinks 810 kg/s off the pad, more than the crack ever passes, so
@@ -572,7 +586,8 @@ const scenario = {
 
 const problems: string[] = [];
 const at = (x: number, y: number) => terrainHeightAt(terrain, { x, y });
-const cell = (c: number, r: number) => heights[r * COLS + c];
+/** Height of a cell by SITE index. */
+const cell = (c: number, r: number) => heights[(r + MARGIN) * GRID_COLS + c + MARGIN];
 
 for (let r = PAD_R0; r <= PAD_R1; r++) {
   for (let c = PAD_C0; c <= PAD_C1; c++) {
@@ -607,7 +622,6 @@ if (!(CRACK_BEARING === 270)) problems.push(`the tear faces ${CRACK_BEARING} deg
 // The bench is a closed depression: every cell touching it must stand above it
 for (let r = PAD_R0 - 1; r <= PAD_R1 + 1; r++) {
   for (let c = PAD_C0 - 1; c <= PAD_C1 + 1; c++) {
-    if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
     if (c >= PAD_C0 && c <= PAD_C1 && r >= PAD_R0 && r <= PAD_R1) continue;
     if (!(cell(c, r) >= PAD_HEIGHT + 0.5)) {
       problems.push(`bench lip ${c},${r} is ${cell(c, r)} m, not clear of the ${PAD_HEIGHT} m bench`);
@@ -641,7 +655,7 @@ if (!seaBasin) problems.push('the terrain has no basin carrying the water body `
 else {
   for (let c = 0; c < heights.length; c++) {
     if (heights[c] < 0 && model.basinOf[c] !== seaBasin.id) {
-      problems.push(`cell ${c % COLS},${Math.floor(c / COLS)} at ${heights[c]} m is below sea level but not in the sea`);
+      problems.push(`cell ${c % GRID_COLS - MARGIN},${Math.floor(c / GRID_COLS) - MARGIN} at ${heights[c]} m is below sea level but not in the sea`);
     }
   }
 }
@@ -658,10 +672,11 @@ const plant = { components, connections, terrain, scenario };
 fs.writeFileSync(OUT, JSON.stringify(plant, null, 1).replace(/\n/g, '\r\n') + '\r\n');
 const hMin = Math.min(...heights), hMax = Math.max(...heights);
 console.log(`Wrote ${OUT}`);
-console.log(`  terrain ${COLS} x ${ROWS} cells of ${CELL} m; relief ${hMin.toFixed(1)} .. ${hMax.toFixed(1)} m ` +
+console.log(`  terrain ${GRID_COLS} x ${GRID_ROWS} cells of ${CELL} m (the ${COLS} x ${ROWS} site plus ${MARGIN * CELL} m all round); ` +
+  `relief ${hMin.toFixed(1)} .. ${hMax.toFixed(1)} m ` +
   `(seed ${SEED}, warp ${WARP_AMP} m, relief noise ${VERT_AMP} m)`);
 console.log(`  bench ${PAD_HEIGHT} m (trough ${PAD_DISH} m deep along its west edge), shore at (200,75) ${shoreH.toFixed(2)} m, ` +
-  `sea floor ${at(236, 75).toFixed(1)} m at the edge, ${at(290, 75).toFixed(1)} m at the map's edge`);
+  `sea floor ${at(236, 75).toFixed(1)} m at the edge, ${at(290, 75).toFixed(1)} m at x=290`);
 console.log(`  shoreline at y=75 is x=${shorelineX(75).toFixed(1)} m; sea nozzle at x=${SEA_PORT_X} ` +
   `(${SEA_INTAKE_DEPTH} m down), body at x=${SEA_X} on ${seaGround.toFixed(2)} m (elevation ${SEA_ELEVATION})`);
 console.log(`  rack top at ${(RACK_BOTTOM + RACK_HEIGHT).toFixed(2)} m above the pool floor`);

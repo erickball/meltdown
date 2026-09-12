@@ -29,3 +29,22 @@ export function createsPipe(flowArea: number, length: number): boolean {
   return (flowArea > AUTO_PIPE_MIN_AREA && length > AUTO_PIPE_MIN_LENGTH)
     || flowArea * length > AUTO_PIPE_MAX_DIRECT_VOLUME;
 }
+
+// A pipe is ONE well-mixed node, and that node sits at the middle of its run
+// (factory pipeMidRun). For a run that climbs, that means water arriving at
+// the low end is priced as if it were already halfway up: a 250 m discharge
+// line rising 20 m put its node 10 m above the pump, so the instant the flow
+// into it turned from air to water it had to lift 10 m in one step against
+// 7 m of sea head, and the 60 m suction column stopped dead - 21.7 bar, burst
+// casing. Real water climbs the line and is slowed by gravity as it goes. A
+// sloped run is therefore laid as a chain of pipes that each climb no more
+// than this, so the head builds in steps of at most this much.
+
+/** Most a single laid pipe may rise (or fall) end to end before the run is
+ *  laid as a chain of pipes instead. */
+export const AUTO_PIPE_MAX_SEGMENT_RISE = 5;   // m
+
+/** How many pipes a run rising `rise` metres (either way) is laid as. */
+export function pipeSegmentCount(rise: number): number {
+  return Math.max(1, Math.ceil(Math.abs(rise) / AUTO_PIPE_MAX_SEGMENT_RISE));
+}

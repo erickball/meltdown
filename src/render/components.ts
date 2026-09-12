@@ -991,9 +991,10 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   const h = tank.height * view.zoom;
 
   // A tank that IS a terrain water body (a sea, a lake) has no vessel to
-  // draw. The grid view suppresses it entirely and lets the painted water
-  // stand for it; this view has no terrain, so all it can honestly show is
-  // the water surface itself - a low band at the component's own water line,
+  // draw. Both views suppress it and let the painted water stand for it
+  // (grid-view.ts, terrain-3d.ts). This is only reached when the plant's
+  // terrain has no body of that name - then all it can honestly show is the
+  // water surface itself: a low band at the component's own water line,
   // wide enough to pipe to and small enough not to pretend to be a tank.
   if (tank.waterBody) {
     const surface = h * ((tank.fillLevel ?? 0.5) - 0.5);
