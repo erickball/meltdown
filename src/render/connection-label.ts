@@ -10,7 +10,7 @@
 
 import type { PlantState, PlantComponent, Connection, Fluid, Point } from '../types';
 import type { SimulationState } from '../simulation';
-import { flowConnectionIdForPlantConnection, formatGaugeValue } from './components';
+import { flowConnectionIdForPlantConnection, formatGaugeValue, standInInfo } from './components';
 
 export function connectionLabelLines(
   conn: Connection,
@@ -26,11 +26,24 @@ export function connectionLabelLines(
 
   const name = (c: PlantComponent | undefined) => c ? (c.label || c.id) : 'Open air';
   const lines: string[] = [`${name(from)} → ${name(to)}`];
-  lines.push(`ports ${conn.fromPortId} → ${conn.toPortId}`);
+  // A break or an open nozzle has no pipe: say what the opening is instead
+  const standIn = standInInfo(conn);
+  if (standIn?.kind === 'break') {
+    const area = conn.flowArea ?? 0;
+    const centre = conn.fromElevation ?? 0;
+    const tall = conn.fromOpeningHeight ?? 0;
+    lines.push(tall > 0
+      ? `break: ${formatGaugeValue(area * 1e4)} cm²  ·  ${formatGaugeValue(centre - tall / 2)}-${formatGaugeValue(centre + tall / 2)} m up`
+      : `break: ${formatGaugeValue(area * 1e4)} cm²  ·  ${formatGaugeValue(centre)} m up`);
+  } else if (standIn?.kind === 'open') {
+    lines.push(`open nozzle ${from ? conn.fromPortId : conn.toPortId} - nothing is piped to it`);
+  } else {
+    lines.push(`ports ${conn.fromPortId} → ${conn.toPortId}`);
+  }
   const bore = conn.flowArea && conn.flowArea > 0 ? Math.sqrt(4 * conn.flowArea / Math.PI) : undefined;
   const geometry: string[] = [];
-  if (bore !== undefined) geometry.push(`⌀ ${formatGaugeValue(bore)} m`);
-  if (conn.length !== undefined) geometry.push(`L ${formatGaugeValue(conn.length)} m`);
+  if (!standIn && bore !== undefined) geometry.push(`⌀ ${formatGaugeValue(bore)} m`);
+  if (!standIn && conn.length !== undefined) geometry.push(`L ${formatGaugeValue(conn.length)} m`);
   if (geometry.length > 0) lines.push(geometry.join('  ·  '));
 
   if (simState) {
@@ -47,7 +60,7 @@ export function connectionLabelLines(
       }
     }
   }
-  if (buildMode) lines.push('click again to edit · Delete removes it');
+  if (buildMode && !standIn) lines.push('click again to edit · Delete removes it');
   return lines;
 }
 

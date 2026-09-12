@@ -1,7 +1,7 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, PipeComponent, waterBodyOf, paintDepthY } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
-import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, gaugeNodesByComponent, ConnectionScreenEndpoints, renderBurstOverlays, renderBreakConnections, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, gaugeNodesByComponent, ConnectionScreenEndpoints, renderBurstOverlays, standInInfo, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
 import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import {
   IsometricConfig,
@@ -821,17 +821,27 @@ export class PlantCanvas {
    *
    * The rectangle a break is placed on is the one the component is DRAWN in
    * (the same bounds the gauges hang off), and `plan` tells break-fx whether
-   * the view has a height axis to put the break's elevation on. One call per
-   * frame; the marker, the tear, the spray and the discharge line then all
-   * read the same anchors.
+   * the view has a height axis to put the break's elevation on. A break's
+   * direction is a WORLD plan bearing; it is projected here, at the
+   * component, onto this view's screen. One call per frame; the crack, the
+   * spray, the label and the break's flow arrow then all read the same
+   * anchors.
    */
   private currentBreaks() {
     const boundsFor = (comp: PlantComponent): ScreenBox | null => {
       const b = this.getComponentScreenBounds(comp);
       if (!b || b.width === undefined || b.height === undefined) return null;
-      return { x: b.topCenter.x - b.width / 2, y: b.topCenter.y, w: b.width, h: b.height };
+      return { x: b.topCenter.x - b.width / 2, y: b.topCenter.y, w: b.width, h: b.height, scale: b.scale };
     };
-    return collectBreaks(this.plantState, this.simState, boundsFor, this.viewMode === 'grid');
+    const screenAngle = (comp: PlantComponent, bearing: number): number => {
+      const p = comp.position;
+      const q = { x: p.x + Math.cos(bearing), y: p.y + Math.sin(bearing) };
+      const elev = comp.elevation ?? 0;
+      const a = this.viewMode === 'grid' ? this.grid.worldToScreen(p) : this.worldToScreenPerspective(p, elev).pos;
+      const b = this.viewMode === 'grid' ? this.grid.worldToScreen(q) : this.worldToScreenPerspective(q, elev).pos;
+      return Math.atan2(b.y - a.y, b.x - a.x);
+    };
+    return collectBreaks(this.plantState, this.simState, boundsFor, this.viewMode === 'grid', screenAngle);
   }
 
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
@@ -2340,6 +2350,10 @@ export class PlantCanvas {
     }
 
     mark('edges+arrows+ports');
+    // Every break, resolved once: the crack, the spray, the label and the
+    // break's own flow arrow all hang off the same anchor.
+    const breaks = this.currentBreaks();
+    const anchorFor = breakAnchorLookup(breaks);
     // Draw flow connection arrows from simulation state (on top of components)
     if (this.simState) {
       // Port screen positions and connection endpoints (accounting for
@@ -2348,7 +2362,7 @@ export class PlantCanvas {
       const getConnScreenPos = (fromComp: PlantComponent, toComp: PlantComponent, conn: Connection) => this.getConnectionScreenEndpoints(fromComp, toComp, conn);
       this.flowArrowHits = [];
       renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos,
-        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }));
+        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }), anchorFor);
     } else {
       // Debug: log once if simState is not set
       if (!this._simStateWarningLogged) {
@@ -2363,19 +2377,10 @@ export class PlantCanvas {
       // Gauges of anything the depth-sorted pass did not draw
       this.renderGaugesFor(ctx, null, gaugeNodes, gaugesDrawn);
 
-      // Every break, resolved once: the marker, the discharge line and the
-      // spray all hang off the same anchor.
-      const breaks = this.currentBreaks();
-      const anchorFor = breakAnchorLookup(breaks);
-
-      // Draw burst overlays (the warning border and the burst marker)
+      // Draw burst overlays (the warning border and the break-size label)
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds, anchorFor);
 
-      // Draw break connections (red dashed lines for LOCA flows)
-      const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
-      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY, anchorFor);
-
-      // The hole and what is coming out of it - the same drawing the grid
+      // The crack and what is coming out of it - the same drawing the grid
       // uses, on the same anchor, scaled by the break's own mass flow.
       drawBreaks(ctx, breaks, performance.now());
 
@@ -4057,10 +4062,14 @@ export class PlantCanvas {
     ctx.restore();
   }
 
-  /** The selected flow path's label in the 2.5D view (the grid draws its own). */
+  /**
+   * The selected flow path's label in the 2.5D view (the grid draws its own
+   * for the runs it lays), and in both views for a flow path the plant never
+   * declared - a break or an open nozzle, labelled at its arrow.
+   */
   private drawSelectedFlowPathLabel(ctx: CanvasRenderingContext2D, width: number, height: number): void {
     const conn = this.selectedConnection;
-    if (!conn || !this.plantState.connections.includes(conn)) return;
+    if (!conn || !(this.plantState.connections.includes(conn) || standInInfo(conn))) return;
     const run = this.perspectiveRuns.find(r => r.conn === conn);
     const hit = this.flowArrowHits.find(a => a.conn === conn);
     const anchor = hit ? { x: hit.x, y: hit.y }
@@ -4303,24 +4312,25 @@ export class PlantCanvas {
         this.grid.portScreenPosition(comp, (port as Port).id);
       const getConnScreenPos = (_from: PlantComponent, _to: PlantComponent, conn: Connection) =>
         this.grid.connectionScreenEndpoints(conn, this.plantState);
+      const breaks = this.currentBreaks();
+      const anchorFor = breakAnchorLookup(breaks);
       this.flowArrowHits = [];
       renderFlowConnectionArrows(ctx, this.simState, this.plantState, this.view, getPortScreenPos, getConnScreenPos,
-        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }));
+        (conn, x, y, size) => this.flowArrowHits.push({ conn, x, y, size }), anchorFor);
       this.drawSelectedArrowRing(ctx);
 
       const getScreenBounds = (comp: PlantComponent) => this.getComponentScreenBounds(comp);
       // Gauges of anything drawn without a sprite (floors, pipes)
       this.renderGaugesFor(ctx, null, gaugeNodes, gaugesDrawn);
-      const breaks = this.currentBreaks();
-      const anchorFor = breakAnchorLookup(breaks);
       renderBurstOverlays(ctx, this.simState, this.plantState, this.view, getScreenBounds, anchorFor);
-      const getGroundY = (worldPos: Point) => this.getGroundY(worldPos);
-      renderBreakConnections(ctx, this.simState, this.plantState, this.view, undefined, getScreenBounds, getGroundY, anchorFor);
 
-      // Plan-view break: a torn gap on the wall the break faces, with the
+      // Plan-view break: a crack along the wall the break faces, with the
       // discharge running out across the ground (break-fx.ts).
       drawBreaks(ctx, breaks, performance.now());
       this.renderFires(ctx, getScreenBounds);
+      // The grid labels the runs it lays itself; a flow path with no run (a
+      // break, an open nozzle) is labelled at its arrow
+      if (standInInfo(this.selectedConnection)) this.drawSelectedFlowPathLabel(ctx, width, height);
     }
 
     if (shake) ctx.restore();

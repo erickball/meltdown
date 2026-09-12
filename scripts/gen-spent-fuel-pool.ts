@@ -90,17 +90,21 @@ const PAD_C0 = 2, PAD_C1 = 10;    // x = 20 .. 100 m
 const PAD_R0 = 3, PAD_R1 = 11;    // y = 30 .. 110 m
 const PAD_HEIGHT = 13.0;
 /**
- * The pad is a shallow DISH, not a plane: PAD_DISH metres lower at the pool
- * than at its edges, falling off as the square of the distance from the pool
- * out to PAD_DISH_RADIUS. Water leaving the pool collects around the pool
- * instead of spreading one centimetre deep over the whole pad (a perfectly
- * flat pad is one basin, and any puddle on it wets all 8100 m2 at once).
- * The tanks and the yard stand outside the dish, on the flat 13.0 m rim, so
- * their datums are untouched; only the pool's ground is lower, and the wave
- * (12.6 m) still stops short of the pool's rim.
+ * The pad is flat except for a shallow TROUGH along its west edge: PAD_DISH
+ * metres deep at the pad's west side, shelving up to the flat 13.0 m bench
+ * PAD_TROUGH_WIDTH metres in. Water leaving the pool runs across the flat
+ * bench to the trough and collects there instead of spreading one
+ * centimetre deep over the whole pad (a perfectly flat pad is one basin, and
+ * any puddle on it wets all 8100 m2 at once). The pool's liner tears on its
+ * WEST wall, so the puddle stands on the side the spray goes. Everything -
+ * pool, tanks, yard - stands on the flat bench, and the wave (12.6 m) stops
+ * short of the trough's floor.
+ *
+ * (This was a dish centred on the pool until 2026-09-12, which put the
+ * puddle in a ring round the pool whichever way the tear faced.)
  */
-const PAD_DISH = 0.3;
-const PAD_DISH_RADIUS = 40;
+const PAD_DISH = 0.35;
+const PAD_TROUGH_WIDTH = 20;
 const POOL_X = 50, POOL_Y = 75;
 /**
  * The sea floor: a shelf that shelves gently from the water's edge, then
@@ -195,17 +199,17 @@ function warpTaper(x: number): number {
   return 1 - clamp01((x - 218) / 30);
 }
 
-/** The pad's dish: how far below PAD_HEIGHT the ground is at (x, y). */
-function padDip(x: number, y: number): number {
-  const r = Math.hypot(x - POOL_X, y - POOL_Y) / PAD_DISH_RADIUS;
-  return r >= 1 ? 0 : PAD_DISH * (1 - r * r);
+/** The pad's trough: how far below PAD_HEIGHT the ground is at plan x. */
+function padDip(x: number): number {
+  const t = (x - PAD_C0 * CELL) / PAD_TROUGH_WIDTH;
+  return t >= 1 ? 0 : PAD_DISH * (1 - Math.max(0, t));
 }
 
 /** Ground height (m) at a cell centre. */
 function heightAt(col: number, row: number): number {
   const x = col * CELL, y = row * CELL;
   if (col >= PAD_C0 && col <= PAD_C1 && row >= PAD_R0 && row <= PAD_R1) {
-    return Number((PAD_HEIGHT - padDip(x, y)).toFixed(3));
+    return Number((PAD_HEIGHT - padDip(x)).toFixed(3));
   }
 
   const damp = padTaper(col, row);
@@ -233,10 +237,9 @@ const terrain = {
   heights,
   // How fast standing water soaks into the ground, m/s. The model's default
   // (1e-4) drinks 810 kg/s off the pad, more than the crack ever passes, so
-  // no puddle ever stood. At 3e-5 the leak keeps ~4800 m2 of the dish wet:
-  // a puddle a few tens of centimetres deep around the pool that grows over
-  // the first hours and shrinks as the leak falls off. A pump standing in it
-  // is fine - its motor is half a metre up.
+  // no puddle ever stood. At 3e-5 the full trough (1800 m2) drinks ~54 kg/s;
+  // a leak bigger than that for long enough brims it over onto the bench.
+  // A pump standing in it is fine - its motor is half a metre up.
   infiltration: 3e-5,
   waters: [{ id: 'sea', seed: { x: 270, y: 75 }, surface: 0 }],
 };
@@ -398,7 +401,9 @@ const components: Array<[string, Record<string, unknown>]> = [
 
   ['yard', {
     id: 'yard', type: 'warehouse', label: 'Supply Yard',
-    position: { x: 60, y: 35 }, rotation: 0, elevation: 0,
+    // North of the pool (behind it from the 2.5D camera, which looks north),
+    // so the shed does not stand between the player and the water
+    position: { x: 60, y: 100 }, rotation: 0, elevation: 0,
     width: 12, depth: 8,
     // Fully specified: the yard hands out ONE pump design and ONE line size,
     // so placing from it asks the player where the part goes, not what it is.
@@ -468,16 +473,25 @@ const connections = [
 const QUAKE = 1200;          // s - the aftershock cracks the liner (20 s of wall time at 60x)
 
 /**
- * The tear the aftershock leaves. 0.4 m up the pool wall with a 0.8 m
- * opening, so it spans the floor to knee height: while the pool is deep it
- * runs full of water, and as the level sweeps down through the opening the
- * draw crossfades to vapour and the leak dies away on its own - no
- * threshold, no valve, no special case. CRACK_AREA is set so the leak is
- * ~144 kg/s when the liner goes.
+ * The tear the aftershock leaves: one long crack up the west wall, from just
+ * above the foot of the racks to the rim. As the level sweeps down the
+ * opening the draw crossfades from water to air, with no threshold, no
+ * valve, no special case. The scripted burst's `elevation` is the CENTRE of
+ * the opening.
+ *
+ * It faces WEST (CRACK_BEARING): the spray goes that way and so does the
+ * water, into the trough along the pad's west edge (see padDip) - the puddle
+ * stands on the side the pool is leaking from, not all round it.
+ *
+ * NOT RE-TUNED for this geometry (2026-09-12): CRACK_AREA is the old knee-
+ * height tear's 0.0170 m2.
  */
-const CRACK_AREA = 0.0170;   // m2
-const CRACK_ELEVATION = 0.4; // m above the pool floor
-const CRACK_OPENING = 0.8;   // m of tear height
+const CRACK_AREA = 0.0170;               // m2
+const CRACK_BOTTOM = RACK_BOTTOM + 0.3;  // m above the pool floor - just above the foot of the fuel
+const CRACK_TOP = POOL_DEPTH;            // m - the rim
+const CRACK_OPENING = CRACK_TOP - CRACK_BOTTOM;
+const CRACK_ELEVATION = (CRACK_BOTTOM + CRACK_TOP) / 2;
+const CRACK_BEARING = 270;               // deg - west, towards the trough
 // Everything after the quake is written as an offset from it rather than as
 // an absolute time, so moving QUAKE moves the whole sequence with it.
 //
@@ -527,7 +541,8 @@ const scenario = {
         {
           kind: 'burst', id: 'pool',
           area: CRACK_AREA, elevation: CRACK_ELEVATION, openingHeight: CRACK_OPENING,
-          breachMessage: 'AFTERSHOCK: the pool liner has split at the floor. ' +
+          bearing: CRACK_BEARING,
+          breachMessage: 'AFTERSHOCK: the pool liner has split down the west wall. ' +
             'Water is running out onto the pad.',
         },
       ],
@@ -574,15 +589,21 @@ if (!(PAD_HEIGHT - PAD_DISH > 12.6)) problems.push(`the dish bottom ${PAD_HEIGHT
 // the dish's edge reach them faintly; that is the ground they stand on, and
 // the factory reads it, so there is no phantom head - just a datum a
 // hand's breadth off the nominal 13.0)
-for (const [what, x, y] of [['tank-a', 85, 95], ['tank-b', 85, 50], ['the yard', 60, 35]] as const) {
+for (const [what, x, y] of [['tank-a', 85, 95], ['tank-b', 85, 50], ['the yard', 60, 100], ['the pool', POOL_X, POOL_Y]] as const) {
   if (!(at(x, y) <= PAD_HEIGHT && at(x, y) >= PAD_HEIGHT - 0.05)) {
     problems.push(`${what} stands on ${at(x, y).toFixed(3)} m, not the ${PAD_HEIGHT} m rim`);
   }
 }
-// The pool sits in the bottom of the dish
-if (Math.abs(at(POOL_X, POOL_Y) - (PAD_HEIGHT - PAD_DISH)) > 0.02) {
-  problems.push(`the pool's ground is ${at(POOL_X, POOL_Y).toFixed(3)} m, not the dish bottom ${PAD_HEIGHT - PAD_DISH}`);
+// The pool's whole footprint stands on the flat bench, clear of the trough:
+// the water the tear throws west has to run AWAY from it
+for (const dx of [-POOL_SIDE / 2 - 1.2, POOL_SIDE / 2 + 1.2]) {
+  if (at(POOL_X + dx, POOL_Y) !== PAD_HEIGHT) {
+    problems.push(`the pool's ${dx < 0 ? 'west' : 'east'} wall stands on ${at(POOL_X + dx, POOL_Y).toFixed(3)} m, not the flat ${PAD_HEIGHT} m bench`);
+  }
 }
+// The trough is the pad's low ground, and it is on the side the tear faces
+if (!(at(PAD_C0 * CELL, POOL_Y) < PAD_HEIGHT)) problems.push(`there is no trough at the pad's west edge`);
+if (!(CRACK_BEARING === 270)) problems.push(`the tear faces ${CRACK_BEARING} deg, but the trough is to the west (270)`);
 // The bench is a closed depression: every cell touching it must stand above it
 for (let r = PAD_R0 - 1; r <= PAD_R1 + 1; r++) {
   for (let c = PAD_C0 - 1; c <= PAD_C1 + 1; c++) {
@@ -639,7 +660,7 @@ const hMin = Math.min(...heights), hMax = Math.max(...heights);
 console.log(`Wrote ${OUT}`);
 console.log(`  terrain ${COLS} x ${ROWS} cells of ${CELL} m; relief ${hMin.toFixed(1)} .. ${hMax.toFixed(1)} m ` +
   `(seed ${SEED}, warp ${WARP_AMP} m, relief noise ${VERT_AMP} m)`);
-console.log(`  bench ${PAD_HEIGHT} m (dish ${PAD_DISH} m deep at the pool), shore at (200,75) ${shoreH.toFixed(2)} m, ` +
+console.log(`  bench ${PAD_HEIGHT} m (trough ${PAD_DISH} m deep along its west edge), shore at (200,75) ${shoreH.toFixed(2)} m, ` +
   `sea floor ${at(236, 75).toFixed(1)} m at the edge, ${at(290, 75).toFixed(1)} m at the map's edge`);
 console.log(`  shoreline at y=75 is x=${shorelineX(75).toFixed(1)} m; sea nozzle at x=${SEA_PORT_X} ` +
   `(${SEA_INTAKE_DEPTH} m down), body at x=${SEA_X} on ${seaGround.toFixed(2)} m (elevation ${SEA_ELEVATION})`);

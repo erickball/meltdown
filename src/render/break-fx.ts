@@ -1,23 +1,25 @@
 /**
- * Break effects: the hole a burst opens in a component, and the spray coming
+ * Break effects: the crack a burst opens in a component, and the spray coming
  * out of it.
  *
- * ONE anchor for both views. A burst used to be marked in three places that
- * did not agree - a lightning symbol on the component's centreline, a red
- * dashed line and arrow starting somewhere else, and (on the grid) a torn
- * gap on the wall the break faces - so the player saw the warning in one
- * place and the water leaving from another. `collectBreaks` now resolves the
- * break to a single point on the component, and everything that draws a
- * burst is handed that point: the tear, the spray, the lightning marker and
- * the discharge line.
+ * ONE anchor for both views. `collectBreaks` resolves each break to a single
+ * place on the component, and everything that draws a burst - the crack, the
+ * spray, the warning label and the break's flow arrow - is handed that place.
  *
- * Where that point is depends only on what the view is showing:
+ * Where that place is depends only on what the view is showing:
  *   - a PLAN (the grid) has no height, but it has a direction, so the break
- *     sits on the wall the break faces;
- *   - an ELEVATION (2.5D) has a height, so the break sits at its own
- *     elevation on the side it faces.
- * Both come from the same two numbers the simulation stores on the break -
- * `breakDirection` and `fromElevation` - so the two views mark the same hole.
+ *     sits on the wall it faces and the crack runs along that wall;
+ *   - an ELEVATION (2.5D) has a height, so the crack stands on the side it
+ *     faces and spans its own elevations - a tear with a tall opening is a
+ *     long crack, a pinhole a short one.
+ * Both come from the numbers the simulation stores on the break connection:
+ * `breakDirection` (a plan bearing in WORLD coordinates, which each view
+ * projects onto its own screen), `fromElevation` (the centre of the opening)
+ * and `fromOpeningHeight`.
+ *
+ * The spray leaves from the part of the opening that is under water, as the
+ * simulation's own draw composition has it: a tall crack in a draining pool
+ * sprays from its wetted lower part, and the jet sinks with the level.
  *
  * A scripted burst (a scenario action, e.g. an earthquake tearing a pool
  * liner) and a pressure burst are the same object here, because they are the
@@ -26,20 +28,28 @@
 
 import { PlantState, PlantComponent } from '../types';
 import { SimulationState } from '../simulation';
+import { drawCompositionAt } from '../simulation/operators/connection-hydraulics';
 
 /** A component's drawn rectangle on screen. */
 export interface ScreenBox {
   x: number; y: number; w: number; h: number;
+  /** Perspective scale of the component's drawing (readout sizing). */
+  scale?: number;
 }
 
 /** Where a break is and which way what comes out of it goes. */
 export interface BreakAnchor {
+  /** Where the discharge leaves the component. */
   x: number;
   y: number;
   /** Direction the discharge leaves in (radians, screen coordinates). */
   angle: number;
-  /** Characteristic size of the tear in pixels; the spray scales off it. */
+  /** Characteristic size of the break in pixels; the spray scales off it. */
   span: number;
+  /** The crack's two ends on screen. */
+  crack: { x0: number; y0: number; x1: number; y1: number };
+  /** Perspective scale of the component (1 when the view did not say). */
+  scale: number;
 }
 
 /** One break, resolved to screen space. */
@@ -58,54 +68,74 @@ export interface BreakMark {
 }
 
 /**
- * The one place a break is turned into a point on a component.
+ * The one place a break is turned into a crack on a component.
  *
- * `heightFraction` is where the break is up the node (0 = bottom, 1 = top),
- * or null when nothing said. In a plan that is meaningless and ignored; in
- * an elevation it is the whole answer for the vertical.
+ * `band` is the opening as fractions of the node's height (0 = bottom,
+ * 1 = top): `lo`..`hi` for the crack and `at` for where the discharge
+ * leaves, or null when nothing said. In a plan the fractions only set how
+ * much of the wall the crack runs along; in an elevation they are the
+ * whole answer for the vertical.
  */
 export function breakAnchorOn(
   box: ScreenBox,
   angle: number,
-  heightFraction: number | null,
+  band: { lo: number; hi: number; at: number } | null,
   plan: boolean,
   fraction: number
 ): BreakAnchor {
   const cx = box.x + box.w / 2;
   const cy = box.y + box.h / 2;
   const dx = Math.cos(angle), dy = Math.sin(angle);
-
-  let x: number, y: number;
-  if (plan) {
-    // Walk out from the centre until the ray leaves the footprint: the wall
-    // the break faces, whatever shape of box it is.
-    const scale = Math.min(
-      Math.abs(dx) > 1e-6 ? (box.w / 2) / Math.abs(dx) : Infinity,
-      Math.abs(dy) > 1e-6 ? (box.h / 2) / Math.abs(dy) : Infinity);
-    x = cx + dx * scale;
-    y = cy + dy * scale;
-  } else {
-    // Side-on: the lateral half is the wall it faces, the vertical half is
-    // its own elevation. A break with no stated elevation falls back to the
-    // direction, which is the best the geometry can say.
-    x = cx + dx * (box.w / 2);
-    y = heightFraction === null
-      ? cy + dy * (box.h / 2)
-      : box.y + (1 - Math.max(0, Math.min(1, heightFraction))) * box.h;
-  }
+  const scale = box.scale ?? 1;
 
   // Sized by the break fraction but never smaller than a couple of pixels: a
   // 0.02% break in a 9 m pool is a hairline, and a hairline that passes
   // 140 kg/s still has to be visible.
   const span = Math.max(6, Math.min(box.w, box.h) * (0.12 + 0.55 * Math.sqrt(Math.max(0, fraction))));
-  return { x, y, angle, span };
+
+  if (plan) {
+    // Walk out from the centre until the ray leaves the footprint: the wall
+    // the break faces, whatever shape of box it is.
+    const sx = Math.abs(dx) > 1e-6 ? (box.w / 2) / Math.abs(dx) : Infinity;
+    const sy = Math.abs(dy) > 1e-6 ? (box.h / 2) / Math.abs(dy) : Infinity;
+    const s = Math.min(sx, sy);
+    const x = cx + dx * s, y = cy + dy * s;
+    // The crack runs along that wall, as much of it as the opening is tall
+    // relative to the node (a tear from floor to rim is most of the wall)
+    const wall = sx < sy ? box.h : box.w;
+    const length = Math.max(span, band ? (band.hi - band.lo) * wall : 0);
+    const nx = -dy, ny = dx;
+    return {
+      x, y, angle, span, scale,
+      crack: { x0: x - nx * length / 2, y0: y - ny * length / 2, x1: x + nx * length / 2, y1: y + ny * length / 2 },
+    };
+  }
+
+  // Side-on: the lateral half is the wall it faces, the vertical half is
+  // its own elevation. A break with no stated elevation falls back to the
+  // component's mid-height.
+  const x = cx + dx * (box.w / 2);
+  const yAt = (f: number) => box.y + (1 - Math.max(0, Math.min(1, f))) * box.h;
+  if (!band) {
+    return { x, y: cy, angle, span, scale, crack: { x0: x, y0: cy - span / 2, x1: x, y1: cy + span / 2 } };
+  }
+  let y0 = yAt(band.hi), y1 = yAt(band.lo);
+  // A hole with no height is still a visible crack, centred on the hole
+  if (y1 - y0 < span) {
+    const mid = (y0 + y1) / 2;
+    y0 = mid - span / 2;
+    y1 = mid + span / 2;
+  }
+  return { x, y: yAt(band.at), angle, span, scale, crack: { x0: x, y0, x1: x, y1 } };
 }
 
 /**
  * Collect every open break in the plant, in screen coordinates.
  *
  * `boundsFor` is the drawn rectangle of a component in whatever projection
- * the caller is in, and `plan` says whether that projection is a plan.
+ * the caller is in, `plan` says whether that projection is a plan, and
+ * `screenAngle` projects a world plan bearing (radians, 0 = east, π/2 =
+ * north) at the component onto a direction on the caller's screen.
  * Returns an empty array when nothing has burst, so the caller can skip the
  * whole layer in the overwhelmingly common case.
  */
@@ -113,7 +143,8 @@ export function collectBreaks(
   plantState: PlantState,
   simState: SimulationState | null,
   boundsFor: (component: PlantComponent) => ScreenBox | null,
-  plan: boolean
+  plan: boolean,
+  screenAngle: (component: PlantComponent, bearing: number) => number
 ): BreakMark[] {
   if (!simState || !simState.burstStates || simState.burstStates.size === 0) return [];
   const marks: BreakMark[] = [];
@@ -126,25 +157,45 @@ export function collectBreaks(
 
     const conn = simState.flowConnections.find(c => c.id === `break-${nodeId}`);
     const node = simState.flowNodes.get(nodeId);
-    // Height above the node's floor, as a fraction of it. The break
-    // connection's own `fromElevation` is the authority; a burst that has
-    // not made its connection yet falls back to the absolute elevation the
-    // burst state recorded.
-    let heightFraction: number | null = null;
+    const flow = conn?.massFlowRate ?? 0;
+
+    // The opening as fractions of the node's height. The break connection's
+    // own `fromElevation` (the opening's centre) is the authority; a burst
+    // that has not made its connection yet falls back to the absolute
+    // elevation the burst state recorded.
+    let band: { lo: number; hi: number; at: number } | null = null;
+    let liquid = node ? node.fluid.phase !== 'vapor' : true;
     if (node && node.height) {
-      if (conn?.fromElevation !== undefined) heightFraction = conn.fromElevation / node.height;
-      else if (bs.breakElevation !== undefined) {
-        heightFraction = (bs.breakElevation - (node.elevation ?? 0)) / node.height;
+      const H = node.height;
+      const centre = conn?.fromElevation !== undefined ? conn.fromElevation
+        : bs.breakElevation !== undefined ? bs.breakElevation - (node.elevation ?? 0)
+        : undefined;
+      if (centre !== undefined) {
+        const opening = conn?.fromOpeningHeight ?? bs.breakOpeningHeight ?? 0;
+        const lo = Math.max(0, Math.min(H, centre - opening / 2));
+        const hi = Math.max(0, Math.min(H, centre + opening / 2));
+        let at = (lo + hi) / 2;
+        if (conn) {
+          // What the break is drawing, zone by zone up the opening (liquid at
+          // the bottom, froth, gas at the top): the jet leaves from the wetted
+          // part, a plume from the dry part - whichever carries the mass.
+          const draw = drawCompositionAt(node, conn.fromElevation, flow,
+            conn.fromPhaseTolerance, conn.fromOpeningHeight);
+          const wet = (draw.fLiquid + draw.fMixture) * (hi - lo);
+          liquid = draw.wLiquid + draw.wMixture >= 0.5;
+          at = liquid ? lo + wet / 2 : lo + wet + (hi - lo - wet) / 2;
+        }
+        band = { lo: lo / H, hi: hi / H, at: at / H };
       }
     }
-    const angle = conn?.breakDirection ?? -Math.PI / 2;
+    const bearing = conn?.breakDirection ?? 0;
     marks.push({
       nodeId,
       box,
-      anchor: breakAnchorOn(box, angle, heightFraction, plan, bs.currentBreakFraction),
+      anchor: breakAnchorOn(box, screenAngle(component, bearing), band, plan, bs.currentBreakFraction),
       fraction: bs.currentBreakFraction,
-      flow: conn?.massFlowRate ?? 0,
-      liquid: node ? node.fluid.phase !== 'vapor' : true,
+      flow,
+      liquid,
       seed: bs.breakSizeSeed,
     });
   }
@@ -156,28 +207,57 @@ function hash(n: number): number {
   return x - Math.floor(x);
 }
 
-/** The torn gap itself: a jagged wedge across the wall the break faces. */
-export function drawTear(ctx: CanvasRenderingContext2D, a: BreakAnchor, seed: number): void {
-  const dx = Math.cos(a.angle), dy = Math.sin(a.angle);
-  const nx = -dy, ny = dx;             // along the wall
-  ctx.save();
-  ctx.beginPath();
-  ctx.moveTo(a.x + nx * a.span / 2, a.y + ny * a.span / 2);
-  const teeth = 5;
-  for (let k = 1; k < teeth; k++) {
-    const u = k / teeth;
-    const jag = (hash(seed + k) - 0.5) * a.span * 0.5;
-    ctx.lineTo(
-      a.x + nx * a.span * (0.5 - u) - dx * jag,
-      a.y + ny * a.span * (0.5 - u) - dy * jag);
+/**
+ * The crack itself: a jagged dark line from one end of the opening to the
+ * other, with a couple of short branches, over a faint pale edge so it reads
+ * against dark concrete and bright water alike.
+ */
+export function drawCrack(ctx: CanvasRenderingContext2D, a: BreakAnchor, seed: number): void {
+  const { x0, y0, x1, y1 } = a.crack;
+  const len = Math.hypot(x1 - x0, y1 - y0);
+  if (!(len > 0)) return;
+  const ux = (x1 - x0) / len, uy = (y1 - y0) / len;   // along the crack
+  const nx = -uy, ny = ux;                            // across it
+  const segments = Math.max(4, Math.round(len / 7));
+  const jag = Math.min(6, Math.max(1.5, a.span * 0.18));
+
+  const pts: Array<{ x: number; y: number }> = [{ x: x0, y: y0 }];
+  for (let k = 1; k < segments; k++) {
+    const t = k / segments;
+    const off = (hash(seed + k * 1.37) - 0.5) * 2 * jag;
+    pts.push({ x: x0 + ux * len * t + nx * off, y: y0 + uy * len * t + ny * off });
   }
-  ctx.lineTo(a.x - nx * a.span / 2, a.y - ny * a.span / 2);
-  ctx.strokeStyle = 'rgba(20, 20, 20, 0.95)';
-  ctx.lineWidth = Math.max(2, a.span * 0.22);
+  pts.push({ x: x1, y: y1 });
+
+  // Branches: short forks off a few of the vertices, alternating sides
+  const branches: Array<[{ x: number; y: number }, { x: number; y: number }]> = [];
+  const forks = Math.max(1, Math.floor(segments / 5));
+  for (let b = 0; b < forks; b++) {
+    const i = 1 + Math.floor(hash(seed + 300 + b) * (pts.length - 2));
+    const p = pts[i];
+    const side = b % 2 === 0 ? 1 : -1;
+    const reach = jag * (1.5 + 1.5 * hash(seed + 400 + b));
+    const lean = (hash(seed + 500 + b) - 0.5) * reach;
+    branches.push([p, { x: p.x + nx * side * reach + ux * lean, y: p.y + ny * side * reach + uy * lean }]);
+  }
+
+  const width = Math.min(3.5, Math.max(1.5, a.span * 0.1));
+  const path = () => {
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);
+    for (const [p, q] of branches) { ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y); }
+  };
+  ctx.save();
   ctx.lineJoin = 'miter';
+  ctx.lineCap = 'round';
+  path();
+  ctx.strokeStyle = 'rgba(235, 228, 215, 0.45)';
+  ctx.lineWidth = width + 2;
   ctx.stroke();
-  ctx.strokeStyle = 'rgba(255, 90, 60, 0.9)';
-  ctx.lineWidth = Math.max(1, a.span * 0.09);
+  path();
+  ctx.strokeStyle = 'rgba(18, 14, 12, 0.95)';
+  ctx.lineWidth = width;
   ctx.stroke();
   ctx.restore();
 }
@@ -225,15 +305,19 @@ export function drawSpray(
   ctx.restore();
 }
 
-/** Draw every break: the tear, then what is coming out of it. */
+/**
+ * Draw every break: the crack, then what is coming out of it. Only an
+ * OUTFLOW sprays - a break drawing air in has nothing to show but its
+ * arrow.
+ */
 export function drawBreaks(
   ctx: CanvasRenderingContext2D,
   marks: BreakMark[],
   timeMs: number
 ): void {
   for (const m of marks) {
-    drawTear(ctx, m.anchor, m.seed);
-    drawSpray(ctx, m.anchor, m.flow, m.liquid, m.seed, timeMs);
+    drawCrack(ctx, m.anchor, m.seed);
+    if (m.flow > 0) drawSpray(ctx, m.anchor, m.flow, m.liquid, m.seed, timeMs);
   }
 }
 

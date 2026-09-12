@@ -2437,10 +2437,10 @@ function renderScriptedBreakSection(componentId: string, simState: SimulationSta
   html += `<div class="detail-row"><span class="detail-label" title="Area of the hole. For scale: a 19 mm tube severed clean through leaks from both ends, about 4 cm²; a 30 cm pipe guillotined through, about 1400 cm².">Area (cm²):</span>` +
     `<input id="break-area" type="number" min="0" step="any" value="${draft.areaCm2}" style="${inputStyle}"></div>`;
   html += `<div class="detail-row" style="color: #8899aa; font-size: 10px;" id="break-area-note">${breakAreaNote(parseFloat(draft.areaCm2), node.flowArea)}</div>`;
-  html += `<div class="detail-row"><span class="detail-label" title="Height of the hole above the bottom of this boundary. Low on a vessel, liquid pours out; high up, vapour or gas escapes.">Elevation (m):</span>` +
+  html += `<div class="detail-row"><span class="detail-label" title="Height of the hole above the bottom of this boundary - the CENTRE of the opening when it has a tear height. Low on a vessel, liquid pours out; high up, vapour or gas escapes. NB the pressure driving the leak is taken at this one height, so a tall tear stops draining once the level falls to its centre.">Elevation (m):</span>` +
     `<input id="break-elevation" type="number" step="any" value="${draft.elevation}" style="${inputStyle}">` +
     `<span style="color: #8899aa; font-size: 10px; margin-left: 4px;">of ${(node.height ?? 0).toFixed(1)} m</span></div>`;
-  html += `<div class="detail-row"><span class="detail-label" title="Vertical extent of the opening (a tear rather than a hole). A tall tear draws a blend of whatever stands across it, so the leak crossfades from liquid to vapour as the level sweeps past. 0 = a hole at one height.">Tear height (m):</span>` +
+  html += `<div class="detail-row"><span class="detail-label" title="Vertical extent of the opening (a tear rather than a hole), centred on the elevation above. A tall tear draws a blend of whatever stands across it, so the leak crossfades from liquid to vapour as the level sweeps past. 0 = a hole at one height.">Tear height (m):</span>` +
     `<input id="break-opening" type="number" min="0" step="any" value="${draft.openingHeight}" style="${inputStyle}"></div>`;
   html += `<div class="detail-row" style="gap: 6px; align-items: center;">` +
     `<select id="break-when" style="background: #223; color: #ddd; border: 1px solid #445; border-radius: 3px;" title="Break now, or schedule it. A scheduled break is saved with the plant and fires when simulation time reaches it.">` +

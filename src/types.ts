@@ -877,6 +877,15 @@ export function pumpVisualHeight(pump: { diameter?: number }): number {
   return (pump.diameter || 0.3) * 1.3 * 2.2;
 }
 
+/**
+ * The drawn height of a valve, m: twice its bore, which leaves room for the
+ * stem and actuator above the body. Its port elevations are pinned to this
+ * height (height/2 - port.y) exactly as a pump's are.
+ */
+export function valveVisualHeight(valve: { diameter?: number }): number {
+  return (valve.diameter || 0.2) * 2;
+}
+
 // ============================================================================
 // Electrical distribution (see simulation/electrical.ts)
 //

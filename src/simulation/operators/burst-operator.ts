@@ -448,8 +448,8 @@ function createBreakConnection(
     const targetElevation = state.flowNodes.get(targetNodeId)?.elevation ?? 0;
     const toElev = node.elevation + fromElev - targetElevation;
 
-    // Generate random direction for the break (0 to 2π)
-    // Use a different seed offset than break size to get independent randomness
+    // Which way the break faces (a plan bearing, see FlowConnection.
+    // breakDirection): seeded, independent of the break size's seed
     const breakDirection = seededRandom(burstState.breakSizeSeed + 7777) * Math.PI * 2;
 
     breakConn = {
@@ -468,7 +468,7 @@ function createBreakConnection(
       burstSourceNodeId: burstState.nodeId,
       breakFraction: burstState.currentBreakFraction,
       breakDischargeCoeff: config.breakDischargeCoeff,
-      breakDirection,                      // Random direction for rendering
+      breakDirection,
       fromOpeningHeight: burstState.breakOpeningHeight,
     };
     state.flowConnections.push(breakConn);
@@ -557,10 +557,23 @@ export interface ScriptedBurstSpec {
   area?: number;
   /** Break area as a fraction of the node's own flow area. */
   fraction?: number;
-  /** Height of the break above the component's own base (m). Default: the base. */
+  /**
+   * Height of the break above the component's own base (m) - the CENTRE of
+   * the opening when it has a height. Default: the base.
+   */
   elevation?: number;
-  /** Vertical extent of the opening (m); the draw is averaged over it. */
+  /**
+   * Vertical extent of the opening (m), centred on `elevation`; the draw is
+   * averaged over [elevation - h/2, elevation + h/2].
+   */
   openingHeight?: number;
+  /**
+   * Which way the break faces, as a compass bearing in degrees (0 = north,
+   * 90 = east, 180 = south, 270 = west). Unset: the burst state's own seeded
+   * direction, as a pressure rupture gets. A scenario names it when the side
+   * matters - the side a torn liner sprays to is the side the water runs to.
+   */
+  bearing?: number;
   /** Reported in the event banner instead of the generic burst wording. */
   message?: string;
 }
@@ -613,6 +626,14 @@ export function applyScriptedBurst(
   if (!(fraction > 0)) {
     throw new Error(`[Scenario] burst '${id}': break size ${fraction} is not positive.`);
   }
+  if (spec.bearing !== undefined && !Number.isFinite(spec.bearing)) {
+    throw new Error(`[Scenario] burst '${id}': bearing ${spec.bearing} is not a number of degrees.`);
+  }
+  // Compass degrees (clockwise from north) -> the plan angle breakDirection
+  // is stored as (counter-clockwise from east)
+  const direction = spec.bearing !== undefined
+    ? (90 - spec.bearing) * Math.PI / 180
+    : undefined;
 
   const config = state.burstConfig ?? DEFAULT_BURST_CONFIG;
   const elevation = spec.elevation ?? 0;
@@ -635,13 +656,17 @@ export function applyScriptedBurst(
       conn.breakFraction = burstState.currentBreakFraction;
       conn.fromElevation = elevation;
       conn.fromOpeningHeight = spec.openingHeight;
+      if (direction !== undefined) conn.breakDirection = direction;
     }
   } else {
     createBreakConnection(burstState, state, config);
     const conn = state.flowConnections.find(c => c.id === `break-${burstState.nodeId}`);
     // A tear has a height; a hole does not. Either way the connection reads
     // it the same way every other offtake does.
-    if (conn) conn.fromOpeningHeight = spec.openingHeight;
+    if (conn) {
+      conn.fromOpeningHeight = spec.openingHeight;
+      if (direction !== undefined) conn.breakDirection = direction;
+    }
   }
 
   const area = node.flowArea * burstState.currentBreakFraction;

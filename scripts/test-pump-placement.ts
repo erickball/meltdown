@@ -13,6 +13,9 @@
  *   4. The history's epoch designs are copies: emptying the yard after the
  *      design was recorded leaves the recorded design full (this is what
  *      lets "back to t=0" put the parts back on the shelf).
+ *   5. A VALVE with a side unpiped opens it the same way - to the container
+ *      it stands in, else the air - and still throttles; and a scripted
+ *      burst faces the compass bearing it is given.
  *
  *   npx tsx scripts/test-pump-placement.ts
  */
@@ -26,6 +29,7 @@ import { serializePlantDesign, deserializePlantDesign } from '../src/simulation/
 import { getStock, spend, chargeForComponent } from '../src/game/stock';
 import type { PlantComponent, PlantState, Connection, PumpComponent } from '../src/types';
 import { ConstructionManager } from '../src/construction/construction-manager';
+import { applyScriptedBurst } from '../src/simulation/operators/burst-operator';
 
 // ---------------------------------------------------------------------------
 // A little coast: 6 x 3 cells of 10 m, ground rising from a -3 m sea floor
@@ -344,6 +348,83 @@ test('A dry pump piped to a tank starts dry: matchUpstream does not refill it fr
     `${(casing.fluid.temperature - 273.15).toFixed(2)} C`);
   assert(casing.fluid.pressure > 1.0e5 && casing.fluid.pressure < 1.03e5,
     `the piped dry casing should sit at the air's pressure over the sea, got ${(casing.fluid.pressure / 1e5).toFixed(4)} bar`);
+});
+
+// ---------------------------------------------------------------------------
+// 5. Valves put somewhere: an unpiped side opens to what the valve stands in
+// ---------------------------------------------------------------------------
+
+function valve(id: string, x: number, extra: Record<string, unknown> = {}): [string, PlantComponent] {
+  return [id, {
+    id, type: 'valve', label: id,
+    position: { x, y: 10 }, rotation: 0, elevation: 0,
+    diameter: 0.3, opening: 1, valveType: 'gate', pressureRating: 16,
+    ports: [
+      { id: `${id}-left`, position: { x: -0.5, y: 0 }, direction: 'both' },
+      { id: `${id}-right`, position: { x: 0.5, y: 0 }, direction: 'both' },
+    ],
+    fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
+    ...extra,
+  } as unknown as PlantComponent];
+}
+// A 0.3 m valve is drawn 0.6 m tall; its ports sit at mid-height
+const VALVE_NOZZLE = 0.3;
+
+test('A valve with its outlet unpiped pours onto the ground, and shut it holds', () => {
+  // The same hilltop tank feeding a valve on the +2 m shelf
+  const sim = buildSimFromPlantJson({
+    components: [tank('src', 0, 0.5), valve('v', 20)],
+    connections: [line('src', 'src-bottom', 'v', 'v-left', 0, VALVE_NOZZLE, 25)],
+    terrain,
+  });
+  const open = sim.state.flowConnections.filter(c => c.openPort?.componentId === 'v');
+  assert(open.length === 1 && open[0].openPort!.portId === 'v-right',
+    `only the unpiped outlet opens, got ${open.map(c => c.openPort!.portId).join(', ') || 'nothing'}`);
+  assert(open[0].fromNodeId === 'v' && open[0].toNodeId === 'atmosphere',
+    `the open outlet runs from the valve to the air, got ${open[0].fromNodeId} -> ${open[0].toNodeId}`);
+  const vs = sim.state.components.valves.get('v')!;
+  assert(vs.connectedFlowPath !== open[0].id, 'the valve still throttles its piped side');
+
+  run(sim, 30, 0.02);
+  const basin = sim.state.terrain!.basinOf[cellAt(sim.state.terrain!.spec, { x: 20, y: 10 })];
+  const outflow = sim.state.flowConnections.find(c => c.id === open[0].id)!.massFlowRate;
+  const puddle = sim.state.surfaceWater!.volumes.get(basin) ?? 0;
+  console.log(`    open: ${outflow.toFixed(1)} kg/s out of the valve, puddle ${puddle.toFixed(2)} m3`);
+  assert(outflow > 1, `water should pour out of the open outlet, got ${outflow.toFixed(2)} kg/s`);
+  assert(puddle > 0, 'and stand on the ground under the valve');
+
+  sim.state.components.valves.get('v')!.position = 0;
+  run(sim, 30, 0.02);
+  const shut = sim.state.flowConnections.find(c => c.id === open[0].id)!.massFlowRate;
+  console.log(`    shut: ${shut.toFixed(2)} kg/s`);
+  assert(Math.abs(shut) < 0.05 * outflow, `shut, the valve should stop it, got ${shut.toFixed(2)} kg/s`);
+});
+
+test('A valve standing in a tank with nothing piped opens both sides into the tank', () => {
+  const [, v] = valve('v', 30, { containedBy: 't', elevation: 1 });
+  const sim = buildSimFromPlantJson({ components: [tank('t', 30, 0.5), ['v', v]], connections: [], terrain });
+  const open = sim.state.flowConnections.filter(c => c.openPort?.componentId === 'v');
+  assert(open.length === 2, `both sides open, got ${open.length}`);
+  const inlet = open.find(c => c.openPort!.portId === 'v-left')!;
+  const outlet = open.find(c => c.openPort!.portId === 'v-right')!;
+  assert(inlet && inlet.fromNodeId === 't' && inlet.toNodeId === 'v', `the inlet draws from the tank, got ${inlet?.fromNodeId} -> ${inlet?.toNodeId}`);
+  assert(outlet && outlet.fromNodeId === 'v' && outlet.toNodeId === 't', `the outlet delivers to the tank, got ${outlet?.fromNodeId} -> ${outlet?.toNodeId}`);
+  assert(inlet.id !== outlet.id, 'the two openings are separate flow paths');
+  assert(sim.state.components.valves.get('v')!.connectedFlowPath === outlet.id,
+    'with nothing piped, the valve throttles its open outlet');
+  run(sim, 10, 0.02);
+  assert(Number.isFinite(sim.state.flowNodes.get('v')!.fluid.pressure), 'and it runs');
+});
+
+test('A scripted burst faces the bearing it is given', () => {
+  const sim = buildSimFromPlantJson({ components: [tank('t', 30, 0.5)], connections: [], terrain });
+  applyScriptedBurst(sim.state, 't', { area: 0.001, elevation: 2, openingHeight: 2, bearing: 270 });
+  const brk = sim.state.flowConnections.find(c => c.id === 'break-t')!;
+  assert(brk !== undefined, 'the burst opens a break connection');
+  // 270 deg = west = -x
+  assert(Math.abs(Math.cos(brk.breakDirection!) + 1) < 1e-9 && Math.abs(Math.sin(brk.breakDirection!)) < 1e-9,
+    `a west-facing break points along -x, got ${brk.breakDirection}`);
+  assert(brk.fromElevation === 2 && brk.fromOpeningHeight === 2, 'centred 2 m up, 2 m tall');
 });
 
 report('Pump placement');

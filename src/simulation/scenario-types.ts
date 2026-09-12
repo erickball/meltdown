@@ -40,14 +40,23 @@ export type ScenarioAction =
       area?: number;
       /** Break area as a fraction of the component's own flow area. */
       fraction?: number;
-      /** Height of the break above the component's base (m). Default 0 - the floor. */
+      /**
+       * Height of the break above the component's base (m) - the centre of
+       * the opening when it has a height. Default 0 - the floor.
+       */
       elevation?: number;
       /**
-       * Vertical extent of the opening (m). A tall tear draws a blend of
-       * what stands across it, so the leak crossfades from water to vapour
-       * and dies away as the level sweeps past, with no threshold anywhere.
+       * Vertical extent of the opening (m), centred on `elevation`. A tall
+       * tear draws a blend of what stands across it, so the leak crossfades
+       * from water to vapour as the level sweeps past, with no threshold.
        */
       openingHeight?: number;
+      /**
+       * Compass bearing the break faces, degrees (0 = north, 90 = east).
+       * Unset = the component's seeded direction. It is the way the spray
+       * goes - pick the side the ground falls away to.
+       */
+      bearing?: number;
       /** Banner text, in place of the generic breach wording. */
       breachMessage?: string;
     }

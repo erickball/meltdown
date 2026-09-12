@@ -24,6 +24,7 @@ import {
   Connection,
   RadiantSurface,
   pumpVisualHeight,
+  valveVisualHeight,
   radiantRingOf,
 } from '../types';
 import { SimulationState, getTurbineCondenserState, getReactorPowerState, isHxTubeNodeId, hxBundleCount, assignFlowConnectionIds, ENVIRONMENT_NODE_ID } from '../simulation';
@@ -78,8 +79,8 @@ export function getComponentVisualHeight(component: PlantComponent): number {
       return pumpVisualHeight(component as PumpComponent);
     case 'valve':
       // The bounding height the renderer anchors the valve drawing with
-      // (2x diameter leaves room for the stem/actuator above the body)
-      return ((component as ValveComponent).diameter || 0.2) * 2;
+      // (see valveVisualHeight; the factory pins open nozzles to it too)
+      return valveVisualHeight(component as ValveComponent);
     case 'pipe':
       return (component as PipeComponent).diameter || 0.3;
     case 'pool':
@@ -4882,16 +4883,12 @@ export function renderFlowConnectionArrows(
   getPortScreenPos?: (component: PlantComponent, port: { position: Point }) => { x: number; y: number; radius: number } | null,
   getConnectionScreenPos?: (fromComp: PlantComponent, toComp: PlantComponent, plantConn: Connection) => ConnectionScreenEndpoints | null,
   // Told where each arrow went, so a click on one can pick its flow path out
-  onArrow?: (plantConn: Connection, x: number, y: number, size: number) => void
+  onArrow?: (plantConn: Connection, x: number, y: number, size: number) => void,
+  // Where each break is on screen (break-fx's anchors for this frame). A
+  // break's arrow sits on its crack, pointing the way the discharge goes.
+  breakAnchorFor?: (nodeId: string) => BreakAnchor | null
 ): void {
   for (const conn of simState.flowConnections) {
-    // A break is not a run of pipe with a direction to explain. It is drawn
-    // by renderBreakConnections and break-fx - the tear, the marker and the
-    // spray, all on one anchor - and it has no ports for this to hang an
-    // arrow off, which is what used to produce a stray red line to nowhere
-    // and a "Could not find port positions for break-<node>" every frame.
-    if (conn.isBreakConnection) continue;
-
     const fromNode = simState.flowNodes.get(conn.fromNodeId);
     const toNode = simState.flowNodes.get(conn.toNodeId);
     if (!fromNode || !toNode) continue;
@@ -4903,8 +4900,44 @@ export function renderFlowConnectionArrows(
     let fromScreenPos: Point | null = null;
     let toScreenPos: Point | null = null;
     let arrowScale = 1;
+    // A flow path with no plant connection behind it (a break, an open
+    // nozzle) is picked out through a stand-in - see standInFlowPath
+    let standIn: Connection | undefined;
 
-    if (conn.id && conn.id.startsWith('flow-')) {
+    if (conn.isBreakConnection) {
+      // A break is a flow path like any other, but it has no ports: its
+      // arrow hangs off the crack break-fx drew, leaving the way the spray
+      // leaves (and pointing back in when the break is drawing air in). No
+      // anchor = the burst component is not drawn this frame.
+      const a = breakAnchorFor?.(conn.burstSourceNodeId ?? conn.fromNodeId) ?? null;
+      if (!a) continue;
+      fromScreenPos = { x: a.x, y: a.y };
+      toScreenPos = { x: a.x + Math.cos(a.angle) * 2 * a.span, y: a.y + Math.sin(a.angle) * 2 * a.span };
+      arrowScale = a.scale;
+      standIn = standInFlowPath(conn, simState, plantState);
+    } else if (conn.openPort) {
+      // An open nozzle faces what the component stands in, at the nozzle
+      // itself: the arrow sits on the port, as a vent's does
+      const comp = plantState.components.get(conn.openPort.componentId);
+      const port = comp?.ports?.find(p => p.id === conn.openPort!.portId);
+      if (!comp || !port) {
+        console.error(`[renderFlowConnectionArrows] ${conn.id} opens ${conn.openPort.componentId}:` +
+          `${conn.openPort.portId}, which is not in the plant`);
+        continue;
+      }
+      if (getPortScreenPos) {
+        const screen = getPortScreenPos(comp, port);
+        if (!screen) continue;
+        fromScreenPos = { x: screen.x, y: screen.y };
+        arrowScale = screen.radius / 25;
+      } else {
+        const world = getPortWorldPosition(comp, port.id);
+        if (!world) continue;
+        fromScreenPos = worldToScreen(world, view);
+      }
+      toScreenPos = fromScreenPos;
+      standIn = standInFlowPath(conn, simState, plantState);
+    } else if (conn.id && conn.id.startsWith('flow-')) {
       const pc = findPlantConnectionForFlowId(conn.id, plantState);
       if (pc) {
           const fromComponent = plantState.components.get(pc.fromComponentId);
@@ -5013,7 +5046,7 @@ export function renderFlowConnectionArrows(
     const perspectiveMultiplier = getPortScreenPos ? readoutScale(arrowScale) : 1;
     const arrowSize = baseArrowSize * perspectiveMultiplier;
     if (onArrow) {
-      const drawnFor = findPlantConnectionForFlowId(conn.id, plantState);
+      const drawnFor = standIn ?? findPlantConnectionForFlowId(conn.id, plantState);
       if (drawnFor) onArrow(drawnFor, screenPos.x, screenPos.y, arrowSize);
     }
 
@@ -5148,7 +5181,86 @@ export function flowConnectionIdForPlantConnection(
 ): string | undefined {
   const ids = flowConnectionIds(plantState);
   const idx = plantState.connections.indexOf(connection);
-  return idx >= 0 ? ids[idx] : undefined;
+  if (idx >= 0) return ids[idx];
+  return standInFlowIds.get(connection)?.flowId;
+}
+
+// ----------------------------------------------------------------------------
+// Flow paths with no plant connection behind them
+// ----------------------------------------------------------------------------
+
+type FlowConnectionRecord = SimulationState['flowConnections'][number];
+
+/** What a stand-in stands in for. */
+export interface StandInInfo {
+  flowId: string;
+  /** 'break': a burst's opening; 'open': a nozzle left with nothing piped to it. */
+  kind: 'break' | 'open';
+}
+
+const standIns = new Map<string, Connection>();
+const standInFlowIds = new WeakMap<Connection, StandInInfo>();
+
+/**
+ * A plant-shaped Connection for a simulation flow path the plant never
+ * declared: a break (the burst operator opens it) or a nozzle the factory
+ * opened to whatever the component stands in. It exists so the views can
+ * treat those like any other flow path - an arrow that can be clicked, a
+ * ring and a label - through the same Connection-keyed code. One object per
+ * flow id, so selection (an identity test) survives from frame to frame;
+ * its geometry fields are refreshed from the simulation on every call.
+ *
+ * It is never in `plantState.connections`: nothing can edit or delete it,
+ * and `standInInfo` is how callers tell.
+ */
+export function standInFlowPath(
+  conn: FlowConnectionRecord,
+  simState: SimulationState,
+  plantState: PlantState
+): Connection {
+  const componentOf = (nodeId: string): string =>
+    nodeId === ENVIRONMENT_NODE_ID ? ENVIRONMENT_NODE_ID
+      : findComponentForFlowNode(nodeId, plantState)?.id ?? nodeId;
+  const kind: StandInInfo['kind'] = conn.isBreakConnection ? 'break' : 'open';
+
+  let fromComponentId: string, fromPortId: string, toComponentId: string, toPortId: string;
+  if (kind === 'break') {
+    const source = conn.burstSourceNodeId ?? conn.fromNodeId;
+    fromComponentId = simState.burstStates?.get(source)?.componentId ?? componentOf(source);
+    fromPortId = 'break';
+    toComponentId = componentOf(conn.toNodeId);
+    toPortId = toComponentId === ENVIRONMENT_NODE_ID ? 'environment' : 'break';
+  } else {
+    const open = conn.openPort!;
+    const fromIsOpen = componentOf(conn.fromNodeId) === open.componentId;
+    fromComponentId = componentOf(conn.fromNodeId);
+    toComponentId = componentOf(conn.toNodeId);
+    const facing = (id: string) => id === ENVIRONMENT_NODE_ID ? 'environment' : 'open nozzle';
+    fromPortId = fromIsOpen ? open.portId : facing(fromComponentId);
+    toPortId = fromIsOpen ? facing(toComponentId) : open.portId;
+  }
+
+  let c = standIns.get(conn.id);
+  if (!c) {
+    c = { fromComponentId, fromPortId, toComponentId, toPortId };
+    standIns.set(conn.id, c);
+    standInFlowIds.set(c, { flowId: conn.id, kind });
+  }
+  c.fromComponentId = fromComponentId;
+  c.fromPortId = fromPortId;
+  c.toComponentId = toComponentId;
+  c.toPortId = toPortId;
+  c.flowArea = conn.flowArea;
+  c.length = conn.length;
+  c.fromElevation = conn.fromElevation;
+  c.toElevation = conn.toElevation;
+  c.fromOpeningHeight = conn.fromOpeningHeight;
+  return c;
+}
+
+/** Set when `conn` is a stand-in (see standInFlowPath), else undefined. */
+export function standInInfo(conn: Connection | null | undefined): StandInInfo | undefined {
+  return conn ? standInFlowIds.get(conn) : undefined;
 }
 
 function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
@@ -6107,46 +6219,14 @@ function renderCrossVessel(
 // ============================================================================
 
 /**
- * Draw a crack/lightning bolt symbol for burst components.
- */
-function renderCrackSymbol(
-  ctx: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  scale: number
-): void {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.scale(scale, scale);
-
-  // Lightning bolt crack shape
-  ctx.beginPath();
-  ctx.moveTo(0, -15);
-  ctx.lineTo(5, -5);
-  ctx.lineTo(-1, -3);
-  ctx.lineTo(4, 10);
-  ctx.lineTo(-5, 0);
-  ctx.lineTo(2, -2);
-  ctx.closePath();
-
-  ctx.fillStyle = 'rgba(255, 50, 50, 0.95)';
-  ctx.fill();
-  ctx.strokeStyle = '#990000';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-/**
- * Render burst overlays (the warning border and the burst marker) for all
- * burst components.
+ * Render burst overlays (the warning border and the break-size label) for
+ * all burst components.
  *
  * `anchorFor` is where the break actually IS on the component, resolved once
- * per frame by break-fx.ts and shared with the torn gap, the spray and the
- * discharge line - so the marker lands on the hole rather than on the
- * component's centreline. Without it the marker falls back to the component
- * centre, which is what it always did.
+ * per frame by break-fx.ts and shared with the crack, the spray and the
+ * break's flow arrow - so the label hangs under the crack rather than on the
+ * component's centreline. Without it the label falls back to the component
+ * centre.
  */
 export function renderBurstOverlays(
   ctx: CanvasRenderingContext2D,
@@ -6231,19 +6311,17 @@ export function renderBurstOverlays(
     );
     ctx.restore();
 
-    // The burst marker goes exactly where the break is drawn - the anchor
-    // break-fx resolved for the tear and the spray. There is no second
-    // opinion about where the hole is any more.
+    // The label hangs under the crack break-fx drew - the same anchor as the
+    // spray and the arrow, so there is no second opinion about where the
+    // hole is.
     const anchor = anchorFor?.(nodeId) ?? null;
-    let crackX = anchor ? anchor.x : screenPos.x;
-    let crackY = anchor ? anchor.y : screenPos.y + height / 2;
+    let labelX = anchor ? (anchor.crack.x0 + anchor.crack.x1) / 2 : screenPos.x;
+    const labelY = anchor ? Math.max(anchor.crack.y0, anchor.crack.y1) + 4 * rScale : screenPos.y + height / 2;
     if (!anchor && burstState.breakLocation !== undefined && component.type === 'pipe') {
       // No resolved anchor (no break connection yet): a pipe at least knows
       // where along its length it went.
-      crackX = screenPos.x + (burstState.breakLocation - 0.5) * width;
+      labelX = screenPos.x + (burstState.breakLocation - 0.5) * width;
     }
-
-    renderCrackSymbol(ctx, crackX, crackY, rScale * 1.2);
 
     // Draw break percentage label
     ctx.save();
@@ -6255,153 +6333,8 @@ export function renderBurstOverlays(
     // 0.02% of a 9 m pool rounded to "0% break", which reads as no break.
     const pct = burstState.currentBreakFraction * 100;
     const breakPct = pct >= 1 ? pct.toFixed(0) : pct.toPrecision(1);
-    ctx.fillText(`${breakPct}% break`, crackX, crackY + 15 * rScale);
+    ctx.fillText(`${breakPct}% break`, labelX, labelY);
     ctx.restore();
-  }
-}
-
-/**
- * Render break connections with red dashed styling.
- * These are the flow connections created when components burst.
- */
-// Type for screen bounds callback (matches renderBurstOverlays)
-type ScreenBoundsGetter = (comp: PlantComponent) => { topCenter: Point; scale: number; width?: number; height?: number } | null;
-type GroundYGetter = (worldPos: Point) => number | null;
-
-export function renderBreakConnections(
-  ctx: CanvasRenderingContext2D,
-  simState: SimulationState,
-  plantState: PlantState,
-  view: ViewState,
-  _getNodeScreenPos?: (nodeId: string) => Point | null,  // Deprecated, kept for API compatibility
-  getScreenBounds?: ScreenBoundsGetter,
-  getGroundY?: GroundYGetter,
-  anchorFor?: (nodeId: string) => BreakAnchor | null
-): void {
-  for (const conn of simState.flowConnections) {
-    if (!conn.isBreakConnection) continue;
-
-    const fromNode = simState.flowNodes.get(conn.fromNodeId);
-    const toNode = simState.flowNodes.get(conn.toNodeId);
-    if (!fromNode || !toNode) continue;
-
-    // Get screen positions for the connection endpoints
-    let fromScreenPos: Point | null = null;
-    let toScreenPos: Point | null = null;
-    let fromComponent: PlantComponent | undefined;
-
-    // Find the FROM component (the one that burst)
-    for (const [compId, comp] of plantState.components) {
-      const simNodeId = (comp as { simNodeId?: string }).simNodeId;
-      if (simNodeId === conn.fromNodeId || compId === conn.fromNodeId ||
-          conn.fromNodeId.startsWith(compId + '-')) {
-        fromComponent = comp;
-        break;
-      }
-    }
-
-    // Get screen position and scale for the FROM component (the one that burst)
-    let fromBounds: { topCenter: Point; scale: number; width?: number; height?: number } | null = null;
-    if (getScreenBounds && fromComponent) {
-      fromBounds = getScreenBounds(fromComponent);
-      if (fromBounds) {
-        fromScreenPos = { ...fromBounds.topCenter };
-      }
-    }
-
-    // Error if getScreenBounds didn't work
-    if (!fromScreenPos && fromComponent) {
-      console.error(`[renderBreakConnections] getScreenBounds failed for ${fromComponent.id}, using worldToScreen`);
-      fromScreenPos = worldToScreen(fromComponent.position, view);
-    }
-
-    if (!fromScreenPos) {
-      continue;
-    }
-
-    // Calculate connection length based on the burst component's largest dimension
-    if (fromBounds?.width === undefined || fromBounds?.height === undefined) {
-      console.error(`[renderBreakConnections] No width/height from getScreenBounds for ${conn.fromNodeId}`);
-    }
-    const compWidth = fromBounds?.width ?? 50;
-    const compHeight = fromBounds?.height ?? 50;
-    const maxDimension = Math.max(compWidth, compHeight);
-
-    // Where the break IS: the anchor break-fx resolved, which is also where
-    // the tear and the spray are drawn. Without one (no bounds this frame)
-    // fall back to the old centre-of-component reading.
-    const anchor = anchorFor?.(conn.fromNodeId) ?? null;
-    if (anchor) {
-      fromScreenPos = { x: anchor.x, y: anchor.y };
-    } else if (conn.fromElevation !== undefined && fromNode.height) {
-      const breakFraction = conn.fromElevation / fromNode.height;
-      const clampedFraction = Math.max(0, Math.min(1, breakFraction));
-      fromScreenPos.y = fromScreenPos.y + (1 - clampedFraction) * compHeight;
-    } else {
-      fromScreenPos.y = fromScreenPos.y + compHeight / 2;
-    }
-
-    // Connection length is 0.5-1x the largest dimension
-    const connectionLength = maxDimension * 0.75;
-
-    // Use the randomized break direction from the connection, or default to upward
-    const breakDirection = conn.breakDirection ?? -Math.PI / 2;  // Default: upward
-
-    // Calculate TO position based on direction and length from the FROM position
-    toScreenPos = {
-      x: fromScreenPos.x + Math.cos(breakDirection) * connectionLength,
-      y: fromScreenPos.y + Math.sin(breakDirection) * connectionLength,
-    };
-
-    // Clamp toScreenPos.y so it doesn't go below ground level (elevation 0)
-    if (getGroundY && fromComponent) {
-      const groundY = getGroundY(fromComponent.position);
-      if (groundY !== null && toScreenPos.y > groundY) {
-        toScreenPos.y = groundY;
-      }
-    }
-
-    // Calculate midpoint for label and arrow
-    const midX = (fromScreenPos.x + toScreenPos.x) / 2;
-    const midY = (fromScreenPos.y + toScreenPos.y) / 2;
-
-    // Draw red dashed line for break connection
-    ctx.save();
-    ctx.strokeStyle = 'rgba(255, 50, 50, 0.9)';
-    ctx.lineWidth = 4;
-    ctx.setLineDash([8, 4]);
-    ctx.lineCap = 'round';
-
-    ctx.beginPath();
-    ctx.moveTo(fromScreenPos.x, fromScreenPos.y);
-    ctx.lineTo(toScreenPos.x, toScreenPos.y);
-    ctx.stroke();
-    ctx.restore();
-
-    // NO flow arrow. A break is not a pipe with a direction to explain - it
-    // is a hole, and what comes out of it is drawn as spray (break-fx's
-    // drawSpray, in both views), scaled by this same mass flow. An arrow on
-    // top of the spray said the same thing twice and pointed at the middle
-    // of a dashed line rather than at the hole.
-
-    // Draw flow rate label for break connection
-    const breakScale = readoutScale(view.zoom / 50);
-    ctx.save();
-    ctx.fillStyle = '#ff3333';
-    ctx.strokeStyle = '#fff';
-    ctx.lineWidth = 2 * breakScale;
-    ctx.font = `bold ${11 * breakScale}px sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'bottom';
-
-    const flowLabel = `${Math.abs(conn.massFlowRate).toFixed(0)} kg/s`;
-    ctx.strokeText(flowLabel, midX, midY - 15 * breakScale);
-    ctx.fillText(flowLabel, midX, midY - 15 * breakScale);
-    ctx.restore();
-
-    // The burst marker at the source is renderBurstOverlays' job - it draws
-    // it at this same anchor, so drawing a second one here would only stack
-    // two symbols on one hole.
   }
 }
 

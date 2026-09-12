@@ -4,7 +4,7 @@ import { buildTimeline, formatBandTime, eventIcon } from './game/history-timelin
 import { PlantCanvas, ViewMode } from './render/canvas';
 import { PipeOrientation } from './render/grid-geometry';
 import { installPageZoomReset } from './page-zoom';
-import { getComponentVisualHeight, formatGaugeValue } from './render/components';
+import { getComponentVisualHeight, formatGaugeValue, standInInfo } from './render/components';
 // Demo plant imports - uncomment createDemoPlant and createDemoReactor to load demo on startup
 // import { createDemoPlant } from './plant/factory';
 import pwrPresetData from './presets/pwr.json';
@@ -1929,7 +1929,8 @@ function init() {
     // first: it is the thing the click most recently picked out.
     if (e.key === 'Delete' && (currentMode === 'construction' || liveBuildAllowed())) {
       const selectedRun = plantCanvas.getSelectedConnection();
-      if (selectedRun) {
+      // (a selected break or open nozzle is not a run anyone laid)
+      if (selectedRun && !standInInfo(selectedRun)) {
         e.preventDefault();
         deletePlantConnection(selectedRun);
         return;
@@ -2322,7 +2323,9 @@ function init() {
   // again while building opens its edit dialog (same one as the detail
   // panel's Edit button)
   plantCanvas.onConnectionSelect = (conn, again) => {
-    if (conn && again && (currentMode === 'construction' || liveBuildAllowed())) {
+    // A break or an open nozzle is a flow path with no pipe behind it:
+    // there is nothing to edit (standInFlowPath)
+    if (conn && again && !standInInfo(conn) && (currentMode === 'construction' || liveBuildAllowed())) {
       editPlantConnection(conn);
     }
   };
@@ -4420,22 +4423,31 @@ function init() {
     if (hoveredPortInfo && portTooltip) {
       const { component, port, worldPos } = hoveredPortInfo;
       const portType = getPortTypeLabel(port.id, component.id);
-      const elevation = component.elevation ?? 0;
 
-      // Calculate port elevation offset (some ports are above/below component center)
-      // For most components, port.position.y affects elevation
-      let portElevation = elevation;
-      if (component.type === 'tank' || component.type === 'vessel' || component.type === 'reactorVessel' || component.type === 'heatExchanger') {
-        // Vertical components: port Y offset is vertical
-        // For HX, the component.elevation is the shell bottom, and port positions already include plenum offset
-        portElevation = elevation - port.position.y;
+      // ABSOLUTE elevation of the nozzle (above the terrain datum), by the
+      // same convention every connection is built and drawn on: the ground
+      // under the component, its own elevation above that ground, and the
+      // port's rise above the drawn bottom (visual height / 2 - port y). A
+      // pipe's two ends each stand over their own ground at their own
+      // centreline elevation. (This used to print the component's elevation
+      // above local ground less port y - neither absolute nor the port's.)
+      let portElevation: number;
+      if (component.type === 'pipe') {
+        const pipe = component as PipeComponent;
+        const atEnd = port.position.x > pipe.length / 2;
+        portElevation = atEnd
+          ? terrainHeightAt(plantState.terrain, pipe.endPosition ?? pipe.position) + (pipe.endElevation ?? pipe.elevation ?? 0)
+          : terrainHeightAt(plantState.terrain, pipe.position) + (pipe.elevation ?? 0);
+      } else {
+        portElevation = terrainHeightAt(plantState.terrain, component.position) + (component.elevation ?? 0) +
+          getComponentVisualHeight(component) / 2 - port.position.y;
       }
 
       portTooltip.innerHTML = `
         <div class="port-component">${component.label || component.id}</div>
         <div class="port-type">${portType}</div>
         <div class="port-coords">Position: (${worldPos.x.toFixed(1)}, ${worldPos.y.toFixed(1)}) m</div>
-        <div class="port-coords">Elevation: ${portElevation.toFixed(1)} m</div>
+        <div class="port-coords" title="Absolute height of the nozzle above the map datum: ground under the component + its elevation above that ground + the nozzle's height on it">Elevation: ${portElevation.toFixed(1)} m (absolute)</div>
       `;
 
       // Position tooltip near cursor

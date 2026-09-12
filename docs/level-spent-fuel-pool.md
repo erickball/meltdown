@@ -504,6 +504,18 @@ leak now stands as a puddle around the pool that grows to ~500 m3 over the
 first hours and shrinks as the tear slows. On a flat pad at the default 1e-4
 no puddle ever stood (the whole 8100 m2 drank 810 kg/s).
 
+**UPDATED 2026-09-12 - the tear, the trough and the yard.** The dish is gone:
+the pad is flat with a 0.35 m TROUGH along its west edge (x = 20..40 m), and
+the tear is one long crack up the pool's WEST wall, from 0.3 m above the foot
+of the racks (0.8 m) to the rim (10.5 m), facing west (scripted burst
+`bearing: 270`). The spray goes west and so does the water - the puddle
+stands in the trough on the side the pool is leaking from, not in a ring
+round it. The pool now stands on the flat 13.0 m bench (its rim was 12.7 m in
+the dish). The supply yard moved to (60, 100), north of the pool, so the 2.5D
+camera (which looks north) sees the pool past it. **Not re-tuned**: the crack
+keeps the old 0.0170 m2, and see the note below on how the leak's head is
+priced for a tall opening.
+
 **Decay heat 10 MW** (was 8). Unfed: racks uncovered t=3840 s, dry t=16,640,
 clad past 900 C t=19,740, release limit **t=20,640 s** (was 23,620).
 

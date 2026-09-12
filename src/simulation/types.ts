@@ -560,7 +560,18 @@ export interface FlowConnection {
   // Break connection metadata (set when component bursts)
   isBreakConnection?: boolean;      // True if this is a burst-created connection
   burstSourceNodeId?: string;       // Which node burst to create this connection
-  breakDirection?: number;          // Radians - direction of break for rendering (0 = right, π/2 = down)
+  // The way the break faces, as a PLAN bearing in world coordinates:
+  // radians, 0 = +x (east), π/2 = +y (north). Each view projects it onto its
+  // own screen, so the plan and the 2.5D picture spray the same way and the
+  // spray points at the ground the water actually runs to.
+  breakDirection?: number;
+
+  // A nozzle left with no line on it, opened by the factory to whatever the
+  // component stands in (its container, else the open air) - see
+  // openLoosePortsToSurroundings. The component and port it opens, so the
+  // views can hang its flow arrow on the nozzle itself: there is no plant
+  // connection to find it by.
+  openPort?: { componentId: string; portId: string };
 
   // Current flow state (computed by solver)
   massFlowRate: number;             // kg/s (positive = from -> to)

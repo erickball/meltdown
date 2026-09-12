@@ -59,6 +59,7 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
         fraction: a.fraction,
         elevation: a.elevation,
         openingHeight: a.openingHeight,
+        bearing: a.bearing,
         message: a.breachMessage,
       });
       return;
