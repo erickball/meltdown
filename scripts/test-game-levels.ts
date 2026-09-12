@@ -405,7 +405,7 @@ function sfpBuild(plant: PlantJsonRW, runs: SfpRun[]): {
   if (stock) stock.pipeMeters = RACK;
   const lastHop: string[] = [];
   for (const r of runs) {
-    const before = new Set(ps.components.keys());
+    const connectionsBefore = ps.connections.length;
     const ok = createsPipe(r.flowArea, r.length)
       ? cm.createConnectionWithPipe(r.fromPortId, r.toPortId, r.flowArea, r.length, r.fromElevation, r.toElevation)
       : cm.createConnection(r.fromPortId, r.toPortId, r.fromElevation, r.toElevation, r.flowArea, r.length);
@@ -413,8 +413,13 @@ function sfpBuild(plant: PlantJsonRW, runs: SfpRun[]): {
       throw new Error(`[sfp] the connection dialog could not lay ${r.fromComponentId} -> ${r.toComponentId}: ` +
         `${cm.takeStockRefusal() ?? 'refused (see the log above)'}`);
     }
-    const pipe = [...ps.components.keys()].find(id => !before.has(id));
-    lastHop.push(pipe ?? r.fromComponentId);
+    // The hop into the run's far end: whichever of the connections this run
+    // just laid lands on its target port (a sloped run is a chain of pipes,
+    // and two runs may land on the same port)
+    const arrival = ps.connections.slice(connectionsBefore)
+      .find(c => c.toComponentId === r.toComponentId && c.toPortId === r.toPortId);
+    if (!arrival) throw new Error(`[sfp] the run ${r.fromComponentId} -> ${r.toComponentId} laid nothing into ${r.toPortId}`);
+    lastHop.push(arrival.fromComponentId);
   }
   const metres = stock ? RACK - stock.pipeMeters : 0;
   if (stock) stock.pipeMeters = stockMetres;
