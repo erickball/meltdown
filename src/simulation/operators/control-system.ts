@@ -32,6 +32,7 @@ import { SimulationState, ControllerState, ControllerSignal, ControllerSensorKin
 import { ConstraintOperator } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
 import { saturationPressure } from '../water-properties';
+import { nodeGasVolume } from '../mixture-properties';
 import { evaluateOtsgSections } from './otsg-operator';
 import {
   approxLiquidDensity,
@@ -754,15 +755,23 @@ export function nodeLiquidLevelFraction(node: FlowNode): number {
   if (height !== undefined && height > 0) return nodeLiquidLevel(node) / height;
   // No height declared: fall back to the volume fraction, which is what a
   // drawing of a shapeless node can show anyway.
-  const liquidMass = node.fluid.mass * (1 - (node.fluid.quality ?? 0));
-  return node.volume > 0 ? (liquidMass / approxLiquidDensity(node)) / node.volume : 0;
+  return node.volume > 0 ? nodeLiquidVolume(node) / node.volume : 0;
+}
+
+/**
+ * The liquid's volume in a two-phase node: everything but the vapour space
+ * the mixture solve left (nodeGasVolume) - the same split the draws and the
+ * hydrostatic head use (connection-hydraulics). This used to be the liquid
+ * mass over a density fit, which put the surface somewhere the node's own
+ * equation of state did not (0.05% at 12 C, 3-4% near 100 and 200 C).
+ */
+function nodeLiquidVolume(node: FlowNode): number {
+  return node.volume - Math.max(0, Math.min(node.volume, nodeGasVolume(node)));
 }
 
 export function nodeLiquidLevel(node: FlowNode): number {
   const phase = node.fluid.phase;
   if (phase === 'vapor') return 0;
-  const quality = phase === 'two-phase' ? (node.fluid.quality ?? 0) : 0;
-  const liquidMass = node.fluid.mass * (1 - quality);
-  const liquidVolume = liquidMass / approxLiquidDensity(node);
+  const liquidVolume = phase === 'two-phase' ? nodeLiquidVolume(node) : node.volume;
   return calculateLiquidLevelWithObstructions(node, liquidVolume);
 }

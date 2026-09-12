@@ -21,7 +21,7 @@ import {
   DECAY_HEAT_GROUPS, DECAY_HEAT_TOTAL_FRACTION,
 } from './neutronics';
 import * as Water from '../water-properties';
-import { solveMixtureState, type MixtureState } from '../mixture-properties';
+import { solveMixtureState, nodeGasVolume, type MixtureState } from '../mixture-properties';
 import { simulationConfig } from '../types';
 import {
   totalMoles,
@@ -52,7 +52,6 @@ import {
   drawCompositionAt,
   DrawComposition,
   approxVaporDensity,
-  approxLiquidDensity,
   CLOSED_FLOW_DECAY_TAU,
   pressureAtConnection,
 } from './connection-hydraulics';
@@ -3461,10 +3460,12 @@ export class CladdingOxidationRateOperator implements RateOperator {
       // is a smooth exponential run-down and starvation needs no rule
       // (the graphite oxidation operator does the same thing for the same
       // reason).
-      const liquidVolume = coolantNode.fluid.phase === 'vapor'
-        ? 0
-        : (coolantNode.fluid.mass * (1 - quality)) / approxLiquidDensity(coolantNode);
-      const gasVolume = Math.max(0, volume - liquidVolume);
+      // The gas space the mixture solve left (nodeGasVolume), the same room
+      // every partial pressure is priced over - not the volume minus the
+      // liquid's mass over a density fit
+      const gasVolume = coolantNode.fluid.phase === 'vapor'
+        ? volume
+        : Math.max(0, Math.min(volume, nodeGasVolume(coolantNode)));
       const C_steam = gasVolume > 0 ? steamMoles / gasVolume : 0;
       const C_O2 = gasVolume > 0 ? Math.max(0, ncg.O2 ?? 0) / gasVolume : 0;
 

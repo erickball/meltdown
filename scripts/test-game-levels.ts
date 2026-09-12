@@ -508,6 +508,12 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     const q = flowRate(sim.state, spot.id, 'pool');
     const casing = sim.state.flowNodes.get(spot.id)!;
     const pump = sim.state.components.pumps.get(spot.id)!;
+    // Wherever it stands, a pump that fills while it runs must not burst its
+    // own casing (a slam here once went unnoticed: the pump delivered its
+    // flow through a ruptured casing leaking 42 kg/s)
+    if (sim.state.burstStates?.get(spot.id)?.isBurst) {
+      fail(`the pump at the ${spot.name} burst its casing`);
+    }
     const ground = casing.groundHeight ?? 0;
     console.log(`  [${spot.deliver ? 3 : 2}] ${spot.name}: ${q.toFixed(1)} kg/s to the pool, ` +
       `casing ${casing.fluid.phase} at ${(casing.fluid.pressure / 1e5).toFixed(3)} bar, ground ${ground.toFixed(2)} m, ` +

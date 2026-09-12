@@ -383,9 +383,10 @@ export function pressureAtConnection(node: FlowNode, connectionElevation?: numbe
   let rho_liquid: number;
   let liquidVolume: number;
   if (node.fluid.phase === 'two-phase') {
-    const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
     rho_liquid = approxLiquidDensity(node);
-    liquidVolume = Math.min(node.volume, node.fluid.mass * (1 - quality) / rho_liquid);
+    // The surface where the draw model puts it: the node's own vapour space
+    // (nodeGasVolume), not the mass over a density fit (see drawCompositionAt)
+    liquidVolume = node.volume - Math.max(0, Math.min(node.volume, nodeGasVolume(node)));
     liquidLevel = calculateLiquidLevelWithObstructions(node, liquidVolume);
   } else if (node.fluid.phase === 'liquid') {
     // Liquid-full: the surface is the top of the node
@@ -471,14 +472,12 @@ export function pumpHeadFactor(
     : baseFactor + (1.0 - baseFactor) * Math.max(0, npshAvailable / npshRequired);
 
   if (phase === 'two-phase') {
-    // Void fraction from what the pot actually holds - the liquid volume its
-    // mass and quality account for against its total volume (the same book
-    // the draw model keeps), not a density-ratio estimate of it
-    const quality = Math.max(0, Math.min(1, suctionNode.fluid.quality ?? 0));
-    const liquidVolume = suctionNode.volume > 0
-      ? Math.min(suctionNode.volume, suctionNode.fluid.mass * (1 - quality) / approxLiquidDensity(suctionNode))
-      : 0;
-    const alpha = suctionNode.volume > 0 ? 1 - liquidVolume / suctionNode.volume : 1;
+    // Void fraction from what the pot actually holds - its vapour space as
+    // the mixture solve left it (nodeGasVolume, the same book the draw model
+    // keeps), not a density-fit estimate of the liquid's volume
+    const alpha = suctionNode.volume > 0
+      ? Math.max(0, Math.min(1, nodeGasVolume(suctionNode) / suctionNode.volume))
+      : 1;
     // Quadratic through (0, liquidFactor), (1/2, midVoidFactor), (1, 1):
     // continuous with the liquid law at alpha = 0 whatever the subcooling
     // (it used to start every two-phase pot at the saturated value, a 15%
@@ -623,10 +622,18 @@ export function drawCompositionAt(
     // (sep * V_liq), the separated share of the vapor into a clear space at
     // the top (sep * V_vap), and everything else is froth in between. At
     // sep = 1 this is a sharp interface, at sep = 0 all froth - continuously.
-    const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
-    const liquidVolume = Math.min(node.volume,
-      node.fluid.mass * (1 - quality) / approxLiquidDensity(node));
-    const vaporVolume = node.volume - liquidVolume;
+    // The split is the node's own: its vapour space as the mixture solve left
+    // it (nodeGasVolume), everything else liquid. (This used to recompute the
+    // liquid volume from the mass over a density FIT, 1000 - 0.08*T_C, which
+    // is 0.05% light at 12 C - enough, in a pump pot of ~8 m3, to "fill" the
+    // 3.5 L of air the solve said was there. The draw at the casing's top
+    // nozzle then saw no gas zone at all, took pure liquid, and the air could
+    // never vent: it sat in the casing as a stiff spring for as long as the
+    // pump ran. The fit is 3-4% off near 100 and 200 C, so every hot tank's
+    // interface was being drawn somewhere its equation of state did not
+    // put it.)
+    const vaporVolume = Math.max(0, Math.min(node.volume, nodeGasVolume(node)));
+    const liquidVolume = node.volume - vaporVolume;
     const zLiquid = calculateLiquidLevelWithObstructions(node, separation * liquidVolume);
     const zVapor = calculateLiquidLevelWithObstructions(node, node.volume - separation * vaporVolume);
     // Interface smear: waves and slosh blur the zone boundaries by ~10 cm; a
@@ -1212,14 +1219,22 @@ export function computeConnectionHydraulics(
       // full head against backflow, while a vapor-bound pump develops almost
       // nothing (gas-locked) regardless of what leaks backward through it.
       const pumpNode = fromNode;
-      // Include NCG mass: a gas circulator develops rho*g*H head from the
-      // gas it actually contains (a few % of a water pump's - physical for
-      // the same impeller, so gas loops need high-head circulators). A
-      // two-phase pump works on its mixture density; the impeller's extra
-      // loss against a mixture is pumpHeadFactor's. (This used to switch to
-      // the liquid density whenever the pot held more than 10 kg of liquid -
-      // a threshold the continuous factor does not need.)
-      const pumpRho = nodeBulkDensity(pumpNode);
+      // The density the head is paid in is that of the fluid the impeller
+      // actually delivers into this line - the draw at the pump's own
+      // discharge nozzle. Euler's turbomachine equation fixes the specific
+      // work, g*H per kg; the pressure rise is that times the density of
+      // what passes through. A gas circulator's draw is its gas, a primed
+      // pump's its liquid (the NCG mass is in the draw's density either way).
+      // A casing still half full of air while its nozzle draws that air gets
+      // the gas head: a centrifugal impeller is not a vacuum pump. (This was
+      // the casing's BULK density, so a dry pump started in the sea put a
+      // half-water head on the air it was pushing out, pulled its own casing
+      // down to 0.03 bar, let the sea in at 466 kg/s and burst on the slam.)
+      // Priced at the discharge nozzle even for momentary reverse flow: the
+      // head is the pump's, not whatever leaks back through it.
+      const pumpDraw = currentFlow >= 0 ? drawComp : drawCompositionAt(
+        pumpNode, conn.fromElevation, Math.abs(currentFlow), conn.fromPhaseTolerance, conn.fromOpeningHeight);
+      const pumpRho = pumpDraw.rho;
 
       // Head from the pump curve: falls off with flow, zero at runout - and
       // the whole curve scales down with what the suction can supply
