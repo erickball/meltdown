@@ -634,7 +634,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       // out long before the wave does.
       ['tank-valve', {
         id: 'tank-valve', type: 'valve', label: 'Tank Make-up Valve',
-        position: { x: 78, y: 62 }, rotation: 0, elevation: 0,
+        position: { x: 78, y: 88 }, rotation: 0, elevation: 0,
         diameter: 0.2, volume: 0.3, valveType: 'gate', opening: 0,
         ports: [
           { id: 'tank-valve-in', position: { x: -0.5, y: 0 }, direction: 'both' },

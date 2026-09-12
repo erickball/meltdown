@@ -104,8 +104,8 @@ check('circulator outlet is drawn on the pump sprite (left side, mid-height)',
 // anchor on the footprint edge (that is where an outside pipe is laid to)
 const suctionMarker = grid.portScreenPosition(sg, 'tank-sg-suction-a')!;
 const sgRectScreen = {
-  tl: grid.worldToScreen({ x: footprintRect(sg.position, componentFootprint(sg)).x0, y: footprintRect(sg.position, componentFootprint(sg)).y0 }),
-  br: grid.worldToScreen({ x: footprintRect(sg.position, componentFootprint(sg)).x1, y: footprintRect(sg.position, componentFootprint(sg)).y1 }),
+  tl: grid.worldToScreen({ x: footprintRect(sg.position, componentFootprint(sg)).x0, y: footprintRect(sg.position, componentFootprint(sg)).y1 }),
+  br: grid.worldToScreen({ x: footprintRect(sg.position, componentFootprint(sg)).x1, y: footprintRect(sg.position, componentFootprint(sg)).y0 }),
 };
 check('the vessel\'s own port marker stays on its footprint edge',
   suctionMarker.x >= sgRectScreen.tl.x - 1e-6 && suctionMarker.x <= sgRectScreen.br.x + 1e-6 &&
@@ -192,27 +192,33 @@ if (hotDrawn.sections.length === 1) {
   check('  ending on the duct\'s RPV end, on its axis', near(end.x, ductBox.left, 0.5) &&
     near(end.y, (ductBox.top + ductBox.bottom) / 2, 0.5), `ends ${fmt(end)} duct ${fmtBox(ductBox)}`);
 }
-check('a plan sprite stands on its footprint', near(grid.spriteScreenBox(rv)!.bottom,
-  grid.worldToScreen({ x: rv.position.x, y: footprintRect(rv.position, componentFootprint(rv)).y1 }).y, 1e-6));
+check('a plan sprite stands on its footprint\'s south edge', near(grid.spriteScreenBox(rv)!.bottom,
+  grid.worldToScreen({ x: rv.position.x, y: footprintRect(rv.position, componentFootprint(rv)).y0 }).y, 1e-6));
+{
+  // North is up the screen, as it is away from the 2.5D camera
+  const south = grid.worldToScreen({ x: rv.position.x, y: rv.position.y - 5 });
+  const north = grid.worldToScreen({ x: rv.position.x, y: rv.position.y + 5 });
+  check('+y (north, away from the 2.5D camera) is up the screen', north.y < south.y, `north ${fmt(north)} south ${fmt(south)}`);
+}
 
 console.log('Wall anchors');
 {
   const rect = footprintRect(sg.position, componentFootprint(sg));
   const port = pumpA.ports[1];
-  const w = wallAnchor(sg, port, 'W', { x: sg.position.x - 20, y: rect.y0 - 5 });
+  const w = wallAnchor(sg, port, 'W', { x: sg.position.x - 20, y: rect.y1 + 5 });
   check('a partner north-west of the vessel meets the west wall at its north cell',
-    w.side === 'W' && near(w.point.x, rect.x0) && near(w.point.y, rect.y0 + 0.5), fmt(w.point));
-  const n = wallAnchor(sg, port, 'N', { x: rect.x1 + 3, y: rect.y0 - 10 });
+    w.side === 'W' && near(w.point.x, rect.x0) && near(w.point.y, rect.y1 - 0.5), fmt(w.point));
+  const n = wallAnchor(sg, port, 'N', { x: rect.x1 + 3, y: rect.y1 + 10 });
   check('a partner north-east meets the north wall at its east cell',
-    n.side === 'N' && near(n.point.y, rect.y0) && near(n.point.x, rect.x1 - 0.5), fmt(n.point));
+    n.side === 'N' && near(n.point.y, rect.y1) && near(n.point.x, rect.x1 - 0.5), fmt(n.point));
   check('the out cell lies one half tile outside the wall', !!w.out && near(w.out.x, rect.x0 - 0.5) && near(w.out.y, w.point.y));
   check('sideFacing picks the dominant axis', sideFacing(sg, { x: sg.position.x - 3, y: sg.position.y + 1 }) === 'W' &&
-    sideFacing(sg, { x: sg.position.x + 1, y: sg.position.y + 3 }) === 'S');
+    sideFacing(sg, { x: sg.position.x + 1, y: sg.position.y + 3 }) === 'N');
 }
 
 console.log('Plan routes');
 {
-  // SG vessel head -> primary safety valve, 4 m north of the head and 1 m
+  // SG vessel head -> primary safety valve, 4 m south of the head and 1 m
   // above it: a straight run from where the head nozzle stands to the face of
   // the valve turned to meet it (was a seven-leg tangle round the valve)
   const prel = conn('tank-sg-1', 'tank-sg-top', 'val-prel-1', 'val-prel-1-in');
@@ -224,7 +230,7 @@ console.log('Plan routes');
     near(r[0].x, sg.position.x) && near(r[0].y, sg.position.y) && near(r[1].x, valve.position.x) && near(r[1].y, valve.position.y + 0.5),
     r.map(fmt).join(' '));
   check('the head end is a vertical nozzle, the valve end a turned valve face',
-    ends?.from?.vertical === 'up' && ends?.to?.side === 'S', JSON.stringify(ends));
+    ends?.from?.vertical === 'up' && ends?.to?.side === 'N', JSON.stringify(ends));
 
   // No routed connection in any preset has a diagonal leg (the lattice used to
   // sit half a tile off every odd footprint centred on a whole metre)

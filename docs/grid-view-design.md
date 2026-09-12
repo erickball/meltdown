@@ -42,7 +42,9 @@ Layers, back to front (`GridView.render`):
    not a sprite (a building, a pool) are not drawn.
 5. Sprites: the component's existing front-view drawing standing on its pad,
    rising north from the south edge of the footprint, painter-sorted by south
-   edge and containment. A sprite standing on the plan sits on its pad
+   edge (far north first) and containment. North is +y and up the screen:
+   the viewer stands at the south, where the 2.5D camera does, so a plant
+   reads the same way round in both views. A sprite standing on the plan sits on its pad
    whatever its elevation (the elevation is a label). Small fittings are
    drawn no smaller than 0.8 tile so a valve is visible. Right after each
    container's sprite come the runs inside its section view, then (by the

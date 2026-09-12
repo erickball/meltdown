@@ -75,10 +75,19 @@ const OUT = path.join(
 const CELL = 10;
 const COLS = 30;
 const ROWS = 16;
+/**
+ * y is a NORTHING (+y north, up the grid's screen, away from the 2.5D
+ * camera). The map was first laid out when the grid drew +y DOWN the screen;
+ * when that was turned the right way up (2026-09-12) the level was mirrored
+ * about y = 75 m, the line the pool, the sea and every pump test stand on, so
+ * it still looks as it did. The noise field is sampled at the mirrored
+ * northing (MAP_N - y) so the landscape is the same one, cell for cell.
+ */
+const MAP_N = (ROWS - 1) * CELL;
 
 /** Pad (flat bench) extent in CELL INDICES, so its edges land on cell centres. */
 const PAD_C0 = 2, PAD_C1 = 10;    // x = 20 .. 100 m
-const PAD_R0 = 4, PAD_R1 = 12;    // y = 40 .. 120 m
+const PAD_R0 = 3, PAD_R1 = 11;    // y = 30 .. 110 m
 const PAD_HEIGHT = 13.0;
 /**
  * The pad is a shallow DISH, not a plane: PAD_DISH metres lower at the pool
@@ -200,13 +209,14 @@ function heightAt(col: number, row: number): number {
   }
 
   const damp = padTaper(col, row);
+  const yNoise = MAP_N - y;   // see MAP_N
   // Lateral wander: bends the coastline and every contour with it
-  const shift = WARP_AMP * fbm(x * 0.35, y, 95, 3, 2) * warpTaper(x) * damp;
+  const shift = WARP_AMP * fbm(x * 0.35, yNoise, 95, 3, 2) * warpTaper(x) * damp;
   const base = profile(x + shift);
   // Vertical relief: only above the shore bench, so nothing the level's
   // numbers depend on moves
   const amp = VERT_AMP * clamp01((base - 2.2) / 3.0) * damp;
-  const h = base + amp * fbm(x, y, 90, 11, 4);
+  const h = base + amp * fbm(x, yNoise, 90, 11, 4);
   return Number(h.toFixed(3));
 }
 
@@ -333,7 +343,7 @@ const components: Array<[string, Record<string, unknown>]> = [
 
   ['tank-a', {
     id: 'tank-a', type: 'tank', label: 'Demineralised Water Tank',
-    position: { x: 85, y: 55 }, rotation: 0, elevation: 0,
+    position: { x: 85, y: 95 }, rotation: 0, elevation: 0,
     width: 14, height: 7, wallThickness: 0.05,
     fillLevel: 0.78,                 // 841 m3 of a 1078 m3 tank
     pressureRating: 2,
@@ -346,7 +356,7 @@ const components: Array<[string, Record<string, unknown>]> = [
   }],
   ['tank-b', {
     id: 'tank-b', type: 'tank', label: 'Fire Water Tank',
-    position: { x: 85, y: 100 }, rotation: 0, elevation: 0,
+    position: { x: 85, y: 50 }, rotation: 0, elevation: 0,
     width: 10, height: 6, wallThickness: 0.05,
     fillLevel: 0.80,                 // 377 m3 of a 471 m3 tank
     pressureRating: 2,
@@ -388,7 +398,7 @@ const components: Array<[string, Record<string, unknown>]> = [
 
   ['yard', {
     id: 'yard', type: 'warehouse', label: 'Supply Yard',
-    position: { x: 60, y: 115 }, rotation: 0, elevation: 0,
+    position: { x: 60, y: 35 }, rotation: 0, elevation: 0,
     width: 12, depth: 8,
     // Fully specified: the yard hands out ONE pump design and ONE line size,
     // so placing from it asks the player where the part goes, not what it is.
@@ -564,7 +574,7 @@ if (!(PAD_HEIGHT - PAD_DISH > 12.6)) problems.push(`the dish bottom ${PAD_HEIGHT
 // the dish's edge reach them faintly; that is the ground they stand on, and
 // the factory reads it, so there is no phantom head - just a datum a
 // hand's breadth off the nominal 13.0)
-for (const [what, x, y] of [['tank-a', 85, 55], ['tank-b', 85, 100], ['the yard', 60, 115]] as const) {
+for (const [what, x, y] of [['tank-a', 85, 95], ['tank-b', 85, 50], ['the yard', 60, 35]] as const) {
   if (!(at(x, y) <= PAD_HEIGHT && at(x, y) >= PAD_HEIGHT - 0.05)) {
     problems.push(`${what} stands on ${at(x, y).toFixed(3)} m, not the ${PAD_HEIGHT} m rim`);
   }
