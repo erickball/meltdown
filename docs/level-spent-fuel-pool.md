@@ -18,7 +18,7 @@ Files:
 | Headless checks | `scripts/test-game-levels.ts` (`npm run test:levels`, key `sfp`) |
 | Tuning probe | `scripts/probe-sfp-level.ts` |
 
-Do **not** hand-edit `spent-fuel-pool.json`: the terrain is a 30x16 height
+Do **not** hand-edit `spent-fuel-pool.json`: the terrain is a 46x32 height
 field and every structure's elevation depends on standing on a flat bench.
 Edit `scripts/gen-spent-fuel-pool.ts` and re-run `npx tsx
 scripts/gen-spent-fuel-pool.ts`.
@@ -27,8 +27,11 @@ scripts/gen-spent-fuel-pool.ts`.
 
 ## The map
 
-Terrain: 30 x 16 cells of 10 m (300 x 160 m), heights piecewise linear in x
-and constant in y.
+Terrain: the site is 30 x 16 cells of 10 m (x 0..290, y 0..150 m), heights
+piecewise linear in x and constant in y (before the noise). Since 2026-09-12
+the field carries on 80 m past the site on every side (46 x 32 cells, origin
+at -80, -80) - the same plateau, coast and deep sea continued, so the player
+has room to look round; the site's own cells did not change.
 
 | x (m) | ground | what it is |
 | --- | --- | --- |
