@@ -130,10 +130,12 @@ function marchingSquares(field: Field, level: number): Array<[Point, Point]> {
   };
   for (let j = 0; j + 1 < ny; j++) {
     for (let i = 0; i + 1 < nx; i++) {
-      const a = values[j * nx + i];             // north-west
-      const b = values[j * nx + i + 1];         // north-east
-      const c = values[(j + 1) * nx + i + 1];   // south-east
-      const d = values[(j + 1) * nx + i];       // south-west
+      // Corners of the square; row j is its low-y (south) side, and the edge
+      // names below are the old screen-down ones (N = row j, S = row j + 1)
+      const a = values[j * nx + i];             // row j, west
+      const b = values[j * nx + i + 1];         // row j, east
+      const c = values[(j + 1) * nx + i + 1];   // row j + 1, east
+      const d = values[(j + 1) * nx + i];       // row j + 1, west
       const code = (a >= level ? 8 : 0) | (b >= level ? 4 : 0) | (c >= level ? 2 : 0) | (d >= level ? 1 : 0);
       if (code === 0 || code === 15) continue;
       const N = { x: X(i + cut(a, b)), y: Y(j) };

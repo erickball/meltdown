@@ -77,8 +77,8 @@ console.log('Port anchors');
   const t = tank('t1', 3, 1, 2, 4); // footprint x 2..4, y 0..2
   const anchors = portAnchors(t);
   const by = (id: string) => anchors.find(a => a.port.id === id)!;
-  check('top port faces north on the north edge', by('t1-top').side === 'N' && near(by('t1-top').point.y, 0), JSON.stringify(by('t1-top')));
-  check('bottom port faces south on the south edge', by('t1-bottom').side === 'S' && near(by('t1-bottom').point.y, 2));
+  check('top port faces north on the north (high-y) edge', by('t1-top').side === 'N' && near(by('t1-top').point.y, 2), JSON.stringify(by('t1-top')));
+  check('bottom port faces south on the south (low-y) edge', by('t1-bottom').side === 'S' && near(by('t1-bottom').point.y, 0));
   check('left port faces west on the west edge', by('t1-left').side === 'W' && near(by('t1-left').point.x, 2));
   check('right port faces east on the east edge', by('t1-right').side === 'E' && near(by('t1-right').point.x, 4));
   check('anchors sit on edge-cell midpoints', anchors.every(a =>
@@ -112,7 +112,8 @@ console.log('Routing');
   const expectedLen = Math.abs(bLeft.point.x - aRight.point.x) + Math.abs(bLeft.point.y - aRight.point.y);
   check('single-bend route length is the manhattan distance', near(routeLength(route), expectedLen), `${routeLength(route)} vs ${expectedLen}`);
 
-  // Interactive laying: sweep east then south, finish into b
+  // Interactive laying: sweep east then north, finish into b (a's right
+  // nozzle, centred on an even footprint, is on its southern cell at y 0.5)
   let wp = [aRight.out!];
   for (let x = 3.5; x <= 7.5; x += 1) wp = extendRoute(wp, { x, y: aRight.out!.y });
   check('sweeping along a line keeps a single segment', wp.length === 2, fmt(wp));
@@ -120,7 +121,7 @@ console.log('Routing');
   check('turning adds a vertex', wp.length === 3, fmt(wp));
   wp = extendRoute(wp, { x: 7.5, y: 2.5 });
   check('dragging back along the last leg shortens it', wp.length === 3 && near(wp[2].y, 2.5), fmt(wp));
-  wp = extendRoute(wp, { x: 7.5, y: 1.5 });
+  wp = extendRoute(wp, { x: 7.5, y: 0.5 });
   check('dragging back to the corner removes the leg', wp.length === 2 && near(wp[1].x, 7.5), fmt(wp));
   const done = completeRoute([aRight.point, ...wp], bLeft);
   check('completed route ends on the target anchor', samePt(done[done.length - 1], bLeft.point), fmt(done));
@@ -186,8 +187,8 @@ console.log('Vertical nozzles, turned valves, plain runs');
   const isOrtho = (r: Point[]) => r.every((p, i) => i === 0 || near(p.x, r[i - 1].x) || near(p.y, r[i - 1].y));
   const fmt3 = (pts: { x: number; y: number; z: number }[]) => pts.map(p => `(${p.x},${p.y},${p.z})`).join(' ');
   // The Xe-100 plant layout's SG vessel head and primary safety valve: a
-  // 5x5 vessel centred on whole metres, and a one-tile valve 4 m north of
-  // its centre, 1 m above the head
+  // 5x5 vessel centred on whole metres, and a one-tile valve 4 m south of
+  // its centre (nearer the viewer), 1 m above the head
   const sg = tank('sg', 55, 78, 4.6, 19.5);
   const valve: any = {
     id: 'v', type: 'valve', position: { x: 55, y: 74 }, rotation: 0, diameter: 0.1, opening: 0,
@@ -206,7 +207,7 @@ console.log('Vertical nozzles, turned valves, plain runs');
   check('a side nozzle is not vertical', verticalNozzle(sg, 'sg-left') === null);
 
   const sides = turnedValveSides(valve, id => id === 'v-in' ? sg.position : null)!;
-  check('a valve turns its inlet to face the vessel south of it', sides.get('v-in') === 'S' && sides.get('v-out') === 'N',
+  check('a valve turns its inlet to face the vessel north of it', sides.get('v-in') === 'N' && sides.get('v-out') === 'S',
     JSON.stringify([...sides]));
   const drawn = turnedValveSides(valve, () => null)!;
   check('an unpiped valve keeps its drawn sides', drawn.get('v-in') === 'W' && drawn.get('v-out') === 'E');
@@ -329,7 +330,7 @@ console.log('Pipes');
   check('legacy pipe auto-routes as an L between its ends', pr.length === 3 && samePt(pr[0], pipe.position) && samePt(pr[2], pipe.endPosition!), fmt(pr));
   const pa = portAnchors(pipe);
   check('pipe port anchors are the route ends', samePt(pa[0].point, pr[0]) && samePt(pa[1].point, pr[2]));
-  check('pipe end faces away from the body', pa[0].side === 'W' && pa[1].side === 'S', `${pa[0].side} ${pa[1].side}`);
+  check('pipe end faces away from the body', pa[0].side === 'W' && pa[1].side === 'N', `${pa[0].side} ${pa[1].side}`);
   pipe.route = [{ x: 2, y: 0.5 }, { x: 2, y: 4.5 }, { x: 6, y: 4.5 }, { x: 6, y: 3.5 }];
   check('a drawn route wins over the endpoints', pipeRoute(pipe) === pipe.route);
   check('drawn route length', near(routeLength(pipe.route), 9));

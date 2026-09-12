@@ -4,7 +4,8 @@
  *
  * Everything here is pure (no canvas, no DOM) so it can be exercised
  * headlessly (scripts/test-grid-geometry.ts). World coordinates stay in
- * metres in the plan (x east, y south, as in the other views); the grid is a
+ * metres in the plan (x east, y NORTH: +y runs away from the viewer, the way
+ * the 2.5D camera looks along it, so the grid draws +y up-screen); the grid is a
  * TILE_M lattice on those same coordinates, so nothing about a plant changes
  * when it is viewed on the grid - only where new things snap to and how the
  * pipes between them are drawn.
@@ -65,8 +66,8 @@ const EPS = 1e-6;
 
 export function sideVector(side: Side): Point {
   switch (side) {
-    case 'N': return { x: 0, y: -1 };
-    case 'S': return { x: 0, y: 1 };
+    case 'N': return { x: 0, y: 1 };
+    case 'S': return { x: 0, y: -1 };
     case 'E': return { x: 1, y: 0 };
     case 'W': return { x: -1, y: 0 };
   }
@@ -79,7 +80,7 @@ export function oppositeSide(side: Side): Side {
 /** The grid side a plan direction vector mostly points to. */
 export function sideOfVector(dx: number, dy: number): Side {
   if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? 'E' : 'W';
-  return dy >= 0 ? 'S' : 'N';
+  return dy >= 0 ? 'N' : 'S';
 }
 
 // ---------------------------------------------------------------------------
@@ -339,12 +340,14 @@ function footprintPortAnchors(component: PlantComponent): PortAnchor[] {
     }
     used.add(k);
 
+    // Along an east/west edge, k counts from the top of the drawing, which
+    // is the back (north, high y) of the footprint
     let point: Point;
     switch (side) {
-      case 'N': point = { x: rect.x0 + (k + 0.5) * TILE_M, y: rect.y0 }; break;
-      case 'S': point = { x: rect.x0 + (k + 0.5) * TILE_M, y: rect.y1 }; break;
-      case 'W': point = { x: rect.x0, y: rect.y0 + (k + 0.5) * TILE_M }; break;
-      case 'E': point = { x: rect.x1, y: rect.y0 + (k + 0.5) * TILE_M }; break;
+      case 'N': point = { x: rect.x0 + (k + 0.5) * TILE_M, y: rect.y1 }; break;
+      case 'S': point = { x: rect.x0 + (k + 0.5) * TILE_M, y: rect.y0 }; break;
+      case 'W': point = { x: rect.x0, y: rect.y1 - (k + 0.5) * TILE_M }; break;
+      case 'E': point = { x: rect.x1, y: rect.y1 - (k + 0.5) * TILE_M }; break;
     }
     const v = sideVector(side);
     const out = { x: point.x + v.x * TILE_M / 2, y: point.y + v.y * TILE_M / 2 };
@@ -548,7 +551,7 @@ export function wallAnchor(container: PlantComponent, port: Port, side: Side, al
     point = { x: side === 'E' ? rect.x1 : rect.x0, y: rect.y0 + (k + 0.5) * TILE_M };
   } else {
     const k = clampIndex((along.x - rect.x0) / TILE_M, fp.w);
-    point = { x: rect.x0 + (k + 0.5) * TILE_M, y: side === 'N' ? rect.y0 : rect.y1 };
+    point = { x: rect.x0 + (k + 0.5) * TILE_M, y: side === 'N' ? rect.y1 : rect.y0 };
   }
   const v = sideVector(side);
   return { port, point, side, out: { x: point.x + v.x * TILE_M / 2, y: point.y + v.y * TILE_M / 2 } };

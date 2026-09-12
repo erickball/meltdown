@@ -1,10 +1,12 @@
 /**
  * Grid view: a top-down tile map in the style of factory-building games.
  *
- * The world plan is drawn straight down (screen = (world - camera) * ppm),
- * components snap to whole tiles and stand on a foundation pad as 3/4-view
- * sprites (the same front-view drawings the other views use, rising north
- * from the south edge of their footprint), and every connection is a pipe
+ * The world plan is drawn straight down, north (+y) up the screen: the
+ * viewer stands to the south, where the 2.5D camera stands, so both views
+ * show the same plant the same way round. Components snap to whole tiles and
+ * stand on a foundation pad as 3/4-view sprites (the same front-view drawings
+ * the other views use, rising north from the south edge - the low-y edge -
+ * of their footprint), and every connection is a pipe
  * laid along the grid through cell centres. PlantCanvas delegates to this
  * class for projection, hit testing, and the frame's ground/plant layers,
  * then draws the shared overlays (gauges, flow arrows, ...) on top.
@@ -182,7 +184,7 @@ interface SpriteLayout {
   zoom: number;
   centerX: number;
   /**
-   * Screen y of the sprite's bottom edge: the south footprint edge for a
+   * Screen y of the sprite's bottom edge: the south (low-y) footprint edge for a
    * sprite standing on the plan, or the component's elevation on its
    * container's sprite for one drawn inside a section view.
    */
@@ -596,23 +598,25 @@ export class GridView {
     this.clampToTerrain();
   }
 
+  /** Plan to screen: north (+y) is up the screen, as it is away from the 2.5D camera. */
   worldToScreen(p: Point): Point {
     return {
       x: (p.x - this.cam.x) * this.cam.ppm + this.size.width / 2,
-      y: (p.y - this.cam.y) * this.cam.ppm + this.size.height / 2,
+      y: (this.cam.y - p.y) * this.cam.ppm + this.size.height / 2,
     };
   }
 
   screenToWorld(s: Point): Point {
     return {
       x: (s.x - this.size.width / 2) / this.cam.ppm + this.cam.x,
-      y: (s.y - this.size.height / 2) / this.cam.ppm + this.cam.y,
+      y: this.cam.y - (s.y - this.size.height / 2) / this.cam.ppm,
     };
   }
 
+  /** Move the picture by (dx, dy) screen pixels. */
   panByPixels(dx: number, dy: number): void {
     this.cam.x -= dx / this.cam.ppm;
-    this.cam.y -= dy / this.cam.ppm;
+    this.cam.y += dy / this.cam.ppm;
     this.clampToTerrain();
   }
 
@@ -726,7 +730,7 @@ export class GridView {
       y: this.insets.top + free.h / 2,
     };
     this.cam.x = (minX + maxX) / 2 - (freeCentre.x - this.size.width / 2) / this.cam.ppm;
-    this.cam.y = (minY + maxY) / 2 - (freeCentre.y - this.size.height / 2) / this.cam.ppm;
+    this.cam.y = (minY + maxY) / 2 + (freeCentre.y - this.size.height / 2) / this.cam.ppm;
     this.clampToTerrain();
   }
 
@@ -800,7 +804,7 @@ export class GridView {
     // A sprite standing on the plan sits on its pad regardless of elevation
     // (the elevation is labelled instead): a raised duct floating above the
     // pipes that meet it reads as detached, not as high
-    const south = this.worldToScreen({ x: component.position.x, y: rect.y1 });
+    const south = this.worldToScreen({ x: component.position.x, y: rect.y0 });
     return {
       fp, rect, zoom, frame: null,
       centerX: south.x,
@@ -834,8 +838,8 @@ export class GridView {
     }
     if (this.isGroundLayer(component)) {
       const rect = footprintRect(component.position, componentFootprint(component));
-      const a = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-      const b = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+      const a = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+      const b = this.worldToScreen({ x: rect.x1, y: rect.y0 });
       return { left: a.x, right: b.x, top: a.y, bottom: b.y };
     }
     const L = this.spriteLayout(component);
@@ -1001,20 +1005,22 @@ export class GridView {
       depth.set(c.id, d);
       return d;
     };
+    // The edge nearest the viewer (the lowest y): the farther north it is,
+    // the earlier the thing is painted
     const southEdge = (c: PlantComponent): number => {
-      if (c.type === 'pipe') return Math.max(...pipeRoute(c as PipeComponent).map(p => p.y));
+      if (c.type === 'pipe') return Math.min(...pipeRoute(c as PipeComponent).map(p => p.y));
       // A standpipe ring draws only its back half, so it stands behind the
       // vessel it wraps, not level with it (paintDepthY)
       if (radiantRingOf(c as never)) return paintDepthY(c as never);
-      return footprintRect(c.position, componentFootprint(c)).y1;
+      return footprintRect(c.position, componentFootprint(c)).y0;
     };
     return comps.sort((a, b) => {
-      // Ground-layer things first, then by containment depth, then by south edge
+      // Ground-layer things first, then by containment depth, then north to south
       const ga = this.isGroundLayer(a) ? 0 : 1, gb = this.isGroundLayer(b) ? 0 : 1;
       if (ga !== gb) return ga - gb;
       const da = depthOf(a), db = depthOf(b);
       if (da !== db) return da - db;
-      return southEdge(a) - southEdge(b);
+      return southEdge(b) - southEdge(a);
     });
   }
 
@@ -1336,10 +1342,11 @@ export class GridView {
       const building = f.constructionMode ||
         (f.buildMode && (f.placementPreview !== null || f.showPorts));
       const alpha = building ? 0.16 : 0.02;
-      const tl = this.screenToWorld({ x: 0, y: 0 });
-      const br = this.screenToWorld({ x: f.width, y: f.height });
-      const x0 = Math.floor(tl.x / TILE_M), x1 = Math.ceil(br.x / TILE_M);
-      const y0 = Math.floor(tl.y / TILE_M), y1 = Math.ceil(br.y / TILE_M);
+      // South-west and north-east corners of the screen, in the plan
+      const sw = this.screenToWorld({ x: 0, y: f.height });
+      const ne = this.screenToWorld({ x: f.width, y: 0 });
+      const x0 = Math.floor(sw.x / TILE_M), x1 = Math.ceil(ne.x / TILE_M);
+      const y0 = Math.floor(sw.y / TILE_M), y1 = Math.ceil(ne.y / TILE_M);
       ctx.lineWidth = 1;
       for (const major of [false, true]) {
         ctx.strokeStyle = major ? `rgba(40, 40, 30, ${alpha * 1.8})` : `rgba(40, 40, 30, ${alpha})`;
@@ -1374,13 +1381,13 @@ export class GridView {
     const { origin, cellSize, cols, rows, heights } = spec;
     const half = cellSize / 2;
 
-    // Visible cell range
-    const tl = this.screenToWorld({ x: 0, y: 0 });
-    const br = this.screenToWorld({ x: f.width, y: f.height });
-    const i0 = Math.max(0, Math.floor((tl.x - origin.x) / cellSize - 1));
-    const i1 = Math.min(cols - 1, Math.ceil((br.x - origin.x) / cellSize + 1));
-    const j0 = Math.max(0, Math.floor((tl.y - origin.y) / cellSize - 1));
-    const j1 = Math.min(rows - 1, Math.ceil((br.y - origin.y) / cellSize + 1));
+    // Visible cell range (screen corners south-west and north-east in the plan)
+    const sw = this.screenToWorld({ x: 0, y: f.height });
+    const ne = this.screenToWorld({ x: f.width, y: 0 });
+    const i0 = Math.max(0, Math.floor((sw.x - origin.x) / cellSize - 1));
+    const i1 = Math.min(cols - 1, Math.ceil((ne.x - origin.x) / cellSize + 1));
+    const j0 = Math.max(0, Math.floor((sw.y - origin.y) / cellSize - 1));
+    const j1 = Math.min(rows - 1, Math.ceil((ne.y - origin.y) / cellSize + 1));
     if (i1 < i0 || j1 < j0) return;
 
     let hMin = Infinity, hMax = -Infinity;
@@ -1427,7 +1434,7 @@ export class GridView {
       for (let i = i0; i <= i1; i++) {
         const c = j * cols + i;
         const h = heights[c];
-        const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
+        const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize + half });
         // Height tint: valley green to hilltop tan
         const t = (h - hMin) / span;
         const r = Math.round(70 + 140 * t), g = Math.round(125 + 45 * t), bl = Math.round(55 + 55 * t);
@@ -1458,11 +1465,12 @@ export class GridView {
         for (let i = i0; i <= i1; i++) {
           const c = j * cols + i;
           if (!isLit(c)) continue;
-          const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize - half });
+          const s = this.worldToScreen({ x: origin.x + i * cellSize - half, y: origin.y + j * cellSize + half });
           if (i === 0 || !isLit(c - 1)) { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x, s.y + px); }
           if (i === cols - 1 || !isLit(c + 1)) { ctx.moveTo(s.x + px, s.y); ctx.lineTo(s.x + px, s.y + px); }
-          if (j === 0 || !isLit(c - cols)) { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + px, s.y); }
-          if (j === rows - 1 || !isLit(c + cols)) { ctx.moveTo(s.x, s.y + px); ctx.lineTo(s.x + px, s.y + px); }
+          // s is the cell's north-west corner; row j - 1 lies south (below it on screen)
+          if (j === 0 || !isLit(c - cols)) { ctx.moveTo(s.x, s.y + px); ctx.lineTo(s.x + px, s.y + px); }
+          if (j === rows - 1 || !isLit(c + cols)) { ctx.moveTo(s.x, s.y); ctx.lineTo(s.x + px, s.y); }
         }
       }
       ctx.stroke();
@@ -1551,8 +1559,8 @@ export class GridView {
   /** A building in plan: concrete floor inside a thick wall, labelled. */
   private renderBuilding(ctx: CanvasRenderingContext2D, b: BuildingComponent, f: GridFrameState): void {
     const rect = footprintRect(b.position, componentFootprint(b));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     const w = br.x - tl.x, h = br.y - tl.y;
     const cx = (tl.x + br.x) / 2, cy = (tl.y + br.y) / 2;
     const wallPx = Math.max(3, Math.min(w, h) * 0.035, (b.wallThickness || 1) * this.cam.ppm);
@@ -1662,8 +1670,8 @@ export class GridView {
    */
   private renderPool(ctx: CanvasRenderingContext2D, pool: PoolComponent, f: GridFrameState): void {
     const rect = footprintRect(pool.position, componentFootprint(pool));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     const W = br.x - tl.x, H = br.y - tl.y;
     if (!(W > 2 && H > 2)) return;
     // The coping is the real wall thickness, but a thick wall on a small
@@ -1992,8 +2000,8 @@ export class GridView {
    */
   private renderWarehouse(ctx: CanvasRenderingContext2D, wh: WarehouseComponent, f: GridFrameState): void {
     const rect = footprintRect(wh.position, componentFootprint(wh));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     const w = br.x - tl.x, h = br.y - tl.y;
     const origin = this.worldToScreen({ x: 0, y: 0 });
     const stock = wh.stock ?? { pipeMeters: 0, components: {} };
@@ -2179,8 +2187,8 @@ export class GridView {
 
   private renderSwitchyard(ctx: CanvasRenderingContext2D, s: SwitchyardComponent, f: GridFrameState): void {
     const rect = footprintRect(s.position, componentFootprint(s));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     const origin = this.worldToScreen({ x: 0, y: 0 });
     // Gravel yard on a concrete apron with a fence line
     ctx.fillStyle = this.art.pattern(ctx, 'pad', this.cam.ppm, origin);
@@ -2210,8 +2218,8 @@ export class GridView {
    */
   private renderPad(ctx: CanvasRenderingContext2D, c: PlantComponent, f: GridFrameState): void {
     const rect = footprintRect(c.position, componentFootprint(c));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     const w = br.x - tl.x, h = br.y - tl.y;
     const origin = this.worldToScreen({ x: 0, y: 0 });
     // A margin of slab, in metres, so the border stays put as the view zooms
@@ -2331,8 +2339,8 @@ export class GridView {
       // stand on, so a faint sprite still reads as work in progress.
       if (c.type !== 'pipe') {
         const rect = footprintRect(c.position, componentFootprint(c));
-        const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-        const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+        const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+        const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
         ctx.save();
         ctx.setLineDash([6, 4]);
         ctx.lineWidth = 1.5;
@@ -2567,10 +2575,11 @@ export class GridView {
     ctx.stroke();
 
     if (port.direction === 'in' || port.direction === 'out') {
-      // Arrow along the side normal: into the component for inlets, out for outlets
+      // Arrow along the side normal: into the component for inlets, out for
+      // outlets (a plan vector, so its y turns over onto the screen)
       const v = sideVector(side);
       const sign = port.direction === 'out' ? 1 : -1;
-      const dirX = v.x * sign, dirY = v.y * sign;
+      const dirX = v.x * sign, dirY = -v.y * sign;
       const len = radius * 0.55, head = radius * 0.35;
       const sx = s.x - dirX * len, sy = s.y - dirY * len;
       const ex = s.x + dirX * len, ey = s.y + dirY * len;
@@ -2680,8 +2689,8 @@ export class GridView {
       if ((c as any).isHydraulicOnly || c.type === 'pipe' || c.type === 'building') continue;
       if (rectsOverlap(rect, footprintRect(c.position, componentFootprint(c)))) { clash = true; break; }
     }
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y0 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y1 });
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
     ctx.save();
     ctx.fillStyle = clash ? 'rgba(255, 170, 60, 0.28)' : 'rgba(90, 220, 130, 0.28)';
     ctx.fillRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
@@ -2709,8 +2718,8 @@ export class GridView {
     const a = this.worldToScreen(route[0]);
     const b = this.worldToScreen(route[route.length - 1]);
     const cell = cellCenter(position);
-    const tl = this.worldToScreen({ x: cell.x - TILE_M / 2, y: cell.y - TILE_M / 2 });
-    const br = this.worldToScreen({ x: cell.x + TILE_M / 2, y: cell.y + TILE_M / 2 });
+    const tl = this.worldToScreen({ x: cell.x - TILE_M / 2, y: cell.y + TILE_M / 2 });
+    const br = this.worldToScreen({ x: cell.x + TILE_M / 2, y: cell.y - TILE_M / 2 });
 
     ctx.save();
     ctx.fillStyle = 'rgba(90, 220, 130, 0.18)';
