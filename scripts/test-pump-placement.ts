@@ -284,17 +284,66 @@ test('A pump placed in the sea is primed with sea water and its open nozzles are
   assert(casing.fluid.phase === 'liquid', `a primed pump under water stays full of it, got ${casing.fluid.phase}`);
   assert(q > 10, `it should draw from the sea it stands in, got ${q.toFixed(1)} kg/s`);
 
-  // The one on the shelf has its nozzles in the air over the sea: it must
-  // not flood. (Its PRESSURE is not asserted: a small dry casing breathing a
-  // saturated gas space hunts the dew point, ~0.85-1.3 bar on a ~3 s cycle.
-  // That is a known defect of the gas exchange, not of this feature - two
-  // ordinary lines from the same gas space do exactly the same - see
-  // scripts/probe-dry-pump-dewpoint.ts. Assert it here once that is fixed.)
+  // The one on the shelf has its nozzles in the air over the sea: it stays
+  // an air-filled casing at about an atmosphere, neither flooded nor pumped
+  // up. (Until the steam draw off a two-phase node was priced from the steam
+  // tables, this casing was flushed with steam 266 kJ/kg short, cooled below
+  // both gases, went supersaturated and rang 0.85-1.3 bar at the dew point -
+  // scripts/probe-dry-pump-dewpoint.ts.)
   const dry = sim.state.flowNodes.get(highId)!;
   console.log(`    above the sea after 30 s: casing ${dry.fluid.phase}, ` +
-    `${(dry.fluid.pressure / 1e5).toFixed(3)} bar, ${(100 * nodeLiquidLevelFraction(dry)).toFixed(1)}% liquid`);
+    `${(dry.fluid.pressure / 1e5).toFixed(3)} bar, ${(dry.fluid.temperature - 273.15).toFixed(2)} C, ` +
+    `${(100 * nodeLiquidLevelFraction(dry)).toFixed(1)}% liquid`);
   assert(nodeLiquidLevelFraction(dry) < 0.05,
     `a pump above the surface must not flood, casing ${(100 * nodeLiquidLevelFraction(dry)).toFixed(1)}% liquid`);
+  assert(dry.fluid.pressure > 1.0e5 && dry.fluid.pressure < 1.03e5,
+    `its casing should sit at the air's pressure over the sea, got ${(dry.fluid.pressure / 1e5).toFixed(4)} bar`);
+  assert(dry.fluid.temperature > 288.15 - 0.05,
+    `mixing 20 C casing air with 15 C sea air cannot end below 15 C, got ${(dry.fluid.temperature - 273.15).toFixed(3)} C`);
+});
+
+// ---------------------------------------------------------------------------
+// 6. A dry pump on ordinary lines keeps its air at build
+// ---------------------------------------------------------------------------
+
+test('A dry pump piped to a tank starts dry: matchUpstream does not refill it from the tank', () => {
+  // The construction UI builds every pump with matchUpstream on. The same
+  // dry pump on the shelf, NOT contained, with two plain lines from the
+  // sea's gas space. Before, the factory rebuilt its casing from the sea's
+  // BULK fluid at build - 55 kg of liquid-heavy two-phase at 0.017 bar, the
+  // air thrown away - and the casing then rang for as long as it ran.
+  const plant = { components: new Map(), connections: [], terrain } as unknown as PlantState;
+  const cm = new ConstructionManager(plant);
+  plant.components.set('sea', { ...tank('sea', 50, 0.5)[1], waterBody: 'sea' } as PlantComponent);
+  const id = cm.createComponent({
+    type: 'pump', name: 'P', position: { x: 25, y: 10 },
+    properties: { name: 'P', ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry' },
+  })!;
+  const p = plant.components.get(id) as PumpComponent;
+  assert((p as unknown as { matchUpstream?: boolean }).matchUpstream === true,
+    'the construction UI builds the pump with matchUpstream on (the case under test)');
+  // Two lines from the sea's gas space to the pump's nozzles, 0.3 m of pipe each
+  const [inlet, outlet] = p.ports;
+  const seaSide = 5;   // m up the 6 m sea node: in its gas space (surface at 3 m)
+  const lines = [
+    { fromComponentId: 'sea', fromPortId: 'sea-bottom', toComponentId: id, toPortId: inlet.id,
+      fromElevation: seaSide, flowArea: 0.03, length: 0.3 },
+    { fromComponentId: id, fromPortId: outlet.id, toComponentId: 'sea', toPortId: 'sea-bottom',
+      toElevation: seaSide, flowArea: 0.03, length: 0.3 },
+  ] as Connection[];
+  const sim = buildSimFromPlantJson({ components: Array.from(plant.components.entries()), connections: lines, terrain });
+  const casing0 = sim.state.flowNodes.get(id)!;
+  const air0 = casing0.fluid.ncg ? Object.values(casing0.fluid.ncg).reduce((s: number, x) => s + (x ?? 0), 0) : 0;
+  console.log(`    built: casing ${casing0.fluid.phase}, ${(casing0.fluid.pressure / 1e5).toFixed(4)} bar, ` +
+    `${(casing0.fluid.mass * 1000).toFixed(2)} g of water, ${air0.toFixed(2)} mol of air`);
+  assert(casing0.fluid.phase === 'vapor' && air0 > 5 && casing0.fluid.mass < 0.05,
+    `a dry pump starts full of air, got ${casing0.fluid.phase} with ${casing0.fluid.mass.toFixed(3)} kg of water and ${air0.toFixed(2)} mol of air`);
+  run(sim, 30, 0.02);
+  const casing = sim.state.flowNodes.get(id)!;
+  console.log(`    after 30 s: casing ${casing.fluid.phase}, ${(casing.fluid.pressure / 1e5).toFixed(4)} bar, ` +
+    `${(casing.fluid.temperature - 273.15).toFixed(2)} C`);
+  assert(casing.fluid.pressure > 1.0e5 && casing.fluid.pressure < 1.03e5,
+    `the piped dry casing should sit at the air's pressure over the sea, got ${(casing.fluid.pressure / 1e5).toFixed(4)} bar`);
 });
 
 report('Pump placement');

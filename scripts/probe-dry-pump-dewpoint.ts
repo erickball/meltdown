@@ -65,6 +65,12 @@ function probe(variant: Variant): void {
     properties: { name: 'dry', ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry' },
   } as any)!;
   const pump = plant.components.get(id)! as any;
+  // Isolation switches for the piped variant: NO_MATCH=1 keeps the dry IC
+  // (the factory's matchUpstream pass otherwise rebuilds the casing from the
+  // sea's bulk fluid), NO_CHECK=1 takes the discharge check valve off
+  if (process.env.NO_MATCH) pump.matchUpstream = false;
+  if (process.env.NO_CHECK) pump.dischargeCheck = false;
+  console.log(`(pump matchUpstream=${pump.matchUpstream} dischargeCheck=${pump.dischargeCheck} initialFill=${pump.initialFill})`);
   const connections: any[] = [];
   if (variant === 'piped') {
     const h = getComponentVisualHeight(pump);

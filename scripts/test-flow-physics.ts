@@ -387,6 +387,16 @@ test('Liquid inertia rings at small dt (not over-damped)', () => {
 // 10. Gravity-driven level equalization between two-phase tanks
 // ---------------------------------------------------------------------------
 // Exercises hydrostatic connection pressures + phase-dependent flow density.
+//
+// Two saturated tanks level under gravity only if their VAPOUR spaces are
+// joined too (the U-tube): with a liquid line alone, the draining tank must
+// flash steam to fill the room its liquid leaves (it cools) and the filling
+// tank must condense the steam its liquid displaces (it warms), and the
+// saturation-pressure difference that opens up holds the levels apart. Until
+// 2026-09-11 a liquid draw off a two-phase node was priced with a fit 7.6
+// kJ/kg under the steam tables at 180 C; the heat that left behind in the
+// draining tank cancelled its flash cooling, and the SEALED pair levelled -
+// which is what this test used to assert.
 
 test('Connected tanks equalize liquid levels', () => {
   const sim = buildSim(
@@ -394,7 +404,11 @@ test('Connected tanks equalize liquid levels', () => {
       makeTank({ id: 'full', temperature: 453, pressure: 10e5, fillLevel: 0.7 }),
       makeTank({ id: 'empty', temperature: 453, pressure: 10e5, fillLevel: 0.3 }),
     ],
-    [makeConn({ from: 'full', to: 'empty', flowArea: 0.05, length: 1, fromElevation: 0.05, toElevation: 0.05 })]
+    [
+      makeConn({ from: 'full', to: 'empty', flowArea: 0.05, length: 1, fromElevation: 0.05, toElevation: 0.05 }),
+      // the vapour-balance line: tank tops are 4 m up
+      makeConn({ from: 'empty', to: 'full', flowArea: 0.05, length: 1, fromElevation: 3.95, toElevation: 3.95 }),
+    ]
   );
   const dm0 = nodeMass(sim.state, 'full') - nodeMass(sim.state, 'empty');
   assert(dm0 > 1000, `initial mass imbalance should be large, got ${dm0.toFixed(0)} kg`);
@@ -403,6 +417,31 @@ test('Connected tanks equalize liquid levels', () => {
   assert(dm < 0.6 * dm0,
     `levels should equalize: imbalance only fell ${dm0.toFixed(0)} -> ${dm.toFixed(0)} kg in 30 s`);
   assert(dm > -0.3 * dm0, `equalization should not overshoot badly (imbalance now ${dm.toFixed(0)} kg)`);
+});
+
+test('Sealed saturated tanks on a liquid line alone hold their levels apart (steam cushion)', () => {
+  const sim = buildSim(
+    [
+      makeTank({ id: 'full', temperature: 453, pressure: 10e5, fillLevel: 0.7 }),
+      makeTank({ id: 'empty', temperature: 453, pressure: 10e5, fillLevel: 0.3 }),
+    ],
+    [makeConn({ from: 'full', to: 'empty', flowArea: 0.05, length: 1, fromElevation: 0.05, toElevation: 0.05 })]
+  );
+  const dm0 = nodeMass(sim.state, 'full') - nodeMass(sim.state, 'empty');
+  run(sim, 30.0);
+  const dm = nodeMass(sim.state, 'full') - nodeMass(sim.state, 'empty');
+  const full = sim.state.flowNodes.get('full')!;
+  const empty = sim.state.flowNodes.get('empty')!;
+  const dP = empty.fluid.pressure - full.fluid.pressure;
+  console.log(`    sealed pair after 30 s: imbalance ${(100 * dm / dm0).toFixed(1)}%, draining tank ` +
+    `${(full.fluid.temperature - 273.15).toFixed(3)} C, filling tank ${(empty.fluid.temperature - 273.15).toFixed(3)} C, ` +
+    `filling tank ${(dP / 1e3).toFixed(2)} kPa higher`);
+  assert(dm < dm0, 'some liquid should still move before the cushion builds');
+  assert(dm > 0.6 * dm0,
+    `the steam cushion should hold the levels apart: imbalance fell to ${(100 * dm / dm0).toFixed(1)}% in 30 s`);
+  assert(full.fluid.temperature < empty.fluid.temperature,
+    'the draining tank flashes (cools) and the filling tank condenses (warms)');
+  assert(dP > 5e3, `the filling tank's higher saturation pressure is what holds the head, got ${(dP / 1e3).toFixed(2)} kPa`);
 });
 
 report('Flow Physics Regression Suite');

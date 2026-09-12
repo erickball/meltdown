@@ -1995,6 +1995,14 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     const matchUpstream = (component as any).matchUpstream;
     if (!matchUpstream) continue;
     if (component.type !== 'pump' && component.type !== 'valve') continue;
+    // A pump built DRY holds air by design (see the pump node above): there
+    // is no liquid in it to match to anything. matchUpstream is the default
+    // for every pump the construction UI builds, so without this every dry
+    // yard pump with a suction line was quietly rebuilt from its source's
+    // BULK fluid - a two-phase tank's liquid-heavy mix, its air thrown away
+    // - and started primed, with no air to vent (probe-dry-pump-dewpoint.ts,
+    // 'piped': 55 kg of water at 0.017 bar in a 'dry' casing at t=0).
+    if (component.type === 'pump' && (component as PumpComponent).initialFill === 'dry') continue;
 
     // Find upstream component via connections
     // Look for connections where this component is the "to" side (downstream)

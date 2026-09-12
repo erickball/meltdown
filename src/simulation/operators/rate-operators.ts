@@ -2055,7 +2055,6 @@ export class FlowRateOperator implements RateOperator {
 
     const P = node.fluid.pressure;
     const T = node.fluid.temperature;
-    const T_C = T - 273.15;
 
     // For single-phase or mixture, use bulk average
     // IMPORTANT: Must subtract NCG energy and volume when computing water-specific properties!
@@ -2183,42 +2182,29 @@ export class FlowRateOperator implements RateOperator {
       return h;
     }
 
-    // For two-phase node drawing from specific phase, use phase-specific properties
+    // A two-phase node drawing ONE phase hands over that saturated phase, at
+    // the node's temperature - two-phase means saturated, and T is the
+    // saturation temperature of the water's own (steam partial) pressure.
+    // Both from the steam tables.
+    //
+    // This used to be a pair of fits: h_f = 4186*T_C and h_g = u_f + a latent
+    // heat held at 2200 kJ/kg below 10 bar. They are -266 kJ/kg on steam at
+    // 15 C (h_g is 2529, the fit said 2263), -57 at 100 C and +190 at 200 C.
+    // Every vapour draw off a cool two-phase node lost that on each kg: a
+    // dry pump casing breathing the saturated air over a tank was flushed
+    // with steam 266 kJ/kg short of what the tank gave up, cooled below both
+    // gases it was mixing, went supersaturated and rang at the dew point
+    // (scripts/probe-dry-pump-dewpoint.ts).
     if (flowPhase === 'liquid') {
-      // Saturated liquid specific internal energy
-      // u_f ≈ c_p * (T - T_ref) where c_p ≈ 4186 J/kg/K for water
-      const u_f = 4186 * T_C; // J/kg relative to 0°C
-
-      // Saturated liquid specific volume (approximate)
-      const rho_f = T_C < 100 ? 1000 - 0.08 * T_C :
-                    T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                    700 - 2.5 * (T_C - 300);
-      const v_f = 1 / rho_f;
-
-      // Specific enthalpy h_f = u_f + P*v_f
-      return u_f + P * v_f;
-    } else {
-      // Saturated vapor specific internal energy
-      // u_g = u_f + u_fg where u_fg ≈ h_fg - P*(v_g - v_f) ≈ h_fg - P*v_g
-      // h_fg varies from ~2257 kJ/kg at 100°C to ~1000 kJ/kg near critical
-      const u_f = 4186 * T_C;
-
-      // Approximate h_fg (latent heat)
-      const P_bar = P / 1e5;
-      const h_fg = P_bar < 10 ? 2200e3 :
-                   P_bar < 100 ? 2200e3 - (P_bar - 10) * 10e3 :
-                   1300e3 - (P_bar - 100) * 10e3;
-
-      // Saturated vapor specific volume
-      const rho_g = P * 0.018 / (8.314 * T);
-      const v_g = 1 / rho_g;
-
-      // u_g ≈ u_f + h_fg - P*v_g (from h = u + Pv and h_g = h_f + h_fg)
-      const u_g = u_f + h_fg - P * v_g;
-
-      // Specific enthalpy h_g = u_g + P*v_g = u_f + h_fg
-      return u_g + P * v_g;
+      // The liquid carries its internal energy plus the flow work of the
+      // pressure that pushes it out (the node's total, gas included)
+      return Water.saturatedLiquidEnergy(T) + P / Water.saturatedLiquidDensity(T);
     }
+    // The steam carries its internal energy plus its OWN flow work: Dalton -
+    // it is at its partial (saturation) pressure over its own specific
+    // volume, and the gas beside it carries the rest (n*Cp*T above). That
+    // is exactly the tables' h_g(T).
+    return Water.saturatedVaporEnergy(T) + Water.saturationPressure(T) / Water.saturatedVaporDensity(T);
   }
 }
 
@@ -2746,9 +2732,20 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
       conn.targetFlowRate = targetFlow;
       conn.steadyStateFlow = targetFlow;
 
-      // Determine flow phase for display
-      const upstreamNode = conn.massFlowRate >= 0 ? fromNode : toNode;
-      conn.currentFlowPhase = this.getFlowPhase(upstreamNode, conn.massFlowRate >= 0 ? conn.fromElevation : conn.toElevation);
+      // Flow phase for display: the same draw the transport prices the line
+      // with (drawCompositionAt). This used to be its own estimate - a node
+      // height from sqrt(V / (pi/4)), a 10%-of-height interface band - and
+      // labelled a vapour-space draw off a squat tank 'liquid' while the line
+      // was carrying air.
+      const forward = conn.massFlowRate >= 0;
+      const upstreamNode = forward ? fromNode : toNode;
+      conn.currentFlowPhase = drawCompositionAt(
+        upstreamNode,
+        forward ? conn.fromElevation : conn.toElevation,
+        Math.abs(conn.massFlowRate),
+        forward ? conn.fromPhaseTolerance : conn.toPhaseTolerance,
+        forward ? conn.fromOpeningHeight : conn.toOpeningHeight,
+        undefined, false).phase;
 
       // === PHYSICAL CONSTRAINTS ON FLOW ===
 
@@ -2763,49 +2760,6 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
     }
 
     return newState;
-  }
-
-  /**
-   * Determine what phase of fluid is flowing based on connection elevation
-   * relative to liquid level in a two-phase node.
-   */
-  private getFlowPhase(node: FlowNode, connectionElevation?: number): 'liquid' | 'vapor' | 'mixture' {
-    // Single-phase nodes flow their phase
-    if (node.fluid.phase === 'liquid') return 'liquid';
-    if (node.fluid.phase === 'vapor') return 'vapor';
-
-    // Two-phase: determine based on connection elevation vs liquid level
-    const quality = node.fluid.quality ?? 0;
-    const T_C = node.fluid.temperature - 273.15;
-
-    // Approximate densities
-    const rho_liquid = T_C < 100 ? 1000 - 0.08 * T_C :
-                       T_C < 300 ? 958 - 1.3 * (T_C - 100) :
-                       700 - 2.5 * (T_C - 300);
-    const rho_vapor = node.fluid.pressure * 0.018 / (8.314 * node.fluid.temperature);
-
-    // Void fraction (vapor volume / total volume)
-    const voidFraction = quality > 0 && rho_vapor > 0
-      ? (quality * rho_liquid) / (quality * rho_liquid + (1 - quality) * rho_vapor)
-      : 0;
-
-    // Estimate node height from volume (assume cylindrical)
-    const nodeHeight = Math.sqrt(node.volume / (Math.PI * 0.25));
-    const liquidLevel = nodeHeight * (1 - voidFraction);
-
-    // Default to mid-height if not specified
-    const connElevation = connectionElevation ?? nodeHeight / 2;
-
-    // Tolerance zone around interface
-    const tolerance = nodeHeight * 0.1;
-
-    if (connElevation < liquidLevel - tolerance) {
-      return 'liquid';
-    } else if (connElevation > liquidLevel + tolerance) {
-      return 'vapor';
-    } else {
-      return 'mixture';
-    }
   }
 
   private computeSteadyStateFlow(
