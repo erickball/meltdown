@@ -22,16 +22,19 @@ const ABSOLUTE_TIP =
   "elevation above that ground, plus the port's height on the component. " +
   "Relative elevations are measured from the component's own base.";
 
-// A connection at least this big and this long is built as a real pipe (its
-// own node, holding its own inventory); anything smaller or shorter is a
-// direct connection that carries flow but no volume. 0.03 m² is a ~20 cm
-// bore: small instrument and drain lines stay direct, service lines don't.
-export const AUTO_PIPE_MIN_AREA = 0.03;   // m²
-export const AUTO_PIPE_MIN_LENGTH = 1;    // m
+// Pipe or direct connection: one rule, shared with the headless level checks
+import {
+  AUTO_PIPE_MIN_AREA, AUTO_PIPE_MIN_LENGTH, AUTO_PIPE_MAX_DIRECT_VOLUME, createsPipe,
+} from './pipe-rules';
+export { AUTO_PIPE_MIN_AREA, AUTO_PIPE_MIN_LENGTH, AUTO_PIPE_MAX_DIRECT_VOLUME };
 
-function createsPipe(flowArea: number, length: number): boolean {
-  return flowArea > AUTO_PIPE_MIN_AREA && length > AUTO_PIPE_MIN_LENGTH;
-}
+// Why the rule has a volume limit, for the dialog's tooltip
+const AUTO_PIPE_TIP =
+  "A direct connection carries flow but holds no water of its own: half of " +
+  "its volume is added to each pump or valve at its ends, at that " +
+  "component's height. That is fine for a short stub. A long or fat run " +
+  "holds water somewhere else - up a hill, across the yard - so it gets its " +
+  "own pipe, which keeps that water where it really is.";
 
 export interface ConnectionConfig {
   fromComponent: PlantComponent;
@@ -605,10 +608,12 @@ export class ConnectionDialog {
     // Add auto-pipe creation note
     const pipeNote = document.createElement('div');
     pipeNote.style.cssText = 'margin-top: 15px; padding: 10px; background: #252830; border-radius: 4px; border-left: 3px solid #5588cc;';
+    pipeNote.title = AUTO_PIPE_TIP;
     pipeNote.innerHTML = `
       <div style="font-size: 12px; color: #7af; margin-bottom: 5px;">Automatic Pipe Creation</div>
       <div id="pipe-status" style="font-size: 11px; color: #99aacc;">
-        Pipes are automatically created for connections with flow area > ${AUTO_PIPE_MIN_AREA} m² and length > ${AUTO_PIPE_MIN_LENGTH} m
+        Pipes are automatically created for connections with flow area > ${AUTO_PIPE_MIN_AREA} m² and length > ${AUTO_PIPE_MIN_LENGTH} m,
+        or holding more than ${AUTO_PIPE_MAX_DIRECT_VOLUME} m³
       </div>
     `;
     this.bodyElement.appendChild(pipeNote);
@@ -628,7 +633,10 @@ export class ConnectionDialog {
         pipeStatus.innerHTML = `✓ A pipe will be created (diameter: ${diameter.toFixed(3)} m${ratingNote})`;
         pipeStatus.style.color = '#4a4';
       } else {
-        pipeStatus.innerHTML = 'Direct connection (no pipe needed)';
+        const volume = area * length;
+        pipeStatus.innerHTML = Number.isFinite(volume)
+          ? `Direct connection (no pipe needed - holds ${(volume * 1000).toFixed(0)} L)`
+          : 'Direct connection (no pipe needed)';
         pipeStatus.style.color = '#99aacc';
       }
     };

@@ -335,6 +335,9 @@ export interface PipeComponent extends ComponentBase {
   // inlet end first). Absent for pipes laid in the other views, which the
   // grid view auto-routes between position and endPosition.
   route?: Point[];
+  // NCG initial conditions (partial pressures in bar) - the air a run laid
+  // to a dry pump starts with (see ConstructionManager.dryRunAir)
+  initialNcg?: { [species: string]: number };
 }
 
 export interface PumpComponent extends ComponentBase {

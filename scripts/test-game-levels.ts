@@ -53,6 +53,9 @@ import {
 } from '../src/simulation';
 import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
 import { LEVELS } from '../src/game-mode/levels';
+import { ConstructionManager } from '../src/construction/construction-manager';
+import { createsPipe } from '../src/construction/pipe-rules';
+import { getStock } from '../src/game/stock';
 
 interface PlantJson {
   components?: Array<[string, PlantComponent]>;
@@ -357,11 +360,72 @@ function sfpPoolPortElevation(portId: string): number {
   return pool.depth / 2 - port.position.y;
 }
 
+interface SfpRun {
+  fromComponentId: string; fromPortId: string; toComponentId: string; toPortId: string;
+  fromElevation: number; toElevation: number; length: number; flowArea: number;
+}
+
 function sfpLine(
   fromComponentId: string, fromPortId: string, toComponentId: string, toPortId: string,
   fromElevation: number, toElevation: number, length: number, flowArea: number
-) {
+): SfpRun {
   return { fromComponentId, fromPortId, toComponentId, toPortId, fromElevation, toElevation, length, flowArea };
+}
+
+/**
+ * Lay an answer's runs the way a player's connection dialog does: through
+ * the ConstructionManager, as a real pipe or a direct connection by the same
+ * rule the dialog applies (src/construction/pipe-rules.ts). A long run built
+ * as a bare connection would lump its whole inventory into the pump at the
+ * pump's elevation - a plant no player can build, with physics of its own.
+ *
+ * The level is loaded the way main.ts loads it (the manager clears the plant
+ * it is handed, so the components go in afterwards, then normalizeLoadedPlant).
+ * The yard's pipe is measured, not enforced: the runs are laid from a
+ * bottomless rack so the physics is still checked, and the caller compares
+ * `metres` with `stockMetres`.
+ *
+ * `lastHop[i]` is the node that feeds run i's far end (its pipe, or its own
+ * from-component when it stayed direct), for flowRate(state, lastHop[i], to).
+ */
+function sfpBuild(plant: PlantJsonRW, runs: SfpRun[]): {
+  plant: PlantJsonRW; metres: number; stockMetres: number; lastHop: string[];
+} {
+  const ps = {
+    components: new Map(), connections: [], terrain: plant.terrain, scenario: plant.scenario,
+  } as unknown as PlantState;
+  const cm = new ConstructionManager(ps);
+  for (const [id, c] of plant.components) ps.components.set(id, c as unknown as PlantComponent);
+  ps.connections = plant.connections as unknown as PlantConnection[];
+  cm.normalizeLoadedPlant();
+
+  const stock = getStock(ps);
+  const stockMetres = stock ? stock.pipeMeters : Infinity;
+  const RACK = 1e9;
+  if (stock) stock.pipeMeters = RACK;
+  const lastHop: string[] = [];
+  for (const r of runs) {
+    const before = new Set(ps.components.keys());
+    const ok = createsPipe(r.flowArea, r.length)
+      ? cm.createConnectionWithPipe(r.fromPortId, r.toPortId, r.flowArea, r.length, r.fromElevation, r.toElevation)
+      : cm.createConnection(r.fromPortId, r.toPortId, r.fromElevation, r.toElevation, r.flowArea, r.length);
+    if (!ok) {
+      throw new Error(`[sfp] the connection dialog could not lay ${r.fromComponentId} -> ${r.toComponentId}: ` +
+        `${cm.takeStockRefusal() ?? 'refused (see the log above)'}`);
+    }
+    const pipe = [...ps.components.keys()].find(id => !before.has(id));
+    lastHop.push(pipe ?? r.fromComponentId);
+  }
+  const metres = stock ? RACK - stock.pipeMeters : 0;
+  if (stock) stock.pipeMeters = stockMetres;
+  return {
+    plant: {
+      ...plant,
+      components: [...ps.components] as unknown as PlantJsonRW['components'],
+      connections: ps.connections as unknown as PlantJsonRW['connections'],
+    },
+    metres, stockMetres, lastHop,
+  };
 }
 
 /** Pool water level (m above the pool floor). */
@@ -499,13 +563,21 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     const plant = sfpPlant();
     plant.components.push(sfpPump(spot.id, `Sea pump (${spot.name})`, spot.x, spot.y));
     (plant.components.find(c => c[0] === spot.id)![1] as Record<string, unknown>).running = true;
-    plant.connections.push(
-      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, seaIntake, sfpPumpNozzle(), spot.suction, SFP_PIPE_AREA),
-      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', sfpPumpNozzle(), sfpPoolPortElevation('pool-makeup-e'), spot.discharge, SFP_PIPE_AREA));
     plant.scenario = undefined;   // no earthquake: this is about the pump alone
-    const sim = buildSimFromPlantJson(plant as never);
-    run(sim, 120, 0.02);
-    const q = flowRate(sim.state, spot.id, 'pool');
+    const built = sfpBuild(plant, [
+      sfpLine('sea', 'sea-out', spot.id, `${spot.id}-inlet`, seaIntake, sfpPumpNozzle(), spot.suction, SFP_PIPE_AREA),
+      sfpLine(spot.id, `${spot.id}-outlet`, 'pool', 'pool-makeup-e', sfpPumpNozzle(), sfpPoolPortElevation('pool-makeup-e'), spot.discharge, SFP_PIPE_AREA)]);
+    if (built.metres > built.stockMetres) {
+      console.log(`      (these runs take ${built.metres.toFixed(0)} m of pipe; the yard holds ${built.stockMetres.toFixed(0)} m)`);
+    }
+    const sim = buildSimFromPlantJson(built.plant as never);
+    // Five minutes, not two: the runs are real pipes, laid DRY with the dry
+    // pump, and a 200 m discharge line holds 14 m3 of air that the sea has to
+    // push out before any water reaches the pool. The first water arrives
+    // after ~90 s and delivery climbs to ~70 kg/s by ~240 s (the casing and
+    // its suction fill first, then the line) - at 120 s it is mid-fill.
+    run(sim, 300, 0.02);
+    const q = flowRate(sim.state, built.lastHop[1], 'pool');
     const casing = sim.state.flowNodes.get(spot.id)!;
     const pump = sim.state.components.pumps.get(spot.id)!;
     // Wherever it stands, a pump that fills while it runs must not burst its
@@ -571,12 +643,18 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         fluid: { temperature: 288.15, pressure: 101325, phase: 'liquid', quality: 0, flowRate: 0 },
         pressureRating: 20,
       }] as [string, Record<string, unknown>]);
-    plant.connections.push(
+    const built = sfpBuild(plant, [
       sfpLine('sea', 'sea-out', 'shore-pump', 'shore-pump-inlet', seaIntake, sfpPumpNozzle(), 12, SFP_PIPE_AREA),
       sfpLine('shore-pump', 'shore-pump-outlet', 'pool', 'pool-makeup-e', sfpPumpNozzle(), sfpPoolPortElevation('pool-makeup-e'), 200, SFP_PIPE_AREA),
       sfpLine('tank-a', 'tank-a-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 20, 0.03),
       sfpLine('tank-b', 'tank-b-out', 'tank-valve', 'tank-valve-in', 0.4, 0.3, 45, 0.03),
-      sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03));
+      sfpLine('tank-valve', 'tank-valve-out', 'pool', 'pool-makeup-w', 0.3, 10.5, 30, 0.03)]);
+    const seaFeed = built.lastHop[1];
+    const tankFeed = built.lastHop[4];
+    console.log(`      (the answer takes ${built.metres.toFixed(0)} m of pipe; the yard holds ${built.stockMetres.toFixed(0)} m)`);
+    if (built.metres > built.stockMetres) {
+      fail(`the answer needs ${built.metres.toFixed(0)} m of pipe and the yard holds ${built.stockMetres.toFixed(0)} m - a player could not build it`);
+    }
     // The operator's actions, as scenario events instead of live edits, and
     // in the order the fifty-four-minute gap forces: the TANK LINE FIRST,
     // because it is the only make-up there is while the tsunami is on its way,
@@ -604,7 +682,7 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
       { time: 5700, message: 'Sea pump has what it can carry; throttling the tank line to the shortfall', actions: [
         { kind: 'valve', id: 'tank-valve', position: SFP_ANSWER_TANK_THROTTLE },
       ] });
-    const sim = buildSimFromPlantJson(plant as never);
+    const sim = buildSimFromPlantJson(built.plant as never);
     const tankMass = () => sim.state.flowNodes.get('tank-a')!.fluid.mass +
       sim.state.flowNodes.get('tank-b')!.fluid.mass;
     const tanks0 = tankMass();
@@ -618,8 +696,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
     let takenAt = -1;
     let lastLog = 0;
     const plantForWave = {
-      components: new Map(plant.components as Array<[string, never]>),
-      connections: plant.connections, terrain: plant.terrain, scenario: plant.scenario,
+      components: new Map(built.plant.components as Array<[string, never]>),
+      connections: built.plant.connections, terrain: plant.terrain, scenario: plant.scenario,
     } as unknown as PlantState;
     let maxPuddle = 0;
     while (sim.state.time < 28800) {
@@ -646,8 +724,8 @@ async function runSpentFuelPoolChecks(): Promise<boolean> {
         lastLog = sim.state.time;
         console.log(`      t=${sim.state.time.toFixed(0).padStart(5)}s  pool ${lvl.toFixed(2)} m  ` +
           `clad ${sfpCladC(sim.state).toFixed(0)} C  ` +
-          `tanks ${(tankMass() / 1000).toFixed(0)} t (${flowRate(sim.state, 'tank-valve', 'pool').toFixed(0)} kg/s)  ` +
-          `sea pump ${shore.flooded ? 'DROWNED' : 'clear'} (${shore.effectiveSpeed.toFixed(2)}, ${flowRate(sim.state, 'shore-pump', 'pool').toFixed(0)} kg/s, ` +
+          `tanks ${(tankMass() / 1000).toFixed(0)} t (${flowRate(sim.state, tankFeed, 'pool').toFixed(0)} kg/s)  ` +
+          `sea pump ${shore.flooded ? 'DROWNED' : 'clear'} (${shore.effectiveSpeed.toFixed(2)}, ${flowRate(sim.state, seaFeed, 'pool').toFixed(0)} kg/s, ` +
           `casing ${(() => {
             const c = sim.state.flowNodes.get('shore-pump')!;
             return `${c.fluid.phase} ${(100 * (c.fluid.gasVolume ?? 0) / c.volume).toFixed(1)}% gas ${(c.fluid.pressure / 1e5).toFixed(3)} bar`;

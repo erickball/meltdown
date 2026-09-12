@@ -41,6 +41,7 @@ import {
 } from '../render/grid-geometry';
 import { buildGhost } from '../game/build-queue';
 import { terrainHeightAt } from '../simulation/terrain';
+import { ambientAir } from '../simulation/factory';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import {
   calculateState,
@@ -2145,8 +2146,10 @@ export class ConstructionManager {
       }
     ];
 
-    // Compute average fluid properties from connected components
-    const pipeFluid = this.computeAverageFluid(
+    // Compute average fluid properties from connected components - unless
+    // the run is laid to a pump delivered dry, in which case it is dry too
+    const dryAir = this.dryRunAir(fromComponent, toComponent);
+    const pipeFluid = dryAir ? dryAir.fluid : this.computeAverageFluid(
       fromComponent, toComponent, fromElevation, toElevation, fromPort, toPort
     );
 
@@ -2191,7 +2194,8 @@ export class ConstructionManager {
       endPosition: { x: endX, y: endY },
       endElevation: endElevation,
       // Grid view draws the pipe along the route the user laid
-      ...(route && route.length >= 2 ? { route } : {})
+      ...(route && route.length >= 2 ? { route } : {}),
+      ...(dryAir ? { initialNcg: dryAir.initialNcg } : {})
     };
 
     // A pipe between two components that share a container runs inside that
@@ -2217,6 +2221,32 @@ export class ConstructionManager {
 
     console.log(`[Construction] Created pipe '${pipeId}' with diameter ${diameter.toFixed(3)}m between components`);
     return true;
+  }
+
+  /**
+   * What a new run holds when one of its ends is a pump delivered DRY
+   * (initialFill 'dry'): the same ambient air the factory fills that casing
+   * with, rather than an average of its two ends. It comes off the same yard
+   * as the pump and nothing has flooded it yet. Averaging instead handed the
+   * run the pump's nominal liquid: a suction line from the sea to a dry pump
+   * started FULL OF WATER - 150 m of it hanging from a pump on a 13 m bench
+   * drained back and pulled its casing to 0.35 bar, and a drowned pump's
+   * casing air was trapped between two water-filled lines for the sea to
+   * slam into. A pump that has since primed is 'primed' again (resume.ts
+   * re-derives the flag from its casing), so this reads the casing as it is.
+   * Null when neither end is a dry pump.
+   */
+  private dryRunAir(
+    ...ends: PlantComponent[]
+  ): { fluid: Fluid; initialNcg: { [species: string]: number } } | null {
+    const dry = ends.some(c =>
+      c.type === 'pump' && (c as { initialFill?: string }).initialFill === 'dry');
+    if (!dry) return null;
+    const air = ambientAir();
+    return {
+      fluid: { temperature: air.temperature, pressure: air.steamPressure, phase: 'vapor', quality: 1, flowRate: 0 },
+      initialNcg: { ...air.ncg },
+    };
   }
 
   /**
@@ -3396,7 +3426,13 @@ export class ConstructionManager {
     const neighbour = joins.find(j => j.join.component.type === 'pipe' &&
         this.sameLine(pipe, j.join.component as PipeComponent))?.join.component
       ?? (joins.length > 0 ? joins[0].join.component : undefined);
-    if (neighbour?.fluid) {
+    // ...except a run that lands on a pump delivered dry: dry like the pump
+    const dryAir = this.dryRunAir(...joins.map(j => j.join.component));
+    if (dryAir) {
+      pipe.fluid = dryAir.fluid;
+      pipe.initialNcg = dryAir.initialNcg;
+      console.log(`[Construction] Ground pipe '${id}' is laid to a dry pump: it starts dry (ambient air)`);
+    } else if (neighbour?.fluid) {
       pipe.fluid = { ...neighbour.fluid, flowRate: 0 };
       const ncg = (neighbour as Record<string, any>).initialNcg;
       if (ncg) (pipe as Record<string, any>).initialNcg = { ...ncg };
