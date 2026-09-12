@@ -1176,6 +1176,22 @@ export function pointAlongRoute(pts: Point[], fraction: number): { point: Point;
   return { point: pts[pts.length - 1], dir: { x: 1, y: 0 } };
 }
 
+/** The part of a route between two fractions (0..1) of its length. */
+export function sliceRoute(pts: Point[], from: number, to: number): Point[] {
+  const total = routeLength(pts);
+  if (pts.length < 2 || total < EPS) return [pts[0], pts[pts.length - 1]].map(p => ({ ...p }));
+  const a = from * total, b = to * total;
+  const out: Point[] = [pointAlongRoute(pts, from).point];
+  let s = 0;
+  for (let i = 1; i < pts.length; i++) {
+    s += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    if (s > a + EPS && s < b - EPS) out.push({ ...pts[i] });
+  }
+  out.push(pointAlongRoute(pts, to).point);
+  const simple = simplifyRoute(out);
+  return simple.length >= 2 ? simple : [out[0], out[out.length - 1]];
+}
+
 export function distanceToPolyline(p: Point, pts: Point[]): number {
   if (pts.length === 0) return Infinity;
   if (pts.length === 1) return Math.hypot(p.x - pts[0].x, p.y - pts[0].y);

@@ -1949,9 +1949,22 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       if (!node || node.isBoundary) continue;
       let pipeVolume = 0;
       for (const conn of state.flowConnections) {
-        if (conn.fromNodeId === nodeId || conn.toNodeId === nodeId) {
-          pipeVolume += conn.flowArea * conn.length / 2;
+        if (conn.fromNodeId !== nodeId && conn.toNodeId !== nodeId) continue;
+        // A stub to a PIPE has no run of its own: its length is borrowed
+        // from the pipe it joins, and that pipe's own node already holds the
+        // water. Lumping it here counted the run twice - with its lines laid
+        // as real pipes, the level-1 sea pump still carried half of both of
+        // them in its casing node (11.4 m3), flat at the pump's elevation.
+        // A connection that states its own length is a run of its own (a tap
+        // off a header) and is lumped as before.
+        const otherId = conn.fromNodeId === nodeId ? conn.toNodeId : conn.fromNodeId;
+        if (plantState.components.get(otherId)?.type === 'pipe') {
+          const stub = plantState.connections.find(pc =>
+            (pc.fromComponentId === id && pc.toComponentId === otherId) ||
+            (pc.fromComponentId === otherId && pc.toComponentId === id));
+          if (stub && stub.length === undefined) continue;
         }
+        pipeVolume += conn.flowArea * conn.length / 2;
       }
       if (!(pipeVolume > 0)) continue;
       const factor = (node.volume + pipeVolume) / node.volume;
@@ -4250,7 +4263,18 @@ function createFlowConnectionFromPlantConnection(
     } else {
       hydraulicDiameter = Math.sqrt(4 * flowArea / Math.PI);
     }
-    if (connection.length === undefined) length = pipe.length;
+  }
+  // A connection with no run of its own touching a pipe is a stub: it spans
+  // from the middle of each pipe it joins (where that pipe's node sits - see
+  // pipeMidRun) to the joint, so it takes HALF of each such pipe's length.
+  // The two stubs around an auto-pipe then add up to the pipe's own run.
+  // (Until 2026-09-12 each stub took the WHOLE pipe length, so every piped
+  // run carried twice its inertia.)
+  if (connection.length === undefined) {
+    const halfRun = (c: PlantComponent | undefined): number =>
+      c?.type === 'pipe' ? (c as unknown as { length: number }).length / 2 : 0;
+    const borrowed = halfRun(fromComponent) + halfRun(toComponent);
+    if (borrowed > 0) length = borrowed;
   }
 
   // Connection point elevations, measured from each node's own reference -
