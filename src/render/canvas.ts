@@ -1,7 +1,7 @@
 import { ViewState, Point, PlantState, PlantComponent, ControllerComponent, SwitchyardComponent, TurbineGeneratorComponent, Connection, Fluid, Port, PipeComponent, waterBodyOf, paintDepthY } from '../types';
 import { SimulationState, getReactorPowerState, getTurbineCondenserState } from '../simulation';
 import { ComponentSpriteCache, LayerCache, quantizedKey, keyAnimates } from './sprite-cache';
-import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, gaugeNodesByComponent, ConnectionScreenEndpoints, renderBurstOverlays, standInInfo, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight } from './components';
+import { renderComponent, getTimeSeed, formatCorePowerLabel, worldToScreen, renderFlowConnectionArrows, renderPressureGauge, renderThermometers, gaugeNodesByComponent, ConnectionScreenEndpoints, renderBurstOverlays, standInInfo, renderBuildingFloor, renderBuildingFrontEdge, projectCircleToEllipse, flowConnectionIdForPlantConnection, openingArrowEndpoints, getComponentVisualHeight, findPlantConnectionForFlowId } from './components';
 import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import {
   IsometricConfig,
@@ -22,7 +22,7 @@ import { connectionDrawElevation } from '../types';
 import { steamPartialPressurePa } from '../simulation/resume';
 import { nodeGasVolume } from '../simulation/mixture-properties';
 import { drawFires, collectCladdingFires } from './fire-fx';
-import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox } from './break-fx';
+import { drawBreaks, collectBreaks, breakAnchorLookup, ScreenBox, collectDischarges, drawDischarges } from './break-fx';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getCladdingOxidationPower } from '../simulation/operators/rate-operators';
 import { CameraShake } from './camera-shake';
@@ -844,17 +844,39 @@ export class PlantCanvas {
    * spray, the label and the break's flow arrow then all read the same
    * anchors.
    */
+  /**
+   * Screen length of one metre across the plan at a component - a spray is
+   * thrown at the jet's real speed, so it needs the view's scale.
+   */
+  private pxPerMeterAt(comp: PlantComponent): number {
+    const p = comp.position;
+    const q = { x: p.x + 1, y: p.y };
+    const elev = comp.elevation ?? 0;
+    const a = this.viewMode === 'grid' ? this.grid.worldToScreen(p) : this.worldToScreenPerspective(p, elev).pos;
+    const b = this.viewMode === 'grid' ? this.grid.worldToScreen(q) : this.worldToScreenPerspective(q, elev).pos;
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  }
+
+  /** Every flow path putting liquid into gas this frame, placed in the current view (break-fx). */
+  private currentDischarges() {
+    return collectDischarges(this.plantState, this.simState, {
+      portScreen: (comp, portId) => {
+        // The grid lands routes on plan anchors but draws the nozzle on the
+        // sprite; a spray leaves the drawn nozzle
+        if (this.viewMode === 'grid') return this.grid.spriteNozzle(comp, portId) ?? this.grid.portScreenPosition(comp, portId);
+        const port = comp.ports?.find(p => p.id === portId);
+        return port ? this.getPortScreenPosition(comp, port) : null;
+      },
+      centreOf: comp => {
+        const b = this.getComponentScreenBounds(comp);
+        return b && b.height !== undefined ? { x: b.topCenter.x, y: b.topCenter.y + b.height / 2 } : null;
+      },
+      pxPerMeter: comp => this.pxPerMeterAt(comp),
+    }, flowId => findPlantConnectionForFlowId(flowId, this.plantState));
+  }
+
   private currentBreaks() {
-    // Screen length of one metre across the plan at the component - the
-    // spray is thrown at the jet's real speed, so it needs the view's scale
-    const pxPerMeter = (comp: PlantComponent): number => {
-      const p = comp.position;
-      const q = { x: p.x + 1, y: p.y };
-      const elev = comp.elevation ?? 0;
-      const a = this.viewMode === 'grid' ? this.grid.worldToScreen(p) : this.worldToScreenPerspective(p, elev).pos;
-      const b = this.viewMode === 'grid' ? this.grid.worldToScreen(q) : this.worldToScreenPerspective(q, elev).pos;
-      return Math.hypot(b.x - a.x, b.y - a.y);
-    };
+    const pxPerMeter = (comp: PlantComponent) => this.pxPerMeterAt(comp);
     const boundsFor = (comp: PlantComponent): ScreenBox | null => {
       const b = this.getComponentScreenBounds(comp);
       if (!b || b.width === undefined || b.height === undefined) return null;
@@ -2553,6 +2575,7 @@ export class PlantCanvas {
       // The crack and what is coming out of it - the same drawing the grid
       // uses, on the same anchor, scaled by the break's own mass flow.
       drawBreaks(ctx, breaks, performance.now());
+      drawDischarges(ctx, this.currentDischarges(), performance.now());
 
       // Cladding that is burning. The intensity is the chemical power the
       // oxidation operator released, so the flames rise as the reaction runs
@@ -4497,6 +4520,7 @@ export class PlantCanvas {
       // Plan-view break: a crack along the wall the break faces, with the
       // discharge running out across the ground (break-fx.ts).
       drawBreaks(ctx, breaks, performance.now());
+      drawDischarges(ctx, this.currentDischarges(), performance.now());
       this.renderFires(ctx, getScreenBounds);
       // The grid labels the runs it lays itself; a flow path with no run (a
       // break, an open nozzle) is labelled at its arrow

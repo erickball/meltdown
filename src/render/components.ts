@@ -2276,6 +2276,69 @@ function renderValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view:
   }
 }
 
+/**
+ * The cavities of a bowtie valve body - its two halves, shrunk about their
+ * centroids to leave the steel wall - plus the throat the opening leaves
+ * between them. Every piece is wound the same way as rect(), so under the
+ * nonzero rule they add up rather than cutting holes in each other.
+ */
+function valveBodyCavity(ctx: CanvasRenderingContext2D, d: number, bodySize: number, opening: number): void {
+  const k = 0.72;
+  for (const s of [-1, 1]) {
+    const cx = s * bodySize / 3;
+    const pts = s < 0
+      ? [[-bodySize / 2, -d / 2], [0, 0], [-bodySize / 2, d / 2]]
+      : [[bodySize / 2, d / 2], [0, 0], [bodySize / 2, -d / 2]];
+    pts.forEach(([px, py], i) => {
+      const x = cx + k * (px - cx), y = k * py;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+  }
+  if (opening > 0) {
+    const w = d * opening * 0.8;
+    ctx.rect(-bodySize / 2, -w / 2, bodySize, w);
+  }
+}
+
+/**
+ * The fluid in a valve body, drawn the way a vessel's is (renderFluidWithNcg):
+ * with a level when the node's phases have separated, as a blend of the two
+ * when they have not - both from the node's own synced liquid level and
+ * separation, so the picture says what the model does. `cavity` traces
+ * where the fluid is; `box` is that region's extent in the valve's frame.
+ *
+ * The surface is level on SCREEN whichever way the valve is turned (the 2.5D
+ * view rotates the context by the component's rotation, the grid does not):
+ * the fill undoes whatever rotation the current transform carries and spans
+ * the box as it stands after the turn.
+ */
+function renderValveFluid(
+  ctx: CanvasRenderingContext2D,
+  valve: ValveComponent,
+  cavity: () => void,
+  box: { x: number; y: number; w: number; h: number }
+): void {
+  if (!valve.fluid) return;
+  ctx.save();
+  ctx.beginPath();
+  cavity();
+  ctx.clip();
+  const m = ctx.getTransform();
+  const th = Math.atan2(m.b, m.a);
+  ctx.rotate(-th);
+  const c = Math.cos(th), s = Math.sin(th);
+  const xs: number[] = [], ys: number[] = [];
+  for (const [px, py] of [[box.x, box.y], [box.x + box.w, box.y], [box.x, box.y + box.h], [box.x + box.w, box.y + box.h]]) {
+    xs.push(c * px - s * py);
+    ys.push(s * px + c * py);
+  }
+  const x0 = Math.min(...xs), y0 = Math.min(...ys);
+  renderFluidWithNcg(ctx, valve.fluid, x0, y0, Math.max(...xs) - x0, Math.max(...ys) - y0,
+    getLiquidFraction(valve, valve.fluid, true), valve.fluid.separation ?? 0, 2);
+  ctx.restore();
+}
+
 function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
   // Valve body - bowtie shape for gate valve
   ctx.fillStyle = COLORS.steel;
@@ -2293,12 +2356,9 @@ function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponen
   ctx.closePath();
   ctx.fill();
 
-  // Flow path visualization based on opening
-  if (valve.opening > 0 && valve.fluid) {
-    const openingWidth = d * valve.opening * 0.8;
-    ctx.fillStyle = getFluidColor(valve.fluid);
-    ctx.fillRect(-bodySize / 2, -openingWidth / 2, bodySize, openingWidth);
-  }
+  // The fluid in the body's two cavities and, open, through the throat
+  renderValveFluid(ctx, valve, () => valveBodyCavity(ctx, d, bodySize, valve.opening),
+    { x: -bodySize / 2, y: -d / 2, w: bodySize, h: d });
 
   // Valve stem
   ctx.fillStyle = COLORS.steelDark;
@@ -2335,12 +2395,9 @@ function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, 
   ctx.closePath();
   ctx.fill();
 
-  // Flow path visualization based on opening
-  if (valve.opening > 0 && valve.fluid) {
-    const openingWidth = d * valve.opening * 0.8;
-    ctx.fillStyle = getFluidColor(valve.fluid);
-    ctx.fillRect(-bodySize / 2, -openingWidth / 2, bodySize, openingWidth);
-  }
+  // The fluid in the body's two cavities and, open, through the throat
+  renderValveFluid(ctx, valve, () => valveBodyCavity(ctx, d, bodySize, valve.opening),
+    { x: -bodySize / 2, y: -d / 2, w: bodySize, h: d });
 
   // Check valve flapper/disc with hinge animation
   // When closed: diagonal at ~45 degrees (blocking flow)
@@ -2479,6 +2536,14 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
   // Stopper/disc (moves based on opening)
   const stopperHeight = bodyHeight * 0.15;
   const stopperY = -bodyHeight / 2 + chamberInset + (bodyHeight * 0.3) * (1 - valve.opening);
+
+  // The fluid in the body below the disc (the spring's bonnet above it is
+  // the vented side), with its level as a tank shows one
+  const wetTop = stopperY + stopperHeight;
+  const wetW = bodyWidth - chamberInset * 2;
+  const wetH = bodyHeight / 2 - chamberInset - wetTop;
+  renderValveFluid(ctx, valve, () => ctx.rect(-wetW / 2, wetTop, wetW, wetH),
+    { x: -wetW / 2, y: wetTop, w: wetW, h: wetH });
   ctx.fillStyle = valve.opening > 0 ? COLORS.warning : COLORS.steel;
   ctx.fillRect(-bodyWidth / 2 + chamberInset + 2, stopperY,
                bodyWidth - chamberInset * 2 - 4, stopperHeight);
@@ -5264,7 +5329,7 @@ export function standInInfo(conn: Connection | null | undefined): StandInInfo | 
   return conn ? standInFlowIds.get(conn) : undefined;
 }
 
-function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
+export function findPlantConnectionForFlowId(flowId: string, plantState: PlantState): Connection | undefined {
   const idx = flowConnectionIds(plantState).indexOf(flowId);
   return idx >= 0 ? plantState.connections[idx] : undefined;
 }

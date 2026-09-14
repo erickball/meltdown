@@ -470,6 +470,16 @@ export class GridView {
     return { x: L.centerX + port.position.x * L.zoom, y: L.baseY - L.halfHpx + port.position.y * L.zoom };
   }
 
+  /**
+   * Where a nozzle is DRAWN on the component's own front-view sprite (not the
+   * plan anchor its routes land on), or null for anything drawn flat (pipes,
+   * floors, ground-layer things). What leaves a nozzle - a spray - leaves
+   * from here, so it comes out of the drawn nozzle.
+   */
+  spriteNozzle(c: PlantComponent, portId: string): Point | null {
+    return this.spritePortPosition(c, portId);
+  }
+
   /** Height above grade of a port: the component's elevation plus the port's rise above the drawn bottom. */
   private portElevation(c: PlantComponent, portId: string): number {
     const base = c.elevation ?? 0;

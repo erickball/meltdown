@@ -34,6 +34,7 @@ import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
 import type { FlowNode } from './simulation/types';
 import { pressureAtConnection } from './simulation/operators/connection-hydraulics';
+import { terrainHeightAt } from './simulation/terrain';
 import {
   formatMetres, stockedLines, stockLineDisplayName, pipeSpecDisplayName,
 } from './game/stock';
@@ -1068,7 +1069,7 @@ function designPressureNote(currentPa: number, designBar: number | undefined): s
 
 export function updateComponentDetail(
   componentId: string | null,
-  plantState: { components: Map<string, unknown>; connections: Connection[] },
+  plantState: { components: Map<string, unknown>; connections: Connection[]; terrain?: Parameters<typeof terrainHeightAt>[0] },
   simState: SimulationState
 ): void {
   const panel = document.getElementById('component-detail');
@@ -1948,6 +1949,10 @@ export function updateComponentDetail(
   }
   // Show simulation connections if running AND they match this component, otherwise show plant connections
   const componentElev = elevation ?? 0;
+  // Absolute elevation of the component's base before there is a simulation
+  // to ask: the ground under it plus its elevation above that ground (the
+  // connection dialog's convention)
+  const plantBase = terrainHeightAt(plantState.terrain, (component as { position: { x: number; y: number } }).position) + componentElev;
 
   // Check if any simulation connections involve this component's nodes
   const matchingSimConnections = simState.flowConnections?.filter(conn =>
@@ -2005,11 +2010,16 @@ export function updateComponentDetail(
         `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
       // Where the connection meets this component: a height, or the span of
       // an opening that has one
-      const elevLabel = (rel: number, opening: number | undefined) => {
+      // an opening that has one. `rel` is measured from the bottom of that
+      // end's flow node; the node's own elevation is already absolute (above
+      // the map datum), so abs = node base + rel
+      const elevLabel = (base: number | undefined, rel: number, opening: number | undefined) => {
         const h = opening ?? 0;
-        if (!(h > 0)) return `@ ${rel.toFixed(1)}m rel (${(componentElev + rel).toFixed(1)}m abs)`;
+        const abs = (z: number) => base === undefined ? '' : ` (${(base + z).toFixed(1)}`;
+        if (!(h > 0)) return `@ ${rel.toFixed(1)}m rel${base === undefined ? '' : `${abs(rel)}m abs)`}`;
         const lo = rel - h / 2, hi = rel + h / 2;
-        return `@ ${lo.toFixed(1)}–${hi.toFixed(1)}m rel (${(componentElev + lo).toFixed(1)}–${(componentElev + hi).toFixed(1)}m abs)`;
+        return `@ ${lo.toFixed(1)}–${hi.toFixed(1)}m rel` +
+          (base === undefined ? '' : `${abs(lo)}–${(base + hi).toFixed(1)}m abs)`);
       };
 
       for (const { conn, isInternal, isFrom } of flowConnections) {
@@ -2024,7 +2034,9 @@ export function updateComponentDetail(
           const connElev = conn.fromElevation ?? conn.toElevation;
           let elevStr = '';
           if (connElev !== undefined) {
-            elevStr = elevLabel(connElev, conn.fromElevation !== undefined ? conn.fromOpeningHeight : conn.toOpeningHeight);
+            elevStr = conn.fromElevation !== undefined
+              ? elevLabel(fromNode?.elevation, connElev, conn.fromOpeningHeight)
+              : elevLabel(toNode?.elevation, connElev, conn.toOpeningHeight);
           }
           const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
           const flowPhase = upstreamNode?.fluid.phase || 'unknown';
@@ -2033,7 +2045,7 @@ export function updateComponentDetail(
           html += `<span style="color: #888;">Internal:</span> <span style="color: #9af;">${fromName} ${arrowDir} ${toName}</span>`;
           html += conn.isBreakConnection ? `${breakBadge}<br>` : connButtons(conn);
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
-          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;" title="rel: height above the bottom of this end's flow node. abs: height above the map datum (sea level on a map with terrain) - the same number the nozzle's tooltip gives.">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
         } else {
           const otherName = isFrom ? toName : fromName;
@@ -2043,7 +2055,8 @@ export function updateComponentDetail(
           const relElev = isFrom ? conn.fromElevation : conn.toElevation;
           let elevStr = '';
           if (relElev !== undefined) {
-            elevStr = elevLabel(relElev, isFrom ? conn.fromOpeningHeight : conn.toOpeningHeight);
+            elevStr = elevLabel((isFrom ? fromNode : toNode)?.elevation, relElev,
+              isFrom ? conn.fromOpeningHeight : conn.toOpeningHeight);
           }
           const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
           const flowPhase = upstreamNode?.fluid.phase || 'unknown';
@@ -2052,7 +2065,7 @@ export function updateComponentDetail(
           html += `<span style="color: ${flowColor};">${arrowDir}</span> ${otherName}`;
           html += conn.isBreakConnection ? `${breakBadge}<br>` : connButtons(conn);
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
-          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;" title="rel: height above the bottom of this end's flow node. abs: height above the map datum (sea level on a map with terrain) - the same number the nozzle's tooltip gives.">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
         }
       }
@@ -2106,7 +2119,7 @@ export function updateComponentDetail(
           const connElev = conn.fromElevation ?? conn.toElevation;
           let elevStr = '';
           if (connElev !== undefined) {
-            elevStr = `@ ${connElev.toFixed(1)}m rel (${(componentElev + connElev).toFixed(1)}m abs)`;
+            elevStr = `@ ${connElev.toFixed(1)}m rel (${(plantBase + connElev).toFixed(1)}m abs)`;
           }
 
           html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(150,150,255,0.1); border-radius: 3px;">`;
@@ -2114,14 +2127,14 @@ export function updateComponentDetail(
           html += `<button class="delete-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
           html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
-          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;" title="rel: height above the bottom of this end's flow node. abs: height above the map datum (sea level on a map with terrain) - the same number the nozzle's tooltip gives.">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(flowArea.toFixed(4))} m²</span></div>`;
         } else {
           const otherName = isFrom ? toName : fromName;
           const relElev = isFrom ? conn.fromElevation : conn.toElevation;
           let elevStr = '';
           if (relElev !== undefined) {
-            elevStr = `@ ${relElev.toFixed(1)}m rel (${(componentElev + relElev).toFixed(1)}m abs)`;
+            elevStr = `@ ${relElev.toFixed(1)}m rel (${(plantBase + relElev).toFixed(1)}m abs)`;
           }
 
           html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
@@ -2129,7 +2142,7 @@ export function updateComponentDetail(
           html += `<button class="delete-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
           html += `<button class="edit-plant-connection-btn" data-from="${conn.fromComponentId}" data-to="${conn.toComponentId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
           html += `<span style="color: #888; margin-left: 12px;"><span style="color: #666; font-style: italic;">(no flow yet)</span>`;
-          if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
+          if (elevStr) html += `<br><span style="color: #6a8;" title="rel: height above the bottom of this end's flow node. abs: height above the map datum (sea level on a map with terrain) - the same number the nozzle's tooltip gives.">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(flowArea.toFixed(4))} m²</span></div>`;
         }
       }

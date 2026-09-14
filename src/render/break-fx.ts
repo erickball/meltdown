@@ -32,7 +32,7 @@
  * same object in the simulation: one BurstState and one break connection.
  */
 
-import { PlantState, PlantComponent } from '../types';
+import { PlantState, PlantComponent, Connection } from '../types';
 import { SimulationState } from '../simulation';
 import { drawCompositionAt } from '../simulation/operators/connection-hydraulics';
 
@@ -362,7 +362,7 @@ const G = 9.81;
  */
 export function drawSpray(
   ctx: CanvasRenderingContext2D,
-  a: BreakAnchor,
+  a: SprayOrigin,
   flow: number,
   speed: number,
   liquid: boolean,
@@ -416,6 +416,143 @@ export function drawBreaks(
     drawCrack(ctx, m.anchor, m.seed);
     if (m.flow > 0) drawSpray(ctx, m.anchor, m.flow, m.speed, m.liquid, m.seed, timeMs);
   }
+}
+
+// ============================================================================
+// Liquid discharging into gas through any flow path
+// ============================================================================
+
+/** Where a spray leaves from and which way: a break's anchor is one, a nozzle's another. */
+export interface SprayOrigin {
+  x: number;
+  y: number;
+  /** Direction the discharge leaves in (radians, screen coordinates). */
+  angle: number;
+  /** Characteristic size of the opening in pixels; drop size scales off it. */
+  span: number;
+  /** Screen pixels per metre at the opening. */
+  pxPerMeter: number;
+}
+
+/** One flow path putting liquid into gas this frame, resolved to screen space. */
+export interface Discharge {
+  origin: SprayOrigin;
+  /** kg/s of liquid entering gas through the path. */
+  flow: number;
+  /** Mean speed through the path, m/s. */
+  speed: number;
+  seed: number;
+}
+
+/** How the calling view places things: a nozzle, a component's middle, its metres-to-pixels. */
+export interface DischargeView {
+  portScreen: (component: PlantComponent, portId: string) => { x: number; y: number } | null;
+  centreOf: (component: PlantComponent) => { x: number; y: number } | null;
+  pxPerMeter: (component: PlantComponent) => number;
+}
+
+function hashString(s: string): number {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 100003;
+  return h;
+}
+
+/**
+ * Every flow path that is putting liquid into gas right now: a vent or an
+ * open nozzle pouring into the air, a relief line discharging water into a
+ * building, a line spraying into a vessel's vapour space. Breaks are left to
+ * `collectBreaks`, which draws them from their crack.
+ *
+ * Nothing here is a rule about which paths spray. The drawn flow is
+ *   |mdot| x (liquid share of what the path carries, by mass, from the
+ *            upstream draw composition)
+ *          x (share of the receiving opening that stands in gas, from the
+ *            downstream node's draw composition at that opening)
+ * so a line feeding a tank below its surface draws nothing, the same line
+ * draws the whole flow once the level falls below its nozzle, and it fades
+ * continuously as the surface sweeps across; a steam vent draws nothing.
+ *
+ * The spray leaves the downstream end's nozzle heading INTO that component;
+ * when the downstream side has no drawing of its own (the open air, or the
+ * container an open nozzle stands in) it leaves the upstream nozzle heading
+ * OUT of its component.
+ */
+export function collectDischarges(
+  plantState: PlantState,
+  simState: SimulationState | null,
+  view: DischargeView,
+  plantConnectionFor: (flowId: string) => Connection | undefined
+): Discharge[] {
+  if (!simState) return [];
+  const out: Discharge[] = [];
+  for (const conn of simState.flowConnections) {
+    if (conn.isBreakConnection) continue;
+    const m = conn.massFlowRate;
+    if (!(m > 0) && !(m < 0)) continue;
+
+    // The two ends as plant geometry; null = the surroundings
+    type End = { component: PlantComponent; portId: string } | null;
+    let fromEnd: End = null, toEnd: End = null;
+    if (conn.openPort) {
+      const comp = plantState.components.get(conn.openPort.componentId);
+      if (!comp) continue;
+      const end = { component: comp, portId: conn.openPort.portId };
+      // The nozzle is on the component's own node; the other end is what it stands in
+      const node = ((comp as { simNodeId?: string }).simNodeId) ?? comp.id;
+      if (conn.fromNodeId === node) fromEnd = end;
+      else if (conn.toNodeId === node) toEnd = end;
+      else continue;
+    } else {
+      const pc = plantConnectionFor(conn.id);
+      if (!pc) continue;
+      const f = plantState.components.get(pc.fromComponentId);
+      const t = plantState.components.get(pc.toComponentId);
+      fromEnd = f ? { component: f, portId: pc.fromPortId } : null;
+      toEnd = t ? { component: t, portId: pc.toPortId } : null;
+    }
+
+    const forward = m > 0;
+    const upNode = simState.flowNodes.get(forward ? conn.fromNodeId : conn.toNodeId);
+    const downNode = simState.flowNodes.get(forward ? conn.toNodeId : conn.fromNodeId);
+    if (!upNode || !downNode) continue;
+    const q = Math.abs(m);
+    const up = drawCompositionAt(upNode,
+      forward ? conn.fromElevation : conn.toElevation, q,
+      forward ? conn.fromPhaseTolerance : conn.toPhaseTolerance,
+      forward ? conn.fromOpeningHeight : conn.toOpeningHeight);
+    const liquidShare = up.wLiquid + up.wMixture;
+    if (!(liquidShare > 0)) continue;
+    const down = drawCompositionAt(downNode,
+      forward ? conn.toElevation : conn.fromElevation, q,
+      forward ? conn.toPhaseTolerance : conn.fromPhaseTolerance,
+      forward ? conn.toOpeningHeight : conn.fromOpeningHeight, undefined, false);
+    const gasShare = down.fVapor;
+    if (!(gasShare > 0)) continue;
+
+    const downEnd = forward ? toEnd : fromEnd;
+    const at = downEnd ?? (forward ? fromEnd : toEnd);
+    if (!at) continue;
+    const p = view.portScreen(at.component, at.portId);
+    const c = view.centreOf(at.component);
+    if (!p || !c) continue;
+    const angle = at === downEnd
+      ? Math.atan2(c.y - p.y, c.x - p.x)     // into the receiving component
+      : Math.atan2(p.y - c.y, p.x - c.x);    // out of the discharging one
+    const ppm = view.pxPerMeter(at.component);
+    const bore = conn.hydraulicDiameter > 0 ? conn.hydraulicDiameter : Math.sqrt(4 * conn.flowArea / Math.PI);
+    out.push({
+      origin: { x: p.x, y: p.y, angle, span: Math.max(6, 2 * bore * ppm), pxPerMeter: ppm },
+      flow: q * liquidShare * gasShare,
+      speed: up.rho > 0 && conn.flowArea > 0 ? q / (up.rho * conn.flowArea) : 0,
+      seed: hashString(conn.id),
+    });
+  }
+  return out;
+}
+
+/** Draw every discharge's spray (see collectDischarges). */
+export function drawDischarges(ctx: CanvasRenderingContext2D, discharges: Discharge[], timeMs: number): void {
+  for (const d of discharges) drawSpray(ctx, d.origin, d.flow, d.speed, true, d.seed, timeMs);
 }
 
 /** Look a resolved break up by the node that burst. */
