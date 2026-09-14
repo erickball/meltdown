@@ -525,7 +525,51 @@ export class ConstructionManager {
           flowRate: 0
         };
 
-        const pipeLength = props.length || 5;
+        // Calculate endpoint position based on length and elevation change
+        // Pipe starts at position (worldX, worldY)
+        const startElevation = props.elevation ?? 0;
+        const elevationChange = props.elevationChange ?? 0; // Height change from inlet to outlet
+        const endElevation = startElevation + elevationChange;
+
+        // A pipe laid on the grid comes with the polyline it was drawn
+        // along, and its two ENDS are that polyline's ends. A pipe from the
+        // placement dialog states its far end as an offset from its start
+        // (`endOffset`, plan metres) - it is then exactly as long as the
+        // distance between its ends. Without either the pipe runs east from
+        // its position for its length, as it always has.
+        // (`position` is the pipe's INLET END either way, which is why the
+        // grid places a pipe by cell rather than by footprint centre - see
+        // GridView.snapPlacement.)
+        const drawnRoute: Point[] | undefined =
+          Array.isArray(props.route) && props.route.length >= 2
+            ? (props.route as Point[]).map(p => ({ x: p.x, y: p.y }))
+            : undefined;
+        const endOffset = props.endOffset as Point | undefined;
+        let pipeLength: number;
+        if (endOffset) {
+          if (drawnRoute) {
+            throw new Error(`[Construction] Pipe '${id}' was given both a drawn route and an endOffset; ` +
+              `its far end can only come from one of them`);
+          }
+          pipeLength = Math.hypot(endOffset.x, endOffset.y, elevationChange);
+          if (!(pipeLength > 0)) {
+            throw new Error(`[Construction] Pipe '${id}' has no length between its ends: endOffset ` +
+              `${JSON.stringify(endOffset)}, rise ${elevationChange} m`);
+          }
+          if (props.length !== undefined && !(Math.abs(props.length - pipeLength) <= 1e-9 * pipeLength)) {
+            throw new Error(`[Construction] Pipe '${id}' was given length ${props.length} m but its ends ` +
+              `are ${pipeLength} m apart (endOffset ${JSON.stringify(endOffset)}, rise ${elevationChange} m)`);
+          }
+        } else {
+          pipeLength = props.length || 5;
+        }
+        const startPoint: Point = drawnRoute ? drawnRoute[0] : { x: worldX, y: worldY };
+        const endPoint: Point = drawnRoute
+          ? drawnRoute[drawnRoute.length - 1]
+          : endOffset
+            ? { x: worldX + endOffset.x, y: worldY + endOffset.y }
+            : { x: worldX + pipeLength, y: worldY };
+
         // Pipe ports at each end - pipe is drawn from x=0 to x=length (left edge at origin)
         const pipePorts: Port[] = [
           {
@@ -539,27 +583,6 @@ export class ConstructionManager {
             direction: 'both'
           }
         ];
-
-        // Calculate endpoint position based on length and elevation change
-        // Pipe starts at position (worldX, worldY) and extends in the +X direction
-        const startElevation = props.elevation ?? 0;
-        const elevationChange = props.elevationChange ?? 0; // Height change from inlet to outlet
-        const endElevation = startElevation + elevationChange;
-
-        // A pipe laid on the grid comes with the polyline it was drawn
-        // along, and its two ENDS are that polyline's ends. Without one the
-        // pipe runs east from its position for its length, as it always has.
-        // (`position` is the pipe's INLET END either way, which is why the
-        // grid places a pipe by cell rather than by footprint centre - see
-        // GridView.snapPlacement.)
-        const drawnRoute: Point[] | undefined =
-          Array.isArray(props.route) && props.route.length >= 2
-            ? (props.route as Point[]).map(p => ({ x: p.x, y: p.y }))
-            : undefined;
-        const startPoint: Point = drawnRoute ? drawnRoute[0] : { x: worldX, y: worldY };
-        const endPoint: Point = drawnRoute
-          ? drawnRoute[drawnRoute.length - 1]
-          : { x: worldX + pipeLength, y: worldY };
 
         const pipe: PipeComponent = {
           id,

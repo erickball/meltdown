@@ -328,16 +328,16 @@ export const componentDefinitions: Record<string, {
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false },
       // syncExempt: the model recomputes length from the endpoint positions,
       // so a typed length is only a request, not the stored value
-      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Calculated from endpoint positions when editing', syncExempt: true },
+      { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Distance between the two ends. Typing a length slides the End point along the pipe; moving either end changes the length. When editing, it is recalculated from the endpoints.', syncExempt: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.5, min: 0.05, max: 2, step: 0.05, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
       // Start endpoint (inlet)
-      { name: 'startX', type: 'number', label: 'Start X', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of inlet end' },
-      { name: 'startY', type: 'number', label: 'Start Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of inlet end' },
+      { name: 'startX', type: 'number', label: 'Start X', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of inlet end (a new pipe starts where you clicked)' },
+      { name: 'startY', type: 'number', label: 'Start Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of inlet end (a new pipe starts where you clicked)' },
       { name: 'elevation', type: 'number', label: 'Start Elevation', default: 0, min: -20, max: 100, step: 0.05, unit: 'm', help: 'Height of the inlet end\'s CENTRELINE above ground. A new pipe starts at half its diameter, resting on the ground, and follows the diameter until you type an elevation.' },
       // End endpoint (outlet)
-      { name: 'endX', type: 'number', label: 'End X', default: 10, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of outlet end' },
-      { name: 'endY', type: 'number', label: 'End Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of outlet end' },
+      { name: 'endX', type: 'number', label: 'End X', default: 10, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of outlet end (a new pipe runs east from its start by its Length)' },
+      { name: 'endY', type: 'number', label: 'End Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of outlet end (a new pipe runs east from its start by its Length)' },
       { name: 'endElevation', type: 'number', label: 'End Elevation', default: 0, min: -20, max: 100, step: 0.05, unit: 'm', help: 'Height of the outlet end\'s CENTRELINE above ground. A new pipe starts at half its diameter, resting on the ground, and follows the diameter until you type an elevation.' },
       { name: 'roughness', type: 'number', label: 'Roughness', default: 0.0001, min: 0.00001, max: 0.01, step: 0.00001, unit: 'm' },
       { name: 'initialPhase', type: 'select', label: 'Initial Phase', default: 'liquid', options: [
@@ -1967,8 +1967,97 @@ export class ComponentDialog {
 
     // Keep volume <-> diameter mutually consistent (tanks, pressurizers)
     this.setupGeometryCoupling();
-    if (this.isCreateMode && this.currentType === 'pipe') this.setupPipeRestingElevation();
+    if (this.isCreateMode && this.currentType === 'pipe') {
+      this.setupPipeEndpoints();
+      this.setupPipeRestingElevation();
+    }
     if (this.isCreateMode && this.fixedDesignId) this.lockFieldsToYardDesign();
+  }
+
+  /**
+   * A new pipe's two ends, kept in step with its Length. The start is where
+   * it was clicked and the end one Length east of it; typing a Length slides
+   * the end along the pipe's heading, and moving either end (or changing
+   * either elevation) makes the Length the distance between them. On confirm
+   * the ends are what the pipe is built from (resolvePipeEndpoints).
+   */
+  private setupPipeEndpoints(): void {
+    const field = (name: string) => document.getElementById(`option-${name}`) as HTMLInputElement | null;
+    const length = field('length'), startX = field('startX'), startY = field('startY');
+    const endX = field('endX'), endY = field('endY');
+    const startZ = field('elevation'), endZ = field('endElevation');
+    if (!length || !startX || !startY || !endX || !endY || !startZ || !endZ) {
+      throw new Error('[ComponentDialog] The pipe form is missing one of its endpoint fields ' +
+        '(length, startX, startY, endX, endY, elevation, endElevation)');
+    }
+
+    const fmt = (v: number) => String(+v.toPrecision(6));
+    const num = (input: HTMLInputElement) => parseFloat(input.value);
+    let syncing = false;
+    // Write a field and let its other listeners (price, calculated length) see it
+    const write = (input: HTMLInputElement, value: number, untouched: boolean) => {
+      syncing = true;
+      input.value = fmt(value);
+      if (untouched) input.dataset.initialValue = input.value;   // prefill, not an edit
+      input.dispatchEvent(new Event('input'));
+      syncing = false;
+    };
+
+    const endFromLength = (untouched: boolean) => {
+      const L = num(length);
+      const dz = num(endZ) - num(startZ);
+      // A length shorter than the rise cannot be laid; the end stays put and
+      // confirm reports the disagreement (resolvePipeEndpoints).
+      if (!(L * L > dz * dz)) return;
+      const plan = Math.sqrt(L * L - dz * dz);
+      const dx = num(endX) - num(startX), dy = num(endY) - num(startY);
+      const heading = Math.hypot(dx, dy);
+      const [ux, uy] = heading > 0 ? [dx / heading, dy / heading] : [1, 0];
+      write(endX, num(startX) + ux * plan, untouched);
+      write(endY, num(startY) + uy * plan, untouched);
+    };
+    const lengthFromEnds = () => {
+      write(length, Math.hypot(num(endX) - num(startX), num(endY) - num(startY), num(endZ) - num(startZ)), false);
+    };
+
+    // Start where it was clicked; the end collapses onto it, so it has no
+    // heading yet and is laid east by the Length.
+    write(startX, this.currentPosition.x, true);
+    write(startY, this.currentPosition.y, true);
+    write(endX, this.currentPosition.x, true);
+    write(endY, this.currentPosition.y, true);
+    endFromLength(true);
+
+    length.addEventListener('input', () => { if (!syncing) endFromLength(false); });
+    for (const input of [startX, startY, endX, endY, startZ, endZ]) {
+      input.addEventListener('input', () => { if (!syncing) lengthFromEnds(); });
+    }
+  }
+
+  /**
+   * Turn a new pipe's form into what construction builds it from: the start
+   * becomes the placement position, the end an offset from it plus a rise,
+   * and the length the distance between them. Returns an error when the
+   * form's Length is not the distance between its ends (the only way is a
+   * Length typed shorter than the rise, which the end cannot follow).
+   */
+  private resolvePipeEndpoints(properties: Record<string, any>): string | null {
+    const dx = properties.endX - properties.startX;
+    const dy = properties.endY - properties.startY;
+    const dz = properties.endElevation - properties.elevation;
+    const span = Math.hypot(dx, dy, dz);
+    // The Length field holds the span to 6 significant figures
+    if (!(Math.abs(properties.length - span) <= 1e-5 * span)) {
+      return `Length: ${properties.length} m cannot join the two ends, which are ` +
+        `${span.toFixed(2)} m apart with a rise of ${Math.abs(dz).toFixed(2)} m. ` +
+        `Move an end or change the Length.`;
+    }
+    this.currentPosition = { x: properties.startX, y: properties.startY };
+    properties.length = span;
+    properties.endOffset = { x: dx, y: dy };
+    properties.elevationChange = dz;
+    for (const key of ['startX', 'startY', 'endX', 'endY', 'endElevation']) delete properties[key];
+    return null;
   }
 
   /**
@@ -2841,6 +2930,15 @@ export class ComponentDialog {
       const pidError = this.validatePidConfig(properties);
       if (pidError) {
         this.showValidationError(pidError);
+        return;
+      }
+    }
+
+    // A new pipe is built from its two ends
+    if (this.isCreateMode && this.currentType === 'pipe') {
+      const endpointError = this.resolvePipeEndpoints(properties);
+      if (endpointError) {
+        this.showValidationError(endpointError);
         return;
       }
     }
