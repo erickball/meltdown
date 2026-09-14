@@ -364,8 +364,25 @@ export function nodeGasSpaceDensity(node: FlowNode, liquidVolume: number): numbe
  * exception is the BOUNDARY node - the outside air - which has no walls to
  * be outside of: its column runs to whatever elevation the opening is at,
  * above or below the terrain datum its own base sits on.
+ *
+ * An opening with a HEIGHT (a tear, a slot, a tall offtake) is answered with
+ * the MEAN of P(z) over [elev - h/2, elev + h/2], the same span the draw
+ * composition averages over. P(z) is piecewise linear, so the mean is exact:
+ * each piece integrated on its own. An opening wholly under the surface or
+ * wholly above it therefore gets exactly its centre's pressure, as a point
+ * does - the change is only where the surface cuts across the opening, and
+ * there it is what lets a tall crack keep draining until the water reaches
+ * its BOTTOM rather than stopping at its centre (flow through each strip
+ * goes as its own head, and the wetted strips still have some). The profile
+ * is continued past the node's ends rather than clipped, so an opening that
+ * overhangs the node's floor or roof does not shift its mean height and
+ * inject a head the connection's own elevation change does not balance.
  */
-export function pressureAtConnection(node: FlowNode, connectionElevation?: number): number {
+export function pressureAtConnection(
+  node: FlowNode,
+  connectionElevation?: number,
+  openingHeight?: number,
+): number {
   const g = 9.81;
   const baseP = node.fluid.pressure;
   const nodeHeight = node.height ?? Math.cbrt(node.volume);
@@ -397,6 +414,24 @@ export function pressureAtConnection(node: FlowNode, connectionElevation?: numbe
     rho_liquid = 0;
     liquidVolume = 0;
     liquidLevel = 0;
+  }
+
+  const a = openingHeight ?? 0;
+  if (a > 0) {
+    // Mean over the opening: the liquid piece below the surface and the gas
+    // piece above it, each integrated exactly (P is linear within each)
+    const lo = elev - a / 2, hi = elev + a / 2;
+    let integral = 0;
+    const liquidTop = Math.min(hi, liquidLevel);
+    if (liquidTop > lo) {
+      integral += rho_liquid * g * ((liquidLevel - lo) ** 2 - (liquidLevel - liquidTop) ** 2) / 2;
+    }
+    const gasBottom = Math.max(lo, liquidLevel);
+    if (hi > gasBottom) {
+      integral -= nodeGasSpaceDensity(node, liquidVolume) * g *
+        ((hi - liquidLevel) ** 2 - (gasBottom - liquidLevel) ** 2) / 2;
+    }
+    return baseP + integral / a;
   }
 
   if (elev < liquidLevel) return baseP + rho_liquid * g * (liquidLevel - elev);
@@ -1219,8 +1254,9 @@ export function computeConnectionHydraulics(
   // === Driving pressures ===
 
   // Pressure difference at connection points, with hydrostatic adjustment
-  const P_from = pressureAtConnection(fromNode, conn.fromElevation);
-  const P_to = pressureAtConnection(toNode, conn.toElevation);
+  // (averaged over each end's opening where it has a height)
+  const P_from = pressureAtConnection(fromNode, conn.fromElevation, conn.fromOpeningHeight);
+  const P_to = pressureAtConnection(toNode, conn.toElevation, conn.toOpeningHeight);
   const dP_pressure = P_from - P_to;
 
   // Gravity head (positive = downward flow is favored) - uses the density of

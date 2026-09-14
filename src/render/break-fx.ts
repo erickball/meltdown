@@ -11,15 +11,21 @@
  *     sits on the wall it faces and the crack runs along that wall;
  *   - an ELEVATION (2.5D) has a height, so the crack stands on the side it
  *     faces and spans its own elevations - a tear with a tall opening is a
- *     long crack, a pinhole a short one.
- * Both come from the numbers the simulation stores on the break connection:
+ *     long crack, a pinhole a short one;
+ *   - a component a view draws as a SOLID in some projection (the grid's
+ *     cut-away pool, see ObliqueFrame) has both: the crack stands on the wall
+ *     it faces, at its own elevations, in that projection.
+ * All come from the numbers the simulation stores on the break connection:
  * `breakDirection` (a plan bearing in WORLD coordinates, which each view
  * projects onto its own screen), `fromElevation` (the centre of the opening)
  * and `fromOpeningHeight`.
  *
  * The spray leaves from the part of the opening that is under water, as the
  * simulation's own draw composition has it: a tall crack in a draining pool
- * sprays from its wetted lower part, and the jet sinks with the level.
+ * sprays from its wetted lower part, and the jet sinks with the level. It is
+ * thrown at the discharge's real speed and falls under gravity, and the mass
+ * it draws is proportional to the mass flow, so a trickle drips down the wall
+ * and a stopped leak shows nothing.
  *
  * A scripted burst (a scenario action, e.g. an earthquake tearing a pool
  * liner) and a pressure burst are the same object here, because they are the
@@ -35,7 +41,17 @@ export interface ScreenBox {
   x: number; y: number; w: number; h: number;
   /** Perspective scale of the component's drawing (readout sizing). */
   scale?: number;
+  /** Screen pixels per metre at the component: the spray is thrown to physical scale. */
+  pxPerMeter: number;
 }
+
+/**
+ * How a view draws a component that it shows as a solid rather than a flat
+ * sprite (the grid's cut-away pool): (u, v, w) -> screen, with u 0..1 west to
+ * east and v 0..1 north to south across the footprint, and w 0..1 from the
+ * bottom of the node to its top.
+ */
+export type ObliqueFrame = (u: number, v: number, w: number) => { x: number; y: number };
 
 /** Where a break is and which way what comes out of it goes. */
 export interface BreakAnchor {
@@ -44,12 +60,14 @@ export interface BreakAnchor {
   y: number;
   /** Direction the discharge leaves in (radians, screen coordinates). */
   angle: number;
-  /** Characteristic size of the break in pixels; the spray scales off it. */
+  /** Characteristic size of the break in pixels; the crack's jaggedness scales off it. */
   span: number;
   /** The crack's two ends on screen. */
   crack: { x0: number; y0: number; x1: number; y1: number };
   /** Perspective scale of the component (1 when the view did not say). */
   scale: number;
+  /** Screen pixels per metre at the break. */
+  pxPerMeter: number;
 }
 
 /** One break, resolved to screen space. */
@@ -62,9 +80,23 @@ export interface BreakMark {
   fraction: number;
   /** kg/s crossing the break right now (sign = out of the component). */
   flow: number;
+  /** Mean speed of the discharge through the opening, m/s. */
+  speed: number;
   /** Whether what is coming out is liquid (a jet) or gas (a plume). */
   liquid: boolean;
   seed: number;
+}
+
+/** The opening as fractions of the node's height: `lo`..`hi` the crack, `at` where the discharge leaves. */
+type Band = { lo: number; hi: number; at: number };
+
+/**
+ * Sized by the break fraction but never smaller than a couple of pixels: a
+ * 0.02% break in a 9 m pool is a hairline, and a hairline that passes
+ * 140 kg/s still has to be visible.
+ */
+function breakSpan(box: ScreenBox, fraction: number): number {
+  return Math.max(6, Math.min(box.w, box.h) * (0.12 + 0.55 * Math.sqrt(Math.max(0, fraction))));
 }
 
 /**
@@ -79,7 +111,7 @@ export interface BreakMark {
 export function breakAnchorOn(
   box: ScreenBox,
   angle: number,
-  band: { lo: number; hi: number; at: number } | null,
+  band: Band | null,
   plan: boolean,
   fraction: number
 ): BreakAnchor {
@@ -87,11 +119,8 @@ export function breakAnchorOn(
   const cy = box.y + box.h / 2;
   const dx = Math.cos(angle), dy = Math.sin(angle);
   const scale = box.scale ?? 1;
-
-  // Sized by the break fraction but never smaller than a couple of pixels: a
-  // 0.02% break in a 9 m pool is a hairline, and a hairline that passes
-  // 140 kg/s still has to be visible.
-  const span = Math.max(6, Math.min(box.w, box.h) * (0.12 + 0.55 * Math.sqrt(Math.max(0, fraction))));
+  const pxPerMeter = box.pxPerMeter;
+  const span = breakSpan(box, fraction);
 
   if (plan) {
     // Walk out from the centre until the ray leaves the footprint: the wall
@@ -106,7 +135,7 @@ export function breakAnchorOn(
     const length = Math.max(span, band ? (band.hi - band.lo) * wall : 0);
     const nx = -dy, ny = dx;
     return {
-      x, y, angle, span, scale,
+      x, y, angle, span, scale, pxPerMeter,
       crack: { x0: x - nx * length / 2, y0: y - ny * length / 2, x1: x + nx * length / 2, y1: y + ny * length / 2 },
     };
   }
@@ -117,7 +146,7 @@ export function breakAnchorOn(
   const x = cx + dx * (box.w / 2);
   const yAt = (f: number) => box.y + (1 - Math.max(0, Math.min(1, f))) * box.h;
   if (!band) {
-    return { x, y: cy, angle, span, scale, crack: { x0: x, y0: cy - span / 2, x1: x, y1: cy + span / 2 } };
+    return { x, y: cy, angle, span, scale, pxPerMeter, crack: { x0: x, y0: cy - span / 2, x1: x, y1: cy + span / 2 } };
   }
   let y0 = yAt(band.hi), y1 = yAt(band.lo);
   // A hole with no height is still a visible crack, centred on the hole
@@ -126,7 +155,38 @@ export function breakAnchorOn(
     y0 = mid - span / 2;
     y1 = mid + span / 2;
   }
-  return { x, y: yAt(band.at), angle, span, scale, crack: { x0: x, y0, x1: x, y1 } };
+  return { x, y: yAt(band.at), angle, span, scale, pxPerMeter, crack: { x0: x, y0, x1: x, y1 } };
+}
+
+/**
+ * A break on a component drawn as a solid (see ObliqueFrame). The plan
+ * bearing picks the point on the wall the break faces, and the band its
+ * elevations on that wall, so the crack stands on the wall from the bottom of
+ * the opening to its top, in the same projection as the rest of the drawing.
+ */
+export function breakAnchorInFrame(
+  frame: ObliqueFrame,
+  box: ScreenBox,
+  angle: number,
+  bearing: number,
+  band: Band | null,
+  fraction: number
+): BreakAnchor {
+  // Walk from the plan centre along the bearing to the wall. The bearing is
+  // counter-clockwise from east with +y north; v runs north to south.
+  const bx = Math.cos(bearing), by = Math.sin(bearing);
+  const m = Math.max(Math.abs(bx), Math.abs(by));
+  const u = 0.5 + 0.5 * bx / m, v = 0.5 - 0.5 * by / m;
+  const span = breakSpan(box, fraction);
+  const b = band ?? { lo: 0.5, hi: 0.5, at: 0.5 };
+  const top = frame(u, v, b.hi), bottom = frame(u, v, b.lo), at = frame(u, v, b.at);
+  let crack = { x0: top.x, y0: top.y, x1: bottom.x, y1: bottom.y };
+  // A hole with no height is still a visible crack, centred on the hole
+  if (Math.hypot(bottom.x - top.x, bottom.y - top.y) < span) {
+    const mx = (top.x + bottom.x) / 2, my = (top.y + bottom.y) / 2;
+    crack = { x0: mx, y0: my - span / 2, x1: mx, y1: my + span / 2 };
+  }
+  return { x: at.x, y: at.y, angle, span, scale: box.scale ?? 1, pxPerMeter: box.pxPerMeter, crack };
 }
 
 /**
@@ -136,6 +196,8 @@ export function breakAnchorOn(
  * the caller is in, `plan` says whether that projection is a plan, and
  * `screenAngle` projects a world plan bearing (radians, 0 = east, π/2 =
  * north) at the component onto a direction on the caller's screen.
+ * `frameFor` hands over the projection of a component the view draws as a
+ * solid, which then decides where the crack stands instead of the box.
  * Returns an empty array when nothing has burst, so the caller can skip the
  * whole layer in the overwhelmingly common case.
  */
@@ -144,7 +206,8 @@ export function collectBreaks(
   simState: SimulationState | null,
   boundsFor: (component: PlantComponent) => ScreenBox | null,
   plan: boolean,
-  screenAngle: (component: PlantComponent, bearing: number) => number
+  screenAngle: (component: PlantComponent, bearing: number) => number,
+  frameFor?: (component: PlantComponent) => ObliqueFrame | null
 ): BreakMark[] {
   if (!simState || !simState.burstStates || simState.burstStates.size === 0) return [];
   const marks: BreakMark[] = [];
@@ -159,12 +222,23 @@ export function collectBreaks(
     const node = simState.flowNodes.get(nodeId);
     const flow = conn?.massFlowRate ?? 0;
 
+    // What the break is drawing, zone by zone up the opening (liquid at the
+    // bottom, froth, gas at the top): a jet if liquid carries the mass, a
+    // plume otherwise. Its density over the opening's area turns the mass
+    // flow into the speed the discharge leaves at.
+    const draw = conn && node
+      ? drawCompositionAt(node, conn.fromElevation, flow, conn.fromPhaseTolerance, conn.fromOpeningHeight)
+      : null;
+    const liquid = draw ? draw.wLiquid + draw.wMixture >= 0.5 : node ? node.fluid.phase !== 'vapor' : true;
+    const speed = draw && conn && draw.rho > 0 && conn.flowArea > 0
+      ? Math.abs(flow) / (draw.rho * conn.flowArea)
+      : 0;
+
     // The opening as fractions of the node's height. The break connection's
     // own `fromElevation` (the opening's centre) is the authority; a burst
     // that has not made its connection yet falls back to the absolute
     // elevation the burst state recorded.
-    let band: { lo: number; hi: number; at: number } | null = null;
-    let liquid = node ? node.fluid.phase !== 'vapor' : true;
+    let band: Band | null = null;
     if (node && node.height) {
       const H = node.height;
       const centre = conn?.fromElevation !== undefined ? conn.fromElevation
@@ -175,26 +249,26 @@ export function collectBreaks(
         const lo = Math.max(0, Math.min(H, centre - opening / 2));
         const hi = Math.max(0, Math.min(H, centre + opening / 2));
         let at = (lo + hi) / 2;
-        if (conn) {
-          // What the break is drawing, zone by zone up the opening (liquid at
-          // the bottom, froth, gas at the top): the jet leaves from the wetted
-          // part, a plume from the dry part - whichever carries the mass.
-          const draw = drawCompositionAt(node, conn.fromElevation, flow,
-            conn.fromPhaseTolerance, conn.fromOpeningHeight);
+        if (draw) {
+          // The jet leaves from the wetted part, a plume from the dry part
           const wet = (draw.fLiquid + draw.fMixture) * (hi - lo);
-          liquid = draw.wLiquid + draw.wMixture >= 0.5;
           at = liquid ? lo + wet / 2 : lo + wet + (hi - lo - wet) / 2;
         }
         band = { lo: lo / H, hi: hi / H, at: at / H };
       }
     }
     const bearing = conn?.breakDirection ?? 0;
+    const angle = screenAngle(component, bearing);
+    const frame = frameFor?.(component) ?? null;
     marks.push({
       nodeId,
       box,
-      anchor: breakAnchorOn(box, screenAngle(component, bearing), band, plan, bs.currentBreakFraction),
+      anchor: frame
+        ? breakAnchorInFrame(frame, box, angle, bearing, band, bs.currentBreakFraction)
+        : breakAnchorOn(box, angle, band, plan, bs.currentBreakFraction),
       fraction: bs.currentBreakFraction,
       flow,
+      speed,
       liquid,
       seed: bs.breakSizeSeed,
     });
@@ -262,38 +336,61 @@ export function drawCrack(ctx: CanvasRenderingContext2D, a: BreakAnchor, seed: n
   ctx.restore();
 }
 
+/** Mass flow one drawn drop stands for, kg/s. */
+const KG_PER_S_PER_DROP = 2;
+/**
+ * Most drops drawn for one break. Past this the drops fatten instead of
+ * multiplying, so the drawn mass stays proportional to the flow - a cap on
+ * drawing cost, not on what is shown.
+ */
+const MAX_DROPS = 60;
+/** How long a drop is followed after it leaves, s: a liquid jet's fall, a gas plume's dispersal. */
+const LIQUID_FLIGHT_S = 0.6;
+const GAS_FLIGHT_S = 0.25;
+const G = 9.81;
+
 /**
  * The discharge leaving a break.
  *
- * Length and density follow the flow the simulation is actually passing, so
- * a break that has run itself dry stops spraying without anything switching
- * it off, and there is no separate "is it flowing" rule to get out of step
- * with the model. `timeMs` animates it; a paused plant holds still.
+ * Everything in it is the flow the simulation is actually passing: the drawn
+ * mass (drop count, then drop size) is proportional to the mass flow, and
+ * each drop leaves at the discharge's speed and - a liquid one - falls
+ * under gravity, both at the view's own metres-to-pixels. A full-bore jet
+ * arcs out from the wall, a trickle runs down it, and a leak that has
+ * stopped draws nothing, with no switch anywhere to get out of step with the
+ * model. `timeMs` animates it.
  */
 export function drawSpray(
   ctx: CanvasRenderingContext2D,
   a: BreakAnchor,
   flow: number,
+  speed: number,
   liquid: boolean,
   seed: number,
   timeMs: number
 ): void {
   const q = Math.abs(flow);
-  if (!(q > 0.01)) return;
+  if (!(q > 0)) return;
   const t = timeMs / 1000;
   const dx = Math.cos(a.angle), dy = Math.sin(a.angle);
   const nx = -dy, ny = dx;
-  const reach = Math.min(6 * a.span, a.span * (1.2 + 2.2 * Math.log10(1 + q)));
-  const drops = Math.round(6 + 14 * Math.min(1, q / 100));
+  const drops = Math.min(MAX_DROPS, Math.ceil(q / KG_PER_S_PER_DROP));
+  // Drop AREA carries the mass each one stands for
+  const r0 = a.span * 0.12 * Math.sqrt(q / drops / KG_PER_S_PER_DROP);
+  const flight = liquid ? LIQUID_FLIGHT_S : GAS_FLIGHT_S;
+  const ppm = a.pxPerMeter;
   ctx.save();
   ctx.globalCompositeOperation = 'source-over';
   for (let k = 0; k < drops; k++) {
     const s = seed + 50 + k * 5.31;
-    const age = ((t * (0.6 + 0.5 * hash(s))) + hash(s + 1)) % 1;
-    const spread = (hash(s + 2) - 0.5) * 0.7;
-    const px = a.x + dx * reach * age + nx * reach * spread * age;
-    const py = a.y + dy * reach * age + ny * reach * spread * age;
-    const r = Math.max(1, a.span * 0.12 * (1 + 1.5 * age));
+    const age = ((t / flight) * (0.8 + 0.4 * hash(s)) + hash(s + 1)) % 1;
+    const tau = age * flight;
+    const out = speed * tau * ppm;                          // along the jet
+    const fall = liquid ? 0.5 * G * tau * tau * ppm : 0;    // down the screen
+    const spread = (hash(s + 2) - 0.5) * 0.5;
+    const px = a.x + dx * out + nx * out * spread;
+    const py = a.y + dy * out + ny * out * spread + fall;
+    const r = r0 * (1 + 1.5 * age);
     const alpha = (1 - age) * (liquid ? 0.55 : 0.35);
     ctx.fillStyle = liquid
       ? `rgba(120, 175, 220, ${alpha.toFixed(3)})`
@@ -317,7 +414,7 @@ export function drawBreaks(
 ): void {
   for (const m of marks) {
     drawCrack(ctx, m.anchor, m.seed);
-    if (m.flow > 0) drawSpray(ctx, m.anchor, m.flow, m.liquid, m.seed, timeMs);
+    if (m.flow > 0) drawSpray(ctx, m.anchor, m.flow, m.speed, m.liquid, m.seed, timeMs);
   }
 }
 

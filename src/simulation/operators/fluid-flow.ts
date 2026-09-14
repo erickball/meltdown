@@ -383,8 +383,8 @@ export class FlowOperator implements PhysicsOperator {
     //
     // This replaces the previous approach of using node.fluid.pressure directly,
     // which didn't account for where on the node the connection was located.
-    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
-    const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
+    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation, conn.fromOpeningHeight);
+    const P_to = this.getPressureAtConnection(toNode, conn.toElevation, conn.toOpeningHeight);
 
     // Base pressure difference (positive = from has higher pressure)
     // Now includes hydrostatic effects within each node
@@ -775,8 +775,8 @@ export class FlowOperator implements PhysicsOperator {
   }
 
   /** Pressure at a connection point inside a node: the shared model (connection-hydraulics). */
-  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
-    return pressureAtConnection(node, connectionElevation);
+  private getPressureAtConnection(node: FlowNode, connectionElevation?: number, openingHeight?: number): number {
+    return pressureAtConnection(node, connectionElevation, openingHeight);
   }
 
   /**

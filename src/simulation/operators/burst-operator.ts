@@ -469,7 +469,10 @@ function createBreakConnection(
       breakFraction: burstState.currentBreakFraction,
       breakDischargeCoeff: config.breakDischargeCoeff,
       breakDirection,
+      // A hole has no length, so its two faces are the same opening: both
+      // ends average over the same span (drawCompositionAt, pressureAtConnection)
       fromOpeningHeight: burstState.breakOpeningHeight,
+      toOpeningHeight: burstState.breakOpeningHeight,
     };
     state.flowConnections.push(breakConn);
   }
@@ -654,8 +657,12 @@ export function applyScriptedBurst(
       conn.flowArea = area;
       conn.hydraulicDiameter = Math.sqrt(4 * area / Math.PI);
       conn.breakFraction = burstState.currentBreakFraction;
+      // The target's end moves with it: the same point, in its own reference
+      const targetElevation = state.flowNodes.get(conn.toNodeId)?.elevation ?? 0;
       conn.fromElevation = elevation;
+      conn.toElevation = node.elevation + elevation - targetElevation;
       conn.fromOpeningHeight = spec.openingHeight;
+      conn.toOpeningHeight = spec.openingHeight;
       if (direction !== undefined) conn.breakDirection = direction;
     }
   } else {
@@ -665,6 +672,7 @@ export function applyScriptedBurst(
     // it the same way every other offtake does.
     if (conn) {
       conn.fromOpeningHeight = spec.openingHeight;
+      conn.toOpeningHeight = spec.openingHeight;
       if (direction !== undefined) conn.breakDirection = direction;
     }
   }

@@ -161,8 +161,8 @@ function formatDensity(rho: number): string {
 }
 
 /** Pressure at a connection point: the same model the flow solver uses. */
-function getPressureAtConnectionDebug(node: FlowNode, connectionElevation?: number): number {
-  return pressureAtConnection(node, connectionElevation);
+function getPressureAtConnectionDebug(node: FlowNode, connectionElevation?: number, openingHeight?: number): number {
+  return pressureAtConnection(node, connectionElevation, openingHeight);
 }
 
 /** Pressure solver status for debug panel display */
@@ -580,8 +580,8 @@ export function updateDebugPanel(
       // Get node pressures for ΔP display (including hydrostatic at connection elevation)
       const fromNode = state.flowNodes.get(conn.fromNodeId);
       const toNode = state.flowNodes.get(conn.toNodeId);
-      const P_from = fromNode ? getPressureAtConnectionDebug(fromNode, conn.fromElevation) / 1e5 : 0;
-      const P_to = toNode ? getPressureAtConnectionDebug(toNode, conn.toElevation) / 1e5 : 0;
+      const P_from = fromNode ? getPressureAtConnectionDebug(fromNode, conn.fromElevation, conn.fromOpeningHeight) / 1e5 : 0;
+      const P_to = toNode ? getPressureAtConnectionDebug(toNode, conn.toElevation, conn.toOpeningHeight) / 1e5 : 0;
       const dP = P_from - P_to;
 
       // Show flow phase indicator with color
@@ -1997,6 +1997,21 @@ export function updateComponentDetail(
       html += '<div class="detail-section">';
       html += '<div class="detail-section-title">Flow Connections</div>';
 
+      // A break is a flow path the simulation opened, not one the design
+      // has, so it gets a marker instead of the Edit / Del buttons
+      const breakBadge = `<span style="float: right; color: #fff; background: #a33; font-size: 9px; font-weight: bold; padding: 1px 5px; border-radius: 2px;" title="A break in this component's pressure boundary - a rupture, or a scripted tear - open to whatever surrounds it (the open air if nothing does). It belongs to the running simulation, not the design, so it cannot be edited or deleted here; the Scripted Break section below moves or enlarges it.">BREAK</span>`;
+      const connButtons = (conn: typeof simState.flowConnections[0]) =>
+        `<button class="delete-connection-btn" data-from="${conn.fromNodeId}" data-to="${conn.toNodeId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>` +
+        `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+      // Where the connection meets this component: a height, or the span of
+      // an opening that has one
+      const elevLabel = (rel: number, opening: number | undefined) => {
+        const h = opening ?? 0;
+        if (!(h > 0)) return `@ ${rel.toFixed(1)}m rel (${(componentElev + rel).toFixed(1)}m abs)`;
+        const lo = rel - h / 2, hi = rel + h / 2;
+        return `@ ${lo.toFixed(1)}–${hi.toFixed(1)}m rel (${(componentElev + lo).toFixed(1)}–${(componentElev + hi).toFixed(1)}m abs)`;
+      };
+
       for (const { conn, isInternal, isFrom } of flowConnections) {
         const fromNode = simState.flowNodes.get(conn.fromNodeId);
         const toNode = simState.flowNodes.get(conn.toNodeId);
@@ -2009,15 +2024,14 @@ export function updateComponentDetail(
           const connElev = conn.fromElevation ?? conn.toElevation;
           let elevStr = '';
           if (connElev !== undefined) {
-            elevStr = `@ ${connElev.toFixed(1)}m rel (${(componentElev + connElev).toFixed(1)}m abs)`;
+            elevStr = elevLabel(connElev, conn.fromElevation !== undefined ? conn.fromOpeningHeight : conn.toOpeningHeight);
           }
           const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
           const flowPhase = upstreamNode?.fluid.phase || 'unknown';
 
-          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(150,150,255,0.1); border-radius: 3px;">`;
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: ${conn.isBreakConnection ? 'rgba(255,90,90,0.12)' : 'rgba(150,150,255,0.1)'}; border-radius: 3px;">`;
           html += `<span style="color: #888;">Internal:</span> <span style="color: #9af;">${fromName} ${arrowDir} ${toName}</span>`;
-          html += `<button class="delete-connection-btn" data-from="${conn.fromNodeId}" data-to="${conn.toNodeId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
-          html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += conn.isBreakConnection ? `${breakBadge}<br>` : connButtons(conn);
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
@@ -2029,15 +2043,14 @@ export function updateComponentDetail(
           const relElev = isFrom ? conn.fromElevation : conn.toElevation;
           let elevStr = '';
           if (relElev !== undefined) {
-            elevStr = `@ ${relElev.toFixed(1)}m rel (${(componentElev + relElev).toFixed(1)}m abs)`;
+            elevStr = elevLabel(relElev, isFrom ? conn.fromOpeningHeight : conn.toOpeningHeight);
           }
           const upstreamNode = simState.flowNodes.get(actualFlow >= 0 ? conn.fromNodeId : conn.toNodeId);
           const flowPhase = upstreamNode?.fluid.phase || 'unknown';
 
-          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: rgba(255,255,255,0.05); border-radius: 3px;">`;
+          html += `<div style="font-size: 10px; margin: 4px 0; padding: 3px; background: ${conn.isBreakConnection ? 'rgba(255,90,90,0.12)' : 'rgba(255,255,255,0.05)'}; border-radius: 3px;">`;
           html += `<span style="color: ${flowColor};">${arrowDir}</span> ${otherName}`;
-          html += `<button class="delete-connection-btn" data-from="${conn.fromNodeId}" data-to="${conn.toNodeId}" style="float: right; font-size: 9px; padding: 1px 4px; background: #644; border: none; color: #aaa; cursor: pointer; border-radius: 2px; margin-left: 4px;">Del</button>`;
-          html += `<button class="edit-connection-btn" data-conn-id="${conn.id}" style="float: right; font-size: 9px; padding: 1px 4px; background: #456; border: none; color: #aaa; cursor: pointer; border-radius: 2px;">Edit</button><br>`;
+          html += conn.isBreakConnection ? `${breakBadge}<br>` : connButtons(conn);
           html += `<span style="color: #888; margin-left: 12px;">${Math.abs(actualFlow).toFixed(1)} kg/s ${flowPhase}`;
           if (elevStr) html += `<br><span style="color: #6a8;">${elevStr}</span>`;
           html += `<br>Area: ${parseFloat(conn.flowArea.toFixed(4))} m²</span></div>`;
@@ -2354,6 +2367,8 @@ interface BreakDraft {
   openingHeight: string;
   when: 'now' | 'at';
   time: string;
+  /** Node whose open break the fields were last filled from (see renderScriptedBreakSection). */
+  seededFrom?: string;
 }
 const breakDrafts = new Map<string, BreakDraft>();
 const breakSectionsOpen = new Set<string>();
@@ -2371,13 +2386,17 @@ export function setScriptedBreakCallbacks(
 }
 
 function breakBoundaries(componentId: string, simState: SimulationState) {
-  const out: Array<{ nodeId: string; label: string; isBurst: boolean; fraction: number; elevation?: number }> = [];
+  const out: Array<{
+    nodeId: string; label: string; isBurst: boolean; fraction: number;
+    elevation?: number; openingHeight?: number;
+  }> = [];
   for (const bs of simState.burstStates?.values() ?? []) {
     if (bs.componentId !== componentId) continue;
     if (!simState.flowNodes.has(bs.nodeId)) continue;
     out.push({
       nodeId: bs.nodeId, label: bs.componentLabel, isBurst: bs.isBurst,
       fraction: bs.currentBreakFraction, elevation: bs.breakElevation,
+      openingHeight: bs.breakOpeningHeight,
     });
   }
   return out;
@@ -2386,12 +2405,17 @@ function breakBoundaries(componentId: string, simState: SimulationState) {
 /** Scheduled (not yet fired) scripted bursts on any of these nodes, with their index in the running scenario. */
 function scheduledBreaks(nodeIds: string[], simState: SimulationState) {
   const sc = simState.scenario;
-  const out: Array<{ index: number; time: number; nodeId: string; area?: number; elevation?: number }> = [];
+  const out: Array<{
+    index: number; time: number; nodeId: string; area?: number; elevation?: number; openingHeight?: number;
+  }> = [];
   if (!sc) return out;
   for (let i = sc.fired; i < sc.events.length; i++) {
     for (const a of sc.events[i].actions) {
       if (a.kind === 'burst' && nodeIds.includes(a.id)) {
-        out.push({ index: i, time: sc.events[i].time, nodeId: a.id, area: a.area, elevation: a.elevation });
+        out.push({
+          index: i, time: sc.events[i].time, nodeId: a.id, area: a.area,
+          elevation: a.elevation, openingHeight: a.openingHeight,
+        });
       }
     }
   }
@@ -2417,6 +2441,17 @@ function renderScriptedBreakSection(componentId: string, simState: SimulationSta
   }
   const chosen = boundaries.find(b => b.nodeId === draft!.nodeId)!;
   const node = simState.flowNodes.get(chosen.nodeId)!;
+  // An open break fills the fields with ITS size and place, once - a form
+  // made before it opened would otherwise go on offering the defaults
+  // ("tear height 0" beside a 10 m tear). After that, what is typed stays.
+  if (chosen.isBurst && draft.seededFrom !== chosen.nodeId) {
+    draft.areaCm2 = String(parseFloat((node.flowArea * chosen.fraction * 1e4).toPrecision(4)));
+    if (chosen.elevation !== undefined) {
+      draft.elevation = String(parseFloat((chosen.elevation - node.elevation).toFixed(2)));
+    }
+    draft.openingHeight = String(parseFloat((chosen.openingHeight ?? 0).toFixed(2)));
+    draft.seededFrom = chosen.nodeId;
+  }
   const inputStyle = 'width: 70px; background: #223; color: #ddd; border: 1px solid #445; border-radius: 3px; padding: 2px 4px;';
 
   let html = `<details id="break-section" class="detail-section"${breakSectionsOpen.has(componentId) ? ' open' : ''}>`;
@@ -2430,14 +2465,18 @@ function renderScriptedBreakSection(componentId: string, simState: SimulationSta
   }
   if (chosen.isBurst) {
     const area = node.flowArea * chosen.fraction;
-    const at = chosen.elevation !== undefined ? ` at ${(chosen.elevation - node.elevation).toFixed(1)} m` : '';
+    const open = chosen.openingHeight ?? 0;
+    const rel = chosen.elevation !== undefined ? chosen.elevation - node.elevation : undefined;
+    const at = rel === undefined ? ''
+      : open > 0 ? `, ${(rel - open / 2).toFixed(1)}–${(rel + open / 2).toFixed(1)} m up`
+      : ` at ${rel.toFixed(1)} m`;
     html += `<div class="detail-row" style="color: #f96; font-size: 10px;" title="Breaking it again moves and resizes the existing hole (a hole never shrinks).">Already open: ${(area * 1e4).toFixed(1)} cm²${at}</div>`;
   }
 
   html += `<div class="detail-row"><span class="detail-label" title="Area of the hole. For scale: a 19 mm tube severed clean through leaks from both ends, about 4 cm²; a 30 cm pipe guillotined through, about 1400 cm².">Area (cm²):</span>` +
     `<input id="break-area" type="number" min="0" step="any" value="${draft.areaCm2}" style="${inputStyle}"></div>`;
   html += `<div class="detail-row" style="color: #8899aa; font-size: 10px;" id="break-area-note">${breakAreaNote(parseFloat(draft.areaCm2), node.flowArea)}</div>`;
-  html += `<div class="detail-row"><span class="detail-label" title="Height of the hole above the bottom of this boundary - the CENTRE of the opening when it has a tear height. Low on a vessel, liquid pours out; high up, vapour or gas escapes. NB the pressure driving the leak is taken at this one height, so a tall tear stops draining once the level falls to its centre.">Elevation (m):</span>` +
+  html += `<div class="detail-row"><span class="detail-label" title="Height of the hole above the bottom of this boundary - the CENTRE of the opening when it has a tear height. Low on a vessel, liquid pours out; high up, vapour or gas escapes. A tall tear is driven by the pressure difference averaged over its height, so it keeps draining until the level reaches its bottom.">Elevation (m):</span>` +
     `<input id="break-elevation" type="number" step="any" value="${draft.elevation}" style="${inputStyle}">` +
     `<span style="color: #8899aa; font-size: 10px; margin-left: 4px;">of ${(node.height ?? 0).toFixed(1)} m</span></div>`;
   html += `<div class="detail-row"><span class="detail-label" title="Vertical extent of the opening (a tear rather than a hole), centred on the elevation above. A tall tear draws a blend of whatever stands across it, so the leak crossfades from liquid to vapour as the level sweeps past. 0 = a hole at one height.">Tear height (m):</span>` +
@@ -2454,7 +2493,8 @@ function renderScriptedBreakSection(componentId: string, simState: SimulationSta
     const label = boundaries.find(b => b.nodeId === s.nodeId)?.label ?? s.nodeId;
     const size = s.area !== undefined ? `${(s.area * 1e4).toFixed(1)} cm²` : 'break';
     html += `<div class="detail-row" style="font-size: 10px; align-items: center;">` +
-      `<span style="flex: 1;">t = ${s.time.toFixed(0)} s: ${size} in ${label} at ${(s.elevation ?? 0).toFixed(1)} m</span>` +
+      `<span style="flex: 1;">t = ${s.time.toFixed(0)} s: ${size} in ${label} at ${(s.elevation ?? 0).toFixed(1)} m` +
+      `${(s.openingHeight ?? 0) > 0 ? `, ${(s.openingHeight as number).toFixed(1)} m tall` : ''}</span>` +
       `<button class="break-cancel-btn" data-index="${s.index}" style="background: #445; color: #fff; border: none; padding: 1px 6px; border-radius: 3px; cursor: pointer;" title="Cancel this scheduled break (removes it from the plant's scenario)">&#10005;</button></div>`;
   }
   html += '</details>';
