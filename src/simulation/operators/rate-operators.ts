@@ -2698,8 +2698,8 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
   name = 'FlowDynamics';
 
   /** Pressure at a connection point inside a node: the shared model (connection-hydraulics). */
-  private getPressureAtConnection(node: FlowNode, connectionElevation?: number): number {
-    return pressureAtConnection(node, connectionElevation);
+  private getPressureAtConnection(node: FlowNode, connectionElevation?: number, openingHeight?: number): number {
+    return pressureAtConnection(node, connectionElevation, openingHeight);
   }
 
   applyConstraints(state: SimulationState): SimulationState {
@@ -2760,8 +2760,8 @@ export class FlowDynamicsConstraintOperator implements ConstraintOperator {
     state: SimulationState
   ): number {
     // Pressure difference with hydrostatic adjustment at connection points
-    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation);
-    const P_to = this.getPressureAtConnection(toNode, conn.toElevation);
+    const P_from = this.getPressureAtConnection(fromNode, conn.fromElevation, conn.fromOpeningHeight);
+    const P_to = this.getPressureAtConnection(toNode, conn.toElevation, conn.toOpeningHeight);
     const dP_pressure = P_from - P_to;
 
     // Gravity head

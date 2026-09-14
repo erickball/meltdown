@@ -1631,6 +1631,41 @@ export class GridView {
   }
 
   /**
+   * The cut-away pool's oblique frame (see renderPool), shared with anything
+   * that has to land on the drawing - a break stands on the wall it faces,
+   * at its own elevations. Null when the footprint is too small to draw.
+   */
+  private poolFrame(pool: PoolComponent) {
+    const rect = footprintRect(pool.position, componentFootprint(pool));
+    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
+    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
+    const W = br.x - tl.x, H = br.y - tl.y;
+    if (!(W > 2 && H > 2)) return null;
+    // SH is how far the far edge slides west of the near edge, Hz the drawn
+    // height of the wall and Dy what is left of the footprint for the floor.
+    // Hz + Dy = H and the shear is taken out of W, so the whole box lands
+    // inside the footprint whatever its aspect.
+    const SH = W * 0.12;
+    const Hz = H * 0.42;
+    const Dy = H - Hz;
+    const P = (u: number, v: number, w: number): Point => ({
+      x: tl.x + u * (W - SH) + v * SH,
+      y: tl.y + Hz + v * Dy - w * Hz,
+    });
+    return { tl, br, W, H, SH, Hz, Dy, P };
+  }
+
+  /**
+   * The projection of a component this view draws as a solid rather than a
+   * flat sprite, as (u, v, w) -> screen (break-fx's ObliqueFrame); null for
+   * everything drawn flat.
+   */
+  obliqueFrame(component: PlantComponent): ((u: number, v: number, w: number) => Point) | null {
+    if (component.type !== 'pool') return null;
+    return this.poolFrame(component as PoolComponent)?.P ?? null;
+  }
+
+  /**
    * A spent-fuel pool as a cut-away three-quarter view.
    *
    * A pool is read as ONE question - is there water over the fuel - and a
@@ -1661,11 +1696,9 @@ export class GridView {
    * cannot drift apart.
    */
   private renderPool(ctx: CanvasRenderingContext2D, pool: PoolComponent, f: GridFrameState): void {
-    const rect = footprintRect(pool.position, componentFootprint(pool));
-    const tl = this.worldToScreen({ x: rect.x0, y: rect.y1 });
-    const br = this.worldToScreen({ x: rect.x1, y: rect.y0 });
-    const W = br.x - tl.x, H = br.y - tl.y;
-    if (!(W > 2 && H > 2)) return;
+    const frame = this.poolFrame(pool);
+    if (!frame) return;
+    const { tl, br, W, H, SH, Hz, Dy, P } = frame;
     // The coping is the real wall thickness, but a thick wall on a small
     // basin would swamp the picture, so it stops at a sixth of the opening.
     // The deck around the opening is the real wall thickness, as a fraction
@@ -1679,18 +1712,6 @@ export class GridView {
     const r = poolReadout(pool, f.simState, !f.constructionMode);
     const lf = Math.max(0, Math.min(1, r.level / Math.max(r.depth, 1e-6)));
 
-    // --- the oblique frame -------------------------------------------------
-    // SH is how far the far edge slides west of the near edge, Hz the drawn
-    // height of the wall and Dy what is left of the footprint for the floor.
-    // Hz + Dy = H and the shear is taken out of W, so the whole box lands
-    // inside the footprint whatever its aspect.
-    const SH = W * 0.12;
-    const Hz = H * 0.42;
-    const Dy = H - Hz;
-    const P = (u: number, v: number, w: number): Point => ({
-      x: tl.x + u * (W - SH) + v * SH,
-      y: tl.y + Hz + v * Dy - w * Hz,
-    });
     const poly = (pts: Point[]) => {
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);

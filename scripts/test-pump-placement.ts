@@ -23,7 +23,8 @@
 import { test, assert, report, buildSimFromPlantJson, run, flowRate } from './lib/sim-harness';
 import { saturationPressure } from '../src/simulation/water-properties';
 import { cellAt } from '../src/simulation/terrain';
-import { nodeLiquidLevelFraction } from '../src/simulation';
+import { nodeLiquidLevelFraction, nodeLiquidLevel } from '../src/simulation';
+import { pressureAtConnection } from '../src/simulation/operators/connection-hydraulics';
 import { waveCasualties, washAwayElevation } from '../src/simulation/wave-casualties';
 import { serializePlantDesign, deserializePlantDesign } from '../src/simulation/serialization';
 import { getStock, spend, chargeForComponent } from '../src/game/stock';
@@ -425,6 +426,36 @@ test('A scripted burst faces the bearing it is given', () => {
   assert(Math.abs(Math.cos(brk.breakDirection!) + 1) < 1e-9 && Math.abs(Math.sin(brk.breakDirection!)) < 1e-9,
     `a west-facing break points along -x, got ${brk.breakDirection}`);
   assert(brk.fromElevation === 2 && brk.fromOpeningHeight === 2, 'centred 2 m up, 2 m tall');
+  assert(brk.toOpeningHeight === 2, 'a hole has no length: the outside face is the same 2 m opening');
+});
+
+test('A tall crack keeps draining below its centre, down to its bottom', () => {
+  // Half full (3 m of 6 m), torn from 1 m to 6 m: the centre, 3.5 m, is in
+  // the AIR. Driven at its centre the crack would sit there dead; averaged
+  // over its height, the 2 m of wetted crack still has head.
+  const sim = buildSimFromPlantJson({ components: [tank('t', 30, 0.5)], connections: [], terrain });
+  const t = sim.state.flowNodes.get('t')!;
+  const level0 = nodeLiquidLevel(t);
+
+  // The averaging is exact where nothing changes: an opening wholly under
+  // the surface, or wholly above it, is its centre's pressure
+  const under = pressureAtConnection(t, level0 / 2, level0 / 2);
+  const underPoint = pressureAtConnection(t, level0 / 2);
+  assert(Math.abs(under - underPoint) < 1e-6 * underPoint,
+    `a submerged opening averages to its centre: ${under} vs ${underPoint}`);
+  const above = pressureAtConnection(t, (level0 + 6) / 2, 1);
+  const abovePoint = pressureAtConnection(t, (level0 + 6) / 2);
+  assert(Math.abs(above - abovePoint) < 1e-6 * abovePoint,
+    `an opening in the gas averages to its centre: ${above} vs ${abovePoint}`);
+
+  applyScriptedBurst(sim.state, 't', { area: 0.01, elevation: 3.5, openingHeight: 5, bearing: 270 });
+  run(sim, 60, 0.02);
+  const brk = sim.state.flowConnections.find(c => c.id === 'break-t')!;
+  const level1 = nodeLiquidLevel(sim.state.flowNodes.get('t')!);
+  console.log(`    level ${level0.toFixed(3)} -> ${level1.toFixed(3)} m, leaking ${brk.massFlowRate.toFixed(2)} kg/s`);
+  assert(level0 < 3.5, `the test needs the surface below the crack's centre, got ${level0.toFixed(2)} m`);
+  assert(brk.massFlowRate > 1, `the wetted part of the crack should drain, got ${brk.massFlowRate.toFixed(2)} kg/s`);
+  assert(level1 < level0 - 0.02, `and the level fall, ${level0.toFixed(3)} -> ${level1.toFixed(3)} m`);
 });
 
 report('Pump placement');

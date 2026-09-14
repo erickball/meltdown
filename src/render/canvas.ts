@@ -845,11 +845,28 @@ export class PlantCanvas {
    * anchors.
    */
   private currentBreaks() {
+    // Screen length of one metre across the plan at the component - the
+    // spray is thrown at the jet's real speed, so it needs the view's scale
+    const pxPerMeter = (comp: PlantComponent): number => {
+      const p = comp.position;
+      const q = { x: p.x + 1, y: p.y };
+      const elev = comp.elevation ?? 0;
+      const a = this.viewMode === 'grid' ? this.grid.worldToScreen(p) : this.worldToScreenPerspective(p, elev).pos;
+      const b = this.viewMode === 'grid' ? this.grid.worldToScreen(q) : this.worldToScreenPerspective(q, elev).pos;
+      return Math.hypot(b.x - a.x, b.y - a.y);
+    };
     const boundsFor = (comp: PlantComponent): ScreenBox | null => {
       const b = this.getComponentScreenBounds(comp);
       if (!b || b.width === undefined || b.height === undefined) return null;
-      return { x: b.topCenter.x - b.width / 2, y: b.topCenter.y, w: b.width, h: b.height, scale: b.scale };
+      return {
+        x: b.topCenter.x - b.width / 2, y: b.topCenter.y, w: b.width, h: b.height,
+        scale: b.scale, pxPerMeter: pxPerMeter(comp),
+      };
     };
+    // A component the grid draws as a cut-away (the pool) has a height on
+    // screen after all: its break stands on the wall in that projection
+    const frameFor = (comp: PlantComponent) =>
+      this.viewMode === 'grid' ? this.grid.obliqueFrame(comp) : null;
     const screenAngle = (comp: PlantComponent, bearing: number): number => {
       const p = comp.position;
       const q = { x: p.x + Math.cos(bearing), y: p.y + Math.sin(bearing) };
@@ -858,7 +875,7 @@ export class PlantCanvas {
       const b = this.viewMode === 'grid' ? this.grid.worldToScreen(q) : this.worldToScreenPerspective(q, elev).pos;
       return Math.atan2(b.y - a.y, b.x - a.x);
     };
-    return collectBreaks(this.plantState, this.simState, boundsFor, this.viewMode === 'grid', screenAngle);
+    return collectBreaks(this.plantState, this.simState, boundsFor, this.viewMode === 'grid', screenAngle, frameFor);
   }
 
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
