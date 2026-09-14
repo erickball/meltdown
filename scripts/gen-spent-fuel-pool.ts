@@ -281,6 +281,8 @@ const RACK_HEIGHT = 3.66;
 /** Vapour pressures (Pa) at the initial temperatures, IAPWS to 4 figures. */
 const PSAT_45C = 9593;
 const PSAT_15C = 1706;
+/** The site's outside air (15 C), written into the plant's `ambient`. */
+const AMBIENT_K = 288.15;
 const PSAT_12C = 1403;
 
 /**
@@ -368,7 +370,7 @@ const components: Array<[string, Record<string, unknown>]> = [
       { id: 'tank-a-out', position: { x: 7, y: 0 }, direction: 'both' },
       { id: 'tank-a-vent', position: { x: 0, y: -3.5 }, direction: 'both' },
     ],
-    fluid: { temperature: 288.15, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
+    fluid: { temperature: AMBIENT_K, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     initialNcg: { N2: 0.786, O2: 0.210 },
   }],
   ['tank-b', {
@@ -381,7 +383,7 @@ const components: Array<[string, Record<string, unknown>]> = [
       { id: 'tank-b-out', position: { x: 5, y: 0 }, direction: 'both' },
       { id: 'tank-b-vent', position: { x: 0, y: -3 }, direction: 'both' },
     ],
-    fluid: { temperature: 288.15, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
+    fluid: { temperature: AMBIENT_K, pressure: PSAT_15C, phase: 'two-phase', quality: 0.0001, flowRate: 0 },
     initialNcg: { N2: 0.786, O2: 0.210 },
   }],
 
@@ -667,7 +669,13 @@ if (problems.length > 0) {
 
 // ---------------------------------------------------------------------------
 
-const plant = { components, connections, terrain, scenario };
+// The night air on the bench. The storage tanks are seeded at this same
+// temperature, so they start in equilibrium with the air their walls see;
+// with the model's 20 C default instead, each tank took 4-7 kW through its
+// shell from the moment the level loaded.
+const ambient = { temperature: AMBIENT_K };
+
+const plant = { components, connections, terrain, scenario, ambient };
 
 fs.writeFileSync(OUT, JSON.stringify(plant, null, 1).replace(/\n/g, '\r\n') + '\r\n');
 const hMin = Math.min(...heights), hMax = Math.max(...heights);

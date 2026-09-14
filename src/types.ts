@@ -955,6 +955,17 @@ export interface BatteryComponent extends ComponentBase {
  * Plant-wide switch for the electrical model. Off (or absent) is every plant
  * before it existed: every pump, valve and controller simply works.
  */
+/**
+ * The outside air a plant stands in: what the `atmosphere` boundary node is
+ * made of (the far side of every uncontained wall, every vent and every
+ * rupture), and what a dry pump or a dry run is filled with. Total pressure
+ * is always 1 atm at the terrain datum.
+ */
+export interface AmbientSettings {
+  temperature: number;          // K
+  relativeHumidity?: number;    // 0..1, default 0.5
+}
+
 export interface ElectricalSettings {
   enabled: boolean;
 }
@@ -994,6 +1005,8 @@ export interface PlantState {
   terrain?: TerrainSpec;
   // Optional electrical power model. Off/absent = everything is powered.
   electrical?: ElectricalSettings;
+  // Optional outside air. Absent = the default 20 C, 50% RH (see ambientAir).
+  ambient?: AmbientSettings;
   simTime: number;
   simSpeed: number;
   isPaused: boolean;

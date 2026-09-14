@@ -38,7 +38,7 @@ import {
   H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM,
 } from './otsg';
 import * as Water from './water-properties';
-import { PlantState, PlantComponent, Connection, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface,
+import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface,
   PumpComponent, ValveComponent, pumpMotorElevation, pumpVisualHeight, valveVisualHeight } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
@@ -768,6 +768,8 @@ export function createDemoReactor(): SimulationState {
  * local ground". Set for the duration of createSimulationFromPlant.
  */
 let buildTerrain: TerrainSpec | undefined;
+/** The plant being built's outside air (PlantState.ambient), for ambientAir. */
+let buildAmbient: AmbientSettings | undefined;
 
 function absoluteBase(component: { position: { x: number; y: number }; elevation?: number } | PlantComponent): number {
   return terrainHeightAt(buildTerrain, component.position) + ((component as any).elevation || 0);
@@ -903,6 +905,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
   const plantState = withoutUnbuiltParts(plantStateIn);
   const state = createSimulationState();
   buildTerrain = plantState.terrain;
+  buildAmbient = plantState.ambient;
   if (plantState.terrain) {
     state.terrain = buildTerrainModel(plantState.terrain);
     state.surfaceWater = createSurfaceWaterState(state.terrain);
@@ -2309,7 +2312,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // pump: its own head on that air is a few hundred pascals, so it
       // fills only if the suction floods it.
       const dry = pump.initialFill === 'dry';
-      const air = dry ? ambientAir() : null;
+      const air = dry ? ambientAir(buildAmbient) : null;
       const pumpPhase = dry || pump.fluid?.phase === 'vapor' ? 'vapor' : 'liquid';
       const temp = air ? air.temperature : (pump.fluid?.temperature || 350);
       const pressure = air ? air.steamPressure : Math.max(pump.fluid?.pressure ?? 1e6, MIN_STEAM_PRESSURE_PA);
@@ -5142,10 +5145,26 @@ function createMcciNodes(plantState: PlantState, state: SimulationState): void {
  * pressure plus dry-air partial pressures (bar). The environment node is made
  * of this, and so is anything built open to it (a dry pump casing).
  */
-export function ambientAir(): { temperature: number; steamPressure: number; ncg: NcgPartialPressures } {
-  const T_AMBIENT = 293.15;             // K (20 °C)
+/** Outside air when a plant states none (PlantState.ambient absent). */
+export const DEFAULT_AMBIENT_K = 293.15;      // 20 C
+export const DEFAULT_AMBIENT_RH = 0.5;
+
+export function ambientAir(
+  ambient?: AmbientSettings,
+): { temperature: number; steamPressure: number; ncg: NcgPartialPressures } {
+  // The plant's own outside air when it states one (a level set on a cool
+  // night), else the default. Everything that means "the outside" reads this
+  // one function, so a tank seeded at the site's air temperature is in
+  // equilibrium with the air its walls actually see.
+  const T_AMBIENT = ambient?.temperature ?? DEFAULT_AMBIENT_K;
   const P_AMBIENT = 101325;             // Pa (1 atm total)
-  const RELATIVE_HUMIDITY = 0.5;
+  const RELATIVE_HUMIDITY = ambient?.relativeHumidity ?? DEFAULT_AMBIENT_RH;
+  if (!(T_AMBIENT > 0) || !Number.isFinite(T_AMBIENT)) {
+    throw new Error(`[Factory] Ambient air temperature must be a positive number of kelvin, got ${T_AMBIENT}`);
+  }
+  if (!(RELATIVE_HUMIDITY >= 0 && RELATIVE_HUMIDITY <= 1)) {
+    throw new Error(`[Factory] Ambient relative humidity must be between 0 and 1, got ${RELATIVE_HUMIDITY}`);
+  }
   const P_steam = Water.saturationPressure(T_AMBIENT) * RELATIVE_HUMIDITY;
   const P_dryAir = P_AMBIENT - P_steam;
   // Dry-air mole fractions (N2 / O2 / Ar make up 99.96% of it), RENORMALISED
@@ -5393,7 +5412,7 @@ function fitPumpDischargeChecks(plantState: PlantState, state: SimulationState):
 
 function createAtmosphereNode(): FlowNode {
   const volume = 1e12;                  // Effectively infinite
-  const air = ambientAir();
+  const air = ambientAir(buildAmbient);
   return {
     id: ENVIRONMENT_NODE_ID,
     label: 'Atmosphere',

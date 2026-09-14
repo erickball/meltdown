@@ -106,7 +106,14 @@ function checkUntouchedCarriedOver(
     if (owned(id)) continue;
     nodes++;
     const now = after.flowNodes.get(id);
-    if (now !== node) {
+    // A boundary node (the atmosphere) is rebuilt from the design rather than
+    // carried over - that is how an edit of PlantState.ambient reaches it -
+    // so it only has to hold the same air
+    const same = node.isBoundary
+      ? !!now && now.fluid.temperature === node.fluid.temperature &&
+        now.fluid.pressure === node.fluid.pressure && now.fluid.mass === node.fluid.mass
+      : now === node;
+    if (!same) {
       nodeFails++;
       if (nodeFails <= 5) {
         console.error(`    node '${id}' ${now ? 'was re-initialized' : 'disappeared'}`);

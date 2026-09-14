@@ -106,6 +106,14 @@
           <button id="electrical-autowire-btn" class="mode-btn" style="display: none; margin-top: 4px; font-size: 11px;"
                   title="Connect every part that needs power and has no supply to the nearest supply of the right voltage (network pieces first, then loads). Parts with no compatible supply anywhere are left unwired - check their panels.">Auto-wire unpowered parts</button>
         </div>
+        <div id="ambient-controls" style="margin: 0 0 8px; font-size: 11px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;"
+             title="The outside air around THIS plant (saved with it): the far side of every wall that is not inside a building, what vents and ruptures discharge into, and what a pump delivered dry is full of. Always 1 atm. Tanks and pipes are NOT filled at this temperature - set their own temperatures to match if they should start in equilibrium with the air.">
+          <span>Outside air</span>
+          <input type="number" id="ambient-temperature-input" step="1" style="width: 4.5em;"
+                 title="Outside air temperature in degrees C (default 20)." /> &deg;C
+          <input type="number" id="ambient-humidity-input" min="0" max="100" step="5" style="width: 4em;"
+                 title="Outside air relative humidity in percent (default 50). Sets how much steam the air carries, which is what a cold wall can condense out of it." /> % RH
+        </div>
         <div class="component-categories"
              title="Pick a component, then click the site to place it. This works while the plant is running too: the new component starts from its own initial conditions and everything already running carries straight on at the same simulated time. The rewind history is kept: rewinding past the edit shows the plant as it was before it.">
           <details open id="yard-palette-group" style="display: none;">

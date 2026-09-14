@@ -136,6 +136,7 @@ export function buildSimFromPlantJson(
     scenario?: unknown;
     terrain?: unknown;
     electrical?: unknown;
+    ambient?: unknown;
   },
   solverConfig: ConstructorParameters<typeof RK45Solver>[0] = {}
 ): Sim {
@@ -145,6 +146,7 @@ export function buildSimFromPlantJson(
     scenario: data.scenario,
     terrain: data.terrain,
     electrical: data.electrical,
+    ambient: data.ambient,
   } as PlantState;
   setSimulationRandomSeed(0);
   return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };

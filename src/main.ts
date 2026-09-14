@@ -54,6 +54,7 @@ import {
   steamPartialPressurePa,
   terrainHeightAt,
 } from './simulation';
+import { DEFAULT_AMBIENT_K, DEFAULT_AMBIENT_RH } from './simulation/factory';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
   formatMetres, applyConnectionLengthEdit,
@@ -2192,6 +2193,31 @@ function init() {
     }
     if (selectedComponentId) updateComponentDetail(selectedComponentId, plantState, gameLoop.getState());
   });
+  // The plant-level outside air (PlantState.ambient). Both fields blank means
+  // the model's default air, and the plant stops carrying an `ambient` at all.
+  const onAmbientChange = (): void => {
+    const tInput = document.getElementById('ambient-temperature-input') as HTMLInputElement | null;
+    const rhInput = document.getElementById('ambient-humidity-input') as HTMLInputElement | null;
+    const tText = tInput?.value.trim() ?? '';
+    const rhText = rhInput?.value.trim() ?? '';
+    const temperature = tText === '' ? DEFAULT_AMBIENT_K : parseFloat(tText) + 273.15;
+    const relativeHumidity = rhText === '' ? DEFAULT_AMBIENT_RH : parseFloat(rhText) / 100;
+    if (!(temperature > 0) || !Number.isFinite(temperature) ||
+        !(relativeHumidity >= 0 && relativeHumidity <= 1)) {
+      showNotification('Outside air: the temperature must be above absolute zero and the humidity between 0 and 100%.', 'warning', 6000);
+      syncAmbientUI();
+      return;
+    }
+    liveEdit(`Setting the outside air to ${(temperature - 273.15).toFixed(1)} C, ${(relativeHumidity * 100).toFixed(0)}% RH`, () => {
+      if (tText === '' && rhText === '') delete plantState.ambient;
+      else plantState.ambient = { temperature, relativeHumidity };
+    });
+    syncAmbientUI();
+  };
+  document.getElementById('ambient-temperature-input')?.addEventListener('change', onAmbientChange);
+  document.getElementById('ambient-humidity-input')?.addEventListener('change', onAmbientChange);
+  syncAmbientUI();
+
   document.getElementById('electrical-autowire-btn')?.addEventListener('click', () => {
     let wired: string[] = [];
     liveEdit('Auto-wiring power supplies', () => { wired = autoWirePlant(plantState); });
@@ -2557,6 +2583,8 @@ function init() {
     plantState.terrain = data.terrain ?? undefined;
     // And the electrical model: on for this plant only if it says so
     plantState.electrical = data.electrical ?? undefined;
+    // And the outside air: a plant that says nothing gets the default
+    plantState.ambient = data.ambient ?? undefined;
 
     // Migration: convert legacy reactor vessels (sibling architecture) to new architecture (parent-child)
     migrateReactorVessels(plantState);
@@ -2573,6 +2601,7 @@ function init() {
     refreshViewportInsets();
     plantCanvas.centerOnPlant();
     syncElectricalUI();
+    syncAmbientUI();
   }
 
   /**
@@ -2610,12 +2639,14 @@ function init() {
     plantState.scenario = design.scenario;
     plantState.terrain = design.terrain;
     plantState.electrical = design.electrical;
+    plantState.ambient = design.ambient;
     migrateReactorVessels(plantState);
     migratePipeEndpoints(plantState);
     constructionManager.normalizeLoadedPlant();
 
     gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
     syncElectricalUI();
+    syncAmbientUI();
     if (selectedComponentId && !plantState.components.has(selectedComponentId)) {
       selectedComponentId = null;
       if (selectedComponentDiv) selectedComponentDiv.textContent = 'No component selected';
@@ -3709,6 +3740,16 @@ function init() {
     const autowire = document.getElementById('electrical-autowire-btn');
     if (autowire) autowire.style.display = on ? '' : 'none';
     applyPaletteFilter();
+  }
+
+  /** Show the plant's outside air (or the default) in the construction panel. */
+  function syncAmbientUI(): void {
+    const tInput = document.getElementById('ambient-temperature-input') as HTMLInputElement | null;
+    const rhInput = document.getElementById('ambient-humidity-input') as HTMLInputElement | null;
+    const t = plantState.ambient?.temperature ?? DEFAULT_AMBIENT_K;
+    const rh = plantState.ambient?.relativeHumidity ?? DEFAULT_AMBIENT_RH;
+    if (tInput) tInput.value = String(Math.round((t - 273.15) * 10) / 10);
+    if (rhInput) rhInput.value = String(Math.round(rh * 100));
   }
 
   function liveEdit(what: string, mutate: () => void): void {

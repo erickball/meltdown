@@ -27,7 +27,7 @@ import {
   BurstCheckOperator, ControlSystemOperator,
   writeSimulationStateToPlant, captureResumeSnapshot, transplantSimulationState,
 } from '../src/simulation';
-import type { SimulationState } from '../src/simulation/types';
+import type { SimulationState, FlowNode } from '../src/simulation/types';
 import type { PlantState, PlantComponent, PlantConnection } from '../src/types';
 
 const plantFile = process.argv[2] || 'scripts/pwr-test.json';
@@ -109,9 +109,15 @@ console.log(`[Resume notes] ${notes.join('; ')}\n`);
 console.log('--- No edits: exact resume ---');
 check('time carried over', resumedNoEdit.time === live.time,
   `${resumedNoEdit.time} vs ${live.time}`);
+// A boundary node (the atmosphere) is rebuilt from the design, never carried
+// over - it is what an edit of PlantState.ambient has to reach - so it
+// matches by value, not identity
+const sameAir = (a: FlowNode | undefined, b: FlowNode | undefined): boolean =>
+  !!a && !!b && a.fluid.temperature === b.fluid.temperature &&
+  a.fluid.pressure === b.fluid.pressure && a.fluid.mass === b.fluid.mass;
 let allNodesExact = true;
 for (const [id, node] of resumedNoEdit.flowNodes) {
-  if (node !== live.flowNodes.get(id)) {
+  if (node.isBoundary ? !sameAir(node, live.flowNodes.get(id)) : node !== live.flowNodes.get(id)) {
     allNodesExact = false;
     console.error(`    node '${id}' was re-initialized instead of resumed`);
   }
@@ -181,7 +187,7 @@ if (editedId) {
     if (id === editedId) continue;
     // Nodes owned by the edited component (e.g. its -shell) also re-init
     if (id.startsWith(editedId + '-')) continue;
-    if (node !== live.flowNodes.get(id)) {
+    if (node.isBoundary ? !sameAir(node, live.flowNodes.get(id)) : node !== live.flowNodes.get(id)) {
       othersExact = false;
       console.error(`    node '${id}' was re-initialized but '${editedId}' was the only edit`);
     }
@@ -194,6 +200,40 @@ if (editedId) {
   } catch (e) {
     check('edited-resume state integrates 1 s without error', false, String(e));
   }
+}
+
+// 3d. Edit the outside air: the resumed atmosphere must be the NEW air (a
+// boundary node is rebuilt from the design, never carried over), and no
+// plant node may resume differently than it does without the edit. Compared
+// against a control rebuild, so an edit an earlier section left in the plant
+// does not read as one this edit caused.
+console.log('\n--- Ambient edit: the atmosphere follows the design ---');
+{
+  const before = plant.ambient;
+  setSimulationRandomSeed(0);
+  const control = createSimulationFromPlant(plant);
+  transplantSimulationState(control, snapshot, plant);
+
+  plant.ambient = { temperature: 278.15, relativeHumidity: 0.8 };
+  setSimulationRandomSeed(0);
+  const resumedAir = createSimulationFromPlant(plant);
+  transplantSimulationState(resumedAir, snapshot, plant);
+  const atm = resumedAir.flowNodes.get('atmosphere')!;
+  check('edited ambient reaches the resumed atmosphere',
+    Math.abs(atm.fluid.temperature - 278.15) < 1e-6, `${atm.fluid.temperature} K`);
+  let sameAsControl = true;
+  for (const [id, node] of resumedAir.flowNodes) {
+    if (node.isBoundary) continue;
+    const resumed = node === live.flowNodes.get(id);
+    const controlResumed = control.flowNodes.get(id) === live.flowNodes.get(id);
+    if (resumed !== controlResumed) {
+      sameAsControl = false;
+      console.error(`    node '${id}' resumed=${resumed} with the ambient edit, ${controlResumed} without`);
+    }
+  }
+  check('an ambient edit changes how no plant node resumes', sameAsControl);
+  if (before === undefined) delete plant.ambient;
+  else plant.ambient = before;
 }
 
 // 3c. Edit a turbine: its design point must survive (it is frozen at first

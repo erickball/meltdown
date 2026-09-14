@@ -2276,7 +2276,7 @@ export class ConstructionManager {
     const dry = ends.some(c =>
       c.type === 'pump' && (c as { initialFill?: string }).initialFill === 'dry');
     if (!dry) return null;
-    const air = ambientAir();
+    const air = ambientAir(this.plantState.ambient);
     return {
       fluid: { temperature: air.temperature, pressure: air.steamPressure, phase: 'vapor', quality: 1, flowRate: 0 },
       initialNcg: { ...air.ncg },

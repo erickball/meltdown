@@ -607,6 +607,11 @@ export function transplantSimulationState(
     const savedNode = saved.flowNodes.get(nodeId);
     if (!savedNode) continue; // new component
     if (isDirtyOwner(nodeId)) continue;
+    // A boundary node's state is the design's (the atmosphere is made from
+    // PlantState.ambient), and physics never moves it - so there is nothing
+    // live to carry over, and carrying it over would keep the OLD air after
+    // the ambient conditions were edited.
+    if (freshNode.isBoundary) continue;
     const refNode = refBuild.flowNodes.get(nodeId);
     // Geometry must be reproduced by the rebuild (compare factory output to
     // factory output - the LIVE node's volume may legitimately have evolved).
