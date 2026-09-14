@@ -334,11 +334,11 @@ export const componentDefinitions: Record<string, {
       // Start endpoint (inlet)
       { name: 'startX', type: 'number', label: 'Start X', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of inlet end' },
       { name: 'startY', type: 'number', label: 'Start Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of inlet end' },
-      { name: 'elevation', type: 'number', label: 'Start Elevation', default: 0, min: -20, max: 100, step: 0.5, unit: 'm', help: 'Height of inlet end above ground' },
+      { name: 'elevation', type: 'number', label: 'Start Elevation', default: 0, min: -20, max: 100, step: 0.05, unit: 'm', help: 'Height of the inlet end\'s CENTRELINE above ground. A new pipe starts at half its diameter, resting on the ground, and follows the diameter until you type an elevation.' },
       // End endpoint (outlet)
       { name: 'endX', type: 'number', label: 'End X', default: 10, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of outlet end' },
       { name: 'endY', type: 'number', label: 'End Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of outlet end' },
-      { name: 'endElevation', type: 'number', label: 'End Elevation', default: 0, min: -20, max: 100, step: 0.5, unit: 'm', help: 'Height of outlet end above ground' },
+      { name: 'endElevation', type: 'number', label: 'End Elevation', default: 0, min: -20, max: 100, step: 0.05, unit: 'm', help: 'Height of the outlet end\'s CENTRELINE above ground. A new pipe starts at half its diameter, resting on the ground, and follows the diameter until you type an elevation.' },
       { name: 'roughness', type: 'number', label: 'Roughness', default: 0.0001, min: 0.00001, max: 0.01, step: 0.00001, unit: 'm' },
       { name: 'initialPhase', type: 'select', label: 'Initial Phase', default: 'liquid', options: [
         { value: 'liquid', label: 'Subcooled Liquid' },
@@ -1566,8 +1566,12 @@ export class ComponentDialog {
   ): void {
     this.show(componentType, position, callback, availableCores, availableGenerators,
       defaultName, fixedDesignId);
-    const elevation = document.getElementById('option-elevation') as HTMLInputElement | null;
-    if (elevation) elevation.value = '0';   // on the ground where it was put
+    // On the ground where it was put
+    const ground = String(this.restingElevation());
+    for (const id of ['option-elevation', 'option-endElevation']) {
+      const elevation = document.getElementById(id) as HTMLInputElement | null;
+      if (elevation) elevation.value = ground;
+    }
     this.handleConfirm();
   }
 
@@ -1963,7 +1967,54 @@ export class ComponentDialog {
 
     // Keep volume <-> diameter mutually consistent (tanks, pressurizers)
     this.setupGeometryCoupling();
+    if (this.isCreateMode && this.currentType === 'pipe') this.setupPipeRestingElevation();
     if (this.isCreateMode && this.fixedDesignId) this.lockFieldsToYardDesign();
+  }
+
+  /**
+   * A pipe's elevation is its CENTRELINE, so a new pipe at elevation 0 would
+   * lie half buried. Its elevation fields start at half the diameter - the
+   * pipe resting on the ground - and follow the diameter as it is edited,
+   * until the player types an elevation of their own.
+   */
+  private setupPipeRestingElevation(): void {
+    const diameterInput = document.getElementById('option-diameter') as HTMLInputElement | null;
+    const elevationInputs = ['option-elevation', 'option-endElevation']
+      .map(id => document.getElementById(id) as HTMLInputElement | null)
+      .filter((el): el is HTMLInputElement => el !== null);
+    if (!diameterInput || elevationInputs.length === 0) return;
+
+    // Only a field still at the type default (0) rests on the ground; a
+    // design that states an elevation keeps it.
+    const following = elevationInputs.filter(input => parseFloat(input.value) === 0);
+    if (following.length === 0) return;
+
+    const fmt = (v: number) => String(+v.toPrecision(6));
+    let resting = following[0].value;   // the value this coupling last wrote
+    const rest = () => {
+      const d = parseFloat(diameterInput.value);
+      if (!(d > 0)) return;
+      const next = fmt(d / 2);
+      for (const input of following) {
+        if (input.value !== resting) continue;   // the player typed their own
+        input.value = next;
+        input.dataset.initialValue = next;   // still untouched for range validation
+        input.dispatchEvent(new Event('input'));
+      }
+      resting = next;
+    };
+    rest();
+    diameterInput.addEventListener('input', rest);
+  }
+
+  /** Where a part put down from the yard stands: on the ground (a pipe's centreline half a bore up). */
+  private restingElevation(): number {
+    if (this.currentType !== 'pipe') return 0;
+    const diameter = parseFloat((document.getElementById('option-diameter') as HTMLInputElement | null)?.value ?? '');
+    if (!(diameter > 0)) {
+      throw new Error(`[ComponentDialog] Yard pipe has no usable diameter ('${diameter}') to rest it on the ground`);
+    }
+    return diameter / 2;
   }
 
   /**

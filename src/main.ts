@@ -4127,12 +4127,13 @@ function init() {
     const liveSnap = beginLiveEdit();
     const partsBefore = capturePlantParts();
     let laid: { id: string; joined: number } | null = null;
+    const diameter = spec?.diameter ?? 0.3;
     try {
       laid = constructionManager.layGroundPipe({
         name,
-        diameter: spec?.diameter ?? 0.3,
+        diameter,
         pressureRating: spec?.pressureRating ?? 155,
-        elevation: 0,
+        elevation: diameter / 2,   // centreline: the pipe rests ON the ground
         initialPhase: 'liquid',
         initialPressure: 1,
         initialTemperature: 25,
