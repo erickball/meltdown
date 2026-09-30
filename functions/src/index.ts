@@ -41,6 +41,9 @@ const ALLOWED_ORIGINS = [
   "https://unityriskresearch.firebaseapp.com",
   "https://unityriskresearch.com",
   "https://www.unityriskresearch.com",
+  "https://unityriskresearch-meltdown.web.app",
+  "https://unityriskresearch-meltdown.firebaseapp.com",
+  "https://meltdown.unityriskresearch.com",
 ];
 const LOCALHOST_RE = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 

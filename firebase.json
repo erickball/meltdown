@@ -4,6 +4,7 @@
     "predeploy": ["npm --prefix functions run build"]
   },
   "hosting": {
+    "site": "unityriskresearch-meltdown",
     "public": "dist",
     "ignore": [
       "firebase.json",
