@@ -2197,8 +2197,8 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
  * Each node is balanced with the live operators - conduction, convection and
  * heat generation, the same correlations the simulation runs - by bisecting
  * its own net heat rate, which falls monotonically with its temperature.
- * The nodes are coupled (kernels -> matrix -> reflector), so they are swept
- * in turn until none moves. A pebble core's neutronics is then re-derived at
+ * The nodes are coupled (kernels -> matrix -> reflector), so after balancing
+ * each alone they are solved together by Newton. A pebble core's neutronics is then re-derived at
  * the temperatures it actually starts at, so a critical start stays critical.
  */
 function seatCoreGraphiteAtSteadyState(plantState: PlantState, state: SimulationState): void {
@@ -2212,24 +2212,75 @@ function seatCoreGraphiteAtSteadyState(plantState: PlantState, state: Simulation
     if (nodeIds.length === 0) continue;
 
     const seeded = nodeIds.map(n => state.thermalNodes.get(n)!.temperature);
-    for (let sweep = 0; ; sweep++) {
-      if (sweep >= 50) {
-        throw new Error(`[Factory] Core '${id}': graphite temperatures did not settle in 50 sweeps ` +
-          `(${nodeIds.join(', ')}) - a heat path is mis-wired.`);
-      }
-      let moved = 0;
-      for (const nodeId of nodeIds) {
-        const node = state.thermalNodes.get(nodeId)!;
-        const before = node.temperature;
-        node.temperature = balanceTemperature(state, nodeId, operators);
-        moved = Math.max(moved, Math.abs(node.temperature - before));
-      }
-      if (moved < 0.05) break;
+    // Each node alone first (a good start whatever the seed), then Newton on
+    // the coupled set: the kernels and matrix are tied ~100x tighter than
+    // anything else, so balancing one node at a time crawls ~3% a sweep.
+    for (const nodeId of nodeIds) {
+      state.thermalNodes.get(nodeId)!.temperature = balanceTemperature(state, nodeId, operators);
     }
+    solveCoupledBalance(state, id, nodeIds, operators);
     console.log(`[Factory] Core '${id}': graphite seated at its operating balance - ` +
       nodeIds.map((n, k) => `${n} ${(state.thermalNodes.get(n)!.temperature - 273.15).toFixed(0)} C ` +
         `(built at ${(seeded[k] - 273.15).toFixed(0)})`).join(', '));
     if (isPebbleBed) state.neutronics = createNeutronicsFromCore(component, state);
+  }
+}
+
+/** Newton on the net heat rates (dT/dt) of a coupled set of thermal nodes,
+ *  with a finite-difference Jacobian from the same operators. */
+function solveCoupledBalance(state: SimulationState, coreId: string, nodeIds: string[],
+                             operators: RateOperator[]): void {
+  const nodes = nodeIds.map(n => state.thermalNodes.get(n)!);
+  const residual = (): number[] => {
+    const r = nodeIds.map(() => 0);
+    for (const op of operators) {
+      const rates = op.computeRates(state).thermalNodes;
+      nodeIds.forEach((n, i) => { r[i] += rates.get(n)?.dTemperature ?? 0; });
+    }
+    return r;
+  };
+  const n = nodes.length;
+  for (let iter = 0; ; iter++) {
+    if (iter >= 30) {
+      throw new Error(`[Factory] Core '${coreId}': graphite temperatures did not settle ` +
+        `(${nodeIds.join(', ')}) - a heat path is mis-wired.`);
+    }
+    const r0 = residual();
+    const J: number[][] = nodeIds.map(() => new Array(n).fill(0));
+    const dT = 0.5;
+    for (let j = 0; j < n; j++) {
+      nodes[j].temperature += dT;
+      const r1 = residual();
+      nodes[j].temperature -= dT;
+      for (let i = 0; i < n; i++) J[i][j] = (r1[i] - r0[i]) / dT;
+    }
+    // Gaussian elimination with partial pivoting: J * step = -r0
+    const A = J.map((row, i) => [...row, -r0[i]]);
+    for (let c = 0; c < n; c++) {
+      let p = c;
+      for (let r = c + 1; r < n; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+      [A[c], A[p]] = [A[p], A[c]];
+      if (A[c][c] === 0) {
+        throw new Error(`[Factory] Core '${coreId}': graphite heat balance is singular ` +
+          `(${nodeIds.join(', ')}) - a node has no heat path at all.`);
+      }
+      for (let r = c + 1; r < n; r++) {
+        const f = A[r][c] / A[c][c];
+        for (let k = c; k <= n; k++) A[r][k] -= f * A[c][k];
+      }
+    }
+    const step = new Array(n).fill(0);
+    for (let r = n - 1; r >= 0; r--) {
+      let acc = A[r][n];
+      for (let k = r + 1; k < n; k++) acc -= A[r][k] * step[k];
+      step[r] = acc / A[r][r];
+    }
+    let moved = 0;
+    for (let j = 0; j < n; j++) {
+      nodes[j].temperature += step[j];
+      moved = Math.max(moved, Math.abs(step[j]));
+    }
+    if (moved < 0.01) return;
   }
 }
 

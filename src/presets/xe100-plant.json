@@ -1966,7 +1966,10 @@
             },
             "factor": 0.012987012987012988
           },
-          "aggressiveness": 1,
+          "gains": {
+            "kp": 0.5,
+            "ki": 0.02
+          },
           "scanPeriod": 0.25,
           "actuator": {
             "kind": "pump-speed",
@@ -2007,7 +2010,10 @@
             },
             "factor": 0.012987012987012988
           },
-          "aggressiveness": 1,
+          "gains": {
+            "kp": 0.5,
+            "ki": 0.02
+          },
           "scanPeriod": 0.25,
           "actuator": {
             "kind": "pump-speed",

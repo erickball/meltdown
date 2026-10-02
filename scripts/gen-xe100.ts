@@ -911,7 +911,11 @@ controller('ctl-fw-1', 'Feedwater Flow (Load Demand)', 20, 81, {
 controller('ctl-he-1', 'He Circulator (Power)', 20, 95, {
   sensor: { kind: 'reactor-power', targetId: '' },
   setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
-  aggressiveness: 1.0,
+  // Explicit PI: the auto-tuner's templates are for integrating processes,
+  // and power answers circulator speed self-regulating (gain ~1 per unit
+  // speed, settling on the bed's tens-of-seconds thermal lag). Half the
+  // error in speed, ~25 s integral time.
+  gains: { kp: 0.5, ki: 0.02 },
   scanPeriod: 0.25,
   actuator: { kind: 'pump-speed', targetId: 'pump-1', min: 0.3, max: 1.1, rateLimit: 0.02 },
 });
