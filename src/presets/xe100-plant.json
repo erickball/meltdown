@@ -311,7 +311,6 @@
         "tubeCount": 300,
         "tubeModel": "moving-boundary",
         "bundleCount": 2,
-        "tubeLengthFactor": 14.11634349030471,
         "initialSections": {
           "pressureBar": 165,
           "TFeedK": 473,
