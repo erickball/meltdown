@@ -21,7 +21,8 @@ import {
   DEFAULT_BURST_CONFIG,
 } from './types';
 import { createFluidState, NcgPartialPressures } from './operators';
-import { DECAY_HEAT_GROUPS } from './operators/rate-operators';
+import { DECAY_HEAT_GROUPS, ConductionRateOperator, ConvectionRateOperator, HeatGenerationRateOperator } from './operators/rate-operators';
+import type { RateOperator } from './rk45-solver';
 import { GAS_PROPERTIES, GasSpecies, emptyGasComposition } from './gas-properties';
 import { deriveNeutronics, deriveControlRodWorth, LatticeParams } from './lattice';
 import {
@@ -42,7 +43,7 @@ import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselC
   PumpComponent, ValveComponent, pumpMotorElevation, pumpVisualHeight, valveVisualHeight } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
-  hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
+  hxTubeLength, hxTubeInnerDiameter, helicalCrossflowGeometry } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
@@ -1395,25 +1396,18 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     if (component.type === 'heatExchanger') {
       // Create shell-side flow node for heat exchanger
       const shellNode = createHeatExchangerShellNode(component);
-      // A feedwater heater's shell IS a turbine bleed point: tagging it here
-      // is what lets the expansion operator take the stage work out of the
-      // steam as it arrives, so the heater sees partly-expanded steam. The
-      // alternative - a free-standing extraction node between the machine and
-      // the heater - is a stiff few-cubic-metre buffer with seconds of
-      // residence time that swings hundreds of degrees as the heater's demand
-      // moves, and it buys nothing physically.
-      const extraction = (component as any).extractionSource;
-      if (extraction) {
-        if (!plantState.components.has(extraction.turbineId)) {
-          throw new Error(
-            `[Factory] '${id}': extractionSource names turbine '${extraction.turbineId}', ` +
-            `which is not in the plant.`
-          );
-        }
-        shellNode.parentTurbineId = extraction.turbineId;
-        shellNode.extractionPressure = extraction.pressure;
-        console.log(`[Factory] ${shellNode.id}: feedwater-heater shell bled from ` +
-          `'${extraction.turbineId}' at ${(extraction.pressure / 1e5).toFixed(1)} bar design`);
+      // The old side-branch bleed: a heater shell tagged as a stage of a
+      // turbine it was not wired into. Since a turbine became a chain of
+      // stages (expandTurbines), such a shell reads as the machine's FIRST
+      // stage - its feed line gets the governor's throttle and the main
+      // steam enters the exhaust unexpanded - so refuse it rather than build
+      // a machine that silently does no work.
+      if ((component as any).extractionSource) {
+        throw new Error(
+          `[Factory] '${id}': 'extractionSource' is no longer supported. Give the turbine an ` +
+          `extraction port (extractionPorts: [{ id, pressure }]) and pipe the heater's bleed ` +
+          `from that port to the shell - the stage then holds the bleed pressure itself.`
+        );
       }
       state.flowNodes.set(shellNode.id, shellNode);
 
@@ -1505,6 +1499,11 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
             // the film coefficient) is the same for each, only the carrying
             // capacity mdot*cp each bundle marches against is divided.
             gasShare: 1 / nBundles,
+            // A helical coil puts the shell gas across its tubes; anything
+            // else lets it run along them (see otsgGasFilmCoefficient).
+            gasSide: hxComp.hxType === 'helical'
+              ? { arrangement: 'crossflow', ...helicalCrossflowGeometry(hxComp) }
+              : { arrangement: 'axial' },
           };
           // Design-point initialization: a preset can hand the bundle its
           // OPERATING partition - pressure, feed and steam temperatures, and
@@ -2048,6 +2047,12 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     }
   }
 
+  // Graphite at its operating temperatures: with every node, connection and
+  // initial flow in place, a pebble bed's kernels and matrix and any core's
+  // reflector follow from the power and the gas around them. Before the
+  // controllers, which start bumplessly from the rod position this settles.
+  seatCoreGraphiteAtSteadyState(plantState, state);
+
   // Fourth pass: translate PID controller components. Done after connection
   // processing so actuator/sensor targets (including connection ids and
   // connectedFlowPath links) exist for validation and bumpless-start init.
@@ -2174,6 +2179,94 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
   console.log(`[Simulation] Created simulation with ${state.flowNodes.size} flow nodes, ${state.flowConnections.length} connections, ${state.thermalNodes.size} thermal nodes`);
 
   return state;
+}
+
+/**
+ * Start a core's graphite at the temperatures its own heat paths hold it at:
+ * every reflector, and a pebble bed's fuel kernels and pebble matrix.
+ *
+ * None of these has an initial condition worth asking a designer for - each
+ * is wherever its heat flows balance, given the power and the gas around it -
+ * and with hundreds of tonnes of graphite any other starting point is an
+ * hour-long transient. Seeded at the core-outlet gas temperature, the
+ * Xe-100's 232 t reflector dumped ~50 MW into the cold inlet helium for the
+ * whole first hour; seeded at that same temperature with the kernels BELOW it
+ * (900 K under a 1023 K matrix), its pebbles could pass no heat to the gas at
+ * all, and the core outlet fell 90 K in the first 20 s at full power.
+ *
+ * Each node is balanced with the live operators - conduction, convection and
+ * heat generation, the same correlations the simulation runs - by bisecting
+ * its own net heat rate, which falls monotonically with its temperature.
+ * The nodes are coupled (kernels -> matrix -> reflector), so they are swept
+ * in turn until none moves. A pebble core's neutronics is then re-derived at
+ * the temperatures it actually starts at, so a critical start stays critical.
+ */
+function seatCoreGraphiteAtSteadyState(plantState: PlantState, state: SimulationState): void {
+  const operators = [new ConductionRateOperator(), new ConvectionRateOperator(), new HeatGenerationRateOperator()];
+  for (const [id, component] of plantState.components) {
+    const nodeIds: string[] = [];
+    const isPebbleBed = (component as any).fuelForm === 'pebbles' &&
+      state.neutronics.coreId === id && state.thermalNodes.has(`${id}-fuel`);
+    if (isPebbleBed) nodeIds.push(`${id}-fuel`, `${id}-clad`);
+    if (state.thermalNodes.get(`${id}-reflector`)?.graphiteOxidation) nodeIds.push(`${id}-reflector`);
+    if (nodeIds.length === 0) continue;
+
+    const seeded = nodeIds.map(n => state.thermalNodes.get(n)!.temperature);
+    for (let sweep = 0; ; sweep++) {
+      if (sweep >= 50) {
+        throw new Error(`[Factory] Core '${id}': graphite temperatures did not settle in 50 sweeps ` +
+          `(${nodeIds.join(', ')}) - a heat path is mis-wired.`);
+      }
+      let moved = 0;
+      for (const nodeId of nodeIds) {
+        const node = state.thermalNodes.get(nodeId)!;
+        const before = node.temperature;
+        node.temperature = balanceTemperature(state, nodeId, operators);
+        moved = Math.max(moved, Math.abs(node.temperature - before));
+      }
+      if (moved < 0.05) break;
+    }
+    console.log(`[Factory] Core '${id}': graphite seated at its operating balance - ` +
+      nodeIds.map((n, k) => `${n} ${(state.thermalNodes.get(n)!.temperature - 273.15).toFixed(0)} C ` +
+        `(built at ${(seeded[k] - 273.15).toFixed(0)})`).join(', '));
+    if (isPebbleBed) state.neutronics = createNeutronicsFromCore(component, state);
+  }
+}
+
+/** The temperature at which a thermal node's net heat rate, from the given
+ *  operators with everything else held, is zero. */
+function balanceTemperature(state: SimulationState, nodeId: string, operators: RateOperator[]): number {
+  const node = state.thermalNodes.get(nodeId)!;
+  const netRate = (T: number): number => {
+    node.temperature = T;
+    let r = 0;
+    for (const op of operators) r += op.computeRates(state).thermalNodes.get(nodeId)?.dTemperature ?? 0;
+    return r;
+  };
+  const neighbourTemps: number[] = [node.temperature];
+  for (const c of state.thermalConnections) {
+    if (c.fromNodeId === nodeId) neighbourTemps.push(state.thermalNodes.get(c.toNodeId)!.temperature);
+    if (c.toNodeId === nodeId) neighbourTemps.push(state.thermalNodes.get(c.fromNodeId)!.temperature);
+  }
+  for (const c of state.convectionConnections) {
+    if (c.thermalNodeId === nodeId) neighbourTemps.push(state.flowNodes.get(c.flowNodeId)!.fluid.temperature);
+  }
+  let lo = Math.min(...neighbourTemps), hi = Math.max(...neighbourTemps);
+  // A heated node sits above everything it touches: widen until the rate
+  // changes sign (it must - every path out grows with the node's own T).
+  for (let k = 0; netRate(hi) > 0; k++) {
+    if (k > 30) throw new Error(`[Factory] '${nodeId}': no temperature balances its heat rate.`);
+    lo = hi; hi += 100 * 2 ** k;
+  }
+  for (let k = 0; netRate(lo) < 0; k++) {
+    if (k > 30 || lo <= 1) throw new Error(`[Factory] '${nodeId}': no temperature balances its heat rate.`);
+    hi = lo; lo = Math.max(1, lo - 100 * 2 ** k);
+  }
+  for (let i = 0; i < 60 && hi - lo > 0.01; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (netRate(mid) > 0) lo = mid; else hi = mid;
+  }
+  return 0.5 * (lo + hi);
 }
 
 /**

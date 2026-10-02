@@ -331,7 +331,7 @@ export function otsgWallPin(
     // one source, so the outlet's ceiling and the duty cannot disagree
     // about what gas the bundle is sitting in.
     TGasIn3: otsgGasInletTemp(state, shell),
-    hAGas3Full: otsgGasFilmCoefficient(shell, state) * cfg.heatArea,
+    hAGas3Full: otsgGasFilmCoefficient(shell, state, cfg.gasSide) * cfg.heatArea,
     CGas3: otsgGasMcp(shell, state) * (cfg.gasShare ?? 1),
   };
 }
@@ -356,9 +356,38 @@ export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): numbe
   return TGasIn;
 }
 
-/** Shell-side film coefficient (W/m2-K): crossflow Dittus-Boelter on the
- *  actual gas mixture, floored at natural convection. */
-export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
+/**
+ * Shell-side film coefficient (W/m2-K) on the actual gas mixture, by how the
+ * gas meets the tubes (see the otsg config's gasSide), floored at natural
+ * convection.
+ *
+ * Crossflow (helical bundle): the VDI Heat Atlas tube-bank method
+ * (Gnielinski, section G7). A single cylinder's Nusselt number on the
+ * streamed length l = pi*D/2 blends its laminar and turbulent boundary
+ * layers as 0.3 + sqrt(Nu_lam^2 + Nu_turb^2) - one smooth curve across the whole
+ * Reynolds range, no regime switches - and the bank's arrangement factor
+ * f_A = 1 + 2/(3b) (staggered, as alternately wound coil layers are) scales
+ * it to the bundle. The velocity is the interstitial one, w/psi, with
+ * psi = 1 - packing the void fraction of the coil annulus, and b the
+ * longitudinal pitch ratio of a uniform array that packs the same:
+ * (pi/4)/b^2 = packing.
+ *
+ * This used to be Dittus-Boelter - an IN-TUBE correlation - on the tube OD
+ * and the whole shell's axial flow area, which reads a 60-bar helium bank
+ * at ~350 W/m2-K. The bank correlation gives ~1450, and the Xe-100's
+ * design duty needs ~1000 from its 2780 m2: at 350 the SG could pass only
+ * two thirds of rated power and returned 400 C helium to the core.
+ *
+ * Axial (straight or U-tubes): the gas runs along the tubes, a duct of the
+ * shell's own hydraulic diameter - Dittus-Boelter is the right tool there.
+ */
+export function otsgGasFilmCoefficient(
+  shell: FlowNode, state: SimulationState, gasSide: NonNullable<FlowNode['otsg']>['gasSide'],
+): number {
+  if (!gasSide) {
+    throw new Error(`[OTSG] shell '${shell.id}': its bundle has no gasSide geometry - ` +
+      `the factory sets it on every moving-boundary tube node.`);
+  }
   const throughput = otsgShellThroughput(shell, state);
   const ncg = shell.fluid.ncg;
   const T = shell.fluid.temperature;
@@ -366,14 +395,36 @@ export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState):
   const mu = ncg && totalMoles(ncg) > 0 ? mixtureViscosity(ncg, T) : 3e-5;
   const cp = otsgGasCpPerKg(shell);
   const rho = approxVaporDensity(shell);
-  const D = 0.019; // tube OD - the crossflow characteristic length
-  const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
-  const Re = mu > 0 ? (rho * v * D) / mu : 0;
   const Pr = k > 0 ? (cp * mu) / k : 0.7;
+  const H_NATURAL = 60;
+  if (!(rho > 0 && mu > 0 && k > 0)) return H_NATURAL;
+
+  if (gasSide.arrangement === 'crossflow') {
+    const { frontalArea, packing, tubeOD } = gasSide;
+    const psi = 1 - packing;
+    const l = Math.PI * tubeOD / 2;
+    const w = throughput / (rho * frontalArea);
+    const Re = (w * l) / (psi * (mu / rho));
+    // Turbulent layer in the Colburn flat-plate form, not VDI's Petukhov
+    // Prandtl factor Pr/(1 + 2.443 Re^-0.1 (Pr^2/3 - 1)): for a gas (Pr < 1)
+    // that denominator passes through ZERO at Re ~ 0.004, which a coasting
+    // circulator drives straight through. For Pr ~ 0.7 the two agree within
+    // 2% across the turbulent range, and this one is smooth down to Re = 0.
+    const NuLam = 0.664 * Math.sqrt(Re) * Math.cbrt(Pr);
+    const NuTurb = 0.037 * Math.pow(Re, 0.8) * Math.cbrt(Pr);
+    const b = Math.sqrt(Math.PI / (4 * packing));
+    const fA = 1 + 2 / (3 * b);
+    const Nu = fA * (0.3 + Math.sqrt(NuLam * NuLam + NuTurb * NuTurb));
+    return Math.max(H_NATURAL, Nu * k / l);
+  }
+
+  const D = shell.hydraulicDiameter;
+  const v = shell.flowArea > 0 ? throughput / (rho * shell.flowArea) : 0;
+  const Re = (rho * v * D) / mu;
   const hForced = Re > 10
     ? 0.023 * Math.pow(Re, 0.8) * Math.pow(Math.max(0.1, Pr), 0.4) * k / D
     : 0;
-  return Math.max(60, hForced);
+  return Math.max(H_NATURAL, hForced);
 }
 
 /** Gas capacity rate mdot*cp through the shell (W/K). */
@@ -580,7 +631,7 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Gas side: counterflow march against the metal temperature
       // ----------------------------------------------------------------
-      const hGas = this.gasFilmCoefficient(shell, state);
+      const hGas = otsgGasFilmCoefficient(shell, state, cfg.gasSide);
       // March from the shell's INLET temperature (the upstream duct node),
       // not its bulk: with the duty evaluated from the inlet, the well-mixed
       // shell node's own energy balance lands its bulk exactly at the
@@ -694,12 +745,6 @@ export class OtsgRateOperator implements RateOperator {
     }
 
     return rates;
-  }
-
-  /** Shell-gas film coefficient (W/m2-K): Dittus-Boelter on the shell node's
-   *  through-flow, mixture properties, with a natural-convection floor. */
-  private gasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
-    return otsgGasFilmCoefficient(shell, state);
   }
 
   private gasMcp(shell: FlowNode, state: SimulationState): number {

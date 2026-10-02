@@ -31,6 +31,8 @@ const T_STEAM = 838;            // K (565 C) main steam
 const T_FEED = 473;             // K (200 C) feedwater
 const P_COND = 7000;            // Pa
 const FEED_FLOW = 77;           // kg/s - design feedwater = design steam flow
+const P_EXTRACTION = 25e5;      // Pa - HP heater bleed point in the turbine
+const EXTRACTION_FLOW = 25;     // kg/s - design heater bleed
 
 // Trace steam pressure in the helium spaces. `fluid.pressure` on a gas node is
 // the STEAM partial pressure; the helium is added on top of it from
@@ -214,7 +216,11 @@ add('hx-1', {
   ]),
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
-  shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
+  // The shell is one well-mixed node, and the gas march lands its bulk at the
+  // plug-flow OUTLET temperature (OtsgRateOperator) - so that is where it
+  // starts. Seeding it at the mean put 505 C helium straight into the core
+  // inlet at t=0 and spent the first minute shedding the extra 250 K.
+  shellFluid: { temperature: T_SG_HE_OUT, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   secondaryFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   shellInitialNcg: HE,
   nqa1: true, containedBy: 'tank-sg-1',
@@ -462,7 +468,14 @@ add('turbine-1', {
   // draw-starvation spiral. The hold needs the t=0 draw within a few
   // percent of generation; the pressure loop (0.01/s slew) trims the rest.
   governorValve: 0.25, generatorEfficiency: 0.98,
-  ports: ports([['inlet', -7, 0, 'in'], ['outlet', 7, 0, 'out']]),
+  // An extraction port makes this a two-stage machine: the inlet lines
+  // enter the first stage (the factory's `turbine-1-extraction-1` node at
+  // the 25 bar design interstage pressure), a fixed nozzle row sized for
+  // the design through-flow drops it to the exhaust, and the heater bleed
+  // leaves the first stage sideways at the stage's own outlet state - so
+  // its pressure droops with load as a real extraction's does.
+  extractionPorts: [{ id: 'extraction-1', pressure: P_EXTRACTION }],
+  ports: ports([['inlet', -7, 0, 'in'], ['extraction-1', -3.5, 1.5, 'out'], ['outlet', 7, 0, 'out']]),
   // EXHAUST conditions, not main-steam: the turbine's internal node sits
   // DOWNSTREAM of the governor - it is the LP end, a breath above the
   // condenser. Seeding it at 165 bar parked a high-pressure pocket behind
@@ -630,9 +643,6 @@ add('fwh-1', {
   material: 'low-alloy-steel',
   pressureRating: 40, tubePressureRating: 250, shellPressureRating: 40,
   plenumLength: FWH_PLENUM, tubeOD: 0.019,
-  // Names the turbine stage the bleed is tapped from, so the extraction
-  // enthalpy follows the real expansion line rather than throttled inlet steam
-  extractionSource: { turbineId: 'turbine-1', pressure: 25e5 },
   // 188 bar, not 170: the feed-train pressure LADDER at design flow is
   // boiler 165 + bundle orifices ~20 + piping ~2. Nodes seeded a rung low
   // let the pump hammer the line while the solve re-finds the ladder.
@@ -657,12 +667,6 @@ add('fwh-1', {
   // in 13.4, i.e. 2 m of level in a 7 m shell, and the loop starts inside
   // its own control band: bleed and drain settle equal at ~15 kg/s with the
   // shell at 18 bar and the feed leaving at 195 C.
-  //
-  // The deeper asymmetry is real and worth knowing: this bleed is tapped off
-  // the 165 bar main steam header, not a turbine casing, so nothing BOUNDS
-  // the shell pressure the way a real extraction nozzle does. The shell can
-  // only hold station by condensing everything the valve lets in, which it
-  // can do - but only while its drain can run.
   shellFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   secondaryFluid: { temperature: 477, pressure: 16.3e5, phase: 'two-phase', quality: 0.023, flowRate: 0 },
   fillLevel: 0.3,
@@ -675,42 +679,27 @@ add('fwh-1', {
   nqa1: false,
 });
 
+// Extraction valve: on the bleed line from the turbine's first stage to the
+// heater shell. The body rides at the stage's ~25 bar, so the line is a real
+// low-pressure extraction line (0.02 m2) and the valve starts well open: at
+// 25 bar even a wide-open line only passes the ~25 kg/s the heater needs on
+// the ~8 bar it has to the shell. Stainless: the first stage runs ~400 C.
+// It is listed as the `from` end of its outlet connection, so that is the
+// connection it throttles. (This used to be tapped off the 165 bar boiler
+// outlet with the heater shell tagged as a side-branch turbine stage; once
+// the turbine became a chain of stages that tag made the shell the
+// machine's FIRST stage - the bleed line was then throttled by the
+// governor, and the main steam entered the exhaust node unexpanded.)
 add('val-bleed-1', {
   type: 'valve', label: 'FWH Extraction Valve',
   valveType: 'gate',
-  // Stainless 304H, not the low-alloy default. This body sits on the
-  // superheated main steam header, and SA-533B "loses strength fast above
-  // ~700 K" by the material table's own note - at the 565 C design outlet it
-  // is already past that, and the wall-node change (which gave valves real
-  // metal instead of a slow lag of their fluid) turned that from an
-  // unmodelled assumption into a creep rupture in under three minutes. Real
-  // superheater-outlet valves are alloy or austenitic for exactly this
-  // reason.
   material: 'stainless-304',
   position: { x: 70, y: 99 }, rotation: 0, elevation: 0,
-  // Open at the operating throttle, and the body rides at TUBE pressure:
-  // the valve sits on its OUTLET connection, so a closed valve with the
-  // body seeded at shell pressure is a 0.1 m3 vacuum bolted to a 165-bar
-  // boiler - it swallowed ~30 kg/s until it went liquid-solid and hammered
-  // the feed train to 274 bar.
-  // 0.1: measured ~46 kg/s at 0.2 through the twin taps - this meters the
-  // ~25 the heater duty needs.
-  diameter: 0.1, opening: 0.1,
-  // The extraction LINE's inventory. This valve is the only node that
-  // represents that line: the 2 x 20 m taps (0.002 m2) and the 6 m outlet
-  // (0.004 m2) hold 0.104 m3, and the factory's lumping pass credits a
-  // small node only HALF of each adjacent connection - the other halves go
-  // to the SG bundle and the heater shell, which are enormous and swallow
-  // them. That left a 0.01 m3 valve body (the factory floor for a 0.1 m
-  // valve) plus 0.052 m3 to pass ~60 kg/s of steam: it turned over a
-  // quarter of its own inventory per step, and the throughput sanity guard
-  // rejected 22k steps over a 300 s run - 78% of ALL rejections in the
-  // preset. Holding the line's full volume is both the physical reading and
-  // the same lumping val-leak-1 already carries explicitly.
-  volume: 0.1,
+  diameter: 0.16, opening: 0.6,
+  volume: 0.3,
   ports: ports([['val-bleed-1-in', -0.1, 0], ['val-bleed-1-out', 0.1, 0]]),
-  fluid: { temperature: 700, pressure: 165e5, phase: 'vapor', quality: 1, flowRate: 0 },
-  nqa1: false, pressureRating: 200,
+  fluid: { temperature: 500, pressure: P_EXTRACTION, phase: 'vapor', quality: 1, flowRate: 0 },
+  nqa1: false, pressureRating: 60,
 });
 
 // ---------------------------------------------------------------------------
@@ -854,7 +843,7 @@ controller('ctl-fwh-1', 'FW Heater Outlet Temp', 20, 74, {
   sensor: { kind: 'node-temperature', targetId: 'fwh-1-tube' },
   setpoint: T_FEED,
   aggressiveness: 1.0,
-  actuator: { kind: 'valve-position', targetId: 'val-bleed-1', min: 0, max: 0.8, rateLimit: 0.02 },
+  actuator: { kind: 'valve-position', targetId: 'val-bleed-1', min: 0, max: 1.0, rateLimit: 0.02 },
 });
 
 // Drain valve for the heater's condensing shell, cascading to the condenser.
@@ -879,43 +868,26 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
   actuator: { kind: 'valve-position', targetId: 'val-fwhdr-1', min: 0.02, max: 1.0, rateLimit: 0.05 },
 });
 
-// Three-element feedwater control, replacing the passive-pump-only scheme.
-// The comment block this supersedes argued that every ACTIVE feed loop had
-// failed - and every SINGLE-element one had: pressure trim has positive
-// feedback when flooded (more feed cools the boiler, pressure falls, it
-// demands more feed); temperature trim winds up against a two-phase node
-// pinned at T_sat; bare level trim fights shrink-swell. Three-element evades
-// all three because the dominant term is FEEDFORWARD - match the steam
-// leaving, summed over both bundles - and level only trims around it
-// (-1 kg/s per metre off the 4 m target: the node is 14 m tall, and the
-// first trim - scaled 5x for a level that could never span 14 m - opened at
-// -8 kg/s and later railed at +16 of standing overfeed; metres, not
-// fractions, THIRD bite). Aggressiveness 4: the auto-tune lambda of 30 s
-// gave Ti = 120 s, and against 40 kg/s errors the loop moved ~0.001/s -
-// what looked reverse-signed was merely glacial. The pump curve's droop is
-// still underneath as the fallback if the loop saturates.
-controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
+// Feedwater flow IS the load demand. A once-through boiler has no drum to
+// buffer it: in steady state steam out = feed in, the governor holds steam
+// pressure, the rods hold core outlet temperature and the circulator holds
+// helium flow - so the feed flow is what fixes the power, the way an HTGR's
+// "reactor follows turbine" control (Fort St. Vrain, HTR-PM) sets it. Change
+// this setpoint to change load.
+//
+// This was three-element - feed = measured steam flow plus a level trim -
+// which leaves NOTHING setting the load: feed follows steam, steam follows
+// pressure, and the plant drifts along a neutral family of operating points
+// (it walked from 200 to ~130 MW in five minutes). The steam-flow feed-
+// forward existed to dodge single-element failures (pressure trim's
+// positive feedback when flooded, temperature trim winding up against T_sat,
+// level fighting shrink-swell); a flow setpoint has none of them - it reads
+// the feed line itself and the boiler's own pressure/inventory response does
+// the rest. Aggressiveness 2.5 (~50 s integral time) against the startup's
+// governor/relief cycling; the pump curve's droop is still underneath.
+controller('ctl-fw-1', 'Feedwater Flow (Load Demand)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
-  setpoint: {
-    op: 'sum',
-    inputs: [
-      {
-        op: 'sum',
-        inputs: [
-          { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1' },
-          { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet' },
-        ],
-      },
-      {
-        op: 'scale', factor: -1.0, offset: 4.0,
-        input: { kind: 'node-level', targetId: 'hx-1-tube' },
-      },
-    ],
-  },
-  // 2.5, not the 4.0 the bench retune used: against the startup's
-  // governor/relief cycling the hotter loop swung feed 0 -> 40 kg/s and the
-  // swings themselves cornered the boiler's books. 2.5 still turns the old
-  // 120 s integral time into ~50 s, without chasing every relief pop.
+  setpoint: FEED_FLOW,
   aggressiveness: 2.5,
   scanPeriod: 0.25,   // feedwater control on the same fast-plant footing
   // min 0.40, not 0.05: below the ~0.47 deadhead the pump moves no water at
@@ -924,6 +896,24 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
   // its gradient back while the boiler drains. 0.40 keeps the low end just
   // under the cliff: still nearly zero flow, never out of authority.
   actuator: { kind: 'pump-speed', targetId: 'fw-pump-1', min: 0.40, max: 1.0, rateLimit: 0.05 },
+});
+
+// Helium flow follows the load. With feed flow fixing the steam generated and
+// the rods fixing core outlet temperature, the circulator is what sets the
+// core's temperature RISE - and so the thermal power: P = W_He cp (T_out -
+// T_in). At a fixed speed it settled ~85 kg/s across a 475 K rise, 7% over
+// rating, and the surplus went into superheat. Here the circulator holds
+// reactor power at the feed flow's share of rated - a helium/feed ratio
+// station - so the one load setpoint (feed flow) moves both, and steam
+// leaves at design temperature at any load. Power answers circulator speed
+// within seconds: more helium cools the bed, and the kernels' Doppler
+// feedback raises fission power to meet it.
+controller('ctl-he-1', 'He Circulator (Power)', 20, 95, {
+  sensor: { kind: 'reactor-power', targetId: '' },
+  setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
+  aggressiveness: 1.0,
+  scanPeriod: 0.25,
+  actuator: { kind: 'pump-speed', targetId: 'pump-1', min: 0.3, max: 1.1, rateLimit: 0.02 },
 });
 
 // NO hotwell level controller - it was starving the plant. Its 0.80 setpoint
@@ -1005,14 +995,17 @@ connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1-b2',
 // VAPOR, and the OTSG model hands it the superheat section's enthalpy.
 // Both bundles discharge into the same main steam line, each through half the
 // area, so the two in parallel present the throttle the single bundle did.
+// ALL the steam enters here, the heater bleed included (it leaves the
+// turbine's first stage), so the pair is 0.02 m2 - what passes the design
+// 77 kg/s at the 165 bar drop with the governor at its 0.25 start.
 connect('hx-1', 'hx-1-tube-2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.01, length: 25, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('hx-1', 'hx-1-tube-2-b2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.01, length: 25, resistanceCoeff: 2,
     fromPhaseTolerance: 0 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - 25, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - EXTRACTION_FLOW, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
 connect('condenser-1', 'condenser-1-bottom', 'cond-pump-1', 'cond-pump-1-inlet',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: 0.1, toElevation: 0, flowArea: 0.2, length: 4 });
 // Condensate pump -> discharge check -> feed pump (the old single 4 m run,
@@ -1095,25 +1088,14 @@ connect('val-leak-1', 'val-leak-1-out', 'hx-1', 'hx-1-shell-1',
 // ---------------------------------------------------------------------------
 connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: FEED_FLOW, fromElevation: FWH_TUBE_NOZZLE, toElevation: 0, flowArea: 0.05, length: 4, resistanceCoeff: 2 });
-// Extraction tap off the main steam line. 0.004 m2, not 0.0008: a single HP
-// heater lifting 77 kg/s of feed from condensate temperature to 200 C needs
-// ~53 MW = ~25 kg/s of extraction steam - a THIRD of the steam flow, which
-// is what doing five heaters' work in one costs. The 0.0008 line choked at
-// ~4 kg/s and the heater could never make its duty at design flow.
-// fromElevation 13.5 - the TOP of the tube, like the MSV taps. At 0 the
-// tap sat at the bottom of the bundle, inside the subcooled slug, and the
-// "extraction steam" line drew boiler WATER at whatever the line would
-// pass (120 kg/s once it was sized for real extraction) - which is also
-// why the feedwater heater could never make its duty: it was being fed
-// its own feedwater.
-// Tapped off BOTH bundles, like the MSV: a single-bundle tap carries the
-// whole extraction from one side and Ledinegg-tilts the pair.
-connect('hx-1', 'hx-1-tube-2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
-connect('hx-1', 'hx-1-tube-2-b2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
+// Heater extraction: turbine first stage -> extraction valve -> heater
+// shell. The initial flow on the extraction port is what the factory sizes
+// the stage nozzle around (rated flow less this bleed passes on to the
+// exhaust).
+connect('turbine-1', 'extraction-1', 'val-bleed-1', 'val-bleed-1-in',
+  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.02, length: 10, resistanceCoeff: 2 });
 connect('val-bleed-1', 'val-bleed-1-out', 'fwh-1', 'fwh-1-shell-1',
-  { initialFlowPhase: 'vapor', initialFlowRate: 25, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 6, resistanceCoeff: 2 });
+  { initialFlowPhase: 'vapor', initialFlowRate: EXTRACTION_FLOW, fromElevation: 0, toElevation: 0, flowArea: 0.02, length: 12, resistanceCoeff: 2 });
 // Shell drain cascades to the condenser. Valve-side elevations are pinned
 // to the valve port (0.1 m for a 0.1 m valve) - an earlier toElevation of 3
 // claimed a 3 m attachment on a 0.2 m-tall valve, which drew the connection
@@ -1151,6 +1133,7 @@ const stationBlackout = {
       // built around - not just the helium circulator. A station blackout
       // takes the feed and condensate pumps with it and shuts the turbine.
       { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+      { kind: 'controller', id: 'ctl-he-1', mode: 'manual', manualOutput: 0 },
       { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
       { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
       // Feed controller off with the pump it drives, or it winds up commanding
@@ -1159,8 +1142,7 @@ const stationBlackout = {
       // Governor shut with the turbine
       { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0.02 },
       { kind: 'turbine-governor', id: 'turbine-1', value: 0.02 },
-      // The extraction line is a 165-bar tap into a heater with no drain
-      // pumps left; shut it with the plant.
+      // The heater bleed: shut it with the plant.
       { kind: 'valve', id: 'val-bleed-1', position: 0 },
       { kind: 'controller', id: 'ctl-fwh-1', mode: 'manual', manualOutput: 0 },
     ],

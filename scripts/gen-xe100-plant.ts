@@ -289,7 +289,11 @@ add('hx-1', {
   ],
   tubeFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
   primaryFluid: { temperature: 624, pressure: P_STEAM, phase: 'two-phase', quality: 0.22, flowRate: 0 },
-  shellFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
+  // The shell is one well-mixed node, and the gas march lands its bulk at the
+  // plug-flow OUTLET temperature (OtsgRateOperator) - so that is where it
+  // starts. Seeding it at the mean put 505 C helium straight into the core
+  // inlet at t=0 and spent the first minute shedding the extra 250 K.
+  shellFluid: { temperature: T_SG_HE_OUT, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   secondaryFluid: { temperature: (T_CORE_OUT + T_CORE_IN) / 2, pressure: P_TRACE_STEAM, phase: 'vapor', quality: 1, flowRate: 0 },
   shellInitialNcg: HE,
   nqa1: true, containedBy: 'tank-sg-1',
@@ -722,30 +726,39 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
   actuator: { kind: 'valve-position', targetId: 'val-fwhdr-1', min: 0.02, max: 1.0, rateLimit: 0.05 },
 });
 
-// Three-element feedwater: the steam-flow feedforward now reads the two
-// bundle lines at their isolation valves (distinct component pairs, so the
-// plain flow ids apply).
-controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
+// Feedwater flow is the load demand (see gen-xe100.ts): steam out = feed in
+// for a once-through boiler, so this setpoint fixes the power.
+controller('ctl-fw-1', 'Feedwater Flow (Load Demand)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
-  setpoint: {
-    op: 'sum',
-    inputs: [
-      {
-        op: 'sum',
-        inputs: [
-          { kind: 'connection-flow', targetId: 'flow-hx-1-val-msiv-1' },
-          { kind: 'connection-flow', targetId: 'flow-hx-1-val-msiv-2' },
-        ],
-      },
-      {
-        op: 'scale', factor: -1.0, offset: 4.0,
-        input: { kind: 'node-level', targetId: 'hx-1-tube' },
-      },
-    ],
-  },
+  setpoint: FEED_FLOW,
   aggressiveness: 2.5,
   scanPeriod: 0.25,
   actuator: { kind: 'pump-speed', targetId: 'fw-pump-1', min: 0.40, max: 1.0, rateLimit: 0.05 },
+});
+
+// Helium flow follows the load. With feed flow fixing the steam generated and
+// the rods fixing core outlet temperature, the circulator is what sets the
+// core's temperature RISE - and so the thermal power: P = W_He cp (T_out -
+// T_in). At a fixed speed it settled ~85 kg/s across a 475 K rise, 7% over
+// rating, and the surplus went into superheat. Here the circulator holds
+// reactor power at the feed flow's share of rated - a helium/feed ratio
+// station - so the one load setpoint (feed flow) moves both, and steam
+// leaves at design temperature at any load. Power answers circulator speed
+// within seconds: more helium cools the bed, and the kernels' Doppler
+// feedback raises fission power to meet it.
+controller('ctl-he-1a', 'He Circulator A (Power)', 20, 95, {
+  sensor: { kind: 'reactor-power', targetId: '' },
+  setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
+  aggressiveness: 1.0,
+  scanPeriod: 0.25,
+  actuator: { kind: 'pump-speed', targetId: 'pump-1a', min: 0.3, max: 1.1, rateLimit: 0.02 },
+});
+controller('ctl-he-1b', 'He Circulator B (Power)', 20, 102, {
+  sensor: { kind: 'reactor-power', targetId: '' },
+  setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
+  aggressiveness: 1.0,
+  scanPeriod: 0.25,
+  actuator: { kind: 'pump-speed', targetId: 'pump-1b', min: 0.3, max: 1.1, rateLimit: 0.02 },
 });
 
 // ---------------------------------------------------------------------------

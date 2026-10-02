@@ -321,6 +321,15 @@ export interface FlowNode {
      *  the same velocity: the gas film coefficient is unchanged, only the
      *  carrying capacity mdot*cp each bundle marches against is divided. */
     gasShare?: number;
+    /** How the shell gas meets the tubes, which picks its film correlation
+     *  (otsgGasFilmCoefficient). 'crossflow': a helical bundle - the gas runs
+     *  axially through the coil annulus (frontalArea, m2, shared by every
+     *  bundle in the shell) across tubes of tubeOD that fill `packing` of it.
+     *  'axial': straight or U-tubes the gas runs along - a duct of the shell's
+     *  own hydraulic diameter and flow area. */
+    gasSide:
+      | { arrangement: 'crossflow'; frontalArea: number; packing: number; tubeOD: number }
+      | { arrangement: 'axial' };
     /** One tube-metal thermal node PER SECTION (fixed masses, moving areas).
      *  A single shared metal node cannot support superheat: the boiling
      *  section's film coefficient pins it to T_sat and clamps every wall. */

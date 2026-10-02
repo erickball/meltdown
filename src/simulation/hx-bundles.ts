@@ -165,3 +165,25 @@ export function hxTubeLength(hx: HxTubeGeometry): number {
   return hxTubeLengthFactor(hx) *
     Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
 }
+
+/**
+ * Gas-side crossflow geometry of a helical bundle: the coil annulus the shell
+ * stream is pushed through (its frontal area, m2) and the fraction of that
+ * annulus the tubes occupy. The shell gas of a helical boiler does not run
+ * along the tubes - it runs axially through the annulus and so crosses every
+ * coil layer at near right angles, which is a tube bank in crossflow, not a
+ * duct. Both numbers come from the same packing the tube length was derived
+ * from (helicalLengthFactor), so a hand-wound bundle reports its own, denser
+ * packing.
+ */
+export function helicalCrossflowGeometry(hx: HxTubeGeometry): {
+  frontalArea: number;
+  packing: number;
+  tubeOD: number;
+} {
+  const d = hx.tubeOD || 0.022;
+  const n = Math.max(1, hx.tubeCount || 1000);
+  const frontalArea = coilAnnulusArea(hx);
+  const packing = n * hxTubeLengthFactor(hx) * Math.PI * d * d / 4 / frontalArea;
+  return { frontalArea, packing, tubeOD: d };
+}
