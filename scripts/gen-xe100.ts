@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { heatExchangerPorts } from '../src/construction/construction-manager';
+import { helicalLengthFactor } from '../src/simulation/hx-bundles';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -191,13 +192,22 @@ add('hx-1', {
   // tubes packed into this shell made each coil absurdly short.
   width: 2.8, height: SG_HEIGHT, hxType: 'helical', tubeCount: 300,
   tubeModel: 'moving-boundary', bundleCount: 2,
-  // Start AT the operating point: 165 bar with the economizer holding the
-  // bottom quarter, boiling the middle, and the superheater running
-  // saturation -> 565 C in the top 35%. The factory builds the node totals,
+  // Start AT the operating point (see initialSections). The factory builds the node totals,
   // slug ledger and metal temperatures this partition implies - a plant
   // initialized at its design state should simply STAY there instead of
   // boiling through the whole startup transient every session.
-  initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.25, L3: 0.35, flowKgs: FEED_FLOW / 2 },
+  // Coils wound 20% longer than the default gas-side packing gives (0.24 of
+  // the annulus instead of 0.20; tubes touch near 0.55): 1670 m2 a bundle
+  // instead of 1390. The design point needs ~1110 at the economizer's ~55 K
+  // pinch (260 C helium back against 200 C feed under 350 C saturation), and
+  // with the reflector preheating the return and the feed arriving a little
+  // under 200 C the default left the superheater short - steam at ~520 C.
+  tubeLengthFactor: 1.2 * helicalLengthFactor({ hxType: 'helical', width: 2.8, height: SG_HEIGHT, tubeOD: 0.019, tubeCount: 300 }),
+  // Start AT the design partition. The sections are set by the pinch, not by
+  // equal shares: the economizer's driving difference is ~55 K at both ends
+  // against 185-230 K in the superheater, so it needs about half the tube for
+  // a third of the duty (counterflow LMTD per section at the design duties).
+  initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.53, L3: 0.25, flowKgs: FEED_FLOW / 2 },
   material: 'alloy-800h',
   pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
   plenumLength: SG_PLENUM, tubeOD: 0.019,

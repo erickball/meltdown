@@ -240,12 +240,13 @@
         "tubeCount": 300,
         "tubeModel": "moving-boundary",
         "bundleCount": 2,
+        "tubeLengthFactor": 14.11634349030471,
         "initialSections": {
           "pressureBar": 165,
           "TFeedK": 473,
           "TSteamK": 838,
-          "L1": 0.25,
-          "L3": 0.35,
+          "L1": 0.53,
+          "L3": 0.25,
           "flowKgs": 38.5
         },
         "material": "alloy-800h",
