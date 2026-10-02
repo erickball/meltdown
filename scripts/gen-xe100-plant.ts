@@ -727,7 +727,8 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 });
 
 // Feedwater flow is the load demand (see gen-xe100.ts): steam out = feed in
-// for a once-through boiler, so this setpoint fixes the power.
+// for a once-through boiler, so this setpoint (with the circulators' power
+// demand below) fixes the load.
 controller('ctl-fw-1', 'Feedwater Flow (Load Demand)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
   setpoint: FEED_FLOW,
@@ -741,14 +742,18 @@ controller('ctl-fw-1', 'Feedwater Flow (Load Demand)', 20, 81, {
 // core's temperature RISE - and so the thermal power: P = W_He cp (T_out -
 // T_in). At a fixed speed it settled ~85 kg/s across a 475 K rise, 7% over
 // rating, and the surplus went into superheat. Here the circulator holds
-// reactor power at the feed flow's share of rated - a helium/feed ratio
-// station - so the one load setpoint (feed flow) moves both, and steam
-// leaves at design temperature at any load. Power answers circulator speed
-// within seconds: more helium cools the bed, and the kernels' Doppler
-// feedback raises fission power to meet it.
+// reactor power at its demand, which pairs with the feed-flow demand above:
+// together they are the unit load demand (change both to change load - 77
+// kg/s of feed at 1.0 is rated), and with both met the steam leaves at
+// design temperature. Power answers circulator speed within seconds: more
+// helium cools the bed and the kernels' Doppler feedback raises fission
+// power to meet it. (The demand is not slaved to MEASURED feed flow: that
+// signal rings +-1.5 kg/s at the scan rate, and the proportional kicks it
+// caused were clipped by the rate limit every scan, which erased the
+// integral action.)
 controller('ctl-he-1a', 'He Circulator A (Power)', 20, 95, {
   sensor: { kind: 'reactor-power', targetId: '' },
-  setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
+  setpoint: 1.0,   // fraction of rated - the power half of the load demand
   // Explicit PI: the auto-tuner's templates are for integrating processes,
   // and power answers circulator speed self-regulating (gain ~1 per unit
   // speed, settling on the bed's tens-of-seconds thermal lag). Half the
@@ -759,7 +764,7 @@ controller('ctl-he-1a', 'He Circulator A (Power)', 20, 95, {
 });
 controller('ctl-he-1b', 'He Circulator B (Power)', 20, 102, {
   sensor: { kind: 'reactor-power', targetId: '' },
-  setpoint: { op: 'scale', input: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' }, factor: 1 / FEED_FLOW },
+  setpoint: 1.0,   // fraction of rated - the power half of the load demand
   // Explicit PI: the auto-tuner's templates are for integrating processes,
   // and power answers circulator speed self-regulating (gain ~1 per unit
   // speed, settling on the bed's tens-of-seconds thermal lag). Half the

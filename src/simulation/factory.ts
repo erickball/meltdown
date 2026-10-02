@@ -2210,6 +2210,17 @@ function seatCoreGraphiteAtSteadyState(plantState: PlantState, state: Simulation
     if (isPebbleBed) nodeIds.push(`${id}-fuel`, `${id}-clad`);
     if (state.thermalNodes.get(`${id}-reflector`)?.graphiteOxidation) nodeIds.push(`${id}-reflector`);
     if (nodeIds.length === 0) continue;
+    // A balance only means something at an operating point. A core whose
+    // coolant starts at rest (the HTGR preset's loop has no initial flows)
+    // would be balanced against natural convection alone and start its
+    // pebbles hundreds of kelvin hot; its seed is left as the plant gave it.
+    const coolantFlow = state.flowConnections.reduce((acc, c) =>
+      acc + (c.fromNodeId === id || c.toNodeId === id ? Math.abs(c.massFlowRate) : 0), 0);
+    if (!(coolantFlow > 0)) {
+      console.log(`[Factory] Core '${id}': coolant starts at rest - graphite left at its built ` +
+        `temperatures (seating needs an operating point to balance against)`);
+      continue;
+    }
 
     const seeded = nodeIds.map(n => state.thermalNodes.get(n)!.temperature);
     // Each node alone first (a good start whatever the seed), then Newton on

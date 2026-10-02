@@ -1556,14 +1556,7 @@
             "kind": "reactor-power",
             "targetId": ""
           },
-          "setpoint": {
-            "op": "scale",
-            "input": {
-              "kind": "connection-flow",
-              "targetId": "flow-fw-pump-1-val-fpcv-1"
-            },
-            "factor": 0.012987012987012988
-          },
+          "setpoint": 1,
           "gains": {
             "kp": 0.5,
             "ki": 0.02
