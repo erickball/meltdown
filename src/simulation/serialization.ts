@@ -14,6 +14,9 @@
 import { SimulationState } from './types';
 import type { PlantState, PlantComponent } from '../types';
 import { cloneSimulationState } from './solver';
+import {
+  DECAY_HEAT_GROUPS, LEGACY_DECAY_HEAT_GROUPS_V1, migrateDecayHeatPools,
+} from './operators/neutronics';
 
 export const SIM_STATE_VERSION = 1;
 
@@ -79,6 +82,19 @@ export function deserializeSimulationState(data: Record<string, unknown>): Simul
     scenario: d.scenario ? { events: (d.scenario as any).events, fired: (d.scenario as any).fired } : undefined,
   } as unknown as SimulationState;
   delete (state as unknown as Record<string, unknown>).version;
+
+  // Decay-heat groups grew from 4 to 8 (long-lived groups for day-scale
+  // accidents). A save from the 4-group build is migrated explicitly -
+  // the pools' meaning is known, see migrateDecayHeatPools - and anything
+  // else is left for the neutronics operator to reject loudly.
+  const pools = state.neutronics?.decayHeatPools;
+  if (pools && pools.length === LEGACY_DECAY_HEAT_GROUPS_V1.length &&
+      pools.length !== DECAY_HEAT_GROUPS.length) {
+    state.neutronics.decayHeatPools = migrateDecayHeatPools(pools, LEGACY_DECAY_HEAT_GROUPS_V1);
+    console.warn(
+      `[Serialization] Migrated ${pools.length} decay-heat pools to the ${DECAY_HEAT_GROUPS.length}-group ` +
+      `set (long-lived groups seeded from the slowest saved power average).`);
+  }
   return state;
 }
 

@@ -12,6 +12,7 @@ import bwrPresetData from './presets/bwr.json';
 import htgrPresetData from './presets/htgr.json';
 import xe100PresetData from './presets/xe100.json';
 import xe100SboPresetData from './presets/xe100-sbo.json';
+import xe100DlofcPresetData from './presets/xe100-dlofc.json';
 import xe100SgtrPresetData from './presets/xe100-sgtr.json';
 import xe100PlantPresetData from './presets/xe100-plant.json';
 import twoLoopPresetData from './presets/two-loop.json';
@@ -54,6 +55,7 @@ import {
   steamPartialPressurePa,
   terrainHeightAt,
 } from './simulation';
+import { DECAY_HEAT_GROUPS } from './simulation/operators/neutronics';
 import { DEFAULT_AMBIENT_K, DEFAULT_AMBIENT_RH } from './simulation/factory';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
@@ -370,7 +372,7 @@ function init() {
       controlRodPosition: 1,
       controlRodWorth: 0.08,
       decayHeatFraction: 0,
-      decayHeatPools: [0, 0, 0, 0],
+      decayHeatPools: DECAY_HEAT_GROUPS.map(() => 0),
       scrammed: false,
       scramTime: 0,
       scramReason: '',
@@ -3121,6 +3123,15 @@ function init() {
           'feedback and the reflector-to-cavity heat path - watch fission power die on its own ' +
           'and decay heat soak into the graphite. The event fires automatically; a notification ' +
           'marks it.',
+      },
+      {
+        label: 'Xe-100 Depressurized Cooldown', data: xe100DlofcPresetData,
+        tooltip: 'The HTGR design-basis heat-up (DLOFC): at t = 400 s a ~60 mm nozzle shears off ' +
+          'the top of the RPV during a station blackout, no scram. The helium blows down into the ' +
+          'reactor building, convection in the vessel collapses, and decay heat can only leave by ' +
+          'conduction and radiation through the reflector to the vessel wall and the RCCS. Fuel ' +
+          'heats slowly for a day or more; the TRISO particles hold their fission products unless ' +
+          'the kernels spend days near 1800 C (watch "SiC failed" on the fuel node).',
       },
       {
         label: 'Xe-100 SG Tube Rupture', data: xe100SgtrPresetData,

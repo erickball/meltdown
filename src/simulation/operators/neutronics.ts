@@ -43,19 +43,77 @@ export const BORON_REF_WATER_DENSITY = 750; // kg/m³
 // ============================================================================
 
 /**
- * Fission-product decay heat groups: a coarse 4-group fit to ANS-5.1 decay
- * power after long operation. Each group builds toward fraction*P_fission
- * with time constant 1/lambda and releases its inventory after shutdown:
- * ~5% of prior power at 10 s, ~3% at 100 s, ~1.5% at 1000 s.
+ * Fission-product decay heat groups: an 8-group exponential fit to the
+ * Way-Wigner decay power, P(t)/P0 = 0.0622 (t^-0.2 - (t + T_op)^-0.2),
+ * with T_op = 2 years (the mean irradiation of an equilibrium core's
+ * batches). Each group builds toward fraction*P_fission with time constant
+ * 1/lambda and releases its inventory after shutdown. Within ~3% of the
+ * curve from 1 s to 30 days:
+ *
+ *     1 s 6.1%   10 s 3.8%   100 s 2.3%   1000 s 1.4%   1 h 1.0%
+ *    10 h 0.59%  1 d 0.47%   3 d 0.33%    1 wk 0.27%   30 d 0.16%
+ *
+ * The long groups are what any accident longer than an afternoon runs on:
+ * an HTGR conduction cooldown peaks a day or two after the trip, an LWR
+ * boil-off takes hours. The earlier 4-group fit stopped at tau = 2.8 h and
+ * had lost 99.9% of the decay heat by one day.
+ *
+ * Lambdas are log-spaced decades so a pool's content always means "the
+ * group fraction times the power averaged over the last 1/lambda" - which
+ * is also what makes a saved state from a different group set migratable
+ * (see migrateDecayHeatPools). Fractions: non-negative least squares on
+ * relative error over 1 s..116 d (scratch fit, reproducible from the
+ * formula above).
  *
  * (Lives here rather than with the rate operator that integrates the pools
  * because the neutron source model below reads the pool inventory too.)
  */
 export const DECAY_HEAT_GROUPS: ReadonlyArray<{ fraction: number; lambda: number }> = [
-  { fraction: 0.026, lambda: 0.1 },   // short-lived products, tau ~10 s
-  { fraction: 0.020, lambda: 0.01 },  // tau ~100 s
-  { fraction: 0.012, lambda: 1e-3 },  // tau ~17 min
-  { fraction: 0.012, lambda: 1e-4 },  // tau ~2.8 h
+  { fraction: 0.03056, lambda: 1 },     // tau 1 s
+  { fraction: 0.01988, lambda: 0.1 },   // tau 10 s
+  { fraction: 0.01232, lambda: 0.01 },  // tau 100 s
+  { fraction: 0.00795, lambda: 1e-3 },  // tau 17 min
+  { fraction: 0.00477, lambda: 1e-4 },  // tau 2.8 h
+  { fraction: 0.00339, lambda: 1e-5 },  // tau 1.2 d
+  { fraction: 0.00155, lambda: 1e-6 },  // tau 12 d
+  { fraction: 0.00191, lambda: 1e-7 },  // tau 116 d
+];
+
+/**
+ * Re-map decay-heat pools saved under a different group set onto the
+ * current one. Each pool divided by its group fraction is the power
+ * averaged over that group's time constant, so every current group takes
+ * the lagged power of the saved group with the nearest lambda (in log
+ * terms). Longer groups than any saved one inherit the slowest saved
+ * average - the best estimate of the longer history the save never
+ * recorded - which means a core saved shortly after a trip comes back
+ * believing it ran at that power for weeks rather than for hours.
+ */
+export function migrateDecayHeatPools(
+  pools: number[],
+  savedGroups: ReadonlyArray<{ fraction: number; lambda: number }>,
+): number[] {
+  if (pools.length !== savedGroups.length) {
+    throw new Error(
+      `[Neutronics] Cannot migrate ${pools.length} decay-heat pools against a ` +
+      `${savedGroups.length}-group table - the saved group set is unknown.`);
+  }
+  return DECAY_HEAT_GROUPS.map(g => {
+    let best = 0;
+    for (let i = 1; i < savedGroups.length; i++) {
+      if (Math.abs(Math.log(savedGroups[i].lambda / g.lambda)) <
+          Math.abs(Math.log(savedGroups[best].lambda / g.lambda))) best = i;
+    }
+    return g.fraction * pools[best] / savedGroups[best].fraction;
+  });
+}
+
+/** The 4-group set states were saved with before the long groups existed */
+export const LEGACY_DECAY_HEAT_GROUPS_V1: ReadonlyArray<{ fraction: number; lambda: number }> = [
+  { fraction: 0.026, lambda: 0.1 },
+  { fraction: 0.020, lambda: 0.01 },
+  { fraction: 0.012, lambda: 1e-3 },
+  { fraction: 0.012, lambda: 1e-4 },
 ];
 
 /** Fraction of fission energy that is delayed (deposited via the pools) */
