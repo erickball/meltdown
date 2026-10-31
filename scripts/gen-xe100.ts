@@ -1167,6 +1167,33 @@ const stationBlackout = {
   }],
 };
 
+// Depressurized loss of forced cooling: the HTGR design-basis heat-up. The
+// blackout of stationBlackout plus a break in the primary pressure boundary,
+// so the bed loses its helium as well as its circulator - convection inside
+// the vessel collapses and decay heat must leave by conduction and
+// radiation alone (bed -> reflector -> vessel wall -> RCCS). Fuel peaks a
+// day or two later; the TRISO barrier is what keeps the source term at the
+// as-manufactured defect level. The break is a ~60 mm opening high on the
+// RPV (an instrument or relief nozzle shearing off), the size range DLOFC
+// analyses use: it blows the primary down in minutes rather than seconds.
+const depressurizedCooldown = {
+  description: 'Depressurized loss of forced cooling at t=400 s: station blackout plus a ' +
+    '~60 mm break high on the RPV into the reactor building, no scram. Helium blows down, ' +
+    'in-vessel convection collapses, and decay heat leaves by conduction and radiation ' +
+    'through the reflector to the vessel wall and the RCCS.',
+  events: [{
+    time: SETTLE,
+    message: 'Primary boundary breached (~60 mm, top of RPV) with station blackout, no scram',
+    actions: [
+      ...stationBlackout.events[0].actions,
+      {
+        kind: 'burst', id: 'rv-1', area: 0.003, elevation: 18,
+        breachMessage: 'RPV nozzle sheared - primary helium blowing down into the reactor building',
+      },
+    ],
+  }],
+};
+
 const tubeRupture = {
   description: 'Turbine trip at t=400 s bottles the boiler toward the dump setpoint, then at ' +
     't=550 s an SG tube ruptures: 165-bar steam into 60-bar helium, carried to the hot ' +
@@ -1192,7 +1219,11 @@ const tubeRupture = {
   ],
 };
 
-for (const [file, scenario] of [['xe100-sbo.json', stationBlackout], ['xe100-sgtr.json', tubeRupture]] as const) {
+for (const [file, scenario] of [
+  ['xe100-sbo.json', stationBlackout],
+  ['xe100-dlofc.json', depressurizedCooldown],
+  ['xe100-sgtr.json', tubeRupture],
+] as const) {
   const t = path.join(HERE, '..', 'src', 'presets', file);
   fs.writeFileSync(t, JSON.stringify({ ...out, scenario }, null, 2) + '\n');
   console.log(`Wrote ${t}: ${scenario.events.length} scenario event(s)`);
