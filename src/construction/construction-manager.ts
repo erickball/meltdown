@@ -66,6 +66,7 @@ import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
+import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -1448,6 +1449,7 @@ export class ConstructionManager {
           (core as any).pebbleDiameter = props.pebbleDiameter ?? 60;  // mm
           (core as any).pebbleCount = props.pebbleCount ?? 400000;
           (core as any).heavyMetalPerPebble = props.heavyMetalPerPebble ?? 7;  // g
+          (core as any).trisoDefectFraction = props.trisoDefectFraction ?? DEFAULT_TRISO_DEFECT_FRACTION;
           (core as any).reflectorThickness = props.reflectorThickness ?? 0.8;  // m
         }
 
@@ -4669,6 +4671,9 @@ export class ConstructionManager {
     if (properties.heavyMetalPerPebble !== undefined) {
       component.heavyMetalPerPebble = properties.heavyMetalPerPebble; // g
     }
+    if (properties.trisoDefectFraction !== undefined) {
+      component.trisoDefectFraction = properties.trisoDefectFraction;
+    }
     if (properties.reflectorThickness !== undefined) {
       component.reflectorThickness = properties.reflectorThickness; // m
     }
@@ -4874,6 +4879,7 @@ export class ConstructionManager {
       container.pebbleDiameter = coreProperties.pebbleDiameter ?? 60; // mm
       container.pebbleCount = coreProperties.pebbleCount ?? 400000;
       container.heavyMetalPerPebble = coreProperties.heavyMetalPerPebble ?? 7; // g
+      container.trisoDefectFraction = coreProperties.trisoDefectFraction ?? DEFAULT_TRISO_DEFECT_FRACTION;
       container.reflectorThickness = coreProperties.reflectorThickness ?? 0.8; // m
     }
 
@@ -4954,6 +4960,7 @@ export class ConstructionManager {
             (coreBarrel as any).pebbleDiameter = container.pebbleDiameter;
             (coreBarrel as any).pebbleCount = container.pebbleCount;
             (coreBarrel as any).heavyMetalPerPebble = container.heavyMetalPerPebble;
+            (coreBarrel as any).trisoDefectFraction = container.trisoDefectFraction;
             (coreBarrel as any).reflectorThickness = container.reflectorThickness;
           }
           // Clear from vessel (they belong on core barrel now)

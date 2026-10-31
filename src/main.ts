@@ -56,6 +56,7 @@ import {
   terrainHeightAt,
 } from './simulation';
 import { DECAY_HEAT_GROUPS } from './simulation/operators/neutronics';
+import { DEFAULT_TRISO_DEFECT_FRACTION } from './simulation/triso';
 import { DEFAULT_AMBIENT_K, DEFAULT_AMBIENT_RH } from './simulation/factory';
 import {
   getStock, componentsRemaining, pipeMetersRemaining, storedTypeForPaletteKey,
@@ -2084,6 +2085,7 @@ function init() {
       pebbleDiameter: barrel.pebbleDiameter ?? 60,
       pebbleCount: barrel.pebbleCount ?? 400000,
       heavyMetalPerPebble: barrel.heavyMetalPerPebble ?? 7,
+      trisoDefectFraction: barrel.trisoDefectFraction ?? DEFAULT_TRISO_DEFECT_FRACTION,
       reflectorThickness: barrel.reflectorThickness ?? 0.8,
       enrichmentPct: (barrel.enrichment ?? 0.05) * 100,
       fuelMaterial: barrel.fuelMaterial ?? 'UO2',
