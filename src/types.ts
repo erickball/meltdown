@@ -468,6 +468,9 @@ export interface CoreBarrelComponent extends ComponentBase {
   pebbleDiameter?: number;      // Pebble diameter (mm), default 60
   pebbleCount?: number;         // Number of pebbles in the core
   heavyMetalPerPebble?: number; // Uranium loading per pebble (g), default 7
+  // As-manufactured failed TRISO particle fraction (defective SiC + matrix
+  // heavy-metal contamination), default 5e-5. Drives release in mild accidents.
+  trisoDefectFraction?: number;
   reflectorThickness?: number;  // Graphite reflector thickness (m), default 0
   // Fuel properties
   fuelRodCount?: number;        // Number of fuel rods to display (visual, typically 8-12)

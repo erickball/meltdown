@@ -23,6 +23,7 @@ import {
 import * as Water from '../water-properties';
 import { solveMixtureState, nodeGasVolume, type MixtureState } from '../mixture-properties';
 import { simulationConfig } from '../types';
+import { sicDamageRate, trisoFailedFraction } from '../triso';
 import {
   totalMoles,
   totalMass as ncgTotalMass,
@@ -3569,6 +3570,11 @@ export class CladdingOxidationRateOperator implements RateOperator {
  * transport - out breaks, through valves, into containment, to the
  * environment (tracked in state.environmentalRelease when they cross a
  * boundary node).
+ *
+ * TRISO fuel (fissionProducts.trisoDefectFraction set) adds a barrier in
+ * front of this: only failed or as-manufactured-defective particles expose
+ * their inventory to these kernel kinetics; intact particles hold it all.
+ * The failed fraction comes from the consumed particle life (triso.ts).
  */
 export class FissionProductReleaseOperator implements RateOperator {
   name = 'FissionProductRelease';
@@ -3634,6 +3640,28 @@ export class FissionProductReleaseOperator implements RateOperator {
       const oxideTotal = locations.reduce((s, l) => s + l.oxide, 0);
       if (oxideTotal <= 0) continue;
 
+      // TRISO fuel: the inventory of every intact particle is sealed behind
+      // its SiC. Intact particles still hold their whole initial inventory,
+      // so what the kernel-release kinetics below may act on is only the
+      // remainder - the inventory of failed particles not yet released.
+      // Particle life is consumed at the kernel temperature (triso.ts).
+      let noble = fp.nobleGas;
+      let volatile = fp.volatile;
+      if (fp.trisoDefectFraction !== undefined) {
+        if (fp.initialNobleGas === undefined || fp.initialVolatile === undefined) {
+          throw new Error(
+            `[FissionProductRelease] TRISO fuel node '${id}' has no initial inventory - ` +
+            `the sealed (intact-particle) share is measured against it.`
+          );
+        }
+        const thermalRates = rates.thermalNodes.get(id) || { dTemperature: 0 };
+        thermalRates.dTrisoDamage = sicDamageRate(node.temperature);
+        rates.thermalNodes.set(id, thermalRates);
+        const intact = 1 - trisoFailedFraction(fp.trisoDamage ?? 0, fp.trisoDefectFraction);
+        noble -= fp.initialNobleGas * intact;
+        volatile -= fp.initialVolatile * intact;
+      }
+
       let dNobleTotal = 0;
       let dVolatileTotal = 0;
       for (const loc of locations) {
@@ -3645,8 +3673,8 @@ export class FissionProductReleaseOperator implements RateOperator {
 
         const share = loc.oxide / oxideTotal;
         const arrhenius = Math.exp(-FissionProductReleaseOperator.Q_OVER_R / loc.T);
-        const dNoble = -fp.nobleGas * share * FissionProductReleaseOperator.K0_NOBLE * arrhenius;
-        const dVolatile = -fp.volatile * share * FissionProductReleaseOperator.K0_VOLATILE * arrhenius;
+        const dNoble = -noble * share * FissionProductReleaseOperator.K0_NOBLE * arrhenius;
+        const dVolatile = -volatile * share * FissionProductReleaseOperator.K0_VOLATILE * arrhenius;
         dNobleTotal += dNoble;
         dVolatileTotal += dVolatile;
 

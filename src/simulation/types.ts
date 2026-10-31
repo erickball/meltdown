@@ -147,6 +147,13 @@ export interface ThermalNode {
     initialNobleGas?: number;       // mol at startup (for release-fraction display)
     initialVolatile?: number;       // mol at startup
     associatedCoolantNode: string;  // FlowNode ID receiving releases
+    // TRISO coated-particle fuel only (see triso.ts). Present = the
+    // inventory sits behind SiC: only failed particles release.
+    //   trisoDefectFraction  as-manufactured failed fraction (0-1)
+    //   trisoDamage          consumed particle life, integral dt/t_med(T);
+    //                        the failed fraction is DERIVED from it
+    trisoDefectFraction?: number;
+    trisoDamage?: number;
   };
 
   // Cladding oxidation state (only for cladding nodes)

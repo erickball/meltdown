@@ -2,6 +2,7 @@
  * Xe-100 accident scenarios: loss of primary flow and SG tube rupture.
  *
  *   npx tsx scripts/xe100-scenarios.ts lofc [seconds]   - circulator trip
+ *   npx tsx scripts/xe100-scenarios.ts dlofc [seconds]  - blackout + RPV break (depressurized)
  *   npx tsx scripts/xe100-scenarios.ts sgtr [seconds]   - tube rupture into primary
  *
  * Both start from the preset, settle to steady state, then inject the fault.
@@ -11,7 +12,8 @@
  * feedback shuts the fission power down without rods, decay heat soaks into
  * 100+ tonnes of graphite, and the reflector conducts/radiates it to the
  * vessel wall. Peak fuel must stay under the ~1900-2100 K TRISO failure
- * band with everything switched off. Watch for recriticality as xenon-free
+ * band with everything switched off (SiC failure is negligible at 1600 C and
+ * begins only after days near 1800 C - see src/simulation/triso.ts). Watch for recriticality as xenon-free
  * graphite cools back through the power coefficient hours later - a real
  * HTGR phenomenon (we run minutes here, so what shows is the shutdown and
  * the slow heatup toward conduction equilibrium).
@@ -29,15 +31,17 @@ import { fileURLToPath } from 'url';
 import { buildSimFromFile } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
 import { getGraphiteOxidationDiagnostics } from '../src/simulation/operators/graphite-oxidation';
+import { trisoFailedFraction } from '../src/simulation/triso';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'sgtr';
+const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'dlofc' | 'sgtr';
 // The fault sequences live in the scenario presets (gen-xe100.ts writes them;
 // src/simulation/scenario-types.ts describes them) and fire from inside the
 // solver, so this script only drives time and reports. PRESET=<path> runs a
 // different preset file under its own sequence.
 const PRESET = process.env.PRESET ??
-  path.join(HERE, '..', 'src', 'presets', scenario === 'sgtr' ? 'xe100-sgtr.json' : 'xe100-sbo.json');
+  path.join(HERE, '..', 'src', 'presets',
+    scenario === 'sgtr' ? 'xe100-sgtr.json' : scenario === 'dlofc' ? 'xe100-dlofc.json' : 'xe100-sbo.json');
 const seconds = parseFloat(process.argv[3] ?? '1800');
 const SETTLE = 400; // s to steady state before the fault
 
@@ -147,7 +151,17 @@ for (let t = 0; t < seconds; t += step) {
 console.log('\nPost-mortem:');
 const fuel = st().thermalNodes.get('cb-1-fuel')!;
 console.log(`  Peak-ish fuel T now: ${(fuel.temperature - 273.15).toFixed(0)} C ` +
-  `(TRISO failure band ~1620-1830 C)`);
+  `(TRISO: negligible SiC failure at 1600 C, onset ~1800 C over days)`);
+const fp = fuel.fissionProducts;
+if (fp?.trisoDefectFraction !== undefined) {
+  const failed = trisoFailedFraction(fp.trisoDamage ?? 0, fp.trisoDefectFraction);
+  console.log(`  TRISO SiC failed: ${failed.toExponential(3)} (as-made defects ${fp.trisoDefectFraction.toExponential(1)}, ` +
+    `life consumed D=${(fp.trisoDamage ?? 0).toExponential(2)})`);
+  console.log(`  Released from fuel: noble ${(1 - fp.nobleGas / fp.initialNobleGas!).toExponential(2)}, ` +
+    `volatile ${(1 - fp.volatile / fp.initialVolatile!).toExponential(2)}; ` +
+    `to environment: Xe ${(st().environmentalRelease?.Xe ?? 0).toExponential(2)} mol, ` +
+    `CsI ${(st().environmentalRelease?.CsI ?? 0).toExponential(2)} mol`);
+}
 const gox = st().thermalNodes.get('cb-1-clad')?.graphiteOxidation;
 if (gox) {
   console.log(`  Pebble graphite burn-off: ${(gox.burnoff * 100).toFixed(4)}% ` +

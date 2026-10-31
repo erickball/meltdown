@@ -31,6 +31,7 @@ import {
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { resolveMaterial } from './materials';
 import { NBG_18, A3_3 } from './graphite';
+import { DEFAULT_TRISO_DEFECT_FRACTION } from './triso';
 import { saturationTemperature, saturationPressure } from './water-properties';
 import {
   saturationAtP, subcooledSectionMean, subcooledLiquidV,
@@ -1123,6 +1124,12 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
           initialNobleGas: 700e-9 * ratedPower,
           initialVolatile: 250e-9 * ratedPower,
           associatedCoolantNode: coolantFlowNodeId,
+          // Pebble fuel is TRISO: the inventory sits behind each particle's
+          // SiC and only failed particles release (triso.ts).
+          ...(isPebbleBed ? {
+            trisoDefectFraction: coreComp.trisoDefectFraction ?? DEFAULT_TRISO_DEFECT_FRACTION,
+            trisoDamage: 0,
+          } : {}),
         };
       }
 
@@ -3549,11 +3556,11 @@ function createNeutronicsFromCore(component: PlantComponent, state?: SimulationS
     controlRodWorth,
     excessReactivity,
     // Decay heat starts at the steady-state value for the power the core is
-    // running at initially: 7% of that power, split across the fission-product
-    // groups. `decayHeatPower` overrides the basis for "started low but
+    // running at initially: ~8% of that power (the sum of the group
+    // fractions), split across the fission-product groups. `decayHeatPower` overrides the basis for "started low but
     // recently ran high." A core that starts shut down (power ~ 0) begins near
     // zero and the group model (dQ_g/dt = lambda_g*(f_g*P - Q_g)) ramps it up
-    // toward 7% of power as the reactor comes up.
+    // toward ~8% of power as the reactor comes up.
     decayHeatFraction: 0.07,
     decayHeatPools: DECAY_HEAT_GROUPS.map(
       g => g.fraction * (vessel.decayHeatPower ?? power)

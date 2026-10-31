@@ -32,6 +32,7 @@ import type { ControllerSignal } from './simulation/types';
 import { hxBundleCount, hxTubeNodeIds } from './simulation/hx-bundles';
 import { meltFraction } from './simulation/operators/rate-operators';
 import { basematErodedDepth } from './simulation/operators/mcci';
+import { trisoFailedFraction } from './simulation/triso';
 import type { FlowNode } from './simulation/types';
 import { pressureAtConnection } from './simulation/operators/connection-hydraulics';
 import { terrainHeightAt } from './simulation/terrain';
@@ -376,6 +377,13 @@ export function updateDebugPanel(
           if (releasedFrac > 0.0001) {
             html += ` <span class="debug-danger" title="Fraction of noble-gas fission-product inventory released from the fuel">FP rel ${(releasedFrac * 100).toFixed(1)}%</span>`;
           }
+        }
+        // TRISO particles whose SiC barrier is gone (as-made defects plus
+        // time-at-temperature failures) - only these can release
+        if (fp?.trisoDefectFraction !== undefined) {
+          const failed = trisoFailedFraction(fp.trisoDamage ?? 0, fp.trisoDefectFraction);
+          const cls = failed > 1e-3 ? 'debug-danger' : failed > 2 * fp.trisoDefectFraction ? 'debug-warning' : 'debug-value';
+          html += ` <span class="${cls}" title="TRISO particles with a failed SiC layer: the as-manufactured defect fraction plus particles that have used up their life at temperature. Intact particles hold all their fission products; only failed ones release. Failures are negligible at the 1600 C design limit, begin after ~200 h at 1800 C, and run away above ~2100 C.">SiC failed ${failed < 1e-3 ? failed.toExponential(1) : (failed * 100).toFixed(1) + '%'}</span>`;
         }
         // Melt pool inventories (corium / ex-vessel debris)
         if ((id.endsWith('-corium') || id.endsWith('-corium-ex')) && node.mass > 2) {

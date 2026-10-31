@@ -16,9 +16,10 @@ import { mixtureCv } from './gas-properties.js';
 import { deriveNeutronics, deriveControlRodWorth, latticeKeff, LatticeParams } from './lattice.js';
 import {
   computeReactivityComponents, neutronSourceRate, normalizedNeutronSource,
-  FISSION_ENERGY, DECAY_HEAT_GROUPS,
+  FISSION_ENERGY, DECAY_HEAT_GROUPS, LEGACY_DECAY_HEAT_GROUPS_V1, migrateDecayHeatPools,
 } from './operators/neutronics.js';
-import { NeutronicsRateOperator } from './operators/rate-operators.js';
+import { NeutronicsRateOperator, FissionProductReleaseOperator } from './operators/rate-operators.js';
+import { sicDamageRate, trisoFailedFraction, thermalFailureFraction, erfc } from './triso.js';
 import { ControlSystemOperator, describeControllerSignal,
   primaryControllerSignal } from './operators/control-system.js';
 import {
@@ -1161,6 +1162,142 @@ test('graphiteOxidation survives a state clone (conservation regression)', () =>
   copy.thermalNodes.get('g')!.graphiteOxidation!.burnoff = 0.9;
   assert(state.thermalNodes.get('g')!.graphiteOxidation!.burnoff === 0.1,
     'mutating the clone must not touch the original - graphiteOxidation is integrated state');
+});
+
+// ============================================================================
+// Decay heat
+// ============================================================================
+category('Decay heat');
+
+test('decay heat follows Way-Wigner from seconds to weeks', () => {
+  // After long operation each pool sits at fraction * P; after shutdown it
+  // decays as exp(-lambda t). The day-scale tail is what an HTGR conduction
+  // cooldown or an LWR boil-off runs on - the old 4-group set had lost
+  // 99.9% of it by one day.
+  const T_op = 2 * 365.25 * 86400;
+  const wayWigner = (t: number) => 0.0622 * (Math.pow(t, -0.2) - Math.pow(t + T_op, -0.2));
+  const groups = (t: number) => DECAY_HEAT_GROUPS.reduce((s, g) => s + g.fraction * Math.exp(-g.lambda * t), 0);
+  for (const t of [1, 10, 100, 1000, 3600, 36000, 86400, 259200, 604800, 2592000]) {
+    const ratio = groups(t) / wayWigner(t);
+    assert(Math.abs(ratio - 1) < 0.05,
+      `decay power at t=${t} s: groups ${(100 * groups(t)).toFixed(3)}% vs ` +
+      `Way-Wigner ${(100 * wayWigner(t)).toFixed(3)}%`);
+  }
+});
+
+test('legacy 4-group decay pools migrate by matching time constants', () => {
+  // A save from shortly after a trip: the fast pools have emptied, the slow
+  // ones still remember full power. The power averages must carry over.
+  const P = 200e6;
+  const saved = [0.1 * 0.026 * P, 0.4 * 0.020 * P, 0.9 * 0.012 * P, 1.0 * 0.012 * P];
+  const pools = migrateDecayHeatPools(saved, LEGACY_DECAY_HEAT_GROUPS_V1);
+  assert(pools.length === DECAY_HEAT_GROUPS.length, 'one pool per current group');
+  const avg = (i: number) => pools[i] / DECAY_HEAT_GROUPS[i].fraction / P;
+  assertClose(avg(1), 0.1, 1e-12, 'tau 10 s group keeps the 10 s average');
+  assertClose(avg(2), 0.4, 1e-12, 'tau 100 s group keeps the 100 s average');
+  assertClose(avg(4), 1.0, 1e-12, 'tau 2.8 h group keeps the 2.8 h average');
+  assertClose(avg(7), 1.0, 1e-12, 'longer groups inherit the slowest saved average');
+  let threw = false;
+  try { migrateDecayHeatPools([1, 2, 3], LEGACY_DECAY_HEAT_GROUPS_V1); } catch { threw = true; }
+  assert(threw, 'a pool count that matches no known group set must be rejected loudly');
+});
+
+// ============================================================================
+// TRISO coated-particle retention
+// ============================================================================
+category('TRISO');
+
+// Failed fraction after holding a constant kernel temperature for some hours
+const trisoHold = (T: number, hours: number) =>
+  thermalFailureFraction(sicDamageRate(T) * hours * 3600);
+
+test('TRISO failure reproduces the heating-test anchors', () => {
+  // 1600 C is the design-basis conduction-cooldown peak: no SiC failures
+  // in 500 h at KUFA or AGR-1. 1700 C: none in ~4000 AGR-1 particles.
+  const f1600 = trisoHold(1873, 500);
+  const f1700 = trisoHold(1973, 300);
+  assert(f1600 < 1e-6, `1600 C / 500 h must fail essentially nothing, got ${f1600.toExponential(2)}`);
+  assert(f1700 < 2.5e-4, `1700 C / 300 h: AGR-1 saw no failures, got ${f1700.toExponential(2)}`);
+  // 1800 C: AGR-1 compacts saw the first SiC failures after ~200 h
+  const f1800 = trisoHold(2073, 200);
+  assert(f1800 > 1e-4 && f1800 < 1e-2,
+    `1800 C / 200 h should be the onset (~1e-3), got ${f1800.toExponential(2)}`);
+  // 2100 C: SiC decomposition fails a large share within a day
+  const f2100 = trisoHold(2373, 20);
+  assert(f2100 > 0.05 && f2100 < 0.8, `2100 C / 20 h should be tens of percent, got ${f2100.toFixed(3)}`);
+});
+
+test('TRISO 50 K/h ramp: failures start near 2000 C, ~all gone by 2500 C', () => {
+  // Nabielek et al. 1989 ramp tests: Cs release approaches 100% at 2500 C
+  let D = 0;
+  let fAt2000 = 0;
+  const dt = 60; // s
+  for (let T = 1873; T < 2773; T += 50 * dt / 3600) {
+    D += sicDamageRate(T) * dt;
+    if (fAt2000 === 0 && T >= 2273) fAt2000 = thermalFailureFraction(D);
+  }
+  const fEnd = thermalFailureFraction(D);
+  assert(fAt2000 < 1e-3, `by 2000 C a ramp should have failed little, got ${fAt2000.toExponential(2)}`);
+  assert(fEnd > 0.9, `by 2500 C nearly every particle should have failed, got ${fEnd.toFixed(3)}`);
+});
+
+test('TRISO failed fraction is smooth and monotone from zero damage', () => {
+  // Defects alone at zero damage - no failure temperature, no step
+  assert(Math.abs(trisoFailedFraction(0, 5e-5) / 5e-5 - 1) < 1e-9, 'zero damage = the as-made defect fraction');
+  let prev = thermalFailureFraction(0);
+  assert(prev === 0, 'zero damage must give zero thermal failures');
+  for (let lgD = -12; lgD <= 2; lgD += 0.25) {
+    const f = thermalFailureFraction(Math.pow(10, lgD));
+    assert(f >= prev && f <= 1, `failed fraction must rise monotonically, broke at D=1e${lgD}`);
+    prev = f;
+  }
+  assert(Math.abs(thermalFailureFraction(1) - 0.5) < 1e-6, 'D = 1 is the median: half failed');
+  // No overflow at either end of the temperature range
+  assert(sicDamageRate(50) === 0 || sicDamageRate(50) > 0, 'cold damage rate must be finite');
+  assert(Number.isFinite(sicDamageRate(4000)), 'hot damage rate must be finite');
+});
+
+test('erfc keeps relative accuracy deep in the tail', () => {
+  // The failure fractions that matter (1e-10..1e-4) are tail values
+  assertClose(erfc(0), 1, 1e-7, 'erfc(0)');
+  assert(Math.abs(erfc(3) / 2.209049699858544e-5 - 1) < 1e-6, `erfc(3) = ${erfc(3)}`);
+  assert(Math.abs(erfc(5) / 1.537459794428035e-12 - 1) < 1e-6, `erfc(5) = ${erfc(5)}`);
+  assert(Math.abs(erfc(-2) - (2 - 4.677734981047266e-3)) < 1e-9, `erfc(-2) = ${erfc(-2)}`);
+});
+
+test('intact TRISO particles hold their inventory; failed ones release it', () => {
+  // A pebble-bed fuel node at 1600 C. Bare-kernel (CORSOR) kinetics would
+  // empty it in hours; with the SiC barrier only the defective share is
+  // exposed, so the release rate is f_defect times the bare-kernel rate.
+  const makeState = (damage: number, triso: boolean) => ({
+    thermalNodes: new Map([['core-fuel', {
+      id: 'core-fuel', label: 'fuel', temperature: 1873, mass: 3000, specificHeat: 300,
+      thermalConductivity: 3, characteristicLength: 2.5e-4, surfaceArea: 1,
+      heatGeneration: 0, maxTemperature: 2800,
+      fissionProducts: {
+        nobleGas: 140, volatile: 50, initialNobleGas: 140, initialVolatile: 50,
+        associatedCoolantNode: 'core',
+        ...(triso ? { trisoDefectFraction: 1e-4, trisoDamage: damage } : {}),
+      },
+    }]]),
+    flowNodes: new Map([['core', {
+      id: 'core', label: 'core', volume: 10, hydraulicDiameter: 0.1, flowArea: 1, elevation: 0,
+      fluid: { temperature: 1000, pressure: 1e5, phase: 'vapor', mass: 0.01, internalEnergy: 0, quality: 1 },
+    }]]),
+    flowConnections: [], thermalConnections: [], convectionConnections: [],
+    components: { pumps: new Map(), valves: new Map() }, neutronics: {}, time: 0,
+  }) as any;
+  const op = new FissionProductReleaseOperator();
+  const bare = op.computeRates(makeState(0, false)).thermalNodes.get('core-fuel')!;
+  const sealed = op.computeRates(makeState(0, true)).thermalNodes.get('core-fuel')!;
+  assert(sealed.dTrisoDamage! > 0, 'a hot TRISO core must be consuming particle life');
+  assert(Math.abs(sealed.dFpNobleGas! / bare.dFpNobleGas! - 1e-4) < 1e-9,
+    `only the defective 1e-4 should release, got ratio ${(sealed.dFpNobleGas! / bare.dFpNobleGas!).toExponential(3)}`);
+  // At the median life half the particles have failed and release
+  const half = op.computeRates(makeState(1, true)).thermalNodes.get('core-fuel')!;
+  const expected = 1 - (1 - 1e-4) * 0.5;
+  assert(Math.abs(half.dFpVolatile! / bare.dFpVolatile! - expected) < 1e-6,
+    `at D = 1 about half should release, got ${(half.dFpVolatile! / bare.dFpVolatile!).toFixed(4)}`);
 });
 
 // ============================================================================

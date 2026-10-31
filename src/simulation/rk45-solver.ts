@@ -47,6 +47,7 @@ export interface ThermalNodeRates {
   dGraphiteBurnoff?: number;   // 1/s - rate of graphite consumption by oxidation
   dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
   dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
+  dTrisoDamage?: number;  // 1/s - TRISO particle life consumed (1/t_med(T))
   dMetalZr?: number;      // kg/s - unoxidized Zr inventory change (corium/debris nodes)
   dMetalFe?: number;      // kg/s - unoxidized Fe inventory change (corium/debris nodes)
   dSlag?: number;         // kg/s - concrete-slag inventory change (MCCI debris)
@@ -248,6 +249,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     if (aRates.dFpVolatile !== undefined || bRates.dFpVolatile !== undefined) {
       combined.dFpVolatile = (aRates.dFpVolatile ?? 0) + (bRates.dFpVolatile ?? 0);
     }
+    if (aRates.dTrisoDamage !== undefined || bRates.dTrisoDamage !== undefined) {
+      combined.dTrisoDamage = (aRates.dTrisoDamage ?? 0) + (bRates.dTrisoDamage ?? 0);
+    }
     if (aRates.dMetalZr !== undefined || bRates.dMetalZr !== undefined) {
       combined.dMetalZr = (aRates.dMetalZr ?? 0) + (bRates.dMetalZr ?? 0);
     }
@@ -367,6 +371,7 @@ export function accumulateRates(target: StateRates, source: StateRates, factor =
     }
     if (r.dFpNobleGas !== undefined) t.dFpNobleGas = (t.dFpNobleGas ?? 0) + r.dFpNobleGas * factor;
     if (r.dFpVolatile !== undefined) t.dFpVolatile = (t.dFpVolatile ?? 0) + r.dFpVolatile * factor;
+    if (r.dTrisoDamage !== undefined) t.dTrisoDamage = (t.dTrisoDamage ?? 0) + r.dTrisoDamage * factor;
     if (r.dMetalZr !== undefined) t.dMetalZr = (t.dMetalZr ?? 0) + r.dMetalZr * factor;
     if (r.dMetalFe !== undefined) t.dMetalFe = (t.dMetalFe ?? 0) + r.dMetalFe * factor;
     if (r.dSlag !== undefined) t.dSlag = (t.dSlag ?? 0) + r.dSlag * factor;
@@ -455,6 +460,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     }
     if (r.dFpVolatile !== undefined) {
       scaled.dFpVolatile = r.dFpVolatile * factor;
+    }
+    if (r.dTrisoDamage !== undefined) {
+      scaled.dTrisoDamage = r.dTrisoDamage * factor;
     }
     if (r.dMetalZr !== undefined) {
       scaled.dMetalZr = r.dMetalZr * factor;
@@ -628,6 +636,12 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         if (nodeRates.dFpVolatile !== undefined) {
           node.fissionProducts.volatile =
             Math.max(0, node.fissionProducts.volatile + nodeRates.dFpVolatile * dt);
+        }
+        // TRISO particle life consumed. The rate is a positive Arrhenius
+        // term, so the integral only grows - no floor needed.
+        if (nodeRates.dTrisoDamage !== undefined) {
+          node.fissionProducts.trisoDamage =
+            (node.fissionProducts.trisoDamage ?? 0) + nodeRates.dTrisoDamage * dt;
         }
       }
       // Corium composition inventories: sources are relocation flows

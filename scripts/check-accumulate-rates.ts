@@ -37,7 +37,8 @@ function makeRates(seed: { s: number }, nodeIds: string[], thermalIds: string[],
     if (opts.optionals) {
       tr.dMass = rnd(seed); tr.dOxidizedFraction = rnd(seed) * 1e-4;
       tr.dGraphiteBurnoff = rnd(seed) * 1e-5; tr.dFpNobleGas = rnd(seed);
-      tr.dFpVolatile = rnd(seed); tr.dMetalZr = rnd(seed);
+      tr.dFpVolatile = rnd(seed); tr.dTrisoDamage = rnd(seed) * 1e-6;
+      tr.dMetalZr = rnd(seed);
       tr.dMetalFe = rnd(seed); tr.dSlag = rnd(seed);
     }
     r.thermalNodes.set(id, tr);
