@@ -1252,6 +1252,10 @@ test('TRISO failed fraction is smooth and monotone from zero damage', () => {
     prev = f;
   }
   assert(Math.abs(thermalFailureFraction(1) - 0.5) < 1e-6, 'D = 1 is the median: half failed');
+  // RK45 trial stages can hand the integral a hair below zero (negative
+  // Dormand-Prince coefficients on a ~1e-27 value): that is "no damage",
+  // and must not become NaN moles of Xe in the coolant
+  assert(thermalFailureFraction(-3e-27) === 0, 'a trial-stage D slightly below zero means no failures');
   // No overflow at either end of the temperature range
   assert(sicDamageRate(50) === 0 || sicDamageRate(50) > 0, 'cold damage rate must be finite');
   assert(Number.isFinite(sicDamageRate(4000)), 'hot damage rate must be finite');

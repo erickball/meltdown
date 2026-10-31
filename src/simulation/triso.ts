@@ -88,7 +88,14 @@ export function erfc(x: number): number {
 
 /** Fraction of intact particles whose life is used up at damage D (log-normal CDF) */
 export function thermalFailureFraction(damage: number): number {
-  // ln(0) = -Infinity -> erfc(+Infinity) = 0: undamaged fuel has no failures
+  if (Number.isNaN(damage)) {
+    throw new Error('[TRISO] particle damage is NaN - the life-consumed integral has been corrupted upstream');
+  }
+  // The lifetime is a positive random variable, so its CDF is exactly 0 for
+  // D <= 0 - the continuous extension, not a floor. It matters: D starts at
+  // 0 and Dormand-Prince stages have negative coefficients, so a trial
+  // stage can see D ~ -1e-27, where ln(D) would be NaN.
+  if (damage <= 0) return 0;
   return 0.5 * erfc(-Math.log(damage) / (SIC_LIFETIME_LOG_SPREAD * Math.SQRT2));
 }
 
