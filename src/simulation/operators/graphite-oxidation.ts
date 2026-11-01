@@ -45,7 +45,7 @@
  *    graphite has more internal surface per gram than medium-grain NBG-18.
  */
 
-import { SimulationState } from '../types';
+import { SimulationState, FlowNode, ThermalNode } from '../types';
 import { nodeGasVolume } from '../mixture-properties';
 import { RateOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
@@ -73,7 +73,8 @@ import {
   effectivePoreDiffusivity,
   speciesMolecularWeight,
 } from '../gas-properties';
-import { nodeHeatCapacity } from './rate-operators';
+import { nodeHeatCapacity, pieceFraction } from './rate-operators';
+import { PEBBLE_BED_VOID_FRACTION } from './pebble-spill';
 import { approxVaporDensity } from './connection-hydraulics';
 
 const OXIDANTS: GraphiteOxidant[] = ['O2', 'H2O', 'CO2'];
@@ -127,6 +128,11 @@ export class GraphiteOxidationRateOperator implements RateOperator {
       const remaining = 1 - gox.burnoff;
       if (remaining <= 0) continue; // no carbon left to attack
 
+      // Loose pieces (pebbles) can leave or arrive: the exposed area and the
+      // carbon that burn-off is a fraction of both follow how many are here.
+      const pieceScale = pieceFraction(node);
+      if (!(pieceScale > 0)) continue; // nothing here to burn
+
       const grade = gradeFor(gox.grade);
       const T = node.temperature;
 
@@ -179,6 +185,10 @@ export class GraphiteOxidationRateOperator implements RateOperator {
 
       const nodeRates = rates.thermalNodes.get(id) ?? { dTemperature: 0 };
       const gasRates = rates.flowNodes.get(gasNode.id) ?? { dMass: 0, dEnergy: 0 };
+      // Pebble bed: where along the bed the oxidant arrives, and how fast
+      // it moves through it (see layerWeights)
+      const front = gox.layers ? bedFront(state, gasNode, rho_g, gox.layers, pieceScale) : undefined;
+      const layerCarbon = gox.layers ? new Array<number>(gox.layers.burnoff.length).fill(0) : undefined;
       if (!gasRates.dNcg) gasRates.dNcg = emptyGasComposition();
 
       let carbonTotal = 0;      // kg/s
@@ -217,7 +227,7 @@ export class GraphiteOxidationRateOperator implements RateOperator {
 
         // Series resistance, then carbon consumption
         const flux = C_bulk / (1 / h_m + 1 / k_eff);      // mol oxidant/(m2.s)
-        const oxidantMolRate = flux * gox.externalArea;    // mol/s
+        const oxidantMolRate = flux * gox.externalArea * pieceScale; // mol/s
         const carbonMolRate = oxidantMolRate / oxidantPerCarbon(oxidant, T);
 
         if (!(carbonMolRate > 0) || !Number.isFinite(carbonMolRate)) continue;
@@ -226,6 +236,14 @@ export class GraphiteOxidationRateOperator implements RateOperator {
         heatTotal += carbonMolRate * reactionHeatPerCarbon(oxidant, T);
         diagCarbon[oxidant] = carbonMolRate * M_CARBON;
         diagEta[oxidant] = eta;
+
+        // Which layers of a pebble bed this oxidant's carbon came out of
+        if (front && layerCarbon) {
+          const k_bed = (6 * (1 - PEBBLE_BED_VOID_FRACTION) / gox.layers!.pebbleDiameter) /
+            (1 / h_m + 1 / k_eff);
+          const w = layerWeights(gox.layers!.burnoff, front, D_bulk, k_bed, rho_g);
+          for (let i = 0; i < w.length; i++) layerCarbon[i] += carbonMolRate * M_CARBON * w[i];
+        }
 
         // --- Products ----------------------------------------------------
         switch (oxidant) {
@@ -262,7 +280,16 @@ export class GraphiteOxidationRateOperator implements RateOperator {
 
       // Burn-off advances in proportion to carbon consumed.
       nodeRates.dGraphiteBurnoff =
-        (nodeRates.dGraphiteBurnoff ?? 0) + carbonTotal / gox.initialCarbonMass;
+        (nodeRates.dGraphiteBurnoff ?? 0) + carbonTotal / (gox.initialCarbonMass * pieceScale);
+      // A node of loose pieces integrates its own mass (pieces come and go),
+      // so the burned carbon leaves it as a mass rate; other graphite has
+      // its mass set from burn-off when the step is applied.
+      if (gox.fullMass !== undefined) nodeRates.dMass = (nodeRates.dMass ?? 0) - carbonTotal;
+      // Each layer holds 1/N of the bed's carbon
+      if (layerCarbon) {
+        const perLayer = gox.initialCarbonMass * pieceScale / layerCarbon.length;
+        nodeRates.dLayerBurnoff = layerCarbon.map(c => c / perLayer);
+      }
 
       rates.flowNodes.set(gasNode.id, gasRates);
 
@@ -278,4 +305,170 @@ export class GraphiteOxidationRateOperator implements RateOperator {
 
     return rates;
   }
+}
+
+// ============================================================================
+// Burn front in a pebble bed
+// ============================================================================
+//
+// A pebble core is one lumped matrix node, so the oxidation rate above is the
+// bed's total. Where in the bed that carbon comes from is not uniform: an
+// oxidant entering a hot bed is consumed in the first layers it meets, and
+// those pebbles burn through their fuel-free shells long before the rest
+// lose anything. The bed's `layers` record that history (burn-off per axial
+// layer, integrated), so fuel exposure can be read off the pebbles that
+// actually burned. The TOTAL is unchanged - only its distribution.
+//
+// The distribution is the steady profile of advection, dispersion and a
+// first-order sink along the bed, c ~ exp(-|z - z_in|/lambda), with the
+// exact decay length of D c'' - u c' - k c = 0:
+//
+//   lambda = (u + sqrt(u^2 + 4 D k)) / (2 k)
+//
+// u: superficial velocity of the gas entering the bed; k = a_v k_ov, the
+// per-bed-volume sink (pebble surface per bed volume a_v = 6(1-eps)/d,
+// times the same series film + pore coefficient the total rate used);
+// D = eps D_m / tau + d u / 2 (pore diffusion with tortuosity sqrt 2, plus
+// axial dispersion). No flow: lambda = sqrt(D/k), the diffusion penetration
+// depth. Fast flow or slow kinetics: lambda -> u/k or beyond the bed, and
+// the burning spreads out evenly - the lumped answer is recovered.
+//
+// z_in is where the gas comes in, opening by opening: every opening into
+// the core node supplies a share of the oxidant - the gas flowing in through
+// it plus the diffusive exchange it would carry anyway (rho D A / H) - and
+// each share decays along its own profile. A dead bed is attacked at all its
+// openings by diffusion, a flowing one mostly from its inlet.
+// Each layer's share is also weighted by its remaining carbon (1 - b_i): a
+// burned-out layer has nothing left to consume, and the attack moves on.
+//
+// Simplifications: each profile is symmetric about its opening; the layers are
+// fractions of the CURRENT bed (a draining bed's burn-off pattern does not
+// slide down with the pebbles); the kinetics still run on the mean burn-off.
+
+/**
+ * Decay length (m) of an oxidant entering a reacting bed: the exact
+ * solution of D c'' - u c' - k c = 0 downstream of the inlet. u = 0 gives
+ * the diffusion depth sqrt(D/k); u^2 >> Dk gives the advective u/k.
+ */
+export function burnFrontDecayLength(u: number, D: number, k: number): number {
+  return (u + Math.sqrt(u * u + 4 * D * k)) / (2 * k);
+}
+
+export interface BedFront {
+  /** current bed height (m) */
+  H: number;
+  /** openings into the core node: elevation above the bed bottom (m),
+   *  inflowing mass rate (kg/s), area (m2) */
+  openings: Array<{ z: number; inflow: number; area: number }>;
+  /** superficial velocity of the gas entering the bed (m/s) */
+  u: number;
+  /** pebble diameter (m) */
+  d: number;
+}
+
+function bedFront(
+  state: SimulationState,
+  gasNode: FlowNode,
+  rho_g: number,
+  layers: NonNullable<NonNullable<ThermalNode['graphiteOxidation']>['layers']>,
+  pieceScale: number,
+): BedFront {
+  const H = layers.bedHeight * pieceScale;
+  const openings: BedFront['openings'] = [];
+  let inflowTotal = 0;
+  const base = gasNode.elevation - layers.bedBottomElevation;
+  const mid = (gasNode.height ?? 0) / 2;
+  for (const c of state.flowConnections) {
+    let inflow: number;
+    let e: number | undefined;
+    if (c.toNodeId === gasNode.id) {
+      inflow = Math.max(0, c.massFlowRate);
+      e = c.toElevation;
+    } else if (c.fromNodeId === gasNode.id) {
+      inflow = Math.max(0, -c.massFlowRate);
+      e = c.fromElevation;
+    } else {
+      continue;
+    }
+    openings.push({ z: base + (e ?? mid), inflow, area: c.flowArea });
+    inflowTotal += inflow;
+  }
+  const u = rho_g > 0 && layers.bedArea > 0 ? inflowTotal / (rho_g * layers.bedArea) : 0;
+  return { H, openings, u, d: layers.pebbleDiameter };
+}
+
+export function layerWeights(
+  burnoff: number[],
+  front: BedFront,
+  D_molecular: number,
+  k_bed: number,
+  rho_g: number,
+): number[] {
+  const n = burnoff.length;
+  const eps = PEBBLE_BED_VOID_FRACTION;
+  const D = eps * D_molecular / Math.SQRT2 + 0.5 * front.d * front.u;
+  const lambda = burnFrontDecayLength(front.u, D, k_bed);
+
+  // Attenuation accumulates only through carbon that is still there: a
+  // burned-out layer is no sink, so the oxidant passes it and attacks the
+  // next. depth(z) is that optical depth measured from the bed bottom; the
+  // gas plenum outside the bed consumes nothing, so an opening beyond the
+  // bed delivers at the bed's nearest face.
+  const dz = front.H / n;
+  const cum = new Array<number>(n + 1);
+  cum[0] = 0;
+  for (let j = 0; j < n; j++) cum[j + 1] = cum[j] + (1 - burnoff[j]) * dz / lambda;
+  const depth = (z: number): number => {
+    const j = Math.min(n - 1, Math.floor(z / dz));
+    return cum[j] + (1 - burnoff[j]) * (z - j * dz) / lambda;
+  };
+  const centres = new Array<number>(n);
+  for (let i = 0; i < n; i++) centres[i] = depth((i + 0.5) * dz);
+
+  // Every opening supplies its share - the gas flowing in through it plus
+  // the diffusive exchange it carries anyway (rho D A / H) - and that share
+  // is consumed along its own profile. Superposed, so a bed fed from both
+  // ends burns at both ends, not in the middle.
+  const w = new Array<number>(n).fill(0);
+  const p = new Array<number>(n);
+  let supplyTotal = 0;
+  for (const o of front.openings) {
+    supplyTotal += o.inflow + rho_g * D_molecular * o.area / front.H;
+  }
+  for (const o of front.openings) {
+    const supply = o.inflow + rho_g * D_molecular * o.area / front.H;
+    if (!(supply > 0)) continue;
+    const aIn = depth(Math.min(front.H, Math.max(0, o.z)));
+    // Normalised against the nearest live layer, so a front centimetres
+    // deep in a metre-thick layer cannot underflow every weight to zero
+    let tauMin = Infinity;
+    for (let i = 0; i < n; i++) {
+      if (burnoff[i] < 1) tauMin = Math.min(tauMin, Math.abs(centres[i] - aIn));
+    }
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      p[i] = (1 - burnoff[i]) * Math.exp(-(Math.abs(centres[i] - aIn) - tauMin));
+      sum += p[i];
+    }
+    if (!(sum > 0)) continue;
+    for (let i = 0; i < n; i++) w[i] += (supply / supplyTotal) * p[i] / sum;
+  }
+  let total = 0;
+  for (let i = 0; i < n; i++) total += w[i];
+  if (!(total > 0)) return w.fill(1 / n);
+  for (let i = 0; i < n; i++) w[i] /= total;
+  return w;
+}
+
+/**
+ * Fraction of a pebble bed's fuel particles whose matrix cover has burned
+ * away (0-1). Burning works inward from a pebble's surface, so a layer's
+ * particles start to be exposed once its burn-off passes the fuel-free
+ * shell's share of the carbon, and are all exposed when it reaches 1.
+ */
+export function exposedParticleFraction(layers: { burnoff: number[]; shellFraction: number }): number {
+  const s = layers.shellFraction;
+  let e = 0;
+  for (const b of layers.burnoff) e += Math.max(0, b - s) / (1 - s);
+  return e / layers.burnoff.length;
 }

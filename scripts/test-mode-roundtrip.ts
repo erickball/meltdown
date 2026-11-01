@@ -19,7 +19,7 @@ import * as fs from 'fs';
 import {
   createSimulationFromPlant, setSimulationRandomSeed, RK45Solver,
   ConductionRateOperator, ConvectionRateOperator, CladdingOxidationRateOperator,
-  HydrogenCombustionRateOperator, CoriumRelocationRateOperator, McciRateOperator,
+  HydrogenCombustionRateOperator, CoriumRelocationRateOperator, McciRateOperator, PebbleSpillRateOperator,
   FissionProductReleaseOperator, HeatGenerationRateOperator, NeutronicsRateOperator,
   FlowRateOperator, FlowMomentumRateOperator, TurbineCondenserRateOperator,
   FluidStateConstraintOperator, FlowDynamicsConstraintOperator, PumpSpeedRateOperator,
@@ -53,6 +53,7 @@ function makeSolver(): RK45Solver {
   solver.addRateOperator(new HydrogenCombustionRateOperator());
   solver.addRateOperator(new CoriumRelocationRateOperator());
   solver.addRateOperator(new McciRateOperator());
+  solver.addRateOperator(new PebbleSpillRateOperator());
   solver.addRateOperator(new FissionProductReleaseOperator());
   solver.addRateOperator(new HeatGenerationRateOperator());
   solver.addRateOperator(new NeutronicsRateOperator());

@@ -48,6 +48,7 @@ export interface ThermalNodeRates {
   dFpNobleGas?: number;   // mol/s - fission-product noble gas leaving the fuel (negative)
   dFpVolatile?: number;   // mol/s - volatile fission products leaving the fuel (negative)
   dTrisoDamage?: number;  // 1/s - TRISO particle life consumed (1/t_med(T))
+  dLayerBurnoff?: number[]; // 1/s per bed layer - where in a pebble bed the burning is
   dMetalZr?: number;      // kg/s - unoxidized Zr inventory change (corium/debris nodes)
   dMetalFe?: number;      // kg/s - unoxidized Fe inventory change (corium/debris nodes)
   dSlag?: number;         // kg/s - concrete-slag inventory change (MCCI debris)
@@ -183,6 +184,14 @@ export function createZeroRates(): StateRates {
   };
 }
 
+/** a + f*b, elementwise, for per-layer rate arrays (either side may be absent). */
+function addLayerRates(a: number[] | undefined, b: number[] | undefined, f: number): number[] {
+  const n = Math.max(a?.length ?? 0, b?.length ?? 0);
+  const out = new Array<number>(n);
+  for (let i = 0; i < n; i++) out[i] = (a?.[i] ?? 0) + (b?.[i] ?? 0) * f;
+  return out;
+}
+
 export function addRates(a: StateRates, b: StateRates): StateRates {
   const result = createZeroRates();
 
@@ -251,6 +260,9 @@ export function addRates(a: StateRates, b: StateRates): StateRates {
     }
     if (aRates.dTrisoDamage !== undefined || bRates.dTrisoDamage !== undefined) {
       combined.dTrisoDamage = (aRates.dTrisoDamage ?? 0) + (bRates.dTrisoDamage ?? 0);
+    }
+    if (aRates.dLayerBurnoff !== undefined || bRates.dLayerBurnoff !== undefined) {
+      combined.dLayerBurnoff = addLayerRates(aRates.dLayerBurnoff, bRates.dLayerBurnoff, 1);
     }
     if (aRates.dMetalZr !== undefined || bRates.dMetalZr !== undefined) {
       combined.dMetalZr = (aRates.dMetalZr ?? 0) + (bRates.dMetalZr ?? 0);
@@ -372,6 +384,7 @@ export function accumulateRates(target: StateRates, source: StateRates, factor =
     if (r.dFpNobleGas !== undefined) t.dFpNobleGas = (t.dFpNobleGas ?? 0) + r.dFpNobleGas * factor;
     if (r.dFpVolatile !== undefined) t.dFpVolatile = (t.dFpVolatile ?? 0) + r.dFpVolatile * factor;
     if (r.dTrisoDamage !== undefined) t.dTrisoDamage = (t.dTrisoDamage ?? 0) + r.dTrisoDamage * factor;
+    if (r.dLayerBurnoff !== undefined) t.dLayerBurnoff = addLayerRates(t.dLayerBurnoff, r.dLayerBurnoff, factor);
     if (r.dMetalZr !== undefined) t.dMetalZr = (t.dMetalZr ?? 0) + r.dMetalZr * factor;
     if (r.dMetalFe !== undefined) t.dMetalFe = (t.dMetalFe ?? 0) + r.dMetalFe * factor;
     if (r.dSlag !== undefined) t.dSlag = (t.dSlag ?? 0) + r.dSlag * factor;
@@ -463,6 +476,9 @@ export function scaleRates(rates: StateRates, factor: number): StateRates {
     }
     if (r.dTrisoDamage !== undefined) {
       scaled.dTrisoDamage = r.dTrisoDamage * factor;
+    }
+    if (r.dLayerBurnoff !== undefined) {
+      scaled.dLayerBurnoff = r.dLayerBurnoff.map(v => v * factor);
     }
     if (r.dMetalZr !== undefined) {
       scaled.dMetalZr = r.dMetalZr * factor;
@@ -624,8 +640,17 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
         const g = node.graphiteOxidation;
         g.burnoff = Math.max(0, Math.min(1, g.burnoff + nodeRates.dGraphiteBurnoff * dt));
         // Node mass follows burn-off exactly - carbon that left as CO/CO2
-        // is no longer there to hold heat.
-        node.mass = g.initialCarbonMass * (1 - g.burnoff);
+        // is no longer there to hold heat. A node of loose pieces (fullMass)
+        // also gains and loses whole pieces, so its mass is integrated
+        // instead: the oxidation operator books the burned carbon as dMass.
+        if (g.fullMass === undefined) node.mass = g.initialCarbonMass * (1 - g.burnoff);
+      }
+      // Where in a pebble bed the burning is (same bound, same reason)
+      if (nodeRates.dLayerBurnoff !== undefined && node.graphiteOxidation?.layers) {
+        const b = node.graphiteOxidation.layers.burnoff;
+        for (let i = 0; i < b.length; i++) {
+          b[i] = Math.max(0, Math.min(1, b[i] + (nodeRates.dLayerBurnoff[i] ?? 0) * dt));
+        }
       }
       // Apply fission-product release (inventory can only fall, floor at 0)
       if (node.fissionProducts) {

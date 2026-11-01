@@ -44,6 +44,7 @@ export { GraphiteOxidationRateOperator, getGraphiteOxidationDiagnostics } from '
 export { OtsgRateOperator, OtsgLedgerCheckOperator, OtsgPartitionConstraintOperator, evaluateOtsgSections } from './otsg-operator';
 export { CoriumRelocationRateOperator, relocatedFuelFraction } from './corium';
 export { McciRateOperator, basematErodedDepth, CONCRETE_DENSITY, CONCRETE_ABLATION_T } from './mcci';
+export { PebbleSpillRateOperator, beverlooMassFlow, heapGeometry, pebbleSpillSummary, PEBBLE_BED_VOID_FRACTION } from './pebble-spill';
 
 export {
   getConvectionHeatRates,

@@ -1120,7 +1120,11 @@ export function cloneSimulationState(state: SimulationState): SimulationState {
     if (v.oxidation) clone.oxidation = { ...v.oxidation };
     if (v.fissionProducts) clone.fissionProducts = { ...v.fissionProducts };
     if (v.metal) clone.metal = { ...v.metal };
-    if (v.graphiteOxidation) clone.graphiteOxidation = { ...v.graphiteOxidation };
+    if (v.graphiteOxidation) {
+      clone.graphiteOxidation = { ...v.graphiteOxidation };
+      const layers = v.graphiteOxidation.layers;
+      if (layers) clone.graphiteOxidation.layers = { ...layers, burnoff: layers.burnoff.slice() };
+    }
     thermalNodes.set(k, clone);
   });
 

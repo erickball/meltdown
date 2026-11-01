@@ -29,6 +29,7 @@ import {
   DEFAULT_STARTUP_SOURCE_RATE,
 } from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
+import { PEBBLE_BED_VOID_FRACTION } from './operators/pebble-spill';
 import { resolveMaterial } from './materials';
 import { NBG_18, A3_3 } from './graphite';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from './triso';
@@ -1934,6 +1935,10 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
   // inside a building. Runs after ALL flow nodes exist (the containment may
   // appear later than the vessel in the component list).
   createMcciNodes(plantState, state);
+
+  // Pebble spill pass: heaps for pebbles that drain out of a bed through a
+  // break below it. Same ordering reason as MCCI (containers may come later).
+  createPebbleSpillNodes(plantState, state);
 
   // Pipe-inventory lumping pass: flow connections carry no volume of their
   // own, so the fluid that physically sits in the run of pipe a connection
@@ -4518,7 +4523,7 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
         conductance: 0, // the bed IS the path - no parallel solid link
         packedBed: {
           gasNodeId: coolantFlowNodeId,
-          voidFraction: 0.39,          // random close packing of spheres
+          voidFraction: PEBBLE_BED_VOID_FRACTION, // random close packing of spheres
           particleDiameter: pebbleGeo.pebbleDiameter,
           emissivity: A3_3.emissivity,
           solidK300: A3_3.k300,
@@ -5118,6 +5123,176 @@ function createMcciNodes(plantState: PlantState, state: SimulationState): void {
     }
     console.log(`[Factory] MCCI nodes: ${coreId}-corium-ex on ${buildingId} floor ` +
       `(${footprint.toFixed(0)} m², basemat ${((buildingComp as any).basematThickness ?? 3)} m)`);
+  }
+}
+
+/**
+ * Pebble spill pass: a pebble bed can drain out through a break at or below
+ * its bottom (PebbleSpillRateOperator). Builds, for every pebble core:
+ *
+ *  - the bed's spill descriptor on its matrix node (pebbleBed): which flow
+ *    nodes' breaks can let pebbles out - the bed's own coolant node, then
+ *    each enclosing vessel - and where each kind of break leads;
+ *  - one spilled-pebble heap per region a break can open into (the outside
+ *    of each of those boundaries): a matrix node and a kernel node, seeded
+ *    at 1 kg so dT/dt is defined, joined by the same per-kilogram
+ *    kernel-to-surface conductance the bed has;
+ *  - the bed's own heat paths (kernels to matrix, bed to side reflector,
+ *    bed to coolant) sized by the pebbles still in it, and its graphite
+ *    oxidation by the pebbles still there to burn.
+ *
+ * Runs after all flow nodes exist (a vessel's building may come later in
+ * the component list).
+ */
+function createPebbleSpillNodes(plantState: PlantState, state: SimulationState): void {
+  for (const [id, component] of plantState.components) {
+    const coreComp = component as any;
+    if (coreComp.fuelForm !== 'pebbles' || !(coreComp.fuelRodCount > 0)) continue;
+    const matrix = state.thermalNodes.get(`${id}-clad`);
+    const fuel = state.thermalNodes.get(`${id}-fuel`);
+    if (!matrix || !fuel || !matrix.graphiteOxidation) {
+      throw new Error(`[Factory] Pebble core ${id}: matrix/kernel nodes missing - ` +
+        `the spill pass runs after the core is built`);
+    }
+    const coolantNodeId = component.type === 'reactorVessel'
+      ? (coreComp.insideBarrelId || id)
+      : id;
+    const coolantNode = state.flowNodes.get(coolantNodeId);
+    if (!coolantNode) {
+      throw new Error(`[Factory] Pebble core ${id}: coolant node '${coolantNodeId}' does not exist`);
+    }
+    const pebbleGeo = corePebbleGeometry(component);
+
+    // The bed's heat paths and its burning follow the pebbles still in it
+    matrix.initialMass = matrix.mass;
+    fuel.initialMass = fuel.mass;
+    matrix.graphiteOxidation.fullMass = matrix.mass;
+
+    // Where in the bed the burning is: axial burn-off layers, and the
+    // carbon share of the fuel-free shell every pebble's fuel sits behind.
+    // Pebble designs from AVR through HTR-10 to the Xe-100 keep the same
+    // 5 mm shell around the fuelled zone.
+    const r = pebbleGeo.pebbleDiameter / 2;
+    const SHELL = 0.005;
+    if (!(r > SHELL)) {
+      throw new Error(`[Factory] Pebble core ${id}: ${(2 * r * 1000).toFixed(0)} mm pebbles leave no ` +
+        `room for a fuelled zone inside the standard 5 mm fuel-free shell`);
+    }
+    const pebbleVolumeEach = (Math.PI / 6) * Math.pow(pebbleGeo.pebbleDiameter, 3);
+    const bulkDensity = (1 - PEBBLE_BED_VOID_FRACTION) *
+      (matrix.mass + fuel.mass) / (pebbleGeo.pebbleCount * pebbleVolumeEach);
+    const bedBottomElevation = coolantNode.elevation + (coreComp.coreBottomElevation ?? 0.5);
+    matrix.graphiteOxidation.layers = {
+      burnoff: new Array(10).fill(0),
+      shellFraction: 1 - Math.pow((r - SHELL) / r, 3),
+      bedHeight: pebbleGeo.activeHeight,
+      bedBottomElevation,
+      bedArea: (matrix.mass + fuel.mass) / bulkDensity / pebbleGeo.activeHeight,
+      pebbleDiameter: pebbleGeo.pebbleDiameter,
+    };
+    for (const conn of state.thermalConnections) {
+      if (conn.id === `conduction-${id}-fuel-clad` || conn.id === `conduction-${id}-bed-reflector`) {
+        conn.scaleWithMassOf = matrix.id;
+      }
+    }
+    for (const conn of state.convectionConnections) {
+      if (conn.thermalNodeId === matrix.id) conn.scaleWithMassOf = matrix.id;
+    }
+    const kernelConn = state.thermalConnections.find(c => c.id === `conduction-${id}-fuel-clad`);
+    if (!kernelConn) {
+      throw new Error(`[Factory] Pebble core ${id}: no kernel-to-matrix conduction to copy onto its heaps`);
+    }
+
+    // Boundaries a pebble can leave through, innermost first, and the
+    // region outside each. The chain stops at the first container that is
+    // not a vessel (a building floor is where heaps land, not a way out).
+    const boundaryNodeIds: string[] = [coolantNodeId];
+    const regions: string[] = [];
+    let comp: any = component;
+    while (comp?.containedBy) {
+      const container = plantState.components.get(comp.containedBy) as any;
+      if (!container) break;
+      const regionId = container.simNodeId || container.id;
+      if (!state.flowNodes.has(regionId)) break;
+      regions.push(regionId);
+      if (container.type !== 'reactorVessel' && container.type !== 'vessel') break;
+      boundaryNodeIds.push(regionId);
+      comp = container;
+    }
+    if (regions.length === 0) {
+      console.warn(`[Factory] Pebble core ${id} is not inside anything - pebble spill disabled ` +
+        `(a break in it has nowhere for pebbles to land)`);
+      continue;
+    }
+
+    const heaps: Array<{ regionNodeId: string; matrixNodeId: string; fuelNodeId: string }> = [];
+    const SEED = 1; // kg of matrix; zero mass breaks dT/dt
+    for (const regionId of regions) {
+      const region = state.flowNodes.get(regionId)!;
+      const heapId = `${id}-heap-${regionId}`;
+      const heapFuelId = `${heapId}-fuel`;
+      state.thermalNodes.set(heapId, {
+        id: heapId,
+        label: `${component.label || 'Core'} spilled pebbles (${region.label || regionId})`,
+        temperature: region.fluid.temperature,
+        mass: SEED,
+        // Reference for the heap's mass-scaled paths: a heap holding the
+        // whole bed has the bed's kernel conductance and burning area
+        initialMass: matrix.mass,
+        specificHeat: matrix.specificHeat,
+        specificHeatModel: 'graphite',
+        thermalConductivity: matrix.thermalConductivity,
+        characteristicLength: matrix.characteristicLength,
+        surfaceArea: matrix.surfaceArea,
+        heatGeneration: 0,
+        maxTemperature: matrix.maxTemperature,
+        graphiteOxidation: {
+          ...matrix.graphiteOxidation,
+          burnoff: 0,
+          layers: undefined, // a heap burns from its surface, not along a bed
+          associatedGasNode: regionId,
+          fullMass: matrix.mass,
+        },
+        pebbleHeap: { regionNodeId: regionId, fuelNodeId: heapFuelId, sourceMatrixNodeId: matrix.id },
+      });
+      state.thermalNodes.set(heapFuelId, {
+        id: heapFuelId,
+        label: `${component.label || 'Core'} spilled pebble kernels (${region.label || regionId})`,
+        temperature: region.fluid.temperature,
+        mass: SEED * fuel.mass / matrix.mass,
+        specificHeat: fuel.specificHeat,
+        thermalConductivity: fuel.thermalConductivity,
+        characteristicLength: fuel.characteristicLength,
+        surfaceArea: fuel.surfaceArea,
+        heatGeneration: 0, // decay-heat share deposited by HeatGeneration
+        maxTemperature: fuel.maxTemperature,
+        meltingPoint: fuel.meltingPoint,
+        latentHeatFusion: fuel.latentHeatFusion,
+      });
+      state.thermalConnections.push({
+        id: `conduction-${heapId}-kernels`,
+        fromNodeId: heapFuelId,
+        toNodeId: heapId,
+        conductance: kernelConn.conductance,
+        scaleWithMassOf: heapId,
+      });
+      // Spilled kernels keep their decay heat and outgas into the room they
+      // landed in
+      fuel.meltLocations = [...(fuel.meltLocations ?? []), { nodeId: heapFuelId, releaseTo: regionId }];
+      heaps.push({ regionNodeId: regionId, matrixNodeId: heapId, fuelNodeId: heapFuelId });
+    }
+
+    matrix.pebbleBed = {
+      fuelNodeId: fuel.id,
+      pebbleDiameter: pebbleGeo.pebbleDiameter,
+      bulkDensity,
+      bedBottomElevation,
+      bedHeight: pebbleGeo.activeHeight,
+      boundaryNodeIds,
+      heaps,
+    };
+    console.log(`[Factory] Pebble spill: ${id} can drain through breaks in ${boundaryNodeIds.join(', ')} ` +
+      `onto heaps in ${regions.join(', ')}`);
   }
 }
 

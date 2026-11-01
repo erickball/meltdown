@@ -183,6 +183,60 @@ export interface ThermalNode {
     externalArea: number;           // m² - geometric surface exposed to gas
     characteristicLength: number;   // m - V/A_ext of the piece (pebble or block)
     associatedGasNode: string;      // FlowNode ID supplying oxidant, receiving products
+    /**
+     * Node mass (kg) at which externalArea and initialCarbonMass apply, for
+     * a node made of loose pieces that can leave or arrive (a pebble bed
+     * draining through a broken chute, the heap it lands in). Both scale
+     * with mass/fullMass, and burn-off stays a per-piece fraction. Absent =
+     * the node's pieces never move.
+     */
+    fullMass?: number;
+    /**
+     * Pebble beds only: burn-off per axial layer (bottom first), so the
+     * pebbles that actually burned - and the fuel they expose - can be told
+     * apart from the bed's mean. Distribution only: the total stays the
+     * lumped rate. See the burn-front notes in graphite-oxidation.ts.
+     */
+    layers?: {
+      burnoff: number[];            // 0-1 per layer, integrated (dLayerBurnoff)
+      shellFraction: number;        // carbon share of a pebble's fuel-free shell
+      bedHeight: number;            // m, as built
+      bedBottomElevation: number;   // m, absolute
+      bedArea: number;              // m2, bed cross-section
+      pebbleDiameter: number;       // m
+    };
+  };
+
+  /**
+   * Pebble-bed matrix nodes only: what PebbleSpillRateOperator needs to let
+   * pebbles drain out of the bed through a break at or below its bottom.
+   * The physical picture is the defuel (discharge) chute: it runs from the
+   * bottom of the bed through every boundary below it, so a break in any of
+   * them low enough to sever it is an open orifice under the bed.
+   */
+  pebbleBed?: {
+    fuelNodeId: string;             // the bed's kernel node
+    pebbleDiameter: number;         // m
+    bulkDensity: number;            // kg/m³ of packed bed (pebbles + voids)
+    bedBottomElevation: number;     // m, absolute
+    bedHeight: number;              // m, as built (the bed shortens as it drains)
+    /** Flow nodes a break in which can let pebbles out: the bed's own
+     *  coolant node, then each enclosing vessel outward. */
+    boundaryNodeIds: string[];
+    /** Where spilled pebbles pile up, one heap per region a break can open
+     *  into (keyed by that region's flow node). */
+    heaps: Array<{ regionNodeId: string; matrixNodeId: string; fuelNodeId: string }>;
+  };
+
+  /**
+   * Spilled-pebble heap (matrix node of the heap): a cone of loose pebbles
+   * on the floor of `regionNodeId`, cooled from its surface to that
+   * region's fluid and through its own packed-bed conduction.
+   */
+  pebbleHeap?: {
+    regionNodeId: string;
+    fuelNodeId: string;             // the heap's kernel node
+    sourceMatrixNodeId: string;     // the bed these pebbles came from
   };
 }
 
@@ -476,6 +530,16 @@ export interface ThermalConnection {
     /** 300 K conductivity of that series path (W/m-K) */
     seriesK300?: number;
   };
+
+  /**
+   * A path whose size follows how much of a node is still there: the whole
+   * conductance (solid, bed and radiation alike) is multiplied by
+   * mass/initialMass of this thermal node. A pebble bed draining out through
+   * a broken discharge chute (PebbleSpillRateOperator) leaves a shorter bed,
+   * and every path through it - kernels to matrix, bed to side reflector -
+   * shrinks with it.
+   */
+  scaleWithMassOf?: string;
 }
 
 export interface ConvectionConnection {
@@ -520,6 +584,10 @@ export interface ConvectionConnection {
   // connection that does not care is unaffected.
   flowPassageArea?: number;
   flowHydraulicDiameter?: number;
+
+  // Surface area follows mass/initialMass of this thermal node (the pebbles
+  // still in a draining bed; see ThermalConnection.scaleWithMassOf).
+  scaleWithMassOf?: string;
 }
 
 export interface FlowConnection {

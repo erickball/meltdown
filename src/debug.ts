@@ -30,7 +30,8 @@ import { pumpHeadPressure, pumpHeadFraction } from './simulation/operators/pump-
 import { describeControllerSignal, primaryControllerSignal } from './simulation/operators/control-system';
 import type { ControllerSignal } from './simulation/types';
 import { hxBundleCount, hxTubeNodeIds } from './simulation/hx-bundles';
-import { meltFraction } from './simulation/operators/rate-operators';
+import { meltFraction, pieceFraction } from './simulation/operators/rate-operators';
+import { exposedParticleFraction } from './simulation/operators/graphite-oxidation';
 import { basematErodedDepth } from './simulation/operators/mcci';
 import { trisoFailedFraction } from './simulation/triso';
 import type { FlowNode } from './simulation/types';
@@ -395,6 +396,25 @@ export function updateDebugPanel(
           if ((node.slagMass ?? 0) > 1) {
             html += ` <span style="color: #888;" title="Decomposed-concrete slag stirred into the melt by MCCI (dilutes the decay heat)">slag ${((node.slagMass ?? 0) / 1000).toFixed(1)} t</span>`;
           }
+        }
+        // Pebble bed: pebbles that have drained out, and fuel particles whose
+        // matrix cover has burned off where the oxidant got in
+        if (node.pebbleBed) {
+          const spilled = 1 - pieceFraction(node);
+          if (spilled > 1e-4) {
+            html += ` <span class="debug-danger" title="Share of the pebble bed that has drained out through a break at or below its bottom (a severed defuel chute) or through a hole in the core barrel's side. Spilled pebbles keep their decay heat and fission products and pile up in the room the break opens into.">spilled ${(spilled * 100).toFixed(1)}%</span>`;
+          }
+        }
+        const layers = node.graphiteOxidation?.layers;
+        if (layers) {
+          const exposed = exposedParticleFraction(layers);
+          const peak = Math.max(...layers.burnoff);
+          if (peak > 1e-4) {
+            html += ` <span class="${exposed > 0 ? 'debug-danger' : 'debug-warning'}" title="Oxidation burns a pebble bed where the oxidant gets in, not evenly: this is the burn-off of the worst-hit layer of pebbles. Each pebble's fuel sits behind a 5 mm fuel-free graphite shell (${(layers.shellFraction * 100).toFixed(0)}% of its carbon); once a layer burns past that, its TRISO particles are exposed to the gas.">worst layer burned ${(peak * 100).toFixed(1)}%${exposed > 0 ? `, particles exposed ${exposed < 1e-3 ? exposed.toExponential(1) : (exposed * 100).toFixed(1) + '%'}` : ''}</span>`;
+          }
+        }
+        if (node.pebbleHeap && node.mass > 2) {
+          html += ` <span class="debug-warning" title="Spilled pebbles piled on the floor of ${node.pebbleHeap.regionNodeId} (kernels counted separately). The heap is cooled from its surface and through its own packed-bed conduction, so a big hot heap stays hot - and burns if the room has oxygen.">${(node.mass / 1000).toFixed(2)} t of pebbles</span>`;
         }
         // Basemat erosion (MCCI ablation front)
         if (id.endsWith('-basemat') && node.initialMass && node.initialMass > node.mass + 1) {

@@ -1194,6 +1194,30 @@ const depressurizedCooldown = {
   }],
 };
 
+// Defuel chute break: the pebble discharge line under the core shears off
+// where it leaves the RPV's bottom head. The 0.2 m opening (a few pebble
+// diameters) both blows the primary down and lets the bed drain through it
+// at the Beverloo rate - ~8 kg/s, the whole core in an hour and a half -
+// onto the reactor building floor, where the hot pebbles pile up in air
+// (PebbleSpillRateOperator). Station blackout as in the DLOFC.
+const chuteBreak = {
+  description: 'Defuel chute break at t=400 s: the pebble discharge line shears off at the ' +
+    'RPV bottom head with station blackout, no scram. Helium blows down through the 0.2 m ' +
+    'opening and the pebble bed drains out through it onto the reactor building floor, ' +
+    'where the spilled pebbles heat up under their own decay heat and burn in the air.',
+  events: [{
+    time: SETTLE,
+    message: 'Defuel chute sheared at the RPV bottom head with station blackout, no scram',
+    actions: [
+      ...stationBlackout.events[0].actions,
+      {
+        kind: 'burst', id: 'rv-1', area: Math.PI * 0.1 * 0.1, elevation: 0,
+        breachMessage: 'Defuel chute sheared at the bottom head - helium and pebbles pouring into the reactor building',
+      },
+    ],
+  }],
+};
+
 const tubeRupture = {
   description: 'Turbine trip at t=400 s bottles the boiler toward the dump setpoint, then at ' +
     't=550 s an SG tube ruptures: 165-bar steam into 60-bar helium, carried to the hot ' +
@@ -1222,6 +1246,7 @@ const tubeRupture = {
 for (const [file, scenario] of [
   ['xe100-sbo.json', stationBlackout],
   ['xe100-dlofc.json', depressurizedCooldown],
+  ['xe100-chute.json', chuteBreak],
   ['xe100-sgtr.json', tubeRupture],
 ] as const) {
   const t = path.join(HERE, '..', 'src', 'presets', file);

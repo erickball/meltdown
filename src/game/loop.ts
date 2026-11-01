@@ -28,6 +28,7 @@ import {
   HydrogenCombustionRateOperator,
   CoriumRelocationRateOperator,
   McciRateOperator,
+  PebbleSpillRateOperator,
   FissionProductReleaseOperator,
   HeatGenerationRateOperator,
   NeutronicsRateOperator,
@@ -218,6 +219,7 @@ export class GameLoop {
       this.rk45Solver.addRateOperator(new HydrogenCombustionRateOperator()); // H2 deflagration when flammable + ignited
       this.rk45Solver.addRateOperator(new CoriumRelocationRateOperator()); // molten fuel/clad slumps to the lower head
       this.rk45Solver.addRateOperator(new McciRateOperator()); // ex-vessel corium attacks the concrete basemat
+      this.rk45Solver.addRateOperator(new PebbleSpillRateOperator()); // pebbles drain out of a broken bed onto a heap
       this.rk45Solver.addRateOperator(new FissionProductReleaseOperator()); // Overheated fuel releases Xe/CsI
       this.rk45Solver.addRateOperator(new TurbineCondenserRateOperator());
 

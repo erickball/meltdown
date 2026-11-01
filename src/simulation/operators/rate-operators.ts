@@ -8,7 +8,7 @@
  * Each operator returns StateRates describing dm/dt, dU/dt, dT/dt, etc.
  */
 
-import { SimulationState, FlowNode, ConvectionConnection } from '../types';
+import { SimulationState, FlowNode, ConvectionConnection, FlowConnection } from '../types';
 import {
   RateOperator,
   ConstraintOperator,
@@ -169,6 +169,41 @@ export function fuelOxideMass(node: {
     node.mass - (node.metal?.zr ?? 0) - (node.metal?.fe ?? 0) - (node.slagMass ?? 0));
 }
 
+/**
+ * mass/initialMass of a thermal node whose remaining amount sizes a heat
+ * path (scaleWithMassOf on thermal and convection connections). 1 when no
+ * node is named. A named node that is missing, or has no as-built mass to
+ * measure against, is a wiring error and throws.
+ */
+export function massScale(state: SimulationState, nodeId: string | undefined): number {
+  if (nodeId === undefined) return 1;
+  const node = state.thermalNodes.get(nodeId);
+  if (node?.graphiteOxidation?.fullMass !== undefined) return pieceFraction(node);
+  if (!node || !(node.initialMass && node.initialMass > 0)) {
+    throw new Error(
+      `[MassScale] a heat path is sized by thermal node '${nodeId}', which ` +
+      (node ? `has no initialMass to measure its remaining amount against` : `does not exist`) +
+      ` - factory wiring is broken`);
+  }
+  return node.mass / node.initialMass;
+}
+
+/**
+ * How many of its full set of loose pieces a graphite node holds (pebbles in
+ * a draining bed, or on the heap they land in), as a fraction: its mass over
+ * the mass the full set would have at the node's own burn-off. Burning makes
+ * pebbles lighter, not fewer, so burn-off is divided out. 1 for graphite
+ * whose pieces never move.
+ */
+export function pieceFraction(node: {
+  mass: number;
+  graphiteOxidation?: { burnoff: number; fullMass?: number };
+}): number {
+  const g = node.graphiteOxidation;
+  if (g?.fullMass === undefined) return 1;
+  return node.mass / (g.fullMass * (1 - g.burnoff));
+}
+
 export function nodeHeatCapacity(node: {
   mass: number; specificHeat: number; temperature: number;
   specificHeatModel?: 'graphite';
@@ -266,6 +301,8 @@ export class ConductionRateOperator implements RateOperator {
         conductance += SIGMA_SB * conn.radiationCoeff *
           (T1 + T2) * (T1 * T1 + T2 * T2);
       }
+
+      conductance *= massScale(state, conn.scaleWithMassOf);
 
       // Heat flow from node1 to node2 (W)
       const Q = conductance * (node1.temperature - node2.temperature);
@@ -534,7 +571,10 @@ export class ConvectionRateOperator implements RateOperator {
 
       // Split the surface into liquid-wetted and vapor-exposed portions by
       // the node's liquid level (tubes above the water line barely transfer).
-      const { liquidArea, vaporArea } = effectiveSurfaceAreas(conn, flowNode);
+      const split = effectiveSurfaceAreas(conn, flowNode);
+      const areaScale = massScale(state, conn.scaleWithMassOf);
+      const liquidArea = split.liquidArea * areaScale;
+      const vaporArea = split.vaporArea * areaScale;
 
       const dT = thermalNode.temperature - flowNode.fluid.temperature;
       // Two lengths, because the correlations want different ones. D_heater
@@ -1822,66 +1862,10 @@ export class FlowRateOperator implements RateOperator {
 
       const absMassFlow = Math.abs(massFlow);
 
-      // Determine what phase is actually flowing based on connection elevation
-      // For two-phase nodes, we need to use phase-specific enthalpy
-      // Pass mass flow rate so separation calculation can account for turbulence
-      let comp = drawCompositionAt(
-        upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight,
-        this.drawScratch, false);
-      let flowPhase = comp.phase;
-
-      // Check if we're trying to draw more of a phase than is available.
-      // If the flow rate would drain the phase too quickly, use mixture instead.
-      // This prevents unrealistic phase separation when flow exceeds what the
-      // interface can supply. (Approved fallback - discussed with user)
-      //
-      // A pure draw that its zone cannot supply (drained more than ten times
-      // a second, or empty) has already come back as the mixture from
-      // drawCompositionAt - the same answer the momentum solve priced the
-      // line with. It used to be decided here, after the solve, and the two
-      // disagreed (see zoneCanSupply in connection-hydraulics.ts).
-
-      // The connection's mass flow is TOTAL mixture flow (the momentum
-      // solvers use bulk density including NCG), so when the flowing phase
-      // carries gas, the flow must be SPLIT between water and NCG by the
-      // mass composition of what is actually flowing. Liquid draws leave the
-      // NCG behind in the vapor space (water share 1). A helium-filled node
-      // (~no water) transports ~pure gas; a steam node transports ~pure
-      // water; both fall out of the same split with no special cases.
+      const priced = this.priceDraw(
+        upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
+      const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace } = priced;
       const upNcg = upstreamNode.fluid.ncg;
-      let gasMassInSpace = 0;
-      let shareOf = (_zone: 'liquid' | 'vapor' | 'mixture'): number => 1;
-      if (upNcg && totalMoles(upNcg) > 0 && (comp.wVapor > 0 || comp.wMixture > 0)) {
-        gasMassInSpace = ncgTotalMass(upNcg);
-        // Steam sharing the flowing space with the gas (zoneWaterShare - the
-        // pressure solver weights the same split, so the two agree on how
-        // much gas a line carries).
-        shareOf = (zone) => zoneWaterShare(upstreamNode, zone);
-      }
-
-      // Per zone: the zone's share of the total flow (mass weight), the
-      // water fraction of what that zone carries, and the water's specific
-      // enthalpy there. The water leaving through the opening is the sum
-      // over zones of (weight x water share), and its energy the sum of
-      // (weight x water share x enthalpy) - each zone's water priced at
-      // that zone's enthalpy. (Until 2026-09-09 the enthalpies were blended
-      // by the bare zone weights and multiplied by the summed water share,
-      // which priced a gas zone's WHOLE mass at the steam enthalpy while
-      // only its steam share left as water: an air-blanketed node drawing
-      // across its interface lost ~45 kJ per kg more than it held and cooled
-      // 5 K/s until it froze - the pump node of CAR BZ1bOwQ0oLXY0q8jG1hU.)
-      let waterShare = 0;
-      let waterEnthalpyFlux = 0;  // per kg of total flow
-      const zones: Array<['liquid' | 'mixture' | 'vapor', number]> = [
-        ['liquid', comp.wLiquid], ['mixture', comp.wMixture], ['vapor', comp.wVapor],
-      ];
-      for (const [zone, weight] of zones) {
-        if (!(weight > 0)) continue;
-        const zoneWater = weight * shareOf(zone);
-        waterShare += zoneWater;
-        waterEnthalpyFlux += zoneWater * this.getSpecificEnthalpy(upstreamNode, zone);
-      }
-      const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
 
       // Water portion: mass flow * specific enthalpy of the flowing water
       const waterFlow = absMassFlow * waterShare;
@@ -2032,6 +2016,85 @@ export class FlowRateOperator implements RateOperator {
       );
     }
     return T;
+  }
+
+  /**
+   * What a draw from `upstreamNode` through an opening actually carries: the
+   * flowing phase, the water share of the flow, the water enthalpy flux per
+   * kg of total flow, and the water's specific enthalpy. The ONE pricing of
+   * an advected draw - the transport below books it, and a turbine expands
+   * from it (connectionDrawEnthalpy), so the work a machine takes and the
+   * energy its steam carried can never disagree.
+   */
+  priceDraw(
+    upstreamNode: FlowNode,
+    upstreamElevation: number | undefined,
+    absMassFlow: number,
+    upstreamPhaseTolerance: number | undefined,
+    upstreamOpeningHeight: number | undefined,
+  ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; waterShare: number; waterEnthalpyFlux: number;
+       h_up: number; gasMassInSpace: number } {
+    // Determine what phase is actually flowing based on connection elevation
+    // For two-phase nodes, we need to use phase-specific enthalpy
+    // Pass mass flow rate so separation calculation can account for turbulence
+    const comp = drawCompositionAt(
+      upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight,
+      this.drawScratch, false);
+    const flowPhase = comp.phase;
+
+    // Check if we're trying to draw more of a phase than is available.
+    // If the flow rate would drain the phase too quickly, use mixture instead.
+    // This prevents unrealistic phase separation when flow exceeds what the
+    // interface can supply. (Approved fallback - discussed with user)
+    //
+    // A pure draw that its zone cannot supply (drained more than ten times
+    // a second, or empty) has already come back as the mixture from
+    // drawCompositionAt - the same answer the momentum solve priced the
+    // line with. It used to be decided here, after the solve, and the two
+    // disagreed (see zoneCanSupply in connection-hydraulics.ts).
+
+    // The connection's mass flow is TOTAL mixture flow (the momentum
+    // solvers use bulk density including NCG), so when the flowing phase
+    // carries gas, the flow must be SPLIT between water and NCG by the
+    // mass composition of what is actually flowing. Liquid draws leave the
+    // NCG behind in the vapor space (water share 1). A helium-filled node
+    // (~no water) transports ~pure gas; a steam node transports ~pure
+    // water; both fall out of the same split with no special cases.
+    const upNcg = upstreamNode.fluid.ncg;
+    let gasMassInSpace = 0;
+    let shareOf = (_zone: 'liquid' | 'vapor' | 'mixture'): number => 1;
+    if (upNcg && totalMoles(upNcg) > 0 && (comp.wVapor > 0 || comp.wMixture > 0)) {
+      gasMassInSpace = ncgTotalMass(upNcg);
+      // Steam sharing the flowing space with the gas (zoneWaterShare - the
+      // pressure solver weights the same split, so the two agree on how
+      // much gas a line carries).
+      shareOf = (zone) => zoneWaterShare(upstreamNode, zone);
+    }
+
+    // Per zone: the zone's share of the total flow (mass weight), the
+    // water fraction of what that zone carries, and the water's specific
+    // enthalpy there. The water leaving through the opening is the sum
+    // over zones of (weight x water share), and its energy the sum of
+    // (weight x water share x enthalpy) - each zone's water priced at
+    // that zone's enthalpy. (Until 2026-09-09 the enthalpies were blended
+    // by the bare zone weights and multiplied by the summed water share,
+    // which priced a gas zone's WHOLE mass at the steam enthalpy while
+    // only its steam share left as water: an air-blanketed node drawing
+    // across its interface lost ~45 kJ per kg more than it held and cooled
+    // 5 K/s until it froze - the pump node of CAR BZ1bOwQ0oLXY0q8jG1hU.)
+    let waterShare = 0;
+    let waterEnthalpyFlux = 0;  // per kg of total flow
+    const zones: Array<['liquid' | 'mixture' | 'vapor', number]> = [
+      ['liquid', comp.wLiquid], ['mixture', comp.wMixture], ['vapor', comp.wVapor],
+    ];
+    for (const [zone, weight] of zones) {
+      if (!(weight > 0)) continue;
+      const zoneWater = weight * shareOf(zone);
+      waterShare += zoneWater;
+      waterEnthalpyFlux += zoneWater * this.getSpecificEnthalpy(upstreamNode, zone);
+    }
+    const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
+    return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace };
   }
 
   private getSpecificEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
@@ -2211,21 +2274,15 @@ import { stateAtPh, expandStage } from '../turbine-expansion';
 export const TURBINE_ISENTROPIC_EFFICIENCY = 0.87;
 
 /**
- * Specific enthalpy of the steam a donor node hands to the turbine.
- *
- * A moving-boundary boiler knows what is actually at its steam takeoff -
- * the superheat section's state, not the bundle's (much colder) bulk
- * average - and that is the enthalpy the flow machinery advects down the
- * connection, so the expansion has to start from the same number or the
- * turbine's energy books and the boiler's disagree.
+ * Specific enthalpy (J/kg) of the water a forward flow through `conn` draws
+ * out of `donor` (its from-node): FlowRateOperator's own pricing, zone by
+ * zone at the opening, so a consumer can never price the steam differently
+ * from the transport that moves it.
  */
-function donorSteamEnthalpy(donor: FlowNode, flowPhase?: string): number {
-  if (donor.otsg?.lastEval && flowPhase !== 'liquid') {
-    return donor.otsg.lastEval.hSteamOut;
-  }
-  const u = donor.fluid.internalEnergy / Math.max(1e-9, donor.fluid.mass);
-  const v = donor.volume / Math.max(1e-9, donor.fluid.mass);
-  return u + donor.fluid.pressure * v;
+const drawPricer = new FlowRateOperator();
+export function connectionDrawEnthalpy(donor: FlowNode, conn: FlowConnection): number {
+  return drawPricer.priceDraw(donor, conn.fromElevation, Math.abs(conn.massFlowRate),
+    conn.fromPhaseTolerance, conn.fromOpeningHeight).h_up;
 }
 
 /** One steam turbine's expansion: its shaft power and what each stage node gives up for it. */
@@ -2291,11 +2348,18 @@ export function expandTurbines(state: SimulationState): TurbineExpansion[] {
         inletMassFlow += conn.massFlowRate;
         const donor = state.flowNodes.get(conn.fromNodeId);
         if (donor) {
-          // Same enthalpy the flow machinery advects down this connection,
-          // so a moving-boundary boiler hands over its superheat instead of
-          // its (much colder) bulk state
-          inletEnthalpyNum += conn.massFlowRate *
-            donorSteamEnthalpy(donor, conn.currentFlowPhase);
+          // The enthalpy the flow machinery actually advects down this
+          // connection (the same priceDraw): dry steam off a
+          // two-phase drum's vapour space, a moving-boundary boiler's
+          // superheat. The donor's BULK state is the wrong number - a
+          // U-tube SG shell at x~0.02 priced its steam at ~h_f and the
+          // turbine charged a third of its real work (2026-11-01).
+          // Connections the nearly-implicit pass transports (single-phase,
+          // non-OTSG donors only) move the donor's bulk (U + PV)/M.
+          const h = conn.implicitAdvection
+            ? (donor.fluid.internalEnergy + donor.fluid.pressure * donor.volume) / donor.fluid.mass
+            : connectionDrawEnthalpy(donor, conn);
+          inletEnthalpyNum += conn.massFlowRate * h;
           inletP = Math.max(inletP, donor.fluid.pressure);
         }
       }

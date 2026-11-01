@@ -3,6 +3,7 @@
  *
  *   npx tsx scripts/xe100-scenarios.ts lofc [seconds]   - circulator trip
  *   npx tsx scripts/xe100-scenarios.ts dlofc [seconds]  - blackout + RPV break (depressurized)
+ *   npx tsx scripts/xe100-scenarios.ts chute [seconds]  - blackout + defuel chute break (pebble spill)
  *   npx tsx scripts/xe100-scenarios.ts sgtr [seconds]   - tube rupture into primary
  *
  * Both start from the preset, settle to steady state, then inject the fault.
@@ -32,16 +33,19 @@ import { buildSimFromFile } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
 import { getGraphiteOxidationDiagnostics } from '../src/simulation/operators/graphite-oxidation';
 import { trisoFailedFraction } from '../src/simulation/triso';
+import { exposedParticleFraction } from '../src/simulation/operators/graphite-oxidation';
+import { pebbleSpillSummary } from '../src/simulation/operators/pebble-spill';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'dlofc' | 'sgtr';
+const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'dlofc' | 'chute' | 'sgtr';
 // The fault sequences live in the scenario presets (gen-xe100.ts writes them;
 // src/simulation/scenario-types.ts describes them) and fire from inside the
 // solver, so this script only drives time and reports. PRESET=<path> runs a
 // different preset file under its own sequence.
 const PRESET = process.env.PRESET ??
   path.join(HERE, '..', 'src', 'presets',
-    scenario === 'sgtr' ? 'xe100-sgtr.json' : scenario === 'dlofc' ? 'xe100-dlofc.json' : 'xe100-sbo.json');
+    scenario === 'sgtr' ? 'xe100-sgtr.json' : scenario === 'dlofc' ? 'xe100-dlofc.json' :
+    scenario === 'chute' ? 'xe100-chute.json' : 'xe100-sbo.json');
 const seconds = parseFloat(process.argv[3] ?? '1800');
 const SETTLE = 400; // s to steady state before the fault
 
@@ -166,6 +170,19 @@ const gox = st().thermalNodes.get('cb-1-clad')?.graphiteOxidation;
 if (gox) {
   console.log(`  Pebble graphite burn-off: ${(gox.burnoff * 100).toFixed(4)}% ` +
     `(${(gox.burnoff * gox.initialCarbonMass).toFixed(1)} kg)`);
+  if (gox.layers) {
+    console.log(`  Burn-off by bed layer (bottom first): ` +
+      `${gox.layers.burnoff.map(b => (b * 100).toFixed(3)).join(' ')} %; ` +
+      `particles exposed ${exposedParticleFraction(gox.layers).toExponential(2)}`);
+  }
+}
+const spill = pebbleSpillSummary(st(), 'cb-1-clad');
+if (spill.spilledFraction > 0) {
+  console.log(`  Pebbles spilled: ${(spill.spilledFraction * 100).toFixed(2)}% of the bed`);
+  for (const h of spill.heaps.filter(x => x.mass > 2)) {
+    console.log(`    heap in ${h.regionNodeId}: ${(h.mass / 1000).toFixed(2)} t at ` +
+      `${(h.temperature - 273.15).toFixed(0)} C, burn-off ${(h.burnoff * 100).toFixed(3)}%`);
+  }
 }
 console.log(`  Core gas: ${ncg('cb-1', 'H2').toFixed(1)} mol H2, ${ncg('cb-1', 'CO').toFixed(1)} mol CO, ` +
   `${ncg('cb-1', 'He').toFixed(0)} mol He, ${(st().flowNodes.get('cb-1')!.fluid.mass).toFixed(2)} kg H2O`);

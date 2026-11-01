@@ -73,6 +73,10 @@ export {
   CONCRETE_DENSITY,
   CONCRETE_ABLATION_T,
 } from './operators/mcci';
+export {
+  PebbleSpillRateOperator,         // pebbles drain out of a broken pebble bed onto a heap
+  pebbleSpillSummary,              // spilled fraction and heaps, for displays/reports
+} from './operators/pebble-spill';
 
 // Semi-implicit pressure solver
 export { PressureSolver } from './operators/pressure-solver';

@@ -19,6 +19,8 @@ import {
   FISSION_ENERGY, DECAY_HEAT_GROUPS, LEGACY_DECAY_HEAT_GROUPS_V1, migrateDecayHeatPools,
 } from './operators/neutronics.js';
 import { NeutronicsRateOperator, FissionProductReleaseOperator } from './operators/rate-operators.js';
+import { beverlooMassFlow, heapGeometry } from './operators/pebble-spill.js';
+import { burnFrontDecayLength, layerWeights, exposedParticleFraction } from './operators/graphite-oxidation.js';
 import { sicDamageRate, trisoFailedFraction, thermalFailureFraction, erfc } from './triso.js';
 import { ControlSystemOperator, describeControllerSignal,
   primaryControllerSignal } from './operators/control-system.js';
@@ -1302,6 +1304,82 @@ test('intact TRISO particles hold their inventory; failed ones release it', () =
   const expected = 1 - (1 - 1e-4) * 0.5;
   assert(Math.abs(half.dFpVolatile! / bare.dFpVolatile! - expected) < 1e-6,
     `at D = 1 about half should release, got ${(half.dFpVolatile! / bare.dFpVolatile!).toFixed(4)}`);
+});
+
+// ============================================================================
+// Pebble spill and burn front
+// ============================================================================
+category('Pebble spill & burn front');
+
+test('Beverloo: jams at 1.5 pebble diameters, grows as (D - 1.5d)^2.5 beyond', () => {
+  const d = 0.06, rho = 1100;
+  assert(beverlooMassFlow(rho, 1.5 * d, d) === 0 && beverlooMassFlow(rho, d, d) === 0,
+    'an orifice up to 1.5 pebble diameters passes nothing');
+  const W = beverlooMassFlow(rho, 0.2, d);
+  const expected = 0.58 * rho * Math.sqrt(9.81) * Math.pow(0.2 - 0.09, 2.5);
+  assert(Math.abs(W / expected - 1) < 1e-12, `0.2 m chute: ${W.toFixed(3)} vs ${expected.toFixed(3)} kg/s`);
+  assert(W > 5 && W < 12, `a 0.2 m chute drains a pebble bed at a few kg/s, got ${W.toFixed(2)}`);
+});
+
+test('pebble heap is a cone at the angle of repose holding its own volume', () => {
+  const g = heapGeometry(44000, 1100);
+  const coneVolume = Math.PI * g.radius * g.radius * g.height / 3;
+  assert(Math.abs(coneVolume / g.volume - 1) < 1e-12 && Math.abs(g.volume - 40) < 1e-9,
+    `cone volume ${coneVolume.toFixed(3)} vs ${g.volume.toFixed(3)} m3`);
+  assert(g.area > Math.PI * g.radius * g.radius, 'sloped surface exceeds the footprint');
+});
+
+test('burn-front decay length: diffusion depth at rest, u/k in fast flow', () => {
+  const D = 1e-4, k = 10;
+  assert(Math.abs(burnFrontDecayLength(0, D, k) / Math.sqrt(D / k) - 1) < 1e-12,
+    'no flow: lambda = sqrt(D/k)');
+  assert(Math.abs(burnFrontDecayLength(10, D, k) / (10 / k) - 1) < 1e-3,
+    'fast flow: lambda -> u/k');
+});
+
+test('burn front: concentrated at the inlet when lambda << H, even when lambda >> H', () => {
+  const n = 10;
+  const open = (u: number) => ({ H: 9, u, d: 0.06, openings: [{ z: 0, inflow: 1, area: 0.1 }] });
+  // Hot bed, no flow: oxygen goes centimetres - the bottom layer takes it all
+  const hot = layerWeights(new Array(n).fill(0), open(0), 1e-4, 50, 1);
+  const sumHot = hot.reduce((a, b) => a + b, 0);
+  assert(Math.abs(sumHot - 1) < 1e-12, `weights sum to 1, got ${sumHot}`);
+  assert(hot[0] > 0.99, `bottom layer should take ~everything, got ${hot[0].toFixed(4)}`);
+  // Cold bed, brisk flow: lambda far beyond the bed - the lumped answer
+  const cold = layerWeights(new Array(n).fill(0), open(1), 1e-4, 1e-4, 1);
+  assert(cold.every(w => Math.abs(w - 1 / n) < 0.01), `near uniform, got ${cold.map(w => w.toFixed(3)).join(' ')}`);
+  // A burned-out layer has nothing left: the attack moves past it
+  const moved = layerWeights([1, 0, 0, 0, 0, 0, 0, 0, 0, 0], open(0), 1e-4, 50, 1);
+  assert(moved[0] === 0 && moved[1] > 0.99, `attack moves to layer 2, got ${moved.slice(0, 3).map(w => w.toFixed(3)).join(' ')}`);
+});
+
+test('exposed particles: none until the fuel-free shell is gone, all at full burn-off', () => {
+  const s = 1 - Math.pow(25 / 30, 3);
+  assert(exposedParticleFraction({ burnoff: [s, s], shellFraction: s }) === 0, 'shell burned, fuel zone intact');
+  assert(exposedParticleFraction({ burnoff: [1, 0], shellFraction: s }) === 0.5, 'one of two layers burned out');
+});
+
+test('burn-front layers survive a state clone', () => {
+  const state = {
+    thermalNodes: new Map([['g', {
+      id: 'g', label: 'g', temperature: 1000, mass: 100, specificHeat: 1700,
+      thermalConductivity: 25, characteristicLength: 0.01, surfaceArea: 1,
+      heatGeneration: 0, maxTemperature: 3000,
+      graphiteOxidation: {
+        burnoff: 0.1, initialCarbonMass: 100, grade: 'A3-3' as const,
+        externalArea: 1, characteristicLength: 0.01, associatedGasNode: 'gas',
+        layers: { burnoff: [0.1, 0.1], shellFraction: 0.42, bedHeight: 9,
+          bedBottomElevation: 0, bedArea: 5, pebbleDiameter: 0.06 },
+      },
+    }]]),
+    flowNodes: new Map(), flowConnections: [], thermalConnections: [],
+    convectionConnections: [], components: { pumps: new Map(), valves: new Map() },
+    neutronics: {}, time: 0,
+  } as any;
+  const copy = cloneSimulationState(state);
+  copy.thermalNodes.get('g')!.graphiteOxidation!.layers!.burnoff[0] = 0.9;
+  assert(state.thermalNodes.get('g')!.graphiteOxidation!.layers!.burnoff[0] === 0.1,
+    'mutating the clone must not touch the original - layer burn-off is integrated state');
 });
 
 // ============================================================================

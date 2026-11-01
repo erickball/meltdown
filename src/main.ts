@@ -13,6 +13,7 @@ import htgrPresetData from './presets/htgr.json';
 import xe100PresetData from './presets/xe100.json';
 import xe100SboPresetData from './presets/xe100-sbo.json';
 import xe100DlofcPresetData from './presets/xe100-dlofc.json';
+import xe100ChutePresetData from './presets/xe100-chute.json';
 import xe100SgtrPresetData from './presets/xe100-sgtr.json';
 import xe100PlantPresetData from './presets/xe100-plant.json';
 import twoLoopPresetData from './presets/two-loop.json';
@@ -3134,6 +3135,15 @@ function init() {
           'conduction and radiation through the reflector to the vessel wall and the RCCS. Fuel ' +
           'heats slowly for a day or more; the TRISO particles hold their fission products unless ' +
           'the kernels spend days near 1800 C (watch "SiC failed" on the fuel node).',
+      },
+      {
+        label: 'Xe-100 Defuel Chute Break', data: xe100ChutePresetData,
+        tooltip: 'At t = 400 s the pebble discharge line shears off where it leaves the bottom of ' +
+          'the RPV, during a station blackout, no scram. The 0.2 m opening blows the helium down ' +
+          'and the pebble bed drains through it onto the reactor building floor at ~8 kg/s (a ' +
+          '60 mm hole would jam - pebbles need an opening over 1.5 diameters). The spilled pebbles ' +
+          'carry their decay heat and fission products with them, pile up in the building air, ' +
+          'heat up and burn. Watch "spilled" on the core graphite node and the heap node.',
       },
       {
         label: 'Xe-100 SG Tube Rupture', data: xe100SgtrPresetData,
