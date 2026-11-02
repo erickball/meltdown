@@ -154,10 +154,12 @@ const K_MASS = 0, K_ENERGY = 1, K_MOL = 2, K_TEMP = 3, K_SOLID_MASS = 4,
  *  polynomial cannot follow past a fraction of its time constant. */
 const EXPONENTIAL = new Set([K_POWER, K_PRECURSOR]);
 
-/** Burn-off / oxidation fractions are judged relative to at least this much:
- *  an absolute 1e-3 (per jump, or per accuracyHorizon of systematic drift) is
- *  far below anything they decide - a pebble shell burns through near 0.4 */
-const FRACTION_FLOOR = 1;
+/** Oxidation fractions (graphite burn-off, cladding oxide) are judged by the
+ *  heat of the oxidation an error stands for, against the same plant-level
+ *  energy floor as everything else: C -> CO releases ~9-10 MJ/kg (32.8 to
+ *  CO2), Zr -> ZrO2 ~6.5 MJ/kg. Error-norm weights, not physics. */
+const CARBON_OXIDATION_WEIGHT = 1e7;   // J per kg of carbon burned
+const ZR_OXIDATION_WEIGHT = 6.5e6;     // J per kg of Zr oxidized
 /** TRISO damage integral: failures go as Phi(ln D / s), negligible below this */
 const DAMAGE_FLOOR = 1e-4;
 
@@ -198,17 +200,17 @@ function visitIntegratedState(state: SimulationState, visit: Visitor): void {
     visit(`${id}.T`, K_TEMP, t.temperature, 0, Infinity, v => { t.temperature = v; }, id);
     visit(`${id}.mass`, K_SOLID_MASS, t.mass, 0, Infinity, v => { t.mass = v; }, '');
     const ox = t.oxidation;
-    if (ox) visit(`${id}.ox`, K_FRACTION, ox.oxidizedFraction, 0, 1, v => { ox.oxidizedFraction = v; }, '');
+    if (ox) visit(`${id}.ox`, K_FRACTION, ox.oxidizedFraction, 0, 1, v => { ox.oxidizedFraction = v; }, `ox:${id}`);
     const go = t.graphiteOxidation;
     if (go) {
       // Node mass follows burn-off unless the node integrates its own pieces
       // (applyRatesToState); both are extrapolated linearly from the same fit,
       // so they stay consistent to the fit's linearity.
-      visit(`${id}.burn`, K_FRACTION, go.burnoff, 0, 1, v => { go.burnoff = v; }, '');
+      visit(`${id}.burn`, K_FRACTION, go.burnoff, 0, 1, v => { go.burnoff = v; }, `burn:${id}`);
       const layers = go.layers?.burnoff;
       if (layers) {
         for (let i = 0; i < layers.length; i++) {
-          visit(`${id}.layer${i}`, K_FRACTION, layers[i], 0, 1, v => { layers[i] = v; }, '');
+          visit(`${id}.layer${i}`, K_FRACTION, layers[i], 0, 1, v => { layers[i] = v; }, `layer:${id}`);
         }
       }
     }
@@ -540,7 +542,18 @@ export class SlowModeController {
         // fluid node: its temperature error is worth the plant-level energy
         case K_TEMP: t = Math.max(c.tempTol, energyFloor / (solidHeatCap.get(owner) ?? Infinity)); break;
         case K_SOLID_MASS: t = Math.max(c.relTol * a, solidFloor); break;
-        case K_FRACTION: t = c.relTol * Math.max(a, FRACTION_FLOOR); break;
+        case K_FRACTION: {
+          // kg of material one unit of this fraction stands for, x heat weight
+          const [what, nodeId] = owner.split(':');
+          const t0 = s.thermalNodes.get(nodeId);
+          const go = t0?.graphiteOxidation;
+          const joulesPerUnit = what === 'ox'
+            ? (t0?.mass ?? 0) * ZR_OXIDATION_WEIGHT
+            : (go?.fullMass ?? go?.initialCarbonMass ?? 0) * CARBON_OXIDATION_WEIGHT /
+              (what === 'layer' ? (go?.layers?.burnoff.length ?? 1) : 1);
+          t = Math.max(c.relTol * a, joulesPerUnit > 0 ? energyFloor / joulesPerUnit : c.relTol);
+          break;
+        }
         case K_INVENTORY: t = Math.max(c.relTol * a, fpFloor); break;
         case K_DAMAGE: t = c.relTol * Math.max(a, DAMAGE_FLOOR); break;
         case K_POWER: t = c.relTol * Math.max(a, powerFloor); break;
