@@ -410,6 +410,14 @@ export class SlowModeController {
     return { ...out, state: jumped.state, jump: jumped.jump };
   }
 
+  /** Double the measurement window (an oscillation it cannot average) */
+  private lengthenWindow(t: number, why: string): void {
+    this.measure = Math.min(this.config.maxMeasureSeconds, 2 * this.measure);
+    this.windows = [];
+    console.warn(`[SlowMode] t=${t.toFixed(0)}: ${why} oscillates on a period the window cannot ` +
+      `average; measurement window -> ${this.measure.toFixed(0)} s`);
+  }
+
   private startRelax(t: number): void {
     this.phase = 'relax';
     this.phaseStart = t;
@@ -585,6 +593,7 @@ export class SlowModeController {
     const win: WindowFit = { keys: this.keys, tc, slope, seSlope, J: 0, quadratic: false, tol };
     const k = c.confidence;
 
+    const measureBefore = this.measure;
     // Curvature from this window and the previous one, centred between them
     if (w1) {
       const d1 = tc - w1.tc;
@@ -605,7 +614,7 @@ export class SlowModeController {
     // against the truncation budget for a jump of that length.
     if (w1 && w1.J > 0) {
       const d1 = tc - w1.tc;
-      let worst = 0, worstKey = '';
+      let worst = 0, worstKey = '', worstFlipped = false;
       for (let i = 0; i < N; i++) {
         if (this.kinds[i] === K_PASSIVE) continue;
         const t1 = w1.tau ? w1.tau[i] : 0;
@@ -616,7 +625,7 @@ export class SlowModeController {
         const err = t1 > 0 ? 0.5 * m * Math.min(w1.J, t1)
           : w1.quadratic ? m * w1.J ** 3 / (3 * d1 * d1) : m * w1.J * w1.J / (2 * d1);
         const e = err / (w1.tol[i] * w1.J / c.accuracyHorizon);
-        if (e > worst) { worst = e; worstKey = this.keys[i]; }
+        if (e > worst) { worst = e; worstKey = this.keys[i]; worstFlipped = slope[i] * w1.slope[i] < 0; }
       }
       // Step-size control on the realized error, which goes as J^2: the
       // usual safety factor 0.9 and growth between halving and doubling
@@ -625,7 +634,15 @@ export class SlowModeController {
       if (worst > 2) {
         console.warn(`[SlowMode] t=${s.time.toFixed(0)}: previous ${w1.J.toFixed(0)} s jump overshot its error ` +
           `budget ${worst.toFixed(1)}x on ${worstKey}; jump ceiling -> ${this.jmax.toFixed(0)} s`);
+        // A slope that changed sign is an oscillation the window did not
+        // average over, not a curvature the fits missed
+        if (worstFlipped && this.measure < c.maxMeasureSeconds) this.lengthenWindow(s.time, worstKey);
       }
+    }
+    if (this.measure !== measureBefore) {
+      // the window was lengthened: fits of the old length start over
+      this.status.lastHold = 'measurement window lengthened';
+      return { state: s };
     }
     this.windows = [win, ...hist].slice(0, 3);
 
@@ -634,6 +651,10 @@ export class SlowModeController {
       return { state: s };
     }
 
+    // The ceiling never sits below the shortest jump worth taking: the
+    // window may have lengthened since the ceiling was last set, and a
+    // ceiling no jump can clear would never be revisited
+    this.jmax = Math.max(this.jmax, c.minJumpFactor * (c.relaxSeconds + this.measure));
     let J = Math.min(this.jmax, c.maxJump);
     let limitedBy = 'jump ceiling';
     let limiterDetail = '';
@@ -653,6 +674,7 @@ export class SlowModeController {
     const tau = new Float64Array(N);   // > 0: extrapolate as an exponential with this time constant
     const limits: { key: string; J: number; detail: string }[] = [];
     let limiterOscillating = false;
+    let errorLimit = Infinity;   // tightest slot limit, ignoring the ceiling
     const waterDominated = new Set<string>();
     for (const [id, node] of s.flowNodes) {
       let mol = 0;
@@ -693,6 +715,7 @@ export class SlowModeController {
           return lo2;
         };
         const Ji = within(J);
+        if (Ji < J) errorLimit = Math.min(errorLimit, Ji);
         const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} tau=${t0.toFixed(0)} tau_prev=${t1.toFixed(0)} ` +
           `seR=${seR.toExponential(2)} tol=${T.toExponential(2)} (exponential)`;
         if (c.diagnose) limits.push({ key: this.keys[i], J: within(1e7), detail: detail() });
@@ -721,6 +744,7 @@ export class SlowModeController {
         trunc3 > 0 ? Math.sqrt(T / (H * trunc3)) : Infinity,
         trunc2 > 0 ? T / (H * trunc2) : Infinity);
       const Ji = Math.min(largestRoot(n3, n2, n1, T, J), jTrunc(J));
+      if (Ji < J) errorLimit = Math.min(errorLimit, Ji);
       const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} a=${a.toExponential(2)} ` +
         `seR=${seR.toExponential(2)} seA=${seA.toExponential(2)} tol=${T.toExponential(2)}` +
         (quadratic ? ` a_prev=${w1.curv![i].toExponential(2)}` : ' (linear)');
@@ -749,15 +773,12 @@ export class SlowModeController {
         (limiterDetail ? ` (${limiterDetail})` : '');
       // An oscillation slower than the window aliases into slope and
       // curvature: lengthen the window until it averages over whole cycles
-      if (limiterOscillating && this.measure < c.maxMeasureSeconds) {
-        this.measure = Math.min(c.maxMeasureSeconds, 2 * this.measure);
-        this.windows = [];
-        console.warn(`[SlowMode] t=${s.time.toFixed(0)}: ${limitedBy} oscillates on a period the window cannot ` +
-          `average; measurement window -> ${this.measure.toFixed(0)} s`);
-      }
+      if (limiterOscillating && this.measure < c.maxMeasureSeconds) this.lengthenWindow(s.time, limitedBy);
       return { state: s };
     }
-    if (limitedBy === 'jump ceiling' && this.measure > c.measureSeconds) {
+    // Back to shorter windows only once jumps run into the absolute ceiling
+    // with error room to spare: then the window is pure overhead
+    if (J >= c.maxJump && errorLimit > 2 * c.maxJump && this.measure > c.measureSeconds) {
       this.measure = Math.max(c.measureSeconds, 0.5 * this.measure);
     }
 
