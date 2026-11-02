@@ -68,6 +68,7 @@ import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
 import { designWallThickness, hxTubeWall, crossVesselWalls } from '../simulation/wall-sizing';
+import { DEFAULT_MATERIAL } from '../simulation/materials';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -592,7 +593,14 @@ export class ConstructionManager {
           elevation: startElevation,
           rotation: 0,
           diameter: props.diameter,
-          thickness: 0.01,  // 1cm default wall thickness
+          // The wall the dialog shows: sized from the rating, code and
+          // material (wall-sizing.ts), so the metal that heats and bursts is
+          // the one the player picked
+          thickness: designWallThickness({
+            pressureBar: props.pressureRating ?? 155, diameter: props.diameter, measuredOn: 'inner',
+            form: 'seamless', nqa1: props.nqa1 ?? false, material: props.material,
+            label: props.name || 'Pipe',
+          }),
           length: pipeLength,
           // End position: the drawn route's far end, or +X from the start
           endPosition: { x: endPoint.x, y: endPoint.y },
@@ -810,7 +818,7 @@ export class ConstructionManager {
         // cuts the bore from (wall-sizing.ts)
         const tubeOD_m = (props.tubeOD || 19) / 1000; // mm to m
         const tubeThickness_m = hxTubeWall(
-          { tubePressureRating, nqa1: props.nqa1 ?? true, label: props.name }, tubeOD_m);
+          { tubePressureRating, nqa1: props.nqa1 ?? true, material: props.material, label: props.name }, tubeOD_m);
         const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
 
         const tubeCount = props.tubeCount || 3000;
@@ -1054,7 +1062,7 @@ export class ConstructionManager {
         // inherit only the condenser's ~2 bar.
         const exhaustWallThickness = designWallThickness({
           pressureBar: turbinePressureRating, diameter: exhaustPipeDiameter,
-          measuredOn: 'inner', form: 'welded', nqa1: false, label: 'Exhaust Pipe',
+          measuredOn: 'inner', form: 'welded', nqa1: false, material: props.material, label: 'Exhaust Pipe',
         });
         const exhaustPipe: PipeComponent = {
           id: exhaustPipeId,
@@ -1064,6 +1072,8 @@ export class ConstructionManager {
           rotation: 0,
           diameter: exhaustPipeDiameter,
           thickness: Math.round(exhaustWallThickness * 1000) / 1000,
+          // Same steam path as the casing, so the same alloy
+          ...(props.material ? { material: props.material } : {}),
           length: exhaustPipeLength,
           pressureRating: turbinePressureRating,
           ports: exhaustPipePorts,
@@ -1472,7 +1482,8 @@ export class ConstructionManager {
         const vesselR = vesselDiameter / 2;
         const wallThickness = designWallThickness({
           pressureBar: pressureRating, diameter: vesselDiameter, measuredOn: 'inner',
-          form: 'welded', nqa1: props.nqa1 ?? true, label: props.name || 'Reactor Vessel',
+          form: 'welded', nqa1: props.nqa1 ?? true, material: props.material,
+          label: props.name || 'Reactor Vessel',
         });
 
         // Calculate barrel geometry accounting for dome curvature
@@ -1951,7 +1962,7 @@ export class ConstructionManager {
         const angle = props.angle || 0;
 
         const { outerWallThickness, innerWallThickness } =
-          crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true);
+          crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true, props.material);
 
         // Calculate volumes for simulation
         const outerRadius = outerDiam / 2;
@@ -2033,6 +2044,13 @@ export class ConstructionManager {
       default:
         console.error(`[Construction] Unknown component type: ${config.type}`);
         return null;
+    }
+
+    // Structural material from the dialog (pressure-boundary parts only;
+    // the walls above were already sized with it)
+    if (props.material) {
+      const built = this.plantState.components.get(id) as Record<string, any> | undefined;
+      if (built) built.material = props.material;
     }
 
     // Electrical wiring from the dialog (the fields exist only with the
@@ -2229,7 +2247,12 @@ export class ConstructionManager {
         position: { x: a.x, y: a.y },
         rotation: segments === 1 ? rotation : Math.atan2(b.y - a.y, b.x - a.x),
         diameter,
-        thickness: 0.01,
+        // Sized like any other pipe of this rating (Section VIII, default
+        // material) rather than a fixed placeholder
+        thickness: designWallThickness({
+          pressureBar: pipePressureRating, diameter, measuredOn: 'inner',
+          form: 'seamless', nqa1: false, label: `Pipe ${fromComponent.id} to ${toComponent.id}`,
+        }),
         length: segmentLength,
         pressureRating: pipePressureRating,
         // Ports at the ends - bidirectional since flow is determined by physics
@@ -3519,7 +3542,8 @@ export class ConstructionManager {
     const x = a as Record<string, any>, y = b as Record<string, any>;
     return a.diameter === b.diameter && a.thickness === b.thickness &&
       a.pressureRating === b.pressureRating && a.containedBy === b.containedBy &&
-      (x.roughness ?? 0.0001) === (y.roughness ?? 0.0001) && !!x.nqa1 === !!y.nqa1;
+      (x.roughness ?? 0.0001) === (y.roughness ?? 0.0001) && !!x.nqa1 === !!y.nqa1 &&
+      (x.material ?? DEFAULT_MATERIAL) === (y.material ?? DEFAULT_MATERIAL);
   }
 
   /**
@@ -4005,6 +4029,11 @@ export class ConstructionManager {
     if (properties.nqa1 !== undefined) {
       component.nqa1 = properties.nqa1;
     }
+    // ...and the material, which sets the allowable stress those walls are
+    // sized at
+    if (properties.material !== undefined) {
+      component.material = properties.material;
+    }
 
     // Apply property updates with unit conversions
     if (properties.name !== undefined) {
@@ -4201,6 +4230,16 @@ export class ConstructionManager {
         if (rightPort) {
           rightPort.position.x = pipe.length;
         }
+      }
+
+      // The wall follows the bore, rating, code and material as at creation
+      if (properties.diameter !== undefined || properties.pressureRating !== undefined ||
+          properties.nqa1 !== undefined || properties.material !== undefined) {
+        pipe.thickness = designWallThickness({
+          pressureBar: pipe.pressureRating ?? 155, diameter: pipe.diameter, measuredOn: 'inner',
+          form: 'seamless', nqa1: component.nqa1 ?? false, material: component.material,
+          label: pipe.label || pipe.id,
+        });
       }
     }
 
@@ -4776,7 +4815,8 @@ export class ConstructionManager {
     // Cross-vessel walls follow the rating and the code like every other wall
     // (the factory builds the annulus volume from them)
     if (component.type === 'crossVessel' &&
-        (properties.pressureRating !== undefined || properties.nqa1 !== undefined)) {
+        (properties.pressureRating !== undefined || properties.nqa1 !== undefined ||
+         properties.material !== undefined)) {
       Object.assign(component, crossVesselWalls(
         component.pressureRating, component.outerDiameter, component.innerDiameter,
         component.nqa1 ?? true, component.material));
