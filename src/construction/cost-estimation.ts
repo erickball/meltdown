@@ -18,7 +18,7 @@
  */
 
 import { designWallThickness, crossVesselWalls, type WallForm } from '../simulation/wall-sizing';
-import { MATERIALS, DEFAULT_MATERIAL, resolveMaterial } from '../simulation/materials';
+import { MATERIALS, resolveMaterial } from '../simulation/materials';
 
 /** Price of a pressure boundary's alloy relative to the steel grade an
  *  estimator assumes for low-alloy steel (materials.ts costFactor). */
@@ -31,7 +31,6 @@ const STEEL_PRICES = {
   carbonSteel: 2.5,           // SA-516 Gr 70, general purpose
   lowAlloySteel: 4.0,         // SA-533 Grade B, reactor vessels
   stainlessSteel: 8.0,        // 304/316 SS
-  inconel: 45.0,              // Inconel 600/690 for SG tubes
 };
 
 // Fabrication cost multipliers (vs raw material cost)
@@ -343,6 +342,7 @@ export function estimatePumpCost(props: {
   pumpType: 'centrifugal' | 'positive';
   pressureRating?: number;  // bar - casing design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Hydraulic power in kW
   const hydraulicPower = (props.ratedFlow * 9.81 * props.ratedHead) / 1000;
@@ -354,9 +354,11 @@ export function estimatePumpCost(props: {
   // Positive displacement pumps cost ~1.5x more
   const typeMultiplier = props.pumpType === 'positive' ? 1.5 : 1.0;
 
-  // Casing pressure class: wall mass grows with design pressure, but machining
-  // and internals keep a low-pressure casing from becoming free
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  // Casing pressure class: wall mass grows with design pressure (and is
+  // priced in the casing alloy), but machining and internals keep a
+  // low-pressure casing from becoming free
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
 
   const equipmentCost = baseCost * typeMultiplier * pressureMultiplier;
 
@@ -401,6 +403,7 @@ export function estimateValveCost(props: {
   valveType: 'gate' | 'globe' | 'ball' | 'butterfly' | 'check' | 'relief' | 'porv';
   pressureRating?: number;  // bar - body design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Base costs for 300mm valve
   const baseCosts: Record<string, number> = {
@@ -422,9 +425,11 @@ export function estimateValveCost(props: {
   const referenceSize = 0.3; // 300mm reference
   const sizeMultiplier = Math.pow(props.diameter / referenceSize, 2.5);
 
-  // Pressure class: body wall mass grows with design pressure, with a
-  // machining/trim floor so low-pressure valves don't become free
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  // Pressure class: body wall mass grows with design pressure (priced in
+  // the body alloy), with a machining/trim floor so low-pressure valves
+  // don't become free
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
 
   const equipmentCost = baseCost * sizeMultiplier * pressureMultiplier;
 
@@ -482,7 +487,7 @@ export function estimateHeatExchangerCost(props: {
     true
   );
 
-  // Tube bundle mass (assume Inconel for SG, SS for others)
+  // Tube bundle mass
   const tubeID_m = tubeOD_m - 2 * (props.tubeThickness / 1000);
   const tubeVolume = Math.PI * ((tubeOD_m/2)**2 - (tubeID_m/2)**2) * tubeLength * props.tubeCount;
   const tubeMass = tubeVolume * STEEL_DENSITY;
@@ -493,13 +498,8 @@ export function estimateHeatExchangerCost(props: {
   // Material costs
   const shellMaterialCost = shellMass * STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
 
-  // Tubes in the chosen alloy. Low-alloy steel (also what an HX that names
-  // no material is) keeps the old grade guess - Inconel for a high-pressure
-  // tube side (like SG tubes), stainless otherwise - so the default doesn't
-  // price a steam generator's tubing as plate steel.
-  const tubeMaterial = resolveMaterial(props.material) !== DEFAULT_MATERIAL
-    ? STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material)
-    : props.tubePressure > 100 ? STEEL_PRICES.inconel : STEEL_PRICES.stainlessSteel;
+  // Tubes in the alloy the simulation builds them from (one material per HX)
+  const tubeMaterial = STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
   const tubeMaterialCost = (tubeMass + supportMass) * tubeMaterial;
 
   const materialCost = shellMaterialCost + tubeMaterialCost;
@@ -586,6 +586,7 @@ export function estimateTurbineDrivenPumpCost(props: {
   stages: number;
   pressureRating?: number;  // bar - pump casing design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Small steam turbine cost
   const shaftPower = (props.ratedPumpFlow * 9.81 * props.ratedHead) / 1000 / 0.75; // kW (assuming 75% pump efficiency)
@@ -594,7 +595,8 @@ export function estimateTurbineDrivenPumpCost(props: {
   const turbineCost = shaftPower * 1000;
 
   // Pump cost (same as regular pump, including the casing pressure class)
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
   const pumpCost = 5000 * Math.pow(shaftPower, 0.7) * pressureMultiplier;
 
   const equipmentCost = turbineCost + pumpCost;
@@ -1165,6 +1167,7 @@ export function estimateComponentCost(
         pumpType: props.type || 'centrifugal',
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'valve':
@@ -1176,6 +1179,7 @@ export function estimateComponentCost(
         valveType: props.type || props.valveType || 'gate',
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'heat-exchanger':
@@ -1207,6 +1211,7 @@ export function estimateComponentCost(
         stages: props.stages || 1,
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'condenser':
