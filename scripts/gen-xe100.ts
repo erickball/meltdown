@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { heatExchangerPorts } from '../src/construction/construction-manager';
+import { designWallThickness, crossVesselWalls } from '../src/simulation/wall-sizing';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
@@ -22,6 +23,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Design point
 // ---------------------------------------------------------------------------
 const P_HE_BAR = 60;            // primary helium pressure (bar)
+// Design pressure of the primary helium boundary - the rating every primary
+// wall is sized from (ASME Section III, wall-sizing.ts), ~17% over the
+// operating helium. It used to be 90 with a hand-set 0.22 m RPV wall: 2.6x
+// the code minimum, a 450-bar vessel holding 60 bar.
+const P_DESIGN_BAR = 70;
 const T_CORE_IN = 533;          // K (260 C)
 const T_CORE_OUT = 1023;        // K (750 C)
 const T_SG_HE_OUT = T_CORE_IN;  // helium leaves the SG at core inlet temperature
@@ -40,6 +46,20 @@ const FEED_FLOW = 77;           // kg/s - design feedwater = design steam flow
 const P_TRACE_STEAM = 700;      // Pa
 
 const HE = { He: P_HE_BAR };
+
+// Primary walls from the design pressure (ASME Section III Class 1, SA-533B
+// unless the component names its own material) - the same sizing the
+// factory and the construction dialogs use, so the preset's walls are what
+// a player would get building the same vessel.
+const primaryWall = (innerDiameter: number, material?: string) => designWallThickness({
+  pressureBar: P_DESIGN_BAR, diameter: innerDiameter, measuredOn: 'inner',
+  form: 'welded', nqa1: true, material,
+});
+// The duct's outer shell (Alloy 800H, sized on its OD). The inner pipe is an
+// insulated liner across a ~1 bar differential, not a pressure wall, so it
+// keeps its own 20 mm.
+const ductShellWall = (outerDiameter: number, innerDiameter: number) =>
+  crossVesselWalls(P_DESIGN_BAR, outerDiameter, innerDiameter, true, 'alloy-800h').outerWallThickness;
 
 const components: Array<[string, any]> = [];
 const connections: any[] = [];
@@ -86,7 +106,7 @@ add('bui-1', {
 add('rv-1', {
   type: 'reactorVessel', label: 'HTGR-200 RPV',
   position: { x: 36, y: 78 }, rotation: 0, elevation: 0,
-  innerDiameter: 4.6, wallThickness: 0.22, height: 20, pressureRating: 90,
+  innerDiameter: 4.6, wallThickness: primaryWall(4.6), height: 20, pressureRating: P_DESIGN_BAR,
   fillLevel: 0,
   // Barrel wraps the SIDE REFLECTOR (core 2.4 m + 2 x 1.0 m graphite), not the
   // bare bed - the downcomer is the 10 cm annulus between barrel and vessel.
@@ -138,7 +158,7 @@ add('cb-1', {
 add('tank-sg-1', {
   type: 'tank', label: 'SG Vessel',
   position: { x: 56, y: 74 }, rotation: 0, elevation: -10,
-  width: 4.2, height: 16, wallThickness: 0.15, pressureRating: 90,
+  width: 4.2, height: 16, wallThickness: primaryWall(4.2), pressureRating: P_DESIGN_BAR,
   fillLevel: 0,
   ports: ports([
     ['tank-sg-top', 0, -8],     // circulator suction (dome)
@@ -198,7 +218,7 @@ add('hx-1', {
   // boiling through the whole startup transient every session.
   initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.25, L3: 0.35, flowKgs: FEED_FLOW / 2 },
   material: 'alloy-800h',
-  pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
+  pressureRating: P_DESIGN_BAR, tubePressureRating: 200, shellPressureRating: P_DESIGN_BAR,
   plenumLength: SG_PLENUM, tubeOD: 0.019,
   ports: ports([
     ['hx-1-tube-1', ...sgHeader('hx-1-tube-bottom')],       // bundle 1 feedwater in (lower header)
@@ -237,7 +257,7 @@ add('pump-1', {
   ratedFlow: 80, ratedHead: 2600, orientation: 'left-right',
   ports: ports([['pump-1-inlet', -0.5, 0, 'in'], ['pump-1-outlet', 0.5, 0, 'out']]),
   fluid: heFluid(T_SG_HE_OUT),
-  nqa1: true, containedBy: 'bui-1', initialNcg: HE, pressureRating: 200,
+  nqa1: true, containedBy: 'bui-1', initialNcg: HE, pressureRating: P_DESIGN_BAR,
 });
 
 // ---------------------------------------------------------------------------
@@ -288,7 +308,7 @@ add('val-prel-1', {
   // Beside the RPV and inside the reactor building footprint (see pump-1)
   position: { x: 35, y: 70 }, rotation: 0, elevation: 18,
   diameter: 0.1, opening: 0, volume: 0.1,
-  pressureRating: 120, setpoint: 75e5, blowdown: 0.03,
+  pressureRating: P_DESIGN_BAR, setpoint: 75e5, blowdown: 0.03,
   ports: ports([['val-prel-1-in', -0.1, 0, 'in'], ['val-prel-1-out', 0.1, 0, 'out']]),
   fluid: heFluid(T_CORE_IN),
   nqa1: true, containedBy: 'bui-1', initialNcg: HE,
@@ -755,9 +775,9 @@ function pipe(id: string, label: string, x: number, y: number, elevation: number
 add('cv-1', {
   type: 'crossVessel', label: 'Coaxial Gas Duct',
   position: { x: 46, y: 80 }, rotation: 0, elevation: 5,
-  outerDiameter: 1.8, wallThickness: 0.06, length: 7,
+  outerDiameter: 1.8, wallThickness: ductShellWall(1.8, 1.0), length: 7,
   innerDiameter: 1.0, innerWallThickness: 0.02,
-  pressureRating: 90,
+  pressureRating: P_DESIGN_BAR,
   // Alloy 800H. Even with the cold return in the annulus keeping the pressure
   // boundary near core-inlet temperature, the inner liner sees 750 C - and the
   // outer wall still runs ~460 C, where low-alloy steel is marginal.

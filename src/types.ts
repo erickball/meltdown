@@ -209,7 +209,8 @@ export interface TankComponent extends ComponentBase {
   type: 'tank';
   width: number;        // meters
   height: number;       // meters
-  wallThickness: number;
+  /** Explicit wall (m). Absent = the wall the rating sizes (wall-sizing.ts). */
+  wallThickness?: number;
   fillLevel: number;    // 0-1
   pressureRating?: number;  // Design pressure (bar) - used to calculate rendered wall thickness
   /**

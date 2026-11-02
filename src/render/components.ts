@@ -45,6 +45,7 @@ import {
 } from './colors';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
+import { componentWall, hxShellWall } from '../simulation/wall-sizing';
 import { renderElectricalComponent } from './electrical-components';
 import type { BreakAnchor } from './break-fx';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
@@ -96,35 +97,19 @@ export function getComponentVisualHeight(component: PlantComponent): number {
   }
 }
 
-export function calculateWallThicknessFromPressure(pressureBar: number, innerDiameterM: number): number {
-  const P = pressureBar * 1e5; // bar to Pa
-  const R = innerDiameterM / 2; // radius in meters
-  const S = 172e6; // Pa - SA-533 Grade B Class 1 allowable stress
-  const E = 1.0; // Joint efficiency
-
-  // ASME formula for cylindrical shells
-  const thickness = P * R / (S * E - 0.6 * P);
-
-  // Minimum 2mm wall thickness
-  return Math.max(0.002, thickness);
-}
-
 /**
- * Calculate pipe wall thickness from pressure rating.
- * Uses Barlow's formula: t = P*D / (2*S*E)
- * For pipes, we use a lower allowable stress (carbon steel SA-106)
+ * The wall a component is drawn with: the same wall the simulation heats and
+ * bursts (wall-sizing.ts componentWall) - an explicit thickness where the
+ * component carries one, otherwise the one its rating and NQA-1 box size.
+ * `fallback` only for a component with neither (no rating to size from).
  */
-export function calculatePipeThicknessFromPressure(pressureBar: number, outerDiameterM: number): number {
-  const P = pressureBar * 1e5; // bar to Pa
-  const D = outerDiameterM; // outer diameter in meters
-  const S = 138e6; // Pa - SA-106 Grade B allowable stress at elevated temp
-  const E = 1.0; // Joint efficiency
-
-  // Barlow's formula
-  const thickness = P * D / (2 * S * E);
-
-  // Minimum 2mm wall thickness
-  return Math.max(0.002, thickness);
+function drawnWallThickness(component: PlantComponent, fallback: number): number {
+  const rating = (component as { pressureRating?: number }).pressureRating;
+  if (!(rating !== undefined && rating > 0)) {
+    return (component as { wallThickness?: number; thickness?: number }).wallThickness
+      ?? (component as { thickness?: number }).thickness ?? fallback;
+  }
+  return componentWall(component, rating)?.thickness ?? fallback;
 }
 
 // Convert world coordinates (meters) to screen coordinates (pixels)
@@ -1016,11 +1001,7 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
     return;
   }
 
-  // Calculate wall thickness from pressure rating if available, otherwise use stored value
-  let wallThickness = tank.wallThickness;
-  if (tank.pressureRating !== undefined && tank.pressureRating > 0) {
-    wallThickness = calculateWallThicknessFromPressure(tank.pressureRating, tank.width);
-  }
+  const wallThickness = drawnWallThickness(tank, 0.01);
   const wallPx = Math.max(2, wallThickness * view.zoom);
 
   // Outer wall
@@ -1218,14 +1199,7 @@ function renderPool(
 function renderPipe(ctx: CanvasRenderingContext2D, pipe: PipeComponent, view: ViewState): void {
   const length = pipe.length * view.zoom;
 
-  // Calculate wall thickness from pressure rating if available, otherwise use stored value
-  let wallThickness = pipe.thickness;
-  if (pipe.pressureRating !== undefined && pipe.pressureRating > 0) {
-    // For pipes, outer diameter = inner diameter + 2*thickness
-    // We calculate thickness based on what outer diameter would be
-    const estimatedOuterD = pipe.diameter + 2 * pipe.thickness;
-    wallThickness = calculatePipeThicknessFromPressure(pipe.pressureRating, estimatedOuterD);
-  }
+  const wallThickness = drawnWallThickness(pipe, 0.01);
 
   const outerD = (pipe.diameter + wallThickness * 2) * view.zoom;
   const innerD = pipe.diameter * view.zoom;
@@ -1559,11 +1533,7 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
 function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, view: ViewState, isSimulating: boolean = false): void {
   const innerR = (vessel.innerDiameter / 2) * view.zoom;
 
-  // Calculate wall thickness from pressure rating if available, otherwise use stored value
-  let wallThickness = vessel.wallThickness;
-  if (vessel.pressureRating !== undefined && vessel.pressureRating > 0) {
-    wallThickness = calculateWallThicknessFromPressure(vessel.pressureRating, vessel.innerDiameter);
-  }
+  const wallThickness = drawnWallThickness(vessel, 0.2);
 
   const outerR = innerR + wallThickness * view.zoom;
   const h = vessel.height * view.zoom;
@@ -2604,12 +2574,8 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   const h = Math.max((hx.height || 4) * view.zoom, 20);
   const hxType = hx.hxType || 'utube';
 
-  // Calculate wall thickness from pressure rating if available
-  // Use the smaller dimension as the "diameter" for cylindrical approximation
-  const shellDiameter = Math.min(hx.width || 2, hx.height || 4);
-  const wallThicknessM = hx.pressureRating
-    ? calculateWallThicknessFromPressure(hx.pressureRating, shellDiameter)
-    : 0.01; // Default 10mm wall
+  // The shell wall the simulation heats and bursts
+  const wallThicknessM = hxShellWall(hx).thickness;
   const wallPx = Math.max(wallThicknessM * view.zoom, 2);
 
   // Detect orientation: horizontal when width > height, vertical when height > width

@@ -30,7 +30,8 @@ import {
 } from './operators/neutronics';
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { PEBBLE_BED_VOID_FRACTION } from './operators/pebble-spill';
-import { resolveMaterial } from './materials';
+import { resolveMaterial, MATERIALS, type StructuralMaterial } from './materials';
+import { designStress, designCodeFor, jointEfficiency, componentWall, hxShellWall, hxTubeWall } from './wall-sizing';
 import { NBG_18, A3_3 } from './graphite';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from './triso';
 import { saturationTemperature, saturationPressure } from './water-properties';
@@ -3781,14 +3782,13 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
 /** Tube bore (m): OD minus two wall thicknesses, the wall sized from the
  *  tube-side pressure rating exactly as the burst model sizes it. */
 function hxTubeBore(hx: any, tubeOD: number): number {
-  const rating = hx.tubePressureRating || hx.pressureRating || 100;
-  const wall = calculateThicknessFromPressure(rating, tubeOD);
+  const wall = hxTubeWall(hx, tubeOD);
   const bore = tubeOD - 2 * wall;
   if (!(bore > 0)) {
     throw new Error(
       `[Factory] Heat exchanger '${hx.id}': a ${(tubeOD * 1000).toFixed(1)} mm tube rated ` +
-      `${rating} bar needs ${(wall * 1000).toFixed(1)} mm of wall, leaving no bore. ` +
-      `Use a larger tubeOD or a lower tubePressureRating.`
+      `${hx.tubePressureRating || hx.pressureRating || 100} bar needs ${(wall * 1000).toFixed(1)} mm ` +
+      `of wall, leaving no bore. Use a larger tubeOD or a lower tubePressureRating.`
     );
   }
   return bore;
@@ -4631,6 +4631,11 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
   if (policy === 'none') return;
   const envThick = (globalThis as { process?: { env?: Record<string, string> } }).process?.env?.WALL_THICK_MIN;
   const thickMin = envThick ? parseFloat(envThick) : 0.0254;
+  // The wall the burst state will be built from (same rating, same sizing)
+  const wallOf = (id: string, component: PlantComponent) => {
+    const rating = componentRatingBar(id, component, state, false);
+    return rating === undefined ? null : componentWall(component, rating);
+  };
 
   let created = 0;
   for (const [id, component] of plantState.components) {
@@ -4704,11 +4709,10 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
     if (component.type === 'heatExchanger' && !state.thermalNodes.has(`${id}-wall`)) {
       const shellFlow = state.flowNodes.get(`${id}-shell`);
       if (shellFlow) {
-        const dia = Math.min(comp.width ?? 2.5, comp.height ?? 8);
-        const len = Math.max(comp.width ?? 2.5, comp.height ?? 8);
+        // The same shell the burst state is built from
+        const { innerDiameter: dia, thickness: hxThick } = hxShellWall(comp);
+        const len = Math.max(comp.width || 1, comp.height || 1);
         const hxArea = Math.PI * dia * len + 2 * Math.PI * (dia / 2) * (dia / 2);
-        const hxThick = calculateThicknessFromPressure(
-          comp.shellPressureRating ?? comp.pressureRating ?? 20, dia);
         state.thermalNodes.set(`${id}-wall`, {
           id: `${id}-wall`,
           label: `${component.label || id} shell`,
@@ -4814,7 +4818,7 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
         // when a core is present (corium relocation) - avoid double counting
         const r = comp.innerDiameter / 2;
         area = Math.PI * comp.innerDiameter * comp.height + 2 * Math.PI * r * r;
-        thickness = comp.wallThickness;
+        thickness = wallOf(id, component)?.thickness ?? 0;
         break;
       }
       case 'building': {
@@ -4832,26 +4836,27 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
       }
       case 'tank': {
         if (policy === 'rpv-bui') continue;
-        if (policy === 'thick' && (comp.wallThickness ?? 0) <= thickMin) continue;
+        thickness = wallOf(id, component)?.thickness ?? 0;
+        if (policy === 'thick' && thickness <= thickMin) continue;
         area = Math.PI * comp.width * comp.height +
           2 * Math.PI * (comp.width / 2) * (comp.width / 2);
-        thickness = comp.wallThickness ?? 0.01;
         break;
       }
       case 'pipe': {
         if (policy === 'rpv-bui') continue;
-        if (policy === 'thick' && (comp.thickness ?? 0) <= thickMin) continue;
+        thickness = wallOf(id, component)?.thickness ?? 0;
+        if (policy === 'thick' && thickness <= thickMin) continue;
         area = Math.PI * comp.diameter * comp.length;
-        thickness = comp.thickness ?? 0.01;
         break;
       }
       case 'pump':
       case 'valve': {
         if (policy !== 'all') continue;
-        const d = comp.diameter ?? 0.3;
-        // Body ~ cylinder 2 diameters long; thickness from rating
-        area = Math.PI * d * (2 * d);
-        thickness = calculateThicknessFromPressure(comp.pressureRating ?? 20, d);
+        const wall = wallOf(id, component);
+        if (!wall) continue;
+        // Body ~ cylinder 2 diameters long
+        area = Math.PI * wall.innerDiameter * (2 * wall.innerDiameter);
+        thickness = wall.thickness;
         break;
       }
       default:
@@ -5610,108 +5615,179 @@ function createAtmosphereNode(): FlowNode {
 }
 
 /**
- * Calculate collapse pressure from geometry using elastic buckling formula.
+ * Collapse pressure (Pa) of a cylindrical shell under external pressure.
  *
- * For a thin-walled cylinder under external pressure, collapse occurs at:
- *   P_collapse = 2 * E * (t/D)³ / (1 - ν²)
+ * Elastic buckling first, in the two regimes the ASME UG-28 charts are
+ * built on:
+ *   long (n = 2 ovalling, no help from the ends):
+ *     P_long  = 2 E (t/D)^3 / (1 - nu^2)
+ *   short (the ends hold it round; Windenburg-Trilling, length L):
+ *     P_short = 2.42 E (t/D)^2.5 / ((1 - nu^2)^0.75 (L/D - 0.45 (t/D)^0.5))
+ * A shell buckles in whichever mode its length allows it to reach, so it
+ * holds max(P_long, P_short): P_short falls below P_long past the critical
+ * length (~1.1 D sqrt(D/t)), where the n = 2 mode takes over. A shell short
+ * enough that the Windenburg-Trilling denominator vanishes is a ring, which
+ * does not buckle elastically at all.
  *
- * where:
- *   E = Young's modulus (~200 GPa for steel)
- *   ν = Poisson's ratio (~0.3 for steel)
- *   t = wall thickness
- *   D = diameter
+ * Then the wall yields: no shell holds more than the external pressure that
+ * puts its hoop stress at yield, P_yield = 2 t S_y / D_o.
  *
- * This assumes the same random margin as burst pressure for variability.
- * The ratio of collapse to burst pressure scales with (t/D)², so thin-walled
- * vessels are much more vulnerable to external pressure than internal.
+ * Without the length a 16 m x 2.5 m storage tank (L/D 0.16) was charged the
+ * long-cylinder 0.13 bar and imploded under a pump's suction - real ones of
+ * that shape are ten times stiffer, and fail by their roofs and vents.
+ *
+ * Scaled by the same strength factor as the wall's burst pressure (a weak
+ * wall is weak both ways). `length` absent = treat as long.
  */
 function calculateCollapsePressure(
-  diameter: number,      // m - inner diameter
-  thickness: number,     // m - wall thickness
-  randomMargin: number   // same margin as burst (0-0.4)
+  diameter: number,       // m - inner diameter
+  thickness: number,      // m - wall thickness
+  strengthFactor: number, // the wall's log-normal strength draw (median 1)
+  material: StructuralMaterial,
+  length?: number         // m - unsupported length between heads/stiffeners
 ): number {
   const E = 200e9;       // Pa - Young's modulus for steel
   const nu = 0.3;        // Poisson's ratio for steel
 
   const tOverD = thickness / diameter;
-  const designCollapse = (2 * E * Math.pow(tOverD, 3)) / (1 - nu * nu);
-
-  // Apply same random margin as burst pressure
-  return designCollapse * (1 + randomMargin);
+  const pLong = (2 * E * Math.pow(tOverD, 3)) / (1 - nu * nu);
+  let pElastic = pLong;
+  if (length !== undefined && length > 0) {
+    const shortDenom = length / diameter - 0.45 * Math.sqrt(tOverD);
+    const pShort = shortDenom > 0
+      ? 2.42 * E * Math.pow(tOverD, 2.5) / (Math.pow(1 - nu * nu, 0.75) * shortDenom)
+      : Infinity;
+    pElastic = Math.max(pLong, pShort);
+  }
+  const pYield = 2 * thickness * MATERIALS[material].yieldMPa * 1e6 / (diameter + 2 * thickness);
+  return Math.min(pElastic, pYield) * strengthFactor;
 }
 
 /**
- * Get geometry (diameter and wall thickness) from a component.
- * Uses explicit values when available, or calculates from pressure rating.
- * Returns null if geometry cannot be determined.
+ * Spread of a wall's real strength about its material's typical ultimate,
+ * as a log-normal sigma. Heat-to-heat ultimate strength of a plate or forging
+ * grade scatters by ~5-8% (CoV), and burst tests of vessels land within
+ * about +/-10% of the ultimate-strength prediction; 0.07 covers both. The
+ * median is 1 on purpose: the creep fits in materials.ts are normalised to
+ * those same typical ultimates, so a median above 1 would quietly loosen
+ * every creep life the fits were calibrated for. Log-normal because a
+ * strength cannot go negative, so nothing needs a floor.
  */
-function getComponentGeometry(
-  component: PlantComponent,
-  pressureRatingBar: number
-): { diameter: number; thickness: number } | null {
-  const comp = component as any;
+const STRENGTH_SCATTER_SIGMA_LN = 0.07;
 
-  // Pipes have explicit diameter and thickness
-  if (component.type === 'pipe' && comp.diameter && comp.thickness) {
-    return { diameter: comp.diameter, thickness: comp.thickness };
-  }
-
-  // Vessels have explicit innerDiameter and wallThickness
-  if (component.type === 'vessel' && comp.innerDiameter && comp.wallThickness) {
-    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
-  }
-
-  // Tanks have explicit innerDiameter and wallThickness
-  if (component.type === 'tank' && comp.innerDiameter && comp.wallThickness) {
-    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
-  }
-
-  // Valves have diameter, calculate thickness from pressure rating
-  if (component.type === 'valve' && comp.diameter) {
-    const thickness = calculateThicknessFromPressure(pressureRatingBar, comp.diameter);
-    return { diameter: comp.diameter, thickness };
-  }
-
-  // Pumps have diameter, calculate thickness from pressure rating
-  if (component.type === 'pump' && comp.diameter) {
-    const thickness = calculateThicknessFromPressure(pressureRatingBar, comp.diameter);
-    return { diameter: comp.diameter, thickness };
-  }
-
-  // Reactor vessels have innerDiameter and wallThickness
-  if (component.type === 'reactorVessel' && comp.innerDiameter && comp.wallThickness) {
-    return { diameter: comp.innerDiameter, thickness: comp.wallThickness };
-  }
-
-  // Core barrels: thin shell inside the vessel; its geometry sets both the
-  // Barlow burst differential and the buckling collapse differential
-  if (component.type === 'coreBarrel' && comp.innerDiameter) {
-    return { diameter: comp.innerDiameter, thickness: comp.thickness ?? comp.barrelThickness ?? 0.05 };
-  }
-
-  return null;
+/** One draw of a wall's strength factor (median 1, log-normal). */
+function drawStrengthFactor(): number {
+  // Box-Muller; 1 - u keeps the log argument in (0, 1]
+  const u1 = 1 - simulationRandom();
+  const u2 = simulationRandom();
+  const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+  return Math.exp(STRENGTH_SCATTER_SIGMA_LN * z);
 }
 
 /**
- * Calculate wall thickness from pressure rating using simplified Barlow formula.
- * t = P * D / (2 * S) where S = 138 MPa (SA-106 Grade B)
+ * Burst pressure of a cylindrical wall (Pa): where the hoop stress at the
+ * outer fibre, P*D_o/(2t), reaches the material's ultimate strength. The
+ * outer diameter makes this the standard (slightly conservative) Barlow
+ * burst form, and keeps a thick wall from being credited with more than
+ * its metal.
+ */
+function wallBurstPressure(
+  innerDiameter: number, thickness: number,
+  material: StructuralMaterial, strengthFactor: number
+): number {
+  const sigmaU = MATERIALS[material].ultimateMPa * 1e6 * strengthFactor;
+  return 2 * thickness * sigmaU / (innerDiameter + 2 * thickness);
+}
+
+/**
+ * The design pressure (bar) a component's wall is sized for: its own rating
+ * where it has one; otherwise derived, or undefined when it has no flow node
+ * to hold pressure (it then gets no burst state and no sized wall).
  *
- * The minimum is diameter-proportional (D/50, floor 3mm) rather than a fixed
- * 2mm: this is used for cast bodies (pumps, valves, HX shells), which are far
- * thicker than the Barlow minimum for castability and rigidity. A fixed 2mm
- * wall on a 0.4m pump gives a buckling collapse pressure below 1 bar, which
- * would (unphysically) crush any pump pulling suction from a condenser vacuum.
+ * The wall thermal nodes and the burst states both call this, so an unrated
+ * component is sized for the same pressure it will burst against. `warn`
+ * prints the missing-rating complaint (once - from the burst pass).
  */
-function calculateThicknessFromPressure(pressureBar: number, diameter: number): number {
-  const P = pressureBar * 1e5;  // bar to Pa
-  const S = 138e6;              // Pa - allowable stress
-  const thickness = P * diameter / (2 * S);
-  return Math.max(0.003, diameter / 50, thickness);
+function componentRatingBar(
+  compId: string,
+  component: PlantComponent,
+  state: SimulationState,
+  warn: boolean
+): number | undefined {
+  const own = (component as any).pressureRating;
+  if (own > 0) return own;
+  // A fluid-holding component with no rating would silently get NO burst
+  // state - an unbreakable component, which violates the model. Derive a
+  // SERVICE rating (1.5x margin, the turbine creator's convention) and
+  // complain loudly so the gap gets an explicit rating eventually.
+  // Service pressure, not initial pressure: a feedwater pump filled with
+  // condensate at 0.05 bar runs at suction + rated head; a check valve
+  // holds whatever its neighbors run at.
+  //
+  // Core barrels are special: the vessel is the full pressure boundary,
+  // but the barrel shell itself can still fail across the core-to-
+  // downcomer differential (its containerId, so gauge is dP across the
+  // shell). Its rating is what its ACTUAL wall is good for under its code -
+  // normally dP is a couple of bar of flow resistance and the margin is
+  // huge, but a paper-thin barrel, a blocked/isolated barrel, or a steam
+  // explosion in the core can let go. No warning: this is by design,
+  // not a data gap.
+  if (component.type === 'coreBarrel') {
+    const comp = component as any;
+    const t = comp.thickness ?? comp.barrelThickness ?? 0.05;
+    const D = comp.innerDiameter ?? 3;
+    const S = designStress(resolveMaterial(comp.material), designCodeFor(comp.nqa1));
+    const barlowBar = (2 * S * t) / D / 1e5;
+    if (!(barlowBar > 0)) return undefined;
+    return Math.round(barlowBar * 10) / 10;
+  }
+  const simNodeId = (component as any).simNodeId || compId;
+  const node = state.flowNodes.get(simNodeId);
+  if (!node || node.isBoundary) return undefined;
+  const comp = component as any;
+  // Turbines rate their casing for the DESIGN inlet, not whatever live
+  // pressure the write-back left in inletFluid (a tripped turbine at
+  // condenser pressure must not rebuild with a condenser-rated casing)
+  let refPressure = comp.designInletPressure ?? comp.inletFluid?.pressure ?? node.fluid.pressure;
+  if (component.type === 'pump' && comp.ratedHead) {
+    refPressure += 1000 * 9.81 * comp.ratedHead; // conservative liquid head
+  }
+  // static components (valves etc.): must hold the neighbors' pressure too
+  for (const conn of state.flowConnections) {
+    if (conn.fromNodeId !== simNodeId && conn.toNodeId !== simNodeId) continue;
+    const otherId = conn.fromNodeId === simNodeId ? conn.toNodeId : conn.fromNodeId;
+    const other = state.flowNodes.get(otherId);
+    if (other && !other.isBoundary) refPressure = Math.max(refPressure, other.fluid.pressure);
+  }
+  const derived = Math.max(6, Math.ceil((1.5 * refPressure / 1e5) / 5) * 5);
+  if (warn) {
+    console.warn(
+      `[Factory] ⚠ '${compId}' (${component.type}) has no pressureRating - it would be ` +
+      `UNBREAKABLE. Deriving ${derived} bar (1.5x service pressure) so it can ` +
+      `burst like everything else. Give it an explicit rating to silence this.`
+    );
+  }
+  return derived;
 }
 
 /**
  * Initialize burst states for all pressurized components.
- * Burst pressure = design rating + random 0-40% margin.
+ *
+ * A pressure RATING is a design pressure, the way the codes use the word: it
+ * sizes the wall by Section III or Section VIII (wall-sizing.ts, via
+ * componentWall). What breaks the wall is the wall itself - burst where its
+ * hoop stress reaches the material's ultimate strength (times a log-normal
+ * strength scatter), and creep at the stress ratio P/P_burst, which is then
+ * a true sigma/sigma_u. A Section III component at its rating sits at ~1/3
+ * of ultimate: the margin the codes exist to provide, and the reason a
+ * healthy plant at design conditions has a creep life of years, not hours.
+ *
+ * This used to burst at the rating itself times a 0-40% one-sided margin,
+ * while the wall it described had been sized to carry that rating at 138
+ * MPa. Creep then charged every component as if it were ~3.7x more highly
+ * stressed than its own wall said - a 304H valve at 82% of its rating and
+ * 565 C lasted a day.
+ *
  * Collapse pressure = calculated from geometry (buckling under external pressure).
  */
 function initializeBurstStates(
@@ -5724,66 +5800,21 @@ function initializeBurstStates(
   state.environmentalRelease = emptyGasComposition();
 
   for (const [compId, component] of plantState.components) {
-    // Get pressure rating if component has one
-    let pressureRating = (component as any).pressureRating;
-    if (!pressureRating || pressureRating <= 0) {
-      // A fluid-holding component with no rating would silently get NO burst
-      // state - an unbreakable component, which violates the model. Derive a
-      // SERVICE rating (1.5x margin, the turbine creator's convention) and
-      // complain loudly so the gap gets an explicit rating eventually.
-      // Service pressure, not initial pressure: a feedwater pump filled with
-      // condensate at 0.05 bar runs at suction + rated head; a check valve
-      // holds whatever its neighbors run at.
-      //
-      // Core barrels are special: the vessel is the full pressure boundary,
-      // but the barrel shell itself can still fail across the core-to-
-      // downcomer differential (its containerId, so gauge is dP across the
-      // shell). Its strength comes from its ACTUAL geometry via Barlow -
-      // normally dP is a couple of bar of flow resistance and the margin is
-      // huge, but a paper-thin barrel, a blocked/isolated barrel, or a steam
-      // explosion in the core can let go. No warning: this is by design,
-      // not a data gap.
-      if (component.type === 'coreBarrel') {
-        const comp = component as any;
-        const t = comp.thickness ?? comp.barrelThickness ?? 0.05;
-        const D = comp.innerDiameter ?? 3;
-        const S = 138e6; // Pa - allowable stress, matches calculateThicknessFromPressure
-        const barlowBar = (2 * S * t) / D / 1e5;
-        if (!(barlowBar > 0)) continue;
-        pressureRating = Math.round(barlowBar * 10) / 10;
-      } else {
-      const simNodeId = (component as any).simNodeId || compId;
-      const node = state.flowNodes.get(simNodeId);
-      if (!node || node.isBoundary) continue;
-      const comp = component as any;
-      // Turbines rate their casing for the DESIGN inlet, not whatever live
-      // pressure the write-back left in inletFluid (a tripped turbine at
-      // condenser pressure must not rebuild with a condenser-rated casing)
-      let refPressure = comp.designInletPressure ?? comp.inletFluid?.pressure ?? node.fluid.pressure;
-      if (component.type === 'pump' && comp.ratedHead) {
-        refPressure += 1000 * 9.81 * comp.ratedHead; // conservative liquid head
-      }
-      // static components (valves etc.): must hold the neighbors' pressure too
-      for (const conn of state.flowConnections) {
-        if (conn.fromNodeId !== simNodeId && conn.toNodeId !== simNodeId) continue;
-        const otherId = conn.fromNodeId === simNodeId ? conn.toNodeId : conn.fromNodeId;
-        const other = state.flowNodes.get(otherId);
-        if (other && !other.isBoundary) refPressure = Math.max(refPressure, other.fluid.pressure);
-      }
-      pressureRating = Math.max(6, Math.ceil((1.5 * refPressure / 1e5) / 5) * 5);
-      console.warn(
-        `[Factory] ⚠ '${compId}' (${component.type}) has no pressureRating - it would be ` +
-        `UNBREAKABLE. Deriving ${pressureRating} bar (1.5x service pressure) so it can ` +
-        `burst like everything else. Give it an explicit rating to silence this.`
-      );
-      }
-    }
+    const pressureRating = componentRatingBar(compId, component, state, true);
+    if (pressureRating === undefined) continue;
 
     const designPressure = pressureRating * 1e5;  // bar to Pa
-    const randomMargin = simulationRandom() * 0.4;     // 0-40%
-    const burstPressure = designPressure * (1 + randomMargin);
-    // Structural material sets the creep-rupture correlation (materials.ts)
+    const strengthFactor = drawStrengthFactor();
+    // Structural material sets the ultimate strength and the creep-rupture
+    // correlation (materials.ts)
     const material = resolveMaterial((component as any).material);
+    // A component not described as a cylinder (turbine casing, condenser...)
+    // still has the wall its rating sizes: in the thin-wall limit it bursts
+    // at the rating times ultimate over the code's allowable - ~3x under
+    // Section III, ~4x under Section VIII (welded, E = 0.85).
+    const code = designCodeFor((component as any).nqa1);
+    const ratedWallBurst = designPressure * MATERIALS[material].ultimateMPa * 1e6 * strengthFactor /
+      (designStress(material, code) * jointEfficiency(code, 'welded'));
 
     // Special handling for heat exchangers (tube + shell sides)
     if (component.type === 'heatExchanger') {
@@ -5793,19 +5824,19 @@ function initializeBurstStates(
       const shellNodeId = `${compId}-shell`;
       if (state.flowNodes.has(shellNodeId)) {
         const shellNode = state.flowNodes.get(shellNodeId)!;
-        // For HX shell, estimate diameter from width/height (whichever is smaller is typically the diameter)
-        const shellDiameter = Math.min(hx.width || 1, hx.height || 1);
-        const shellThickness = calculateThicknessFromPressure(pressureRating, shellDiameter);
-        const shellCollapsePressure = calculateCollapsePressure(shellDiameter, shellThickness, randomMargin);
+        // The same shell wall the wall thermal node is built from
+        const { innerDiameter: shellDiameter, thickness: shellThickness, length: shellLength } = hxShellWall(hx);
+        const shellCollapsePressure = calculateCollapsePressure(
+          shellDiameter, shellThickness, strengthFactor, material, shellLength);
 
         state.burstStates.set(shellNodeId, {
           nodeId: shellNodeId,
           componentId: compId,
           componentLabel: `${component.label || 'HX'} (shell)`,
-          designPressure,
-          burstPressure,
+          designPressure: (hx.shellPressureRating ?? pressureRating) * 1e5,
+          burstPressure: wallBurstPressure(shellDiameter, shellThickness, material, strengthFactor),
           collapsePressure: shellCollapsePressure,
-          randomMargin,
+          strengthFactor,
           material,
           isBurst: false,
           currentBreakFraction: 0,
@@ -5839,10 +5870,14 @@ function initializeBurstStates(
       for (let b = 0; b < nBundles; b++) {
         const tubeNodeId = hxTubeNodeId(compId, b);
         if (!state.flowNodes.has(tubeNodeId)) continue;
-        const tubeRandomMargin = simulationRandom() * 0.4;
-        const tubeBurstPressure = tubeDesignPressure * (1 + tubeRandomMargin);
-        const tubeThickness = calculateThicknessFromPressure(tubePressureRating, tubeOD);
-        const tubeCollapsePressure = calculateCollapsePressure(tubeOD, tubeThickness, tubeRandomMargin);
+        const tubeStrength = drawStrengthFactor();
+        // The same wall hxTubeBore cuts the bore from: tubeOD is the OUTER
+        // diameter, so the bore is what is left inside two walls
+        const tubeThickness = hxTubeWall(hx, tubeOD);
+        const tubeBurstPressure = wallBurstPressure(
+          tubeOD - 2 * tubeThickness, tubeThickness, material, tubeStrength);
+        const tubeCollapsePressure = calculateCollapsePressure(
+          tubeOD - 2 * tubeThickness, tubeThickness, tubeStrength, material);
         // Name this bundle's metal explicitly. The generic `${id}-tubes`
         // fallback in the burst operator cannot pick the right one when there
         // are several - and finds nothing at all for a moving-boundary bundle,
@@ -5864,7 +5899,7 @@ function initializeBurstStates(
           designPressure: tubeDesignPressure,
           burstPressure: tubeBurstPressure,
           collapsePressure: tubeCollapsePressure,
-          randomMargin: tubeRandomMargin,
+          strengthFactor: tubeStrength,
           material,
           wallNodeId,
           isBurst: false,
@@ -5923,10 +5958,11 @@ function initializeBurstStates(
           componentId: compId,
           componentLabel: `${component.label || 'Cross-Vessel'} (outer shell)`,
           designPressure,
-          burstPressure,
+          burstPressure: wallBurstPressure(
+            cv.outerDiameter - 2 * cv.wallThickness, cv.wallThickness, material, strengthFactor),
           collapsePressure: calculateCollapsePressure(
-            cv.outerDiameter, cv.wallThickness, randomMargin),
-          randomMargin,
+            cv.outerDiameter - 2 * cv.wallThickness, cv.wallThickness, strengthFactor, material, cv.length),
+          strengthFactor,
           material,
           isBurst: false,
           currentBreakFraction: 0,
@@ -5938,19 +5974,18 @@ function initializeBurstStates(
       // Inner liner: differential boundary against the annulus, running at
       // hot-leg temperature. Barlow from its own wall.
       if (state.flowNodes.has(innerNodeId)) {
-        const S = 138e6; // Pa allowable stress, matches calculateThicknessFromPressure
-        const linerBar = (2 * S * cv.innerWallThickness) / cv.innerDiameter / 1e5;
-        const linerMargin = simulationRandom() * 0.4;
-        const linerDesign = linerBar * 1e5;
+        const linerDesign = (2 * designStress(material, code) * cv.innerWallThickness) / cv.innerDiameter;
+        const linerStrength = drawStrengthFactor();
         state.burstStates.set(innerNodeId, {
           nodeId: innerNodeId,
           componentId: compId,
           componentLabel: `${component.label || 'Cross-Vessel'} (inner liner)`,
           designPressure: linerDesign,
-          burstPressure: linerDesign * (1 + linerMargin),
+          burstPressure: wallBurstPressure(
+            cv.innerDiameter, cv.innerWallThickness, material, linerStrength),
           collapsePressure: calculateCollapsePressure(
-            cv.innerDiameter, cv.innerWallThickness, linerMargin),
-          randomMargin: linerMargin,
+            cv.innerDiameter, cv.innerWallThickness, linerStrength, material, cv.length),
+          strengthFactor: linerStrength,
           material,
           isBurst: false,
           currentBreakFraction: 0,
@@ -5969,9 +6004,12 @@ function initializeBurstStates(
       const flowNode = state.flowNodes.get(simNodeId)!;
 
       // Calculate collapse pressure from geometry
-      const geometry = getComponentGeometry(component, pressureRating);
-      const collapsePressure = geometry
-        ? calculateCollapsePressure(geometry.diameter, geometry.thickness, randomMargin)
+      const wall = componentWall(component, pressureRating);
+      const burstPressure = wall
+        ? wallBurstPressure(wall.innerDiameter, wall.thickness, material, strengthFactor)
+        : ratedWallBurst;
+      const collapsePressure = wall
+        ? calculateCollapsePressure(wall.innerDiameter, wall.thickness, strengthFactor, material, wall.length)
         : burstPressure * 0.5;  // Default: assume thin-walled, collapse at half burst pressure
 
       const burstState: BurstState = {
@@ -5981,7 +6019,7 @@ function initializeBurstStates(
         designPressure,
         burstPressure,
         collapsePressure,
-        randomMargin,
+        strengthFactor,
         material,
         isBurst: false,
         currentBreakFraction: 0,

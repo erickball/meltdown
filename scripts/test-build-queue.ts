@@ -90,7 +90,7 @@ console.log('\n=== Build queue ===\n');
 console.log('--- The law: 6 simulated seconds per metre of the service-water line ---');
 {
   const kgPerM = pipeSteelMassPerMetre(0.3, 16);
-  check('12" service-water pipe weighs ~27 kg/m', kgPerM > 26 && kgPerM < 28,
+  check('12" service-water pipe weighs ~35 kg/m (Schedule 10 wall + fittings)', kgPerM > 34 && kgPerM < 35.5,
     `${kgPerM.toFixed(2)} kg/m`);
   check('one metre of it takes 6 simulated seconds',
     near(kgPerM * SIM_SECONDS_PER_KG, 6, 1e-12),
@@ -98,8 +98,8 @@ console.log('--- The law: 6 simulated seconds per metre of the service-water lin
   check('which is 0.1 s of the player\'s own time at the level\'s 60x',
     near(kgPerM * SIM_SECONDS_PER_KG / 60, 0.1, 1e-12),
     `${(kgPerM * SIM_SECONDS_PER_KG / 60).toFixed(6)} s`);
-  check('the rate is 0.223 s/kg (4.48 kg a simulated second)',
-    near(SIM_SECONDS_PER_KG, 0.2230, 1e-4),
+  check('the rate is 0.173 s/kg (5.78 kg a simulated second)',
+    near(SIM_SECONDS_PER_KG, 0.1732, 1e-4),
     `${SIM_SECONDS_PER_KG.toFixed(5)} s/kg`);
 
   // A yard pump lands in the seconds, not the minutes: the whole point of
@@ -243,7 +243,7 @@ console.log('\n--- A run of pipe is held as a ghost, and so is its node count --
     `${pipeMetersRemaining(plant)} left of ${pipeBefore}`);
 
   const massKg = connectionBuildMassKg(conn);
-  check('a 40 m run of 0.3 m pipe weighs ~1.1 t', massKg > 900 && massKg < 1300,
+  check('a 40 m run of 0.3 m pipe weighs ~1.4 t', massKg > 1200 && massKg < 1600,
     `${Math.round(massKg)} kg`);
 
   let finished = 0;

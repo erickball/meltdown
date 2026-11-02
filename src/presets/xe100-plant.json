@@ -117,16 +117,16 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 12.043116329012044,
+        "elevation": 12.173588988882294,
         "innerDiameter": 4.6,
-        "wallThickness": 0.22,
+        "wallThickness": 0.08952734012974975,
         "height": 20,
-        "pressureRating": 90,
+        "pressureRating": 70,
         "fillLevel": 0,
         "barrelDiameter": 4.4,
         "barrelThickness": 0.06,
         "barrelBottomGap": 1.5,
-        "barrelTopGap": 3.5862326580240875,
+        "barrelTopGap": 3.847177977764588,
         "volume": 9.741450500251107,
         "coreBarrelId": "cb-1",
         "ports": [
@@ -134,7 +134,7 @@
             "id": "rv-1-cold-leg",
             "position": {
               "x": -2.3,
-              "y": 6.543116329012044
+              "y": 6.673588988882294
             },
             "direction": "both"
           },
@@ -177,7 +177,7 @@
         "thickness": 0.06,
         "height": 11,
         "bottomGap": 1.5,
-        "topGap": 3.5862326580240875,
+        "topGap": 3.847177977764588,
         "fuelRodCount": 8,
         "fuelTemperature": 900,
         "fuelMeltingPoint": 2800,
@@ -242,8 +242,8 @@
         "elevation": 0,
         "width": 4.2,
         "height": 19.5,
-        "wallThickness": 0.15,
-        "pressureRating": 90,
+        "wallThickness": 0.08174235403151066,
+        "pressureRating": 70,
         "fillLevel": 0,
         "ports": [
           {
@@ -320,9 +320,9 @@
           "flowKgs": 38.5
         },
         "material": "alloy-800h",
-        "pressureRating": 90,
+        "pressureRating": 70,
         "tubePressureRating": 200,
-        "shellPressureRating": 90,
+        "shellPressureRating": 70,
         "plenumLength": 0.8,
         "tubeOD": 0.019,
         "ports": [
@@ -459,7 +459,7 @@
         "initialNcg": {
           "He": 60
         },
-        "pressureRating": 200
+        "pressureRating": 70
       }
     ],
     [
@@ -511,7 +511,7 @@
         "initialNcg": {
           "He": 60
         },
-        "pressureRating": 200
+        "pressureRating": 70
       }
     ],
     [
@@ -521,17 +521,17 @@
         "type": "crossVessel",
         "label": "Coaxial Gas Duct",
         "position": {
-          "x": 49.71,
+          "x": 49.64,
           "y": 78
         },
         "rotation": 0,
         "elevation": 14.6,
         "outerDiameter": 1.8,
-        "wallThickness": 0.06,
-        "length": 6.38,
+        "wallThickness": 0.054247990815154995,
+        "length": 6.51,
         "innerDiameter": 1,
         "innerWallThickness": 0.02,
-        "pressureRating": 90,
+        "pressureRating": 70,
         "material": "alloy-800h",
         "targetComponentId": "hx-1",
         "orientation": "horizontal",
@@ -539,7 +539,7 @@
           {
             "id": "cv-1-inner-in",
             "position": {
-              "x": -3.19,
+              "x": -3.255,
               "y": 0
             },
             "direction": "both"
@@ -547,7 +547,7 @@
           {
             "id": "cv-1-inner-out",
             "position": {
-              "x": 3.19,
+              "x": 3.255,
               "y": 0
             },
             "direction": "both"
@@ -555,7 +555,7 @@
           {
             "id": "cv-1-annulus-1",
             "position": {
-              "x": -3.19,
+              "x": -3.255,
               "y": 0.65
             },
             "direction": "both"
@@ -563,7 +563,7 @@
           {
             "id": "cv-1-annulus-2",
             "position": {
-              "x": 3.19,
+              "x": 3.255,
               "y": 0.65
             },
             "direction": "both"
@@ -988,7 +988,7 @@
         "diameter": 0.1,
         "opening": 0,
         "volume": 0.1,
-        "pressureRating": 120,
+        "pressureRating": 70,
         "setpoint": 7500000,
         "blowdown": 0.03,
         "ports": [
@@ -1034,7 +1034,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 12.043116329012044,
+        "elevation": 12.173588988882294,
         "width": 0.66,
         "height": 10,
         "wallThickness": 0.006,
@@ -1089,7 +1089,7 @@
           "y": 78
         },
         "rotation": 0,
-        "elevation": 22.043116329012044,
+        "elevation": 22.173588988882294,
         "width": 0.66,
         "height": 10,
         "wallThickness": 0.006,
@@ -1144,7 +1144,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 38.043116329012044,
+        "elevation": 38.173588988882294,
         "width": 4,
         "height": 16,
         "wallThickness": 0.012,
@@ -1204,7 +1204,7 @@
           "y": 70
         },
         "rotation": 0,
-        "elevation": 54.043116329012044,
+        "elevation": 54.173588988882294,
         "diameter": 0.1,
         "opening": 0,
         "volume": 0.1,
@@ -2068,7 +2068,7 @@
       "toPortId": "rv-1-cold-leg",
       "initialFlowRate": 78.56848225334407,
       "fromElevation": 0.9,
-      "toElevation": 3.4568836709879562,
+      "toElevation": 3.326411011117706,
       "flowArea": 1,
       "length": 3,
       "resistanceCoeff": 1.5
@@ -2464,7 +2464,7 @@
       "toComponentId": "bui-rx",
       "toPortId": "bui-rx-vent-2",
       "fromElevation": 0,
-      "toElevation": 54.043116329012044,
+      "toElevation": 54.173588988882294,
       "flowArea": 0.008,
       "length": 6,
       "resistanceCoeff": 2

@@ -67,6 +67,7 @@ import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
+import { designWallThickness, hxTubeWall, crossVesselWalls } from '../simulation/wall-sizing';
 
 /**
  * Translate PID controller dialog properties (per-kind setpoint fields in
@@ -444,7 +445,6 @@ export class ConstructionManager {
           elevation: props.elevation || 0,
           width,
           height: props.height,
-          wallThickness: 0.05,  // 5cm default (overridden by rendering if pressureRating is set)
           fillLevel: props.initialLevel / 100,
           pressureRating: props.pressureRating,
           ports: tankPorts,
@@ -494,7 +494,6 @@ export class ConstructionManager {
           elevation: props.elevation || 5, // Pressurizers are typically elevated
           width,
           height: props.height,
-          wallThickness: 0.05,  // Default (overridden by rendering if pressureRating is set)
           fillLevel: props.initialLevel / 100,
           pressureRating: props.pressureRating,
           ports: pressurizerPorts,
@@ -807,14 +806,11 @@ export class ConstructionManager {
         const tubePressureRating = props.tubePressure || 150; // bar
         const shellPressureRating = props.shellPressure || 60; // bar
 
-        // Calculate tube wall thickness from tube pressure rating
-        // ASME formula: t = P*R / (S*E - 0.6*P)
+        // Tube wall from the tube-side rating - the same wall the simulation
+        // cuts the bore from (wall-sizing.ts)
         const tubeOD_m = (props.tubeOD || 19) / 1000; // mm to m
-        const P_tube = tubePressureRating * 1e5; // bar to Pa
-        const R_tube = tubeOD_m / 2;
-        const S_tube = 137e6; // Inconel 690 allowable stress at 300°C (Pa)
-        const E_tube = 1.0; // Seamless tube
-        const tubeThickness_m = Math.max(0.0005, P_tube * R_tube / (S_tube * E_tube - 0.6 * P_tube));
+        const tubeThickness_m = hxTubeWall(
+          { tubePressureRating, nqa1: props.nqa1 ?? true, label: props.name }, tubeOD_m);
         const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
 
         const tubeCount = props.tubeCount || 3000;
@@ -1056,10 +1052,10 @@ export class ConstructionManager {
         // could expose it to inlet pressure. Without a rating it would get
         // NO burst state (unbreakable), and pipes chained from it would
         // inherit only the condenser's ~2 bar.
-        const exhaustWallThickness = Math.max(
-          0.01,
-          (turbinePressureRating * 1e5) * (exhaustPipeDiameter / 2) / (172e6 - 0.6 * turbinePressureRating * 1e5)
-        );
+        const exhaustWallThickness = designWallThickness({
+          pressureBar: turbinePressureRating, diameter: exhaustPipeDiameter,
+          measuredOn: 'inner', form: 'welded', nqa1: false, label: 'Exhaust Pipe',
+        });
         const exhaustPipe: PipeComponent = {
           id: exhaustPipeId,
           type: 'pipe',
@@ -1471,13 +1467,13 @@ export class ConstructionManager {
         const barrelTopGap = props.barrelTopGap ?? 0;  // Default: barrel extends to top
         const vesselElevation = props.elevation ?? 0;
 
-        // Calculate wall thickness from pressure rating (ASME formula)
-        // t = P*R / (S*E - 0.6*P)
-        // S = 172 MPa (SA-533 Grade B Class 1 at ~320°C), E = 1.0 (full radiograph)
-        const P = pressureRating * 1e5; // bar to Pa
+        // Wall from the design pressure by the code the NQA-1 box names
+        // (Section III for a nuclear vessel) - wall-sizing.ts
         const vesselR = vesselDiameter / 2;
-        const S = 172e6; // Pa - gives realistic wall thicknesses for PWR vessels
-        const wallThickness = P * vesselR / (S * 1.0 - 0.6 * P);
+        const wallThickness = designWallThickness({
+          pressureBar: pressureRating, diameter: vesselDiameter, measuredOn: 'inner',
+          form: 'welded', nqa1: props.nqa1 ?? true, label: props.name || 'Reactor Vessel',
+        });
 
         // Calculate barrel geometry accounting for dome curvature
         // The dome is hemispherical with inner radius = vesselR.
@@ -1954,12 +1950,8 @@ export class ConstructionManager {
         const orientation = props.orientation || 'horizontal';
         const angle = props.angle || 0;
 
-        // Calculate wall thicknesses from pressure rating using ASME formula
-        const P = pressureRating * 1e5; // bar to Pa
-        const S = 172e6; // Pa - SA-533 Grade B Class 1 allowable stress
-        const E = 1.0; // Joint efficiency
-        const outerWallThickness = Math.max(0.02, (P * (outerDiam / 2)) / (S * E - 0.6 * P));
-        const innerWallThickness = Math.max(0.01, (P * (innerDiam / 2)) / (S * E - 0.6 * P));
+        const { outerWallThickness, innerWallThickness } =
+          crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true);
 
         // Calculate volumes for simulation
         const outerRadius = outerDiam / 2;
@@ -4008,6 +4000,12 @@ export class ConstructionManager {
       return false;
     }
 
+    // NQA-1 property (applies to all components). First, because it picks
+    // the design code every wall below is re-sized by.
+    if (properties.nqa1 !== undefined) {
+      component.nqa1 = properties.nqa1;
+    }
+
     // Apply property updates with unit conversions
     if (properties.name !== undefined) {
       component.label = properties.name;
@@ -4436,8 +4434,7 @@ export class ConstructionManager {
       // Recompute the derived engineering quantities the simulation reads
       // (same formulas as creation) so an edit actually changes the physics
       const tubeOD_m = component.tubeOD ?? 0.019;
-      const P_tube = (component.tubePressureRating ?? 150) * 1e5;
-      const tubeThickness_m = Math.max(0.0005, P_tube * (tubeOD_m / 2) / (137e6 - 0.6 * P_tube));
+      const tubeThickness_m = hxTubeWall(component, tubeOD_m);
       const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
       const tubeCount = component.realTubeCount ?? 3000;
       const hxType = component.hxType || 'utube';
@@ -4701,6 +4698,13 @@ export class ConstructionManager {
 
       // Recalculate volumes when geometry changes
       const rv = component as ReactorVesselComponent;
+      // ...and the wall, which follows the design pressure, the bore and the
+      // code (the NQA-1 box) exactly as at creation
+      rv.wallThickness = designWallThickness({
+        pressureBar: rv.pressureRating ?? 175, diameter: rv.innerDiameter, measuredOn: 'inner',
+        form: 'welded', nqa1: (rv as { nqa1?: boolean }).nqa1 ?? true,
+        material: (rv as { material?: string }).material, label: rv.label,
+      });
       const vesselR = rv.innerDiameter / 2;
       // barrelDiameter is CENTER-LINE diameter (to middle of barrel wall)
       const barrelCenterR = rv.barrelDiameter / 2;
@@ -4769,9 +4773,15 @@ export class ConstructionManager {
       }
     }
 
-    // NQA-1 property (applies to all components)
-    if (properties.nqa1 !== undefined) {
-      component.nqa1 = properties.nqa1;
+    // Cross-vessel walls follow the rating and the code like every other wall
+    // (the factory builds the annulus volume from them)
+    if (component.type === 'crossVessel' &&
+        (properties.pressureRating !== undefined || properties.nqa1 !== undefined)) {
+      Object.assign(component, crossVesselWalls(
+        component.pressureRating, component.outerDiameter, component.innerDiameter,
+        component.nqa1 ?? true, component.material));
+      component.wallThickness = component.outerWallThickness;
+      delete component.outerWallThickness;
     }
 
     console.log(`[Construction] Updated component ${componentId}`);

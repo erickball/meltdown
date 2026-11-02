@@ -17,6 +17,8 @@
  * and regulatory compliance. We use a 3x multiplier as default.
  */
 
+import { designWallThickness, crossVesselWalls, type WallForm } from '../simulation/wall-sizing';
+
 // Steel prices ($/kg) for different grades
 const STEEL_PRICES = {
   carbonSteel: 2.5,           // SA-516 Gr 70, general purpose
@@ -106,8 +108,8 @@ function pipeSteelMass(
  * SAME arithmetic the cost estimate uses - hence this wrapper rather than a
  * second copy of the formula.
  */
-export function pipeSteelMassPerMetre(diameter: number, pressureRating: number): number {
-  const wall = Math.max(calculateWallThickness(pressureRating, diameter / 2, 137e6, 1.0), 0.003);
+export function pipeSteelMassPerMetre(diameter: number, pressureRating: number, nqa1 = false): number {
+  const wall = calculateWallThickness(pressureRating, diameter, 'seamless', nqa1);
   return pipeSteelMass(diameter, wall, 1);
 }
 
@@ -119,26 +121,31 @@ export function vesselSteelMass(
   innerDiameter: number,
   height: number,
   pressureRating: number,
-  hasDomes: boolean = true
+  hasDomes: boolean = true,
+  nqa1 = false
 ): number {
-  const wall = Math.max(calculateWallThickness(pressureRating, innerDiameter / 2), 0.006);
+  const wall = calculateWallThickness(pressureRating, innerDiameter, 'welded', nqa1);
   return cylindricalVesselSteelMass(innerDiameter, height, wall, hasDomes);
 }
 
 /**
- * Calculate wall thickness using ASME formula
- * t = P*R / (S*E - 0.6*P)
+ * The wall a rating asks for - the shared sizing the simulation heats and
+ * bursts (wall-sizing.ts): Section III under NQA-1, Section VIII otherwise,
+ * never below the handling minimum. A rating beyond what the code can size
+ * prices as a wall as thick as the bore rather than throwing out of a cost
+ * readout; the factory throws for real when the plant is built.
  */
 function calculateWallThickness(
   pressureRating: number,   // bar
-  innerRadius: number,      // m
-  allowableStress: number = 137e6,  // Pa (carbon steel default)
-  jointEfficiency: number = 0.85
+  innerDiameter: number,    // m
+  form: WallForm,
+  nqa1: boolean
 ): number {
-  const P = pressureRating * 1e5; // bar to Pa
-  const S = allowableStress;
-  const E = jointEfficiency;
-  return P * innerRadius / (S * E - 0.6 * P);
+  try {
+    return designWallThickness({ pressureBar: pressureRating, diameter: innerDiameter, measuredOn: 'inner', form, nqa1 });
+  } catch {
+    return innerDiameter;
+  }
 }
 
 export interface CostEstimate {
@@ -164,7 +171,7 @@ export function estimateTankCost(props: {
   const radius = Math.sqrt(props.volume / (Math.PI * props.height));
 
   // Calculate wall thickness
-  const wallThickness = calculateWallThickness(props.pressureRating, radius);
+  const wallThickness = calculateWallThickness(props.pressureRating, 2 * radius, 'welded', props.nqa1);
 
   // Steel mass
   const steelMass = cylindricalVesselSteelMass(
@@ -211,13 +218,8 @@ export function estimateReactorVesselCost(props: {
   barrelThickness: number;  // m
   nqa1: boolean;
 }): CostEstimate {
-  // Reactor vessel wall thickness (SA-533 Grade B Class 1)
-  const wallThickness = calculateWallThickness(
-    props.pressureRating,
-    props.innerDiameter / 2,
-    172e6,  // Higher allowable stress for SA-533
-    1.0     // Full radiography
-  );
+  // Reactor vessel wall thickness
+  const wallThickness = calculateWallThickness(props.pressureRating, props.innerDiameter, 'welded', props.nqa1);
 
   // Vessel steel mass (including cladding at ~3mm SS)
   const vesselMass = cylindricalVesselSteelMass(
@@ -283,13 +285,8 @@ export function estimatePipeCost(props: {
   pressureRating: number;   // bar
   nqa1: boolean;
 }): CostEstimate {
-  // Wall thickness for pipe (ASME B31.1)
-  const wallThickness = calculateWallThickness(
-    props.pressureRating,
-    props.diameter / 2,
-    137e6,
-    1.0
-  );
+  // Wall thickness for pipe
+  const wallThickness = calculateWallThickness(props.pressureRating, props.diameter, 'seamless', props.nqa1);
 
   // Minimum wall thickness for handling
   const effectiveWallThickness = Math.max(wallThickness, 0.003); // 3mm minimum
@@ -468,12 +465,7 @@ export function estimateHeatExchangerCost(props: {
   const htArea = Math.PI * tubeOD_m * tubeLength * props.tubeCount;
 
   // Shell mass
-  const shellWallThickness = calculateWallThickness(
-    props.shellPressure,
-    props.shellDiameter / 2,
-    172e6,
-    1.0
-  );
+  const shellWallThickness = calculateWallThickness(props.shellPressure, props.shellDiameter, 'welded', props.nqa1);
   const shellMass = cylindricalVesselSteelMass(
     props.shellDiameter,
     props.shellLength,
@@ -1290,12 +1282,9 @@ export function estimateComponentCost(
       const cvLength = props.length || 3.0;
       const pressureRating = props.pressureRating || 150;
 
-      // Calculate wall thicknesses from pressure rating
-      const P = pressureRating * 1e5;
-      const S = 172e6; // SA-533 allowable stress
-      const E = 1.0;
-      const outerWallThickness = Math.max(0.02, (P * (outerDiam / 2)) / (S * E - 0.6 * P));
-      const innerWallThickness = Math.max(0.01, (P * (innerDiam / 2)) / (S * E - 0.6 * P));
+      // The walls the cross-vessel is built with (wall-sizing.ts)
+      const { outerWallThickness, innerWallThickness } =
+        crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true);
 
       // Outer shell steel mass (cylindrical shell)
       const outerShellVolume = Math.PI * outerDiam * outerWallThickness * cvLength;

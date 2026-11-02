@@ -32,6 +32,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { heatExchangerPorts } from '../src/construction/construction-manager';
+import { designWallThickness, crossVesselWalls } from '../src/simulation/wall-sizing';
 import { reactorBarrelExtent } from '../src/reactor-geometry';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -40,6 +41,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 // Design point (see gen-xe100.ts)
 // ---------------------------------------------------------------------------
 const P_HE_BAR = 60;            // primary helium pressure (bar)
+// Design pressure of the primary helium boundary - the rating every primary
+// wall is sized from (ASME Section III, wall-sizing.ts), ~17% over the
+// operating helium. It used to be 90 with a hand-set 0.22 m RPV wall: 2.6x
+// the code minimum, a 450-bar vessel holding 60 bar.
+const P_DESIGN_BAR = 70;
 const T_CORE_IN = 533;          // K (260 C)
 const T_CORE_OUT = 1023;        // K (750 C)
 const T_SG_HE_OUT = T_CORE_IN;  // helium leaves the SG at core inlet temperature
@@ -55,6 +61,20 @@ const EXTRACTION_FLOW = 25;     // kg/s - what ~53 MW of heater duty costs
 
 const P_TRACE_STEAM = 700;      // Pa - steam partial pressure in the helium spaces
 const HE = { He: P_HE_BAR };
+
+// Primary walls from the design pressure (ASME Section III Class 1, SA-533B
+// unless the component names its own material) - the same sizing the
+// factory and the construction dialogs use, so the preset's walls are what
+// a player would get building the same vessel.
+const primaryWall = (innerDiameter: number, material?: string) => designWallThickness({
+  pressureBar: P_DESIGN_BAR, diameter: innerDiameter, measuredOn: 'inner',
+  form: 'welded', nqa1: true, material,
+});
+// The duct's outer shell (Alloy 800H, sized on its OD). The inner pipe is an
+// insulated liner across a ~1 bar differential, not a pressure wall, so it
+// keeps its own 20 mm.
+const ductShellWall = (outerDiameter: number, innerDiameter: number) =>
+  crossVesselWalls(P_DESIGN_BAR, outerDiameter, innerDiameter, true, 'alloy-800h').outerWallThickness;
 const AIR = { N2: 0.78, O2: 0.21, Ar: 0.009 };
 
 // ---------------------------------------------------------------------------
@@ -91,7 +111,7 @@ const SG_SUCTION_ELEVATION = 16.5;      // circulator suctions, beside the circu
 // (whose height sets the core's volume) IS the barrel on screen and its top
 // and bottom ports sit on the drawn ends.
 const RPV_HEIGHT = 20;
-const RPV_ID = 4.6, RPV_WALL = 0.22;
+const RPV_ID = 4.6, RPV_WALL = primaryWall(RPV_ID);   // ~90 mm at 70 bar
 const BARREL_DIAMETER = 4.4, BARREL_THICKNESS = 0.06;
 const BARREL_GAP = 1.5;                 // under the barrel
 const CORE_BARREL_HEIGHT = 11;
@@ -199,7 +219,7 @@ building('bui-sg', 'Steam Generator Building', SG_BLDG, [
 add('rv-1', {
   type: 'reactorVessel', label: 'Xe-100 RPV',
   position: { x: RPV_X, y: 78 }, rotation: 0, elevation: RPV_LIFT,
-  innerDiameter: RPV_ID, wallThickness: RPV_WALL, height: RPV_HEIGHT, pressureRating: 90,
+  innerDiameter: RPV_ID, wallThickness: RPV_WALL, height: RPV_HEIGHT, pressureRating: P_DESIGN_BAR,
   fillLevel: 0,
   barrelDiameter: BARREL_DIAMETER, barrelThickness: BARREL_THICKNESS,
   barrelBottomGap: BARREL_GAP, barrelTopGap: BARREL_TOP_GAP,
@@ -241,7 +261,7 @@ add('cb-1', {
 add('tank-sg-1', {
   type: 'tank', label: 'SG Vessel',
   position: { x: SG_X, y: 78 }, rotation: 0, elevation: 0,
-  width: SG_WIDTH, height: SG_VESSEL_HEIGHT, wallThickness: 0.15, pressureRating: 90,
+  width: SG_WIDTH, height: SG_VESSEL_HEIGHT, wallThickness: primaryWall(SG_WIDTH), pressureRating: P_DESIGN_BAR,
   fillLevel: 0,
   ports: ports([
     ['tank-sg-in', 1.8, SG_VESSEL_HEIGHT / 2 - SG_IN_ELEVATION],               // bundle discharge, low
@@ -278,7 +298,7 @@ add('hx-1', {
   tubeModel: 'moving-boundary', bundleCount: 2,
   initialSections: { pressureBar: 165, TFeedK: T_FEED, TSteamK: T_STEAM, L1: 0.25, L3: 0.35, flowKgs: FEED_FLOW / 2 },
   material: 'alloy-800h',
-  pressureRating: 90, tubePressureRating: 200, shellPressureRating: 90,
+  pressureRating: P_DESIGN_BAR, tubePressureRating: 200, shellPressureRating: P_DESIGN_BAR,
   plenumLength: SG_PLENUM, tubeOD: 0.019,
   ports: [
     ...SG_TUBE_PORTS,               // hx-1-tube-bottom/-top (bundle 1), ...-b2 (bundle 2)
@@ -313,7 +333,7 @@ function circulator(id: string, label: string, x: number, orientation: string) {
       ? ports([[`${id}-inlet`, 0.5, 0, 'in'], [`${id}-outlet`, -0.5, 0, 'out']])
       : ports([[`${id}-inlet`, -0.5, 0, 'in'], [`${id}-outlet`, 0.5, 0, 'out']]),
     fluid: heFluid(T_SG_HE_OUT),
-    nqa1: true, containedBy: 'tank-sg-1', initialNcg: HE, pressureRating: 200,
+    nqa1: true, containedBy: 'tank-sg-1', initialNcg: HE, pressureRating: P_DESIGN_BAR,
   });
 }
 // Both discharge toward the duct (lower x), so both face right-to-left
@@ -331,9 +351,9 @@ circulator('pump-1b', 'He Circulator B', SG_X + 0.9, 'right-left');
 add('cv-1', {
   type: 'crossVessel', label: 'Coaxial Gas Duct',
   position: { x: DUCT_X, y: 78 }, rotation: 0, elevation: DUCT_BASE,
-  outerDiameter: DUCT_OD, wallThickness: 0.06, length: DUCT_LENGTH,
+  outerDiameter: DUCT_OD, wallThickness: ductShellWall(DUCT_OD, 1.0), length: DUCT_LENGTH,
   innerDiameter: 1.0, innerWallThickness: 0.02,
-  pressureRating: 90,
+  pressureRating: P_DESIGN_BAR,
   material: 'alloy-800h',
   targetComponentId: 'hx-1', orientation: 'horizontal',
   ports: ports([
@@ -462,7 +482,7 @@ add('val-prel-1', {
   valveType: 'relief',
   position: { x: SG_X, y: 74 }, rotation: 0, elevation: PREL_ELEVATION,
   diameter: 0.1, opening: 0, volume: 0.1,
-  pressureRating: 120, setpoint: 75e5, blowdown: 0.03,
+  pressureRating: P_DESIGN_BAR, setpoint: 75e5, blowdown: 0.03,
   ports: ports([['val-prel-1-in', -0.1, 0, 'in'], ['val-prel-1-out', 0.1, 0, 'out']]),
   fluid: heFluid(T_SG_HE_OUT),
   nqa1: true, containedBy: 'bui-sg', initialNcg: HE,

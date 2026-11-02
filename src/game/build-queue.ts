@@ -14,12 +14,13 @@
  * anchored on the pipe the player lays most:
  *
  *   the level's service-water line (`spec-12in-service`, 0.3 m bore, 16 bar)
- *   weighs 26.90 kg/m (the 3 mm handling minimum wall, plus the estimator's
- *   20% for elbows, tees and flanges), one grid segment of it is 1 m, and
- *   one segment should feel like about 0.1 s of the PLAYER'S time on the
- *   level this was tuned on, which runs at 60x
- *     => SIM_SECONDS_PER_KG = 0.1 x 60 / 26.90 = 0.2230 s/kg,
- *        i.e. 6 simulated seconds a metre, or 3.72 simulated minutes a tonne.
+ *   weighs 34.65 kg/m (the ~3.9 mm handling-minimum wall wall-sizing.ts gives
+ *   a 0.3 m pipe - about 12" Schedule 10 - plus the estimator's 20% for
+ *   elbows, tees and flanges), one grid segment of it is 1 m, and one
+ *   segment should feel like about 0.1 s of the PLAYER'S time on the level
+ *   this was tuned on, which runs at 60x
+ *     => SIM_SECONDS_PER_KG = 0.1 x 60 / 34.65 = 0.1732 s/kg,
+ *        i.e. 6 simulated seconds a metre, or 2.89 simulated minutes a tonne.
  *
  * Everything else follows from its own mass (`componentBuildMassKg`), so a
  * 2.5 t service-water pump is ~9 minutes of plant time and a 300 m run of

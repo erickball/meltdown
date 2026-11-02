@@ -1441,7 +1441,8 @@ export interface SolverMetrics {
 
 /**
  * Tracks burst status for a pressurized component.
- * Burst pressure = design rating + random 0-40% margin.
+ * Burst pressure = the wall's hoop stress at ultimate strength (the rating
+ * sizes the wall at the design allowable; see initializeBurstStates).
  * Collapse pressure = calculated from geometry (buckling under external pressure).
  * Break size scales with overpressure: 1% at burst, ~20% at 1.5x, cap at 100%.
  */
@@ -1451,10 +1452,10 @@ export interface BurstState {
   componentLabel: string;            // Human-readable name
 
   // Calculated at simulation start
-  designPressure: number;            // Pa - component's pressure rating (internal)
-  burstPressure: number;             // Pa - actual burst pressure (design + random margin)
+  designPressure: number;            // Pa - component's pressure rating (sizes the wall)
+  burstPressure: number;             // Pa - where the wall's hoop stress reaches ultimate (~3.7x design)
   collapsePressure: number;          // Pa - external pressure differential to cause buckling
-  randomMargin: number;              // 0-0.4 - the random factor applied
+  strengthFactor: number;            // this wall's log-normal strength draw (median 1, sigma_ln 0.07)
 
   // Runtime state
   isBurst: boolean;                  // Has this component ruptured?

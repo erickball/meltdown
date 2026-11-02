@@ -34,9 +34,16 @@ export interface MaterialCreepData {
   /** LMP_required(s) = lmA - lmB*log10(s) */
   lmA: number;
   lmB: number;
-  /** Rough room-temperature ultimate tensile strength (MPa) - documentation
-   *  only; the stress ratio is taken against the component's burst pressure. */
+  /** Typical ultimate tensile strength (MPa). Sets every wall's burst
+   *  pressure (hoop stress at ultimate, times a median-1 strength scatter -
+   *  factory.ts initializeBurstStates), and so the creep stress ratio
+   *  P/P_burst = sigma/sigma_u that the (A, B) fits below are normalised to.
+   *  Change it and refit, or every creep life moves with it. */
   ultimateMPa: number;
+  /** Yield strength (MPa). With ultimateMPa it sets the code design stress
+   *  a rating sizes the wall at (wall-sizing.ts): min(S_u/3, 2S_y/3) under
+   *  Section III, min(S_u/3.5, 2S_y/3) under Section VIII. */
+  yieldMPa: number;
   /** Temperature above which this alloy is outside its qualified range (K).
    *  Not a cliff - creep already handles the physics - but useful for UI. */
   serviceLimitK: number;
@@ -52,6 +59,8 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     lmA: 14660,
     lmB: 6074,
     ultimateMPa: 550,
+    // SA-533 B Cl.1 minimum: S_m = 183 MPa (the ASME tabulated 184), VIII 157
+    yieldMPa: 345,
     serviceLimitK: 700,
     notes: 'PWR/BWR pressure boundary. Loses strength fast above ~700 K.',
   },
@@ -75,6 +84,8 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     lmA: 13116,
     lmB: 5074,
     ultimateMPa: 515,
+    // SA-240/312 304H minimum: yield-governed, S = 137 MPa under either code
+    yieldMPa: 205,
     serviceLimitK: 1090,
     notes: 'General high-temperature service; oxidation-limited around 1090 K.',
   },
@@ -93,6 +104,8 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     lmA: 13923,
     lmB: 5163,
     ultimateMPa: 500,
+    // SB-407 800H minimum ~170: yield-governed, S = 113 MPa under either code
+    yieldMPa: 170,
     serviceLimitK: 1173,
     notes: 'HTGR hot-duct liner and helical SG tubing. ASME qualified to 1173 K.',
   },

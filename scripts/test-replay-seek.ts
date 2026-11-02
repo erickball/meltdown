@@ -46,6 +46,14 @@ function firstDiff(a: string, b: string): string {
 // ============================================================================
 
 const data = JSON.parse(fs.readFileSync('scripts/tankburst.json', 'utf-8'));
+// The suite needs tan-3 to burst inside 3 s, i.e. a little above the 15 bar
+// it starts at. Walls burst at their hoop stress now (a rating is a design
+// pressure, and no sized 1.8 m shell is thinner than the ~9 mm handling
+// minimum - a ~57-bar shell), and this file carries the old UI's 0.05 m
+// placeholder, which would make it a 290-bar tank. Give it an explicitly
+// thin 4 mm wall: 2 x 4 mm x 550 MPa / 1.79 m ~ 24 bar, where the old
+// 20-bar "rating" burst it.
+for (const [id, c] of data.components) if (id === 'tan-3') c.wallThickness = 0.004;
 const plantState: PlantState = {
   components: new Map<string, PlantComponent>(data.components),
   connections: data.connections ?? [],
