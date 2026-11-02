@@ -957,6 +957,7 @@ function init() {
    * figure is averaged over a couple of seconds of wall time by the game loop
    * - a single frame's ratio swings too wildly to read.
    */
+  const SIM_SPEED_TITLE = document.getElementById('sim-speed')?.title ?? '';
   function updateAchievedSpeedDisplay(): void {
     const el = document.getElementById('sim-speed');
     if (!el) return;
@@ -982,8 +983,21 @@ function init() {
     if (commanded < target - 0.001) {
       text += ` (auto-slow from ${formatRequestedSpeed(target)}x)`;
     }
+    // Slow mode: say how much plant time the jumps have skipped, and why the
+    // last window did not jump (the drift was not smooth enough, an event...)
+    const slow = gameLoop.getSlowModeStatus();
+    if (slow) {
+      text += ` · slow mode: ${formatGaugeValue(slow.jumpedSeconds / 3600)} h skipped`;
+      el.title = slow.lastHold
+        ? `Slow mode is integrating normally: ${slow.lastHold}`
+        : slow.last
+          ? `Slow mode: last jump skipped ${slow.last.jump.toFixed(0)} s (limited by ${slow.last.limitedBy}); ${slow.jumps} jumps so far`
+          : 'Slow mode: measuring the plant drift';
+    } else {
+      el.title = SIM_SPEED_TITLE;
+    }
     el.textContent = text;
-    el.style.color = lagging ? '#ff4444' : '#aaa';
+    el.style.color = lagging && !slow ? '#ff4444' : '#aaa';
   }
 
   function updateSpeedDisplay() {
@@ -1535,6 +1549,14 @@ function init() {
   }
 
   // Advanced solver settings: Deterministic mode enable/disable
+  // Slow mode is per session, deliberately not saved: coming back to a plant
+  // that silently skips time would be a surprise
+  const slowModeCheckbox = document.getElementById('slow-mode') as HTMLInputElement | null;
+  slowModeCheckbox?.addEventListener('change', () => {
+    gameLoop.setSlowMode(slowModeCheckbox.checked);
+    updateAchievedSpeedDisplay();
+  });
+
   const deterministicModeCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
   if (deterministicModeCheckbox) {
     // Load saved setting, default to false for UI responsiveness

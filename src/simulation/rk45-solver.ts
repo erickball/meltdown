@@ -2762,6 +2762,24 @@ export class RK45Solver {
   }
 
   /**
+   * Slow mode (slow-mode.ts): re-derive a state whose integrated variables
+   * were just moved forward by a projective jump of `jump` seconds. Same
+   * path an accepted candidate takes - the pre-constraint sanity check, the
+   * full constraint chain (pressure, temperature, phase, OTSG partition) -
+   * then the post-accept operators with dt = jump, so their accumulators
+   * (creep damage, controller scans, actuator stroke, electrical stores) see
+   * the jump as one long accepted step. Throws if the jumped state is not a
+   * state the model can evaluate; the caller treats that as a rejection.
+   */
+  reconcileJumpedState(state: SimulationState, jump: number): SimulationState {
+    const pre = checkPreConstraintSanity(state);
+    if (!pre.safe) throw new Error(`pre-constraint sanity failed: ${pre.reason}`);
+    let s = this.applyAllConstraints(state, this.currentDt, true);
+    s = this.applyPostAcceptConstraints(s, jump);
+    return s;
+  }
+
+  /**
    * Take exactly one integration step (for debugging)
    */
   singleStep(state: SimulationState): {

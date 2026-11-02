@@ -4,6 +4,40 @@ STATUS: design for discussion (2026-07-08). Nothing implemented except the
 relief-valve lift counter (`ValveState.liftCount`), which the averaged model
 below requires and real cycling already increments.
 
+UPDATE 2026-11-02: step 3 (rate-based quiescent jumping) is BUILT as
+projective integration - src/simulation/slow-mode.ts (SlowModeController),
+RK45Solver.reconcileJumpedState, a "Slow mode" checkbox under the speed
+presets, scripts/test-slow-mode.ts (npm test) and scripts/probe-slow-mode.ts.
+How it differs from the sketch below:
+- No fingerprint/recurrence detection. Every integrated state variable (the
+  set applyRatesToState integrates: node m/U/NCG, OTSG m1/U1, solid T/mass,
+  oxidation, burn-off + layers, FP inventories, TRISO damage, corium metal/
+  slag, power/precursors/decay pools, release accumulators) is least-squares
+  fitted with a quadratic over a measurement window. Ringing lands in the fit
+  residual, so the rate/curvature standard errors price it directly - the
+  same machinery covers quiescent and lightly oscillating plants.
+- Cycle: relax 20 s (fast modes re-settle after the last jump), measure 40 s
+  (samples every 0.5 s), then jump J. Extrapolation is quadratic once a
+  previous window exists (its curvature gives the third derivative), linear
+  otherwise. J = largest jump whose predicted error (k*seR*J + ... + d3*J^3/6)
+  fits every slot's tolerance (relTol 1e-3 on inventories with a 1e-3-of-
+  plant significance floor, 0.5 K on temperatures / temperature-equivalent
+  energies), never more than halfway to a bound (inventories >= 0, fractions
+  <= 1), never past the next scenario event. Ceiling starts at 120 s, doubles
+  per verified jump, halves when the next window's rates miss the prediction
+  by more than 2x the budget. Max 3600 s.
+- Linear in the data, so conserved totals stay conserved exactly.
+- Flows and pump speeds are not extrapolated (fast). Post-accept operators
+  (creep damage, controllers, actuators, electrical stores, relief latches)
+  run once with dt = J on the jumped state.
+- A discrete change inside a window (burst, scenario event, relief pop,
+  pump switched) discards the window. Rejected jumps (state the constraint
+  chain cannot evaluate) halve the ceiling and keep the pre-jump state.
+- GameLoop: a jump is snapshotted like an input so seeks/replay stay exact;
+  edits, seeks and plant swaps reset the window.
+Mechanism 1 (averaged relief cycling) and full periodic envelope jumping are
+NOT built: a plant in a relief sawtooth never jumps (the discrete-change rule).
+
 ## Problem
 
 Slow boil-off, MCCI, and long-term containment pressurization play out over
