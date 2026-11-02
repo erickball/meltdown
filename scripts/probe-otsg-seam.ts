@@ -63,7 +63,7 @@ const geom = { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea };
 const PStart = node.fluid.pressure - water.gasPressure;
 console.log(`\n${TUBE} at t=${sim.state.time.toFixed(2)}: mass=${node.fluid.mass.toFixed(3)} U=${(water.energy / 1e6).toFixed(3)} MJ ` +
   `V=${geom.tubeVolume.toFixed(4)} m1L=${cfg.m1.toFixed(3)} uFRef=${(cfg.uFRef / 1e3).toFixed(1)} uFeed=${(flows.uFeed / 1e3).toFixed(1)} ` +
-  `PStart=${(PStart / 1e5).toFixed(2)} TWall3=${(pin.TWall3 - 273.15).toFixed(0)}C WCp3=${(pin.WCp3 / 1e3).toFixed(2)}kW/K`);
+  `PStart=${(PStart / 1e5).toFixed(2)} Twall=${pin.zoneTemps.map((T: number) => (T - 273.15).toFixed(0)).join("/")}C WCp3=${(pin.WCp3 / 1e3).toFixed(2)}kW/K`);
 console.log(`sweep ${VAR} +/-${(100 * SPAN).toFixed(2)}%`);
 console.log('       var      P(bar)  regime          m1      m2      m3    x2bar  v2(L/kg)  u3(MJ/kg)  du3(kJ/kg)  T3(C)  hOut(MJ/kg)');
 let prev: any = null;

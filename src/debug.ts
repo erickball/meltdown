@@ -357,7 +357,20 @@ export function updateDebugPanel(
       thermalDiv.innerHTML = '<span style="color: #666; font-style: italic;">No thermal nodes</span>';
     } else {
       let html = '';
+      // Once-through boiler bundles carry their tube metal as a row of fixed
+      // zones - one line per bundle with the whole profile, not one per zone.
+      const otsgZoneIds = new Set<string>();
+      for (const [tubeId, tube] of state.flowNodes) {
+        const zoneIds = tube.otsg?.metalNodeIds;
+        if (!zoneIds) continue;
+        const temps = zoneIds.map(z => state.thermalNodes.get(z)?.temperature ?? NaN);
+        zoneIds.forEach(z => otsgZoneIds.add(z));
+        html += `<span class="debug-label">${tubeId} metal:</span> ` +
+          `<span class="debug-value" title="Tube-metal temperature along the bundle, feed end to steam end, in ${zoneIds.length} fixed zones. The water's economizer, boiling and superheat sections slide over these zones as their boundaries move.">` +
+          `${temps.map(T => (T - 273).toFixed(0)).join(' ')} C</span><br>`;
+      }
       for (const [id, node] of state.thermalNodes) {
+        if (otsgZoneIds.has(id)) continue;
         const tempC = node.temperature - 273;
         const pctOfMax = (node.temperature / node.maxTemperature) * 100;
         const tempClass = pctOfMax > 95 ? 'debug-danger' : pctOfMax > 80 ? 'debug-warning' : 'debug-value';

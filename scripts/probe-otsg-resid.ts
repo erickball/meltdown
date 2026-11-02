@@ -45,7 +45,7 @@ const pin = otsgWallPin(sim.state, node, flows);
 const V = node.volume;
 console.log(`${TUBE} at t=${sim.state.time.toFixed(1)}: mass=${node.fluid.mass.toFixed(2)} U=${(water.energy / 1e6).toFixed(2)} MJ ` +
   `V=${V.toFixed(4)} m3 m1L=${cfg.m1.toFixed(2)} uFRef=${(cfg.uFRef / 1e3).toFixed(1)} uFeed=${(flows.uFeed / 1e3).toFixed(1)} ` +
-  `published P=${(node.fluid.pressure / 1e5).toFixed(2)} TWall3=${(pin.TWall3 - 273.15).toFixed(0)}C WCp3=${(pin.WCp3 / 1e3).toFixed(2)}kW/K`);
+  `published P=${(node.fluid.pressure / 1e5).toFixed(2)} Twall=${pin.zoneTemps.map((T: number) => (T - 273.15).toFixed(0)).join("/")}C WCp3=${(pin.WCp3 / 1e3).toFixed(2)}kW/K`);
 
 for (const du3 of DU3S) {
   console.log(`\ndu3=${(du3 / 1e3).toFixed(0)} kJ/kg`);

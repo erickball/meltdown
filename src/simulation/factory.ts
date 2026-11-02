@@ -38,6 +38,7 @@ import {
   saturationAtP, subcooledSectionMean, subcooledLiquidV,
   boilingMeanVolume, boilingMeanQuality, superheatedStateAtPT,
   H_TUBE_LIQUID, H_TUBE_BOILING, H_TUBE_STEAM,
+  otsgZoneOverlaps, OTSG_METAL_ZONES,
 } from './otsg';
 import * as Water from './water-properties';
 import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselComponent, CoreBarrelComponent, RadiantSurface,
@@ -1470,28 +1471,35 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
           // let the interface dynamics find their real sizes - the partition
           // self-corrects within tens of seconds because the fluxes depend on
           // heat and flow, not on this guess.
-          // The metal is split into three FIXED thermal nodes, one per water
-          // section. One shared metal node cannot work: the boiling section's
+          // The metal is split into FIXED axial zones of equal length, feed
+          // end to steam end, each its own thermal node. The metal stays put
+          // and the water sections slide over it: each zone exchanges heat
+          // with whichever sections currently cover it (otsgZoneOverlaps).
+          // One shared metal node cannot work - the boiling section's
           // enormous film coefficient pins it within a few K of T_sat, which
-          // clamps the superheat section's wall to T_sat too - superheat can
-          // then never develop no matter how the water partitions. The masses
-          // are fixed thirds (metal does not move); only each section's AREA
-          // tracks the moving boundaries.
+          // clamps the superheat wall too and superheat never develops - and
+          // one node per SECTION cannot either: a section's metal must grow
+          // and shrink with it, and lumping a moving stretch of tubing into
+          // one temperature turns every jitter of a boundary into mixing
+          // (measured: 4-13 MW of numerical conduction on the steady Xe-100).
           const oneMetal = state.thermalNodes.get(metalId);
           if (!oneMetal) {
             throw new Error(`[Factory] ${id}: tube metal node missing for moving-boundary split`);
           }
           state.thermalNodes.delete(metalId);
-          const metalIds: [string, string, string] = [`${metalId}-s1`, `${metalId}-s2`, `${metalId}-s3`];
-          const metalLabels = ['Economizer', 'Evaporator', 'Superheater'];
+          const nZones = (hxComp as { tubeMetalZones?: number }).tubeMetalZones ?? OTSG_METAL_ZONES;
+          if (!(Number.isInteger(nZones) && nZones >= 1)) {
+            throw new Error(`[Factory] ${id}: tubeMetalZones must be a positive integer, got ${nZones}`);
+          }
+          const metalIds = Array.from({ length: nZones }, (_, k) => `${metalId}-z${k + 1}`);
           const bundleTag = nBundles > 1 ? ` Bundle ${b + 1}` : '';
-          metalIds.forEach((mid, i) => {
+          metalIds.forEach((mid, k) => {
             state.thermalNodes.set(mid, {
               ...oneMetal,
               id: mid,
-              label: `${component.label || id}${bundleTag} ${metalLabels[i]} Tubes`,
-              mass: oneMetal.mass / 3,
-              surfaceArea: oneMetal.surfaceArea / 3,
+              label: `${component.label || id}${bundleTag} Tubes, zone ${k + 1} of ${nZones} from feed end`,
+              mass: oneMetal.mass / nZones,
+              surfaceArea: oneMetal.surfaceArea / nZones,
             });
           });
           // Seed the ONE integrated section - the economizer's (mass,
@@ -1588,15 +1596,12 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
             const hA3 = H_TUBE_STEAM * A3;
             const thetaBar3 = hA3 / (2 * w * CP_STEAM + hA3);
             const Tm3 = sat.T + (TMean3 - sat.T) / thetaBar3;
-            const seeds: [string, number][] = [
-              [metalIds[0], Tm1],
-              [metalIds[1], Tm2],
-              [metalIds[2], Tm3],
-            ];
-            for (const [mid, T] of seeds) {
-              const m = state.thermalNodes.get(mid)!;
-              m.temperature = T;
-            }
+            // Each zone takes the section walls it lies under, by length.
+            const seedOv = otsgZoneOverlaps([init.L1, L2, init.L3], nZones);
+            metalIds.forEach((mid, k) => {
+              const [o1, o2, o3] = seedOv[k];
+              state.thermalNodes.get(mid)!.temperature = (o1 * Tm1 + o2 * Tm2 + o3 * Tm3) / (o1 + o2 + o3);
+            });
             console.log(`[Factory] ${tubeNodeId}: design-point partition seeded - ` +
               `${(P / 1e5).toFixed(0)} bar, sections ${m1.toFixed(0)}/${m2.toFixed(0)}/${m3.toFixed(0)} kg ` +
               `(${(100 * init.L1).toFixed(0)}/${(100 * L2).toFixed(0)}/${(100 * init.L3).toFixed(0)}% by length), ` +
@@ -5844,13 +5849,14 @@ function initializeBurstStates(
         // Name this bundle's metal explicitly. The generic `${id}-tubes`
         // fallback in the burst operator cannot pick the right one when there
         // are several - and finds nothing at all for a moving-boundary bundle,
-        // whose metal is split into economizer/evaporator/superheater nodes.
-        // Of those three the superheater runs hottest - it faces the incoming
-        // hot stream and has no boiling to hold it near T_sat - so it is the
-        // section that governs creep rupture.
+        // whose metal is split into axial zones. The steam-end zone runs
+        // hottest - it faces the incoming hot stream and has no boiling to
+        // hold it near T_sat once the tube dries - so it is the one that
+        // governs creep rupture.
         const metalId = hxTubeMetalId(compId, b);
+        const zoneIds = state.flowNodes.get(tubeNodeId)?.otsg?.metalNodeIds;
         const wallNodeId = state.thermalNodes.has(metalId) ? metalId
-          : state.thermalNodes.has(`${metalId}-s3`) ? `${metalId}-s3`
+          : zoneIds && zoneIds.length > 0 ? zoneIds[zoneIds.length - 1]
           : undefined;
         state.burstStates.set(tubeNodeId, {
           nodeId: tubeNodeId,

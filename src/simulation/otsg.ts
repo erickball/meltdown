@@ -728,7 +728,10 @@ export function slugJoinCap(mR: number, UR: number, uJoin: number, uG: number): 
  *  evaluateOtsgPartition. Built by the operator (and every diagnostic) from
  *  the bundle's own metal and flows via otsgWallPin in otsg-operator.ts. */
 export interface OtsgWallPin {
-  TWall3: number;   // K   - the superheat section's metal temperature
+  /** K - the bundle's tube-metal zone temperatures, feed end to steam end
+   *  (equal lengths). The superheat section's wall is whatever stretch of
+   *  them it covers - see zoneMeanTemp. A single entry is a uniform wall. */
+  zoneTemps: number[];
   hA3Full: number;  // W/K - steam-film conductance if section 3 owned the whole bundle
   WCp3: number;     // W/K - steam draw's carrying capacity (W_steam * cp)
   // The gas side of the same section, for the OUTLET. The mean above only
@@ -738,6 +741,65 @@ export interface OtsgWallPin {
   TGasIn3: number;    // K   - gas temperature entering the superheat section
   hAGas3Full: number; // W/K - gas-film conductance if section 3 owned the whole bundle
   CGas3: number;      // W/K - gas capacity rate through this bundle (mdot * cp * share)
+}
+
+/** Default number of fixed tube-metal zones per moving-boundary bundle
+ *  (a heat exchanger can override it with `tubeMetalZones`). The zone that
+ *  a section boundary sits in carries a blend of both sections' walls, so
+ *  this sets how sharply the wall's temperature profile is resolved.
+ *  Convergence on the steady Xe-100 (2026-11-01): 20 and 40 zones agree to
+ *  ~5 K on steam temperature and a point on section lengths; 10 drifts
+ *  (boiling length 14% -> 7%) and 5 wanders (0-35%) because a ~12% boiling
+ *  section then shares a zone with its neighbours. Cost is negligible next
+ *  to the partition solve. */
+export const OTSG_METAL_ZONES = 20;
+
+/**
+ * Length of each section inside each metal zone. The tube metal is fixed in
+ * space as `nZones` equal zones from the feed end (s = 0) to the steam end
+ * (s = 1); the water sections lie end to end over it in flow order and their
+ * boundaries move. Entry [k][i] is the fraction of the WHOLE tube where zone k
+ * and section i coincide, so each zone's row sums to 1/nZones and each
+ * section's column to its length fraction. A boundary jittering inside a zone
+ * only slides this split - no metal changes hands, so nothing is mixed.
+ */
+export function otsgZoneOverlaps(
+  lengthFracs: readonly [number, number, number], nZones: number,
+): Array<[number, number, number]> {
+  const b1 = lengthFracs[0], b2 = lengthFracs[0] + lengthFracs[1];
+  const edges = [0, b1, b2, 1];
+  const out: Array<[number, number, number]> = [];
+  for (let k = 0; k < nZones; k++) {
+    const z0 = k / nZones, z1 = (k + 1) / nZones;
+    const row: [number, number, number] = [0, 0, 0];
+    for (let i = 0; i < 3; i++) {
+      row[i] = Math.max(0, Math.min(z1, edges[i + 1]) - Math.max(z0, edges[i]));
+    }
+    out.push(row);
+  }
+  return out;
+}
+
+/**
+ * Length-weighted mean temperature of the metal zones over [s0, s1] of the
+ * tube (zones equal, feed end at 0). As the span closes it tends to the zone
+ * at that point, so a vanishing section reads the metal it is about to grow
+ * over - continuous, no special case.
+ */
+export function zoneMeanTemp(zoneTemps: readonly number[], s0: number, s1: number): number {
+  const n = zoneTemps.length;
+  if (!(n > 0) || zoneTemps.some(T => !Number.isFinite(T))) {
+    throw new Error(`[OTSG] tube metal zone temperatures are not usable: [${zoneTemps.join(', ')}]`);
+  }
+  if (!(s1 - s0 > 1e-12)) {
+    return zoneTemps[Math.min(n - 1, Math.max(0, Math.floor(s0 * n)))];
+  }
+  let sum = 0;
+  for (let k = 0; k < n; k++) {
+    const ov = Math.min((k + 1) / n, s1) - Math.max(k / n, s0);
+    if (ov > 0) sum += ov * zoneTemps[k];
+  }
+  return sum / (s1 - s0);
 }
 
 /**
@@ -1273,7 +1335,9 @@ export function evaluateOtsgPartition(
     const L3New = Math.max(0, Math.min(1, (fin.m3 * fin.v3) / V));
     const hA3 = pin.hA3Full * L3New;
     const thetaMean = hA3 > 0 ? hA3 / (2 * pin.WCp3 + hA3) : 0;
-    const T3target = fin.sat.T + thetaMean * Math.max(0, pin.TWall3 - fin.sat.T);
+    // The superheat section's wall is the metal it covers at this length.
+    const TWall3 = zoneMeanTemp(pin.zoneTemps, 1 - L3New, 1);
+    const T3target = fin.sat.T + thetaMean * Math.max(0, TWall3 - fin.sat.T);
     let du3New = 0;
     if (T3target > fin.sat.T + 0.1) {
       // The inversion costs ~a hundred property calls; when the target has
@@ -1283,7 +1347,7 @@ export function evaluateOtsgPartition(
         du3New = du3;
       } else {
         const u3Pin = u3AtTemperature(T3target, P, fin.sat, probe,
-          fin.u3 > fin.sat.u_g ? fin.u3 : fin.sat.u_g + 2500 * (T3target - fin.sat.T), pin.TWall3);
+          fin.u3 > fin.sat.u_g ? fin.u3 : fin.sat.u_g + 2500 * (T3target - fin.sat.T), TWall3);
         du3New = u3Pin - fin.sat.u_g;
       }
     }

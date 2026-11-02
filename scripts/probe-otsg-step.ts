@@ -76,7 +76,7 @@ for (let i = 0; i < Math.round(window / fine); i++) {
     `${(ev?.sections?.[2]?.mass ?? NaN).toFixed(2).padStart(6)} ` +
     `${((cfg.uFRef ?? NaN) / 1e3).toFixed(1).padStart(7)} ${(ev ? (ev.u3 - ev.sat.u_g) / 1e3 : NaN).toFixed(0).padStart(6)} ` +
     `${(fl?.WSteamOut ?? NaN).toFixed(2).padStart(6)} ${(fl?.WFeed ?? NaN).toFixed(2).padStart(6)} ` +
-    `${(fl?.uFeed / 1e3 ?? NaN).toFixed(0).padStart(6)} ${((pin?.TWall3 ?? NaN) - 273.15).toFixed(0).padStart(5)} ` +
+    `${(fl?.uFeed / 1e3 ?? NaN).toFixed(0).padStart(6)} ${((pin?.zoneTemps?.[pin.zoneTemps.length - 1] ?? NaN) - 273.15).toFixed(0).padStart(5)} ` +
     `${(ev?.regime ?? '-').padEnd(11)} Pex=${ev ? (ev.P / 1e5).toFixed(2) : err}`);
   prevP = P;
 }

@@ -382,10 +382,11 @@ export interface FlowNode {
      *  the same velocity: the gas film coefficient is unchanged, only the
      *  carrying capacity mdot*cp each bundle marches against is divided. */
     gasShare?: number;
-    /** One tube-metal thermal node PER SECTION (fixed masses, moving areas).
-     *  A single shared metal node cannot support superheat: the boiling
-     *  section's film coefficient pins it to T_sat and clamps every wall. */
-    metalNodeIds: [string, string, string];
+    /** The bundle's tube metal as fixed axial zones of equal length, feed end
+     *  to steam end; the water sections slide over them (otsgZoneOverlaps).
+     *  Saves from before the zones carry three per-section nodes here, which
+     *  simply run as three fixed zones. */
+    metalNodeIds: string[];
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */

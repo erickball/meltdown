@@ -30,13 +30,13 @@
  * emptying subcooled section never steps its own rate.
  */
 
-import { SimulationState, FlowNode } from '../types';
+import { SimulationState, FlowNode, ThermalNode } from '../types';
 import { RateOperator, ConstraintOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
   evaluateOtsgPartition,
   otsgRates,
-  transitStandingQ,
   marchCounterflowGas,
+  otsgZoneOverlaps,
   reconcileSlug,
   saturationAtP,
   OtsgEval,
@@ -306,6 +306,21 @@ export function classifyOtsgFlows(
  *  duty calculation's cpSteam default plays. */
 const CP_STEAM_PIN = 3000;
 
+/** The bundle's tube-metal zones, feed end to steam end. */
+export function otsgMetalZones(state: SimulationState, node: FlowNode): ThermalNode[] {
+  const cfg = node.otsg!;
+  const zones = cfg.metalNodeIds.map(mid => state.thermalNodes.get(mid));
+  if (zones.length === 0 || zones.some(z => !z)) {
+    throw new Error(`[OTSG] node '${node.id}': tube metal zones ` +
+      `[${cfg.metalNodeIds.join(', ')}] missing or empty.`);
+  }
+  return zones as ThermalNode[];
+}
+
+export function otsgZoneTemps(state: SimulationState, node: FlowNode): number[] {
+  return otsgMetalZones(state, node).map(z => z.temperature);
+}
+
 /** The wall pin for a bundle's superheat section - the one piece of closure
  *  information the totals cannot supply (see evaluateOtsgPartition). Built from the
  *  bundle's own metal and its steam draw. */
@@ -313,18 +328,13 @@ export function otsgWallPin(
   state: SimulationState, node: FlowNode, flows: OtsgFlows,
 ): OtsgWallPin {
   const cfg = node.otsg!;
-  const metal3 = state.thermalNodes.get(cfg.metalNodeIds[2]);
-  if (!metal3) {
-    throw new Error(`[OTSG] node '${node.id}': superheat metal node ` +
-      `'${cfg.metalNodeIds[2]}' does not exist.`);
-  }
   const shell = state.flowNodes.get(cfg.shellNodeId);
   if (!shell) {
     throw new Error(`[OTSG] node '${node.id}': shell node '${cfg.shellNodeId}' ` +
       `does not exist.`);
   }
   return {
-    TWall3: metal3.temperature,
+    zoneTemps: otsgZoneTemps(state, node),
     hA3Full: H_TUBE_STEAM * cfg.heatArea,
     WCp3: Math.max(0, flows.WSteamOut) * CP_STEAM_PIN,
     // Gas side of the same section, from the same reads the march uses -
@@ -510,37 +520,53 @@ export function evaluateOtsgSections(
  * came to read far healthier than the physics.
  */
 export function otsgWaterSideDuties(
-  ev: OtsgEval, flows: OtsgFlows, metalTemps: [number, number, number],
-): { Q1: number; Q2: number; Q3: number; TFeedIn: number } {
+  ev: OtsgEval, flows: OtsgFlows, zoneTemps: readonly number[], heatArea: number,
+): { Q1: number; Q2: number; Q3: number; TFeedIn: number; zoneQ: number[] } {
   const cpLiquid = 5000;
+  const N = zoneTemps.length;
+  const ov = otsgZoneOverlaps(
+    [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac], N);
+  const zoneQ = new Array<number>(N).fill(0);
+  // A transiting stream marches through the zones its section covers, in
+  // the water's flow direction, approaching each zone's wall across that
+  // piece (a piece has one metal temperature, so the isothermal form is
+  // exact for it - the wall's ramp along the section is the zones' own
+  // temperatures now); the standing branch heats the section's bulk from
+  // every piece in parallel. See transitStandingQ for the two branches.
+  const march = (i: 0 | 2, hForced: number, mcp: number, TIn: number, TBulk: number): number => {
+    let T = TIn, Q = 0;
+    for (let k = 0; k < N; k++) {
+      const a = heatArea * ov[k][i];
+      if (!(a > 0)) continue;
+      let q = H_TUBE_NATURAL * a * (zoneTemps[k] - TBulk);
+      if (mcp > 0) {
+        const transit = (1 - Math.exp(-hForced * a / mcp)) * mcp * (zoneTemps[k] - T);
+        T += transit / mcp;
+        q += transit;
+      }
+      zoneQ[k] += q;
+      Q += q;
+    }
+    return Q;
+  };
   // Section 1: feed stream entering at its own temperature
   const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.hFeed) : ev.sections[0].T;
-  const Q1 = transitStandingQ(
-    H_TUBE_LIQUID * ev.sections[0].area,
-    H_TUBE_NATURAL * ev.sections[0].area,
-    flows.WFeed * cpLiquid,
-    TFeedIn, ev.sections[0].T, metalTemps[0],
-    // The economizer's wall ramps from the feed temperature to saturation
-    // along its length; capping its water at the section-AVERAGE wall is what
-    // left the Xe-100 economizer with no length that ends it.
-    'ramping',
-  );
+  const Q1 = march(0, H_TUBE_LIQUID, flows.WFeed * cpLiquid, TFeedIn, ev.sections[0].T);
   // Section 2: boiling at T_sat - huge film coefficient, pure standing form
-  const Q2 = (H_TUBE_BOILING * ev.sections[1].area) * (metalTemps[1] - ev.sat.T);
+  let Q2 = 0;
+  for (let k = 0; k < N; k++) {
+    const q = H_TUBE_BOILING * heatArea * ov[k][1] * (zoneTemps[k] - ev.sat.T);
+    zoneQ[k] += q;
+    Q2 += q;
+  }
   // Section 3: steam entering at saturation, heated toward its own wall -
   // which the boiling section can no longer clamp.
   const cpSteam = ev.sections[2].mass > 0 && ev.sections[2].T > ev.sat.T + 1
     ? Math.max(2000, (ev.sections[2].hBar - ev.sat.h_g) / (ev.sections[2].T - ev.sat.T))
     : 3000;
   const W23Guess = Math.max(0, flows.WSteamOut); // transit rate scale for the steam pass
-  const Q3 = transitStandingQ(
-    H_TUBE_STEAM * ev.sections[2].area,
-    H_TUBE_NATURAL * ev.sections[2].area,
-    W23Guess * cpSteam,
-    ev.sat.T, ev.sections[2].T, metalTemps[2],
-    'ramping',   // same for the superheater: saturation in, gas-hot out
-  );
-  return { Q1, Q2, Q3, TFeedIn };
+  const Q3 = march(2, H_TUBE_STEAM, W23Guess * cpSteam, ev.sat.T, ev.sections[2].T);
+  return { Q1, Q2, Q3, TFeedIn, zoneQ };
 }
 
 export class OtsgRateOperator implements RateOperator {
@@ -553,14 +579,14 @@ export class OtsgRateOperator implements RateOperator {
       const cfg = node.otsg;
       if (!cfg) continue;
 
-      const metals = cfg.metalNodeIds.map(mid => state.thermalNodes.get(mid));
+      const zones = otsgMetalZones(state, node);
+      const zoneT = zones.map(z => z.temperature);
+      const N = zones.length;
       const shell = state.flowNodes.get(cfg.shellNodeId);
-      if (metals.some(m => !m) || !shell) {
-        throw new Error(`[OTSG] node '${id}' references metal nodes ` +
-          `[${cfg.metalNodeIds.join(', ')}] / shell '${cfg.shellNodeId}' but one of them ` +
-          `does not exist.`);
+      if (!shell) {
+        throw new Error(`[OTSG] node '${id}' references shell '${cfg.shellNodeId}', ` +
+          `which does not exist.`);
       }
-      const [metal1, metal2, metal3] = metals as [any, any, any];
 
       // The sections are a description of the WATER, so they run at the
       // water's own partial pressure and account for the water's own share of
@@ -588,36 +614,32 @@ export class OtsgRateOperator implements RateOperator {
       // to the gas side. Marching from bulk instead left the cold leg 200 C
       // hot because the counterflow outlet never propagated downstream.
       const TGasIn = otsgGasInletTemp(state, shell);
-      // Counterflow: gas physically meets the superheat section first, and
-      // each section has its OWN metal - one shared wall cannot superheat
-      // (boiling pins it to T_sat and clamps every other section's wall).
+      // Counterflow: the gas meets the steam end of the bundle first and
+      // works down to the feed end, across each metal zone in turn. Every
+      // zone has its own temperature - one shared wall cannot superheat
+      // (boiling pins it to T_sat and clamps every other section's wall) -
+      // and one temperature per zone makes the isothermal approach exact for
+      // it; the wall's ramp along the bundle is the zones' own profile.
       // Parallel bundles in one shell each take their share of the gas
       // stream (equal areas -> equal flows), so each marches against its own
       // mdot*cp. Their duties then sum onto the shell node below, which is
       // the same total the single-bundle case delivers.
+      const hAZone = hGas * cfg.heatArea / N;
+      const gasOrder = zones.map((_, j) => N - 1 - j);
       const march = marchCounterflowGas(
         TGasIn,
         this.gasMcp(shell, state) * (cfg.gasShare ?? 1),
-        [
-          // The gas sees the same walls the water does, so it approaches each
-          // one by that wall's own profile: ramping under the superheater and
-          // the economizer, isothermal under the boiling section, whose wall
-          // its water pins at T_sat end to end. Composed across the metal,
-          // the two ramping half-steps give the standard counterflow result
-          // with the wall as a series resistance (see WallProfile).
-          { hA: hGas * ev.sections[2].area, TWall: metal3.temperature, wall: 'ramping' as const },
-          { hA: hGas * ev.sections[1].area, TWall: metal2.temperature, wall: 'isothermal' as const },
-          { hA: hGas * ev.sections[0].area, TWall: metal1.temperature, wall: 'ramping' as const },
-        ],
+        gasOrder.map(k => ({ hA: hAZone, TWall: zoneT[k], wall: 'isothermal' as const })),
       );
-      const QGasTotal = march.Q[0] + march.Q[1] + march.Q[2];
+      const gasQ = new Array<number>(N);
+      gasOrder.forEach((k, j) => { gasQ[k] = march.Q[j]; });
+      const QGasTotal = march.Q.reduce((a, b) => a + b, 0);
 
 
       // ----------------------------------------------------------------
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
-      const { Q1, Q2, Q3 } = otsgWaterSideDuties(ev, flows,
-        [metal1.temperature, metal2.temperature, metal3.temperature]);
+      const { Q1, Q2, Q3, zoneQ } = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
       const QWaterTotal = Q1 + Q2 + Q3;
       // OTSG_TRACE=<nodeId>: one line per 0.5 s of sim time with the
       // partition, the metal and the duties - the view that found the
@@ -635,7 +657,7 @@ export class OtsgRateOperator implements RateOperator {
             `regime=${ev.regime} m123=${sec[0].mass.toFixed(2)}/${sec[1].mass.toFixed(2)}/${sec[2].mass.toFixed(2)} ` +
             `A123=${sec[0].area.toFixed(1)}/${sec[1].area.toFixed(1)}/${sec[2].area.toFixed(1)} ` +
             `T123=${(sec[0].T - 273).toFixed(0)}/${(sec[1].T - 273).toFixed(0)}/${(sec[2].T - 273).toFixed(0)} ` +
-            `Tm=${(metal1.temperature - 273).toFixed(0)}/${(metal2.temperature - 273).toFixed(0)}/${(metal3.temperature - 273).toFixed(0)} ` +
+            `Tm=${zoneT.map(T => (T - 273).toFixed(0)).join('/')} ` +
             `Q123=${(Q1 / 1e6).toFixed(2)}/${(Q2 / 1e6).toFixed(2)}/${(Q3 / 1e6).toFixed(2)}MW Qgas=${(QGasTotal / 1e6).toFixed(2)}MW ` +
             `WFeed=${flows.WFeed.toFixed(2)} WSteam=${flows.WSteamOut.toFixed(2)} WLiq=${WLiquidOut.toFixed(2)}`);
         }
@@ -679,18 +701,13 @@ export class OtsgRateOperator implements RateOperator {
       shellRates.dEnergy -= QGasTotal;
       rates.flowNodes.set(cfg.shellNodeId, shellRates);
 
-      // Each section's metal balances its own gas-in vs water-out; axial
-      // conduction along the bundle is negligible against either.
-      const perMetal: Array<[string, any, number, number]> = [
-        [cfg.metalNodeIds[0], metal1, march.Q[2], Q1],
-        [cfg.metalNodeIds[1], metal2, march.Q[1], Q2],
-        [cfg.metalNodeIds[2], metal3, march.Q[0], Q3],
-      ];
-      for (const [mid, m, qIn, qOut] of perMetal) {
-        const mr = rates.thermalNodes.get(mid) ?? { dTemperature: 0 };
-        mr.dTemperature += (qIn - qOut) / nodeHeatCapacity(m);
-        rates.thermalNodes.set(mid, mr);
-      }
+      // Each zone balances its own gas-in against whatever water covers it;
+      // axial conduction along the bundle is negligible against either.
+      zones.forEach((z, k) => {
+        const mr = rates.thermalNodes.get(z.id) ?? { dTemperature: 0 };
+        mr.dTemperature += (gasQ[k] - zoneQ[k]) / nodeHeatCapacity(z);
+        rates.thermalNodes.set(z.id, mr);
+      });
     }
 
     return rates;

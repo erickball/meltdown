@@ -45,8 +45,8 @@ function line(state: SimulationState) {
       `${ev.regime} L=${ev.sections.map(s => (100 * s.lengthFrac).toFixed(0)).join('/')}`;
     // Recompute the rate terms the operator would emit at this state
     const metalT = cfg.metalNodeIds.map(mid =>
-      state.thermalNodes.get(mid)?.temperature ?? NaN) as [number, number, number];
-    const duties = otsgWaterSideDuties(ev, flows, metalT);
+      state.thermalNodes.get(mid)?.temperature ?? NaN);
+    const duties = otsgWaterSideDuties(ev, flows, metalT, cfg.heatArea);
     const r = otsgRates(ev, flows.WFeed, flows.hFeed, flows.WSteamOut,
       duties.Q1, duties.Q2, duties.Q3);
     ratesStr =

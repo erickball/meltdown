@@ -71,6 +71,8 @@ import {
   streamApproach,
   marchCounterflowGas,
   reconcileSlug,
+  otsgZoneOverlaps,
+  zoneMeanTemp,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
 import { tubeWaterState, classifyOtsgFlows } from './operators/otsg-operator.js';
@@ -808,6 +810,30 @@ test('empty superheat section: smooth pass-through, no singularities', () => {
     50 * (ev.sat.h_f - H_FEED), 55e6, 0);
   assert(Number.isFinite(r.dm3) && Number.isFinite(r.dU3), 'rates must stay finite at m3=0');
   assert((r.dm3 > 0) === (r.W23 > 40), 'section grows exactly when boil-off exceeds the draw');
+});
+
+test('fixed metal zones: sections overlay them exactly and read them continuously', () => {
+  const L: [number, number, number] = [0.23, 0.11, 0.66];
+  const ov = otsgZoneOverlaps(L, 10);
+  for (const row of ov) {
+    assert(Math.abs(row[0] + row[1] + row[2] - 0.1) < 1e-12, 'each zone is fully covered by sections');
+  }
+  for (let i = 0; i < 3; i++) {
+    const col = ov.reduce((s, r) => s + r[i], 0);
+    assert(Math.abs(col - L[i]) < 1e-12, `section ${i + 1} covers exactly its length, got ${col}`);
+  }
+  // A boundary inside zone 3 splits it; nudging it moves only that split.
+  const nudged = otsgZoneOverlaps([0.231, 0.11, 0.659], 10);
+  ov.forEach((row, k) => {
+    const moved = Math.abs(row[0] - nudged[k][0]) + Math.abs(row[1] - nudged[k][1]) + Math.abs(row[2] - nudged[k][2]);
+    assert(k === 2 || k === 3 ? moved < 3e-3 : moved < 1e-12, `a nudge must only touch the zones it sits in (zone ${k + 1}: ${moved})`);
+  });
+  const T = [400, 420, 440, 460, 480, 500, 520, 540, 560, 580];
+  assert(Math.abs(zoneMeanTemp(T, 0, 1) - 490) < 1e-9, 'whole-tube mean');
+  assert(Math.abs(zoneMeanTemp(T, 0.95, 1) - 580) < 1e-9, 'within one zone');
+  assert(zoneMeanTemp(T, 1, 1) === 580 && Math.abs(zoneMeanTemp(T, 1 - 1e-9, 1) - 580) < 1e-6,
+    'a vanishing steam-end span reads the steam-end zone, continuously');
+  assert(Math.abs(zoneMeanTemp(T, 0.85, 1) - (0.05 * 560 + 0.1 * 580) / 0.15) < 1e-9, 'spanning two zones');
 });
 
 test('transit + standing branches: both limits, no blend function', () => {
@@ -1844,7 +1870,7 @@ function pinAt(TWall3: number, WCp3 = 0): OtsgWallPin {
   // effectively infinite gas stream, so "soaks fully to its metal" keeps
   // exactly the meaning it had before the outlet learned about the gas.
   return {
-    TWall3, hA3Full: 1200 * PART_GEOM.heatArea, WCp3,
+    zoneTemps: [TWall3], hA3Full: 1200 * PART_GEOM.heatArea, WCp3,
     TGasIn3: TWall3, hAGas3Full: 1200 * PART_GEOM.heatArea, CGas3: 1e8,
   };
 }
@@ -1930,7 +1956,7 @@ test('a constructed three-section state round-trips, pressure included', () => {
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
   const ev = evaluateOtsgPartition(
     m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, { m1, U1: m1 * u1Bar }, geom,
-    { TWall3: T3, hA3Full: 1200 * geom.heatArea, WCp3: 0,
+    { zoneTemps: [T3], hA3Full: 1200 * geom.heatArea, WCp3: 0,
       TGasIn3: T3, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 });
   assertClose(ev.P / 1e5, 80, 0.8, 'the pressure the partition was built at comes back');
   assertClose(ev.sections[0].mass, m1, 1e-2 * m1, 'economizer mass recovered');
@@ -1964,7 +1990,7 @@ test('the published pressure is the partition\'s, not the mush read', () => {
     `the uniform read of a partitioned boiler must be badly biased low, got ${(mushP / 1e5).toFixed(1)} bar`);
   const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
-    { TWall3: calculateState(1, u3, v3).temperature, hA3Full: 1200 * 2000, WCp3: 0,
+    { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WCp3: 0,
       TGasIn3: calculateState(1, u3, v3).temperature, hAGas3Full: 1200 * 2000, CGas3: 1e8 });
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
 });
@@ -2274,7 +2300,7 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
   assertClose(water.energy / 1e9, mass * uW / 1e9, 0.01 * mass * uW / 1e9,
     'as must the water energy');
 
-  const testPin = { TWall3: satW.T + 60, hA3Full: 1200 * geom.heatArea, WCp3: 0,
+  const testPin = { zoneTemps: [satW.T + 60], hA3Full: 1200 * geom.heatArea, WCp3: 0,
     TGasIn3: satW.T + 60, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 };
   const withGas = evaluateOtsgPartition(mass, water.energy, EMPTY_SLUG, geom, testPin);
   const noGas = evaluateOtsgPartition(mass, mass * uW, EMPTY_SLUG, geom, testPin);
@@ -2363,7 +2389,7 @@ test('a weakly drawn superheat section offers steam bounded by its gas', () => {
   const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
   const TGasIn = 1023;   // 750 C helium
   const pin: OtsgWallPin = {
-    TWall3: 900, hA3Full: 1200 * geom.heatArea, WCp3: 3000 * 3, // ~3 kg/s draw
+    zoneTemps: [900], hA3Full: 1200 * geom.heatArea, WCp3: 3000 * 3, // ~3 kg/s draw
     TGasIn3: TGasIn, hAGas3Full: 300 * geom.heatArea, CGas3: 2e5,
   };
   // Mass/energy that lands well into the superheat regime with a small slug.
