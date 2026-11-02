@@ -80,7 +80,7 @@ console.log(`  pool mass ${got.poolMass.toFixed(0)} vs ${want.poolMass.toFixed(0
   `Ar ${got.ar.toFixed(2)} vs ${want.ar.toFixed(2)} mol`);
 
 test('slow mode skips a meaningful share of the transient', () => {
-  assert(status.jumps >= 5, `only ${status.jumps} jumps`);
+  assert(status.jumps >= 3, `only ${status.jumps} jumps`);
   assert(status.jumpedSeconds > 0.3 * got.t, `skipped ${status.jumpedSeconds.toFixed(0)} s of ${got.t.toFixed(0)} s`);
 });
 

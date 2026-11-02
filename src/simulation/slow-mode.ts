@@ -12,22 +12,26 @@
  *   1. RELAX: integrate normally for a short while, so whatever the last jump
  *      disturbed in the fast modes damps back onto the slow manifold.
  *   2. MEASURE: keep integrating normally, sampling every integrated state
- *      variable, and least-squares fit each one with a quadratic in time.
- *      The fit gives the drift rate at the end of the window, the curvature,
- *      and - from the residuals - how uncertain both are (fast ringing shows
- *      up as residual, not as rate).
- *   3. JUMP: move every integrated variable forward by rate x J in one go,
- *      advance the clock by J, and re-derive everything algebraic (pressure,
- *      temperature, phase, OTSG partition) through the solver's own
- *      constraint chain. J is the largest jump whose predicted extrapolation
- *      error - the rate uncertainty times J plus the neglected curvature
- *      times J^2/2 - stays inside each variable's tolerance, never so far that
- *      a non-negative inventory would be extrapolated through zero, and
- *      never past the next scripted scenario event.
- *   4. VERIFY: the next window measures the rates again. If they moved by
- *      more than the last jump's error budget allowed, the jump ceiling
- *      halves; if they held, it doubles. A nonlinear event the curvature did
- *      not foresee is therefore caught one window late at worst.
+ *      variable, and least-squares fit each one with a straight line: its
+ *      slope is the drift rate at the middle of the window, and the fit's
+ *      residual - fast ringing, a feed train sloshing - prices how uncertain
+ *      that slope is.
+ *   3. JUMP: consecutive windows give the curvature (change of slope between
+ *      window centres, over a long baseline, so little noise) and, with a
+ *      third window, the change of curvature. Every integrated variable is
+ *      moved forward along the extrapolated drift in one go, the clock
+ *      advances by J, and everything algebraic (pressure, temperature, phase,
+ *      OTSG partition) is re-derived through the solver's own constraint
+ *      chain. J is the largest jump whose predicted extrapolation error - rate
+ *      uncertainty x J, curvature uncertainty x J^2/2, change of curvature x
+ *      J^3/6 - stays inside each variable's tolerance, never so far that a
+ *      non-negative inventory would be extrapolated through zero, and never
+ *      past the next scripted scenario event. The first window after a reset
+ *      only measures: one slope says nothing about curvature.
+ *   4. VERIFY: the next window measures the slope again. If it moved by more
+ *      than the last jump's error budget allowed, the jump ceiling halves; if
+ *      it held, it doubles. A nonlinear event the curvature did not foresee
+ *      is therefore caught one window late at worst.
  *
  * Every step of the jump is linear in the measured data, so any quantity that
  * the real dynamics conserve exactly (total water, energy and gas moles of a
@@ -50,27 +54,54 @@ import { ALL_GAS_SPECIES } from './gas-properties';
 import { cloneSimulationState } from './solver';
 import type { RK45Solver } from './rk45-solver';
 import type { SolverMetrics } from './types';
+import { nodeHeatCapacity } from './operators/rate-operators';
+
+/** One measurement window's straight-line fits (see tryJump) */
+interface WindowFit {
+  keys: string[];            // slot structure (identity = same structure)
+  tc: number;                // window centre (s plant time)
+  slope: Float64Array;       // fitted rate at tc
+  seSlope: Float64Array;     // its standard error
+  curv?: Float64Array;       // (slope - previous slope) / centre spacing
+  seCurv?: Float64Array;
+  J: number;                 // jump taken after this window (0 = none)
+  quadratic: boolean;        // ... and whether it extrapolated quadratically
+  tau?: Float64Array;        // ... per slot: > 0 = extrapolated as this exponential
+  tol: Float64Array;         // tolerances used for that jump
+}
 
 export interface SlowModeConfig {
   /** Normal integration after each jump before measuring (s plant time) */
   relaxSeconds: number;
-  /** Measurement window (s plant time) */
+  /** Measurement window (s plant time). This is the shortest; it doubles
+   *  (up to maxMeasureSeconds) while the variable limiting the jump is
+   *  oscillating on a period the window cannot average over, and comes back
+   *  down once jumps run into the ceiling instead. */
   measureSeconds: number;
+  maxMeasureSeconds: number;
   /** Sampling interval inside the measurement window (s) */
   sampleSeconds: number;
   /** Relative tolerance per jump on inventories (mass, moles, fractions, power) */
   relTol: number;
   /** Temperature-equivalent tolerance per jump (K) on solid and fluid energies */
   tempTol: number;
-  /** Absolute tolerance floor per jump on any one node's water / gas moles,
-   *  as a fraction of the plant's total. A small node (a valve body, a pump
-   *  casing) is a fast mode: its error is re-settled by the next relax phase
-   *  and only matters through what it lends to or borrows from the plant, so
-   *  it is judged against the plant, not against its own few kilograms. */
+  /** Absolute tolerance floor per jump on any one node's water, gas moles,
+   *  solid mass or fission-product inventory, as a fraction of the plant's
+   *  total of that kind. A small node (a valve body, a pump casing, one axial
+   *  zone of tube metal) is a fast mode: its error is re-settled by the next
+   *  relax phase and only matters through what it lends to or borrows from
+   *  the plant, so it is judged against the plant, not against itself. */
   absTolFraction: number;
-  /** Energy counterpart of absTolFraction: the energy to warm that floor's
-   *  worth of the plant's heat capacity by this many kelvin */
-  energyFloorKelvin: number;
+  /** Energy counterpart of absTolFraction, as a plant-average temperature:
+   *  no one node's energy error need be smaller than the energy that warms
+   *  the whole plant (fluid + solids) by this much */
+  plantEnergyTolKelvin: number;
+  /** Truncation error (the part of the extrapolation error that has the
+   *  same sign jump after jump and so ADDS UP) is budgeted per this much
+   *  skipped plant time: a variable's tolerance is the most it may drift
+   *  systematically per accuracyHorizon of jumping. Measurement noise is
+   *  random from window to window and keeps a per-jump budget. */
+  accuracyHorizon: number;
   /** Confidence multiplier on the fitted rate/curvature standard errors */
   confidence: number;
   /** Jumps shorter than this multiple of one relax+measure cycle are not worth taking */
@@ -79,16 +110,20 @@ export interface SlowModeConfig {
   initialMaxJump: number;
   /** Absolute jump ceiling (s) */
   maxJump: number;
+  /** Record the tightest per-slot jump limits of every window (getLimits) */
+  diagnose?: boolean;
 }
 
 export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
   relaxSeconds: 20,
   measureSeconds: 40,
+  maxMeasureSeconds: 640,
   sampleSeconds: 0.5,
   relTol: 1e-3,
   tempTol: 0.5,
   absTolFraction: 1e-4,
-  energyFloorKelvin: 10,
+  plantEnergyTolKelvin: 0.01,
+  accuracyHorizon: 3600,
   confidence: 2,
   minJumpFactor: 0.5,
   initialMaxJump: 120,
@@ -98,19 +133,33 @@ export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
 // Tolerance kinds (see tolerances())
 const K_MASS = 0, K_ENERGY = 1, K_MOL = 2, K_TEMP = 3, K_SOLID_MASS = 4,
   K_FRACTION = 5, K_INVENTORY = 6, K_POWER = 7, K_PRECURSOR = 8, K_PASSIVE = 9,
-  K_PART_MASS = 10, K_PART_ENERGY = 11;
+  K_PART_MASS = 10, K_PART_ENERGY = 11, K_DAMAGE = 12;
 
 /**
- * Kinds that may be HELD during a jump once they sit within their tolerance
- * of a bound they are heading for (a decaying precursor population, an
- * emptying OTSG economizer slug, burn-off reaching 1). The true value lies
- * between where it is and the bound, so holding it costs at most the
- * tolerance - whereas the halfway-to-the-bound rule would cap every jump at
- * half the decay time of something already negligible. Conserved node
- * totals (water, energy, gas moles) are never held: that would create or
- * destroy inventory.
+ * HOLDING: a variable that sits within its tolerance of a bound it is heading
+ * for (trace oxygen being eaten as fast as it arrives, an emptying OTSG
+ * economizer slug, burn-off reaching 1) is held where it is during the jump.
+ * The true value lies between where it is and the bound, so holding costs at
+ * most the tolerance - for a conserved inventory, at most that much created
+ * or destroyed, which is what the tolerance allows by definition - whereas
+ * the halfway-to-the-bound rule would cap every jump at half the decay time
+ * of something already negligible. A water-dominated node whose water is
+ * held keeps its energy (and OTSG partition) with it, so the node stays a
+ * state the equation of state recognises.
  */
-const HOLDABLE = new Set([K_PART_MASS, K_PART_ENERGY, K_SOLID_MASS, K_FRACTION, K_INVENTORY, K_POWER, K_PRECURSOR]);
+
+/** Kinds integrated by linear first-order kinetics with no conservation
+ *  constraint (fission power, precursors, decay-heat groups): when the data
+ *  say one is relaxing, it is extrapolated as the exponential it is, which a
+ *  polynomial cannot follow past a fraction of its time constant. */
+const EXPONENTIAL = new Set([K_POWER, K_PRECURSOR]);
+
+/** Burn-off / oxidation fractions are judged relative to at least this much:
+ *  an absolute 1e-3 (per jump, or per accuracyHorizon of systematic drift) is
+ *  far below anything they decide - a pebble shell burns through near 0.4 */
+const FRACTION_FLOOR = 1;
+/** TRISO damage integral: failures go as Phi(ln D / s), negligible below this */
+const DAMAGE_FLOOR = 1e-4;
 
 /** Error-norm heat-capacity weights (J/kg/K for water, J/mol/K for gas) */
 const WATER_CP_WEIGHT = 4186;
@@ -146,7 +195,7 @@ function visitIntegratedState(state: SimulationState, visit: Visitor): void {
     }
   }
   for (const [id, t] of state.thermalNodes) {
-    visit(`${id}.T`, K_TEMP, t.temperature, 0, Infinity, v => { t.temperature = v; }, '');
+    visit(`${id}.T`, K_TEMP, t.temperature, 0, Infinity, v => { t.temperature = v; }, id);
     visit(`${id}.mass`, K_SOLID_MASS, t.mass, 0, Infinity, v => { t.mass = v; }, '');
     const ox = t.oxidation;
     if (ox) visit(`${id}.ox`, K_FRACTION, ox.oxidizedFraction, 0, 1, v => { ox.oxidizedFraction = v; }, '');
@@ -168,7 +217,7 @@ function visitIntegratedState(state: SimulationState, visit: Visitor): void {
       visit(`${id}.fpNoble`, K_INVENTORY, fp.nobleGas, 0, Infinity, v => { fp.nobleGas = v; }, '');
       visit(`${id}.fpVol`, K_INVENTORY, fp.volatile, 0, Infinity, v => { fp.volatile = v; }, '');
       if (fp.trisoDamage !== undefined) {
-        visit(`${id}.triso`, K_INVENTORY, fp.trisoDamage, 0, Infinity, v => { fp.trisoDamage = v; }, '');
+        visit(`${id}.triso`, K_DAMAGE, fp.trisoDamage, 0, Infinity, v => { fp.trisoDamage = v; }, '');
       }
     }
     const metal = t.metal;
@@ -254,24 +303,29 @@ export class SlowModeController {
   // Least-squares accumulators. Time is measured from the window start;
   // values are offsets from the first sample (no cancellation in sum x^2).
   private n = 0;
-  private st = [0, 0, 0, 0, 0];   // sum t^k, k = 0..4
+  private st = [0, 0, 0];   // sum t^k, k = 0..2
   private x0: Float64Array = new Float64Array(0);
   private sx: Float64Array = new Float64Array(0);
   private sxt: Float64Array = new Float64Array(0);
-  private sxt2: Float64Array = new Float64Array(0);
   private sxx: Float64Array = new Float64Array(0);
   private jmax: number;
-  // Verification of the previous jump against the next window's rates
-  private prevWindow: {
-    tEnd: number; keys: string[]; rates: Float64Array; curv: Float64Array; seA: Float64Array;
-    tol: Float64Array; J: number; quadratic: boolean;
-  } | null = null;
+  private measure: number;
+  // Fits of the most recent windows (newest first), all with the same slot
+  // structure and no discrete change between them
+  private windows: WindowFit[] = [];
   private status: SlowModeStatus;
 
   constructor(config: Partial<SlowModeConfig> = {}) {
     this.config = { ...DEFAULT_SLOW_MODE_CONFIG, ...config };
     this.jmax = this.config.initialMaxJump;
+    this.measure = this.config.measureSeconds;
     this.status = { phase: 'relax', jumps: 0, jumpedSeconds: 0, maxJump: this.jmax, lastHold: '' };
+  }
+
+  private lastLimits: { key: string; J: number; detail: string }[] = [];
+  /** With config.diagnose: the ten tightest error-budget jump limits of the last window */
+  getLimits(): { key: string; J: number; detail: string }[] {
+    return this.lastLimits;
   }
 
   getStatus(): SlowModeStatus {
@@ -282,7 +336,7 @@ export class SlowModeController {
   reset(): void {
     this.phase = 'relax';
     this.phaseStart = NaN;
-    this.prevWindow = null;
+    this.windows = [];
   }
 
   /**
@@ -336,20 +390,20 @@ export class SlowModeController {
 
     if (discreteSignature(s) !== this.signature) {
       this.status.lastHold = 'discrete change in window';
-      this.prevWindow = null;
+      this.windows = [];
       this.startRelax(s.time);
       return out;
     }
     if (s.time >= this.nextSample - 1e-9) {
       if (!this.sample(s)) {
         this.status.lastHold = 'state structure changed in window';
-        this.prevWindow = null;
+        this.windows = [];
         this.startRelax(s.time);
         return out;
       }
       this.nextSample += this.config.sampleSeconds;
     }
-    if (s.time < this.phaseStart + this.config.measureSeconds - 1e-9) return out;
+    if (s.time < this.phaseStart + this.measure - 1e-9) return out;
 
     const jumped = this.tryJump(solver, s);
     this.startRelax(jumped.state.time);
@@ -379,10 +433,9 @@ export class SlowModeController {
     this.x0 = new Float64Array(N);
     this.sx = new Float64Array(N);
     this.sxt = new Float64Array(N);
-    this.sxt2 = new Float64Array(N);
     this.sxx = new Float64Array(N);
     this.n = 0;
-    this.st = [0, 0, 0, 0, 0];
+    this.st = [0, 0, 0];
     let i = 0;
     visitIntegratedState(s, (_k, _kind, value) => { this.x0[i++] = value; });
     this.nextSample = s.time;
@@ -400,22 +453,21 @@ export class SlowModeController {
       const x = value - this.x0[i];
       this.sx[i] += x;
       this.sxt[i] += x * t;
-      this.sxt2[i] += x * t * t;
       this.sxx[i] += x * x;
       i++;
     });
     if (!ok || i !== N) return false;
     this.n++;
     let tk = 1;
-    for (let k = 0; k < 5; k++) { this.st[k] += tk; tk *= t; }
+    for (let k = 0; k < 3; k++) { this.st[k] += tk; tk *= t; }
     return true;
   }
 
   /** Per-slot tolerances from the current state (see SlowModeConfig). */
   private tolerances(s: SimulationState): Float64Array {
     const c = this.config;
-    let totalWater = 0, totalMol = 0, totalHeatCap = 0;
-    const heatCap = new Map<string, number>();
+    let totalWater = 0, totalMol = 0, plantHeatCap = 0, totalSolid = 0, totalFp = 0;
+    const contents = new Map<string, { m: number; mol: number; U: number }>();
     for (const [id, node] of s.flowNodes) {
       if (node.isBoundary) continue;
       let mol = 0;
@@ -423,17 +475,46 @@ export class SlowModeController {
         const g = node.fluid.ncg as unknown as Record<string, number>;
         for (const sp of ALL_GAS_SPECIES) mol += g[sp] ?? 0;
       }
-      const C = node.fluid.mass * WATER_CP_WEIGHT + mol * GAS_CV_WEIGHT;
-      heatCap.set(id, C);
+      contents.set(id, { m: node.fluid.mass, mol, U: node.fluid.internalEnergy });
       totalWater += node.fluid.mass;
       totalMol += mol;
-      totalHeatCap += C;
+      plantHeatCap += node.fluid.mass * WATER_CP_WEIGHT + mol * GAS_CV_WEIGHT;
+      totalFp += node.depositedCsI ?? 0;
+    }
+    const solidHeatCap = new Map<string, number>();
+    for (const [id, t] of s.thermalNodes) {
+      const C = nodeHeatCapacity(t);
+      solidHeatCap.set(id, C);
+      plantHeatCap += C;
+      totalSolid += t.mass;
+      if (t.fissionProducts) totalFp += t.fissionProducts.nobleGas + t.fissionProducts.volatile;
     }
     const massFloor = c.absTolFraction * totalWater;
     const molFloor = Math.max(1e-9, c.absTolFraction * totalMol);
-    const energyFloor = c.absTolFraction * totalHeatCap * c.energyFloorKelvin;
+    const solidFloor = Math.max(1e-6, c.absTolFraction * totalSolid);
+    const fpFloor = Math.max(1e-30, c.absTolFraction * totalFp);
+    const energyFloor = Math.max(1, plantHeatCap * c.plantEnergyTolKelvin);
+    // A node's energy tolerance is the larger of a temperature-equivalent
+    // error on its whole contents, the plant-level floor, and the energy its
+    // mass and mole tolerances CARRY: an error of massTol kilograms moves
+    // massTol x u of energy with it, so holding the energy tighter than the
+    // mass is meaningless. Weighted by heat capacity, and never more material
+    // than the node actually holds.
+    const energyTol = (id: string): number => {
+      const n = contents.get(id);
+      if (!n) return energyFloor;
+      const C = n.m * WATER_CP_WEIGHT + n.mol * GAS_CV_WEIGHT;
+      const mTol = Math.max(c.relTol * n.m, massFloor);
+      const nTol = Math.max(c.relTol * n.mol, molFloor);
+      const Ctol = Math.min(mTol, n.m) * WATER_CP_WEIGHT + Math.min(nTol, n.mol) * GAS_CV_WEIGHT;
+      const carried = C > 0 ? Math.abs(n.U) * Ctol / C : 0;
+      return Math.max(c.tempTol * C, carried, energyFloor);
+    };
+    // Fission power and every decay-heat group are judged against the core's
+    // total heat output (a decaying group is significant only as part of it)
     const n = s.neutronics;
-    const powerFloor = 1e-4 * Math.max(n.nominalPower, 1);
+    const corePower = n.power + (n.decayHeatPools ?? []).reduce((x, y) => x + y, 0);
+    const powerFloor = Math.max(1e-4 * Math.max(n.nominalPower, 1), corePower);
     // Precursor level that would hold powerFloor through the prompt jump
     const precursorFloor = powerFloor / Math.max(n.nominalPower, 1) *
       n.delayedNeutronFraction / (n.precursorDecayConstant * n.promptNeutronLifetime);
@@ -445,12 +526,15 @@ export class SlowModeController {
       let t: number;
       switch (kind) {
         case K_MASS: case K_PART_MASS: t = Math.max(c.relTol * a, massFloor, 1e-6); break;
-        case K_ENERGY: case K_PART_ENERGY: t = Math.max(c.tempTol * (heatCap.get(owner) ?? 0), energyFloor, 1); break;
+        case K_ENERGY: case K_PART_ENERGY: t = energyTol(owner); break;
         case K_MOL: t = Math.max(c.relTol * a, molFloor); break;
-        case K_TEMP: t = c.tempTol; break;
-        case K_SOLID_MASS: t = c.relTol * Math.max(a, 1); break;
-        case K_FRACTION: t = c.relTol * Math.max(a, 1e-4); break;
-        case K_INVENTORY: t = c.relTol * Math.max(a, 1e-12); break;
+        // A light solid (one zone of tube metal) is a fast mode like a small
+        // fluid node: its temperature error is worth the plant-level energy
+        case K_TEMP: t = Math.max(c.tempTol, energyFloor / (solidHeatCap.get(owner) ?? Infinity)); break;
+        case K_SOLID_MASS: t = Math.max(c.relTol * a, solidFloor); break;
+        case K_FRACTION: t = c.relTol * Math.max(a, FRACTION_FLOOR); break;
+        case K_INVENTORY: t = Math.max(c.relTol * a, fpFloor); break;
+        case K_DAMAGE: t = c.relTol * Math.max(a, DAMAGE_FLOOR); break;
         case K_POWER: t = c.relTol * Math.max(a, powerFloor); break;
         case K_PRECURSOR: t = c.relTol * Math.max(a, precursorFloor); break;
         default: t = Infinity;
@@ -464,27 +548,28 @@ export class SlowModeController {
     const c = this.config;
     const N = this.keys.length;
     const nS = this.n;
-    const te = s.time - this.phaseStart;
     if (nS < 6) {
       this.status.lastHold = `too few samples (${nS})`;
-      this.prevWindow = null;
+      this.windows = [];
       return { state: s };
     }
-    // Normal matrix of the quadratic fit and its inverse
-    const [s0, s1, s2, s3, s4] = this.st;
-    const M = [[s0, s1, s2], [s1, s2, s3], [s2, s3, s4]];
-    const Minv = invert3(M);
-    // End-of-window rate R = b1 + 2 b2 te is the linear functional g.b
-    const g = [0, 1, 2 * te];
-    const Mg = mul3(Minv, g);
-    const varRCoef = g[0] * Mg[0] + g[1] * Mg[1] + g[2] * Mg[2];
-    const varACoef = 4 * Minv[2][2];
-
+    // Straight-line fit of every slot: slope at the window centre, and its
+    // standard error from the residual
+    const [s0, s1, s2] = this.st;
+    const tcRel = s1 / s0;
+    const Stt = s2 - s0 * tcRel * tcRel;
+    const tc = this.phaseStart + tcRel;
+    const slope = new Float64Array(N);
+    const seSlope = new Float64Array(N);
+    for (let i = 0; i < N; i++) {
+      const Sxt = this.sxt[i] - this.sx[i] * tcRel;
+      const Sxx = this.sxx[i] - this.sx[i] * this.sx[i] / s0;
+      const b = Sxt / Stt;
+      slope[i] = b;
+      const rss = Math.max(0, Sxx - b * Sxt);
+      seSlope[i] = Math.sqrt(rss / (nS - 2) / Stt);
+    }
     const tol = this.tolerances(s);
-    const rates = new Float64Array(N);
-    const curv = new Float64Array(N);
-    const seAs = new Float64Array(N);
-    const seRs = new Float64Array(N);
     const values = new Float64Array(N);
     const lo = new Float64Array(N);
     const hi = new Float64Array(N);
@@ -492,44 +577,61 @@ export class SlowModeController {
       let i = 0;
       visitIntegratedState(s, (_k, _kind, value, l, h) => { values[i] = value; lo[i] = l; hi[i] = h; i++; });
     }
-    for (let i = 0; i < N; i++) {
-      const rhs = [this.sx[i], this.sxt[i], this.sxt2[i]];
-      const b = mul3(Minv, rhs);
-      rates[i] = b[1] + 2 * b[2] * te;
-      curv[i] = 2 * b[2];
-      // Residual variance of the fit -> standard errors of R and a
-      const rss = Math.max(0, this.sxx[i] - (b[0] * rhs[0] + b[1] * rhs[1] + b[2] * rhs[2]));
-      const sigma2 = rss / (nS - 3);
-      seAs[i] = Math.sqrt(sigma2 * varACoef);
-      seRs[i] = Math.sqrt(sigma2 * varRCoef);
+
+    // Earlier windows are comparable only with the same slot structure
+    const hist = this.windows.filter(w => w.keys === this.keys);
+    const w1 = hist[0];
+    const w2 = hist[1];
+    const win: WindowFit = { keys: this.keys, tc, slope, seSlope, J: 0, quadratic: false, tol };
+    const k = c.confidence;
+
+    // Curvature from this window and the previous one, centred between them
+    if (w1) {
+      const d1 = tc - w1.tc;
+      win.curv = new Float64Array(N);
+      win.seCurv = new Float64Array(N);
+      for (let i = 0; i < N; i++) {
+        win.curv[i] = (slope[i] - w1.slope[i]) / d1;
+        win.seCurv[i] = Math.hypot(seSlope[i], w1.seSlope[i]) / d1;
+      }
     }
 
-    // The previous window (same structure, no discrete change since) gives
-    // the third derivative - the change in curvature between the two fits -
-    // and, if a jump followed it, the yardstick to verify that jump against.
-    const prev = this.prevWindow && this.prevWindow.keys === this.keys ? this.prevWindow : null;
-    const dtWin = prev ? s.time - prev.tEnd : 0;
-
-    // VERIFY the previous jump: the rates now should match what its fit
-    // predicted for now. A rate mismatch m that grew over dtWin means the
-    // jump's position error was about m J^2 / (2 dtWin) if it extrapolated
-    // linearly, m J^3 / (3 dtWin^2) if quadratically.
-    if (prev && prev.J > 0) {
+    // VERIFY the previous jump: the slope now should be what the previous
+    // fits predicted for now (beyond their own noise). A slope mismatch m
+    // that built up over d1 means the jump's position error was about
+    // m J^2 / (2 d1) for a linear extrapolation (rate error growing linearly)
+    // and m J^3 / (3 d1^2) for a quadratic one (growing quadratically).
+    // What is left after the noise allowance is systematic, so it is judged
+    // against the truncation budget for a jump of that length.
+    if (w1 && w1.J > 0) {
+      const d1 = tc - w1.tc;
       let worst = 0, worstKey = '';
       for (let i = 0; i < N; i++) {
         if (this.kinds[i] === K_PASSIVE) continue;
-        const predicted = prev.rates[i] + (prev.quadratic ? prev.curv[i] * dtWin : 0);
-        const m = Math.abs(rates[i] - predicted);
-        const e = (prev.quadratic ? m * prev.J ** 3 / (3 * dtWin * dtWin) : m * prev.J ** 2 / (2 * dtWin)) / prev.tol[i];
+        const t1 = w1.tau ? w1.tau[i] : 0;
+        const predicted = t1 > 0 ? w1.slope[i] * Math.exp(-d1 / t1)
+          : w1.slope[i] + (w1.curv ? w1.curv[i] * d1 : 0);
+        const noise = k * Math.hypot(seSlope[i], w1.seSlope[i], w1.seCurv ? w1.seCurv[i] * d1 : 0);
+        const m = Math.max(0, Math.abs(slope[i] - predicted) - noise);
+        const err = t1 > 0 ? 0.5 * m * Math.min(w1.J, t1)
+          : w1.quadratic ? m * w1.J ** 3 / (3 * d1 * d1) : m * w1.J * w1.J / (2 * d1);
+        const e = err / (w1.tol[i] * w1.J / c.accuracyHorizon);
         if (e > worst) { worst = e; worstKey = this.keys[i]; }
       }
+      // Step-size control on the realized error, which goes as J^2: the
+      // usual safety factor 0.9 and growth between halving and doubling
+      const factor = Math.min(2, Math.max(0.5, 0.9 / Math.sqrt(Math.max(worst, 1e-12))));
+      this.jmax = Math.min(c.maxJump, Math.max(c.minJumpFactor * (c.relaxSeconds + this.measure), factor * w1.J));
       if (worst > 2) {
-        this.jmax = Math.max(c.minJumpFactor * (c.relaxSeconds + c.measureSeconds), 0.5 * prev.J);
-        console.warn(`[SlowMode] t=${s.time.toFixed(0)}: previous ${prev.J.toFixed(0)} s jump overshot its error ` +
+        console.warn(`[SlowMode] t=${s.time.toFixed(0)}: previous ${w1.J.toFixed(0)} s jump overshot its error ` +
           `budget ${worst.toFixed(1)}x on ${worstKey}; jump ceiling -> ${this.jmax.toFixed(0)} s`);
-      } else {
-        this.jmax = Math.min(c.maxJump, Math.max(this.jmax, 2 * prev.J));
       }
+    }
+    this.windows = [win, ...hist].slice(0, 3);
+
+    if (!w1) {
+      this.status.lastHold = 'first window after a reset: measuring the drift';
+      return { state: s };
     }
 
     let J = Math.min(this.jmax, c.maxJump);
@@ -539,57 +641,124 @@ export class SlowModeController {
       ? s.scenario.events[s.scenario.fired].time - s.time : Infinity;
     if (nextEvent < J) { J = nextEvent; limitedBy = 'next scenario event'; }
 
-    // Quadratic extrapolation needs a third-derivative estimate to price its
-    // error; the first window after a reset extrapolates linearly instead.
-    const quadratic = prev !== null;
-    const k = c.confidence;
+    // Rate and curvature at the end of this window. With three windows the
+    // change of curvature prices a quadratic extrapolation; with two, the
+    // extrapolation is linear and the whole curvature is its error.
+    const quadratic = w2 !== undefined && w1.curv !== undefined;
+    const d1 = tc - w1.tc;
+    const h = s.time - tc;
+    const rates = new Float64Array(N);
+    const curv = win.curv!;
     const held = new Uint8Array(N);
+    const tau = new Float64Array(N);   // > 0: extrapolate as an exponential with this time constant
+    const limits: { key: string; J: number; detail: string }[] = [];
+    let limiterOscillating = false;
+    const waterDominated = new Set<string>();
+    for (const [id, node] of s.flowNodes) {
+      let mol = 0;
+      if (node.fluid.ncg) for (const v of Object.values(node.fluid.ncg as unknown as Record<string, number>)) mol += v;
+      if (node.fluid.mass * WATER_CP_WEIGHT >= mol * GAS_CV_WEIGHT) waterDominated.add(id);
+    }
     for (let i = 0; i < N; i++) {
-      if (this.kinds[i] === K_PASSIVE) continue;
-      const R = rates[i], a = curv[i], seA = seAs[i], seR = seRs[i];
+      const a = curv[i];
+      const R = slope[i] + a * h;
+      rates[i] = R;
+      if (this.kinds[i] === K_PASSIVE || held[i]) continue;
       const T = tol[i];
-      if (HOLDABLE.has(this.kinds[i]) &&
-          ((R < 0 && values[i] - lo[i] <= T) || (R > 0 && hi[i] - values[i] <= T))) {
+      if ((R < 0 && values[i] - lo[i] <= T) || (R > 0 && hi[i] - values[i] <= T)) {
         held[i] = 1;
+        const key = this.keys[i];
+        if (this.kinds[i] === K_MASS && key.endsWith('.m') && waterDominated.has(key.slice(0, -2))) {
+          const id = key.slice(0, -2);
+          for (let j = i + 1; j < N && this.keys[j].startsWith(id + '.'); j++) {
+            if (this.keys[j] === `${id}.U` || this.keys[j] === `${id}.m1` || this.keys[j] === `${id}.U1`) held[j] = 1;
+          }
+        }
         continue;
       }
-      // Predicted extrapolation error e(J) = c3 J^3 + c2 J^2 + c1 J
-      let c3 = 0, c2: number;
-      const c1 = k * seR;
-      if (quadratic) {
-        const d3 = (Math.abs(a - prev!.curv[i]) + k * Math.hypot(seA, prev!.seA[i])) / dtWin;
-        c3 = d3 / 6;
-        c2 = 0.5 * k * seA;
-      } else {
-        c2 = 0.5 * (Math.abs(a) + k * seA);
+      if (EXPONENTIAL.has(this.kinds[i]) && quadratic && R * a < 0 && w1.slope[i] * w1.curv![i] < 0) {
+        // Relaxing: x -> x + R tau (1 - e^(-J/tau)). Systematic error = the
+        // spread between this window's time constant and the previous one's;
+        // noise saturates with the exponential.
+        const t0 = -R / a;
+        const t1 = -w1.slope[i] / w1.curv![i];
+        tau[i] = t0;
+        const grow = (J: number, t: number) => t * (1 - Math.exp(-J / t));
+        const seR = Math.hypot(seSlope[i] * (1 + h / d1), w1.seSlope[i] * h / d1);
+        const err = (J: number) => Math.abs(R) * Math.abs(grow(J, t0) - grow(J, t1)) + k * seR * grow(J, t0);
+        const within = (cap: number) => {
+          if (err(cap) <= T) return cap;
+          let lo2 = 0, hi2 = cap;
+          for (let it = 0; it < 60; it++) { const mid = 0.5 * (lo2 + hi2); if (err(mid) <= T) lo2 = mid; else hi2 = mid; }
+          return lo2;
+        };
+        const Ji = within(J);
+        const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} tau=${t0.toFixed(0)} tau_prev=${t1.toFixed(0)} ` +
+          `seR=${seR.toExponential(2)} tol=${T.toExponential(2)} (exponential)`;
+        if (c.diagnose) limits.push({ key: this.keys[i], J: within(1e7), detail: detail() });
+        if (Ji < J) { J = Ji; limitedBy = this.keys[i]; limiterDetail = detail(); limiterOscillating = false; }
+        continue;   // an exponential approach never crosses its asymptote
       }
-      const Ji = largestRoot(c3, c2, c1, T, J);
+      const seR = Math.hypot(seSlope[i] * (1 + h / d1), w1.seSlope[i] * h / d1);
+      const seA = win.seCurv![i];
+      // Predicted extrapolation error, split into its random part (fit
+      // noise: n3 J^3 + n2 J^2 + n1 J <= T per jump) and its systematic part
+      // (the neglected curvature, or change of curvature: <= T per
+      // accuracyHorizon of skipped time, i.e. T J / horizon for this jump)
+      let n3 = 0, trunc3 = 0, trunc2 = 0;
+      const n1 = k * seR;
+      const n2 = 0.5 * k * seA;
+      if (quadratic) {
+        // the two curvatures sit at the midpoints between window centres
+        const span = 0.5 * (tc - w2!.tc);
+        trunc3 = Math.abs(a - w1.curv![i]) / span / 6;
+        n3 = k * Math.hypot(seA, w1.seCurv![i]) / span / 6;
+      } else {
+        trunc2 = 0.5 * Math.abs(a);
+      }
+      const H = c.accuracyHorizon;
+      const jTrunc = (cap: number) => Math.min(cap,
+        trunc3 > 0 ? Math.sqrt(T / (H * trunc3)) : Infinity,
+        trunc2 > 0 ? T / (H * trunc2) : Infinity);
+      const Ji = Math.min(largestRoot(n3, n2, n1, T, J), jTrunc(J));
+      const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} a=${a.toExponential(2)} ` +
+        `seR=${seR.toExponential(2)} seA=${seA.toExponential(2)} tol=${T.toExponential(2)}` +
+        (quadratic ? ` a_prev=${w1.curv![i].toExponential(2)}` : ' (linear)');
+      if (c.diagnose) limits.push({ key: this.keys[i], J: Math.min(largestRoot(n3, n2, n1, T, 1e9), jTrunc(1e9)), detail: detail() });
       if (Ji < J) {
-        J = Ji; limitedBy = this.keys[i];
-        limiterDetail = `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} a=${a.toExponential(2)} ` +
-          `seR=${seR.toExponential(2)} seA=${seA.toExponential(2)} tol=${T.toExponential(2)}` +
-          (quadratic ? ` a_prev=${prev!.curv[i].toExponential(2)} dtWin=${dtWin.toFixed(0)}` : '');
+        J = Ji; limitedBy = this.keys[i]; limiterDetail = detail();
+        limiterOscillating = quadratic && a * w1.curv![i] < 0;
       }
       // A bounded inventory is never extrapolated more than halfway to its
       // bound at any point of the jump
       const qa = quadratic ? 0.5 * a : 0;
       if (Number.isFinite(lo[i])) {
         const Jb = firstCrossing(qa, R, 0.5 * (values[i] - lo[i]));
-        if (Jb < J) { J = Jb; limitedBy = `${this.keys[i]} (bound)`; limiterDetail = ''; }
+        if (Jb < J) { J = Jb; limitedBy = `${this.keys[i]} (bound)`; limiterDetail = detail(); limiterOscillating = false; }
       }
       if (Number.isFinite(hi[i])) {
         const Jb = firstCrossing(-qa, -R, 0.5 * (hi[i] - values[i]));
-        if (Jb < J) { J = Jb; limitedBy = `${this.keys[i]} (bound)`; limiterDetail = ''; }
+        if (Jb < J) { J = Jb; limitedBy = `${this.keys[i]} (bound)`; limiterDetail = detail(); limiterOscillating = false; }
       }
     }
+    if (c.diagnose) this.lastLimits = limits.sort((x, y) => x.J - y.J).slice(0, 10);
 
-    this.prevWindow = { tEnd: s.time, keys: this.keys, rates, curv, seA: seAs, tol, J: 0, quadratic };
-
-    const minJump = c.minJumpFactor * (c.relaxSeconds + c.measureSeconds);
+    const minJump = c.minJumpFactor * (c.relaxSeconds + this.measure);
     if (!(J >= minJump)) {
       this.status.lastHold = `jump ${J.toFixed(1)} s < ${minJump.toFixed(0)} s, limited by ${limitedBy}` +
         (limiterDetail ? ` (${limiterDetail})` : '');
+      // An oscillation slower than the window aliases into slope and
+      // curvature: lengthen the window until it averages over whole cycles
+      if (limiterOscillating && this.measure < c.maxMeasureSeconds) {
+        this.measure = Math.min(c.maxMeasureSeconds, 2 * this.measure);
+        this.windows = [];
+        console.warn(`[SlowMode] t=${s.time.toFixed(0)}: ${limitedBy} oscillates on a period the window cannot ` +
+          `average; measurement window -> ${this.measure.toFixed(0)} s`);
+      }
       return { state: s };
+    }
+    if (limitedBy === 'jump ceiling' && this.measure > c.measureSeconds) {
+      this.measure = Math.max(c.measureSeconds, 0.5 * this.measure);
     }
 
     // Jump a private clone, then let the solver re-derive it
@@ -598,7 +767,9 @@ export class SlowModeController {
       let i = 0;
       const half = quadratic ? 0.5 * J * J : 0;
       visitIntegratedState(jumped, (_k, _kind, value, _l, _h, set) => {
-        if (!held[i]) set(value + rates[i] * J + curv[i] * half);
+        if (held[i]) { /* held: see HOLDING */ }
+        else if (tau[i] > 0) set(value + rates[i] * tau[i] * (1 - Math.exp(-J / tau[i])));
+        else set(value + rates[i] * J + curv[i] * half);
         i++;
       });
     }
@@ -611,13 +782,15 @@ export class SlowModeController {
       // the jumped state is discarded and the ceiling comes down.
       const message = e instanceof Error ? e.message : String(e);
       this.jmax = Math.max(minJump, 0.5 * J);
-      this.prevWindow = null;
+      this.windows = [];
       console.warn(`[SlowMode] t=${s.time.toFixed(0)}: ${J.toFixed(0)} s jump rejected ` +
         `(${message}); jump ceiling -> ${this.jmax.toFixed(0)} s`);
       this.status.lastHold = `jump rejected: ${message}`;
       return { state: s };
     }
-    this.prevWindow.J = J;
+    win.J = J;
+    win.quadratic = quadratic;
+    win.tau = tau;
     const jump: SlowModeJump = { time: s.time, jump: J, limitedBy, detail: limiterDetail };
     this.status.jumps++;
     this.status.jumpedSeconds += J;
@@ -625,26 +798,6 @@ export class SlowModeController {
     this.status.lastHold = '';
     return { state: reconciled, jump };
   }
-}
-
-function invert3(m: number[][]): number[][] {
-  const [[a, b, c], [d, e, f], [g, h, i]] = m;
-  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
-  const det = a * A + b * B + c * C;
-  if (!(Math.abs(det) > 0)) throw new Error('[SlowMode] singular least-squares normal matrix');
-  return [
-    [A / det, -(b * i - c * h) / det, (b * f - c * e) / det],
-    [B / det, (a * i - c * g) / det, -(a * f - c * d) / det],
-    [C / det, -(a * h - b * g) / det, (a * e - b * d) / det],
-  ];
-}
-
-function mul3(m: number[][], v: number[]): number[] {
-  return [
-    m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-    m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-    m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-  ];
 }
 
 /** Largest J in [0, cap] with c3 J^3 + c2 J^2 + c1 J <= T (all coefficients >= 0). */

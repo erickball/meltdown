@@ -26,7 +26,9 @@ for (const [k, e] of [['relTol', 'SLOW_RELTOL'], ['tempTol', 'SLOW_TEMPTOL'], ['
   const v = env(e);
   if (v !== undefined) cfg[k] = v;
 }
-const slow = mode === 'slow' ? new SlowModeController(cfg) : null;
+const diagnose = process.env.SLOW_DIAG === '1';
+const slow = mode === 'slow' ? new SlowModeController({ ...cfg, diagnose }) : null;
+let lastLimitsPrinted: unknown = null;
 
 const wall0 = performance.now();
 let steps = 0, rej = 0;
@@ -71,6 +73,11 @@ while (sim.state.time < end) {
     console.log(`   jump t=${r.jump.time.toFixed(0)} +${r.jump.jump.toFixed(0)}s limited by ${r.jump.limitedBy} ${r.jump.detail ?? ''}`);
   }
   sim.state.pendingEvents = [];
+  if (diagnose && slow && slow.getLimits() !== lastLimitsPrinted) {
+    lastLimitsPrinted = slow.getLimits();
+    console.log(`   window t=${sim.state.time.toFixed(0)} tightest limits:\n` +
+      slow.getLimits().map(l => `     ${l.J.toFixed(1).padStart(8)} s  ${l.key}  ${l.detail}`).join('\n'));
+  }
   steps += r.metrics?.subcycleCount ?? 0;
   rej += r.metrics?.retriesThisFrame ?? 0;
 }
