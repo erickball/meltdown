@@ -3112,23 +3112,23 @@ function init() {
           'graphite pebbles are a huge passive heat sink.',
       },
       {
-        label: 'Xe-100 (HTGR)', data: xe100PresetData,
-        tooltip: 'X-energy Xe-100: 200 MWt helium pebble-bed at 60 bar, 750°C core outlet, ' +
+        label: 'HTGR-200', data: xe100PresetData,
+        tooltip: 'HTGR-200: 200 MWt modular helium pebble-bed at 60 bar, 750°C core outlet, ' +
           'with a coaxial hot gas duct and a helical once-through steam generator modeled with ' +
           'moving phase boundaries (water in the tubes - an SG tube leak pushes steam INTO the ' +
           'primary, where hot graphite gasifies it to H₂ and CO). Walk-away safe: trip the ' +
           'circulator and watch decay heat leave through the reflector.',
       },
       {
-        label: 'Xe-100 Station Blackout', data: xe100SboPresetData,
-        tooltip: 'The Xe-100 with a scripted station blackout at t = 400 s: circulator, feed and ' +
+        label: 'HTGR-200 Station Blackout', data: xe100SboPresetData,
+        tooltip: 'The HTGR-200 with a scripted station blackout at t = 400 s: circulator, feed and ' +
           'condensate pumps trip, turbine shut, no scram. Nothing is left but temperature ' +
           'feedback and the reflector-to-cavity heat path - watch fission power die on its own ' +
           'and decay heat soak into the graphite. The event fires automatically; a notification ' +
           'marks it.',
       },
       {
-        label: 'Xe-100 Depressurized Cooldown', data: xe100DlofcPresetData,
+        label: 'HTGR-200 Depressurized Cooldown', data: xe100DlofcPresetData,
         tooltip: 'The HTGR design-basis heat-up (DLOFC): at t = 400 s a ~60 mm nozzle shears off ' +
           'the top of the RPV during a station blackout, no scram. The helium blows down into the ' +
           'reactor building, convection in the vessel collapses, and decay heat can only leave by ' +
@@ -3137,7 +3137,7 @@ function init() {
           'the kernels spend days near 1800 C (watch "SiC failed" on the fuel node).',
       },
       {
-        label: 'Xe-100 Defuel Chute Break', data: xe100ChutePresetData,
+        label: 'HTGR-200 Defuel Chute Break', data: xe100ChutePresetData,
         tooltip: 'At t = 400 s the pebble discharge line shears off where it leaves the bottom of ' +
           'the RPV, during a station blackout, no scram. The 0.2 m opening blows the helium down ' +
           'and the pebble bed drains through it onto the reactor building floor at ~8 kg/s (a ' +
@@ -3146,8 +3146,8 @@ function init() {
           'heat up and burn. Watch "spilled" on the core graphite node and the heap node.',
       },
       {
-        label: 'Xe-100 SG Tube Rupture', data: xe100SgtrPresetData,
-        tooltip: 'The Xe-100 with a scripted turbine trip at t = 400 s (the boiler bottles up ' +
+        label: 'HTGR-200 SG Tube Rupture', data: xe100SgtrPresetData,
+        tooltip: 'The HTGR-200 with a scripted turbine trip at t = 400 s (the boiler bottles up ' +
           'toward the dump setpoint) followed by an SG tube rupture at t = 550 s: 165-bar steam ' +
           'into 60-bar helium, carried to the hot graphite where it gasifies to H₂ and CO. ' +
           'Both events fire automatically; notifications mark them.',

@@ -57,7 +57,7 @@
       {
         "id": "rv-1",
         "type": "reactorVessel",
-        "label": "Xe-100 RPV",
+        "label": "HTGR-200 RPV",
         "position": {
           "x": 36,
           "y": 78

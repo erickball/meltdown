@@ -1,5 +1,6 @@
 /**
- * Generator for the Xe-100 preset (src/presets/xe100.json).
+ * Generator for the HTGR-200 preset family (src/presets/xe100.json and its -sbo/-dlofc/-chute/-sgtr scenarios; the
+ * menu labels say HTGR-200 so "Xe-100" means the plant-layout preset).
  *
  * X-energy Xe-100: 200 MWt helium-cooled pebble-bed module, 60 bar primary,
  * 260 C core inlet / 750 C core outlet, feeding a HELICAL ONCE-THROUGH steam
@@ -83,7 +84,7 @@ add('bui-1', {
 // Reactor vessel + pebble core
 // ---------------------------------------------------------------------------
 add('rv-1', {
-  type: 'reactorVessel', label: 'Xe-100 RPV',
+  type: 'reactorVessel', label: 'HTGR-200 RPV',
   position: { x: 36, y: 78 }, rotation: 0, elevation: 0,
   innerDiameter: 4.6, wallThickness: 0.22, height: 20, pressureRating: 90,
   fillLevel: 0,
