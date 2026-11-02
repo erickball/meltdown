@@ -49,6 +49,12 @@
             <button class="speed-preset" data-speed="10">10x</button>
             <button class="speed-preset" data-speed="100">100x</button>
           </div>
+          <div style="margin-top: 4px;">
+            <label style="font-size: 11px;" title="For long, slow transients (decay-heat boil-off, a loss of forced cooling heating up over a day). The simulation runs normally for about a minute at a time, measures how every temperature, inventory and pressure is drifting, and when that drift is smooth enough to extrapolate it jumps the whole plant forward along it - tens of seconds to an hour at a time - then runs normally again to check the drift still holds. Jumps get longer while the plant stays quiet and shrink or stop as soon as something starts changing fast. Fast events (valve pops, ruptures, operator actions) are always run normally. The status bar shows how much time has been skipped.">
+              <input type="checkbox" id="slow-mode" />
+              Slow mode (fast-forward quiet stretches)
+            </label>
+          </div>
           <!-- Reactor controls: shown only when the plant HAS a reactor (a
                vessel/barrel/fuel assembly or a turbine). updateReactorControlsVisibility()
                in main.ts derives that from the plant, not from any mode or level flag. -->

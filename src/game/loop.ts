@@ -50,6 +50,7 @@ import { StateHistory, StateSnapshot, HistoryEpoch, HistoryEvent, SnapshotKind }
 import { cloneSimulationState } from '../simulation/solver';
 import { wireSavedRelocation } from '../simulation/operators/corium';
 import { ElectricalOperator } from '../simulation/electrical';
+import { SlowModeController, type SlowModeStatus } from '../simulation/slow-mode';
 
 export type IntegrationMethod = 'euler' | 'rk45';
 
@@ -164,6 +165,10 @@ export class GameLoop {
 
   // Last solver metrics (stored for getSolverMetrics)
   private lastMetrics: SolverMetrics | null = null;
+
+  // Slow mode (projective jumping for day-scale transients, see
+  // simulation/slow-mode.ts). Null = off.
+  private slowMode: SlowModeController | null = null;
 
   // Callbacks
   public onStateUpdate?: (state: SimulationState, metrics: SolverMetrics) => void;
@@ -302,6 +307,7 @@ export class GameLoop {
    * Reset simulation to a new state
    */
   resetState(newState: SimulationState, design: unknown = null): void {
+    this.slowMode?.reset();
     this.state = newState;
     this.previousPower = newState.neutronics?.power ?? 0;
     this.previousMaxTemp = this.getMaxFuelTemperature();
@@ -412,8 +418,13 @@ export class GameLoop {
         if (!this.rk45Solver) {
           throw new Error('[GameLoop] No solver configured');
         }
-        const result = this.rk45Solver.advance(this.state, simDt, frameDt * 1000);
+        const result = this.slowMode
+          ? this.slowMode.advance(this.rk45Solver, this.state, simDt, frameDt * 1000)
+          : this.rk45Solver.advance(this.state, simDt, frameDt * 1000);
         this.state = result.state;
+        // A jump moves the state without solver steps the dt log could
+        // replay: snapshot it like an input, so seeks land on it exactly
+        if ('jump' in result && result.jump) this.recordInputSnapshot();
         this.recordSpeedSample();
 
         // Time the cap threw away is time we fell behind, and the solver cannot
@@ -738,6 +749,7 @@ export class GameLoop {
    * Used when switching from construction mode with a new plant configuration
    */
   setSimulationState(newState: SimulationState, design: unknown = null): void {
+    this.slowMode?.reset();
     wireSavedRelocation(newState);
     this.state = newState;
     // Reset tracking variables
@@ -780,6 +792,7 @@ export class GameLoop {
    * timeline there, like any other input.
    */
   rebuildSimulationState(newState: SimulationState, design: unknown, label: string): void {
+    this.slowMode?.reset();
     if (Math.abs(newState.time - this.state.time) > 1e-6) {
       throw new Error(
         `[GameLoop] rebuildSimulationState: the rebuilt state is at t=${newState.time} but the ` +
@@ -894,6 +907,20 @@ export class GameLoop {
       Math.min(this.config.maxSimSpeed, speed)
     );
     this.targetSimSpeed = this.simSpeed;
+  }
+
+  /**
+   * Slow mode on/off. While on, the loop integrates normally in short
+   * windows and jumps the plant forward along its measured drift whenever
+   * the drift is smooth enough to extrapolate (see simulation/slow-mode.ts).
+   */
+  setSlowMode(enabled: boolean): void {
+    if (enabled && !this.slowMode) this.slowMode = new SlowModeController();
+    if (!enabled) this.slowMode = null;
+  }
+
+  getSlowModeStatus(): SlowModeStatus | null {
+    return this.slowMode?.getStatus() ?? null;
   }
 
   setMaxTimestep(maxDt: number): void {
@@ -1238,6 +1265,8 @@ export class GameLoop {
    * outside the solver must leave a snapshot behind it.
    */
   updateState(updater: (state: SimulationState) => SimulationState): void {
+    // An input mid-window would read as drift
+    this.slowMode?.reset();
     this.state = updater(this.state);
     this.recordInputSnapshot();
   }
@@ -1277,6 +1306,7 @@ export class GameLoop {
    * and reset the adaptive timestep to a safe value.
    */
   private adoptSnapshot(snapshot: StateSnapshot): void {
+    this.slowMode?.reset();
     this.state = cloneSimulationState(snapshot.state);
     if (this.rk45Solver) {
       this.rk45Solver.setFlowRatesContext(snapshot.flowRates);
