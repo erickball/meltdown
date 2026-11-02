@@ -1118,10 +1118,6 @@
         "shellPressureRating": 40,
         "plenumLength": 0.5,
         "tubeOD": 0.019,
-        "extractionSource": {
-          "turbineId": "turbine-1",
-          "pressure": 2500000
-        },
         "tubeFluid": {
           "temperature": 474,
           "pressure": 18800000,
@@ -1525,16 +1521,33 @@
                   {
                     "kind": "connection-flow",
                     "targetId": "flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet"
+                  },
+                  {
+                    "kind": "connection-flow",
+                    "targetId": "flow-hx-1-val-bleed-1"
+                  },
+                  {
+                    "kind": "connection-flow",
+                    "targetId": "flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in"
                   }
                 ]
               },
               {
                 "op": "scale",
-                "factor": -1,
-                "offset": 4,
+                "factor": 15,
+                "offset": -5.25,
                 "input": {
-                  "kind": "node-level",
+                  "kind": "otsg-superheat-fraction",
                   "targetId": "hx-1-tube"
+                }
+              },
+              {
+                "op": "scale",
+                "factor": 15,
+                "offset": -5.25,
+                "input": {
+                  "kind": "otsg-superheat-fraction",
+                  "targetId": "hx-1-tube-b2"
                 }
               }
             ]

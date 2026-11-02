@@ -631,9 +631,12 @@ add('fwh-1', {
   material: 'low-alloy-steel',
   pressureRating: 40, tubePressureRating: 250, shellPressureRating: 40,
   plenumLength: FWH_PLENUM, tubeOD: 0.019,
-  // Names the turbine stage the bleed is tapped from, so the extraction
-  // enthalpy follows the real expansion line rather than throttled inlet steam
-  extractionSource: { turbineId: 'turbine-1', pressure: 25e5 },
+  // No `extractionSource`: this bleed is a tap off the SG outlet header
+  // through val-bleed-1, so it arrives as THROTTLED live steam - which is
+  // what that topology is. The tag made this shell the turbine's first
+  // stage: the bleed became the machine's inlet, the 49 kg/s of main steam
+  // did no work (4.7 MW of shaft), and the governor (~0.2) throttled the
+  // bleed, choking it at ~9.5 kg/s with the valve railed at 0.8.
   // 188 bar, not 170: the feed-train pressure LADDER at design flow is
   // boiler 165 + bundle orifices ~20 + piping ~2. Nodes seeded a rung low
   // let the pump hammer the line while the solve re-finds the ladder.
@@ -895,6 +898,31 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 // gave Ti = 120 s, and against 40 kg/s errors the loop moved ~0.001/s -
 // what looked reverse-signed was merely glacial. The pump curve's droop is
 // still underneath as the fallback if the loop saturates.
+//
+// "The steam leaving" includes the FWH EXTRACTION, which is tapped off the
+// same SG outlets as the turbine. It used to count the turbine lines only,
+// so the feedforward ran short by the whole ~15-25 kg/s bleed - against a
+// level trim of 1 kg/s per metre, which cannot make up more than a few kg/s
+// in a 14 m node. The boiler drained (tube mass 450 -> 250 kg over 900 s),
+// the superheat section grew to ~3/4 of the tube, and the steam leaving
+// approached the helium inlet: ~710 C at 165 bar instead of the design
+// 565. The 304H extraction valve then creep-ruptured at t~900 s of a run
+// with no fault in it - honestly, at that temperature. A real three-element
+// loop meters total steam flow upstream of every extraction. The MSSV lines
+// stay out: they only lift in upsets, and a relief pop chased with feed is
+// exactly the swing the aggressiveness note below is about.
+//
+// The trim is on SUPERHEAT FRACTION now, not level. Matching steam flow only
+// holds the inventory wherever it happens to be, and in a once-through
+// boiler that inventory IS the steam temperature: the outlet runs toward the
+// helium inlet as the superheat section lengthens. Level was the wrong
+// handle on it - the 1 kg/s-per-metre trim never stopped the slow dry-out
+// even with the bleed metered (steam 600-680 C and climbing at 1500 s, valve
+// creep life ~2 h). Superheat fraction moves monotonically with feed at any
+// power and has no shrink-swell sign flip. 0.35 is where the start of every
+// run makes ~565 C, the design main steam. Hotter -> drier -> more feed.
+const SH_FRACTION = 0.35;
+const SH_TRIM_GAIN = 30;   // kg/s of feed per unit superheat fraction
 controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
   setpoint: {
@@ -905,12 +933,16 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
         inputs: [
           { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1' },
           { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet' },
+          { kind: 'connection-flow', targetId: 'flow-hx-1-val-bleed-1' },
+          { kind: 'connection-flow', targetId: 'flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in' },
         ],
       },
-      {
-        op: 'scale', factor: -1.0, offset: 4.0,
-        input: { kind: 'node-level', targetId: 'hx-1-tube' },
-      },
+      // Superheat trim: +SH_TRIM_GAIN kg/s per unit of superheated tube
+      // length over SH_FRACTION, averaged over the two bundles.
+      ...['hx-1-tube', 'hx-1-tube-b2'].map(targetId => ({
+        op: 'scale' as const, factor: SH_TRIM_GAIN / 2, offset: -SH_TRIM_GAIN / 2 * SH_FRACTION,
+        input: { kind: 'otsg-superheat-fraction' as const, targetId },
+      })),
     ],
   },
   // 2.5, not the 4.0 the bench retune used: against the startup's

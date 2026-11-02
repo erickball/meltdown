@@ -517,15 +517,10 @@ export interface HeatExchangerComponent extends ComponentBase {
     fluids: [Fluid, Fluid, Fluid];
   }>;
   /**
-   * Marks this exchanger's SHELL as a turbine bleed point: a feedwater
-   * heater. Steam piped into the shell is treated as having expanded through
-   * the turbine's stages down to the shell's pressure, so it arrives with
-   * the work already taken out of it (partly-expanded steam, not throttled
-   * live steam) and that work counts toward the machine's output.
-   *
-   * `pressure` is the design bleed pressure - the shell's initial condition
-   * and the sanity check; the work actually credited follows the shell's own
-   * pressure, so the accounting can never disagree with the physics.
+   * @deprecated IGNORED by the factory (with a loud error). It used to tag
+   * the shell as a turbine stage, which the staged expansion reads as the
+   * machine's first stage - see createSimulationFromPlant. Kept only so old
+   * saves still parse; bleed from a turbine's extraction port instead.
    */
   extractionSource?: { turbineId: string; pressure: number };
   tubeCount: number;

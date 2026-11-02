@@ -1404,25 +1404,22 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
     if (component.type === 'heatExchanger') {
       // Create shell-side flow node for heat exchanger
       const shellNode = createHeatExchangerShellNode(component);
-      // A feedwater heater's shell IS a turbine bleed point: tagging it here
-      // is what lets the expansion operator take the stage work out of the
-      // steam as it arrives, so the heater sees partly-expanded steam. The
-      // alternative - a free-standing extraction node between the machine and
-      // the heater - is a stiff few-cubic-metre buffer with seconds of
-      // residence time that swings hundreds of degrees as the heater's demand
-      // moves, and it buys nothing physically.
-      const extraction = (component as any).extractionSource;
-      if (extraction) {
-        if (!plantState.components.has(extraction.turbineId)) {
-          throw new Error(
-            `[Factory] '${id}': extractionSource names turbine '${extraction.turbineId}', ` +
-            `which is not in the plant.`
-          );
-        }
-        shellNode.parentTurbineId = extraction.turbineId;
-        shellNode.extractionPressure = extraction.pressure;
-        console.log(`[Factory] ${shellNode.id}: feedwater-heater shell bled from ` +
-          `'${extraction.turbineId}' at ${(extraction.pressure / 1e5).toFixed(1)} bar design`);
+      // `extractionSource` used to tag this shell as a turbine stage. Since
+      // the staged expansion (expandTurbines) a stage must sit IN the steam
+      // path - fed by the stage above, feeding the one below - and a heater
+      // shell is a dead end, so the tag made the shell the machine's FIRST
+      // stage: the bleed line became "the turbine inlet", the main steam
+      // entering the exhaust node did no work at all (HTGR-200: 4.7 MW of
+      // shaft from 49 kg/s of 165-bar steam), and the governor throttled the
+      // bleed as if it were the admission. Bleed from a turbine by piping
+      // from its extraction port (stages > 1); a line from the steam header
+      // is a header tap and arrives throttled, which is what it is.
+      if ((component as any).extractionSource) {
+        console.error(
+          `[Factory] ⚠⚠ '${id}': 'extractionSource' is no longer supported and is IGNORED - ` +
+          `it made this heater shell the turbine's first stage and broke the turbine's ` +
+          `work accounting. Pipe the bleed from the turbine's extraction port instead.`
+        );
       }
       state.flowNodes.set(shellNode.id, shellNode);
 
