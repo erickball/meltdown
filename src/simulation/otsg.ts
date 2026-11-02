@@ -751,8 +751,10 @@ export interface OtsgWallPin {
  *  ~5 K on steam temperature and a point on section lengths; 10 drifts
  *  (boiling length 14% -> 7%) and 5 wanders (0-35%) because a ~12% boiling
  *  section then shares a zone with its neighbours. Cost is negligible next
- *  to the partition solve. */
-export const OTSG_METAL_ZONES = 20;
+ *  to the partition solve (40 zones ran as fast as the old 3 nodes), so the
+ *  default sits at 40 for headroom on designs whose boiling section is
+ *  shorter than the Xe-100's. */
+export const OTSG_METAL_ZONES = 40;
 
 /**
  * Length of each section inside each metal zone. The tube metal is fixed in
