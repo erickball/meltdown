@@ -8,33 +8,49 @@ UPDATE 2026-11-02: step 3 (rate-based quiescent jumping) is BUILT as
 projective integration - src/simulation/slow-mode.ts (SlowModeController),
 RK45Solver.reconcileJumpedState, a "Slow mode" checkbox under the speed
 presets, scripts/test-slow-mode.ts (npm test) and scripts/probe-slow-mode.ts.
-How it differs from the sketch below:
+How it differs from the sketch below (details in the slow-mode.ts header):
 - No fingerprint/recurrence detection. Every integrated state variable (the
   set applyRatesToState integrates: node m/U/NCG, OTSG m1/U1, solid T/mass,
   oxidation, burn-off + layers, FP inventories, TRISO damage, corium metal/
-  slag, power/precursors/decay pools, release accumulators) is least-squares
-  fitted with a quadratic over a measurement window. Ringing lands in the fit
-  residual, so the rate/curvature standard errors price it directly - the
-  same machinery covers quiescent and lightly oscillating plants.
-- Cycle: relax 20 s (fast modes re-settle after the last jump), measure 40 s
-  (samples every 0.5 s), then jump J. Extrapolation is quadratic once a
-  previous window exists (its curvature gives the third derivative), linear
-  otherwise. J = largest jump whose predicted error (k*seR*J + ... + d3*J^3/6)
-  fits every slot's tolerance (relTol 1e-3 on inventories with a 1e-3-of-
-  plant significance floor, 0.5 K on temperatures / temperature-equivalent
-  energies), never more than halfway to a bound (inventories >= 0, fractions
-  <= 1), never past the next scenario event. Ceiling starts at 120 s, doubles
-  per verified jump, halves when the next window's rates miss the prediction
-  by more than 2x the budget. Max 3600 s.
-- Linear in the data, so conserved totals stay conserved exactly.
+  slag, power/precursors/decay pools, release accumulators) is fitted with a
+  straight line over each measurement window (slope at the window centre,
+  standard error from the residual). Curvature = change of slope between
+  consecutive windows (long baseline, little noise); a third window gives the
+  change of curvature and enables quadratic extrapolation. The first window
+  after any reset only measures.
+- Cycle: relax 20 s, measure 40 s (sampled every 0.5 s), jump. The window
+  doubles (to 640 s max) while the limiting variable oscillates on a period
+  it cannot average (curvature or verified slope flips sign) and halves only
+  when jumps hit the 3600 s ceiling with error room to spare.
+- Error budget per variable: fit noise (random window to window) <= tol per
+  jump; truncation (same sign jump after jump, so it adds up) <= tol per
+  hour of skipped time. Tolerances: relTol 1e-3 on inventories, 0.5 K on
+  temperatures, with plant-level floors - 1e-4 of the plant's water / gas /
+  solids / FP inventory, and 0.01 K of plant-average temperature for any
+  energy (so a valve body, a pump casing or one zone of tube metal - fast
+  modes the relax phase re-settles - is judged against the plant, not
+  itself). Oxidation fractions are weighted by their oxidation heat; power,
+  precursors and decay groups by total core power.
+- Fission power, precursors and decay-heat groups extrapolate as exponentials
+  when the data show them relaxing (a polynomial cannot follow a 1000 s decay
+  group past a fraction of its time constant).
+- Holding: a variable within its tolerance of a bound it is heading for
+  (trace O2 being eaten as fast as it arrives, an emptying OTSG slug) is held
+  instead of capping the jump at half its decay time; a water-dominated node
+  whose water is held keeps its energy too. Otherwise inventories are never
+  extrapolated more than halfway to zero.
+- Verification: the next window's slope vs the prediction; step-size control
+  on the realized error (0.9/sqrt(ratio), x0.5..x2). Rejected jumps (state
+  the constraint chain cannot evaluate) halve the ceiling.
+- Linear in the data (except the exponential groups, which are not conserved
+  quantities), so conserved totals stay conserved exactly.
 - Flows and pump speeds are not extrapolated (fast). Post-accept operators
   (creep damage, controllers, actuators, electrical stores, relief latches)
-  run once with dt = J on the jumped state.
-- A discrete change inside a window (burst, scenario event, relief pop,
-  pump switched) discards the window. Rejected jumps (state the constraint
-  chain cannot evaluate) halve the ceiling and keep the pre-jump state.
+  run once with dt = J on the jumped state. Jumps never cross the next
+  scenario event; a discrete change inside a window (burst, scenario event,
+  relief pop, pump switched) discards it.
 - GameLoop: a jump is snapshotted like an input so seeks/replay stay exact;
-  edits, seeks and plant swaps reset the window.
+  edits, seeks and plant swaps reset the controller.
 Mechanism 1 (averaged relief cycling) and full periodic envelope jumping are
 NOT built: a plant in a relief sawtooth never jumps (the discrete-change rule).
 

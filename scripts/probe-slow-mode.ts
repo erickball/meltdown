@@ -82,5 +82,23 @@ while (sim.state.time < end) {
   rej += r.metrics?.retriesThisFrame ?? 0;
 }
 line();
+if (process.env.DUMP === '1') {
+  // Where the oxygen and the burning are, for comparing two runs
+  const s = sim.state;
+  for (const [id, n] of s.flowNodes) {
+    const g = n.fluid.ncg as unknown as Record<string, number> | undefined;
+    if (g && (g.O2 > 1e-6 || g.CO > 1e-6 || g.CO2 > 1e-6)) {
+      console.log(`  node ${id}: O2=${g.O2.toFixed(3)} N2=${g.N2.toFixed(2)} He=${g.He.toFixed(1)} CO=${g.CO.toFixed(3)} CO2=${g.CO2.toFixed(3)} T=${(n.fluid.temperature - 273.15).toFixed(0)}C`);
+    }
+  }
+  for (const [id, t] of s.thermalNodes) {
+    const go = t.graphiteOxidation;
+    if (go && go.burnoff > 0) console.log(`  solid ${id}: burned=${(go.burnoff * go.initialCarbonMass).toFixed(3)} kg T=${(t.temperature - 273.15).toFixed(0)}C`);
+  }
+  for (const c of s.flowConnections) {
+    const from = s.flowNodes.get(c.fromNodeId)?.fluid.ncg as unknown as Record<string, number> | undefined;
+    if (from && from.O2 > 0.01 && Math.abs(c.massFlowRate) > 1e-4) console.log(`  flow ${c.id}: ${c.massFlowRate.toExponential(2)} kg/s`);
+  }
+}
 if (snapOut && snapOut !== '-') fs.writeFileSync(snapOut, JSON.stringify(serializeSimulationState(sim.state)));
 if (csvOut) fs.writeFileSync(csvOut, csv.join('\n'));
