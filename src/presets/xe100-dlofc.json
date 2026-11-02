@@ -1118,10 +1118,6 @@
         "shellPressureRating": 40,
         "plenumLength": 0.5,
         "tubeOD": 0.019,
-        "extractionSource": {
-          "turbineId": "turbine-1",
-          "pressure": 2500000
-        },
         "tubeFluid": {
           "temperature": 474,
           "pressure": 18800000,

@@ -631,9 +631,12 @@ add('fwh-1', {
   material: 'low-alloy-steel',
   pressureRating: 40, tubePressureRating: 250, shellPressureRating: 40,
   plenumLength: FWH_PLENUM, tubeOD: 0.019,
-  // Names the turbine stage the bleed is tapped from, so the extraction
-  // enthalpy follows the real expansion line rather than throttled inlet steam
-  extractionSource: { turbineId: 'turbine-1', pressure: 25e5 },
+  // No `extractionSource`: this bleed is a tap off the SG outlet header
+  // through val-bleed-1, so it arrives as THROTTLED live steam - which is
+  // what that topology is. The tag made this shell the turbine's first
+  // stage: the bleed became the machine's inlet, the 49 kg/s of main steam
+  // did no work (4.7 MW of shaft), and the governor (~0.2) throttled the
+  // bleed, choking it at ~9.5 kg/s with the valve railed at 0.8.
   // 188 bar, not 170: the feed-train pressure LADDER at design flow is
   // boiler 165 + bundle orifices ~20 + piping ~2. Nodes seeded a rung low
   // let the pump hammer the line while the solve re-finds the ladder.
