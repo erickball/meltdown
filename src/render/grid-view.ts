@@ -17,7 +17,7 @@ import {
   PIPE_METRES_PER_STICK,
 } from '../game/stock';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow, openingArrowEndpoints } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackColor, openingArrowEndpoints } from './components';
 import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import { poolReadout, poolStateLabel } from './pool-readout';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
@@ -1812,18 +1812,18 @@ export class GridView {
     // wetting the rack surface.
     const wBot = Math.max(0, Math.min(1, r.rackBottom / Math.max(r.depth, 1e-6)));
     const wTop = Math.max(wBot, Math.min(1, r.rackTop / Math.max(r.depth, 1e-6)));
-    const glow = poolRackGlow(r.cladK ?? r.waterK);
+    const rack = poolRackColor(r.cladK ?? r.waterK);
     const cells = Math.max(2, Math.min(8, Math.round(Math.sqrt(pool.assemblyCount || 800) / 4)));
     const inset = 0.10;
     const pitch = (1 - 2 * inset) / cells;
     const gap = pitch * 0.16;
 
     const rackShade = (base: number) => {
-      // Steel grey, going orange-white with the cladding temperature. The
-      // three faces differ only in how much light they get.
-      const rC = Math.round((104 + 161 * glow) * base);
-      const gC = Math.round((114 + 44 * glow) * base);
-      const bC = Math.round((122 - 82 * glow) * base);
+      // Steel grey, glowing at the cladding's blackbody colour. The three
+      // faces differ only in how much light they get.
+      const rC = Math.round(rack.r * base);
+      const gC = Math.round(rack.g * base);
+      const bC = Math.round(rack.b * base);
       return `rgb(${Math.max(0, Math.min(255, rC))}, ${Math.max(0, Math.min(255, gC))}, ` +
         `${Math.max(0, Math.min(255, bC))})`;
     };

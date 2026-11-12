@@ -15,6 +15,7 @@ import {
   totalMoles,
   R_GAS,
 } from '../simulation/gas-properties';
+import { incandescentColor } from './incandescence';
 
 /**
  * The NCG partial pressure (Pa) a display fluid's stamped moles represent,
@@ -456,41 +457,12 @@ function hexToRGB(hex: string): RGB {
   } : { r: 0, g: 0, b: 0 };
 }
 
-// Fuel rod temperature color: black (cold) -> dark red -> red -> orange -> bright red/white (melting)
-// Temperature in Kelvin, meltingPoint is typically 2800K for UO2
-const FUEL_COLD: RGB = { r: 20, g: 20, b: 20 };           // Below 200°C (473K) - nearly black
-const FUEL_WARM: RGB = { r: 80, g: 20, b: 10 };           // ~600K - dark red
-const FUEL_HOT: RGB = { r: 180, g: 50, b: 20 };           // ~1200K - red
-const FUEL_VERY_HOT: RGB = { r: 255, g: 120, b: 30 };     // ~2000K - orange
-const FUEL_MELTING: RGB = { r: 255, g: 220, b: 180 };     // Near melting - bright orange/white
+// Fuel rod colour: dark UO2 / oxide, glowing at its blackbody colour
+// (see incandescence.ts). Temperature in Kelvin.
+const FUEL_COLD: RGB = { r: 20, g: 20, b: 20 };
 
-export function getFuelColor(temperature: number, meltingPoint: number = 2800): string {
-  const T = temperature;
-  const T_cold = 473;  // 200°C - below this is "cold"
-  const T_melt = meltingPoint;
-
-  if (T <= T_cold) {
-    return rgbToString(FUEL_COLD);
-  } else if (T <= 600) {
-    // Cold to warm: black -> dark red
-    const t = (T - T_cold) / (600 - T_cold);
-    return rgbToString(lerpRGB(FUEL_COLD, FUEL_WARM, t));
-  } else if (T <= 1200) {
-    // Warm to hot: dark red -> red
-    const t = (T - 600) / (1200 - 600);
-    return rgbToString(lerpRGB(FUEL_WARM, FUEL_HOT, t));
-  } else if (T <= 2000) {
-    // Hot to very hot: red -> orange
-    const t = (T - 1200) / (2000 - 1200);
-    return rgbToString(lerpRGB(FUEL_HOT, FUEL_VERY_HOT, t));
-  } else if (T <= T_melt) {
-    // Very hot to melting: orange -> bright
-    const t = (T - 2000) / (T_melt - 2000);
-    return rgbToString(lerpRGB(FUEL_VERY_HOT, FUEL_MELTING, t));
-  } else {
-    // Above melting point - pulsing bright
-    return rgbToString(FUEL_MELTING);
-  }
+export function getFuelColor(temperature: number): string {
+  return rgbToString(incandescentColor(FUEL_COLD, temperature));
 }
 
 // ============================================================================

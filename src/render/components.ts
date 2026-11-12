@@ -43,6 +43,7 @@ import {
   RGB,
   GasColorInfo,
 } from './colors';
+import { incandescentColor, incandescentIntensity } from './incandescence';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
 import { componentWall, hxShellWall } from '../simulation/wall-sizing';
@@ -1108,10 +1109,12 @@ function renderStandpipeRing(
  * rackHeight tall - so what the picture says about the water covering the
  * fuel is what the heat-transfer model is actually doing.
  */
-export function poolRackGlow(rackTemperatureK: number): number {
-  // Steel grey below boiling, orange-white by the time the cladding is in
-  // trouble (~1200 K, where Zr-steam oxidation runs away).
-  return Math.max(0, Math.min(1, (rackTemperatureK - 373) / 800));
+export const RACK_STEEL: RGB = { r: 104, g: 114, b: 122 };
+
+/** Rack/cladding colour at temperature: steel grey, glowing at its
+ *  blackbody colour once hot enough to (dull red from ~900 K). */
+export function poolRackColor(rackTemperatureK: number): RGB {
+  return incandescentColor(RACK_STEEL, rackTemperatureK);
 }
 
 function renderPool(
@@ -1147,16 +1150,17 @@ function renderPool(
   const rackW = innerW * 0.8;
   const rackX = -rackW / 2;
   if (rackH > 0 && rackY > innerY) {
-    const glow = poolRackGlow((pool as { rackTemperature?: number }).rackTemperature
-      ?? pool.fluid?.temperature ?? 300);
-    const r = Math.round(90 + 165 * glow);
-    const g = Math.round(95 + 60 * glow);
-    const b = Math.round(105 - 60 * glow);
+    const rackK = (pool as { rackTemperature?: number }).rackTemperature
+      ?? pool.fluid?.temperature ?? 300;
+    const glow = incandescentIntensity(rackK);
     if (glow > 0.02) {
-      ctx.fillStyle = `rgba(255, 140, 40, ${(0.35 * glow).toFixed(3)})`;
+      // Halo: the glow's own light spilling onto its surroundings
+      const c = incandescentColor({ r: 0, g: 0, b: 0 }, rackK);
+      ctx.fillStyle = `rgba(${c.r}, ${c.g}, ${c.b}, ${(0.35 * glow).toFixed(3)})`;
       ctx.fillRect(rackX - 3, rackY - 3, rackW + 6, rackH + 6);
     }
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    const rc = poolRackColor(rackK);
+    ctx.fillStyle = `rgb(${rc.r}, ${rc.g}, ${rc.b})`;
     ctx.fillRect(rackX, rackY, rackW, rackH);
     // Assembly cells
     const cells = Math.max(3, Math.min(16, Math.round(rackW / Math.max(4, view.zoom * 0.8))));
@@ -1616,8 +1620,7 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   // Fuel rods and control rods (if this is a reactor vessel with fuel)
   if (vessel.fuelRodCount && vessel.fuelRodCount > 0) {
     const fuelTemp = vessel.fuelTemperature ?? 600; // Default to warm if not set
-    const meltPoint = vessel.fuelMeltingPoint ?? 2800;
-    const fuelColor = getFuelColor(fuelTemp, meltPoint);
+    const fuelColor = getFuelColor(fuelTemp);
 
     // Calculate inner cavity dimensions
     const domeOffset = vessel.hasDome ? outerR : 0;
@@ -1879,8 +1882,7 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   const fuelRodCount = coreBarrel?.fuelRodCount ?? (vessel as any).fuelRodCount;
   if (fuelRodCount && fuelRodCount > 0) {
     const fuelTemp = coreBarrel?.fuelTemperature ?? (vessel as any).fuelTemperature ?? 600;
-    const meltPoint = coreBarrel?.fuelMeltingPoint ?? (vessel as any).fuelMeltingPoint ?? 2800;
-    const fuelColor = getFuelColor(fuelTemp, meltPoint);
+    const fuelColor = getFuelColor(fuelTemp);
 
     // Core dimensions - use stored coreDiameter or default to barrel inner diameter
     // barrelDiameter is center-line, so inner = barrelDiameter - barrelThickness/2
