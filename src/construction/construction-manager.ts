@@ -67,7 +67,7 @@ import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
-import { designWallThickness, hxTubeWall, crossVesselWalls } from '../simulation/wall-sizing';
+import { designWallThickness, hxTubeWall, crossVesselWalls, crossVesselInsulation } from '../simulation/wall-sizing';
 import { DEFAULT_MATERIAL } from '../simulation/materials';
 
 /**
@@ -1971,8 +1971,13 @@ export class ConstructionManager {
         const annulusVolume = Math.PI * cvLength * (
           Math.pow(outerRadius - outerWallThickness, 2) - Math.pow(innerOuterRadius, 2)
         );
-        // Inner pipe volume
-        const innerVolume = Math.PI * Math.pow(innerDiam / 2, 2) * cvLength;
+        // Inner gas volume: the bore the hot-duct insulation leaves
+        const insulationThickness = props.innerInsulationThickness ?? 0;
+        const insulationConductivity = props.innerInsulationConductivity;
+        const gasBore = crossVesselInsulation({ id, innerDiameter: innerDiam,
+          innerInsulationThickness: insulationThickness,
+          innerInsulationConductivity: insulationConductivity }).gasBore;
+        const innerVolume = Math.PI * Math.pow(gasBore / 2, 2) * cvLength;
 
         // Ports: inner pipe has in/out at each end, annulus has ports at each end
         // Annulus ports must connect with zero-length connections (physically touching)
@@ -2020,6 +2025,10 @@ export class ConstructionManager {
           length: cvLength,
           innerDiameter: innerDiam,
           innerWallThickness: innerWallThickness,
+          ...(insulationThickness > 0 ? {
+            innerInsulationThickness: insulationThickness,
+            innerInsulationConductivity: insulationConductivity,
+          } : {}),
           pressureRating: pressureRating,
           targetComponentId: props.targetComponentId,
           orientation: orientation,
@@ -2525,7 +2534,7 @@ export class ConstructionManager {
           crossVessel.annulusVolume = Math.PI * newLength * (
             Math.pow(outerRadius - crossVessel.wallThickness, 2) - Math.pow(innerOuterRadius, 2)
           );
-          crossVessel.innerVolume = Math.PI * Math.pow(innerRadius, 2) * newLength;
+          crossVessel.innerVolume = Math.PI * Math.pow(crossVesselInsulation(crossVessel).gasBore / 2, 2) * newLength;
         }
       } else {
         // First annulus connection: move cross-vessel so this port touches the other component
@@ -4809,6 +4818,23 @@ export class ConstructionManager {
       }
       if (properties.lowCoolantFlow !== undefined) {
         component.setpoints.lowCoolantFlow = properties.lowCoolantFlow;
+      }
+    }
+
+    // Cross-vessel hot-duct insulation: narrows the gas bore, so the stored
+    // inner volume follows it
+    if (component.type === 'crossVessel' &&
+        (properties.innerInsulationThickness !== undefined ||
+         properties.innerInsulationConductivity !== undefined)) {
+      if (properties.innerInsulationThickness !== undefined) {
+        component.innerInsulationThickness = properties.innerInsulationThickness;
+      }
+      if (properties.innerInsulationConductivity !== undefined) {
+        component.innerInsulationConductivity = properties.innerInsulationConductivity;
+      }
+      if (component.innerVolume !== undefined) {
+        const bore = crossVesselInsulation(component as any).gasBore;
+        component.innerVolume = Math.PI * (bore / 2) ** 2 * component.length;
       }
     }
 

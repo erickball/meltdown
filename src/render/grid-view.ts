@@ -17,13 +17,14 @@ import {
   PIPE_METRES_PER_STICK,
 } from '../game/stock';
 import { SimulationState } from '../simulation';
-import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackGlow, openingArrowEndpoints } from './components';
+import { renderComponent, getComponentVisualHeight, ConnectionScreenEndpoints, formatGaugeValue, renderFluidWithNcg, getLiquidFraction, poolRackColor, openingArrowEndpoints } from './components';
 import { connectionLabelLines, drawConnectionLabel } from './connection-label';
 import { poolReadout, poolStateLabel } from './pool-readout';
 import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
+import { hotColor, hotRunBody, heatHalo } from './incandescence';
 import {
   TILE_M, Footprint, PlanRect, PortAnchor, Side,
   componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
@@ -1812,18 +1813,18 @@ export class GridView {
     // wetting the rack surface.
     const wBot = Math.max(0, Math.min(1, r.rackBottom / Math.max(r.depth, 1e-6)));
     const wTop = Math.max(wBot, Math.min(1, r.rackTop / Math.max(r.depth, 1e-6)));
-    const glow = poolRackGlow(r.cladK ?? r.waterK);
+    const rack = poolRackColor(r.cladK ?? r.waterK);
     const cells = Math.max(2, Math.min(8, Math.round(Math.sqrt(pool.assemblyCount || 800) / 4)));
     const inset = 0.10;
     const pitch = (1 - 2 * inset) / cells;
     const gap = pitch * 0.16;
 
     const rackShade = (base: number) => {
-      // Steel grey, going orange-white with the cladding temperature. The
-      // three faces differ only in how much light they get.
-      const rC = Math.round((104 + 161 * glow) * base);
-      const gC = Math.round((114 + 44 * glow) * base);
-      const bC = Math.round((122 - 82 * glow) * base);
+      // Steel grey, glowing at the cladding's blackbody colour. The three
+      // faces differ only in how much light they get.
+      const rC = Math.round(rack.r * base);
+      const gC = Math.round(rack.g * base);
+      const bC = Math.round(rack.b * base);
       return `rgb(${Math.max(0, Math.min(255, rC))}, ${Math.max(0, Math.min(255, gC))}, ` +
         `${Math.max(0, Math.min(255, bC))})`;
     };
@@ -2398,7 +2399,7 @@ export class GridView {
       const color = pipe.fluid ? getFluidColor(pipe.fluid) : COLORS.steel;
       const ghost = buildGhost(pipe);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
-      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
+      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId, pipe.wallTemperature);
       if (ghost) ctx.globalAlpha = 1;
     }
     for (const [run, pts] of layout.display) {
@@ -2435,7 +2436,7 @@ export class GridView {
   }
 
   /** A pipe run: shadow, dark wall, fluid-coloured body, a sheen, elbows at bends, flanges at the ends. */
-  private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean): void {
+  private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean, wallK?: number): void {
     if (pts.length < 2) return;
     const path = () => {
       ctx.beginPath();
@@ -2459,11 +2460,18 @@ export class GridView {
     path(); ctx.stroke();
     ctx.restore();
 
-    ctx.strokeStyle = '#2a2e33';
+    const halo = heatHalo(wallK);
+    if (halo) {
+      ctx.strokeStyle = halo.color;
+      ctx.lineWidth = w + 2 * halo.spread;
+      path(); ctx.stroke();
+    }
+
+    ctx.strokeStyle = hotColor('#2a2e33', wallK);
     ctx.lineWidth = w + 2;
     path(); ctx.stroke();
 
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = hotRunBody(color, COLORS.steel, wallK);
     ctx.lineWidth = w;
     path(); ctx.stroke();
 

@@ -573,6 +573,11 @@ export interface ConvectionConnection {
 
   // Heat transfer parameters
   surfaceArea: number;              // m² - total wetted surface area (when fully submerged)
+  /** Conductive resistance (m²K/W, referred to surfaceArea) in series with
+   *  the film: insulation or a liner between the fluid and the metal node.
+   *  The exchanged heat is (T_wall - T_fluid) / (1/h + R) per unit area.
+   *  The layer is massless - it carries no heat of its own. */
+  seriesResistance?: number;
   // Heat transfer coefficient computed dynamically based on flow
 
   // Tube/rod geometry for liquid-level-dependent heat transfer

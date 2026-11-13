@@ -203,6 +203,11 @@ export interface ComponentBase {
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
   simValveId?: string;  // Links to simulation ValveState
+  /** Display only: temperature (K) of the component's wall metal node, synced
+   *  from the simulation so the drawing can glow when the metal is hot. */
+  wallTemperature?: number;
+  /** Display only (heat exchangers): hottest tube-metal temperature (K). */
+  tubeMetalTemperature?: number;
 }
 
 export interface TankComponent extends ComponentBase {
@@ -757,6 +762,9 @@ export interface BuildingComponent extends ComponentBase {
 // wall at cold temperature while allowing hot fluid to pass through.
 // Used in SMR designs where the hot leg connects directly to an external steam generator.
 export interface CrossVesselComponent extends ComponentBase {
+  /** Display only: outer-shell metal temperature (K), from `${id}-shell-wall`.
+   *  (wallTemperature, from `${id}-wall`, is the inner liner.) */
+  outerShellTemperature?: number;
   type: 'crossVessel';
   // Outer vessel (protrusion of parent vessel)
   outerDiameter: number;      // meters - outer diameter of the cross-vessel extension
@@ -765,6 +773,13 @@ export interface CrossVesselComponent extends ComponentBase {
   // Inner hot leg pipe
   innerDiameter: number;      // meters - inner diameter of the hot leg pipe
   innerWallThickness: number; // meters - wall thickness of the inner pipe
+  // Internal insulation lining the inner pipe (the hot-gas duct of a
+  // gas-cooled plant): fibrous ceramic behind a thin cover sheet, between
+  // the hot gas and the pipe wall. It narrows the gas bore to
+  // innerDiameter - 2*thickness and puts its conductive resistance between
+  // the hot gas and the pipe metal. Absent / 0: bare pipe.
+  innerInsulationThickness?: number;   // meters
+  innerInsulationConductivity?: number; // W/m-K, effective (gas-filled fibre: ~ the fill gas's own)
   // Optional explicit hot-pipe length. By default the factory derives it as
   // `length` plus the radius of each vessel the inner pipe joins - the hot
   // pipe runs centerline to centerline (core outlet plenum to SG bundle

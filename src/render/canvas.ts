@@ -2339,7 +2339,8 @@ export class PlantCanvas {
         const run = this.pipeComponentRun(pipe);
         if (run) {
           drawPipeRun(ctx, run, pipe.fluid ? getFluidColor(pipe.fluid) : '#111',
-            component.id === this.selectedComponentId ? 'rgba(100, 150, 255, 0.8)' : null);
+            component.id === this.selectedComponentId ? 'rgba(100, 150, 255, 0.8)' : null,
+            pipe.wallTemperature);
         }
         ctx.restore();
         this.renderBelowGradeOverlay(ctx, component);

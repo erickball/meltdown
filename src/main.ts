@@ -21,7 +21,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock, waterBodyOf } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, CrossVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock, waterBodyOf } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -42,6 +42,8 @@ import {
   getTurbineCondenserState,
   hxBundleCount,
   hxTubeNodeIds,
+  hxTubeNodeId,
+  hxTubeMetalId,
   assignFlowConnectionIds,
   evaluateOtsgSections,
   writeSimulationStateToPlant,
@@ -5643,6 +5645,34 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
   // Uses simNodeId if set, otherwise falls back to component.id
   for (const [, component] of plantState.components) {
     const simNodeId = (component as { simNodeId?: string }).simNodeId || component.id;
+
+    // Wall metal temperature, for the incandescent glow. Buildings' walls are
+    // concrete, not metal, and keep their own colouring.
+    if (component.type !== 'building') {
+      const wallNode = simState.thermalNodes.get(`${component.id}-wall`);
+      if (wallNode) component.wallTemperature = wallNode.temperature;
+    }
+    // Cross-vessels: `-wall` above is the inner liner; the outer pressure
+    // shell has its own node
+    if (component.type === 'crossVessel') {
+      const shellNode = simState.thermalNodes.get(`${component.id}-shell-wall`);
+      if (shellNode) (component as CrossVesselComponent).outerShellTemperature = shellNode.temperature;
+    }
+    // Heat-exchanger tubes: the hottest of every bundle's metal (lumped node
+    // or once-through zones)
+    if (component.type === 'heatExchanger') {
+      let hottest = -Infinity;
+      const nb = hxBundleCount(component as any);
+      for (let b = 0; b < nb; b++) {
+        const lumped = simState.thermalNodes.get(hxTubeMetalId(component.id, b));
+        if (lumped) hottest = Math.max(hottest, lumped.temperature);
+        for (const z of simState.flowNodes.get(hxTubeNodeId(component.id, b))?.otsg?.metalNodeIds ?? []) {
+          const zn = simState.thermalNodes.get(z);
+          if (zn) hottest = Math.max(hottest, zn.temperature);
+        }
+      }
+      if (hottest > -Infinity) component.tubeMetalTemperature = hottest;
+    }
 
     // Handle heat exchangers specially - they have primary and secondary sides
     if (component.type === 'heatExchanger') {
