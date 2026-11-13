@@ -82,7 +82,16 @@ export type ScenarioAction =
   /** Open or close a turbine-generator's output breaker (closing onto a live grid needs it in step). */
   | { kind: 'generator-breaker'; id: string; closed: boolean }
   /** Trip a turbine-generator's turbine (stop valves shut), or reset the trip. */
-  | { kind: 'turbine-trip'; id: string; reset?: boolean };
+  | { kind: 'turbine-trip'; id: string; reset?: boolean }
+  /**
+   * Trip the reactor: rods fully in, the rod controller stands down. For a
+   * plant without an electrical model, this is what a blackout does to rod
+   * drives that hold their rods on power (the electrical model trips them
+   * itself when it has one). A blackout that HOLDS the rods is the extra
+   * failure, scripted by leaving this out and putting the rod controller in
+   * manual.
+   */
+  | { kind: 'scram'; reason: string };
 
 export interface ScenarioEvent {
   /** Simulation time (s) at which the event fires. */
