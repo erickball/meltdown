@@ -762,6 +762,9 @@ export interface BuildingComponent extends ComponentBase {
 // wall at cold temperature while allowing hot fluid to pass through.
 // Used in SMR designs where the hot leg connects directly to an external steam generator.
 export interface CrossVesselComponent extends ComponentBase {
+  /** Display only: outer-shell metal temperature (K), from `${id}-shell-wall`.
+   *  (wallTemperature, from `${id}-wall`, is the inner liner.) */
+  outerShellTemperature?: number;
   type: 'crossVessel';
   // Outer vessel (protrusion of parent vessel)
   outerDiameter: number;      // meters - outer diameter of the cross-vessel extension

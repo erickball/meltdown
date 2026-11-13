@@ -6244,9 +6244,11 @@ function renderCrossVessel(
   const wallPx = Math.max(2, wallThickness * view.zoom);
   const innerWallPx = Math.max(1, innerWallThickness * view.zoom);
 
-  // Outer shell
-  ctx.fillStyle = steelColorStr;
+  // Outer shell (the pressure boundary), at its own metal temperature
+  const endHalo = beginHeatHalo(ctx, cv.outerShellTemperature);
+  ctx.fillStyle = hotColor(steelColorStr, cv.outerShellTemperature);
   ctx.fillRect(-lengthPx / 2, -outerDiamPx / 2, lengthPx, outerDiamPx);
+  endHalo();
 
   // Annulus (cold fluid)
   const annulusFluid = (cv as any).annulusFluid;
@@ -6258,9 +6260,10 @@ function renderCrossVessel(
   ctx.fillRect(-lengthPx / 2 + wallPx, -outerDiamPx / 2 + wallPx,
     lengthPx - wallPx * 2, outerDiamPx - wallPx * 2);
 
-  // Inner pipe wall
+  // Inner pipe wall (the liner), at its own metal temperature. No halo: it
+  // is inside the shell, and its light is already in its colour.
   const innerOuterDiamPx = innerDiamPx + innerWallPx * 2;
-  ctx.fillStyle = steelColorStr;
+  ctx.fillStyle = hotColor(steelColorStr, cv.wallTemperature);
   ctx.fillRect(-lengthPx / 2 + wallPx, -innerOuterDiamPx / 2,
     lengthPx - wallPx * 2, innerOuterDiamPx);
 

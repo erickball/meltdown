@@ -21,7 +21,7 @@ import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
 import sboPresetData from './presets/sbo.json';
 import meltdownDemoPresetData from './presets/meltdown-demo.json';
-import { PlantState, PlantComponent, ReactorVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock, waterBodyOf } from './types';
+import { PlantState, PlantComponent, ReactorVesselComponent, CrossVesselComponent, ControllerComponent, PipeComponent, HeatExchangerComponent, Fluid, Port, Point, Connection, PlantStock, waterBodyOf } from './types';
 import { GameLoop, ScramSetpoints } from './game';
 import {
   // createDemoReactor,
@@ -5651,6 +5651,12 @@ function syncSimulationToVisuals(simState: SimulationState, plantState: PlantSta
     if (component.type !== 'building') {
       const wallNode = simState.thermalNodes.get(`${component.id}-wall`);
       if (wallNode) component.wallTemperature = wallNode.temperature;
+    }
+    // Cross-vessels: `-wall` above is the inner liner; the outer pressure
+    // shell has its own node
+    if (component.type === 'crossVessel') {
+      const shellNode = simState.thermalNodes.get(`${component.id}-shell-wall`);
+      if (shellNode) (component as CrossVesselComponent).outerShellTemperature = shellNode.temperature;
     }
     // Heat-exchanger tubes: the hottest of every bundle's metal (lumped node
     // or once-through zones)
