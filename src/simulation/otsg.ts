@@ -1354,7 +1354,6 @@ export function evaluateOtsgPartition(
       // tube) held the steam 5.4 kJ/kg - 3.6 K - above the metal pinning
       // it, and the standing film then pumped 1.1 MW from the steam into
       // its own wall, paid for by the boiling section.
-      if ((globalThis as any).process?.env?.AB_OFF && result && Math.abs(T3target - lastT3target) < 0.25 && du3 > 0) { du3New = du3; } else // TEMP-AB
       if (lastU3Pin !== undefined && Math.abs(T3target - lastT3target) < 0.25 &&
           Math.abs(P - lastPinP) < 1e-3 * P) {
         du3New = lastU3Pin - fin.sat.u_g;

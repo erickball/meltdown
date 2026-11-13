@@ -576,107 +576,107 @@ export function otsgWaterSideDuties(
 }
 
 /**
- * The wall exchange of a dried-out tube, whose water answers it faster than
- * the step: the OTSG counterpart of RK45Solver.applyStiffConvection, applied
- * at the same point (once per attempt, before the stages).
+ * The wall exchange of a tube whose water answers it faster than the step:
+ * the OTSG counterpart of RK45Solver.applyStiffConvection, in two halves -
+ * stampStiffOtsgTubes before the first stage, completeStiffOtsgTubes right
+ * after it.
  *
- * A dried-out tube blowing down sits on the seam where its steam is at the
- * wall pin, and relaxes onto it from both sides:
+ * Two arms, by which side of the seam (steam at the wall pin) the tube is on:
  *
- *  - Below the seam (pinned arm, a boiling sliver present): expansion cools
- *    the steam a little below the pin, the partition books that deficit as a
- *    sliver of boiling liquid, and the boiling film (25 kW/m2K over the
- *    sliver's length, ~100 K superheat) flashes it - grams of water,
- *    megawatts of duty. At fixed pressure the partition gives the sliver
- *    from the energy exactly, dm2/dU = -1/(u3 - u2), so the energy that
- *    closes it is dU* = m2 (u3 - u2); Q2 is proportional to m2 (its length
- *    is), so the water relaxes at k = Q2 / dU* ~ H_boil A (T_wall - T_sat)
- *    v2 / (V (u3 - u2)) - ~4 ms at 1 bar, ~0.4 ms at condenser vacuum,
- *    growing as the pressure falls (v2 ~ v_g), not as the mass does.
- *  - Above it (free superheat arm, no sliver): the steam is off the pin
- *    and Q3 pulls it back toward its wall across the whole bundle; with
- *    grams of steam on 1390 m2 that is k = hA3 / (m3 cv) ~ 2 ms at 0.6 kg.
- *    Measured from the partition itself, by a small energy probe (one more
- *    solve), closer in if the first probe already reaches the seam.
+ *  - Pinned arm (a boiling section present): the variable that answers is
+ *    Q2. The partition gives the boiling section from the energy - at fixed
+ *    pressure dm2/dU = -1/(u3 - u2), so adding dU* = m2 (u3 - u2) closes it -
+ *    and the film is 25 kW/m2K, so Q2 falls as the water's energy rises at
+ *    k = -dQ2/dU. Two routes: the section's own length (k >= Q2 / dU*), and
+ *    the pressure, because boiling packs steam into the tube and raises
+ *    T_sat under the whole film. On a dried-out tube blowing down (a sliver
+ *    of grams that expansion keeps re-creating) the first is ~4 ms at 1 bar,
+ *    ~0.4 ms at condenser vacuum; on a healthy flowing evaporator the second
+ *    is ~20 ms (52 /s measured on the steady xe100). Q3, priced at the pin,
+ *    does not depend on the water's energy (to the pin's theta ~ 1), so it
+ *    stays constant over the step.
+ *  - Free arm (no boiling section, steam off the pin): the variable is Q3,
+ *    pulling grams of steam toward its wall across the whole bundle
+ *    (k = hA3 / (m3 cv) ~ 2 ms at 0.6 kg).
+ *  k is measured from the partition itself by a small energy probe (one more
+ *  solve; the free arm probes closer in if the first probe already reaches
+ *  the seam, where the slope is the other arm's).
  *
  * Stepped explicitly those time constants became the plant's step (the
  * xe100-dlofc crawl past ~7200 s, scripts/probe-step-limiter.ts). Where
  * k*dt > 1 - the resolution boundary, the same criterion as the convection
- * pairs - the step's whole boiling + superheat exchange is applied here and
- * the tube is stamped so the rate operator leaves Q2 and Q3 out of the
- * stages (a stage that crossed the seam would otherwise meet the other
- * side's stiff duty explicitly):
+ * pairs - the tube is stamped: the rate operator leaves the stiff duty
+ * (Q2 + Q3) out of its evaluation and adds instead a CONSTANT duty per zone
+ * that integrates the stiff variable exactly over the step. Constant across
+ * the stages, it integrates to exactly duty * dt in the 5th-order solution,
+ * cancels out of the embedded error estimate (the E weights sum to zero),
+ * and is booked in the step's rates (the pressure solver's measured heat
+ * source sees it).
  *
- *  - pinned arm: Q2 by the exact integral of its linear relaxation,
- *    min(Q2 (1 - exp(-k dt)) / k, dU*) - it approaches its fixed point and
- *    never boils more than the liquid there is - taken from the zones under
- *    the boiling section in their shares; Q3, priced at the pin, does not
- *    depend on the water's energy (to the pin's theta ~ 1), so Q3 dt is
- *    exact for it. k is the larger of the sliver's own Q2 / dU* and the
- *    slope a probe inside the sliver measures, which also carries the
- *    pressure: boiling packs steam into the tube and raises T_sat under a
- *    film worth tens of MW/K - a pool of 0.5 kg under 139 m2 of metal a
- *    third of a kelvin above saturation answers in ~1 ms.
- *  - free arm: only the steam's NET energy change relaxes. Each zone's
- *    duty is H a_z (T_z - T3) with one T3 for all of them, so the zones
- *    share the relaxation by area while their differences - the stagnant
- *    steam carrying heat from the hot steam-end metal to the cold feed end -
- *    are not stiff and stay whole: zone z gives up
- *    Q3_z dt - (a_z / A3) (Q3 dt - Q3 (1 - exp(-k dt)) / k).
- *    (Scaling every zone's duty by the relaxed fraction instead suppressed
- *    that mixing and drove the feed-end metal 11 K colder in 120 s.)
+ * The integral is of the whole tube's linearized energy balance, not the wall
+ * term alone. With q the stiff duty and R everything else the tube's energy
+ * receives (feed, steam out, Q1, and in the pinned arm the constant Q3 -
+ * read from the first stage's rates, which are evaluated with the stiff duty
+ * left out; completeStiffOtsgTubes), q' = -k (q + R), so
+ *   q(t) = (q0 + R) e^{-kt} - R,   integral = (q0 + R)(1 - e^{-k dt})/k - R dt.
+ * Leaving R out relaxes q toward zero - the fixed point of a sealed tube -
+ * and on a flowing evaporator that under-booked the boiling by two thirds at
+ * a 55 ms step (feed and steam out hold q at -R in steady state, which this
+ * form returns exactly: q0 = -R gives q0 dt). Boiling cannot go negative on a
+ * wall above saturation: when R > 0 (other heat closing the section) q stops
+ * at zero at t* = ln((q0 + R)/R)/k, and the integral is q0/k - R t* if that
+ * falls inside the step. The mass route of the drift (feed arriving changes
+ * Q2 at fixed energy) is not linearized: in steady state it is zero, in a
+ * transient it is the ordinary first-order splitting error.
+ *
+ * Zones: pinned arm, Q2 from the zones under the boiling section in their
+ * Q2 shares, Q3 whole. Free arm, only the steam's NET energy change relaxes;
+ * each zone's duty is H a_z (T_z - T3) with one T3 for all of them, so the
+ * zones share the relaxation by area while their differences - stagnant
+ * steam carrying heat from the hot steam-end metal to the cold feed end - are
+ * not stiff and stay whole: zone z gives Q3_z - (a_z / A3)(Q3 - integral/dt).
+ * (Scaling every zone's duty by the relaxed fraction instead suppressed that
+ * mixing and drove the feed-end metal 11 K colder in 120 s.)
  *
  * The metal gives up exactly what the water receives. Where k*dt <= 1, or
  * the tube is flooded (no seam), the stages are the better integrator and
- * nothing changes. Returns the number of tubes exchanged implicitly.
+ * nothing changes. Returns the number of tubes stamped.
  */
-export function applyStiffOtsgWallExchange(state: SimulationState, dt: number): number {
+export function stampStiffOtsgTubes(state: SimulationState, dt: number): number {
   let n = 0;
-  if ((globalThis as any).process?.env?.AB_OFF) return 0; // TEMP-AB
   for (const [id, node] of state.flowNodes) {
     const cfg = node.otsg;
     if (!cfg) continue;
-    cfg.wallImplicitThisStep = false;
+    cfg.wallImplicit = undefined;
     if (node.isBoundary || !(node.fluid.mass > 0)) continue;
     const { ev, flows } = evaluateOtsgSections(state, id, node, { exact: true });
     if (ev.regime !== 'superheat' && ev.regime !== 'dryout') continue;
     const [, s2, s3] = ev.sections;
     if (!(s3.mass > 0)) continue;
-    const zones = otsgMetalZones(state, node);
-    const zoneT = zones.map(z => z.temperature);
-    const N = zones.length;
+    const zoneT = otsgMetalZones(state, node).map(z => z.temperature);
     const d = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
-    // Joules each zone hands the water over the step
-    const zoneE = new Array<number>(N).fill(0);
     if (s2.mass > 0) {
       if (!(d.Q2 > 0)) continue;
       const u2 = s2.hBar - ev.P * s2.vBar;
       const u3 = s3.hBar - ev.P * s3.vBar;
-      const closeSliver = s2.mass * (u3 - u2);
-      if (!(closeSliver > 0)) continue;
-      // Q2 answers the water's energy two ways: the sliver's own length
-      // (k = Q2 / dU*), and the pressure - boiling packs steam into the
-      // tube, raising T_sat under a film worth tens of MW/K (0.5 kg pooled
-      // under 139 m2 of metal 0.3 K above saturation: ~800 /s). The probe
-      // sees both; it stays inside the sliver so the slope is this arm's.
-      const dU = Math.min(0.5 * closeSliver, 1e-4 * Math.abs(node.fluid.internalEnergy));
+      const closeSection = s2.mass * (u3 - u2);
+      if (!(closeSection > 0)) continue;
+      // The probe stays inside the boiling section so the slope is this arm's
+      const dU = Math.min(0.5 * closeSection, 1e-4 * Math.abs(node.fluid.internalEnergy));
       const probe: FlowNode = {
         ...node,
         fluid: { ...node.fluid, internalEnergy: node.fluid.internalEnergy + dU },
         otsg: { ...cfg, partitionCache: undefined, partitionLin: undefined },
       };
       const moved = evaluateOtsgSections(state, id, probe, { exact: true });
-      const k = Math.max(d.Q2 / closeSliver,
+      const k = Math.max(d.Q2 / closeSection,
         -(otsgWaterSideDuties(moved.ev, moved.flows, zoneT, cfg.heatArea).Q2 - d.Q2) / dU);
       if (!(k * dt > 1)) continue;
-      // Never more than closes the sliver: there is no more liquid to boil
-      const relaxed = Math.min((1 - Math.exp(-k * dt)) / k, closeSliver / d.Q2);
-      for (let j = 0; j < N; j++) zoneE[j] = d.zoneQ2[j] * relaxed + d.zoneQ3[j] * dt;
+      cfg.wallImplicit = { arm: 'pinned', k, q0: d.Q2, zoneQ2: d.zoneQ2, zoneQ3: d.zoneQ3 };
     } else {
       if (d.Q3 === 0) continue;
       // Probe toward where Q3 is heading, a thousandth of the tube's energy;
-      // closer in if that already reaches the seam (the slope there is the
-      // other arm's)
+      // closer in if that already reaches the seam
       let k = NaN;
       for (const frac of [1e-3, 1e-5]) {
         const dU = frac * Math.abs(node.fluid.internalEnergy) * Math.sign(d.Q3);
@@ -691,23 +691,68 @@ export function applyStiffOtsgWallExchange(state: SimulationState, dt: number): 
         break;
       }
       if (!(k * dt > 1)) continue;
+      const N = zoneT.length;
       const ov = otsgZoneOverlaps(
         [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac], N);
       const L3 = ov.reduce((a, o) => a + o[2], 0);
       if (!(L3 > 0)) continue;
-      const notRelaxed = d.Q3 * dt - d.Q3 * (1 - Math.exp(-k * dt)) / k;
-      for (let j = 0; j < N; j++) zoneE[j] = d.zoneQ3[j] * dt - (ov[j][2] / L3) * notRelaxed;
+      cfg.wallImplicit = {
+        arm: 'free', k, q0: d.Q3, zoneQ2: d.zoneQ2, zoneQ3: d.zoneQ3,
+        share3: ov.map(o => o[2] / L3),
+      };
     }
-    let total = 0;
-    zones.forEach((z, j) => {
-      z.temperature -= zoneE[j] / nodeHeatCapacity(z);
-      total += zoneE[j];
-    });
-    node.fluid.internalEnergy += total;
-    cfg.wallImplicitThisStep = true;
     n++;
   }
   return n;
+}
+
+/**
+ * Second half of the stiff wall exchange (see stampStiffOtsgTubes): with the
+ * first stage's rates k0 in hand - evaluated with the stamped tubes' stiff
+ * duty left out, so k0's tube energy rate is R (less the pinned arm's
+ * constant Q3) - set each stamped tube's constant zone duties for the step
+ * and add them to k0, which was evaluated before they existed. Later stages
+ * get them from the rate operator.
+ */
+export function completeStiffOtsgTubes(state: SimulationState, k0: StateRates, dt: number): void {
+  for (const [id, node] of state.flowNodes) {
+    const w = node.otsg?.wallImplicit;
+    if (!w) continue;
+    const zones = otsgMetalZones(state, node);
+    const N = zones.length;
+    const nodeRates = k0.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
+    const Q3Const = w.arm === 'pinned' ? w.zoneQ3.reduce((a, b) => a + b, 0) : 0;
+    const R = nodeRates.dEnergy + Q3Const;
+    const { k, q0 } = w;
+    // Boiling stops at zero inside the step when other heat closes the section
+    const tStop = w.arm === 'pinned' && R > 0 ? Math.log((q0 + R) / R) / k : Infinity;
+    const integral = tStop < dt
+      ? q0 / k - R * tStop
+      : (q0 + R) * (1 - Math.exp(-k * dt)) / k - R * dt;
+    if (!Number.isFinite(integral)) {
+      throw new Error(`[OTSG] stiff wall exchange on '${id}' produced a non-finite duty ` +
+        `(arm ${w.arm}, k=${k}, q0=${q0}, R=${R}, dt=${dt})`);
+    }
+    const qMean = integral / dt;
+    const zoneRate = new Array<number>(N);
+    if (w.arm === 'pinned') {
+      const scale = qMean / q0;
+      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ2[j] * scale + w.zoneQ3[j];
+    } else {
+      const notRelaxed = q0 - qMean;
+      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ3[j] - w.share3![j] * notRelaxed;
+    }
+    w.zoneRate = zoneRate;
+    let total = 0;
+    zones.forEach((z, j) => {
+      total += zoneRate[j];
+      const mr = k0.thermalNodes.get(z.id) ?? { dTemperature: 0 };
+      mr.dTemperature -= zoneRate[j] / nodeHeatCapacity(z);
+      k0.thermalNodes.set(z.id, mr);
+    });
+    nodeRates.dEnergy += total;
+    k0.flowNodes.set(id, nodeRates);
+  }
 }
 
 export class OtsgRateOperator implements RateOperator {
@@ -781,10 +826,15 @@ export class OtsgRateOperator implements RateOperator {
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
       const { Q1, Q2, Q3, zoneQ, zoneQ2, zoneQ3 } = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
-      // The boiling + superheat exchange the solver already applied for
-      // this step (applyStiffOtsgWallExchange) stays out of the stages
-      const implicitWall = cfg.wallImplicitThisStep === true;
-      const QWaterTotal = implicitWall ? Q1 : Q1 + Q2 + Q3;
+      // A tube stamped for this step (stampStiffOtsgTubes) takes its boiling
+      // + superheat exchange as the step's constant zone duties instead of
+      // the live Q2 + Q3; before completeStiffOtsgTubes has set them (the
+      // first stage) it takes none, and the solver adds them to that stage.
+      const implicitWall = cfg.wallImplicit;
+      const zoneRate = implicitWall?.zoneRate;
+      const QWaterTotal = implicitWall
+        ? Q1 + (zoneRate ? zoneRate.reduce((a, b) => a + b, 0) : 0)
+        : Q1 + Q2 + Q3;
       // OTSG_TRACE=<nodeId>: one line per 0.5 s of sim time with the
       // partition, the metal and the duties - the view that found the
       // bottled-boiler ring. Reads an env var once per evaluation; the
@@ -849,7 +899,9 @@ export class OtsgRateOperator implements RateOperator {
       // axial conduction along the bundle is negligible against either.
       zones.forEach((z, k) => {
         const mr = rates.thermalNodes.get(z.id) ?? { dTemperature: 0 };
-        const waterQ = implicitWall ? zoneQ[k] - zoneQ2[k] - zoneQ3[k] : zoneQ[k];
+        const waterQ = implicitWall
+          ? zoneQ[k] - zoneQ2[k] - zoneQ3[k] + (zoneRate ? zoneRate[k] : 0)
+          : zoneQ[k];
         mr.dTemperature += (gasQ[k] - waterQ) / nodeHeatCapacity(z);
         rates.thermalNodes.set(z.id, mr);
       });
