@@ -2,6 +2,7 @@
  * Xe-100 accident scenarios: loss of primary flow and SG tube rupture.
  *
  *   npx tsx scripts/xe100-scenarios.ts lofc [seconds]   - circulator trip
+ *   npx tsx scripts/xe100-scenarios.ts plofc [seconds]  - blackout + SG isolated (pressurized, RCCS only)
  *   npx tsx scripts/xe100-scenarios.ts dlofc [seconds]  - blackout + RPV break (depressurized)
  *   npx tsx scripts/xe100-scenarios.ts chute [seconds]  - blackout + defuel chute break (pebble spill)
  *   npx tsx scripts/xe100-scenarios.ts sgtr [seconds]   - tube rupture into primary
@@ -37,7 +38,7 @@ import { exposedParticleFraction } from '../src/simulation/operators/graphite-ox
 import { pebbleSpillSummary } from '../src/simulation/operators/pebble-spill';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'dlofc' | 'chute' | 'sgtr';
+const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'plofc' | 'dlofc' | 'chute' | 'sgtr';
 // The fault sequences live in the scenario presets (gen-xe100.ts writes them;
 // src/simulation/scenario-types.ts describes them) and fire from inside the
 // solver, so this script only drives time and reports. PRESET=<path> runs a
@@ -45,6 +46,7 @@ const scenario = (process.argv[2] ?? 'lofc') as 'lofc' | 'dlofc' | 'chute' | 'sg
 const PRESET = process.env.PRESET ??
   path.join(HERE, '..', 'src', 'presets',
     scenario === 'sgtr' ? 'xe100-sgtr.json' : scenario === 'dlofc' ? 'xe100-dlofc.json' :
+    scenario === 'plofc' ? 'xe100-plofc.json' :
     scenario === 'chute' ? 'xe100-chute.json' : 'xe100-sbo.json');
 const seconds = parseFloat(process.argv[3] ?? '1800');
 const SETTLE = 400; // s to steady state before the fault
