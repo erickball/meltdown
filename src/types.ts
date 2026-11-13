@@ -203,6 +203,11 @@ export interface ComponentBase {
   simNodeId?: string;   // Links to simulation FlowNode
   simPumpId?: string;   // Links to simulation PumpState
   simValveId?: string;  // Links to simulation ValveState
+  /** Display only: temperature (K) of the component's wall metal node, synced
+   *  from the simulation so the drawing can glow when the metal is hot. */
+  wallTemperature?: number;
+  /** Display only (heat exchangers): hottest tube-metal temperature (K). */
+  tubeMetalTemperature?: number;
 }
 
 export interface TankComponent extends ComponentBase {

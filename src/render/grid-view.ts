@@ -24,6 +24,7 @@ import { buildGhost, drawBuildProgress } from '../game/build-queue';
 import { getFluidColor, COLORS } from './colors';
 import { getComponentSize } from './component-size';
 import { readoutScale } from './readout-scale';
+import { hotColor, hotRunBody, heatHalo } from './incandescence';
 import {
   TILE_M, Footprint, PlanRect, PortAnchor, Side,
   componentFootprint, footprintForType, footprintRect, snapCenter, rectsOverlap, cellCenter,
@@ -2398,7 +2399,7 @@ export class GridView {
       const color = pipe.fluid ? getFluidColor(pipe.fluid) : COLORS.steel;
       const ghost = buildGhost(pipe);
       if (ghost) ctx.globalAlpha = GHOST_ALPHA;
-      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId);
+      this.drawPipe(ctx, pts.map(p => this.worldToScreen(p)), color, this.lineWidthForDiameter(pipe.diameter || 0.3), pipe.id === f.selectedComponentId, pipe.wallTemperature);
       if (ghost) ctx.globalAlpha = 1;
     }
     for (const [run, pts] of layout.display) {
@@ -2435,7 +2436,7 @@ export class GridView {
   }
 
   /** A pipe run: shadow, dark wall, fluid-coloured body, a sheen, elbows at bends, flanges at the ends. */
-  private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean): void {
+  private drawPipe(ctx: CanvasRenderingContext2D, pts: Point[], color: string, w: number, highlight: boolean, wallK?: number): void {
     if (pts.length < 2) return;
     const path = () => {
       ctx.beginPath();
@@ -2459,11 +2460,18 @@ export class GridView {
     path(); ctx.stroke();
     ctx.restore();
 
-    ctx.strokeStyle = '#2a2e33';
+    const halo = heatHalo(wallK);
+    if (halo) {
+      ctx.strokeStyle = halo.color;
+      ctx.lineWidth = w + 2 * halo.spread;
+      path(); ctx.stroke();
+    }
+
+    ctx.strokeStyle = hotColor('#2a2e33', wallK);
     ctx.lineWidth = w + 2;
     path(); ctx.stroke();
 
-    ctx.strokeStyle = color;
+    ctx.strokeStyle = hotRunBody(color, COLORS.steel, wallK);
     ctx.lineWidth = w;
     path(); ctx.stroke();
 

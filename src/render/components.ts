@@ -43,7 +43,7 @@ import {
   RGB,
   GasColorInfo,
 } from './colors';
-import { incandescentColor, incandescentIntensity } from './incandescence';
+import { incandescentColor, incandescentIntensity, hotColor } from './incandescence';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
 import { componentWall, hxShellWall } from '../simulation/wall-sizing';
@@ -1006,8 +1006,10 @@ function renderTank(ctx: CanvasRenderingContext2D, tank: TankComponent, view: Vi
   const wallPx = Math.max(2, wallThickness * view.zoom);
 
   // Outer wall
-  ctx.fillStyle = COLORS.steel;
+  const endHalo = beginHeatHalo(ctx, tank.wallTemperature);
+  ctx.fillStyle = hotColor(COLORS.steel, tank.wallTemperature);
   ctx.fillRect(-w / 2, -h / 2, w, h);
+  endHalo();
 
   // Inner area (show fluid if present)
   const innerW = w - wallPx * 2;
@@ -1109,6 +1111,21 @@ function renderStandpipeRing(
  * rackHeight tall - so what the picture says about the water covering the
  * fuel is what the heat-transfer model is actually doing.
  */
+/**
+ * Radiant halo for a hot shell: the next fill/stroke casts a soft glow in
+ * the emission colour, as bright as the glow is. Returns the restore call.
+ * Cheap in practice - component drawings are cached as sprites.
+ */
+function beginHeatHalo(ctx: CanvasRenderingContext2D, T: number | undefined): () => void {
+  const a = T === undefined ? 0 : incandescentIntensity(T);
+  if (!(a > 0.01)) return () => {};
+  const c = incandescentColor({ r: 0, g: 0, b: 0 }, T as number);
+  ctx.save();
+  ctx.shadowColor = `rgba(${c.r}, ${c.g}, ${c.b}, ${Math.min(1, 1.5 * a).toFixed(3)})`;
+  ctx.shadowBlur = 4 + 24 * a;
+  return () => ctx.restore();
+}
+
 export const RACK_STEEL: RGB = { r: 104, g: 114, b: 122 };
 
 /** Rack/cladding colour at temperature: steel grey, glowing at its
@@ -1209,8 +1226,10 @@ function renderPipe(ctx: CanvasRenderingContext2D, pipe: PipeComponent, view: Vi
   const innerD = pipe.diameter * view.zoom;
 
   // Outer pipe (wall)
-  ctx.fillStyle = COLORS.steel;
+  const endHalo = beginHeatHalo(ctx, pipe.wallTemperature);
+  ctx.fillStyle = hotColor(COLORS.steel, pipe.wallTemperature);
   ctx.fillRect(0, -outerD / 2, length, outerD);
+  endHalo();
 
   // Inner pipe (fluid space)
   if (pipe.fluid) {
@@ -1315,7 +1334,7 @@ function renderPump(ctx: CanvasRenderingContext2D, pump: PumpComponent, view: Vi
   const casingBottom = couplingBottom + pumpCasingHeight;
   const nozzleBottom = casingBottom + suctionNozzleHeight;
 
-  const steelColor = pump.running ? COLORS.steel : COLORS.steelDark;
+  const steelColor = hotColor(pump.running ? COLORS.steel : COLORS.steelDark, pump.wallTemperature);
   const highlightColor = pump.running ? COLORS.steelHighlight : COLORS.steel;
 
   // === INLET PIPE (vertical, from bottom of suction nozzle) ===
@@ -1543,7 +1562,7 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
   const h = vessel.height * view.zoom;
 
   // Draw the vessel shell as a single continuous path (no dome transition lines)
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, vessel.wallTemperature);
   ctx.beginPath();
 
   if (vessel.hasDome && vessel.hasBottom) {
@@ -1572,7 +1591,7 @@ function renderVessel(ctx: CanvasRenderingContext2D, vessel: VesselComponent, vi
     // No domes - just a cylinder
     ctx.rect(-outerR, -h / 2, outerR * 2, h);
   }
-  ctx.fill();
+  { const endHalo = beginHeatHalo(ctx, vessel.wallTemperature); ctx.fill(); endHalo(); }
 
   // Inner cavity with fluid - also as single path
   ctx.save();
@@ -1778,7 +1797,7 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   const barrelHeight = barrelBottomY - barrelTopY;
 
   // Draw the vessel shell as a single continuous path (no dome transition lines)
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, vessel.wallTemperature);
   ctx.beginPath();
 
   // Start at bottom-left of cylinder, draw outer path clockwise
@@ -1798,7 +1817,7 @@ function renderReactorVessel(ctx: CanvasRenderingContext2D, vessel: ReactorVesse
   ctx.arc(0, h / 2 - domeR, domeR, 0, Math.PI, false);
 
   ctx.closePath();
-  ctx.fill();
+  { const endHalo = beginHeatHalo(ctx, vessel.wallTemperature); ctx.fill(); endHalo(); }
 
   // Now draw the inner cavity (hollow it out)
   // Inner cavity with fluid - drawn as a single path
@@ -2313,7 +2332,7 @@ function renderValveFluid(
 
 function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number): void {
   // Valve body - bowtie shape for gate valve
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.beginPath();
   ctx.moveTo(-bodySize / 2, -d / 2);
   ctx.lineTo(0, 0);
@@ -2352,7 +2371,7 @@ function renderStandardValve(ctx: CanvasRenderingContext2D, valve: ValveComponen
 
 function renderCheckValve(ctx: CanvasRenderingContext2D, valve: ValveComponent, view: ViewState, d: number, bodySize: number, connections?: Connection[]): void {
   // Check valve body - bowtie shape like standard valve
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.beginPath();
   ctx.moveTo(-bodySize / 2, -d / 2);
   ctx.lineTo(0, 0);
@@ -2469,13 +2488,13 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
   const bodyHeight = bodySize * 1.2;
 
   // Main valve body (vertical rectangular shape)
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.fillRect(-bodyWidth / 2, -bodyHeight / 2, bodyWidth, bodyHeight);
 
   // Inlet pipe from bottom
   const pipeWidth = d * 0.6;
   const pipeLength = d * 0.5;
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.fillRect(-pipeWidth / 2, bodyHeight / 2, pipeWidth, pipeLength);
 
   // Flow path in inlet (if open)
@@ -2490,7 +2509,7 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
 
   // Outlet pipe to the right side
   const outletY = -bodyHeight / 4;
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.fillRect(bodyWidth / 2, outletY - pipeWidth / 2, pipeLength, pipeWidth);
 
   // Flow path in outlet (if open)
@@ -2516,7 +2535,7 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
   const wetH = bodyHeight / 2 - chamberInset - wetTop;
   renderValveFluid(ctx, valve, () => ctx.rect(-wetW / 2, wetTop, wetW, wetH),
     { x: -wetW / 2, y: wetTop, w: wetW, h: wetH });
-  ctx.fillStyle = valve.opening > 0 ? COLORS.warning : COLORS.steel;
+  ctx.fillStyle = valve.opening > 0 ? COLORS.warning : hotColor(COLORS.steel, valve.wallTemperature);
   ctx.fillRect(-bodyWidth / 2 + chamberInset + 2, stopperY,
                bodyWidth - chamberInset * 2 - 4, stopperHeight);
 
@@ -2544,7 +2563,7 @@ function renderReliefValve(ctx: CanvasRenderingContext2D, valve: ValveComponent,
   ctx.stroke();
 
   // Spring cap on top
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, valve.wallTemperature);
   ctx.fillRect(-bodyWidth / 3, -bodyHeight / 2 - 5, bodyWidth * 2 / 3, 8);
 
   // Adjustment bolt on top (for setpoint)
@@ -2598,7 +2617,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
 
   // Draw shell and fluid together to avoid seams
   // First draw the outer shell shape
-  ctx.fillStyle = COLORS.steel;
+  ctx.fillStyle = hotColor(COLORS.steel, hx.wallTemperature);
   ctx.beginPath();
   if (hxType === 'utube') {
     if (isHorizontal) {
@@ -2619,7 +2638,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   } else {
     ctx.rect(-w / 2, -h / 2, w, h);
   }
-  ctx.fill();
+  { const endHalo = beginHeatHalo(ctx, hx.wallTemperature); ctx.fill(); endHalo(); }
 
   // Now draw the inner fluid region (clipped)
   ctx.save();
@@ -2735,8 +2754,20 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
     b: number,
     inletEnd: number,
     outletEnd: number,
-    paint: (fill: string | CanvasPattern) => void
+    paintFluid: (fill: string | CanvasPattern) => void
   ): void => {
+    // Glowing tube metal is opaque and outshines the fluid drawn through
+    // it: lay the hot wall over each interior in proportion to the glow
+    const tubeGlow = incandescentIntensity(hx.tubeMetalTemperature ?? 0);
+    const paint = tubeGlow > 0.01
+      ? (fill: string | CanvasPattern) => {
+          paintFluid(fill);
+          ctx.save();
+          ctx.globalAlpha = tubeGlow;
+          paintFluid(hotColor(COLORS.steel, hx.tubeMetalTemperature));
+          ctx.restore();
+        }
+      : paintFluid;
     const section = hx.tubeSections?.[b];
     if (!section) {
       paint(bundleFillOf(b));
@@ -2808,17 +2839,17 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
       for (let i = 0; i < tubesPerBundle; i++) {
         const y = tubeY(i);
         if (hxType === 'straight') {
-          ctx.fillStyle = COLORS.steel;
+          ctx.fillStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           ctx.fillRect(innerLeft + tubeSheetThickness, y - tubeRadius - tubeWall, innerW - tubeSheetThickness * 2, (tubeRadius + tubeWall) * 2);
         } else if (hxType === 'helical') {
-          ctx.strokeStyle = COLORS.steel;
+          ctx.strokeStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           ctx.lineWidth = (tubeRadius + tubeWall) * 2;
           helicalPathH(y, waveAmplitude, waveFreq);
           ctx.stroke();
         } else {
           // U-tube - tubes with U-bends at the right end. Bend center sits
           // where the tubes meet the bulge arc.
-          ctx.fillStyle = COLORS.steel;
+          ctx.fillStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           ctx.beginPath();
           ctx.arc(innerLeft + tubeSheetThickness, y, tubeRadius + tubeWall, Math.PI / 2, -Math.PI / 2);
           ctx.lineTo(uBendX, y - tubeRadius - tubeWall);
@@ -2912,15 +2943,15 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
       for (let i = 0; i < tubesPerBundle; i++) {
         const x = tubeX(i);
         if (hxType === 'straight') {
-          ctx.fillStyle = COLORS.steel;
+          ctx.fillStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           ctx.fillRect(x - tubeRadius - tubeWall, innerTop + tubeSheetThickness, (tubeRadius + tubeWall) * 2, innerH - tubeSheetThickness * 2);
         } else if (hxType === 'helical') {
-          ctx.strokeStyle = COLORS.steel;
+          ctx.strokeStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           ctx.lineWidth = (tubeRadius + tubeWall) * 2;
           helicalPathV(x, waveAmplitude, waveFreq);
           ctx.stroke();
         } else {
-          ctx.fillStyle = COLORS.steel;
+          ctx.fillStyle = hotColor(COLORS.steel, hx.tubeMetalTemperature);
           uTubePathV(x, tubeRadius + tubeWall);
           ctx.fill();
         }
@@ -2964,7 +2995,7 @@ function renderHeatExchanger(ctx: CanvasRenderingContext2D, hx: HeatExchangerCom
   // Draw plenums (semi-ellipsoid tube-side headers)
   const plenumLength = (hx.plenumLength || 0) * view.zoom;
   if (plenumLength > 0) {
-    const plenumColor = COLORS.steel;
+    const plenumColor = hotColor(COLORS.steel, hx.wallTemperature);
     const plenumHighlight = COLORS.steelHighlight;
     const dividerThickness = 3; // Pixels for divider plate
     // Canvas throws on a negative radius: zoomed far out the plenum can be

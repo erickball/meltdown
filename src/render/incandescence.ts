@@ -160,3 +160,53 @@ export function incandescentIntensity(T: number, emissivity = 0.8): number {
   const [r, gg, b] = blackbodyLinearRGB(T, emissivity);
   return film((0.2126 * r + 0.7152 * gg + 0.0722 * b) ** GAMMA);
 }
+
+/** Parse '#rrggbb', 'rgb(...)' or 'rgba(...)' into RGB (alpha dropped). */
+export function parseColor(css: string): RGB {
+  const hex = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(css);
+  if (hex) return { r: parseInt(hex[1], 16), g: parseInt(hex[2], 16), b: parseInt(hex[3], 16) };
+  const m = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)/i.exec(css);
+  if (m) return { r: +m[1], g: +m[2], b: +m[3] };
+  throw new Error(`[incandescence] cannot parse colour '${css}'`);
+}
+
+/** A css colour of a surface whose cold colour is `css`, at temperature T
+ *  (unchanged when T is undefined: no metal node behind the drawing). */
+export function hotColor(css: string, T: number | undefined): string {
+  if (T === undefined || !(T > T_MIN)) return css; // no visible emission below T_MIN
+  // Drawn many times a frame (every HX tube), so memoised per whole kelvin
+  const key = `${css}|${Math.round(T)}`;
+  let out = HOT_CACHE.get(key);
+  if (out === undefined) {
+    const c = incandescentColor(parseColor(css), Math.round(T));
+    out = `rgb(${c.r}, ${c.g}, ${c.b})`;
+    if (HOT_CACHE.size > 4096) HOT_CACHE.clear();
+    HOT_CACHE.set(key, out);
+  }
+  return out;
+}
+const HOT_CACHE = new Map<string, string>();
+
+/**
+ * The body of a pipe run, which the views draw in its FLUID's colour (a
+ * see-through convention). Hot metal is opaque and outshines that, so the
+ * fluid colour gives way to the glowing wall in proportion to how bright the
+ * glow is: unchanged until the metal glows, the fluid hidden only when the
+ * wall is white-hot.
+ */
+export function hotRunBody(fluidCss: string, wallCss: string, T: number | undefined): string {
+  if (T === undefined || !(T > T_MIN)) return fluidCss;
+  const a = incandescentIntensity(T);
+  const f = parseColor(fluidCss), w = parseColor(hotColor(wallCss, T));
+  const mix = (x: number, y: number) => Math.round(x + (y - x) * a);
+  return `rgb(${mix(f.r, w.r)}, ${mix(f.g, w.g)}, ${mix(f.b, w.b)})`;
+}
+
+/** Colour of the radiant halo round a hot run (null when it does not glow),
+ *  and how wide it spreads, in px beyond the run. */
+export function heatHalo(T: number | undefined): { color: string; spread: number } | null {
+  const a = T === undefined ? 0 : incandescentIntensity(T);
+  if (!(a > 0.01)) return null;
+  const c = incandescentColor({ r: 0, g: 0, b: 0 }, T as number);
+  return { color: `rgba(${c.r}, ${c.g}, ${c.b}, ${(0.6 * a).toFixed(3)})`, spread: 4 + 14 * a };
+}

@@ -14,6 +14,7 @@
  * the caller's.
  */
 import { Point } from '../types';
+import { hotColor, hotRunBody, heatHalo } from './incandescence';
 
 export interface Point3 {
   x: number;
@@ -153,8 +154,9 @@ export function screenMidpoint(pts: Point[]): { point: Point; dir: Point } {
  * sheen along its upper side, collars at the bends, flanges at the ends -
  * with the width following the perspective from vertex to vertex. `halo`,
  * when given, is the colour of a selection halo laid under the whole run.
+ * `wallK`, the wall metal's temperature, makes a hot run glow.
  */
-export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], color: string, halo: string | null): void {
+export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], color: string, halo: string | null, wallK?: number): void {
   if (pts.length < 2) return;
 
   // Consecutive legs drawn (nearly) the same width share one path, so a run
@@ -184,9 +186,14 @@ export function drawPipeRun(ctx: CanvasRenderingContext2D, pts: RunVertex[], col
     ctx.strokeStyle = halo;
     pass(w => w + 8);
   }
-  ctx.strokeStyle = '#2a2e33';
+  const heat = heatHalo(wallK);
+  if (heat) {
+    ctx.strokeStyle = heat.color;
+    pass(w => w + 2 * heat.spread);
+  }
+  ctx.strokeStyle = hotColor('#2a2e33', wallK);
   pass(w => w + 2);
-  ctx.strokeStyle = color;
+  ctx.strokeStyle = hotRunBody(color, '#667788', wallK);
   pass(w => w);
 
   // The detailing below is a pixel or less on a small-bore line - invisible,
