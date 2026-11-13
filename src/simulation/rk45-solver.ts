@@ -558,15 +558,23 @@ export function applyRatesToState(state: SimulationState, rates: StateRates, dt:
       // section cannot hold more water than the whole node does.
       if (node.otsg && nodeRates.dOtsgM1 !== undefined) {
         const m1Raw = node.otsg.m1 + nodeRates.dOtsgM1 * dt;
-        const m1 = Math.min(Math.max(0, node.fluid.mass), Math.max(0, m1Raw));
-        const U1Raw = Math.max(0, node.otsg.U1 + (nodeRates.dOtsgU1 ?? 0) * dt);
+        const U1Raw = node.otsg.U1 + (nodeRates.dOtsgU1 ?? 0) * dt;
+        // The section empties as a PAIR: an empty section holds no energy,
+        // and a section whose energy is gone holds no water. A slug boiling
+        // away takes both to zero together, and whichever residue the RK
+        // combination leaves on the wrong side of zero first, the other is
+        // float residue too. Flooring only the energy once left 6.8 ug at
+        // u = 0 - a profile reaching down to -894 kJ/kg, which reconcileSlug
+        // then re-based to a negative energy (xe100-plofc, t = 2390 s).
+        const empty = !(m1Raw > 0) || !(U1Raw > 0);
+        const m1 = empty ? 0 : Math.min(node.fluid.mass, m1Raw);
         // The leash on the mass takes the energy with it, at the section's
         // own mean, so the profile keeps its shape: a section pegged at the
         // tube's whole inventory while its energy kept climbing would read
         // back a mean above saturation, which is not a state the model has
-        // room for. An empty section holds no energy at all, exactly.
-        node.otsg.m1 = m1;
-        node.otsg.U1 = m1 > 0 && m1Raw > 0 ? U1Raw * (m1 / m1Raw) : 0;
+        // room for.
+        node.otsg.m1 = Math.max(0, m1);
+        node.otsg.U1 = node.otsg.m1 > 0 ? U1Raw * (node.otsg.m1 / m1Raw) : 0;
       }
 
       if (nodeRates.dNcg) {
