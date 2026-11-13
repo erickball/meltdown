@@ -1998,11 +1998,11 @@
     }
   ],
   "scenario": {
-    "description": "Pressurized loss of forced cooling at t=400 s: station blackout with the steam generator isolated (governor and extraction shut, feed tripped), no scram. The helium stays at pressure; decay heat leaves through in-vessel convection, conduction and radiation to the vessel wall and the RCCS alone.",
+    "description": "Pressurized loss of forced cooling at t=400 s: station blackout with the steam generator isolated (governor and extraction shut, feed tripped). The helium stays at pressure; decay heat leaves through in-vessel convection, conduction and radiation to the vessel wall and the RCCS alone.",
     "events": [
       {
         "time": 400,
-        "message": "Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated, no scram",
+        "message": "Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated",
         "actions": [
           {
             "kind": "pump",

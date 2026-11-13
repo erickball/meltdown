@@ -1234,17 +1234,20 @@ const stationBlackout = {
 // valve. The SG sits below the core, so with the circulator stopped the
 // helium inventory stratifies rather than circulating through it: decay heat
 // leaves the bed by conduction, radiation and in-vessel natural convection to
-// the reflector and vessel wall, then by radiation to the RCCS panels. The
-// pressurized gas still convects inside the vessel, which is what makes this
-// milder than the DLOFC - fuel peaks lower, and later.
+// the reflector and vessel wall, then by radiation to the RCCS panels.
+// Rods: whatever stationBlackout does with them on the loss of power, this
+// takes too - the design-basis PLOFC is the scrammed one. Do NOT leave the
+// rod controller in auto here: it inserts while the stagnant core runs hot,
+// then withdraws as decay heat ebbs below its 750 C setpoint and restarts
+// the reactor, a power burst every ~80 minutes that no unpowered plant makes.
 const pressurizedLofc = {
   description: 'Pressurized loss of forced cooling at t=400 s: station blackout with the ' +
-    'steam generator isolated (governor and extraction shut, feed tripped), no scram. The ' +
-    'helium stays at pressure; decay heat leaves through in-vessel convection, conduction ' +
-    'and radiation to the vessel wall and the RCCS alone.',
+    'steam generator isolated (governor and extraction shut, feed tripped). The helium ' +
+    'stays at pressure; decay heat leaves through in-vessel convection, conduction and ' +
+    'radiation to the vessel wall and the RCCS alone.',
   events: [{
     time: SETTLE,
-    message: 'Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated, no scram',
+    message: 'Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated',
     actions: [
       ...stationBlackout.events[0].actions.filter(a => a.kind !== 'turbine-governor' && a.id !== 'ctl-msp-1'),
       { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0 },

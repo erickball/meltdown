@@ -3156,11 +3156,10 @@ function init() {
         label: 'HTGR-200 Pressurized Cooldown', data: xe100PlofcPresetData,
         tooltip: 'Pressurized loss of forced cooling (PLOFC): at t = 400 s a station blackout trips ' +
           'the circulator and feed pumps and the steam generator is isolated (turbine and ' +
-          'extraction shut), no scram. The helium stays at pressure but nothing moves it; the SG ' +
-          'sits below the core, so decay heat leaves through in-vessel natural convection, ' +
-          'conduction and radiation to the vessel wall and the RCCS alone. Milder than the ' +
-          'depressurized case: the pressurized gas still carries heat from the hot core centre ' +
-          'up and out to the reflector.',
+          'extraction shut); the rods drop with the power. The helium stays at pressure but ' +
+          'nothing moves it, and the SG sits below the core, so decay heat leaves through ' +
+          'in-vessel natural convection, conduction and radiation to the vessel wall and the ' +
+          'RCCS alone. Compare the Depressurized Cooldown, where the helium is lost as well.',
       },
       {
         label: 'HTGR-200 Depressurized Cooldown', data: xe100DlofcPresetData,
