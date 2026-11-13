@@ -3,7 +3,7 @@
  * and what they draw. Usage: npx tsx scripts/probe-exhaust-line.ts <preset> [s] [every]
  */
 import { buildSimFromFile } from './lib/sim-harness';
-import { pressureAtConnection, drawCompositionAt, calculateSeparation, calculateLiquidLevelWithObstructions, approxLiquidDensity } from '../src/simulation/operators/connection-hydraulics';
+import { pressureAtConnection, drawCompositionAt, calculateSeparation, calculateLiquidLevelWithObstructions, nodeLiquidDensity } from '../src/simulation/operators/connection-hydraulics';
 
 const preset = process.argv[2];
 const seconds = parseFloat(process.argv[3] || '60');
@@ -16,7 +16,7 @@ function report() {
   const p = s.flowNodes.get(PIPE)!;
   const conns = s.flowConnections.filter(c => c.fromNodeId === PIPE || c.toNodeId === PIPE);
   const q = Math.max(0, Math.min(1, p.fluid.quality ?? 0));
-  const liqV = p.fluid.mass * (1 - q) / approxLiquidDensity(p);
+  const liqV = p.fluid.mass * (1 - q) / nodeLiquidDensity(p);
   const level = calculateLiquidLevelWithObstructions(p, liqV);
   const sep = calculateSeparation(p, conns.reduce((m, c) => Math.max(m, Math.abs(c.massFlowRate)), 0));
   console.log(`t=${s.time.toFixed(1)} ${p.fluid.phase} m=${p.fluid.mass.toFixed(1)}kg x=${q.toFixed(3)} P=${(p.fluid.pressure/1e5).toFixed(3)}bar T=${(p.fluid.temperature-273.15).toFixed(1)}C h=${(p.height??0).toFixed(1)}m liqV=${liqV.toFixed(3)} level=${level.toFixed(3)} sep=${sep.toFixed(3)}`);

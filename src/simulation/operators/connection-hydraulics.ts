@@ -402,7 +402,7 @@ export function pressureAtConnection(
   let rho_liquid: number;
   let liquidVolume: number;
   if (node.fluid.phase === 'two-phase') {
-    rho_liquid = approxLiquidDensity(node);
+    rho_liquid = nodeLiquidDensity(node);
     // The surface where the draw model puts it: the node's own vapour space
     // (nodeGasVolume), not the mass over a density fit (see drawCompositionAt)
     liquidVolume = node.volume - Math.max(0, Math.min(node.volume, nodeGasVolume(node)));
@@ -529,9 +529,37 @@ export function pumpHeadFactor(
 }
 
 /**
- * Get approximate saturated liquid density at node temperature
+ * Density of a node's LIQUID zone, kg/m³ - what stands under the surface, and
+ * what a liquid draw is made of.
+ *
+ *  - A liquid node: the liquid it actually holds, over the room it actually
+ *    has (the whole node, less any pocket its gas has squeezed open).
+ *  - Anything else: saturated liquid at the node's temperature, from the steam
+ *    tables. For a two-phase node that is the SAME density the mixture solve
+ *    used to size the vapour space (nodeGasVolume), so the level, the head of
+ *    the liquid under it and the density of a draw from it are one statement.
+ *
+ * (This was a three-piece linear fit in temperature, 1000 - 0.08*T_C and so
+ * on. It was 4% light at 200 C and 3% light at 285 C - on a liquid node as
+ * well, where the true density was sitting in the node the whole time - so
+ * every hot line's momentum density and every hot tank's liquid head were off
+ * by that much from the equation of state the rest of the model used.)
+ *
+ * SCOPE: a moving-boundary OTSG tube keeps the old fit for now. Its zones are
+ * the partition's sections, not the bulk state this reads, and their true
+ * densities belong to the partition evaluation (not yet exposed on lastEval).
  */
-export function approxLiquidDensity(node: FlowNode): number {
+export function nodeLiquidDensity(node: FlowNode): number {
+  if (node.otsg?.lastEval) return otsgLiquidZoneDensityFit(node);
+  if (node.fluid.phase === 'liquid') {
+    return node.fluid.mass / (node.volume - nodeGasVolume(node));
+  }
+  return saturatedLiquidDensity(node.fluid.temperature);
+}
+
+/** The retired liquid-density fit, kept ONLY for OTSG section draws (see the
+ *  scope note on nodeLiquidDensity). */
+function otsgLiquidZoneDensityFit(node: FlowNode): number {
   const T_C = node.fluid.temperature - 273.15;
   if (T_C < 100) {
     return 1000 - 0.08 * T_C;
@@ -554,14 +582,38 @@ export function nodeBulkDensity(node: FlowNode): number {
 }
 
 /**
- * Get approximate vapor-space density at node conditions: ideal-gas steam at
- * its partial pressure plus the NCG mixture at its own. For a pure-steam
- * node this is the old PM/(RT); for a helium-filled node it is the helium
- * density (0.018 kg/mol water would overestimate helium ~4.5x). The NCG is
- * priced over the vapour space it actually has (nodeGasVolume), the same
- * room the mixture solve prices its partial pressure over.
+ * Density of a node's VAPOUR zone, kg/m³ - steam plus the gas sharing the
+ * space with it; what a vapour draw is made of.
+ *
+ *  - A vapour node: the node's own bulk density (water + gas over V). No
+ *    model at all.
+ *  - Anything else: saturated vapour at the node's temperature, from the steam
+ *    tables, plus the gas over the vapour space it actually has
+ *    (nodeGasVolume - where the mixture solve prices its partial pressure).
+ *
+ * (This was ideal-gas steam at its partial pressure, P*M/(R*T), floored at
+ * 0.1 kg/m³. The ideal gas is 40% light on saturated steam at 165 bar, and
+ * the floor is 2.5x the true density of the steam in a condenser at 0.055
+ * bar - which is the density the exhaust line's momentum was being priced
+ * with.)
+ *
+ * SCOPE: OTSG tubes keep the old estimate; see nodeLiquidDensity.
  */
-export function approxVaporDensity(node: FlowNode): number {
+export function nodeVaporDensity(node: FlowNode): number {
+  if (node.otsg?.lastEval) return otsgVaporZoneDensityEstimate(node);
+  if (node.fluid.phase === 'vapor') return nodeBulkDensity(node);
+  const ncg = node.fluid.ncg;
+  let rho = saturatedVaporDensity(node.fluid.temperature);
+  if (ncg && totalMoles(ncg) > 0) {
+    const gasVolume = nodeGasVolume(node);
+    if (gasVolume > 0) rho += ncgTotalMass(ncg) / gasVolume;
+  }
+  return rho;
+}
+
+/** The retired ideal-gas vapour density, kept ONLY for OTSG section draws
+ *  (see the scope note on nodeLiquidDensity). */
+function otsgVaporZoneDensityEstimate(node: FlowNode): number {
   const T = node.fluid.temperature;
   const R = 8.314; // J/mol-K
   let P_ncg = 0;
@@ -829,8 +881,8 @@ export function drawCompositionAt(
     if (fLiquid === 0 && fVapor === 0) {
       return fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
     }
-    const rhoL = fLiquid > 0 ? approxLiquidDensity(node) : 0;
-    const rhoV = fVapor > 0 ? approxVaporDensity(node) : 0;
+    const rhoL = fLiquid > 0 ? nodeLiquidDensity(node) : 0;
+    const rhoV = fVapor > 0 ? nodeVaporDensity(node) : 0;
     const rhoM = nodeBulkDensity(node);
     const rho = fLiquid * rhoL + fMixture * rhoM + fVapor * rhoV;
     const wLiquid = fLiquid * rhoL / rho;
@@ -880,8 +932,8 @@ export function drawCompositionAt(
     alphaAp = elev > b1 ? 1 : 0;
   }
 
-  const rhoL = approxLiquidDensity(node);
-  const rhoV = approxVaporDensity(node);
+  const rhoL = nodeLiquidDensity(node);
+  const rhoV = nodeVaporDensity(node);
   const rhoFroth = alphaAp * rhoV + (1 - alphaAp) * rhoL;
   const rho = fLiquid * rhoL + fMixture * rhoFroth + fVapor * rhoV;
   const wLiquid = (fLiquid * rhoL + fMixture * (1 - alphaAp) * rhoL) / rho;
@@ -927,7 +979,7 @@ function fillPure(
   out: DrawComposition | undefined, needRho: boolean,
 ): DrawComposition {
   const rho = !needRho ? 0
-    : phase === 'liquid' ? approxLiquidDensity(node) : approxVaporDensity(node);
+    : phase === 'liquid' ? nodeLiquidDensity(node) : nodeVaporDensity(node);
   return phase === 'liquid'
     ? fillComp(out, 'liquid', 1, 0, 0, 1, 0, 0, rho)
     : fillComp(out, 'vapor', 0, 0, 1, 0, 0, 1, rho);
@@ -983,10 +1035,10 @@ export function nodeSoundSpeed(node: FlowNode, flowPhase: 'liquid' | 'vapor' | '
   // Pure steam - use water properties
   const quality = fluid.phase === 'two-phase' ? (fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
   const rho = flowPhase === 'vapor'
-    ? approxVaporDensity(node)
+    ? nodeVaporDensity(node)
     : flowPhase === 'mixture'
       ? fluid.mass / V
-      : approxLiquidDensity(node);
+      : nodeLiquidDensity(node);
 
   const waterState: WaterState = {
     temperature: T,
@@ -1022,7 +1074,7 @@ export function nodeCriticalPressureRatio(node: FlowNode, flowPhase: 'liquid' | 
   // Pure steam - use water properties
   const quality = fluid.phase === 'two-phase' ? (fluid.quality ?? 0.5) : (flowPhase === 'vapor' ? 1 : 0);
   const rho = flowPhase === 'vapor'
-    ? approxVaporDensity(node)
+    ? nodeVaporDensity(node)
     : fluid.mass / node.volume;
 
   const waterState: WaterState = {

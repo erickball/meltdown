@@ -52,7 +52,7 @@ import {
   connectionRestriction,
   drawCompositionAt,
   DrawComposition,
-  approxVaporDensity,
+  nodeVaporDensity,
   CLOSED_FLOW_DECAY_TAU,
   pressureAtConnection,
   zoneWaterShare,
@@ -546,7 +546,7 @@ function vaporPropsFor(
     // Vapor-space density: ideal-gas steam at its partial pressure plus the
     // NCG mixture (valid above the water critical point, unlike the
     // saturated-vapor table this replaced)
-    rho_g: approxVaporDensity(flowNode),
+    rho_g: nodeVaporDensity(flowNode),
     nSteam, nNcg,
   };
   cache?.vapor.set(flowNode.id, out);
@@ -3325,7 +3325,7 @@ export class CladdingOxidationRateOperator implements RateOperator {
           totalMassFlow += Math.abs(fc.massFlowRate);
         }
       }
-      const rho_g = approxVaporDensity(coolantNode);
+      const rho_g = nodeVaporDensity(coolantNode);
       const mu_g = mixtureViscosity(ncg, T_gas);
       const passageArea = conn.flowPassageArea ?? coolantNode.flowArea;
       const velocity = passageArea > 0 && rho_g > 0 ? totalMassFlow / (rho_g * passageArea) : 0;

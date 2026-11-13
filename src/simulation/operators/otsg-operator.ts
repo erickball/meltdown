@@ -51,7 +51,7 @@ import {
   mixtureCp,
   averageMolecularWeight,
 } from '../gas-properties';
-import { approxVaporDensity, drawCompositionAt } from './connection-hydraulics';
+import { nodeVaporDensity, drawCompositionAt } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
 
 // Tube-side film coefficients live in otsg.ts so the factory's design-point
@@ -375,7 +375,7 @@ export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState):
   const k = ncg && totalMoles(ncg) > 0 ? mixtureThermalConductivity(ncg, T) : 0.05;
   const mu = ncg && totalMoles(ncg) > 0 ? mixtureViscosity(ncg, T) : 3e-5;
   const cp = otsgGasCpPerKg(shell);
-  const rho = approxVaporDensity(shell);
+  const rho = nodeVaporDensity(shell);
   const D = 0.019; // tube OD - the crossflow characteristic length
   const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
   const Re = mu > 0 ? (rho * v * D) / mu : 0;

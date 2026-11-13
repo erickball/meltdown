@@ -36,7 +36,7 @@ import { fileURLToPath } from 'url';
 import { buildSimFromFile } from './lib/sim-harness';
 import {
   computeConnectionHydraulics, nodeGasSpaceDensity,
-  calculateLiquidLevelWithObstructions, approxLiquidDensity,
+  calculateLiquidLevelWithObstructions, nodeLiquidDensity,
 } from '../src/simulation/operators/connection-hydraulics';
 import type { SimulationState, FlowNode, FlowConnection } from '../src/simulation/types';
 
@@ -86,7 +86,7 @@ function surfaceElevation(node: FlowNode): number {
   if (node.fluid.phase === 'liquid') return node.elevation + h;
   if (node.fluid.phase === 'vapor') return node.elevation;
   const quality = Math.max(0, Math.min(1, node.fluid.quality ?? 0));
-  const rhoL = approxLiquidDensity(node);
+  const rhoL = nodeLiquidDensity(node);
   const liquidVolume = Math.min(node.volume, node.fluid.mass * (1 - quality) / rhoL);
   return node.elevation + calculateLiquidLevelWithObstructions(node, liquidVolume);
 }
@@ -98,13 +98,13 @@ function columnDensity(node: FlowNode, localElev: number): number {
   const surface = surfaceElevation(node) - node.elevation;
   if (localElev < surface) {
     if (node.fluid.phase === 'liquid') return node.fluid.mass / node.volume;
-    return approxLiquidDensity(node);
+    return nodeLiquidDensity(node);
   }
   const quality = node.fluid.phase === 'two-phase'
     ? Math.max(0, Math.min(1, node.fluid.quality ?? 0)) : 0;
   const liquidVolume = node.fluid.phase === 'liquid' ? node.volume
     : node.fluid.phase === 'vapor' ? 0
-      : Math.min(node.volume, node.fluid.mass * (1 - quality) / approxLiquidDensity(node));
+      : Math.min(node.volume, node.fluid.mass * (1 - quality) / nodeLiquidDensity(node));
   return nodeGasSpaceDensity(node, liquidVolume);
 }
 
