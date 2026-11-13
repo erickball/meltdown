@@ -22,6 +22,7 @@ import type { ComponentType, StockLine } from '../types';
 import {
   designWallThickness, hxTubeWall, crossVesselWalls, type WallForm,
 } from '../simulation/wall-sizing';
+import { MATERIALS, DEFAULT_MATERIAL, type StructuralMaterial } from '../simulation/materials';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -97,13 +98,33 @@ const NQA1_HELP =
   'with full weld examination and design analysis, so its walls come out somewhat ' +
   'thinner for the same rating - and it costs more.';
 
+/** Tooltip for the material picker: what the choice trades. */
+const MATERIAL_HELP =
+  'What the pressure boundary is made of. It sets the allowable stress the wall is sized at ' +
+  '(so the wall thickness), the burst pressure, how fast the wall creeps to rupture when ' +
+  'hot, and the steel price. ' +
+  (Object.keys(MATERIALS) as StructuralMaterial[]).map(m => {
+    const d = MATERIALS[m];
+    return `${d.label}: qualified to ~${Math.round(d.serviceLimitK - 273.15)} C. ${d.notes}`;
+  }).join(' ') +
+  ' Above its qualified temperature an alloy still holds for a while - creep life just ' +
+  'shortens fast.';
+
+/** The material picker, shared by every pressure-boundary dialog. */
+const MATERIAL_OPTION: ComponentOption = {
+  name: 'material', type: 'select', label: 'Material', default: DEFAULT_MATERIAL,
+  options: (Object.keys(MATERIALS) as StructuralMaterial[]).map(m => ({ value: m, label: MATERIALS[m].label })),
+  help: MATERIAL_HELP,
+};
+
 /** A dialog's computed wall, in mm, from the shared sizing (wall-sizing.ts). */
 function dialogWallMm(
-  ratingBar: number, innerDiameter: number, form: WallForm, nqa1: boolean | undefined, digits: number
+  ratingBar: number, innerDiameter: number, form: WallForm, nqa1: boolean | undefined,
+  material: string | undefined, digits: number
 ): string {
   try {
     return (designWallThickness({
-      pressureBar: ratingBar, diameter: innerDiameter, measuredOn: 'inner', form, nqa1,
+      pressureBar: ratingBar, diameter: innerDiameter, measuredOn: 'inner', form, nqa1, material,
     }) * 1000).toFixed(digits);
   } catch {
     return 'too high';
@@ -194,6 +215,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Tank' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Height of tank bottom above ground level' },
       { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 5000, step: 0.1, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 1.78, min: 0.05, max: 60, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical tank. Coupled to volume: editing either one recalculates the other from the height.' },
@@ -236,7 +258,7 @@ export const componentDefinitions: Record<string, {
           const h = p.height || 4;
           const vol = p.volume || 10;
           const D = 2 * Math.sqrt(vol / (Math.PI * h)); // Derive diameter from volume and height
-          return dialogWallMm(p.pressureRating || 200, D, 'welded', p.nqa1, 1);
+          return dialogWallMm(p.pressureRating || 200, D, 'welded', p.nqa1, p.material, 1);
         }
       }
     ]
@@ -246,6 +268,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pressurizer' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 10, min: -50, max: 100, step: 0.5, unit: 'm', help: 'Typically elevated above hot leg' },
       { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 2.06, min: 0.05, max: 10, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical shell. Coupled to volume: editing either one recalculates the other from the height.' },
@@ -263,7 +286,7 @@ export const componentDefinitions: Record<string, {
           const vol = p.volume || 40;
           const h = p.height || 12;
           const D = 2 * Math.sqrt(vol / (Math.PI * h)); // Derive diameter from volume and height
-          return dialogWallMm(p.pressureRating || 175, D, 'welded', p.nqa1 ?? true, 1);
+          return dialogWallMm(p.pressureRating || 175, D, 'welded', p.nqa1 ?? true, p.material, 1);
         }
       }
     ]
@@ -273,6 +296,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Reactor Vessel' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm' },
       { name: 'innerDiameter', type: 'number', label: 'Vessel Inner Diameter', default: 4.4, min: 2, max: 8, step: 0.1, unit: 'm' },
       { name: 'height', type: 'number', label: 'Vessel Inner Height', default: 12, min: 5, max: 20, step: 0.5, unit: 'm', help: 'Total internal cavity height (including domes)' },
@@ -287,7 +311,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to the vapor space' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm', help: WALL_HELP,
-        calculate: (p) => dialogWallMm(p.pressureRating || 175, p.innerDiameter || 4.4, 'welded', p.nqa1 ?? true, 0)
+        calculate: (p) => dialogWallMm(p.pressureRating || 175, p.innerDiameter || 4.4, 'welded', p.nqa1 ?? true, p.material, 0)
       },
       { name: 'insideVolume', type: 'calculated', label: 'Inside Barrel Volume', default: 0, unit: 'm³',
         calculate: (p) => {
@@ -335,6 +359,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pipe' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       // syncExempt: the model recomputes length from the endpoint positions,
       // so a typed length is only a request, not the stored value
       { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Distance between the two ends. Typing a length slides the End point along the pipe; moving either end changes the length. When editing, it is recalculated from the endpoints.', syncExempt: true },
@@ -360,7 +385,7 @@ export const componentDefinitions: Record<string, {
       { name: 'initialNcg', type: 'ncg', label: 'Non-Condensible Gases', default: {}, help: 'Add gases like N₂, H₂ to vapor' },
       // Calculated fields
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'mm', help: WALL_HELP,
-        calculate: (p) => dialogWallMm(p.pressureRating || 155, p.diameter || 0.5, 'seamless', p.nqa1, 1)
+        calculate: (p) => dialogWallMm(p.pressureRating || 155, p.diameter || 0.5, 'seamless', p.nqa1, p.material, 1)
       },
       { name: 'calculatedLength', type: 'calculated', label: 'Actual Length', default: 0, unit: 'm',
         calculate: (p) => {
@@ -379,6 +404,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Valve' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'type', type: 'select', label: 'Valve Type', default: 'gate', options: [
         { value: 'gate', label: 'Gate Valve' },
         { value: 'globe', label: 'Globe Valve' },
@@ -417,6 +443,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Check Valve' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'type', type: 'select', label: 'Check Valve Type', default: 'swing', options: [
         { value: 'swing', label: 'Swing Check' },
         { value: 'lift', label: 'Lift Check' },
@@ -449,6 +476,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Relief Valve' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.15, min: 0.025, max: 0.5, step: 0.025, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the set pressure. Burst point and cost follow the rating.' },
       { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
@@ -478,6 +506,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'PORV' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.1, min: 0.025, max: 0.3, step: 0.025, unit: 'm' },
       { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the auto-open pressure. Burst point and cost follow the rating.' },
       { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
@@ -508,6 +537,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Pump' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'elevation', type: 'number', label: 'Elevation', default: 0, min: -20, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (negative for basement placement, e.g. condensate pumps)' },
       { name: 'type', type: 'select', label: 'Pump Type', default: 'centrifugal', options: [
         { value: 'centrifugal', label: 'Centrifugal' },
@@ -567,6 +597,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Heat Exchanger' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'hxType', type: 'select', label: 'Type', default: 'utube', options: [
         { value: 'utube', label: 'U-Tube' },
         { value: 'straight', label: 'Straight Tube' },
@@ -604,11 +635,11 @@ export const componentDefinitions: Record<string, {
       { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure Rating', default: 60, min: 1, max: 100, step: 5, unit: 'bar', help: 'Design pressure for shell side (determines shell and plenum wall thickness)' },
       // Calculated fields - displayed but not editable
       { name: 'tubeWallThickness', type: 'calculated', label: 'Tube Wall Thickness', default: 0, unit: 'mm', help: WALL_HELP,
-        calculate: (p) => (hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true },
+        calculate: (p) => (hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true, material: p.material },
           (p.tubeOD || 19) / 1000) * 1000).toFixed(2)
       },
       { name: 'shellWallThickness', type: 'calculated', label: 'Shell Wall Thickness', default: 0, unit: 'mm', help: WALL_HELP,
-        calculate: (p) => dialogWallMm(p.shellPressure || 60, p.shellDiameter || 2.5, 'welded', p.nqa1 ?? true, 0)
+        calculate: (p) => dialogWallMm(p.shellPressure || 60, p.shellDiameter || 2.5, 'welded', p.nqa1 ?? true, p.material, 0)
       },
       { name: 'heatTransferArea', type: 'calculated', label: 'Heat Transfer Area', default: 0, unit: 'm²',
         calculate: (p) => {
@@ -621,7 +652,7 @@ export const componentDefinitions: Record<string, {
       { name: 'tubeSideVolume', type: 'calculated', label: 'Tube-Side Volume', default: 0, unit: 'm³',
         calculate: (p) => {
           const tubeOD_m = (p.tubeOD || 19) / 1000;
-          const tubeThickness_m = hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true }, tubeOD_m);
+          const tubeThickness_m = hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true, material: p.material }, tubeOD_m);
           const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
           const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8);
           const volume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
@@ -647,6 +678,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Condenser' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (typically at ground level)' },
       { name: 'volume', type: 'number', label: 'Volume', default: 100, min: 10, max: 1000, step: 10, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 3, min: 1, max: 10, step: 0.5, unit: 'm' },
@@ -693,6 +725,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Turbine-Generator' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: false, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'left-right', options: [
         { value: 'left-right', label: 'Inlet Left → Exhaust Right' },
         { value: 'right-left', label: 'Inlet Right → Exhaust Left' }
@@ -770,6 +803,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'TD Pump' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'orientation', type: 'select', label: 'Orientation', default: 'left-right', options: [
         { value: 'left-right', label: 'Steam Left → Pump Right' },
         { value: 'right-left', label: 'Steam Right → Pump Left' }
@@ -1211,6 +1245,7 @@ export const componentDefinitions: Record<string, {
     options: [
       { name: 'name', type: 'text', label: 'Name', default: 'Cross-Vessel' },
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: 'Cross-vessels are part of the primary pressure boundary. ' + NQA1_HELP },
+      MATERIAL_OPTION,
       { name: 'outerDiameter', type: 'number', label: 'Outer Diameter', default: 1.0, min: 0.3, max: 3.0, step: 0.1, unit: 'm', help: 'Diameter of the outer shell (annulus boundary)' },
       { name: 'innerDiameter', type: 'number', label: 'Inner Pipe Diameter', default: 0.5, min: 0.1, max: 2.0, step: 0.05, unit: 'm', help: 'Diameter of the inner hot leg pipe' },
       { name: 'length', type: 'number', label: 'Length', default: 3.0, min: 0.5, max: 15.0, step: 0.5, unit: 'm', help: 'Will auto-adjust when annulus ports are connected' },
@@ -1218,11 +1253,11 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation', default: 5, min: 0, max: 50, step: 0.5, unit: 'm', help: 'Height above ground' },
       { name: 'wallThickness', type: 'calculated', label: 'Outer Wall Thickness', default: 0, unit: 'm', help: WALL_HELP,
         calculate: (p) => crossVesselWalls(p.pressureRating || 170, p.outerDiameter || 1.0,
-          p.innerDiameter || 0.5, p.nqa1 ?? true).outerWallThickness.toFixed(3)
+          p.innerDiameter || 0.5, p.nqa1 ?? true, p.material).outerWallThickness.toFixed(3)
       },
       { name: 'innerWallThickness', type: 'calculated', label: 'Inner Pipe Wall Thickness', default: 0, unit: 'm', help: WALL_HELP,
         calculate: (p) => crossVesselWalls(p.pressureRating || 170, p.outerDiameter || 1.0,
-          p.innerDiameter || 0.5, p.nqa1 ?? true).innerWallThickness.toFixed(3)
+          p.innerDiameter || 0.5, p.nqa1 ?? true, p.material).innerWallThickness.toFixed(3)
       },
       { name: 'innerTemperature', type: 'number', label: 'Inner Pipe Temperature', default: 320, min: 100, max: 400, step: 5, unit: '°C', help: 'Hot leg temperature' },
       { name: 'annulusTemperature', type: 'number', label: 'Annulus Temperature', default: 290, min: 100, max: 400, step: 5, unit: '°C', help: 'Cold leg/downcomer temperature' },
@@ -1231,7 +1266,7 @@ export const componentDefinitions: Record<string, {
           const outerR = (p.outerDiameter || 1.0) / 2;
           const innerR = (p.innerDiameter || 0.5) / 2;
           const { outerWallThickness: outerWall, innerWallThickness: innerWall } = crossVesselWalls(
-            p.pressureRating || 170, p.outerDiameter || 1.0, p.innerDiameter || 0.5, p.nqa1 ?? true);
+            p.pressureRating || 170, p.outerDiameter || 1.0, p.innerDiameter || 0.5, p.nqa1 ?? true, p.material);
           const outerInner = outerR - outerWall;
           const innerOuter = innerR + innerWall;
           const length = p.length || 3.0;

@@ -18,13 +18,19 @@
  */
 
 import { designWallThickness, crossVesselWalls, type WallForm } from '../simulation/wall-sizing';
+import { MATERIALS, resolveMaterial } from '../simulation/materials';
+
+/** Price of a pressure boundary's alloy relative to the steel grade an
+ *  estimator assumes for low-alloy steel (materials.ts costFactor). */
+function alloyPriceFactor(material: string | undefined): number {
+  return MATERIALS[resolveMaterial(material)].costFactor;
+}
 
 // Steel prices ($/kg) for different grades
 const STEEL_PRICES = {
   carbonSteel: 2.5,           // SA-516 Gr 70, general purpose
   lowAlloySteel: 4.0,         // SA-533 Grade B, reactor vessels
   stainlessSteel: 8.0,        // 304/316 SS
-  inconel: 45.0,              // Inconel 600/690 for SG tubes
 };
 
 // Fabrication cost multipliers (vs raw material cost)
@@ -139,10 +145,11 @@ function calculateWallThickness(
   pressureRating: number,   // bar
   innerDiameter: number,    // m
   form: WallForm,
-  nqa1: boolean
+  nqa1: boolean,
+  material?: string
 ): number {
   try {
-    return designWallThickness({ pressureBar: pressureRating, diameter: innerDiameter, measuredOn: 'inner', form, nqa1 });
+    return designWallThickness({ pressureBar: pressureRating, diameter: innerDiameter, measuredOn: 'inner', form, nqa1, material });
   } catch {
     return innerDiameter;
   }
@@ -166,12 +173,13 @@ export function estimateTankCost(props: {
   height: number;           // m
   pressureRating: number;   // bar
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Derive radius from volume and height
   const radius = Math.sqrt(props.volume / (Math.PI * props.height));
 
   // Calculate wall thickness
-  const wallThickness = calculateWallThickness(props.pressureRating, 2 * radius, 'welded', props.nqa1);
+  const wallThickness = calculateWallThickness(props.pressureRating, 2 * radius, 'welded', props.nqa1, props.material);
 
   // Steel mass
   const steelMass = cylindricalVesselSteelMass(
@@ -182,7 +190,7 @@ export function estimateTankCost(props: {
   );
 
   // Material cost
-  const materialCost = steelMass * STEEL_PRICES.carbonSteel;
+  const materialCost = steelMass * STEEL_PRICES.carbonSteel * alloyPriceFactor(props.material);
 
   // Fabrication
   const fabricationCost = materialCost * FABRICATION_MULTIPLIERS.pressureVessel;
@@ -217,9 +225,10 @@ export function estimateReactorVesselCost(props: {
   barrelDiameter: number;   // m
   barrelThickness: number;  // m
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Reactor vessel wall thickness
-  const wallThickness = calculateWallThickness(props.pressureRating, props.innerDiameter, 'welded', props.nqa1);
+  const wallThickness = calculateWallThickness(props.pressureRating, props.innerDiameter, 'welded', props.nqa1, props.material);
 
   // Vessel steel mass (including cladding at ~3mm SS)
   const vesselMass = cylindricalVesselSteelMass(
@@ -246,7 +255,7 @@ export function estimateReactorVesselCost(props: {
   );
 
   // Material costs (reactor grade steel is more expensive)
-  const vesselMaterialCost = vesselMass * STEEL_PRICES.lowAlloySteel;
+  const vesselMaterialCost = vesselMass * STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
   const claddingMaterialCost = claddingMass * STEEL_PRICES.stainlessSteel;
   const barrelMaterialCost = barrelMass * STEEL_PRICES.stainlessSteel;
   const materialCost = vesselMaterialCost + claddingMaterialCost + barrelMaterialCost;
@@ -284,18 +293,16 @@ export function estimatePipeCost(props: {
   length: number;           // m
   pressureRating: number;   // bar
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
-  // Wall thickness for pipe
-  const wallThickness = calculateWallThickness(props.pressureRating, props.diameter, 'seamless', props.nqa1);
-
-  // Minimum wall thickness for handling
-  const effectiveWallThickness = Math.max(wallThickness, 0.003); // 3mm minimum
+  // The wall the simulation builds (handling minimum included)
+  const wallThickness = calculateWallThickness(props.pressureRating, props.diameter, 'seamless', props.nqa1, props.material);
 
   // Steel mass
-  const steelMass = pipeSteelMass(props.diameter, effectiveWallThickness, props.length);
+  const steelMass = pipeSteelMass(props.diameter, wallThickness, props.length);
 
   // Material cost
-  const materialCost = steelMass * STEEL_PRICES.carbonSteel;
+  const materialCost = steelMass * STEEL_PRICES.carbonSteel * alloyPriceFactor(props.material);
 
   // Fabrication
   const fabricationCost = materialCost * FABRICATION_MULTIPLIERS.piping;
@@ -315,7 +322,7 @@ export function estimatePipeCost(props: {
     total: subtotal + nqa1Premium,
     breakdown: {
       steelMass,
-      wallThickness: effectiveWallThickness * 1000, // mm
+      wallThickness: wallThickness * 1000, // mm
     },
   };
 }
@@ -335,6 +342,7 @@ export function estimatePumpCost(props: {
   pumpType: 'centrifugal' | 'positive';
   pressureRating?: number;  // bar - casing design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Hydraulic power in kW
   const hydraulicPower = (props.ratedFlow * 9.81 * props.ratedHead) / 1000;
@@ -346,9 +354,11 @@ export function estimatePumpCost(props: {
   // Positive displacement pumps cost ~1.5x more
   const typeMultiplier = props.pumpType === 'positive' ? 1.5 : 1.0;
 
-  // Casing pressure class: wall mass grows with design pressure, but machining
-  // and internals keep a low-pressure casing from becoming free
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  // Casing pressure class: wall mass grows with design pressure (and is
+  // priced in the casing alloy), but machining and internals keep a
+  // low-pressure casing from becoming free
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
 
   const equipmentCost = baseCost * typeMultiplier * pressureMultiplier;
 
@@ -393,6 +403,7 @@ export function estimateValveCost(props: {
   valveType: 'gate' | 'globe' | 'ball' | 'butterfly' | 'check' | 'relief' | 'porv';
   pressureRating?: number;  // bar - body design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Base costs for 300mm valve
   const baseCosts: Record<string, number> = {
@@ -414,9 +425,11 @@ export function estimateValveCost(props: {
   const referenceSize = 0.3; // 300mm reference
   const sizeMultiplier = Math.pow(props.diameter / referenceSize, 2.5);
 
-  // Pressure class: body wall mass grows with design pressure, with a
-  // machining/trim floor so low-pressure valves don't become free
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  // Pressure class: body wall mass grows with design pressure (priced in
+  // the body alloy), with a machining/trim floor so low-pressure valves
+  // don't become free
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
 
   const equipmentCost = baseCost * sizeMultiplier * pressureMultiplier;
 
@@ -458,6 +471,7 @@ export function estimateHeatExchangerCost(props: {
   shellPressure: number;    // bar
   tubePressure: number;     // bar
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Calculate heat transfer area
   const tubeOD_m = props.tubeOD / 1000;
@@ -465,15 +479,15 @@ export function estimateHeatExchangerCost(props: {
   const htArea = Math.PI * tubeOD_m * tubeLength * props.tubeCount;
 
   // Shell mass
-  const shellWallThickness = calculateWallThickness(props.shellPressure, props.shellDiameter, 'welded', props.nqa1);
+  const shellWallThickness = calculateWallThickness(props.shellPressure, props.shellDiameter, 'welded', props.nqa1, props.material);
   const shellMass = cylindricalVesselSteelMass(
     props.shellDiameter,
     props.shellLength,
-    Math.max(shellWallThickness, 0.010), // 10mm minimum
+    shellWallThickness,
     true
   );
 
-  // Tube bundle mass (assume Inconel for SG, SS for others)
+  // Tube bundle mass
   const tubeID_m = tubeOD_m - 2 * (props.tubeThickness / 1000);
   const tubeVolume = Math.PI * ((tubeOD_m/2)**2 - (tubeID_m/2)**2) * tubeLength * props.tubeCount;
   const tubeMass = tubeVolume * STEEL_DENSITY;
@@ -482,10 +496,10 @@ export function estimateHeatExchangerCost(props: {
   const supportMass = tubeMass * 0.1;
 
   // Material costs
-  const shellMaterialCost = shellMass * STEEL_PRICES.lowAlloySteel;
+  const shellMaterialCost = shellMass * STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
 
-  // Use Inconel for high-pressure tube side (like SG tubes)
-  const tubeMaterial = props.tubePressure > 100 ? STEEL_PRICES.inconel : STEEL_PRICES.stainlessSteel;
+  // Tubes in the alloy the simulation builds them from (one material per HX)
+  const tubeMaterial = STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
   const tubeMaterialCost = (tubeMass + supportMass) * tubeMaterial;
 
   const materialCost = shellMaterialCost + tubeMaterialCost;
@@ -572,6 +586,7 @@ export function estimateTurbineDrivenPumpCost(props: {
   stages: number;
   pressureRating?: number;  // bar - pump casing design pressure
   nqa1: boolean;
+  material?: string;
 }): CostEstimate {
   // Small steam turbine cost
   const shaftPower = (props.ratedPumpFlow * 9.81 * props.ratedHead) / 1000 / 0.75; // kW (assuming 75% pump efficiency)
@@ -580,7 +595,8 @@ export function estimateTurbineDrivenPumpCost(props: {
   const turbineCost = shaftPower * 1000;
 
   // Pump cost (same as regular pump, including the casing pressure class)
-  const pressureMultiplier = 0.5 + 0.5 * ((props.pressureRating ?? 150) / 150);
+  const pressureMultiplier = 0.5 +
+    0.5 * ((props.pressureRating ?? 150) / 150) * alloyPriceFactor(props.material);
   const pumpCost = 5000 * Math.pow(shaftPower, 0.7) * pressureMultiplier;
 
   const equipmentCost = turbineCost + pumpCost;
@@ -1121,6 +1137,7 @@ export function estimateComponentCost(
         height: props.height || 4,
         pressureRating: props.pressureRating || 200,
         nqa1,
+        material: props.material,
       });
 
     case 'reactor-vessel':
@@ -1131,6 +1148,7 @@ export function estimateComponentCost(
         barrelDiameter: props.barrelDiameter || 3.4,
         barrelThickness: props.barrelThickness || 0.05,
         nqa1,
+        material: props.material,
       });
 
     case 'pipe':
@@ -1139,6 +1157,7 @@ export function estimateComponentCost(
         length: props.length || 10,
         pressureRating: props.pressureRating || 155,
         nqa1,
+        material: props.material,
       });
 
     case 'pump':
@@ -1148,6 +1167,7 @@ export function estimateComponentCost(
         pumpType: props.type || 'centrifugal',
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'valve':
@@ -1159,6 +1179,7 @@ export function estimateComponentCost(
         valveType: props.type || props.valveType || 'gate',
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'heat-exchanger':
@@ -1172,6 +1193,7 @@ export function estimateComponentCost(
         shellPressure: props.shellPressure || 60,
         tubePressure: props.tubePressure || 150,
         nqa1,
+        material: props.material,
       });
 
     case 'turbine-generator':
@@ -1189,6 +1211,7 @@ export function estimateComponentCost(
         stages: props.stages || 1,
         pressureRating: props.pressureRating,
         nqa1,
+        material: props.material,
       });
 
     case 'condenser':
@@ -1284,7 +1307,7 @@ export function estimateComponentCost(
 
       // The walls the cross-vessel is built with (wall-sizing.ts)
       const { outerWallThickness, innerWallThickness } =
-        crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true);
+        crossVesselWalls(pressureRating, outerDiam, innerDiam, props.nqa1 ?? true, props.material);
 
       // Outer shell steel mass (cylindrical shell)
       const outerShellVolume = Math.PI * outerDiam * outerWallThickness * cvLength;
@@ -1295,7 +1318,7 @@ export function estimateComponentCost(
       const steelMass = totalSteelVolume * STEEL_DENSITY;
 
       // Use low-alloy steel for reactor-grade pressure boundary
-      const materialCost = steelMass * STEEL_PRICES.lowAlloySteel;
+      const materialCost = steelMass * STEEL_PRICES.lowAlloySteel * alloyPriceFactor(props.material);
       const fabricationCost = materialCost * FABRICATION_MULTIPLIERS.reactorVessel;
       const installationCost = (materialCost + fabricationCost) * INSTALLATION_MULTIPLIERS.pressureVessel;
       const subtotal = materialCost + fabricationCost + installationCost;

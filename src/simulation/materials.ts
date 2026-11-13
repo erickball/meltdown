@@ -47,6 +47,9 @@ export interface MaterialCreepData {
   /** Temperature above which this alloy is outside its qualified range (K).
    *  Not a cliff - creep already handles the physics - but useful for UI. */
   serviceLimitK: number;
+  /** Price of this alloy's plate/pipe relative to low-alloy steel, for the
+   *  construction cost estimate (cost-estimation.ts). Low-alloy steel = 1. */
+  costFactor: number;
   notes: string;
 }
 
@@ -62,6 +65,7 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     // SA-533 B Cl.1 minimum: S_m = 183 MPa (the ASME tabulated 184), VIII 157
     yieldMPa: 345,
     serviceLimitK: 700,
+    costFactor: 1,
     notes: 'PWR/BWR pressure boundary. Loses strength fast above ~700 K.',
   },
 
@@ -87,6 +91,8 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     // SA-240/312 304H minimum: yield-governed, S = 137 MPa under either code
     yieldMPa: 205,
     serviceLimitK: 1090,
+    // ~$8/kg against ~$4/kg for SA-533B plate
+    costFactor: 2,
     notes: 'General high-temperature service; oxidation-limited around 1090 K.',
   },
 
@@ -107,6 +113,8 @@ export const MATERIALS: Record<StructuralMaterial, MaterialCreepData> = {
     // SB-407 800H minimum ~170: yield-governed, S = 113 MPa under either code
     yieldMPa: 170,
     serviceLimitK: 1173,
+    // Nickel alloy, ~$30/kg
+    costFactor: 7.5,
     notes: 'HTGR hot-duct liner and helical SG tubing. ASME qualified to 1173 K.',
   },
 };
