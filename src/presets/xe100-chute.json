@@ -648,6 +648,14 @@
               "y": -8
             },
             "direction": "both"
+          },
+          {
+            "id": "rccs-tank-1-vb",
+            "position": {
+              "x": 1,
+              "y": -8
+            },
+            "direction": "both"
           }
         ],
         "fluid": {
@@ -696,6 +704,58 @@
           },
           {
             "id": "val-rccs-1-out",
+            "position": {
+              "x": 0.1,
+              "y": 0
+            },
+            "direction": "out"
+          }
+        ],
+        "fluid": {
+          "temperature": 313,
+          "pressure": 7375,
+          "phase": "vapor",
+          "quality": 1,
+          "flowRate": 0
+        },
+        "initialNcg": {
+          "N2": 0.78,
+          "O2": 0.21,
+          "Ar": 0.009
+        },
+        "nqa1": true,
+        "containedBy": "bui-1"
+      }
+    ],
+    [
+      "val-rccs-vb-1",
+      {
+        "id": "val-rccs-vb-1",
+        "type": "valve",
+        "label": "RCCS Tank Vacuum Breaker",
+        "valveType": "check",
+        "position": {
+          "x": 42,
+          "y": 66
+        },
+        "rotation": 0,
+        "elevation": 42,
+        "diameter": 0.15,
+        "opening": 0,
+        "crackingPressure": 3000,
+        "volume": 0.1,
+        "pressureRating": 20,
+        "ports": [
+          {
+            "id": "val-rccs-vb-1-in",
+            "position": {
+              "x": -0.1,
+              "y": 0
+            },
+            "direction": "in"
+          },
+          {
+            "id": "val-rccs-vb-1-out",
             "position": {
               "x": 0.1,
               "y": 0
@@ -1247,8 +1307,6 @@
         "length": 7,
         "innerDiameter": 1,
         "innerWallThickness": 0.02,
-        "innerInsulationThickness": 0.05,
-        "innerInsulationConductivity": 0.3,
         "pressureRating": 70,
         "material": "alloy-800h",
         "targetComponentId": "hx-1",
@@ -1308,7 +1366,9 @@
           "He": 60
         },
         "nqa1": true,
-        "containedBy": "bui-1"
+        "containedBy": "bui-1",
+        "innerInsulationThickness": 0.05,
+        "innerInsulationConductivity": 0.3
       }
     ],
     [
@@ -1897,6 +1957,28 @@
       "resistanceCoeff": 2
     },
     {
+      "fromComponentId": "bui-1",
+      "fromPortId": "bui-1-south",
+      "toComponentId": "val-rccs-vb-1",
+      "toPortId": "val-rccs-vb-1-in",
+      "fromElevation": 42,
+      "toElevation": 0,
+      "flowArea": 0.0177,
+      "length": 1,
+      "resistanceCoeff": 2
+    },
+    {
+      "fromComponentId": "val-rccs-vb-1",
+      "fromPortId": "val-rccs-vb-1-out",
+      "toComponentId": "rccs-tank-1",
+      "toPortId": "rccs-tank-1-vb",
+      "fromElevation": 0,
+      "toElevation": 16,
+      "flowArea": 0.0177,
+      "length": 1,
+      "resistanceCoeff": 2
+    },
+    {
       "fromComponentId": "hx-1",
       "fromPortId": "hx-1-tube-leak",
       "toComponentId": "val-leak-1",
@@ -1998,11 +2080,11 @@
     }
   ],
   "scenario": {
-    "description": "Defuel chute break at t=400 s: the pebble discharge line shears off at the RPV bottom head with station blackout, no scram. Helium blows down through the 0.2 m opening and the pebble bed drains out through it onto the reactor building floor, where the spilled pebbles heat up under their own decay heat and burn in the air.",
+    "description": "Defuel chute break at t=400 s: the pebble discharge line shears off at the RPV bottom head with station blackout; the rods drop. Helium blows down through the 0.2 m opening and the pebble bed drains out through it onto the reactor building floor, where the spilled pebbles heat up under their own decay heat and burn in the air.",
     "events": [
       {
         "time": 400,
-        "message": "Defuel chute sheared at the RPV bottom head with station blackout, no scram",
+        "message": "Defuel chute sheared at the RPV bottom head with station blackout, rods dropped",
         "actions": [
           {
             "kind": "pump",
@@ -2049,6 +2131,10 @@
             "id": "ctl-fwh-1",
             "mode": "manual",
             "manualOutput": 0
+          },
+          {
+            "kind": "scram",
+            "reason": "loss of power to the control rod drives - rods released"
           },
           {
             "kind": "burst",
