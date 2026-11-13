@@ -3708,4 +3708,4 @@ export function auditComponentEditSync(
     }
   }
   return mismatches;
-}
+}
