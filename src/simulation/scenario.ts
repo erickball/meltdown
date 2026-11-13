@@ -99,6 +99,18 @@ export function applyScenarioAction(state: SimulationState, a: ScenarioAction): 
       if (!result.ok) throw new Error(`[Scenario] ${a.kind} '${a.id}': ${result.message}`);
       return;
     }
+    case 'scram': {
+      const n = state.neutronics;
+      if (!n.coreId) throw new Error(`[Scenario] scram: the plant has no reactor core`);
+      if (n.scrammed) return;
+      n.scrammed = true;
+      n.scramTime = state.time;
+      n.scramReason = a.reason;
+      n.controlRodPosition = 0;
+      if (!state.pendingEvents) state.pendingEvents = [];
+      state.pendingEvents.push({ type: 'scram', message: `SCRAM: ${a.reason}` });
+      return;
+    }
     default:
       throw new Error(`[Scenario] unknown action ${JSON.stringify(a)}`);
   }

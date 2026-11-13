@@ -414,6 +414,7 @@ add('rccs-tank-1', {
     ['rccs-tank-1-draw', -2, 8],     // downcomer to the panels
     ['rccs-tank-1-return', 2, 8],    // riser return
     ['rccs-tank-1-vent', 0, -8],     // relief on the dome
+    ['rccs-tank-1-vb', 1, -8],       // vacuum breaker on the dome
   ]),
   fluid: { temperature: 313, pressure: 7375, phase: 'liquid', quality: 0, flowRate: 0 },
   initialNcg: { N2: 0.78, O2: 0.21, Ar: 0.009 },
@@ -432,6 +433,25 @@ add('val-rccs-1', {
   diameter: 0.1, opening: 0, volume: 0.1,
   pressureRating: 20, setpoint: 2e5, blowdown: 0.05,
   ports: ports([['val-rccs-1-in', -0.1, 0, 'in'], ['val-rccs-1-out', 0.1, 0, 'out']]),
+  fluid: { temperature: 313, pressure: 7375, phase: 'vapor', quality: 1, flowRate: 0 },
+  initialNcg: { N2: 0.78, O2: 0.21, Ar: 0.009 },
+  nqa1: true, containedBy: 'bui-1',
+});
+
+// Vacuum breaker: the tank is a closed vessel inside the reactor building,
+// and its 12 mm shell is built for 10 bar from INSIDE - against outside
+// pressure it buckles at ~0.64 bar. A primary break that pressurises the
+// building to 1.5 bar crushed it (xe100-dlofc, t = 887 s) and tore it open
+// under water. A check valve from the building into the dome lets building
+// gas in whenever the outside leads by its 3 kPa cracking pressure, the
+// usual setting for a tank vacuum breaker.
+add('val-rccs-vb-1', {
+  type: 'valve', label: 'RCCS Tank Vacuum Breaker',
+  valveType: 'check',
+  position: { x: 42, y: 66 }, rotation: 0, elevation: 42,
+  diameter: 0.15, opening: 0, crackingPressure: 3000, volume: 0.1,
+  pressureRating: 20,
+  ports: ports([['val-rccs-vb-1-in', -0.1, 0, 'in'], ['val-rccs-vb-1-out', 0.1, 0, 'out']]),
   fluid: { temperature: 313, pressure: 7375, phase: 'vapor', quality: 1, flowRate: 0 },
   initialNcg: { N2: 0.78, O2: 0.21, Ar: 0.009 },
   nqa1: true, containedBy: 'bui-1',
@@ -1136,6 +1156,10 @@ connect('rccs-tank-1', 'rccs-tank-1-vent', 'val-rccs-1', 'val-rccs-1-in',
   { fromElevation: 16, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
 connect('val-rccs-1', 'val-rccs-1-out', 'bui-1', 'bui-1-south',
   { fromElevation: 0, toElevation: 42, flowArea: 0.008, length: 6, resistanceCoeff: 2 });
+connect('bui-1', 'bui-1-south', 'val-rccs-vb-1', 'val-rccs-vb-1-in',
+  { fromElevation: 42, toElevation: 0, flowArea: 0.0177, length: 1, resistanceCoeff: 2 });
+connect('val-rccs-vb-1', 'val-rccs-vb-1-out', 'rccs-tank-1', 'rccs-tank-1-vb',
+  { fromElevation: 0, toElevation: 16, flowArea: 0.0177, length: 1, resistanceCoeff: 2 });
 
 // ---------------------------------------------------------------------------
 // Leak path: SG tube side -> leak valve -> SG shell side
@@ -1198,11 +1222,11 @@ const SETTLE = 400; // s at the design point before the fault
 
 const stationBlackout = {
   description: 'Station blackout at t=400 s: circulator, feed and condensate pumps trip, ' +
-    'turbine shut, no scram. The pebble bed rides it out on temperature feedback and ' +
+    'turbine shut, rods drop on loss of power. The pebble bed rides it out on decay heat and ' +
     'the reflector-to-cavity heat path alone.',
   events: [{
     time: SETTLE,
-    message: 'Station blackout - circulator, feed and condensate pumps tripped, turbine shut, no scram',
+    message: 'Station blackout - circulator, feed and condensate pumps tripped, turbine shut, rods dropped',
     actions: [
       // Loss of ALL forced cooling, the design-basis event this plant is
       // built around - not just the helium circulator. A station blackout
@@ -1220,6 +1244,10 @@ const stationBlackout = {
       // pumps left; shut it with the plant.
       { kind: 'valve', id: 'val-bleed-1', position: 0 },
       { kind: 'controller', id: 'ctl-fwh-1', mode: 'manual', manualOutput: 0 },
+      // The rod drives hold the rods on power: losing it drops them. (Holding
+      // them through a blackout is an extra failure - a scenario that wants
+      // it leaves this out and puts ctl-rods-1 in manual.)
+      { kind: 'scram', reason: 'loss of power to the control rod drives - rods released' },
     ],
   }],
 };
@@ -1267,12 +1295,12 @@ const pressurizedLofc = {
 // analyses use: it blows the primary down in minutes rather than seconds.
 const depressurizedCooldown = {
   description: 'Depressurized loss of forced cooling at t=400 s: station blackout plus a ' +
-    '~60 mm break high on the RPV into the reactor building, no scram. Helium blows down, ' +
+    '~60 mm break high on the RPV into the reactor building; the rods drop. Helium blows down, ' +
     'in-vessel convection collapses, and decay heat leaves by conduction and radiation ' +
     'through the reflector to the vessel wall and the RCCS.',
   events: [{
     time: SETTLE,
-    message: 'Primary boundary breached (~60 mm, top of RPV) with station blackout, no scram',
+    message: 'Primary boundary breached (~60 mm, top of RPV) with station blackout, rods dropped',
     actions: [
       ...stationBlackout.events[0].actions,
       {
@@ -1291,12 +1319,12 @@ const depressurizedCooldown = {
 // (PebbleSpillRateOperator). Station blackout as in the DLOFC.
 const chuteBreak = {
   description: 'Defuel chute break at t=400 s: the pebble discharge line shears off at the ' +
-    'RPV bottom head with station blackout, no scram. Helium blows down through the 0.2 m ' +
+    'RPV bottom head with station blackout; the rods drop. Helium blows down through the 0.2 m ' +
     'opening and the pebble bed drains out through it onto the reactor building floor, ' +
     'where the spilled pebbles heat up under their own decay heat and burn in the air.',
   events: [{
     time: SETTLE,
-    message: 'Defuel chute sheared at the RPV bottom head with station blackout, no scram',
+    message: 'Defuel chute sheared at the RPV bottom head with station blackout, rods dropped',
     actions: [
       ...stationBlackout.events[0].actions,
       {
