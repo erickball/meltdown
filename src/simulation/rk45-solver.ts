@@ -20,6 +20,7 @@ import { getLastConvectionConductance, recordConvectionHeatRate, fluidHeatCapaci
 import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig, DEFAULT_PRESSURE_SOLVER_CONFIG, SANITY_PRESSURE_TOLERANCE, SANITY_PRESSURE_SCALE_FLOOR } from './types';
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
+import { stampStiffOtsgTubes, completeStiffOtsgTubes } from './operators/otsg-operator';
 import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass } from './gas-properties';
 import { MODEL_MIN_TEMPERATURE, modelMinPressure, minimumSpecificEnergy } from './water-properties';
 
@@ -1694,6 +1695,10 @@ export class RK45Solver {
   // running total over all attempts (diagnostics).
   public lastStiffConvectionPairs = 0;
   public stiffConvectionPairSteps = 0;
+  // Boiler tubes whose wall exchange was applied implicitly on the last
+  // attempt, and the running total (diagnostics).
+  public lastStiffOtsgTubes = 0;
+  public stiffOtsgTubeSteps = 0;
 
   /** Attempts on which the secant-compliance pass re-solved the network
    *  because a node's dome-edge stiffness differed from its linearization
@@ -2245,6 +2250,11 @@ export class RK45Solver {
     if (!(this.implicitMomentumActive() && this.pressureSolver)) state = cloneSimulationState(state);
     this.lastStiffConvectionPairs = this.applyStiffConvection(state, dt);
     this.stiffConvectionPairSteps += this.lastStiffConvectionPairs;
+    // Boiler tubes whose wall exchange relaxes faster than the step: stamped
+    // now, their exact duties set from the first stage's rates below (see
+    // stampStiffOtsgTubes).
+    this.lastStiffOtsgTubes = stampStiffOtsgTubes(state, dt);
+    this.stiffOtsgTubeSteps += this.lastStiffOtsgTubes;
 
     // Compute the 7 stages of DOPRI5
     const k: StateRates[] = [];
@@ -2260,6 +2270,7 @@ export class RK45Solver {
         errorRates: createZeroRates(),
       };
     }
+    if (this.lastStiffOtsgTubes > 0) completeStiffOtsgTubes(state, k0, dt);
     k[0] = k0;
 
     // k2 through k7
@@ -2339,6 +2350,12 @@ export class RK45Solver {
       accumulateRates(solution5Rates, k[i], B5[i]);
     }
     const newState = applyRatesToState(state, solution5Rates, dt);
+    // The stiff-tube stamps belong to this step's stages; an evaluation of
+    // the candidate (constraints, displays, the next attempt) sees the live
+    // duties again.
+    if (this.lastStiffOtsgTubes > 0) {
+      for (const node of newState.flowNodes.values()) if (node.otsg) node.otsg.wallImplicit = undefined;
+    }
 
     // Nearly-implicit advection, part 2 of 2: apply the step's transport for
     // the stamped connection set against the solved (frozen) flows, using

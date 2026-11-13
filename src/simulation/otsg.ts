@@ -1311,6 +1311,8 @@ export function evaluateOtsgPartition(
   // settles in a couple of rounds.
   let result: { P: number; fin: AtP } | null = null;
   let lastT3target = -1;
+  let lastU3Pin: number | undefined;
+  let lastPinP = NaN;
   for (let outer = 0; outer < 5; outer++) {
     const solved = solveP();
     if (solved === 'supercritical') {
@@ -1342,15 +1344,25 @@ export function evaluateOtsgPartition(
     const T3target = fin.sat.T + thetaMean * Math.max(0, TWall3 - fin.sat.T);
     let du3New = 0;
     if (T3target > fin.sat.T + 0.1) {
-      // The inversion costs ~a hundred property calls; when the target has
-      // moved less than the pin's own fidelity since the last round, the
-      // carried offset is already the answer.
-      if (result && Math.abs(T3target - lastT3target) < 0.25 && du3 > 0) {
-        du3New = du3;
+      // The inversion costs ~a hundred property calls; when neither the
+      // target nor the pressure has moved since the last round, the last
+      // inversion is already the answer. What carries is the pinned ENERGY,
+      // re-offset against this round's u_g: the offset du3 = u3 - u_g(P)
+      // does not survive a pressure move, because u_g moves with P while
+      // steam at a given temperature barely does. Carrying the offset
+      // across round 0's pressure jump (0.92 -> 1.06 bar on a blowing-down
+      // tube) held the steam 5.4 kJ/kg - 3.6 K - above the metal pinning
+      // it, and the standing film then pumped 1.1 MW from the steam into
+      // its own wall, paid for by the boiling section.
+      if (lastU3Pin !== undefined && Math.abs(T3target - lastT3target) < 0.25 &&
+          Math.abs(P - lastPinP) < 1e-3 * P) {
+        du3New = lastU3Pin - fin.sat.u_g;
       } else {
         const u3Pin = u3AtTemperature(T3target, P, fin.sat, probe,
           fin.u3 > fin.sat.u_g ? fin.u3 : fin.sat.u_g + 2500 * (T3target - fin.sat.T), TWall3);
         du3New = u3Pin - fin.sat.u_g;
+        lastU3Pin = u3Pin;
+        lastPinP = P;
       }
     }
     lastT3target = T3target;

@@ -387,6 +387,24 @@ export interface FlowNode {
      *  Saves from before the zones carry three per-section nodes here, which
      *  simply run as three fixed zones. */
     metalNodeIds: string[];
+    /** Stamped by the solver each step attempt when the tube's boiling or
+     *  superheat exchange answers faster than the step: the rate operator
+     *  then replaces the live Q2 + Q3 with zoneRate (W into the water per
+     *  metal zone), the exact integral of the stiff duty over the step, set
+     *  after the first stage. See stampStiffOtsgTubes. Transient - re-stamped
+     *  every attempt and cleared on the accepted state. */
+    wallImplicit?: {
+      arm: 'pinned' | 'free';
+      /** 1/s - -d(stiff duty)/dU, from a partition probe */
+      k: number;
+      /** W - the stiff duty at the step's start (Q2 pinned, Q3 free) */
+      q0: number;
+      zoneQ2: number[];
+      zoneQ3: number[];
+      /** free arm: each zone's share of the superheat section's area */
+      share3?: number[];
+      zoneRate?: number[];
+    };
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */
