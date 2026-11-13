@@ -56,6 +56,7 @@ import {
   CLOSED_FLOW_DECAY_TAU,
   pressureAtConnection,
   zoneWaterShare,
+  zoneWaterEnthalpy,
 } from './connection-hydraulics';
 
 // Shared per-connection hydraulics now live in connection-hydraulics.ts (one
@@ -1802,11 +1803,6 @@ export class NeutronicsRateOperator implements RateOperator {
 // Flow Rate Operator - Mass and Energy Transport
 // ============================================================================
 
-// Rate limiter for the getSpecificEnthalpy diagnostic dump (wall-clock ms).
-// Without it, a persistently-suspicious node logs 8 lines on every rate
-// evaluation (7+ per RK45 step) and console I/O dominates the frame time.
-let lastEnthalpyDebugLog = 0;
-
 export class FlowRateOperator implements RateOperator {
   // Reusable scratch for drawCompositionAt on the per-stage pricing loop -
   // consumed within each iteration, never retained (see the `out` param).
@@ -1911,13 +1907,15 @@ export class FlowRateOperator implements RateOperator {
           totalMolesTransferred += molesTransferred;
         }
 
-        // Bill the gas at the node's effective mixture temperature (phase-
-        // aware energy-balance inversion; see ncgEffectiveT). Enthalpy (Cp),
-        // not internal energy: the gas carries its flow work with it.
+        // Bill the gas at the node's temperature - the mixture solve's own,
+        // the one its energy n*Cv*T is booked at. Enthalpy (Cp), not internal
+        // energy: the gas carries its flow work with it. (This used to invert
+        // a linear caloric fit of the water for an "effective" temperature,
+        // which disagreed with the solved one and so billed the gas at an
+        // energy the node did not hold it at.)
         const Cp_ncg = mixtureCp(upNcg);
-        const effectiveT = this.ncgEffectiveT(upstreamNode);
 
-        const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * effectiveT;
+        const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * upstreamNode.fluid.temperature;
         upRates.dEnergy -= ncgEnergyFlow;
         downRates.dEnergy += ncgEnergyFlow;
 
@@ -1972,57 +1970,6 @@ export class FlowRateOperator implements RateOperator {
 
 
 
-
-  /**
-   * Get specific enthalpy of the flowing phase.
-   * h = u + Pv for the phase actually being drawn from the node.
-   */
-  /**
-   * Effective mixture temperature of a node holding water + NCG, from the
-   * energy balance with the water's ACTUAL phase split:
-   *   totalU = n*Cv_ncg*T + m_vap*(u_ref + Cv_vap*(T-273)) + m_liq*c_f*(T-273.15)
-   *
-   * The previous version assumed ALL water was vapor, which floored the
-   * inversion to 273 K for liquid-dominated nodes (e.g. an accumulator's N2
-   * cushion over 28 t of water reads as T=273 instead of ~306 K). NCG leaving
-   * such nodes was then billed ~30 K too cold, and the receiving node
-   * accumulated an energy deficit that drove it below the water-property
-   * floor (LOCA accumulator nitrogen breakthrough froze the injection line
-   * nodes and crashed the run).
-   *
-   * No 273 K floor here: if the books say the gas is cold, billing it cold is
-   * what keeps the energy accounting conservative. A very low result means
-   * the accounting is already broken - fail loudly.
-   */
-  private ncgEffectiveT(node: FlowNode): number {
-    const ncg = node.fluid.ncg!;
-    const n = totalMoles(ncg);
-    const Cv_ncg = mixtureCv(ncg);
-    const quality = node.fluid.phase === 'vapor' ? 1
-      : node.fluid.phase === 'liquid' ? 0
-      : (node.fluid.quality ?? 0);
-    const mVap = node.fluid.mass * quality;
-    const mLiq = node.fluid.mass - mVap;
-    const C_F = 4186;      // J/kg-K liquid water
-    const CV_VAP = 1900;   // J/kg-K water vapor
-    const U_REF = 2.375e6; // J/kg vapor internal energy at 273 K
-    const coeff = n * Cv_ncg + mVap * CV_VAP + mLiq * C_F;
-    const constant = mVap * (U_REF - 273 * CV_VAP) - mLiq * C_F * 273.15;
-    const T = (node.fluid.internalEnergy - constant) / Math.max(coeff, 1e-9);
-    if (!(T > 50)) {
-      // No substitute value: billing the gas at a made-up 50 K let a node
-      // whose books were already broken keep trading energy for thousands
-      // of seconds (the frozen pump of CAR BZ1bOwQ0oLXY0q8jG1hU sat at the
-      // 150 K floor for 2000 s). Stop here so the cause is still in view.
-      throw new Error(
-        `[ncgEffectiveT] ${node.id}: effective mixture temperature ${T.toFixed(1)} K - the node's ` +
-        `energy accounting is broken (totalU=${(node.fluid.internalEnergy / 1e6).toFixed(4)} MJ, ` +
-        `ncg=${n.toFixed(1)} mol, m=${node.fluid.mass.toFixed(3)} kg, phase=${node.fluid.phase}, ` +
-        `x=${quality.toFixed(3)}). Something removed more energy from this node than it held.`
-      );
-    }
-    return T;
-  }
 
   /**
    * What a draw from `upstreamNode` through an opening actually carries: the
@@ -2097,176 +2044,12 @@ export class FlowRateOperator implements RateOperator {
       if (!(weight > 0)) continue;
       const zoneWater = weight * shareOf(zone);
       waterShare += zoneWater;
-      waterEnthalpyFlux += zoneWater * this.getSpecificEnthalpy(upstreamNode, zone);
+      waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone);
     }
     const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
     return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace };
   }
 
-  private getSpecificEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    // Moving-boundary OTSG nodes: the sectioned model knows what actually
-    // sits at each end of the bundle. A vapor draw comes from the superheat
-    // section (carrying its superheat - the entire point of the model; the
-    // bulk state would hand back saturated h_g), a liquid draw from the
-    // subcooled section. Mixture draws fall through to the bulk path.
-    if (node.otsg?.lastEval) {
-      if (flowPhase === 'vapor') return node.otsg.lastEval.hSteamOut;
-      if (flowPhase === 'liquid') return node.otsg.lastEval.hLiquidOut;
-    }
-
-    const P = node.fluid.pressure;
-    const T = node.fluid.temperature;
-
-    // For single-phase or mixture, use bulk average
-    // IMPORTANT: Must subtract NCG energy and volume when computing water-specific properties!
-    // NCG shares the volume and contributes energy, but we only transport water here.
-    if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') {
-      let waterEnergy = node.fluid.internalEnergy;
-      let waterVolume = node.volume;
-
-      // Subtract NCG contribution if present
-      if (node.fluid.ncg) {
-        const ncgMoles = totalMoles(node.fluid.ncg);
-        if (ncgMoles > 0) {
-          const Cv_ncg = mixtureCv(node.fluid.ncg);
-
-          // Effective temperature from the phase-aware energy-balance
-          // inversion (see ncgEffectiveT - the old all-vapor assumption
-          // floored liquid-dominated nodes to 273 K)
-          const totalU = node.fluid.internalEnergy;
-          const T_eff = this.ncgEffectiveT(node);
-
-          // NCG energy at effective temperature
-          const ncgEnergy = ncgMoles * Cv_ncg * T_eff;
-          waterEnergy = totalU - ncgEnergy;
-
-          // Water energy below the reference is real for ice (the
-          // ice-vapour states below the triple line carry u < 0), so it is
-          // priced as it is. This used to clamp negative water energy to
-          // zero, which billed a draw from a frozen node at MORE energy per
-          // kg than the node held and drove it further down; a node whose
-          // books are actually broken is caught by ncgEffectiveT above,
-          // which throws instead of substituting a temperature.
-
-          // The water keeps the WHOLE volume: the gas shares the vapour
-          // space with the steam (Dalton), it does not take a slice of the
-          // node for itself. (This used to subtract an ideal-gas "NCG
-          // volume" at the total pressure - an Amagat split the mixture
-          // solve never used - so a draw's enthalpy was priced at a water
-          // state the node was not in.)
-        }
-      }
-
-      const waterMass = node.fluid.mass;
-      if (waterMass <= 0) {
-        // No water - return 0 (should not happen in normal flow)
-        return 0;
-      }
-
-      const u = waterEnergy / waterMass;
-      const v = waterVolume / waterMass;
-
-      // CRITICAL: Don't blindly trust stored P - it may be stale!
-      // The enthalpy h = u + Pv must use a pressure consistent with the current (u, v).
-      // If stored P is inconsistent, we'd remove more energy per mass than actually exists.
-      //
-      // Compute P from ideal gas at energy-consistent temperature:
-      //   For steam: u ≈ u_ref + Cv*(T - T_ref), so T = T_ref + (u - u_ref)/Cv
-      //   Then P_ideal = (R/M) * T / v
-      //
-      // Blend between stored P and ideal gas P based on specific volume:
-      //   - At v < 0.001 (liquid): use stored P (Pv term is tiny anyway)
-      //   - At v > 0.1 (vapor): use ideal gas P
-      //   - In between: smooth blend to avoid discontinuities
-      const R_over_M = 8.314 / 0.018;  // ~462 J/kg-K for water
-      const Cv_steam = 1400;           // J/kg-K
-      const u_ref = 2.375e6;           // J/kg at 273K
-      const T_ref = 273;               // K
-
-      // Estimate T from energy: u = u_ref + Cv*(T - T_ref)
-      const T_from_energy = T_ref + (u - u_ref) / Cv_steam;
-
-      let P_ideal: number;
-      if (T_from_energy > 10) {
-        P_ideal = (1 / v) * R_over_M * T_from_energy;
-      } else {
-        // Extremely low energy - use minimal T to get minimal P
-        // This prevents runaway energy extraction from unphysical states
-        P_ideal = (1 / v) * R_over_M * 10;
-      }
-
-      // Blend factor: 0 at v<=0.001, 1 at v>=0.1, smooth in between
-      // Using log scale for smooth transition across density range
-      let blendFactor: number;
-      if (v <= 0.001) {
-        blendFactor = 0;  // Pure liquid - use stored P
-      } else if (v >= 0.1) {
-        blendFactor = 1;  // Pure vapor - use ideal gas P
-      } else {
-        // Log-linear blend from v=0.001 to v=0.1 (factor of 100)
-        blendFactor = Math.log10(v / 0.001) / 2;  // 0 at 0.001, 1 at 0.1
-      }
-
-      const effectiveP = (1 - blendFactor) * P + blendFactor * P_ideal;
-      const h = u + effectiveP * v;
-
-      // DEBUG: Log enthalpy calculation details for problem diagnosis
-      // Enable for nodes with suspicious energy states or significant P mismatch
-      const h_stored_P = u + P * v;
-      const h_ideal_P = u + P_ideal * v;
-      const pMismatchRatio = Math.abs(P - P_ideal) / Math.max(P, P_ideal, 1);
-
-      // Log if:
-      // 1. There's >50% difference between stored and ideal P for vapor-like densities
-      // 2. Or energy implies T < 100K for vapor (anomalously cold)
-      // 3. Or specific energy is very low for vapor (<500 kJ/kg at v>0.01)
-      // Boundary nodes are excluded - their synthetic reservoir states (e.g. the
-      // atmosphere) trip these conditions by construction, and logging them every
-      // rate evaluation floods the console badly enough to slow the simulation.
-      const shouldLog = !node.isBoundary &&
-                        ((pMismatchRatio > 0.5 && v > 0.01) ||
-                         (T_from_energy < 100 && v > 0.01) ||
-                         (u < 500e3 && v > 0.01));
-
-      if (shouldLog && performance.now() - lastEnthalpyDebugLog > 1000) {
-        lastEnthalpyDebugLog = performance.now();
-        console.warn(`[getSpecificEnthalpy DEBUG] ${node.id}:`);
-        console.warn(`  State: mass=${waterMass.toFixed(3)}kg, U=${(waterEnergy/1e6).toFixed(4)}MJ, V=${(waterVolume*1e3).toFixed(1)}L`);
-        console.warn(`  Specific: u=${(u/1e3).toFixed(2)}kJ/kg, v=${(v*1e3).toFixed(2)}L/kg`);
-        console.warn(`  Stored: T=${(T-273.15).toFixed(1)}C, P=${(P/1e5).toFixed(3)}bar, phase=${node.fluid.phase}`);
-        console.warn(`  Computed: T_from_u=${(T_from_energy-273.15).toFixed(1)}C, P_ideal=${(P_ideal/1e5).toFixed(3)}bar`);
-        console.warn(`  Blend: factor=${blendFactor.toFixed(3)}, P_eff=${(effectiveP/1e5).toFixed(3)}bar`);
-        console.warn(`  Enthalpy: h_stored_P=${(h_stored_P/1e3).toFixed(1)}kJ/kg, h_ideal_P=${(h_ideal_P/1e3).toFixed(1)}kJ/kg, h_used=${(h/1e3).toFixed(1)}kJ/kg`);
-        console.warn(`  Pv work: stored=${(P*v/1e3).toFixed(1)}kJ/kg, ideal=${(P_ideal*v/1e3).toFixed(1)}kJ/kg, eff=${(effectiveP*v/1e3).toFixed(1)}kJ/kg`);
-      }
-
-      return h;
-    }
-
-    // A two-phase node drawing ONE phase hands over that saturated phase, at
-    // the node's temperature - two-phase means saturated, and T is the
-    // saturation temperature of the water's own (steam partial) pressure.
-    // Both from the steam tables.
-    //
-    // This used to be a pair of fits: h_f = 4186*T_C and h_g = u_f + a latent
-    // heat held at 2200 kJ/kg below 10 bar. They are -266 kJ/kg on steam at
-    // 15 C (h_g is 2529, the fit said 2263), -57 at 100 C and +190 at 200 C.
-    // Every vapour draw off a cool two-phase node lost that on each kg: a
-    // dry pump casing breathing the saturated air over a tank was flushed
-    // with steam 266 kJ/kg short of what the tank gave up, cooled below both
-    // gases it was mixing, went supersaturated and rang at the dew point
-    // (scripts/probe-dry-pump-dewpoint.ts).
-    if (flowPhase === 'liquid') {
-      // The liquid carries its internal energy plus the flow work of the
-      // pressure that pushes it out (the node's total, gas included)
-      return Water.saturatedLiquidEnergy(T) + P / Water.saturatedLiquidDensity(T);
-    }
-    // The steam carries its internal energy plus its OWN flow work: Dalton -
-    // it is at its partial (saturation) pressure over its own specific
-    // volume, and the gas beside it carries the rest (n*Cp*T above). That
-    // is exactly the tables' h_g(T).
-    return Water.saturatedVaporEnergy(T) + Water.saturationPressure(T) / Water.saturatedVaporDensity(T);
-  }
 }
 
 // ============================================================================

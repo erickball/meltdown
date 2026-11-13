@@ -26,11 +26,13 @@ import {
   steamNcgSoundSpeed,
   ncgCriticalFluxFactor,
   steamNcgCriticalFluxFactor,
+  mixtureCp,
   R_GAS,
 } from '../gas-properties';
 import {
   soundSpeed, criticalPressureRatio, WaterState,
   saturatedLiquidDensity, saturatedVaporDensity, surfaceTension, saturationPressure,
+  saturatedLiquidEnergy, saturatedVaporEnergy,
 } from '../water-properties';
 import { pumpHeadPressure, pumpHeadSlopeMagnitude } from './pump-curve';
 import { nodeGasVolume } from '../mixture-properties';
@@ -621,6 +623,82 @@ export function zoneWaterShare(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixtu
     : node.fluid.mass;
   const total = gasMass + steamMass;
   return total > 0 ? steamMass / total : 1;
+}
+
+/**
+ * Enthalpy the node's non-condensible gas holds, J: n·Cp·T - its internal
+ * energy n·Cv·T plus its own flow work n·R·T (Dalton: the gas is at its
+ * partial pressure over the vapour space, and P_gas·V_gas = n·R·T).
+ */
+export function nodeGasEnthalpy(node: FlowNode): number {
+  const ncg = node.fluid.ncg;
+  if (!ncg) return 0;
+  const n = totalMoles(ncg);
+  return n > 0 ? n * mixtureCp(ncg) * node.fluid.temperature : 0;
+}
+
+/**
+ * Specific enthalpy (J/kg of WATER) of the water one zone of `node` delivers.
+ * THE pricing of a water draw: the transport operator books it, the pressure
+ * solver's energy-coupled closure weighs it, and a turbine expands from it,
+ * so they cannot disagree about what a kilogram leaving a node carries.
+ *
+ * Everything here is the node's own solved state - no caloric fits.
+ *
+ * Whole-inventory draws (any draw from a single-phase node, a mixture draw
+ * from a two-phase one). The node's total enthalpy U + P·V splits EXACTLY
+ * into the gas's n·Cp·T and the water's remainder:
+ *
+ *   U          = U_water + n·Cv·T                     (one temperature)
+ *   P·V        = P·V_liquid + P_steam·V_gas + n·R·T   (Dalton in the vapour space)
+ *   H_water    = U_water + P·V_liquid + P_steam·V_gas = (U + P·V) − n·Cp·T
+ *
+ * i.e. the liquid carries the flow work of the TOTAL pressure that pushes it
+ * out, the steam the flow work of its own partial pressure, and the gas the
+ * rest. T and P are the mixture solve's answer for this (m, U, V, n), so the
+ * identity holds to the solve's own tolerance for every water fraction - a
+ * steam line, a flooded vessel and grams of humidity in a helium loop alike.
+ * (This replaced a linear caloric fit for the water/gas energy split and an
+ * ideal-gas pressure blended in by specific volume; both priced a draw at a
+ * state the node was not in.)
+ *
+ * Separated draws from a two-phase node hand over that saturated phase at the
+ * node's temperature, from the steam tables. Summed over the inventory these
+ * give the same H_water as above.
+ */
+export function zoneWaterEnthalpy(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture'): number {
+  // Moving-boundary OTSG nodes: the sectioned model knows what actually sits
+  // at each end of the bundle. A vapor draw comes from the superheat section
+  // (carrying its superheat - the entire point of the model; the bulk state
+  // would hand back saturated h_g), a liquid draw from the subcooled section.
+  // Mixture draws fall through to the bulk path.
+  if (node.otsg?.lastEval) {
+    if (zone === 'vapor') return node.otsg.lastEval.hSteamOut;
+    if (zone === 'liquid') return node.otsg.lastEval.hLiquidOut;
+  }
+  const f = node.fluid;
+  if (f.phase !== 'two-phase' || zone === 'mixture') {
+    // No water: nothing to price (the caller's water share is zero too)
+    if (!(f.mass > 0)) return 0;
+    return (f.internalEnergy + f.pressure * node.volume - nodeGasEnthalpy(node)) / f.mass;
+  }
+  const T = f.temperature;
+  if (zone === 'liquid') {
+    return saturatedLiquidEnergy(T) + f.pressure / saturatedLiquidDensity(T);
+  }
+  return saturatedVaporEnergy(T) + saturationPressure(T) / saturatedVaporDensity(T);
+}
+
+/**
+ * Specific enthalpy per kg of EVERYTHING one zone delivers (water plus the
+ * gas that rides with it): the water at zoneWaterEnthalpy, the gas at its
+ * n·Cp·T per kg, weighted by zoneWaterShare.
+ */
+export function zoneDrawEnthalpy(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture'): number {
+  const w = zoneWaterShare(node, zone);
+  if (w >= 1) return zoneWaterEnthalpy(node, zone);
+  const hGas = nodeGasEnthalpy(node) / ncgTotalMass(node.fluid.ncg!);
+  return (w > 0 ? w * zoneWaterEnthalpy(node, zone) : 0) + (1 - w) * hGas;
 }
 
 /** Mass fraction of a draw that is non-condensible gas (the rest is water). */
