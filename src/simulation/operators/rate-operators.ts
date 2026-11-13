@@ -599,10 +599,16 @@ export class ConvectionRateOperator implements RateOperator {
         ? this.vaporHeatTransferCoeff(
             flowNode, state, D_flow, thermalNode.temperature, conn, cache)
         : 0;
-      const Q = h_liquid * liquidArea * dT + h_vapor * vaporArea * dT;
+      // A layer between film and metal (insulation) adds in series per unit
+      // area: U = 1/(1/h + R). The stiff-pair split reads the same
+      // conductance, so the implicit exchange sees the insulation too.
+      const R = conn.seriesResistance ?? 0;
+      const U_liquid = R > 0 ? h_liquid / (1 + h_liquid * R) : h_liquid;
+      const U_vapor = R > 0 ? h_vapor / (1 + h_vapor * R) : h_vapor;
+      const Q = U_liquid * liquidArea * dT + U_vapor * vaporArea * dT;
 
       lastConvectionHeatRates.set(conn.id, Q);
-      lastConvectionConductance.set(conn.id, h_liquid * liquidArea + h_vapor * vaporArea);
+      lastConvectionConductance.set(conn.id, U_liquid * liquidArea + U_vapor * vaporArea);
 
       // Solid temperature rate (effective capacity includes latent heat)
       const dT_solid = -Q / nodeHeatCapacity(thermalNode);

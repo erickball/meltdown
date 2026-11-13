@@ -1259,6 +1259,10 @@ export const componentDefinitions: Record<string, {
         calculate: (p) => crossVesselWalls(p.pressureRating || 170, p.outerDiameter || 1.0,
           p.innerDiameter || 0.5, p.nqa1 ?? true, p.material).innerWallThickness.toFixed(3)
       },
+      { name: 'innerInsulationThickness', type: 'number', label: 'Hot-Duct Insulation', default: 0, min: 0, max: 0.3, step: 0.01, unit: 'm',
+        help: 'Thermal insulation lining the inside of the inner pipe (fibrous ceramic behind a thin cover sheet), as in the hot-gas duct of a gas-cooled reactor. It keeps the hot gas from heating the cold annulus through the pipe wall and keeps the pipe metal near the annulus temperature. It takes up room: the gas flows in a bore of inner diameter minus twice this thickness. 0 = bare pipe, which leaks percents of core power from the hot leg into the cold leg.' },
+      { name: 'innerInsulationConductivity', type: 'number', label: 'Insulation Conductivity', default: 0.3, min: 0.02, max: 5, step: 0.01, unit: 'W/m·K',
+        help: 'Effective thermal conductivity of the hot-duct insulation. Fibrous insulation conducts mostly through the gas in its pores, so in helium it is close to helium\'s own conductivity (~0.3 W/m·K at 700 °C); in air or steam about a tenth of that. Ignored when the insulation thickness is 0.' },
       { name: 'innerTemperature', type: 'number', label: 'Inner Pipe Temperature', default: 320, min: 100, max: 400, step: 5, unit: '°C', help: 'Hot leg temperature' },
       { name: 'annulusTemperature', type: 'number', label: 'Annulus Temperature', default: 290, min: 100, max: 400, step: 5, unit: '°C', help: 'Cold leg/downcomer temperature' },
       { name: 'annulusVolume', type: 'calculated', label: 'Annulus Volume', default: 0, unit: 'm³',
@@ -1275,7 +1279,10 @@ export const componentDefinitions: Record<string, {
       },
       { name: 'innerVolume', type: 'calculated', label: 'Inner Pipe Volume', default: 0, unit: 'm³',
         calculate: (p) => {
-          const innerR = (p.innerDiameter || 0.5) / 2;
+          const t = p.innerInsulationThickness || 0;
+          const bore = (p.innerDiameter || 0.5) - 2 * t;
+          if (!(bore > 0)) return 'insulation fills the pipe';
+          const innerR = bore / 2;
           const length = p.length || 3.0;
           return (Math.PI * innerR * innerR * length).toFixed(2);
         }

@@ -232,3 +232,30 @@ export function crossVesselWalls(
     }),
   };
 }
+
+/**
+ * A cross-vessel's internal hot-duct insulation: the gas bore it leaves
+ * (m) and its conductive resistance (m2K/W) referred to the gas-side surface
+ * at that bore - the exact cylindrical-shell value, r_g ln(r_pipe/r_g) / k,
+ * so that Q = A_gas (T_gas - T_pipe) / (1/h + R). A bare pipe returns its
+ * own bore and R = 0.
+ */
+export function crossVesselInsulation(cv: {
+  id?: string; innerDiameter: number;
+  innerInsulationThickness?: number; innerInsulationConductivity?: number;
+}): { gasBore: number; resistance: number } {
+  const t = cv.innerInsulationThickness ?? 0;
+  if (!(t > 0)) return { gasBore: cv.innerDiameter, resistance: 0 };
+  const k = cv.innerInsulationConductivity;
+  if (!(k! > 0)) {
+    throw new Error(`[wall-sizing] cross-vessel '${cv.id ?? '?'}' has ${t} m of hot-duct insulation ` +
+      `but no innerInsulationConductivity - the insulation's resistance cannot be computed`);
+  }
+  const rPipe = cv.innerDiameter / 2;
+  const rGas = rPipe - t;
+  if (!(rGas > 0)) {
+    throw new Error(`[wall-sizing] cross-vessel '${cv.id ?? '?'}': ${t} m of insulation fills the ` +
+      `${cv.innerDiameter} m inner pipe - no gas bore is left`);
+  }
+  return { gasBore: 2 * rGas, resistance: (rGas * Math.log(rPipe / rGas)) / k! };
+}

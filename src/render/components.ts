@@ -6267,14 +6267,24 @@ function renderCrossVessel(
   ctx.fillRect(-lengthPx / 2 + wallPx, -innerOuterDiamPx / 2,
     lengthPx - wallPx * 2, innerOuterDiamPx);
 
+  // Hot-duct insulation lining the inner pipe (if any): the gas runs in the
+  // bore it leaves
+  const insulPx = Math.min((cv.innerInsulationThickness ?? 0) * view.zoom, innerDiamPx / 2);
+  if (insulPx > 0) {
+    ctx.fillStyle = '#cfc6ae'; // ceramic fibre
+    ctx.fillRect(-lengthPx / 2 + wallPx + innerWallPx, -innerDiamPx / 2,
+      lengthPx - wallPx * 2 - innerWallPx * 2, innerDiamPx);
+  }
+  const boreDiamPx = innerDiamPx - 2 * insulPx;
+
   // Inner hot fluid
   if (cv.fluid) {
     ctx.fillStyle = getFluidColor(cv.fluid);
   } else {
     ctx.fillStyle = getFluidColor({ temperature: 593, pressure: 15.5e6, phase: 'liquid', quality: 0, flowRate: 0 });
   }
-  ctx.fillRect(-lengthPx / 2 + wallPx + innerWallPx, -innerDiamPx / 2,
-    lengthPx - wallPx * 2 - innerWallPx * 2, innerDiamPx);
+  ctx.fillRect(-lengthPx / 2 + wallPx + innerWallPx, -boreDiamPx / 2,
+    lengthPx - wallPx * 2 - innerWallPx * 2, boreDiamPx);
 
   // Outline
   ctx.strokeStyle = steelHighlightStr;

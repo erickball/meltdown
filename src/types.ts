@@ -773,6 +773,13 @@ export interface CrossVesselComponent extends ComponentBase {
   // Inner hot leg pipe
   innerDiameter: number;      // meters - inner diameter of the hot leg pipe
   innerWallThickness: number; // meters - wall thickness of the inner pipe
+  // Internal insulation lining the inner pipe (the hot-gas duct of a
+  // gas-cooled plant): fibrous ceramic behind a thin cover sheet, between
+  // the hot gas and the pipe wall. It narrows the gas bore to
+  // innerDiameter - 2*thickness and puts its conductive resistance between
+  // the hot gas and the pipe metal. Absent / 0: bare pipe.
+  innerInsulationThickness?: number;   // meters
+  innerInsulationConductivity?: number; // W/m-K, effective (gas-filled fibre: ~ the fill gas's own)
   // Optional explicit hot-pipe length. By default the factory derives it as
   // `length` plus the radius of each vessel the inner pipe joins - the hot
   // pipe runs centerline to centerline (core outlet plenum to SG bundle

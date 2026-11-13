@@ -31,7 +31,7 @@ import {
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { PEBBLE_BED_VOID_FRACTION } from './operators/pebble-spill';
 import { resolveMaterial, MATERIALS, type StructuralMaterial } from './materials';
-import { designStress, designCodeFor, jointEfficiency, componentWall, hxShellWall, hxTubeWall } from './wall-sizing';
+import { designStress, designCodeFor, jointEfficiency, componentWall, hxShellWall, hxTubeWall, crossVesselInsulation } from './wall-sizing';
 import { NBG_18, A3_3 } from './graphite';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from './triso';
 import { saturationTemperature, saturationPressure } from './water-properties';
@@ -1681,9 +1681,13 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       // annulus (the in-vessel portions face the vessels' own gas and are
       // left adiabatic here - the liner is insulated in the real machine,
       // and this is the smaller of its two faces' couplings).
+      // With hot-duct insulation the gas wets the insulation's face at the
+      // gas bore, and the insulation's resistance sits between that film
+      // and the pipe metal (seriesResistance on the inner coupling).
+      const insulation = crossVesselInsulation(cv);
       const innerRadius = cv.innerDiameter / 2;
       const outerRadius = innerRadius + cv.innerWallThickness;
-      const innerSurfaceArea = 2 * Math.PI * innerRadius * innerLength;  // Inner surface, full duct
+      const innerSurfaceArea = Math.PI * insulation.gasBore * innerLength;  // Gas-wetted surface, full duct
       const outerSurfaceArea = 2 * Math.PI * outerRadius * cv.length;    // Outer surface facing the annulus
 
       // Pipe wall thermal properties (steel)
@@ -1717,6 +1721,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         thermalNodeId: `${id}-wall`,
         flowNodeId: `${id}-inner`,  // Inner pipe flow node
         surfaceArea: innerSurfaceArea,
+        ...(insulation.resistance > 0 ? { seriesResistance: insulation.resistance } : {}),
       });
 
       // Convection from wall to annulus
@@ -2757,8 +2762,9 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
       // Return inner pipe node here; annulus is created separately like HX shell
       const cv = component as any;
 
-      // Inner pipe volume and properties
-      const innerRadius = cv.innerDiameter / 2;
+      // Inner pipe volume and properties: the gas runs in the bore the
+      // hot-duct insulation (if any) leaves, not the pipe's own bore
+      const innerRadius = crossVesselInsulation(cv).gasBore / 2;
       const innerVolume = (cv as any).innerVolume || Math.PI * innerRadius * innerRadius * cv.length;
 
       // Use fluid from component or default to typical hot leg conditions
@@ -2784,7 +2790,7 @@ function createFlowNodeFromComponent(component: PlantComponent): FlowNode | null
         label: `${component.label || 'Cross-Vessel'} Inner`,
         fluid,
         volume: innerVolume,
-        hydraulicDiameter: cv.innerDiameter,
+        hydraulicDiameter: 2 * innerRadius,
         flowArea: Math.PI * innerRadius * innerRadius,
         height: 0,  // Horizontal, well-mixed
         elevation,

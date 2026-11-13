@@ -531,6 +531,8 @@
         "length": 6.51,
         "innerDiameter": 1,
         "innerWallThickness": 0.02,
+        "innerInsulationThickness": 0.05,
+        "innerInsulationConductivity": 0.3,
         "pressureRating": 70,
         "material": "alloy-800h",
         "targetComponentId": "hx-1",
