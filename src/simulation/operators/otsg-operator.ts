@@ -521,12 +521,16 @@ export function evaluateOtsgSections(
  */
 export function otsgWaterSideDuties(
   ev: OtsgEval, flows: OtsgFlows, zoneTemps: readonly number[], heatArea: number,
-): { Q1: number; Q2: number; Q3: number; TFeedIn: number; zoneQ: number[] } {
+): { Q1: number; Q2: number; Q3: number; TFeedIn: number; zoneQ: number[]; zoneQ2: number[]; zoneQ3: number[] } {
   const cpLiquid = 5000;
   const N = zoneTemps.length;
   const ov = otsgZoneOverlaps(
     [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac], N);
   const zoneQ = new Array<number>(N).fill(0);
+  // The boiling section's share of each zone's duty - the part
+  // applyStiffOtsgWallExchange can take out of the stages
+  const zoneQ2 = new Array<number>(N).fill(0);
+  const zoneQ3 = new Array<number>(N).fill(0);
   // A transiting stream marches through the zones its section covers, in
   // the water's flow direction, approaching each zone's wall across that
   // piece (a piece has one metal temperature, so the isothermal form is
@@ -545,6 +549,7 @@ export function otsgWaterSideDuties(
         q += transit;
       }
       zoneQ[k] += q;
+      if (i === 2) zoneQ3[k] += q;
       Q += q;
     }
     return Q;
@@ -557,6 +562,7 @@ export function otsgWaterSideDuties(
   for (let k = 0; k < N; k++) {
     const q = H_TUBE_BOILING * heatArea * ov[k][1] * (zoneTemps[k] - ev.sat.T);
     zoneQ[k] += q;
+    zoneQ2[k] += q;
     Q2 += q;
   }
   // Section 3: steam entering at saturation, heated toward its own wall -
@@ -566,7 +572,142 @@ export function otsgWaterSideDuties(
     : 3000;
   const W23Guess = Math.max(0, flows.WSteamOut); // transit rate scale for the steam pass
   const Q3 = march(2, H_TUBE_STEAM, W23Guess * cpSteam, ev.sat.T, ev.sections[2].T);
-  return { Q1, Q2, Q3, TFeedIn, zoneQ };
+  return { Q1, Q2, Q3, TFeedIn, zoneQ, zoneQ2, zoneQ3 };
+}
+
+/**
+ * The wall exchange of a dried-out tube, whose water answers it faster than
+ * the step: the OTSG counterpart of RK45Solver.applyStiffConvection, applied
+ * at the same point (once per attempt, before the stages).
+ *
+ * A dried-out tube blowing down sits on the seam where its steam is at the
+ * wall pin, and relaxes onto it from both sides:
+ *
+ *  - Below the seam (pinned arm, a boiling sliver present): expansion cools
+ *    the steam a little below the pin, the partition books that deficit as a
+ *    sliver of boiling liquid, and the boiling film (25 kW/m2K over the
+ *    sliver's length, ~100 K superheat) flashes it - grams of water,
+ *    megawatts of duty. At fixed pressure the partition gives the sliver
+ *    from the energy exactly, dm2/dU = -1/(u3 - u2), so the energy that
+ *    closes it is dU* = m2 (u3 - u2); Q2 is proportional to m2 (its length
+ *    is), so the water relaxes at k = Q2 / dU* ~ H_boil A (T_wall - T_sat)
+ *    v2 / (V (u3 - u2)) - ~4 ms at 1 bar, ~0.4 ms at condenser vacuum,
+ *    growing as the pressure falls (v2 ~ v_g), not as the mass does.
+ *  - Above it (free superheat arm, no sliver): the steam is off the pin
+ *    and Q3 pulls it back toward its wall across the whole bundle; with
+ *    grams of steam on 1390 m2 that is k = hA3 / (m3 cv) ~ 2 ms at 0.6 kg.
+ *    Measured from the partition itself, by a small energy probe (one more
+ *    solve), closer in if the first probe already reaches the seam.
+ *
+ * Stepped explicitly those time constants became the plant's step (the
+ * xe100-dlofc crawl past ~7200 s, scripts/probe-step-limiter.ts). Where
+ * k*dt > 1 - the resolution boundary, the same criterion as the convection
+ * pairs - the step's whole boiling + superheat exchange is applied here and
+ * the tube is stamped so the rate operator leaves Q2 and Q3 out of the
+ * stages (a stage that crossed the seam would otherwise meet the other
+ * side's stiff duty explicitly):
+ *
+ *  - pinned arm: Q2 by the exact integral of its linear relaxation,
+ *    min(Q2 (1 - exp(-k dt)) / k, dU*) - it approaches its fixed point and
+ *    never boils more than the liquid there is - taken from the zones under
+ *    the boiling section in their shares; Q3, priced at the pin, does not
+ *    depend on the water's energy (to the pin's theta ~ 1), so Q3 dt is
+ *    exact for it. k is the larger of the sliver's own Q2 / dU* and the
+ *    slope a probe inside the sliver measures, which also carries the
+ *    pressure: boiling packs steam into the tube and raises T_sat under a
+ *    film worth tens of MW/K - a pool of 0.5 kg under 139 m2 of metal a
+ *    third of a kelvin above saturation answers in ~1 ms.
+ *  - free arm: only the steam's NET energy change relaxes. Each zone's
+ *    duty is H a_z (T_z - T3) with one T3 for all of them, so the zones
+ *    share the relaxation by area while their differences - the stagnant
+ *    steam carrying heat from the hot steam-end metal to the cold feed end -
+ *    are not stiff and stay whole: zone z gives up
+ *    Q3_z dt - (a_z / A3) (Q3 dt - Q3 (1 - exp(-k dt)) / k).
+ *    (Scaling every zone's duty by the relaxed fraction instead suppressed
+ *    that mixing and drove the feed-end metal 11 K colder in 120 s.)
+ *
+ * The metal gives up exactly what the water receives. Where k*dt <= 1, or
+ * the tube is flooded (no seam), the stages are the better integrator and
+ * nothing changes. Returns the number of tubes exchanged implicitly.
+ */
+export function applyStiffOtsgWallExchange(state: SimulationState, dt: number): number {
+  let n = 0;
+  if ((globalThis as any).process?.env?.AB_OFF) return 0; // TEMP-AB
+  for (const [id, node] of state.flowNodes) {
+    const cfg = node.otsg;
+    if (!cfg) continue;
+    cfg.wallImplicitThisStep = false;
+    if (node.isBoundary || !(node.fluid.mass > 0)) continue;
+    const { ev, flows } = evaluateOtsgSections(state, id, node, { exact: true });
+    if (ev.regime !== 'superheat' && ev.regime !== 'dryout') continue;
+    const [, s2, s3] = ev.sections;
+    if (!(s3.mass > 0)) continue;
+    const zones = otsgMetalZones(state, node);
+    const zoneT = zones.map(z => z.temperature);
+    const N = zones.length;
+    const d = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
+    // Joules each zone hands the water over the step
+    const zoneE = new Array<number>(N).fill(0);
+    if (s2.mass > 0) {
+      if (!(d.Q2 > 0)) continue;
+      const u2 = s2.hBar - ev.P * s2.vBar;
+      const u3 = s3.hBar - ev.P * s3.vBar;
+      const closeSliver = s2.mass * (u3 - u2);
+      if (!(closeSliver > 0)) continue;
+      // Q2 answers the water's energy two ways: the sliver's own length
+      // (k = Q2 / dU*), and the pressure - boiling packs steam into the
+      // tube, raising T_sat under a film worth tens of MW/K (0.5 kg pooled
+      // under 139 m2 of metal 0.3 K above saturation: ~800 /s). The probe
+      // sees both; it stays inside the sliver so the slope is this arm's.
+      const dU = Math.min(0.5 * closeSliver, 1e-4 * Math.abs(node.fluid.internalEnergy));
+      const probe: FlowNode = {
+        ...node,
+        fluid: { ...node.fluid, internalEnergy: node.fluid.internalEnergy + dU },
+        otsg: { ...cfg, partitionCache: undefined, partitionLin: undefined },
+      };
+      const moved = evaluateOtsgSections(state, id, probe, { exact: true });
+      const k = Math.max(d.Q2 / closeSliver,
+        -(otsgWaterSideDuties(moved.ev, moved.flows, zoneT, cfg.heatArea).Q2 - d.Q2) / dU);
+      if (!(k * dt > 1)) continue;
+      // Never more than closes the sliver: there is no more liquid to boil
+      const relaxed = Math.min((1 - Math.exp(-k * dt)) / k, closeSliver / d.Q2);
+      for (let j = 0; j < N; j++) zoneE[j] = d.zoneQ2[j] * relaxed + d.zoneQ3[j] * dt;
+    } else {
+      if (d.Q3 === 0) continue;
+      // Probe toward where Q3 is heading, a thousandth of the tube's energy;
+      // closer in if that already reaches the seam (the slope there is the
+      // other arm's)
+      let k = NaN;
+      for (const frac of [1e-3, 1e-5]) {
+        const dU = frac * Math.abs(node.fluid.internalEnergy) * Math.sign(d.Q3);
+        const probe: FlowNode = {
+          ...node,
+          fluid: { ...node.fluid, internalEnergy: node.fluid.internalEnergy + dU },
+          otsg: { ...cfg, partitionCache: undefined, partitionLin: undefined },
+        };
+        const moved = evaluateOtsgSections(state, id, probe, { exact: true });
+        if (moved.ev.sections[1].mass > 0) continue;
+        k = -(otsgWaterSideDuties(moved.ev, moved.flows, zoneT, cfg.heatArea).Q3 - d.Q3) / dU;
+        break;
+      }
+      if (!(k * dt > 1)) continue;
+      const ov = otsgZoneOverlaps(
+        [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac], N);
+      const L3 = ov.reduce((a, o) => a + o[2], 0);
+      if (!(L3 > 0)) continue;
+      const notRelaxed = d.Q3 * dt - d.Q3 * (1 - Math.exp(-k * dt)) / k;
+      for (let j = 0; j < N; j++) zoneE[j] = d.zoneQ3[j] * dt - (ov[j][2] / L3) * notRelaxed;
+    }
+    let total = 0;
+    zones.forEach((z, j) => {
+      z.temperature -= zoneE[j] / nodeHeatCapacity(z);
+      total += zoneE[j];
+    });
+    node.fluid.internalEnergy += total;
+    cfg.wallImplicitThisStep = true;
+    n++;
+  }
+  return n;
 }
 
 export class OtsgRateOperator implements RateOperator {
@@ -639,8 +780,11 @@ export class OtsgRateOperator implements RateOperator {
       // ----------------------------------------------------------------
       // Water side: transit + standing branches per section
       // ----------------------------------------------------------------
-      const { Q1, Q2, Q3, zoneQ } = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
-      const QWaterTotal = Q1 + Q2 + Q3;
+      const { Q1, Q2, Q3, zoneQ, zoneQ2, zoneQ3 } = otsgWaterSideDuties(ev, flows, zoneT, cfg.heatArea);
+      // The boiling + superheat exchange the solver already applied for
+      // this step (applyStiffOtsgWallExchange) stays out of the stages
+      const implicitWall = cfg.wallImplicitThisStep === true;
+      const QWaterTotal = implicitWall ? Q1 : Q1 + Q2 + Q3;
       // OTSG_TRACE=<nodeId>: one line per 0.5 s of sim time with the
       // partition, the metal and the duties - the view that found the
       // bottled-boiler ring. Reads an env var once per evaluation; the
@@ -705,7 +849,8 @@ export class OtsgRateOperator implements RateOperator {
       // axial conduction along the bundle is negligible against either.
       zones.forEach((z, k) => {
         const mr = rates.thermalNodes.get(z.id) ?? { dTemperature: 0 };
-        mr.dTemperature += (gasQ[k] - zoneQ[k]) / nodeHeatCapacity(z);
+        const waterQ = implicitWall ? zoneQ[k] - zoneQ2[k] - zoneQ3[k] : zoneQ[k];
+        mr.dTemperature += (gasQ[k] - waterQ) / nodeHeatCapacity(z);
         rates.thermalNodes.set(z.id, mr);
       });
     }

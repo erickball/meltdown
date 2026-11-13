@@ -387,6 +387,12 @@ export interface FlowNode {
      *  Saves from before the zones carry three per-section nodes here, which
      *  simply run as three fixed zones. */
     metalNodeIds: string[];
+    /** Stamped by the solver each step attempt: the boiling and superheat
+     *  sections' wall exchange (Q2 + Q3) was applied for the step outside
+     *  the stages (the tube relaxes onto its seam faster than the step), so
+     *  the rate operator leaves it out. See applyStiffOtsgWallExchange.
+     *  Transient - re-stamped every step. */
+    wallImplicitThisStep?: boolean;
     /** Transient cache of the last sectioned evaluation, for the draw-
      *  enthalpy hook and displays. Derived data - safe to serialize, safe
      *  to lose. */
