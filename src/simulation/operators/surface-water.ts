@@ -25,7 +25,7 @@ import { SimulationState, FlowNode } from '../types';
 import { RateOperator, ConstraintOperator, StateRates, createZeroRates } from '../rk45-solver';
 import { cloneSimulationState } from '../solver';
 import { TerrainModel, cellAt, surfaceAtVolume, volumeAtSurface, wettedArea, DEFAULT_INFILTRATION } from '../terrain';
-import { drawCompositionAt, approxLiquidDensity } from './connection-hydraulics';
+import { drawCompositionAt, nodeLiquidDensity } from './connection-hydraulics';
 
 /** A water body's surface: a level, or a ramp from one level to another over a scenario event. */
 export interface WaterBodyState {
@@ -133,7 +133,7 @@ export class SurfaceWaterRateOperator implements RateOperator {
       const liquidShare = draw.wLiquid + draw.wMixture * (1 - Math.max(0, Math.min(1, source.fluid.quality ?? 0)));
       if (liquidShare <= 0) continue;
       const cell = cellAt(model.spec, source.position);
-      add(model.basinOf[cell], mdot * liquidShare / approxLiquidDensity(source));
+      add(model.basinOf[cell], mdot * liquidShare / nodeLiquidDensity(source));
     }
 
     // Open ground drinks every puddle through its wetted area
