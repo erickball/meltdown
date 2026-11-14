@@ -451,6 +451,8 @@ export interface FlowNode {
       dPdm: number;
       hSteamOut: number;     // J/kg - vapor-draw enthalpy (superheat carried)
       hLiquidOut: number;    // J/kg - liquid-draw enthalpy (section 1 mean)
+      vSteamOut: number;     // m3/kg - specific volume of the steam hSteamOut prices
+      vLiquidOut: number;    // m3/kg - section 1 mean specific volume
       TSat: number;          // K
       T3: number;            // K - superheat section temperature
       lengthFracs: [number, number, number];

@@ -374,6 +374,10 @@ export interface OtsgEval {
    *  when the superheat section is empty. Smoothly mass-weighted between the
    *  two so an emptying section does not step the draw enthalpy. */
   hSteamOut: number;
+  /** Specific volume of that same outlet steam (m3/kg): built from the same
+   *  states with the same weights as hSteamOut, so a vapour draw's density
+   *  and its enthalpy describe one fluid. */
+  vSteamOut: number;
   u3: number;        // superheat specific energy actually used (J/kg)
   /** Quality the boiling section reaches at its OUTLET. 1 whenever there is
    *  anything downstream to hand dry steam to; below 1 only for a flooded
@@ -481,6 +485,7 @@ export function evaluateOtsg(
   // never steps).
   const w = m3 / (m3 + 1);
   const hSteamOut = w * h3Bar + (1 - w) * sat.h_g;
+  const vSteamOut = m3 > 0 ? w * fin.v3 + (1 - w) * sat.v_g : sat.v_g;
 
   return {
     P, sat,
@@ -490,6 +495,7 @@ export function evaluateOtsg(
       mk(m3, fin.v3, V3, h3Bar, T3),
     ],
     hSteamOut,
+    vSteamOut,
     u3: fin.u3,
     // The reference closure carries m3 as state, so its boiling section
     // always has somewhere to hand dry steam to.
@@ -1104,11 +1110,16 @@ export function evaluateOtsgPartition(
     // it. A supercritical pass has no h_g inlet at all (its inlet is the
     // feed) and draws at its mean.
     const w2 = m2 / (m2 + 1);
+    // vSteamOut follows hSteamOut branch for branch: the same states, the
+    // same weights, so the draw's density and enthalpy are one fluid.
     let hSteamOut: number;
+    let vSteamOut: number;
     if (m3 <= 0) {
       hSteamOut = sat.h_g;
+      vSteamOut = sat.v_g;
     } else if (regime === 'supercritical') {
       hSteamOut = h3Bar;
+      vSteamOut = v3;
     } else {
       const L3frac = V3 / VT;
       const TOut = counterflowOutletTemp(
@@ -1116,14 +1127,23 @@ export function evaluateOtsgPartition(
         pin.hA3Full * L3frac, pin.hAGas3Full * L3frac,
         pin.WCp3, pin.CGas3);
       let hEps = sat.h_g;
+      let vEps = sat.v_g;
       if (TOut > sat.T + 0.5) {
         const uOut = u3AtTemperature(TOut, P, sat, probe,
           Math.max(u3, sat.u_g + 10e3), pin.TGasIn3);
         const vOut = superheatedV(uOut, P, 1e-6,
           v3 > sat.v_g ? v3 : undefined, sat);
         hEps = uOut + P * vOut;
+        vEps = vOut;
       }
-      hSteamOut = Math.max(sat.h_g, w2 * hEps + (1 - w2) * h3Bar);
+      const hBlend = w2 * hEps + (1 - w2) * h3Bar;
+      if (hBlend >= sat.h_g) {
+        hSteamOut = hBlend;
+        vSteamOut = w2 * vEps + (1 - w2) * v3;
+      } else {
+        hSteamOut = sat.h_g;
+        vSteamOut = sat.v_g;
+      }
     }
     return {
       P, sat,
@@ -1132,7 +1152,7 @@ export function evaluateOtsgPartition(
         mk(m2, v2, V2, h2Bar, T2),
         mk(m3, v3, V3, h3Bar, T3),
       ],
-      hSteamOut, u3, x2Out, regime,
+      hSteamOut, vSteamOut, u3, x2Out, regime,
     };
   };
 
