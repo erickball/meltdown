@@ -21,8 +21,18 @@ import { SimulationState, SolverMetrics, ErrorContributor, PressureSolverConfig,
 import { cloneSimulationState } from './solver';
 import { PressureSolver } from './operators/pressure-solver';
 import { stampStiffOtsgTubes, completeStiffOtsgTubes } from './operators/otsg-operator';
-import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass } from './gas-properties';
+import { type GasComposition, ALL_GAS_SPECIES, emptyGasComposition, totalMass as ncgTotalMass, totalMoles as ncgTotalMoles, mixtureCv as ncgMixtureCv } from './gas-properties';
 import { MODEL_MIN_TEMPERATURE, modelMinPressure, minimumSpecificEnergy } from './water-properties';
+
+/**
+ * Internal energy (J) of a node's non-condensible gas at the coldest
+ * temperature the model admits: the gas's share of the node's energy floor.
+ */
+function gasEnergyFloor(ncg: GasComposition | undefined): number {
+  if (!ncg) return 0;
+  const n = ncgTotalMoles(ncg);
+  return n > 0 ? n * ncgMixtureCv(ncg) * MODEL_MIN_TEMPERATURE : 0;
+}
 
 // ============================================================================
 // State Rates - Derivatives for all state variables
@@ -1102,13 +1112,24 @@ export function checkPreConstraintSanity(state: SimulationState): { safe: boolea
     // lower still: a gas space carrying frozen moisture legitimately has
     // negative water energy, and this test rejected every such step. The real
     // floor is the coldest state the tables admit at this specific volume.
+    //
+    // internalEnergy is the node TOTAL - water plus the non-condensible gas's
+    // n·Cv·T - so the floor it is held against is the total at that same
+    // coldest state: the water's floor plus the gas at MODEL_MIN_TEMPERATURE.
+    // (Dividing the total by the water mass and comparing with the water's
+    // floor alone let the gas's energy hide a water deficit. Subtracting
+    // n·Cv·T is not available here: the node's temperature has not been
+    // re-solved for this energy yet.)
     if (node.fluid.mass > 0) {
       const u_floor = minimumSpecificEnergy(node.volume / node.fluid.mass);
-      if (node.fluid.internalEnergy < node.fluid.mass * u_floor) {
-        return { safe: false, reason: `${id}: specific energy ` +
-          `${(node.fluid.internalEnergy / node.fluid.mass / 1e3).toFixed(1)} kJ/kg is below ` +
-          `the model floor ${(u_floor / 1e3).toFixed(1)} kJ/kg at ` +
-          `v=${(node.volume / node.fluid.mass).toExponential(3)} m³/kg` };
+      const gasFloor = gasEnergyFloor(node.fluid.ncg);
+      const U_floor = node.fluid.mass * u_floor + gasFloor;
+      if (node.fluid.internalEnergy < U_floor) {
+        return { safe: false, reason: `${id}: internal energy ` +
+          `${(node.fluid.internalEnergy / 1e3).toFixed(1)} kJ is below the model floor ` +
+          `${(U_floor / 1e3).toFixed(1)} kJ (${node.fluid.mass.toExponential(3)} kg water at ` +
+          `${(u_floor / 1e3).toFixed(1)} kJ/kg, v=${(node.volume / node.fluid.mass).toExponential(3)} m³/kg` +
+          (gasFloor > 0 ? `, plus ${(gasFloor / 1e3).toFixed(1)} kJ of gas at ${MODEL_MIN_TEMPERATURE} K` : '') + `)` };
       }
     } else if (node.fluid.internalEnergy < 0) {
       return { safe: false, reason: `${id}: Negative internal energy with no water mass` };
@@ -1314,7 +1335,6 @@ export function checkStateSanity(
     // At the triple point (v_g = 206 m³/kg): u ranges from 0 (liquid) to ~2375 kJ/kg (vapor)
     // For v > v_f, estimate quality x = (v - v_f) / (v_g - v_f), then u_min = x * u_g_triple
     const v_specific = newNode.volume / newNode.fluid.mass; // m³/kg
-    const u_specific = newNode.fluid.internalEnergy / newNode.fluid.mass; // J/kg
 
     // Only check for vapor-like densities (v > 0.01 m³/kg = 10 L/kg)
     // Liquid water has v ≈ 0.001 m³/kg, so anything > 0.01 should have significant vapor energy
@@ -1327,13 +1347,21 @@ export function checkStateSanity(
       // triple point was penalised, and the node could not be stepped below
       // it. Sub-triple states are REAL states now; only genuinely
       // unrepresentable energy is a fault.
+      //
+      // Held against the node's TOTAL energy, so the gas's share of the floor
+      // (n·Cv·T at that same temperature) goes on the other side - see
+      // checkPreConstraintSanity.
       const u_min = minimumSpecificEnergy(v_specific);
-      if (u_specific < u_min) {
+      const gasFloor = gasEnergyFloor(newNode.fluid.ncg);
+      const U_floor = newNode.fluid.mass * u_min + gasFloor;
+      if (newNode.fluid.internalEnergy < U_floor) {
         const scale = Math.max(1e3, Math.abs(u_min));
-        const deficit = (u_min - u_specific) / scale;
-        console.warn(`[RK45 Sanity] ${id}: Energy below the water model's floor. ` +
-          `u=${(u_specific/1e3).toFixed(1)} kJ/kg < u_min=${(u_min/1e3).toFixed(1)} kJ/kg ` +
-          `(v=${v_specific.toExponential(3)} m³/kg)`);
+        // Shortfall per kg of water, in units of the water's own floor
+        const deficit = (U_floor - newNode.fluid.internalEnergy) / newNode.fluid.mass / scale;
+        console.warn(`[RK45 Sanity] ${id}: Energy below the model's floor. ` +
+          `U=${(newNode.fluid.internalEnergy/1e3).toFixed(1)} kJ < U_min=${(U_floor/1e3).toFixed(1)} kJ ` +
+          `(water floor ${(u_min/1e3).toFixed(1)} kJ/kg at v=${v_specific.toExponential(3)} m³/kg, ` +
+          `gas floor ${(gasFloor/1e3).toFixed(1)} kJ)`);
         const badness = 1 + deficit * 10;
         maxBadness = Math.max(maxBadness, badness);
       }

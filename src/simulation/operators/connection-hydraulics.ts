@@ -27,6 +27,7 @@ import {
   ncgCriticalFluxFactor,
   steamNcgCriticalFluxFactor,
   mixtureCp,
+  mixtureCv,
   R_GAS,
 } from '../gas-properties';
 import {
@@ -671,6 +672,30 @@ export function nodeGasEnthalpy(node: FlowNode): number {
   if (!ncg) return 0;
   const n = totalMoles(ncg);
   return n > 0 ? n * mixtureCp(ncg) * node.fluid.temperature : 0;
+}
+
+/**
+ * Specific internal energy of the node's WATER, J/kg: the node's total
+ * internal energy less the n·Cv·T its non-condensible gas holds, over the
+ * water mass. `fluid.internalEnergy / fluid.mass` is NOT this - the energy is
+ * the node total and the mass is water only - and anything that takes a
+ * (u, v) point to the steam tables needs the water's own u.
+ *
+ * Valid on a SOLVED node only: the temperature must be the mixture solve's
+ * answer for this energy (the same condition as zoneWaterEnthalpy). The
+ * subtraction loses precision as the water becomes a trace under a large gas
+ * inventory, so this is for nodes whose water matters (liquid, two-phase); a
+ * gas space should be priced from its temperature instead.
+ */
+export function nodeWaterSpecificEnergy(node: FlowNode): number {
+  const f = node.fluid;
+  if (!(f.mass > 0)) {
+    throw new Error(`[nodeWaterSpecificEnergy] '${node.id}' holds no water (mass=${f.mass} kg)`);
+  }
+  const ncg = f.ncg;
+  const n = ncg ? totalMoles(ncg) : 0;
+  const gasEnergy = n > 0 ? n * mixtureCv(ncg!) * f.temperature : 0;
+  return (f.internalEnergy - gasEnergy) / f.mass;
 }
 
 /**

@@ -10,8 +10,6 @@ import {
   saturationPressure,
   getWaterPropsProfile,
   resetWaterPropsProfile,
-  getFlowOperatorProfile,
-  resetFlowOperatorProfile,
   getSolverProfile,
   resetSolverProfile,
   getTurbineCondenserState,
@@ -848,14 +846,7 @@ export function updateDebugPanel(
     html += `<span class="debug-label">Total:</span> ${formatValue(total, 'ms', 10, 20)}<br>`;
 
     // Detailed profiling breakdown
-    const flowProfile = getFlowOperatorProfile();
     const waterProfile = getWaterPropsProfile();
-
-    if (flowProfile.totalCalls > 0) {
-      html += '<br><b>FluidFlow breakdown:</b><br>';
-      html += `<span style="font-size: 10px; margin-left: 8px;">flowRates: ${flowProfile.computeFlowRates.toFixed(2)}ms</span><br>`;
-      html += `<span style="font-size: 10px; margin-left: 8px;">massTransfer: ${flowProfile.transferMass.toFixed(2)}ms</span><br>`;
-    }
 
     if (waterProfile.calculateStateCalls > 0) {
       html += '<br><b>Water props breakdown:</b><br>';
@@ -890,7 +881,6 @@ export function updateDebugPanel(
     operatorsDiv.innerHTML = html;
 
     // Reset profiling accumulators after each display update
-    resetFlowOperatorProfile();
     resetWaterPropsProfile();
     resetSolverProfile();
   }
