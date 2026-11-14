@@ -313,6 +313,43 @@ test('A pump placed in the sea is primed with sea water and its open nozzles are
     `mixing 20 C casing air with 15 C sea air cannot end below 15 C, got ${(dry.fluid.temperature - 273.15).toFixed(3)} C`);
 });
 
+test('A pump whose motor is under water is drowned: it never turns and moves (almost) nothing', () => {
+  // The same pump in the same sea, but with the default half-metre motor: on
+  // the -1.5 m step that motor sits about a metre under the surface. Switched
+  // on, it must stay stopped, and with both nozzles open into the same still
+  // water nothing should flow through it. (Until 0c1f01b a 0.06 m phantom
+  // head between the suction line and the casing's port pricing drove
+  // 66 kg/s through exactly this pump, and the sea test above passed on it.)
+  //
+  // KNOWN RESIDUAL, 12.6 g/s, steady: the sea's liquid is priced at the
+  // saturated density at its vapour pressure (999.047 kg/m3 at 15 C), not
+  // compressed by the bar of air over it, while the liquid-full casing at
+  // 1.2 bar carries that compression (999.102). Gravity heads use the
+  // upstream density, so the two nozzle lines see different water - a
+  // 0.23 Pa loop head that real, barotropic water cannot have. The bound
+  // below catches anything like the old phantom (5000x larger) without
+  // pinning that residual; tighten it to ~0 if the two-phase liquid density
+  // learns about its gas cushion.
+  const plant = { components: new Map(), connections: [], terrain } as unknown as PlantState;
+  const cm = new ConstructionManager(plant);
+  plant.components.set('sea', { ...tank('sea', 50, 0.5)[1], waterBody: 'sea' } as PlantComponent);
+  const id = cm.createComponent({
+    type: 'pump', name: 'P45', position: { x: 45, y: 10 }, containedBy: 'sea',
+    properties: { name: 'P45', ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry' },
+  })!;
+  const sim = buildSimFromPlantJson({ components: Array.from(plant.components.entries()), connections: [], terrain });
+  sim.state.components.pumps.get(id)!.running = true;
+  run(sim, 30, 0.02);
+  // (the state object is replaced every step - read the pump after the run)
+  const p = sim.state.components.pumps.get(id)!;
+  const q = flowRate(sim.state, 'sea', id);
+  console.log(`    drowned pump after 30 s: flooded=${p.flooded}, speed ${p.effectiveSpeed.toFixed(3)}, ${q.toFixed(4)} kg/s`);
+  assert(p.flooded === true, 'a motor a metre under the surface should be flooded');
+  assert(p.running === true, 'drowning leaves the operator\'s switch as it was');
+  assert(p.effectiveSpeed === 0, `a drowned motor must not turn, speed ${p.effectiveSpeed}`);
+  assert(Math.abs(q) < 0.1, `nothing should flow through a stopped pump in still water, got ${q.toFixed(3)} kg/s`);
+});
+
 // ---------------------------------------------------------------------------
 // 6. A dry pump on ordinary lines keeps its air at build
 // ---------------------------------------------------------------------------
