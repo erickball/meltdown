@@ -566,7 +566,7 @@ export function otsgWaterSideDuties(
 
 /**
  * The wall exchange of a tube whose water answers it faster than the step:
- * the OTSG counterpart of RK45Solver.applyStiffConvection, in two halves -
+ * the OTSG counterpart of the stiff wall-fluid pairs (stiff-convection.ts), in two halves -
  * stampStiffOtsgTubes before the first stage, completeStiffOtsgTubes right
  * after it.
  *

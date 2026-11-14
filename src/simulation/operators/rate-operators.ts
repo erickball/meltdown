@@ -334,12 +334,6 @@ export class ConductionRateOperator implements RateOperator {
 // getTurbineCondenserState pattern): the RK45 path never writes
 // state.energyDiagnostics, so the panels read these instead.
 const lastConvectionHeatRates = new Map<string, number>();
-/** hA (W/K) of each convection pair at its last explicit evaluation - what
- *  the solver's stiff-pair split reads to size a pair's relaxation time. */
-const lastConvectionConductance = new Map<string, number>();
-export function getLastConvectionConductance(): Map<string, number> {
-  return lastConvectionConductance;
-}
 export function recordConvectionHeatRate(connId: string, Q: number): void {
   lastConvectionHeatRates.set(connId, Q);
 }
@@ -557,6 +551,57 @@ function vaporPropsFor(
   return out;
 }
 
+/**
+ * Heat a wall is giving its fluid right now (W, positive into the fluid): the
+ * live correlations for one convection pair, on the state as it stands. One
+ * path for the rate operator and for the solver's stiff-pair probe
+ * (stiff-convection.ts), which differences it in the wall temperature.
+ */
+export function convectionPairHeat(
+  state: SimulationState, conn: ConvectionConnection, cache: ConvectionNodeProps,
+): number {
+  const thermalNode = state.thermalNodes.get(conn.thermalNodeId);
+  const flowNode = state.flowNodes.get(conn.flowNodeId);
+  if (!thermalNode || !flowNode) {
+    throw new Error(`[Convection] pair '${conn.id}' names a missing node ` +
+      `('${conn.thermalNodeId}' / '${conn.flowNodeId}')`);
+  }
+  // Split the surface into liquid-wetted and vapor-exposed portions by
+  // the node's liquid level (tubes above the water line barely transfer).
+  const split = effectiveSurfaceAreas(conn, flowNode);
+  const areaScale = massScale(state, conn.scaleWithMassOf);
+  const liquidArea = split.liquidArea * areaScale;
+  const vaporArea = split.vaporArea * areaScale;
+
+  const dT = thermalNode.temperature - flowNode.fluid.temperature;
+  // Two lengths, because the correlations want different ones. D_heater
+  // is the rod or tube the heat comes off, which is what film boiling
+  // blankets; D_flow is the passage the coolant runs in, which is what
+  // the channel correlations are written against. They coincide for a
+  // bare surface in a big volume and differ by ~2x in a rod bundle.
+  const D_heater = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
+  const D_flow = conn.flowHydraulicDiameter ?? D_heater;
+
+  // Each coefficient is only ever used against its own area, and a
+  // single-phase node has one of them at exactly zero - which is most
+  // surfaces in most plants. Computing the other anyway was half the
+  // convection pass multiplied by nothing: two correlation sets, a
+  // mixture-property sweep over every gas species, and a saturation
+  // lookup, to scale a zero.
+  const h_liquid = liquidArea > 0
+    ? liquidWallHeatTransfer(flowNode, state, conn, D_flow, D_heater, cache).total
+    : 0;
+  const h_vapor = vaporArea > 0
+    ? vaporWallHeatTransfer(flowNode, state, D_flow, thermalNode.temperature, conn, cache).total
+    : 0;
+  // A layer between film and metal (insulation) adds in series per unit
+  // area: U = 1/(1/h + R).
+  const R = conn.seriesResistance ?? 0;
+  const U_liquid = R > 0 ? h_liquid / (1 + h_liquid * R) : h_liquid;
+  const U_vapor = R > 0 ? h_vapor / (1 + h_vapor * R) : h_vapor;
+  return U_liquid * liquidArea * dT + U_vapor * vaporArea * dT;
+}
+
 export class ConvectionRateOperator implements RateOperator {
   name = 'Convection';
 
@@ -569,51 +614,21 @@ export class ConvectionRateOperator implements RateOperator {
       const flowNode = state.flowNodes.get(conn.flowNodeId);
 
       if (!thermalNode || !flowNode) continue;
-      // Applied implicitly for this step by the solver (relaxation faster
-      // than the step): nothing explicit to add, and the conductance stays
-      // what the last explicit evaluation measured.
-      if (conn.implicitThisStep) continue;
-
-      // Split the surface into liquid-wetted and vapor-exposed portions by
-      // the node's liquid level (tubes above the water line barely transfer).
-      const split = effectiveSurfaceAreas(conn, flowNode);
-      const areaScale = massScale(state, conn.scaleWithMassOf);
-      const liquidArea = split.liquidArea * areaScale;
-      const vaporArea = split.vaporArea * areaScale;
-
-      const dT = thermalNode.temperature - flowNode.fluid.temperature;
-      // Two lengths, because the correlations want different ones. D_heater
-      // is the rod or tube the heat comes off, which is what film boiling
-      // blankets; D_flow is the passage the coolant runs in, which is what
-      // the channel correlations are written against. They coincide for a
-      // bare surface in a big volume and differ by ~2x in a rod bundle.
-      const D_heater = conn.characteristicDiameter ?? flowNode.hydraulicDiameter;
-      const D_flow = conn.flowHydraulicDiameter ?? D_heater;
-
-      // Each coefficient is only ever used against its own area, and a
-      // single-phase node has one of them at exactly zero - which is most
-      // surfaces in most plants. Computing the other anyway was half the
-      // convection pass multiplied by nothing: two correlation sets, a
-      // mixture-property sweep over every gas species, and a saturation
-      // lookup, to scale a zero.
-      const h_liquid = liquidArea > 0
-        ? this.liquidHeatTransferCoeff(
-            flowNode, state, conn, D_flow, D_heater, cache)
-        : 0;
-      const h_vapor = vaporArea > 0
-        ? this.vaporHeatTransferCoeff(
-            flowNode, state, D_flow, thermalNode.temperature, conn, cache)
-        : 0;
-      // A layer between film and metal (insulation) adds in series per unit
-      // area: U = 1/(1/h + R). The stiff-pair split reads the same
-      // conductance, so the implicit exchange sees the insulation too.
-      const R = conn.seriesResistance ?? 0;
-      const U_liquid = R > 0 ? h_liquid / (1 + h_liquid * R) : h_liquid;
-      const U_vapor = R > 0 ? h_vapor / (1 + h_vapor * R) : h_vapor;
-      const Q = U_liquid * liquidArea * dT + U_vapor * vaporArea * dT;
-
-      lastConvectionHeatRates.set(conn.id, Q);
-      lastConvectionConductance.set(conn.id, U_liquid * liquidArea + U_vapor * vaporArea);
+      // A pair the solver has stamped for this step (its relaxation is
+      // faster than the step - see stiff-convection.ts) exchanges the step's
+      // constant duty instead of the live correlation.
+      let Q: number;
+      if (conn.implicitThisStep) {
+        if (conn.implicitDuty === undefined) {
+          throw new Error(`[Convection] pair '${conn.id}' is stamped implicit for this step ` +
+            `but carries no duty - the stamp and the duty are set together`);
+        }
+        Q = conn.implicitDuty;
+        lastConvectionHeatRates.set(conn.id, Q);
+      } else {
+        Q = convectionPairHeat(state, conn, cache);
+        lastConvectionHeatRates.set(conn.id, Q);
+      }
 
       // Solid temperature rate (effective capacity includes latent heat)
       const dT_solid = -Q / nodeHeatCapacity(thermalNode);
@@ -636,70 +651,33 @@ export class ConvectionRateOperator implements RateOperator {
 
     return rates;
   }
-
-  /**
-   * Liquid-wetted surface split by node liquid level (same model the level-
-   * dependent HX work introduced; previously only the obsolete Euler path
-   * applied it).
-   */
-  /**
-   * Wetted-surface heat transfer coefficient: single-phase convection -
-   * Dittus-Boelter blended with Churchill-Chu on the liquid's own Rayleigh
-   * number, both on properties read at the node's temperature - plus, for a
-   * saturated (two-phase) node with a HOT wall, boiling.
-   *
-   * Cold walls get the single-phase term and nothing else. See the comment
-   * at the branch itself for why there is no condensation term here: it is a
-   * wall that cannot nucleate, the vapor-exposed share of the same surface
-   * already carries condensation, and the latent heat is in the node's
-   * (u,v) bookkeeping either way.
-   *
-   * Hot walls (boiling): the full boiling curve. Below the critical heat
-   * flux the same saturated-Thom nucleate term applies. Past the boiling
-   * crisis the wall progressively vapor-blankets: we model transition
-   * boiling as partial surface wetting - a wetted fraction f that falls
-   * smoothly (logistic in log-superheat) from ~0.9 at the CHF superheat
-   * (Thom inverted at the Zuber flux) to ~0.1 at the minimum-film-boiling
-   * superheat (homogeneous nucleation limit, Lienhard). The dry fraction
-   * transfers by Bromley film boiling
-   * plus radiation across the vapor film. The result is the classic
-   * N-shaped q(dT) curve - nucleate rise, transition collapse, slow film-
-   * boiling recovery - with no thresholds, no hysteresis, and every branch
-   * evaluated from the same saturated-property tables.
-   */
-  private liquidHeatTransferCoeff(
-    flowNode: FlowNode,
-    state: SimulationState,
-    conn: ConvectionConnection,
-    D_flow: number,
-    D_heater: number,
-    cache: ConvectionNodeProps,
-  ): number {
-    return liquidWallHeatTransfer(
-      flowNode, state, conn, D_flow, D_heater, cache).total;
-  }
-
-
-  /**
-   * Vapor-exposed surface. Three mechanisms on the ACTUAL gas mixture's
-   * properties - steam blended with any NCG by vapor-space mole fraction:
-   * forced convection, natural convection, and condensation when the wall is
-   * below the local dew point. See vaporWallHeatTransfer for the model; this
-   * is the thin wrapper that keeps the operator's call site tidy.
-   */
-  private vaporHeatTransferCoeff(
-    flowNode: FlowNode,
-    state: SimulationState,
-    D: number,
-    T_wall: number,
-    conn: ConvectionConnection | undefined,
-    cache: ConvectionNodeProps,
-  ): number {
-    const { total } = vaporWallHeatTransfer(
-      flowNode, state, D, T_wall, conn, cache);
-    return total;
-  }
 }
+
+/*
+ * Wetted-surface heat transfer coefficient: single-phase convection -
+ * Dittus-Boelter blended with Churchill-Chu on the liquid's own Rayleigh
+ * number, both on properties read at the node's temperature - plus, for a
+ * saturated (two-phase) node with a HOT wall, boiling.
+ *
+ * Cold walls get the single-phase term and nothing else. See the comment
+ * at the branch itself for why there is no condensation term here: it is a
+ * wall that cannot nucleate, the vapor-exposed share of the same surface
+ * already carries condensation, and the latent heat is in the node's
+ * (u,v) bookkeeping either way.
+ *
+ * Hot walls (boiling): the full boiling curve. Below the critical heat
+ * flux the same saturated-Thom nucleate term applies. Past the boiling
+ * crisis the wall progressively vapor-blankets: we model transition
+ * boiling as partial surface wetting - a wetted fraction f that falls
+ * smoothly (logistic in log-superheat) from ~0.9 at the CHF superheat
+ * (Thom inverted at the Zuber flux) to ~0.1 at the minimum-film-boiling
+ * superheat (homogeneous nucleation limit, Lienhard). The dry fraction
+ * transfers by Bromley film boiling
+ * plus radiation across the vapor film. The result is the classic
+ * N-shaped q(dT) curve - nucleate rise, transition collapse, slow film-
+ * boiling recovery - with no thresholds, no hysteresis, and every branch
+ * evaluated from the same saturated-property tables.
+ */
 
 /**
  * The liquid-side wall coefficient, broken into the mechanisms that make it

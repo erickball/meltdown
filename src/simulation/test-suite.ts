@@ -77,6 +77,7 @@ import {
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
 import { tubeWaterState, classifyOtsgFlows, completeStiffOtsgTubes } from './operators/otsg-operator.js';
 import { createZeroRates } from './rk45-solver.js';
+import { coupledMeanDuties, phi2, symmetricEigen } from './operators/stiff-convection.js';
 import {
   binaryDiffusivity,
   diffusivityInMixture,
@@ -2468,6 +2469,95 @@ test('a stamped boiling section shares its relaxation by area, however small its
   }
   assertClose(k0.flowNodes.get('tube')!.dEnergy, dEnergy0 + qMean + Q3, 1e-6 * qMean,
     'and the tube books the same total');
+});
+
+// ============================================================================
+// Stiff wall-fluid exchange (coupled, with drift)
+// ============================================================================
+
+test('a sealed, unheated wall-fluid pair gets the two-body relaxation', () => {
+  // No drift: wall and fluid relax toward each other and the step-mean duty
+  // is dT C_eq (1 - e^{-dt/tau}) / dt, at any dt/tau.
+  const Cw = 4e4, Cf = 3e3, g = 2e4, dT = 50;
+  const tau = 1 / (g * (1 / Cw + 1 / Cf));
+  for (const dt of [0.1 * tau, tau, 30 * tau]) {
+    // Each node's heating at the start is just the pair's own duty
+    const [q] = coupledMeanDuties([Cw, Cf], [-g * dT, g * dT],
+      [{ wall: 0, fluid: 1, g, q0: g * dT }], dt);
+    const exact = dT * (Cw * Cf / (Cw + Cf)) * (1 - Math.exp(-dt / tau)) / dt;
+    assertClose(q, exact, 1e-9 * exact, `step-mean duty at dt = ${(dt / tau).toFixed(1)} tau`);
+  }
+});
+
+test('a pair in steady state is handed back exactly its own duty', () => {
+  // Cladding at power: the fuel feeds the wall what the coolant takes, and
+  // the flow carries the same away. Total heating of both is zero, so
+  // nothing relaxes - whatever the step. (Relaxing this toward equal
+  // temperatures is what made every explicit/implicit switch a rejection.)
+  const q0 = 9.3e8;
+  for (const dt of [0.01, 0.1, 10]) {
+    const [q] = coupledMeanDuties([1e7, 1.5e8], [0, 0],
+      [{ wall: 0, fluid: 1, g: 4e7, q0 }], dt);
+    assertClose(q, q0, 1e-9 * q0, `duty at dt = ${dt} s`);
+  }
+});
+
+test('a heated wall settles on the duty that balances its heating', () => {
+  // A wall heated at R against a fluid too big to notice: over a step long
+  // against tau the duty goes from q0 to R, so the mean approaches R, and
+  // the linear model's exact mean is R + (q0 - R)(1 - e^{-k dt})/(k dt).
+  const Cw = 1e6, Cf = 1e12, g = 5e7, q0 = 2e8, R = 9e8;
+  const k = g * (1 / Cw + 1 / Cf);
+  const dt = 2;
+  const [q] = coupledMeanDuties([Cw, Cf], [R - q0, q0], [{ wall: 0, fluid: 1, g, q0 }], dt);
+  const exact = R + (q0 - R) * (1 - Math.exp(-k * dt)) / (k * dt);
+  assertClose(q, exact, 1e-6 * exact, 'step-mean duty of a driven wall');
+});
+
+test('a tube wall between two fluids is solved as one system', () => {
+  // Hot fluid - wall - cold fluid, both films stiff. Compare the coupled
+  // step-mean duties with a brute-force integration of the same linear
+  // system; and the two duties must differ by exactly the wall's own
+  // temperature change (energy).
+  const C = [8e5, 2e3, 5e6];           // hot fluid, wall, cold fluid
+  const g1 = 6e4, g2 = 9e4;
+  const T = [600, 540, 450];
+  const drift = [-3e6, 0, 2e6];        // flow cooling the hot side, feeding the cold
+  // Edges are (wall -> fluid): the hot side's duty is negative
+  const q0a = g1 * (T[1] - T[0]), q0b = g2 * (T[1] - T[2]);
+  const heating = [drift[0] + q0a, drift[1] - q0a - q0b, drift[2] + q0b];
+  const dt = 0.5;                      // wall tau ~ 13 ms
+  const [qa, qb] = coupledMeanDuties(C, heating,
+    [{ wall: 1, fluid: 0, g: g1, q0: q0a }, { wall: 1, fluid: 2, g: g2, q0: q0b }], dt);
+  const x = T.slice();
+  const N = 200000, h = dt / N;
+  let sa = 0, sb = 0;
+  for (let i = 0; i < N; i++) {
+    const a = g1 * (x[1] - x[0]), b = g2 * (x[1] - x[2]);
+    sa += a * h; sb += b * h;
+    x[0] += h * (drift[0] + a) / C[0];
+    x[1] += h * (drift[1] - a - b) / C[1];
+    x[2] += h * (drift[2] + b) / C[2];
+  }
+  assertClose(qa, sa / dt, 2e-4 * Math.abs(sa / dt), 'hot-side duty');
+  assertClose(qb, sb / dt, 2e-4 * Math.abs(sb / dt), 'cold-side duty');
+  assertClose((drift[1] - qa - qb) * dt / C[1], x[1] - T[1], 1e-3 * Math.abs(x[1] - T[1]) + 1e-6,
+    'the wall ends where the brute-force integration puts it');
+});
+
+test('the eigen-solve and phi2 hold up at their awkward ends', () => {
+  assertClose(phi2(0), 0.5, 1e-15, 'phi2(0)');
+  assertClose(phi2(-1e-3), (Math.expm1(-1e-3) + 1e-3) / 1e-6, 1e-9, 'series meets closed form');
+  assertClose(phi2(-1e6), 1e-6, 1e-11, 'phi2 falls as 1/|z|');
+  const { values, vectors } = symmetricEigen([[2, -1, 0], [-1, 2, -1], [0, -1, 2]]);
+  const sorted = values.slice().sort((a, b) => a - b);
+  assertClose(sorted[0], 2 - Math.SQRT2, 1e-12, 'smallest eigenvalue');
+  assertClose(sorted[2], 2 + Math.SQRT2, 1e-12, 'largest eigenvalue');
+  for (let k = 0; k < 3; k++) {
+    let norm = 0;
+    for (let i = 0; i < 3; i++) norm += vectors[i][k] * vectors[i][k];
+    assertClose(norm, 1, 1e-12, `eigenvector ${k} is unit length`);
+  }
 });
 
 // ============================================================================
