@@ -1132,26 +1132,10 @@ export class PressureSolver {
       return e.mStar + e.D * (pFrom - pTo);
     };
 
-    // Post-solve choked-flow capping. The sonic bound uses the same discharge
-    // coefficients and 0.95 near-sonic margin as the explicit operator.
-    let anyCapped = false;
-    for (const e of entries) {
-      if (!e.choke) continue;
-      const capMag = e.choke.chokedByRatio
-        ? e.choke.m_dot_choked
-        : 0.95 * e.choke.m_dot_choked;
-      const m1 = flowOf(e);
-      if (Math.abs(m1) > capMag) {
-        e.capped = true;
-        e.cappedFlow = (m1 >= 0 ? 1 : -1) * capMag;
-        anyCapped = true;
-      }
-    }
-
     // Check-valve seating pass: an open check valve whose SOLVED end-of-step
     // flow came out reversed seats - flow exactly zero, conductance dropped -
     // and the network is re-solved once so its neighbours see the seated
-    // valve (the same one-outer-iteration treatment as choked flow above).
+    // valve (the same one-outer-iteration treatment as choked flow below).
     // This makes the disc position an outcome of the end-of-step balance
     // (a valve that was seated last step enters the solve open, and is
     // seated again here if its solved flow is still reversed - one re-solve
@@ -1166,6 +1150,7 @@ export class PressureSolver {
     // reopen within the step; it reopens next step when the predictor's
     // momentum says so.
     let anySeated = false;
+    let anyCapped = false;
     for (const e of entries) {
       if (!e.h.checkValve || e.capped || e.seated) continue;
       const w = flowOf(e);
@@ -1216,6 +1201,33 @@ export class PressureSolver {
           e.cappedFlow = 0;
           anySeated = true;
         }
+      }
+    }
+
+    // The seating pass runs BEFORE the choke caps, and the network is
+    // re-solved here once a valve seats: a cap decided against flows the
+    // seated valve no longer carries is stale. (In the other order the first
+    // solve ran the RCCS tank's 0.4 bar adverse head backwards through its
+    // vacuum breaker at 3.9 kg/s, the breaker body passed it on to the
+    // building past that line's sonic bound, the line was capped at 3.7 kg/s
+    // - and then the breaker seated, leaving the capped line draining a body
+    // that nothing fed: a -5.5 bar correction and a rejected step, every
+    // step above ~100 ms.)
+    if (anySeated || anyCapped) dP = solveNetwork();
+
+    // Post-solve choked-flow capping. The sonic bound uses the same discharge
+    // coefficients and 0.95 near-sonic margin as the explicit operator.
+    let anyChoked = false;
+    for (const e of entries) {
+      if (!e.choke) continue;
+      const capMag = e.choke.chokedByRatio
+        ? e.choke.m_dot_choked
+        : 0.95 * e.choke.m_dot_choked;
+      const m1 = flowOf(e);
+      if (Math.abs(m1) > capMag) {
+        e.capped = true;
+        e.cappedFlow = (m1 >= 0 ? 1 : -1) * capMag;
+        anyChoked = true;
       }
     }
 
@@ -1414,7 +1426,7 @@ export class PressureSolver {
       }
     }
 
-    if (anyCapped || anyStiffened || anySeated) {
+    if (anyChoked || anyStiffened) {
       dP = solveNetwork();
       if (anyStiffened && !corrector) this.secantResolveSteps++;
     }
@@ -1488,7 +1500,7 @@ export class PressureSolver {
 
     this.lastStatus = {
       ran: true,
-      iterations: anyCapped ? 2 : 1,
+      iterations: 1 + (anySeated || anyCapped ? 1 : 0) + (anyChoked || anyStiffened ? 1 : 0),
       converged: true,
       stagnated: false,
       maxImbalance: maxResidual,
