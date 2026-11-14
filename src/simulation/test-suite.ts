@@ -59,7 +59,7 @@ import {
   evaluateOtsg,
   evaluateOtsgPartition,
   otsgPartitionAtP,
-  superheatOutletTemp,
+  marchSteamOverMetal, buildSteamIsobar, isobarAt, superheatOverlaps,
   OtsgWallPin,
   otsgRates,
   boilingMeanQuality,
@@ -1866,8 +1866,8 @@ const EMPTY_SLUG = { m1: 0, U1: 0 };
 /** A test pin: wall temperature straight through (no draw, so the section
  *  soaks fully to its metal). A wall at 273 K pins the steam at saturation -
  *  the dryout limit. */
-function pinAt(TWall3: number, WCp3 = 0): OtsgWallPin {
-  return { zoneTemps: [TWall3], hA3Full: 1200 * PART_GEOM.heatArea, WCp3 };
+function pinAt(TWall3: number, WSteam = 0): OtsgWallPin {
+  return { zoneTemps: [TWall3], hA3Full: 1200 * PART_GEOM.heatArea, WSteam };
 }
 const PIN_COLD = pinAt(273);
 /** Total section volume - the quantity an integrated m3 used to violate. */
@@ -1951,7 +1951,7 @@ test('a constructed three-section state round-trips, pressure included', () => {
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
   const ev = evaluateOtsgPartition(
     m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, { m1, U1: m1 * u1Bar }, geom,
-    { zoneTemps: [T3], hA3Full: 1200 * geom.heatArea, WCp3: 0 });
+    { zoneTemps: [T3], hA3Full: 1200 * geom.heatArea, WSteam: 0 });
   assertClose(ev.P / 1e5, 80, 0.8, 'the pressure the partition was built at comes back');
   assertClose(ev.sections[0].mass, m1, 1e-2 * m1, 'economizer mass recovered');
   assertClose(ev.sections[1].mass, m2, 5e-2 * m2, 'boiling mass recovered');
@@ -1984,7 +1984,7 @@ test('the published pressure is the partition\'s, not the mush read', () => {
     `the uniform read of a partitioned boiler must be badly biased low, got ${(mushP / 1e5).toFixed(1)} bar`);
   const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
-    { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WCp3: 0 });
+    { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WSteam: 0 });
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
 });
 
@@ -2041,7 +2041,7 @@ test('a stronger steam draw pulls the pin toward saturation', () => {
   const U = m1 * u1Bar + m2 * u2 + m3 * u3c;
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3c, tubeLength: 1, heatArea: 2000 };
   const still = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(sat0.T + 120, 0));
-  const drawing = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(sat0.T + 120, 500e3));
+  const drawing = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar }, geom, pinAt(sat0.T + 120, 160));
   assert(drawing.sections[2].T < still.sections[2].T - 5,
     `a drawn-through section must sit cooler than a stagnant one ` +
     `(${drawing.sections[2].T.toFixed(1)} vs ${still.sections[2].T.toFixed(1)} K)`);
@@ -2293,7 +2293,7 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
   assertClose(water.energy / 1e9, mass * uW / 1e9, 0.01 * mass * uW / 1e9,
     'as must the water energy');
 
-  const testPin = { zoneTemps: [satW.T + 60], hA3Full: 1200 * geom.heatArea, WCp3: 0 };
+  const testPin = { zoneTemps: [satW.T + 60], hA3Full: 1200 * geom.heatArea, WSteam: 0 };
   const withGas = evaluateOtsgPartition(mass, water.energy, EMPTY_SLUG, geom, testPin);
   const noGas = evaluateOtsgPartition(mass, mass * uW, EMPTY_SLUG, geom, testPin);
   assertClose(withGas.P / 1e5, noGas.P / 1e5, 0.02 * noGas.P / 1e5,
@@ -2350,37 +2350,90 @@ test('the superheat outlet is marched across its metal and never passes it', () 
   // and a gas-side effectiveness form was bounded by the helium inlet but
   // not by the tube - 90 K above the steam-end metal at the Xe-100's design
   // point.
-  const TIn = 620;                                   // K: saturation in
+  const P = 165e5;
+  const sat = saturationAtP(P);
+  const TIn = sat.T;                                 // ~623 K: saturation in
   const zones = [560, 600, 640, 700, 760, 800, 830, 850];  // feed end -> steam end
+  const iso = buildSteamIsobar(P, sat, 900);
   const hA = 1200 * 2000;
   const L3 = 0.5;                                    // covers the last four zones
-  // Zero draw is the limit of the same formula: the stream soaks to the
-  // last metal it crosses.
-  assertClose(superheatOutletTemp(zones, L3, hA, 0, TIn), 850, 1e-9,
-    'a stagnant section offers steam at its steam-end metal');
-  const weak = superheatOutletTemp(zones, L3, hA, 50, TIn);
-  assert(weak <= 850 && weak > 849, `a near-zero draw should soak to the steam-end metal, got ${weak.toFixed(1)}`);
+  const out = (prof: number[], L: number, W: number) =>
+    marchSteamOverMetal(iso, prof, superheatOverlaps(prof.length, L), hA, W, TIn);
+  // Zero draw is the limit of the same march: the stream soaks to the last
+  // metal it crosses, and its mean is the mean of the metal it covers.
+  const still = out(zones, L3, 0);
+  assertClose(still.TOut, 850, 1e-9, 'a stagnant section offers steam at its steam-end metal');
+  assertClose(still.TMean, (760 + 800 + 830 + 850) / 4, 1e-9, 'and sits at its wall');
+  const weak = out(zones, L3, 0.02);
+  assert(weak.TOut <= 850 && weak.TOut > 849,
+    `a near-zero draw should soak to the steam-end metal, got ${weak.TOut.toFixed(1)}`);
   // Monotone in draw on a wall that rises toward the outlet.
-  const mid = superheatOutletTemp(zones, L3, hA, 1e5, TIn);
-  const strong = superheatOutletTemp(zones, L3, hA, 3e6, TIn);
-  assert(weak > mid && mid > strong && strong > TIn, 'the approach must fall as the draw grows');
+  const mid = out(zones, L3, 30);
+  const strong = out(zones, L3, 600);
+  assert(weak.TOut > mid.TOut && mid.TOut > strong.TOut && strong.TOut > TIn,
+    'the approach must fall as the draw grows');
+  assert(still.TMean > mid.TMean && mid.TMean > strong.TMean && strong.TMean > TIn,
+    'and the section mean with it');
   // NOTHING leaves hotter than the hottest metal it crossed, at any draw or
-  // length - including a wall whose hot spot is mid-section.
+  // length - including a wall whose hot spot is mid-section. And the heat the
+  // zones give up is the enthalpy the stream gained, on the same isobar.
   const humped = [560, 600, 640, 700, 900, 800, 760, 720];
   for (const prof of [zones, humped]) {
     for (const L of [0.03, 0.2, 0.5, 0.77, 1]) {
       const covered = prof.filter((_, k) => (k + 1) / prof.length > 1 - L);
       const hottest = Math.max(TIn, ...covered);
-      for (const Cw of [0, 10, 1e4, 1e5, 4e5, 1e7]) {
-        const T = superheatOutletTemp(prof, L, hA, Cw, TIn);
-        assert(T <= hottest + 1e-9,
-          `outlet ${T.toFixed(1)} K passed the hottest metal it crossed (${hottest} K) at L3=${L}, Cw=${Cw}`);
+      for (const W of [0, 0.003, 3, 30, 130, 3000]) {
+        const r = out(prof, L, W);
+        assert(r.TOut <= hottest + 1e-9,
+          `outlet ${r.TOut.toFixed(1)} K passed the hottest metal it crossed (${hottest} K) at L3=${L}, W=${W}`);
+        const taken = r.transit.reduce((x, y) => x + y, 0);
+        const gained = W * (isobarAt(iso, 'h', r.TOut) - sat.h_g);
+        assertClose(taken, gained, 1e-9 * Math.max(1, Math.abs(gained)),
+          `zone duties must sum to the stream's enthalpy gain at L3=${L}, W=${W}`);
       }
     }
   }
   // A section of no length heats nothing; metal colder than the stream cools it.
-  assertClose(superheatOutletTemp(zones, 0, hA, 1e4, TIn), TIn, 1e-12, 'no section, no superheat');
-  assert(superheatOutletTemp([500, 500], 1, hA, 1e4, TIn) < TIn, 'a cold wall cools the stream');
+  assertClose(out(zones, 0, 3).TOut, TIn, 1e-12, 'no section, no superheat');
+  assert(out([500, 500], 1, 3).TOut < TIn, 'a cold wall cools the stream');
+});
+
+test('the steam isobar is the property surface, and the film approach is exact on it', () => {
+  // The stream's cp is not a constant: at 165 bar it leaves the dome above
+  // 10 kJ/kg-K and is under 3 by 550 C. The isobar must reproduce the
+  // surface's own (P, T) states, and the approach across one isothermal wall
+  // must match a fine numerical integration of W dh = H (Tw - T) dA on it.
+  const P = 165e5;
+  const sat = saturationAtP(P);
+  const iso = buildSteamIsobar(P, sat, 850);
+  for (const T of [sat.T + 5, sat.T + 40, 750, 840]) {
+    const u = isobarAt(iso, 'u', T), v = isobarAt(iso, 'v', T);
+    const st = calculateState(1, u, v);
+    assertClose(st.temperature, T, 1.0, `isobar state at ${T.toFixed(0)} K reads back its temperature`);
+    assertClose(st.pressure, P, 0.01 * P, `isobar state at ${T.toFixed(0)} K reads back its pressure`);
+  }
+  const cpDome = (iso.h[1] - iso.h[0]) / (iso.T[1] - iso.T[0]);
+  const nTop = iso.T.length - 1;
+  const cpTop = (iso.h[nTop] - iso.h[nTop - 1]) / (iso.T[nTop] - iso.T[nTop - 1]);
+  assert(cpDome > 2 * cpTop && cpTop > 2000 && cpTop < 4000,
+    `steam cp must fall away from the dome: ${cpDome.toFixed(0)} at the dome, ${cpTop.toFixed(0)} J/kg-K at the top`);
+  const Tw = 840, hA = 2.0e5, W = 40;
+  const marched = marchSteamOverMetal(iso, [Tw], [1], hA, W, sat.T);
+  let T = sat.T;
+  const steps = 20000;
+  for (let i = 0; i < steps; i++) {
+    const j = iso.T.findIndex((_, q) => q === iso.T.length - 2 || T < iso.T[q + 1]);
+    const cp = (iso.h[j + 1] - iso.h[j]) / (iso.T[j + 1] - iso.T[j]);
+    T += (hA / steps) * (Tw - T) / (W * cp);
+  }
+  assertClose(marched.TOut, T, 0.05, 'segment-by-segment approach matches the integrated film equation');
+  // A constant 3000 J/kg-K would have closed on the wall much faster.
+  const constCp = Tw - (Tw - sat.T) * Math.exp(-hA / (W * 3000));
+  assert(marched.TOut < constCp - 10,
+    `real steam approaches its wall slower than a 3000 J/kg-K stream: ${marched.TOut.toFixed(1)} vs ${constCp.toFixed(1)} K`);
+  // The mean is the film's own energy balance.
+  assertClose(hA * (Tw - marched.TMean), W * (isobarAt(iso, 'h', marched.TOut) - sat.h_g), 1e-3,
+    'the film at the mean temperature carries exactly the heat the stream took');
 });
 
 test('a superheat section offers steam no hotter than its own metal', () => {
@@ -2396,7 +2449,7 @@ test('a superheat section offers steam no hotter than its own metal', () => {
   const mass = 400;
   const U = mass * 2.85e6;
   for (const W of [3, 25]) {
-    const pin: OtsgWallPin = { zoneTemps, hA3Full: 1200 * geom.heatArea, WCp3: 3000 * W };
+    const pin: OtsgWallPin = { zoneTemps, hA3Full: 1200 * geom.heatArea, WSteam: W };
     const ev = evaluateOtsgPartition(mass, U, { m1: 30, U1: 30 * (sat.u_f - 150e3) }, geom, pin);
     assert(ev.regime === 'superheat', `test state should superheat, got '${ev.regime}'`);
     const s3 = ev.sections[2];

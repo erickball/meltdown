@@ -41,6 +41,7 @@ import {
   saturationAtP,
   OtsgEval,
   OtsgWallPin,
+  marchSteamOverMetal,
 } from '../otsg';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from '../water-properties';
 import { nodeHeatCapacity } from './rate-operators';
@@ -300,12 +301,6 @@ export function classifyOtsgFlows(
 }
 
 
-/** cp scale for the wall pin's NTU (J/kg-K). The pin only needs the RATIO
- *  hA/(W cp) to know how closely a transiting stream approaches its wall, so
- *  a correlation-grade constant is the right fidelity - the same role the
- *  duty calculation's cpSteam default plays. */
-const CP_STEAM_PIN = 3000;
-
 /** The bundle's tube-metal zones, feed end to steam end. */
 export function otsgMetalZones(state: SimulationState, node: FlowNode): ThermalNode[] {
   const cfg = node.otsg!;
@@ -331,7 +326,7 @@ export function otsgWallPin(
   return {
     zoneTemps: otsgZoneTemps(state, node),
     hA3Full: H_TUBE_STEAM * cfg.heatArea,
-    WCp3: Math.max(0, flows.WSteamOut) * CP_STEAM_PIN,
+    WSteam: Math.max(0, flows.WSteamOut),
   };
 }
 
@@ -526,26 +521,25 @@ export function otsgWaterSideDuties(
   // exact for it - the wall's ramp along the section is the zones' own
   // temperatures now); the standing branch heats the section's bulk from
   // every piece in parallel. See transitStandingQ for the two branches.
-  const march = (i: 0 | 2, hForced: number, mcp: number, TIn: number, TBulk: number): number => {
-    let T = TIn, Q = 0;
+  // Section 1: feed stream entering at its own temperature
+  const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.hFeed) : ev.sections[0].T;
+  const mcp1 = flows.WFeed * cpLiquid;
+  let Q1 = 0;
+  {
+    let T = TFeedIn;
     for (let k = 0; k < N; k++) {
-      const a = heatArea * ov[k][i];
+      const a = heatArea * ov[k][0];
       if (!(a > 0)) continue;
-      let q = H_TUBE_NATURAL * a * (zoneTemps[k] - TBulk);
-      if (mcp > 0) {
-        const transit = (1 - Math.exp(-hForced * a / mcp)) * mcp * (zoneTemps[k] - T);
-        T += transit / mcp;
+      let q = H_TUBE_NATURAL * a * (zoneTemps[k] - ev.sections[0].T);
+      if (mcp1 > 0) {
+        const transit = (1 - Math.exp(-H_TUBE_LIQUID * a / mcp1)) * mcp1 * (zoneTemps[k] - T);
+        T += transit / mcp1;
         q += transit;
       }
       zoneQ[k] += q;
-      if (i === 2) zoneQ3[k] += q;
-      Q += q;
+      Q1 += q;
     }
-    return Q;
-  };
-  // Section 1: feed stream entering at its own temperature
-  const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.hFeed) : ev.sections[0].T;
-  const Q1 = march(0, H_TUBE_LIQUID, flows.WFeed * cpLiquid, TFeedIn, ev.sections[0].T);
+  }
   // Section 2: boiling at T_sat - huge film coefficient, pure standing form
   let Q2 = 0;
   for (let k = 0; k < N; k++) {
@@ -555,12 +549,28 @@ export function otsgWaterSideDuties(
     Q2 += q;
   }
   // Section 3: steam entering at saturation, heated toward its own wall -
-  // which the boiling section can no longer clamp.
-  const cpSteam = ev.sections[2].mass > 0 && ev.sections[2].T > ev.sat.T + 1
-    ? Math.max(2000, (ev.sections[2].hBar - ev.sat.h_g) / (ev.sections[2].T - ev.sat.T))
-    : 3000;
-  const W23Guess = Math.max(0, flows.WSteamOut); // transit rate scale for the steam pass
-  const Q3 = march(2, H_TUBE_STEAM, W23Guess * cpSteam, ev.sat.T, ev.sections[2].T);
+  // which the boiling section can no longer clamp. The transit branch is the
+  // partition's own march on the partition's own isobar (marchSteamOverMetal):
+  // the heat each zone gives the stream is the enthalpy the stream gains
+  // crossing it, so the steam offered at the outlet is the steam heated here.
+  let Q3 = 0;
+  if (ev.sections[2].lengthFrac > 0) {
+    if (!ev.steamIsobar) {
+      throw new Error(`[OTSG] a superheat section ${(100 * ev.sections[2].lengthFrac).toFixed(1)}% of ` +
+        `the tube long (regime '${ev.regime}') came without its steam isobar - the wall duty ` +
+        `has no property surface to price the stream on.`);
+    }
+    const { transit } = marchSteamOverMetal(ev.steamIsobar, zoneTemps, ov.map(o => o[2]),
+      H_TUBE_STEAM * heatArea, Math.max(0, flows.WSteamOut), ev.sat.T);
+    for (let k = 0; k < N; k++) {
+      const a = heatArea * ov[k][2];
+      if (!(a > 0)) continue;
+      const q = H_TUBE_NATURAL * a * (zoneTemps[k] - ev.sections[2].T) + transit[k];
+      zoneQ[k] += q;
+      zoneQ3[k] += q;
+      Q3 += q;
+    }
+  }
   return { Q1, Q2, Q3, TFeedIn, zoneQ, zoneQ2, zoneQ3 };
 }
 

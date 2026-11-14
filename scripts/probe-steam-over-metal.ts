@@ -97,7 +97,7 @@ function check() {
           `m=${ev.sections.map(x => x.mass.toFixed(2)).join('/')} L=${ev.sections.map(x => x.lengthFrac.toFixed(3)).join('/')} ` +
           `Tsat=${C(ev.sat.T)} T3=${C(s3.T)} TOut=${Number.isFinite(TOut) ? C(TOut) : '-'} TWall3=${C(TWall3)} TmMax=${C(TMax)} ` +
           `Tm(feed..steam)=${C(zT[0])}/${C(zT[Math.floor(zT.length / 2)])}/${C(zT[zT.length - 1])} TGasIn=${C(TGasIn)} Tshell=${C(shell.fluid.temperature)} ` +
-          `WSteam=${flows.WSteamOut.toFixed(3)} WFeed=${flows.WFeed.toFixed(3)} WCp3=${pin.WCp3.toFixed(0)}`;
+          `WSteam=${flows.WSteamOut.toFixed(3)} WFeed=${flows.WFeed.toFixed(3)} pin.WSteam=${pin.WSteam.toFixed(3)}`;
         rec[k] = { v, t: s.time, line };
         console.log(line);
         if (k === 'mean') {
