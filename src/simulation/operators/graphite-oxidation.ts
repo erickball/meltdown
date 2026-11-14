@@ -75,7 +75,7 @@ import {
 } from '../gas-properties';
 import { nodeHeatCapacity, pieceFraction } from './rate-operators';
 import { PEBBLE_BED_VOID_FRACTION } from './pebble-spill';
-import { approxVaporDensity } from './connection-hydraulics';
+import { nodeVaporDensity } from './connection-hydraulics';
 
 const OXIDANTS: GraphiteOxidant[] = ['O2', 'H2O', 'CO2'];
 const M_CARBON = 0.012011; // kg/mol
@@ -175,7 +175,7 @@ export class GraphiteOxidationRateOperator implements RateOperator {
           totalMassFlow += Math.abs(fc.massFlowRate);
         }
       }
-      const rho_g = approxVaporDensity(gasNode);
+      const rho_g = nodeVaporDensity(gasNode);
       const mu_g = mixtureViscosity(ncg, T_gas);
       const velocity = gasNode.flowArea > 0 && rho_g > 0
         ? totalMassFlow / (rho_g * gasNode.flowArea)

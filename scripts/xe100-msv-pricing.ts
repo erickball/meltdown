@@ -7,7 +7,7 @@
  * h_node exceeds h_source, so the ratchet needs inflow credited above the
  * source's true enthalpy or outflow debited below the node's.
  *
- * This calls the operator's OWN getSpecificEnthalpy for both nodes each
+ * This calls the transport's OWN pricing (zoneWaterEnthalpy) for both nodes each
  * sample - the same function the transport uses - and prints it against the
  * enthalpy the water tables give for those states. Where those two disagree
  * is the leak.
@@ -18,7 +18,7 @@
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
-import { FlowRateOperator } from '../src/simulation/operators/rate-operators';
+import { zoneWaterEnthalpy } from '../src/simulation/operators/connection-hydraulics';
 import { calculateState } from '../src/simulation/water-properties';
 import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
 import { stateAtPh } from '../src/simulation/turbine-expansion';
@@ -29,13 +29,12 @@ const seconds = parseFloat(process.argv[2] ?? '400');
 
 const sim = buildSimFromFile(PRESET);
 const st = () => sim.state;
-const op: any = new FlowRateOperator();
 
 /** The operator's own price for a vapor draw out of this node (kJ/kg). */
 const priced = (id: string) => {
   const n = st().flowNodes.get(id);
   if (!n) return NaN;
-  return op.getSpecificEnthalpy(n, 'vapor') / 1e3;
+  return zoneWaterEnthalpy(n, 'vapor') / 1e3;
 };
 
 /** What the water tables say the node's state is really worth (kJ/kg). */

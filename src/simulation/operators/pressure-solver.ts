@@ -71,9 +71,6 @@ import {
   calculateState,
   distanceToSaturationLine,
   saturatedLiquidDensity,
-  saturatedVaporDensity,
-  saturatedLiquidEnergy,
-  saturatedVaporEnergy,
   latentHeat,
   iceCv,
   liquidCv,
@@ -84,7 +81,6 @@ import {
   totalMass as ncgTotalMass,
   totalMoles as ncgTotalMoles,
   mixtureCv as ncgMixtureCv,
-  mixtureCp as ncgMixtureCp,
   R_GAS,
   GAS_PROPERTIES,
   ALL_GAS_SPECIES,
@@ -92,13 +88,14 @@ import {
 } from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
 import { nodeGasVolume } from '../mixture-properties';
+import { breakExchangeLegs } from './exchange-flow';
 import {
   computeConnectionHydraulics,
   computeChokeLimit,
   ConnectionHydraulics,
   DrawComposition,
   ChokeLimit,
-  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction } from './connection-hydraulics';
+  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction, drawCompositionAt, zoneDrawEnthalpy } from './connection-hydraulics';
 
 /** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
 interface FlowGas { y: number; molPerKg: number }
@@ -834,6 +831,35 @@ export class PressureSolver {
     // solve prices only the flow CHANGE (see the corrector param on solve).
     const banked: typeof fixedFlows = [];
     const entries: ImplicitEntry[] = [];
+
+    // Two-way flow through breaks (exchange-flow.ts): each counter-current
+    // leg is a fixed flow, so the closure sees the mass and enthalpy it moves
+    // and the measured heat source q - which subtracts this same transport -
+    // does not mistake a liquid-for-gas swap for heating or cooling. The
+    // stages integrate the legs explicitly; in corrector mode that transport
+    // is already in the probe state, like every non-implicit connection's.
+    if (!corrector) {
+      for (const leg of breakExchangeLegs(state)) {
+        const c = leg.conn;
+        const iFrom = index.get(c.fromNodeId) ?? -1;
+        const iTo = index.get(c.toNodeId) ?? -1;
+        if (iFrom < 0 && iTo < 0) continue;
+        const donor = state.flowNodes.get(leg.fromIsDonor ? c.fromNodeId : c.toNodeId)!;
+        const comp = leg.fromIsDonor
+          ? drawCompositionAt(donor, c.fromElevation, leg.massFlow, c.fromPhaseTolerance, c.fromOpeningHeight)
+          : drawCompositionAt(donor, c.toElevation, leg.massFlow, c.toPhaseTolerance, c.toOpeningHeight);
+        const hDonor = useEnergy ? this.blendedDonorEnthalpy(donor, comp) : 0;
+        const ncg = donor.fluid.ncg;
+        const gasMass = ncg ? ncgTotalMass(ncg) : 0;
+        const gas: FlowGas = gasMass > 0
+          ? { y: drawGasMassFraction(donor, comp), molPerKg: ncgTotalMoles(ncg!) / gasMass }
+          : NO_GAS;
+        fixedFlows.push({
+          flow: leg.fromIsDonor ? leg.massFlow : -leg.massFlow,
+          hDonor, donorIsFrom: leg.fromIsDonor, iFrom, iTo, gas,
+        });
+      }
+    }
 
     for (const conn of state.flowConnections) {
       const fromNode = state.flowNodes.get(conn.fromNodeId);
@@ -1740,44 +1766,11 @@ export class PressureSolver {
   }
 
   private donorEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
-    // Moving-boundary boiler tubes know what actually sits at each end of
-    // the bundle: a vapor draw carries the SUPERHEAT section's enthalpy (the
-    // entire point of the model - the bulk of a slug-heavy tube is ~2x too
-    // cheap and leaves the vapor's energy behind in the node), a liquid draw
-    // the subcooled section's. The cache is refreshed on every state by
-    // OtsgPartitionConstraintOperator.
-    if (node.otsg?.lastEval) {
-      if (flowPhase === 'vapor') return node.otsg.lastEval.hSteamOut;
-      if (flowPhase === 'liquid') return node.otsg.lastEval.hLiquidOut;
-    }
-    const bulk = this.bulkEnthalpy(node);
-    if (node.fluid.phase !== 'two-phase' || flowPhase === 'mixture') return bulk;
-
-    // Table top only. The lower clamp that used to sit here (273.16 K) is
-    // gone: the equilibrium line continues onto the sublimation curve, and the
-    // accessors follow it. In practice this branch only runs for phase
-    // 'two-phase', which below the triple point means the triple line itself
-    // (T = 273.16 K exactly), so the clamp was never doing anything but hiding
-    // the question.
-    const T_s = Math.min(node.fluid.temperature, 646.5);
-    const P_sat = saturationPressure(T_s);
-    if (flowPhase === 'liquid') {
-      return saturatedLiquidEnergy(T_s) + P_sat / saturatedLiquidDensity(T_s);
-    }
-    // Vapor draw: saturated steam sharing the vapor space with NCG (which
-    // carries its enthalpy at Cp, flow work included)
-    // quality is the non-liquid fraction; the ice does not evaporate up the
-    // standpipe with the steam, so take it back out. Zero above the triple
-    // point, so this is the old expression there.
-    const m_v = node.fluid.mass
-      * Math.max(0, (node.fluid.quality ?? 0) - (node.fluid.iceFraction ?? 0));
-    const m_g = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
-    if (m_v + m_g <= 0) return bulk;
-    const h_g = saturatedVaporEnergy(T_s) + P_sat / saturatedVaporDensity(T_s);
-    const H_gas = node.fluid.ncg
-      ? ncgTotalMoles(node.fluid.ncg) * ncgMixtureCp(node.fluid.ncg) * node.fluid.temperature
-      : 0;
-    return (m_v * h_g + H_gas) / (m_v + m_g);
+    // The transport operator's own pricing (zoneDrawEnthalpy), per kg of
+    // everything the zone delivers - so the closure weighs each flow at
+    // exactly the enthalpy the advection will move. For a whole-inventory
+    // draw this IS bulkEnthalpy, (U + P*V) / m_total, by construction.
+    return zoneDrawEnthalpy(node, flowPhase);
   }
 
   /**

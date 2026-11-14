@@ -35,7 +35,7 @@ import { saturationPressure } from '../water-properties';
 import { nodeGasVolume } from '../mixture-properties';
 import { evaluateOtsgSections } from './otsg-operator';
 import {
-  approxLiquidDensity,
+  nodeLiquidDensity,
   calculateLiquidLevelWithObstructions,
 } from './connection-hydraulics';
 
@@ -556,7 +556,7 @@ export class ControlSystemOperator implements ConstraintOperator {
         const node = this.getNode(state, targetId, ctl.id, 'sensor');
         const height = node.height && node.height > 0 ? node.height : Math.cbrt(node.volume);
         const area = node.volume / height;
-        return 1 / (approxLiquidDensity(node) * area);
+        return 1 / (nodeLiquidDensity(node) * area);
       }
       case 'node-pressure': {
         const node = this.getNode(state, targetId, ctl.id, 'sensor');
@@ -605,7 +605,7 @@ export class ControlSystemOperator implements ConstraintOperator {
         // gain is a property of the bundle, not a constant: a big bundle
         // swallows the same excess feed with a proportionally smaller shift.
         const node = this.getNode(state, targetId, ctl.id, 'sensor');
-        return 1 / (approxLiquidDensity(node) * node.volume);
+        return 1 / (nodeLiquidDensity(node) * node.volume);
       }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': no gain template for sensor kind '${kind}'`);
