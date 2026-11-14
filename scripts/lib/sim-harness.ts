@@ -41,6 +41,7 @@ import {
 import type { PlantState, PlantComponent, PlantConnection } from '../../src/types';
 import type { SimulationState } from '../../src/simulation/types';
 import { ElectricalOperator } from '../../src/simulation/electrical';
+import { collapseInlineValves } from '../../src/simulation/collapse-valves';
 
 // ============================================================================
 // Test framework
@@ -115,7 +116,7 @@ export function buildSim(
     components: new Map<string, PlantComponent>(components),
     connections,
   };
-  return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
+  return { state: lumpValves(createSimulationFromPlant(plantState)), solver: makeSolver(solverConfig) };
 }
 
 export function buildSimFromFile(
@@ -150,7 +151,7 @@ export function buildSimFromPlantJson(
     ambient: data.ambient,
   } as PlantState;
   setSimulationRandomSeed(0);
-  return { state: createSimulationFromPlant(plantState), solver: makeSolver(solverConfig) };
+  return { state: lumpValves(createSimulationFromPlant(plantState)), solver: makeSolver(solverConfig) };
 }
 
 function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45Solver {
@@ -374,4 +375,17 @@ export function assertStateSane(state: SimulationState, allowedBursts: string[] 
       }
     }
   }
+}
+
+// EXPERIMENT: LUMP_VALVES=1 folds in-line valve nodes into the neighbour on
+// the open side of their seat (see collapse-valves.ts). LUMP_VALVES_LOG=1 prints
+// what was folded and what was kept.
+function lumpValves(state: SimulationState): SimulationState {
+  if (process.env.LUMP_VALVES !== '1') return state;
+  const report = collapseInlineValves(state);
+  if (process.env.LUMP_VALVES_LOG === '1') {
+    for (const c of report.collapsed) console.log('[lump] ' + c.valveId + ' -> ' + c.hostId + ' (' + c.volume.toFixed(4) + ' m3)');
+    for (const k of report.kept) console.log('[lump] kept ' + k.valveId + ': ' + k.reason);
+  }
+  return state;
 }
