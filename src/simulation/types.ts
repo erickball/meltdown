@@ -1338,7 +1338,8 @@ export interface PressureSolverConfig {
    *  solve is blind to that feedback and such nodes flip flow direction
    *  every accepted step at any dt (discrete relaxation oscillation - the
    *  post-dryout dt bottleneck). Arriving flows are billed at the
-   *  receiver's enthalpy, with the remainder (wall heat, work, arrival
+   *  receiver's enthalpy (except the gas share - implicitArrivalEnergy),
+   *  with the remainder (wall heat, work, arrival
    *  excess) fed back as a measured source rate from the last accepted
    *  step - zero steady-state bias by construction. Only affects
    *  implicitMomentum mode. */
@@ -1384,6 +1385,26 @@ export interface PressureSolverConfig {
    *  per solve. EXPERIMENTAL - default off (see the dome-resolve experiment
    *  in docs/semi-implicit-flow-solver-plan.md). */
   eosSecantCompliance?: boolean;
+  /** Arriving flows carry their energy excess into the closure IN the step,
+   *  for the gas's share of the receiving node.
+   *
+   *  Off: every arrival is billed at the receiver's bulk enthalpy and the
+   *  excess it really deposits reaches the closure one step late through the
+   *  measured source q. In a stagnant loop between large temperature
+   *  contrasts (a tripped helium primary: core gas into a cooler duct) that
+   *  lag runs out of phase with a flow that reverses every step - a period-2
+   *  flip-flop of the whole loop at dt >= ~50 ms that nothing damps.
+   *  On: the share theta = C_gas/C_total of the node's heat capacity is
+   *  billed at the donor's enthalpy in the step (a gas's pressure answers
+   *  arriving energy linearly); the water's share keeps the lagged billing
+   *  (its tangent over-extrapolates across the dome). Pure water/steam
+   *  nodes are unchanged. */
+  implicitArrivalEnergy?: boolean;
+  /** Re-price connections whose SOLVED flow reversed against the
+   *  start-of-step direction from their real donor, and re-solve (up to a
+   *  few passes). Without it the closure bills a reversing flow at the
+   *  wrong node's enthalpy - a period-2/3 slosh in stagnant gas loops. */
+  donorRepick?: boolean;
 }
 
 /** Per-step pressure-swing tolerance, shared between the post-step sanity
@@ -1407,6 +1428,8 @@ export const DEFAULT_PRESSURE_SOLVER_CONFIG: PressureSolverConfig = {
   implicitAdvection: false,
   outerResolve: false,
   eosSecantCompliance: false,
+  implicitArrivalEnergy: true,
+  donorRepick: true,
 };
 
 // ============================================================================

@@ -15,11 +15,13 @@
  *     band, not a single endpoint.
  *
  * Usage: npx tsx scripts/probe-loop-mode.ts [preset] [seconds] [tickDt] [sampleEvery] [--steps]
- * Knobs: MAX_DT=<s> caps solver dt (with tickDt=0.1 that quantizes to 100/n ms);
+ * Knobs: SNAP=<file> starts from a saved state; MAX_DT=<s> caps solver dt (with tickDt=0.1 that quantizes to 100/n ms);
  *        LOOP=<nodeId,nodeId,...> overrides the watched node set;
  *        --steps prints every accepted step's loop flows (verbose).
  */
 
+import * as fs from 'fs';
+import { deserializeSimulationState } from '../src/simulation/serialization';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { buildSimFromFile } from './lib/sim-harness';
@@ -37,6 +39,8 @@ const sampleEvery = parseFloat(pos[3] || '5');
 
 const maxDtEnv = process.env.MAX_DT;
 const sim = buildSimFromFile(preset, maxDtEnv ? { maxDt: parseFloat(maxDtEnv) } : {});
+// SNAP=<file>: start from a saved simulation state instead of the preset's t=0
+if (process.env.SNAP) sim.state = deserializeSimulationState(JSON.parse(fs.readFileSync(process.env.SNAP, 'utf-8')));
 
 // ---------- watched node set ----------
 function gasRingFrom(state: SimulationState, seed: string): string[] {

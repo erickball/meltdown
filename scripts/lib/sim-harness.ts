@@ -219,6 +219,29 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
       },
     };
   }
+  // A/B override for in-step arrival energy (Newton closure): ARRIVAL_ENERGY=0
+  // bills every arrival at the receiver's h, the excess lagged through q.
+  const arrivalEnv = process.env.ARRIVAL_ENERGY;
+  if (arrivalEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        implicitArrivalEnergy: arrivalEnv === '1',
+      },
+    };
+  }
+  // A/B override for the donor re-pick of reversed flows: DONOR_REPICK=0.
+  const repickEnv = process.env.DONOR_REPICK;
+  if (repickEnv !== undefined && config.pressureSolver !== false) {
+    config = {
+      ...config,
+      pressureSolver: {
+        ...(typeof config.pressureSolver === 'object' ? config.pressureSolver : {}),
+        donorRepick: repickEnv === '1',
+      },
+    };
+  }
   const energyEnv = process.env.ENERGY_COMPLIANCE;
   if (energyEnv !== undefined && config.pressureSolver !== false) {
     config = {

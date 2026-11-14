@@ -101,6 +101,10 @@ import {
 /** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
 interface FlowGas { y: number; molPerKg: number }
 
+/** Passes of the donor re-pick (see solveImplicit): each one re-solves the
+ *  network after re-pricing connections whose solved flow reversed. */
+const DONOR_REPICK_PASSES = 3;
+
 /** Status of the last pressure solve */
 export interface PressureSolverStatus {
   /** Whether the solver ran this timestep */
@@ -164,6 +168,8 @@ export class PressureSolver {
   readonly lastSecantNodes = new Map<string, string>();
   /** Total number of network re-solves the secant-compliance pass caused. */
   public secantResolveSteps = 0;
+  /** Network re-solves caused by re-picking the donor of reversed flows. */
+  public donorRepickResolves = 0;
   // The most recent predictor solve's system, kept for measureClosureError:
   // node order, compliances c_i (kg/s per Pa), the assembled matrix M (a
   // copy - the solve consumes its own), and the solved δP.
@@ -785,33 +791,65 @@ export class PressureSolver {
     // anomaly the drawn phase carries on top of it (boil-off cooling when
     // vapor leaves a near-dry remnant is the canonical case).
     //
-    // Flows ARRIVING at a node are billed at the RECEIVER's own bulk
-    // enthalpy ("equilibrated arrival", weight 1): the tangent-EOS response
-    // to fluid at foreign enthalpy - e.g. cold water entering a hot steam
-    // space reads as a pressure collapse - over-extrapolates wildly at the
-    // very nodes where beta is large, because the real response includes the
-    // concurrent wall/fuel heat-transfer jump (injected water flashes on hot
-    // structures) that a one-step-stale source estimate cannot see. The
-    // solve then feeds the predicted collapse back as MORE inflow - an
-    // artificial condensation-implosion channel that held water in a
-    // degrading core against the explicit-reference trajectory. The energy
-    // the arriving fluid actually deposits beyond h_node is picked up one
-    // step later through the measured heat-source term q below, which is
-    // computed against this SAME transport model so the closure reproduces
-    // the true dU/dt exactly whenever flows are unchanged - zero
-    // steady-state bias for every node type by construction.
+    // Flows ARRIVING at a node: how much of the energy they deposit beyond
+    // the receiver's bulk enthalpy the closure sees IN the step is set by
+    // what the node's pressure is made of.
+    //
+    // A GAS's pressure answers arriving energy linearly - helium is ideal to
+    // the joule - so for the gas's share of the node the excess is billed in
+    // the step, on the receiving row's own β. Leaving it to the lagged source
+    // term instead (below) is a flaw in a stagnant loop between large
+    // temperature contrasts: when a flow reverses every step the one-step
+    // lag lands out of phase, and a tripped helium primary between a 740 C
+    // core and a 440 C steam-generator shell flip-flopped ±50 kg/s, period 2,
+    // at any dt >= ~50 ms (2026-11-14) - "natural circulation" carrying core
+    // heat into a bottled SG that, physically, would have stratified and
+    // stopped.
+    //
+    // WATER's pressure does not: fluid at a foreign enthalpy can carry the
+    // node across the dome within the step, and the tangent then
+    // over-extrapolates wildly - subcooled feedwater entering a 14 kg
+    // steam-filled check-valve body reads, on the vapour tangent, as a
+    // -510 bar collapse, and the solve pours 100 kg into it in one step. The
+    // homogeneous node really would condense instantly, but that is the
+    // lumped node's artifact (condensation on a real stratified interface is
+    // rate-limited), it makes the step size collapse, and neither Newton on
+    // the true EOS at the predicted end state (end-state partials flip sign
+    // pass to pass across the dome edge - no convergence in 16 passes) nor
+    // an end-state check that lags only the nodes the tables contradict
+    // (the verdict depends on dt, so the node's model flips with the step
+    // size) recovered it (both tried 2026-11-14). For the water's share the
+    // arrival is billed at the RECEIVER's bulk enthalpy ("equilibrated
+    // arrival") and the excess reaches the closure one step late, through
+    // the measured source q.
+    //
+    // The split is the node's heat capacity, the same one β is built on:
+    // θ_i = C_gas / C_total (a two-phase node's latent buffer counts as
+    // water). θ = 1 for a helium space, 0 for pure water or steam - exactly
+    // the equilibrated-arrival closure - and continuous in between, so a
+    // steam-air space slides from one to the other as it dries or floods.
+    // With implicitArrivalEnergy off, θ = 0 everywhere.
+    //
+    // Either way q is computed against this SAME transport model, so the
+    // closure reproduces the true dU/dt exactly whenever flows are
+    // unchanged - zero steady-state bias for every node type by construction.
     const useEnergy = this.config.energyCompliance !== false;
+    const arrivalInStep = useEnergy && this.config.implicitArrivalEnergy !== false;
     const beta = new Float64Array(n);
     const hNode = new Float64Array(n);
+    // θ_i: share of an arrival's enthalpy excess billed in the step
+    const theta = new Float64Array(n);
     if (useEnergy) {
       for (let i = 0; i < n; i++) {
         const node = nodeList[i];
-        beta[i] = this.energyComplianceSlope(node);
+        const slope = this.energyComplianceSlope(node);
+        beta[i] = slope.beta;
+        if (arrivalInStep) theta[i] = slope.gasShare;
         hNode[i] = this.bulkEnthalpy(node);
-        if (!isFinite(beta[i]) || !isFinite(hNode[i])) {
+        if (!isFinite(beta[i]) || !isFinite(hNode[i]) || !(theta[i] >= 0 && theta[i] <= 1)) {
           throw new Error(
             `[PressureSolver] Invalid energy compliance for '${node.id}': ` +
-            `dP/dU=${beta[i]} Pa/J, h=${hNode[i]} J/kg (m=${node.fluid.mass} kg, ` +
+            `dP/dU=${beta[i]} Pa/J, h=${hNode[i]} J/kg, gas heat-capacity share=${theta[i]} (m=${node.fluid.mass} kg, ` +
             `T=${node.fluid.temperature} K, P=${node.fluid.pressure} Pa, ` +
             `phase=${node.fluid.phase}, quality=${node.fluid.quality})`
           );
@@ -1021,7 +1059,8 @@ export class PressureSolver {
     // core's fluid node is the extreme case (fuel reheats the vapor as fast
     // as outflow removes it). Estimated as (last accepted step's TOTAL
     // dEnergy) minus (this closure's transport model at the current flows:
-    // outflows at donor enthalpy, inflows at the receiver's bulk enthalpy) -
+    // outflows at donor enthalpy, inflows at theta*h_donor + (1 - theta)*h_node,
+    // see the arrival comment above) -
     // so the closure's dU matches reality exactly whenever flows are
     // unchanged. One step stale during transients; zero (behave like the
     // mass-only closure) when no history exists yet.
@@ -1032,16 +1071,20 @@ export class PressureSolver {
     // the banked transport twice).
     if (useEnergy && lastEnergyRates && !corrector) {
       const transport = new Float64Array(n);
+      // Enthalpy an arrival is billed at on the receiving row: the donor's
+      // for the gas share θ of the node, its own bulk h for the rest.
+      const hArrive = (i: number, hDonor: number): number =>
+        theta[i] * hDonor + (1 - theta[i]) * hNode[i];
       const addTransport = (
         flow: number, hDonor: number, donorIsFrom: boolean, iFrom: number, iTo: number
       ): void => {
         // Signed flow: positive = from->to. The donor side loses fluid at
-        // the donor enthalpy; the receiving side gains at its own bulk h.
+        // the donor enthalpy; the receiving side gains at hArrive.
         if (iFrom >= 0) {
-          transport[iFrom] -= flow * (donorIsFrom ? hDonor : hNode[iFrom]);
+          transport[iFrom] -= flow * (donorIsFrom ? hDonor : hArrive(iFrom, hDonor));
         }
         if (iTo >= 0) {
-          transport[iTo] += flow * (donorIsFrom ? hNode[iTo] : hDonor);
+          transport[iTo] += flow * (donorIsFrom ? hArrive(iTo, hDonor) : hDonor);
         }
       };
       for (const f of fixedFlows) addTransport(f.flow, f.hDonor, f.donorIsFrom, f.iFrom, f.iTo);
@@ -1059,8 +1102,10 @@ export class PressureSolver {
     // anomaly of the drawn phase into the same c-normalized closure (φ = 1
     // recovers the pure mass-compliance system; the weight reads the LIVE
     // c_i so the secant-compliance pass stays consistent on the re-solve).
-    // The receiving node's row keeps weight 1 (equilibrated arrival - see
-    // the transport-model comment above). The heat-source rate enters the
+    // The receiving node's row takes 1 + θ_i·(h_donor - h_i)·β_i·c_i·dt:
+    // the in-step share of the arrival excess (see the transport-model
+    // comment above; θ = 0 is the equilibrated arrival, weight 1).
+    // The heat-source rate enters the
     // RHS as the equivalent inflow c_i·β_i·q_i·dt. The weighted system is
     // mildly non-symmetric; partial pivoting handles it, and a genuinely
     // singular assembly still fails loudly in solveLinearSystem.
@@ -1078,11 +1123,16 @@ export class PressureSolver {
         : 1 + g.y * cushionBlend[i] * (cushionPerMole[i] * g.molPerKg * c[i] * dt - 1);
     const donorWeight = (i: number, hDonor: number, g: FlowGas): number =>
       i < 0 ? 1 : arrivalWeight(i, g) + (useEnergy ? (hDonor - hNode[i]) * beta[i] * c[i] * dt : 0);
+    const rowWeight = (i: number, hFlow: number, g: FlowGas, isDonor: boolean): number =>
+      i < 0 ? 1
+        : isDonor ? donorWeight(i, hFlow, g)
+        : arrivalWeight(i, g) + (theta[i] > 0 ? theta[i] * (hFlow - hNode[i]) * beta[i] * c[i] * dt : 0);
     const weightsOf = (f: {
       hDonor: number; donorIsFrom: boolean; iFrom: number; iTo: number; gas: FlowGas;
-    }): [number, number] => f.donorIsFrom
-      ? [donorWeight(f.iFrom, f.hDonor, f.gas), arrivalWeight(f.iTo, f.gas)]
-      : [arrivalWeight(f.iFrom, f.gas), donorWeight(f.iTo, f.hDonor, f.gas)];
+    }): [number, number] => [
+      rowWeight(f.iFrom, f.hDonor, f.gas, f.donorIsFrom),
+      rowWeight(f.iTo, f.hDonor, f.gas, !f.donorIsFrom),
+    ];
     let lastMatrix: Float64Array | null = null;
     const solveNetwork = (): Float64Array => {
       const M = new Float64Array(n * n);
@@ -1132,6 +1182,58 @@ export class PressureSolver {
       const pTo = e.iTo >= 0 ? dP[e.iTo] : 0;
       return e.mStar + e.D * (pFrom - pTo);
     };
+
+    // Donor re-pick. The hydraulics name the upstream node from the
+    // START-of-step flow sign, and every connection entered the solve with
+    // that node's drawn enthalpy (and gas share). Where the SOLVED flow came
+    // out the other way, the stages will advect it from the other end, so
+    // the closure priced it at the wrong node: in a stagnant helium loop
+    // between a 740 C core and a 440 C SG shell the solve reverses
+    // flows every few steps, and core gas billed at the downcomer's
+    // temperature mispredicted both nodes by 20-30 kPa on exactly those
+    // steps - a period-2/3 slosh at any dt >= ~50 ms (2026-11-14). Re-price
+    // the reversed connections from their real donor and re-solve. The
+    // upwind flux ṁ·h_up(ṁ) is continuous through ṁ = 0, so where a flow
+    // sits near zero the choice barely moves the solve and the iteration
+    // settles; a flow still flipping after the last pass is near zero by
+    // the same argument and stays as solved.
+    if (useEnergy && this.config.donorRepick !== false) {
+      for (let pass = 0; pass < DONOR_REPICK_PASSES; pass++) {
+        let flipped = false;
+        for (const e of entries) {
+          if (e.capped || e.seated) continue;
+          const w = flowOf(e);
+          if (w === 0 || (w > 0) === e.donorIsFrom) continue;
+          const fromSide = w > 0;
+          const conn = e.conn;
+          const donor = state.flowNodes.get(fromSide ? conn.fromNodeId : conn.toNodeId)!;
+          const comp = fromSide
+            ? drawCompositionAt(donor, conn.fromElevation, w, conn.fromPhaseTolerance, conn.fromOpeningHeight)
+            : drawCompositionAt(donor, conn.toElevation, w, conn.toPhaseTolerance, conn.toOpeningHeight);
+          const hDonor = this.blendedDonorEnthalpy(donor, comp);
+          if (!isFinite(hDonor)) {
+            throw new Error(
+              `[PressureSolver] Non-finite donor enthalpy re-picking connection '${conn.id}': ` +
+              `donor='${donor.id}', m=${donor.fluid.mass} kg, P=${donor.fluid.pressure} Pa`
+            );
+          }
+          const ncg = donor.fluid.ncg;
+          const gasMass = ncg ? ncgTotalMass(ncg) : 0;
+          e.gas = gasMass > 0
+            ? {
+              y: conn.implicitAdvection ? gasMass / (gasMass + donor.fluid.mass) : drawGasMassFraction(donor, comp),
+              molPerKg: ncgTotalMoles(ncg!) / gasMass,
+            }
+            : NO_GAS;
+          e.hDonor = hDonor;
+          e.donorIsFrom = fromSide;
+          flipped = true;
+        }
+        if (!flipped) break;
+        dP = solveNetwork();
+        this.donorRepickResolves++;
+      }
+    }
 
     // Check-valve seating pass: an open check valve whose SOLVED end-of-step
     // flow came out reversed seats - flow exactly zero, conductance dropped -
@@ -1273,11 +1375,11 @@ export class PressureSolver {
       ): void => {
         if (iFrom >= 0) {
           dMdt![iFrom] -= flow;
-          dUdt![iFrom] -= flow * (donorIsFrom ? hDon : hB[iFrom]);
+          dUdt![iFrom] -= flow * (donorIsFrom ? hDon : theta[iFrom] * hDon + (1 - theta[iFrom]) * hB[iFrom]);
         }
         if (iTo >= 0) {
           dMdt![iTo] += flow;
-          dUdt![iTo] += flow * (donorIsFrom ? hB[iTo] : hDon);
+          dUdt![iTo] += flow * (donorIsFrom ? theta[iTo] * hDon + (1 - theta[iTo]) * hB[iTo] : hDon);
         }
       };
       for (const f of fixedFlows) add(f.flow, f.hDonor, f.donorIsFrom, f.iFrom, f.iTo);
@@ -1668,7 +1770,7 @@ export class PressureSolver {
    *   (∂P/∂T)_V = K·β_T and dT/dU = 1/(m·c_v). Negative below the ~4 °C
    *   density maximum - physical, so no floor.
    */
-  private energyComplianceSlope(node: FlowNode): number {
+  private energyComplianceSlope(node: FlowNode): { beta: number; gasShare: number } {
     const T = node.fluid.temperature;
     const P = node.fluid.pressure;
     const V = node.volume;
@@ -1687,7 +1789,7 @@ export class PressureSolver {
     const iceFrac = node.fluid.iceFraction ?? 0;
     if (phase !== 'liquid' && phase !== 'two-phase' && !(iceFrac > 0)) {
       const C_th = m_w * vaporCv(T) + CvGas;
-      return P / (T * C_th);
+      return { beta: P / (T * C_th), gasShare: CvGas / C_th };
     }
 
     // Saturation-table evaluations stay inside the TABLE's top (a two-phase
@@ -1751,7 +1853,7 @@ export class PressureSolver {
     const satDist = distanceToSaturationLine(u, v);
     const BLEND_DISTANCE = 10; // mL/kg
     const blend = Math.min(1, Math.max(0, (BLEND_DISTANCE - satDist.distance) / (2 * BLEND_DISTANCE)));
-    return blend * b_twoPhase;
+    return { beta: blend * b_twoPhase, gasShare: CvGas / C_eff };
   }
 
   /**
