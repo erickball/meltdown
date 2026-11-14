@@ -1009,6 +1009,8 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
         dPdm,
         hSteamOut: ev.hSteamOut,
         hLiquidOut: ev.sections[0].hBar,
+        vSteamOut: ev.vSteamOut,
+        vLiquidOut: ev.sections[0].vBar,
         TSat: ev.sat.T,
         T3: ev.sections[2].T,
         lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],

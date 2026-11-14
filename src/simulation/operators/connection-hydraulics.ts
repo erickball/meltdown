@@ -545,29 +545,29 @@ export function pumpHeadFactor(
  * every hot line's momentum density and every hot tank's liquid head were off
  * by that much from the equation of state the rest of the model used.)
  *
- * SCOPE: a moving-boundary OTSG tube keeps the old fit for now. Its zones are
- * the partition's sections, not the bulk state this reads, and their true
- * densities belong to the partition evaluation (not yet exposed on lastEval).
+ * A moving-boundary OTSG tube's zones are the partition's sections, not the
+ * bulk state: its liquid zone is the economizer section, at the mean specific
+ * volume the partition solved for it - the same section mean the liquid draw's
+ * enthalpy (hLiquidOut) is priced at.
  */
 export function nodeLiquidDensity(node: FlowNode): number {
-  if (node.otsg?.lastEval) return otsgLiquidZoneDensityFit(node);
+  const ev = node.otsg?.lastEval;
+  if (ev) return otsgZoneDensity(node, ev.vLiquidOut, 'vLiquidOut');
   if (node.fluid.phase === 'liquid') {
     return node.fluid.mass / (node.volume - nodeGasVolume(node));
   }
   return saturatedLiquidDensity(node.fluid.temperature);
 }
 
-/** The retired liquid-density fit, kept ONLY for OTSG section draws (see the
- *  scope note on nodeLiquidDensity). */
-function otsgLiquidZoneDensityFit(node: FlowNode): number {
-  const T_C = node.fluid.temperature - 273.15;
-  if (T_C < 100) {
-    return 1000 - 0.08 * T_C;
-  } else if (T_C < 300) {
-    return 958 - 1.3 * (T_C - 100);
-  } else {
-    return Math.max(400, 700 - 2.5 * (T_C - 300));
+/** 1/v for an OTSG section, refusing a specific volume the partition never
+ *  wrote (a state restored from before these fields existed, or a broken
+ *  evaluation) rather than pricing a line at NaN or at a made-up density. */
+function otsgZoneDensity(node: FlowNode, v: number, what: string): number {
+  if (!(v > 0) || !Number.isFinite(v)) {
+    throw new Error(`[OTSG] ${node.id}: partition evaluation carries no usable ${what} ` +
+      `(${v} m3/kg) - a draw from this tube has no density to be priced at.`);
   }
+  return 1 / v;
 }
 
 /**
@@ -597,38 +597,22 @@ export function nodeBulkDensity(node: FlowNode): number {
  * bar - which is the density the exhaust line's momentum was being priced
  * with.)
  *
- * SCOPE: OTSG tubes keep the old estimate; see nodeLiquidDensity.
+ * An OTSG tube's vapour zone is its superheat outlet: the specific volume the
+ * partition built alongside hSteamOut, from the same states with the same
+ * weights, so the vapour draw's density and enthalpy describe one fluid.
  */
 export function nodeVaporDensity(node: FlowNode): number {
-  if (node.otsg?.lastEval) return otsgVaporZoneDensityEstimate(node);
-  if (node.fluid.phase === 'vapor') return nodeBulkDensity(node);
+  const ev = node.otsg?.lastEval;
   const ncg = node.fluid.ncg;
-  let rho = saturatedVaporDensity(node.fluid.temperature);
+  if (!ev && node.fluid.phase === 'vapor') return nodeBulkDensity(node);
+  let rho = ev
+    ? otsgZoneDensity(node, ev.vSteamOut, 'vSteamOut')
+    : saturatedVaporDensity(node.fluid.temperature);
   if (ncg && totalMoles(ncg) > 0) {
     const gasVolume = nodeGasVolume(node);
     if (gasVolume > 0) rho += ncgTotalMass(ncg) / gasVolume;
   }
   return rho;
-}
-
-/** The retired ideal-gas vapour density, kept ONLY for OTSG section draws
- *  (see the scope note on nodeLiquidDensity). */
-function otsgVaporZoneDensityEstimate(node: FlowNode): number {
-  const T = node.fluid.temperature;
-  const R = 8.314; // J/mol-K
-  let P_ncg = 0;
-  let rho_ncg = 0;
-  const gasVolume = node.fluid.ncg ? nodeGasVolume(node) : 0;
-  if (node.fluid.ncg && gasVolume > 0) {
-    const n = totalMoles(node.fluid.ncg);
-    if (n > 0) {
-      P_ncg = (n * R * T) / gasVolume;
-      rho_ncg = ncgTotalMass(node.fluid.ncg) / gasVolume;
-    }
-  }
-  const P_steam = Math.max(0, node.fluid.pressure - P_ncg);
-  const M = 0.018; // kg/mol for water
-  return Math.max(0.1, (P_steam * M) / (R * T) + rho_ncg);
 }
 
 /**
