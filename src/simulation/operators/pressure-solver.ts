@@ -95,7 +95,8 @@ import {
   ConnectionHydraulics,
   DrawComposition,
   ChokeLimit,
-  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction, drawCompositionAt, zoneDrawEnthalpy } from './connection-hydraulics';
+  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction, drawCompositionAt, zoneDrawEnthalpy,
+  nodeWaterSpecificEnergy } from './connection-hydraulics';
 
 /** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
 interface FlowGas { y: number; molPerKg: number }
@@ -1366,7 +1367,7 @@ export class PressureSolver {
       }
 
       const dm = c[i] * dP[i] * dt; // predicted absorbed mass this step (kg)
-      const u = node.fluid.internalEnergy / node.fluid.mass;
+      const u = nodeWaterSpecificEnergy(node);
       const v = node.volume / node.fluid.mass;
       const sat = distanceToSaturationLine(u, v);
       const v_f = sat.v_f_closest * 1e-6; // m³/kg
@@ -1556,7 +1557,10 @@ export class PressureSolver {
     const P_sat = saturationPressure(T_K);
     const K_liquid = numericalBulkModulus(T_K - 273.15, this.config.K_max);
 
-    const u = node.fluid.internalEnergy / node.fluid.mass;
+    // The WATER's (u, v): a pressurizer under nitrogen or a pool under an air
+    // blanket carries the gas's n·Cv·T in its internalEnergy, and the dome
+    // edge is a property of the water alone.
+    const u = nodeWaterSpecificEnergy(node);
     const v = node.volume / node.fluid.mass;
     // distance > 0: liquid side (v < v_f); distance < 0: inside the dome
     const satDist = distanceToSaturationLine(u, v);

@@ -5,22 +5,9 @@
  */
 
 export {
-  ConductionOperator,
-  ConvectionOperator,
-  HeatGenerationOperator,
-  FluidStateUpdateOperator,
-  getFluidSpecificHeat,
   createFluidState,
-  enableFluidStateDebug,
   type NcgPartialPressures,
 } from './heat-transfer';
-
-// FlowOperator removed - replaced by FlowMomentumRateOperator and FlowRateOperator
-export {
-  getFlowOperatorProfile,
-  resetFlowOperatorProfile,
-  type FlowOperatorProfile,
-} from './fluid-flow';
 
 export {
   NeutronicsOperator,
@@ -34,7 +21,6 @@ export {
 export {
   getTurbineCondenserState,
   updateTurbineCondenserState,
-  type TurbineCondenserConfig,
   type TurbineCondenserState,
 } from './turbine-condenser';
 

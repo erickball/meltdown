@@ -57,6 +57,7 @@ import {
   pressureAtConnection,
   zoneWaterShare,
   zoneWaterEnthalpy,
+  nodeWaterSpecificEnergy,
 } from './connection-hydraulics';
 import { breakExchangeLegs } from './exchange-flow';
 
@@ -345,8 +346,7 @@ export function recordConvectionHeatRate(connId: string, Q: number): void {
 
 /**
  * A flow node's effective heat capacity (J/K) for wall exchange: water at
- * its effective specific heat (two-phase includes the evaporation buffer,
- * exactly as FluidStateUpdateOperator's stability estimate prices it) plus
+ * its effective specific heat (two-phase includes the evaporation buffer) plus
  * the NCG at constant volume. Zero for an empty node.
  */
 export function fluidHeatCapacity(node: FlowNode): number {
@@ -373,7 +373,10 @@ export function fluidHeatCapacity(node: FlowNode): number {
       phase: node.fluid.phase,
       quality: node.fluid.quality ?? 0,
       iceFraction: node.fluid.iceFraction ?? 0,
-      specificEnergy: node.fluid.internalEnergy / node.fluid.mass,
+      // Not read by effectiveSpecificHeat (see above) - filled with the
+      // water's own u so the state is at least not the node total over the
+      // water mass.
+      specificEnergy: nodeWaterSpecificEnergy(node),
     });
   }
   return C;
@@ -2816,8 +2819,6 @@ export class PumpSpeedConstraintOperator implements ConstraintOperator {
  *
  * This is the PRIMARY operator that computes flow rate changes (dṁ/dt).
  * The result is integrated by RK45 to update conn.massFlowRate each timestep.
- *
- * NOTE: This replaces the old FlowOperator (in fluid-flow.ts) which is now OBSOLETE.
  *
  * The per-connection physics (driving pressures, phase-dependent flow density,
  * resistances, choking limits) lives in connection-hydraulics.ts and is SHARED
