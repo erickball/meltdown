@@ -253,9 +253,15 @@ test('A pump placed in the sea is primed with sea water and its open nozzles are
   const plant = { components: new Map(), connections: [], terrain } as unknown as PlantState;
   const cm = new ConstructionManager(plant);   // (starts by clearing the plant)
   plant.components.set('sea', { ...tank('sea', 50, 0.5)[1], waterBody: 'sea' } as PlantComponent);
+  // Wet-pit pumps: the motor stands on a column 4 m above the bowl, clear of
+  // the water. (With the default 0.5 m motor the pump in the water is
+  // DROWNED and never turns; this test used to pass anyway, on a 0.06 m
+  // phantom head - its suction nozzle sits below the casing's base, and the
+  // line charged that drop while the casing priced the port at its floor -
+  // which drove 66 kg/s around the sea through a stopped pump.)
   const place = (x: number) => cm.createComponent({
     type: 'pump', name: `P${x}`, position: { x, y: 10 }, containedBy: 'sea',
-    properties: { name: `P${x}`, ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry' },
+    properties: { name: `P${x}`, ratedFlow: 100, ratedHead: 15, elevation: 0, initialFill: 'dry', motorElevation: 4 },
   })!;
   const wetId = place(45);
   const highId = place(25);

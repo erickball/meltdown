@@ -323,6 +323,33 @@ export function nodeGasSpaceDensity(node: FlowNode, liquidVolume: number): numbe
 }
 
 /**
+ * The local elevation inside `node` that its pressure is priced to for a port
+ * stated at `stated` - THE point a connection's line starts or ends at.
+ *
+ * pressureAtConnection prices head to this point, and the factory's
+ * conn.elevation runs between the two ends' points, so both books must read
+ * it from here: if they disagree, the difference is a column counted once on
+ * the line and never inside the node, and around a closed loop it is a
+ * standing head no density put there (scripts/check-gas-columns.ts, UNIFORM).
+ * A header nozzle beyond the tube bundle's ends (plenumLength; the bundle
+ * node does not include its plenums) left 1.6 m of phantom water on the
+ * Xe-100 feed loop and 2 m on the HTGR's that way.
+ *
+ * - a node with no vertical extent is a point: its reference, 0;
+ * - an unstated port sits at mid-height;
+ * - the BOUNDARY (outside air) has no walls, so its column runs to the port;
+ * - otherwise a port outside the node's extent draws from the nearest end of
+ *   it (as drawCompositionAt does), and the run beyond is the line's.
+ */
+export function nodePortElevation(node: FlowNode, stated: number | undefined): number {
+  const h = node.height ?? Math.cbrt(node.volume);
+  if (h <= 0) return 0;
+  if (stated === undefined) return h / 2;
+  if (node.isBoundary) return stated;
+  return Math.max(0, Math.min(h, stated));
+}
+
+/**
  * Pressure at a connection point inside a node.
  *
  * ONE formula for every node, and the datum it is measured from is the
@@ -391,11 +418,7 @@ export function pressureAtConnection(
   const nodeHeight = node.height ?? Math.cbrt(node.volume);
   if (nodeHeight <= 0) return baseP;
 
-  const elev = connectionElevation === undefined
-    ? nodeHeight / 2
-    : node.isBoundary
-      ? connectionElevation
-      : Math.max(0, Math.min(nodeHeight, connectionElevation));
+  const elev = nodePortElevation(node, connectionElevation);
 
   // Where the liquid surface is, what stands under it, and what room is left
   // above it - one answer per phase, all from the node's own inventory.

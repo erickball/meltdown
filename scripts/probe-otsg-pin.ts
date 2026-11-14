@@ -26,10 +26,13 @@ const zT = zones.map(z => z.temperature);
 const pin = otsgWallPin(s, node, flows);
 const L = ev.sections.map(x => x.lengthFrac);
 const L3 = L[2];
-const hA3 = pin.hA3Full * L3;
-const theta = hA3 > 0 ? hA3 / (2 * pin.WCp3 + hA3) : 0;
 const TWall3 = zoneMeanTemp(zT, 1 - L3, 1);
-const T3target = ev.sat.T + theta * Math.max(0, TWall3 - ev.sat.T);
+// The pin's own target: the stream's length-mean on the partition's isobar.
+const marched = ev.steamIsobar
+  ? marchSteamOverMetal(ev.steamIsobar, zT, superheatOverlaps(zT.length, L3), pin.hA3Full, pin.WSteam, ev.sat.T)
+  : { TMean: ev.sat.T, TOut: ev.sat.T };
+const T3target = Math.max(ev.sat.T, marched.TMean);
+const theta = TWall3 > ev.sat.T ? (T3target - ev.sat.T) / (TWall3 - ev.sat.T) : NaN;
 const d = otsgWaterSideDuties(ev, flows, zT, node.otsg!.heatArea);
 const C = (T: number) => (T - 273.15).toFixed(2);
 console.log(`P=${(ev.P / 1e5).toFixed(3)} bar regime=${ev.regime} L=${L.map(x => x.toFixed(4)).join('/')} ` +
@@ -44,7 +47,7 @@ zones.forEach((z, j) => {
 });
 
 // Where the pinned energy and the reported temperature part ways
-import { superheatedStateAtPT } from '../src/simulation/otsg';
+import { superheatedStateAtPT, marchSteamOverMetal, superheatOverlaps } from '../src/simulation/otsg';
 import { calculateState } from '../src/simulation/water-properties';
 {
   const s3 = ev.sections[2];

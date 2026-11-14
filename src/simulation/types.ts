@@ -401,8 +401,9 @@ export interface FlowNode {
       q0: number;
       zoneQ2: number[];
       zoneQ3: number[];
-      /** free arm: each zone's share of the superheat section's area */
-      share3?: number[];
+      /** each zone's share of the stiff section's area (boiling section
+       *  on the pinned arm, superheat section on the free arm) */
+      share: number[];
       zoneRate?: number[];
     };
     /** Transient cache of the last sectioned evaluation, for the draw-
@@ -567,11 +568,13 @@ export interface ConvectionConnection {
   id: string;
   thermalNodeId: string;            // Solid node
   flowNodeId: string;               // Fluid node
-  /** Stamped by the solver each step attempt: this pair's wall-fluid
-   *  exchange was applied implicitly for the step (its relaxation time is
-   *  shorter than the step), so the explicit convection rates must skip it.
-   *  See RK45Solver.applyStiffConvection. Transient - re-stamped every step. */
+  /** Stamped by the solver each step attempt: this pair's relaxation time
+   *  is shorter than the step, so for this step it exchanges the constant
+   *  duty `implicitDuty` (W, wall to fluid) instead of the live
+   *  correlations. See operators/stiff-convection.ts. Transient - re-stamped
+   *  every step. */
   implicitThisStep?: boolean;
+  implicitDuty?: number;
 
   // Heat transfer parameters
   surfaceArea: number;              // m² - total wetted surface area (when fully submerged)

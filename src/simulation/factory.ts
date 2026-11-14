@@ -52,7 +52,7 @@ import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
 import type { TerrainSpec } from '../terrain-types';
 import { createSurfaceWaterState } from './operators/surface-water';
-import { nodeSoundSpeed, nodeCriticalFluxFactor, NOZZLE_DISCHARGE_COEFF } from './operators/connection-hydraulics';
+import { nodeSoundSpeed, nodeCriticalFluxFactor, NOZZLE_DISCHARGE_COEFF, nodePortElevation } from './operators/connection-hydraulics';
 
 // Minimum steam pressure to keep water above freezing (at 1°C = 274.15 K)
 const MIN_STEAM_PRESSURE_PA = saturationPressure(274.15); // ~657 Pa
@@ -804,13 +804,6 @@ export const ENVIRONMENT_NODE_ID = 'atmosphere';
  * reference, and for this node that reference is the datum.
  */
 export const ENVIRONMENT_REFERENCE_ELEVATION = 0;
-
-/** Mid-height of a node, the reference a port without an elevation of its own sits at (as in pressureAtConnection). */
-function nodeMidHeight(node: FlowNode | undefined): number {
-  if (!node) return 0;
-  const h = node.height ?? Math.cbrt(node.volume);
-  return h > 0 ? h / 2 : 0;
-}
 
 /**
  * Where a pipe's fluid actually is: the middle of its run.
@@ -4253,8 +4246,15 @@ function createFlowConnectionFromPlantConnection(
     // elevations are measured from and what pressureAtConnection prices head
     // against. It equals absoluteBase for every component but a pipe, whose
     // node sits at the middle of its run rather than at its start end.
-    const base = state.flowNodes.get(nodeId)?.elevation ?? absoluteBase(component);
-    return base + (localElevation ?? nodeMidHeight(state.flowNodes.get(nodeId)));
+    //
+    // The port's height inside the node is read the way pressureAtConnection
+    // reads it (nodePortElevation): a point node answers at its reference and
+    // a port past the node's ends at the nearest end, so the line carries
+    // the column beyond it. Charging the stated height here instead counts
+    // that column on the line but never in the node - a standing loop head.
+    const node = state.flowNodes.get(nodeId);
+    if (node) return node.elevation + nodePortElevation(node, localElevation);
+    return absoluteBase(component) + (localElevation ?? 0);
   };
   const fromPointOrEnv = pointOf(fromComponent, fromNodeId, localFrom);
   const toPointOrEnv = pointOf(toComponent, toNodeId, localTo);

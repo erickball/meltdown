@@ -387,6 +387,11 @@ export interface OtsgEval {
    *  'flooded' (no dry steam), 'dryout' (dry steam at saturation), 'superheat'
    *  (volume and energy both enforced), 'supercritical' (no dome at all). */
   regime: 'flooded' | 'dryout' | 'superheat' | 'supercritical';
+  /** The steam isobar at P that the outlet and the mean pin were read from,
+   *  present whenever there is a superheat section - the wall duty reads the
+   *  same one (otsgWaterSideDuties). Above the dome it is the local tangent
+   *  of the one fluid's own state instead. */
+  steamIsobar?: SteamIsobar;
   /** Pressure tangent at the solved point (Pa/kg, Pa/J, Pa/kg), when asked
    *  for: dPdm follows feed addition (mass, its enthalpy and the slug's own
    *  pair together), dPdU energy alone, dPdm1 and dPdU1 the slug's mass and
@@ -739,14 +744,7 @@ export interface OtsgWallPin {
    *  them it covers - see zoneMeanTemp. A single entry is a uniform wall. */
   zoneTemps: number[];
   hA3Full: number;  // W/K - steam-film conductance if section 3 owned the whole bundle
-  WCp3: number;     // W/K - steam draw's carrying capacity (W_steam * cp)
-  // The gas side of the same section, for the OUTLET. The mean above only
-  // needs the metal; the outlet needs to know where the metal's ramp TOPS
-  // OUT, and that is the gas inlet - the one temperature in the machine
-  // nothing downstream of it may exceed.
-  TGasIn3: number;    // K   - gas temperature entering the superheat section
-  hAGas3Full: number; // W/K - gas-film conductance if section 3 owned the whole bundle
-  CGas3: number;      // W/K - gas capacity rate through this bundle (mdot * cp * share)
+  WSteam: number;   // kg/s - the steam draw crossing the superheat section
 }
 
 /** Default number of fixed tube-metal zones per moving-boundary bundle
@@ -811,50 +809,180 @@ export function zoneMeanTemp(zoneTemps: readonly number[], s0: number, s1: numbe
 }
 
 /**
- * Steam outlet temperature of a counterflow passage, from the standard
- * effectiveness-NTU relation:
+ * Steam along one isobar, saturated vapour upward: the temperature, energy,
+ * volume and enthalpy of the stream that crosses the superheat section, read
+ * off the property surface. Everything that asks "how hot is steam carrying
+ * this much heat" - the outlet, the section's mean pin, the wall duty - reads
+ * this one table, so they describe one stream. (They used to share a constant
+ * cp of 3000 J/kg-K, or a secant through the section mean. Steam leaving the
+ * dome at boiler pressure has several times that, falling steeply over the
+ * first tens of kelvin, so a constant overstated how fast the stream closes
+ * on its wall.)
  *
- *     eps = (1 - e^(-NTU (1-Cr))) / (1 - Cr e^(-NTU (1-Cr)))
- *     T_out = T_in + eps * (C_min / C_water) * (T_gas_in - T_in)
- *
- * with UA the two films in series across the (thin) tube wall, C_min/C_max
- * the two capacity rates, NTU = UA/C_min.
- *
- * This exists because the closure's linear-profile forms cannot express the
- * one bound that matters at low flow. The ramping theta (2NTU/(2+NTU)) tends
- * to 2, so a weakly-drawn section's OUTLET extrapolates to twice its
- * average-wall superheat - which is how the Xe-100's dried-out boiler offered
- * the MSSV line steam 50-70 K hotter than the helium heating it. The
- * effectiveness form contains the limit intrinsically: as the draw vanishes,
- * NTU diverges, eps -> 1 and the outlet pinches at the GAS INLET, the
- * physical ceiling. At small NTU it reduces to the same linear behaviour the
- * closure already had, so the design point does not move.
- *
- * The limits are continuous, not special cases: a zero draw is the
- * NTU -> infinity limit (a parcel soaking to the hot inlet), a dead gas
- * stream heats nothing, and a hot inlet below the steam inlet drives the
- * approach to zero from the (T_gas_in - T_in) factor itself.
+ * Between nodes h, u and v are linear in T - cp is constant on a segment, so
+ * the film approach across a piece of isothermal wall is exact segment by
+ * segment (marchSteamOverMetal). Below the first node and above the last the
+ * end segments continue: steam meeting metal colder than saturation is priced
+ * as sensible cooling at the dome-edge cp (condensation on a cold superheater
+ * wall is not modelled), and metal that warmed past the table since it was
+ * built reads the last slope.
  */
-export function counterflowOutletTemp(
-  TIn: number, TGasIn: number,
-  hAWater: number, hAGas: number,
-  CWater: number, CGas: number,
-): number {
-  if (!(hAWater > 0) || !(hAGas > 0) || !(CGas > 0) || !(TGasIn > TIn)) return TIn;
-  const UA = 1 / (1 / hAWater + 1 / hAGas);
-  if (!(CWater > 1e-9)) return TGasIn;   // the NTU -> infinity limit, exactly
-  const Cmin = Math.min(CWater, CGas);
-  const Cmax = Math.max(CWater, CGas);
-  const Cr = Cmin / Cmax;
-  const NTU = UA / Cmin;
-  let eps: number;
-  if (1 - Cr < 1e-6) {
-    eps = NTU / (1 + NTU);               // balanced-flow limit of the same relation
-  } else {
-    const e = Math.exp(-NTU * (1 - Cr));
-    eps = (1 - e) / (1 - Cr * e);
+export interface SteamIsobar {
+  P: number;
+  T: number[];
+  u: number[];
+  v: number[];
+  h: number[];
+}
+
+/** Node spacing of the isobar table, in specific energy: the first step off
+ *  the dome, and the growth of each step over the last. cp changes fastest
+ *  at the dome and flattens above it, so the nodes crowd there. Resolution,
+ *  not physics. */
+const ISOBAR_FIRST_STEP = 20e3;
+const ISOBAR_STEP_GROWTH = 1.3;
+
+/** Build the isobar from saturation up to (at least) TTop. */
+export function buildSteamIsobar(
+  P: number, sat: SaturationProps, TTop: number,
+  probe: (u: number, v: number, what: string) => { temperature: number } =
+    (u, v) => calculateState(1, u, v),
+): SteamIsobar {
+  const iso: SteamIsobar = { P, T: [sat.T], u: [sat.u_g], v: [sat.v_g], h: [sat.h_g] };
+  let du = ISOBAR_FIRST_STEP;
+  let vHint: number | undefined;
+  for (;;) {
+    const i = iso.T.length - 1;
+    const u = iso.u[i] + du;
+    if (u > U3_CEILING) {
+      throw new Error(`[OTSG] tube metal at ${(TTop - 273.15).toFixed(0)} C asks for steam at ` +
+        `${(P / 1e5).toFixed(1)} bar past the ${(U3_CEILING / 1e6).toFixed(1)} MJ/kg where the ` +
+        `steam tables end (they reach ${(iso.T[i] - 273.15).toFixed(0)} C on this isobar). ` +
+        `That is not a wall temperature a boiler tube survives.`);
+    }
+    const v = superheatedV(u, P, 1e-6, vHint, sat);
+    vHint = v;
+    const T = probe(u, v, 'steam isobar').temperature;
+    const h = u + P * v;
+    if (!(T > iso.T[i]) || !(h > iso.h[i])) {
+      throw new Error(`[OTSG] steam isobar at ${(P / 1e5).toFixed(2)} bar is not rising: ` +
+        `${(iso.u[i] / 1e3).toFixed(1)} kJ/kg reads ${iso.T[i].toFixed(3)} K, h=${(iso.h[i] / 1e3).toFixed(1)} kJ/kg; ` +
+        `${(u / 1e3).toFixed(1)} kJ/kg reads ${T.toFixed(3)} K, h=${(h / 1e3).toFixed(1)} kJ/kg. ` +
+        `The property surface is not monotone along this isobar.`);
+    }
+    iso.T.push(T); iso.u.push(u); iso.v.push(v); iso.h.push(h);
+    if (T >= TTop) return iso;
+    du *= ISOBAR_STEP_GROWTH;
   }
-  return TIn + eps * (Cmin / CWater) * (TGasIn - TIn);
+}
+
+/** One of the isobar's columns at temperature T (end segments continue). */
+export function isobarAt(iso: SteamIsobar, col: 'u' | 'v' | 'h', T: number): number {
+  const n = iso.T.length;
+  let j = 0;
+  while (j < n - 2 && T >= iso.T[j + 1]) j++;
+  const y = iso[col];
+  return y[j] + (y[j + 1] - y[j]) * (T - iso.T[j]) / (iso.T[j + 1] - iso.T[j]);
+}
+
+/**
+ * A stream of W kg/s at temperature T crossing a piece of film (conductance
+ * hA, W/K) on a wall at TWall: the temperature it leaves at. On a segment of
+ * the isobar cp is constant and the approach is the exponential
+ *     T <- TWall - (TWall - T) e^(-hA / W cp),
+ * so the piece is walked segment by segment, each spending the conductance it
+ * takes to reach its far node. Every move is toward the wall and stops short
+ * of it; a stream that does not flow (W = 0) is at its wall.
+ */
+function approachWall(iso: SteamIsobar, T: number, TWall: number, hA: number, W: number): number {
+  if (!(hA > 0) || TWall === T) return T;
+  if (!(W > 0)) return TWall;
+  const n = iso.T.length;
+  const heating = TWall > T;
+  let budget = hA / W;                       // J/kg-K still to spend
+  for (;;) {
+    // The segment the stream is about to move through.
+    let j = 0;
+    if (heating) { while (j < n - 2 && T >= iso.T[j + 1]) j++; }
+    else { while (j < n - 2 && T > iso.T[j + 1]) j++; }
+    const cp = (iso.h[j + 1] - iso.h[j]) / (iso.T[j + 1] - iso.T[j]);
+    // Its far node in the direction of travel - unless the stream is already
+    // past the table's end that way, where the end segment simply continues.
+    const TNode = heating ? iso.T[j + 1] : iso.T[j];
+    const open = heating ? T >= iso.T[n - 1] : T <= iso.T[0];
+    const nodeFirst = !open && (heating ? TNode < TWall : TNode > TWall);
+    if (nodeFirst) {
+      const need = cp * Math.log((TWall - T) / (TWall - TNode));
+      if (budget > need) { budget -= need; T = TNode; continue; }
+    }
+    return TWall - (TWall - T) * Math.exp(-budget / cp);
+  }
+}
+
+/**
+ * The steam crossing the superheat section: the stream that enters at TIn
+ * (saturation), marched in flow order across the metal zones the section
+ * covers, approaching each one across its own piece of film (approachWall).
+ * `overlap[k]` is the fraction of the whole tube where zone k and the section
+ * coincide (otsgZoneOverlaps), `hAFull` the steam film's conductance if the
+ * section owned the whole bundle.
+ *
+ * One march answers three questions, which is the point:
+ *  - TOut, the steam LEAVING. Every step moves the stream toward a zone's
+ *    metal and never past it, so it cannot leave hotter than the hottest
+ *    metal it crossed: the bound a tube wall imposes on the fluid inside it.
+ *    The gas does not appear - the helium heats the METAL, and the metal's
+ *    own energy balance decides how close to the gas inlet its steam end
+ *    gets. (An effectiveness formula against the gas inlet, which this
+ *    replaced, offered the Xe-100's turbine 630 C steam off a bundle whose
+ *    hottest zone stood at 540 C.)
+ *  - transit[k], the heat the stream takes from zone k: W times its enthalpy
+ *    rise across that piece. They sum to W (h(TOut) - h(TIn)) exactly.
+ *  - TMean, the stream's length-mean temperature. A piece of film carries
+ *    hA_piece (T_zone - T_mean,piece), so over the section
+ *        TMean = TWall - (heat taken) / hA_section
+ *    with TWall the mean metal under it: the wall's mean, less the film drop
+ *    it takes to carry the duty. No draw, no drop.
+ *
+ * The limits are the march's own: a vanishing draw soaks every piece to its
+ * metal, a strong draw barely leaves saturation, a section of no length
+ * returns its inlet, and metal colder than the stream cools it.
+ */
+export function marchSteamOverMetal(
+  iso: SteamIsobar,
+  zoneTemps: readonly number[],
+  overlap: readonly number[],
+  hAFull: number,
+  W: number,
+  TIn: number,
+): { TOut: number; TMean: number; transit: number[] } {
+  const n = zoneTemps.length;
+  const transit = new Array<number>(n).fill(0);
+  let T = TIn, L = 0, wallSum = 0, taken = 0;
+  let hNow = isobarAt(iso, 'h', T);
+  for (let k = 0; k < n; k++) {
+    const ov = overlap[k];
+    if (!(ov > 0)) continue;
+    L += ov;
+    wallSum += ov * zoneTemps[k];
+    T = approachWall(iso, T, zoneTemps[k], hAFull * ov, W);
+    if (W > 0) {
+      const hNext = isobarAt(iso, 'h', T);
+      transit[k] = W * (hNext - hNow);
+      taken += transit[k];
+      hNow = hNext;
+    }
+  }
+  const TMean = L > 0 && hAFull > 0 ? wallSum / L - taken / (hAFull * L) : TIn;
+  return { TOut: T, TMean, transit };
+}
+
+/** Fraction of the whole tube where each metal zone lies under a superheat
+ *  section of length fraction L3 (the steam end). */
+export function superheatOverlaps(nZones: number, L3: number): number[] {
+  const s0 = 1 - L3;
+  return Array.from({ length: nZones }, (_, k) =>
+    Math.max(0, (k + 1) / nZones - Math.max(k / nZones, s0)));
 }
 
 /** The partition at ONE trial pressure - the closed form the pressure root
@@ -1016,18 +1144,6 @@ export function evaluateOtsgPartition(
     throw new Error(`[OTSG] economizer ledger is not a physical (mass, energy) pair: ` +
       `m1=${m1Ledger} kg carrying U1=${slug.U1} J. An empty section holds no energy.`);
   }
-  // A half-built pin would silently price every draw at saturation (the
-  // effectiveness guards read an undefined gas side as "nothing to heat
-  // with"), and tsconfig excludes the test files where hand-built pins
-  // live - so the closure checks its own inputs. Zero is a legitimate
-  // value for the conductances and capacity rate; undefined is not.
-  if (!Number.isFinite(pin.TGasIn3) || !Number.isFinite(pin.hAGas3Full) ||
-      !Number.isFinite(pin.CGas3)) {
-    throw new Error(`[OTSG] wall pin has no gas side (TGasIn3=${pin.TGasIn3}, ` +
-      `hAGas3Full=${pin.hAGas3Full}, CGas3=${pin.CGas3}) - the superheat outlet ` +
-      `has no ceiling without it. Build pins through otsgWallPin, or supply all ` +
-      `three fields.`);
-  }
   const V = geom.tubeVolume;
 
   const probe = (u: number, v: number, what: string) => {
@@ -1041,6 +1157,37 @@ export function evaluateOtsgPartition(
         `${V.toFixed(1)} m3, the economizer claims ${m1Ledger.toFixed(0)} kg. ` +
         `(${e instanceof Error ? e.message : String(e)})`);
     }
+  };
+
+  // The steam isobar at a solved pressure, up to the hottest tube metal. The
+  // pin refresh and finish() ask at the same pressure, so the last one built
+  // is kept.
+  const TMetalTop = Math.max(...pin.zoneTemps);
+  let isoKept: SteamIsobar | undefined;
+  const isobarFor = (P: number, sat: SaturationProps): SteamIsobar => {
+    if (!isoKept || isoKept.P !== P) isoKept = buildSteamIsobar(P, sat, TMetalTop, probe);
+    return isoKept;
+  };
+  // Above the dome there is one fluid and no saturated inlet to build an
+  // isobar from; the wall duty still needs the stream's cp. It is the
+  // fluid's own (dh/dT)_P at its state, from the surface's local
+  // derivatives: along the isobar dv = -(P_u / P_v) du.
+  const localIsobar = (P: number, u: number, v: number, T: number, h: number): SteamIsobar => {
+    const du = 1e-3 * u, dv = 1e-3 * v;
+    const s0 = probe(u, v, 'supercritical state');
+    const sU = probe(u + du, v, 'supercritical state');
+    const sV = probe(u, v + dv, 'supercritical state');
+    const Pu = (sU.pressure - s0.pressure) / du, Pv = (sV.pressure - s0.pressure) / dv;
+    const Tu = (sU.temperature - s0.temperature) / du, Tv = (sV.temperature - s0.temperature) / dv;
+    const dvdu = -Pu / Pv;
+    const dTdu = Tu + Tv * dvdu;
+    const cp = (1 + P * dvdu) / dTdu;
+    if (!(cp > 0) || !Number.isFinite(cp)) {
+      throw new Error(`[OTSG] supercritical tube at ${(P / 1e5).toFixed(1)} bar, ` +
+        `${(u / 1e3).toFixed(0)} kJ/kg, ${v.toFixed(5)} m3/kg: the property surface gives no ` +
+        `usable (dh/dT)_P there (cp=${cp}).`);
+    }
+    return { P, T: [T, T + 1], u: [u, u + 1 / dTdu], v: [v, v + dvdu / dTdu], h: [h, h + cp] };
   };
 
   // Assemble the final evaluation from a solved configuration.
@@ -1085,24 +1232,21 @@ export function evaluateOtsgPartition(
       }
     }
     // The draw leaves from the section's OUTLET, which is a heat-transfer
-    // result, not a profile reconstruction. This used to be the linear
-    // inversion 2 h_bar - h_g, which is unbounded against the heat source:
-    // at weak draw its theta tends to 2, and the dried-out Xe-100 offered
-    // its MSSV line steam hotter than the helium. The counterflow
-    // effectiveness form pinches at the gas inlet instead, and reduces to
-    // the same linear behaviour at the design point (see
-    // counterflowOutletTemp).
+    // result, not a profile reconstruction: the saturated stream marched
+    // across the metal zones this section covers (superheatOutletTemp), the
+    // same march that prices Q3. It cannot leave hotter than the hottest
+    // metal it crossed. Two earlier forms could: the linear inversion
+    // 2 h_bar - h_g (unbounded - at weak draw its theta tends to 2), and an
+    // effectiveness formula against the gas inlet, which bounded the outlet
+    // by the helium but not by the tube, and ran 90 K above the steam-end
+    // metal at the Xe-100's design point.
     //
-    // The outlet's temperature becomes an enthalpy by inverting the real
-    // property surface at (TOut, P) - the same u3AtTemperature the mean pin
-    // already uses. NOT by a cp-linear extension: steam's cp near the dome
-    // at these pressures is ~4.6 kJ/kg-K and falls to ~2.7 by 700 C, so the
-    // section's own near-dome slope stretched over hundreds of kelvin
-    // over-priced the outlet by ~400 kJ/kg - a correctly bounded
-    // TEMPERATURE arriving downstream as an unbounded enthalpy, which is
-    // the exact bug this replaces wearing different units. finish() runs
-    // once per evaluation, outside the pressure iteration, so the inversion
-    // is paid where the mean pin already pays it.
+    // The outlet's temperature becomes an enthalpy on the same isobar the
+    // march was run on (isobarFor) - the real property surface, NOT a
+    // cp-linear extension: the section's own near-dome slope stretched over
+    // hundreds of kelvin once over-priced the outlet by ~400 kJ/kg, a
+    // correctly bounded TEMPERATURE arriving downstream as an unbounded
+    // enthalpy.
     //
     // The inlet-at-saturation assumption only exists while a boiling
     // section actually FEEDS this one, so it fades with the boiling
@@ -1114,28 +1258,22 @@ export function evaluateOtsgPartition(
     // same weights, so the draw's density and enthalpy are one fluid.
     let hSteamOut: number;
     let vSteamOut: number;
+    let steamIsobar: SteamIsobar | undefined;
     if (m3 <= 0) {
       hSteamOut = sat.h_g;
       vSteamOut = sat.v_g;
     } else if (regime === 'supercritical') {
       hSteamOut = h3Bar;
       vSteamOut = v3;
+      steamIsobar = localIsobar(P, u3, v3, T3, h3Bar);
     } else {
-      const L3frac = V3 / VT;
-      const TOut = counterflowOutletTemp(
-        sat.T, pin.TGasIn3,
-        pin.hA3Full * L3frac, pin.hAGas3Full * L3frac,
-        pin.WCp3, pin.CGas3);
-      let hEps = sat.h_g;
-      let vEps = sat.v_g;
-      if (TOut > sat.T + 0.5) {
-        const uOut = u3AtTemperature(TOut, P, sat, probe,
-          Math.max(u3, sat.u_g + 10e3), pin.TGasIn3);
-        const vOut = superheatedV(uOut, P, 1e-6,
-          v3 > sat.v_g ? v3 : undefined, sat);
-        hEps = uOut + P * vOut;
-        vEps = vOut;
-      }
+      steamIsobar = isobarFor(P, sat);
+      const { TOut } = marchSteamOverMetal(steamIsobar, pin.zoneTemps,
+        superheatOverlaps(pin.zoneTemps.length, V3 / VT), pin.hA3Full, pin.WSteam, sat.T);
+      // Metal colder than saturation cannot hand the draw less than
+      // saturated vapour (the blend below floors there too).
+      const hEps = TOut > sat.T ? isobarAt(steamIsobar, 'h', TOut) : sat.h_g;
+      const vEps = TOut > sat.T ? isobarAt(steamIsobar, 'v', TOut) : sat.v_g;
       const hBlend = w2 * hEps + (1 - w2) * h3Bar;
       if (hBlend >= sat.h_g) {
         hSteamOut = hBlend;
@@ -1152,7 +1290,7 @@ export function evaluateOtsgPartition(
         mk(m2, v2, V2, h2Bar, T2),
         mk(m3, v3, V3, h3Bar, T3),
       ],
-      hSteamOut, vSteamOut, u3, x2Out, regime,
+      hSteamOut, vSteamOut, u3, x2Out, regime, steamIsobar,
     };
   };
 
@@ -1330,9 +1468,6 @@ export function evaluateOtsgPartition(
   // mild function of L3 and du3 shifts the volume only through v3, so this
   // settles in a couple of rounds.
   let result: { P: number; fin: AtP } | null = null;
-  let lastT3target = -1;
-  let lastU3Pin: number | undefined;
-  let lastPinP = NaN;
   for (let outer = 0; outer < 5; outer++) {
     const solved = solveP();
     if (solved === 'supercritical') {
@@ -1357,35 +1492,19 @@ export function evaluateOtsgPartition(
     const { P, fin } = solved;
     // Refresh the pin at the solved pressure.
     const L3New = Math.max(0, Math.min(1, (fin.m3 * fin.v3) / V));
-    const hA3 = pin.hA3Full * L3New;
-    const thetaMean = hA3 > 0 ? hA3 / (2 * pin.WCp3 + hA3) : 0;
-    // The superheat section's wall is the metal it covers at this length.
-    const TWall3 = zoneMeanTemp(pin.zoneTemps, 1 - L3New, 1);
-    const T3target = fin.sat.T + thetaMean * Math.max(0, TWall3 - fin.sat.T);
+    // The section's mean is the stream's own length-mean over the metal it
+    // covers at this length: the wall's mean less the film drop that carries
+    // the superheat duty (marchSteamOverMetal) - on the same isobar, with the
+    // same draw, as the outlet and the wall duty. Its energy is read off
+    // that isobar too.
     let du3New = 0;
-    if (T3target > fin.sat.T + 0.1) {
-      // The inversion costs ~a hundred property calls; when neither the
-      // target nor the pressure has moved since the last round, the last
-      // inversion is already the answer. What carries is the pinned ENERGY,
-      // re-offset against this round's u_g: the offset du3 = u3 - u_g(P)
-      // does not survive a pressure move, because u_g moves with P while
-      // steam at a given temperature barely does. Carrying the offset
-      // across round 0's pressure jump (0.92 -> 1.06 bar on a blowing-down
-      // tube) held the steam 5.4 kJ/kg - 3.6 K - above the metal pinning
-      // it, and the standing film then pumped 1.1 MW from the steam into
-      // its own wall, paid for by the boiling section.
-      if (lastU3Pin !== undefined && Math.abs(T3target - lastT3target) < 0.25 &&
-          Math.abs(P - lastPinP) < 1e-3 * P) {
-        du3New = lastU3Pin - fin.sat.u_g;
-      } else {
-        const u3Pin = u3AtTemperature(T3target, P, fin.sat, probe,
-          fin.u3 > fin.sat.u_g ? fin.u3 : fin.sat.u_g + 2500 * (T3target - fin.sat.T), TWall3);
-        du3New = u3Pin - fin.sat.u_g;
-        lastU3Pin = u3Pin;
-        lastPinP = P;
-      }
+    if (L3New > 0 && fin.m3 > 0) {
+      const iso = isobarFor(P, fin.sat);
+      const { TMean } = marchSteamOverMetal(iso, pin.zoneTemps,
+        superheatOverlaps(pin.zoneTemps.length, L3New), pin.hA3Full, pin.WSteam, fin.sat.T);
+      // Metal colder than saturation leaves the section at saturated vapour.
+      if (TMean > fin.sat.T) du3New = isobarAt(iso, 'u', TMean) - fin.sat.u_g;
     }
-    lastT3target = T3target;
     const settled = Math.abs(du3New - du3) < 2e3 && Math.abs(L3New - L3) < 1e-3;
     du3 = du3New;
     L3 = L3New;
