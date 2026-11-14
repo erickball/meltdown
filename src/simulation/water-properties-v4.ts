@@ -256,18 +256,33 @@ interface CellBlock {
 
 let spatialIndex: SpatialIndex | null = null;
 
-// Hot edge of the vapor/supercritical grid: for each logV cell, the grid
+// Hot edge of the vapor/supercritical grid: for each slice of logV, the grid
 // point with the highest internal energy. Used to anchor the superheated
 // extrapolation (see superheatedVaporExtrapolation) so states hotter than
 // the table's coverage extend continuously instead of throwing.
 interface VaporHotEdgePoint {
-  cellX: number;   // logV cell index
+  cellX: number;   // logV slice index (HOT_EDGE_BIN_LOGV wide)
   logV: number;    // log10(v) of the edge point
   u: number;       // J/kg
   T_K: number;
   P_Pa: number;
 }
 let vaporHotEdge: VaporHotEdgePoint[] = [];
+// Resolution of the hot edge in logV: one edge point per slice this wide, so
+// in practice one per grid COLUMN (columns are at least 0.004 apart in logV;
+// two that share a slice contribute the taller).
+//
+// It used to be one point per interpolation cell (0.1 in logV, 2-5 columns),
+// which was fine while every column stopped at the same u ~ 3300 kJ/kg: the
+// edge was flat, and a chord between cell maxima WAS the top of the data. The
+// grid now runs to IF97's limits (2273.15 K, 50 MPa), and where it ends on
+// the 50 MPa isobar its top climbs 3300 -> 6300 kJ/kg across v = 0.008-0.021
+// m3/kg, with a corner where the isobar leaves the old flat top. A chord
+// between cell maxima cuts that corner by up to 170 kJ/kg, and a state under
+// the chord but over the data is refused by both sides - "not above the
+// edge" here, "no data" from the grid - and throws. Following the columns
+// puts the edge on the data's actual top.
+const HOT_EDGE_BIN_LOGV = 0.01;
 
 // Saturation curve in (v, u) space - single continuous curve from liquid to vapor
 // Sorted by v (ascending). Built at initialization from raw saturation data.
@@ -1922,11 +1937,12 @@ function buildSpatialIndex(): void {
   console.log(`[WaterProps v4] Spatial index built: ${spatialIndex.liquidPoints.length} liquid, ` +
     `${spatialIndex.vaporPoints.length} vapor, ${spatialIndex.supercriticalPoints.length} supercritical`);
 
-  // Build the hot edge of the vapor/supercritical grid: max-u point per logV cell
+  // Build the hot edge of the vapor/supercritical grid: max-u point per
+  // HOT_EDGE_BIN_LOGV slice of logV (see the constant for why not per cell)
   const edgeByCell = new Map<number, VaporHotEdgePoint>();
   for (const pt of [...spatialIndex.vaporPoints, ...spatialIndex.supercriticalPoints]) {
     const logV = Math.log10(pt.v);
-    const cellX = Math.floor(logV / GRID_CELL_SIZE_LOGV);
+    const cellX = Math.floor(logV / HOT_EDGE_BIN_LOGV);
     const u_J = pt.u * 1000;
     const existing = edgeByCell.get(cellX);
     if (!existing || u_J > existing.u) {
@@ -2132,7 +2148,7 @@ function interpolateFromGrid(
 
   // Scale factors to make logV and u comparable
   // logV range: about -3 to 2 (5 units)
-  // u range: about 0 to 3300 kJ/kg (3300 units)
+  // u range: about 0 to 6300 kJ/kg (6300 units)
   // Scale u down by ~600 to make them comparable
   const U_SCALE = MLS_U_SCALE;
 
@@ -2702,7 +2718,21 @@ let lastSuperheatWarn = 0;
  * covers at a given specific volume (e.g. severely superheated steam after a
  * reactivity excursion). Steam far above saturation behaves close to an
  * ideal gas, so we anchor at the grid's hot edge for this v and extend at
- * constant volume:
+ * constant volume.
+ *
+ * WHERE THE EDGE IS. The grid runs to the limits of IAPWS-IF97 itself:
+ * 2273.15 K (2000 C) for v > ~0.021 m3/kg, and the 50 MPa isobar for denser
+ * steam (scripts/build-uv-grid-v13-hot-patch.py; the near-critical columns
+ * below v ~ 0.008 keep their older 100 MPa / u = 3300 kJ/kg tops). So this
+ * path - and its notice - is reached only by steam hotter than 2000 C or
+ * above 500 bar, where there is no table to be had. It is NOT where a hot
+ * plant lives any more: the grid used to stop at u = 3300 kJ/kg (590-650 C),
+ * which put every 750 C gas-reactor steam generator out here, and this
+ * extension drifts from IF97 as it leaves the edge (at 180 bar: 3 K and 1.1%
+ * in P after 50 K, 15 K and 4.4% after 350 K - Z and the real-gas part of cv
+ * are frozen at their edge values).
+ *
+ * The model:
  *
  *   T from u:  u - u_edge = integral of cv(T) dT with cv(T) = CV_A + CV_B*T
  *              (ideal-gas cv of steam: ~1630 J/kg-K at 600 K rising to
@@ -3236,10 +3266,37 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
       P = result.P;
       calculationPath = 'liquid_saturation_anchor';
     } else {
-      // Saturation-anchored failed (likely supercritical) - try grid interpolation
+      // Saturation-anchored failed (likely supercritical).
+      //
+      // Dense AND hotter than the grid's hot edge at this v: past the
+      // IF97 region-3 boundary (the near-critical columns now run to
+      // 100 MPa), where no grid data can exist. The same anchored
+      // hot-edge extension the vapor branch uses (approved) covers it -
+      // continuous with the edge point, monotone in u - so a small
+      // throughput node chasing a hot inlet can TRANSIT this corner and
+      // solver trial stages can be evaluated and rejected, instead of
+      // every stage dying and the run being declared divergent. No
+      // ACCEPTED plant state belongs out here (equivalent pressures
+      // over 750 bar); the pressure ceiling watch below reports any
+      // that persist. (Edit approved by user 2026-08-18.)
+      //
+      // Tested FIRST, before asking the grid, for the reason the vapor branch
+      // below does it. This used to be the last resort, taken only once both
+      // grids had refused - and the grid does not always refuse above its own
+      // top: its degenerate-support fallback answers with a plain average
+      // whenever its search block holds points above and below the query's
+      // u, however far off to the side they are. Once the vapor columns at
+      // v > 0.008 m3/kg ran past u = 3300 kJ/kg, that turned the 20 kJ/kg
+      // above the top of the dense columns (v = 0.0051-0.0058, ~800 bar)
+      // into a plateau 65 K BELOW the edge - T falling as u rose.
+      const denseHot = superheatedVaporExtrapolation(u, v);
       // Supercritical points are stored in the vapor grid, so try vapor first
-      let gridResult = interpolateFromGrid(u, v, 'vapor');
-      if (gridResult) {
+      let gridResult = denseHot ? null : interpolateFromGrid(u, v, 'vapor');
+      if (denseHot) {
+        T = denseHot.T;
+        P = denseHot.P;
+        calculationPath = 'supercritical_hot_edge_extrapolation';
+      } else if (gridResult) {
         T = gridResult.T;
         P = gridResult.P;
         calculationPath = 'supercritical_grid_vapor';
@@ -3251,25 +3308,7 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
           P = gridResult.P;
           calculationPath = 'supercritical_grid_liquid';
         } else {
-          // Dense AND hotter than the grid's hot edge at this v: past the
-          // IF97 region-3 boundary (the near-critical columns now run to
-          // 100 MPa), where no grid data can exist. The same anchored
-          // hot-edge extension the vapor branch uses (approved) covers it -
-          // continuous with the edge point, monotone in u - so a small
-          // throughput node chasing a hot inlet can TRANSIT this corner and
-          // solver trial stages can be evaluated and rejected, instead of
-          // every stage dying and the run being declared divergent. No
-          // ACCEPTED plant state belongs out here (equivalent pressures
-          // over 1000 bar); the pressure ceiling watch below reports any
-          // that persist. (Edit approved by user 2026-08-18.)
-          const denseHot = superheatedVaporExtrapolation(u, v);
-          if (denseHot) {
-            T = denseHot.T;
-            P = denseHot.P;
-            calculationPath = 'supercritical_hot_edge_extrapolation';
-          } else {
-            throw new Error(`[WaterProps v4] Liquid/supercritical interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
-          }
+          throw new Error(`[WaterProps v4] Liquid/supercritical interpolation failed: u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, rho=${rho.toFixed(1)} kg/m³`);
         }
       }
     }

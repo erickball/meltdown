@@ -6,12 +6,15 @@ well above 50 MPa. Those high-pressure points sit far outside anything a reactor
 sandbox will reach, and they pull the interpolation stencil around in the region
 we do care about, so they are dropped here.
 
-This is the last step of the water-property chain:
+This is the last step of the base water-property chain; two patches are then
+applied in place to its output, in this order:
 
     build-saturation-dome.py  ->  saturation_dome_iapws.json
     build-uv-grid-v5.py       ->  uv_grid_data_v5.json        (seed for v13)
     build-uv-grid-v13.py      ->  uv_grid_data_v13.json
     filter-uv-grid-v13.py     ->  uv_grid_data_v13_filtered.json   (this script)
+    build-uv-grid-v13-nearcrit-patch.py   (dense columns near the critical point)
+    build-uv-grid-v13-hot-patch.py        (vapor columns from u=3300 to 2273 K / 50 MPa)
 
 Writes the result to both scripts/ (read by Node) and public/ (fetched by the
 browser); water-properties-v4.ts loads it from whichever it is running under.
