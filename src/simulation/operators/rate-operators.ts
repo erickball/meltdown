@@ -57,6 +57,7 @@ import {
   pressureAtConnection,
   zoneWaterShare,
 } from './connection-hydraulics';
+import { breakExchangeLegs } from './exchange-flow';
 
 // Shared per-connection hydraulics now live in connection-hydraulics.ts (one
 // model consumed by both this file's explicit momentum operator and the
@@ -1868,73 +1869,12 @@ export class FlowRateOperator implements RateOperator {
 
       const absMassFlow = Math.abs(massFlow);
 
-      const priced = this.priceDraw(
-        upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
-      const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace } = priced;
-      const upNcg = upstreamNode.fluid.ncg;
-
-      // Water portion: mass flow * specific enthalpy of the flowing water
-      const waterFlow = absMassFlow * waterShare;
-      const energyFlow = absMassFlow * waterEnthalpyFlux;
+      const { flowPhase, energyFlow, h_up } = this.transportDraw(
+        rates, state, upstreamNode, upstreamId, downstreamId,
+        upstreamElevation, upstreamPhaseTolerance, upstreamOpeningHeight, absMassFlow);
 
       // Store flow phase on connection for debug display
       conn.currentFlowPhase = flowPhase;
-
-      // Update rates: upstream loses mass/energy, downstream gains
-      const upRates = rates.flowNodes.get(upstreamId)!;
-      const downRates = rates.flowNodes.get(downstreamId)!;
-
-      upRates.dMass -= waterFlow;
-      upRates.dEnergy -= energyFlow;
-
-      downRates.dMass += waterFlow;
-      downRates.dEnergy += energyFlow;
-
-      // NCG portion: the rest of the mixture flow, distributed across
-      // species by their share of the gas mass, transported with ENTHALPY
-      // (Cp - internal energy plus flow work, like the water above).
-      const gasFlow = absMassFlow - waterFlow;
-      if (gasFlow > 0 && gasMassInSpace > 0 && upNcg) {
-        if (!upRates.dNcg) {
-          upRates.dNcg = emptyGasComposition();
-        }
-        if (!downRates.dNcg) {
-          downRates.dNcg = emptyGasComposition();
-        }
-
-        // moles per kg of gas mixture, per species
-        let totalMolesTransferred = 0;
-        for (const species of ALL_GAS_SPECIES) {
-          const molesTransferred = (gasFlow * upNcg[species]) / gasMassInSpace;
-          upRates.dNcg[species] -= molesTransferred;
-          downRates.dNcg[species] += molesTransferred;
-          totalMolesTransferred += molesTransferred;
-        }
-
-        // Bill the gas at the node's effective mixture temperature (phase-
-        // aware energy-balance inversion; see ncgEffectiveT). Enthalpy (Cp),
-        // not internal energy: the gas carries its flow work with it.
-        const Cp_ncg = mixtureCp(upNcg);
-        const effectiveT = this.ncgEffectiveT(upstreamNode);
-
-        const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * effectiveT;
-        upRates.dEnergy -= ncgEnergyFlow;
-        downRates.dEnergy += ncgEnergyFlow;
-
-        // Gas crossing into a boundary node (atmosphere) leaves the modeled
-        // system: accumulate it as the environmental release source term
-        // (the boundary node itself never integrates rates)
-        const downstreamNode = state.flowNodes.get(downstreamId);
-        if (downstreamNode?.isBoundary) {
-          if (!rates.environmentalRelease) {
-            rates.environmentalRelease = emptyGasComposition();
-          }
-          for (const species of ALL_GAS_SPECIES) {
-            rates.environmentalRelease[species] +=
-              (gasFlow * (upNcg[species] ?? 0)) / gasMassInSpace;
-          }
-        }
-      }
 
       // Track flows for debug node
       if (downstreamId === DEBUG_NODE_ID) {
@@ -1942,6 +1882,22 @@ export class FlowRateOperator implements RateOperator {
       }
       if (upstreamId === DEBUG_NODE_ID) {
         debugFlowsOut.push({ to: downstreamId, massFlow: absMassFlow, energyFlow, h_specific: h_up, flowPhase });
+      }
+    }
+
+    // Two-way flow through breaks: the counter-current legs on top of each
+    // break's net flow (exchange-flow.ts), drawn and priced like any flow
+    // through that opening
+    for (const leg of breakExchangeLegs(state)) {
+      const c = leg.conn;
+      const fromNode = state.flowNodes.get(c.fromNodeId)!;
+      const toNode = state.flowNodes.get(c.toNodeId)!;
+      if (leg.fromIsDonor) {
+        this.transportDraw(rates, state, fromNode, c.fromNodeId, c.toNodeId,
+          c.fromElevation, c.fromPhaseTolerance, c.fromOpeningHeight, leg.massFlow);
+      } else {
+        this.transportDraw(rates, state, toNode, c.toNodeId, c.fromNodeId,
+          c.toElevation, c.toPhaseTolerance, c.toOpeningHeight, leg.massFlow);
       }
     }
 
@@ -2022,6 +1978,86 @@ export class FlowRateOperator implements RateOperator {
       );
     }
     return T;
+  }
+
+  /**
+   * Move `absMassFlow` of what `upstreamNode` delivers through an opening at
+   * `upstreamElevation` into `downstreamId`: water, gas species and their
+   * enthalpy, with gas crossing into a boundary node booked as environmental
+   * release. The one transport of a draw - a connection's net flow and a
+   * break's exchange legs (exchange-flow.ts) both go through it.
+   */
+  private transportDraw(
+    rates: StateRates, state: SimulationState,
+    upstreamNode: FlowNode, upstreamId: string, downstreamId: string,
+    upstreamElevation: number | undefined, upstreamPhaseTolerance: number | undefined,
+    upstreamOpeningHeight: number | undefined, absMassFlow: number,
+  ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; energyFlow: number; h_up: number } {
+    const priced = this.priceDraw(
+      upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
+    const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace } = priced;
+    const upNcg = upstreamNode.fluid.ncg;
+
+    // Water portion: mass flow * specific enthalpy of the flowing water
+    const waterFlow = absMassFlow * waterShare;
+    const energyFlow = absMassFlow * waterEnthalpyFlux;
+
+    // Update rates: upstream loses mass/energy, downstream gains
+    const upRates = rates.flowNodes.get(upstreamId)!;
+    const downRates = rates.flowNodes.get(downstreamId)!;
+
+    upRates.dMass -= waterFlow;
+    upRates.dEnergy -= energyFlow;
+
+    downRates.dMass += waterFlow;
+    downRates.dEnergy += energyFlow;
+
+    // NCG portion: the rest of the mixture flow, distributed across
+    // species by their share of the gas mass, transported with ENTHALPY
+    // (Cp - internal energy plus flow work, like the water above).
+    const gasFlow = absMassFlow - waterFlow;
+    if (gasFlow > 0 && gasMassInSpace > 0 && upNcg) {
+      if (!upRates.dNcg) {
+        upRates.dNcg = emptyGasComposition();
+      }
+      if (!downRates.dNcg) {
+        downRates.dNcg = emptyGasComposition();
+      }
+
+      // moles per kg of gas mixture, per species
+      let totalMolesTransferred = 0;
+      for (const species of ALL_GAS_SPECIES) {
+        const molesTransferred = (gasFlow * upNcg[species]) / gasMassInSpace;
+        upRates.dNcg[species] -= molesTransferred;
+        downRates.dNcg[species] += molesTransferred;
+        totalMolesTransferred += molesTransferred;
+      }
+
+      // Bill the gas at the node's effective mixture temperature (phase-
+      // aware energy-balance inversion; see ncgEffectiveT). Enthalpy (Cp),
+      // not internal energy: the gas carries its flow work with it.
+      const Cp_ncg = mixtureCp(upNcg);
+      const effectiveT = this.ncgEffectiveT(upstreamNode);
+
+      const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * effectiveT;
+      upRates.dEnergy -= ncgEnergyFlow;
+      downRates.dEnergy += ncgEnergyFlow;
+
+      // Gas crossing into a boundary node (atmosphere) leaves the modeled
+      // system: accumulate it as the environmental release source term
+      // (the boundary node itself never integrates rates)
+      const downstreamNode = state.flowNodes.get(downstreamId);
+      if (downstreamNode?.isBoundary) {
+        if (!rates.environmentalRelease) {
+          rates.environmentalRelease = emptyGasComposition();
+        }
+        for (const species of ALL_GAS_SPECIES) {
+          rates.environmentalRelease[species] +=
+            (gasFlow * (upNcg[species] ?? 0)) / gasMassInSpace;
+        }
+      }
+    }
+    return { flowPhase, energyFlow, h_up };
   }
 
   /**

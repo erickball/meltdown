@@ -92,13 +92,14 @@ import {
 } from '../gas-properties';
 import { pumpHeadSlopeMagnitude } from './pump-curve';
 import { nodeGasVolume } from '../mixture-properties';
+import { breakExchangeLegs } from './exchange-flow';
 import {
   computeConnectionHydraulics,
   computeChokeLimit,
   ConnectionHydraulics,
   DrawComposition,
   ChokeLimit,
-  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction } from './connection-hydraulics';
+  CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction, drawCompositionAt } from './connection-hydraulics';
 
 /** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
 interface FlowGas { y: number; molPerKg: number }
@@ -834,6 +835,35 @@ export class PressureSolver {
     // solve prices only the flow CHANGE (see the corrector param on solve).
     const banked: typeof fixedFlows = [];
     const entries: ImplicitEntry[] = [];
+
+    // Two-way flow through breaks (exchange-flow.ts): each counter-current
+    // leg is a fixed flow, so the closure sees the mass and enthalpy it moves
+    // and the measured heat source q - which subtracts this same transport -
+    // does not mistake a liquid-for-gas swap for heating or cooling. The
+    // stages integrate the legs explicitly; in corrector mode that transport
+    // is already in the probe state, like every non-implicit connection's.
+    if (!corrector) {
+      for (const leg of breakExchangeLegs(state)) {
+        const c = leg.conn;
+        const iFrom = index.get(c.fromNodeId) ?? -1;
+        const iTo = index.get(c.toNodeId) ?? -1;
+        if (iFrom < 0 && iTo < 0) continue;
+        const donor = state.flowNodes.get(leg.fromIsDonor ? c.fromNodeId : c.toNodeId)!;
+        const comp = leg.fromIsDonor
+          ? drawCompositionAt(donor, c.fromElevation, leg.massFlow, c.fromPhaseTolerance, c.fromOpeningHeight)
+          : drawCompositionAt(donor, c.toElevation, leg.massFlow, c.toPhaseTolerance, c.toOpeningHeight);
+        const hDonor = useEnergy ? this.blendedDonorEnthalpy(donor, comp) : 0;
+        const ncg = donor.fluid.ncg;
+        const gasMass = ncg ? ncgTotalMass(ncg) : 0;
+        const gas: FlowGas = gasMass > 0
+          ? { y: drawGasMassFraction(donor, comp), molPerKg: ncgTotalMoles(ncg!) / gasMass }
+          : NO_GAS;
+        fixedFlows.push({
+          flow: leg.fromIsDonor ? leg.massFlow : -leg.massFlow,
+          hDonor, donorIsFrom: leg.fromIsDonor, iFrom, iTo, gas,
+        });
+      }
+    }
 
     for (const conn of state.flowConnections) {
       const fromNode = state.flowNodes.get(conn.fromNodeId);
