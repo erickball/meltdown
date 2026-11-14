@@ -71,6 +71,9 @@ import {
   calculateState,
   distanceToSaturationLine,
   saturatedLiquidDensity,
+  saturatedVaporDensity,
+  saturatedLiquidEnergy,
+  saturatedVaporEnergy,
   latentHeat,
   iceCv,
   liquidCv,
@@ -98,8 +101,28 @@ import {
   CLOSED_FLOW_DECAY_TAU, governorPositionFor, drawGasMassFraction, drawCompositionAt, zoneDrawEnthalpy,
   nodeWaterSpecificEnergy } from './connection-hydraulics';
 
-/** The gas share of a flow: NCG mass fraction, and moles per kg of that gas. */
-interface FlowGas { y: number; molPerKg: number }
+/** The gas share of a flow: NCG mass fraction, moles per kg of that gas, and
+ *  the gas's molar heat capacity at constant volume (J/mol-K). */
+interface FlowGas { y: number; molPerKg: number; cv: number }
+
+/** Lowest temperature of the liquid-vapour saturation table (the triple point). */
+const T_TRIPLE = 273.16;
+
+/**
+ * Tangent pressure response of a saturated (liquid + vapour, with or without
+ * non-condensable gas) node at fixed volume - see PressureSolver.twoPhaseTangent.
+ */
+interface TwoPhaseTangent {
+  /** (dP/dU) at constant water mass, gas moles and volume, Pa/J. */
+  beta: number;
+  /** Steam's share of the pressure rise per kg of water arriving at the
+   *  node's own bulk enthalpy, Pa/kg. With no gas this is the whole response. */
+  steamPerKg: number;
+  /** The gas partial pressure's share of that same response, Pa/kg (0 with no gas). */
+  cushionPerKg: number;
+  // Inputs the entry was computed for (the cache key)
+  m: number; U: number; T: number; x: number; n: number; P: number; V: number;
+}
 
 /** Status of the last pressure solve */
 export interface PressureSolverStatus {
@@ -282,6 +305,8 @@ export class PressureSolver {
     // the implicit closure gives gas-carrying flows.
     const cushionBlend = new Float64Array(n);
     const cushionPerMole = new Float64Array(n);
+    const cushionBetaT = new Float64Array(n);
+    const cushionHBeta = new Float64Array(n);
     for (let i = 0; i < n; i++) {
       const node = nodeList[i];
       const ncgMass = node.fluid.ncg ? ncgTotalMass(node.fluid.ncg) : 0;
@@ -306,6 +331,8 @@ export class PressureSolver {
         c[i] = 1 / (1 / c[i] + cushion.perKgWater * dt);
         cushionBlend[i] = cushion.blend;
         cushionPerMole[i] = cushion.perMoleGas;
+        cushionBetaT[i] = cushion.betaT;
+        cushionHBeta[i] = cushion.hBeta;
       }
       // Moving-boundary boiler tubes publish their own dP/dm - the pressure
       // there is the partition's volume-packing solution, and a tube being
@@ -324,7 +351,7 @@ export class PressureSolver {
 
     if (this.config.implicitMomentum) {
       this.solveImplicit(state, dt, index, nodeList, c, n, lastEnergyRates, corrector,
-        cushionBlend, cushionPerMole);
+        cushionBlend, cushionPerMole, cushionBetaT, cushionHBeta);
       return;
     }
 
@@ -737,7 +764,9 @@ export class PressureSolver {
     lastEnergyRates: Map<string, { dMass: number; dEnergy: number }> | undefined,
     corrector: { startFlows: Map<string, number> } | undefined,
     cushionBlend: Float64Array,
-    cushionPerMole: Float64Array
+    cushionPerMole: Float64Array,
+    cushionBetaT: Float64Array,
+    cushionHBeta: Float64Array
   ): void {
     interface ImplicitEntry {
       conn: FlowConnection;
@@ -766,7 +795,7 @@ export class PressureSolver {
     // advection will move it (zoneWaterShare for the explicit operator,
     // whole-node concentrations for the implicit transport partition), and
     // moles per kg of that gas.
-    const NO_GAS: FlowGas = { y: 0, molPerKg: 0 };
+    const NO_GAS: FlowGas = { y: 0, molPerKg: 0, cv: 0 };
     const flowGas = (conn: FlowConnection, h: ConnectionHydraulics): FlowGas => {
       const up = h.upstreamNode;
       const ncg = up.fluid.ncg;
@@ -775,7 +804,7 @@ export class PressureSolver {
       const y = conn.implicitAdvection
         ? gasMass / (gasMass + up.fluid.mass)
         : drawGasMassFraction(up, h.drawComp);
-      return { y, molPerKg: ncgTotalMoles(ncg!) / gasMass };
+      return { y, molPerKg: ncgTotalMoles(ncg!) / gasMass, cv: ncgMixtureCv(ncg!) };
     };
 
     // Energy-coupled compliance: beta_i = dP/dU at constant (m, V) and the
@@ -853,7 +882,7 @@ export class PressureSolver {
         const ncg = donor.fluid.ncg;
         const gasMass = ncg ? ncgTotalMass(ncg) : 0;
         const gas: FlowGas = gasMass > 0
-          ? { y: drawGasMassFraction(donor, comp), molPerKg: ncgTotalMoles(ncg!) / gasMass }
+          ? { y: drawGasMassFraction(donor, comp), molPerKg: ncgTotalMoles(ncg!) / gasMass, cv: ncgMixtureCv(ncg!) }
           : NO_GAS;
         fixedFlows.push({
           flow: leg.fromIsDonor ? leg.massFlow : -leg.massFlow,
@@ -1073,9 +1102,17 @@ export class PressureSolver {
     // two responses (blended across the dome edge exactly as the cushion
     // is). y = 0, or a node without a cushion, gives weight 1: the closure
     // above, unchanged.
+    //
+    // The gas's response is, like the water's, the one for a kilogram
+    // arriving at the node's own bulk enthalpy h (the transport model bills
+    // every arriving kilogram at h, whatever it is made of): per mole at
+    // fixed U the gas adds R·T/room of partial pressure and takes Cv·T of
+    // the node's energy into its own heat capacity (cooling the saturated
+    // water, -β·Cv·T), and the h it brings raises the pressure by h·β.
     const arrivalWeight = (i: number, g: FlowGas): number =>
       i < 0 || !(g.y > 0) || !(cushionBlend[i] > 0) ? 1
-        : 1 + g.y * cushionBlend[i] * (cushionPerMole[i] * g.molPerKg * c[i] * dt - 1);
+        : 1 + g.y * cushionBlend[i] * (
+          (g.molPerKg * (cushionPerMole[i] - cushionBetaT[i] * g.cv) + cushionHBeta[i]) * c[i] * dt - 1);
     const donorWeight = (i: number, hDonor: number, g: FlowGas): number =>
       i < 0 ? 1 : arrivalWeight(i, g) + (useEnergy ? (hDonor - hNode[i]) * beta[i] * c[i] * dt : 0);
     const weightsOf = (f: {
@@ -1516,7 +1553,8 @@ export class PressureSolver {
    * density changes.
    *
    * For liquid: temperature-dependent bulk modulus from steam tables
-   * For two-phase: P_sat as scale (phase change absorbs density changes)
+   * For two-phase: the exact tangent of the saturated state, K = m·dP/dm for
+   *   water arriving at the node's own enthalpy (see twoPhaseTangent)
    * For vapor: gamma*P (ideal gas; also correct for NCG-dominated nodes since
    *   node pressure includes NCG partial pressure)
    *
@@ -1555,8 +1593,9 @@ export class PressureSolver {
     }
 
     // Liquid and two-phase share one continuous treatment across the liquid
-    // saturation line. K spans ~6 orders of magnitude between compressed liquid
-    // (~2.2 GPa) and low-pressure two-phase (~P_sat), so the transition must be:
+    // saturation line. K spans 6-8 orders of magnitude between compressed liquid
+    // (~2.2 GPa) and low-pressure, low-quality two-phase (~100 Pa), so the
+    // transition must be:
     // - wide enough that a node can't cross it in one timestep's worth of mass
     //   flow (a hair-thin blend lets mass flood into a "soft" barely-two-phase
     //   node, which then punches out into stiff liquid with an MPa-scale jump)
@@ -1566,7 +1605,6 @@ export class PressureSolver {
     // BLEND_DISTANCE = 10 mL/kg is ~1% of v_f. In quality terms it covers only
     // x < ~0.001 at typical pressures, so genuinely two-phase nodes (condensers,
     // pressurizers, boiling SG shells) are untouched.
-    const P_sat = saturationPressure(T_K);
     const K_liquid = numericalBulkModulus(T_K - 273.15, this.config.K_max);
 
     // The WATER's (u, v): a pressurizer under nitrogen or a pool under an air
@@ -1578,19 +1616,148 @@ export class PressureSolver {
     const satDist = distanceToSaturationLine(u, v);
 
     const BLEND_DISTANCE = 10; // mL/kg
-    // blend = 0 -> pure liquid K, blend = 1 -> pure two-phase K (P_sat)
+    // blend = 0 -> pure liquid K, blend = 1 -> pure two-phase K
     const blend = Math.min(1, Math.max(0, (BLEND_DISTANCE - satDist.distance) / (2 * BLEND_DISTANCE)));
     if (blend <= 0) return K_liquid;
-    if (blend >= 1) return P_sat;
-    return Math.exp((1 - blend) * Math.log(K_liquid) + blend * Math.log(P_sat));
+    // Two-phase: K such that c = rho·V/(K·dt) is exactly the mass (kg) that
+    // raises the steam's pressure by 1 Pa when it arrives at the node's own
+    // enthalpy. (It was K = P_sat: 3-30x too stiff below 10% quality, where
+    // the saturated liquid's heat capacity soaks up the compression, and
+    // ~10% too soft above 50%.) The gas's share of the response, if there is
+    // gas, is added by gasCushion (Dalton).
+    const K_twoPhase = _rho * node.volume * this.twoPhaseTangent(node).steamPerKg;
+    if (blend >= 1) return K_twoPhase;
+    return Math.exp((1 - blend) * Math.log(K_liquid) + blend * Math.log(K_twoPhase));
+  }
+
+  private tangentCache = new WeakMap<FlowNode, TwoPhaseTangent>();
+
+  /**
+   * Exact tangent pressure response of a saturated node at fixed volume: the
+   * partial derivatives of the state function the fluid-state constraint
+   * evaluates (solveMixtureState), in closed form.
+   *
+   * Inside the dome P_steam = P_sat(T), and the water obeys
+   *   V = m·(v_f + x·v_fg),   U_w = m·(u_f + x·u_fg),   U = U_w + n·Cv·T
+   * (the gas shares the vapour space and the temperature; Dalton). With
+   * primes for d/dT along saturation, v' = v_f' + x·v_fg', u' = u_f' + x·u_fg',
+   * eliminating dx between the two water equations gives
+   *   C·dT = dU + N·dm - Cv·T·dn
+   *   C = m·cv2 + n·Cv,   cv2 = u' - u_fg·v'/v_fg,   N = v_f·u_fg/v_fg - u_f
+   * cv2 is the two-phase constant-volume heat capacity: sensible heat plus
+   * the latent heat of whatever must evaporate to keep the volume filled.
+   * N is what a kilogram of water costs at fixed U and V: it condenses
+   * v_f/v_fg kg of steam to make room for itself (+u_fg each) and has to be
+   * supplied with its own u_f.
+   *
+   * The gas's partial pressure P_gas = n·R·T/V_gas rides on the vapour space
+   * V_gas = V - m·(1-x)·v_f plus what the liquid gives under P_gas (bulk
+   * modulus K): R·T·dn + n·R·dT = room·dP_gas + P_gas·dV_free, with
+   *   room = V_gas + P_gas·V_liq/K
+   *   dV_free = -(v_f·v_g/v_fg)·dm - m·(v'·v_f/v_fg + (1-x)·v_f')·dT
+   * (a kilogram arriving at fixed T ends up as v_g/v_fg kg more liquid;
+   * heating expands the liquid and moves mass across the phases).
+   *
+   * So, with a_T = dV_free/dT:
+   *   β = (dP/dU)_{m,n}     = (P_sat' + (n·R - P_gas·a_T)/room) / C
+   *   (dP/dm)_{U,n}         = β·N + P_gas·v_f·v_g/(v_fg·room)
+   *   (dP/dn)_{U,m}         = R·T/room - β·Cv·T
+   *
+   * WHAT THE CLOSURE NEEDS. The solve's row for a node reads
+   *   c·δP = Σ(arrivals) - Σ φ·(departures) + c·β·q·dt,
+   *   φ = 1 + (h_drawn - h)·β·c·dt
+   * and its energy book bills every arriving kilogram at the node's own
+   * bulk enthalpy h. Expanding δP = (dP/dm)·Δm + β·ΔU with that book gives
+   * 1/(c·dt) = (dP/dm)_U + h·β: the response to SAME-FLUID injection, which
+   * is the isentropic one (for pure water it reduces to K = v·T·P_sat'²/cv2,
+   * the homogeneous-equilibrium ρ·c²; the vapour branch's γ·P is the same
+   * derivative for a gas). β is the plain constant-(m,V) slope. Returned
+   * split by who carries the pressure: steamPerKg = P_sat'·(N + h)/C and
+   * cushionPerKg = the P_gas terms, so the liquid-edge blend and the gas
+   * cushion keep their separate roles.
+   *
+   * Saturation derivatives are centred differences of the table accessors
+   * over 1 K, as dP_sat/dT always was here; the window stops at the table's
+   * ends (the triple point and its top row) the same way.
+   *
+   * Checked against centred finite differences of solveMixtureState over
+   * 0.05-150 bar, x = 0.001-0.99, with and without air: K and β agree to
+   * ~0.3% wherever the difference stencil stays inside the dome.
+   */
+  private twoPhaseTangent(node: FlowNode): TwoPhaseTangent {
+    const f = node.fluid;
+    const m = f.mass;
+    const T = f.temperature;
+    const x = f.quality ?? 0;
+    const ncg = f.ncg;
+    const n = ncg ? ncgTotalMoles(ncg) : 0;
+    const hit = this.tangentCache.get(node);
+    if (hit && hit.m === m && hit.U === f.internalEnergy && hit.T === T && hit.x === x && hit.n === n
+        && hit.P === f.pressure && hit.V === node.volume) {
+      return hit;
+    }
+    const V = node.volume;
+
+    const T_s = Math.min(T, 646.5);
+    let T_hi = Math.min(T_s + 0.5, 646.5);
+    let T_lo = T_hi - 1;
+    if (T_lo < T_TRIPLE) { T_lo = T_TRIPLE; T_hi = T_TRIPLE + 1; }
+    const span = T_hi - T_lo;
+    const dPsat = (saturationPressure(T_hi) - saturationPressure(T_lo)) / span;
+    const vf_hi = 1 / saturatedLiquidDensity(T_hi), vf_lo = 1 / saturatedLiquidDensity(T_lo);
+    const vg_hi = 1 / saturatedVaporDensity(T_hi), vg_lo = 1 / saturatedVaporDensity(T_lo);
+    const uf_hi = saturatedLiquidEnergy(T_hi), uf_lo = saturatedLiquidEnergy(T_lo);
+    const ug_hi = saturatedVaporEnergy(T_hi), ug_lo = saturatedVaporEnergy(T_lo);
+    const dvf = (vf_hi - vf_lo) / span, dvg = (vg_hi - vg_lo) / span;
+    const duf = (uf_hi - uf_lo) / span, dug = (ug_hi - ug_lo) / span;
+    const v_f = 1 / saturatedLiquidDensity(T_s), v_g = 1 / saturatedVaporDensity(T_s);
+    const u_f = saturatedLiquidEnergy(T_s), u_g = saturatedVaporEnergy(T_s);
+    const v_fg = v_g - v_f, u_fg = u_g - u_f;
+
+    const dv = dvf + x * (dvg - dvf);
+    const du = duf + x * (dug - duf);
+    const cv2 = du - u_fg * dv / v_fg;
+    const N = v_f * u_fg / v_fg - u_f;
+    const CvGas = n > 0 ? n * ncgMixtureCv(ncg!) : 0;
+    const C = m * cv2 + CvGas;
+    const h = this.bulkEnthalpy(node);
+
+    let gasPerK = 0;   // d(P_gas)/dT at fixed m, n
+    let gasPerKg = 0;  // d(P_gas)/dm at fixed T, n
+    if (n > 0) {
+      const V_gas = nodeGasVolume(node);
+      const P_gas = (n * R_GAS * T) / V_gas;
+      const K_liq = numericalBulkModulus(T - 273.15, this.config.K_max);
+      const room = V_gas + (P_gas * (V - V_gas)) / K_liq;
+      const a_T = -m * (dv * v_f / v_fg + (1 - x) * dvf);
+      gasPerK = (n * R_GAS - P_gas * a_T) / room;
+      gasPerKg = (P_gas * v_f * v_g) / (v_fg * room);
+    }
+    const beta = (dPsat + gasPerK) / C;
+    const steamPerKg = (dPsat * (N + h)) / C;
+    const cushionPerKg = (gasPerK * (N + h)) / C + gasPerKg;
+    if (!(C > 0) || !(steamPerKg > 0) || !isFinite(steamPerKg) || !isFinite(beta) || !isFinite(cushionPerKg)) {
+      throw new Error(
+        `[PressureSolver] Invalid two-phase tangent for '${node.id}': dP/dU=${beta} Pa/J, ` +
+        `steam dP/dm=${steamPerKg} Pa/kg, gas dP/dm=${cushionPerKg} Pa/kg ` +
+        `(C=${C} J/K, cv2=${cv2} J/kg-K, N=${N} J/kg, h=${h} J/kg, dPsat/dT=${dPsat} Pa/K, ` +
+        `v_fg=${v_fg} m³/kg, m=${m} kg, n=${n} mol, T=${T} K, x=${x}, phase=${f.phase}) - ` +
+        `heating a saturated node, or adding its own fluid to it, must raise its pressure`
+      );
+    }
+    const out: TwoPhaseTangent = {
+      beta, steamPerKg, cushionPerKg, m, U: f.internalEnergy, T, x, n, P: f.pressure, V,
+    };
+    this.tangentCache.set(node, out);
+    return out;
   }
 
   /**
    * The gas cushion over a condensed phase, as the implicit closure sees it.
    *
-   * getEffectiveBulkModulus prices a two-phase node at K = P_sat: water
-   * arriving compresses the vapour space, the steam there condenses, and the
-   * pressure is held by the evaporation buffer. Gas does not condense. With
+   * getEffectiveBulkModulus prices a two-phase node at the STEAM's response:
+   * water arriving compresses the vapour space, the steam there condenses,
+   * and the pressure is held by the evaporation buffer. Gas does not condense. With
    * n moles of it sharing the vapour space, the gas's partial pressure
    * P_gas = n·R·T/V_gas rises as the space shrinks, on top of the steam's
    * response (Dalton: the pressures add). A spent-fuel pool under a 278 m³
@@ -1600,22 +1767,27 @@ export class PressureSolver {
    * the next - a period-2 flip of the pool (±7 kPa, ±44 kg/s) that a
    * consistent backward-Euler closure damps at any step.
    *
-   * At fixed T, with the liquid giving way at its bulk modulus K:
-   *   R·T·dn = V_gas·dP + P_gas·dV_gas,   dV_gas = V_liq·dP/K - v_f·dm_w
-   * so both the water and the gas act on the same room
-   *   D = V_gas + P_gas·V_liq/K
-   * and the responses are dP/dm_w = v_f·P_gas/D and dP/dn = R·T/D. The first
-   * vanishes with the gas, so a pure steam-water node is untouched; the
-   * second stays finite (the first moles of air into a steam space raise its
-   * pressure by their partial pressure). Both fade across the same dome-edge
-   * zone as the bulk modulus, so a node flooding solid hands over to the
-   * liquid stiffness continuously. Temperature effects stay with the energy
-   * leg (β), exactly as for every other node.
+   * With the liquid giving way at its bulk modulus K:
+   *   R·T·dn + n·R·dT = D·dP_gas + P_gas·dV_free,   D = V_gas + P_gas·V_liq/K
+   * so both the water and the gas act on the same room D. The water's
+   * response (perKgWater) is the gas share of the exact same-fluid tangent
+   * (twoPhaseTangent.cushionPerKg: the squeeze v_f·v_g/v_fg·P_gas/D plus
+   * what the temperature rise does to P_gas). It vanishes with the gas, so
+   * a pure steam-water node is untouched. The gas's response at fixed
+   * temperature is dP/dn = R·T/D, which stays finite (the first moles of
+   * air into a steam space raise its pressure by their partial pressure);
+   * betaT and hBeta carry the two temperature terms a mole of gas brings
+   * (it takes Cv·T into its own heat capacity, and arrives with the bulk
+   * enthalpy) for the species weight in solveImplicit. Everything fades
+   * across the same dome-edge zone as the bulk modulus, so a node flooding
+   * solid hands over to the liquid stiffness continuously.
    *
    * Null for a vapour node (γ·P is already the mixture's own response) and
    * for a node with no vapour space.
    */
-  private gasCushion(node: FlowNode): { blend: number; perKgWater: number; perMoleGas: number } | null {
+  private gasCushion(node: FlowNode): {
+    blend: number; perKgWater: number; perMoleGas: number; betaT: number; hBeta: number;
+  } | null {
     const phase = node.fluid.phase;
     if (phase !== 'liquid' && phase !== 'two-phase') return null;
     const V_gas = nodeGasVolume(node);
@@ -1631,8 +1803,8 @@ export class PressureSolver {
     const V_liq = node.volume - V_gas;
     const K_liq = numericalBulkModulus(T - 273.15, this.config.K_max);
     const room = V_gas + (P_gas * V_liq) / K_liq;
-    const v_f = 1 / saturatedLiquidDensity(Math.min(T, 646.5));
-    const perKgWater = blend * v_f * P_gas / room;
+    const tangent = this.twoPhaseTangent(node);
+    const perKgWater = blend * tangent.cushionPerKg;
     const perMoleGas = (R_GAS * T) / room;
     if (!(perKgWater >= 0) || !(perMoleGas > 0) || !isFinite(perMoleGas)) {
       throw new Error(
@@ -1640,7 +1812,10 @@ export class PressureSolver {
         `dP/dn=${perMoleGas} Pa/mol (V_gas=${V_gas} m³, V_liq=${V_liq} m³, n=${n} mol, T=${T} K)`
       );
     }
-    return { blend, perKgWater, perMoleGas };
+    return {
+      blend, perKgWater, perMoleGas,
+      betaT: tangent.beta * T, hBeta: tangent.beta * this.bulkEnthalpy(node),
+    };
   }
 
   /**
@@ -1655,15 +1830,16 @@ export class PressureSolver {
    *   and U = C_th·T + const, so β = P/(T·C_th) with C_th the total
    *   constant-volume heat capacity (steam + NCG). Tiny inventory → tiny
    *   C_th → large β: exactly the near-empty nodes whose P rides on T.
-   * - Two-phase: P = P_sat(T) + n·R·T/V, and dT/dU is set by the effective
-   *   constant-volume heat capacity INCLUDING the evaporation buffer -
-   *   raising T means evaporating dm_v = d(P_sat·V_vap/(R_w·T))/dT into the
-   *   vapor space at u_fg a kilogram (the same energy-balance model the
-   *   FluidState NCG equilibrium iterates on). A node with plenty of liquid
-   *   and vapor space is strongly buffered (β small); a nearly-dry remnant
-   *   has almost nothing left to evaporate per kelvin only when its vapor
-   *   space is small - once dried past the dome it lands in the vapor branch
-   *   above.
+   * - Two-phase: the exact tangent of the saturated state (twoPhaseTangent):
+   *   P = P_sat(T) + P_gas, and dT/dU is set by the two-phase constant-volume
+   *   heat capacity m·cv2 + n·Cv, which INCLUDES the evaporation buffer -
+   *   raising T at fixed volume means evaporating into the vapour space at
+   *   u_fg a kilogram. A node with plenty of liquid and vapor space is
+   *   strongly buffered (β small); once dried past the dome it lands in the
+   *   vapor branch above.
+   * - Ice + vapour (below the triple point): the same idea with an ideal-gas
+   *   vapour space, dm_v = d(P_sat·V_vap/(R_w·T))/dT - the tables' dome
+   *   stops at the triple point, so there is no exact tangent to take.
    * - Liquid: thermal expansion against the bulk stiffness,
    *   (∂P/∂T)_V = K·β_T and dT/dU = 1/(m·c_v). Negative below the ~4 °C
    *   density maximum - physical, so no floor.
@@ -1690,6 +1866,18 @@ export class PressureSolver {
       return P / (T * C_th);
     }
 
+    if (!(iceFrac > 0)) {
+      // Liquid or liquid + vapour. Pure liquid takes NO energy coupling
+      // (β = 0, see the note at the end of this function); the two-phase
+      // slope comes in linearly across the bulk modulus's dome-edge zone.
+      const sd = distanceToSaturationLine(node.fluid.internalEnergy / m_w, V / m_w);
+      const BLEND = 10; // mL/kg
+      const bl = Math.min(1, Math.max(0, (BLEND - sd.distance) / (2 * BLEND)));
+      if (!(bl > 0)) return 0;
+      return bl * this.twoPhaseTangent(node).beta;
+    }
+
+    // ICE-BEARING NODE from here on.
     // Saturation-table evaluations stay inside the TABLE's top (a two-phase
     // node cannot exist above it anyway - it is a whisker below the critical
     // point). There is no lower bound any more: the equilibrium line continues
