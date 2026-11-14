@@ -120,6 +120,9 @@ interface TwoPhaseTangent {
   steamPerKg: number;
   /** The gas partial pressure's share of that same response, Pa/kg (0 with no gas). */
   cushionPerKg: number;
+  /** The gas's share of the heat capacity this tangent is built on,
+   *  C_gas / C (0 with no gas). */
+  gasShare: number;
   // Inputs the entry was computed for (the cache key)
   m: number; U: number; T: number; x: number; n: number; P: number; V: number;
 }
@@ -1260,6 +1263,7 @@ export class PressureSolver {
             ? {
               y: conn.implicitAdvection ? gasMass / (gasMass + donor.fluid.mass) : drawGasMassFraction(donor, comp),
               molPerKg: ncgTotalMoles(ncg!) / gasMass,
+              cv: ncgMixtureCv(ncg!),
             }
             : NO_GAS;
           e.hDonor = hDonor;
@@ -1848,7 +1852,7 @@ export class PressureSolver {
       );
     }
     const out: TwoPhaseTangent = {
-      beta, steamPerKg, cushionPerKg, m, U: f.internalEnergy, T, x, n, P: f.pressure, V,
+      beta, steamPerKg, cushionPerKg, gasShare: CvGas / C, m, U: f.internalEnergy, T, x, n, P: f.pressure, V,
     };
     this.tangentCache.set(node, out);
     return out;
@@ -1975,8 +1979,9 @@ export class PressureSolver {
       const sd = distanceToSaturationLine(node.fluid.internalEnergy / m_w, V / m_w);
       const BLEND = 10; // mL/kg
       const bl = Math.min(1, Math.max(0, (BLEND - sd.distance) / (2 * BLEND)));
-      if (!(bl > 0)) return 0;
-      return bl * this.twoPhaseTangent(node).beta;
+      if (!(bl > 0)) return { beta: 0, gasShare: 0 };
+      const tangent = this.twoPhaseTangent(node);
+      return { beta: bl * tangent.beta, gasShare: tangent.gasShare };
     }
 
     // ICE-BEARING NODE from here on.
