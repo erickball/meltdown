@@ -1237,9 +1237,11 @@ const stationBlackout = {
       // Feed controller off with the pump it drives, or it winds up commanding
       // a dead machine and slams the speed back the moment anything returns.
       { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },
-      // Governor shut with the turbine
-      { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0.02 },
-      { kind: 'turbine-governor', id: 'turbine-1', value: 0.02 },
+      // Governor shut with the turbine: fully, a blackout trips it. (It was
+      // 0.02 only because the governor actuator once bottomed out there; the
+      // leak blew the SG down to the condenser through every blackout.)
+      { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0 },
+      { kind: 'turbine-governor', id: 'turbine-1', value: 0 },
       // The extraction line is a 165-bar tap into a heater with no drain
       // pumps left; shut it with the plant.
       { kind: 'valve', id: 'val-bleed-1', position: 0 },

@@ -2114,12 +2114,12 @@
             "kind": "controller",
             "id": "ctl-msp-1",
             "mode": "manual",
-            "manualOutput": 0.02
+            "manualOutput": 0
           },
           {
             "kind": "turbine-governor",
             "id": "turbine-1",
-            "value": 0.02
+            "value": 0
           },
           {
             "kind": "valve",
