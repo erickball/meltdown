@@ -240,6 +240,7 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
   // NETMASS_GUARD=0 disable; defaults on).
   if (process.env.THROUGHPUT_GUARD !== undefined) config = { ...config, throughputGuard: process.env.THROUGHPUT_GUARD === '1' };
   if (process.env.NETMASS_GUARD !== undefined) config = { ...config, netMassGuard: process.env.NETMASS_GUARD === '1' };
+  if (process.env.COURANT_CEILING !== undefined) config = { ...config, courantCeiling: process.env.COURANT_CEILING === '1' };
   const solver = new RK45Solver(config);
   // OTSG must run FIRST: it writes each moving-boundary node's sectioned
   // evaluation cache (draw enthalpies), which FlowRateOperator consults in

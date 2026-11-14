@@ -1487,6 +1487,8 @@ export interface RK45Config {
   // design doc addendum before changing the defaults.
   throughputGuard?: boolean;
   netMassGuard?: boolean;
+  // EXPERIMENT (error-derived-dt): the declared material-Courant ceiling.
+  courantCeiling?: boolean;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -1504,6 +1506,11 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   // on scenarios without liquid loops.
   relTol: 2e-4,
   absTol: 1e-6,
+  // EXPERIMENT (error-derived-dt): no fixed inventory fractions; the flow
+  // solve's closure error joins step control instead.
+  courantCeiling: false,
+  throughputGuard: false,
+  closureErrorControl: true,
 
   safetyFactor: 0.9,
   minShrinkFactor: 0.1,
@@ -2593,7 +2600,7 @@ export class RK45Solver {
       // throughput rejections per 60 s of Xe-100, ~half of all rejections).
       // Same idea as an operator's getMaxStableDt: a mode the error
       // controller cannot see must be declared, not discovered.
-      stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
+      if (this.config.courantCeiling !== false) stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
 
       // Take a step
       const { newState, error, errorRates } = this.step(currentState, stepDt);
