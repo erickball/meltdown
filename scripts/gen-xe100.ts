@@ -1254,38 +1254,6 @@ const stationBlackout = {
   }],
 };
 
-// Pressurized loss of forced cooling: the blackout with the steam generator
-// isolated, so the helium stays at pressure and the RCCS is the only heat
-// sink. stationBlackout leaves the governor cracked at 2% - a steam path to
-// the condenser that keeps the SG drawing heat - so here the governor shuts
-// fully and the extraction line with it. The feed pump is dead and its check
-// valve seats once the boiler is above the feed line; what is left in the
-// tubes boils into a bottled boiler that can only vent through its safety
-// valve. The SG sits below the core, so with the circulator stopped the
-// helium inventory stratifies rather than circulating through it: decay heat
-// leaves the bed by conduction, radiation and in-vessel natural convection to
-// the reflector and vessel wall, then by radiation to the RCCS panels.
-// Rods: whatever stationBlackout does with them on the loss of power, this
-// takes too - the design-basis PLOFC is the scrammed one. Do NOT leave the
-// rod controller in auto here: it inserts while the stagnant core runs hot,
-// then withdraws as decay heat ebbs below its 750 C setpoint and restarts
-// the reactor, a power burst every ~80 minutes that no unpowered plant makes.
-const pressurizedLofc = {
-  description: 'Pressurized loss of forced cooling at t=400 s: station blackout with the ' +
-    'steam generator isolated (governor and extraction shut, feed tripped). The helium ' +
-    'stays at pressure; decay heat leaves through in-vessel convection, conduction and ' +
-    'radiation to the vessel wall and the RCCS alone.',
-  events: [{
-    time: SETTLE,
-    message: 'Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated',
-    actions: [
-      ...stationBlackout.events[0].actions.filter(a => a.kind !== 'turbine-governor' && a.id !== 'ctl-msp-1'),
-      { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0 },
-      { kind: 'turbine-governor', id: 'turbine-1', value: 0 },
-    ],
-  }],
-};
-
 // Depressurized loss of forced cooling: the HTGR design-basis heat-up. The
 // blackout of stationBlackout plus a break in the primary pressure boundary,
 // so the bed loses its helium as well as its circulator - convection inside
@@ -1364,7 +1332,6 @@ const tubeRupture = {
 
 for (const [file, scenario] of [
   ['xe100-sbo.json', stationBlackout],
-  ['xe100-plofc.json', pressurizedLofc],
   ['xe100-dlofc.json', depressurizedCooldown],
   ['xe100-chute.json', chuteBreak],
   ['xe100-sgtr.json', tubeRupture],
