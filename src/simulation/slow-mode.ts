@@ -25,8 +25,9 @@
  *      chain. J is the largest jump whose predicted extrapolation error - rate
  *      uncertainty x J, curvature uncertainty x J^2/2, change of curvature x
  *      J^3/6 - stays inside each variable's tolerance, never so far that a
- *      non-negative inventory would be extrapolated through zero, and never
- *      past the next scripted scenario event. The first window after a reset
+ *      non-negative inventory would be extrapolated through zero, never
+ *      more than halfway from a shut relief valve's sensed pressure to its
+ *      setpoint, and never past the next scripted scenario event. The first window after a reset
  *      only measures: one slope says nothing about curvature.
  *   4. VERIFY: the next window measures the slope again. If it moved by more
  *      than the last jump's error budget allowed, the jump ceiling halves; if
@@ -68,6 +69,10 @@ interface WindowFit {
   quadratic: boolean;        // ... and whether it extrapolated quadratically
   tau?: Float64Array;        // ... per slot: > 0 = extrapolated as this exponential
   tol: Float64Array;         // tolerances used for that jump
+  /** Observed (not integrated, not extrapolated) quantities: each relief
+   *  valve's sensed pressure, fitted like a slot so a jump can be kept
+   *  short of the setpoint (see RELIEF SETPOINTS in tryJump) */
+  obs: Map<string, { slope: number; se: number }>;
 }
 
 export interface SlowModeConfig {
@@ -310,6 +315,13 @@ export class SlowModeController {
   private sx: Float64Array = new Float64Array(0);
   private sxt: Float64Array = new Float64Array(0);
   private sxx: Float64Array = new Float64Array(0);
+  // The same accumulators for the observed relief-valve pressures (valve id
+  // -> index), offsets from their first sample
+  private obsIds: string[] = [];
+  private ox0: Float64Array = new Float64Array(0);
+  private osx: Float64Array = new Float64Array(0);
+  private osxt: Float64Array = new Float64Array(0);
+  private osxx: Float64Array = new Float64Array(0);
   private jmax: number;
   private measure: number;
   // Fits of the most recent windows (newest first), all with the same slot
@@ -448,6 +460,14 @@ export class SlowModeController {
     this.st = [0, 0, 0];
     let i = 0;
     visitIntegratedState(s, (_k, _kind, value) => { this.x0[i++] = value; });
+    this.obsIds = [];
+    for (const [id, v] of s.components.valves) if (v.relief) this.obsIds.push(id);
+    const M = this.obsIds.length;
+    this.ox0 = new Float64Array(M);
+    this.osx = new Float64Array(M);
+    this.osxt = new Float64Array(M);
+    this.osxx = new Float64Array(M);
+    this.obsIds.forEach((id, j) => { this.ox0[j] = reliefSensedPressure(s, id); });
     this.nextSample = s.time;
     this.sample(s);
     this.nextSample += this.config.sampleSeconds;
@@ -467,6 +487,12 @@ export class SlowModeController {
       i++;
     });
     if (!ok || i !== N) return false;
+    for (let j = 0; j < this.obsIds.length; j++) {
+      const x = reliefSensedPressure(s, this.obsIds[j]) - this.ox0[j];
+      this.osx[j] += x;
+      this.osxt[j] += x * t;
+      this.osxx[j] += x * x;
+    }
     this.n++;
     let tk = 1;
     for (let k = 0; k < 3; k++) { this.st[k] += tk; tk *= t; }
@@ -603,7 +629,14 @@ export class SlowModeController {
     const hist = this.windows.filter(w => w.keys === this.keys);
     const w1 = hist[0];
     const w2 = hist[1];
-    const win: WindowFit = { keys: this.keys, tc, slope, seSlope, J: 0, quadratic: false, tol };
+    const obs = new Map<string, { slope: number; se: number }>();
+    for (let j = 0; j < this.obsIds.length; j++) {
+      const Sxt = this.osxt[j] - this.osx[j] * tcRel;
+      const Sxx = this.osxx[j] - this.osx[j] * this.osx[j] / s0;
+      const b = Sxt / Stt;
+      obs.set(this.obsIds[j], { slope: b, se: Math.sqrt(Math.max(0, Sxx - b * Sxt) / (nS - 2) / Stt) });
+    }
+    const win: WindowFit = { keys: this.keys, tc, slope, seSlope, J: 0, quadratic: false, tol, obs };
     const k = c.confidence;
 
     const measureBefore = this.measure;
@@ -778,6 +811,36 @@ export class SlowModeController {
         if (Jb < J) { J = Jb; limitedBy = `${this.keys[i]} (bound)`; limiterDetail = detail(); limiterOscillating = false; }
       }
     }
+    // RELIEF SETPOINTS. A shut relief valve's sensed pressure is a bound
+    // like an inventory's zero: a jump never carries it more than halfway to
+    // the setpoint at any point of the jump, so successive jumps approach the
+    // pop geometrically and the pop, the blowdown and the reseat are always
+    // integrated normally. (A jump that carried the pressure past the
+    // setpoint would pop the valve from an overpressure the plant never
+    // reached.) The rate is taken at the top of its noise band; curvature,
+    // from the previous window's fit of the same valve, only when it bends
+    // the pressure upward. A valve that is open, or not under its own
+    // pressure control, is left alone - a lift inside the window already
+    // discards it (discreteSignature).
+    for (const [id, v] of s.components.valves) {
+      const relief = v.relief;
+      if (!relief || v.reliefOpen || relief.controlMode !== 'auto' || v.powered === false) continue;
+      const o = obs.get(id);
+      if (!o) continue;
+      const gap = relief.setpoint - reliefSensedPressure(s, id);
+      const o1 = w1.obs?.get(id);
+      const aP = o1 ? (o.slope - o1.slope) / d1 : 0;
+      const R = o.slope + aP * h + k * Math.hypot(o.se, o1 ? o1.se * h / d1 : 0);
+      const Jb = firstCrossing(-0.5 * Math.max(0, aP), -R, 0.5 * gap);
+      if (c.diagnose) limits.push({ key: `${id} (relief setpoint)`, J: Jb,
+        detail: `P=${(reliefSensedPressure(s, id) / 1e5).toFixed(3)} bar setpoint=${(relief.setpoint / 1e5).toFixed(3)} ` +
+          `rate=${(R / 1e5).toExponential(2)} bar/s curv=${(aP / 1e5).toExponential(2)}` });
+      if (Jb < J) {
+        J = Jb; limitedBy = `${id} (relief setpoint)`; limiterOscillating = false;
+        limiterDetail = `P=${(reliefSensedPressure(s, id) / 1e5).toFixed(3)} bar, setpoint ${(relief.setpoint / 1e5).toFixed(3)} bar, ` +
+          `rising ${(R / 1e5 * 3600).toFixed(2)} bar/h`;
+      }
+    }
     if (c.diagnose) this.lastLimits = limits.sort((x, y) => x.J - y.J).slice(0, 10);
 
     const minJump = c.minJumpFactor * (c.relaxSeconds + this.measure);
@@ -832,6 +895,14 @@ export class SlowModeController {
     this.status.lastHold = '';
     return { state: reconciled, jump };
   }
+}
+
+/** The pressure a relief valve acts on (its sense node's). */
+function reliefSensedPressure(s: SimulationState, valveId: string): number {
+  const v = s.components.valves.get(valveId)!;
+  const node = s.flowNodes.get(v.relief!.senseNodeId);
+  if (!node) throw new Error(`[SlowMode] relief valve '${valveId}' senses node '${v.relief!.senseNodeId}', which does not exist`);
+  return node.fluid.pressure;
 }
 
 /** Largest J in [0, cap] with c3 J^3 + c2 J^2 + c1 J <= T (all coefficients >= 0). */
