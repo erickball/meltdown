@@ -1198,6 +1198,17 @@ export function checkStateSanity(
     nodeThroughput.set(conn.toNodeId, (nodeThroughput.get(conn.toNodeId) || 0) + absFlow);
   }
 
+  // A solid at or below absolute zero (or not a number) is not a state any
+  // rate can be evaluated from. Nothing downstream would refuse it - metal
+  // temperatures are integrated, not solved - so it is refused here.
+  for (const [id, tn] of newState.thermalNodes) {
+    if (!isFinite(tn.temperature) || !(tn.temperature > 0)) {
+      console.warn(`[RK45 Sanity] ${id}: non-physical solid temperature ${tn.temperature} K`);
+      lastSanityFailureReason = `${id}: non-physical solid temperature ${tn.temperature} K`;
+      return 1000;
+    }
+  }
+
   // Check each flow node for bad physics
   for (const [id, newNode] of newState.flowNodes) {
     // Skip boundary nodes - their state is fixed

@@ -328,21 +328,10 @@ export function otsgWallPin(
   state: SimulationState, node: FlowNode, flows: OtsgFlows,
 ): OtsgWallPin {
   const cfg = node.otsg!;
-  const shell = state.flowNodes.get(cfg.shellNodeId);
-  if (!shell) {
-    throw new Error(`[OTSG] node '${node.id}': shell node '${cfg.shellNodeId}' ` +
-      `does not exist.`);
-  }
   return {
     zoneTemps: otsgZoneTemps(state, node),
     hA3Full: H_TUBE_STEAM * cfg.heatArea,
     WCp3: Math.max(0, flows.WSteamOut) * CP_STEAM_PIN,
-    // Gas side of the same section, from the same reads the march uses -
-    // one source, so the outlet's ceiling and the duty cannot disagree
-    // about what gas the bundle is sitting in.
-    TGasIn3: otsgGasInletTemp(state, shell),
-    hAGas3Full: otsgGasFilmCoefficient(shell, state) * cfg.heatArea,
-    CGas3: otsgGasMcp(shell, state) * (cfg.gasShare ?? 1),
   };
 }
 
@@ -629,14 +618,23 @@ export function otsgWaterSideDuties(
  * Q2 at fixed energy) is not linearized: in steady state it is zero, in a
  * transient it is the ordinary first-order splitting error.
  *
- * Zones: pinned arm, Q2 from the zones under the boiling section in their
- * Q2 shares, Q3 whole. Free arm, only the steam's NET energy change relaxes;
- * each zone's duty is H a_z (T_z - T3) with one T3 for all of them, so the
- * zones share the relaxation by area while their differences - stagnant
- * steam carrying heat from the hot steam-end metal to the cold feed end - are
- * not stiff and stay whole: zone z gives Q3_z - (a_z / A3)(Q3 - integral/dt).
- * (Scaling every zone's duty by the relaxed fraction instead suppressed that
- * mixing and drove the feed-end metal 11 K colder in 120 s.)
+ * Zones: in both arms each zone's duty is H a_z (T_z - T_fluid) with ONE
+ * fluid temperature for all of them (T_sat under the boiling section, T3
+ * under free steam), and what relaxes over the step is that one temperature.
+ * So the zones share the relaxation by area while their differences - heat
+ * carried from metal above the fluid's temperature to metal below it - are
+ * not stiff and stay whole: zone z gives Q_z - (a_z / A)(q0 - integral/dt),
+ * plus, in the pinned arm, its Q3 whole. NEVER by scaling each zone's duty by
+ * integral/(q0 dt). On the free arm that suppressed the mixing and drove the
+ * feed-end metal 11 K colder in 120 s. On the pinned arm it is unbounded: a
+ * boiling section lying over metal both hotter and colder than saturation
+ * (a tripped bundle whose section has slid over the cold feed end) has a q0
+ * that is the small difference of megawatts, and the ratio multiplied every
+ * zone's duty by it - 679 W against a 4.6 MW mean threw the zones 80 GW
+ * apart and left metal below absolute zero in one accepted step. (The area
+ * split is exact for the pressure route, where T_sat moves under the whole
+ * film; for the length route, where the change really sits at the moving
+ * boundary, it spreads it over the section.)
  *
  * The metal gives up exactly what the water receives. Where k*dt <= 1, or
  * the tube is flooded (no seam), the stages are the better integrator and
@@ -672,7 +670,15 @@ export function stampStiffOtsgTubes(state: SimulationState, dt: number): number 
       const k = Math.max(d.Q2 / closeSection,
         -(otsgWaterSideDuties(moved.ev, moved.flows, zoneT, cfg.heatArea).Q2 - d.Q2) / dU);
       if (!(k * dt > 1)) continue;
-      cfg.wallImplicit = { arm: 'pinned', k, q0: d.Q2, zoneQ2: d.zoneQ2, zoneQ3: d.zoneQ3 };
+      const N = zoneT.length;
+      const ov = otsgZoneOverlaps(
+        [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac], N);
+      const L2 = ov.reduce((a, o) => a + o[1], 0);
+      if (!(L2 > 0)) continue;
+      cfg.wallImplicit = {
+        arm: 'pinned', k, q0: d.Q2, zoneQ2: d.zoneQ2, zoneQ3: d.zoneQ3,
+        share: ov.map(o => o[1] / L2),
+      };
     } else {
       if (d.Q3 === 0) continue;
       // Probe toward where Q3 is heading, a thousandth of the tube's energy;
@@ -698,7 +704,7 @@ export function stampStiffOtsgTubes(state: SimulationState, dt: number): number 
       if (!(L3 > 0)) continue;
       cfg.wallImplicit = {
         arm: 'free', k, q0: d.Q3, zoneQ2: d.zoneQ2, zoneQ3: d.zoneQ3,
-        share3: ov.map(o => o[2] / L3),
+        share: ov.map(o => o[2] / L3),
       };
     }
     n++;
@@ -735,12 +741,14 @@ export function completeStiffOtsgTubes(state: SimulationState, k0: StateRates, d
     }
     const qMean = integral / dt;
     const zoneRate = new Array<number>(N);
+    // The step-mean duty differs from the starting one by (q0 - qMean), and
+    // the zones under the stiff section give that difference up by area;
+    // what each zone was exchanging at the start stays whole.
+    const notRelaxed = q0 - qMean;
     if (w.arm === 'pinned') {
-      const scale = qMean / q0;
-      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ2[j] * scale + w.zoneQ3[j];
+      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ2[j] + w.zoneQ3[j] - w.share[j] * notRelaxed;
     } else {
-      const notRelaxed = q0 - qMean;
-      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ3[j] - w.share3![j] * notRelaxed;
+      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ3[j] - w.share[j] * notRelaxed;
     }
     w.zoneRate = zoneRate;
     let total = 0;

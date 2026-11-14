@@ -59,7 +59,7 @@ import {
   evaluateOtsg,
   evaluateOtsgPartition,
   otsgPartitionAtP,
-  counterflowOutletTemp,
+  superheatOutletTemp,
   OtsgWallPin,
   otsgRates,
   boilingMeanQuality,
@@ -75,7 +75,8 @@ import {
   zoneMeanTemp,
 } from './otsg.js';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from './water-properties.js';
-import { tubeWaterState, classifyOtsgFlows } from './operators/otsg-operator.js';
+import { tubeWaterState, classifyOtsgFlows, completeStiffOtsgTubes } from './operators/otsg-operator.js';
+import { createZeroRates } from './rk45-solver.js';
 import {
   binaryDiffusivity,
   diffusivityInMixture,
@@ -1866,13 +1867,7 @@ const EMPTY_SLUG = { m1: 0, U1: 0 };
  *  soaks fully to its metal). A wall at 273 K pins the steam at saturation -
  *  the dryout limit. */
 function pinAt(TWall3: number, WCp3 = 0): OtsgWallPin {
-  // Gas side: the ramp tops out AT the wall (TGasIn3 = TWall3) with an
-  // effectively infinite gas stream, so "soaks fully to its metal" keeps
-  // exactly the meaning it had before the outlet learned about the gas.
-  return {
-    zoneTemps: [TWall3], hA3Full: 1200 * PART_GEOM.heatArea, WCp3,
-    TGasIn3: TWall3, hAGas3Full: 1200 * PART_GEOM.heatArea, CGas3: 1e8,
-  };
+  return { zoneTemps: [TWall3], hA3Full: 1200 * PART_GEOM.heatArea, WCp3 };
 }
 const PIN_COLD = pinAt(273);
 /** Total section volume - the quantity an integrated m3 used to violate. */
@@ -1956,8 +1951,7 @@ test('a constructed three-section state round-trips, pressure included', () => {
   const geom = { tubeVolume: m1 * v1 + m2 * vBarFull + m3 * v3, tubeLength: 1, heatArea: 2000 };
   const ev = evaluateOtsgPartition(
     m1 + m2 + m3, m1 * u1Bar + m2 * u2 + m3 * u3, { m1, U1: m1 * u1Bar }, geom,
-    { zoneTemps: [T3], hA3Full: 1200 * geom.heatArea, WCp3: 0,
-      TGasIn3: T3, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 });
+    { zoneTemps: [T3], hA3Full: 1200 * geom.heatArea, WCp3: 0 });
   assertClose(ev.P / 1e5, 80, 0.8, 'the pressure the partition was built at comes back');
   assertClose(ev.sections[0].mass, m1, 1e-2 * m1, 'economizer mass recovered');
   assertClose(ev.sections[1].mass, m2, 5e-2 * m2, 'boiling mass recovered');
@@ -1990,8 +1984,7 @@ test('the published pressure is the partition\'s, not the mush read', () => {
     `the uniform read of a partitioned boiler must be badly biased low, got ${(mushP / 1e5).toFixed(1)} bar`);
   const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
-    { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WCp3: 0,
-      TGasIn3: calculateState(1, u3, v3).temperature, hAGas3Full: 1200 * 2000, CGas3: 1e8 });
+    { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WCp3: 0 });
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
 });
 
@@ -2300,8 +2293,7 @@ test('gas in the tubes: the sections run on the water, not the mixture', () => {
   assertClose(water.energy / 1e9, mass * uW / 1e9, 0.01 * mass * uW / 1e9,
     'as must the water energy');
 
-  const testPin = { zoneTemps: [satW.T + 60], hA3Full: 1200 * geom.heatArea, WCp3: 0,
-    TGasIn3: satW.T + 60, hAGas3Full: 1200 * geom.heatArea, CGas3: 1e8 };
+  const testPin = { zoneTemps: [satW.T + 60], hA3Full: 1200 * geom.heatArea, WCp3: 0 };
   const withGas = evaluateOtsgPartition(mass, water.energy, EMPTY_SLUG, geom, testPin);
   const noGas = evaluateOtsgPartition(mass, mass * uW, EMPTY_SLUG, geom, testPin);
   assertClose(withGas.P / 1e5, noGas.P / 1e5, 0.02 * noGas.P / 1e5,
@@ -2352,74 +2344,130 @@ test('mean volume and mean quality are the same statement', () => {
   }
 });
 
-test('the counterflow outlet pinches at the gas inlet, not at twice the wall', () => {
-  // The relation itself, at its limits. The old ramping form's outlet ran to
-  // theta = 2 at weak draw, which is how a dried-out boiler offered its MSSV
-  // steam hotter than the helium heating it.
-  const TIn = 620, TGas = 1023;  // K: saturation in, Xe-100 helium inlet
-  const hA = 1200 * 2000, hAg = 300 * 2000;
-  // Weak draw: NTU huge, outlet must approach the gas inlet FROM BELOW.
-  const weak = counterflowOutletTemp(TIn, TGas, hA, hAg, 50, 4e5);
-  assert(weak <= TGas && weak > TGas - 1,
-    `a near-zero draw should soak to the gas inlet, got ${weak.toFixed(1)} vs ${TGas}`);
-  // Zero draw is the same limit exactly, not a special case.
-  assertClose(counterflowOutletTemp(TIn, TGas, hA, hAg, 0, 4e5), TGas, 1e-9,
-    'zero draw is the NTU->infinity limit');
-  // Monotone in draw: more flow, less approach.
-  const mid = counterflowOutletTemp(TIn, TGas, hA, hAg, 1e5, 4e5);
-  const strong = counterflowOutletTemp(TIn, TGas, hA, hAg, 3e5, 4e5);
-  assert(weak > mid && mid > strong, 'the approach must fall as the draw grows');
-  // And NOTHING exceeds the gas inlet, at any capacity ratio.
-  for (const Cw of [10, 1e4, 1e5, 4e5, 1e6]) {
-    const T = counterflowOutletTemp(TIn, TGas, hA, hAg, Cw, 4e5);
-    assert(T <= TGas + 1e-9 && T >= TIn,
-      `outlet must stay in [T_in, T_gas_in], got ${T.toFixed(1)} at Cw=${Cw}`);
+test('the superheat outlet is marched across its metal and never passes it', () => {
+  // The relation itself, at its limits. Two earlier outlets broke this: the
+  // linear profile inversion ran to twice the wall's superheat at weak draw,
+  // and a gas-side effectiveness form was bounded by the helium inlet but
+  // not by the tube - 90 K above the steam-end metal at the Xe-100's design
+  // point.
+  const TIn = 620;                                   // K: saturation in
+  const zones = [560, 600, 640, 700, 760, 800, 830, 850];  // feed end -> steam end
+  const hA = 1200 * 2000;
+  const L3 = 0.5;                                    // covers the last four zones
+  // Zero draw is the limit of the same formula: the stream soaks to the
+  // last metal it crosses.
+  assertClose(superheatOutletTemp(zones, L3, hA, 0, TIn), 850, 1e-9,
+    'a stagnant section offers steam at its steam-end metal');
+  const weak = superheatOutletTemp(zones, L3, hA, 50, TIn);
+  assert(weak <= 850 && weak > 849, `a near-zero draw should soak to the steam-end metal, got ${weak.toFixed(1)}`);
+  // Monotone in draw on a wall that rises toward the outlet.
+  const mid = superheatOutletTemp(zones, L3, hA, 1e5, TIn);
+  const strong = superheatOutletTemp(zones, L3, hA, 3e6, TIn);
+  assert(weak > mid && mid > strong && strong > TIn, 'the approach must fall as the draw grows');
+  // NOTHING leaves hotter than the hottest metal it crossed, at any draw or
+  // length - including a wall whose hot spot is mid-section.
+  const humped = [560, 600, 640, 700, 900, 800, 760, 720];
+  for (const prof of [zones, humped]) {
+    for (const L of [0.03, 0.2, 0.5, 0.77, 1]) {
+      const covered = prof.filter((_, k) => (k + 1) / prof.length > 1 - L);
+      const hottest = Math.max(TIn, ...covered);
+      for (const Cw of [0, 10, 1e4, 1e5, 4e5, 1e7]) {
+        const T = superheatOutletTemp(prof, L, hA, Cw, TIn);
+        assert(T <= hottest + 1e-9,
+          `outlet ${T.toFixed(1)} K passed the hottest metal it crossed (${hottest} K) at L3=${L}, Cw=${Cw}`);
+      }
+    }
   }
-  // A gas inlet BELOW the steam inlet heats nothing - continuous, not clamped.
-  assertClose(counterflowOutletTemp(TIn, TIn - 50, hA, hAg, 1e4, 4e5), TIn, 1e-12,
-    'cold gas drives no superheat');
+  // A section of no length heats nothing; metal colder than the stream cools it.
+  assertClose(superheatOutletTemp(zones, 0, hA, 1e4, TIn), TIn, 1e-12, 'no section, no superheat');
+  assert(superheatOutletTemp([500, 500], 1, hA, 1e4, TIn) < TIn, 'a cold wall cools the stream');
 });
 
-test('a weakly drawn superheat section offers steam bounded by its gas', () => {
-  // The partition end of the same statement: build a dried-out-ish state
-  // with a hot wall, a hotter gas inlet, and almost no draw, and check the
-  // OFFERED enthalpy against the ceiling the gas can support - the bound
-  // that used to be violated by 50-70 K.
+test('a superheat section offers steam no hotter than its own metal', () => {
+  // The partition end of the same statement: a hot gas would once have
+  // priced the outlet near itself whatever the tube was doing. Build a
+  // superheating state over a wall that ramps toward the steam end and check
+  // the OFFERED enthalpy against the hottest metal, at a weak and at a
+  // design-like draw.
   const sat = saturationAtP(150e5);
   const geom = { tubeVolume: 20, tubeLength: 1, heatArea: 2000 };
-  const TGasIn = 1023;   // 750 C helium
-  const pin: OtsgWallPin = {
-    zoneTemps: [900], hA3Full: 1200 * geom.heatArea, WCp3: 3000 * 3, // ~3 kg/s draw
-    TGasIn3: TGasIn, hAGas3Full: 300 * geom.heatArea, CGas3: 2e5,
-  };
-  // Mass/energy that lands well into the superheat regime with a small slug.
+  const zoneTemps = Array.from({ length: 20 }, (_, k) => 600 + 15 * k);  // 600 -> 885 K
+  const TMetalMax = Math.max(...zoneTemps);
   const mass = 400;
   const U = mass * 2.85e6;
-  const ev = evaluateOtsgPartition(mass, U, { m1: 30, U1: 30 * (sat.u_f - 150e3) }, geom, pin);
-  assert(ev.regime === 'superheat', `test state should superheat, got '${ev.regime}'`);
-  const s3 = ev.sections[2];
-  // The ceiling from the property surface itself, via the INVERSE map the
-  // rest of the plant applies to this enthalpy: bisect h until stateAtPh
-  // lands on the gas inlet temperature. Pricing the ceiling with a cp-linear
-  // extension instead would repeat the bug this test exists to catch - the
-  // first version of the fix bounded the temperature correctly and still
-  // delivered 900 C-equivalent enthalpy through the near-dome slope.
-  let hLo = ev.sat.h_g, hHi = ev.sat.h_g + 3e6;
-  for (let i = 0; i < 60; i++) {
-    const hm = 0.5 * (hLo + hHi);
-    if (stateAtPh(ev.P, hm).T < TGasIn) hLo = hm; else hHi = hm;
+  for (const W of [3, 25]) {
+    const pin: OtsgWallPin = { zoneTemps, hA3Full: 1200 * geom.heatArea, WCp3: 3000 * W };
+    const ev = evaluateOtsgPartition(mass, U, { m1: 30, U1: 30 * (sat.u_f - 150e3) }, geom, pin);
+    assert(ev.regime === 'superheat', `test state should superheat, got '${ev.regime}'`);
+    const s3 = ev.sections[2];
+    // The ceiling from the property surface itself, via the INVERSE map the
+    // rest of the plant applies to this enthalpy: bisect h until stateAtPh
+    // lands on the metal temperature. Pricing the ceiling with a cp-linear
+    // extension instead would repeat an older bug - a correctly bounded
+    // temperature delivered as 900 C-equivalent enthalpy through the
+    // near-dome slope.
+    let hLo = ev.sat.h_g, hHi = ev.sat.h_g + 3e6;
+    for (let i = 0; i < 60; i++) {
+      const hm = 0.5 * (hLo + hHi);
+      if (stateAtPh(ev.P, hm).T < TMetalMax) hLo = hm; else hHi = hm;
+    }
+    const hCeiling = 0.5 * (hLo + hHi);
+    assert(ev.hSteamOut <= hCeiling + 5e3,
+      `offered steam must stay under its hottest metal at ${W} kg/s: ` +
+      `${(ev.hSteamOut / 1e3).toFixed(0)} vs ${(hCeiling / 1e3).toFixed(0)} kJ/kg ` +
+      `(T-equivalent ${(stateAtPh(ev.P, ev.hSteamOut).T - 273.15).toFixed(0)} vs ` +
+      `${(TMetalMax - 273.15).toFixed(0)} C)`);
+    // And it still leaves hotter than the section mean.
+    assert(ev.hSteamOut > s3.hBar,
+      `the outlet should exceed the mean at ${W} kg/s: ${(ev.hSteamOut / 1e3).toFixed(0)} vs ` +
+      `${(s3.hBar / 1e3).toFixed(0)} kJ/kg`);
   }
-  const hCeiling = 0.5 * (hLo + hHi);
-  assert(ev.hSteamOut <= hCeiling + 5e3,
-    `offered steam must stay under the gas ceiling: ` +
-    `${(ev.hSteamOut / 1e3).toFixed(0)} vs ${(hCeiling / 1e3).toFixed(0)} kJ/kg ` +
-    `(T-equivalent ${(stateAtPh(ev.P, ev.hSteamOut).T - 273.15).toFixed(0)} vs ` +
-    `${(TGasIn - 273.15).toFixed(0)} C)`);
-  // And it still leaves hotter than the section mean - the counterflow
-  // outlet property the linear form was right about.
-  assert(ev.hSteamOut > s3.hBar,
-    `the outlet should exceed the mean: ${(ev.hSteamOut / 1e3).toFixed(0)} vs ` +
-    `${(s3.hBar / 1e3).toFixed(0)} kJ/kg`);
+});
+
+test('a stamped boiling section shares its relaxation by area, however small its net duty', () => {
+  // The stiff wall exchange (completeStiffOtsgTubes) hands each metal zone a
+  // constant duty for the step. A boiling section lying over metal both
+  // hotter and colder than saturation has a net duty q0 that is the small
+  // difference of megawatts; distributing the step-mean duty by SCALING each
+  // zone's duty by qMean/q0 multiplied those megawatts by thousands (the
+  // numbers below are the measured ones: 679 W net against a 4.6 MW mean
+  // threw the zones 80 GW apart and left tube metal below absolute zero in
+  // one accepted step of a tripped Xe-100).
+  const zoneIds = ['z1', 'z2', 'z3', 'z4'];
+  const thermalNodes = new Map(zoneIds.map(id =>
+    [id, { id, mass: 500, specificHeat: 500, temperature: 600 }]));
+  const zoneQ2 = [-3e6, -1e6, 1.5e6, 2.5e6 + 679];
+  const zoneQ3 = [0, 0, 2e5, 4e5];
+  const share = [0.1, 0.4, 0.4, 0.1];
+  const q0 = zoneQ2.reduce((a, b) => a + b, 0);
+  const Q3 = zoneQ3.reduce((a, b) => a + b, 0);
+  const k = 22.36, dt = 0.05;
+  const wallImplicit: { arm: 'pinned'; k: number; q0: number; zoneQ2: number[]; zoneQ3: number[];
+    share: number[]; zoneRate?: number[] } = { arm: 'pinned', k, q0, zoneQ2, zoneQ3, share };
+  const node = { id: 'tube', otsg: { metalNodeIds: zoneIds, wallImplicit } };
+  const state = { flowNodes: new Map([['tube', node]]), thermalNodes } as unknown as SimulationState;
+  // The first stage's rates, evaluated with the stiff duty left out.
+  const dEnergy0 = -1.162e7;
+  const k0 = createZeroRates();
+  k0.flowNodes.set('tube', { dMass: 0, dEnergy: dEnergy0 });
+  completeStiffOtsgTubes(state, k0, dt);
+
+  const R = dEnergy0 + Q3;
+  const qMean = ((q0 + R) * (1 - Math.exp(-k * dt)) / k - R * dt) / dt;
+  assert(qMean > 1e3 * q0, 'the test must sit where the mean duty dwarfs the starting one');
+  const zr = wallImplicit.zoneRate!;
+  assertClose(zr.reduce((a, b) => a + b, 0), qMean + Q3, 1e-6 * qMean,
+    'the zones together give the water the step-mean boiling duty plus Q3');
+  for (let j = 0; j < zoneIds.length; j++) {
+    assertClose(zr[j], zoneQ2[j] + zoneQ3[j] + share[j] * (qMean - q0), 1e-6 * qMean,
+      `zone ${j + 1} keeps its own duty and takes its area share of the change`);
+    assert(Math.abs(zr[j]) < 1e7,
+      `zone ${j + 1} duty must stay on the scale of the duties it was built from, got ${zr[j].toExponential(2)} W`);
+    assertClose(k0.thermalNodes.get(zoneIds[j])!.dTemperature, -zr[j] / (500 * 500), 1e-9,
+      `zone ${j + 1} metal gives up exactly what the water receives`);
+  }
+  assertClose(k0.flowNodes.get('tube')!.dEnergy, dEnergy0 + qMean + Q3, 1e-6 * qMean,
+    'and the tube books the same total');
 });
 
 // ============================================================================

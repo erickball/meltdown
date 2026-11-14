@@ -401,8 +401,9 @@ export interface FlowNode {
       q0: number;
       zoneQ2: number[];
       zoneQ3: number[];
-      /** free arm: each zone's share of the superheat section's area */
-      share3?: number[];
+      /** each zone's share of the stiff section's area (boiling section
+       *  on the pinned arm, superheat section on the free arm) */
+      share: number[];
       zoneRate?: number[];
     };
     /** Transient cache of the last sectioned evaluation, for the draw-
