@@ -130,6 +130,40 @@ export function vapourSpace(
   return free >= 0 ? 0.5 * (free + disc) : 2 * give / (disc - free);
 }
 
+/**
+ * Density of the liquid in a two-phase node, kg/m³: saturated liquid at the
+ * node's temperature, compressed by the gas sharing the vapour space.
+ *
+ * Saturated density is the liquid at P_sat(T). Under a gas blanket the
+ * liquid sits at P_sat + P_gas, and vapourSpace() already shrinks it by
+ * liquidVolume0 · P_gas / K to make room for the gas - so the liquid really
+ * occupies V − V_gas, at ρ_f / (1 − P_gas/K). This is that same statement
+ * read back as a density (the two agree to rounding: m_l / (V − V_gas)),
+ * written in a form that stays finite when there is no liquid to divide by.
+ * No gas gives ρ_f exactly.
+ *
+ * Without it the hydraulics priced an air-blanketed pool's liquid at
+ * 0.017 bar while a liquid-full node beside it was priced at its real
+ * 1.2 bar: two columns of the same water at the same temperature with
+ * different densities, which is a loop head that drives a phantom
+ * circulation through anything connecting them (12.6 g/s through a stopped
+ * pump in the sea).
+ */
+export function twoPhaseLiquidDensity(node: FlowNode): number {
+  const f = node.fluid;
+  const rho_f = Water.saturatedLiquidDensity(f.temperature);
+  const moles = f.ncg ? totalMoles(f.ncg) : 0;
+  if (!(moles > 0)) return rho_f;
+  const P_gas = moles * R_GAS * f.temperature / nodeGasVolume(node);
+  const squeeze = 1 - P_gas / Water.bulkModulus(f.temperature - 273.15);
+  if (!(squeeze > 0) || !Number.isFinite(squeeze)) {
+    throw new Error(
+      `[Mixture] ${node.id}: gas pressure ${P_gas} Pa over the liquid leaves it no volume ` +
+      `(1 - P_gas/K = ${squeeze}; ${moles} mol in ${nodeGasVolume(node)} m3 at ${f.temperature} K)`);
+  }
+  return rho_f / squeeze;
+}
+
 /** Liquid volume at saturation density for a water state (the aerosol
  *  convention puts sub-triple ice in the gas: it is not liquid). */
 function liquidVolumeAtSaturation(waterMass: number, quality: number, phase: string, temperature: number): number {

@@ -36,7 +36,7 @@ import {
   saturatedLiquidEnergy, saturatedVaporEnergy,
 } from '../water-properties';
 import { pumpHeadPressure, pumpHeadSlopeMagnitude } from './pump-curve';
-import { nodeGasVolume } from '../mixture-properties';
+import { nodeGasVolume, twoPhaseLiquidDensity } from '../mixture-properties';
 
 // ============================================================================
 // Phase Separation Calculation (shared utility)
@@ -559,9 +559,13 @@ export function pumpHeadFactor(
  *  - A liquid node: the liquid it actually holds, over the room it actually
  *    has (the whole node, less any pocket its gas has squeezed open).
  *  - Anything else: saturated liquid at the node's temperature, from the steam
- *    tables. For a two-phase node that is the SAME density the mixture solve
- *    used to size the vapour space (nodeGasVolume), so the level, the head of
- *    the liquid under it and the density of a draw from it are one statement.
+ *    tables, compressed by whatever gas shares the vapour space
+ *    (twoPhaseLiquidDensity) - the SAME liquid the mixture solve squeezed to
+ *    size the vapour space (nodeGasVolume), so the level, the head of the
+ *    liquid under it and the density of a draw from it are one statement.
+ *    (Plain saturated density priced a blanketed pool's water at P_sat while
+ *    a liquid node at the same pressure and temperature carried its
+ *    compression: a phantom loop head between them.)
  *
  * (This was a three-piece linear fit in temperature, 1000 - 0.08*T_C and so
  * on. It was 4% light at 200 C and 3% light at 285 C - on a liquid node as
@@ -580,7 +584,7 @@ export function nodeLiquidDensity(node: FlowNode): number {
   if (node.fluid.phase === 'liquid') {
     return node.fluid.mass / (node.volume - nodeGasVolume(node));
   }
-  return saturatedLiquidDensity(node.fluid.temperature);
+  return twoPhaseLiquidDensity(node);
 }
 
 /** 1/v for an OTSG section, refusing a specific volume the partition never

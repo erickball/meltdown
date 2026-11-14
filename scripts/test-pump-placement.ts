@@ -321,15 +321,15 @@ test('A pump whose motor is under water is drowned: it never turns and moves (al
   // head between the suction line and the casing's port pricing drove
   // 66 kg/s through exactly this pump, and the sea test above passed on it.)
   //
-  // KNOWN RESIDUAL, 12.6 g/s, steady: the sea's liquid is priced at the
-  // saturated density at its vapour pressure (999.047 kg/m3 at 15 C), not
-  // compressed by the bar of air over it, while the liquid-full casing at
-  // 1.2 bar carries that compression (999.102). Gravity heads use the
-  // upstream density, so the two nozzle lines see different water - a
-  // 0.23 Pa loop head that real, barotropic water cannot have. The bound
-  // below catches anything like the old phantom (5000x larger) without
-  // pinning that residual; tighten it to ~0 if the two-phase liquid density
-  // learns about its gas cushion.
+  // KNOWN RESIDUAL, 5.0 g/s, steady. A lumped node's liquid has ONE density:
+  // the sea's is its surface water's (1.017 bar: 999.0937 kg/m3 at 15 C),
+  // while the casing 1.9 m down is priced at its own 1.203 bar (999.1024).
+  // Gravity heads use the upstream density, so the two nozzle lines see
+  // different water - a loop head real, barotropic water cannot have. (It
+  // was 12.6 g/s while the sea's liquid also ignored the bar of air over it;
+  // twoPhaseLiquidDensity fixed that part.) The bound below catches anything
+  // like the old phantom (66 kg/s) without pinning the residual; tighten it
+  // to ~0 if liquid density is ever made a function of local pressure.
   const plant = { components: new Map(), connections: [], terrain } as unknown as PlantState;
   const cm = new ConstructionManager(plant);
   plant.components.set('sea', { ...tank('sea', 50, 0.5)[1], waterBody: 'sea' } as PlantComponent);
