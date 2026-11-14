@@ -26,8 +26,9 @@
  *      uncertainty x J, curvature uncertainty x J^2/2, change of curvature x
  *      J^3/6 - stays inside each variable's tolerance, never so far that a
  *      non-negative inventory would be extrapolated through zero, never
- *      more than halfway from a shut relief valve's sensed pressure to its
- *      setpoint, and never past the next scripted scenario event. The first window after a reset
+ *      most of the way (reliefApproachFraction) from a shut relief valve's
+ *      sensed pressure to its setpoint, and never past the next scripted
+ *      scenario event. The first window after a reset
  *      only measures: one slope says nothing about curvature.
  *   4. VERIFY: the next window measures the slope again. If it moved by more
  *      than the last jump's error budget allowed, the jump ceiling halves; if
@@ -56,6 +57,7 @@ import { cloneSimulationState } from './solver';
 import type { RK45Solver } from './rk45-solver';
 import type { SolverMetrics } from './types';
 import { nodeHeatCapacity } from './operators/rate-operators';
+import { DECAY_HEAT_GROUPS } from './operators/neutronics';
 
 /** One measurement window's straight-line fits (see tryJump) */
 interface WindowFit {
@@ -73,6 +75,28 @@ interface WindowFit {
    *  valve's sensed pressure, fitted like a slot so a jump can be kept
    *  short of the setpoint (see RELIEF SETPOINTS in tryJump) */
   obs: Map<string, { slope: number; se: number }>;
+}
+
+/** A relief valve lifting, caught on the accepted substep it lifted on */
+interface LiftEvent {
+  valve: string;
+  time: number;
+  values: Float64Array;          // every integrated slot, in visit order
+  obs: Float64Array;             // every relief valve's sensed pressure
+  sig: string;                   // discreteSignature at that instant
+  lifts: Map<string, number>;    // every relief valve's lift count
+}
+
+/**
+ * A measurement window locked to one relief valve's lift cycle (see LIFT
+ * CYCLES in advanceChunk): it opened on a lift of `valve`, and closes on a
+ * later one at the same discrete configuration, so its ends sit at the same
+ * point of the cycle.
+ */
+interface CycleLock {
+  valve: string;
+  sig: string;
+  marks: { time: number; values: Float64Array; obs: Float64Array; lifts: Map<string, number> }[];
 }
 
 export interface SlowModeConfig {
@@ -115,6 +139,14 @@ export interface SlowModeConfig {
   initialMaxJump: number;
   /** Absolute jump ceiling (s) */
   maxJump: number;
+  /** Fraction of the gap between a shut relief valve's sensed pressure and
+   *  its setpoint that one jump may close (rate taken at the top of its
+   *  noise band). Successive jumps approach the setpoint geometrically and
+   *  the last stretch, once a jump would be shorter than worth taking, is
+   *  integrated normally: a larger fraction leaves less of it. At 0.8 the
+   *  pressure must rise 25% faster than the upper edge of its measured rate
+   *  to overshoot. */
+  reliefApproachFraction: number;
   /** Record the tightest per-slot jump limits of every window (getLimits) */
   diagnose?: boolean;
 }
@@ -133,12 +165,15 @@ export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
   minJumpFactor: 0.5,
   initialMaxJump: 120,
   maxJump: 3600,
+  reliefApproachFraction: 0.8,
 };
 
 // Tolerance kinds (see tolerances())
 const K_MASS = 0, K_ENERGY = 1, K_MOL = 2, K_TEMP = 3, K_SOLID_MASS = 4,
   K_FRACTION = 5, K_INVENTORY = 6, K_POWER = 7, K_PRECURSOR = 8, K_PASSIVE = 9,
-  K_PART_MASS = 10, K_PART_ENERGY = 11, K_DAMAGE = 12;
+  K_PART_MASS = 10, K_PART_ENERGY = 11, K_DAMAGE = 12,
+  // Decay-heat pools: not fitted - their equation is known (see DECAY POOLS)
+  K_DECAY_POOL = 13;
 
 /**
  * HOLDING: a variable that sits within its tolerance of a bound it is heading
@@ -242,7 +277,7 @@ function visitIntegratedState(state: SimulationState, visit: Visitor): void {
   const pools = n.decayHeatPools;
   if (pools) {
     for (let i = 0; i < pools.length; i++) {
-      visit(`neutronics.pool${i}`, K_POWER, pools[i], 0, Infinity, v => { pools[i] = v; }, '');
+      visit(`neutronics.pool${i}`, K_DECAY_POOL, pools[i], 0, Infinity, v => { pools[i] = v; }, '');
     }
   }
   // Pure accumulators of boundary releases: extrapolated with everything
@@ -324,6 +359,8 @@ export class SlowModeController {
   private osxx: Float64Array = new Float64Array(0);
   private jmax: number;
   private measure: number;
+  private lock: CycleLock | null = null;
+  private lastLift = new Map<string, number>();
   // Fits of the most recent windows (newest first), all with the same slot
   // structure and no discrete change between them
   private windows: WindowFit[] = [];
@@ -351,6 +388,8 @@ export class SlowModeController {
     this.phase = 'relax';
     this.phaseStart = NaN;
     this.windows = [];
+    this.lock = null;
+    this.lastLift.clear();
   }
 
   /**
@@ -392,7 +431,30 @@ export class SlowModeController {
     let dt = requestedDt;
     if (this.phase === 'measure') dt = Math.min(dt, Math.max(this.nextSample - state.time, 1e-6));
     else dt = Math.min(dt, Math.max(this.phaseStart + this.config.relaxSeconds - state.time, 1e-6));
-    const r = solver.advance(state, dt, wallFrameTimeMs);
+    // Catch relief-valve lifts on the accepted substep they happen on (the
+    // chunk can end up to a sample interval later, and in that time a lift
+    // discharges kilograms): chained onto whatever the caller records with
+    let lift: LiftEvent | undefined;
+    const prevCb = solver.onSubstepComplete;
+    solver.onSubstepComplete = (st, n, adt) => {
+      prevCb?.(st, n, adt);
+      for (const [id, v] of st.components.valves) {
+        if (!v.relief) continue;
+        const count = v.liftCount ?? 0;
+        const before = this.lastLift.get(id);
+        this.lastLift.set(id, count);
+        if (before !== undefined && count > before && this.phase === 'measure') {
+          lift = { valve: id, time: st.time, values: snapshotValues(st), obs: reliefPressures(st),
+            sig: discreteSignature(st), lifts: liftCounts(st) };
+        }
+      }
+    };
+    let r: ReturnType<RK45Solver['advance']>;
+    try {
+      r = solver.advance(state, dt, wallFrameTimeMs);
+    } finally {
+      solver.onSubstepComplete = prevCb;
+    }
     const s = r.state;
     const covered = s.time - state.time;
     const out = { state: s, metrics: r.metrics, covered, yielded: covered < dt * (1 - 1e-9) };
@@ -402,26 +464,99 @@ export class SlowModeController {
       return out;
     }
 
-    if (discreteSignature(s) !== this.signature) {
+    // LIFT CYCLES. A relief valve lifting inside a window used to discard
+    // it, so a valve cycling every few tens of seconds never let the plant
+    // jump at all. Now the lift ANCHORS the window instead: it restarts on
+    // that lift, locked to that valve, and closes on a later lift of the same
+    // valve once it has run its length - provided every other valve is in
+    // the same open/shut state as at the opening lift. Both ends then sit at
+    // the same point of the cycle, so the change between them divided by the
+    // time between them is the cycle-AVERAGE drift of every slot, with the
+    // sawtooth cancelled out exactly; the spread of the per-cycle drifts
+    // prices its noise. The lift rate is measured the same way and the lift
+    // counters advance with it over the jump (fractionally - every lift the
+    // jump skipped still counts). A valve whose cycle is longer than the
+    // window does not close one: once the window has run its length with no
+    // second lift it becomes an ordinary window on the ramp, which is jumped
+    // short of the setpoint (RELIEF SETPOINTS in tryJump).
+    const sig = discreteSignature(s);
+    const otherChange = withoutRelief(sig) !== withoutRelief(this.signature);
+    if (otherChange || (!this.lock && !lift && sig !== this.signature)) {
       this.status.lastHold = 'discrete change in window';
       this.windows = [];
+      this.lock = null;
       this.startRelax(s.time);
+      return out;
+    }
+    if (!this.lock && lift) {
+      if (!this.startLocked(s, lift)) {
+        this.status.lastHold = 'state structure changed in window';
+        this.windows = [];
+        this.lock = null;
+        this.startRelax(s.time);
+      }
       return out;
     }
     if (s.time >= this.nextSample - 1e-9) {
       if (!this.sample(s)) {
         this.status.lastHold = 'state structure changed in window';
         this.windows = [];
+        this.lock = null;
         this.startRelax(s.time);
         return out;
       }
       this.nextSample += this.config.sampleSeconds;
+    }
+
+    if (this.lock) {
+      const lock = this.lock;
+      if (lift && lift.valve === lock.valve && lift.sig === lock.sig) {
+        lock.marks.push({ time: lift.time, values: lift.values, obs: lift.obs, lifts: lift.lifts });
+        if (lift.time - this.phaseStart >= this.measure - 1e-9) {
+          const jumped = this.tryJump(solver, s, lock);
+          this.lock = null;
+          this.startRelax(jumped.state.time);
+          return { ...out, state: jumped.state, jump: jumped.jump };
+        }
+      }
+      // A full window gone by without a second lift: this cycle is longer
+      // than the window, so it is not averaged over but jumped along - the
+      // ramp from here to the next lift is an ordinary window, bounded short
+      // of the setpoint. (Waiting for the second lift instead held every
+      // jump off for as long as the valve stayed shut.)
+      if (lock.marks.length === 1 && s.time - this.phaseStart >= this.measure - 1e-9) {
+        this.lock = null;
+        this.startMeasure(s);
+        this.status.lastHold = lock.valve + ' lift cycle longer than the window: measuring the ramp';
+      }
+      return out;
     }
     if (s.time < this.phaseStart + this.measure - 1e-9) return out;
 
     const jumped = this.tryJump(solver, s);
     this.startRelax(jumped.state.time);
     return { ...out, state: jumped.state, jump: jumped.jump };
+  }
+
+  /** Restart the window on a lift, locked to that valve's cycle. */
+  private startLocked(s: SimulationState, lift: LiftEvent): boolean {
+    this.startMeasure(s);
+    if (lift.values.length !== this.keys.length || lift.obs.length !== this.obsIds.length) return false;
+    const N = this.keys.length, M = this.obsIds.length;
+    this.phaseStart = lift.time;
+    this.signature = lift.sig;
+    this.x0 = Float64Array.from(lift.values);
+    this.ox0 = Float64Array.from(lift.obs);
+    this.sx = new Float64Array(N); this.sxt = new Float64Array(N); this.sxx = new Float64Array(N);
+    this.osx = new Float64Array(M); this.osxt = new Float64Array(M); this.osxx = new Float64Array(M);
+    this.n = 0;
+    this.st = [0, 0, 0];
+    if (!this.sample(s)) return false;
+    this.nextSample = s.time + this.config.sampleSeconds;
+    this.lock = { valve: lift.valve, sig: lift.sig,
+      marks: [{ time: lift.time, values: lift.values, obs: lift.obs, lifts: lift.lifts }] };
+    this.status.lastHold = 'window locked to ' + lift.valve + ' lift cycle';
+    return true;
   }
 
   /** Double the measurement window (an oscillation it cannot average) */
@@ -591,7 +726,7 @@ export class SlowModeController {
     return tol;
   }
 
-  private tryJump(solver: RK45Solver, s: SimulationState): { state: SimulationState; jump?: SlowModeJump } {
+  private tryJump(solver: RK45Solver, s: SimulationState, lock?: CycleLock): { state: SimulationState; jump?: SlowModeJump } {
     const c = this.config;
     const N = this.keys.length;
     const nS = this.n;
@@ -605,7 +740,7 @@ export class SlowModeController {
     const [s0, s1, s2] = this.st;
     const tcRel = s1 / s0;
     const Stt = s2 - s0 * tcRel * tcRel;
-    const tc = this.phaseStart + tcRel;
+    let tc = this.phaseStart + tcRel;
     const slope = new Float64Array(N);
     const seSlope = new Float64Array(N);
     for (let i = 0; i < N; i++) {
@@ -635,6 +770,35 @@ export class SlowModeController {
       const Sxx = this.osxx[j] - this.osx[j] * this.osx[j] / s0;
       const b = Sxt / Stt;
       obs.set(this.obsIds[j], { slope: b, se: Math.sqrt(Math.max(0, Sxx - b * Sxt) / (nS - 2) / Stt) });
+    }
+    // A window locked to a lift cycle: drift = change between same-phase
+    // lifts / time between them (the least-squares line through a sawtooth
+    // is biased by the sawtooth); noise = spread of the per-cycle drifts,
+    // or the fit's residual if there is only one cycle
+    let liftRates: Map<string, number> | undefined;
+    if (lock) {
+      const m = lock.marks;
+      const nc = m.length - 1;
+      const span = m[nc].time - m[0].time;
+      tc = 0.5 * (m[0].time + m[nc].time);
+      const secant = (get: (k: number) => number, se: number): [number, number] => {
+        const b = (get(nc) - get(0)) / span;
+        if (nc < 2) return [b, se];
+        let v = 0;
+        for (let k = 1; k <= nc; k++) {
+          const sk = (get(k) - get(k - 1)) / (m[k].time - m[k - 1].time);
+          v += (sk - b) * (sk - b);
+        }
+        return [b, Math.sqrt(v / (nc - 1) / nc)];
+      };
+      for (let i = 0; i < N; i++) [slope[i], seSlope[i]] = secant(k => m[k].values[i], seSlope[i]);
+      this.obsIds.forEach((id, j) => {
+        const o = obs.get(id)!;
+        const [b, se] = secant(k => m[k].obs[j], o.se);
+        obs.set(id, { slope: b, se });
+      });
+      liftRates = new Map();
+      for (const [id, n1] of m[nc].lifts) liftRates.set(id, (n1 - (m[0].lifts.get(id) ?? n1)) / span);
     }
     const win: WindowFit = { keys: this.keys, tc, slope, seSlope, J: 0, quadratic: false, tol, obs };
     const k = c.confidence;
@@ -731,7 +895,7 @@ export class SlowModeController {
       const a = curv[i];
       const R = slope[i] + a * h;
       rates[i] = R;
-      if (this.kinds[i] === K_PASSIVE || held[i]) continue;
+      if (this.kinds[i] === K_PASSIVE || this.kinds[i] === K_DECAY_POOL || held[i]) continue;
       const T = tol[i];
       if ((R < 0 && values[i] - lo[i] <= T) || (R > 0 && hi[i] - values[i] <= T)) {
         held[i] = 1;
@@ -812,8 +976,9 @@ export class SlowModeController {
       }
     }
     // RELIEF SETPOINTS. A shut relief valve's sensed pressure is a bound
-    // like an inventory's zero: a jump never carries it more than halfway to
-    // the setpoint at any point of the jump, so successive jumps approach the
+    // like an inventory's zero: a jump never carries it more than
+    // reliefApproachFraction of the way to the setpoint at any point of the
+    // jump, so successive jumps approach the
     // pop geometrically and the pop, the blowdown and the reseat are always
     // integrated normally. (A jump that carried the pressure past the
     // setpoint would pop the valve from an overpressure the plant never
@@ -831,7 +996,7 @@ export class SlowModeController {
       const o1 = w1.obs?.get(id);
       const aP = o1 ? (o.slope - o1.slope) / d1 : 0;
       const R = o.slope + aP * h + k * Math.hypot(o.se, o1 ? o1.se * h / d1 : 0);
-      const Jb = firstCrossing(-0.5 * Math.max(0, aP), -R, 0.5 * gap);
+      const Jb = firstCrossing(-0.5 * Math.max(0, aP), -R, c.reliefApproachFraction * gap);
       if (c.diagnose) limits.push({ key: `${id} (relief setpoint)`, J: Jb,
         detail: `P=${(reliefSensedPressure(s, id) / 1e5).toFixed(3)} bar setpoint=${(relief.setpoint / 1e5).toFixed(3)} ` +
           `rate=${(R / 1e5).toExponential(2)} bar/s curv=${(aP / 1e5).toExponential(2)}` });
@@ -863,8 +1028,25 @@ export class SlowModeController {
     {
       let i = 0;
       const half = quadratic ? 0.5 * J * J : 0;
-      visitIntegratedState(jumped, (_k, _kind, value, _l, _h, set) => {
-        if (held[i]) { /* held: see HOLDING */ }
+      // DECAY POOLS are not extrapolated from a fit: their equation is known,
+      // dQ_g/dt = lambda_g (f_g P - Q_g), and over the jump it is solved
+      // exactly for the fission power P running along its own fitted line
+      // P0 + r t:  Q_g(J) = f_g (P0 + r J) - f_g r / lambda_g
+      //                     + (Q_g0 - f_g P0 + f_g r / lambda_g) e^(-lambda_g J).
+      // (Fitting each group's time constant from two windows a few minutes
+      // apart missed a 2.8 h group by 4x its budget on every jump of
+      // xe100-sbo and pinned the ceiling at its floor.)
+      const iP = this.keys.indexOf('neutronics.power');
+      const P0 = s.neutronics.power;
+      const rP = iP >= 0 ? rates[iP] : 0;
+      let pool = 0;
+      visitIntegratedState(jumped, (_k, kind, value, _l, _h, set) => {
+        if (kind === K_DECAY_POOL) {
+          const g = DECAY_HEAT_GROUPS[pool++];
+          const lag = g.fraction * rP / g.lambda;
+          set(g.fraction * (P0 + rP * J) - lag + (value - g.fraction * P0 + lag) * Math.exp(-g.lambda * J));
+        }
+        else if (held[i]) { /* held: see HOLDING */ }
         else if (tau[i] > 0) set(value + rates[i] * tau[i] * (1 - Math.exp(-J / tau[i])));
         else set(value + rates[i] * J + curv[i] * half);
         i++;
@@ -885,6 +1067,15 @@ export class SlowModeController {
       this.status.lastHold = `jump rejected: ${message}`;
       return { state: s };
     }
+    // The lifts the jump skipped still happened: every relief valve's
+    // counter advances at the rate its locked window measured (fractionally)
+    if (liftRates) {
+      for (const [id, rate] of liftRates) {
+        const v = reconciled.components.valves.get(id);
+        if (v && rate > 0) v.liftCount = (v.liftCount ?? 0) + rate * J;
+      }
+    }
+    for (const [id, v] of reconciled.components.valves) if (v.relief) this.lastLift.set(id, v.liftCount ?? 0);
     win.J = J;
     win.quadratic = quadratic;
     win.tau = tau;
@@ -895,6 +1086,29 @@ export class SlowModeController {
     this.status.lastHold = '';
     return { state: reconciled, jump };
   }
+}
+
+function snapshotValues(s: SimulationState): Float64Array {
+  const out: number[] = [];
+  visitIntegratedState(s, (_k, _kind, value) => { out.push(value); });
+  return Float64Array.from(out);
+}
+
+function reliefPressures(s: SimulationState): Float64Array {
+  const out: number[] = [];
+  for (const [id, v] of s.components.valves) if (v.relief) out.push(reliefSensedPressure(s, id));
+  return Float64Array.from(out);
+}
+
+function liftCounts(s: SimulationState): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const [id, v] of s.components.valves) if (v.relief) out.set(id, v.liftCount ?? 0);
+  return out;
+}
+
+/** discreteSignature without the relief-valve latches */
+function withoutRelief(sig: string): string {
+  return sig.split('|').filter(p => !p.startsWith('r:')).join('|');
 }
 
 /** The pressure a relief valve acts on (its sense node's). */
