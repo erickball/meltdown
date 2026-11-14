@@ -281,7 +281,13 @@ export class ControlSystemOperator implements ConstraintOperator {
     // plant sees a continuous stroke, never a jump.
     const maxStep = ctl.actuator.rateLimit * dt;
     output = Math.max(ctl.lastOutput - maxStep, Math.min(ctl.lastOutput + maxStep, output));
-    output = Math.max(ctl.actuator.min, Math.min(ctl.actuator.max, output));
+    // actuator.min/max is the LOOP's authority band - how far the controller
+    // may drive the device on its own (a governor trim held to 0.05-0.45).
+    // An operator in manual is not the loop: the device goes wherever the
+    // device itself can go. Clamping manual into the band silently kept a
+    // "shut" governor 5% open behind every blackout scenario.
+    const [lo, hi] = ctl.mode === 'manual' ? this.deviceRange(state, ctl) : [ctl.actuator.min, ctl.actuator.max];
+    output = Math.max(lo, Math.min(hi, output));
 
     ctl.lastOutput = output;
     ctl.lastError = error;
@@ -652,6 +658,23 @@ export class ControlSystemOperator implements ConstraintOperator {
   // ==========================================================================
   // Actuators
   // ==========================================================================
+
+  /** The physical travel of the device an actuator drives, independent of
+   *  any controller's authority band: a valve, pump speed, governor or rod
+   *  bank runs 0..1; a heater 0 to its rated capacity. */
+  private deviceRange(state: SimulationState, ctl: ControllerState): [number, number] {
+    switch (ctl.actuator.kind) {
+      case 'valve-position':
+      case 'pump-speed':
+      case 'governor-valve':
+      case 'control-rods':
+        return [0, 1];
+      case 'heater-power':
+        return [0, this.getNode(state, ctl.actuator.targetId, ctl.id, 'actuator').heaterCapacity ?? Infinity];
+      default:
+        throw new Error(`[ControlSystem] '${ctl.id}': unknown actuator kind '${ctl.actuator.kind}'`);
+    }
+  }
 
   private writeActuator(state: SimulationState, ctl: ControllerState, output: number): void {
     const { kind, targetId } = ctl.actuator;

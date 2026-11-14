@@ -32,7 +32,7 @@ let lastLimitsPrinted: unknown = null;
 
 const wall0 = performance.now();
 let steps = 0, rej = 0;
-const csv: string[] = ['t,wall,Tfuel,Tmax,TmaxId,Pcore,decayMW,burnoff,jumped'];
+const csv: string[] = ['t,wall,Tfuel,Tmax,TmaxId,Pcore,decayMW,burnoff,jumped,fissionMW'];
 
 function observe(s: SimulationState) {
   let Tmax = -Infinity, TmaxId = '';
@@ -56,9 +56,9 @@ function line() {
   const st = slow?.getStatus();
   console.log(`t=${s.time.toFixed(0)} wall=${wall.toFixed(0)}s x${(s.time - t0) / Math.max(wall, 1e-3) | 0} steps=${steps} rej=${rej} ` +
     `Tfuel=${o.Tfuel.toFixed(1)} Tmax=${o.Tmax.toFixed(1)}(${o.TmaxId}) P=${o.P.toFixed(3)}bar decay=${o.decay.toFixed(3)}MW ` +
-    `burn=${o.burn.toFixed(2)}kg` +
+    `burn=${o.burn.toFixed(2)}kg fission=${(s.neutronics.power / 1e6).toExponential(2)}MW rods=${s.neutronics.controlRodPosition.toFixed(3)}` +
     (st ? ` jumps=${st.jumps} skipped=${st.jumpedSeconds.toFixed(0)}s ceil=${st.maxJump.toFixed(0)} hold="${st.lastHold}"` : ''));
-  csv.push([s.time, wall, o.Tfuel, o.Tmax, o.TmaxId, o.P, o.decay, o.burn, st?.jumpedSeconds ?? 0].join(','));
+  csv.push([s.time, wall, o.Tfuel, o.Tmax, o.TmaxId, o.P, o.decay, o.burn, st?.jumpedSeconds ?? 0, s.neutronics.power / 1e6].join(','));
 }
 
 const t0 = sim.state.time;

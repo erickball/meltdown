@@ -797,6 +797,10 @@ add('cv-1', {
   position: { x: 46, y: 80 }, rotation: 0, elevation: 5,
   outerDiameter: 1.8, wallThickness: ductShellWall(1.8, 1.0), length: 7,
   innerDiameter: 1.0, innerWallThickness: 0.02,
+  // Hot-duct lining: 50 mm of fibre insulation in helium (~0.3 W/m-K) inside
+  // the inner pipe. A bare liner leaks ~3.3 MW from the hot leg into the cold
+  // annulus; lined, ~70 kW (scripts/check-hot-duct-leak.ts).
+  innerInsulationThickness: 0.05, innerInsulationConductivity: 0.3,
   pressureRating: P_DESIGN_BAR,
   // Alloy 800H. Even with the cold return in the annulus keeping the pressure
   // boundary near core-inlet temperature, the inner liner sees 750 C - and the
@@ -1248,6 +1252,38 @@ const stationBlackout = {
   }],
 };
 
+// Pressurized loss of forced cooling: the blackout with the steam generator
+// isolated, so the helium stays at pressure and the RCCS is the only heat
+// sink. stationBlackout leaves the governor cracked at 2% - a steam path to
+// the condenser that keeps the SG drawing heat - so here the governor shuts
+// fully and the extraction line with it. The feed pump is dead and its check
+// valve seats once the boiler is above the feed line; what is left in the
+// tubes boils into a bottled boiler that can only vent through its safety
+// valve. The SG sits below the core, so with the circulator stopped the
+// helium inventory stratifies rather than circulating through it: decay heat
+// leaves the bed by conduction, radiation and in-vessel natural convection to
+// the reflector and vessel wall, then by radiation to the RCCS panels.
+// Rods: whatever stationBlackout does with them on the loss of power, this
+// takes too - the design-basis PLOFC is the scrammed one. Do NOT leave the
+// rod controller in auto here: it inserts while the stagnant core runs hot,
+// then withdraws as decay heat ebbs below its 750 C setpoint and restarts
+// the reactor, a power burst every ~80 minutes that no unpowered plant makes.
+const pressurizedLofc = {
+  description: 'Pressurized loss of forced cooling at t=400 s: station blackout with the ' +
+    'steam generator isolated (governor and extraction shut, feed tripped). The helium ' +
+    'stays at pressure; decay heat leaves through in-vessel convection, conduction and ' +
+    'radiation to the vessel wall and the RCCS alone.',
+  events: [{
+    time: SETTLE,
+    message: 'Pressurized loss of forced cooling - circulator and feed tripped, steam generator isolated',
+    actions: [
+      ...stationBlackout.events[0].actions.filter(a => a.kind !== 'turbine-governor' && a.id !== 'ctl-msp-1'),
+      { kind: 'controller', id: 'ctl-msp-1', mode: 'manual', manualOutput: 0 },
+      { kind: 'turbine-governor', id: 'turbine-1', value: 0 },
+    ],
+  }],
+};
+
 // Depressurized loss of forced cooling: the HTGR design-basis heat-up. The
 // blackout of stationBlackout plus a break in the primary pressure boundary,
 // so the bed loses its helium as well as its circulator - convection inside
@@ -1326,6 +1362,7 @@ const tubeRupture = {
 
 for (const [file, scenario] of [
   ['xe100-sbo.json', stationBlackout],
+  ['xe100-plofc.json', pressurizedLofc],
   ['xe100-dlofc.json', depressurizedCooldown],
   ['xe100-chute.json', chuteBreak],
   ['xe100-sgtr.json', tubeRupture],

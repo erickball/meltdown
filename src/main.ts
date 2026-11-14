@@ -12,6 +12,7 @@ import bwrPresetData from './presets/bwr.json';
 import htgrPresetData from './presets/htgr.json';
 import xe100PresetData from './presets/xe100.json';
 import xe100SboPresetData from './presets/xe100-sbo.json';
+import xe100PlofcPresetData from './presets/xe100-plofc.json';
 import xe100DlofcPresetData from './presets/xe100-dlofc.json';
 import xe100ChutePresetData from './presets/xe100-chute.json';
 import xe100SgtrPresetData from './presets/xe100-sgtr.json';
@@ -3150,6 +3151,15 @@ function init() {
           'feedback and the reflector-to-cavity heat path - watch fission power die on its own ' +
           'and decay heat soak into the graphite. The event fires automatically; a notification ' +
           'marks it.',
+      },
+      {
+        label: 'HTGR-200 Pressurized Cooldown', data: xe100PlofcPresetData,
+        tooltip: 'Pressurized loss of forced cooling (PLOFC): at t = 400 s a station blackout trips ' +
+          'the circulator and feed pumps and the steam generator is isolated (turbine and ' +
+          'extraction shut); the rods drop with the power. The helium stays at pressure but ' +
+          'nothing moves it, and the SG sits below the core, so decay heat leaves through ' +
+          'in-vessel natural convection, conduction and radiation to the vessel wall and the ' +
+          'RCCS alone. Compare the Depressurized Cooldown, where the helium is lost as well.',
       },
       {
         label: 'HTGR-200 Depressurized Cooldown', data: xe100DlofcPresetData,
