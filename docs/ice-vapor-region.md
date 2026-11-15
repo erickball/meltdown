@@ -25,7 +25,7 @@ descriptions meet exactly at 273.16 K:
 | curve | definition |
 |---|---|
 | ice line | v = 1/917 m³/kg, constant; u_ice(T) = u_f(T_t) − 333.5 kJ/kg − 2.05 kJ/kg·K · (T_t − T) |
-| vapour over ice | ideal gas at the sublimation pressure with Z frozen at the table's triple-point value; u_g(T) = u_g(T_t) − 1500 J/kg·K · (T_t − T) |
+| vapour over ice | ideal gas at the sublimation pressure with Z frozen at the table's triple-point value; u_g(T) = u_g(T_t) − cv · (T_t − T), cv = 1412 J/kg·K read from the tables (`cvVaporCold`) |
 | sublimation | IAPWS R14-08 (Wagner, Riethmann, Feistel, Harvey 2011), certified 50 to 273.16 K |
 
 The **triple triangle** is the set of (u, v) where ice, liquid and vapour
@@ -80,11 +80,14 @@ draw (ice does not evaporate up the pipe with the steam), the debug panel
   ice contracts 2% and its heat capacity falls to 1.4 between the triple point
   and 150 K. Both are negligible next to the vapour specific volume that sets
   the tie line's quality split.
-- The vapour-over-ice caloric slope is 1500 J/kg·K, 7% above the ideal-gas
-  value for cold steam, because it must equal the `cv_steam` the ideal-gas
-  path uses for dilute vapour: that path owns the region immediately above the
-  vapour-over-ice line, and sharing the constant is what makes T and P
-  continuous across the line. The cost is 0.2% on the vapour's energy at 217 K.
+- The vapour-over-ice caloric slope is 1412 J/kg·K, 1% above the ideal-gas
+  value for cold steam (1390-1398). It is not a chosen constant: it is the
+  slope of the chord from the triple-point vapour to the first point of the
+  steam table's most dilute column, which is what the ideal-gas path follows
+  just above the triple point. That path owns the region immediately above the
+  vapour-over-ice line, and sharing the value is what makes T, P and dT/du
+  continuous across the line and through 273.16 K. (It was a flat 1500 until
+  2026-11-15.)
 
 ## What changed outside the tables
 
@@ -135,6 +138,6 @@ draw (ice does not evaporate up the pipe with the steam), the debug panel
 | `idealGasApproximation` condensed-state test compares P against the equilibrium pressure at the state's own T instead of `u < u_g(T_triple)` | removes a fabrication (rejected legitimate cold vapour between 2317 and 2375 kJ/kg) |
 | final validation floor 150 K instead of 273.16 K | scope limit |
 | `WaterState.iceFraction`, `quality` redefined as non-liquid fraction; Wood's speed of sound uses the vapour fraction | adds physics |
-| `T_MIN_MODEL = 150`, `RHO_ICE`, `CP_ICE`, `H_FUSION`, `CV_VAPOR_COLD` | physical constants, sources in the comments; `CV_VAPOR_COLD` is the one deliberate approximation (7% high, see above) |
+| `T_MIN_MODEL = 150`, `RHO_ICE`, `CP_ICE`, `H_FUSION`, `cvVaporCold()` | physical constants, sources in the comments; `cvVaporCold()` is read from the tables (1% above the ideal-gas cv, see above) |
 | triple-point row cached as `tripleAnchor` with a check that the table's first row is the triple point | search anchor, fails loudly |
 | `effectiveSpecificHeat`: a frost node (phase vapour with ice) takes the two-phase latent-heat buffer, which is on the sublimation line there | consistency with the existing two-phase buffer (that buffer's `/10` is a pre-existing heuristic, not touched) |

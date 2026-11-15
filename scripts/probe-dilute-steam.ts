@@ -17,8 +17,9 @@
  *  1. ACCURACY - (T, v) -> reference u -> calculateState must return T and
  *     P = R T / v, from the triple point to the table's hot limit (2000 C),
  *     for v = 211 .. 1e8 m3/kg. Below the triple point the model carries a
- *     deliberately flat cv (CV_VAPOR_COLD, shared with the vapour-over-ice
- *     line so the two meet exactly) - reported, with a looser tolerance.
+ *     flat cv (cvVaporCold: the slope of the chord just above the triple
+ *     point, shared with the vapour-over-ice line so the two meet exactly);
+ *     it is 1% above the ideal-gas value, which adds up to 1.7 K by 180 K.
  *  2. SEAM - T and P*v at fixed u, either side of the grid's last column.
  *  3. ONE SURFACE - T rises with u at fixed v at a steam-like rate, from the
  *     coldest vapour to past the table's hot limit, including the hand-over
@@ -90,7 +91,7 @@ const VS = [211, 300, 1e3, 1e4, 1e6, 1e8];
 const TS = [160, 180, 200, 220, 240, 260, 273.2, 280, 300, 315, 350, 400, 500, 600, 700, 800,
   923.15, 1023.15, 1123.15, 1203.15, 1400, 1600, 1800, 2000, 2200, 2273];
 const TOL_T_HOT = 0.5, TOL_P_HOT = 1e-3;      // at and above the triple point
-const TOL_T_COLD = 10, TOL_P_COLD = 0.06;     // below it: the flat-cv frost model
+const TOL_T_COLD = 2.5, TOL_P_COLD = 0.015;   // below it: the flat-cv frost model
 let worstHotT = 0, worstHotP = 0, worstColdT = 0, worstColdP = 0;
 for (const T of TS) {
   let wT = 0, wP = 0, n = 0;
@@ -135,13 +136,12 @@ console.log(`  worst below the triple point:    ${worstColdT.toFixed(3)} K, ${(w
 // ---------------------------------------------------------------------------
 console.log('\n2. Seam at the grid\'s dilute edge: fixed u, v = 209.9 (grid) vs 210.1 (dilute path)');
 console.log('   u(kJ/kg)   T grid(K)   T dilute(K)    jump T(K)   jump P*v (%)   paths');
-// P*v tolerance: the GRID side ripples by +-0.25% in P below u = 2700 kJ/kg,
-// where its last column is missing points and the local fit spans the gaps
-// (Z read off the grid at v = 209.9 wanders 0.9976..1.0003 there; the truth
-// is 0.9998..1.0000). That ripple is the grid's, on both sides of v = 210
-// before the dilute path was read from the column, and it bounds how well
-// ANY smooth continuation can match it.
-const TOL_SEAM_T = 0.5, TOL_SEAM_PV = 5e-3;
+// What is left is the grid's local fit against the column's chords: 0.02 K
+// and 0.1% in P*v, worst in the 20 kJ/kg under the column's first row, where
+// the grid is extrapolating toward the triple point. (Before
+// build-uv-grid-v13-dilute-patch.py restored the column's absent rows the
+// grid side rippled by +-0.25% in P below u = 2700 kJ/kg.)
+const TOL_SEAM_T = 0.05, TOL_SEAM_PV = 1.5e-3;
 let worstSeamT = 0, worstSeamPv = 0, worstSeamU = 0, floorRefusals = 0;
 const seamRows: string[] = [];
 for (let u = 2376e3; u <= 6600e3; u += 5e3) {
