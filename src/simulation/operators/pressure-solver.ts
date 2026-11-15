@@ -225,7 +225,10 @@ export class PressureSolver {
   measureClosureError(
     fromState: SimulationState,
     toState: SimulationState,
-    dt: number
+    dt: number,
+    // EXPERIMENT (RK45Config.closureErrorPool): measure against the node's
+    // inventory plus its connected neighbours' instead of its own alone.
+    poolNeighbors = false
   ): {
     rms: number; maxRel: number; maxNode: string;
     detail?: { predicted: number; mismatch: number; response: number; c: number; mass: number };
@@ -245,10 +248,21 @@ export class PressureSolver {
       mass[i] = from.fluid.mass + (from.fluid.ncg ? ncgTotalMass(from.fluid.ncg) : 0);
     }
     const dq = solveLinearSystem(lc.M.slice(), rhs, n);
+    const pool = mass.slice();
+    if (poolNeighbors) {
+      const idx = new Map<string, number>();
+      for (let i = 0; i < n; i++) idx.set(lc.ids[i], i);
+      for (const conn of fromState.flowConnections) {
+        const a = idx.get(conn.fromNodeId), b = idx.get(conn.toNodeId);
+        if (a === undefined || b === undefined || a === b) continue;
+        pool[a] += mass[b];
+        pool[b] += mass[a];
+      }
+    }
     let sumSq = 0, count = 0, maxRel = 0, maxNode = '', maxI = -1;
     for (let i = 0; i < n; i++) {
       if (!(mass[i] > 0)) continue;
-      const rel = Math.abs(lc.c[i] * (r[i] - dq[i]) * dt) / mass[i];
+      const rel = Math.abs(lc.c[i] * (r[i] - dq[i]) * dt) / pool[i];
       sumSq += rel * rel;
       count++;
       if (rel > maxRel) { maxRel = rel; maxNode = lc.ids[i]; maxI = i; }

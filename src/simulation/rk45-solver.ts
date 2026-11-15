@@ -1181,7 +1181,9 @@ export function checkStateSanity(
   quietPressureToleranceScale = 1,
   // A/B knobs (see RK45Config.throughputGuard / netMassGuard)
   throughputGuard = true,
-  netMassGuard = true
+  netMassGuard = true,
+  // EXPERIMENT knob (RK45Config.pressureGuard): the 20% pressure-change guard.
+  pressureGuard = true
 ): number {
   let maxBadness = 0;
 
@@ -1293,7 +1295,7 @@ export function checkStateSanity(
         oldNode.fluid.phase === newNode.fluid.phase;
       const pTol = SANITY_PRESSURE_TOLERANCE * (quiet ? Math.max(1, quietPressureToleranceScale) : 1);
 
-      if (pChange > pTol) {
+      if (pressureGuard && pChange > pTol) {
         // Scale badness: tolerance = badness 1, 2x tolerance = 2, etc.
         const badness = pChange / pTol;
         if (badness > maxBadness) lastSanityFailureReason = `${id}: pressure change ${(pChange * 100).toFixed(0)}% of scale (${oldNode.fluid.pressure.toFixed(0)}->${newNode.fluid.pressure.toFixed(0)} Pa)${quiet ? ' [quiet]' : ''}`;
@@ -1498,6 +1500,15 @@ export interface RK45Config {
   // design doc addendum before changing the defaults.
   throughputGuard?: boolean;
   netMassGuard?: boolean;
+
+  // EXPERIMENT knobs (2026-11-15, step-error-norm branch; not defaults).
+  // pressureGuard: false drops the 20%-per-step pressure-change guard in
+  // checkStateSanity, leaving the closure error to catch a bad linearization.
+  // closureErrorPool: 'neighbors' measures each node's mispredicted inventory
+  // against the node's inventory PLUS its connected neighbours' (the pool the
+  // wrongly moved mass is exchanged with) instead of its own alone.
+  pressureGuard?: boolean;
+  closureErrorPool?: 'own' | 'neighbors';
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -1723,7 +1734,7 @@ export class RK45Solver {
    */
   private closureErrorNorm(fromState: SimulationState, toState: SimulationState, dt: number): number {
     const ps = this.pressureSolver;
-    const m = ps && this.implicitMomentumActive() ? ps.measureClosureError(fromState, toState, dt) : null;
+    const m = ps && this.implicitMomentumActive() ? ps.measureClosureError(fromState, toState, dt, this.config.closureErrorPool === 'neighbors') : null;
     if (!m) {
       this.lastClosureError = 0;
       this.lastClosureNode = '';
@@ -2612,7 +2623,8 @@ export class RK45Solver {
       // Check for obviously bad physics (in addition to RK45 error estimate)
       const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive(),
         this.config.quietPressureToleranceScale ?? 1,
-        this.config.throughputGuard !== false, this.config.netMassGuard !== false);
+        this.config.throughputGuard !== false, this.config.netMassGuard !== false,
+        this.config.pressureGuard !== false);
 
       // Closure-consistency error of the implicit pressure-flow solve: what
       // the solve predicted for this step's pressures against what the EOS
@@ -2876,7 +2888,8 @@ export class RK45Solver {
     // Check sanity and log warning if needed
     const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive(),
       this.config.quietPressureToleranceScale ?? 1,
-      this.config.throughputGuard !== false, this.config.netMassGuard !== false);
+      this.config.throughputGuard !== false, this.config.netMassGuard !== false,
+      this.config.pressureGuard !== false);
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }
