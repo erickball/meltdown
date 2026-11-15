@@ -247,6 +247,20 @@ export class ControlSystemOperator implements ConstraintOperator {
       if (ctl.gains) {
         kp = ctl.gains.kp;
         ki = ctl.gains.ki;
+      } else if (this.sensorKindOf(ctl) === 'connection-flow') {
+        // A flow answers its actuator within the scan - the momentum solve is
+        // implicit - so to a sampled loop it is a STATIC gain, not an
+        // integrator. A proportional term on a static process is positive
+        // feedback through the one-scan delay: the increment kp*(e - e_last)
+        // is answered a scan later by its own mirror image, a pole at
+        // -kp*gain however fast the loop scans. SIMC for a pure gain is
+        // integral-only, Ki = 1/(gain*lambda): the flow closes on its
+        // setpoint as exp(-t/lambda), and the loop tolerates a gain estimate
+        // off by 2*lambda/scan before it rings.
+        const lambda = LAMBDA_DEFAULTS['connection-flow'] / Math.max(0.1, ctl.aggressiveness || 1);
+        kp = 0;
+        ki = 1 / (lambda * gA);
+        ctl.lastAutoGains = { kp, ki };
       } else {
         const lambda = (LAMBDA_DEFAULTS[this.sensorKindOf(ctl)] ?? 30) / Math.max(0.1, ctl.aggressiveness || 1);
         const kPrime = this.processIntegratingGain(state, ctl);
@@ -258,8 +272,9 @@ export class ControlSystemOperator implements ConstraintOperator {
         ctl.lastAutoGains = { kp, ki };
       }
 
-      // Velocity-form PI increment
-      let du = kp * (error - ctl.lastError) + ki * error * dt;
+      // Velocity-form PI increment, its two parts kept apart (see below)
+      let duFast = kp * (error - ctl.lastError);
+      const duIntegral = ki * error * dt;
 
       // Feedforward (three-element): follow changes in the measured
       // feedforward flow, converted to actuator units. Velocity form needs
@@ -268,19 +283,34 @@ export class ControlSystemOperator implements ConstraintOperator {
       if (ctl.feedforward) {
         const ff = this.readConnectionFlow(state, ctl.feedforward.targetId, ctl.id);
         const lastFf = ctl.lastFeedforward ?? ff;
-        du += (ff - lastFf) / gA;
+        duFast += (ff - lastFf) / gA;
         ctl.lastFeedforward = ff;
       }
 
-      output = ctl.lastOutput + du;
+      // Each part is held to one scan's stroke SEPARATELY. The velocity form
+      // keeps its integral in the command itself, so a single limit on the
+      // sum throws the integral away whenever the proportional kick alone
+      // reaches the limit: a loop ringing between +stroke and -stroke nets
+      // zero per pair of scans however large its standing error, and never
+      // corrects it (the Xe-100 feed loop sat 1.5 kg/s off its trim for an
+      // hour this way). What stops the command running away from a device
+      // that cannot keep up is the limit against the device's ACTUAL
+      // position: it may lead by two scans of stroke and no more.
+      const stroke = ctl.actuator.rateLimit * dt;
+      const within = (x: number) => Math.max(-stroke, Math.min(stroke, x));
+      const actual = ctl.actual ?? ctl.lastOutput;
+      output = ctl.lastOutput + within(duFast) + within(duIntegral);
+      output = Math.max(actual - 2 * stroke, Math.min(actual + 2 * stroke, output));
     }
 
-    // Command limits: at most one scan's worth of stroke, then saturation.
-    // The command is what the actuator can reach by the next scan; the
-    // device itself is moved toward it step by step (slewActuator), so the
-    // plant sees a continuous stroke, never a jump.
-    const maxStep = ctl.actuator.rateLimit * dt;
-    output = Math.max(ctl.lastOutput - maxStep, Math.min(ctl.lastOutput + maxStep, output));
+    // Manual: at most one scan's worth of stroke toward the operator's
+    // demand. The command is what the actuator can reach by the next scan;
+    // the device itself is moved toward it step by step (slewActuator), so
+    // the plant sees a continuous stroke, never a jump.
+    if (ctl.mode === 'manual') {
+      const maxStep = ctl.actuator.rateLimit * dt;
+      output = Math.max(ctl.lastOutput - maxStep, Math.min(ctl.lastOutput + maxStep, output));
+    }
     // actuator.min/max is the LOOP's authority band - how far the controller
     // may drive the device on its own (a governor trim held to 0.05-0.45).
     // An operator in manual is not the loop: the device goes wherever the
@@ -605,11 +635,8 @@ export class ControlSystemOperator implements ConstraintOperator {
         const H_SCALE = 2e6; // J/kg
         return H_SCALE / (node.fluid.mass * cEff);
       }
-      case 'connection-flow':
-        // Flow responds within a step under the implicit momentum solve -
-        // treat as a fast integrator with a 1-second effective inertia so the
-        // PI is a smooth tracker rather than a deadbeat controller.
-        return 1;
+      // 'connection-flow' is not here: a flow is a static gain, not an
+      // integrator, and is tuned integral-only in updateController.
       case 'otsg-superheat-fraction': {
         // A kilogram of feed the boiler is not evaporating accumulates as
         // liquid, and at fixed tube volume that liquid displaces steam - so
@@ -638,9 +665,35 @@ export class ControlSystemOperator implements ConstraintOperator {
         const pump = state.components.pumps.get(targetId);
         if (!pump) throw new Error(`[ControlSystem] '${ctl.id}': pump '${targetId}' not found`);
         const flow = Math.abs(this.readConnectionFlow(state, pump.connectedFlowPath, ctl.id));
-        // Affinity-law scale flow ~ speed; floor at a fraction of rated so
-        // the gain stays sane while flow is still establishing.
-        return Math.max(pump.ratedFlow * 0.3, flow / Math.max(0.2, pump.effectiveSpeed));
+        // Floor at a fraction of rated so the loop keeps moving while flow
+        // is still establishing (below the deadhead speed nothing flows and
+        // the true gain is zero).
+        const floor = pump.ratedFlow * 0.3;
+        const s = pump.effectiveSpeed;
+        if (!(flow > 0) || !(s > 0)) return floor;
+        // The pump curve H = Hr(1.25 s^2 - 0.25 q^2) meets a system curve
+        // h0 + c q^2 (static head plus friction). Differentiating the
+        // balance at the operating point, the friction coefficient drops
+        // out and
+        //     dQ/ds = Q s / (s^2 - s0^2),   s0^2 = h0 / 1.25
+        // with s0 the DEADHEAD speed - where the shutoff head just equals
+        // the static head. No static head gives the affinity law Q/s; a
+        // feed pump lifting into a boiler runs a little above s0 and its
+        // flow is several times more sensitive than that (the Xe-100 pump:
+        // deadhead at 0.48, 60 kg/s at 0.575, 300 kg/s per unit speed where
+        // affinity says 105 - a loop tuned on the affinity figure rang
+        // between its rate limits). Friction cannot be negative, so the
+        // gain is at most the no-friction value 5 s Qr^2 / Q.
+        const conn = state.flowConnections.find(c => c.id === pump.connectedFlowPath);
+        if (!conn) throw new Error(`[ControlSystem] '${ctl.id}': pump '${targetId}' has no discharge connection '${pump.connectedFlowPath}'`);
+        const pumpNode = this.getNode(state, conn.fromNodeId, ctl.id, 'pump');
+        const rho = pumpNode.fluid.phase === 'liquid'
+          ? nodeLiquidDensity(pumpNode) : pumpNode.fluid.mass / pumpNode.volume;
+        const h0 = this.pumpStaticHead(state, conn, pumpNode, rho) / (rho * 9.81 * pump.ratedHead);
+        const frictionless = 5 * s * pump.ratedFlow * pump.ratedFlow / flow;
+        const margin = s * s - h0 / 1.25;
+        const gain = margin > 0 ? Math.min(frictionless, flow * s / margin) : frictionless;
+        return Math.max(floor, gain);
       }
       case 'valve-position': {
         const valve = state.components.valves.get(targetId);
@@ -664,6 +717,58 @@ export class ControlSystemOperator implements ConstraintOperator {
       }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': unknown actuator kind '${kind}'`);
+    }
+  }
+
+  /**
+   * The static head a pump works against (Pa): the pressure it must make
+   * before anything flows. Followed downstream from the pump's discharge
+   * through liquid-full nodes - which pass a pressure change straight on -
+   * to the first node that can take the flow up without its pressure
+   * answering within a scan: one with a vapour space, or the suction of the
+   * next pump in the train. The lift along the way is static head too. At a
+   * branch the path is the line carrying the most flow. A path that comes
+   * back to a node it has visited is a closed liquid loop, where the pump's
+   * whole head is friction and there is no static head at all.
+   */
+  private pumpStaticHead(
+    state: SimulationState,
+    discharge: SimulationState['flowConnections'][number],
+    pumpNode: FlowNode,
+    rho: number,
+  ): number {
+    const pumpNodes = new Set<string>();
+    for (const [, p] of state.components.pumps) {
+      const c = state.flowConnections.find(x => x.id === p.connectedFlowPath);
+      if (c) pumpNodes.add(c.fromNodeId);
+    }
+    const visited = new Set<string>([pumpNode.id]);
+    let lift = rho * 9.81 * (discharge.elevation || 0);
+    let nodeId = discharge.toNodeId;
+    for (;;) {
+      if (visited.has(nodeId)) return 0;
+      visited.add(nodeId);
+      const node = state.flowNodes.get(nodeId);
+      if (!node) throw new Error(`[ControlSystem] flow node '${nodeId}' not found downstream of pump node '${pumpNode.id}'`);
+      const takesUpFlow = node.fluid.phase !== 'liquid' || nodeGasVolume(node) > 0 || pumpNodes.has(nodeId);
+      // Onward along the line carrying the most flow out of this node
+      let next: { id: string; dz: number } | undefined;
+      let most = 0;
+      if (!takesUpFlow) {
+        for (const c of state.flowConnections) {
+          const out = c.fromNodeId === nodeId ? c.massFlowRate : c.toNodeId === nodeId ? -c.massFlowRate : 0;
+          if (out > most) {
+            most = out;
+            const forward = c.fromNodeId === nodeId;
+            next = { id: forward ? c.toNodeId : c.fromNodeId, dz: forward ? (c.elevation || 0) : -(c.elevation || 0) };
+          }
+        }
+      }
+      // A liquid-full node with nothing leaving it is the end of the line:
+      // its pressure is what the pump is holding.
+      if (!next) return node.fluid.pressure - pumpNode.fluid.pressure + lift;
+      lift += rho * 9.81 * next.dz;
+      nodeId = next.id;
     }
   }
 
