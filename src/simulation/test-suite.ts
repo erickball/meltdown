@@ -3302,12 +3302,16 @@ test('a loop scans on its own period, not on the solver step', () => {
       aggressiveness: 1, lastOutput: 0.5, lastError: 0,
     } as unknown as ControllerState;
     const state = {
-      time: 0, flowNodes: new Map(), thermalNodes: new Map(),
+      time: 0, thermalNodes: new Map(),
+      flowNodes: new Map([
+        ['a', { id: 'a', volume: 1, fluid: { mass: 900, phase: 'liquid', pressure: 20e5, temperature: 450, gasVolume: 0 } }],
+        ['b', { id: 'b', volume: 10, fluid: { mass: 3000, phase: 'two-phase', pressure: 20e5, temperature: 485, quality: 0.1 } }],
+      ]),
       thermalConnections: [], convectionConnections: [], radiationConnections: [],
       flowConnections: [{ id: 'feed', fromNodeId: 'a', toNodeId: 'b', massFlowRate: 5 }],
       components: {
         controllers: new Map([['ctl-x', ctl]]),
-        pumps: new Map([['p1', { id: 'p1', speed: 0.5, effectiveSpeed: 0.5, ratedFlow: 80,
+        pumps: new Map([['p1', { id: 'p1', speed: 0.5, effectiveSpeed: 0.5, ratedFlow: 80, ratedHead: 600,
                                  running: true, connectedFlowPath: 'feed' }]]),
         valves: new Map(),
       },
@@ -3336,6 +3340,131 @@ test('a loop scans on its own period, not on the solver step', () => {
   assertClose(ctl.lastScanTime ?? -1, 0.6, 1e-9, 'the scan is stamped at the time it ran');
   assert(ctl.lastOutput > 0.5,
     `a +20 kg/s error must raise the command, got ${ctl.lastOutput.toFixed(4)}`);
+});
+
+/** A pump lifting from a liquid suction node through a liquid line into a
+ *  sink, with a flow loop on its speed. `sink` chooses what the line ends in. */
+function pumpLoopRig(opts: {
+  speed: number; flow: number; suctionP: number; sinkP: number;
+  sink: 'boiler' | 'closed-loop'; setpoint?: number; rateLimit?: number; aggressiveness?: number;
+}): { state: SimulationState; ctl: ControllerState } {
+  const ctl = {
+    id: 'ctl-p', label: 'p', mode: 'auto',
+    sensor: { kind: 'connection-flow', targetId: 'discharge' },
+    setpoint: opts.setpoint ?? opts.flow, scanPeriod: 0.25,
+    actuator: { kind: 'pump-speed', targetId: 'p1', min: 0, max: 1, rateLimit: opts.rateLimit ?? 0.05 },
+    aggressiveness: opts.aggressiveness ?? 1, lastOutput: opts.speed, lastError: 0, actual: opts.speed,
+  } as unknown as ControllerState;
+  const liquid = (id: string, P: number) =>
+    [id, { id, volume: 1, fluid: { mass: 865, phase: 'liquid', pressure: P, temperature: 473, gasVolume: 0 } }] as const;
+  const flowConnections = [
+    { id: 'discharge', fromNodeId: 'pump', toNodeId: 'line', massFlowRate: opts.flow },
+    opts.sink === 'boiler'
+      ? { id: 'line-out', fromNodeId: 'line', toNodeId: 'boiler', massFlowRate: opts.flow }
+      // The line runs straight back to the suction: nothing but friction.
+      : { id: 'line-out', fromNodeId: 'line', toNodeId: 'pump', massFlowRate: opts.flow },
+  ];
+  const state = {
+    time: 0, thermalNodes: new Map(),
+    flowNodes: new Map<string, unknown>([
+      liquid('pump', opts.suctionP), liquid('line', opts.sinkP + 1e5),
+      ['boiler', { id: 'boiler', volume: 10, fluid: { mass: 3000, phase: 'two-phase', pressure: opts.sinkP, temperature: 623, quality: 0.1 } }],
+    ]),
+    thermalConnections: [], convectionConnections: [], radiationConnections: [],
+    flowConnections,
+    components: {
+      controllers: new Map([['ctl-p', ctl]]),
+      pumps: new Map([['p1', { id: 'p1', speed: opts.speed, effectiveSpeed: opts.speed, ratedFlow: 80,
+                               ratedHead: 6000, running: true, connectedFlowPath: 'discharge' }]]),
+      valves: new Map(),
+    },
+    neutronics: { nominalPower: 0 },
+  } as unknown as SimulationState;
+  return { state, ctl };
+}
+
+const pumpGain = (state: SimulationState, ctl: ControllerState) =>
+  (new ControlSystemOperator() as unknown as {
+    actuatorFlowGain(s: SimulationState, c: ControllerState): number;
+  }).actuatorFlowGain(state, ctl);
+
+test('a pump with no static head follows the affinity law', () => {
+  // A closed liquid loop: all the head is friction, so flow is proportional
+  // to speed and dQ/ds is simply Q/s.
+  const { state, ctl } = pumpLoopRig({ speed: 0.8, flow: 64, suctionP: 20e5, sinkP: 150e5, sink: 'closed-loop' });
+  assertClose(pumpGain(state, ctl), 64 / 0.8, 1e-9, 'gain should be Q/s');
+});
+
+test('a pump lifting into a boiler is far more sensitive than the affinity law', () => {
+  // The Xe-100 feed pump: 6000 m rated head, 80 kg/s rated, lifting from
+  // 20 bar into 150 bar. Its curve H = Hr(1.25 s^2 - 0.25 q^2) against a
+  // static head h0 gives Q(s) explicitly once the friction is fixed, so the
+  // gain can be checked against a finite difference of the plant itself.
+  const rho = 865, gHr = rho * 9.81 * 6000;
+  const s = 0.575, Q = 60, q = Q / 80;
+  const friction = (1.25 * s * s - 0.25 * q * q - (150e5 - 20e5) / gHr) / (q * q);
+  assert(friction > 0, 'the rig has some line friction');
+  const flowAt = (speed: number) =>
+    80 * Math.sqrt((1.25 * speed * speed - (150e5 - 20e5) / gHr) / (0.25 + friction));
+  assertClose(flowAt(s), Q, 1e-6, 'the rig is self-consistent');
+  const measured = (flowAt(s + 1e-5) - flowAt(s - 1e-5)) / 2e-5;
+
+  const { state, ctl } = pumpLoopRig({ speed: s, flow: Q, suctionP: 20e5, sinkP: 150e5, sink: 'boiler' });
+  const gain = pumpGain(state, ctl);
+  assertClose(gain, measured, 0.01 * measured,
+    `gain ${gain.toFixed(0)} should match the plant's dQ/ds ${measured.toFixed(0)} kg/s per unit speed`);
+  assert(gain > 2.5 * Q / s, `and be well above the affinity figure ${(Q / s).toFixed(0)}, got ${gain.toFixed(0)}`);
+});
+
+test('a flow loop is integral-only and closes on its setpoint without ringing', () => {
+  // The plant: flow answers speed within the scan, at the true pump gain.
+  // The loop must walk onto a new setpoint monotonically - a proportional
+  // term here rings through the one-scan delay.
+  const op = new ControlSystemOperator();
+  const rho = 865, gHr = rho * 9.81 * 6000, hStatic = (165e5 - 20e5) / gHr;
+  const flowAt = (speed: number) => {
+    const head = 1.25 * speed * speed - hStatic;
+    return head > 0 ? 80 * Math.sqrt(head / 0.26) : 0;
+  };
+  const s0 = 0.575;
+  let { state } = pumpLoopRig({ speed: s0, flow: flowAt(s0), suctionP: 20e5, sinkP: 165e5,
+    sink: 'boiler', setpoint: flowAt(s0) + 3, aggressiveness: 2.5 });
+  const errors: number[] = [];
+  for (let i = 0; i < 400; i++) {
+    state.time = i * 0.05;
+    state = op.applyConstraints(state, 0.05)!;
+    const pump = state.components.pumps.get('p1')!;
+    pump.effectiveSpeed = pump.speed;
+    const flow = flowAt(pump.speed);
+    for (const c of state.flowConnections) c.massFlowRate = flow;
+    errors.push(flowAt(s0) + 3 - flow);
+  }
+  const ctl = state.components.controllers.get('ctl-p')!;
+  assertClose(ctl.lastAutoGains!.kp, 0, 0, 'no proportional term on a static process');
+  assert(Math.abs(errors[errors.length - 1]) < 0.01,
+    `after 20 s the flow should be on its setpoint, error ${errors[errors.length - 1].toFixed(3)} kg/s`);
+  assert(Math.min(...errors) > -0.05,
+    `and should not have overshot, worst ${Math.min(...errors).toFixed(3)} kg/s`);
+});
+
+test('a stroke limit does not swallow the integral', () => {
+  // Hand gains with a proportional term large enough to hit the stroke
+  // limit on every scan, and a measurement that alternates so the kicks
+  // cancel. Under a single limit on the sum the command nets zero per pair
+  // of scans and a standing error is never corrected.
+  const op = new ControlSystemOperator();
+  let { state } = pumpLoopRig({ speed: 0.6, flow: 60, suctionP: 20e5, sinkP: 165e5,
+    sink: 'boiler', setpoint: 62 });
+  state.components.controllers.get('ctl-p')!.gains = { kp: 1, ki: 0.001 };
+  for (let i = 0; i < 40; i++) {
+    state.time = i * 0.25;
+    for (const c of state.flowConnections) c.massFlowRate = i % 2 ? 61 : 59;   // mean error +2 kg/s
+    state = op.applyConstraints(state, 0.25)!;
+  }
+  const out = state.components.controllers.get('ctl-p')!.lastOutput;
+  // 40 scans of ki*e*dt = 0.001 * 2 * 0.25 each
+  assert(out > 0.6 + 0.5 * 40 * 0.001 * 2 * 0.25,
+    `the mean error must move the command, got ${out.toFixed(4)} from 0.6000`);
 });
 
 test('anything that displays a controller can survive an expression', () => {
