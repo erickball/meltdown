@@ -455,7 +455,8 @@ export interface FlowNode {
       vSteamOut: number;     // m3/kg - specific volume of the steam hSteamOut prices
       vLiquidOut: number;    // m3/kg - section 1 mean specific volume
       TSat: number;          // K
-      T3: number;            // K - superheat section temperature
+      T3: number;            // K - superheat section MEAN temperature
+      TSteamOut: number;     // K - temperature of the steam offered at the outlet
       lengthFracs: [number, number, number];
     };
   };
@@ -1075,7 +1076,17 @@ export type ControllerSensorKind =
    * the controller most needs to act) and from pressure (whose response to
    * feed changes sign between the flooded and dry sides).
    */
-  | 'otsg-superheat-fraction';
+  | 'otsg-superheat-fraction'
+  /**
+   * Temperature of the steam a moving-boundary boiler tube offers its outlet
+   * (K) - the main-steam thermocouple. targetId is the tube flow node. It is
+   * the quantity a plant is designed to, so it is the natural target for a
+   * feed trim (hotter steam -> more feed); but it stops moving at both ends -
+   * a flooded tube reads saturation however flooded it is, a dried-out one
+   * reads its steam-end metal - so there the error keeps the right sign and
+   * loses its slope. otsg-superheat-fraction keeps a slope everywhere.
+   */
+  | 'otsg-outlet-temperature';
 
 export type ControllerActuatorKind =
   | 'valve-position'    // ValveState.position (0-1)

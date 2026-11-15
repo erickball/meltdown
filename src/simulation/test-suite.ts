@@ -2471,6 +2471,11 @@ test('a superheat section offers steam no hotter than its own metal', () => {
       `${(ev.hSteamOut / 1e3).toFixed(0)} vs ${(hCeiling / 1e3).toFixed(0)} kJ/kg ` +
       `(T-equivalent ${(stateAtPh(ev.P, ev.hSteamOut).T - 273.15).toFixed(0)} vs ` +
       `${(TMetalMax - 273.15).toFixed(0)} C)`);
+    // The outlet thermometer reads the same steam the enthalpy describes.
+    assertClose(ev.TSteamOut, stateAtPh(ev.P, ev.hSteamOut).T, 2.0,
+      `outlet temperature and outlet enthalpy must be one state at ${W} kg/s`);
+    assert(ev.TSteamOut <= TMetalMax + 1e-6 && ev.TSteamOut > ev.sat.T,
+      `outlet temperature must sit between saturation and the hottest metal at ${W} kg/s`);
     // And it still leaves hotter than the section mean.
     assert(ev.hSteamOut > s3.hBar,
       `the outlet should exceed the mean at ${W} kg/s: ${(ev.hSteamOut / 1e3).toFixed(0)} vs ` +

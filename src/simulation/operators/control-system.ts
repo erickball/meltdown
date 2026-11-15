@@ -515,6 +515,18 @@ export class ControlSystemOperator implements ConstraintOperator {
         // evaluation path can simply be rerun on the accepted state.
         return evaluateOtsgSections(state, targetId, node).ev.sections[2].lengthFrac;
       }
+      case 'otsg-outlet-temperature': {
+        const node = this.getNode(state, targetId, ctl.id, 'sensor');
+        if (!node.otsg) {
+          throw new Error(
+            `[ControlSystem] '${ctl.id}': otsg-outlet-temperature sensor on '${targetId}', ` +
+            `which is not a moving-boundary boiler tube node (no otsg state). Point it at a ` +
+            `heat exchanger built with tubeModel 'moving-boundary'.`
+          );
+        }
+        // Evaluated here for the same reason as the superheat fraction above.
+        return evaluateOtsgSections(state, targetId, node).ev.TSteamOut;
+      }
       default:
         throw new Error(`[ControlSystem] '${ctl.id}': unknown sensor kind '${kind}'`);
     }
