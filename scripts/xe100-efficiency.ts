@@ -120,7 +120,7 @@ for (const id of tubes) {
     `${(node.fluid.pressure / 1e5).toFixed(1).padStart(6)} bar  ` +
     `${(node.fluid.temperature - 273.15).toFixed(0).padStart(5)} C  ` +
     `sections ${secs} %` +
-    (ev ? `  steam out ${(ev.T3 - 273.15).toFixed(0)} C` : ''));
+    (ev ? `  superheat mean ${(ev.T3 - 273.15).toFixed(0)} C, steam out ${(ev.TSteamOut - 273.15).toFixed(0)} C` : ''));
 }
 console.log(`  Helium: ${T('hx-1-shell').toFixed(0)} C shell, ` +
   `core ${T('rv-1').toFixed(0)} -> ${T('cb-1').toFixed(0)} C, ` +

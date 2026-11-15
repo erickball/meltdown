@@ -378,6 +378,9 @@ export interface OtsgEval {
    *  states with the same weights as hSteamOut, so a vapour draw's density
    *  and its enthalpy describe one fluid. */
   vSteamOut: number;
+  /** Temperature of that same outlet steam (K): what a thermocouple in the
+   *  steam nozzle reads. Saturation when there is no superheat section. */
+  TSteamOut: number;
   u3: number;        // superheat specific energy actually used (J/kg)
   /** Quality the boiling section reaches at its OUTLET. 1 whenever there is
    *  anything downstream to hand dry steam to; below 1 only for a flooded
@@ -491,6 +494,7 @@ export function evaluateOtsg(
   const w = m3 / (m3 + 1);
   const hSteamOut = w * h3Bar + (1 - w) * sat.h_g;
   const vSteamOut = m3 > 0 ? w * fin.v3 + (1 - w) * sat.v_g : sat.v_g;
+  const TSteamOut = w * T3 + (1 - w) * sat.T;
 
   return {
     P, sat,
@@ -501,6 +505,7 @@ export function evaluateOtsg(
     ],
     hSteamOut,
     vSteamOut,
+    TSteamOut,
     u3: fin.u3,
     // The reference closure carries m3 as state, so its boiling section
     // always has somewhere to hand dry steam to.
@@ -885,6 +890,14 @@ export function isobarAt(iso: SteamIsobar, col: 'u' | 'v' | 'h', T: number): num
   return y[j] + (y[j + 1] - y[j]) * (T - iso.T[j]) / (iso.T[j + 1] - iso.T[j]);
 }
 
+/** Temperature on the isobar at enthalpy h (end segments continue). */
+export function isobarTempAtH(iso: SteamIsobar, h: number): number {
+  const n = iso.T.length;
+  let j = 0;
+  while (j < n - 2 && h >= iso.h[j + 1]) j++;
+  return iso.T[j] + (iso.T[j + 1] - iso.T[j]) * (h - iso.h[j]) / (iso.h[j + 1] - iso.h[j]);
+}
+
 /**
  * A stream of W kg/s at temperature T crossing a piece of film (conductance
  * hA, W/K) on a wall at TWall: the temperature it leaves at. On a segment of
@@ -1259,12 +1272,14 @@ export function evaluateOtsgPartition(
     let hSteamOut: number;
     let vSteamOut: number;
     let steamIsobar: SteamIsobar | undefined;
+    let TSteamOut = sat.T;
     if (m3 <= 0) {
       hSteamOut = sat.h_g;
       vSteamOut = sat.v_g;
     } else if (regime === 'supercritical') {
       hSteamOut = h3Bar;
       vSteamOut = v3;
+      TSteamOut = T3;
       steamIsobar = localIsobar(P, u3, v3, T3, h3Bar);
     } else {
       steamIsobar = isobarFor(P, sat);
@@ -1278,6 +1293,7 @@ export function evaluateOtsgPartition(
       if (hBlend >= sat.h_g) {
         hSteamOut = hBlend;
         vSteamOut = w2 * vEps + (1 - w2) * v3;
+        TSteamOut = isobarTempAtH(steamIsobar, hBlend);
       } else {
         hSteamOut = sat.h_g;
         vSteamOut = sat.v_g;
@@ -1290,7 +1306,7 @@ export function evaluateOtsgPartition(
         mk(m2, v2, V2, h2Bar, T2),
         mk(m3, v3, V3, h3Bar, T3),
       ],
-      hSteamOut, vSteamOut, u3, x2Out, regime, steamIsobar,
+      hSteamOut, vSteamOut, TSteamOut, u3, x2Out, regime, steamIsobar,
     };
   };
 

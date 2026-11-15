@@ -1031,6 +1031,7 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
         vLiquidOut: ev.sections[0].vBar,
         TSat: ev.sat.T,
         T3: ev.sections[2].T,
+        TSteamOut: ev.TSteamOut,
         lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
       };
       if (ev.regime === 'supercritical') {
