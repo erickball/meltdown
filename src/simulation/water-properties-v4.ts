@@ -3432,14 +3432,36 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   // makes the trace-water limit unrepresentable, which is the whole regime a
   // gas-cooled plant lives in.
   //
-  // Grid/extension paths keep a floor, but the PHYSICAL one: the triple point
-  // (611.657 Pa), below which water cannot be a vapour in equilibrium with
-  // liquid at all. The old 1 kPa value pre-dated the grid reaching
-  // v = 210 m³/kg, where saturation pressures genuinely run down toward
-  // 600-1000 Pa, and it turned those legitimate states into throws.
-  const minPressure = calculationPath === 'vapor_ideal_gas' ? Number.MIN_VALUE : 611.0;
-  if (!(P >= minPressure) || P > P_CRIT * 10) {
+  // Grid/extension paths: positive, and under the triple-point pressure
+  // (611.657 Pa) only as a VAPOUR. No liquid exists below that pressure, so
+  // a liquid or supercritical path that answers with one has gone wrong. A
+  // superheated vapour, though, can be as thin as it likes: at v = 206..210
+  // m³/kg (between the end of the saturated-vapour line and the hand-over to
+  // the dilute path) vapour at 273-278 K sits at 600-611 Pa, and a flat
+  // 611 Pa floor on every grid path refused it - humid gas near 0 C on its
+  // way to saturation. What such a vapour must NOT be is above the
+  // equilibrium pressure at its own temperature (the same test the dilute
+  // path makes): then it is condensed, and the dome classification missed it.
+  // (Known residue: within ~0.01 kJ/kg of the frost line at v = 206..210 the
+  // grid's 0.04 K error reads a state the classifier calls vapour as 0.7 %
+  // over the sublimation pressure, and this throws. Those states threw under
+  // the flat floor too.)
+  if (!(P > 0) || P > P_CRIT * 10) {
     throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
+  }
+  if (P < P_TRIPLE && calculationPath !== 'vapor_ideal_gas') {
+    if (phase !== 'vapor') {
+      throw new Error(`[WaterProps v4] Pressure out of range: P=${P.toFixed(2)} Pa is below the triple-point ` +
+        `pressure (${P_TRIPLE} Pa) for a ${phase} state, which cannot exist there ` +
+        `(u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
+    }
+    const P_equilibrium = T < T_TRIPLE ? sublimationPressure(T) : P_sat_from_T(T);
+    if (P > P_equilibrium * (1 + 1e-9)) {
+      throw new Error(`[WaterProps v4] Vapour below the triple-point pressure is CONDENSED: P=${P.toFixed(2)} Pa at ` +
+        `T=${T.toFixed(3)} K is above the equilibrium ${T < T_TRIPLE ? 'sublimation' : 'saturation'} pressure ` +
+        `${P_equilibrium.toFixed(2)} Pa there (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, ` +
+        `path=${calculationPath}). The dome/sub-triple classification should have caught it first.`);
+    }
   }
   // Ceiling admits severe-accident superheat (steam near molten fuel). Above
   // ~2500K dissociation makes the ideal-gas extension overestimate T, which
