@@ -298,7 +298,15 @@ export class JackManager {
           (b): b is ToolUseBlock => b.type === 'tool_use'
         );
         if (data.stop_reason !== 'tool_use' || toolUses.length === 0) {
-          if (data.stop_reason === 'max_tokens') {
+          if (data.stop_reason === 'refusal') {
+            // The model's safety filter declined the request, and so did the
+            // server-side fallback model. Nothing is wrong with the app.
+            console.warn('[Jack] request refused by the model', data);
+            this.addBubble(
+              'jack-msg-error',
+              "Jack can't take that one — the AI model's safety filter declined the request. Try rephrasing it."
+            );
+          } else if (data.stop_reason === 'max_tokens') {
             this.addBubble(
               'jack-msg-error',
               'Jack got cut off mid-sentence (length limit). Ask him to pick up where he left off.'
