@@ -55,14 +55,16 @@ const RHO_ICE = 917;              // kg/m³
 const V_ICE = 1 / RHO_ICE;        // 1.09051e-3 m³/kg
 const H_FUSION = 333.5e3;         // J/kg - enthalpy of fusion at the triple point
 const CP_ICE = 2.05e3;            // J/kg-K - ice Ih, held constant (2.10 at 273 K)
-// Caloric slope of the vapour-over-ice line. This is EXACTLY the cv_steam that
-// idealGasApproximation uses for dilute vapour, and it has to be, because that
-// path OWNS the region immediately above the vapour-over-ice line (v there is
-// always > 206 m³/kg, far past the grid). Sharing the constant makes both T and
-// P exactly continuous across the line: the ideal-gas path's T = T_t +
-// (u - u_g(T_t))/cv is the exact inverse of u_g(T) = u_g(T_t) - cv*(T_t - T),
-// and its Z is anchored at the same triple-point vapour state that Z_g is, so
-// P comes out to P_sub(T) on the line itself.
+// Caloric slope of the vapour-over-ice line. This is EXACTLY the cv that
+// idealGasApproximation uses for dilute vapour BELOW the triple-point
+// temperature (above it that path reads the steam table's own dilute column),
+// and it has to be, because that path OWNS the region immediately above the
+// vapour-over-ice line (v there is always > 206 m³/kg, far past the grid).
+// Sharing the constant makes both T and P exactly continuous across the line:
+// the ideal-gas path's T = T_t + (u - u_g(T_t))/cv is the exact inverse of
+// u_g(T) = u_g(T_t) - cv*(T_t - T), and its Z is anchored at the same
+// triple-point vapour state that Z_g is, so P comes out to P_sub(T) on the
+// line itself.
 //
 // The ideal-gas cv of cold steam is really ~1400 J/kg-K (cp 1860 minus R), so
 // this is 7% high. That buys the seam: with 1400 here the two descriptions
@@ -268,6 +270,19 @@ interface VaporHotEdgePoint {
   P_Pa: number;
 }
 let vaporHotEdge: VaporHotEdgePoint[] = [];
+
+// The grid's MOST DILUTE column (v = 210 m³/kg), sorted by u. Steam out there
+// is an ideal gas to 2.5e-4 (Z = 0.99976 at the column's cold end, 315 K, and
+// closer to 1 everywhere hotter), so along it T is the ideal-gas T(u) and
+// P·v is the ideal-gas R·T - both functions of u alone, valid for every
+// thinner vapour too. idealGasApproximation reads them from here.
+interface DiluteColumn {
+  v: number;           // m³/kg - the column's specific volume
+  u: Float64Array;     // J/kg, strictly increasing
+  T: Float64Array;     // K, strictly increasing
+  Pv: Float64Array;    // J/kg - P·v at each point (= Z·R·T)
+}
+let diluteColumn: DiluteColumn | null = null;
 // Resolution of the hot edge in logV: one edge point per slice this wide, so
 // in practice one per grid COLUMN (columns are at least 0.004 apart in logV;
 // two that share a slice contribute the taller).
@@ -795,6 +810,8 @@ function _findSaturationAtV(v: number): {
  * Returns null if v is outside the saturation dome range.
  * Claude, do not modify this function without express user permission in advance.
  */
+// @ts-ignore - Unused since idealGasApproximation stopped anchoring on the
+// saturation line (2026-11-14); left untouched per the note above.
 function findSaturationPropsAtV(v: number): { u_g: number; T_sat: number; P_sat: number } | null {
   if (!saturationDome) return null;
 
@@ -1950,6 +1967,33 @@ function buildSpatialIndex(): void {
     }
   }
   vaporHotEdge = Array.from(edgeByCell.values()).sort((a, b) => a.cellX - b.cellX);
+
+  // The most dilute column, for idealGasApproximation (see DiluteColumn).
+  let vMax = 0;
+  for (const pt of spatialIndex.vaporPoints) if (pt.v > vMax) vMax = pt.v;
+  const column = spatialIndex.vaporPoints
+    .filter(pt => pt.v > vMax * (1 - 1e-9))
+    .sort((a, b) => a.u - b.u);
+  for (let i = 1; i < column.length; i++) {
+    if (!(column[i].u > column[i - 1].u && column[i].T_K > column[i - 1].T_K)) {
+      throw new Error(
+        `[WaterProps v4] The steam table's most dilute column (v=${vMax} m³/kg) is not ` +
+        `monotone: T=${column[i - 1].T_K} K at u=${column[i - 1].u} kJ/kg is followed by ` +
+        `T=${column[i].T_K} K at u=${column[i].u} kJ/kg. Dilute steam reads T(u) from this ` +
+        `column, so it must rise strictly.`);
+    }
+  }
+  if (column.length < 2) {
+    throw new Error(
+      `[WaterProps v4] The steam table's most dilute column (v=${vMax} m³/kg) has ` +
+      `${column.length} point(s); dilute steam needs it to read T(u) from.`);
+  }
+  diluteColumn = {
+    v: vMax,
+    u: Float64Array.from(column, pt => pt.u * 1000),
+    T: Float64Array.from(column, pt => pt.T_K),
+    Pv: Float64Array.from(column, pt => pt.P_MPa * 1e6 * pt.v),
+  };
 }
 
 const EMPTY_NEAR_SOA: NearSoA = {
@@ -2698,20 +2742,49 @@ export function criticalPressureRatio(state: WaterState): number {
 // High-Temperature Vapor (Ideal Gas Approximation)
 // ============================================================================
 
-/**
- * Ideal gas approximation for superheated vapor outside the steam table grid.
- *
- * Valid regions:
- *   - v > 100 m³/kg AND u > u_sat(v) (low pressure superheated vapor)
- *   - v > 10 m³/kg AND u > 2800 kJ/kg (high temperature, sparse grid region)
- *
- * To avoid discontinuity at the transition from steam tables, we anchor the
- * approximation to saturation curve values:
- *   - T = T_sat + (u - u_g) / cv
- *   - P = Z * rho * R * T, where Z is calibrated to match P_sat at the boundary
- */
 // Rate limiter for the superheated-extrapolation notice (wall-clock ms)
 let lastSuperheatWarn = 0;
+
+/**
+ * The extension past the steam table's hot edge, from an edge state
+ * (u_edge, T_edge, Pv_edge = P·v there) to a hotter state (u, v) at the same
+ * or a thinner specific volume. Shared by superheatedVaporExtrapolation (the
+ * grid's v range) and idealGasApproximation (vapour thinner than the grid),
+ * so the two cannot disagree where they meet. See
+ * superheatedVaporExtrapolation for the model.
+ */
+function extendPastHotEdge(
+  u: number, v: number, u_edge: number, T_edge: number, Pv_edge: number
+): { T: number; P: number } {
+  // Temperature from energy with linearly temperature-dependent cv
+  const CV_A = 1300;   // J/(kg·K)
+  const CV_B = 0.55;   // J/(kg·K²)
+  // u - u_edge = CV_A*(T - T_edge) + CV_B/2*(T² - T_edge²)  -> quadratic in T
+  const rhs = (u - u_edge) + CV_A * T_edge + 0.5 * CV_B * T_edge * T_edge;
+  const T = (-CV_A + Math.sqrt(CV_A * CV_A + 2 * CV_B * rhs)) / CV_B;
+
+  // Pressure at constant volume with compressibility anchored at the edge.
+  // Z must be evaluated at the EDGE's own volume, not the query's: the two
+  // coincide inside a logV cell, but in the slack band past the table's last
+  // entry both brackets clamp to that entry, and using the query v there
+  // cancels v out of P = Z·R·T/v entirely - pinning P and T flat across a
+  // whole span of volumes (the same failure the dilute ideal-gas path had).
+  const Z_edge = Pv_edge / (R_WATER * T_edge);
+  const P = Z_edge * R_WATER * T / v;
+
+  const now = Date.now();
+  if (now - lastSuperheatWarn > 1000) {
+    lastSuperheatWarn = now;
+    console.warn(
+      `[WaterProps v4] Superheated vapor beyond steam-table grid - using ideal-gas ` +
+      `extrapolation: u=${(u / 1e3).toFixed(0)} kJ/kg, v=${(v * 1e6).toFixed(0)} mL/kg ` +
+      `-> T=${(T - 273.15).toFixed(0)}°C, P=${(P / 1e5).toFixed(1)} bar ` +
+      `(grid edge: ${(T_edge - 273.15).toFixed(0)}°C)`
+    );
+  }
+
+  return { T, P };
+}
 
 /**
  * Extrapolate vapor properties for states HOTTER than the steam table grid
@@ -2773,100 +2846,109 @@ function superheatedVaporExtrapolation(u: number, v: number): { T: number; P: nu
 
   if (u <= u_edge) return null; // not a hot-side miss
 
-  // Temperature from energy with linearly temperature-dependent cv
-  const CV_A = 1300;   // J/(kg·K)
-  const CV_B = 0.55;   // J/(kg·K²)
-  // u - u_edge = CV_A*(T - T_edge) + CV_B/2*(T² - T_edge²)  -> quadratic in T
-  const rhs = (u - u_edge) + CV_A * T_edge + 0.5 * CV_B * T_edge * T_edge;
-  const T = (-CV_A + Math.sqrt(CV_A * CV_A + 2 * CV_B * rhs)) / CV_B;
-
-  // Pressure at constant volume with compressibility anchored at the edge.
-  // Z must be evaluated at the EDGE's own volume, not the query's: the two
-  // coincide inside a logV cell, but in the slack band past the table's last
-  // entry both brackets clamp to that entry, and using the query v there
-  // cancels v out of P = Z·R·T/v entirely - pinning P and T flat across a
-  // whole span of volumes (the same failure the dilute ideal-gas path had).
   const v_edge = Math.pow(10, lo.logV + t * (hi.logV - lo.logV));
-  const Z_edge = (P_edge * v_edge) / (R_WATER * T_edge);
-  const P = Z_edge * R_WATER * T / v;
-
-  const now = Date.now();
-  if (now - lastSuperheatWarn > 1000) {
-    lastSuperheatWarn = now;
-    console.warn(
-      `[WaterProps v4] Superheated vapor beyond steam-table grid - using ideal-gas ` +
-      `extrapolation: u=${(u / 1e3).toFixed(0)} kJ/kg, v=${(v * 1e6).toFixed(0)} mL/kg ` +
-      `-> T=${(T - 273.15).toFixed(0)}°C, P=${(P / 1e5).toFixed(1)} bar ` +
-      `(grid edge: ${(T_edge - 273.15).toFixed(0)}°C)`
-    );
-  }
-
-  return { T, P };
+  return extendPastHotEdge(u, v, u_edge, T_edge, P_edge * v_edge);
 }
 
+/**
+ * Water vapour more dilute than the steam table's last column (v = 210 m³/kg):
+ * trace moisture in a gas node, a blown-down loop's frost-point vapour.
+ *
+ * Steam this thin is an ideal gas, so its state function has a very simple
+ * shape: T depends on u alone, and P = (P·v)(u) / v with P·v = Z·R·T. Both
+ * one-variable functions are READ, not modelled:
+ *
+ *   T >= 315.7 K (u >= 2434.9 kJ/kg) .. 2000 C
+ *       the table's own most dilute column (diluteColumn), linear between its
+ *       points (20 kJ/kg apart, chord error under 0.01 K; the column is
+ *       missing six points below 2675 kJ/kg, and across those 60-80 kJ/kg
+ *       spans the chord reads up to 0.1 K low). At v = 210 this is the grid's
+ *       own data, so the hand-over from the grid is continuous; for thinner
+ *       vapour it is exact to the column's departure from ideal (0.13 K at
+ *       its cold end, under 0.05 K above 500 K).
+ *   273.16 K .. 315.7 K
+ *       the chord from the triple-point saturated vapour to the column's
+ *       first point. Its slope is 1409 J/kg-K; steam's ideal-gas cv over that
+ *       span is 1398-1408.
+ *   below 273.16 K
+ *       T = T_t + (u - u_g(T_t)) / CV_VAPOR_COLD and Z frozen at the
+ *       triple-point value, which is exactly the vapour-over-ice line's own
+ *       caloric model (see CV_VAPOR_COLD) - so the vapour meets the frost
+ *       line at the line's T and P_sub(T).
+ *   above 2000 C
+ *       no table: the same anchored extension (and notice) that hotter-than-
+ *       table steam gets inside the grid's v range, from the column's top.
+ *
+ * The pieces join continuously in T and P at each hand-over.
+ *
+ * (This used to be T = T_t + (u - u_g(T_t)) / 1500 at every temperature. A
+ * flat cv is right to 7% at the triple point, but steam's rises to 1970
+ * J/kg-K by 930 C and 2470 by 2000 C, so the temperature ran away hot: +28 K
+ * at 650 C, +97 K at 930 C, +635 K at 2000 C, with the pressure high in
+ * proportion and a step of that size against the grid at v = 210.)
+ */
 function idealGasApproximation(u: number, v: number): { T: number; P: number } {
-  const rho = 1 / v;
-  const cv_steam = 1500;  // J/(kg·K) - approximate cv for superheated steam
+  const u_kJ = u / 1000;
+  const col = diluteColumn;
+  if (!col || !tripleAnchor) {
+    throw new Error('[WaterProps v4] Steam tables not loaded in idealGasApproximation');
+  }
 
-  // Check valid range
-  const u_kJ = u / 1000;  // Convert to kJ/kg for comparison
-  const inLowPressureRegion = v > 100;
-  const inHighTempRegion = v > 10 && u_kJ > 2800;
-
-  if (!inLowPressureRegion && !inHighTempRegion) {
+  // This path owns vapour THINNER than the table. Anything denser has grid
+  // columns on both sides of it, and a grid miss there is not something an
+  // ideal gas should paper over. (It used to accept v > 100 m³/kg, and
+  // v > 10 above 2800 kJ/kg, anchored on the saturation line; since the grid
+  // reached v = 210 nothing in that range arrives here - a sweep of
+  // v = 100..210 finds every state answered by the grid, the dome or the
+  // hot-edge extension.)
+  if (!(v >= col.v)) {
     throw new Error(
-      `[WaterProps v4] idealGasApproximation called outside valid range: ` +
-      `u=${u_kJ.toFixed(2)} kJ/kg, v=${v.toFixed(4)} m³/kg. ` +
-      `Valid regions: (v > 100 m³/kg) OR (v > 10 m³/kg AND u > 2800 kJ/kg).`
+      `[WaterProps v4] idealGasApproximation called inside the steam table's range: ` +
+      `u=${u_kJ.toFixed(2)} kJ/kg, v=${v.toFixed(4)} m³/kg. It covers only vapour more ` +
+      `dilute than the table's last column (v >= ${col.v} m³/kg); a denser state the grid ` +
+      `could not answer is a hole in the table or broken mass/energy bookkeeping.`
     );
   }
 
-  // Get saturation properties at the boundary (or nearest saturation point).
-  // `v_ref` is the specific volume OF THE REFERENCE STATE - the saturated
-  // vapour line reaches only v_g ~ 206 m³/kg at the triple point, so for
-  // anything more dilute the reference is the triple point itself and its
-  // own v_g, NOT the query volume. (Using the query volume as the reference
-  // density cancels v out of P = Z·ρ·R·T entirely, which pinned every
-  // dilute-steam node at a constant ~1.4 kPa no matter how little water it
-  // held - the phantom "steam pressure floor" in gas-filled loops.)
-  let satProps = findSaturationPropsAtV(v);
-  let v_ref = v;
-
-  if (!satProps) {
-    // v is beyond the saturation curve (v > 206 m³/kg): use the triple point
-    if (!saturationDome) {
-      throw new Error('[WaterProps v4] Saturation dome not loaded in idealGasApproximation');
+  const n = col.u.length;
+  const u_t = tripleAnchor.u_g;
+  const Pv_t = tripleAnchor.P * tripleAnchor.v_g;   // = Z_g·R·T_t
+  let T: number;
+  let Pv: number;
+  if (u > col.u[n - 1]) {
+    // Hotter than the table
+    const hot = extendPastHotEdge(u, v, col.u[n - 1], col.T[n - 1], col.Pv[n - 1]);
+    T = hot.T;
+    Pv = hot.P * v;
+  } else if (u >= col.u[0]) {
+    // On the column: bracket u, interpolate linearly
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (col.u[mid] <= u) lo = mid; else hi = mid;
     }
-    const triple = saturationDome.raw_data[0];
-    satProps = {
-      u_g: triple.u_g * 1000,  // Convert to J/kg
-      T_sat: triple.T_K,
-      P_sat: triple.P_MPa * 1e6,  // Convert to Pa
-    };
-    v_ref = triple.v_g;  // m³/kg at the triple point (~206)
+    const f = (u - col.u[lo]) / (col.u[hi] - col.u[lo]);
+    T = col.T[lo] + f * (col.T[hi] - col.T[lo]);
+    Pv = col.Pv[lo] + f * (col.Pv[hi] - col.Pv[lo]);
+  } else if (u > u_t) {
+    // Between the triple-point vapour and the column's first point
+    if (!(col.u[0] > u_t && col.T[0] > T_TRIPLE)) {
+      throw new Error(
+        `[WaterProps v4] The steam table's most dilute column starts at ` +
+        `u=${(col.u[0] / 1e3).toFixed(3)} kJ/kg, T=${col.T[0].toFixed(3)} K, which is not ` +
+        `above the triple-point vapour (u=${(u_t / 1e3).toFixed(3)} kJ/kg, ${T_TRIPLE} K) ` +
+        `that dilute steam is anchored to below it.`);
+    }
+    const f = (u - u_t) / (col.u[0] - u_t);
+    T = T_TRIPLE + f * (col.T[0] - T_TRIPLE);
+    Pv = Pv_t + f * (col.Pv[0] - Pv_t);
+  } else {
+    // Colder than the triple point: the vapour-over-ice line's caloric model
+    T = T_TRIPLE + (u - u_t) / CV_VAPOR_COLD;
+    Pv = Pv_t * T / T_TRIPLE;
   }
-
-  // Temperature from energy: T = T_sat + (u - u_g) / cv.
-  // NOTE: a temperature-dependent cv (the CV_A + CV_B*T form that
-  // superheatedVaporExtrapolation uses) is the better caloric model in
-  // principle, but it makes the seam against the grid's dilute edge WORSE
-  // here (16-23 K vs 6-19 K), because this path anchors at the dome - the
-  // triple point once v > 206 m³/kg - and so extrapolates across ~600 K
-  // rather than from the grid edge a few tens of K away. Left as the flat
-  // fit that actually matches the neighbouring data; see the note in
-  // mixture-properties.ts about the residual seam.
-  const T = satProps.T_sat + (u - satProps.u_g) / cv_steam;
-
-  // Calculate compressibility factor Z to match P_sat at the reference point
-  // At saturation: P_sat = Z * rho_ref * R * T_sat
-  // So: Z = P_sat / (rho_ref * R * T_sat)
-  // Z ~ 1 out here (0.9997 at the triple point), so this is a real ideal gas:
-  // P falls as 1/v, which is what gives a dilute node a finite dP/dm.
-  const rho_ref = 1 / v_ref;
-  const Z = satProps.P_sat / (rho_ref * R_WATER * satProps.T_sat);
-
-  // Calculate pressure using the calibrated Z
-  const P = Z * rho * R_WATER * T;
+  const P = Pv / v;
 
   // The state must be ABOVE the equilibrium line, or it is a condensed
   // mixture and does not belong on this path. Which line that is depends on
@@ -2881,23 +2963,20 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
   // own frost point. Comparing PRESSURES against the line the state is
   // actually near needs no inversion of v_g(T) and covers both regimes.
   //
-  // NOTE the equilibrium pressure is evaluated at the STATE'S OWN T, not at
-  // the reference's. For v > 206 m³/kg the reference is the triple point, and
-  // its 611.657 Pa says nothing about a 400 K vapour out at v = 261 m³/kg -
-  // whose saturation pressure is 2.5 bar.
-  if (inLowPressureRegion) {
-    const P_equilibrium = T < T_TRIPLE ? sublimationPressure(T) : P_sat_from_T(T);
-    if (P > P_equilibrium * (1 + 1e-9)) {
-      throw new Error(
-        `[WaterProps v4] idealGasApproximation called for a CONDENSED state: ` +
-        `u=${u_kJ.toFixed(3)} kJ/kg, v=${v.toFixed(4)} m³/kg gives T=${T.toFixed(3)} K, ` +
-        `P=${P.toExponential(4)} Pa, which is above the equilibrium ` +
-        `${T < T_TRIPLE ? 'sublimation' : 'saturation'} pressure ` +
-        `${P_equilibrium.toExponential(4)} Pa there. This state is two-phase ` +
-        `(or ice-vapour), not a single-phase gas - the dome/sub-triple ` +
-        `classification in calculateState should have caught it first.`
-      );
-    }
+  // NOTE the equilibrium pressure is evaluated at the STATE'S OWN T: the
+  // triple point's 611.657 Pa says nothing about a 400 K vapour out at
+  // v = 261 m³/kg - whose saturation pressure is 2.5 bar.
+  const P_equilibrium = T < T_TRIPLE ? sublimationPressure(T) : P_sat_from_T(T);
+  if (P > P_equilibrium * (1 + 1e-9)) {
+    throw new Error(
+      `[WaterProps v4] idealGasApproximation called for a CONDENSED state: ` +
+      `u=${u_kJ.toFixed(3)} kJ/kg, v=${v.toFixed(4)} m³/kg gives T=${T.toFixed(3)} K, ` +
+      `P=${P.toExponential(4)} Pa, which is above the equilibrium ` +
+      `${T < T_TRIPLE ? 'sublimation' : 'saturation'} pressure ` +
+      `${P_equilibrium.toExponential(4)} Pa there. This state is two-phase ` +
+      `(or ice-vapour), not a single-phase gas - the dome/sub-triple ` +
+      `classification in calculateState should have caught it first.`
+    );
   }
 
   return { T, P };
