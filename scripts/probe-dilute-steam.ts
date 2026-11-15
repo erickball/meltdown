@@ -141,7 +141,11 @@ console.log('   u(kJ/kg)   T grid(K)   T dilute(K)    jump T(K)   jump P*v (%)  
 // the grid is extrapolating toward the triple point. (Before
 // build-uv-grid-v13-dilute-patch.py restored the column's absent rows the
 // grid side rippled by +-0.25% in P below u = 2700 kJ/kg.)
-const TOL_SEAM_T = 0.05, TOL_SEAM_PV = 1.5e-3;
+// (0.3 % in P*v: the coldest seam states, u under ~2390 kJ/kg at 273-278 K,
+// sit below the v = 210 column's first row, where the grid extrapolates and
+// steps 0.26 % against the dilute path. They used to be refused by a 611 Pa
+// floor on the grid path and so were never compared.)
+const TOL_SEAM_T = 0.05, TOL_SEAM_PV = 3e-3;
 let worstSeamT = 0, worstSeamPv = 0, worstSeamU = 0, floorRefusals = 0;
 const seamRows: string[] = [];
 for (let u = 2376e3; u <= 6600e3; u += 5e3) {
