@@ -248,13 +248,25 @@ export interface ThermalNode {
  * The water's state along a once-through boiler tube, as the partition
  * implies it: specific enthalpy (J/kg) and specific volume (m3/kg) at the
  * feed end (0) and the steam end (1) of each section. Within a section the
- * enthalpy is linear in length; the specific volume is linear in the boiling
- * and superheat sections and log-linear in the economizer (see
- * otsgAxialProfile).
+ * feed end (0) and the steam end (1) of each section. In the economizer and
+ * the boiling section the enthalpy is linear in length; the specific volume
+ * is linear in the boiling section and log-linear in the economizer. The
+ * superheat section is the curve in `steam` (see otsgAxialProfile).
  */
 export interface OtsgAxialProfile {
   h: [[number, number], [number, number], [number, number]];
   v: [[number, number], [number, number], [number, number]];
+  /** The superheat section point by point: `s` the fraction of the section's
+   *  length behind each point (0 at its inlet to 1 at the tube outlet, rising),
+   *  `h` and `v` the steam there, linear between points. Its ends are h[2]
+   *  and v[2]. */
+  steam: OtsgSteamProfile;
+}
+
+export interface OtsgSteamProfile {
+  s: number[];
+  h: number[];
+  v: number[];
 }
 
 export interface FlowNode {
