@@ -42,6 +42,7 @@ import {
   OtsgEval,
   OtsgWallPin,
   marchSteamOverMetal,
+  otsgAxialProfile,
 } from '../otsg';
 import { saturatedLiquidEnergy, saturatedLiquidDensity } from '../water-properties';
 import { nodeHeatCapacity } from './rate-operators';
@@ -120,13 +121,16 @@ export interface OtsgFlows {
    *  partition's own phase-by-elevation answer. The one draw the ledger has
    *  to be debited for. */
   WLiquidOut: number;
+  /** W - the enthalpy that economizer water leaves with, each draw priced
+   *  at its own nozzle's point on the axial profile. */
+  HLiquidOut: number;
 }
 
 export function classifyOtsgFlows(
   state: SimulationState, id: string, node: FlowNode, waterPressure: number,
 ): OtsgFlows {
   let WFeed = 0;
-  let WSteamOut = 0, WLiquidOut = 0;
+  let WSteamOut = 0, WLiquidOut = 0, HLiquidOut = 0;
   // THE ECONOMIZER'S INLET ENTHALPY is accumulated WITHOUT any flow rate in
   // it - see the note where hFeed is formed below - so it cannot step when
   // the feed stops.
@@ -269,6 +273,10 @@ export function classifyOtsgFlows(
         isTo ? conn.toPhaseTolerance : conn.fromPhaseTolerance,
         isTo ? conn.toOpeningHeight : conn.fromOpeningHeight, undefined, false);
       WLiquidOut += -w * compOut.wLiquid;
+      // The enthalpy that water leaves the economizer with: its state at
+      // the nozzle on the section's own profile (the price the node's
+      // totals are charged), so the slug's energy book loses what left.
+      if (compOut.wLiquid > 0) HLiquidOut += -w * compOut.wLiquid * compOut.hZone![0];
       WSteamOut += -w * (1 - compOut.wLiquid);
     }
   }
@@ -296,7 +304,7 @@ export function classifyOtsgFlows(
   return {
     WFeed, hFeed,
     uFeed: hFeed - waterPressure * 0.0012,   // u = h - Pv, liquid v ~ 1.2 L/kg
-    WSteamOut, WLiquidOut,
+    WSteamOut, WLiquidOut, HLiquidOut,
   };
 }
 
@@ -882,9 +890,9 @@ export class OtsgRateOperator implements RateOperator {
       // adds Q1, and a liquid draw takes slug water with it - weighted so
       // an emptying section never steps its own rate, and at the SAME
       // weighted mass on both books so the pair keeps describing a profile.
-      // A draw's energy costs the section u1 per kg: its enthalpy out less
-      // the boundary work the vacated volume does, which is the flow work
-      // it left with. The boiling/superheat split (and the pressure) are
+      // A draw's energy costs the section its enthalpy out less the
+      // boundary work the vacated volume does, which is the flow work it
+      // left with. The boiling/superheat split (and the pressure) are
       // solved, not stepped.
       // ----------------------------------------------------------------
       // A domeless tube (supercritical) has no phase boundary for the
@@ -898,9 +906,11 @@ export class OtsgRateOperator implements RateOperator {
         const m1Now = ev.sections[0].mass;
         const w1 = m1Now / (m1Now + 1);
         const WSlugOut = w1 * WLiquidOut;
-        const u1Now = ev.sections[0].hBar - ev.P * ev.sections[0].vBar;
+        // Enthalpy out at the nozzle's own point on the profile, less the
+        // boundary work of the volume the slug gives up (its mean specific
+        // volume per kg, the same volume dm1 is priced with in otsgRates).
         dM1 = r.dm1 - WSlugOut;
-        dU1 = r.dU1 - WSlugOut * u1Now;
+        dU1 = r.dU1 - w1 * (flows.HLiquidOut - WLiquidOut * ev.P * ev.sections[0].vBar);
       }
 
       const nodeRates = rates.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
@@ -1033,6 +1043,7 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
         T3: ev.sections[2].T,
         TSteamOut: ev.TSteamOut,
         lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
+        profile: otsgAxialProfile(ev),
       };
       if (ev.regime === 'supercritical') {
         // One fluid: the uniform read FluidState already wrote is unbiased

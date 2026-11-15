@@ -244,6 +244,19 @@ export interface ThermalNode {
 // Flow Nodes - Fluid volumes that exchange mass and energy
 // ============================================================================
 
+/**
+ * The water's state along a once-through boiler tube, as the partition
+ * implies it: specific enthalpy (J/kg) and specific volume (m3/kg) at the
+ * feed end (0) and the steam end (1) of each section. Within a section the
+ * enthalpy is linear in length; the specific volume is linear in the boiling
+ * and superheat sections and log-linear in the economizer (see
+ * otsgAxialProfile).
+ */
+export interface OtsgAxialProfile {
+  h: [[number, number], [number, number], [number, number]];
+  v: [[number, number], [number, number], [number, number]];
+}
+
 export interface FlowNode {
   id: string;
   label: string;
@@ -458,6 +471,10 @@ export interface FlowNode {
       T3: number;            // K - superheat section MEAN temperature
       TSteamOut: number;     // K - temperature of the steam offered at the outlet
       lengthFracs: [number, number, number];
+      /** The axial state profile a nozzle part-way up the bundle draws
+       *  from (otsgAxialProfile): each section's end states, feed end
+       *  first. */
+      profile: OtsgAxialProfile;
     };
   };
 

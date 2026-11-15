@@ -667,6 +667,14 @@ export interface DrawComposition {
   wLiquid: number; wMixture: number; wVapor: number;
   /** Opening-mean density of what is flowing (momentum/choking density). */
   rho: number;
+  /**
+   * The water's specific enthalpy (J/kg) in each zone's share of this draw
+   * [liquid, mixture, vapor], when the donor knows it AT THE OPENING rather
+   * than per zone: a once-through boiler tube, whose state varies along
+   * each section (otsgProfileDraw). Unset for every other donor, whose
+   * zones are uniform and priced by zoneWaterEnthalpy.
+   */
+  hZone?: [number, number, number];
 }
 
 /**
@@ -754,15 +762,17 @@ export function nodeWaterSpecificEnergy(node: FlowNode): number {
  * node's temperature, from the steam tables. Summed over the inventory these
  * give the same H_water as above.
  */
-export function zoneWaterEnthalpy(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture'): number {
-  // Moving-boundary OTSG nodes: the sectioned model knows what actually sits
-  // at each end of the bundle. A vapor draw comes from the superheat section
-  // (carrying its superheat - the entire point of the model; the bulk state
-  // would hand back saturated h_g), a liquid draw from the subcooled section.
-  // Mixture draws fall through to the bulk path.
+export function zoneWaterEnthalpy(
+  node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture', comp?: DrawComposition,
+): number {
+  // A draw that carries its own prices (a boiler tube's, read off the
+  // partition's axial profile at the opening) is priced at them: the state
+  // at the nozzle, not a section-wide figure.
+  if (comp?.hZone) return comp.hZone[zone === 'liquid' ? 0 : zone === 'mixture' ? 1 : 2];
   if (node.otsg?.lastEval) {
-    if (zone === 'vapor') return node.otsg.lastEval.hSteamOut;
-    if (zone === 'liquid') return node.otsg.lastEval.hLiquidOut;
+    throw new Error(`[OTSG] ${node.id}: a ${zone} draw from a boiler tube was priced without ` +
+      `its draw composition - the tube's state varies along its length, so the price needs ` +
+      `the opening it leaves by.`);
   }
   const f = node.fluid;
   if (f.phase !== 'two-phase' || zone === 'mixture') {
@@ -782,11 +792,13 @@ export function zoneWaterEnthalpy(node: FlowNode, zone: 'liquid' | 'vapor' | 'mi
  * gas that rides with it): the water at zoneWaterEnthalpy, the gas at its
  * n·Cp·T per kg, weighted by zoneWaterShare.
  */
-export function zoneDrawEnthalpy(node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture'): number {
+export function zoneDrawEnthalpy(
+  node: FlowNode, zone: 'liquid' | 'vapor' | 'mixture', comp?: DrawComposition,
+): number {
   const w = zoneWaterShare(node, zone);
-  if (w >= 1) return zoneWaterEnthalpy(node, zone);
+  if (w >= 1) return zoneWaterEnthalpy(node, zone, comp);
   const hGas = nodeGasEnthalpy(node) / ncgTotalMass(node.fluid.ncg!);
-  return (w > 0 ? w * zoneWaterEnthalpy(node, zone) : 0) + (1 - w) * hGas;
+  return (w > 0 ? w * zoneWaterEnthalpy(node, zone, comp) : 0) + (1 - w) * hGas;
 }
 
 /** Mass fraction of a draw that is non-condensible gas (the rest is water). */
@@ -830,21 +842,17 @@ export function drawCompositionAt(
     ? nodeHeight / 2
     : Math.max(0, Math.min(nodeHeight, connectionElevation));
 
+  // A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
+  // economizer / boiling / superheat is the entire sectioned model - and
+  // its state varies along each section, so it answers from its partition's
+  // own axial profile at the opening.
+  if (node.otsg?.lastEval) return otsgProfileDraw(node, elev, nodeHeight, openingHeight ?? 0, out);
+
   // Zone boundaries b1 (top of liquid zone) and b2 (bottom of vapor zone),
-  // and for tanks the froth's void profile between them (see below).
+  // and the froth's void profile between them (see below).
   let b1: number, b2: number;
-  let isOtsg = false;
   let alphaBar = 0;
-  if (node.otsg?.lastEval) {
-    isOtsg = true;
-    // A moving-boundary boiler tube is axially stratified BY CONSTRUCTION -
-    // economizer / boiling / superheat is the entire sectioned model - so an
-    // OTSG node answers from its partition's own boundaries (sharp: the
-    // partition's boundaries carry no interface waves).
-    const fr = node.otsg.lastEval.lengthFracs;
-    b1 = fr[0] * nodeHeight;
-    b2 = (fr[0] + fr[1]) * nodeHeight;
-  } else {
+  {
     const separation = calculateSeparation(node, massFlowRate);
     // Partial separation LAYERS the node rather than smearing it: the
     // separated share of the liquid has clarified into a pool at the bottom
@@ -910,23 +918,6 @@ export function drawCompositionAt(
       : fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
   }
 
-  if (isOtsg) {
-    // The boiling section is a real zone with its own mean state - the
-    // partition already resolves the axial profile, so its draws price at
-    // the section state ('mixture' falls through to the bulk/section path).
-    if (fLiquid === 0 && fVapor === 0) {
-      return fillComp(out, 'mixture', 0, 1, 0, 0, 1, 0, needRho ? nodeBulkDensity(node) : 0);
-    }
-    const rhoL = fLiquid > 0 ? nodeLiquidDensity(node) : 0;
-    const rhoV = fVapor > 0 ? nodeVaporDensity(node) : 0;
-    const rhoM = nodeBulkDensity(node);
-    const rho = fLiquid * rhoL + fMixture * rhoM + fVapor * rhoV;
-    const wLiquid = fLiquid * rhoL / rho;
-    const wVapor = fVapor * rhoV / rho;
-    const wMixture = Math.max(0, 1 - wLiquid - wVapor);
-    return fillComp(out, 'mixture', fLiquid, fMixture, fVapor, wLiquid, wMixture, wVapor, rho);
-  }
-
   // Tank froth: void fraction ramps across the physical froth span
   // [zL, zV] as alpha(zeta) = zeta^n with n = 1/alphaBar - 1 - zero at the
   // pool boundary, one at the clear-vapor boundary, and integrating exactly
@@ -990,6 +981,7 @@ function fillComp(
   out.fLiquid = fLiquid; out.fMixture = fMixture; out.fVapor = fVapor;
   out.wLiquid = wLiquid; out.wMixture = wMixture; out.wVapor = wVapor;
   out.rho = rho;
+  out.hZone = undefined;
   return out;
 }
 
@@ -1019,6 +1011,100 @@ function fillPure(
   return phase === 'liquid'
     ? fillComp(out, 'liquid', 1, 0, 0, 1, 0, 0, rho)
     : fillComp(out, 'vapor', 0, 0, 1, 0, 0, 1, rho);
+}
+
+/**
+ * A draw from a once-through boiler tube, read off the partition's axial
+ * profile (otsgAxialProfile) at the opening.
+ *
+ * The three zones are the tube's sections - economizer, boiling, superheat -
+ * and each zone's share of the draw is priced at the state the profile holds
+ * where the opening meets that section, not at a figure for the section as a
+ * whole. So a nozzle part-way up the superheater draws steam that is
+ * part-way superheated, a nozzle in the boiling section draws the quality
+ * the water has reached by there, and both change continuously as a section
+ * boundary sweeps past (the profile is continuous across the boundaries).
+ *
+ * All strips of the opening share one velocity, so each strip's mass flow
+ * goes as its density: the zone weights and prices are the integrals of rho
+ * and rho*h over the part of the opening in that section (Simpson's rule -
+ * h is linear in each section and rho = 1/v smooth, and the rule's result is
+ * continuous in the limits). A point opening is the same thing with nothing
+ * to integrate.
+ *
+ * No zoneCanSupply backstop here: what a section can supply is the
+ * partition's business (the economizer ledger debits what leaves it, the
+ * other two are re-solved from the node's totals), and the backstop's
+ * mixture fallback was the node BULK - a state no point of the tube is in.
+ */
+function otsgProfileDraw(
+  node: FlowNode, elev: number, height: number, openingHeight: number,
+  out: DrawComposition | undefined,
+): DrawComposition {
+  const ev = node.otsg!.lastEval!;
+  const prof = ev.profile;
+  if (!prof) {
+    throw new Error(`[OTSG] ${node.id}: partition evaluation carries no axial profile ` +
+      `(a state restored from before it existed, or a broken evaluation) - a draw from ` +
+      `this tube has no state to be priced at.`);
+  }
+  const fr = ev.lengthFracs;
+  const edge = [0, fr[0] * height, (fr[0] + fr[1]) * height, height];
+  // State at height z, read as part of section k (s = fraction along it).
+  const stateAt = (k: number, z: number): [number, number] => {
+    const len = edge[k + 1] - edge[k];
+    const s = len > 0 ? Math.max(0, Math.min(1, (z - edge[k]) / len)) : 0;
+    const h = prof.h[k][0] + s * (prof.h[k][1] - prof.h[k][0]);
+    // Economizer: log-linear specific volume (see otsgAxialProfile).
+    const v = k === 0
+      ? prof.v[0][0] * Math.pow(prof.v[0][1] / prof.v[0][0], s)
+      : prof.v[k][0] + s * (prof.v[k][1] - prof.v[k][0]);
+    if (!(v > 0) || !Number.isFinite(v) || !Number.isFinite(h)) {
+      throw new Error(`[OTSG] ${node.id}: axial profile gives no usable state at ` +
+        `${z.toFixed(3)} m (section ${k + 1}): h=${h} J/kg, v=${v} m3/kg.`);
+    }
+    return [h, v];
+  };
+  const lo = Math.max(0, elev - openingHeight / 2);
+  const hi = Math.min(height, elev + openingHeight / 2);
+  const f = [0, 0, 0];      // opening-area fraction per section
+  const mass = [0, 0, 0];   // integral of rho dz per section
+  const hZone: [number, number, number] = [0, 0, 0];
+  if (hi - lo > 0) {
+    for (let k = 0; k < 3; k++) {
+      const a = Math.max(lo, edge[k]), b = Math.min(hi, edge[k + 1]);
+      if (!(b > a)) continue;
+      const [hA, vA] = stateAt(k, a);
+      const [hM, vM] = stateAt(k, 0.5 * (a + b));
+      const [hB, vB] = stateAt(k, b);
+      const m = (b - a) / 6 * (1 / vA + 4 / vM + 1 / vB);
+      f[k] = (b - a) / (hi - lo);
+      mass[k] = m;
+      hZone[k] = (b - a) / 6 * (hA / vA + 4 * hM / vM + hB / vB) / m;
+    }
+  } else {
+    // Point opening: the section holding it (the first with any length that
+    // reaches it; the last with any length for a nozzle at the very top).
+    let k = -1;
+    for (let j = 0; j < 3; j++) {
+      if (edge[j + 1] > edge[j]) { k = j; if (elev <= edge[j + 1]) break; }
+    }
+    if (k < 0) {
+      throw new Error(`[OTSG] ${node.id}: partition has no section of any length ` +
+        `(length fractions ${fr.join(', ')}) - nothing for a nozzle to draw.`);
+    }
+    const [h, v] = stateAt(k, elev);
+    f[k] = 1;
+    mass[k] = 1 / v;
+    hZone[k] = h;
+  }
+  const total = mass[0] + mass[1] + mass[2];
+  const wL = mass[0] / total, wV = mass[2] / total;
+  const rho = hi - lo > 0 ? total / (hi - lo) : total;
+  const comp = fillComp(out, wL === 1 ? 'liquid' : wV === 1 ? 'vapor' : 'mixture',
+    f[0], f[1], f[2], wL, Math.max(0, 1 - wL - wV), wV, rho);
+  comp.hZone = hZone;
+  return comp;
 }
 
 /** Label-only view of drawCompositionAt, for callers that just branch. */
