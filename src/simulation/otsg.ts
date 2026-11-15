@@ -51,7 +51,7 @@ import {
   saturatedVaporDensity,
   estimateVaporV,
 } from './water-properties';
-import type { OtsgAxialProfile } from './types';
+import type { OtsgAxialProfile, OtsgSteamProfile } from './types';
 
 // ---------------------------------------------------------------------------
 // Saturation bundle
@@ -396,6 +396,10 @@ export interface OtsgEval {
    *  same one (otsgWaterSideDuties). Above the dome it is the local tangent
    *  of the one fluid's own state instead. */
   steamIsobar?: SteamIsobar;
+  /** The steam along the superheat section, inlet to outlet - the march that
+   *  set hSteamOut, point by point (see finish). Its last point IS the
+   *  outlet. Absent when there is no superheat section. */
+  steamProfile?: OtsgSteamProfile;
   /** Pressure tangent at the solved point (Pa/kg, Pa/J, Pa/kg), when asked
    *  for: dPdm follows feed addition (mass, its enthalpy and the slug's own
    *  pair together), dPdU energy alone, dPdm1 and dPdU1 the slug's mass and
@@ -891,6 +895,14 @@ export function isobarAt(iso: SteamIsobar, col: 'u' | 'v' | 'h', T: number): num
   return y[j] + (y[j + 1] - y[j]) * (T - iso.T[j]) / (iso.T[j + 1] - iso.T[j]);
 }
 
+/** Temperature on the isobar at specific energy u (end segments continue). */
+export function isobarTempAtU(iso: SteamIsobar, u: number): number {
+  const n = iso.T.length;
+  let j = 0;
+  while (j < n - 2 && u >= iso.u[j + 1]) j++;
+  return iso.T[j] + (iso.T[j + 1] - iso.T[j]) * (u - iso.u[j]) / (iso.u[j + 1] - iso.u[j]);
+}
+
 /** Temperature on the isobar at enthalpy h (end segments continue). */
 export function isobarTempAtH(iso: SteamIsobar, h: number): number {
   const n = iso.T.length;
@@ -898,6 +910,12 @@ export function isobarTempAtH(iso: SteamIsobar, h: number): number {
   while (j < n - 2 && h >= iso.h[j + 1]) j++;
   return iso.T[j] + (iso.T[j + 1] - iso.T[j]) * (h - iso.h[j]) / (iso.h[j + 1] - iso.h[j]);
 }
+
+/** Points traced per metal zone along the superheat section (see
+ *  marchSteamOverMetal's `trace`). Resolution of the drawn curve between the
+ *  zone boundaries, not physics: every point is exact, and a nozzle between
+ *  two of them reads the chord. */
+const TRACE_STEPS = 4;
 
 /**
  * A stream of W kg/s at temperature T crossing a piece of film (conductance
@@ -961,6 +979,14 @@ function approachWall(iso: SteamIsobar, T: number, TWall: number, hA: number, W:
  * The limits are the march's own: a vanishing draw soaks every piece to its
  * metal, a strong draw barely leaves saturation, a section of no length
  * returns its inlet, and metal colder than the stream cools it.
+ *
+ * `trace`, when given, receives the stream's temperature ALONG the section:
+ * `s` the fraction of the section's length behind each point (0 at the
+ * inlet, 1 at the outlet) and `T` the stream there. The approach to a wall
+ * composes exactly (two half-pieces of film leave the stream where the whole
+ * piece does), so each zone's piece is walked in TRACE_STEPS equal parts and
+ * every traced point lies on the same curve TOut ends - the nozzle part-way
+ * up the superheater draws the steam the outlet's own march has there.
  */
 export function marchSteamOverMetal(
   iso: SteamIsobar,
@@ -969,17 +995,32 @@ export function marchSteamOverMetal(
   hAFull: number,
   W: number,
   TIn: number,
+  trace?: { s: number[]; T: number[] },
 ): { TOut: number; TMean: number; transit: number[] } {
   const n = zoneTemps.length;
   const transit = new Array<number>(n).fill(0);
   let T = TIn, L = 0, wallSum = 0, taken = 0;
   let hNow = isobarAt(iso, 'h', T);
+  let LTotal = 0;
+  if (trace) {
+    for (let k = 0; k < n; k++) if (overlap[k] > 0) LTotal += overlap[k];
+    trace.s.length = 0; trace.T.length = 0;
+    trace.s.push(0); trace.T.push(T);
+  }
   for (let k = 0; k < n; k++) {
     const ov = overlap[k];
     if (!(ov > 0)) continue;
+    if (trace) {
+      for (let i = 1; i <= TRACE_STEPS; i++) {
+        T = approachWall(iso, T, zoneTemps[k], hAFull * ov / TRACE_STEPS, W);
+        trace.s.push((L + ov * i / TRACE_STEPS) / LTotal);
+        trace.T.push(T);
+      }
+    } else {
+      T = approachWall(iso, T, zoneTemps[k], hAFull * ov, W);
+    }
     L += ov;
     wallSum += ov * zoneTemps[k];
-    T = approachWall(iso, T, zoneTemps[k], hAFull * ov, W);
     if (W > 0) {
       const hNext = isobarAt(iso, 'h', T);
       transit[k] = W * (hNext - hNow);
@@ -1211,6 +1252,9 @@ export function evaluateOtsgPartition(
     m2: number, x2Bar: number, v2: number,
     m3: number, u3: number, v3: number,
     regime: OtsgEval['regime'],
+    // The specific energy the wall pin asked of the steam section. u3 is
+    // above it only when the pin could not hold (see otsgPartitionAtP).
+    u3Pin: number = u3,
   ): OtsgEval => {
     const h1Bar = u1 + P * v1;
     const h2Bar = (sat.u_f + x2Bar * (sat.u_g - sat.u_f)) + P * v2;
@@ -1262,17 +1306,23 @@ export function evaluateOtsgPartition(
     // correctly bounded TEMPERATURE arriving downstream as an unbounded
     // enthalpy.
     //
-    // The inlet-at-saturation assumption only exists while a boiling
-    // section actually FEEDS this one, so it fades with the boiling
-    // section's presence (w2), draws landing at the section mean without
-    // it. A supercritical pass has no h_g inlet at all (its inlet is the
-    // feed) and draws at its mean.
-    const w2 = m2 / (m2 + 1);
-    // vSteamOut follows hSteamOut branch for branch: the same states, the
-    // same weights, so the draw's density and enthalpy are one fluid.
+    // The march says what SHAPE the steam has along the section - how far
+    // each point stands from the section's mean. Where the mean itself
+    // stands is the stored energy's to say. While the wall pin holds they
+    // are one statement (the pin sets u3 to the march's own mean). When it
+    // cannot - the leftovers carry more energy than pinned steam can hold,
+    // so there is no boiling section and u3 has floated above the pin - the
+    // steam is hotter than the march's by that excess everywhere along it:
+    // the march's curve, raised bodily until its mean is the section's.
+    // Zero excess at the seam where the pin lets go, so nothing steps there,
+    // and no scale of its own. (This used to be a blend from the marched
+    // outlet toward the section mean, weighted by the boiling section's
+    // mass over its last kilogram.) A supercritical pass has no saturated
+    // inlet at all and stays uniform at its mean.
     let hSteamOut: number;
     let vSteamOut: number;
     let steamIsobar: SteamIsobar | undefined;
+    let steamProfile: OtsgSteamProfile | undefined;
     let TSteamOut = sat.T;
     if (m3 <= 0) {
       hSteamOut = sat.h_g;
@@ -1282,23 +1332,34 @@ export function evaluateOtsgPartition(
       vSteamOut = v3;
       TSteamOut = T3;
       steamIsobar = localIsobar(P, u3, v3, T3, h3Bar);
+      steamProfile = { s: [0, 1], h: [h3Bar, h3Bar], v: [v3, v3] };
     } else {
-      steamIsobar = isobarFor(P, sat);
-      const { TOut } = marchSteamOverMetal(steamIsobar, pin.zoneTemps,
-        superheatOverlaps(pin.zoneTemps.length, V3 / VT), pin.hA3Full, pin.WSteam, sat.T);
-      // Metal colder than saturation cannot hand the draw less than
-      // saturated vapour (the blend below floors there too).
-      const hEps = TOut > sat.T ? isobarAt(steamIsobar, 'h', TOut) : sat.h_g;
-      const vEps = TOut > sat.T ? isobarAt(steamIsobar, 'v', TOut) : sat.v_g;
-      const hBlend = w2 * hEps + (1 - w2) * h3Bar;
-      if (hBlend >= sat.h_g) {
-        hSteamOut = hBlend;
-        vSteamOut = w2 * vEps + (1 - w2) * v3;
-        TSteamOut = isobarTempAtH(steamIsobar, hBlend);
-      } else {
-        hSteamOut = sat.h_g;
-        vSteamOut = sat.v_g;
+      const iso = steamIsobar = isobarFor(P, sat);
+      const trace = { s: [] as number[], T: [] as number[] };
+      marchSteamOverMetal(iso, pin.zoneTemps,
+        superheatOverlaps(pin.zoneTemps.length, V3 / VT), pin.hA3Full, pin.WSteam, sat.T, trace);
+      let dh = 0, dv = 0;
+      if (u3 !== u3Pin) {
+        const TPin = isobarTempAtU(iso, u3Pin);
+        dh = h3Bar - isobarAt(iso, 'h', TPin);
+        dv = v3 - isobarAt(iso, 'v', TPin);
       }
+      // Metal colder than saturation cannot hand the draw less than
+      // saturated vapour.
+      steamProfile = {
+        s: trace.s,
+        h: trace.T.map(T => (T > sat.T ? isobarAt(iso, 'h', T) : sat.h_g) + dh),
+        v: trace.T.map(T => (T > sat.T ? isobarAt(iso, 'v', T) : sat.v_g) + dv),
+      };
+      // A section too short to lie under any metal has no length to trace:
+      // inlet and outlet are the same point.
+      if (steamProfile.s.length === 1) {
+        steamProfile.s.push(1); steamProfile.h.push(steamProfile.h[0]); steamProfile.v.push(steamProfile.v[0]);
+      }
+      const last = steamProfile.s.length - 1;
+      hSteamOut = steamProfile.h[last];
+      vSteamOut = steamProfile.v[last];
+      if (hSteamOut > sat.h_g) TSteamOut = isobarTempAtH(iso, hSteamOut);
     }
     return {
       P, sat,
@@ -1307,7 +1368,7 @@ export function evaluateOtsgPartition(
         mk(m2, v2, V2, h2Bar, T2),
         mk(m3, v3, V3, h3Bar, T3),
       ],
-      hSteamOut, vSteamOut, TSteamOut, u3, x2Out, regime, steamIsobar,
+      hSteamOut, vSteamOut, TSteamOut, u3, x2Out, regime, steamIsobar, steamProfile,
     };
   };
 
@@ -1485,6 +1546,9 @@ export function evaluateOtsgPartition(
   // mild function of L3 and du3 shifts the volume only through v3, so this
   // settles in a couple of rounds.
   let result: { P: number; fin: AtP } | null = null;
+  // The pin offset the returned solve was made with (du3 itself moves on to
+  // the refreshed value at the bottom of the loop).
+  let du3Solved = 0;
   for (let outer = 0; outer < 5; outer++) {
     const solved = solveP();
     if (solved === 'supercritical') {
@@ -1506,6 +1570,7 @@ export function evaluateOtsgPartition(
         `The tube is emptier than saturated steam at vacuum.`);
     }
     result = solved;
+    du3Solved = du3;
     const { P, fin } = solved;
     // Refresh the pin at the solved pressure.
     const L3New = Math.max(0, Math.min(1, (fin.m3 * fin.v3) / V));
@@ -1539,7 +1604,7 @@ export function evaluateOtsgPartition(
     v3 = (V - fin.m1 * fin.v1 - fin.m2 * fin.v2) / fin.m3;
   }
   const ev = finish(P, fin.sat, fin.m1, fin.u1, fin.v1, fin.m2, fin.x2Bar, fin.v2,
-    fin.m3, fin.u3, v3, fin.regime);
+    fin.m3, fin.u3, v3, fin.regime, fin.sat.u_g + du3Solved);
   if (tangentSpec) {
     // Implicit-function tangent of the volume closure R(P; m, U, m1) = 0:
     // dP/dx = -(dR/dx)/(dR/dP), every derivative one residual evaluation
@@ -1777,7 +1842,10 @@ export function otsgRates(
  *    profile otsgRates crosses mass over: h_f - hBar1 is half its span);
  *  - boiling: quality linear in length from 0 to x2Out (boilingMeanVolume
  *    integrates exactly this);
- *  - superheat: saturated steam in, hSteamOut at the outlet.
+ *  - superheat: the outlet's own march over the tube metal, point by point
+ *    (ev.steamProfile) - saturated steam in, hSteamOut out, and in between
+ *    the steam that march has at each height, so a nozzle part-way up draws
+ *    what the metal below it has been charged for heating.
  *
  * A draw used to be priced by SECTION: every nozzle in the superheat section
  * took hSteamOut, the fully superheated outlet, and every nozzle in the
@@ -1790,10 +1858,12 @@ export function otsgRates(
  * across both boundaries, so the draw now changes as the boundary sweeps
  * past instead of when.
  *
- * Ends that only exist while a neighbouring section does fade with that
- * neighbour's mass (m / (m + 1 kg), the convention hSteamOut already uses
- * for its saturated inlet): an all-liquid tube has no saturated boundary
- * for its economizer to climb to and draws at its mean everywhere.
+ * The economizer's profile is the one its own rate equations assume
+ * (otsgRates: W12 = Q1 / (h_f - h_a) with h_a = 2 hBar - h_f): it reaches
+ * saturated liquid at its top whenever the tube holds anything above it. A
+ * tube that is one liquid (nothing above, no dome to partition across) has
+ * no saturated boundary to climb to and is uniform at its mean. That is the
+ * partition's own all-liquid seam, not a second one.
  */
 export function otsgAxialProfile(ev: OtsgEval): OtsgAxialProfile {
   const { sat } = ev;
@@ -1807,19 +1877,17 @@ export function otsgAxialProfile(ev: OtsgEval): OtsgAxialProfile {
   const v2: [number, number] = boils
     ? [sat.v_f, sat.v_f + ev.x2Out * (sat.v_g - sat.v_f)]
     : [s2.vBar, s2.vBar];
-  // Economizer: symmetric about its mean, reaching the boundary state to
-  // the extent there is anything above the boundary. The boundary state is
-  // the boiling section's inlet when there is one, saturated liquid when
-  // the water flashes straight to steam.
-  const mAbove = s2.mass + s3.mass;
-  const wAbove = mAbove / (mAbove + 1);
+  // Economizer: symmetric about its mean, reaching the boundary state at
+  // its top. The boundary state is the boiling section's inlet when there
+  // is one, saturated liquid when the water flashes straight to steam.
+  const partitioned = s2.mass + s3.mass > 0;
   const hTop = s2.mass > 0 ? h2[0] : sat.h_f;
   const vTop = s2.mass > 0 ? v2[0] : sat.v_f;
-  const dh = wAbove * (hTop - s1.hBar);
+  const dh = partitioned ? hTop - s1.hBar : 0;
   // Specific volume log-linear between the same two states: positive
   // whatever the span, where the linear mirror 2 vBar - v_f goes negative
   // near the critical point.
-  const dlnv = wAbove * Math.log(vTop / s1.vBar);
+  const dlnv = partitioned ? Math.log(vTop / s1.vBar) : 0;
   if (s1.mass > 0 && !Number.isFinite(dlnv)) {
     throw new Error(`[OTSG] economizer profile: specific volumes ${s1.vBar} (mean) and ` +
       `${vTop} (boundary) m3/kg give no profile at ${(ev.P / 1e5).toFixed(1)} bar.`);
@@ -1827,13 +1895,16 @@ export function otsgAxialProfile(ev: OtsgEval): OtsgAxialProfile {
   const h1: [number, number] = s1.mass > 0 ? [s1.hBar - dh, s1.hBar + dh] : [hTop, hTop];
   const v1: [number, number] = s1.mass > 0
     ? [s1.vBar * Math.exp(-dlnv), s1.vBar * Math.exp(dlnv)] : [vTop, vTop];
-  // Superheat: what the boiling section hands it, to the outlet. With no
-  // boiling section feeding it the saturated inlet does not exist and the
-  // section is uniform at its outlet state (which is then its mean).
-  const w2 = s2.mass / (s2.mass + 1);
-  const h3: [number, number] = [w2 * h2[1] + (1 - w2) * ev.hSteamOut, ev.hSteamOut];
-  const v3: [number, number] = [w2 * v2[1] + (1 - w2) * ev.vSteamOut, ev.vSteamOut];
-  return { h: [h1, h2, h3], v: [v1, v2, v3] };
+  // Superheat: the march's own curve. With no superheat section the outlet
+  // state stands in for a section of no length.
+  const steam = ev.steamProfile
+    ?? { s: [0, 1], h: [ev.hSteamOut, ev.hSteamOut], v: [ev.vSteamOut, ev.vSteamOut] };
+  const n = steam.s.length - 1;
+  return {
+    h: [h1, h2, [steam.h[0], steam.h[n]]],
+    v: [v1, v2, [steam.v[0], steam.v[n]]],
+    steam,
+  };
 }
 
 // ---------------------------------------------------------------------------

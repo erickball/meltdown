@@ -2051,6 +2051,68 @@ test('a nozzle part-way up a boiler tube draws the state at the nozzle, without 
   // own price, and lands between the ends.
   const all = price(H / 2, H);
   assert(all > price(0) && all < ev.hSteamOut, 'a tube-tall opening draws a blend of all three sections');
+  // Half-way up the superheater the nozzle draws what the outlet's own march
+  // has there: saturated steam taken across half the section's film.
+  const L3 = ev.sections[2].lengthFrac;
+  const half = marchSteamOverMetal(ev.steamIsobar!, [TSteam + 40], [L3 / 2], 1200 * 2000, 5, ev.sat.T);
+  assertClose(price((1 - L3 / 2) * H), isobarAt(ev.steamIsobar!, 'h', half.TOut), 1,
+    'a nozzle half-way up the superheater draws the half-marched steam');
+  assert(price((1 - L3 / 2) * H) > 0.5 * (ev.sat.h_g + ev.hSteamOut),
+    'steam approaching hotter metal takes most of its superheat early');
+});
+
+test('a boiling section running dry steps neither the outlet steam nor a nozzle at its top', () => {
+  // Raise a slug-less tube's energy until its boiling section is gone. The
+  // outlet used to slide from the marched value to the section's mean over
+  // the boiling section's last kilogram (m2/(m2 + 1 kg)) - 100 kJ/kg in two
+  // kilograms here - and a nozzle at the top of the boiling section saw the
+  // unfaded part of that as a step. The march's curve is now carried through
+  // the seam, raised by whatever the steam holds above the wall pin.
+  const P0 = 80e5;
+  const sat0 = saturationAtP(P0);
+  const u3 = sat0.u_g + 250e3;
+  const v3 = superheatedV(u3, P0);
+  const TSteam = calculateState(1, u3, v3).temperature;
+  const m = 40, V = 30 * v3 + 10 * 0.004, H = 14;
+  const pin = { zoneTemps: [TSteam - 20, TSteam + 40], hA3Full: 1200 * 2000, WSteam: 5 };
+  const N = 400;
+  let prev: { lead: number; m2: number } | undefined;
+  let dried = false, sawSliver = false;
+  for (let i = 0; i <= N; i++) {
+    const ev = evaluateOtsgPartition(m, m * (sat0.u_g - 150e3 + 500e3 * i / N), { m1: 0, U1: 0 },
+      { tubeVolume: V, tubeLength: 1, heatArea: 2000 }, pin);
+    const [, s2, s3] = ev.sections;
+    if (!(s3.mass > 0)) continue;
+    const lead = ev.hSteamOut - s3.hBar;
+    if (prev) {
+      assert(Math.abs(lead - prev.lead) < 1e3,
+        `the outlet's lead over the section mean moved ${((lead - prev.lead) / 1e3).toFixed(1)} kJ/kg ` +
+        `between boiling masses ${prev.m2.toFixed(3)} and ${s2.mass.toFixed(3)} kg`);
+    }
+    prev = { lead, m2: s2.mass };
+    if (s2.mass === 0) {
+      dried = true;
+      assert(lead > 50e3, `dry of boiling water the outlet still leads the mean, got ${(lead / 1e3).toFixed(0)} kJ/kg`);
+    } else if (s2.mass < 3) {
+      sawSliver = true;
+      const node = {
+        id: 'tube', volume: V, height: H,
+        fluid: { mass: m, internalEnergy: 0, pressure: ev.P, temperature: ev.sat.T, phase: 'two-phase', quality: 0.9 },
+        otsg: { lastEval: {
+          lengthFracs: [ev.sections[0].lengthFrac, s2.lengthFrac, s3.lengthFrac],
+          profile: otsgAxialProfile(ev),
+        } },
+      } as unknown as FlowNode;
+      const at = (z: number) => {
+        const c = { ...drawCompositionAt(node, z, 1) };
+        return c.wMixture * zoneWaterEnthalpy(node, 'mixture', c) + c.wVapor * zoneWaterEnthalpy(node, 'vapor', c);
+      };
+      const b2 = s2.lengthFrac * H;
+      assertClose(at(b2 * (1 + 1e-9)), at(b2 * (1 - 1e-9)), 1e3,
+        `a nozzle crossing the top of a ${s2.mass.toFixed(2)} kg boiling section`);
+    }
+  }
+  assert(dried && sawSliver, 'the sweep must cross the seam where the boiling section vanishes');
 });
 
 test('the wall referees the partition: steam follows its metal, never past it', () => {

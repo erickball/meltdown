@@ -1027,10 +1027,9 @@ function fillPure(
  *
  * All strips of the opening share one velocity, so each strip's mass flow
  * goes as its density: the zone weights and prices are the integrals of rho
- * and rho*h over the part of the opening in that section (Simpson's rule -
- * h is linear in each section and rho = 1/v smooth, and the rule's result is
- * continuous in the limits). A point opening is the same thing with nothing
- * to integrate.
+ * and rho*h over the part of the opening in that section (Simpson's rule on
+ * each smooth piece of the profile, so the result is continuous in the
+ * limits). A point opening is the same thing with nothing to integrate.
  *
  * No zoneCanSupply backstop here: what a section can supply is the
  * partition's business (the economizer ledger debits what leaves it, the
@@ -1048,17 +1047,33 @@ function otsgProfileDraw(
       `(a state restored from before it existed, or a broken evaluation) - a draw from ` +
       `this tube has no state to be priced at.`);
   }
+  const steam = prof.steam;
+  if (!steam || steam.s.length < 2) {
+    throw new Error(`[OTSG] ${node.id}: the axial profile carries no superheat curve ` +
+      `(a state saved before the curve existed, or a broken evaluation) - a draw from ` +
+      `this tube has no state to be priced at.`);
+  }
   const fr = ev.lengthFracs;
   const edge = [0, fr[0] * height, (fr[0] + fr[1]) * height, height];
   // State at height z, read as part of section k (s = fraction along it).
   const stateAt = (k: number, z: number): [number, number] => {
     const len = edge[k + 1] - edge[k];
     const s = len > 0 ? Math.max(0, Math.min(1, (z - edge[k]) / len)) : 0;
-    const h = prof.h[k][0] + s * (prof.h[k][1] - prof.h[k][0]);
-    // Economizer: log-linear specific volume (see otsgAxialProfile).
-    const v = k === 0
-      ? prof.v[0][0] * Math.pow(prof.v[0][1] / prof.v[0][0], s)
-      : prof.v[k][0] + s * (prof.v[k][1] - prof.v[k][0]);
+    let h: number, v: number;
+    if (k === 2) {
+      // Superheat: the march's curve, linear between its points.
+      let j = 0;
+      while (j < steam.s.length - 2 && s >= steam.s[j + 1]) j++;
+      const t = (s - steam.s[j]) / (steam.s[j + 1] - steam.s[j]);
+      h = steam.h[j] + t * (steam.h[j + 1] - steam.h[j]);
+      v = steam.v[j] + t * (steam.v[j + 1] - steam.v[j]);
+    } else {
+      h = prof.h[k][0] + s * (prof.h[k][1] - prof.h[k][0]);
+      // Economizer: log-linear specific volume (see otsgAxialProfile).
+      v = k === 0
+        ? prof.v[0][0] * Math.pow(prof.v[0][1] / prof.v[0][0], s)
+        : prof.v[k][0] + s * (prof.v[k][1] - prof.v[k][0]);
+    }
     if (!(v > 0) || !Number.isFinite(v) || !Number.isFinite(h)) {
       throw new Error(`[OTSG] ${node.id}: axial profile gives no usable state at ` +
         `${z.toFixed(3)} m (section ${k + 1}): h=${h} J/kg, v=${v} m3/kg.`);
@@ -1074,13 +1089,32 @@ function otsgProfileDraw(
     for (let k = 0; k < 3; k++) {
       const a = Math.max(lo, edge[k]), b = Math.min(hi, edge[k + 1]);
       if (!(b > a)) continue;
-      const [hA, vA] = stateAt(k, a);
-      const [hM, vM] = stateAt(k, 0.5 * (a + b));
-      const [hB, vB] = stateAt(k, b);
-      const m = (b - a) / 6 * (1 / vA + 4 / vM + 1 / vB);
+      // Simpson's rule on each smooth piece: the whole overlap in the
+      // economizer and the boiling section, and in the superheater each
+      // stretch between two points of the march's curve (its kinks are at
+      // those points, and a rule laid across one is not continuous in the
+      // limits).
+      const cuts = [a];
+      if (k === 2) {
+        const len = edge[3] - edge[2];
+        for (const sj of steam.s) {
+          const z = edge[2] + sj * len;
+          if (z > a && z < b) cuts.push(z);
+        }
+      }
+      cuts.push(b);
+      let m = 0, mh = 0;
+      for (let i = 0; i + 1 < cuts.length; i++) {
+        const p = cuts[i], q = cuts[i + 1];
+        const [hA, vA] = stateAt(k, p);
+        const [hM, vM] = stateAt(k, 0.5 * (p + q));
+        const [hB, vB] = stateAt(k, q);
+        m += (q - p) / 6 * (1 / vA + 4 / vM + 1 / vB);
+        mh += (q - p) / 6 * (hA / vA + 4 * hM / vM + hB / vB);
+      }
       f[k] = (b - a) / (hi - lo);
       mass[k] = m;
-      hZone[k] = (b - a) / 6 * (hA / vA + 4 * hM / vM + hB / vB) / m;
+      hZone[k] = mh / m;
     }
   } else {
     // Point opening: the section holding it (the first with any length that
