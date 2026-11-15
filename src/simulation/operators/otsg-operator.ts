@@ -6,8 +6,12 @@
  * for these nodes) with the sectioned model of docs/otsg-moving-boundary-
  * design.md:
  *
- *   shell gas --[counterflow march, section by section]--> tube metal
+ *   shell gas --[its streams marched over the metal zones]--> tube metal
  *   tube metal --[transit + standing branches, per section]--> water sections
+ *
+ * Nothing here assumes which nozzle is an inlet, which way a stream runs, or
+ * which fluid is the hot one: every stream is marched from the flows its
+ * nozzles actually carry (design doc section 5a).
  *
  * The node's ordinary (mass, energy) totals stay owned by the existing flow
  * machinery - this operator adds ONLY the wall heat, plus the matching energy
@@ -23,29 +27,33 @@
  * draw with - so slug water leaving a flooded tube is debited from the slug
  * whatever the momentum path's phase label says. Only that share needs
  * booking - the boiling and superheat masses are derived from the totals -
- * and the rest of what the bundle ships is the scale the steam pass transits
- * at. An INFLOW is the donor's business, classified by the DONOR's own draw
- * model: its non-vapor share, routed to section 1 in proportion to how
- * subcooled it is. Liquid draws leave section 1 weighted by m1/(m1+1), so an
- * emptying subcooled section never steps its own rate.
+ * and the rest of what a nozzle ships is the steam pass's stream. An INFLOW
+ * is priced by the DONOR's own draw model and joins the section it enters:
+ * water colder than saturation joins section 1 where section 1 is (always at
+ * the feed end, and wherever the slug has risen to); anything else stays in
+ * the node's totals. Liquid draws leave section 1 weighted by m1/(m1+1), so
+ * an emptying subcooled section never steps its own rate.
  */
 
-import { SimulationState, FlowNode, ThermalNode } from '../types';
+import { SimulationState, FlowNode, FlowConnection, ThermalNode } from '../types';
 import { RateOperator, ConstraintOperator, StateRates, createZeroRates } from '../rk45-solver';
 import {
   evaluateOtsgPartition,
   otsgRates,
-  marchCounterflowGas,
   otsgZoneOverlaps,
   reconcileSlug,
   saturationAtP,
   OtsgEval,
   OtsgWallPin,
-  marchSteamOverMetal,
+  SteamNozzle,
+  ZoneSource,
+  marchCells,
+  marchSteamStreams,
   otsgAxialProfile,
 } from '../otsg';
-import { saturatedLiquidEnergy, saturatedLiquidDensity } from '../water-properties';
-import { nodeHeatCapacity } from './rate-operators';
+import { saturatedLiquidEnergy } from '../water-properties';
+import { nodeHeatCapacity, priceDrawAt } from './rate-operators';
+import { breakExchange } from './exchange-flow';
 import {
   totalMoles,
   mixtureThermalConductivity,
@@ -110,12 +118,19 @@ export function tubeWaterState(node: FlowNode): { pressure: number; energy: numb
  *  sectioned model needs. Shared so the ledger check (which runs on ACCEPTED
  *  states) sees exactly what the rate operator saw. */
 export interface OtsgFlows {
-  WFeed: number;       // kg/s of liquid inflow routed to the subcooled section
-  hFeed: number;       // J/kg - its mean enthalpy
+  /** kg/s - the inflow the economizer takes: water arriving colder than
+   *  saturation, where the economizer is (see classifyOtsgFlows). */
+  WFeed: number;
+  /** W - the enthalpy that inflow arrives with, each stream at its own. */
+  HFeed: number;
+  /** J/kg - the enthalpy of the water STANDING at the tube's feed end. Not a
+   *  rate and not flow-weighted, so it does not move when the feed stops: it
+   *  prices the partition's pressure tangent, which asks "what would feed
+   *  add" whether or not any is arriving. */
+  hFeed: number;
   uFeed: number;       // J/kg - the same, as internal energy
-  /** kg/s - everything the bundle ships that is NOT economizer water: the
-   *  scale the steam pass transits at (see classifyOtsgFlows). Needs no
-   *  section booking, because those sections are derived from the totals. */
+  /** kg/s - everything the bundle ships that is NOT economizer water. A
+   *  diagnostic total; the steam pass itself runs on steamNozzles. */
   WSteamOut: number;
   /** kg/s - the share of the outflow drawn from the economizer, by the
    *  partition's own phase-by-elevation answer. The one draw the ledger has
@@ -124,14 +139,70 @@ export interface OtsgFlows {
   /** W - the enthalpy that economizer water leaves with, each draw priced
    *  at its own nozzle's point on the axial profile. */
   HLiquidOut: number;
+  /** Every nozzle's flow as the ECONOMIZER sees it: what it takes in (W > 0,
+   *  at enthalpy h) and what is drawn out of it (W < 0), by the metal zone
+   *  the nozzle opens into. The economizer's stream is marched from these. */
+  slugNozzles: SteamNozzle[];
+  /** Every nozzle's flow that is NOT the economizer's: the steam pass is
+   *  marched from these (marchSteamStreams). */
+  steamNozzles: SteamNozzle[];
+}
+
+/** One flow through one of a node's openings: a connection's net flow, or one
+ *  leg of the counter-current exchange through a break (exchange-flow.ts). */
+interface NodeStream {
+  conn: FlowConnection;
+  /** true: the node is the connection's to-node */
+  isTo: boolean;
+  /** kg/s INTO the node (negative = out of it) */
+  w: number;
+  /** true for the connection's own net flow, false for an exchange leg */
+  net: boolean;
+}
+
+/** Everything flowing through `id`'s openings: each connection's net flow,
+ *  and both legs of the exchange through any break. */
+function nodeStreams(state: SimulationState, id: string): NodeStream[] {
+  const out: NodeStream[] = [];
+  for (const conn of state.flowConnections) {
+    const isFrom = conn.fromNodeId === id;
+    const isTo = conn.toNodeId === id;
+    if (!isFrom && !isTo) continue;
+    out.push({ conn, isTo, w: isTo ? conn.massFlowRate : -conn.massFlowRate, net: true });
+    if (conn.isBreakConnection) {
+      const ex = breakExchange(state, conn);
+      if (ex) {
+        for (const leg of [ex.heavy, ex.light]) {
+          out.push({ conn, isTo, w: leg.fromIsDonor === isTo ? leg.massFlow : -leg.massFlow, net: false });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Which metal zone a nozzle opens into. `s` is its position along the bundle
+ * (0 = feed end, 1 = steam end) when the nozzles' elevations give one;
+ * undefined when they do not - every nozzle at one height, a bundle lying on
+ * its side - and elevation says nothing about where along the tube anything
+ * is. Then the only axis left is the one the exchanger is built around:
+ * `inflowEnd` is the end a stream entering takes (and one leaving takes the
+ * other).
+ */
+function nozzleZone(s: number | undefined, w: number, inflowEnd: 0 | 1, nZones: number): number {
+  const pos = s !== undefined ? s : (w > 0 ? inflowEnd : 1 - inflowEnd);
+  return Math.min(nZones - 1, Math.max(0, Math.floor(pos * nZones)));
 }
 
 export function classifyOtsgFlows(
   state: SimulationState, id: string, node: FlowNode, waterPressure: number,
 ): OtsgFlows {
-  let WFeed = 0;
+  let WFeed = 0, HFeed = 0;
   let WSteamOut = 0, WLiquidOut = 0, HLiquidOut = 0;
-  // THE ECONOMIZER'S INLET ENTHALPY is accumulated WITHOUT any flow rate in
+  const slugNozzles: SteamNozzle[] = [];
+  const steamNozzles: SteamNozzle[] = [];
+  // THE FEED END'S STANDING ENTHALPY is accumulated WITHOUT any flow rate in
   // it - see the note where hFeed is formed below - so it cannot step when
   // the feed stops.
   let hInNum = 0, hInDen = 0;
@@ -151,160 +222,185 @@ export function classifyOtsgFlows(
   // partition ran out of leftovers.
   const satNow = saturationAtP(waterPressure);
   const hfNow = satNow.h_f;
-  // WHICH connection is the economizer's inlet is GEOMETRY, not flow: a
-  // once-through tube takes its feed at the bottom and gives up steam at the
-  // top, which is the same convention the partition's own phase-by-elevation
-  // answer rests on. Selecting it by elevation makes the inlet enthalpy
-  // independent of both the flow rate and the momentum solve's phase LABEL -
-  // and the label matters here, because a flooded tube ships water out its
-  // steam nozzle, and letting those (2-5 kg, wildly swinging) sliver valve
-  // nodes price a 73 kg slug put their noise straight into the published
-  // pressure.
-  let minElev = Infinity;
-  for (const conn of state.flowConnections) {
-    if (conn.fromNodeId === id) minElev = Math.min(minElev, conn.fromElevation ?? 0);
-    else if (conn.toNodeId === id) minElev = Math.min(minElev, conn.toElevation ?? 0);
+  const nZones = node.otsg!.metalNodeIds.length;
+  const height = node.height ?? Math.cbrt(node.volume);
+  const streams = nodeStreams(state, id);
+  // WHERE each nozzle is along the tube is GEOMETRY, not flow: its elevation,
+  // the same convention the partition's own phase-by-elevation answer rests
+  // on (drawCompositionAt reads the section boundaries by height). The tube's
+  // LOWEST connection is its feed end: nothing enters below it, so water
+  // arriving there is the bottom of the column whatever the column is made
+  // of at the moment. Selecting by elevation keeps the feed end independent
+  // of the flow rate and of the momentum solve's phase LABEL - and the label
+  // matters, because a flooded tube ships water out its steam nozzle, and
+  // letting those (2-5 kg, wildly swinging) sliver valve nodes price a 73 kg
+  // slug put their noise straight into the published pressure.
+  let minElev = Infinity, loClamped = Infinity, hiClamped = -Infinity;
+  for (const st of streams) {
+    const e = (st.isTo ? st.conn.toElevation : st.conn.fromElevation) ?? 0;
+    minElev = Math.min(minElev, e);
+    const c = Math.max(0, Math.min(height, e));
+    loClamped = Math.min(loClamped, c);
+    hiClamped = Math.max(hiClamped, c);
   }
-  for (const conn of state.flowConnections) {
-    const isFrom = conn.fromNodeId === id;
-    const isTo = conn.toNodeId === id;
-    if (!isFrom && !isTo) continue;
-    // Signed flow INTO this node
-    const w = isTo ? conn.massFlowRate : -conn.massFlowRate;
-    // The water on the OTHER side of this connection, as subcooled liquid at
-    // its own temperature (u_f(T) + P v_f(T) - compressibility negligible).
-    // Which end is the donor depends on the flow's sign, but which node is
-    // the OTHER one does not - and the inlet's own enthalpy is a fact about
-    // the water standing there either way.
+  const spread = hiClamped > loClamped;
+  // Liquid arriving within this much enthalpy of saturation is not
+  // economizer water: it flashes into the boiling region essentially on
+  // entry (~12 K of subcooling), so it stays in the node's totals, whose
+  // boiling and superheat masses are derived. A smoothing WIDTH, not a
+  // threshold: the routing varies continuously with subcooling, so a
+  // transiently near-saturated stream (leak backflow, recirculation) cannot
+  // poison the subcooled section's mean-enthalpy closure - which is exactly
+  // how this ramp's absence killed a run.
+  const subcooledShare = (h: number) => Math.min(1, Math.max(0, (hfNow - h) / 50e3));
+  for (const st of streams) {
+    const { conn, isTo, w } = st;
     const other = state.flowNodes.get(isTo ? conn.fromNodeId : conn.toNodeId);
     if (!other) {
       throw new Error(`[OTSG] node '${id}': connection '${conn.id}' names a node ` +
         `('${isTo ? conn.fromNodeId : conn.toNodeId}') that does not exist.`);
     }
-    const hIn = saturatedLiquidEnergy(other.fluid.temperature) +
-      waterPressure / saturatedLiquidDensity(other.fluid.temperature);
-    // Liquid inflow feeds the SUBCOOLED section only to the extent it is
-    // actually subcooled: water within ~12 K of saturation flashes into
-    // the boiling region essentially on entry, so it routes to section 2
-    // (whose mass is derived - no bookkeeping). The 50 kJ/kg ramp is a
-    // smoothing width, not a threshold: routing varies continuously with
-    // subcooling, and a transiently near-saturated stream (leak backflow,
-    // recirculation) can no longer poison the subcooled section's
-    // mean-enthalpy closure - which is exactly how this line's absence
-    // killed a run.
-    const wSub = Math.min(1, Math.max(0, (hfNow - hIn) / 50e3));
-    // Vapor inflow (backflow from a steam header) needs no bookkeeping: it
-    // lands in the node's totals and the solved partition picks it up as
-    // vapor region on the next evaluation. A vapor line is also not part of
-    // the economizer's inlet.
     const elevHere = (isTo ? conn.toElevation : conn.fromElevation) ?? 0;
-    if (elevHere === minElev) {
-      hInNum += wSub * hIn;
+    const tolHere = isTo ? conn.toPhaseTolerance : conn.fromPhaseTolerance;
+    const openHere = isTo ? conn.toOpeningHeight : conn.fromOpeningHeight;
+    const atFeedEnd = elevHere === minElev;
+    const zone = nozzleZone(
+      spread ? Math.max(0, Math.min(height, elevHere)) / height : undefined, w, 0, nZones);
+    // What the water on the OTHER side of this opening would arrive as: the
+    // donor's own draw at its own nozzle, priced exactly as the transport
+    // prices it (priceDrawAt), so the economizer's book and the node's
+    // totals are credited with the same enthalpy for the same kilogram. (It
+    // used to be re-derived here as saturated liquid at the donor's
+    // temperature - close for an ordinary feed line, but not the number the
+    // node's energy actually received, and nothing like it for a donor that
+    // is not liquid.) Which end is the donor depends on the flow's sign; which
+    // node is the OTHER one does not, and the water standing there is a fact
+    // either way - so the feed end's standing enthalpy is read whether or not
+    // anything is flowing.
+    const arriving = w > 0 || (atFeedEnd && st.net)
+      ? priceDrawAt(other, isTo ? conn.fromElevation : conn.toElevation, Math.abs(w),
+          isTo ? conn.fromPhaseTolerance : conn.toPhaseTolerance,
+          isTo ? conn.fromOpeningHeight : conn.toOpeningHeight)
+      : undefined;
+    if (atFeedEnd && st.net && arriving && arriving.waterShare > 0) {
+      const wSub = subcooledShare(arriving.h);
+      hInNum += wSub * arriving.h;
       hInDen += wSub;
     }
-    // WHAT LEAVES IS DECIDED BY THE PARTITION, NOT BY A LABEL.
-    //
-    // This used to book an outflow by conn.currentFlowPhase - the momentum
-    // path's phase LABEL. That label is written last, before the rates run,
-    // by FlowDynamicsConstraintOperator's own phase model, which knows
-    // nothing about the partition: it estimates the node's height from its
-    // volume as a cylinder (1.2 m for an Xe-100 bundle whose real tubes are
-    // 14 m) and compares the connection's elevation against a bulk-quality
-    // liquid level inside it. Every nozzle above ~1 m therefore reads
-    // 'vapor' whatever is actually there. On a FLOODED tube - the whole
-    // second half of a circulator trip - that booked 20-25 kg/s of boiling
-    // water leaving the top nozzle to the steam section and NOTHING to the
-    // slug, and a mid-bundle leak draining the economizer to the steam
-    // section too. The node's totals lost that water; the ledger did not,
-    // so m1 drifted up over the inventory, hit the closure's cap
-    // ("economizer ledger claims 99.x%"), and the partition it then asked
-    // for needed more than 220 bar to pack.
-    //
-    // The section that owns a draw is the one PHYSICALLY at the nozzle, and
-    // the partition already answers that question - drawCompositionAt reads
-    // its own section boundaries by elevation (economizer / boiling /
-    // superheat), which is the same convention the feed nozzle is selected
-    // by above. It is also the answer the ENERGY side already uses: both
-    // FlowRateOperator and the pressure solver price a draw by blending
-    // these same mass weights over the section enthalpies (hLiquidOut for
-    // the slug's mean, hSteamOut for the superheat outlet). So booking the
-    // mass by the same weights makes the section debit and the energy the
-    // node loses describe one event instead of two.
-    //
-    // An INFLOW is the DONOR's business, so it is classified by the DONOR's
-    // own draw model at its own nozzle: what the other node ships is what
-    // arrives, and (1 - wVapor) is the non-vapor share - the continuous form
-    // of the 'not labelled vapor' test it replaces. For the single-phase
-    // feed line that is every plant's normal case it is exactly 1, as the
-    // label was; where it differs, it is the answer the ENERGY side already
-    // uses, since FlowRateOperator prices what arrives by this same
-    // composition of the same donor.
-    //
-    // WHY THE ELEVATION ANSWER GOVERNS THE LEDGER BUT NOT THE TRANSIT
-    // SCALE. Only the LIQUID share needs booking - the boiling and superheat
-    // masses are derived from the totals - so WLiquidOut is the whole of the
-    // mass-conservation question, and it is the elevation's to answer: water
-    // leaving at 5 m came out of whatever section holds 5 m.
-    //
-    // WSteamOut is not a second booking; it is the scale the steam pass
-    // transits at (the wall pin's theta and the superheater's transit
-    // branch). The sections of a once-through tube are in SERIES, so what
-    // the bundle ships had to flow through the sections above the water it
-    // came from - the outlet is the top of the tube, and the drawn nozzle's
-    // 0.5 m of stub below it is drawing-frame detail, not a bypass. So the
-    // transit scale is the bundle's whole non-liquid throughput, and it does
-    // not step when a section boundary sweeps past a nozzle. Booking it by
-    // elevation instead was measured: the moment the boiling section's top
-    // rose past the steam nozzle on a flooding tube, the pin's theta stepped
-    // from ~0.1 to 1 (a dead-ended pocket soaking to its metal, T3 270 ->
-    // 390 C) and, on a tube that is 99% water, that step lands in the
-    // published pressure through the last cubic centimetres of vapour -
-    // circulator-trip rejections 649 -> 1201 for it. A discontinuity in an
-    // ARGUMENT, which no timestep can shrink.
     if (w > 0) {
-      const compIn = drawCompositionAt(
-        other, isTo ? conn.fromElevation : conn.toElevation, w,
-        isTo ? conn.fromPhaseTolerance : conn.toPhaseTolerance,
-        isTo ? conn.fromOpeningHeight : conn.toOpeningHeight, undefined, false);
-      WFeed += w * wSub * (1 - compIn.wVapor);
+      // AN INFLOW JOINS THE SECTION IT ENTERS.
+      //
+      // Subcooled water joins the economizer when the economizer is what is
+      // at its nozzle: always at the feed end, and anywhere the slug has
+      // risen to (the partition's own answer by elevation - the same one an
+      // outflow from that nozzle would be booked by). Water entering ABOVE
+      // the slug - a steam line draining back into the top of the tube, an
+      // injection part-way up - lands in the boiling or superheat section
+      // and quenches it, which needs no booking: it is in the node's totals,
+      // and the partition those totals solve to has less steam in it.
+      //
+      // Every liquid inflow used to be booked to the economizer wherever it
+      // entered, priced at the FEED end's enthalpy. Water backing in at the
+      // top was thereby teleported to the bottom of the tube past the steam
+      // it should have condensed, and the slug's energy book was credited
+      // with an enthalpy the node never received - a disagreement between
+      // ledger and totals that lands on the leftovers that set the pressure.
+      //
+      // Vapour needs no rule of its own: steam arrives above saturation, so
+      // its subcooled share is zero and it stays in the totals.
+      const Ww = w * arriving!.waterShare;
+      if (Ww > 0) {
+        const share = subcooledShare(arriving!.h) * (atFeedEnd ? 1
+          : node.otsg!.lastEval
+            ? drawCompositionAt(node, elevHere, w, tolHere, openHere, undefined, false).fLiquid
+            : 0);
+        const q = Ww * share;
+        if (q > 0) {
+          WFeed += q;
+          HFeed += q * arriving!.h;
+          slugNozzles.push({ zone, W: q, h: arriving!.h });
+        }
+        if (Ww - q > 0) steamNozzles.push({ zone, W: Ww - q, h: arriving!.h });
+      }
     } else if (w < 0) {
-      const compOut = drawCompositionAt(
-        node, elevHere, -w,
-        isTo ? conn.toPhaseTolerance : conn.fromPhaseTolerance,
-        isTo ? conn.toOpeningHeight : conn.fromOpeningHeight, undefined, false);
-      WLiquidOut += -w * compOut.wLiquid;
+      // WHAT LEAVES IS DECIDED BY THE PARTITION, NOT BY A LABEL.
+      //
+      // This used to book an outflow by conn.currentFlowPhase - the momentum
+      // path's phase LABEL. That label is written last, before the rates run,
+      // by FlowDynamicsConstraintOperator's own phase model, which knows
+      // nothing about the partition: it estimates the node's height from its
+      // volume as a cylinder (1.2 m for an Xe-100 bundle whose real tubes are
+      // 14 m) and compares the connection's elevation against a bulk-quality
+      // liquid level inside it. Every nozzle above ~1 m therefore reads
+      // 'vapor' whatever is actually there. On a FLOODED tube - the whole
+      // second half of a circulator trip - that booked 20-25 kg/s of boiling
+      // water leaving the top nozzle to the steam section and NOTHING to the
+      // slug, and a mid-bundle leak draining the economizer to the steam
+      // section too. The node's totals lost that water; the ledger did not,
+      // so m1 drifted up over the inventory, hit the closure's cap
+      // ("economizer ledger claims 99.x%"), and the partition it then asked
+      // for needed more than 220 bar to pack.
+      //
+      // The section that owns a draw is the one PHYSICALLY at the nozzle, and
+      // the partition already answers that question - drawCompositionAt reads
+      // its own section boundaries by elevation (economizer / boiling /
+      // superheat). It is also the answer the ENERGY side already uses: both
+      // FlowRateOperator and the pressure solver price a draw by blending
+      // these same mass weights over the section enthalpies. So booking the
+      // mass by the same weights makes the section debit and the energy the
+      // node loses describe one event instead of two.
+      //
+      // Only the LIQUID share needs booking - the boiling and superheat
+      // masses are derived from the totals - and it is the elevation's to
+      // answer: water leaving at 5 m came out of whatever section holds 5 m.
+      const compOut = drawCompositionAt(node, elevHere, -w, tolHere, openHere, undefined, false);
+      const liq = -w * compOut.wLiquid;
+      WLiquidOut += liq;
       // The enthalpy that water leaves the economizer with: its state at
       // the nozzle on the section's own profile (the price the node's
       // totals are charged), so the slug's energy book loses what left.
-      if (compOut.wLiquid > 0) HLiquidOut += -w * compOut.wLiquid * compOut.hZone![0];
-      WSteamOut += -w * (1 - compOut.wLiquid);
+      if (compOut.wLiquid > 0) HLiquidOut += liq * compOut.hZone![0];
+      if (liq > 0) slugNozzles.push({ zone, W: -liq, h: 0 });
+      // THE REST IS THE STEAM PASS'S, WHATEVER IT IS MADE OF. The sections of
+      // a once-through tube are in SERIES, so what leaves by a nozzle had to
+      // flow through everything between the water it came from and that
+      // nozzle: a draw at the steam end pulls its whole flow up through the
+      // superheat section, whether the nozzle is handing over dry steam or -
+      // on a flooding tube whose boiling section has reached it - wet. So
+      // the steam pass's stream is set by the flow and WHERE the nozzle is,
+      // never by what the nozzle currently draws, and it does not step when a
+      // section boundary sweeps past. Counting only the vapour share was
+      // measured: the moment the boiling section's top rose past the steam
+      // nozzle on a flooding tube, the pin's theta stepped from ~0.1 to 1 (a
+      // dead-ended pocket soaking to its metal, T3 270 -> 390 C) and, on a
+      // tube that is 99% water, that step lands in the published pressure
+      // through the last cubic centimetres of vapour - circulator-trip
+      // rejections 649 -> 1201 for it. A discontinuity in an ARGUMENT, which
+      // no timestep can shrink.
+      WSteamOut += -w - liq;
+      if (-w - liq > 0) steamNozzles.push({ zone, W: w + liq, h: 0 });
     }
   }
-  // The inlet enthalpy that prices the economizer's linear profile - and
-  // therefore the ENERGY of the whole slug, m1 * (u_in + u_f)/2 - must not
-  // depend on the feed's flow RATE. It used to: `WFeed > 0 ? mean : h_f(473 K)`
-  // handed the profile a hard-coded 200 C the instant the feed stopped.
-  // Measured on a blacked-out Xe-100 bundle: uFeed stepped 1136 -> 840 kJ/kg
-  // in one step, which repriced a 73 kg slug by 11 MJ - 6% of the node's
-  // energy, landing entirely on the 31 kg of leftovers that set the pressure
-  // - and the published pressure jumped 81 -> 99 bar. The closure itself is
-  // smooth in this argument (0.045 bar per kJ/kg over the whole span); the
-  // jump was the argument's. It drove 79% of that run's rejections, and no
-  // amount of dt could shrink it.
-  //
-  // So the inlet is what it physically is: the enthalpy of the water
-  // standing at the tube's LOWEST connections - its feed nozzle - weighted
-  // by how subcooled each one is, the same weight that decides how much of
-  // an inflow the economizer takes at all. With one feed line this is
-  // exactly the value the flow-weighted mean gave, flowing or not. With
-  // nothing subcooled there the weights vanish together with (h_f - h_in),
-  // so the ratio tends to h_f itself: an economizer with no colder water to
-  // draw on degenerates to zero subcooling, continuously.
+  // The enthalpy of the water standing at the tube's LOWEST connections -
+  // its feed end - weighted by how subcooled each one is, the same weight
+  // that decides how much of an inflow the economizer takes at all. It must
+  // not depend on the feed's flow RATE. It used to: `WFeed > 0 ? mean :
+  // h_f(473 K)` handed the profile a hard-coded 200 C the instant the feed
+  // stopped. Measured on a blacked-out Xe-100 bundle: uFeed stepped 1136 ->
+  // 840 kJ/kg in one step, which (the slug being priced off it at the time)
+  // repriced a 73 kg slug by 11 MJ - 6% of the node's energy, landing
+  // entirely on the 31 kg of leftovers that set the pressure - and the
+  // published pressure jumped 81 -> 99 bar. It drove 79% of that run's
+  // rejections, and no amount of dt could shrink it. With nothing subcooled
+  // at the feed end the weights vanish together with (h_f - h_in), so the
+  // ratio tends to h_f itself: no colder water to draw on is zero
+  // subcooling, continuously.
   const hFeed = hInDen > 0 ? hInNum / hInDen : hfNow;
   return {
-    WFeed, hFeed,
+    WFeed, HFeed, hFeed,
     uFeed: hFeed - waterPressure * 0.0012,   // u = h - Pv, liquid v ~ 1.2 L/kg
     WSteamOut, WLiquidOut, HLiquidOut,
+    slugNozzles, steamNozzles,
   };
 }
 
@@ -335,27 +431,127 @@ export function otsgWallPin(
     zoneTemps: otsgZoneTemps(state, node),
     hA3Full: H_TUBE_STEAM * cfg.heatArea,
     WSteam: Math.max(0, flows.WSteamOut),
+    steamNozzles: flows.steamNozzles,
   };
 }
 
 /**
- * The gas temperature entering the bundle's shell - the upstream donor's,
- * not the shell's own bulk. A well-mixed shell node sits at its OUTLET
- * temperature, and both the march and the superheat outlet's ceiling need
- * the other end of it.
+ * The shell gas as a set of streams along the bundle: where each shell
+ * nozzle sits, what flows through it, and the temperature an inflow arrives
+ * at - the terms marchCells walks.
+ *
+ * WHICH END THE GAS ENTERS IS READ OFF THE SHELL, NOT ASSUMED. The march used
+ * to run steam end to feed end whatever the gas was doing - counterflow by
+ * decree - and take its inlet temperature as the hottest thing in sight (the
+ * shell's own bulk, or any hotter donor flowing in). Both are right for a
+ * circulator pushing hot helium down over a boiler and wrong the moment the
+ * shell stops behaving like one: a reversed loop (natural circulation after a
+ * trip can run the bundle backwards) went on being marched from the end the
+ * gas now LEAVES by, and gas arriving COLDER than the shell - a tube bundle
+ * hotter than its primary side, heating it - was marched in at the shell's
+ * bulk temperature instead of its own, so the water could never give the gas
+ * its heat back at the right rate.
+ *
+ * So: each shell connection is a nozzle at its own elevation, placed along
+ * the bundle between the shell's lowest and highest connection (the bundle
+ * fills the shell between its outermost nozzles; where the drawing puts them
+ * relative to the tube sheets is not a bypass). The flow crossing any height
+ * is half the difference between what the nozzles below it and above it take
+ * in - the two estimates of the same through-flow, which differ only by the
+ * gas the shell is storing or giving up - and each inflow enters at ITS
+ * donor's temperature. Parallel bundles each take `share` of every stream.
+ *
+ * A shell whose nozzles are all at one elevation gives no axis to read, and
+ * falls back to the arrangement a once-through boiler is built for: gas in at
+ * the steam end, out at the feed end.
  */
-export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): number {
-  let TGasIn = shell.fluid.temperature;
-  for (const fc of state.flowConnections) {
-    if (fc.toNodeId === shell.id && fc.massFlowRate > 1e-6) {
-      const donor = state.flowNodes.get(fc.fromNodeId);
-      if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
-    } else if (fc.fromNodeId === shell.id && fc.massFlowRate < -1e-6) {
-      const donor = state.flowNodes.get(fc.toNodeId);
-      if (donor && donor.fluid.temperature > TGasIn) TGasIn = donor.fluid.temperature;
+export function otsgGasStreams(
+  state: SimulationState, shell: FlowNode, nZones: number, share: number,
+): { up: number[]; sources: ZoneSource[] } {
+  const streams = nodeStreams(state, shell.id);
+  const height = shell.height ?? Math.cbrt(shell.volume);
+  let lo = Infinity, hi = -Infinity;
+  const elevOf = (st: NodeStream) =>
+    (st.isTo ? st.conn.toElevation : st.conn.fromElevation) ?? height / 2;
+  for (const st of streams) {
+    const e = elevOf(st);
+    lo = Math.min(lo, e);
+    hi = Math.max(hi, e);
+  }
+  const into = new Array<number>(nZones).fill(0);
+  const sources: ZoneSource[] = [];
+  let total = 0;
+  for (const st of streams) {
+    if (st.w === 0) continue;
+    const zone = nozzleZone(hi > lo ? (elevOf(st) - lo) / (hi - lo) : undefined, st.w, 1, nZones);
+    const W = st.w * share;
+    into[zone] += W;
+    total += W;
+    if (W > 0) {
+      const donor = state.flowNodes.get(st.isTo ? st.conn.fromNodeId : st.conn.toNodeId);
+      if (!donor) {
+        throw new Error(`[OTSG] shell '${shell.id}': connection '${st.conn.id}' names a node ` +
+          `('${st.isTo ? st.conn.fromNodeId : st.conn.toNodeId}') that does not exist.`);
+      }
+      sources.push({ zone, W, T: donor.fluid.temperature });
     }
   }
-  return TGasIn;
+  const up = new Array<number>(nZones + 1).fill(0);
+  let below = 0;
+  for (let k = 1; k < nZones; k++) {
+    below += into[k - 1];
+    up[k] = 0.5 * (below - (total - below));
+  }
+  return { up, sources };
+}
+
+/**
+ * The gas temperature arriving at the bundle's shell: the flow-weighted mean
+ * of whatever is flowing in, at each donor's own temperature - hotter than
+ * the shell or colder. With nothing flowing in it is the shell's own bulk. A
+ * diagnostic: the march itself takes each inflow at its own nozzle
+ * (otsgGasStreams).
+ */
+export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): number {
+  let W = 0, WT = 0;
+  for (const st of nodeStreams(state, shell.id)) {
+    if (!(st.w > 0)) continue;
+    const donor = state.flowNodes.get(st.isTo ? st.conn.fromNodeId : st.conn.toNodeId);
+    if (!donor) continue;
+    W += st.w;
+    WT += st.w * donor.fluid.temperature;
+  }
+  return W > 0 ? WT / W : shell.fluid.temperature;
+}
+
+/**
+ * Heat the shell gas gives each metal zone (W, positive = gas heats metal):
+ * the gas streams (otsgGasStreams) marched over the zones in the direction
+ * they actually run, each approaching its zone's metal across that zone's
+ * film. Every zone has its own temperature - one shared wall cannot superheat
+ * (boiling pins it to T_sat and clamps every other section's wall) - and one
+ * temperature per zone makes the isothermal approach exact for it; the wall's
+ * ramp along the bundle is the zones' own profile. The approach is the same
+ * expression whichever side is hotter, so gas colder than the tubes is heated
+ * by them.
+ */
+export function otsgGasDuties(
+  state: SimulationState, shell: FlowNode, zoneTemps: readonly number[],
+  heatArea: number, share: number,
+): number[] {
+  const N = zoneTemps.length;
+  const hAZone = otsgGasFilmCoefficient(shell, state) * heatArea / N;
+  const cp = otsgGasCpPerKg(shell);
+  const { up, sources } = otsgGasStreams(state, shell, N, share);
+  const TBulk = shell.fluid.temperature;
+  const march = marchCells(N, 0, N - 1, up, sources, TBulk, TBulk,
+    (k, T, W) => {
+      return T + (1 - Math.exp(-hAZone / (W * cp))) * (zoneTemps[k] - T);
+    },
+    T => cp * T,
+    h => h / cp,
+    () => TBulk);
+  return march.Q.map(q => -q);
 }
 
 /** Shell-side film coefficient (W/m2-K): crossflow Dittus-Boelter on the
@@ -385,11 +581,7 @@ export function otsgGasMcp(shell: FlowNode, state: SimulationState): number {
 
 function otsgShellThroughput(shell: FlowNode, state: SimulationState): number {
   let throughput = 0;
-  for (const fc of state.flowConnections) {
-    if (fc.fromNodeId === shell.id || fc.toNodeId === shell.id) {
-      throughput += Math.abs(fc.massFlowRate);
-    }
-  }
+  for (const st of nodeStreams(state, shell.id)) throughput += Math.abs(st.w);
   return throughput / 2; // in + out both counted
 }
 
@@ -400,6 +592,25 @@ function otsgGasCpPerKg(shell: FlowNode): number {
     return M > 0 ? mixtureCp(ncg) / M : 5195;
   }
   return 2000; // steam-ish
+}
+
+/** What a solved partition publishes on its node for everything that draws
+ *  from the tube: the states at its ends, where its section boundaries sit,
+ *  and the axial profile a nozzle part-way up reads. */
+function publishedEval(ev: OtsgEval, dPdm: number): NonNullable<NonNullable<FlowNode['otsg']>['lastEval']> {
+  return {
+    P: ev.P,
+    dPdm,
+    hSteamOut: ev.hSteamOut,
+    hLiquidOut: ev.sections[0].hBar,
+    vSteamOut: ev.vSteamOut,
+    vLiquidOut: ev.sections[0].vBar,
+    TSat: ev.sat.T,
+    T3: ev.sections[2].T,
+    TSteamOut: ev.TSteamOut,
+    lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
+    profile: otsgAxialProfile(ev),
+  };
 }
 
 /**
@@ -426,6 +637,26 @@ export function evaluateOtsgSections(
   // less the gas partial; the very first evaluation starts from the uniform
   // read, which is all there is at t=0.
   const PStart = Math.max(800, node.fluid.pressure - water.gasPressure);
+  // A tube whose partition has never been published has nothing for its
+  // nozzles to be read off - which section stands at each one is the
+  // partition's answer, and classifying the flows needs it. That is the
+  // state a freshly built plant is in for its very first evaluation (the
+  // solver's opening pass runs before any constraint has), and it used to be
+  // survivable only when nothing was flowing yet: a rig that starts with its
+  // lines already moving died there, pricing a draw off a profile that did
+  // not exist. Publish it now, from the totals and the metal alone. Flows
+  // enter the partition only through the superheat pin's draw, so this is
+  // the partition of the same tube with its nozzles shut, and the ordinary
+  // evaluation below then refines it with the flows it lets us classify.
+  if (!cfg.lastEval && node.fluid.mass > 0) {
+    const ev0 = evaluateOtsgPartition(
+      node.fluid.mass, water.energy,
+      { m1: cfg.m1, U1: cfg.U1, uFRef: cfg.uFRef },
+      { tubeVolume: node.volume, tubeLength: 1, heatArea: cfg.heatArea },
+      { zoneTemps: otsgZoneTemps(state, node), hA3Full: H_TUBE_STEAM * cfg.heatArea, WSteam: 0 },
+      PStart);
+    cfg.lastEval = publishedEval(ev0, 0);
+  }
   const flows = classifyOtsgFlows(state, id, node, PStart);
   // The partition costs a pressure solve with property calls inside; the
   // constraint, the rate operator and any sensors all want it on the SAME
@@ -529,23 +760,48 @@ export function otsgWaterSideDuties(
   // exact for it - the wall's ramp along the section is the zones' own
   // temperatures now); the standing branch heats the section's bulk from
   // every piece in parallel. See transitStandingQ for the two branches.
-  // Section 1: feed stream entering at its own temperature
-  const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.hFeed) : ev.sections[0].T;
-  const mcp1 = flows.WFeed * cpLiquid;
+  //
+  // Section 1: the economizer's stream, whichever way it runs. Counted from
+  // the feed end up, the flow crossing any height is what the economizer's
+  // nozzles below it have put in less what they have drawn out: feed
+  // entering at the bottom runs up through the whole section at its own
+  // temperature; water drawn out of the bottom (a feed line running
+  // backwards) pulls the column DOWN, saturated liquid following it in at
+  // the top from the boiling section; a nozzle part-way up adds or takes only
+  // above itself. With one feed nozzle at the bottom this is the forward
+  // march it replaced. (That march ran up from the bottom at the feed
+  // temperature whatever the flows were doing, so a draining slug got no
+  // forced convection at all and water entering anywhere else was heated as
+  // if it had come in at the feed nozzle.)
+  const TFeedIn = flows.WFeed > 0 ? tempOfLiquidH(flows.HFeed / flows.WFeed) : ev.sections[0].T;
   let Q1 = 0;
   {
-    let T = TFeedIn;
+    let kLo = -1, kHi = -1;
     for (let k = 0; k < N; k++) {
-      const a = heatArea * ov[k][0];
-      if (!(a > 0)) continue;
-      let q = H_TUBE_NATURAL * a * (zoneTemps[k] - ev.sections[0].T);
-      if (mcp1 > 0) {
-        const transit = (1 - Math.exp(-H_TUBE_LIQUID * a / mcp1)) * mcp1 * (zoneTemps[k] - T);
-        T += transit / mcp1;
-        q += transit;
+      if (ov[k][0] > 0) { if (kLo < 0) kLo = k; kHi = k; }
+    }
+    if (kLo >= 0) {
+      const up = new Array<number>(N + 1).fill(0);
+      const into = new Array<number>(N).fill(0);
+      const sources: ZoneSource[] = [];
+      for (const z of flows.slugNozzles) {
+        into[z.zone] += z.W;
+        if (z.W > 0) sources.push({ zone: z.zone, W: z.W, T: tempOfLiquidH(z.h) });
       }
-      zoneQ[k] += q;
-      Q1 += q;
+      for (let k = 0; k < N; k++) up[k + 1] = up[k] + into[k];
+      const march = marchCells(N, kLo, kHi, up, sources, ev.sections[0].T, ev.sat.T,
+        (k, T, W) => {
+          const mcp = W * cpLiquid;
+          return T + (1 - Math.exp(-H_TUBE_LIQUID * heatArea * ov[k][0] / mcp)) * (zoneTemps[k] - T);
+        },
+        T => cpLiquid * T,
+        h => h / cpLiquid,
+        k => zoneTemps[k]);
+      for (let k = kLo; k <= kHi; k++) {
+        const q = H_TUBE_NATURAL * heatArea * ov[k][0] * (zoneTemps[k] - ev.sections[0].T) + march.Q[k];
+        zoneQ[k] += q;
+        Q1 += q;
+      }
     }
   }
   // Section 2: boiling at T_sat - huge film coefficient, pure standing form
@@ -556,11 +812,13 @@ export function otsgWaterSideDuties(
     zoneQ2[k] += q;
     Q2 += q;
   }
-  // Section 3: steam entering at saturation, heated toward its own wall -
-  // which the boiling section can no longer clamp. The transit branch is the
-  // partition's own march on the partition's own isobar (marchSteamOverMetal):
-  // the heat each zone gives the stream is the enthalpy the stream gains
-  // crossing it, so the steam offered at the outlet is the steam heated here.
+  // Section 3: steam heated toward its own wall - which the boiling section
+  // can no longer clamp - entering at saturation from the boiling boundary,
+  // or at its own temperature through whichever nozzle it is coming in by.
+  // The transit branch is the partition's own march on the partition's own
+  // isobar with the partition's own nozzles (marchSteamStreams): the heat
+  // each zone gives the stream is the enthalpy the stream gains crossing it,
+  // so the steam offered at the outlet is the steam heated here.
   let Q3 = 0;
   if (ev.sections[2].lengthFrac > 0) {
     if (!ev.steamIsobar) {
@@ -568,8 +826,8 @@ export function otsgWaterSideDuties(
         `the tube long (regime '${ev.regime}') came without its steam isobar - the wall duty ` +
         `has no property surface to price the stream on.`);
     }
-    const { transit } = marchSteamOverMetal(ev.steamIsobar, zoneTemps, ov.map(o => o[2]),
-      H_TUBE_STEAM * heatArea, Math.max(0, flows.WSteamOut), ev.sat.T);
+    const { transit } = marchSteamStreams(ev.steamIsobar, ev.sat, zoneTemps, ov.map(o => o[2]),
+      H_TUBE_STEAM * heatArea, flows.steamNozzles);
     for (let k = 0; k < N; k++) {
       const a = heatArea * ov[k][2];
       if (!(a > 0)) continue;
@@ -793,7 +1051,6 @@ export class OtsgRateOperator implements RateOperator {
 
       const zones = otsgMetalZones(state, node);
       const zoneT = zones.map(z => z.temperature);
-      const N = zones.length;
       const shell = state.flowNodes.get(cfg.shellNodeId);
       if (!shell) {
         throw new Error(`[OTSG] node '${id}' references shell '${cfg.shellNodeId}', ` +
@@ -808,7 +1065,7 @@ export class OtsgRateOperator implements RateOperator {
       // node's totals with this bundle's own metal as the superheat pin -
       // one shared path for operator, sensors, checks and probes.
       const { ev, flows } = evaluateOtsgSections(state, id, node);
-      const { WFeed, hFeed, WSteamOut, WLiquidOut } = flows;
+      const { WFeed, HFeed, hFeed, WSteamOut, WLiquidOut } = flows;
 
       // (The draw-enthalpy cache otsg.lastEval is owned by
       // OtsgPartitionConstraintOperator, which runs on every state before
@@ -816,36 +1073,24 @@ export class OtsgRateOperator implements RateOperator {
       // never sees.)
 
       // ----------------------------------------------------------------
-      // Gas side: counterflow march against the metal temperature
+      // Gas side: the shell's streams marched against the metal zones
       // ----------------------------------------------------------------
-      const hGas = this.gasFilmCoefficient(shell, state);
-      // March from the shell's INLET temperature (the upstream duct node),
-      // not its bulk: with the duty evaluated from the inlet, the well-mixed
-      // shell node's own energy balance lands its bulk exactly at the
-      // plug-flow OUTLET temperature - the transit-branch principle applied
-      // to the gas side. Marching from bulk instead left the cold leg 200 C
-      // hot because the counterflow outlet never propagated downstream.
-      const TGasIn = otsgGasInletTemp(state, shell);
-      // Counterflow: the gas meets the steam end of the bundle first and
-      // works down to the feed end, across each metal zone in turn. Every
-      // zone has its own temperature - one shared wall cannot superheat
-      // (boiling pins it to T_sat and clamps every other section's wall) -
-      // and one temperature per zone makes the isothermal approach exact for
-      // it; the wall's ramp along the bundle is the zones' own profile.
-      // Parallel bundles in one shell each take their share of the gas
+      // Each inflow is marched from ITS donor's temperature (the upstream
+      // duct node), not the shell's bulk: with the duty evaluated from the
+      // inlet, the well-mixed shell node's own energy balance lands its bulk
+      // exactly at the plug-flow OUTLET temperature - the transit-branch
+      // principle applied to the gas side. Marching from bulk instead left
+      // the cold leg 200 C hot because the outlet never propagated
+      // downstream. Which end that inlet is at, and which way the gas then
+      // runs over the zones, is the shell's own flows' to say
+      // (otsgGasStreams): hot gas in at the steam end and down to the feed
+      // end is counterflow, the ordinary case, and it is no longer the only
+      // one. Parallel bundles in one shell each take their share of the gas
       // stream (equal areas -> equal flows), so each marches against its own
       // mdot*cp. Their duties then sum onto the shell node below, which is
       // the same total the single-bundle case delivers.
-      const hAZone = hGas * cfg.heatArea / N;
-      const gasOrder = zones.map((_, j) => N - 1 - j);
-      const march = marchCounterflowGas(
-        TGasIn,
-        this.gasMcp(shell, state) * (cfg.gasShare ?? 1),
-        gasOrder.map(k => ({ hA: hAZone, TWall: zoneT[k], wall: 'isothermal' as const })),
-      );
-      const gasQ = new Array<number>(N);
-      gasOrder.forEach((k, j) => { gasQ[k] = march.Q[j]; });
-      const QGasTotal = march.Q.reduce((a, b) => a + b, 0);
+      const gasQ = otsgGasDuties(state, shell, zoneT, cfg.heatArea, cfg.gasShare ?? 1);
+      const QGasTotal = gasQ.reduce((a, b) => a + b, 0);
 
 
       // ----------------------------------------------------------------
@@ -902,7 +1147,9 @@ export class OtsgRateOperator implements RateOperator {
       // and resumes when the dome comes back.
       let dM1 = 0, dU1 = 0;
       if (ev.regime !== 'supercritical') {
-        const r = otsgRates(ev, WFeed, hFeed, WSteamOut, Q1, Q2, Q3);
+        // The feed is priced at what actually arrived (each stream at its
+        // own enthalpy), not at the feed end's standing figure.
+        const r = otsgRates(ev, WFeed, WFeed > 0 ? HFeed / WFeed : hFeed, WSteamOut, Q1, Q2, Q3);
         const m1Now = ev.sections[0].mass;
         const w1 = m1Now / (m1Now + 1);
         const WSlugOut = w1 * WLiquidOut;
@@ -936,16 +1183,6 @@ export class OtsgRateOperator implements RateOperator {
     }
 
     return rates;
-  }
-
-  /** Shell-gas film coefficient (W/m2-K): Dittus-Boelter on the shell node's
-   *  through-flow, mixture properties, with a natural-convection floor. */
-  private gasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
-    return otsgGasFilmCoefficient(shell, state);
-  }
-
-  private gasMcp(shell: FlowNode, state: SimulationState): number {
-    return otsgGasMcp(shell, state);
   }
 }
 
@@ -1032,19 +1269,7 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       // tangent (regime edge) reports 0 and the generic compliance carries
       // it, which is the correct price at a boundary.
       const dPdm = Math.max(0, node.otsg.partitionLin?.dPdm ?? 0);
-      node.otsg.lastEval = {
-        P: ev.P,
-        dPdm,
-        hSteamOut: ev.hSteamOut,
-        hLiquidOut: ev.sections[0].hBar,
-        vSteamOut: ev.vSteamOut,
-        vLiquidOut: ev.sections[0].vBar,
-        TSat: ev.sat.T,
-        T3: ev.sections[2].T,
-        TSteamOut: ev.TSteamOut,
-        lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
-        profile: otsgAxialProfile(ev),
-      };
+      node.otsg.lastEval = publishedEval(ev, dPdm);
       if (ev.regime === 'supercritical') {
         // One fluid: the uniform read FluidState already wrote is unbiased
         // above the dome - only the (identical) pressure is restated.
@@ -1114,12 +1339,20 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
       // the tangent band is 0.4% of mass, orders of magnitude inside them.
       const { ev, water } = evaluateOtsgSections(state, id, node);
 
-      // The hottest surface this water can see: its own tube metal, or the gas
-      // arriving at the shell.
+      // The hottest thing that could have heated this steam: its own tube
+      // metal, the shell gas - or whatever is flowing INTO the tube. A header
+      // backing hot steam into a tube that has lost its feed puts steam in it
+      // hotter than every wall, and that is the header's temperature arriving,
+      // not a stuck regime.
       let TWallMax = state.flowNodes.get(cfg.shellNodeId)?.fluid.temperature ?? 0;
       for (const mid of cfg.metalNodeIds) {
         const m = state.thermalNodes.get(mid);
         if (m && m.temperature > TWallMax) TWallMax = m.temperature;
+      }
+      for (const st of nodeStreams(state, id)) {
+        if (!(st.w > 0)) continue;
+        const donor = state.flowNodes.get(st.isTo ? st.conn.fromNodeId : st.conn.toNodeId);
+        if (donor && donor.fluid.temperature > TWallMax) TWallMax = donor.fluid.temperature;
       }
 
       // Two distinct diseases, one watch. (1) Steam hotter than every
@@ -1135,7 +1368,11 @@ export class OtsgLedgerCheckOperator implements ConstraintOperator {
       // which scripts/probe-otsg-draw.ts measures directly.)
       const m1Claim = ev.sections[0].mass / node.fluid.mass;
       const excess = ev.sections[2].T - TWallMax;
-      const hotSteam = excess > OtsgLedgerCheckOperator.REPORT_MARGIN;
+      // A tube with no steam section has no steam to be too hot: its
+      // sections[2].T is just the saturation temperature standing in for a
+      // section of no mass (an all-liquid tube under a cold wall used to be
+      // reported here as steam 129 K above its metal).
+      const hotSteam = ev.sections[2].mass > 0 && excess > OtsgLedgerCheckOperator.REPORT_MARGIN;
       const overClaim = m1Claim > 0.995 && node.fluid.phase !== 'liquid';
       if (!hotSteam && !overClaim) continue;
       const last = this.lastReport.get(id);

@@ -755,6 +755,17 @@ export interface OtsgWallPin {
   zoneTemps: number[];
   hA3Full: number;  // W/K - steam-film conductance if section 3 owned the whole bundle
   WSteam: number;   // kg/s - the steam draw crossing the superheat section
+  /** The tube's nozzles as the steam pass sees them (marchSteamStreams):
+   *  where steam leaves and where it arrives, so the section's stream runs
+   *  the way the flows actually go. Absent = the ordinary once-through case,
+   *  one draw of WSteam at the steam end. */
+  steamNozzles?: SteamNozzle[];
+}
+
+/** The pin's steam nozzles, or the once-through default when it names none. */
+export function pinSteamNozzles(pin: OtsgWallPin): SteamNozzle[] {
+  return pin.steamNozzles
+    ?? [{ zone: pin.zoneTemps.length - 1, W: -Math.max(0, pin.WSteam), h: 0 }];
 }
 
 /** Default number of fixed tube-metal zones per moving-boundary bundle
@@ -951,6 +962,259 @@ function approachWall(iso: SteamIsobar, T: number, TWall: number, hA: number, W:
   }
 }
 
+// ---------------------------------------------------------------------------
+// Streams along the tube: any direction, any point of entry
+// ---------------------------------------------------------------------------
+
+/** A stream entering a run of zones through a nozzle: the zone it opens
+ *  into, its flow (kg/s) and the temperature it arrives at. */
+export interface ZoneSource { zone: number; W: number; T: number }
+
+export interface CellMarch {
+  /** kg/s flowing into each cell (0 for a stagnant one, or one outside the run) */
+  W: number[];
+  /** K - the mixed stream entering each cell, and the stream leaving it */
+  TIn: number[];
+  TOut: number[];
+  /** W - heat each cell's stream takes from its wall */
+  Q: number[];
+}
+
+/**
+ * The march of a quasi-steady stream over a run of metal zones, when the
+ * stream may run EITHER way along the tube, enter or leave part-way, or not
+ * flow at all.
+ *
+ * A boiler tube's feed normally comes in at the bottom and its steam leaves
+ * at the top, and a march that hard-codes that order is right until the day
+ * a header backs up, a tube tears part-way along, or the shell gas turns
+ * round - when it goes on heating a stream that is no longer there, in the
+ * direction it is no longer going. So the march takes the flows as they are:
+ *
+ *  - `up[k]` (k = 0..n) is the mass flow, kg/s, crossing the LOWER edge of
+ *    zone k upward (negative = downward); up[n] is the top end of the tube.
+ *  - `sources` are the streams entering through nozzles.
+ *
+ * Each zone the run covers (kLo..kHi) is a cell. What flows into a cell -
+ * from the cell below when up[k] > 0, from the one above when up[k+1] < 0,
+ * through its own nozzles - mixes at the cell's inlet, crosses the cell's
+ * film (`cross`: the caller's law for W kg/s arriving at T against zone k,
+ * returning the temperature it leaves at; the heat it took is its enthalpy
+ * rise, by `hOf`), and leaves at that outlet state to wherever the flows
+ * carry it. A cell is only ever
+ * downstream of a neighbour across an edge the flow crosses TOWARD it, so
+ * the dependencies cannot loop and two sweeps resolve them: upward for every
+ * cell that takes nothing from above, then downward for the rest.
+ *
+ * The lowest cell takes what crosses the run's lower boundary at `TBelow`,
+ * the highest what crosses its upper boundary at `TAbove` - the state of
+ * whatever lies beyond the run there. A cell with nothing flowing into it is
+ * stagnant: no transit heat, standing at `stagnantT(k)`.
+ *
+ * With one stream entering at the bottom and flowing up this is the plain
+ * forward march, operation for operation.
+ */
+export function marchCells(
+  nZones: number, kLo: number, kHi: number,
+  up: readonly number[],
+  sources: readonly ZoneSource[],
+  TBelow: number, TAbove: number,
+  cross: (k: number, T: number, W: number) => number,
+  hOf: (T: number) => number,
+  TOfH: (h: number) => number,
+  stagnantT: (k: number) => number,
+): CellMarch {
+  if (up.length !== nZones + 1) {
+    throw new Error(`[OTSG] stream march over ${nZones} zones was handed ${up.length} edge flows ` +
+      `(it needs ${nZones + 1}).`);
+  }
+  const W = new Array<number>(nZones).fill(0);
+  const TIn = new Array<number>(nZones).fill(NaN);
+  const TOut = new Array<number>(nZones).fill(NaN);
+  const Q = new Array<number>(nZones).fill(0);
+  const done = new Array<boolean>(nZones).fill(false);
+  const nSources = sources.length;
+  // Two sweeps: up, then down. (Written flat - this runs for every zone of
+  // every stream on every evaluation, and closures here were a measurable
+  // share of the plant's run time.)
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = kLo; i <= kHi; i++) {
+      const k = pass === 0 ? i : kHi + kLo - i;
+      if (done[k]) continue;
+      const fromBelow = up[k] > 0, fromAbove = up[k + 1] < 0;
+      if (fromBelow && k > kLo && !done[k - 1]) continue;
+      if (fromAbove && k < kHi && (pass === 0 || !done[k + 1])) continue;
+      // Everything flowing into the cell. A single contributor passes its
+      // temperature through untouched; several mix by enthalpy.
+      let wSum = 0, hSum = 0, count = 0, TOne = NaN;
+      if (fromBelow) {
+        TOne = k > kLo ? TOut[k - 1] : TBelow;
+        wSum = up[k]; count = 1;
+      }
+      if (fromAbove) {
+        const w = -up[k + 1], T = k < kHi ? TOut[k + 1] : TAbove;
+        if (count === 0) TOne = T; else hSum = wSum * hOf(TOne) + w * hOf(T);
+        wSum += w; count++;
+      }
+      for (let j = 0; j < nSources; j++) {
+        const s = sources[j];
+        if (s.zone !== k || !(s.W > 0)) continue;
+        if (count === 0) TOne = s.T;
+        else if (count === 1) hSum = wSum * hOf(TOne) + s.W * hOf(s.T);
+        else hSum += s.W * hOf(s.T);
+        wSum += s.W; count++;
+      }
+      if (count === 0) {
+        TIn[k] = TOut[k] = stagnantT(k);
+      } else {
+        const T = count === 1 ? TOne : TOfH(hSum / wSum);
+        if (!Number.isFinite(T)) {
+          throw new Error(`[OTSG] stream march: ${wSum.toFixed(3)} kg/s enters zone ${k + 1} of ` +
+            `${nZones} at a temperature that is not a number (${T}).`);
+        }
+        const TNext = cross(k, T, wSum);
+        W[k] = wSum; TIn[k] = T; TOut[k] = TNext;
+        Q[k] = wSum * (hOf(TNext) - hOf(T));
+      }
+      done[k] = true;
+    }
+  }
+  for (let k = kLo; k <= kHi; k++) {
+    if (!done[k]) {
+      throw new Error(`[OTSG] stream march could not order its cells: zone ${k + 1} of ${nZones} ` +
+        `waits on a neighbour that waits on it (edge flows ${up.map(x => x.toFixed(3)).join(', ')}).`);
+    }
+  }
+  return { W, TIn, TOut, Q };
+}
+
+/**
+ * A nozzle on the tube as the steam pass sees it: the metal zone it opens
+ * into and the flow through it that is NOT economizer water - positive into
+ * the tube, arriving at specific enthalpy `h`; negative out of it.
+ */
+export interface SteamNozzle { zone: number; W: number; h: number }
+
+/**
+ * The steam crossing the superheat section, whichever way it is going.
+ *
+ * The section's stream is whatever its nozzles and its boundary with the
+ * boiling section make it. Counted from the tube's steam end downward, the
+ * flow crossing any height is what the nozzles above it take out (or put
+ * in): steam drawn from the top outlet comes up through the whole section
+ * from the boiling boundary, entering saturated; steam pushed IN at the top
+ * (a header backing up into a tube that has lost its feed) runs down through
+ * it, entering at its own temperature; a nozzle part-way up takes or adds
+ * only below itself. marchCells walks that, and with one draw at the top it
+ * is the ordinary once-through march (marchSteamOverMetal).
+ *
+ * What an inflow contributes to the steam STREAM is its vapour: superheated
+ * steam arrives whole, at the temperature its enthalpy has on this isobar;
+ * wet steam as its vapour fraction, at saturation; and water below
+ * saturation as nothing - it is not a stream of steam. It quenches the
+ * section through the node's totals, which is where its mass and enthalpy
+ * already are.
+ *
+ * Returns the steam at the section's TOP edge (what a thermocouple in the
+ * steam nozzle reads, leaving or arriving), its length-mean temperature, and
+ * the heat each zone gives it - see marchSteamOverMetal for what each is for.
+ */
+export function marchSteamStreams(
+  iso: SteamIsobar,
+  sat: { T: number; h_f: number; h_g: number },
+  zoneTemps: readonly number[],
+  overlap: readonly number[],
+  hAFull: number,
+  nozzles: readonly SteamNozzle[],
+  trace?: { s: number[]; T: number[] },
+): { TOut: number; TMean: number; transit: number[] } {
+  const n = zoneTemps.length;
+  let kLo = -1, kHi = -1;
+  for (let k = 0; k < n; k++) {
+    if (overlap[k] > 0) { if (kLo < 0) kLo = k; kHi = k; }
+  }
+  if (trace) { trace.s.length = 0; trace.T.length = 0; }
+  if (kLo < 0) {
+    // A section of no length: inlet and outlet are the same point.
+    if (trace) { trace.s.push(0); trace.T.push(sat.T); }
+    return { TOut: sat.T, TMean: sat.T, transit: new Array<number>(n).fill(0) };
+  }
+  // Edge flows counted from the steam end down, and the vapour each inflow
+  // brings.
+  const into = new Array<number>(n).fill(0);
+  const sources: ZoneSource[] = [];
+  for (const z of nozzles) {
+    if (!(z.zone >= 0 && z.zone < n) || !Number.isFinite(z.W)) {
+      throw new Error(`[OTSG] a steam nozzle in zone ${z.zone} of ${n} carrying ${z.W} kg/s is ` +
+        `not a nozzle on this tube.`);
+    }
+    if (z.W > 0) {
+      const dry = z.h >= sat.h_g;
+      const Wv = dry ? z.W : z.W * Math.max(0, (z.h - sat.h_f) / (sat.h_g - sat.h_f));
+      if (!(Wv > 0)) continue;
+      into[z.zone] += Wv;
+      sources.push({ zone: z.zone, W: Wv, T: dry ? isobarTempAtH(iso, z.h) : sat.T });
+    } else {
+      into[z.zone] += z.W;
+    }
+  }
+  const up = new Array<number>(n + 1).fill(0);
+  for (let k = n - 1; k >= 0; k--) up[k] = up[k + 1] - into[k];
+
+  const sub: number[][] | undefined = trace ? [] : undefined;
+  const march = marchCells(n, kLo, kHi, up, sources, sat.T, sat.T,
+    (k, T, W) => {
+      const hA = hAFull * overlap[k];
+      let TNext = T;
+      if (sub) {
+        const pts: number[] = [];
+        for (let i = 1; i <= TRACE_STEPS; i++) {
+          TNext = approachWall(iso, TNext, zoneTemps[k], hA / TRACE_STEPS, W);
+          pts.push(TNext);
+        }
+        sub[k] = pts;
+      } else {
+        TNext = approachWall(iso, T, zoneTemps[k], hA, W);
+      }
+      return TNext;
+    },
+    T => isobarAt(iso, 'h', T),
+    h => isobarTempAtH(iso, h),
+    k => zoneTemps[k]);
+
+  let L = 0, wallSum = 0, taken = 0;
+  for (let k = kLo; k <= kHi; k++) {
+    L += overlap[k];
+    wallSum += overlap[k] * zoneTemps[k];
+    taken += march.Q[k];
+  }
+  // Which way the stream runs through a cell decides which of its edges its
+  // inlet state sits at. A cell fed from both ends reads upward.
+  if (trace) {
+    const lowDown = march.W[kLo] > 0 && up[kLo] + up[kLo + 1] < 0;
+    trace.s.push(0);
+    trace.T.push(lowDown ? march.TOut[kLo] : march.W[kLo] > 0 ? march.TIn[kLo] : sat.T);
+    let behind = 0;
+    for (let k = kLo; k <= kHi; k++) {
+      const pts = sub![k];
+      const down = march.W[k] > 0 && up[k] + up[k + 1] < 0;
+      for (let i = 1; i <= TRACE_STEPS; i++) {
+        trace.s.push((behind + overlap[k] * i / TRACE_STEPS) / L);
+        // Stagnant: at its wall. Upward: the i-th point of its walk. Downward:
+        // the same walk read from its far end, arriving at the top edge.
+        trace.T.push(!pts ? zoneTemps[k]
+          : !down ? pts[i - 1]
+          : i === TRACE_STEPS ? march.TIn[k] : pts[TRACE_STEPS - 1 - i]);
+      }
+      behind += overlap[k];
+    }
+  }
+  const topDown = march.W[kHi] > 0 && up[kHi] + up[kHi + 1] < 0;
+  const TOut = topDown ? march.TIn[kHi] : march.TOut[kHi];
+  const TMean = hAFull > 0 ? wallSum / L - taken / (hAFull * L) : sat.T;
+  return { TOut, TMean, transit: march.Q };
+}
+
 /**
  * The steam crossing the superheat section: the stream that enters at TIn
  * (saturation), marched in flow order across the metal zones the section
@@ -958,6 +1222,10 @@ function approachWall(iso: SteamIsobar, T: number, TWall: number, hA: number, W:
  * `overlap[k]` is the fraction of the whole tube where zone k and the section
  * coincide (otsgZoneOverlaps), `hAFull` the steam film's conductance if the
  * section owned the whole bundle.
+ *
+ * This is the ordinary once-through case of marchSteamStreams - one draw of
+ * W at the steam end, fed from the boiling boundary - kept under its own
+ * name because it is the case every design point is built around.
  *
  * One march answers three questions, which is the point:
  *  - TOut, the steam LEAVING. Every step moves the stream toward a zone's
@@ -997,39 +1265,8 @@ export function marchSteamOverMetal(
   TIn: number,
   trace?: { s: number[]; T: number[] },
 ): { TOut: number; TMean: number; transit: number[] } {
-  const n = zoneTemps.length;
-  const transit = new Array<number>(n).fill(0);
-  let T = TIn, L = 0, wallSum = 0, taken = 0;
-  let hNow = isobarAt(iso, 'h', T);
-  let LTotal = 0;
-  if (trace) {
-    for (let k = 0; k < n; k++) if (overlap[k] > 0) LTotal += overlap[k];
-    trace.s.length = 0; trace.T.length = 0;
-    trace.s.push(0); trace.T.push(T);
-  }
-  for (let k = 0; k < n; k++) {
-    const ov = overlap[k];
-    if (!(ov > 0)) continue;
-    if (trace) {
-      for (let i = 1; i <= TRACE_STEPS; i++) {
-        T = approachWall(iso, T, zoneTemps[k], hAFull * ov / TRACE_STEPS, W);
-        trace.s.push((L + ov * i / TRACE_STEPS) / LTotal);
-        trace.T.push(T);
-      }
-    } else {
-      T = approachWall(iso, T, zoneTemps[k], hAFull * ov, W);
-    }
-    L += ov;
-    wallSum += ov * zoneTemps[k];
-    if (W > 0) {
-      const hNext = isobarAt(iso, 'h', T);
-      transit[k] = W * (hNext - hNow);
-      taken += transit[k];
-      hNow = hNext;
-    }
-  }
-  const TMean = L > 0 && hAFull > 0 ? wallSum / L - taken / (hAFull * L) : TIn;
-  return { TOut: T, TMean, transit };
+  return marchSteamStreams(iso, { T: TIn, h_f: NaN, h_g: iso.h[0] }, zoneTemps, overlap, hAFull,
+    [{ zone: zoneTemps.length - 1, W: -Math.max(0, W), h: 0 }], trace);
 }
 
 /** Fraction of the whole tube where each metal zone lies under a superheat
@@ -1336,8 +1573,8 @@ export function evaluateOtsgPartition(
     } else {
       const iso = steamIsobar = isobarFor(P, sat);
       const trace = { s: [] as number[], T: [] as number[] };
-      marchSteamOverMetal(iso, pin.zoneTemps,
-        superheatOverlaps(pin.zoneTemps.length, V3 / VT), pin.hA3Full, pin.WSteam, sat.T, trace);
+      marchSteamStreams(iso, sat, pin.zoneTemps,
+        superheatOverlaps(pin.zoneTemps.length, V3 / VT), pin.hA3Full, pinSteamNozzles(pin), trace);
       let dh = 0, dv = 0;
       if (u3 !== u3Pin) {
         const TPin = isobarTempAtU(iso, u3Pin);
@@ -1582,8 +1819,8 @@ export function evaluateOtsgPartition(
     let du3New = 0;
     if (L3New > 0 && fin.m3 > 0) {
       const iso = isobarFor(P, fin.sat);
-      const { TMean } = marchSteamOverMetal(iso, pin.zoneTemps,
-        superheatOverlaps(pin.zoneTemps.length, L3New), pin.hA3Full, pin.WSteam, fin.sat.T);
+      const { TMean } = marchSteamStreams(iso, fin.sat, pin.zoneTemps,
+        superheatOverlaps(pin.zoneTemps.length, L3New), pin.hA3Full, pinSteamNozzles(pin));
       // Metal colder than saturation leaves the section at saturated vapour.
       if (TMean > fin.sat.T) du3New = isobarAt(iso, 'u', TMean) - fin.sat.u_g;
     }
