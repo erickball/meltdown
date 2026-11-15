@@ -99,6 +99,16 @@ interface CycleLock {
   marks: { time: number; values: Float64Array; obs: Float64Array; lifts: Map<string, number> }[];
 }
 
+/** Sums over one run of consecutive samples of a window (SLOPE NOISE) */
+interface SampleBlock {
+  n: number; t: number; tt: number;      // sum 1, t, t^2
+  sx: Float64Array; sxt: Float64Array;   // per slot: sum x, x t
+  osx: Float64Array; osxt: Float64Array; // per observed relief pressure
+}
+
+/** Fewest blocks a full window's slope noise is estimated from */
+const NOISE_BLOCKS = 8;
+
 export interface SlowModeConfig {
   /** Normal integration after each jump before measuring (s plant time) */
   relaxSeconds: number;
@@ -357,6 +367,12 @@ export class SlowModeController {
   private osx: Float64Array = new Float64Array(0);
   private osxt: Float64Array = new Float64Array(0);
   private osxx: Float64Array = new Float64Array(0);
+  // The same sums kept per consecutive block of samples (see SLOPE NOISE in
+  // tryJump). Blocks hold blockSize samples each; when 2 x NOISE_BLOCKS of
+  // them are full they are merged in pairs, so a window of any length ends
+  // with NOISE_BLOCKS..2 x NOISE_BLOCKS blocks.
+  private blocks: SampleBlock[] = [];
+  private blockSize = 1;
   private jmax: number;
   private measure: number;
   private lock: CycleLock | null = null;
@@ -551,6 +567,8 @@ export class SlowModeController {
     this.osx = new Float64Array(M); this.osxt = new Float64Array(M); this.osxx = new Float64Array(M);
     this.n = 0;
     this.st = [0, 0, 0];
+    this.blocks = [];
+    this.blockSize = 1;
     if (!this.sample(s)) return false;
     this.nextSample = s.time + this.config.sampleSeconds;
     this.lock = { valve: lift.valve, sig: lift.sig,
@@ -602,6 +620,8 @@ export class SlowModeController {
     this.osx = new Float64Array(M);
     this.osxt = new Float64Array(M);
     this.osxx = new Float64Array(M);
+    this.blocks = [];
+    this.blockSize = 1;
     this.obsIds.forEach((id, j) => { this.ox0[j] = reliefSensedPressure(s, id); });
     this.nextSample = s.time;
     this.sample(s);
@@ -613,21 +633,48 @@ export class SlowModeController {
     let i = 0;
     let ok = true;
     const N = this.keys.length;
+    const M = this.obsIds.length;
+    let blk = this.blocks[this.blocks.length - 1];
+    if (!blk || blk.n >= this.blockSize) {
+      if (this.blocks.length >= 2 * NOISE_BLOCKS) {
+        // every block is full: merge them in pairs and fill twice as many
+        // samples into each from here on
+        const merged: SampleBlock[] = [];
+        for (let b = 0; b < this.blocks.length; b += 2) {
+          const p = this.blocks[b], q = this.blocks[b + 1];
+          p.n += q.n; p.t += q.t; p.tt += q.tt;
+          for (let k = 0; k < N; k++) { p.sx[k] += q.sx[k]; p.sxt[k] += q.sxt[k]; }
+          for (let k = 0; k < M; k++) { p.osx[k] += q.osx[k]; p.osxt[k] += q.osxt[k]; }
+          merged.push(p);
+        }
+        this.blocks = merged;
+        this.blockSize *= 2;
+      }
+      blk = { n: 0, t: 0, tt: 0, sx: new Float64Array(N), sxt: new Float64Array(N),
+        osx: new Float64Array(M), osxt: new Float64Array(M) };
+      this.blocks.push(blk);
+    }
+    const bsx = blk.sx, bsxt = blk.sxt;
     visitIntegratedState(s, (key, _kind, value) => {
       if (i >= N || key !== this.keys[i]) { ok = false; i++; return; }
       const x = value - this.x0[i];
       this.sx[i] += x;
       this.sxt[i] += x * t;
       this.sxx[i] += x * x;
+      bsx[i] += x;
+      bsxt[i] += x * t;
       i++;
     });
     if (!ok || i !== N) return false;
-    for (let j = 0; j < this.obsIds.length; j++) {
+    for (let j = 0; j < M; j++) {
       const x = reliefSensedPressure(s, this.obsIds[j]) - this.ox0[j];
       this.osx[j] += x;
       this.osxt[j] += x * t;
       this.osxx[j] += x * x;
+      blk.osx[j] += x;
+      blk.osxt[j] += x * t;
     }
+    blk.n++; blk.t += t; blk.tt += t * t;
     this.n++;
     let tk = 1;
     for (let k = 0; k < 3; k++) { this.st[k] += tk; tk *= t; }
@@ -736,20 +783,56 @@ export class SlowModeController {
       return { state: s };
     }
     // Straight-line fit of every slot: slope at the window centre, and its
-    // standard error from the residual
+    // standard error.
+    //
+    // SLOPE NOISE. The textbook standard error, sqrt(rss / (n - 2) / Stt),
+    // takes every sample's residual as independent of its neighbours'. Plant
+    // noise is not: a stagnant gas loop's flow chatter, or a tank breathing
+    // through a cycling valve, pushes an inventory one way for tens of
+    // seconds - dozens of samples - at a time. The slope of such a window is
+    // far less certain than its sample-to-sample scatter says, and with the
+    // textbook figure the next window's (honestly different) slope read as a
+    // trend the fits had missed, which cut the jump ceiling on noise that was
+    // a fraction of a percent of the inventory and going nowhere.
+    //
+    // So the noise is measured over blocks of consecutive samples instead.
+    // The slope's error is sum((t - tc) e) / Stt; each block's share of that
+    // sum, g_b = sum over the block of (t - tc) x residual, is one draw of it
+    // that already contains whatever correlation there is inside a block,
+    // and var(slope) = B / (B - 1) x sum(g_b^2) / Stt^2 (the cluster-robust
+    // estimate, with blocks as clusters). For independent residuals this
+    // reproduces the textbook figure on average; it is taken no smaller than
+    // that figure, since with 8-16 blocks it is itself a noisy estimate and
+    // chatter never makes a slope MORE certain than white noise would.
+    // Correlation longer than a block is still underestimated - that is what
+    // the lengthening of the window on a slope reversal is for.
     const [s0, s1, s2] = this.st;
     const tcRel = s1 / s0;
     const Stt = s2 - s0 * tcRel * tcRel;
     let tc = this.phaseStart + tcRel;
     const slope = new Float64Array(N);
     const seSlope = new Float64Array(N);
+    const blocks = this.blocks;
+    const B = blocks.length;
+    // each block's sum of (t - tc) and (t - tc)^2
+    const bc1 = blocks.map(b => b.t - tcRel * b.n);
+    const bc2 = blocks.map(b => b.tt - 2 * tcRel * b.t + tcRel * tcRel * b.n);
+    const blockSe = (b: number, xbar: number, sx: (blk: SampleBlock) => number, sxt: (blk: SampleBlock) => number): number => {
+      let g2 = 0;
+      for (let q = 0; q < B; q++) {
+        const g = (sxt(blocks[q]) - tcRel * sx(blocks[q])) - xbar * bc1[q] - b * bc2[q];
+        g2 += g * g;
+      }
+      return Math.sqrt(B / (B - 1) * g2) / Stt;
+    };
     for (let i = 0; i < N; i++) {
       const Sxt = this.sxt[i] - this.sx[i] * tcRel;
       const Sxx = this.sxx[i] - this.sx[i] * this.sx[i] / s0;
       const b = Sxt / Stt;
       slope[i] = b;
       const rss = Math.max(0, Sxx - b * Sxt);
-      seSlope[i] = Math.sqrt(rss / (nS - 2) / Stt);
+      seSlope[i] = Math.max(Math.sqrt(rss / (nS - 2) / Stt),
+        blockSe(b, this.sx[i] / s0, blk => blk.sx[i], blk => blk.sxt[i]));
     }
     const tol = this.tolerances(s);
     const values = new Float64Array(N);
@@ -769,7 +852,8 @@ export class SlowModeController {
       const Sxt = this.osxt[j] - this.osx[j] * tcRel;
       const Sxx = this.osxx[j] - this.osx[j] * this.osx[j] / s0;
       const b = Sxt / Stt;
-      obs.set(this.obsIds[j], { slope: b, se: Math.sqrt(Math.max(0, Sxx - b * Sxt) / (nS - 2) / Stt) });
+      obs.set(this.obsIds[j], { slope: b, se: Math.max(Math.sqrt(Math.max(0, Sxx - b * Sxt) / (nS - 2) / Stt),
+        blockSe(b, this.osx[j] / s0, blk => blk.osx[j], blk => blk.osxt[j])) });
     }
     // A window locked to a lift cycle: drift = change between same-phase
     // lifts / time between them (the least-squares line through a sawtooth
