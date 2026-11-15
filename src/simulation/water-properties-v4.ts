@@ -657,7 +657,7 @@ function T_from_u_f(u_f_Jkg: number): number {
  *
  * We do NOT test if a state is two-phase by checking for a T where x_v = x_u.
  *
- * NOTE: This function is currently unused - replaced by simpler findSaturationPropsAtV.
+ * NOTE: This function is currently unused.
  * Kept for potential debugging/future use.
  */
 // @ts-ignore - Intentionally unused, kept for debugging
@@ -802,61 +802,6 @@ function _findSaturationAtV(v: number): {
   return result;
 }
 
-
-/**
- * Find saturation properties at the temperature where v = v_g(T).
- * Returns u_g, T_sat, and P_sat at that temperature.
- *
- * Returns null if v is outside the saturation dome range.
- * Claude, do not modify this function without express user permission in advance.
- */
-// @ts-ignore - Unused since idealGasApproximation stopped anchoring on the
-// saturation line (2026-11-14); left untouched per the note above.
-function findSaturationPropsAtV(v: number): { u_g: number; T_sat: number; P_sat: number } | null {
-  if (!saturationDome) return null;
-
-  const rawData = saturationDome.raw_data;
-  const v_g_max = rawData[0].v_g;  // ~206 m³/kg at triple point
-  //const v_c = saturationDome.critical_point.v_c;  // ~0.003 m³/kg
-  const v_min_unique = rawData[0].v_f; //0.00100022; // From the steam table: this is v_sat at u=0.
-  // If v > v_min_unique, then there is a unique u_sat(v). For lower v, there may be two. -Erick
-
-  if (v > v_g_max || v < v_min_unique) {
-    return null;
-  }
-
-  // Binary search for T where v_g(T) = v
-  // v_g decreases with increasing T (index)
-  let lo = 0;
-  let hi = rawData.length - 1;
-
-  while (hi - lo > 1) {
-    const mid = Math.floor((lo + hi) / 2);
-    if (rawData[mid].v_g > v) {
-      lo = mid;
-    } else {
-      hi = mid;
-    }
-  }
-
-  // Interpolate between lo and hi
-  const v_g_lo = rawData[lo].v_g;
-  const v_g_hi = rawData[hi].v_g;
-  const t = (v - v_g_lo) / (v_g_hi - v_g_lo);
-
-  const u_g_lo = rawData[lo].u_g * 1000;  // Convert kJ/kg to J/kg
-  const u_g_hi = rawData[hi].u_g * 1000;
-  const T_lo = rawData[lo].T_K;
-  const T_hi = rawData[hi].T_K;
-  const P_lo = rawData[lo].P_MPa * 1e6;  // Convert MPa to Pa
-  const P_hi = rawData[hi].P_MPa * 1e6;
-
-  return {
-    u_g: u_g_lo + t * (u_g_hi - u_g_lo),
-    T_sat: T_lo + t * (T_hi - T_lo),
-    P_sat: P_lo + t * (P_hi - P_lo),
-  };
-}
 
 /**
  * Find ALL saturation properties at the temperature where v = v_g(T).
