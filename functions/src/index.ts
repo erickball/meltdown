@@ -12,7 +12,13 @@ initializeApp();
 
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
 
-const MODEL = "claude-opus-5";
+const MODEL = "claude-opus-5-5";
+// Opus 5.5's safety classifiers (cyber, bio) can decline a harmless request -
+// a reactor sandbox talks about meltdowns and releases all day. When that
+// happens the API re-runs the same request on this model inside the same
+// call, so a false positive costs a slightly pricier reply instead of a
+// silent Jack.
+const FALLBACK_MODEL = "claude-opus-5";
 // Generous cap: adaptive thinking counts against max_tokens, and starving it
 // truncates the reply mid-tool-loop with no visible text. Output is only
 // billed as used.
@@ -21,14 +27,17 @@ const MAX_OUTPUT_TOKENS = 8000;
 // Hard monthly spend ceiling for the whole app, in USD.
 const MONTHLY_BUDGET_USD = 25;
 
-// claude-opus-5 list prices, USD per million tokens. Cache write is 1.25x the
-// base input rate (5-minute TTL) and cache read is 0.1x, per Anthropic's
-// prompt-caching pricing.
-const PRICE = {
-  input: 5.0,
-  output: 25.0,
-  cacheWrite: 6.25,
-  cacheRead: 0.5,
+// List prices, USD per million tokens, for every model a reply can be served
+// by. Cache write is the 5-minute-TTL rate.
+interface Price {
+  input: number;
+  output: number;
+  cacheWrite: number;
+  cacheRead: number;
+}
+const PRICES: Record<string, Price> = {
+  [MODEL]: { input: 4.0, output: 20.0, cacheWrite: 5.0, cacheRead: 0.2 },
+  [FALLBACK_MODEL]: { input: 5.0, output: 25.0, cacheWrite: 6.25, cacheRead: 0.5 },
 };
 
 // Request sanity limits — the budget cap is the real backstop, these just
@@ -66,17 +75,20 @@ function applyCors(req: Request, res: Response): boolean {
   return true;
 }
 
-function usageCostUsd(u: {
-  input_tokens: number;
-  output_tokens: number;
-  cache_creation_input_tokens?: number | null;
-  cache_read_input_tokens?: number | null;
-}): number {
+function usageCostUsd(
+  u: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number | null;
+    cache_read_input_tokens?: number | null;
+  },
+  price: Price
+): number {
   return (
-    (u.input_tokens * PRICE.input +
-      u.output_tokens * PRICE.output +
-      (u.cache_creation_input_tokens ?? 0) * PRICE.cacheWrite +
-      (u.cache_read_input_tokens ?? 0) * PRICE.cacheRead) /
+    (u.input_tokens * price.input +
+      u.output_tokens * price.output +
+      (u.cache_creation_input_tokens ?? 0) * price.cacheWrite +
+      (u.cache_read_input_tokens ?? 0) * price.cacheRead) /
     1_000_000
   );
 }
@@ -154,13 +166,17 @@ export const jackChat = onRequest(
       lastContent[lastContent.length - 1].cache_control = { type: "ephemeral" };
     }
 
-    let response: Anthropic.Messages.Message;
+    let response: Anthropic.Beta.Messages.BetaMessage;
     try {
-      response = await client.messages.create({
+      response = await client.beta.messages.create({
         model: MODEL,
         max_tokens: MAX_OUTPUT_TOKENS,
-        // Adaptive thinking at low effort: quick chat replies, still smart
-        // enough for sizing math; keeps think-time (Jack "getting stuck") down.
+        betas: ["server-side-fallback-2026-07-01"],
+        fallbacks: [{ model: FALLBACK_MODEL }],
+        // Thinking is always on for this model; effort is the only control.
+        // Low effort: quick chat replies, still smart enough for sizing math;
+        // keeps think-time (Jack "getting stuck") down. Set explicitly - the
+        // model's own default is medium.
         thinking: { type: "adaptive" },
         output_config: { effort: "low" },
         tools: JACK_TOOLS,
@@ -186,7 +202,22 @@ export const jackChat = onRequest(
       throw err;
     }
 
-    const cost = usageCostUsd(response.usage);
+    // A reply the fallback model served is billed at that model's rates. The
+    // declined first attempt, if it was billed at all, is in the same usage
+    // totals; pricing the whole reply at the fallback's (higher) rates keeps
+    // the ledger an upper bound on what was spent.
+    const servedBy = (response.usage.iterations ?? []).some(
+      (it) => it.type === "fallback_message"
+    )
+      ? FALLBACK_MODEL
+      : MODEL;
+    if (servedBy !== MODEL) {
+      console.warn(`jackChat: ${MODEL} declined, reply served by ${servedBy}`);
+    }
+    if (response.stop_reason === "refusal") {
+      console.warn("jackChat: request refused", response.stop_details);
+    }
+    const cost = usageCostUsd(response.usage, PRICES[servedBy]);
     await usageRef.set(
       {
         costUsd: FieldValue.increment(cost),

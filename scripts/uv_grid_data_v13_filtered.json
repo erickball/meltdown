@@ -1,6 +1,6 @@
 {
-  "description": "Water properties on (u, v) grid - v13 filtered to P <= 50 MPa + near-critical patch (dense vapor/supercritical columns extended to u=3300, same IAPWS-IF97 source, seam-checked) + near-critical patch (dense vapor/supercritical columns extended to u=3300, same IAPWS-IF97 source, seam-checked) + hot patch (full-height vapor columns extended from u=3300 to 2273.15 K / 50 MPa, fringe columns under the 50 MPa edge; same IAPWS-IF97 source, seam-checked)",
-  "n_points": 16278,
+  "description": "Water properties on (u, v) grid - v13 filtered to P <= 50 MPa + near-critical patch (dense vapor/supercritical columns extended to u=3300, same IAPWS-IF97 source, seam-checked) + near-critical patch (dense vapor/supercritical columns extended to u=3300, same IAPWS-IF97 source, seam-checked) + hot patch (full-height vapor columns extended from u=3300 to 2273.15 K / 50 MPa, fringe columns under the 50 MPa edge; same IAPWS-IF97 source, seam-checked) + dilute patch (rows v13 could not solve in the v=140..210 columns, where its pressure bracket crossed the IF97 floor; same IAPWS-IF97 source, self-checked)",
+  "n_points": 16294,
   "max_pressure_MPa": 50,
   "points": [
     {
@@ -144207,6 +144207,134 @@
       "P_MPa": 48.98826212384669,
       "region": "vapor",
       "curve": null
+    },
+    {
+      "u": 2402.9104667705615,
+      "v": 139.7623336772688,
+      "T_K": 293.10324159775263,
+      "T_C": 19.95324159775265,
+      "P_MPa": 0.000967377891280359,
+      "region": "vapor"
+    },
+    {
+      "u": 2422.9104667705615,
+      "v": 139.7623336772688,
+      "T_K": 307.2933358772555,
+      "T_C": 34.14333587725554,
+      "P_MPa": 0.0010143270431847136,
+      "region": "vapor"
+    },
+    {
+      "u": 2442.9104667705615,
+      "v": 139.7623336772688,
+      "T_K": 321.46568102349204,
+      "T_C": 48.31568102349206,
+      "P_MPa": 0.0010611927941807093,
+      "region": "vapor"
+    },
+    {
+      "u": 2462.9104667705615,
+      "v": 139.7623336772688,
+      "T_K": 335.6055378128774,
+      "T_C": 62.455537812877424,
+      "P_MPa": 0.001107935767202396,
+      "region": "vapor"
+    },
+    {
+      "u": 2418.6762331614177,
+      "v": 171.31867986949487,
+      "T_K": 304.2502073609756,
+      "T_C": 31.100207360975617,
+      "P_MPa": 0.0008193458671058445,
+      "region": "vapor"
+    },
+    {
+      "u": 2478.6762331614177,
+      "v": 171.31867986949487,
+      "T_K": 346.7023500557833,
+      "T_C": 73.55235005578334,
+      "P_MPa": 0.0009338191545214443,
+      "region": "vapor"
+    },
+    {
+      "u": 2518.6762331614177,
+      "v": 171.31867986949487,
+      "T_K": 374.7827026843999,
+      "T_C": 101.63270268439993,
+      "P_MPa": 0.0010095054046395692,
+      "region": "vapor"
+    },
+    {
+      "u": 2394.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 287.32537264500377,
+      "T_C": 14.17537264500379,
+      "P_MPa": 0.0006312203092897012,
+      "region": "vapor"
+    },
+    {
+      "u": 2414.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 301.54314981558286,
+      "T_C": 28.393149815582888,
+      "P_MPa": 0.0006625127135282835,
+      "region": "vapor"
+    },
+    {
+      "u": 2454.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 329.90630425432227,
+      "T_C": 56.75630425432229,
+      "P_MPa": 0.0007249047393015247,
+      "region": "vapor"
+    },
+    {
+      "u": 2474.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 344.03106294127844,
+      "T_C": 70.88106294127846,
+      "P_MPa": 0.0007559663945241723,
+      "region": "vapor"
+    },
+    {
+      "u": 2554.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 400.0175690288395,
+      "T_C": 126.86756902883951,
+      "P_MPa": 0.0008790549851869943,
+      "region": "vapor"
+    },
+    {
+      "u": 2574.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 413.86618491194946,
+      "T_C": 140.71618491194948,
+      "P_MPa": 0.0009094973134208395,
+      "region": "vapor"
+    },
+    {
+      "u": 2594.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 427.6501769063063,
+      "T_C": 154.5001769063063,
+      "P_MPa": 0.0009397965749535953,
+      "region": "vapor"
+    },
+    {
+      "u": 2634.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 455.01798679936417,
+      "T_C": 181.8679867993642,
+      "P_MPa": 0.0009999528773280762,
+      "region": "vapor"
+    },
+    {
+      "u": 2654.911206560817,
+      "v": 209.99999999999991,
+      "T_K": 468.59969011193056,
+      "T_C": 195.44969011193058,
+      "P_MPa": 0.0010298055653653415,
+      "region": "vapor"
     }
   ]
 }

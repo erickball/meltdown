@@ -55,25 +55,50 @@ const RHO_ICE = 917;              // kg/m³
 const V_ICE = 1 / RHO_ICE;        // 1.09051e-3 m³/kg
 const H_FUSION = 333.5e3;         // J/kg - enthalpy of fusion at the triple point
 const CP_ICE = 2.05e3;            // J/kg-K - ice Ih, held constant (2.10 at 273 K)
-// Caloric slope of the vapour-over-ice line. This is EXACTLY the cv that
-// idealGasApproximation uses for dilute vapour BELOW the triple-point
+// Caloric slope of the vapour-over-ice line, J/kg-K. This is EXACTLY the cv
+// that idealGasApproximation uses for dilute vapour BELOW the triple-point
 // temperature (above it that path reads the steam table's own dilute column),
 // and it has to be, because that path OWNS the region immediately above the
 // vapour-over-ice line (v there is always > 206 m³/kg, far past the grid).
-// Sharing the constant makes both T and P exactly continuous across the line:
+// Sharing the value makes both T and P exactly continuous across the line:
 // the ideal-gas path's T = T_t + (u - u_g(T_t))/cv is the exact inverse of
 // u_g(T) = u_g(T_t) - cv*(T_t - T), and its Z is anchored at the same
 // triple-point vapour state that Z_g is, so P comes out to P_sub(T) on the
 // line itself.
 //
-// The ideal-gas cv of cold steam is really ~1400 J/kg-K (cp 1860 minus R), so
-// this is 7% high. That buys the seam: with 1400 here the two descriptions
-// disagreed by 2.8 K and ~20% in P at v = 1e4 m³/kg, a step discontinuity in
-// the state function right where a blown-down gas loop crosses - and the RK45
-// error controller and the pressure solver's compliance both break on a step
-// (see the long note at the top of mixture-properties.ts). The cost is 0.2% on
-// the vapour's energy at 217 K, which is nothing next to h_sub.
-const CV_VAPOR_COLD = 1500;       // J/kg-K
+// THE VALUE is read from the tables, not chosen: the slope du/dT of the chord
+// from the triple-point saturated vapour to the first point of the grid's
+// most dilute column (287.3 K at v = 210 m³/kg) - 1412 J/kg-K. That chord is
+// what idealGasApproximation follows just ABOVE the triple point, so taking
+// its slope below makes dT/du continuous through 273.16 K as well as T. The
+// ideal-gas cv of steam is 1397.5 there and falls to 1390 by 200 K; the chord
+// is 1% above it because the triple-point vapour at v = 206 is very slightly
+// non-ideal (0.46 kJ/kg below the ideal-gas u, against 0.23 at the column's
+// first point).
+//
+// (This was a constant 1500, with a 6% step in dT/du at the triple point and
+// the cold vapour reading up to 7 K warm at 180 K. A literal 1400 was tried
+// before that and failed for a different reason: the ideal-gas path kept its
+// own 1500, and the two descriptions disagreed by 2.8 K and ~20% in P at
+// v = 1e4 m³/kg - a step in the state function right where a blown-down gas
+// loop crosses. One shared value is what matters.)
+let cvVaporColdCached = NaN;
+function cvVaporCold(): number {
+  if (cvVaporColdCached > 0) return cvVaporColdCached;
+  if (!diluteColumn || !tripleAnchor) {
+    throw new Error('[WaterProps v4] Steam tables not loaded in cvVaporCold');
+  }
+  const cv = (diluteColumn.u[0] - tripleAnchor.u_g) / (diluteColumn.T[0] - T_TRIPLE);
+  if (!(cv > 0) || !Number.isFinite(cv)) {
+    throw new Error(
+      `[WaterProps v4] Cold-vapour cv from the tables is ${cv} J/kg-K: the steam table's ` +
+      `most dilute column starts at u=${(diluteColumn.u[0] / 1e3).toFixed(3)} kJ/kg, ` +
+      `T=${diluteColumn.T[0].toFixed(3)} K, which is not above the triple-point vapour ` +
+      `(u=${(tripleAnchor.u_g / 1e3).toFixed(3)} kJ/kg, ${T_TRIPLE} K).`);
+  }
+  cvVaporColdCached = cv;
+  return cv;
+}
 
 // ============================================================================
 // Data Types
@@ -272,7 +297,7 @@ interface VaporHotEdgePoint {
 let vaporHotEdge: VaporHotEdgePoint[] = [];
 
 // The grid's MOST DILUTE column (v = 210 m³/kg), sorted by u. Steam out there
-// is an ideal gas to 2.5e-4 (Z = 0.99976 at the column's cold end, 315 K, and
+// is an ideal gas to 4e-4 (Z = 0.99961 at the column's cold end, 287 K, and
 // closer to 1 everywhere hotter), so along it T is the ideal-gas T(u) and
 // P·v is the ideal-gas R·T - both functions of u alone, valid for every
 // thinner vapour too. idealGasApproximation reads them from here.
@@ -1363,7 +1388,7 @@ function iceEnergyAtT(T: number): number {
 
 /** Specific internal energy of water vapour on the sublimation line (J/kg). */
 function vaporOverIceEnergyAtT(T: number): number {
-  return tripleAnchor!.u_g - CV_VAPOR_COLD * (T_TRIPLE - T);
+  return tripleAnchor!.u_g - cvVaporCold() * (T_TRIPLE - T);
 }
 
 /** Specific volume of water vapour on the sublimation line (m³/kg). */
@@ -2803,23 +2828,22 @@ function superheatedVaporExtrapolation(u: number, v: number): { T: number; P: nu
  * shape: T depends on u alone, and P = (P·v)(u) / v with P·v = Z·R·T. Both
  * one-variable functions are READ, not modelled:
  *
- *   T >= 315.7 K (u >= 2434.9 kJ/kg) .. 2000 C
+ *   T >= 287.3 K (u >= 2394.9 kJ/kg) .. 2000 C
  *       the table's own most dilute column (diluteColumn), linear between its
- *       points (20 kJ/kg apart, chord error under 0.01 K; the column is
- *       missing six points below 2675 kJ/kg, and across those 60-80 kJ/kg
- *       spans the chord reads up to 0.1 K low). At v = 210 this is the grid's
- *       own data, so the hand-over from the grid is continuous; for thinner
- *       vapour it is exact to the column's departure from ideal (0.13 K at
- *       its cold end, under 0.05 K above 500 K).
- *   273.16 K .. 315.7 K
+ *       points (20 kJ/kg apart, chord error under 0.01 K). At v = 210 this is
+ *       the grid's own data, so the hand-over from the grid is continuous;
+ *       for thinner vapour it is exact to the column's departure from ideal
+ *       (0.17 K at its cold end, under 0.05 K above 500 K).
+ *   273.16 K .. 287.3 K
  *       the chord from the triple-point saturated vapour to the column's
- *       first point. Its slope is 1409 J/kg-K; steam's ideal-gas cv over that
- *       span is 1398-1408.
+ *       first point. Its slope is 1412 J/kg-K; steam's ideal-gas cv over that
+ *       span is 1398-1400.
  *   below 273.16 K
- *       T = T_t + (u - u_g(T_t)) / CV_VAPOR_COLD and Z frozen at the
- *       triple-point value, which is exactly the vapour-over-ice line's own
- *       caloric model (see CV_VAPOR_COLD) - so the vapour meets the frost
- *       line at the line's T and P_sub(T).
+ *       that same chord continued: T = T_t + (u - u_g(T_t)) / cvVaporCold()
+ *       and Z frozen at the triple-point value, which is exactly the
+ *       vapour-over-ice line's own caloric model (see cvVaporCold) - so the
+ *       vapour meets the frost line at the line's T and P_sub(T), and dT/du
+ *       does not step at the triple point.
  *   above 2000 C
  *       no table: the same anchored extension (and notice) that hotter-than-
  *       table steam gets inside the grid's v range, from the column's top.
@@ -2890,7 +2914,7 @@ function idealGasApproximation(u: number, v: number): { T: number; P: number } {
     Pv = Pv_t + f * (col.Pv[0] - Pv_t);
   } else {
     // Colder than the triple point: the vapour-over-ice line's caloric model
-    T = T_TRIPLE + (u - u_t) / CV_VAPOR_COLD;
+    T = T_TRIPLE + (u - u_t) / cvVaporCold();
     Pv = Pv_t * T / T_TRIPLE;
   }
   const P = Pv / v;
@@ -3408,14 +3432,36 @@ export function calculateState(mass: number, internalEnergy: number, volume: num
   // makes the trace-water limit unrepresentable, which is the whole regime a
   // gas-cooled plant lives in.
   //
-  // Grid/extension paths keep a floor, but the PHYSICAL one: the triple point
-  // (611.657 Pa), below which water cannot be a vapour in equilibrium with
-  // liquid at all. The old 1 kPa value pre-dated the grid reaching
-  // v = 210 m³/kg, where saturation pressures genuinely run down toward
-  // 600-1000 Pa, and it turned those legitimate states into throws.
-  const minPressure = calculationPath === 'vapor_ideal_gas' ? Number.MIN_VALUE : 611.0;
-  if (!(P >= minPressure) || P > P_CRIT * 10) {
+  // Grid/extension paths: positive, and under the triple-point pressure
+  // (611.657 Pa) only as a VAPOUR. No liquid exists below that pressure, so
+  // a liquid or supercritical path that answers with one has gone wrong. A
+  // superheated vapour, though, can be as thin as it likes: at v = 206..210
+  // m³/kg (between the end of the saturated-vapour line and the hand-over to
+  // the dilute path) vapour at 273-278 K sits at 600-611 Pa, and a flat
+  // 611 Pa floor on every grid path refused it - humid gas near 0 C on its
+  // way to saturation. What such a vapour must NOT be is above the
+  // equilibrium pressure at its own temperature (the same test the dilute
+  // path makes): then it is condensed, and the dome classification missed it.
+  // (Known residue: within ~0.01 kJ/kg of the frost line at v = 206..210 the
+  // grid's 0.04 K error reads a state the classifier calls vapour as 0.7 %
+  // over the sublimation pressure, and this throws. Those states threw under
+  // the flat floor too.)
+  if (!(P > 0) || P > P_CRIT * 10) {
     throw new Error(`[WaterProps v4] Pressure out of range: P=${(P/1e6).toFixed(4)} MPa (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
+  }
+  if (P < P_TRIPLE && calculationPath !== 'vapor_ideal_gas') {
+    if (phase !== 'vapor') {
+      throw new Error(`[WaterProps v4] Pressure out of range: P=${P.toFixed(2)} Pa is below the triple-point ` +
+        `pressure (${P_TRIPLE} Pa) for a ${phase} state, which cannot exist there ` +
+        `(u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, path=${calculationPath})`);
+    }
+    const P_equilibrium = T < T_TRIPLE ? sublimationPressure(T) : P_sat_from_T(T);
+    if (P > P_equilibrium * (1 + 1e-9)) {
+      throw new Error(`[WaterProps v4] Vapour below the triple-point pressure is CONDENSED: P=${P.toFixed(2)} Pa at ` +
+        `T=${T.toFixed(3)} K is above the equilibrium ${T < T_TRIPLE ? 'sublimation' : 'saturation'} pressure ` +
+        `${P_equilibrium.toFixed(2)} Pa there (u=${(u/1e3).toFixed(2)} kJ/kg, v=${(v*1e6).toFixed(2)} mL/kg, ` +
+        `path=${calculationPath}). The dome/sub-triple classification should have caught it first.`);
+    }
   }
   // Ceiling admits severe-accident superheat (steam near molten fuel). Above
   // ~2500K dissociation makes the ideal-gas extension overestimate T, which

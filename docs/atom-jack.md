@@ -16,7 +16,7 @@ browser (src/jack/)                    Firebase (functions/)
 │ JackManager (UI + loop)  │  POST    │ jackChat (Cloud Function v2) │
 │ jack-context (CONTEXT    │ ───────► │  - holds ANTHROPIC_API_KEY   │
 │   block per user msg)    │          │    (Secret Manager)          │
-│ jack-tools-exec (runs    │ ◄─────── │  - claude-opus-5, tools +    │
+│ jack-tools-exec (runs    │ ◄─────── │  - claude-opus-5-5, tools +  │
 │   Jack's tool calls on   │  content │    character prompt (cached  │
 │   ConstructionManager)   │          │    prefix, server-side)      │
 └──────────────────────────┘          │  - $25/mo cap via Firestore  │
@@ -35,7 +35,9 @@ browser (src/jack/)                    Firebase (functions/)
   ConstructionManager mutators).
 - **Budget**: the function reads `jack-usage/{YYYY-MM}` before each call and
   refuses (HTTP 429, in-character message) once the month's cost reaches
-  $25, computed at claude-opus-5 list prices including cache reads/writes.
+  $25, computed at list prices including cache reads/writes (claude-opus-5-5,
+  or claude-opus-5 for a reply the refusal fallback served: if 5.5's safety
+  classifier declines a request, the API re-runs it on Opus 5 in the same call).
   Concurrent requests can overshoot by ~one request; acceptable slop.
 - **Integration**: one `new JackManager({...})` host object in `main.ts`
   `init()` (next to `GameModeManager`), same host-object pattern as career
@@ -129,7 +131,7 @@ gcloud firestore fields ttls update expireAt --collection-group=car-chunks --ena
 ## Abuse posture
 
 The endpoint is public (the game has no auth). Protections: origin allowlist
-for CORS, request size/turn caps, `maxInstances: 5`, and the hard $10/month
+for CORS, request size/turn caps, `maxInstances: 5`, and the hard $25/month
 ledger — worst case, a scraper burns the month's chat budget and Jack goes
 quiet until the 1st.
 
