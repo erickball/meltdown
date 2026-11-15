@@ -51,6 +51,7 @@ import {
   saturatedVaporDensity,
   estimateVaporV,
 } from './water-properties';
+import type { OtsgAxialProfile } from './types';
 
 // ---------------------------------------------------------------------------
 // Saturation bundle
@@ -1763,6 +1764,76 @@ export function otsgRates(
     W12,
     W23,
   };
+}
+
+/**
+ * The axial profile a solved partition implies, for pricing a draw from a
+ * nozzle that is not at one of the tube's ends.
+ *
+ * The partition's closures already assume a profile in every section - they
+ * only ever published its MEANS and its two ends:
+ *
+ *  - economizer: enthalpy linear in length up to the boundary state (the
+ *    profile otsgRates crosses mass over: h_f - hBar1 is half its span);
+ *  - boiling: quality linear in length from 0 to x2Out (boilingMeanVolume
+ *    integrates exactly this);
+ *  - superheat: saturated steam in, hSteamOut at the outlet.
+ *
+ * A draw used to be priced by SECTION: every nozzle in the superheat section
+ * took hSteamOut, the fully superheated outlet, and every nozzle in the
+ * boiling section took the node's bulk. A leak nozzle part-way up the tube
+ * therefore saw the enthalpy of its draw step by ~1,700 kJ/kg the instant
+ * the top of the boiling section passed it, and since what it drew moved
+ * that boundary back, the boundary parked on the nozzle and the draw flipped
+ * every few steps - 20 MW in and out of a 10-litre valve body (Xe-100 tube
+ * rupture, 12,000 rejected steps a minute). The profile is continuous
+ * across both boundaries, so the draw now changes as the boundary sweeps
+ * past instead of when.
+ *
+ * Ends that only exist while a neighbouring section does fade with that
+ * neighbour's mass (m / (m + 1 kg), the convention hSteamOut already uses
+ * for its saturated inlet): an all-liquid tube has no saturated boundary
+ * for its economizer to climb to and draws at its mean everywhere.
+ */
+export function otsgAxialProfile(ev: OtsgEval): OtsgAxialProfile {
+  const { sat } = ev;
+  const [s1, s2, s3] = ev.sections;
+  // Boiling section. A flooded section that is subcooled on average
+  // (hBar below h_f) does not boil at all: liquid at its mean.
+  const boils = s2.hBar >= sat.h_f;
+  const h2: [number, number] = boils
+    ? [sat.h_f, sat.h_f + ev.x2Out * (sat.h_g - sat.h_f)]
+    : [s2.hBar, s2.hBar];
+  const v2: [number, number] = boils
+    ? [sat.v_f, sat.v_f + ev.x2Out * (sat.v_g - sat.v_f)]
+    : [s2.vBar, s2.vBar];
+  // Economizer: symmetric about its mean, reaching the boundary state to
+  // the extent there is anything above the boundary. The boundary state is
+  // the boiling section's inlet when there is one, saturated liquid when
+  // the water flashes straight to steam.
+  const mAbove = s2.mass + s3.mass;
+  const wAbove = mAbove / (mAbove + 1);
+  const hTop = s2.mass > 0 ? h2[0] : sat.h_f;
+  const vTop = s2.mass > 0 ? v2[0] : sat.v_f;
+  const dh = wAbove * (hTop - s1.hBar);
+  // Specific volume log-linear between the same two states: positive
+  // whatever the span, where the linear mirror 2 vBar - v_f goes negative
+  // near the critical point.
+  const dlnv = wAbove * Math.log(vTop / s1.vBar);
+  if (s1.mass > 0 && !Number.isFinite(dlnv)) {
+    throw new Error(`[OTSG] economizer profile: specific volumes ${s1.vBar} (mean) and ` +
+      `${vTop} (boundary) m3/kg give no profile at ${(ev.P / 1e5).toFixed(1)} bar.`);
+  }
+  const h1: [number, number] = s1.mass > 0 ? [s1.hBar - dh, s1.hBar + dh] : [hTop, hTop];
+  const v1: [number, number] = s1.mass > 0
+    ? [s1.vBar * Math.exp(-dlnv), s1.vBar * Math.exp(dlnv)] : [vTop, vTop];
+  // Superheat: what the boiling section hands it, to the outlet. With no
+  // boiling section feeding it the saturated inlet does not exist and the
+  // section is uniform at its outlet state (which is then its mean).
+  const w2 = s2.mass / (s2.mass + 1);
+  const h3: [number, number] = [w2 * h2[1] + (1 - w2) * ev.hSteamOut, ev.hSteamOut];
+  const v3: [number, number] = [w2 * v2[1] + (1 - w2) * ev.vSteamOut, ev.vSteamOut];
+  return { h: [h1, h2, h3], v: [v1, v2, v3] };
 }
 
 // ---------------------------------------------------------------------------

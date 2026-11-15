@@ -50,6 +50,7 @@ import { liquidViscosity, liquidThermalConductivity, liquidSpecificHeat,
   liquidThermalExpansivity } from './water-properties.js';
 import { emptyGasComposition } from './gas-properties.js';
 import { createFluidState } from './operators/index.js';
+import { drawCompositionAt, zoneWaterEnthalpy } from './operators/connection-hydraulics.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry, coreRodGeometry } from './factory.js';
 import {
@@ -58,6 +59,7 @@ import {
   superheatedV,
   evaluateOtsg,
   evaluateOtsgPartition,
+  otsgAxialProfile,
   otsgPartitionAtP,
   marchSteamOverMetal, buildSteamIsobar, isobarAt, superheatOverlaps,
   OtsgWallPin,
@@ -1987,6 +1989,68 @@ test('the published pressure is the partition\'s, not the mush read', () => {
     { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
     { zoneTemps: [calculateState(1, u3, v3).temperature], hA3Full: 1200 * 2000, WSteam: 0 });
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
+});
+
+test('a nozzle part-way up a boiler tube draws the state at the nozzle, without a step', () => {
+  // A leak nozzle used to be priced by SECTION - the superheated outlet
+  // anywhere in the superheater, the node bulk anywhere in the boiling
+  // section - so its enthalpy stepped by the whole latent-plus-superheat
+  // span as a boundary passed it. The profile is continuous: walk a point
+  // nozzle up the tube and the price must never jump.
+  const P0 = 80e5;
+  const sat0 = saturationAtP(P0);
+  const u1Bar = subcooledSectionMean(sat0.u_f - 400e3, sat0);
+  const v1 = subcooledLiquidV(u1Bar);
+  const x2 = boilingMeanQuality(sat0.v_f, sat0.v_g, 1);
+  const u3 = sat0.u_g + 250e3;
+  const v3 = superheatedV(u3, P0);
+  const m1 = 400, m2 = 90, m3 = 30;
+  const m = m1 + m2 + m3;
+  const U = m1 * u1Bar + m2 * (sat0.u_f + x2 * (sat0.u_g - sat0.u_f)) + m3 * u3;
+  const V = m1 * v1 + m2 * boilingMeanVolume(sat0.v_f, sat0.v_g, 1) + m3 * v3;
+  const TSteam = calculateState(1, u3, v3).temperature;
+  const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
+    { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
+    { zoneTemps: [TSteam + 40], hA3Full: 1200 * 2000, WSteam: 5 });
+  const H = 14;
+  const node = {
+    id: 'tube', volume: V, height: H,
+    fluid: { mass: m, internalEnergy: U, pressure: ev.P, temperature: ev.sat.T, phase: 'two-phase', quality: 0.3 },
+    otsg: { lastEval: {
+      lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
+      profile: otsgAxialProfile(ev),
+    } },
+  } as unknown as FlowNode;
+  const price = (z: number, opening?: number): number => {
+    const c = drawCompositionAt(node, z, 1, undefined, opening);
+    assertClose(c.wLiquid + c.wMixture + c.wVapor, 1, 1e-12, 'the zone weights sum to one');
+    return c.wLiquid * zoneWaterEnthalpy(node, 'liquid', c)
+      + c.wMixture * zoneWaterEnthalpy(node, 'mixture', c)
+      + c.wVapor * zoneWaterEnthalpy(node, 'vapor', c);
+  };
+  const N = 4000;
+  let worst = 0, last = price(0);
+  for (let i = 1; i <= N; i++) {
+    const h = price(H * i / N);
+    assert(h >= last - 1e-6, `enthalpy must rise up the tube: ${last} -> ${h} at ${(H * i / N).toFixed(3)} m`);
+    worst = Math.max(worst, h - last);
+    last = h;
+  }
+  const span = ev.hSteamOut - price(0);
+  assert(span > 1.5e6, `the tube must span subcooled water to superheated steam, got ${(span / 1e3).toFixed(0)} kJ/kg`);
+  // The steepest stretch is the boiling section (latent heat over its
+  // length) plus the superheater inlet's fade; a section-priced draw
+  // stepped by more than a third of the whole span in one go.
+  assert(worst < 0.05 * span,
+    `largest rise between nozzles ${(H / N * 1e3).toFixed(1)} mm apart is ${(worst / 1e3).toFixed(0)} kJ/kg ` +
+    `of a ${(span / 1e3).toFixed(0)} kJ/kg span`);
+  assertClose(price(H), ev.hSteamOut, 1e-6, 'the top nozzle draws the outlet steam');
+  assertClose(0.5 * (price(0) + price(ev.sections[0].lengthFrac * H)), ev.sections[0].hBar, 1,
+    'the economizer profile is symmetric about its mean');
+  // An opening as tall as the tube draws every section at once, each at its
+  // own price, and lands between the ends.
+  const all = price(H / 2, H);
+  assert(all > price(0) && all < ev.hSteamOut, 'a tube-tall opening draws a blend of all three sections');
 });
 
 test('the wall referees the partition: steam follows its metal, never past it', () => {

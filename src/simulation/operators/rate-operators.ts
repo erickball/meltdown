@@ -2061,7 +2061,7 @@ export class FlowRateOperator implements RateOperator {
       if (!(weight > 0)) continue;
       const zoneWater = weight * shareOf(zone);
       waterShare += zoneWater;
-      waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone);
+      waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone, comp);
     }
     const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
     return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace };
