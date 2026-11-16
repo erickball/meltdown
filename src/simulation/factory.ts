@@ -4489,13 +4489,13 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
     // The reflector starts at the temperature of the coolant ENTERING the
     // core - the fluid in the vessel that contains it - not of the core's
     // own coolant node, which is lumped at the outlet temperature. Its outer
-    // face is swept by the full inlet flow and its inner face only brushes
-    // the bed, so that is where an operating plant holds it: the Xe-100's
-    // graphite settles within a few kelvin of its cold helium. Started at
-    // the 750 C outlet instead it spent three hours handing 140 GJ back to
-    // the helium (60 MW at first), and the rods held fission power down by
-    // that much the whole time. A bare core with no containing vessel has
-    // only its own coolant to go by.
+    // face has over twice the area of the inner one and is swept by the full
+    // inlet flow, so an operating plant holds it much nearer the cold side:
+    // the Xe-100's graphite rides some 50 K above its cold helium, against
+    // 365 K between cold and hot leg. Started at the 750 C outlet instead it
+    // spent three hours handing 140 GJ back to the helium (60 MW at first),
+    // and the rods held fission power down by that much the whole time. A
+    // bare core with no containing vessel has only its own coolant to go by.
     const inletNode = state.flowNodes.get((component as any).containedBy);
     const startNode = inletNode ?? coolantNode;
     if (!startNode) {
@@ -4628,6 +4628,55 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
       );
     }
     const eWall = 0.8; // oxidised steel
+
+    // A core barrel is steel wrapped around the reflector, so the graphite
+    // cannot see the vessel: it conducts into the barrel, and the barrel is
+    // what radiates across the downcomer. That puts the barrel's heat
+    // capacity in the passive path and makes it a radiation shield between
+    // core and vessel - and gives the barrel a temperature of its own, which
+    // in a loss of forced cooling is one of the limits that matter.
+    const barrelWallId = `${id}-wall`;
+    const barrelWall = component.type === 'coreBarrel'
+      ? state.thermalNodes.get(barrelWallId) : undefined;
+    if (barrelWall) {
+      const barrelHeight = barrelWall.surfaceArea / (2 * Math.PI * refGeo.outerRadius);
+      const barrelOuterRadius = refGeo.outerRadius + barrelWall.characteristicLength;
+      // Graphite from where the lumped temperature sits (the volume-mean
+      // radius) out to the steel, then the steel's own inner half.
+      state.thermalConnections.push({
+        id: `conduction-${reflectorId}-barrel`,
+        fromNodeId: reflectorId,
+        toNodeId: barrelWallId,
+        conductance: 0, // the graphite path below is the whole of it
+        graphiteConduction: {
+          shapeFactor: (2 * Math.PI * barrelHeight) /
+            Math.log(refGeo.outerRadius / refGeo.midRadius),
+          k300: NBG_18.k300,
+          seriesConductance: barrelWall.thermalConductivity * barrelWall.surfaceArea /
+            (barrelWall.characteristicLength / 2),
+        },
+      });
+      const exchangeArea = concentricGrayBodyArea(
+        barrelOuterRadius, vesselRadius, barrelHeight, eWall, eWall,
+      );
+      state.thermalConnections.push({
+        id: `radiation-${barrelWallId}-${wallId}`,
+        fromNodeId: barrelWallId,
+        toNodeId: wallId,
+        conductance: 0, // gas in between - radiation only
+        radiationCoeff: exchangeArea,
+      });
+      console.log(
+        `[Factory] Reflector '${reflectorId}': ${(refGeo.mass / 1000).toFixed(1)} t of ` +
+        `${NBG_18.name} graphite, ${refGeo.thickness.toFixed(2)} m thick, conducting into ` +
+        `${barrelWallId} (${(barrelWall.mass / 1000).toFixed(1)} t of steel), which radiates ` +
+        `${exchangeArea.toFixed(1)} m2 (effective) to ${wallId}`
+      );
+      continue;
+    }
+
+    // No barrel (fuel loaded straight into a vessel): the reflector's own
+    // outer face is what the vessel wall sees.
     // refGeo.outerArea is the reflector's own lateral area, so pass the
     // height that generates it rather than re-deriving one.
     const exchangeArea = concentricGrayBodyArea(
@@ -4837,7 +4886,40 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
     let area = 0;
     let thickness = 0;
     let isBuilding = false;
+    // What the wall starts at, and whether its inner face is wetted by the
+    // component's own fluid. Both hold for everything except a core barrel.
+    let startTemperature = flowNode.fluid.temperature;
+    let innerFaceWetted = true;
+    let faceDiameter: number = comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1;
     switch (component.type) {
+      case 'coreBarrel': {
+        // The steel shell around the core. Under EVERY policy, like a
+        // reactor vessel: it stands in the passive heat path between the
+        // core and the vessel wall, it shields the vessel from the core's
+        // radiation, and its creep life is read off this node.
+        //
+        // `innerDiameter` is the active core. A graphite reflector sits
+        // between the core and the steel, so the shell wraps the reflector
+        // and is that much larger - and its inner face then touches graphite
+        // (wired by createReflectorThermalNodes), not coolant. An open
+        // cylinder: no heads.
+        const reflector = comp.reflectorThickness ?? 0;
+        faceDiameter = comp.innerDiameter + 2 * reflector;
+        area = Math.PI * faceDiameter * comp.height;
+        thickness = componentWall(component, 0)?.thickness ?? 0;
+        innerFaceWetted = !(reflector > 0);
+        // Steel between two bodies starts midway between them. Behind a
+        // reflector both are the fluid outside (the reflector starts there
+        // too); a bare barrel has its own coolant inside.
+        const outside = component.containedBy
+          ? state.flowNodes.get(component.containedBy) : undefined;
+        if (outside) {
+          startTemperature = innerFaceWetted
+            ? 0.5 * (flowNode.fluid.temperature + outside.fluid.temperature)
+            : outside.fluid.temperature;
+        }
+        break;
+      }
       case 'reactorVessel': {
         // Cylindrical shell + upper head; the lower head has its own node
         // when a core is present (corium relocation) - avoid double counting
@@ -4912,7 +4994,7 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
     state.thermalNodes.set(`${id}-wall`, {
       id: `${id}-wall`,
       label: `${component.label || id} wall`,
-      temperature: flowNode.fluid.temperature,
+      temperature: startTemperature,
       mass,
       specificHeat: cp,
       thermalConductivity: conductivity,
@@ -4923,13 +5005,15 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
     });
 
     // Inner face: wall <-> own fluid
-    state.convectionConnections.push({
-      id: `convection-${id}-wall`,
-      thermalNodeId: `${id}-wall`,
-      flowNodeId: id,
-      surfaceArea: area,
-      characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
-    });
+    if (innerFaceWetted) {
+      state.convectionConnections.push({
+        id: `convection-${id}-wall`,
+        thermalNodeId: `${id}-wall`,
+        flowNodeId: id,
+        surfaceArea: area,
+        characteristicDiameter: faceDiameter,
+      });
+    }
 
     // Outer face: wall <-> containing fluid (tank inside containment etc.),
     // and ambient when nothing contains it. `containedBy: undefined` already
@@ -4957,7 +5041,7 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
       thermalNodeId: `${id}-wall`,
       flowNodeId: outerFluid,
       surfaceArea: area,
-      characteristicDiameter: comp.innerDiameter ?? comp.width ?? comp.diameter ?? 1,
+      characteristicDiameter: faceDiameter,
     });
     created++;
   }
