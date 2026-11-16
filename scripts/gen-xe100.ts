@@ -377,7 +377,7 @@ const rccsPanel = (id: string, elevation: number, pressure: number, half: string
   },
   ports: ports([
     [`${id}-in`, -3.0, 5],   // up from the section below (or the downcomer)
-    [`${id}-out`, 3.0, 5],   // on up the riser
+    [`${id}-out`, 3.0, -5],   // on up the riser
   ]),
   // Seeded on the static ladder under a water surface 39.6 m up. A rung out
   // here is a standing wave in a loop with no pump to absorb it.
@@ -1150,14 +1150,18 @@ connect('val-prel-1', 'val-prel-1-out', 'bui-1', 'bui-1-north',
 // hydraulically invisible (~10 Pa at design) while the 0.15 m headers at K~8
 // take the whole head. Lands ~10 kg/s and ~25 K of rise at the ~1 MW on-load
 // duty, which is what these systems are built to do.
+// Each panel's outlet is at its TOP (10 m up): steam made in a panel has to
+// be able to leave it. With both nozzles at the bottom the steam was trapped
+// under the panel's roof, pushed all 3 t of water out into the tank, blew
+// down and reflooded - every few minutes, for hours (xe100-sbo, 2026-11-15).
 connect('rccs-tank-1', 'rccs-tank-1-draw', 'rccs-panel-1', 'rccs-panel-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
     flowArea: 0.0177, length: 32, resistanceCoeff: 8 });
 connect('rccs-panel-1', 'rccs-panel-1-out', 'rccs-panel-2', 'rccs-panel-2-in',
-  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 10, toElevation: 0,
     flowArea: 0.0177, length: 10, resistanceCoeff: 2 });
 connect('rccs-panel-2', 'rccs-panel-2-out', 'rccs-tank-1', 'rccs-tank-1-return',
-  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 10, toElevation: 0,
     flowArea: 0.0177, length: 18, resistanceCoeff: 6 });
 connect('rccs-tank-1', 'rccs-tank-1-vent', 'val-rccs-1', 'val-rccs-1-in',
   { fromElevation: 16, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });
