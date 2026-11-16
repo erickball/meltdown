@@ -479,7 +479,7 @@ export interface ConvectionNodeProps {
 interface LiquidFluidProps {
   rho: number; mu: number; k: number; cp: number; Pr: number; beta: number;
 }
-interface VaporFluidProps {
+export interface VaporFluidProps {
   k: number; mu: number; cpMass: number; M: number; Pr: number;
   rho_g: number; nSteam: number; nNcg: number;
 }
@@ -514,7 +514,7 @@ function liquidPropsFor(
   return out;
 }
 
-function vaporPropsFor(
+export function vaporPropsFor(
   flowNode: FlowNode, cache?: ConvectionNodeProps,
 ): VaporFluidProps {
   const hit = cache?.vapor.get(flowNode.id);

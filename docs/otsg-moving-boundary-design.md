@@ -566,6 +566,18 @@ other.
   temperature would give that, but with the gas flowing it also carries heat
   from the hot end's metal to the cold end's through the lumped node (an
   estimated ~10% of duty on the Xe-100, not measured), so it was not added.
+- **Water on the shell side (to do).** The shell side of the bundle is a gas
+  model. The shell NODE handles water properly (phase, pressure, the
+  steam-gas mixture), and the film's conductivity, viscosity and heat capacity
+  are those of the gas and steam together (`shellGasProps`), so steam in the
+  helium after a tube rupture is priced. But there is no boiling on the
+  outside of hot tubes, no condensation on cold ones, no pool level covering
+  part of the bundle, and every stream is marched as gas at the mixture's heat
+  capacity whatever it carries. A shell FULL of liquid throws. A steam
+  generator with the water on the shell side (boiling outside the tubes, as in
+  a B&W once-through unit) cannot be built from this component until the
+  shell side gets the tube side's treatment: sections solved from the shell's
+  totals, a boiling/condensing film, and draws by elevation.
 
 `scripts/test-otsg-flow-directions.ts` runs a bundle between four tanks in
 each of these arrangements.

@@ -52,16 +52,9 @@ import {
   otsgAxialProfile,
 } from '../otsg';
 import { saturatedLiquidEnergy } from '../water-properties';
-import { nodeHeatCapacity, priceDrawAt } from './rate-operators';
+import { nodeHeatCapacity, priceDrawAt, vaporPropsFor, type VaporFluidProps } from './rate-operators';
 import { breakExchange } from './exchange-flow';
-import {
-  totalMoles,
-  mixtureThermalConductivity,
-  mixtureViscosity,
-  mixtureCp,
-  averageMolecularWeight,
-} from '../gas-properties';
-import { nodeVaporDensity, drawCompositionAt } from './connection-hydraulics';
+import { drawCompositionAt } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
 
 // Tube-side film coefficients live in otsg.ts so the factory's design-point
@@ -540,8 +533,9 @@ export function otsgGasDuties(
   heatArea: number, share: number,
 ): number[] {
   const N = zoneTemps.length;
-  const hAZone = otsgGasFilmCoefficient(shell, state) * heatArea / N;
-  const cp = otsgGasCpPerKg(shell);
+  const props = shellGasProps(shell);
+  const hAZone = otsgGasFilmCoefficient(shell, state, props) * heatArea / N;
+  const cp = props.cpMass;
   const { up, sources } = otsgGasStreams(state, shell, N, share);
   const TBulk = shell.fluid.temperature;
   const march = marchCells(N, 0, N - 1, up, sources, TBulk, TBulk,
@@ -554,20 +548,44 @@ export function otsgGasDuties(
   return march.Q.map(q => -q);
 }
 
+/**
+ * What the shell-side film is made of: the gas AND the steam sharing the
+ * shell with it, blended the way every other wall in the plant blends them
+ * (vaporPropsFor). After a tube rupture the shell is helium with steam in it,
+ * and a shell can be built holding steam alone.
+ *
+ * The bundle's shell side is a GAS model. A shell full of liquid has no gas
+ * film to describe, and one with nothing in it has no fluid at all; neither
+ * gets a made-up conductivity (this was k = 0.05, mu = 3e-5, cp = 2000 for
+ * any shell without non-condensible gas, silently). A shell holding a pool
+ * under its gas is still treated as gas over the whole bundle - boiling and
+ * condensation on the outside of the tubes are not modelled yet.
+ */
+function shellGasProps(shell: FlowNode): VaporFluidProps {
+  if (shell.fluid.phase === 'liquid') {
+    throw new Error(`[OTSG] shell '${shell.id}' is full of liquid water ` +
+      `(${shell.fluid.mass.toFixed(1)} kg in ${shell.volume.toFixed(2)} m3 at ` +
+      `${(shell.fluid.temperature - 273.15).toFixed(0)} C). The once-through bundle models gas ` +
+      `(or steam) on its shell side only; liquid on the shell side is not supported.`);
+  }
+  const props = vaporPropsFor(shell);
+  if (!(props.nSteam + props.nNcg > 0)) {
+    throw new Error(`[OTSG] shell '${shell.id}' holds no gas and no steam, so there is nothing ` +
+      `on the shell side of the tubes to exchange heat with.`);
+  }
+  return props;
+}
+
 /** Shell-side film coefficient (W/m2-K): crossflow Dittus-Boelter on the
- *  actual gas mixture, floored at natural convection. */
-export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState): number {
+ *  actual shell mixture (gas plus steam), floored at natural convection. */
+export function otsgGasFilmCoefficient(
+  shell: FlowNode, state: SimulationState, props: VaporFluidProps = shellGasProps(shell),
+): number {
   const throughput = otsgShellThroughput(shell, state);
-  const ncg = shell.fluid.ncg;
-  const T = shell.fluid.temperature;
-  const k = ncg && totalMoles(ncg) > 0 ? mixtureThermalConductivity(ncg, T) : 0.05;
-  const mu = ncg && totalMoles(ncg) > 0 ? mixtureViscosity(ncg, T) : 3e-5;
-  const cp = otsgGasCpPerKg(shell);
-  const rho = nodeVaporDensity(shell);
+  const { k, mu, Pr, rho_g: rho } = props;
   const D = 0.019; // tube OD - the crossflow characteristic length
   const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
   const Re = mu > 0 ? (rho * v * D) / mu : 0;
-  const Pr = k > 0 ? (cp * mu) / k : 0.7;
   const hForced = Re > 10
     ? 0.023 * Math.pow(Re, 0.8) * Math.pow(Math.max(0.1, Pr), 0.4) * k / D
     : 0;
@@ -576,22 +594,13 @@ export function otsgGasFilmCoefficient(shell: FlowNode, state: SimulationState):
 
 /** Gas capacity rate mdot*cp through the shell (W/K). */
 export function otsgGasMcp(shell: FlowNode, state: SimulationState): number {
-  return otsgShellThroughput(shell, state) * otsgGasCpPerKg(shell);
+  return otsgShellThroughput(shell, state) * shellGasProps(shell).cpMass;
 }
 
 function otsgShellThroughput(shell: FlowNode, state: SimulationState): number {
   let throughput = 0;
   for (const st of nodeStreams(state, shell.id)) throughput += Math.abs(st.w);
   return throughput / 2; // in + out both counted
-}
-
-function otsgGasCpPerKg(shell: FlowNode): number {
-  const ncg = shell.fluid.ncg;
-  if (ncg && totalMoles(ncg) > 0) {
-    const M = averageMolecularWeight(ncg);
-    return M > 0 ? mixtureCp(ncg) / M : 5195;
-  }
-  return 2000; // steam-ish
 }
 
 /** What a solved partition publishes on its node for everything that draws
