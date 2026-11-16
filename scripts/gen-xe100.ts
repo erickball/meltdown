@@ -956,17 +956,24 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 // stay out: they only lift in upsets, and a relief pop chased with feed is
 // exactly the swing the aggressiveness note below is about.
 //
-// The trim is on SUPERHEAT FRACTION now, not level. Matching steam flow only
-// holds the inventory wherever it happens to be, and in a once-through
-// boiler that inventory IS the steam temperature: the outlet runs toward the
-// helium inlet as the superheat section lengthens. Level was the wrong
-// handle on it - the 1 kg/s-per-metre trim never stopped the slow dry-out
-// even with the bleed metered (steam 600-680 C and climbing at 1500 s, valve
-// creep life ~2 h). Superheat fraction moves monotonically with feed at any
-// power and has no shrink-swell sign flip. 0.35 is where the start of every
-// run makes ~565 C, the design main steam. Hotter -> drier -> more feed.
-const SH_FRACTION = 0.35;
-const SH_TRIM_GAIN = 30;   // kg/s of feed per unit superheat fraction
+// The trim is on OUTLET STEAM TEMPERATURE. Matching steam flow only holds
+// the inventory wherever it happens to be, and in a once-through boiler that
+// inventory IS the steam temperature: the outlet runs toward the helium
+// inlet as the superheat section lengthens. Level was the wrong handle on
+// it - the 1 kg/s-per-metre trim never stopped the slow dry-out even with
+// the bleed metered (steam 600-680 C and climbing at 1500 s, valve creep
+// life ~2 h). Hotter -> drier -> more feed.
+//
+// It was on superheat FRACTION (0.35) for a while, as a stand-in for the
+// temperature before the boiler reported one. But the fraction that makes
+// 565 C is a property of the heat transfer, not of the plant's design: by
+// the time the loop actually held 0.35 the steam it made was 527 C, and
+// 565 C wanted 0.40. The temperature is what the turbine and the creep life
+// of every valve downstream are designed to, so it is what the loop holds.
+// The gain is small because the boiler does the integrating: any feed over
+// the steam drawn accumulates as inventory and cools the outlet, so the
+// loop rests only where feed equals draw AND the outlet is at T_STEAM.
+const T_STEAM_TRIM_GAIN = 0.1;   // kg/s of feed per kelvin of outlet steam over T_STEAM
 controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
   setpoint: {
@@ -981,11 +988,11 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
           { kind: 'connection-flow', targetId: 'flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in' },
         ],
       },
-      // Superheat trim: +SH_TRIM_GAIN kg/s per unit of superheated tube
-      // length over SH_FRACTION, averaged over the two bundles.
+      // Temperature trim: +T_STEAM_TRIM_GAIN kg/s per kelvin of outlet
+      // steam over T_STEAM, averaged over the two bundles.
       ...['hx-1-tube', 'hx-1-tube-b2'].map(targetId => ({
-        op: 'scale' as const, factor: SH_TRIM_GAIN / 2, offset: -SH_TRIM_GAIN / 2 * SH_FRACTION,
-        input: { kind: 'otsg-superheat-fraction' as const, targetId },
+        op: 'scale' as const, factor: T_STEAM_TRIM_GAIN / 2, offset: -T_STEAM_TRIM_GAIN / 2 * T_STEAM,
+        input: { kind: 'otsg-outlet-temperature' as const, targetId },
       })),
     ],
   },

@@ -4486,10 +4486,29 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
     const isPebbleBed = coreComp.fuelForm === 'pebbles';
     const coreBottomElevation = coreComp.coreBottomElevation ?? 0.5;
 
+    // The reflector starts at the temperature of the coolant ENTERING the
+    // core - the fluid in the vessel that contains it - not of the core's
+    // own coolant node, which is lumped at the outlet temperature. Its outer
+    // face is swept by the full inlet flow and its inner face only brushes
+    // the bed, so that is where an operating plant holds it: the Xe-100's
+    // graphite settles within a few kelvin of its cold helium. Started at
+    // the 750 C outlet instead it spent three hours handing 140 GJ back to
+    // the helium (60 MW at first), and the rods held fission power down by
+    // that much the whole time. A bare core with no containing vessel has
+    // only its own coolant to go by.
+    const inletNode = state.flowNodes.get((component as any).containedBy);
+    const startNode = inletNode ?? coolantNode;
+    if (!startNode) {
+      throw new Error(
+        `[Factory] Core ${id}: reflector has no coolant node to take a starting ` +
+        `temperature from (neither '${(component as any).containedBy}' nor '${coolantFlowNodeId}' exists).`
+      );
+    }
+
     state.thermalNodes.set(reflectorId, {
       id: reflectorId,
       label: `${component.label || 'Core'} Reflector`,
-      temperature: coolantNode?.fluid.temperature ?? 700,
+      temperature: startNode.fluid.temperature,
       mass: refGeo.mass,
       // Graphite cp runs 710 -> 2020 J/kg-K across the range this node
       // actually visits, so it uses the temperature-dependent model; the

@@ -1596,19 +1596,19 @@
               },
               {
                 "op": "scale",
-                "factor": 15,
-                "offset": -5.25,
+                "factor": 0.05,
+                "offset": -41.900000000000006,
                 "input": {
-                  "kind": "otsg-superheat-fraction",
+                  "kind": "otsg-outlet-temperature",
                   "targetId": "hx-1-tube"
                 }
               },
               {
                 "op": "scale",
-                "factor": 15,
-                "offset": -5.25,
+                "factor": 0.05,
+                "offset": -41.900000000000006,
                 "input": {
-                  "kind": "otsg-superheat-fraction",
+                  "kind": "otsg-outlet-temperature",
                   "targetId": "hx-1-tube-b2"
                 }
               }

@@ -353,6 +353,9 @@ add('cv-1', {
   position: { x: DUCT_X, y: 78 }, rotation: 0, elevation: DUCT_BASE,
   outerDiameter: DUCT_OD, wallThickness: ductShellWall(DUCT_OD, 1.0), length: DUCT_LENGTH,
   innerDiameter: 1.0, innerWallThickness: 0.02,
+  // Hot-duct lining, as in gen-xe100.ts (the preset carried it; this
+  // generator had fallen behind).
+  innerInsulationThickness: 0.05, innerInsulationConductivity: 0.3,
   pressureRating: P_DESIGN_BAR,
   material: 'alloy-800h',
   targetComponentId: 'hx-1', orientation: 'horizontal',
@@ -745,6 +748,7 @@ controller('ctl-fwhlvl-1', 'FWH Shell Level', 20, 88, {
 // Three-element feedwater: the steam-flow feedforward now reads the two
 // bundle lines at their isolation valves (distinct component pairs, so the
 // plain flow ids apply).
+const T_STEAM_TRIM_GAIN = 0.1;   // kg/s of feed per kelvin of outlet steam over T_STEAM
 controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
   sensor: { kind: 'connection-flow', targetId: 'flow-fw-pump-1-val-fpcv-1' },
   setpoint: {
@@ -757,10 +761,12 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
           { kind: 'connection-flow', targetId: 'flow-hx-1-val-msiv-2' },
         ],
       },
-      {
-        op: 'scale', factor: -1.0, offset: 4.0,
-        input: { kind: 'node-level', targetId: 'hx-1-tube' },
-      },
+      // Trim on outlet steam temperature, as in gen-xe100.ts (see the note
+      // there): a once-through boiler has no level to trim on.
+      ...['hx-1-tube', 'hx-1-tube-b2'].map(targetId => ({
+        op: 'scale' as const, factor: T_STEAM_TRIM_GAIN / 2, offset: -T_STEAM_TRIM_GAIN / 2 * T_STEAM,
+        input: { kind: 'otsg-outlet-temperature' as const, targetId },
+      })),
     ],
   },
   aggressiveness: 2.5,
