@@ -109,13 +109,17 @@ interface SampleBlock {
 /** Fewest blocks a full window's slope noise is estimated from */
 const NOISE_BLOCKS = 8;
 
+/** How much less certain a white-noise slope is from a window half as long:
+ *  its standard error goes as (window length)^-1.5 */
+const SHORTER_WINDOW_NOISE = Math.pow(2, 1.5);
+
 export interface SlowModeConfig {
   /** Normal integration after each jump before measuring (s plant time) */
   relaxSeconds: number;
   /** Measurement window (s plant time). This is the shortest; it doubles
    *  (up to maxMeasureSeconds) while the variable limiting the jump is
-   *  oscillating on a period the window cannot average over, and comes back
-   *  down once jumps run into the ceiling instead. */
+   *  oscillating on a period the window cannot average over, and halves
+   *  again after a jump taken with error room to spare. */
   measureSeconds: number;
   maxMeasureSeconds: number;
   /** Sampling interval inside the measurement window (s) */
@@ -143,7 +147,11 @@ export interface SlowModeConfig {
   accuracyHorizon: number;
   /** Confidence multiplier on the fitted rate/curvature standard errors */
   confidence: number;
-  /** Jumps shorter than this multiple of one relax+measure cycle are not worth taking */
+  /** Jumps shorter than this multiple of one relaxSeconds + measureSeconds
+   *  cycle are not worth taking. (Of the SHORTEST window, not the current
+   *  one: a window that has lengthened to average an oscillation costs the
+   *  same whether its jump is taken or not, and refusing a 230 s jump
+   *  because the window was 640 s threw that window away.) */
   minJumpFactor: number;
   /** Starting jump ceiling (s); doubles per verified jump, halves per failed one */
   initialMaxJump: number;
@@ -157,6 +165,9 @@ export interface SlowModeConfig {
    *  pressure must rise 25% faster than the upper edge of its measured rate
    *  to overshoot. */
   reliefApproachFraction: number;
+  /** Loosen a slot's tolerance to its own rms departure from its fitted
+   *  line in the window (WANDER in tryJump) */
+  wanderTolerance: boolean;
   /** Record the tightest per-slot jump limits of every window (getLimits) */
   diagnose?: boolean;
 }
@@ -176,6 +187,7 @@ export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
   initialMaxJump: 120,
   maxJump: 3600,
   reliefApproachFraction: 0.8,
+  wanderTolerance: true,
 };
 
 // Tolerance kinds (see tolerances())
@@ -422,7 +434,9 @@ export class SlowModeController {
     const merged = (): SolverMetrics => ({ ...metrics!, subcycleCount: steps, retriesThisFrame: retries });
     // Returns after a jump, so the caller can treat the jumped state like an
     // input (history snapshot) before anything else integrates from it
-    while (remaining > 1e-10) {
+    // (1e-9 s is the tolerance every window boundary below is tested with:
+    // a remainder smaller than that is rounding, not time left to integrate)
+    while (remaining > 1e-9) {
       const r = this.advanceChunk(solver, s, remaining, wallFrameTimeMs);
       const covered = r.covered;
       s = r.state;
@@ -444,9 +458,16 @@ export class SlowModeController {
   } {
     if (!Number.isFinite(this.phaseStart)) this.startRelax(state.time);
     // Sample on the measurement grid: never step past the next sample time
+    // - but a boundary that coincides with the end of the request to within
+    // rounding does not split it. (The sample grid and the caller's ticks
+    // both advance in steps of sampleSeconds from a time that, after a jump,
+    // is not a round number, and drift apart by ~1e-10 s. Splitting there
+    // sent the solver a 1e-10 s advance every tick, whose one tiny step reset
+    // its step size: 12 steps per half second instead of 5, in every window
+    // after the first jump.)
     let dt = requestedDt;
-    if (this.phase === 'measure') dt = Math.min(dt, Math.max(this.nextSample - state.time, 1e-6));
-    else dt = Math.min(dt, Math.max(this.phaseStart + this.config.relaxSeconds - state.time, 1e-6));
+    const boundary = this.phase === 'measure' ? this.nextSample : this.phaseStart + this.config.relaxSeconds;
+    if (boundary - state.time < dt - 1e-9) dt = Math.max(boundary - state.time, 1e-6);
     // Catch relief-valve lifts on the accepted substep they happen on (the
     // chunk can end up to a sample interval later, and in that time a lift
     // discharges kilograms): chained onto whatever the caller records with
@@ -536,14 +557,42 @@ export class SlowModeController {
         }
       }
       // A full window gone by without a second lift: this cycle is longer
-      // than the window, so it is not averaged over but jumped along - the
-      // ramp from here to the next lift is an ordinary window, bounded short
-      // of the setpoint. (Waiting for the second lift instead held every
-      // jump off for as long as the valve stayed shut.)
-      if (lock.marks.length === 1 && s.time - this.phaseStart >= this.measure - 1e-9) {
-        this.lock = null;
-        this.startMeasure(s);
-        this.status.lastHold = lock.valve + ' lift cycle longer than the window: measuring the ramp';
+      // than the window. Whether to average over it or jump along it is
+      // decided by what a jump along it could cover: the window so far IS a
+      // measurement of the ramp (it began on the lift), and a jump may take
+      // the valve's sensed pressure reliefApproachFraction of the way to the
+      // setpoint, which at the measured rate of rise is that fraction of the
+      // time left to the next lift.
+      //  - If that is as long as a jump may be anyway (the jump ceiling),
+      //    there is nothing to gain by waiting: the window is closed here as
+      //    an ordinary one and jumps along the ramp. (Waiting for the second
+      //    lift regardless held every jump off for as long as the valve
+      //    stayed shut.)
+      //  - If not, the next lift is nearer than a jump is long: the window
+      //    stays locked and closes on it as one whole cycle, whose jump the
+      //    setpoint does not limit. (Starting a fresh window on the ramp
+      //    here instead left a dead zone: a valve lifting every 1.3-2.5
+      //    windows - xe100-sbo's steam safety valve at ~450 s against a 320 s
+      //    window - always lifted again before the fresh window finished, and
+      //    the plant never jumped at all.)
+      // Asked again at every sample, so a pressure that levels off short of
+      // the setpoint ends up on the first branch by itself.
+      if (lock.marks.length === 1 && s.time - this.phaseStart >= this.measure - 1e-9 && this.n >= 6) {
+        const j = this.obsIds.indexOf(lock.valve);
+        const [s0, s1, s2] = this.st;
+        const tcRel = s1 / s0;
+        const rise = (this.osxt[j] - this.osx[j] * tcRel) / (s2 - s0 * tcRel * tcRel);
+        const valve = s.components.valves.get(lock.valve)!;
+        const gap = valve.relief!.setpoint - reliefSensedPressure(s, lock.valve);
+        const rampJump = rise > 0 ? this.config.reliefApproachFraction * gap / rise : Infinity;
+        if (!valve.reliefOpen && rampJump >= this.jmax) {
+          this.lock = null;
+          this.signature = sig;
+          const jumped = this.tryJump(solver, s);
+          this.startRelax(jumped.state.time);
+          return { ...out, state: jumped.state, jump: jumped.jump };
+        }
+        this.status.lastHold = lock.valve + ' next lift too close to jump the ramp: averaging the whole cycle';
       }
       return out;
     }
@@ -812,6 +861,7 @@ export class SlowModeController {
     let tc = this.phaseStart + tcRel;
     const slope = new Float64Array(N);
     const seSlope = new Float64Array(N);
+    const wander = new Float64Array(N);   // rms departure from the fitted line (WANDER)
     const blocks = this.blocks;
     const B = blocks.length;
     // each block's sum of (t - tc) and (t - tc)^2
@@ -831,10 +881,31 @@ export class SlowModeController {
       const b = Sxt / Stt;
       slope[i] = b;
       const rss = Math.max(0, Sxx - b * Sxt);
+      wander[i] = Math.sqrt(rss / (nS - 2));
       seSlope[i] = Math.max(Math.sqrt(rss / (nS - 2) / Stt),
         blockSe(b, this.sx[i] / s0, blk => blk.sx[i], blk => blk.sxt[i]));
     }
-    const tol = this.tolerances(s);
+    // WANDER. A slot that cycles inside the window - a panel's water sloshing
+    // to and from its tank, an inventory breathing through a relief valve
+    // that is not the one the window is locked to - is caught by the end of
+    // the window at an arbitrary point of its cycle, and its rate is only as
+    // certain as that cycle is averaged. Held to the ordinary tolerance (a
+    // thousandth of its contents) such a slot stopped every jump: xe100-sbo's
+    // RCCS panel swings by a thousand kilograms a cycle against a 23 kg
+    // tolerance.
+    //
+    // But an error smaller than the slot's own excursion lands it on a state
+    // it passes through every cycle anyway: what the error changes is WHEN in
+    // its cycle the slot is, not where the plant is. So no slot's tolerance
+    // is tighter than its rms departure from its own fitted line during the
+    // window (for a sinusoid that is 0.71 of the amplitude, for a sawtooth
+    // 0.58: always inside the range the slot actually covered). A slot that
+    // only drifts has no such departure and keeps its ordinary tolerance; one
+    // that merely CURVES has one of a W^2/27 for curvature a over a window W,
+    // which loosens its curvature budget by a factor W^2 / (27 x horizon x J)
+    // - nothing. HOLDING (a slot at its bound) still uses the ordinary one.
+    const baseTol = this.tolerances(s);
+    const tol = c.wanderTolerance ? baseTol.map((t, i) => Math.max(t, wander[i])) : baseTol;
     const values = new Float64Array(N);
     const lo = new Float64Array(N);
     const hi = new Float64Array(N);
@@ -981,7 +1052,7 @@ export class SlowModeController {
       rates[i] = R;
       if (this.kinds[i] === K_PASSIVE || this.kinds[i] === K_DECAY_POOL || held[i]) continue;
       const T = tol[i];
-      if ((R < 0 && values[i] - lo[i] <= T) || (R > 0 && hi[i] - values[i] <= T)) {
+      if ((R < 0 && values[i] - lo[i] <= baseTol[i]) || (R > 0 && hi[i] - values[i] <= baseTol[i])) {
         held[i] = 1;
         const key = this.keys[i];
         if (this.kinds[i] === K_MASS && key.endsWith('.m') && waterDominated.has(key.slice(0, -2))) {
@@ -1041,6 +1112,7 @@ export class SlowModeController {
       if (Ji < J) errorLimit = Math.min(errorLimit, Ji);
       const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} a=${a.toExponential(2)} ` +
         `seR=${seR.toExponential(2)} seA=${seA.toExponential(2)} tol=${T.toExponential(2)}` +
+        (T > baseTol[i] ? ` (wander; ordinary ${baseTol[i].toExponential(2)})` : '') +
         (quadratic ? ` a_prev=${w1.curv![i].toExponential(2)}` : ' (linear)');
       if (c.diagnose) limits.push({ key: this.keys[i], J: Math.min(largestRoot(n3, n2, n1, T, 1e9), jTrunc(1e9)), detail: detail() });
       if (Ji < J) {
@@ -1092,7 +1164,7 @@ export class SlowModeController {
     }
     if (c.diagnose) this.lastLimits = limits.sort((x, y) => x.J - y.J).slice(0, 10);
 
-    const minJump = c.minJumpFactor * (c.relaxSeconds + this.measure);
+    const minJump = c.minJumpFactor * (c.relaxSeconds + c.measureSeconds);
     if (!(J >= minJump)) {
       this.status.lastHold = `jump ${J.toFixed(1)} s < ${minJump.toFixed(0)} s, limited by ${limitedBy}` +
         (limiterDetail ? ` (${limiterDetail})` : '');
@@ -1101,9 +1173,17 @@ export class SlowModeController {
       if (limiterOscillating && this.measure < c.maxMeasureSeconds) this.lengthenWindow(s.time, limitedBy);
       return { state: s };
     }
-    // Back to shorter windows only once jumps run into the absolute ceiling
-    // with error room to spare: then the window is pure overhead
-    if (J >= c.maxJump && errorLimit > 2 * c.maxJump && this.measure > c.measureSeconds) {
+    // Back to a shorter window once a jump is taken with error room to spare
+    // for it: the window is what a jump costs, and one lengthened to average
+    // an oscillation during a transient long over (xe100-sbo's reached 640 s
+    // in its first 40 minutes and stayed there) capped the speed-up near 2x
+    // by itself. A window half as long measures a white-noise rate 2^1.5
+    // times less certainly, so that is the room asked for: the tightest slot
+    // limit must exceed the jump actually taken by that factor. (It used to
+    // shorten only when jumps reached the ABSOLUTE ceiling, which a plant
+    // with a cycling valve never does.) If the shorter window turns out not
+    // to average something, the slope reversal lengthens it again.
+    if (errorLimit > SHORTER_WINDOW_NOISE * J && this.measure > c.measureSeconds) {
       this.measure = Math.max(c.measureSeconds, 0.5 * this.measure);
     }
 

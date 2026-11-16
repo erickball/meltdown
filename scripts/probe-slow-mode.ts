@@ -27,7 +27,7 @@ for (const [k, e] of [['relTol', 'SLOW_RELTOL'], ['tempTol', 'SLOW_TEMPTOL'], ['
   if (v !== undefined) cfg[k] = v;
 }
 const diagnose = process.env.SLOW_DIAG === '1';
-const slow = mode === 'slow' ? new SlowModeController({ ...cfg, diagnose }) : null;
+const slow = mode === 'slow' ? new SlowModeController({ ...cfg, diagnose, ...(process.env.SLOW_WANDER === '0' ? { wanderTolerance: false } : {}) }) : null;
 let lastLimitsPrinted: unknown = null;
 
 const wall0 = performance.now();

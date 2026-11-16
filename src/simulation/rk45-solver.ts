@@ -2533,7 +2533,7 @@ export class RK45Solver {
 
       // Don't overshoot remaining time, and honor any operator's declared
       // stability ceiling (see RateOperator.getMaxStableDt)
-      let stepDt = Math.min(this.currentDt, remainingTime);
+      let stepDt = this.currentDt;
       for (const op of this.rateOperators) {
         if (op.getMaxStableDt) {
           stepDt = Math.min(stepDt, op.getMaxStableDt(currentState));
@@ -2550,6 +2550,10 @@ export class RK45Solver {
       // Same idea as an operator's getMaxStableDt: a mode the error
       // controller cannot see must be declared, not discovered.
       stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
+      // The step the controller wanted, before it is cut to land on the end
+      // of the request (see where an accepted step sets currentDt)
+      const freeDt = stepDt;
+      stepDt = Math.min(stepDt, remainingTime);
 
       // Take a step
       const { newState, error, errorRates } = this.step(currentState, stepDt);
@@ -2679,8 +2683,13 @@ export class RK45Solver {
         // Reset consecutive reject counter on successful step
         this.consecutiveRejectsAtMinDt = 0;
 
-        // Grow timestep for next step
+        // Grow timestep for next step. A step that was cut short only to
+        // land on the end of the request says nothing against the step the
+        // controller wanted: growing from the cut length instead made every
+        // advance() that ended on a sliver (a caller's output grid a rounding
+        // error off the solver's) restart from that sliver and climb back.
         this.currentDt = this.computeOptimalDt(effectiveError, stepDt);
+        if (stepDt < freeDt) this.currentDt = Math.max(this.currentDt, freeDt);
       } else {
         // Reject step - shrink timestep and retry
         rejectsThisFrame++;
