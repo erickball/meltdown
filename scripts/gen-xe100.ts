@@ -1060,6 +1060,20 @@ connect('tank-sg-1', 'tank-sg-top', 'pump-1', 'pump-1-inlet',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 15.5, toElevation: 0, flowArea: 0.6, length: 2, resistanceCoeff: 1 });
 connect('pump-1', 'pump-1-outlet', 'cv-1', 'cv-1-annulus-2',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 0, toElevation: 0.25, flowArea: 1.0, length: 2, resistanceCoeff: 1 });
+// Helium flow control: the circulator holds the design mass flow by varying
+// its speed, as a variable-speed circulator does (the plant infers the flow
+// from differential pressure; the sensor here reads it directly). At a fixed
+// speed the flow is whatever the loop's density makes it - a colder cold leg
+// packs more helium through the same head, 82 kg/s instead of 78.6 - and
+// with the rods limited to 100% power the extra flow can only come out of
+// the core's temperature rise: 713 C at the outlet instead of 750.
+controller('ctl-circ-1', 'He Flow (Circulator Speed)', 20, 95, {
+  sensor: { kind: 'connection-flow', targetId: 'flow-pump-1-cv-1' },
+  setpoint: HE_FLOW_INIT,
+  // Rated speed is the top of the band: the circulator is sized with a few
+  // percent in hand at design, and has no overspeed to offer.
+  actuator: { kind: 'pump-speed', targetId: 'pump-1', min: 0.2, max: 1.0, rateLimit: 0.02 },
+});
 connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 0.25, toElevation: 5, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 

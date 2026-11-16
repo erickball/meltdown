@@ -1973,6 +1973,70 @@
           }
         }
       }
+    ],
+    [
+      "ctl-circ-a",
+      {
+        "id": "ctl-circ-a",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "He Flow (Circulator A Speed)",
+        "position": {
+          "x": 20,
+          "y": 95
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "connection-flow",
+            "targetId": "flow-pump-1a-cv-1"
+          },
+          "setpoint": 39.284241126672036,
+          "actuator": {
+            "kind": "pump-speed",
+            "targetId": "pump-1a",
+            "min": 0.2,
+            "max": 1,
+            "rateLimit": 0.02
+          }
+        }
+      }
+    ],
+    [
+      "ctl-circ-b",
+      {
+        "id": "ctl-circ-b",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "He Flow (Circulator B Speed)",
+        "position": {
+          "x": 20,
+          "y": 102
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "connection-flow",
+            "targetId": "flow-pump-1b-cv-1"
+          },
+          "setpoint": 39.284241126672036,
+          "actuator": {
+            "kind": "pump-speed",
+            "targetId": "pump-1b",
+            "min": 0.2,
+            "max": 1,
+            "rateLimit": 0.02
+          }
+        }
+      }
     ]
   ],
   "connections": [

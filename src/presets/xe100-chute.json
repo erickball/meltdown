@@ -1625,6 +1625,38 @@
           }
         }
       }
+    ],
+    [
+      "ctl-circ-1",
+      {
+        "id": "ctl-circ-1",
+        "type": "controller",
+        "controllerType": "pid",
+        "label": "He Flow (Circulator Speed)",
+        "position": {
+          "x": 20,
+          "y": 95
+        },
+        "rotation": 0,
+        "elevation": 0,
+        "width": 2.5,
+        "height": 2.5,
+        "ports": [],
+        "pid": {
+          "sensor": {
+            "kind": "connection-flow",
+            "targetId": "flow-pump-1-cv-1"
+          },
+          "setpoint": 78.56848225334407,
+          "actuator": {
+            "kind": "pump-speed",
+            "targetId": "pump-1",
+            "min": 0.2,
+            "max": 1,
+            "rateLimit": 0.02
+          }
+        }
+      }
     ]
   ],
   "connections": [
