@@ -24,7 +24,7 @@ test('a barrel around a reflector conducts from the graphite and shields the ves
   const ids = s.thermalConnections.map(c => c.id);
   assert(ids.includes('conduction-cb-1-reflector-barrel'), 'reflector must conduct into the barrel');
   assert(ids.includes('radiation-cb-1-wall-rv-1-wall'), 'barrel must radiate to the vessel wall');
-  assert(!s.thermalConnections.some(c => c.fromNodeId === 'cb-1-reflector' && c.toNodeId === 'rv-1-wall'),
+  assert(!s.thermalConnections.some(c => c.fromNodeId.startsWith('cb-1-reflector') && c.toNodeId === 'rv-1-wall'),
     'the reflector must not radiate past the barrel to the vessel wall');
 
   const conv = s.convectionConnections.filter(c => c.thermalNodeId === 'cb-1-wall');
@@ -39,7 +39,8 @@ test('reflector-to-barrel conduction follows live graphite conductivity', () => 
   const s = buildSimFromFile('src/presets/xe100.json').state;
   const conn = s.thermalConnections.find(c => c.id === 'conduction-cb-1-reflector-barrel')!;
   const path = conn.graphiteConduction!;
-  const reflector = s.thermalNodes.get('cb-1-reflector')!;
+  assert(conn.fromNodeId === 'cb-1-reflector-outer', 'the barrel is fed by the outer reflector shell');
+  const reflector = s.thermalNodes.get(conn.fromNodeId)!;
   const barrel = s.thermalNodes.get('cb-1-wall')!;
   // Isolate the one link and put a known difference across it
   s.thermalConnections = [conn];
@@ -58,10 +59,36 @@ test('reflector-to-barrel conduction follows live graphite conductivity', () => 
   assertBetween(hot / expected(1500, 1400), 0.999, 1.001, 'duty vs formula at 1450 K');
   assert(cold > 0 && hot > 0, 'heat must run from the hot reflector into the barrel');
   assert(hot !== cold, 'the path must respond to graphite temperature');
-  // The steel is a small part of the resistance, not the whole of it
+  // The steel is the smaller part of the resistance, not the whole of it
   const k = graphiteThermalConductivity(450, NBG_18);
-  assert(path.seriesConductance! > 5 * k * path.shapeFactor,
-    'barrel half-thickness should be a minor resistance next to half a metre of graphite');
+  assert(path.seriesConductance! > 2 * k * path.shapeFactor,
+    'barrel half-thickness should resist less than the quarter metre of graphite behind it');
+});
+
+test('the reflector is two shells with graphite between them', () => {
+  const s = buildSimFromFile('src/presets/xe100.json').state;
+  const inner = s.thermalNodes.get('cb-1-reflector')!;
+  const outer = s.thermalNodes.get('cb-1-reflector-outer')!;
+  assert(!!inner && !!outer, 'both reflector shells must exist');
+  // 2.4 m core, 8.9 m tall, 1 m of graphite all round: 232 t in total
+  assertBetween(inner.mass + outer.mass, 231e3, 233e3, 'total reflector mass (kg)');
+  assert(outer.mass > inner.mass, 'the outer shell is the larger one');
+
+  const faces = (id: string) => s.convectionConnections
+    .filter(c => c.thermalNodeId === id).map(c => c.flowNodeId).join(',');
+  assert(faces('cb-1-reflector') === 'cb-1', `inner shell faces the core gas only, got ${faces('cb-1-reflector')}`);
+  assert(faces('cb-1-reflector-outer') === 'rv-1', `outer shell faces the vessel gas only, got ${faces('cb-1-reflector-outer')}`);
+
+  const link = s.thermalConnections.find(c => c.id === 'conduction-cb-1-reflector-shells')!;
+  assert(!!link?.graphiteConduction, 'the shells must be joined by graphite conduction');
+  const bed = s.thermalConnections.find(c => c.id === 'conduction-cb-1-bed-reflector')!;
+  assert(bed.toNodeId === 'cb-1-reflector', 'the bed conducts into the inner shell');
+
+  // Inner shell starts between the core gas and the cold side; outer on the cold side
+  const Tcore = s.flowNodes.get('cb-1')!.fluid.temperature;
+  const Tcold = s.flowNodes.get('rv-1')!.fluid.temperature;
+  assert(outer.temperature === Tcold, 'outer shell starts at the inlet gas temperature');
+  assertBetween(inner.temperature, Tcold + 1, Tcore - 1, 'inner shell start temperature (K)');
 });
 
 test('a bare barrel is steel between the core coolant and the downcomer', () => {
