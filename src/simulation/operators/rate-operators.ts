@@ -297,6 +297,16 @@ export class ConductionRateOperator implements RateOperator {
         conductance += 1 / (1 / (kEff * bed.shapeFactor) + seriesR);
       }
 
+      if (conn.graphiteConduction) {
+        const path = conn.graphiteConduction;
+        const kGraphite = graphiteThermalConductivity(
+          0.5 * (node1.temperature + node2.temperature),
+          { ...NBG_18, k300: path.k300 },
+        );
+        const seriesR = path.seriesConductance ? 1 / path.seriesConductance : 0;
+        conductance += 1 / (1 / (kGraphite * path.shapeFactor) + seriesR);
+      }
+
       if (conn.radiationCoeff) {
         // Linearise onto the same conductance so the sign and the
         // accumulation below stay shared. T1^4-T2^4 = (T1-T2)(T1+T2)(T1^2+T2^2),

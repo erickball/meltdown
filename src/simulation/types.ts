@@ -599,6 +599,28 @@ export interface ThermalConnection {
   };
 
   /**
+   * Conduction through a block of nuclear graphite, whose conductivity
+   * falls by roughly half between room temperature and operating
+   * temperature. Evaluated every step at the mean of the two node
+   * temperatures: conductance += 1 / (1/(k(T) * shapeFactor) + 1/seriesConductance).
+   *
+   * This is the outer half of a reflector, from the radius where its lumped
+   * temperature sits out to the steel barrel wrapped around it. For an
+   * annulus of height H that shape factor is 2*pi*H/ln(r_out/r_mid).
+   */
+  graphiteConduction?: {
+    /** Shape factor (m): conductance = k(T) * shapeFactor */
+    shapeFactor: number;
+    /** 300 K conductivity of the graphite grade (W/m-K) */
+    k300: number;
+    /**
+     * Fixed conductance in series (W/K) - the receiving metal's own
+     * half-thickness. Omitted means none.
+     */
+    seriesConductance?: number;
+  };
+
+  /**
    * A path whose size follows how much of a node is still there: the whole
    * conductance (solid, bed and radiation alike) is multiplied by
    * mass/initialMass of this thermal node. A pebble bed draining out through
