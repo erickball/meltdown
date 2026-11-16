@@ -244,6 +244,31 @@ export interface ThermalNode {
 // Flow Nodes - Fluid volumes that exchange mass and energy
 // ============================================================================
 
+/**
+ * The water's state along a once-through boiler tube, as the partition
+ * implies it: specific enthalpy (J/kg) and specific volume (m3/kg) at the
+ * feed end (0) and the steam end (1) of each section. Within a section the
+ * feed end (0) and the steam end (1) of each section. In the economizer and
+ * the boiling section the enthalpy is linear in length; the specific volume
+ * is linear in the boiling section and log-linear in the economizer. The
+ * superheat section is the curve in `steam` (see otsgAxialProfile).
+ */
+export interface OtsgAxialProfile {
+  h: [[number, number], [number, number], [number, number]];
+  v: [[number, number], [number, number], [number, number]];
+  /** The superheat section point by point: `s` the fraction of the section's
+   *  length behind each point (0 at its inlet to 1 at the tube outlet, rising),
+   *  `h` and `v` the steam there, linear between points. Its ends are h[2]
+   *  and v[2]. */
+  steam: OtsgSteamProfile;
+}
+
+export interface OtsgSteamProfile {
+  s: number[];
+  h: number[];
+  v: number[];
+}
+
 export interface FlowNode {
   id: string;
   label: string;
@@ -458,8 +483,27 @@ export interface FlowNode {
       T3: number;            // K - superheat section MEAN temperature
       TSteamOut: number;     // K - temperature of the steam offered at the outlet
       lengthFracs: [number, number, number];
+      /** The axial state profile a nozzle part-way up the bundle draws
+       *  from (otsgAxialProfile): each section's end states, feed end
+       *  first. */
+      profile: OtsgAxialProfile;
     };
   };
+
+  /**
+   * A once-through bundle's SHELL: the gas temperature at each height of the
+   * bundle, as the bundles' gas march left it (OtsgPartitionConstraintOperator
+   * publishes it on every state).
+   *
+   * The shell node holds the gas the whole bundle holds, so its temperature
+   * is the MEAN of the profile along the tubes - not the temperature at
+   * either end. What leaves through a nozzle leaves at the profile's value
+   * THERE: `TDraw[k]` is the gas leaving metal zone k (feed end first), and
+   * `lo`/`hi` are the elevations of the shell's lowest and highest
+   * connection, between which the bundle lies. Read through
+   * shellDrawTemperature. Replaced, never mutated (state clones share it).
+   */
+  shellGasProfile?: { lo: number; hi: number; TDraw: number[] };
 
   // Boundary condition flag
   // If true, this node's fluid state is fixed and should not be updated by physics operators
@@ -552,6 +596,28 @@ export interface ThermalConnection {
     seriesShapeFactor?: number;
     /** 300 K conductivity of that series path (W/m-K) */
     seriesK300?: number;
+  };
+
+  /**
+   * Conduction through a block of nuclear graphite, whose conductivity
+   * falls by roughly half between room temperature and operating
+   * temperature. Evaluated every step at the mean of the two node
+   * temperatures: conductance += 1 / (1/(k(T) * shapeFactor) + 1/seriesConductance).
+   *
+   * This is the outer half of a reflector, from the radius where its lumped
+   * temperature sits out to the steel barrel wrapped around it. For an
+   * annulus of height H that shape factor is 2*pi*H/ln(r_out/r_mid).
+   */
+  graphiteConduction?: {
+    /** Shape factor (m): conductance = k(T) * shapeFactor */
+    shapeFactor: number;
+    /** 300 K conductivity of the graphite grade (W/m-K) */
+    k300: number;
+    /**
+     * Fixed conductance in series (W/K) - the receiving metal's own
+     * half-thickness. Omitted means none.
+     */
+    seriesConductance?: number;
   };
 
   /**

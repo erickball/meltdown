@@ -50,6 +50,7 @@ import { liquidViscosity, liquidThermalConductivity, liquidSpecificHeat,
   liquidThermalExpansivity } from './water-properties.js';
 import { emptyGasComposition } from './gas-properties.js';
 import { createFluidState } from './operators/index.js';
+import { drawCompositionAt, zoneWaterEnthalpy } from './operators/connection-hydraulics.js';
 import { stateAtPh, expandStage } from './turbine-expansion.js';
 import { coreReflectorGeometry, coreRodGeometry } from './factory.js';
 import {
@@ -58,8 +59,9 @@ import {
   superheatedV,
   evaluateOtsg,
   evaluateOtsgPartition,
+  otsgAxialProfile,
   otsgPartitionAtP,
-  marchSteamOverMetal, buildSteamIsobar, isobarAt, superheatOverlaps,
+  marchSteamOverMetal, marchSteamStreams, buildSteamIsobar, isobarAt, superheatOverlaps,
   OtsgWallPin,
   otsgRates,
   boilingMeanQuality,
@@ -1989,6 +1991,130 @@ test('the published pressure is the partition\'s, not the mush read', () => {
   assertClose(ev.P / 1e5, 80, 1, 'while the partition solves the true pressure');
 });
 
+test('a nozzle part-way up a boiler tube draws the state at the nozzle, without a step', () => {
+  // A leak nozzle used to be priced by SECTION - the superheated outlet
+  // anywhere in the superheater, the node bulk anywhere in the boiling
+  // section - so its enthalpy stepped by the whole latent-plus-superheat
+  // span as a boundary passed it. The profile is continuous: walk a point
+  // nozzle up the tube and the price must never jump.
+  const P0 = 80e5;
+  const sat0 = saturationAtP(P0);
+  const u1Bar = subcooledSectionMean(sat0.u_f - 400e3, sat0);
+  const v1 = subcooledLiquidV(u1Bar);
+  const x2 = boilingMeanQuality(sat0.v_f, sat0.v_g, 1);
+  const u3 = sat0.u_g + 250e3;
+  const v3 = superheatedV(u3, P0);
+  const m1 = 400, m2 = 90, m3 = 30;
+  const m = m1 + m2 + m3;
+  const U = m1 * u1Bar + m2 * (sat0.u_f + x2 * (sat0.u_g - sat0.u_f)) + m3 * u3;
+  const V = m1 * v1 + m2 * boilingMeanVolume(sat0.v_f, sat0.v_g, 1) + m3 * v3;
+  const TSteam = calculateState(1, u3, v3).temperature;
+  const ev = evaluateOtsgPartition(m, U, { m1, U1: m1 * u1Bar },
+    { tubeVolume: V, tubeLength: 1, heatArea: 2000 },
+    { zoneTemps: [TSteam + 40], hA3Full: 1200 * 2000, WSteam: 5 });
+  const H = 14;
+  const node = {
+    id: 'tube', volume: V, height: H,
+    fluid: { mass: m, internalEnergy: U, pressure: ev.P, temperature: ev.sat.T, phase: 'two-phase', quality: 0.3 },
+    otsg: { lastEval: {
+      lengthFracs: [ev.sections[0].lengthFrac, ev.sections[1].lengthFrac, ev.sections[2].lengthFrac],
+      profile: otsgAxialProfile(ev),
+    } },
+  } as unknown as FlowNode;
+  const price = (z: number, opening?: number): number => {
+    const c = drawCompositionAt(node, z, 1, undefined, opening);
+    assertClose(c.wLiquid + c.wMixture + c.wVapor, 1, 1e-12, 'the zone weights sum to one');
+    return c.wLiquid * zoneWaterEnthalpy(node, 'liquid', c)
+      + c.wMixture * zoneWaterEnthalpy(node, 'mixture', c)
+      + c.wVapor * zoneWaterEnthalpy(node, 'vapor', c);
+  };
+  const N = 4000;
+  let worst = 0, last = price(0);
+  for (let i = 1; i <= N; i++) {
+    const h = price(H * i / N);
+    assert(h >= last - 1e-6, `enthalpy must rise up the tube: ${last} -> ${h} at ${(H * i / N).toFixed(3)} m`);
+    worst = Math.max(worst, h - last);
+    last = h;
+  }
+  const span = ev.hSteamOut - price(0);
+  assert(span > 1.5e6, `the tube must span subcooled water to superheated steam, got ${(span / 1e3).toFixed(0)} kJ/kg`);
+  // The steepest stretch is the boiling section (latent heat over its
+  // length) plus the superheater inlet's fade; a section-priced draw
+  // stepped by more than a third of the whole span in one go.
+  assert(worst < 0.05 * span,
+    `largest rise between nozzles ${(H / N * 1e3).toFixed(1)} mm apart is ${(worst / 1e3).toFixed(0)} kJ/kg ` +
+    `of a ${(span / 1e3).toFixed(0)} kJ/kg span`);
+  assertClose(price(H), ev.hSteamOut, 1e-6, 'the top nozzle draws the outlet steam');
+  assertClose(0.5 * (price(0) + price(ev.sections[0].lengthFrac * H)), ev.sections[0].hBar, 1,
+    'the economizer profile is symmetric about its mean');
+  // An opening as tall as the tube draws every section at once, each at its
+  // own price, and lands between the ends.
+  const all = price(H / 2, H);
+  assert(all > price(0) && all < ev.hSteamOut, 'a tube-tall opening draws a blend of all three sections');
+  // Half-way up the superheater the nozzle draws what the outlet's own march
+  // has there: saturated steam taken across half the section's film.
+  const L3 = ev.sections[2].lengthFrac;
+  const half = marchSteamOverMetal(ev.steamIsobar!, [TSteam + 40], [L3 / 2], 1200 * 2000, 5, ev.sat.T);
+  assertClose(price((1 - L3 / 2) * H), isobarAt(ev.steamIsobar!, 'h', half.TOut), 1,
+    'a nozzle half-way up the superheater draws the half-marched steam');
+  assert(price((1 - L3 / 2) * H) > 0.5 * (ev.sat.h_g + ev.hSteamOut),
+    'steam approaching hotter metal takes most of its superheat early');
+});
+
+test('a boiling section running dry steps neither the outlet steam nor a nozzle at its top', () => {
+  // Raise a slug-less tube's energy until its boiling section is gone. The
+  // outlet used to slide from the marched value to the section's mean over
+  // the boiling section's last kilogram (m2/(m2 + 1 kg)) - 100 kJ/kg in two
+  // kilograms here - and a nozzle at the top of the boiling section saw the
+  // unfaded part of that as a step. The march's curve is now carried through
+  // the seam, raised by whatever the steam holds above the wall pin.
+  const P0 = 80e5;
+  const sat0 = saturationAtP(P0);
+  const u3 = sat0.u_g + 250e3;
+  const v3 = superheatedV(u3, P0);
+  const TSteam = calculateState(1, u3, v3).temperature;
+  const m = 40, V = 30 * v3 + 10 * 0.004, H = 14;
+  const pin = { zoneTemps: [TSteam - 20, TSteam + 40], hA3Full: 1200 * 2000, WSteam: 5 };
+  const N = 400;
+  let prev: { lead: number; m2: number } | undefined;
+  let dried = false, sawSliver = false;
+  for (let i = 0; i <= N; i++) {
+    const ev = evaluateOtsgPartition(m, m * (sat0.u_g - 150e3 + 500e3 * i / N), { m1: 0, U1: 0 },
+      { tubeVolume: V, tubeLength: 1, heatArea: 2000 }, pin);
+    const [, s2, s3] = ev.sections;
+    if (!(s3.mass > 0)) continue;
+    const lead = ev.hSteamOut - s3.hBar;
+    if (prev) {
+      assert(Math.abs(lead - prev.lead) < 1e3,
+        `the outlet's lead over the section mean moved ${((lead - prev.lead) / 1e3).toFixed(1)} kJ/kg ` +
+        `between boiling masses ${prev.m2.toFixed(3)} and ${s2.mass.toFixed(3)} kg`);
+    }
+    prev = { lead, m2: s2.mass };
+    if (s2.mass === 0) {
+      dried = true;
+      assert(lead > 50e3, `dry of boiling water the outlet still leads the mean, got ${(lead / 1e3).toFixed(0)} kJ/kg`);
+    } else if (s2.mass < 3) {
+      sawSliver = true;
+      const node = {
+        id: 'tube', volume: V, height: H,
+        fluid: { mass: m, internalEnergy: 0, pressure: ev.P, temperature: ev.sat.T, phase: 'two-phase', quality: 0.9 },
+        otsg: { lastEval: {
+          lengthFracs: [ev.sections[0].lengthFrac, s2.lengthFrac, s3.lengthFrac],
+          profile: otsgAxialProfile(ev),
+        } },
+      } as unknown as FlowNode;
+      const at = (z: number) => {
+        const c = { ...drawCompositionAt(node, z, 1) };
+        return c.wMixture * zoneWaterEnthalpy(node, 'mixture', c) + c.wVapor * zoneWaterEnthalpy(node, 'vapor', c);
+      };
+      const b2 = s2.lengthFrac * H;
+      assertClose(at(b2 * (1 + 1e-9)), at(b2 * (1 - 1e-9)), 1e3,
+        `a nozzle crossing the top of a ${s2.mass.toFixed(2)} kg boiling section`);
+    }
+  }
+  assert(dried && sawSliver, 'the sweep must cross the seam where the boiling section vanishes');
+});
+
 test('the wall referees the partition: steam follows its metal, never past it', () => {
   // Fixed totals and ledger while the wall warms: the steam must track its
   // metal from below, with mass and volume closing at every point.
@@ -2394,9 +2520,27 @@ test('the superheat outlet is marched across its metal and never passes it', () 
       }
     }
   }
-  // A section of no length heats nothing; metal colder than the stream cools it.
+  // A section of no length heats nothing.
   assertClose(out(zones, 0, 3).TOut, TIn, 1e-12, 'no section, no superheat');
-  assert(out([500, 500], 1, 3).TOut < TIn, 'a cold wall cools the stream');
+  // Metal colder than saturation is wet: the stream meets the face of the
+  // condensate film, at saturation, and is not cooled below it. (The heat the
+  // cold metal takes is the condensing duty, across the two-phase film.)
+  const wet = out([500, 500], 1, 3);
+  assertClose(wet.TOut, TIn, 1e-12, 'saturated steam over a wet wall leaves saturated');
+  assertClose(wet.TMean, TIn, 1e-12, 'and its section sits at saturation');
+  assert(wet.transit.every(x => x === 0), 'giving up no sensible heat');
+  // Superheated steam arriving over a wet wall gives up its superheat to the
+  // film's face and no more: it runs down from the top nozzle toward
+  // saturation, and what it gives up is its enthalpy above the point it
+  // leaves at.
+  const hHot = isobarAt(iso, 'h', 800);
+  const down = marchSteamStreams(iso, sat, [500, 500, 500, 500], [0.25, 0.25, 0.25, 0.25], hA,
+    [{ zone: 3, W: 3, h: hHot }, { zone: 0, W: -3, h: 0 }]);
+  const lost = down.transit.reduce((x, y) => x + y, 0);
+  assert(lost < 0 && lost >= 3 * (sat.h_g - hHot) - 1e-6,
+    `desuperheating over a wet wall stops at saturation: ${(lost / 1e6).toFixed(2)} MW of ` +
+    `${(3 * (sat.h_g - hHot) / 1e6).toFixed(2)} MW of superheat`);
+  assert(down.TMean >= TIn - 1e-9, `and the section's mean stays at or above saturation (${down.TMean.toFixed(1)} K)`);
 });
 
 test('the steam isobar is the property surface, and the film approach is exact on it', () => {
@@ -2435,6 +2579,130 @@ test('the steam isobar is the property surface, and the film approach is exact o
   // The mean is the film's own energy balance.
   assertClose(hA * (Tw - marched.TMean), W * (isobarAt(iso, 'h', marched.TOut) - sat.h_g), 1e-3,
     'the film at the mean temperature carries exactly the heat the stream took');
+});
+
+test('steam is marched the way it flows: down, part-way, or not at all', () => {
+  // The steam pass used to know one arrangement - saturated steam in at the
+  // boiling boundary, out at the top - and marched it whatever the nozzles
+  // were doing. The flows now come from the nozzles themselves.
+  const P = 100e5;
+  const sat = saturationAtP(P);
+  const iso = buildSteamIsobar(P, sat, 900);
+  const hA = 1200 * 2000;
+  const prof = [640, 660, 700, 760, 800, 830, 850, 860];   // feed end -> steam end
+  const n = prof.length;
+  const whole = new Array<number>(n).fill(1 / n);
+  const W = 25;
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  // DOWN is the mirror of up. Saturated steam let in at the top and taken out
+  // at the bottom crosses the same metal in the opposite order, so it is the
+  // upward march over the mirrored tube, zone for zone.
+  const down = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: sat.h_g }, { zone: 0, W: -W, h: 0 }]);
+  const mirrored = marchSteamOverMetal(iso, [...prof].reverse(), whole, hA, W, sat.T);
+  for (let k = 0; k < n; k++) {
+    assertClose(down.transit[k], mirrored.transit[n - 1 - k], 1e-6 * Math.abs(mirrored.transit[n - 1 - k]) + 1e-6,
+      `zone ${k + 1}: steam running down takes the heat the mirrored upward march takes`);
+  }
+  assertClose(down.TMean, mirrored.TMean, 1e-9, 'and has the same mean');
+  assertClose(down.TOut, sat.T, 1e-9, 'the steam nozzle reads the steam arriving at it');
+  // Steam arriving hotter than the metal heats it, hardest where it comes in
+  // (on an even wall, so the only thing that changes down the tube is the
+  // steam).
+  const flat = new Array<number>(n).fill(700);
+  const hot = marchSteamStreams(iso, sat, flat, whole, hA,
+    [{ zone: n - 1, W, h: isobarAt(iso, 'h', 890) }, { zone: 0, W: -W, h: 0 }]);
+  assert(hot.transit[n - 1] < 0 && hot.transit[n - 1] < hot.transit[n - 4] && hot.transit[n - 4] < hot.transit[0],
+    `arriving 890 K steam gives the steam-end metal the most: ${hot.transit[n - 1].toFixed(0)} W there, ` +
+    `${hot.transit[n - 4].toFixed(0)} W three zones down, ${hot.transit[0].toFixed(0)} W at the far end`);
+  assertClose(hot.TOut, 890, 1e-6, 'and the nozzle reads it arriving');
+
+  // Stopping is the same state from either side: nothing steps as a flow
+  // passes through zero.
+  const still = marchSteamOverMetal(iso, prof, whole, hA, 0, sat.T);
+  const upSlow = marchSteamOverMetal(iso, prof, whole, hA, 1e-9, sat.T);
+  const downSlow = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: 1e-9, h: sat.h_g }, { zone: 0, W: -1e-9, h: 0 }]);
+  assertClose(upSlow.TMean, still.TMean, 1e-3, 'a vanishing upward draw is the stagnant section');
+  assertClose(downSlow.TMean, still.TMean, 1e-3, 'and so is a vanishing downward one');
+
+  // A nozzle part-way up draws from below itself only: the steam above it is
+  // a dead end standing at its metal.
+  const tap = marchSteamStreams(iso, sat, prof, whole, hA, [{ zone: 4, W: -W, h: 0 }]);
+  assert(tap.transit.slice(0, 5).every(q => q > 0), 'the zones up to the nozzle heat its stream');
+  assert(tap.transit.slice(5).every(q => q === 0), 'the zones above it heat no stream');
+  assertClose(tap.TOut, prof[n - 1], 1e-9, 'and the dead end above stands at its metal');
+  // Fed from both ends toward a nozzle in the middle: the stream from below
+  // is the tap's own march with less flow, the one from above starts at the
+  // steam end at its arriving temperature.
+  const both = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: 10, h: sat.h_g }, { zone: 4, W: -W, h: 0 }]);
+  const lesser = marchSteamStreams(iso, sat, prof, whole, hA, [{ zone: 4, W: -(W - 10), h: 0 }]);
+  for (let k = 0; k < 4; k++) {
+    assertClose(both.transit[k], lesser.transit[k], 1e-6 * Math.abs(lesser.transit[k]),
+      `zone ${k + 1}: below the nozzle only what the top did not supply comes up`);
+  }
+  assert(both.transit[n - 1] > 0, 'saturated steam let in at the top is heated by the steam-end metal');
+  assert(Number.isFinite(both.TMean) && Number.isFinite(sum(both.transit)), 'and the section mean stays finite');
+
+  // Water is not a stream of steam: liquid let in at the top takes no transit
+  // heat here (it quenches through the node's totals), and wet steam counts
+  // by its vapour.
+  const water = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: sat.h_f - 300e3 }, { zone: 0, W: -W, h: 0 }]);
+  const wet = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: 0.5 * (sat.h_f + sat.h_g) }]);
+  const halfDry = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: W / 2, h: sat.h_g }]);
+  assertClose(water.transit[n - 1], 0, 1e-12, 'cold water arriving is not marched as steam');
+  assertClose(sum(wet.transit), sum(halfDry.transit), 1e-6 * Math.abs(sum(halfDry.transit)),
+    'half-dry steam is marched as half as much saturated steam');
+});
+
+test('an inflow joins the section it enters, at the enthalpy it arrives with', () => {
+  // Liquid entering a boiler tube used to be booked to the economizer
+  // wherever it came in, priced at the FEED end's enthalpy: water backing in
+  // at the top was teleported to the bottom of the tube, and the slug's
+  // energy book was credited with an enthalpy the node never received.
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const tube: any = {
+    id: 'tube', volume: 1, height: 10, flowArea: 0.1,
+    fluid: { mass: 500, internalEnergy: 5e8, pressure: P, temperature: sat.T, phase: 'two-phase' },
+    otsg: { m1: 100, heatArea: 100, shellNodeId: 'shell', metalNodeIds: ['m1', 'm2', 'm3', 'm4'] },
+  };
+  const liquid = (id: string, u: number): any => ({
+    id, volume: 1, flowArea: 0.1,
+    fluid: { mass: 800, internalEnergy: 800 * u, pressure: P, temperature: 400, phase: 'liquid' },
+  });
+  const feed = liquid('feed', 500e3), header = liquid('header', 300e3);
+  const hOf = (n: any) => (n.fluid.internalEnergy + n.fluid.pressure * n.volume) / n.fluid.mass;
+  const mk = (wFeed: number, wTop: number): any => ({
+    flowNodes: new Map<string, any>([['tube', tube], ['feed', feed], ['header', header]]),
+    flowConnections: [
+      { id: 'feed-line', fromNodeId: 'feed', toNodeId: 'tube', massFlowRate: wFeed, fromElevation: 1, toElevation: 0 },
+      { id: 'steam-line', fromNodeId: 'tube', toNodeId: 'header', massFlowRate: -wTop, fromElevation: 10, toElevation: 1 },
+    ],
+  });
+  // Feed at the feed end: the economizer takes it, at the feed's own enthalpy.
+  const forward = classifyOtsgFlows(mk(20, 0), 'tube', tube, P);
+  assertClose(forward.WFeed, 20, 1e-9, 'the economizer takes what arrives at the feed end');
+  assertClose(forward.HFeed, 20 * hOf(feed), 1e-6 * 20 * hOf(feed),
+    'credited with the enthalpy the transport gives the node for it');
+  assert(forward.slugNozzles.length === 1 && forward.slugNozzles[0].zone === 0,
+    'and it enters the economizer at the feed end');
+  // The same water arriving at the TOP of a tube whose economizer is not
+  // there: none of it is the economizer's.
+  const backed = classifyOtsgFlows(mk(0, 20), 'tube', tube, P);
+  assertClose(backed.WFeed, 0, 1e-12, 'water backing in at the top is not booked to the economizer');
+  assertClose(backed.HFeed, 0, 1e-12, 'and brings its book no enthalpy');
+  assert(backed.steamNozzles.length === 1 && backed.steamNozzles[0].zone === 3 &&
+    backed.steamNozzles[0].W === 20,
+    'it stays in the node, entering at the steam end');
+  assertClose(backed.steamNozzles[0].h, hOf(header), 1e-6 * hOf(header), 'at its own enthalpy');
+  assertClose(backed.hFeed, forward.hFeed, 1,
+    'and the feed end\'s standing enthalpy is still the feed line\'s');
 });
 
 test('a superheat section offers steam no hotter than its own metal', () => {
@@ -3238,12 +3506,16 @@ test('a loop scans on its own period, not on the solver step', () => {
       aggressiveness: 1, lastOutput: 0.5, lastError: 0,
     } as unknown as ControllerState;
     const state = {
-      time: 0, flowNodes: new Map(), thermalNodes: new Map(),
+      time: 0, thermalNodes: new Map(),
+      flowNodes: new Map([
+        ['a', { id: 'a', volume: 1, fluid: { mass: 900, phase: 'liquid', pressure: 20e5, temperature: 450, gasVolume: 0 } }],
+        ['b', { id: 'b', volume: 10, fluid: { mass: 3000, phase: 'two-phase', pressure: 20e5, temperature: 485, quality: 0.1 } }],
+      ]),
       thermalConnections: [], convectionConnections: [], radiationConnections: [],
       flowConnections: [{ id: 'feed', fromNodeId: 'a', toNodeId: 'b', massFlowRate: 5 }],
       components: {
         controllers: new Map([['ctl-x', ctl]]),
-        pumps: new Map([['p1', { id: 'p1', speed: 0.5, effectiveSpeed: 0.5, ratedFlow: 80,
+        pumps: new Map([['p1', { id: 'p1', speed: 0.5, effectiveSpeed: 0.5, ratedFlow: 80, ratedHead: 600,
                                  running: true, connectedFlowPath: 'feed' }]]),
         valves: new Map(),
       },
@@ -3272,6 +3544,131 @@ test('a loop scans on its own period, not on the solver step', () => {
   assertClose(ctl.lastScanTime ?? -1, 0.6, 1e-9, 'the scan is stamped at the time it ran');
   assert(ctl.lastOutput > 0.5,
     `a +20 kg/s error must raise the command, got ${ctl.lastOutput.toFixed(4)}`);
+});
+
+/** A pump lifting from a liquid suction node through a liquid line into a
+ *  sink, with a flow loop on its speed. `sink` chooses what the line ends in. */
+function pumpLoopRig(opts: {
+  speed: number; flow: number; suctionP: number; sinkP: number;
+  sink: 'boiler' | 'closed-loop'; setpoint?: number; rateLimit?: number; aggressiveness?: number;
+}): { state: SimulationState; ctl: ControllerState } {
+  const ctl = {
+    id: 'ctl-p', label: 'p', mode: 'auto',
+    sensor: { kind: 'connection-flow', targetId: 'discharge' },
+    setpoint: opts.setpoint ?? opts.flow, scanPeriod: 0.25,
+    actuator: { kind: 'pump-speed', targetId: 'p1', min: 0, max: 1, rateLimit: opts.rateLimit ?? 0.05 },
+    aggressiveness: opts.aggressiveness ?? 1, lastOutput: opts.speed, lastError: 0, actual: opts.speed,
+  } as unknown as ControllerState;
+  const liquid = (id: string, P: number) =>
+    [id, { id, volume: 1, fluid: { mass: 865, phase: 'liquid', pressure: P, temperature: 473, gasVolume: 0 } }] as const;
+  const flowConnections = [
+    { id: 'discharge', fromNodeId: 'pump', toNodeId: 'line', massFlowRate: opts.flow },
+    opts.sink === 'boiler'
+      ? { id: 'line-out', fromNodeId: 'line', toNodeId: 'boiler', massFlowRate: opts.flow }
+      // The line runs straight back to the suction: nothing but friction.
+      : { id: 'line-out', fromNodeId: 'line', toNodeId: 'pump', massFlowRate: opts.flow },
+  ];
+  const state = {
+    time: 0, thermalNodes: new Map(),
+    flowNodes: new Map<string, unknown>([
+      liquid('pump', opts.suctionP), liquid('line', opts.sinkP + 1e5),
+      ['boiler', { id: 'boiler', volume: 10, fluid: { mass: 3000, phase: 'two-phase', pressure: opts.sinkP, temperature: 623, quality: 0.1 } }],
+    ]),
+    thermalConnections: [], convectionConnections: [], radiationConnections: [],
+    flowConnections,
+    components: {
+      controllers: new Map([['ctl-p', ctl]]),
+      pumps: new Map([['p1', { id: 'p1', speed: opts.speed, effectiveSpeed: opts.speed, ratedFlow: 80,
+                               ratedHead: 6000, running: true, connectedFlowPath: 'discharge' }]]),
+      valves: new Map(),
+    },
+    neutronics: { nominalPower: 0 },
+  } as unknown as SimulationState;
+  return { state, ctl };
+}
+
+const pumpGain = (state: SimulationState, ctl: ControllerState) =>
+  (new ControlSystemOperator() as unknown as {
+    actuatorFlowGain(s: SimulationState, c: ControllerState): number;
+  }).actuatorFlowGain(state, ctl);
+
+test('a pump with no static head follows the affinity law', () => {
+  // A closed liquid loop: all the head is friction, so flow is proportional
+  // to speed and dQ/ds is simply Q/s.
+  const { state, ctl } = pumpLoopRig({ speed: 0.8, flow: 64, suctionP: 20e5, sinkP: 150e5, sink: 'closed-loop' });
+  assertClose(pumpGain(state, ctl), 64 / 0.8, 1e-9, 'gain should be Q/s');
+});
+
+test('a pump lifting into a boiler is far more sensitive than the affinity law', () => {
+  // The Xe-100 feed pump: 6000 m rated head, 80 kg/s rated, lifting from
+  // 20 bar into 150 bar. Its curve H = Hr(1.25 s^2 - 0.25 q^2) against a
+  // static head h0 gives Q(s) explicitly once the friction is fixed, so the
+  // gain can be checked against a finite difference of the plant itself.
+  const rho = 865, gHr = rho * 9.81 * 6000;
+  const s = 0.575, Q = 60, q = Q / 80;
+  const friction = (1.25 * s * s - 0.25 * q * q - (150e5 - 20e5) / gHr) / (q * q);
+  assert(friction > 0, 'the rig has some line friction');
+  const flowAt = (speed: number) =>
+    80 * Math.sqrt((1.25 * speed * speed - (150e5 - 20e5) / gHr) / (0.25 + friction));
+  assertClose(flowAt(s), Q, 1e-6, 'the rig is self-consistent');
+  const measured = (flowAt(s + 1e-5) - flowAt(s - 1e-5)) / 2e-5;
+
+  const { state, ctl } = pumpLoopRig({ speed: s, flow: Q, suctionP: 20e5, sinkP: 150e5, sink: 'boiler' });
+  const gain = pumpGain(state, ctl);
+  assertClose(gain, measured, 0.01 * measured,
+    `gain ${gain.toFixed(0)} should match the plant's dQ/ds ${measured.toFixed(0)} kg/s per unit speed`);
+  assert(gain > 2.5 * Q / s, `and be well above the affinity figure ${(Q / s).toFixed(0)}, got ${gain.toFixed(0)}`);
+});
+
+test('a flow loop is integral-only and closes on its setpoint without ringing', () => {
+  // The plant: flow answers speed within the scan, at the true pump gain.
+  // The loop must walk onto a new setpoint monotonically - a proportional
+  // term here rings through the one-scan delay.
+  const op = new ControlSystemOperator();
+  const rho = 865, gHr = rho * 9.81 * 6000, hStatic = (165e5 - 20e5) / gHr;
+  const flowAt = (speed: number) => {
+    const head = 1.25 * speed * speed - hStatic;
+    return head > 0 ? 80 * Math.sqrt(head / 0.26) : 0;
+  };
+  const s0 = 0.575;
+  let { state } = pumpLoopRig({ speed: s0, flow: flowAt(s0), suctionP: 20e5, sinkP: 165e5,
+    sink: 'boiler', setpoint: flowAt(s0) + 3, aggressiveness: 2.5 });
+  const errors: number[] = [];
+  for (let i = 0; i < 400; i++) {
+    state.time = i * 0.05;
+    state = op.applyConstraints(state, 0.05)!;
+    const pump = state.components.pumps.get('p1')!;
+    pump.effectiveSpeed = pump.speed;
+    const flow = flowAt(pump.speed);
+    for (const c of state.flowConnections) c.massFlowRate = flow;
+    errors.push(flowAt(s0) + 3 - flow);
+  }
+  const ctl = state.components.controllers.get('ctl-p')!;
+  assertClose(ctl.lastAutoGains!.kp, 0, 0, 'no proportional term on a static process');
+  assert(Math.abs(errors[errors.length - 1]) < 0.01,
+    `after 20 s the flow should be on its setpoint, error ${errors[errors.length - 1].toFixed(3)} kg/s`);
+  assert(Math.min(...errors) > -0.05,
+    `and should not have overshot, worst ${Math.min(...errors).toFixed(3)} kg/s`);
+});
+
+test('a stroke limit does not swallow the integral', () => {
+  // Hand gains with a proportional term large enough to hit the stroke
+  // limit on every scan, and a measurement that alternates so the kicks
+  // cancel. Under a single limit on the sum the command nets zero per pair
+  // of scans and a standing error is never corrected.
+  const op = new ControlSystemOperator();
+  let { state } = pumpLoopRig({ speed: 0.6, flow: 60, suctionP: 20e5, sinkP: 165e5,
+    sink: 'boiler', setpoint: 62 });
+  state.components.controllers.get('ctl-p')!.gains = { kp: 1, ki: 0.001 };
+  for (let i = 0; i < 40; i++) {
+    state.time = i * 0.25;
+    for (const c of state.flowConnections) c.massFlowRate = i % 2 ? 61 : 59;   // mean error +2 kg/s
+    state = op.applyConstraints(state, 0.25)!;
+  }
+  const out = state.components.controllers.get('ctl-p')!.lastOutput;
+  // 40 scans of ki*e*dt = 0.001 * 2 * 0.25 each
+  assert(out > 0.6 + 0.5 * 40 * 0.001 * 2 * 0.25,
+    `the mean error must move the command, got ${out.toFixed(4)} from 0.6000`);
 });
 
 test('anything that displays a controller can survive an expression', () => {

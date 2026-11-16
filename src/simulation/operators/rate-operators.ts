@@ -35,6 +35,7 @@ import {
   mixtureViscosity,
   averageMolecularWeight,
   diffusivityInMixture,
+  STEAM_IN_GAS_CP_MOLAR,
 } from '../gas-properties';
 import {
   graphiteSpecificHeat,
@@ -58,6 +59,7 @@ import {
   zoneWaterShare,
   zoneWaterEnthalpy,
   nodeWaterSpecificEnergy,
+  drawGasTemperature,
 } from './connection-hydraulics';
 import { breakExchangeLegs } from './exchange-flow';
 
@@ -295,6 +297,16 @@ export class ConductionRateOperator implements RateOperator {
         conductance += 1 / (1 / (kEff * bed.shapeFactor) + seriesR);
       }
 
+      if (conn.graphiteConduction) {
+        const path = conn.graphiteConduction;
+        const kGraphite = graphiteThermalConductivity(
+          0.5 * (node1.temperature + node2.temperature),
+          { ...NBG_18, k300: path.k300 },
+        );
+        const seriesR = path.seriesConductance ? 1 / path.seriesConductance : 0;
+        conductance += 1 / (1 / (kGraphite * path.shapeFactor) + seriesR);
+      }
+
       if (conn.radiationCoeff) {
         // Linearise onto the same conductance so the sign and the
         // accumulation below stay shared. T1^4-T2^4 = (T1-T2)(T1+T2)(T1^2+T2^2),
@@ -479,7 +491,7 @@ export interface ConvectionNodeProps {
 interface LiquidFluidProps {
   rho: number; mu: number; k: number; cp: number; Pr: number; beta: number;
 }
-interface VaporFluidProps {
+export interface VaporFluidProps {
   k: number; mu: number; cpMass: number; M: number; Pr: number;
   rho_g: number; nSteam: number; nNcg: number;
 }
@@ -514,7 +526,7 @@ function liquidPropsFor(
   return out;
 }
 
-function vaporPropsFor(
+export function vaporPropsFor(
   flowNode: FlowNode, cache?: ConvectionNodeProps,
 ): VaporFluidProps {
   const hit = cache?.vapor.get(flowNode.id);
@@ -530,7 +542,7 @@ function vaporPropsFor(
   const nSteam = steamVaporMass / M_H2O;
   const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
   // Mole-fraction blend of steam and NCG transport properties
-  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = M_H2O;
+  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = STEAM_IN_GAS_CP_MOLAR, M_steam = M_H2O;
   let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
   if (xNcg > 0 && ncg) {
     k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
@@ -1921,7 +1933,7 @@ export class FlowRateOperator implements RateOperator {
   ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; energyFlow: number; h_up: number } {
     const priced = this.priceDraw(
       upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
-    const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace } = priced;
+    const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace, TGas } = priced;
     const upNcg = upstreamNode.fluid.ncg;
 
     // Water portion: mass flow * specific enthalpy of the flowing water
@@ -1964,10 +1976,12 @@ export class FlowRateOperator implements RateOperator {
       // energy: the gas carries its flow work with it. (This used to invert
       // a linear caloric fit of the water for an "effective" temperature,
       // which disagreed with the solved one and so billed the gas at an
-      // energy the node did not hold it at.)
+      // energy the node did not hold it at.) A bundle's shell holds the
+      // mean of its gas profile and hands each nozzle the profile's value
+      // there: TGas is the node's temperature for every other donor.
       const Cp_ncg = mixtureCp(upNcg);
 
-      const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * upstreamNode.fluid.temperature;
+      const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * TGas;
       upRates.dEnergy -= ncgEnergyFlow;
       downRates.dEnergy += ncgEnergyFlow;
 
@@ -2003,7 +2017,7 @@ export class FlowRateOperator implements RateOperator {
     upstreamPhaseTolerance: number | undefined,
     upstreamOpeningHeight: number | undefined,
   ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; waterShare: number; waterEnthalpyFlux: number;
-       h_up: number; gasMassInSpace: number } {
+       h_up: number; gasMassInSpace: number; TGas: number } {
     // Determine what phase is actually flowing based on connection elevation
     // For two-phase nodes, we need to use phase-specific enthalpy
     // Pass mass flow rate so separation calculation can account for turbulence
@@ -2061,10 +2075,11 @@ export class FlowRateOperator implements RateOperator {
       if (!(weight > 0)) continue;
       const zoneWater = weight * shareOf(zone);
       waterShare += zoneWater;
-      waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone);
+      waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone, comp);
     }
     const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
-    return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace };
+    return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace,
+      TGas: drawGasTemperature(upstreamNode, comp) };
   }
 
 }
@@ -2086,6 +2101,22 @@ export const TURBINE_ISENTROPIC_EFFICIENCY = 0.87;
  * from the transport that moves it.
  */
 const drawPricer = new FlowRateOperator();
+
+/**
+ * What `absMassFlow` kg/s drawn from `donor` through an opening at `elevation`
+ * carries, by FlowRateOperator's own pricing: the water share of the flow and
+ * that water's specific enthalpy (J/kg). For a consumer that has to keep a
+ * book of its own on what arrives (a boiler tube's economizer ledger) - the
+ * same numbers the transport credits the receiving node with.
+ */
+export function priceDrawAt(
+  donor: FlowNode, elevation: number | undefined, absMassFlow: number,
+  phaseTolerance: number | undefined, openingHeight: number | undefined,
+): { waterShare: number; h: number } {
+  const p = drawPricer.priceDraw(donor, elevation, absMassFlow, phaseTolerance, openingHeight);
+  return { waterShare: p.waterShare, h: p.h_up };
+}
+
 export function connectionDrawEnthalpy(donor: FlowNode, conn: FlowConnection): number {
   return drawPricer.priceDraw(donor, conn.fromElevation, Math.abs(conn.massFlowRate),
     conn.fromPhaseTolerance, conn.fromOpeningHeight).h_up;

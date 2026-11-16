@@ -1944,11 +1944,20 @@
               },
               {
                 "op": "scale",
-                "factor": -1,
-                "offset": 4,
+                "factor": 0.05,
+                "offset": -41.900000000000006,
                 "input": {
-                  "kind": "node-level",
+                  "kind": "otsg-outlet-temperature",
                   "targetId": "hx-1-tube"
+                }
+              },
+              {
+                "op": "scale",
+                "factor": 0.05,
+                "offset": -41.900000000000006,
+                "input": {
+                  "kind": "otsg-outlet-temperature",
+                  "targetId": "hx-1-tube-b2"
                 }
               }
             ]

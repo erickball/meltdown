@@ -473,6 +473,171 @@ by A_i. This smears axial metal temperature; accepted for v1 and noted as a
 refinement (three fixed metal sub-nodes would be smooth too, since metal
 nodes never vanish).
 
+## 5a. Addendum: streams that do not go the way the drawing says
+
+Everything in §5 was first written for the one arrangement a once-through
+boiler is drawn in: feed in at the bottom, steam out at the top, hot gas
+down over the tubes. The transit branches assumed it — the economizer's
+stream marched up from the bottom at the feed temperature, the steam's from
+the boiling boundary to the top, the gas's from the steam end to the feed
+end — whatever the flows were actually doing. A plant leaves that
+arrangement by accident (a header backing up into a tube that has lost its
+feed, a steam line draining back, a tube torn part-way along, a gas loop
+turning round in natural circulation, a primary side gone colder than the
+secondary), and the model then kept heating streams that were not there, in
+directions they were not going.
+
+**What is geometry and what is flow.** The section ORDER is still geometry:
+subcooled water at the bottom, boiling above it, steam at the top. That is
+gravity's order and the order the partition's draw model reads by elevation
+(§3b). What is no longer assumed is which nozzle is an inlet, which way
+anything runs between them, or which fluid is the hot one.
+
+**One march for every stream** (`marchCells`, otsg.ts). A stream is described
+by the mass flow crossing each metal zone's lower edge (signed: up or down)
+and the streams entering through nozzles (zone, flow, temperature). Each zone
+the stream's run covers is a cell: what flows in — from the cell below, the
+cell above, its own nozzles — mixes, crosses that zone's film, and leaves to
+wherever the flows carry it. A cell is only ever downstream of a neighbour
+across an edge the flow crosses toward it, so two sweeps order the cells.
+With one stream entering at one end this is the forward march of §5,
+operation for operation (the Xe-100's trajectory hash is unchanged by the
+refactor itself).
+
+- **Economizer.** Edge flows are counted from the feed end up: what its
+  nozzles below a height have put in less what they have drawn out. Feed at
+  the bottom runs up at its own temperature; water drawn out of the bottom
+  pulls the column down, saturated liquid following it in from the boiling
+  boundary; a nozzle part-way up adds or takes only above itself.
+- **Superheater** (`marchSteamStreams`). Edge flows are counted from the
+  steam end down: steam drawn at the top comes up from the boiling boundary
+  at saturation; steam pushed in at the top runs down from there at its own
+  temperature; a nozzle part-way up takes only from below itself. An inflow
+  counts for its vapour: superheated steam whole, wet steam by its quality at
+  saturation, water below saturation not at all. The wall pin, the outlet and
+  the wall duty all run this one march, as before.
+- **Shell gas** (`otsgGasStreams`). Each shell connection is a nozzle at its
+  own elevation, placed along the bundle between the shell's lowest and
+  highest connection. The flow crossing a height is half the difference
+  between what the nozzles below and above it take in (two estimates of one
+  through-flow, differing by what the shell is storing), and each inflow
+  enters at ITS donor's temperature — hotter than the shell or colder. The
+  old inlet temperature was `max(shell bulk, hottest donor flowing in)`,
+  which is the assumption that the gas is the heating fluid.
+
+Counting the economizer from the bottom and the superheater from the top
+puts each section's stream where its own nozzles put it and leaves the
+tube's storage change in the boiling section, which has no transit branch
+(§5: the wall simply sees T_sat).
+
+**Inflows join the section they enter.** Subcooled water joins the economizer
+when the economizer is what is at its nozzle: always at the feed end (the
+tube's lowest connection — nothing enters below it, so water arriving there
+is the bottom of the column, which is also what lets an empty economizer be
+born), and anywhere the slug has risen to, by the partition's own
+phase-by-elevation answer. Water entering above the slug lands in the
+boiling or superheat section and quenches it; that needs no booking, because
+it is already in the node's totals and the partition those totals solve to
+has less steam in it. Each inflow is credited to the economizer's book at
+the enthalpy the transport credits the node with (`priceDrawAt`), not the
+feed end's.
+
+**A bundle with no elevation spread** (every nozzle at one height — a bundle
+lying on its side) gives no axis to read. There the only axis left is the
+exchanger's own: an entering stream takes the end a once-through design
+gives it (water the feed end, gas the steam end) and a leaving one the
+other.
+
+**What this does not do.**
+- The section order does not follow the flow. A sustained, fast reverse
+  through-flow (cold water in at the top, out at the bottom) would in a real
+  tube put the cold end at the TOP; the model keeps it at the bottom. Mass and
+  energy close and the tube's overall duty is right, but the axial metal
+  temperature profile is upside down for that case — in particular the metal
+  at the top, where the cold water comes in, is the last to cool.
+- Water entering the steam space exchanges nothing with the superheater's
+  metal on its way down (no falling-film quench).
+- Condensation on cold superheater metal uses the tube side's one two-phase
+  film constant (§5b). It is not hindered by non-condensible gas in the tube,
+  and neither is the boiling section's film.
+- The shell wall (the vessel around the bundle) is one thermal node in
+  contact with the shell's bulk — now the MEAN gas temperature, where it used
+  to be the outlet's. A design that washes its vessel wall with the cold
+  return gas is not represented: its wall reads hotter here than it would be.
+  Per-zone exchange between the tubes and a zoned shell wall is not built.
+- The density a shell outflow is priced at for momentum is still the shell's
+  bulk (mean-temperature) density, not the colder gas at the nozzle.
+- **Water on the shell side (to do).** The shell side of the bundle is a gas
+  model. The shell NODE handles water properly (phase, pressure, the
+  steam-gas mixture), and the film's conductivity, viscosity and heat capacity
+  are those of the gas and steam together (`shellGasProps`), so steam in the
+  helium after a tube rupture is priced. But there is no boiling on the
+  outside of hot tubes, no condensation on cold ones, no pool level covering
+  part of the bundle, and every stream is marched as gas at the mixture's heat
+  capacity whatever it carries. A shell FULL of liquid throws. A steam
+  generator with the water on the shell side (boiling outside the tubes, as in
+  a B&W once-through unit) cannot be built from this component until the
+  shell side gets the tube side's treatment: sections solved from the shell's
+  totals, a boiling/condensing film, and draws by elevation.
+
+`scripts/test-otsg-flow-directions.ts` runs a bundle between four tanks in
+each of these arrangements.
+
+## 5b. Addendum: what the shell node holds, and wet walls under steam
+
+**The shell node holds the mean of its gas profile.** The gas march gives the
+gas temperature at every height of the bundle. The shell node is all of that
+gas at once, so its temperature is the profile's mean, and what leaves through
+a nozzle leaves at the profile's value there. Until 2026-11-15 the node stood
+for the gas at its OUTLET instead — the only way a node that hands out its own
+temperature can deliver the right cold leg. That had two costs. The shell held
+too much gas for its pressure (a shell at 260 °C packs 45% more helium than
+the same shell at its 500 °C mean). And gas that is not flowing had nothing
+to exchange heat with: a transit duty is flow × temperature change, and goes
+to zero with the flow however large the film.
+
+- *Draws.* `OtsgPartitionConstraintOperator` publishes the profile on every
+  state as `FlowNode.shellGasProfile` (the gas leaving each metal zone;
+  parallel bundles mixed by their shares). `drawCompositionAt` reads it and
+  hands every draw from the shell an offset `dTGas` from the node's own
+  temperature; the transport bills the gas at `Cp·(T + dTGas)` and the steam
+  riding with it at `STEAM_IN_GAS_CP·dTGas` more, and the pressure solver's
+  closure weighs the draw at the same figure (`zoneDrawEnthalpy`). A shell
+  fed by another bundle's shell reads that one's profile for its inlet.
+- *The inventory's exchange.* The gas the shell holds exchanges with the tubes
+  across the same film, toward the temperature the profile says it has: each
+  cell's gas at the mean of its exponential approach to the metal (a cell with
+  no flow: at its metal — which is also the flowing cell's limit as the flow
+  stops), cells weighted by 1/T because they share a pressure, so the target
+  is the harmonic mean. With the gas flowing steadily the node already sits
+  there and the term is zero — the transit balance closes on its own, since
+  what comes in less the duty is exactly what leaves at the marched outlet.
+  Stagnant, the target is the metal and the gas follows the tubes. The heat
+  comes from every zone alike, so it carries nothing along the bundle.
+
+The preset's shell initial temperature is therefore the MEAN gas temperature
+(the Xe-100 presets already carried ~505 °C there). Measured on the Xe-100 at
+100 s against the outlet convention: steam 590.6 vs 591.9 °C, 201.2 vs
+200.3 MW, shell pressure 71.7 vs 70.1 bar (the same helium, hotter), cold-leg
+gas 395 °C against the old whole-shell 404 °C, step count unchanged.
+
+**Metal colder than saturation under the steam section is wet.** Steam
+condenses on it, and what the steam stream meets there is the face of the
+condensate film, at saturation. So `marchSteamStreams` marches the stream
+toward `max(T_metal, T_sat)` — it gives up its superheat and no more — and
+the heat crossing the film to the cold metal is the condensing duty,
+`H_TUBE_BOILING · a · (T_metal − T_sat)`, booked with the boiling section's
+duty (Q2, zoneQ2): it answers to T_sat exactly as the boiling film does, the
+condensate joins the boiling section through the totals, and a section
+boundary sweeping over cold metal sees one coefficient on both sides. It is
+zero at `T_metal = T_sat`, so there is no step. Before, the stream was marched
+toward the cold metal itself, down the isobar's extension below saturation, at
+the dry steam film's 1.2 kW/m²K.
+
+The stiff-tube stamp carries it: on the pinned arm it is part of the Q2 the
+stamp relaxes; on the free arm (no boiling section) it is held constant over
+the step with the steam's duty relaxing around it.
+
 ## 6. Empty sections — the part the literature does with switches
 
 Classical moving-boundary implementations track section *lengths* and need

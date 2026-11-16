@@ -894,6 +894,18 @@ export class GameLoop {
   }
 
   /**
+   * Flow-solve error tolerance (RK45Config.closureTol): the accuracy/speed
+   * setting of the once-per-step pressure-flow solve.
+   */
+  setClosureTol(tol: number): void {
+    this.rk45Solver?.setClosureTol(tol);
+  }
+
+  getClosureTol(): number | null {
+    return this.rk45Solver?.getClosureTol() ?? null;
+  }
+
+  /**
    * Set minimum timestep (prevents adaptive dt from going too small)
    * @param minDt - minimum timestep in seconds (e.g., 1e-6 for 1µs)
    */

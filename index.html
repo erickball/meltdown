@@ -262,6 +262,13 @@
               <div class="slider-labels" style="font-size: 9px;"><span>1µs</span><span>100ms</span></div>
             </div>
             <div class="slider-control" style="margin-bottom: 8px;">
+              <label for="closure-tol" style="font-size: 11px;" title="How much error the solver accepts in each step's flows before it takes a smaller step. Once per step the solver predicts the pressures and flows for the whole plant; afterwards it measures how far off that prediction was, as the fraction of each volume's contents that moved wrongly. Above this tolerance the step is redone smaller. Lower = more accurate and slower; higher = faster, with fast events (a valve body filling, a boiler tube quenching) drifting in timing. Small volumes such as valve bodies usually set the step.">
+                Flow error tolerance: <span id="closure-tol-value"></span> per step
+              </label>
+              <input type="range" id="closure-tol" min="-5" max="-2" step="0.05" style="width: 100%;" />
+              <div class="slider-labels" style="font-size: 9px;"><span>0.001% (accurate)</span><span>1% (fast)</span></div>
+            </div>
+            <div class="slider-control" style="margin-bottom: 8px;">
               <label for="k-max" style="font-size: 11px;" title="Caps the numerical bulk modulus used by the pressure solver. Lower values soften liquid nodes (larger stable timesteps, slightly springier pressure response); 2200 MPa = physical stiffness of water (no cap).">
                 K_max: <span id="k-max-value">2200</span> MPa
               </label>

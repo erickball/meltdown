@@ -525,7 +525,7 @@ export class PressureSolver {
     state: SimulationState
   ): Map<string, { dMass: number; dEnergy: number; dNcg?: GasComposition }> {
     const eligibleNode = (node: FlowNode): boolean =>
-      !node.otsg && node.fluid.phase !== 'two-phase';
+      !node.otsg && !node.shellGasProfile && node.fluid.phase !== 'two-phase';
     for (const conn of state.flowConnections) {
       const fromNode = state.flowNodes.get(conn.fromNodeId);
       const toNode = state.flowNodes.get(conn.toNodeId);
@@ -2071,17 +2071,19 @@ export class PressureSolver {
   /** Donor enthalpy blended over the draw composition's mass weights -
    *  a finite opening crossfades between zone prices instead of stepping. */
   private blendedDonorEnthalpy(node: FlowNode, comp: DrawComposition): number {
-    return (comp.wLiquid > 0 ? comp.wLiquid * this.donorEnthalpy(node, 'liquid') : 0)
-      + (comp.wMixture > 0 ? comp.wMixture * this.donorEnthalpy(node, 'mixture') : 0)
-      + (comp.wVapor > 0 ? comp.wVapor * this.donorEnthalpy(node, 'vapor') : 0);
+    return (comp.wLiquid > 0 ? comp.wLiquid * this.donorEnthalpy(node, 'liquid', comp) : 0)
+      + (comp.wMixture > 0 ? comp.wMixture * this.donorEnthalpy(node, 'mixture', comp) : 0)
+      + (comp.wVapor > 0 ? comp.wVapor * this.donorEnthalpy(node, 'vapor', comp) : 0);
   }
 
-  private donorEnthalpy(node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture'): number {
+  private donorEnthalpy(
+    node: FlowNode, flowPhase: 'liquid' | 'vapor' | 'mixture', comp: DrawComposition,
+  ): number {
     // The transport operator's own pricing (zoneDrawEnthalpy), per kg of
     // everything the zone delivers - so the closure weighs each flow at
     // exactly the enthalpy the advection will move. For a whole-inventory
     // draw this IS bulkEnthalpy, (U + P*V) / m_total, by construction.
-    return zoneDrawEnthalpy(node, flowPhase);
+    return zoneDrawEnthalpy(node, flowPhase, comp);
   }
 
   /**
