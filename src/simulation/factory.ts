@@ -46,7 +46,8 @@ import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselC
   PumpComponent, ValveComponent, pumpMotorElevation, pumpVisualHeight, valveVisualHeight } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
-  hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
+  hxTubeLength, hxTubeInnerDiameter, helicalTubeBank, tubeBankMinFlowArea,
+  tubeBankRowLossCoefficient } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
@@ -1815,6 +1816,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         flowConnection.id = connectionIds[connectionIndex];
       }
       addHeatExchangerTubeFriction(flowConnection, connection, plantState);
+      addHeatExchangerShellBundleLoss(flowConnection, connection, plantState);
       state.flowConnections.push(flowConnection);
 
       // Link pump to its OUTLET flow connection (where pump is the FROM component)
@@ -3793,7 +3795,51 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
     flowArea: shellFlowArea,
     height: hx.height,
     elevation,
+    // What the shell fluid does at the tubes. A helical coil lies across the
+    // flow, so its shell side is a tube bank in crossflow; straight and U
+    // tubes run with the flow.
+    shellBundle: hx.hxType === 'helical'
+      ? (({ tubeOD: d, pitchRatio, faceArea }) =>
+          ({ flow: 'cross' as const, tubeOD: d, pitchRatio, faceArea }))(helicalTubeBank(hx))
+      : { flow: 'along' as const },
   };
+}
+
+/**
+ * Charge a connection for the shell-side pressure loss of any helical bundle
+ * it feeds or drains.
+ *
+ * The companion of addHeatExchangerTubeFriction, for the other side of the
+ * tubes. A bundle's shell was hydraulically a point: the gas crossed several
+ * hundred rows of tubes for nothing, so a bundle of any size cost its
+ * circulator the same - none. Row loss over the bank (tubeBankRowLoss-
+ * Coefficient), counted on the velocity in the narrowest gap and referred to
+ * THIS connection's flow area:
+ *
+ *     K_add = rows * xi * (A_conn / A_min)^2 / 2
+ *
+ * halved because the shell's inlet and outlet each carry one. Only a helical
+ * bundle is crossed row by row; flow along straight or U tubes is not charged
+ * here.
+ */
+function addHeatExchangerShellBundleLoss(
+  flowConnection: { flowArea: number; resistanceCoeff: number },
+  connection: Connection,
+  plantState: PlantState,
+): void {
+  for (const endId of [connection.fromComponentId, connection.toComponentId]) {
+    const comp = plantState.components.get(endId) as any;
+    if (!comp || comp.type !== 'heatExchanger' || comp.hxType !== 'helical') continue;
+    const portId = endId === connection.fromComponentId
+      ? connection.fromPortId : connection.toPortId;
+    if (portId?.includes('-tube')) continue;   // tube-side connections see the tubes
+    if (!(flowConnection.flowArea > 0)) continue;
+
+    const bank = helicalTubeBank(comp);
+    const areaRatio = flowConnection.flowArea / tubeBankMinFlowArea(bank);
+    flowConnection.resistanceCoeff +=
+      0.5 * bank.rows * tubeBankRowLossCoefficient(bank.pitchRatio) * areaRatio * areaRatio;
+  }
 }
 
 /** Tube bore (m): OD minus two wall thicknesses, the wall sized from the

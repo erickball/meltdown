@@ -505,6 +505,18 @@ export interface FlowNode {
    */
   shellGasProfile?: { lo: number; hi: number; TDraw: number[] };
 
+  /**
+   * Heat-exchanger shell nodes only: how the shell-side fluid meets the tubes,
+   * which is what its film coefficient is made of (shellFilmCoefficient).
+   * 'cross' is a bank of tubes the fluid crosses row by row (a helical
+   * bundle); 'along' is flow down the length of straight or U tubes, which
+   * the node's own hydraulicDiameter and flowArea describe. Written by the
+   * factory; never mutated.
+   */
+  shellBundle?:
+    | { flow: 'cross'; tubeOD: number; pitchRatio: number; faceArea: number }
+    | { flow: 'along' };
+
   // Boundary condition flag
   // If true, this node's fluid state is fixed and should not be updated by physics operators
   // Used for atmosphere and other infinite reservoirs
