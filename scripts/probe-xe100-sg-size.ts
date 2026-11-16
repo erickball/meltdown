@@ -112,6 +112,9 @@ while (sim.state.time < end) {
     `ctl ${['ctl-rods-1', 'ctl-msp-1', 'ctl-fw-1', 'ctl-fwh-1', 'ctl-fwhlvl-1'].map(ctl).join(' ')} ` +
     `speed fw=${pumpSpeed('fw-pump-1')} circ=${pumpSpeed('pump-1')} | ` +
     `steps ${steps} rej ${rejected} (${(100 * rejected / Math.max(1, steps)).toFixed(1)}%) ` +
-    `mean dt ${(1e3 * acc.t / Math.max(1, steps - rejected)).toFixed(2)} ms, ${wall.toFixed(0)} s wall`);
+    `mean dt ${(1e3 * acc.t / Math.max(1, steps - rejected)).toFixed(2)} ms, ${wall.toFixed(0)} s wall` +
+    // Running totals since the build, most frequent first
+    ` | rejected by ${[...sim.solver.rejectionStats.entries()].sort((x, y) => y[1] - x[1]).slice(0, 4)
+      .map(([cause, n]) => `${cause} ${n}`).join(', ') || 'nothing'}`);
   acc = { t: 0, q: 0, he: 0, steam: 0, bleed: 0, feed: 0, turb: 0, pump: 0, rej: 0 };
 }
