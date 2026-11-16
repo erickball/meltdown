@@ -35,6 +35,7 @@ import {
   mixtureViscosity,
   averageMolecularWeight,
   diffusivityInMixture,
+  STEAM_IN_GAS_CP_MOLAR,
 } from '../gas-properties';
 import {
   graphiteSpecificHeat,
@@ -58,6 +59,7 @@ import {
   zoneWaterShare,
   zoneWaterEnthalpy,
   nodeWaterSpecificEnergy,
+  drawGasTemperature,
 } from './connection-hydraulics';
 import { breakExchangeLegs } from './exchange-flow';
 
@@ -540,7 +542,7 @@ export function vaporPropsFor(
   const nSteam = steamVaporMass / M_H2O;
   const xNcg = nNcg > 0 ? nNcg / (nNcg + nSteam) : 0;
   // Mole-fraction blend of steam and NCG transport properties
-  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = 37, M_steam = M_H2O;
+  const k_steam = 0.03, mu_steam = 2e-5, cpMolar_steam = STEAM_IN_GAS_CP_MOLAR, M_steam = M_H2O;
   let k = k_steam, mu = mu_steam, cpMolar = cpMolar_steam, M = M_steam;
   if (xNcg > 0 && ncg) {
     k = (1 - xNcg) * k_steam + xNcg * mixtureThermalConductivity(ncg, T);
@@ -1931,7 +1933,7 @@ export class FlowRateOperator implements RateOperator {
   ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; energyFlow: number; h_up: number } {
     const priced = this.priceDraw(
       upstreamNode, upstreamElevation, absMassFlow, upstreamPhaseTolerance, upstreamOpeningHeight);
-    const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace } = priced;
+    const { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace, TGas } = priced;
     const upNcg = upstreamNode.fluid.ncg;
 
     // Water portion: mass flow * specific enthalpy of the flowing water
@@ -1974,10 +1976,12 @@ export class FlowRateOperator implements RateOperator {
       // energy: the gas carries its flow work with it. (This used to invert
       // a linear caloric fit of the water for an "effective" temperature,
       // which disagreed with the solved one and so billed the gas at an
-      // energy the node did not hold it at.)
+      // energy the node did not hold it at.) A bundle's shell holds the
+      // mean of its gas profile and hands each nozzle the profile's value
+      // there: TGas is the node's temperature for every other donor.
       const Cp_ncg = mixtureCp(upNcg);
 
-      const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * upstreamNode.fluid.temperature;
+      const ncgEnergyFlow = totalMolesTransferred * Cp_ncg * TGas;
       upRates.dEnergy -= ncgEnergyFlow;
       downRates.dEnergy += ncgEnergyFlow;
 
@@ -2013,7 +2017,7 @@ export class FlowRateOperator implements RateOperator {
     upstreamPhaseTolerance: number | undefined,
     upstreamOpeningHeight: number | undefined,
   ): { flowPhase: 'liquid' | 'vapor' | 'mixture'; waterShare: number; waterEnthalpyFlux: number;
-       h_up: number; gasMassInSpace: number } {
+       h_up: number; gasMassInSpace: number; TGas: number } {
     // Determine what phase is actually flowing based on connection elevation
     // For two-phase nodes, we need to use phase-specific enthalpy
     // Pass mass flow rate so separation calculation can account for turbulence
@@ -2074,7 +2078,8 @@ export class FlowRateOperator implements RateOperator {
       waterEnthalpyFlux += zoneWater * zoneWaterEnthalpy(upstreamNode, zone, comp);
     }
     const h_up = waterShare > 0 ? waterEnthalpyFlux / waterShare : 0;
-    return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace };
+    return { flowPhase, waterShare, waterEnthalpyFlux, h_up, gasMassInSpace,
+      TGas: drawGasTemperature(upstreamNode, comp) };
   }
 
 }

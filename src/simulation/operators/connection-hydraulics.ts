@@ -29,6 +29,7 @@ import {
   mixtureCp,
   mixtureCv,
   R_GAS,
+  STEAM_IN_GAS_CP,
 } from '../gas-properties';
 import {
   soundSpeed, criticalPressureRatio, WaterState,
@@ -675,6 +676,33 @@ export interface DrawComposition {
    * zones are uniform and priced by zoneWaterEnthalpy.
    */
   hZone?: [number, number, number];
+  /**
+   * K - how much hotter (or colder) than the donor's own temperature the
+   * vapour and gas in this draw are, when the donor's gas varies along it: a
+   * once-through bundle's shell, which holds the mean of its gas profile and
+   * hands each nozzle the profile's value there (shellDrawTemperature).
+   * Unset for every other donor.
+   */
+  dTGas?: number;
+}
+
+/**
+ * The temperature of the gas leaving `node` through an opening at
+ * `elevation`: the node's own, except for a once-through bundle's shell,
+ * which publishes its gas profile (FlowNode.shellGasProfile). The nozzle's
+ * place along the bundle is its elevation between the shell's lowest and
+ * highest connection; a shell whose connections are all at one height gives
+ * no axis, and gas leaves it at the feed end, where a once-through boiler is
+ * built to let it out.
+ */
+export function shellDrawTemperature(node: FlowNode, elevation: number | undefined): number {
+  const prof = node.shellGasProfile;
+  if (!prof) return node.fluid.temperature;
+  const n = prof.TDraw.length;
+  if (!(prof.hi > prof.lo)) return prof.TDraw[0];
+  const e = elevation ?? (node.height ?? Math.cbrt(node.volume)) / 2;
+  const k = Math.min(n - 1, Math.max(0, Math.floor((e - prof.lo) / (prof.hi - prof.lo) * n)));
+  return prof.TDraw[k];
 }
 
 /**
@@ -775,16 +803,29 @@ export function zoneWaterEnthalpy(
       `the opening it leaves by.`);
   }
   const f = node.fluid;
+  // Steam leaving a bundle's shell leaves at the gas profile's temperature
+  // at its nozzle, with the gas it rides in (DrawComposition.dTGas).
+  const offset = comp?.dTGas !== undefined && zone !== 'liquid' ? STEAM_IN_GAS_CP * comp.dTGas : 0;
   if (f.phase !== 'two-phase' || zone === 'mixture') {
     // No water: nothing to price (the caller's water share is zero too)
     if (!(f.mass > 0)) return 0;
-    return (f.internalEnergy + f.pressure * node.volume - nodeGasEnthalpy(node)) / f.mass;
+    return (f.internalEnergy + f.pressure * node.volume - nodeGasEnthalpy(node)) / f.mass + offset;
   }
   const T = f.temperature;
   if (zone === 'liquid') {
     return saturatedLiquidEnergy(T) + f.pressure / saturatedLiquidDensity(T);
   }
-  return saturatedVaporEnergy(T) + saturationPressure(T) / saturatedVaporDensity(T);
+  return saturatedVaporEnergy(T) + saturationPressure(T) / saturatedVaporDensity(T) + offset;
+}
+
+/**
+ * The temperature the gas in a draw leaves at: the donor's own, or a bundle
+ * shell's profile value at the nozzle (DrawComposition.dTGas). The transport
+ * bills the gas n·Cp at this, and the pressure solver's closure weighs it at
+ * the same (zoneDrawEnthalpy).
+ */
+export function drawGasTemperature(node: FlowNode, comp?: DrawComposition): number {
+  return node.fluid.temperature + (comp?.dTGas ?? 0);
 }
 
 /**
@@ -797,7 +838,8 @@ export function zoneDrawEnthalpy(
 ): number {
   const w = zoneWaterShare(node, zone);
   if (w >= 1) return zoneWaterEnthalpy(node, zone, comp);
-  const hGas = nodeGasEnthalpy(node) / ncgTotalMass(node.fluid.ncg!);
+  const ncg = node.fluid.ncg!;
+  const hGas = totalMoles(ncg) * mixtureCp(ncg) * drawGasTemperature(node, comp) / ncgTotalMass(ncg);
   return (w > 0 ? w * zoneWaterEnthalpy(node, zone, comp) : 0) + (1 - w) * hGas;
 }
 
@@ -817,6 +859,24 @@ export function drawCompositionAt(
   openingHeight?: number,
   out?: DrawComposition,
   needRho: boolean = true,
+): DrawComposition {
+  const comp = drawZonesAt(
+    node, connectionElevation, massFlowRate, phaseTolerance, openingHeight, out, needRho);
+  // A bundle's shell hands each nozzle the gas at ITS place on the profile.
+  if (node.shellGasProfile) {
+    comp.dTGas = shellDrawTemperature(node, connectionElevation) - node.fluid.temperature;
+  }
+  return comp;
+}
+
+function drawZonesAt(
+  node: FlowNode,
+  connectionElevation: number | undefined,
+  massFlowRate: number,
+  phaseTolerance: number | undefined,
+  openingHeight: number | undefined,
+  out: DrawComposition | undefined,
+  needRho: boolean,
 ): DrawComposition {
   // Hot-path notes: callers that consume the result within their own loop
   // iteration pass a reusable `out` scratch (the rate operator prices every
@@ -982,6 +1042,7 @@ function fillComp(
   out.wLiquid = wLiquid; out.wMixture = wMixture; out.wVapor = wVapor;
   out.rho = rho;
   out.hZone = undefined;
+  out.dTGas = undefined;
   return out;
 }
 

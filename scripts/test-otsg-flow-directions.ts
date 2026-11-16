@@ -29,9 +29,11 @@
 
 import { buildSim, run, test, assert, report, Sim } from './lib/sim-harness';
 import {
-  evaluateOtsgSections, otsgMetalZones, otsgWaterSideDuties, otsgGasDuties, otsgGasInletTemp,
+  evaluateOtsgSections, otsgMetalZones, otsgWaterSideDuties, otsgGasDuties, otsgGasInletTemp, otsgGasMarch,
 } from '../src/simulation/operators/otsg-operator';
 import { saturationPressure } from '../src/simulation/water-properties';
+import { H_TUBE_BOILING } from '../src/simulation/otsg';
+import { drawCompositionAt, shellDrawTemperature } from '../src/simulation/operators/connection-hydraulics';
 import type { PlantComponent, PlantConnection } from '../src/types';
 import type { SimulationState, FlowNode } from '../src/simulation/types';
 
@@ -297,6 +299,30 @@ test('Design arrangement: feed up, gas down, hot end at the steam end', () => {
   assert(mean(q.slice(n - 5)) > 0 && mean(q.slice(n - 5)) > mean(q.slice(0, 5)),
     `the gas gives up most where it enters, at the steam end: ${(mean(q.slice(n - 5)) / 1e3).toFixed(0)} kW/zone ` +
     `there against ${(mean(q.slice(0, 5)) / 1e3).toFixed(0)} at the feed end`);
+  // The shell node holds ALL the gas along the bundle, so it sits at the
+  // mean of the gas profile; what leaves by the bottom nozzle leaves at the
+  // profile's cold end. (The node used to stand for the outlet alone.)
+  const shell = state.flowNodes.get(SHELL)!;
+  const tube = tubeNode(state);
+  const TArr = otsgGasInletTemp(state, shell);
+  const TLeaving = shellDrawTemperature(shell, 1);
+  const march = otsgGasMarch(state, shell, zoneTemps(state), tube.otsg!.heatArea, tube.otsg!.gasShare ?? 1);
+  assert(TLeaving < shell.fluid.temperature - 50 && shell.fluid.temperature < TArr - 50,
+    `the shell sits between the gas arriving and the gas leaving: ${C(TArr)} C in, shell ${C(shell.fluid.temperature)} C, ` +
+    `${C(TLeaving)} C out`);
+  assert(Math.abs(shell.fluid.temperature - march.TTarget) < 10,
+    `at the mean of its gas profile: shell ${C(shell.fluid.temperature)} C, profile mean ${C(march.TTarget)} C`);
+  const drawn = drawCompositionAt(shell, 1, 18);
+  assert(Math.abs((drawn.dTGas ?? 0) - (TLeaving - shell.fluid.temperature)) < 1e-9,
+    `and a draw at the bottom nozzle is priced at the cold end (${(drawn.dTGas ?? 0).toFixed(1)} K from the shell's own)`);
+  // The steady transit balance: what the gas brought in less what it left
+  // with is what it gave the metal.
+  const cp = 5193;
+  const WGas = flowFrom(state, 'gas-top', SHELL);
+  const given = q.reduce((a, b) => a + b, 0);
+  assert(Math.abs(given - WGas * cp * (TArr - TLeaving)) < 0.05 * given,
+    `the gas gave the metal ${(given / 1e6).toFixed(2)} MW; ${WGas.toFixed(1)} kg/s cooled from ${C(TArr)} to ` +
+    `${C(TLeaving)} C is ${(WGas * cp * (TArr - TLeaving) / 1e6).toFixed(2)} MW`);
 });
 
 test('Shell gas reversed: it is cooled from the end it enters by', () => {
@@ -317,8 +343,10 @@ test('Shell gas reversed: it is cooled from the end it enters by', () => {
     `the gas gives up most where it enters, at the feed end: ${(mean(q.slice(0, 5)) / 1e3).toFixed(0)} kW/zone ` +
     `there against ${(mean(q.slice(n - 5)) / 1e3).toFixed(0)} at the steam end`);
   const shell = state.flowNodes.get(SHELL)!;
-  assert(shell.fluid.temperature < otsgGasInletTemp(state, shell) - 50,
-    `the gas leaves colder than it arrived: shell ${C(shell.fluid.temperature)} C, arriving ${C(otsgGasInletTemp(state, shell))} C`);
+  const TLeaving = shellDrawTemperature(shell, HX_HEIGHT - 1);
+  assert(TLeaving < shell.fluid.temperature - 50 && shell.fluid.temperature < otsgGasInletTemp(state, shell) - 50,
+    `the gas leaves by the TOP nozzle, colder than the shell's mean, colder than it arrived: ${C(TLeaving)} C out, ` +
+    `shell ${C(shell.fluid.temperature)} C, arriving ${C(otsgGasInletTemp(state, shell))} C`);
 });
 
 test('Steam driven backwards: it is cooled from the steam end down', () => {
@@ -403,6 +431,63 @@ test('Cold water backing in at the top quenches the steam; it is not feed', () =
     `and cooled the metal: ${C(metalNow)} C mean from ${C(metalAtStart)} C`);
 });
 
+test('Steam over cold tubes condenses on them', () => {
+  // A header of steam on the top nozzle of a tube whose metal starts 170 K
+  // below the steam's saturation. A wet wall takes heat across a condensate
+  // film whose face is at saturation: the steam stream is cooled to
+  // saturation and no further, and the metal is heated by the condensing
+  // duty. (Cold metal under steam used to take only the dry steam film,
+  // against a stream marched below its own dew point.)
+  const sim = rig({
+    gasTop: { T: 380, bar: 60 }, gasBottom: { T: 380, bar: 60 },
+    waterBottom: { T: 380, P: 15e5, phase: 'liquid' },
+    waterTop: { T: 600, P: 60e5, phase: 'vapor' },
+    tube: { T: 620, P: 40e5, phase: 'vapor', quality: 1 },
+    shell: { T: 380, bar: 60 },
+    bottomLine: 0.0003, topLine: 0.002,
+  });
+  for (const z of otsgMetalZones(sim.state, tubeNode(sim.state))) z.temperature = 380;
+  const metalAtStart = mean(zoneTemps(sim.state));
+  {
+    // The first instant: a tube of steam, every zone of its metal cold.
+    note('condensing, t=0', sim.state);
+    const { ev, d } = waterDuties(sim.state);
+    const area = tubeNode(sim.state).otsg!.heatArea;
+    assert(ev.sections[2].lengthFrac > 0.99, `the tube starts as steam (${(100 * ev.sections[2].lengthFrac).toFixed(0)}%)`);
+    const film = H_TUBE_BOILING * area * (380 - ev.sat.T);
+    assert(Math.abs(d.Q2 - film) < 1e-6 * Math.abs(film),
+      `the cold metal takes the condensing film's duty against saturation: ${(d.Q2 / 1e6).toFixed(0)} MW ` +
+      `for ${(film / 1e6).toFixed(0)} MW across the film`);
+    assert(d.Q3 <= 0 && d.Q3 > 0.05 * d.Q2,
+      `and the steam itself gives up only its superheat (${(d.Q3 / 1e6).toFixed(0)} MW)`);
+    assert(ev.TSteamOut >= ev.sat.T - 1e-6 && ev.sections[2].T >= ev.sat.T - 1e-6,
+      `the steam is not cooled below its own saturation: outlet ${C(ev.TSteamOut)} C, ` +
+      `section ${C(ev.sections[2].T)} C, T_sat ${C(ev.sat.T)} C`);
+  }
+  let checked = false;
+  const state = runChecked(sim, 15, 'condensing', s => {
+    // A second on: the tube has collapsed onto its metal's temperature - it
+    // cannot hold a pressure whose saturation is above 2800 m2 of cold steel.
+    if (checked || s.time < 1) return;
+    checked = true;
+    note('condensing, t=1', s);
+    const { ev } = waterDuties(s);
+    assert(flowFrom(s, 'water-top', TUBE) > 0.5,
+      `steam is drawn in at the top (${flowFrom(s, 'water-top', TUBE).toFixed(2)} kg/s)`);
+    const TMetal = mean(zoneTemps(s));
+    assert(Math.abs(ev.sat.T - TMetal) < 15,
+      `the tube's saturation has fallen to its metal: T_sat ${C(ev.sat.T)} C, metal ${C(TMetal)} C`);
+  });
+  note('condensing', state);
+  assert(checked, 'the run reached its early check');
+  const metalNow = mean(zoneTemps(state));
+  assert(metalNow > metalAtStart + 5,
+    `the condensing steam has heated the metal: ${C(metalNow)} C mean from ${C(metalAtStart)} C`);
+  const { ev } = evaluateOtsgSections(state, TUBE, tubeNode(state), { exact: true });
+  assert(ev.sections[0].mass + ev.sections[1].mass > 1,
+    `and left its condensate in the tube (${(ev.sections[0].mass + ev.sections[1].mass).toFixed(1)} kg of water below the steam)`);
+});
+
 test('Tube side hotter than the gas: the water heats the gas', () => {
   // Cold helium over a bundle carrying hot pressurized water. Every wall
   // exchange has to run backwards, and the gas has to be marched in at ITS
@@ -448,7 +533,20 @@ test('Nothing driving any flow: the bundle settles and sits there', () => {
   assert(tubeNode(state).fluid.mass > 0, 'the tube still holds something');
   assert(Math.abs(flowFrom(state, 'water-bottom', TUBE)) < 2 && Math.abs(flowFrom(state, 'water-top', TUBE)) < 2,
     'and its lines have all but stopped');
-  assert(Math.abs(flowFrom(state, 'gas-top', SHELL)) < 0.5, 'as has the gas');
+  // The gas the shell holds exchanges with the tubes though nothing drives it
+  // through: it started 77 K hotter than the metal, cools toward it, and
+  // contracts - so a trickle comes in from BOTH tanks to make up the volume.
+  const shell = state.flowNodes.get(SHELL)!;
+  const inTop = flowFrom(state, 'gas-top', SHELL), inBottom = flowFrom(state, 'gas-bottom', SHELL);
+  assert(Math.abs(inTop) < 2 && Math.abs(inBottom) < 2,
+    `the gas is all but still (${inTop.toFixed(2)} and ${inBottom.toFixed(2)} kg/s in)`);
+  const zT = zoneTemps(state);
+  const TMetal = zT.reduce((a, b) => a + b, 0) / zT.length;
+  assert(shell.fluid.temperature < STILL_GAS.T - 20 && shell.fluid.temperature > TMetal - 1,
+    `and the gas the shell holds has cooled toward its tubes: ${C(shell.fluid.temperature)} C from ` +
+    `${C(STILL_GAS.T)} C, metal mean ${C(TMetal)} C`);
+  assert(inTop > -0.05 && inBottom > -0.05,
+    `drawing gas in at both ends as it contracts (${inTop.toFixed(2)} and ${inBottom.toFixed(2)} kg/s)`);
 });
 
 report('OTSG Flow-Direction Suite');
