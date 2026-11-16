@@ -473,6 +473,103 @@ by A_i. This smears axial metal temperature; accepted for v1 and noted as a
 refinement (three fixed metal sub-nodes would be smooth too, since metal
 nodes never vanish).
 
+## 5a. Addendum: streams that do not go the way the drawing says
+
+Everything in §5 was first written for the one arrangement a once-through
+boiler is drawn in: feed in at the bottom, steam out at the top, hot gas
+down over the tubes. The transit branches assumed it — the economizer's
+stream marched up from the bottom at the feed temperature, the steam's from
+the boiling boundary to the top, the gas's from the steam end to the feed
+end — whatever the flows were actually doing. A plant leaves that
+arrangement by accident (a header backing up into a tube that has lost its
+feed, a steam line draining back, a tube torn part-way along, a gas loop
+turning round in natural circulation, a primary side gone colder than the
+secondary), and the model then kept heating streams that were not there, in
+directions they were not going.
+
+**What is geometry and what is flow.** The section ORDER is still geometry:
+subcooled water at the bottom, boiling above it, steam at the top. That is
+gravity's order and the order the partition's draw model reads by elevation
+(§3b). What is no longer assumed is which nozzle is an inlet, which way
+anything runs between them, or which fluid is the hot one.
+
+**One march for every stream** (`marchCells`, otsg.ts). A stream is described
+by the mass flow crossing each metal zone's lower edge (signed: up or down)
+and the streams entering through nozzles (zone, flow, temperature). Each zone
+the stream's run covers is a cell: what flows in — from the cell below, the
+cell above, its own nozzles — mixes, crosses that zone's film, and leaves to
+wherever the flows carry it. A cell is only ever downstream of a neighbour
+across an edge the flow crosses toward it, so two sweeps order the cells.
+With one stream entering at one end this is the forward march of §5,
+operation for operation (the Xe-100's trajectory hash is unchanged by the
+refactor itself).
+
+- **Economizer.** Edge flows are counted from the feed end up: what its
+  nozzles below a height have put in less what they have drawn out. Feed at
+  the bottom runs up at its own temperature; water drawn out of the bottom
+  pulls the column down, saturated liquid following it in from the boiling
+  boundary; a nozzle part-way up adds or takes only above itself.
+- **Superheater** (`marchSteamStreams`). Edge flows are counted from the
+  steam end down: steam drawn at the top comes up from the boiling boundary
+  at saturation; steam pushed in at the top runs down from there at its own
+  temperature; a nozzle part-way up takes only from below itself. An inflow
+  counts for its vapour: superheated steam whole, wet steam by its quality at
+  saturation, water below saturation not at all. The wall pin, the outlet and
+  the wall duty all run this one march, as before.
+- **Shell gas** (`otsgGasStreams`). Each shell connection is a nozzle at its
+  own elevation, placed along the bundle between the shell's lowest and
+  highest connection. The flow crossing a height is half the difference
+  between what the nozzles below and above it take in (two estimates of one
+  through-flow, differing by what the shell is storing), and each inflow
+  enters at ITS donor's temperature — hotter than the shell or colder. The
+  old inlet temperature was `max(shell bulk, hottest donor flowing in)`,
+  which is the assumption that the gas is the heating fluid.
+
+Counting the economizer from the bottom and the superheater from the top
+puts each section's stream where its own nozzles put it and leaves the
+tube's storage change in the boiling section, which has no transit branch
+(§5: the wall simply sees T_sat).
+
+**Inflows join the section they enter.** Subcooled water joins the economizer
+when the economizer is what is at its nozzle: always at the feed end (the
+tube's lowest connection — nothing enters below it, so water arriving there
+is the bottom of the column, which is also what lets an empty economizer be
+born), and anywhere the slug has risen to, by the partition's own
+phase-by-elevation answer. Water entering above the slug lands in the
+boiling or superheat section and quenches it; that needs no booking, because
+it is already in the node's totals and the partition those totals solve to
+has less steam in it. Each inflow is credited to the economizer's book at
+the enthalpy the transport credits the node with (`priceDrawAt`), not the
+feed end's.
+
+**A bundle with no elevation spread** (every nozzle at one height — a bundle
+lying on its side) gives no axis to read. There the only axis left is the
+exchanger's own: an entering stream takes the end a once-through design
+gives it (water the feed end, gas the steam end) and a leaving one the
+other.
+
+**What this does not do.**
+- The section order does not follow the flow. A sustained, fast reverse
+  through-flow (cold water in at the top, out at the bottom) would in a real
+  tube put the cold end at the TOP; the model keeps it at the bottom. Mass and
+  energy close and the tube's overall duty is right, but the axial metal
+  temperature profile is upside down for that case — in particular the metal
+  at the top, where the cold water comes in, is the last to cool.
+- Water entering the steam space exchanges nothing with the superheater's
+  metal on its way down (no falling-film quench).
+- A cold wall under steam cools it sensibly at the steam film coefficient; it
+  does not condense on the wall at a condensing coefficient. The steam still
+  condenses — through the totals, into the boiling section — but slower than
+  a real cold tube would make it.
+- Stagnant shell gas exchanges no heat with the tubes: the gas side has a
+  transit branch only. A standing branch against the shell's single bulk
+  temperature would give that, but with the gas flowing it also carries heat
+  from the hot end's metal to the cold end's through the lumped node (an
+  estimated ~10% of duty on the Xe-100, not measured), so it was not added.
+
+`scripts/test-otsg-flow-directions.ts` runs a bundle between four tanks in
+each of these arrangements.
+
 ## 6. Empty sections — the part the literature does with switches
 
 Classical moving-boundary implementations track section *lengths* and need

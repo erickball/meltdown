@@ -40,7 +40,7 @@ function heTank(id: string, volume: number, T: number): [string, PlantComponent]
   return [id, {
     id, type: 'tank', label: id,
     position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
-    pressureRating: 500, width, height, wallThickness: 0.05, fillLevel: 0,
+    pressureRating: 500, width, height, wallThickness: 5, fillLevel: 0,
     initialNcg: { He: P_HE_BAR },
     ports: [
       { id: `${id}-top`, position: { x: 0, y: -height / 2 }, direction: 'both' },
@@ -58,7 +58,7 @@ function waterTank(
   return [id, {
     id, type: 'tank', label: id,
     position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
-    pressureRating: 500, width, height, wallThickness: 0.05,
+    pressureRating: 500, width, height, wallThickness: 5,
     fillLevel: phase === 'liquid' ? 1 : 0,
     ports: [
       { id: `${id}-top`, position: { x: 0, y: -height / 2 }, direction: 'both' },

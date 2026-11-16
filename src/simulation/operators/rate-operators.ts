@@ -2086,6 +2086,22 @@ export const TURBINE_ISENTROPIC_EFFICIENCY = 0.87;
  * from the transport that moves it.
  */
 const drawPricer = new FlowRateOperator();
+
+/**
+ * What `absMassFlow` kg/s drawn from `donor` through an opening at `elevation`
+ * carries, by FlowRateOperator's own pricing: the water share of the flow and
+ * that water's specific enthalpy (J/kg). For a consumer that has to keep a
+ * book of its own on what arrives (a boiler tube's economizer ledger) - the
+ * same numbers the transport credits the receiving node with.
+ */
+export function priceDrawAt(
+  donor: FlowNode, elevation: number | undefined, absMassFlow: number,
+  phaseTolerance: number | undefined, openingHeight: number | undefined,
+): { waterShare: number; h: number } {
+  const p = drawPricer.priceDraw(donor, elevation, absMassFlow, phaseTolerance, openingHeight);
+  return { waterShare: p.waterShare, h: p.h_up };
+}
+
 export function connectionDrawEnthalpy(donor: FlowNode, conn: FlowConnection): number {
   return drawPricer.priceDraw(donor, conn.fromElevation, Math.abs(conn.massFlowRate),
     conn.fromPhaseTolerance, conn.fromOpeningHeight).h_up;

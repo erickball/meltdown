@@ -253,14 +253,18 @@ function makeSolver(config: ConstructorParameters<typeof RK45Solver>[0]): RK45So
     };
   }
   // A/B override for the closure-consistency error term of the implicit
-  // pressure-flow solve in step control: CLOSURE_ERROR=1 lets it shrink dt
-  // (shipping default is off; the diagnostics are always computed).
+  // pressure-flow solve in step control: CLOSURE_ERROR=0 takes it out
+  // (shipping default is on; the fixed-fraction guards then return).
+  // CLOSURE_TOL sets its tolerance.
   const closureEnv = process.env.CLOSURE_ERROR;
   if (closureEnv !== undefined) {
     config = { ...config, closureErrorControl: closureEnv === '1' };
   }
   // A/B overrides for the two inventory guards (THROUGHPUT_GUARD=0 /
   // NETMASS_GUARD=0 disable; defaults on).
+  if (process.env.CLOSURE_TOL !== undefined) config = { ...config, closureTol: parseFloat(process.env.CLOSURE_TOL) };
+  if (process.env.PRESSURE_GUARD !== undefined) config = { ...config, pressureGuard: process.env.PRESSURE_GUARD === '1' };
+  if (process.env.COURANT_CEILING !== undefined) config = { ...config, materialCourantCeiling: process.env.COURANT_CEILING === '1' };
   if (process.env.THROUGHPUT_GUARD !== undefined) config = { ...config, throughputGuard: process.env.THROUGHPUT_GUARD === '1' };
   if (process.env.NETMASS_GUARD !== undefined) config = { ...config, netMassGuard: process.env.NETMASS_GUARD === '1' };
   const solver = new RK45Solver(config);

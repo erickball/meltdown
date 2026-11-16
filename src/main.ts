@@ -1505,6 +1505,25 @@ function init() {
   }
 
   // Advanced solver settings: K_max control (numerical bulk modulus cap)
+  // Flow error tolerance (RK45Config.closureTol), logarithmic: the slider
+  // holds log10 of the tolerance. Its starting position is read FROM the
+  // solver so the default lives in one place.
+  const closureTolSlider = document.getElementById('closure-tol') as HTMLInputElement | null;
+  const closureTolValue = document.getElementById('closure-tol-value');
+  const formatClosureTol = (tol: number) => `${parseFloat((tol * 100).toPrecision(2))}%`;
+  if (closureTolSlider) {
+    const initialTol = gameLoop.getClosureTol();
+    if (initialTol !== null) {
+      closureTolSlider.value = Math.log10(initialTol).toString();
+      if (closureTolValue) closureTolValue.textContent = formatClosureTol(initialTol);
+    }
+    closureTolSlider.addEventListener('input', () => {
+      const tol = Math.pow(10, parseFloat(closureTolSlider.value));
+      if (closureTolValue) closureTolValue.textContent = formatClosureTol(tol);
+      gameLoop.setClosureTol(tol);
+    });
+  }
+
   const kMaxSlider = document.getElementById('k-max') as HTMLInputElement;
   const kMaxValue = document.getElementById('k-max-value');
 
