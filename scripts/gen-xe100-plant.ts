@@ -512,7 +512,7 @@ const rccsPanel = (id: string, elevation: number, pressure: number, half: string
   },
   ports: ports([
     [`${id}-in`, -3.0, 5],
-    [`${id}-out`, 3.0, 5],
+    [`${id}-out`, 3.0, -5],
   ]),
   fluid: { temperature: 318, pressure, phase: 'liquid', quality: 0, flowRate: 0 },
   nqa1: true, containedBy: 'bui-rx',
@@ -905,14 +905,18 @@ connect('val-prel-1', 'val-prel-1-out', 'bui-sg', 'bui-sg-vent-1',
 // ---------------------------------------------------------------------------
 // RCCS thermosyphon
 // ---------------------------------------------------------------------------
+// Each panel's outlet is at its TOP (10 m up): steam made in a panel has to
+// be able to leave it. With both nozzles at the bottom the steam was trapped
+// under the panel's roof, pushed all 3 t of water out into the tank, blew
+// down and reflooded - every few minutes, for hours (xe100-sbo, 2026-11-15).
 connect('rccs-tank-1', 'rccs-tank-1-draw', 'rccs-panel-1', 'rccs-panel-1-in',
   { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
     flowArea: 0.0177, length: 32, resistanceCoeff: 8 });
 connect('rccs-panel-1', 'rccs-panel-1-out', 'rccs-panel-2', 'rccs-panel-2-in',
-  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 10, toElevation: 0,
     flowArea: 0.0177, length: 10, resistanceCoeff: 2 });
 connect('rccs-panel-2', 'rccs-panel-2-out', 'rccs-tank-1', 'rccs-tank-1-return',
-  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 0, toElevation: 0,
+  { initialFlowPhase: 'liquid', initialFlowRate: 10, fromElevation: 10, toElevation: 0,
     flowArea: 0.0177, length: 18, resistanceCoeff: 6 });
 connect('rccs-tank-1', 'rccs-tank-1-vent', 'val-rccs-1', 'val-rccs-1-in',
   { fromElevation: 16, toElevation: 0, flowArea: 0.008, length: 3, resistanceCoeff: 2 });

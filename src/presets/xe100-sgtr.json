@@ -536,7 +536,7 @@
             "id": "rccs-panel-1-out",
             "position": {
               "x": 3,
-              "y": 5
+              "y": -5
             },
             "direction": "both"
           }
@@ -591,7 +591,7 @@
             "id": "rccs-panel-2-out",
             "position": {
               "x": 3,
-              "y": 5
+              "y": -5
             },
             "direction": "both"
           }
@@ -1915,7 +1915,7 @@
       "toPortId": "rccs-panel-2-in",
       "initialFlowPhase": "liquid",
       "initialFlowRate": 10,
-      "fromElevation": 0,
+      "fromElevation": 10,
       "toElevation": 0,
       "flowArea": 0.0177,
       "length": 10,
@@ -1928,7 +1928,7 @@
       "toPortId": "rccs-tank-1-return",
       "initialFlowPhase": "liquid",
       "initialFlowRate": 10,
-      "fromElevation": 0,
+      "fromElevation": 10,
       "toElevation": 0,
       "flowArea": 0.0177,
       "length": 18,
