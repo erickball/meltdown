@@ -1161,6 +1161,20 @@ export function marchSteamStreams(
   const up = new Array<number>(n + 1).fill(0);
   for (let k = n - 1; k >= 0; k--) up[k] = up[k + 1] - into[k];
 
+  // THE SURFACE THE STEAM TOUCHES. Metal colder than saturation is wet:
+  // steam condenses on it, and what the stream meets there is the face of
+  // the condensate film, at saturation - not the metal under it. So the
+  // stream is cooled sensibly toward saturation and no further, and the heat
+  // that crosses the film to the cold metal is the condensing duty
+  // (condensingDuty), carried by the two-phase film, not by this one. Metal
+  // at or above saturation is dry and the surface is the metal itself; the
+  // two meet at T_metal = T_sat, where the condensing duty is zero.
+  // (The stream used to be marched toward the cold metal itself, down the
+  // isobar's extension below saturation - "steam" at 20 K under its own dew
+  // point - at the dry steam film's 1.2 kW/m2K, a twentieth of what a wet
+  // wall takes.)
+  const surface = zoneTemps.map(T => (T > sat.T ? T : sat.T));
+
   const sub: number[][] | undefined = trace ? [] : undefined;
   const march = marchCells(n, kLo, kHi, up, sources, sat.T, sat.T,
     (k, T, W) => {
@@ -1169,23 +1183,23 @@ export function marchSteamStreams(
       if (sub) {
         const pts: number[] = [];
         for (let i = 1; i <= TRACE_STEPS; i++) {
-          TNext = approachWall(iso, TNext, zoneTemps[k], hA / TRACE_STEPS, W);
+          TNext = approachWall(iso, TNext, surface[k], hA / TRACE_STEPS, W);
           pts.push(TNext);
         }
         sub[k] = pts;
       } else {
-        TNext = approachWall(iso, T, zoneTemps[k], hA, W);
+        TNext = approachWall(iso, T, surface[k], hA, W);
       }
       return TNext;
     },
     T => isobarAt(iso, 'h', T),
     h => isobarTempAtH(iso, h),
-    k => zoneTemps[k]);
+    k => surface[k]);
 
   let L = 0, wallSum = 0, taken = 0;
   for (let k = kLo; k <= kHi; k++) {
     L += overlap[k];
-    wallSum += overlap[k] * zoneTemps[k];
+    wallSum += overlap[k] * surface[k];
     taken += march.Q[k];
   }
   // Which way the stream runs through a cell decides which of its edges its
@@ -1202,7 +1216,7 @@ export function marchSteamStreams(
         trace.s.push((behind + overlap[k] * i / TRACE_STEPS) / L);
         // Stagnant: at its wall. Upward: the i-th point of its walk. Downward:
         // the same walk read from its far end, arriving at the top edge.
-        trace.T.push(!pts ? zoneTemps[k]
+        trace.T.push(!pts ? surface[k]
           : !down ? pts[i - 1]
           : i === TRACE_STEPS ? march.TIn[k] : pts[TRACE_STEPS - 1 - i]);
       }

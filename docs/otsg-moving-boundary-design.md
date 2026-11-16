@@ -557,15 +557,16 @@ other.
   at the top, where the cold water comes in, is the last to cool.
 - Water entering the steam space exchanges nothing with the superheater's
   metal on its way down (no falling-film quench).
-- A cold wall under steam cools it sensibly at the steam film coefficient; it
-  does not condense on the wall at a condensing coefficient. The steam still
-  condenses — through the totals, into the boiling section — but slower than
-  a real cold tube would make it.
-- Stagnant shell gas exchanges no heat with the tubes: the gas side has a
-  transit branch only. A standing branch against the shell's single bulk
-  temperature would give that, but with the gas flowing it also carries heat
-  from the hot end's metal to the cold end's through the lumped node (an
-  estimated ~10% of duty on the Xe-100, not measured), so it was not added.
+- Condensation on cold superheater metal uses the tube side's one two-phase
+  film constant (§5b). It is not hindered by non-condensible gas in the tube,
+  and neither is the boiling section's film.
+- The shell wall (the vessel around the bundle) is one thermal node in
+  contact with the shell's bulk — now the MEAN gas temperature, where it used
+  to be the outlet's. A design that washes its vessel wall with the cold
+  return gas is not represented: its wall reads hotter here than it would be.
+  Per-zone exchange between the tubes and a zoned shell wall is not built.
+- The density a shell outflow is priced at for momentum is still the shell's
+  bulk (mean-temperature) density, not the colder gas at the nozzle.
 - **Water on the shell side (to do).** The shell side of the bundle is a gas
   model. The shell NODE handles water properly (phase, pressure, the
   steam-gas mixture), and the film's conductivity, viscosity and heat capacity
@@ -581,6 +582,61 @@ other.
 
 `scripts/test-otsg-flow-directions.ts` runs a bundle between four tanks in
 each of these arrangements.
+
+## 5b. Addendum: what the shell node holds, and wet walls under steam
+
+**The shell node holds the mean of its gas profile.** The gas march gives the
+gas temperature at every height of the bundle. The shell node is all of that
+gas at once, so its temperature is the profile's mean, and what leaves through
+a nozzle leaves at the profile's value there. Until 2026-11-15 the node stood
+for the gas at its OUTLET instead — the only way a node that hands out its own
+temperature can deliver the right cold leg. That had two costs. The shell held
+too much gas for its pressure (a shell at 260 °C packs 45% more helium than
+the same shell at its 500 °C mean). And gas that is not flowing had nothing
+to exchange heat with: a transit duty is flow × temperature change, and goes
+to zero with the flow however large the film.
+
+- *Draws.* `OtsgPartitionConstraintOperator` publishes the profile on every
+  state as `FlowNode.shellGasProfile` (the gas leaving each metal zone;
+  parallel bundles mixed by their shares). `drawCompositionAt` reads it and
+  hands every draw from the shell an offset `dTGas` from the node's own
+  temperature; the transport bills the gas at `Cp·(T + dTGas)` and the steam
+  riding with it at `STEAM_IN_GAS_CP·dTGas` more, and the pressure solver's
+  closure weighs the draw at the same figure (`zoneDrawEnthalpy`). A shell
+  fed by another bundle's shell reads that one's profile for its inlet.
+- *The inventory's exchange.* The gas the shell holds exchanges with the tubes
+  across the same film, toward the temperature the profile says it has: each
+  cell's gas at the mean of its exponential approach to the metal (a cell with
+  no flow: at its metal — which is also the flowing cell's limit as the flow
+  stops), cells weighted by 1/T because they share a pressure, so the target
+  is the harmonic mean. With the gas flowing steadily the node already sits
+  there and the term is zero — the transit balance closes on its own, since
+  what comes in less the duty is exactly what leaves at the marched outlet.
+  Stagnant, the target is the metal and the gas follows the tubes. The heat
+  comes from every zone alike, so it carries nothing along the bundle.
+
+The preset's shell initial temperature is therefore the MEAN gas temperature
+(the Xe-100 presets already carried ~505 °C there). Measured on the Xe-100 at
+100 s against the outlet convention: steam 590.6 vs 591.9 °C, 201.2 vs
+200.3 MW, shell pressure 71.7 vs 70.1 bar (the same helium, hotter), cold-leg
+gas 395 °C against the old whole-shell 404 °C, step count unchanged.
+
+**Metal colder than saturation under the steam section is wet.** Steam
+condenses on it, and what the steam stream meets there is the face of the
+condensate film, at saturation. So `marchSteamStreams` marches the stream
+toward `max(T_metal, T_sat)` — it gives up its superheat and no more — and
+the heat crossing the film to the cold metal is the condensing duty,
+`H_TUBE_BOILING · a · (T_metal − T_sat)`, booked with the boiling section's
+duty (Q2, zoneQ2): it answers to T_sat exactly as the boiling film does, the
+condensate joins the boiling section through the totals, and a section
+boundary sweeping over cold metal sees one coefficient on both sides. It is
+zero at `T_metal = T_sat`, so there is no step. Before, the stream was marched
+toward the cold metal itself, down the isobar's extension below saturation, at
+the dry steam film's 1.2 kW/m²K.
+
+The stiff-tube stamp carries it: on the pinned arm it is part of the Q2 the
+stamp relaxes; on the free arm (no boiling section) it is held constant over
+the step with the steam's duty relaxing around it.
 
 ## 6. Empty sections — the part the literature does with switches
 

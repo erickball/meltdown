@@ -54,7 +54,7 @@ import {
 import { saturatedLiquidEnergy } from '../water-properties';
 import { nodeHeatCapacity, priceDrawAt, vaporPropsFor, type VaporFluidProps } from './rate-operators';
 import { breakExchange } from './exchange-flow';
-import { drawCompositionAt } from './connection-hydraulics';
+import { drawCompositionAt, shellDrawTemperature } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
 
 // Tube-side film coefficients live in otsg.ts so the factory's design-point
@@ -460,7 +460,7 @@ export function otsgWallPin(
  */
 export function otsgGasStreams(
   state: SimulationState, shell: FlowNode, nZones: number, share: number,
-): { up: number[]; sources: ZoneSource[] } {
+): { up: number[]; sources: ZoneSource[]; lo: number; hi: number } {
   const streams = nodeStreams(state, shell.id);
   const height = shell.height ?? Math.cbrt(shell.volume);
   let lo = Infinity, hi = -Infinity;
@@ -480,14 +480,7 @@ export function otsgGasStreams(
     const W = st.w * share;
     into[zone] += W;
     total += W;
-    if (W > 0) {
-      const donor = state.flowNodes.get(st.isTo ? st.conn.fromNodeId : st.conn.toNodeId);
-      if (!donor) {
-        throw new Error(`[OTSG] shell '${shell.id}': connection '${st.conn.id}' names a node ` +
-          `('${st.isTo ? st.conn.fromNodeId : st.conn.toNodeId}') that does not exist.`);
-      }
-      sources.push({ zone, W, T: donor.fluid.temperature });
-    }
+    if (W > 0) sources.push({ zone, W, T: streamArrivalTemp(state, shell, st) });
   }
   const up = new Array<number>(nZones + 1).fill(0);
   let below = 0;
@@ -495,7 +488,21 @@ export function otsgGasStreams(
     below += into[k - 1];
     up[k] = 0.5 * (below - (total - below));
   }
-  return { up, sources };
+  return { up, sources, lo, hi };
+}
+
+/** The temperature a stream flowing INTO `shell` arrives at: its donor's, at
+ *  the donor's end of the connection - which for a donor that is itself a
+ *  bundle's shell (two steam generators in series) is that shell's gas
+ *  profile at the nozzle, not its mean. */
+function streamArrivalTemp(state: SimulationState, shell: FlowNode, st: NodeStream): number {
+  const donorId = st.isTo ? st.conn.fromNodeId : st.conn.toNodeId;
+  const donor = state.flowNodes.get(donorId);
+  if (!donor) {
+    throw new Error(`[OTSG] shell '${shell.id}': connection '${st.conn.id}' names a node ` +
+      `('${donorId}') that does not exist.`);
+  }
+  return shellDrawTemperature(donor, st.isTo ? st.conn.fromElevation : st.conn.toElevation);
 }
 
 /**
@@ -509,34 +516,59 @@ export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): numbe
   let W = 0, WT = 0;
   for (const st of nodeStreams(state, shell.id)) {
     if (!(st.w > 0)) continue;
-    const donor = state.flowNodes.get(st.isTo ? st.conn.fromNodeId : st.conn.toNodeId);
-    if (!donor) continue;
     W += st.w;
-    WT += st.w * donor.fluid.temperature;
+    WT += st.w * streamArrivalTemp(state, shell, st);
   }
   return W > 0 ? WT / W : shell.fluid.temperature;
 }
 
 /**
- * Heat the shell gas gives each metal zone (W, positive = gas heats metal):
- * the gas streams (otsgGasStreams) marched over the zones in the direction
- * they actually run, each approaching its zone's metal across that zone's
- * film. Every zone has its own temperature - one shared wall cannot superheat
- * (boiling pins it to T_sat and clamps every other section's wall) - and one
- * temperature per zone makes the isothermal approach exact for it; the wall's
- * ramp along the bundle is the zones' own profile. The approach is the same
- * expression whichever side is hotter, so gas colder than the tubes is heated
- * by them.
+ * One bundle's shell gas, marched over its metal zones the way the gas
+ * actually runs (otsgGasStreams), each stream approaching its zone's metal
+ * across that zone's film. Every zone has its own temperature - one shared
+ * wall cannot superheat (boiling pins it to T_sat and clamps every other
+ * section's wall) - and one temperature per zone makes the isothermal
+ * approach exact for it; the wall's ramp along the bundle is the zones' own
+ * profile. The approach is the same expression whichever side is hotter, so
+ * gas colder than the tubes is heated by them.
+ *
+ * WHAT THE SHELL NODE HOLDS. The march gives the gas temperature at every
+ * height of the bundle, and the shell node is all of that gas at once: its
+ * temperature is the profile's MEAN, and what leaves it through a nozzle
+ * leaves at the profile's value there (`TDraw`, published as
+ * FlowNode.shellGasProfile and read by every draw). The node used to stand
+ * for the gas at its OUTLET instead - the only way a node that hands out its
+ * own temperature can deliver the right cold leg - which held too much gas
+ * for its pressure (a shell at 260 C packs 45% more helium than the same
+ * shell at its 500 C mean) and left gas that is not flowing with nothing to
+ * exchange heat with: a transit duty is flow times temperature change, and
+ * goes to zero with the flow however large the film.
+ *
+ * So the gas the shell HOLDS exchanges with the tubes too, across the same
+ * film: toward `TTarget`, the temperature the gas along this bundle has when
+ * each cell holds what the march says it does. A cell the stream crosses
+ * holds gas at the mean of its exponential approach to the metal, and a cell
+ * nothing flows through holds gas at its metal's temperature - which is also
+ * what the flowing cell's mean tends to as the flow stops, so the target is
+ * continuous through zero flow. The cells share one pressure and equal
+ * volumes, so each holds gas in proportion to 1/T and the temperature of the
+ * whole is their HARMONIC mean - the one that gets the shell's gas inventory
+ * right. With the gas flowing steadily the node already sits at the target
+ * and this term is zero (the transit balance closes on its own: what comes
+ * in less the duty is exactly what leaves at the marched outlet); with it
+ * stagnant the target is the metal and the shell gas follows the tubes. The
+ * heat is taken from every zone alike - it is the inventory's exchange, and
+ * moves nothing from one end of the bundle to the other.
  */
-export function otsgGasDuties(
+export function otsgGasMarch(
   state: SimulationState, shell: FlowNode, zoneTemps: readonly number[],
   heatArea: number, share: number,
-): number[] {
+): { gasQ: number[]; TDraw: number[]; TTarget: number; lo: number; hi: number } {
   const N = zoneTemps.length;
   const props = shellGasProps(shell);
   const hAZone = otsgGasFilmCoefficient(shell, state, props) * heatArea / N;
   const cp = props.cpMass;
-  const { up, sources } = otsgGasStreams(state, shell, N, share);
+  const { up, sources, lo, hi } = otsgGasStreams(state, shell, N, share);
   const TBulk = shell.fluid.temperature;
   const march = marchCells(N, 0, N - 1, up, sources, TBulk, TBulk,
     (k, T, W) => {
@@ -544,8 +576,96 @@ export function otsgGasDuties(
     },
     T => cp * T,
     h => h / cp,
-    () => TBulk);
-  return march.Q.map(q => -q);
+    k => zoneTemps[k]);
+  // The gas each cell holds: the mean of T(x) = Tm + (TIn - Tm) e^(-NTU x)
+  // over the cell, which is Tm + (TIn - TOut) / NTU.
+  let invSum = 0;
+  for (let k = 0; k < N; k++) {
+    const W = march.W[k];
+    const TCell = !(W > 0) ? zoneTemps[k]
+      : hAZone > 0 ? zoneTemps[k] + (march.TIn[k] - march.TOut[k]) * (W * cp) / hAZone
+      : march.TIn[k];
+    invSum += 1 / TCell;
+  }
+  const TTarget = N / invSum;
+  const perZone = hAZone * (TTarget - TBulk);   // W into the gas, from each zone
+  const gasQ = new Array<number>(N);
+  for (let k = 0; k < N; k++) gasQ[k] = -march.Q[k] - perZone;
+  return { gasQ, TDraw: march.TOut, TTarget, lo, hi };
+}
+
+/** Heat the shell gas gives each metal zone of one bundle (W, positive = gas
+ *  heats metal): its streams' transit and its inventory's exchange
+ *  (otsgGasMarch). */
+export function otsgGasDuties(
+  state: SimulationState, shell: FlowNode, zoneTemps: readonly number[],
+  heatArea: number, share: number,
+): number[] {
+  return otsgGasMarch(state, shell, zoneTemps, heatArea, share).gasQ;
+}
+
+/**
+ * Publish every bundle shell's gas profile (FlowNode.shellGasProfile) for
+ * this state: the temperature of the gas leaving each metal zone, which is
+ * what a nozzle there draws. Parallel bundles in one shell each pass their
+ * share of every stream, so a nozzle draws their shares mixed.
+ *
+ * A shell fed by another bundle's shell reads that one's profile for its
+ * inlet, so the feeding shell is published first; shells that feed each other
+ * have no such order and are refused.
+ */
+export function publishShellGasProfiles(state: SimulationState): void {
+  const tubesByShell = new Map<string, FlowNode[]>();
+  for (const [, node] of state.flowNodes) {
+    if (!node.otsg) continue;
+    const list = tubesByShell.get(node.otsg.shellNodeId);
+    if (list) list.push(node); else tubesByShell.set(node.otsg.shellNodeId, [node]);
+  }
+  if (tubesByShell.size === 0) return;
+  // 1 = in progress, 2 = published
+  const status = new Map<string, number>();
+  const publish = (shellId: string): void => {
+    const shell = state.flowNodes.get(shellId);
+    if (!shell) return; // the rate operator reports a missing shell
+    status.set(shellId, 1);
+    if (tubesByShell.size > 1) {
+      for (const st of nodeStreams(state, shellId)) {
+        if (!(st.w > 0)) continue;
+        const donorId = st.isTo ? st.conn.fromNodeId : st.conn.toNodeId;
+        if (donorId === shellId || !tubesByShell.has(donorId)) continue;
+        const s = status.get(donorId) ?? 0;
+        if (s === 1) {
+          throw new Error(`[OTSG] shells '${shellId}' and '${donorId}' each take gas from the ` +
+            `other at t=${state.time.toFixed(2)} s: neither's inlet temperature can be read ` +
+            `before the other's gas profile is known. Two bundle shells exchanging gas both ` +
+            `ways is not supported.`);
+        }
+        if (s === 0) publish(donorId);
+      }
+    }
+    let TDraw: number[] | undefined;
+    let lo = 0, hi = 0;
+    for (const tube of tubesByShell.get(shellId)!) {
+      const cfg = tube.otsg!;
+      const share = cfg.gasShare ?? 1;
+      const m = otsgGasMarch(state, shell, otsgZoneTemps(state, tube), cfg.heatArea, share);
+      lo = m.lo; hi = m.hi;
+      if (!TDraw) {
+        TDraw = m.TDraw.map(T => T * share);
+      } else {
+        if (m.TDraw.length !== TDraw.length) {
+          throw new Error(`[OTSG] shell '${shellId}': its bundles have different numbers of metal ` +
+            `zones (${TDraw.length} and ${m.TDraw.length}), so their gas profiles cannot be mixed.`);
+        }
+        for (let k = 0; k < TDraw.length; k++) TDraw[k] += m.TDraw[k] * share;
+      }
+    }
+    shell.shellGasProfile = { lo, hi, TDraw: TDraw! };
+    status.set(shellId, 2);
+  };
+  for (const shellId of tubesByShell.keys()) {
+    if ((status.get(shellId) ?? 0) === 0) publish(shellId);
+  }
 }
 
 /**
@@ -813,10 +933,24 @@ export function otsgWaterSideDuties(
       }
     }
   }
-  // Section 2: boiling at T_sat - huge film coefficient, pure standing form
+  // Section 2: boiling at T_sat - huge film coefficient, pure standing form.
+  //
+  // The same film, run backwards, on any metal under the STEAM section that
+  // is colder than saturation: steam condenses on it, the film's face is at
+  // saturation whatever the steam beyond it is doing (marchSteamStreams
+  // stops the stream's sensible cooling there), and the heat crossing the
+  // film is the condensing duty. It belongs to the two-phase duty, not the
+  // steam's: it answers to T_sat - so to the tube's pressure - exactly as
+  // the boiling film does, the condensate joins the boiling section through
+  // the node's totals, and a section boundary sweeping over cold metal sees
+  // one coefficient on both sides of it. It is zero at T_metal = T_sat, so
+  // it comes in with no step. (Cold metal under steam used to take only the
+  // dry steam film's 1.2 kW/m2K against the stream's own falling
+  // temperature - a wet wall takes twenty times that, against saturation.)
   let Q2 = 0;
   for (let k = 0; k < N; k++) {
-    const q = H_TUBE_BOILING * heatArea * ov[k][1] * (zoneTemps[k] - ev.sat.T);
+    const dT = zoneTemps[k] - ev.sat.T;
+    const q = H_TUBE_BOILING * heatArea * (ov[k][1] + (dT < 0 ? ov[k][2] : 0)) * dT;
     zoneQ[k] += q;
     zoneQ2[k] += q;
     Q2 += q;
@@ -840,7 +974,10 @@ export function otsgWaterSideDuties(
     for (let k = 0; k < N; k++) {
       const a = heatArea * ov[k][2];
       if (!(a > 0)) continue;
-      const q = H_TUBE_NATURAL * a * (zoneTemps[k] - ev.sections[2].T) + transit[k];
+      // The standing branch exchanges with the surface the steam touches:
+      // the metal, or the condensate film's face on metal below saturation.
+      const TSurface = zoneTemps[k] > ev.sat.T ? zoneTemps[k] : ev.sat.T;
+      const q = H_TUBE_NATURAL * a * (TSurface - ev.sections[2].T) + transit[k];
       zoneQ[k] += q;
       zoneQ3[k] += q;
       Q3 += q;
@@ -1012,8 +1149,12 @@ export function completeStiffOtsgTubes(state: SimulationState, k0: StateRates, d
     const zones = otsgMetalZones(state, node);
     const N = zones.length;
     const nodeRates = k0.flowNodes.get(id) ?? { dMass: 0, dEnergy: 0 };
-    const Q3Const = w.arm === 'pinned' ? w.zoneQ3.reduce((a, b) => a + b, 0) : 0;
-    const R = nodeRates.dEnergy + Q3Const;
+    // The duty the stamp holds constant over the step: the steam's under a
+    // boiling section, and on the free arm whatever is condensing on metal
+    // colder than saturation (the only two-phase duty a tube with no boiling
+    // section has).
+    const QConst = (w.arm === 'pinned' ? w.zoneQ3 : w.zoneQ2).reduce((a, b) => a + b, 0);
+    const R = nodeRates.dEnergy + QConst;
     const { k, q0 } = w;
     // Boiling stops at zero inside the step when other heat closes the section
     const tStop = w.arm === 'pinned' && R > 0 ? Math.log((q0 + R) / R) / k : Infinity;
@@ -1033,7 +1174,7 @@ export function completeStiffOtsgTubes(state: SimulationState, k0: StateRates, d
     if (w.arm === 'pinned') {
       for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ2[j] + w.zoneQ3[j] - w.share[j] * notRelaxed;
     } else {
-      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ3[j] - w.share[j] * notRelaxed;
+      for (let j = 0; j < N; j++) zoneRate[j] = w.zoneQ2[j] + w.zoneQ3[j] - w.share[j] * notRelaxed;
     }
     w.zoneRate = zoneRate;
     let total = 0;
@@ -1294,6 +1435,9 @@ export class OtsgPartitionConstraintOperator implements ConstraintOperator {
       node.fluid.quality = quality;
       node.fluid.phase = quality <= 0 ? 'liquid' : quality >= 1 ? 'vapor' : 'two-phase';
     }
+    // The shells' gas profiles, for this state's draws: every outflow from a
+    // bundle's shell is priced at the profile's temperature at its nozzle.
+    publishShellGasProfiles(state);
     return state;
   }
 }

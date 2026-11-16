@@ -2520,9 +2520,27 @@ test('the superheat outlet is marched across its metal and never passes it', () 
       }
     }
   }
-  // A section of no length heats nothing; metal colder than the stream cools it.
+  // A section of no length heats nothing.
   assertClose(out(zones, 0, 3).TOut, TIn, 1e-12, 'no section, no superheat');
-  assert(out([500, 500], 1, 3).TOut < TIn, 'a cold wall cools the stream');
+  // Metal colder than saturation is wet: the stream meets the face of the
+  // condensate film, at saturation, and is not cooled below it. (The heat the
+  // cold metal takes is the condensing duty, across the two-phase film.)
+  const wet = out([500, 500], 1, 3);
+  assertClose(wet.TOut, TIn, 1e-12, 'saturated steam over a wet wall leaves saturated');
+  assertClose(wet.TMean, TIn, 1e-12, 'and its section sits at saturation');
+  assert(wet.transit.every(x => x === 0), 'giving up no sensible heat');
+  // Superheated steam arriving over a wet wall gives up its superheat to the
+  // film's face and no more: it runs down from the top nozzle toward
+  // saturation, and what it gives up is its enthalpy above the point it
+  // leaves at.
+  const hHot = isobarAt(iso, 'h', 800);
+  const down = marchSteamStreams(iso, sat, [500, 500, 500, 500], [0.25, 0.25, 0.25, 0.25], hA,
+    [{ zone: 3, W: 3, h: hHot }, { zone: 0, W: -3, h: 0 }]);
+  const lost = down.transit.reduce((x, y) => x + y, 0);
+  assert(lost < 0 && lost >= 3 * (sat.h_g - hHot) - 1e-6,
+    `desuperheating over a wet wall stops at saturation: ${(lost / 1e6).toFixed(2)} MW of ` +
+    `${(3 * (sat.h_g - hHot) / 1e6).toFixed(2)} MW of superheat`);
+  assert(down.TMean >= TIn - 1e-9, `and the section's mean stays at or above saturation (${down.TMean.toFixed(1)} K)`);
 });
 
 test('the steam isobar is the property surface, and the film approach is exact on it', () => {

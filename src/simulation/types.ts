@@ -490,6 +490,21 @@ export interface FlowNode {
     };
   };
 
+  /**
+   * A once-through bundle's SHELL: the gas temperature at each height of the
+   * bundle, as the bundles' gas march left it (OtsgPartitionConstraintOperator
+   * publishes it on every state).
+   *
+   * The shell node holds the gas the whole bundle holds, so its temperature
+   * is the MEAN of the profile along the tubes - not the temperature at
+   * either end. What leaves through a nozzle leaves at the profile's value
+   * THERE: `TDraw[k]` is the gas leaving metal zone k (feed end first), and
+   * `lo`/`hi` are the elevations of the shell's lowest and highest
+   * connection, between which the bundle lies. Read through
+   * shellDrawTemperature. Replaced, never mutated (state clones share it).
+   */
+  shellGasProfile?: { lo: number; hi: number; TDraw: number[] };
+
   // Boundary condition flag
   // If true, this node's fluid state is fixed and should not be updated by physics operators
   // Used for atmosphere and other infinite reservoirs

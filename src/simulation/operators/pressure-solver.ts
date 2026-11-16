@@ -525,7 +525,7 @@ export class PressureSolver {
     state: SimulationState
   ): Map<string, { dMass: number; dEnergy: number; dNcg?: GasComposition }> {
     const eligibleNode = (node: FlowNode): boolean =>
-      !node.otsg && node.fluid.phase !== 'two-phase';
+      !node.otsg && !node.shellGasProfile && node.fluid.phase !== 'two-phase';
     for (const conn of state.flowConnections) {
       const fromNode = state.flowNodes.get(conn.fromNodeId);
       const toNode = state.flowNodes.get(conn.toNodeId);

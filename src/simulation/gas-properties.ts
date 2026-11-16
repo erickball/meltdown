@@ -247,6 +247,15 @@ export function mixtureViscosity(comp: GasComposition, T_K: number): number {
   return mu * Math.pow(Math.max(200, T_K) / 300, 0.7);
 }
 
+/**
+ * Heat capacity of steam sharing a vapour space with gas, per mole and per
+ * kilogram (37 J/mol-K over 18.015 g/mol): the one figure the wall-film
+ * blend, a bundle's gas march and the pricing of a draw offset from its
+ * donor's temperature all carry their steam at.
+ */
+export const STEAM_IN_GAS_CP_MOLAR = 37;
+export const STEAM_IN_GAS_CP = STEAM_IN_GAS_CP_MOLAR / 0.018015;
+
 // ============================================================================
 // Universal Gas Constant
 // ============================================================================
