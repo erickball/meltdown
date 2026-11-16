@@ -1475,40 +1475,46 @@ export interface RK45Config {
   // for A/B verification (INPLACE_CONSTRAINTS=0 in the script harnesses).
   inPlaceConstraints?: boolean;
 
-  // Let the closure-consistency error of the implicit pressure-flow solve
-  // take part in step control (see closureErrorNorm). The error is always
-  // computed and reported (lastClosureError, rejection stats, probes);
-  // this decides whether it can shrink dt. DEFAULT OFF, measured 2026-09-06:
-  // the term is exact and silent on the PWR/BWR (100x/20x below relTol at
-  // steady state) and caught a wrong gas bulk modulus at 60x relTol, but
-  // on the Xe-100 it is fed by a real closure gap the solve cannot close
-  // yet - the OTSG tube pressure drops ~1.5 bar in the step after each
-  // feedwater-controller scan (the partition's response to a pump-speed
-  // step, which the compliance model does not predict), and the network
-  // response of that misprediction on the sliver steam nodes hanging off
-  // the tube (val-msv-1, 5 kg; val-leak-1, 2 kg) is ~1% of their inventory
-  // per step, 15-40x relTol. Honest, but it costs 6.4x -> 1.9x realtime for
-  // a defect that is the OTSG's, not the loop's. Flip on (or via
-  // CLOSURE_ERROR=1 in the script harnesses) once the OTSG's pressure
-  // response to feed changes is in the solve's closure.
+  // STEP CONTROL FOR THE FLOW SOLVE (2026-11-15).
+  //
+  // The embedded RK45 estimate cannot see the once-per-step implicit
+  // pressure-flow solve, so that solve carries its own local error estimate:
+  // the inventory each node's flows were wrong by, relative to the node's
+  // inventory, RMS over the network (closureErrorNorm). It is compared with
+  // closureTol and takes part in step control exactly like the RK45 error.
+  //
+  // closureTol is the accuracy/speed setting of the flow solve, and the one
+  // the user sees (Solver panel, "Flow error tolerance"). Measured on eight
+  // 65 s transients against a 2 ms reference: see DEFAULT_RK45_CONFIG.
+  //
+  // closureErrorControl: false takes the estimate out of step control (it
+  // is still computed and reported). The three fixed-fraction guards below
+  // then come back on, because nothing else bounds the flow solve's error.
+  closureTol: number;
   closureErrorControl?: boolean;
 
-  // A/B knobs for the two inventory guards in checkStateSanity (both default
-  // on): the gross-throughput guard (20% of inventory moved per step) and
-  // the net-change guard (50% per step, 1 kg floor). THROUGHPUT_GUARD=0 /
-  // NETMASS_GUARD=0 in the script harnesses. Measured 2026-09-06 - see the
-  // design doc addendum before changing the defaults.
+  // Fixed-fraction limits that predate the error estimate above:
+  //   materialCourantCeiling - never attempt a step that moves more than
+  //     ~36% of a node's inventory through it;
+  //   throughputGuard - reject a step that moved more than 20%;
+  //   pressureGuard - reject a step that changed a node's pressure by more
+  //     than 20% of max(P, 2 bar).
+  // Each is a guess at "too big a step" with no error behind it. Left
+  // undefined (the default) they apply only where the flow-solve error is
+  // not in control: explicit momentum, or closureErrorControl off. Measured
+  // 2026-11-15 with the error in control: dropping the ceiling and the
+  // throughput guard is 3-6x fewer steps on the PWR/BWR at the same error
+  // against the reference; dropping the pressure guard as well changes no
+  // error and removes ~90% of the remaining rejections. true/false forces
+  // one on or off (THROUGHPUT_GUARD / PRESSURE_GUARD / COURANT_CEILING in the
+  // script harnesses).
+  materialCourantCeiling?: boolean;
   throughputGuard?: boolean;
-  netMassGuard?: boolean;
-
-  // EXPERIMENT knobs (2026-11-15, step-error-norm branch; not defaults).
-  // pressureGuard: false drops the 20%-per-step pressure-change guard in
-  // checkStateSanity, leaving the closure error to catch a bad linearization.
-  // closureErrorPool: 'neighbors' measures each node's mispredicted inventory
-  // against the node's inventory PLUS its connected neighbours' (the pool the
-  // wrongly moved mass is exchanged with) instead of its own alone.
   pressureGuard?: boolean;
-  closureErrorPool?: 'own' | 'neighbors';
+
+  // Net-change guard (50% of a node's water per step, 1 kg floor). Default
+  // on; NETMASS_GUARD=0 in the script harnesses.
+  netMassGuard?: boolean;
 }
 
 const DEFAULT_RK45_CONFIG: RK45Config = {
@@ -1526,6 +1532,23 @@ const DEFAULT_RK45_CONFIG: RK45Config = {
   // on scenarios without liquid loops.
   relTol: 2e-4,
   absTol: 1e-6,
+  // Flow-solve error tolerance, measured 2026-11-15 on eight 65 s transients
+  // against a 2 ms reference (steps at 2e-4 / 6e-4 / 1e-3 / 2e-3; the old
+  // fixed-fraction stepping in brackets):
+  //   PWR trip            1,493 / 1,032 /   770 /   720   [8,233]
+  //   BWR trip            1,404 /   949 /   863 /   740   [4,207]
+  //   BWR recirc break   17,745 / 13,722 / 12,304 / 10,331 [41,495]
+  //   Xe-100 circ. trip   3,706 / 2,520 / 2,043 / 1,679   [775]
+  //   Xe-100 tube rupture 3,103 / 1,985 / 1,778 / 1,041   [2,750]
+  // PWR/BWR wall temperatures stay within ~2 K of the reference up to 1e-3
+  // (0.8 K with the old stepping, 5 K at 2e-3 on the trip). On the Xe-100
+  // circulator trip only 2e-4 reproduces the reference's tube-quench time;
+  // 6e-4 and looser all put it ~5 s early in 50 s, as the old stepping did,
+  // so nothing between buys that back - but at 1e-3 the main-steam
+  // temperature tracks the reference for 20 s where the old stepping was
+  // 30 K low within 5 s. 1e-3 is the default: qualitatively right
+  // everywhere, and the setting is the user's to tighten (Solver panel).
+  closureTol: 1e-3,
 
   safetyFactor: 0.9,
   minShrinkFactor: 0.1,
@@ -1734,7 +1757,7 @@ export class RK45Solver {
    */
   private closureErrorNorm(fromState: SimulationState, toState: SimulationState, dt: number): number {
     const ps = this.pressureSolver;
-    const m = ps && this.implicitMomentumActive() ? ps.measureClosureError(fromState, toState, dt, this.config.closureErrorPool === 'neighbors') : null;
+    const m = ps && this.implicitMomentumActive() ? ps.measureClosureError(fromState, toState, dt) : null;
     if (!m) {
       this.lastClosureError = 0;
       this.lastClosureNode = '';
@@ -1987,6 +2010,23 @@ export class RK45Solver {
    * own the full momentum update (backward-Euler flows replace explicit RK45
    * momentum integration).
    */
+  /**
+   * True when the flow solve's own error estimate (closureErrorNorm) takes
+   * part in step control: the implicit momentum solve is running and the
+   * estimate has not been switched out. Where it is false the fixed-fraction
+   * guards stand in for it (see RK45Config.materialCourantCeiling).
+   */
+  flowErrorInControl(): boolean {
+    return this.config.closureErrorControl !== false && this.implicitMomentumActive();
+  }
+
+  /** Flow-solve error tolerance (RK45Config.closureTol). */
+  setClosureTol(tol: number): void {
+    if (!(tol > 0) || !isFinite(tol)) throw new Error(`[RK45] closureTol must be a positive number, got ${tol}`);
+    this.config.closureTol = tol;
+  }
+  getClosureTol(): number { return this.config.closureTol; }
+
   implicitMomentumActive(): boolean {
     return !!(
       this.pressureSolver &&
@@ -2560,7 +2600,9 @@ export class RK45Solver {
       // throughput rejections per 60 s of Xe-100, ~half of all rejections).
       // Same idea as an operator's getMaxStableDt: a mode the error
       // controller cannot see must be declared, not discovered.
-      stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
+      if (this.config.materialCourantCeiling ?? !this.flowErrorInControl()) {
+        stepDt = Math.min(stepDt, this.materialCourantDt(currentState));
+      }
 
       // Take a step
       const { newState, error, errorRates } = this.step(currentState, stepDt);
@@ -2623,14 +2665,15 @@ export class RK45Solver {
       // Check for obviously bad physics (in addition to RK45 error estimate)
       const sanityScore = checkStateSanity(currentState, constrainedState, stepDt, this.implicitMomentumActive(),
         this.config.quietPressureToleranceScale ?? 1,
-        this.config.throughputGuard !== false, this.config.netMassGuard !== false,
-        this.config.pressureGuard !== false);
+        this.config.throughputGuard ?? !this.flowErrorInControl(), this.config.netMassGuard !== false,
+        this.config.pressureGuard ?? !this.flowErrorInControl());
 
       // Closure-consistency error of the implicit pressure-flow solve: what
       // the solve predicted for this step's pressures against what the EOS
       // produced, as mispredicted inventory (see closureErrorNorm).
       const closureNorm = this.closureErrorNorm(currentState, constrainedState, stepDt);
-      const closureError = this.config.closureErrorControl === true ? closureNorm : 0;
+      // Scaled so that closureTol reads on the same scale as relTol below.
+      const closureError = this.flowErrorInControl() ? closureNorm * (this.config.relTol / this.config.closureTol) : 0;
 
       // Combine RK45 error with sanity check and closure error
       // Sanity score > 1 means something suspicious happened
@@ -2700,7 +2743,7 @@ export class RK45Solver {
         const closureBound = sanityScore <= 1 && isFinite(effectiveError) && closureError > error;
         this.onStepRejected?.(currentState, constrainedState, stepDt,
           sanityScore > 1 ? lastSanityFailureReason
-            : closureBound ? `${this.lastClosureNode}: closure error ${closureError.toExponential(2)} (node rel ${this.lastClosureNodeRel.toExponential(2)})`
+            : closureBound ? `${this.lastClosureNode}: closure error ${this.lastClosureError.toExponential(2)} vs tol ${this.config.closureTol.toExponential(1)} (node rel ${this.lastClosureNodeRel.toExponential(2)})`
             : (isFinite(effectiveError) ? `rk45-error ${effectiveError.toExponential(2)}` : 'nan-error'));
 
         if (sanityScore > 1) {
@@ -2888,8 +2931,8 @@ export class RK45Solver {
     // Check sanity and log warning if needed
     const sanityScore = checkStateSanity(state, constrainedState, this.currentDt, this.implicitMomentumActive(),
       this.config.quietPressureToleranceScale ?? 1,
-      this.config.throughputGuard !== false, this.config.netMassGuard !== false,
-      this.config.pressureGuard !== false);
+      this.config.throughputGuard ?? !this.flowErrorInControl(), this.config.netMassGuard !== false,
+      this.config.pressureGuard ?? !this.flowErrorInControl());
     if (sanityScore > 1) {
       console.warn(`[RK45 singleStep] Sanity check warning: score=${sanityScore.toFixed(2)}`);
     }
@@ -2900,7 +2943,7 @@ export class RK45Solver {
     constrainedState = this.applyPostAcceptConstraints(constrainedState, this.currentDt);
 
     const closureNorm = this.closureErrorNorm(state, constrainedState, this.currentDt);
-    const closureError = this.config.closureErrorControl === true ? closureNorm : 0;
+    const closureError = this.flowErrorInControl() ? closureNorm * (this.config.relTol / this.config.closureTol) : 0;
     const effectiveError = Math.max(error, sanityScore * this.config.relTol, closureError);
 
     const metrics: SolverMetrics = {
