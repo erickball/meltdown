@@ -61,7 +61,7 @@ import {
   evaluateOtsgPartition,
   otsgAxialProfile,
   otsgPartitionAtP,
-  marchSteamOverMetal, buildSteamIsobar, isobarAt, superheatOverlaps,
+  marchSteamOverMetal, marchSteamStreams, buildSteamIsobar, isobarAt, superheatOverlaps,
   OtsgWallPin,
   otsgRates,
   boilingMeanQuality,
@@ -2561,6 +2561,130 @@ test('the steam isobar is the property surface, and the film approach is exact o
   // The mean is the film's own energy balance.
   assertClose(hA * (Tw - marched.TMean), W * (isobarAt(iso, 'h', marched.TOut) - sat.h_g), 1e-3,
     'the film at the mean temperature carries exactly the heat the stream took');
+});
+
+test('steam is marched the way it flows: down, part-way, or not at all', () => {
+  // The steam pass used to know one arrangement - saturated steam in at the
+  // boiling boundary, out at the top - and marched it whatever the nozzles
+  // were doing. The flows now come from the nozzles themselves.
+  const P = 100e5;
+  const sat = saturationAtP(P);
+  const iso = buildSteamIsobar(P, sat, 900);
+  const hA = 1200 * 2000;
+  const prof = [640, 660, 700, 760, 800, 830, 850, 860];   // feed end -> steam end
+  const n = prof.length;
+  const whole = new Array<number>(n).fill(1 / n);
+  const W = 25;
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+  // DOWN is the mirror of up. Saturated steam let in at the top and taken out
+  // at the bottom crosses the same metal in the opposite order, so it is the
+  // upward march over the mirrored tube, zone for zone.
+  const down = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: sat.h_g }, { zone: 0, W: -W, h: 0 }]);
+  const mirrored = marchSteamOverMetal(iso, [...prof].reverse(), whole, hA, W, sat.T);
+  for (let k = 0; k < n; k++) {
+    assertClose(down.transit[k], mirrored.transit[n - 1 - k], 1e-6 * Math.abs(mirrored.transit[n - 1 - k]) + 1e-6,
+      `zone ${k + 1}: steam running down takes the heat the mirrored upward march takes`);
+  }
+  assertClose(down.TMean, mirrored.TMean, 1e-9, 'and has the same mean');
+  assertClose(down.TOut, sat.T, 1e-9, 'the steam nozzle reads the steam arriving at it');
+  // Steam arriving hotter than the metal heats it, hardest where it comes in
+  // (on an even wall, so the only thing that changes down the tube is the
+  // steam).
+  const flat = new Array<number>(n).fill(700);
+  const hot = marchSteamStreams(iso, sat, flat, whole, hA,
+    [{ zone: n - 1, W, h: isobarAt(iso, 'h', 890) }, { zone: 0, W: -W, h: 0 }]);
+  assert(hot.transit[n - 1] < 0 && hot.transit[n - 1] < hot.transit[n - 4] && hot.transit[n - 4] < hot.transit[0],
+    `arriving 890 K steam gives the steam-end metal the most: ${hot.transit[n - 1].toFixed(0)} W there, ` +
+    `${hot.transit[n - 4].toFixed(0)} W three zones down, ${hot.transit[0].toFixed(0)} W at the far end`);
+  assertClose(hot.TOut, 890, 1e-6, 'and the nozzle reads it arriving');
+
+  // Stopping is the same state from either side: nothing steps as a flow
+  // passes through zero.
+  const still = marchSteamOverMetal(iso, prof, whole, hA, 0, sat.T);
+  const upSlow = marchSteamOverMetal(iso, prof, whole, hA, 1e-9, sat.T);
+  const downSlow = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: 1e-9, h: sat.h_g }, { zone: 0, W: -1e-9, h: 0 }]);
+  assertClose(upSlow.TMean, still.TMean, 1e-3, 'a vanishing upward draw is the stagnant section');
+  assertClose(downSlow.TMean, still.TMean, 1e-3, 'and so is a vanishing downward one');
+
+  // A nozzle part-way up draws from below itself only: the steam above it is
+  // a dead end standing at its metal.
+  const tap = marchSteamStreams(iso, sat, prof, whole, hA, [{ zone: 4, W: -W, h: 0 }]);
+  assert(tap.transit.slice(0, 5).every(q => q > 0), 'the zones up to the nozzle heat its stream');
+  assert(tap.transit.slice(5).every(q => q === 0), 'the zones above it heat no stream');
+  assertClose(tap.TOut, prof[n - 1], 1e-9, 'and the dead end above stands at its metal');
+  // Fed from both ends toward a nozzle in the middle: the stream from below
+  // is the tap's own march with less flow, the one from above starts at the
+  // steam end at its arriving temperature.
+  const both = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: 10, h: sat.h_g }, { zone: 4, W: -W, h: 0 }]);
+  const lesser = marchSteamStreams(iso, sat, prof, whole, hA, [{ zone: 4, W: -(W - 10), h: 0 }]);
+  for (let k = 0; k < 4; k++) {
+    assertClose(both.transit[k], lesser.transit[k], 1e-6 * Math.abs(lesser.transit[k]),
+      `zone ${k + 1}: below the nozzle only what the top did not supply comes up`);
+  }
+  assert(both.transit[n - 1] > 0, 'saturated steam let in at the top is heated by the steam-end metal');
+  assert(Number.isFinite(both.TMean) && Number.isFinite(sum(both.transit)), 'and the section mean stays finite');
+
+  // Water is not a stream of steam: liquid let in at the top takes no transit
+  // heat here (it quenches through the node's totals), and wet steam counts
+  // by its vapour.
+  const water = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: sat.h_f - 300e3 }, { zone: 0, W: -W, h: 0 }]);
+  const wet = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W, h: 0.5 * (sat.h_f + sat.h_g) }]);
+  const halfDry = marchSteamStreams(iso, sat, prof, whole, hA,
+    [{ zone: n - 1, W: W / 2, h: sat.h_g }]);
+  assertClose(water.transit[n - 1], 0, 1e-12, 'cold water arriving is not marched as steam');
+  assertClose(sum(wet.transit), sum(halfDry.transit), 1e-6 * Math.abs(sum(halfDry.transit)),
+    'half-dry steam is marched as half as much saturated steam');
+});
+
+test('an inflow joins the section it enters, at the enthalpy it arrives with', () => {
+  // Liquid entering a boiler tube used to be booked to the economizer
+  // wherever it came in, priced at the FEED end's enthalpy: water backing in
+  // at the top was teleported to the bottom of the tube, and the slug's
+  // energy book was credited with an enthalpy the node never received.
+  const P = 80e5;
+  const sat = saturationAtP(P);
+  const tube: any = {
+    id: 'tube', volume: 1, height: 10, flowArea: 0.1,
+    fluid: { mass: 500, internalEnergy: 5e8, pressure: P, temperature: sat.T, phase: 'two-phase' },
+    otsg: { m1: 100, heatArea: 100, shellNodeId: 'shell', metalNodeIds: ['m1', 'm2', 'm3', 'm4'] },
+  };
+  const liquid = (id: string, u: number): any => ({
+    id, volume: 1, flowArea: 0.1,
+    fluid: { mass: 800, internalEnergy: 800 * u, pressure: P, temperature: 400, phase: 'liquid' },
+  });
+  const feed = liquid('feed', 500e3), header = liquid('header', 300e3);
+  const hOf = (n: any) => (n.fluid.internalEnergy + n.fluid.pressure * n.volume) / n.fluid.mass;
+  const mk = (wFeed: number, wTop: number): any => ({
+    flowNodes: new Map<string, any>([['tube', tube], ['feed', feed], ['header', header]]),
+    flowConnections: [
+      { id: 'feed-line', fromNodeId: 'feed', toNodeId: 'tube', massFlowRate: wFeed, fromElevation: 1, toElevation: 0 },
+      { id: 'steam-line', fromNodeId: 'tube', toNodeId: 'header', massFlowRate: -wTop, fromElevation: 10, toElevation: 1 },
+    ],
+  });
+  // Feed at the feed end: the economizer takes it, at the feed's own enthalpy.
+  const forward = classifyOtsgFlows(mk(20, 0), 'tube', tube, P);
+  assertClose(forward.WFeed, 20, 1e-9, 'the economizer takes what arrives at the feed end');
+  assertClose(forward.HFeed, 20 * hOf(feed), 1e-6 * 20 * hOf(feed),
+    'credited with the enthalpy the transport gives the node for it');
+  assert(forward.slugNozzles.length === 1 && forward.slugNozzles[0].zone === 0,
+    'and it enters the economizer at the feed end');
+  // The same water arriving at the TOP of a tube whose economizer is not
+  // there: none of it is the economizer's.
+  const backed = classifyOtsgFlows(mk(0, 20), 'tube', tube, P);
+  assertClose(backed.WFeed, 0, 1e-12, 'water backing in at the top is not booked to the economizer');
+  assertClose(backed.HFeed, 0, 1e-12, 'and brings its book no enthalpy');
+  assert(backed.steamNozzles.length === 1 && backed.steamNozzles[0].zone === 3 &&
+    backed.steamNozzles[0].W === 20,
+    'it stays in the node, entering at the steam end');
+  assertClose(backed.steamNozzles[0].h, hOf(header), 1e-6 * hOf(header), 'at its own enthalpy');
+  assertClose(backed.hFeed, forward.hFeed, 1,
+    'and the feed end\'s standing enthalpy is still the feed line\'s');
 });
 
 test('a superheat section offers steam no hotter than its own metal', () => {
