@@ -1404,7 +1404,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
       // path - fed by the stage above, feeding the one below - and a heater
       // shell is a dead end, so the tag made the shell the machine's FIRST
       // stage: the bleed line became "the turbine inlet", the main steam
-      // entering the exhaust node did no work at all (HTGR-200: 4.7 MW of
+      // entering the exhaust node did no work at all (the old Xe-100 layout: 4.7 MW of
       // shaft from 49 kg/s of 165-bar steam), and the governor throttled the
       // bleed as if it were the admission. Bleed from a turbine by piping
       // from its extraction port (stages > 1); a line from the steam header

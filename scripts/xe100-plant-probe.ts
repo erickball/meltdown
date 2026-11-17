@@ -1,5 +1,5 @@
 /**
- * Xe-100 plant-layout preset probe (src/presets/xe100.json).
+ * Xe-100 preset probe (src/presets/xe100.json).
  *
  * Runs the preset headless and prints the design-point quantities: helium
  * flow split across the two circulators, core temperatures, primary pressure,

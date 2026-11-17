@@ -2316,7 +2316,7 @@
       "toPortId": "val-msv-1-in",
       "fromElevation": 0,
       "toElevation": 0,
-      "flowArea": 0.003,
+      "flowArea": 0.005,
       "length": 4,
       "resistanceCoeff": 2
     },
@@ -2327,7 +2327,7 @@
       "toPortId": "condenser-1-inlet",
       "fromElevation": 0,
       "toElevation": 4,
-      "flowArea": 0.003,
+      "flowArea": 0.005,
       "length": 10,
       "resistanceCoeff": 2
     },
