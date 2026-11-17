@@ -20,12 +20,14 @@ const sim = buildSimFromFile(presetPath);
 const C = (K: number | undefined) => ((K ?? NaN) - 273.15).toFixed(1);
 const MW = (W: number | undefined) => W === undefined ? '-' : (W / 1e6).toFixed(2);
 
-let lastReflectorT = sim.state.thermalNodes.get('cb-1-reflector')?.temperature ?? NaN;
+const SHELLS = ['cb-1-reflector', 'cb-1-reflector-outer'];
+const shellTemps = () => SHELLS.map(id => sim.state.thermalNodes.get(id)?.temperature);
+let lastShellT = shellTemps();
 let lastTime = sim.state.time;
 
 function report(): void {
   const s = sim.state;
-  const solids = ['cb-1-reflector', 'cb-1-wall', 'cb-1-clad', 'cb-1-fuel', 'rv-1-wall'].map(id => {
+  const solids = ['cb-1-reflector', 'cb-1-reflector-outer', 'cb-1-wall', 'cb-1-clad', 'cb-1-fuel', 'rv-1-wall'].map(id => {
     const n = s.thermalNodes.get(id);
     return n ? `${id} ${C(n.temperature)} C (${(nodeHeatCapacity(n) / 1e6).toFixed(0)} MJ/K)` : `${id} -`;
   });
@@ -34,17 +36,24 @@ function report(): void {
   console.log(`t=${s.time.toFixed(0)}  power ${(s.neutronics.power / 1e6).toFixed(1)} MW | ${solids.join(', ')} | gas: ${gas.join(', ')}`);
 
   const q = getConvectionHeatRates();
-  const reflector = s.thermalNodes.get('cb-1-reflector');
-  const stored = reflector && s.time > lastTime
-    ? nodeHeatCapacity(reflector) * (reflector.temperature - lastReflectorT) / (s.time - lastTime)
-    : undefined;
+  // Storage rate of all the reflector graphite (one shell on older builds)
+  let stored: number | undefined;
+  if (s.time > lastTime) {
+    stored = 0;
+    SHELLS.forEach((id, i) => {
+      const n = s.thermalNodes.get(id);
+      if (n && lastShellT[i] !== undefined) {
+        stored! += nodeHeatCapacity(n) * (n.temperature - lastShellT[i]!) / (s.time - lastTime);
+      }
+    });
+  }
   console.log(
     `      MW to fluid: reflector inner -> core gas ${MW(q.get('convection-cb-1-reflector-inner'))}, ` +
     `reflector outer -> vessel gas ${MW(q.get('convection-cb-1-reflector-outer'))}, ` +
     `barrel -> vessel gas ${MW(q.get('convection-cb-1-wall-outer'))}, ` +
     `vessel wall -> vessel gas ${MW(q.get('convection-rv-1-wall'))} | reflector storing ${MW(stored)}`
   );
-  if (reflector) lastReflectorT = reflector.temperature;
+  lastShellT = shellTemps();
   lastTime = s.time;
 }
 

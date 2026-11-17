@@ -802,6 +802,19 @@ for (const [pump, suction] of [['pump-1a', 'tank-sg-suction-a'], ['pump-1b', 'ta
   connect(pump, `${pump}-outlet`, 'cv-1', 'cv-1-annulus-2',
     { initialFlowRate: HE_FLOW_INIT / 2, fromElevation: 0, toElevation: DUCT_OD / 2, flowArea: 0.5, length: 2, resistanceCoeff: 1 });
 }
+// Helium flow control: each circulator holds its half of the design mass
+// flow by varying its speed, as a variable-speed circulator does (the plant
+// infers the flow from differential pressure; the sensor here reads it
+// directly). At a fixed speed the flow is whatever the loop's density makes
+// it, and with the rods limited to 100% power any flow over design comes out
+// of the core's temperature rise. Rated speed is the top of the band.
+([['pump-1a', 'A', 95], ['pump-1b', 'B', 102]] as const).forEach(([pump, tag, y]) => {
+  controller(`ctl-circ-${tag.toLowerCase()}`, `He Flow (Circulator ${tag} Speed)`, 20, y, {
+    sensor: { kind: 'connection-flow', targetId: `flow-${pump}-cv-1` },
+    setpoint: HE_FLOW_INIT / 2,
+    actuator: { kind: 'pump-speed', targetId: pump, min: 0.2, max: 1.0, rateLimit: 0.02 },
+  });
+});
 // Duct annulus -> RPV cold leg, just under the core. The duct is welded to
 // the vessel, so both nozzles are the one opening, at the duct's axis.
 connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',

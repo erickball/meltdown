@@ -762,7 +762,7 @@ add('val-bleed-1', {
 // ---------------------------------------------------------------------------
 function pipe(id: string, label: string, x: number, y: number, elevation: number,
               diameter: number, length: number, T: number, P: number,
-              phase: string, ncg?: Record<string, number>) {
+              phase: string, ncg?: Record<string, number>, extra: Record<string, unknown> = {}) {
   const c: Record<string, unknown> = {
     type: 'pipe', label,
     position: { x, y }, rotation: 0, elevation,
@@ -770,10 +770,27 @@ function pipe(id: string, label: string, x: number, y: number, elevation: number
     ports: ports([[`${id}-left`, -length / 2, 0], [`${id}-right`, length / 2, 0]]),
     fluid: { temperature: T, pressure: P, phase, quality: phase === 'liquid' ? 0 : 1, flowRate: 0 },
     nqa1: true, containedBy: 'bui-1', pressureRating: 200,
+    ...extra,
   };
   if (ncg) c.initialNcg = ncg;
   add(id, c);
 }
+
+// Main steam header: both bundles discharge into it, and the turbine
+// throttle, the heater extraction and the steam dump all draw from it -
+// the arrangement of a real main steam line (and of xe100-plant.json).
+// It used to be missing: each bundle ran its own line straight to the
+// turbine, whose node floats near condenser pressure, so the only thing
+// tying the two bundles together at steam pressure was the 0.1 m3 body of
+// the closed dump valve (and the bleed valve's). Whenever the bundles'
+// outlet pressures drifted a few tenths of a bar apart, up to 5 kg/s of
+// steam crossed between them through those ~5 kg valve bodies, and the
+// flow solve could not predict their pressure: ~1.5% of steps rejected
+// and ~50% more steps at design helium flow. 0.35 m bore, ~1.2 m3 and
+// ~75 kg of steam, like the plant preset's line. Stainless for the same
+// creep reason as the valves on it.
+pipe('pipe-ms-1', 'Main Steam Line', 66, 74, 5, 0.35, 12, T_STEAM, P_STEAM, 'vapor', undefined,
+  { material: 'stainless-304' });
 
 // NO turbine-exhaust pipe: at 0.07 bar a duct of any plausible size holds
 // only a few kg of vapor while 77 kg/s pass through it, so it pins the whole
@@ -982,10 +999,9 @@ controller('ctl-fw-1', 'Feedwater (3-element)', 20, 81, {
       {
         op: 'sum',
         inputs: [
-          { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1' },
-          { kind: 'connection-flow', targetId: 'flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet' },
-          { kind: 'connection-flow', targetId: 'flow-hx-1-val-bleed-1' },
-          { kind: 'connection-flow', targetId: 'flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in' },
+          // Steam leaving the two bundles (into the main steam header)
+          { kind: 'connection-flow', targetId: 'flow-hx-1-pipe-ms-1' },
+          { kind: 'connection-flow', targetId: 'flow-hx-1-pipe-ms-1-hx-1-tube-2-b2-pipe-ms-1-left' },
         ],
       },
       // Temperature trim: +T_STEAM_TRIM_GAIN kg/s per kelvin of outlet
@@ -1060,6 +1076,20 @@ connect('tank-sg-1', 'tank-sg-top', 'pump-1', 'pump-1-inlet',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 15.5, toElevation: 0, flowArea: 0.6, length: 2, resistanceCoeff: 1 });
 connect('pump-1', 'pump-1-outlet', 'cv-1', 'cv-1-annulus-2',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 0, toElevation: 0.25, flowArea: 1.0, length: 2, resistanceCoeff: 1 });
+// Helium flow control: the circulator holds the design mass flow by varying
+// its speed, as a variable-speed circulator does (the plant infers the flow
+// from differential pressure; the sensor here reads it directly). At a fixed
+// speed the flow is whatever the loop's density makes it - a colder cold leg
+// packs more helium through the same head, 82 kg/s instead of 78.6 - and
+// with the rods limited to 100% power the extra flow can only come out of
+// the core's temperature rise: 713 C at the outlet instead of 750.
+controller('ctl-circ-1', 'He Flow (Circulator Speed)', 20, 95, {
+  sensor: { kind: 'connection-flow', targetId: 'flow-pump-1-cv-1' },
+  setpoint: HE_FLOW_INIT,
+  // Rated speed is the top of the band: the circulator is sized with a few
+  // percent in hand at design, and has no overspeed to offer.
+  actuator: { kind: 'pump-speed', targetId: 'pump-1', min: 0.2, max: 1.0, rateLimit: 0.02 },
+});
 connect('cv-1', 'cv-1-annulus-1', 'rv-1', 'rv-1-cold-leg',
   { initialFlowRate: HE_FLOW_INIT, fromElevation: 0.25, toElevation: 5, flowArea: 1.0, length: 3, resistanceCoeff: 1.5 });
 
@@ -1087,14 +1117,18 @@ connect('val-fwcv-1', 'val-fwcv-1-out', 'hx-1', 'hx-1-tube-1-b2',
 // simply blows the tube side down to the condenser in seconds.
 // Main steam off the very top of the bundle - the elevated takeoff draws
 // VAPOR, and the OTSG model hands it the superheat section's enthalpy.
-// Both bundles discharge into the same main steam line, each through half the
-// area, so the two in parallel present the throttle the single bundle did.
-connect('hx-1', 'hx-1-tube-2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+// Both bundles discharge into the main steam header through full-bore legs;
+// the THROTTLE that sets rated steam flow is the header's line into the
+// turbine, 0.012 m2 - the two 0.006 m2 per-bundle lines it replaces, in
+// parallel.
+connect('hx-1', 'hx-1-tube-2', 'pipe-ms-1', 'pipe-ms-1-left',
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.03, length: 4, resistanceCoeff: 1,
     fromPhaseTolerance: 0 });
-connect('hx-1', 'hx-1-tube-2-b2', 'turbine-1', 'inlet',
-  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.006, length: 25, resistanceCoeff: 2,
+connect('hx-1', 'hx-1-tube-2-b2', 'pipe-ms-1', 'pipe-ms-1-left',
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW / 2, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.03, length: 4, resistanceCoeff: 1,
     fromPhaseTolerance: 0 });
+connect('pipe-ms-1', 'pipe-ms-1-right', 'turbine-1', 'inlet',
+  { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - 25, fromElevation: 0, toElevation: 0, flowArea: 0.012, length: 25, resistanceCoeff: 2 });
 connect('turbine-1', 'outlet', 'condenser-1', 'condenser-1-inlet',
   { initialFlowPhase: 'vapor', initialFlowRate: FEED_FLOW - 25, fromElevation: 0, toElevation: 4, flowArea: 0.5, length: 6 });
 connect('condenser-1', 'condenser-1-bottom', 'cond-pump-1', 'cond-pump-1-inlet',
@@ -1117,19 +1151,13 @@ connect('val-fpcv-1', 'val-fpcv-1-out', 'fwh-1', 'fwh-1-tube-1',
 // generation, and every lift became a blowdown spiral: P crashed, the
 // pump flooded the boiler 10 t past design, and recovery took half an
 // hour of simulated time.
-// One dump valve on the common header, but a tap off EACH bundle: the tube
-// side is a pressure boundary per bundle, and with the governor shut a bundle
-// whose only outlet is the throttled turbine line has no relief path at all.
-// 0.0015 m2 per tap (~60 kg/s total choked), up from 0.001 (~40): with the
-// partition publishing honest pressures the startup boil-off is real steam
-// that has to leave through SOMETHING while the turbine rolls, and 40 kg/s
-// of dump against ~150 MW of duty let the boiler compress to the dome top.
-connect('hx-1', 'hx-1-tube-2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
-    fromPhaseTolerance: 0 });
-connect('hx-1', 'hx-1-tube-2-b2', 'val-msv-1', 'val-msv-1-in',
-  { fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.0015, length: 4, resistanceCoeff: 2,
-    fromPhaseTolerance: 0 });
+// Off the main steam header, which both bundles relieve through.
+// 0.003 m2 (~60 kg/s choked), up from 0.002 (~40): with the partition
+// publishing honest pressures the startup boil-off is real steam that has
+// to leave through SOMETHING while the turbine rolls, and 40 kg/s of dump
+// against ~150 MW of duty let the boiler compress to the dome top.
+connect('pipe-ms-1', 'pipe-ms-1-right', 'val-msv-1', 'val-msv-1-in',
+  { fromElevation: 0, toElevation: 0, flowArea: 0.003, length: 4, resistanceCoeff: 2 });
 connect('val-msv-1', 'val-msv-1-out', 'condenser-1', 'condenser-1-inlet',
   { fromElevation: 0, toElevation: 4, flowArea: 0.002, length: 10, resistanceCoeff: 2 });
 
@@ -1198,12 +1226,11 @@ connect('fwh-1', 'fwh-1-tube-2', 'val-fwcv-1', 'val-fwcv-1-in',
 // pass (120 kg/s once it was sized for real extraction) - which is also
 // why the feedwater heater could never make its duty: it was being fed
 // its own feedwater.
-// Tapped off BOTH bundles, like the MSV: a single-bundle tap carries the
-// whole extraction from one side and Ledinegg-tilts the pair.
-connect('hx-1', 'hx-1-tube-2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
-connect('hx-1', 'hx-1-tube-2-b2', 'val-bleed-1', 'val-bleed-1-in',
-  { initialFlowPhase: 'vapor', initialFlowRate: 12.5, fromElevation: SG_STEAM_NOZZLE, toElevation: 0, flowArea: 0.002, length: 20, resistanceCoeff: 6 });
+// Off the main steam header, so both bundles share the extraction (a tap
+// on one bundle alone carried it all from one side and Ledinegg-tilted the
+// pair). 0.004 m2 = the two 0.002 m2 per-bundle taps it replaces.
+connect('pipe-ms-1', 'pipe-ms-1-right', 'val-bleed-1', 'val-bleed-1-in',
+  { initialFlowPhase: 'vapor', initialFlowRate: 25, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 20, resistanceCoeff: 6 });
 connect('val-bleed-1', 'val-bleed-1-out', 'fwh-1', 'fwh-1-shell-1',
   { initialFlowPhase: 'vapor', initialFlowRate: 25, fromElevation: 0, toElevation: 0, flowArea: 0.004, length: 6, resistanceCoeff: 2 });
 // Shell drain cascades to the condenser. Valve-side elevations are pinned

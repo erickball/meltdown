@@ -122,7 +122,7 @@ function line(t0: number, t1: number) {
     `${o.L.padStart(9)} ` +
     `${o.T3.toFixed(0).padStart(9)} ` +
     `${W('flow-val-fwcv-1-hx-1').toFixed(1).padStart(6)} ` +
-    `${W('flow-hx-1-turbine-1').toFixed(1).padStart(7)} ` +
+    `${W('flow-pipe-ms-1-turbine-1').toFixed(1).padStart(7)} ` +
     `${P('val-prel-1').toFixed(1).padStart(6)} ` +
     `${P('val-leak-1').toFixed(1).padStart(6)} ` +
     `${P('val-msv-1').toFixed(1).padStart(6)}`);

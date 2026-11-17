@@ -52,7 +52,7 @@ import {
   otsgAxialProfile,
 } from '../otsg';
 import { saturatedLiquidEnergy } from '../water-properties';
-import { nodeHeatCapacity, priceDrawAt, vaporPropsFor, type VaporFluidProps } from './rate-operators';
+import { nodeHeatCapacity, priceDrawAt, vaporPropsFor, naturalConvectionCoeff, type VaporFluidProps } from './rate-operators';
 import { breakExchange } from './exchange-flow';
 import { drawCompositionAt, shellDrawTemperature } from './connection-hydraulics';
 import { solveMixtureState } from '../mixture-properties';
@@ -557,8 +557,9 @@ export function otsgGasInletTemp(state: SimulationState, shell: FlowNode): numbe
  * and this term is zero (the transit balance closes on its own: what comes
  * in less the duty is exactly what leaves at the marched outlet); with it
  * stagnant the target is the metal and the shell gas follows the tubes. The
- * heat is taken from every zone alike - it is the inventory's exchange, and
- * moves nothing from one end of the bundle to the other.
+ * heat is taken from every zone across that zone's own film - it is the
+ * inventory's exchange, and moves nothing from one end of the bundle to the
+ * other.
  */
 export function otsgGasMarch(
   state: SimulationState, shell: FlowNode, zoneTemps: readonly number[],
@@ -566,13 +567,17 @@ export function otsgGasMarch(
 ): { gasQ: number[]; TDraw: number[]; TTarget: number; lo: number; hi: number } {
   const N = zoneTemps.length;
   const props = shellGasProps(shell);
-  const hAZone = otsgGasFilmCoefficient(shell, state, props) * heatArea / N;
+  // One film per zone: the forced part is the same everywhere, the buoyant
+  // part is driven by that zone's own metal-to-gas temperature difference.
+  const throughput = otsgShellThroughput(shell, state);
+  const hA = zoneTemps.map(TZone =>
+    shellFilmCoefficient(shell, throughput, props, TZone) * heatArea / N);
   const cp = props.cpMass;
   const { up, sources, lo, hi } = otsgGasStreams(state, shell, N, share);
   const TBulk = shell.fluid.temperature;
   const march = marchCells(N, 0, N - 1, up, sources, TBulk, TBulk,
     (k, T, W) => {
-      return T + (1 - Math.exp(-hAZone / (W * cp))) * (zoneTemps[k] - T);
+      return T + (1 - Math.exp(-hA[k] / (W * cp))) * (zoneTemps[k] - T);
     },
     T => cp * T,
     h => h / cp,
@@ -583,14 +588,13 @@ export function otsgGasMarch(
   for (let k = 0; k < N; k++) {
     const W = march.W[k];
     const TCell = !(W > 0) ? zoneTemps[k]
-      : hAZone > 0 ? zoneTemps[k] + (march.TIn[k] - march.TOut[k]) * (W * cp) / hAZone
+      : hA[k] > 0 ? zoneTemps[k] + (march.TIn[k] - march.TOut[k]) * (W * cp) / hA[k]
       : march.TIn[k];
     invSum += 1 / TCell;
   }
   const TTarget = N / invSum;
-  const perZone = hAZone * (TTarget - TBulk);   // W into the gas, from each zone
   const gasQ = new Array<number>(N);
-  for (let k = 0; k < N; k++) gasQ[k] = -march.Q[k] - perZone;
+  for (let k = 0; k < N; k++) gasQ[k] = -march.Q[k] - hA[k] * (TTarget - TBulk);
   return { gasQ, TDraw: march.TOut, TTarget, lo, hi };
 }
 
@@ -696,20 +700,88 @@ function shellGasProps(shell: FlowNode): VaporFluidProps {
   return props;
 }
 
-/** Shell-side film coefficient (W/m2-K): crossflow Dittus-Boelter on the
- *  actual shell mixture (gas plus steam), floored at natural convection. */
-export function otsgGasFilmCoefficient(
-  shell: FlowNode, state: SimulationState, props: VaporFluidProps = shellGasProps(shell),
+/**
+ * Shell-side film coefficient (W/m2-K) between the shell mixture (gas plus
+ * steam) and tubes at `TWall`, from how the shell fluid meets the tubes
+ * (FlowNode.shellBundle).
+ *
+ * ACROSS a bank of tubes (a helical bundle) the forced film is Gnielinski's
+ * tube-bundle method: every tube is a body the gas streams around over the
+ * length l = pi d / 2, at the velocity between the tubes of its row,
+ *
+ *     Re = rho w l / (psi mu),   psi = 1 - pi / (4 S/d)   (w on the open face)
+ *     Nu_row = 0.3 + sqrt(Nu_lam^2 + Nu_turb^2)
+ *     Nu_lam = 0.664 Re^(1/2) Pr^(1/3),   Nu_turb = 0.037 Re^0.8 Pr^(1/3)
+ *
+ * raised by the in-line arrangement factor 1 + 0.7 (b/a - 0.3) /
+ * (psi^1.5 (b/a + 0.7)^2), with b/a = 1 for the equal pitches the bank is
+ * built with. One expression from creeping flow to fully turbulent - nothing
+ * switches. The turbulent term is the Colburn flat-plate form rather than
+ * Gnielinski's own: his carries a factor 1 + 2.443 Re^-0.1 (Pr^(2/3) - 1)
+ * underneath, which for a gas (Pr < 1) passes through zero near Re = 0.005 -
+ * a pole every stagnating loop would cross. Where the bundle runs the two
+ * agree within a few percent.
+ *
+ * ALONG straight or U tubes the forced film is Dittus-Boelter on the shell's
+ * own hydraulic diameter, which is the flow that correlation describes.
+ *
+ * Either way the gas a stopped loop leaves around the tubes still moves, by
+ * buoyancy: free convection off the tube (Churchill-Chu, on the same streamed
+ * length for a tube lying across the shell, on the bundle height for one
+ * standing in it), driven by the gas-to-wall temperature difference and
+ * combined with the forced film as (h_f^3 + h_n^3)^(1/3) - the usual rule for
+ * forced and free convection acting together, and the reason no floor is
+ * needed under the forced value.
+ *
+ * This replaced Dittus-Boelter for every bundle, on a hard-coded 19 mm
+ * diameter and the whole shell cross-section, floored at 60 W/m2-K. A pipe
+ * correlation on a tube bank read a third of the film a helical HTGR boiler
+ * has (about 350 W/m2-K against 1600), and since helium's film is the
+ * controlling resistance the Xe-100 bundle could carry only 160 of its
+ * 200 MW.
+ */
+export function shellFilmCoefficient(
+  shell: FlowNode, throughput: number, props: VaporFluidProps, TWall: number,
 ): number {
-  const throughput = otsgShellThroughput(shell, state);
-  const { k, mu, Pr, rho_g: rho } = props;
-  const D = 0.019; // tube OD - the crossflow characteristic length
-  const v = shell.flowArea > 0 && rho > 0 ? throughput / (rho * shell.flowArea) : 0;
-  const Re = mu > 0 ? (rho * v * D) / mu : 0;
-  const hForced = Re > 10
-    ? 0.023 * Math.pow(Re, 0.8) * Math.pow(Math.max(0.1, Pr), 0.4) * k / D
-    : 0;
-  return Math.max(60, hForced);
+  const bundle = shell.shellBundle;
+  if (!bundle) {
+    throw new Error(`[OTSG] shell '${shell.id}' carries no bundle geometry (shellBundle), so ` +
+      `there is nothing to compute its shell-side film from. A state saved before the ` +
+      `tube-bank film model has none - rebuild the plant from its design.`);
+  }
+  const { k, mu, Pr, rho_g: rho, cpMass } = props;
+  const TGas = shell.fluid.temperature;
+  // Ideal gas at fixed composition: drho/rho = dT/T, at the film temperature
+  const buoyancy = (TWall - TGas) / (0.5 * (TWall + TGas));
+  let hForced: number, hFree: number;
+  if (bundle.flow === 'cross') {
+    const l = 0.5 * Math.PI * bundle.tubeOD;
+    const psi = 1 - Math.PI / (4 * bundle.pitchRatio);
+    const Re = throughput * l / (bundle.faceArea * psi * mu);
+    const prThird = Math.cbrt(Pr);
+    const NuRow = 0.3 + Math.hypot(0.664 * Math.sqrt(Re) * prThird, 0.037 * Math.pow(Re, 0.8) * prThird);
+    const arrangement = 1 + 0.7 * 0.7 / (Math.pow(psi, 1.5) * 1.7 * 1.7);
+    hForced = arrangement * NuRow * k / l;
+    hFree = naturalConvectionCoeff(buoyancy, rho, mu, k, cpMass, l);
+  } else {
+    const D = shell.hydraulicDiameter;
+    const Re = throughput * D / (shell.flowArea * mu);
+    hForced = 0.023 * Math.pow(Re, 0.8) * Math.pow(Pr, 0.4) * k / D;
+    if (!(shell.height !== undefined && shell.height > 0)) {
+      throw new Error(`[OTSG] shell '${shell.id}' has no height, so free convection along its ` +
+        `tubes has no length to develop over.`);
+    }
+    hFree = naturalConvectionCoeff(buoyancy, rho, mu, k, cpMass, shell.height);
+  }
+  return Math.cbrt(hForced * hForced * hForced + hFree * hFree * hFree);
+}
+
+/** shellFilmCoefficient at the shell's present flow (W/m2-K). */
+export function otsgGasFilmCoefficient(
+  shell: FlowNode, state: SimulationState, TWall: number,
+  props: VaporFluidProps = shellGasProps(shell),
+): number {
+  return shellFilmCoefficient(shell, otsgShellThroughput(shell, state), props, TWall);
 }
 
 /** Gas capacity rate mdot*cp through the shell (W/K). */

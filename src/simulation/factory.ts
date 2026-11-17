@@ -46,7 +46,8 @@ import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselC
   PumpComponent, ValveComponent, pumpMotorElevation, pumpVisualHeight, valveVisualHeight } from '../types';
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
-  hxTubeLength, hxTubeInnerDiameter } from './hx-bundles';
+  hxTubeLength, hxTubeInnerDiameter, helicalTubeBank, tubeBankMinFlowArea,
+  tubeBankRowLossCoefficient } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 import { runsAgainstPump } from '../construction/connection-orientation';
 import { terrainHeightAt, buildTerrainModel } from './terrain';
@@ -1815,6 +1816,7 @@ export function createSimulationFromPlant(plantStateIn: PlantState): SimulationS
         flowConnection.id = connectionIds[connectionIndex];
       }
       addHeatExchangerTubeFriction(flowConnection, connection, plantState);
+      addHeatExchangerShellBundleLoss(flowConnection, connection, plantState);
       state.flowConnections.push(flowConnection);
 
       // Link pump to its OUTLET flow connection (where pump is the FROM component)
@@ -3184,10 +3186,28 @@ export function coreReflectorGeometry(component: PlantComponent) {
   // conduction path from the core-facing surface.
   const midRadius = Math.sqrt((coreRadius * coreRadius + outerRadius * outerRadius) / 2);
 
+  // The reflector is carried as two shells split at half thickness: an
+  // inner one against the core and an outer one against the cold side. One
+  // lump has no resistance between its two faces, so it short-circuits the
+  // hot core gas to the cold inlet gas through half a metre of graphite as
+  // if the graphite were not there (some 6% of an Xe-100's power). Each
+  // shell's temperature sits at its own volume-mean radius.
+  const splitRadius = coreRadius + thickness / 2;
+  const splitHeight = activeHeight + thickness;
+  const innerVolume = Math.max(0,
+    Math.PI * splitRadius * splitRadius * splitHeight -
+    Math.PI * coreRadius * coreRadius * activeHeight);
+  const volumeMean = (a: number, b: number) => Math.sqrt((a * a + b * b) / 2);
+
   return {
     thickness, coreRadius, outerRadius, activeHeight, outerHeight,
     volume, mass: volume * NBG_18.density,
     innerArea, outerArea, midRadius,
+    splitRadius, splitHeight,
+    innerMass: innerVolume * NBG_18.density,
+    outerMass: (volume - innerVolume) * NBG_18.density,
+    innerMidRadius: volumeMean(coreRadius, splitRadius),
+    outerMidRadius: volumeMean(splitRadius, outerRadius),
   };
 }
 
@@ -3775,7 +3795,51 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
     flowArea: shellFlowArea,
     height: hx.height,
     elevation,
+    // What the shell fluid does at the tubes. A helical coil lies across the
+    // flow, so its shell side is a tube bank in crossflow; straight and U
+    // tubes run with the flow.
+    shellBundle: hx.hxType === 'helical'
+      ? (({ tubeOD: d, pitchRatio, faceArea }) =>
+          ({ flow: 'cross' as const, tubeOD: d, pitchRatio, faceArea }))(helicalTubeBank(hx))
+      : { flow: 'along' as const },
   };
+}
+
+/**
+ * Charge a connection for the shell-side pressure loss of any helical bundle
+ * it feeds or drains.
+ *
+ * The companion of addHeatExchangerTubeFriction, for the other side of the
+ * tubes. A bundle's shell was hydraulically a point: the gas crossed several
+ * hundred rows of tubes for nothing, so a bundle of any size cost its
+ * circulator the same - none. Row loss over the bank (tubeBankRowLoss-
+ * Coefficient), counted on the velocity in the narrowest gap and referred to
+ * THIS connection's flow area:
+ *
+ *     K_add = rows * xi * (A_conn / A_min)^2 / 2
+ *
+ * halved because the shell's inlet and outlet each carry one. Only a helical
+ * bundle is crossed row by row; flow along straight or U tubes is not charged
+ * here.
+ */
+function addHeatExchangerShellBundleLoss(
+  flowConnection: { flowArea: number; resistanceCoeff: number },
+  connection: Connection,
+  plantState: PlantState,
+): void {
+  for (const endId of [connection.fromComponentId, connection.toComponentId]) {
+    const comp = plantState.components.get(endId) as any;
+    if (!comp || comp.type !== 'heatExchanger' || comp.hxType !== 'helical') continue;
+    const portId = endId === connection.fromComponentId
+      ? connection.fromPortId : connection.toPortId;
+    if (portId?.includes('-tube')) continue;   // tube-side connections see the tubes
+    if (!(flowConnection.flowArea > 0)) continue;
+
+    const bank = helicalTubeBank(comp);
+    const areaRatio = flowConnection.flowArea / tubeBankMinFlowArea(bank);
+    flowConnection.resistanceCoeff +=
+      0.5 * bank.rows * tubeBankRowLossCoefficient(bank.pitchRatio) * areaRatio * areaRatio;
+  }
 }
 
 /** Tube bore (m): OD minus two wall thicknesses, the wall sized from the
@@ -4505,35 +4569,72 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
       );
     }
 
-    state.thermalNodes.set(reflectorId, {
-      id: reflectorId,
-      label: `${component.label || 'Core'} Reflector`,
-      temperature: startNode.fluid.temperature,
-      mass: refGeo.mass,
+    // Two shells (see coreReflectorGeometry): `-reflector` against the core,
+    // `-reflector-outer` against the cold side. The outer shell starts at
+    // the inlet temperature as above; the inner one sits between that and
+    // the core coolant and starts midway.
+    const outerReflectorId = `${reflectorId}-outer`;
+    const outerId = (component as any).containedBy;
+    const outerNode = outerId ? state.flowNodes.get(outerId) : undefined;
+    const outerStart = startNode.fluid.temperature;
+    const innerStart = coolantNode
+      ? 0.5 * (coolantNode.fluid.temperature + outerStart)
+      : outerStart;
+    const shell = (
+      shellId: string, label: string, temperature: number, mass: number,
+      faceArea: number, gasNodeId: string | undefined,
+    ): ThermalNode => ({
+      id: shellId,
+      label,
+      temperature,
+      mass,
       // Graphite cp runs 710 -> 2020 J/kg-K across the range this node
       // actually visits, so it uses the temperature-dependent model; the
       // constant is only a fallback for consumers that ignore the model.
       specificHeat: 1700,
       specificHeatModel: 'graphite',
       thermalConductivity: NBG_18.k300,
-      characteristicLength: refGeo.thickness,
-      surfaceArea: refGeo.innerArea,
+      characteristicLength: refGeo.thickness / 2,
+      surfaceArea: faceArea,
       heatGeneration: 0,
       // Graphite does not melt - it sublimes near 3900 K and holds its
       // strength well past steel's limit. Oxidation, not temperature, is
       // what destroys a reflector.
       maxTemperature: 3000,
       // The reflector burns too, but as a thick block rather than a sphere:
-      // its half-thickness is the diffusion length, so it stays
+      // half the shell's thickness is the diffusion length, so it stays
       // reaction-controlled to far higher temperature than the pebbles and
-      // is attacked essentially only on its exposed faces.
-      graphiteOxidation: {
-        burnoff: 0,
-        initialCarbonMass: refGeo.mass,
-        grade: 'NBG-18',
-        externalArea: refGeo.innerArea,
-        characteristicLength: refGeo.thickness / 2,
-        associatedGasNode: coolantFlowNodeId,
+      // is attacked essentially only on its exposed face - by whatever gas
+      // is on that side of it.
+      ...(gasNodeId ? {
+        graphiteOxidation: {
+          burnoff: 0,
+          initialCarbonMass: mass,
+          grade: 'NBG-18' as const,
+          externalArea: faceArea,
+          characteristicLength: refGeo.thickness / 4,
+          associatedGasNode: gasNodeId,
+        },
+      } : {}),
+    });
+    const coreLabel = component.label || 'Core';
+    state.thermalNodes.set(reflectorId, shell(
+      reflectorId, `${coreLabel} Reflector (inner)`, innerStart,
+      refGeo.innerMass, refGeo.innerArea, coolantFlowNodeId));
+    state.thermalNodes.set(outerReflectorId, shell(
+      outerReflectorId, `${coreLabel} Reflector (outer)`, outerStart,
+      refGeo.outerMass, refGeo.outerArea, outerNode ? outerId : undefined));
+
+    // Between the shells: graphite from one volume-mean radius to the other.
+    state.thermalConnections.push({
+      id: `conduction-${reflectorId}-shells`,
+      fromNodeId: reflectorId,
+      toNodeId: outerReflectorId,
+      conductance: 0, // the graphite path below is the whole of it
+      graphiteConduction: {
+        shapeFactor: (2 * Math.PI * refGeo.splitHeight) /
+          Math.log(refGeo.outerMidRadius / refGeo.innerMidRadius),
+        k300: NBG_18.k300,
       },
     });
 
@@ -4542,7 +4643,7 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
       // Core-to-reflector conduction across the packed bed. The shape factor
       // 8*pi*H is the average-to-surface conductance of a uniformly heated
       // cylinder (T_avg - T_surf = Q/(8*pi*k*H)); the series term is the
-      // reflector's own inner half, from its face to its mean radius.
+      // inner shell's own inner half, from its face to its mean radius.
       state.thermalConnections.push({
         id: `conduction-${id}-bed-reflector`,
         fromNodeId: `${id}-clad`,
@@ -4557,7 +4658,7 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
           shapeFactor: 8 * Math.PI * refGeo.activeHeight,
           seriesShapeFactor:
             (2 * Math.PI * refGeo.activeHeight) /
-            Math.log(refGeo.midRadius / refGeo.coreRadius),
+            Math.log(refGeo.innerMidRadius / refGeo.coreRadius),
           seriesK300: NBG_18.k300,
         },
       });
@@ -4577,8 +4678,6 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
     // Outer face: convection to whatever fills the downcomer, plus
     // gray-body radiation to the vessel wall. The radiation term is the one
     // that keeps working after the blowers stop.
-    const outerId = (component as any).containedBy;
-    const outerNode = outerId ? state.flowNodes.get(outerId) : undefined;
     if (!outerNode) {
       console.warn(
         `[Factory] Core ${id}: reflector has no containing flow node ` +
@@ -4590,7 +4689,7 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
 
     state.convectionConnections.push({
       id: `convection-${reflectorId}-outer`,
-      thermalNodeId: reflectorId,
+      thermalNodeId: outerReflectorId,
       flowNodeId: outerId,
       surfaceArea: refGeo.outerArea,
       characteristicDiameter: 2 * refGeo.outerRadius,
@@ -4641,16 +4740,16 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
     if (barrelWall) {
       const barrelHeight = barrelWall.surfaceArea / (2 * Math.PI * refGeo.outerRadius);
       const barrelOuterRadius = refGeo.outerRadius + barrelWall.characteristicLength;
-      // Graphite from where the lumped temperature sits (the volume-mean
-      // radius) out to the steel, then the steel's own inner half.
+      // Graphite from where the outer shell's temperature sits (its
+      // volume-mean radius) out to the steel, then the steel's own inner half.
       state.thermalConnections.push({
         id: `conduction-${reflectorId}-barrel`,
-        fromNodeId: reflectorId,
+        fromNodeId: outerReflectorId,
         toNodeId: barrelWallId,
         conductance: 0, // the graphite path below is the whole of it
         graphiteConduction: {
           shapeFactor: (2 * Math.PI * barrelHeight) /
-            Math.log(refGeo.outerRadius / refGeo.midRadius),
+            Math.log(refGeo.outerRadius / refGeo.outerMidRadius),
           k300: NBG_18.k300,
           seriesConductance: barrelWall.thermalConductivity * barrelWall.surfaceArea /
             (barrelWall.characteristicLength / 2),
@@ -4686,7 +4785,7 @@ function createReflectorThermalNodes(plantState: PlantState, state: SimulationSt
     );
     state.thermalConnections.push({
       id: `radiation-${reflectorId}-wall`,
-      fromNodeId: reflectorId,
+      fromNodeId: outerReflectorId,
       toNodeId: wallId,
       conductance: 0, // gas in between - radiation only
       radiationCoeff: exchangeArea,

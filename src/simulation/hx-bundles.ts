@@ -160,8 +160,76 @@ export function hxTubeInnerDiameter(tubeOD: number | undefined): number {
   return (tubeOD || 0.022) * 0.88;
 }
 
+/** Axial height the tubes occupy (m): the shell less its plenums. */
+export function hxBundleHeight(hx: HxTubeGeometry): number {
+  return Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
+}
+
 /** Length of one tube through the bundle (m). */
 export function hxTubeLength(hx: HxTubeGeometry): number {
-  return hxTubeLengthFactor(hx) *
-    Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
+  return hxTubeLengthFactor(hx) * hxBundleHeight(hx);
+}
+
+/**
+ * A helical bundle as the tube bank the shell-side gas crosses.
+ *
+ * The coils are wound nearly flat, so gas running along the shell axis meets
+ * them broadside: row after row of cylinders in crossflow, which is what both
+ * the shell-side film and the shell-side pressure drop are made of. The bank
+ * follows from the same packing the tube length does. Cut the bundle through
+ * its axis and each tube shows as a circle of diameter d in a cell S_T wide
+ * (between coil layers) and S_L tall (between turns), and the fraction of
+ * that plane the circles cover is the volumetric packing:
+ *
+ *     phi = (pi/4) d^2 / (S_T S_L)
+ *
+ * The layers are concentric, so a tube sits directly downstream of the one in
+ * the turn above - an IN-LINE bank - and with nothing to make the two pitches
+ * differ they are taken equal: S/d = sqrt(pi / (4 phi)). At the derived 20%
+ * packing that is 1.98; where the tubes are wound as tight as they go, 1.19.
+ */
+export interface HelicalTubeBank {
+  tubeOD: number;       // m
+  /** S/d, the same across the layers and along the flow. */
+  pitchRatio: number;
+  /** m2 - the coil annulus the gas approaches, tubes not yet subtracted. */
+  faceArea: number;
+  /** Tube rows the gas crosses on its way through the bundle. */
+  rows: number;
+}
+
+export function helicalTubeBank(hx: HxTubeGeometry): HelicalTubeBank {
+  const tubeOD = hx.tubeOD || 0.022;
+  const packing = HELICAL_PACKING * hxTubeLengthFactor(hx) / helicalLengthFactor(hx);
+  const pitchRatio = Math.sqrt(Math.PI / (4 * packing));
+  return {
+    tubeOD,
+    pitchRatio,
+    faceArea: coilAnnulusArea(hx),
+    rows: hxBundleHeight(hx) / (pitchRatio * tubeOD),
+  };
+}
+
+/** Narrowest free area between the tubes of a bank (m2): where the gas runs
+ *  fastest, and the velocity its pressure loss is counted in. */
+export function tubeBankMinFlowArea(bank: { pitchRatio: number; faceArea: number }): number {
+  return bank.faceArea * (1 - 1 / bank.pitchRatio);
+}
+
+/**
+ * Pressure-loss coefficient of ONE row of an in-line bank, on the velocity
+ * head in the narrowest gap: dP = rows * xi * rho v_max^2 / 2 (Jakob's
+ * correlation, xi = 4 f').
+ *
+ * Jakob's factor falls as Re^-0.15. The hydraulic model carries one fixed K
+ * per connection, so the Reynolds number is fixed here at 2e4 - the middle of
+ * what a gas-cooled bundle runs at (1e4 would read 11% higher, 1e5 21%
+ * lower). The same approximation as the constant Darcy factor on the tube
+ * side.
+ */
+export function tubeBankRowLossCoefficient(pitchRatio: number): number {
+  const gap = pitchRatio - 1;
+  const fPrime = (0.044 + 0.08 * pitchRatio / Math.pow(gap, 0.43 + 1.13 / pitchRatio)) *
+    Math.pow(2e4, -0.15);
+  return 4 * fPrime;
 }

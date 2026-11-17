@@ -127,6 +127,66 @@ function seededRandom(seed: number): number {
   return x - Math.floor(x);
 }
 
+/** One RGBA cell colour, packed the way a little-endian Uint32 view of ImageData reads it. */
+function packCellColor(c: RGB, alpha: number): number {
+  return ((Math.round(alpha * 255) << 24) | (Math.round(c.b) << 16) | (Math.round(c.g) << 8) | Math.round(c.r)) >>> 0;
+}
+
+let cellScratch: HTMLCanvasElement | null = null;
+let cellScratchCtx: CanvasRenderingContext2D | null = null;
+
+/**
+ * Paint a grid of `pixelSize` cells over (x, y, width, height), each cell the
+ * colour `cellColor(row, col)` returns (packed by packCellColor).
+ *
+ * The grid goes down as ONE image: the cells are written a pixel apiece into
+ * a scratch bitmap and stretched over the area unsmoothed. Filling each cell
+ * with its own fillRect cost the browser dearly - a helium plant's vessels
+ * came to ~7000 small translucent rects per repaint, drawn under the vessel's
+ * clip path, and Chrome's GPU raster spent ~0.7 s flushing them (the frame
+ * ran at ~1 fps; without them, 132 ms). The last row and column are cut off
+ * at the area's edge just as the per-cell rects were.
+ */
+function fillCellGrid(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  pixelSize: number,
+  cellColor: (row: number, col: number) => number
+): void {
+  const cols = Math.ceil(width / pixelSize);
+  const rows = Math.ceil(height / pixelSize);
+  if (!(cols > 0 && rows > 0)) return;
+
+  if (!cellScratch || !cellScratchCtx) {
+    cellScratch = document.createElement('canvas');
+    // Written from the CPU on every use, so keep it off the GPU
+    cellScratchCtx = cellScratch.getContext('2d', { willReadFrequently: true })!;
+  }
+  if (cellScratch.width < cols || cellScratch.height < rows) {
+    const w = Math.max(cellScratch.width, cols);
+    const h = Math.max(cellScratch.height, rows);
+    cellScratch.width = w;
+    cellScratch.height = h;
+  }
+
+  const image = cellScratchCtx.createImageData(cols, rows);
+  const cells = new Uint32Array(image.data.buffer);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      cells[row * cols + col] = cellColor(row, col);
+    }
+  }
+  cellScratchCtx.putImageData(image, 0, 0);
+
+  const smoothing = ctx.imageSmoothingEnabled;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(cellScratch, 0, 0, width / pixelSize, height / pixelSize, x, y, width, height);
+  ctx.imageSmoothingEnabled = smoothing;
+}
+
 // Time seed that updates every second for animated two-phase effect
 export function getTimeSeed(): number {
   return Math.floor(Date.now() / 1000);
@@ -283,31 +343,13 @@ function renderZoneWithQuality(
   ctx.fillStyle = rgbToString(blendedColor, 0.87);
   ctx.fillRect(x, y, width, height);
 
-  // Calculate grid dimensions
-  const cols = Math.ceil(width / pixelSize);
-  const rows = Math.ceil(height / pixelSize);
-
-  // Render each pixel
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const px = x + col * pixelSize;
-      const py = y + row * pixelSize;
-      const pw = Math.min(pixelSize, x + width - px);
-      const ph = Math.min(pixelSize, y + height - py);
-
-      // Use seeded random based on position + time for animated pattern
-      const seed = row * 1000 + col + Math.floor(quality * 100) * 10000 + timeSeed * 7919;
-      const rand = seededRandom(seed);
-
-      // Higher quality = more vapor pixels
-      const isVapor = rand < quality;
-
-      ctx.fillStyle = isVapor
-        ? rgbToString(vaporColor, 0.85)
-        : rgbToString(liquidColor, 0.9);
-      ctx.fillRect(px, py, pw, ph);
-    }
-  }
+  const vaporCell = packCellColor(vaporColor, 0.85);
+  const liquidCell = packCellColor(liquidColor, 0.9);
+  const qualitySeed = Math.floor(quality * 100) * 10000 + timeSeed * 7919;
+  fillCellGrid(ctx, x, y, width, height, pixelSize, (row, col) =>
+    // Seeded random based on position + time for the animated pattern;
+    // higher quality = more vapor pixels
+    seededRandom(row * 1000 + col + qualitySeed) < quality ? vaporCell : liquidCell);
 }
 
 /**
@@ -454,35 +496,18 @@ function renderNcgOverlay(
     ctx.fillStyle = rgbToString(ncgViz.blendedColor, 1.0);
     ctx.fillRect(x, y, width, height);
 
-    const cols = Math.ceil(width / pixelSize);
-    const rows = Math.ceil(height / pixelSize);
-
-    for (let row = 0; row < rows; row++) {
-      for (let col = 0; col < cols; col++) {
-        const px = x + col * pixelSize;
-        const py = y + row * pixelSize;
-        const pw = Math.min(pixelSize, x + width - px);
-        const ph = Math.min(pixelSize, y + height - py);
-
-        // Pick which gas species this pixel represents
-        const speciesSeed = row * 2000 + col + timeSeed * 7919;
-        const speciesRand = seededRandom(speciesSeed);
-
-        let cumulative = 0;
-        let selectedColor: RGB = ncgViz.blendedColor;
-
-        for (const gasInfo of ncgViz.gasColors) {
-          cumulative += gasInfo.fraction;
-          if (speciesRand < cumulative) {
-            selectedColor = gasInfo.color;
-            break;
-          }
-        }
-
-        ctx.fillStyle = rgbToString(selectedColor, 0.9);
-        ctx.fillRect(px, py, pw, ph);
+    const speciesCells = ncgViz.gasColors.map(g => packCellColor(g.color, 0.9));
+    const fallbackCell = packCellColor(ncgViz.blendedColor, 0.9);
+    fillCellGrid(ctx, x, y, width, height, pixelSize, (row, col) => {
+      // Pick which gas species this pixel represents
+      const speciesRand = seededRandom(row * 2000 + col + timeSeed * 7919);
+      let cumulative = 0;
+      for (let i = 0; i < ncgViz.gasColors.length; i++) {
+        cumulative += ncgViz.gasColors[i].fraction;
+        if (speciesRand < cumulative) return speciesCells[i];
       }
-    }
+      return fallbackCell;
+    });
     return;
   }
 
@@ -519,35 +544,18 @@ function renderNcgOverlay(
   ctx.fillStyle = rgbToString(blendedBg, 0.85);
   ctx.fillRect(x, y, width, height);
 
-  const cols = Math.ceil(width / pixelSize);
-  const rows = Math.ceil(height / pixelSize);
-
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const px = x + col * pixelSize;
-      const py = y + row * pixelSize;
-      const pw = Math.min(pixelSize, x + width - px);
-      const ph = Math.min(pixelSize, y + height - py);
-
-      // Pick which gas (steam or NCG species) this pixel represents
-      const speciesSeed = row * 2000 + col + timeSeed * 7919;
-      const speciesRand = seededRandom(speciesSeed);
-
-      let cumulative = 0;
-      let selectedColor: RGB = blendedBg;
-
-      for (const gas of mixedGases) {
-        cumulative += gas.fraction;
-        if (speciesRand < cumulative) {
-          selectedColor = gas.color;
-          break;
-        }
-      }
-
-      ctx.fillStyle = rgbToString(selectedColor, 0.9);
-      ctx.fillRect(px, py, pw, ph);
+  const mixedCells = mixedGases.map(g => packCellColor(g.color, 0.9));
+  const fallbackCell = packCellColor(blendedBg, 0.9);
+  fillCellGrid(ctx, x, y, width, height, pixelSize, (row, col) => {
+    // Pick which gas (steam or NCG species) this pixel represents
+    const speciesRand = seededRandom(row * 2000 + col + timeSeed * 7919);
+    let cumulative = 0;
+    for (let i = 0; i < mixedGases.length; i++) {
+      cumulative += mixedGases[i].fraction;
+      if (speciesRand < cumulative) return mixedCells[i];
     }
-  }
+    return fallbackCell;
+  });
 }
 
 /**
