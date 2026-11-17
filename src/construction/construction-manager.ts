@@ -66,6 +66,7 @@ import { PidControllerConfig } from '../types';
 import { hxBundleSuffix, hxBundleCount } from '../simulation/hx-bundles';
 import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
+import { hxShellSideVolume } from '../simulation/hx-bundles';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
 import { designWallThickness, hxTubeWall, crossVesselWalls, crossVesselInsulation } from '../simulation/wall-sizing';
 import { DEFAULT_MATERIAL } from '../simulation/materials';
@@ -823,13 +824,6 @@ export class ConstructionManager {
 
         const tubeCount = props.tubeCount || 3000;
         const hxType = props.hxType || 'utube';
-        const tubeLength = hxType === 'utube' ? shellLen * 1.8 : shellLen;
-
-        // Store calculated values for simulation use
-        const heatTransferArea = Math.PI * tubeOD_m * tubeLength * tubeCount;
-        const tubeSideVolume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * tubeCount;
-        const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
-        const shellSideVolume = Math.max(0, shellVolume - Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * tubeCount);
 
         const bundleCount = Math.max(1, Math.round(props.bundleCount || 1));
         const hxPorts = heatExchangerPorts({
@@ -863,7 +857,11 @@ export class ConstructionManager {
             quality: 0.5,
             flowRate: 0
           },
-          tubeCount: 5, // Visual tube count for rendering (not the real engineering value)
+          // The real count - the simulation sizes area, volume and flow
+          // from it. (It was a visual 5 with the real count kept in
+          // realTubeCount, which the simulation never read: a built SG
+          // simulated as 5 tubes. The renderer caps what it draws itself.)
+          tubeCount,
           ports: hxPorts,
           pressureRating: shellPressureRating,
           plenumLength: plenumLen
@@ -876,15 +874,13 @@ export class ConstructionManager {
         // for squat shells - see hxIsVertical)
         (hx as any).orientation = isVertical ? 'vertical' : 'horizontal';
 
-        // Store additional properties for simulation (can be accessed via component)
-        (hx as any).heatTransferArea = heatTransferArea;
-        (hx as any).tubeSideVolume = tubeSideVolume;
-        (hx as any).shellSideVolume = shellSideVolume;
-        (hx as any).realTubeCount = tubeCount;
         (hx as any).tubeOD = tubeOD_m;
-        (hx as any).tubeID = tubeID_m;
-
-        console.log(`[HX] Created ${hxType} heat exchanger: ${heatTransferArea.toFixed(0)} m² area, tube-side ${tubeSideVolume.toFixed(1)} m³, shell-side ${shellSideVolume.toFixed(1)} m³`);
+        // Refuse a bundle that cannot be built here, at placement, with the
+        // same geometry the simulation will use
+        if (!(hxShellSideVolume(hx, tubeID_m) > 0)) {
+          throw new Error(`[HX] ${tubeCount} tubes of ${props.tubeOD || 19} mm do not fit a ` +
+            `${shellDiam} m x ${shellLen} m shell. Fewer or thinner tubes, or a bigger shell.`);
+        }
 
         this.plantState.components.set(id, hx);
         (hx as any).nqa1 = props.nqa1 ?? true;
@@ -4431,10 +4427,8 @@ export class ConstructionManager {
 
     // Heat exchanger specific
     if (properties.tubeCount !== undefined) {
-      // tubeCount property in dialog is the real engineering count
-      // component.tubeCount stays as visual count (capped at 10 for rendering)
-      component.realTubeCount = properties.tubeCount;
-      component.tubeCount = Math.min(properties.tubeCount, 10);
+      component.tubeCount = properties.tubeCount;
+      delete component.realTubeCount;   // legacy: see hxMigrateTubeCount
     }
     if (component.type === 'heatExchanger') {
       // Orientation is encoded in which of width/height is the shell
@@ -4478,21 +4472,6 @@ export class ConstructionManager {
       if (properties.tubeOD !== undefined) {
         component.tubeOD = properties.tubeOD / 1000; // mm to m
       }
-
-      // Recompute the derived engineering quantities the simulation reads
-      // (same formulas as creation) so an edit actually changes the physics
-      const tubeOD_m = component.tubeOD ?? 0.019;
-      const tubeThickness_m = hxTubeWall(component, tubeOD_m);
-      const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
-      const tubeCount = component.realTubeCount ?? 3000;
-      const hxType = component.hxType || 'utube';
-      const tubeLength = hxType === 'utube' ? shellLen * 1.8 : shellLen;
-      component.heatTransferArea = Math.PI * tubeOD_m * tubeLength * tubeCount;
-      component.tubeSideVolume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * tubeCount;
-      const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
-      component.shellSideVolume = Math.max(0,
-        shellVolume - Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * tubeCount);
-      component.tubeID = tubeID_m;
 
       // Rebuild the nozzles when the drawn geometry changed so they stay on
       // the shell (connections survive by port id)

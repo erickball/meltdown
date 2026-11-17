@@ -30,6 +30,7 @@ interface TestDef { file: string; fast: boolean }
 const TESTS: TestDef[] = [
   { file: 'src/simulation/test-suite.ts', fast: true },
   { file: 'scripts/check-accumulate-rates.ts', fast: true },
+  { file: 'scripts/test-hx-geometry.ts', fast: true },
   { file: 'scripts/test-flow-physics.ts', fast: true },
   { file: 'scripts/test-replay-seek.ts', fast: true },
   { file: 'scripts/test-history-epochs.ts', fast: true },

@@ -47,6 +47,7 @@ import { PlantState, PlantComponent, Connection, AmbientSettings, ReactorVesselC
 import { describeControllerSignal } from './operators/control-system';
 import { hxBundleCount, hxTubeNodeId, hxTubeMetalId, hxBundleIndexFromPortId,
   hxTubeLength, hxTubeInnerDiameter, helicalTubeBank, tubeBankMinFlowArea,
+  hxTubeVolumes, hxShellDiameter, hxBundleHeight, hxShellSideVolume, hxMigrateTubeCount,
   tubeBankRowLossCoefficient } from './hx-bundles';
 import { assignFlowConnectionIds } from './connection-ids';
 import { runsAgainstPump } from '../construction/connection-orientation';
@@ -901,6 +902,9 @@ function withoutUnbuiltParts(plantState: PlantState): PlantState {
 
 export function createSimulationFromPlant(plantStateIn: PlantState): SimulationState {
   const plantState = withoutUnbuiltParts(plantStateIn);
+  for (const component of plantState.components.values()) {
+    if (component.type === 'heatExchanger') hxMigrateTubeCount(component as any);
+  }
   const state = createSimulationState();
   buildTerrain = plantState.terrain;
   buildAmbient = plantState.ambient;
@@ -3695,12 +3699,13 @@ function createHeatExchangerTubeNode(component: PlantComponent, b: number): Flow
   const hx = component as any;
   const elevation = absoluteBase(component);
   const nBundles = hxBundleCount(hx);
-  // Tube volume scales with tube count/size, not a fixed constant - otherwise a HX
-  // sized for a small or large plant would have identical (and often unrealistically
-  // tiny) primary-side inventory, which starves residence time and destabilizes the solver.
-  const tubeOD = hx.tubeOD || 0.02;                 // m
-  const tubeEffectiveLength = hx.hxType === 'straight' ? (hx.height || 10) : 2 * (hx.height || 10); // u-tube/helical go up and back down
-  const tubeVolume = Math.max(1, hx.tubeCount * Math.PI * Math.pow(tubeOD / 2, 2) * tubeEffectiveLength) / nBundles;
+  // Tube-side volume: the bore over the real tube length (hxTubeLength - the
+  // same length the heat-transfer area and the tube friction use). It was
+  // 2 x shell height at the tube OD, which put a helical coil (tubes ~11x
+  // the bundle height) at a quarter of its inventory and a U-tube one (OD
+  // instead of bore) a third over.
+  const tubeOD = hx.tubeOD || 0.022;                 // m
+  const tubeVolume = hxTubeVolumes(hx, hxTubeBore(hx, tubeOD)).inside / nBundles;
   const tubeTemp = hx.tubeFluid?.temperature || hx.primaryFluid?.temperature || 570;
   const tubePressure = hx.tubeFluid?.pressure || hx.primaryFluid?.pressure || 15e6;
   // Gas-cooled primaries: honor a vapor-phase spec and an NCG fill
@@ -3742,9 +3747,20 @@ function createHeatExchangerTubeNode(component: PlantComponent, b: number): Flow
 function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   const hx = component as any;
   const elevation = absoluteBase(component);
-  // Approximate shell as a cylinder (diameter = width) minus tube bundle volume,
-  // rather than a fixed constant - see tube-side volume comment above for why.
-  const shellVolume = Math.max(2, Math.PI * Math.pow((hx.width || 3) / 2, 2) * (hx.height || 10) * 0.75);
+  // Shell side: the shell cylinder less what the tubes displace (was 0.75 x
+  // the cylinder). Diameter and length follow the orientation - a
+  // horizontal shell's footprint is length x diameter, not diameter x length.
+  const shellDiameter = hxShellDiameter(hx);
+  const bundleLength = hxBundleHeight(hx);
+  const bore = hxTubeBore(hx, hx.tubeOD || 0.022);
+  const tubeDisplaced = hxTubeVolumes(hx, bore).displaced;
+  const shellVolume = hxShellSideVolume(hx, bore);
+  if (!(shellVolume > 0)) {
+    throw new Error(
+      `[Factory] Heat exchanger '${component.id}': its tubes displace ${tubeDisplaced.toFixed(1)} m3, ` +
+      `more than the ${(shellVolume + tubeDisplaced).toFixed(1)} m3 shell around them. ` +
+      `Fewer or thinner tubes, or a bigger shell.`);
+  }
   const shellTemp = hx.shellFluid?.temperature || hx.secondaryFluid?.temperature || saturationTemperature(5.5e6);
   const shellPressure = hx.shellFluid?.pressure || hx.secondaryFluid?.pressure || 5.5e6;
   const phase = hx.shellFluid?.phase || hx.secondaryFluid?.phase || 'two-phase';
@@ -3768,11 +3784,13 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
   // not respond to the bundle at all - which is invisible for a water-side
   // boiler (its h is enormous and the tube side dominates) but decisive for a
   // gas-cooled shell, where helium's h is the limiting resistance.
-  const shellDiameter = hx.width || 3;
-  const tubeOD = hx.tubeOD || 0.02;
+  const tubeOD = hx.tubeOD || 0.022;
   const tubeCount = hx.tubeCount || 1000;
   const shellArea = Math.PI * Math.pow(shellDiameter / 2, 2);
-  const tubeBlockage = tubeCount * Math.PI * Math.pow(tubeOD / 2, 2);
+  // The tubes' average cross-section in a plane across the shell: their
+  // displaced volume over the bundle length. A U-tube crosses every plane
+  // twice; a helical coil's flattened turns cut it as long ellipses.
+  const tubeBlockage = tubeDisplaced / bundleLength;
   // Guard the pathological case of a bundle specified denser than its shell:
   // fail loudly rather than hand the solver a negative or zero flow area.
   if (tubeBlockage >= 0.9 * shellArea) {
@@ -3783,7 +3801,8 @@ function createHeatExchangerShellNode(component: PlantComponent): FlowNode {
     );
   }
   const shellFlowArea = shellArea - tubeBlockage;
-  const wettedPerimeter = tubeCount * Math.PI * tubeOD + Math.PI * shellDiameter;
+  // tube surface per unit length of bundle, the same way
+  const wettedPerimeter = tubeCount * Math.PI * tubeOD * hxTubeLength(hx) / bundleLength + Math.PI * shellDiameter;
   const shellHydraulicDiameter = (4 * shellFlowArea) / wettedPerimeter;
 
   return {

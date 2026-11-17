@@ -1437,8 +1437,10 @@ export function estimatePlantComponentCost(
     if (component.tubeOD) {
       costProps.tubeOD = component.tubeOD * 1000;
     }
-    if (component.realTubeCount) {
-      costProps.tubeCount = component.realTubeCount;
+    // realTubeCount: saves from before tubeCount held the real count
+    const tubeCount = component.realTubeCount ?? component.tubeCount;
+    if (tubeCount) {
+      costProps.tubeCount = tubeCount;
     }
     costProps.shellPressure = component.shellPressureRating || component.pressureRating || 60;
     costProps.tubePressure = component.tubePressureRating || 150;

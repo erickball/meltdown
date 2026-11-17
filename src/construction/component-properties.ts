@@ -11,6 +11,7 @@
 // display units (bar, °C, MW, mm, %). All conversions live here and in
 // updateComponent - nowhere else.
 
+import { hxIsVertical as hxIsVerticalGeometry } from '../simulation/hx-bundles';
 import type { StockLine } from '../types';
 
 /**
@@ -60,10 +61,7 @@ export function condenserVolume(component: Record<string, any>): number {
  * squat shells.
  */
 export function hxIsVertical(component: Record<string, any>): boolean {
-  if (component.orientation === 'vertical' || component.orientation === 'horizontal') {
-    return component.orientation === 'vertical';
-  }
-  return (component.height ?? 0) >= (component.width ?? 0);
+  return hxIsVerticalGeometry(component);   // one rule, shared with the simulation
 }
 
 /**
@@ -328,9 +326,9 @@ export function readComponentOption(optionName: string, component: Record<string
     return defaultValue;
   }
 
-  // tubeCount must read the real engineering count; component.tubeCount is
-  // the VISUAL count (capped at ~10 for rendering) and must never reach the
-  // dialog, so this check has to precede the direct property match
+  // Saves from before the tube count was stored where the simulation reads
+  // it keep the visual count in tubeCount and the real one in realTubeCount
+  // (hxMigrateTubeCount); this has to precede the direct property match
   if (optionName === 'tubeCount' && component.realTubeCount !== undefined) {
     return component.realTubeCount;
   }

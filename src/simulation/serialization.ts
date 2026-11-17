@@ -11,6 +11,7 @@
  * rebuilds the solver/operators from the design, then swaps this state in.
  */
 
+import { hxMigrateTubeCount } from './hx-bundles';
 import { SimulationState } from './types';
 import type { PlantState, PlantComponent } from '../types';
 import { cloneSimulationState } from './solver';
@@ -137,6 +138,9 @@ export function deserializePlantDesign(input: Record<string, unknown>): PlantSta
     components: new Map(data.components as Array<[string, PlantComponent]>),
     connections: Array.isArray(data.connections) ? data.connections : [],
   } as unknown as PlantState;
+  for (const component of plant.components.values()) {
+    if (component.type === 'heatExchanger') hxMigrateTubeCount(component as any);
+  }
   if (data.scenario) plant.scenario = data.scenario as PlantState['scenario'];
   if (data.terrain) plant.terrain = data.terrain as PlantState['terrain'];
   if (data.electrical) plant.electrical = data.electrical as PlantState['electrical'];

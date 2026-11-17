@@ -94,8 +94,11 @@ const COIL_R_IN = 0.30, COIL_R_OUT = 0.95;
 
 export interface HxTubeGeometry {
   hxType?: string;
+  /** Drawn footprint: a vertical shell is `width` across and `height` long,
+   *  a horizontal one the other way round (see hxIsVertical). */
   width?: number;
   height?: number;
+  orientation?: string;
   plenumLength?: number;
   tubeOD?: number;
   tubeCount?: number;
@@ -104,9 +107,31 @@ export interface HxTubeGeometry {
   tubeLengthFactor?: number;
 }
 
+/**
+ * Whether the shell's axis is vertical. The construction UI stores the
+ * orientation explicitly; older saves and the presets encode it only in the
+ * drawn footprint (a vertical shell is taller than it is wide).
+ */
+export function hxIsVertical(hx: { orientation?: string; width?: number; height?: number }): boolean {
+  if (hx.orientation === 'vertical' || hx.orientation === 'horizontal') {
+    return hx.orientation === 'vertical';
+  }
+  return (hx.height ?? 0) >= (hx.width ?? 0);
+}
+
+/** Shell inside diameter (m): the footprint dimension across the axis. */
+export function hxShellDiameter(hx: HxTubeGeometry): number {
+  return (hxIsVertical(hx) ? hx.width : hx.height) || 3;
+}
+
+/** Shell length along its axis (m), not counting the plenum caps. */
+export function hxShellLength(hx: HxTubeGeometry): number {
+  return (hxIsVertical(hx) ? hx.height : hx.width) || 5;
+}
+
 /** Coil annulus cross-section (m2) available to the tubes. */
 function coilAnnulusArea(hx: HxTubeGeometry): number {
-  const R = (hx.width ?? 3) / 2;
+  const R = hxShellDiameter(hx) / 2;
   return Math.PI * ((COIL_R_OUT * R) ** 2 - (COIL_R_IN * R) ** 2);
 }
 
@@ -131,7 +156,7 @@ export function hxTubeLengthFactor(hx: HxTubeGeometry | string | undefined): num
     if (derived < 1) {
       throw new Error(
         `[HX] ${hx.tubeCount} tubes of ${((hx.tubeOD || 0.022) * 1e3).toFixed(0)} mm cannot fit ` +
-        `a ${(hx.width ?? 3).toFixed(1)} m shell: even wound flat they need ` +
+        `a ${hxShellDiameter(hx).toFixed(1)} m shell: even wound flat they need ` +
         `${(1 / derived).toFixed(1)}x the annulus there is. Fewer tubes, or a wider shell.`);
     }
     return derived;
@@ -160,14 +185,33 @@ export function hxTubeInnerDiameter(tubeOD: number | undefined): number {
   return (tubeOD || 0.022) * 0.88;
 }
 
-/** Axial height the tubes occupy (m): the shell less its plenums. */
+/** Length along the shell axis the tubes occupy (m): the whole shell. The
+ *  plenums are caps outside it - the dialog's elevation is the shell bottom
+ *  with the plenum below, and the renderer draws them past the shell ends.
+ *  (Height for a vertical shell, hence the name.) */
 export function hxBundleHeight(hx: HxTubeGeometry): number {
-  return Math.max(1, (hx.height || 5) - (hx.plenumLength ?? 0.5));
+  return hxShellLength(hx);
 }
 
 /** Length of one tube through the bundle (m). */
 export function hxTubeLength(hx: HxTubeGeometry): number {
   return hxTubeLengthFactor(hx) * hxBundleHeight(hx);
+}
+
+/**
+ * What the tubes hold and what they take out of the shell (m3), for the whole
+ * exchanger (all bundles). Inside: the bore over the tube length. Outside:
+ * the OD over the same length. `bore` comes from the caller because the wall
+ * is sized from the tube-side pressure rating (factory hxTubeBore).
+ */
+export function hxTubeVolumes(hx: HxTubeGeometry, bore: number): { inside: number; displaced: number } {
+  const n = hx.tubeCount || 1000;
+  const L = hxTubeLength(hx);
+  const od = hx.tubeOD || 0.022;
+  return {
+    inside: n * Math.PI * bore * bore / 4 * L,
+    displaced: n * Math.PI * od * od / 4 * L,
+  };
 }
 
 /**
@@ -232,4 +276,26 @@ export function tubeBankRowLossCoefficient(pitchRatio: number): number {
   const fPrime = (0.044 + 0.08 * pitchRatio / Math.pow(gap, 0.43 + 1.13 / pitchRatio)) *
     Math.pow(2e4, -0.15);
   return 4 * fPrime;
+}
+
+/**
+ * The shell side's free volume (m3): the shell cylinder less what the tubes
+ * displace. Negative means the tubes do not fit (the factory refuses it).
+ */
+export function hxShellSideVolume(hx: HxTubeGeometry, bore: number): number {
+  const D = hxShellDiameter(hx);
+  return Math.PI * D * D / 4 * hxBundleHeight(hx) - hxTubeVolumes(hx, bore).displaced;
+}
+
+/**
+ * Saves from before the construction UI stored the real tube count in
+ * `tubeCount` kept a visual count there (5..10) and the real one in
+ * `realTubeCount`, which the simulation never read - a built exchanger
+ * simulated as 5 tubes. Moves the real count where it is read.
+ */
+export function hxMigrateTubeCount(hx: { tubeCount?: number; realTubeCount?: number }): void {
+  if (hx.realTubeCount !== undefined) {
+    hx.tubeCount = hx.realTubeCount;
+    delete hx.realTubeCount;
+  }
 }

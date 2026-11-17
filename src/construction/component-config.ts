@@ -1,5 +1,6 @@
 // Component configuration definitions and dialog system
 
+import { hxTubeLength, hxTubeVolumes, hxShellSideVolume, type HxTubeGeometry } from '../simulation/hx-bundles';
 import { saturationTemperature, saturationPressure } from '../simulation/water-properties';
 import { estimateComponentCost, formatCost } from './cost-estimation';
 import { ALL_GAS_SPECIES, GAS_PROPERTIES, type GasSpecies } from '../simulation/gas-properties';
@@ -642,34 +643,16 @@ export const componentDefinitions: Record<string, {
         calculate: (p) => dialogWallMm(p.shellPressure || 60, p.shellDiameter || 2.5, 'welded', p.nqa1 ?? true, p.material, 0)
       },
       { name: 'heatTransferArea', type: 'calculated', label: 'Heat Transfer Area', default: 0, unit: 'm²',
-        calculate: (p) => {
-          const tubeOD_m = (p.tubeOD || 19) / 1000; // mm to m
-          const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8); // U-tubes are ~1.8x shell length
-          const area = Math.PI * tubeOD_m * tubeLength * (p.tubeCount || 3000);
-          return area.toFixed(0);
-        }
+        help: 'Outside surface of all the tubes: tube count x tube length x pi x OD. A U-tube runs about 2.1x the shell length; a helical coil much longer, from how densely it is wound.',
+        calculate: (p) => dialogHxFigure(p, (g) => Math.PI * (g.tubeOD ?? 0) * hxTubeLength(g) * (g.tubeCount ?? 0), 0)
       },
       { name: 'tubeSideVolume', type: 'calculated', label: 'Tube-Side Volume', default: 0, unit: 'm³',
-        calculate: (p) => {
-          const tubeOD_m = (p.tubeOD || 19) / 1000;
-          const tubeThickness_m = hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true, material: p.material }, tubeOD_m);
-          const tubeID_m = tubeOD_m - 2 * tubeThickness_m;
-          const tubeLength = p.hxType === 'utube' ? (p.shellLength || 8) * 1.8 : (p.shellLength || 8);
-          const volume = Math.PI * Math.pow(tubeID_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
-          return volume.toFixed(1);
-        }
+        help: 'Water or gas inside the tubes: tube count x bore area x tube length (plenums not included).',
+        calculate: (p) => dialogHxFigure(p, (g, bore) => hxTubeVolumes(g, bore).inside, 1)
       },
       { name: 'shellSideVolume', type: 'calculated', label: 'Shell-Side Volume', default: 0, unit: 'm³',
-        calculate: (p) => {
-          const shellDiam = p.shellDiameter || 2.5;
-          const shellLen = p.shellLength || 8;
-          const tubeOD_m = (p.tubeOD || 19) / 1000;
-          const tubeLength = p.hxType === 'utube' ? shellLen * 1.8 : shellLen;
-          const shellVolume = Math.PI * Math.pow(shellDiam / 2, 2) * shellLen;
-          const tubeDisplacement = Math.PI * Math.pow(tubeOD_m / 2, 2) * tubeLength * (p.tubeCount || 3000);
-          const volume = shellVolume - tubeDisplacement;
-          return Math.max(0, volume).toFixed(1);
-        }
+        help: 'Free volume around the tubes: the shell cylinder less what the tubes displace.',
+        calculate: (p) => dialogHxFigure(p, (g, bore) => hxShellSideVolume(g, bore), 1)
       }
     ]
   },
@@ -3708,4 +3691,25 @@ export function auditComponentEditSync(
     }
   }
   return mismatches;
-}
+}
+
+/** A dialog readout from the same geometry the simulation builds (hx-bundles):
+ *  the dialog's shell diameter/length are the vertical-shell footprint, which
+ *  is orientation-independent for these figures. A bundle that does not fit
+ *  shows why instead of a number. */
+function dialogHxFigure(p: Record<string, any>,
+  figure: (g: HxTubeGeometry, bore: number) => number, digits: number): string {
+  const tubeOD = (p.tubeOD || 19) / 1000;
+  const g: HxTubeGeometry = {
+    hxType: p.hxType || 'utube', orientation: 'vertical',
+    width: p.shellDiameter || 2.5, height: p.shellLength || 8,
+    tubeOD, tubeCount: p.tubeCount || 3000,
+  };
+  try {
+    const bore = tubeOD - 2 * hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true, material: p.material }, tubeOD);
+    const v = figure(g, bore);
+    return v > 0 ? v.toFixed(digits) : 'tubes do not fit';
+  } catch (e) {
+    return (e as Error).message.replace(/^\[HX\] /, '');
+  }
+}
