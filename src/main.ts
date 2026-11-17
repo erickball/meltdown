@@ -15,7 +15,6 @@ import xe100SboPresetData from './presets/xe100-sbo.json';
 import xe100DlofcPresetData from './presets/xe100-dlofc.json';
 import xe100ChutePresetData from './presets/xe100-chute.json';
 import xe100SgtrPresetData from './presets/xe100-sgtr.json';
-import xe100PlantPresetData from './presets/xe100-plant.json';
 import twoLoopPresetData from './presets/two-loop.json';
 import promptCritPresetData from './presets/prompt-crit.json';
 import w4loopPresetData from './presets/w4loop.json';
@@ -3155,57 +3154,52 @@ function init() {
           'graphite pebbles are a huge passive heat sink.',
       },
       {
-        label: 'HTGR-200', data: xe100PresetData,
-        tooltip: 'HTGR-200: 200 MWt modular helium pebble-bed at 60 bar, 750°C core outlet, ' +
-          'with a coaxial hot gas duct and a helical once-through steam generator modeled with ' +
-          'moving phase boundaries (water in the tubes - an SG tube leak pushes steam INTO the ' +
-          'primary, where hot graphite gasifies it to H₂ and CO). Walk-away safe: trip the ' +
-          'circulator and watch decay heat leave through the reflector.',
+        label: 'Xe-100', data: xe100PresetData,
+        tooltip: 'Xe-100: a 200 MWt modular helium pebble-bed at 60 bar, 750°C core outlet, ' +
+          'arranged as the real plant is. Everything is above grade: the steam generator stands ' +
+          'on the ground floor of its own hall and the reactor vessel is raised beside it, the ' +
+          'coaxial duct passing through their shared wall from just under the core into the top ' +
+          'of the SG vessel. Helium flows DOWN through the pebble bed; two circulators in ' +
+          'parallel sit on top of the bundle inside the SG vessel. The helical once-through ' +
+          'steam generator is modeled with moving phase boundaries; each bundle has steam and ' +
+          'feedwater isolation valves onto outboard headers, the MSSV hangs off the steam line, ' +
+          'the turbine has a stop valve, and the feedwater heater bleeds from a turbine ' +
+          'extraction port. Walk-away safe: trip the circulators and watch decay heat leave ' +
+          'through the reflector.',
       },
       {
-        label: 'HTGR-200 Station Blackout', data: xe100SboPresetData,
+        label: 'Xe-100 Station Blackout', data: xe100SboPresetData,
         tooltip: 'Pressurized loss of forced cooling (PLOFC): a scripted station blackout at ' +
-          't = 400 s trips the circulator, feed and condensate pumps, shuts the turbine and ' +
+          't = 400 s trips the circulators, feed and condensate pumps, shuts the turbine and ' +
           'extraction (isolating the steam generator) and drops the rods. The helium stays at ' +
           'pressure but nothing moves it, so decay heat soaks into the graphite and leaves through ' +
           'the reflector, vessel wall and RCCS. The bottled steam generator rides on its safety ' +
           'valve. The event fires automatically; a notification marks it.',
       },
       {
-        label: 'HTGR-200 Depressurized Cooldown', data: xe100DlofcPresetData,
+        label: 'Xe-100 Depressurized Cooldown', data: xe100DlofcPresetData,
         tooltip: 'The HTGR design-basis heat-up (DLOFC): at t = 400 s a ~60 mm nozzle shears off ' +
-          'the top of the RPV during a station blackout, no scram. The helium blows down into the ' +
-          'reactor building, convection in the vessel collapses, and decay heat can only leave by ' +
+          'the top of the RPV during a station blackout; the rods drop. The helium blows down into ' +
+          'the reactor building, convection in the vessel collapses, and decay heat can only leave by ' +
           'conduction and radiation through the reflector to the vessel wall and the RCCS. Fuel ' +
           'heats slowly for a day or more; the TRISO particles hold their fission products unless ' +
           'the kernels spend days near 1800 C (watch "SiC failed" on the fuel node).',
       },
       {
-        label: 'HTGR-200 Defuel Chute Break', data: xe100ChutePresetData,
+        label: 'Xe-100 Defuel Chute Break', data: xe100ChutePresetData,
         tooltip: 'At t = 400 s the pebble discharge line shears off where it leaves the bottom of ' +
-          'the RPV, during a station blackout, no scram. The 0.2 m opening blows the helium down ' +
+          'the RPV, during a station blackout; the rods drop. The 0.2 m opening blows the helium down ' +
           'and the pebble bed drains through it onto the reactor building floor at ~8 kg/s (a ' +
           '60 mm hole would jam - pebbles need an opening over 1.5 diameters). The spilled pebbles ' +
           'carry their decay heat and fission products with them, pile up in the building air, ' +
           'heat up and burn. Watch "spilled" on the core graphite node and the heap node.',
       },
       {
-        label: 'HTGR-200 SG Tube Rupture', data: xe100SgtrPresetData,
-        tooltip: 'The HTGR-200 with a scripted turbine trip at t = 400 s (the boiler bottles up ' +
-          'toward the dump setpoint) followed by an SG tube rupture at t = 550 s: 165-bar steam ' +
-          'into 60-bar helium, carried to the hot graphite where it gasifies to H₂ and CO. ' +
-          'Both events fire automatically; notifications mark them.',
-      },
-      {
-        label: 'Xe-100 (Plant Layout)', data: xe100PlantPresetData,
-        tooltip: 'The Xe-100 module arranged as the real plant is: everything above grade, the ' +
-          'steam generator on the ground floor of its own hall and the reactor vessel raised ' +
-          'beside it, the coaxial duct passing through their shared wall from just under the ' +
-          'core into the top of the SG vessel. Helium flows DOWN through the pebble bed; two ' +
-          'circulators in parallel sit on top of the bundle inside the SG vessel. Each bundle ' +
-          'has steam and feedwater isolation valves onto outboard headers, the MSSV hangs off ' +
-          'the steam line, the turbine has a stop valve, and the feedwater heater bleeds from a ' +
-          'turbine extraction port.',
+        label: 'Xe-100 SG Tube Rupture', data: xe100SgtrPresetData,
+        tooltip: 'The Xe-100 with a scripted turbine trip at t = 400 s (the boiler bottles up ' +
+          'toward the dump setpoint) followed by an SG tube rupture at t = 550 s: one tube ' +
+          'severed, 165-bar steam into 60-bar helium, carried to the hot graphite where it ' +
+          'gasifies to H₂ and CO. Both events fire automatically; notifications mark them.',
       },
       {
         label: 'Two-Loop PWR', data: twoLoopPresetData,

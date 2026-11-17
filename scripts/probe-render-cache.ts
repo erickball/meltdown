@@ -20,7 +20,7 @@ const require = createRequire('C:/Users/erick/source/meltdown/package.json');
 const puppeteer = require('puppeteer-core');
 
 const port = process.argv[2] || '3017';
-const presets = process.argv.slice(3).length ? process.argv.slice(3) : ['Xe-100 (HTGR)', 'PWR', 'BWR', '4-Loop PWR (W)'];
+const presets = process.argv.slice(3).length ? process.argv.slice(3) : ['Xe-100', 'PWR', 'BWR', '4-Loop PWR (W)'];
 const outDir = process.env.PROBE_OUT || 'C:/Users/erick/AppData/Local/Temp/claude/c--Users-erick-source-meltdown/66492a99-ed8f-4ab3-8043-d1a111d16281/scratchpad';
 const dpr = parseFloat(process.env.DPR || '1');
 

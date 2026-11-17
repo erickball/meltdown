@@ -79,7 +79,7 @@ function line() {
     `${fT('rccs-panel-1').toFixed(1).padStart(8)} ` +
     `${fT('rccs-panel-2').toFixed(1).padStart(8)} ` +
     `${fT('rccs-tank-1').toFixed(1).padStart(10)} ` +
-    `${fT('bui-1').toFixed(1).padStart(9)} ` +
+    `${fT('bui-rx').toFixed(1).padStart(9)} ` +
     `${flow('flow-rccs-panel-2-rccs-tank-1').toFixed(2).padStart(8)} ` +
     `${(radDuty() / 1e6).toFixed(3).padStart(10)} ` +
     `${(waterDuty() / 1e6).toFixed(3).padStart(12)} ` +
@@ -94,8 +94,11 @@ let tripped = false;
 const reportEvery = Math.max(1, Math.round(seconds / 30));
 for (let t = 0; t < seconds; t++) {
   if (!tripped && st().time >= lofcTime) {
-    const pump = st().components.pumps.get('pump-1');
-    if (pump) pump.running = false;
+    for (const id of ['pump-1a', 'pump-1b']) {
+      const pump = st().components.pumps.get(id);
+      if (!pump) throw new Error(`circulator ${id} not found`);
+      pump.running = false;
+    }
     console.log(`--- Circulator tripped at t=${st().time.toFixed(0)} s ---`);
     tripped = true;
   }

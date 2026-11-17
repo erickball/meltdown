@@ -4,7 +4,7 @@
  * boundary and where it discharges.
  *
  *   npx tsx scripts/probe-scripted-break.ts <preset.json> <nodeId> <area m2> <elevation m> <at s> <run s>
- *   e.g. npx tsx scripts/probe-scripted-break.ts src/presets/xe100-plant.json hx-1-tube 4e-4 7 30 120
+ *   e.g. npx tsx scripts/probe-scripted-break.ts src/presets/xe100.json hx-1-tube 4e-4 7 30 120
  *
  * The break is SCHEDULED (scheduleScenarioEvent) so the solver fires it
  * itself when it reaches `at`, which is the path a saved plant takes.

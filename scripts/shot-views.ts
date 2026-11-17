@@ -16,7 +16,7 @@ const require = createRequire(join(process.cwd(), 'package.json'));
 const puppeteer = require('puppeteer-core');
 
 const port = process.argv[2] || '3027';
-const presets = process.argv.slice(3).length ? process.argv.slice(3) : ['Xe-100 (HTGR)', 'PWR'];
+const presets = process.argv.slice(3).length ? process.argv.slice(3) : ['Xe-100', 'PWR'];
 const outDir = process.env.SHOT_OUT || process.cwd();
 const zoom = parseFloat(process.env.SHOT_ZOOM || '1');
 /** Component id to crop round (SHOT_FOCUS), device pixel ratio (SHOT_DPR), and SHOT_SIM=1 to run the plant first. */

@@ -36,9 +36,9 @@ const TUBES = (process.env.TUBES || 'hx-1-tube,hx-1-tube-b2').split(',');
 const DU3S = (process.env.DU3 || '0,200000,400000,800000').split(',').map(Number);
 
 const ACTIONS: Record<string, ScenarioAction[]> = {
-  circulator: [{ kind: 'pump', id: 'pump-1', running: false, speed: 0 }],
+  circulator: [{ kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 }],
   sbo: [
-    { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+    { kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 },
     { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
     { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
     { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },

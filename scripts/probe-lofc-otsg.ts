@@ -32,9 +32,9 @@ const TRIP = (process.env.TRIP || 'circulator').toLowerCase();
 const TUBE = process.env.TUBE || 'hx-1-tube';
 
 const ACTIONS: Record<string, ScenarioAction[]> = {
-  circulator: [{ kind: 'pump', id: 'pump-1', running: false, speed: 0 }],
+  circulator: [{ kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 }],
   sbo: [
-    { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+    { kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 },
     { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
     { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
     { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },

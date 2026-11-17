@@ -19,7 +19,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const out = (s: string) => process.stdout.write(s + '\n');
 if (process.env.QUIET !== '0') { console.log = () => {}; console.warn = () => {}; }
 
-const preset = process.argv[2] || path.join(HERE, '..', 'src', 'presets', 'xe100-plant.json');
+const preset = process.argv[2] || path.join(HERE, '..', 'src', 'presets', 'xe100.json');
 const compId = process.argv[3] || 'rv-1';
 const temps = (process.env.TEMPS || '300,350,400,450,500,550,600,650,700,750,800,850,900,1000')
   .split(',').map(Number);

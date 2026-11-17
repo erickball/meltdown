@@ -38,12 +38,12 @@ function line(state: SimulationState) {
   const feed = conn(state, 'flow-fw-pump-1-val-fpcv-1');
   // Both bundles hang off the same header - sum them, and report the SPLIT,
   // because two parallel boiling channels swapping flow is its own failure.
-  const toSgA = conn(state, 'flow-val-fwcv-1-hx-1');
-  const toSgB = conn(state, 'flow-val-fwcv-1-hx-1-val-fwcv-1-out-hx-1-tube-1-b2');
+  const toSgA = conn(state, 'flow-val-fwiv-1-hx-1');
+  const toSgB = conn(state, 'flow-val-fwiv-2-hx-1');
   const toSg = { massFlowRate: (toSgA?.massFlowRate ?? 0) + (toSgB?.massFlowRate ?? 0) };
   const split = (toSgA?.massFlowRate ?? 0) - (toSgB?.massFlowRate ?? 0);
   const bleed = conn(state, 'flow-val-bleed-1-fwh-1');
-  const steam = conn(state, 'flow-hx-1-turbine-1');
+  const steam = conn(state, 'flow-val-tsv-1-turbine-1');
   const pumpOut = node(state, 'fw-pump-1');
   const fwhTube = node(state, 'fwh-1-tube');
   const fwhShell = node(state, 'fwh-1-shell');

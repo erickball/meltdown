@@ -5,13 +5,18 @@
  * (helium flow and core dT, steam flow and conditions, SG duty, primary
  * pressure) plus solver health, so the preset can be tuned quickly.
  *
- * Usage: npx tsx scripts/xe100-probe.ts [seconds] [--leak <t_open> <opening>]
+ * Usage: npx tsx scripts/xe100-probe.ts [seconds] [--leak <t_open> <fraction>]
+ *
+ * --leak tears a bundle tube at t_open: a scripted burst of hx-1-tube sized as
+ * `fraction` of one double-ended tube (3e-4 m2), 5 m up the bundle - the plant
+ * has no leak valve.
  */
 
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { buildSimFromFile, run } from './lib/sim-harness';
 import type { SimulationState } from '../src/simulation/types';
+import { scheduleScenarioEvent } from '../src/simulation/scenario';
 import { totalMoles } from '../src/simulation/gas-properties';
 import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
 import { saturatedLiquidEnergy } from '../src/simulation/water-properties';
@@ -26,6 +31,13 @@ const leakTime = leakIdx >= 0 ? parseFloat(args[leakIdx + 1]) : Infinity;
 const leakOpening = leakIdx >= 0 ? parseFloat(args[leakIdx + 2] ?? '1') : 0;
 
 const sim = buildSimFromFile(PRESET);
+if (leakIdx >= 0) {
+  scheduleScenarioEvent(sim.state, {
+    time: leakTime,
+    message: `SG tube torn (${leakOpening} of a double-ended tube)`,
+    actions: [{ kind: 'burst', id: 'hx-1-tube', area: 3e-4 * leakOpening, elevation: 5 }],
+  });
+}
 
 function flow(state: SimulationState, from: string, to: string): number {
   const c = state.flowConnections.find(x => x.id === `flow-${from}-${to}`);
@@ -95,18 +107,7 @@ header();
 line(sim.state);
 
 const reportEvery = Math.max(1, Math.round(seconds / 30));
-let leakDone = false;
 for (let t = 0; t < seconds; t += 1) {
-  if (!leakDone && sim.state.time >= leakTime) {
-    const v = sim.state.components.valves.get('val-leak-1');
-    if (v) {
-      v.position = leakOpening;
-      console.log(`--- SG tube leak opened to ${leakOpening} at t=${sim.state.time.toFixed(1)}s ---`);
-    } else {
-      console.log('!!! val-leak-1 valve state not found');
-    }
-    leakDone = true;
-  }
   try {
     run(sim, 1, 0.05);
   } catch (e: any) {
