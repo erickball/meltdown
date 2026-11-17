@@ -71,8 +71,10 @@ while (sim.state.time < end) {
   acc.t += TICK;
   acc.q += TICK * s.neutronics.power;
   acc.he += TICK * flowBetween(s, 'cv-1-annulus', 'rv-1');
-  acc.steam += TICK * TUBES.reduce((a, id) => a + flowBetween(s, id, 'turbine-1'), 0);
-  acc.bleed += TICK * TUBES.reduce((a, id) => a + flowBetween(s, id, 'val-bleed-1'), 0);
+  // Off the main steam header (pipe-ms-1) since the bundles stopped
+  // feeding the turbine and the bleed directly.
+  acc.steam += TICK * flowBetween(s, 'pipe-ms-1', 'turbine-1');
+  acc.bleed += TICK * flowBetween(s, 'pipe-ms-1', 'val-bleed-1');
   acc.feed += TICK * TUBES.reduce((a, id) => a + flowBetween(s, 'val-fwcv-1', id), 0);
   acc.turb += TICK * tc.turbinePower;
   acc.pump += TICK * tc.feedwaterPumpWork;
