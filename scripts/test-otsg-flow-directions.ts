@@ -59,7 +59,9 @@ function tankPorts(id: string) {
 }
 
 function heTank(id: string, g: Gas): [string, PlantComponent] {
-  const volume = 4000;
+  // Big enough that the supply holds steady while the bundle (helical tubes
+  // ~11x the bundle height, 1.2 t of water) settles - a minute or so.
+  const volume = 16000;
   return [id, {
     id, type: 'tank', label: id,
     position: { x: 0, y: 0 }, rotation: 0, elevation: 0,
@@ -285,7 +287,7 @@ test('Design arrangement: feed up, gas down, hot end at the steam end', () => {
     gasTop: HOT_GAS, gasBottom: GAS_SINK,
     waterBottom: FEED, waterTop: STEAM_SINK,
     tube: BOILING_TUBE,
-  }), 25, 'forward');
+  }), 60, 'forward');
   note('forward', state);
   const { ev, flows } = waterDuties(state);
   assert(flowFrom(state, 'water-bottom', TUBE) > 0.5, 'feed flows in at the bottom');
@@ -404,7 +406,7 @@ test('Cold water backing in at the top quenches the steam; it is not feed', () =
     waterBottom: { T: 400, P: 15e5, phase: 'liquid' },
     waterTop: { T: 330, P: 100e5, phase: 'liquid' },
     tube: { T: 543, P: 55e5, phase: 'two-phase', quality: 0.6 },
-    bottomLine: 0.0003, topLine: 0.0003,
+    bottomLine: 0.0012, topLine: 0.0012,
   });
   let checked = false;
   let steamAtCheck = NaN;
@@ -532,7 +534,9 @@ test('Nothing driving any flow: the bundle settles and sits there', () => {
     waterBottom: still, waterTop: still,
     tube: BOILING_TUBE,
     shell: STILL_GAS,
-  }), 10, 'stagnant');
+    // the helical tubes hold ~1.5 t of water: a drain line sized to it
+    bottomLine: 0.0024,
+  }), 60, 'stagnant');
   note('stagnant', state);
   assert(tubeNode(state).fluid.mass > 0, 'the tube still holds something');
   assert(Math.abs(flowFrom(state, 'water-bottom', TUBE)) < 2 && Math.abs(flowFrom(state, 'water-top', TUBE)) < 2,
