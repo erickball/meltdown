@@ -23,7 +23,7 @@ const nodes = nodeArg.split(',');
 for (const id of nodes) if (!sim.state.flowNodes.has(id)) throw new Error(`no flow node '${id}'`);
 const reliefs = [...sim.state.components.valves].filter(([, v]) => v.relief).map(([id]) => id);
 const fuelId = [...sim.state.thermalNodes.keys()].find(id => id.endsWith('-fuel'));
-const slow = mode === 'slow' ? new SlowModeController({}) : null;
+const slow = mode === 'slow' ? new SlowModeController(process.env.SLOW_CFG ? JSON.parse(process.env.SLOW_CFG) : {}) : null;
 
 const rows: string[] = [['t', 'jump', 'window', 'Tfuel', ...nodes.flatMap(n => [`${n}.m`, `${n}.P`]), ...reliefs.map(r => `${r}.Psense`)].join(',')];
 const row = (s: SimulationState, jump: number) => {

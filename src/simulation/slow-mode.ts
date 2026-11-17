@@ -165,11 +165,10 @@ export interface SlowModeConfig {
    *  pressure must rise 25% faster than the upper edge of its measured rate
    *  to overshoot. */
   reliefApproachFraction: number;
-  /** Loosen a slot's tolerance to its own rms departure from its fitted
-   *  line in the window (WANDER in tryJump) */
-  wanderTolerance: boolean;
   /** Record the tightest per-slot jump limits of every window (getLimits) */
   diagnose?: boolean;
+  /** false turns off the post-jump settling test (for A/B runs only) */
+  settleTest?: boolean;
 }
 
 export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
@@ -187,7 +186,6 @@ export const DEFAULT_SLOW_MODE_CONFIG: SlowModeConfig = {
   initialMaxJump: 120,
   maxJump: 3600,
   reliefApproachFraction: 0.8,
-  wanderTolerance: true,
 };
 
 // Tolerance kinds (see tolerances())
@@ -392,6 +390,8 @@ export class SlowModeController {
   // Fits of the most recent windows (newest first), all with the same slot
   // structure and no discrete change between them
   private windows: WindowFit[] = [];
+  /** Jump limit the last window's SETTLING test gave, if it held for it (0: it did not) */
+  private lastSettleLimit = 0;
   private status: SlowModeStatus;
 
   constructor(config: Partial<SlowModeConfig> = {}) {
@@ -861,7 +861,6 @@ export class SlowModeController {
     let tc = this.phaseStart + tcRel;
     const slope = new Float64Array(N);
     const seSlope = new Float64Array(N);
-    const wander = new Float64Array(N);   // rms departure from the fitted line (WANDER)
     const blocks = this.blocks;
     const B = blocks.length;
     // each block's sum of (t - tc) and (t - tc)^2
@@ -881,31 +880,10 @@ export class SlowModeController {
       const b = Sxt / Stt;
       slope[i] = b;
       const rss = Math.max(0, Sxx - b * Sxt);
-      wander[i] = Math.sqrt(rss / (nS - 2));
       seSlope[i] = Math.max(Math.sqrt(rss / (nS - 2) / Stt),
         blockSe(b, this.sx[i] / s0, blk => blk.sx[i], blk => blk.sxt[i]));
     }
-    // WANDER. A slot that cycles inside the window - a panel's water sloshing
-    // to and from its tank, an inventory breathing through a relief valve
-    // that is not the one the window is locked to - is caught by the end of
-    // the window at an arbitrary point of its cycle, and its rate is only as
-    // certain as that cycle is averaged. Held to the ordinary tolerance (a
-    // thousandth of its contents) such a slot stopped every jump: xe100-sbo's
-    // RCCS panel swings by a thousand kilograms a cycle against a 23 kg
-    // tolerance.
-    //
-    // But an error smaller than the slot's own excursion lands it on a state
-    // it passes through every cycle anyway: what the error changes is WHEN in
-    // its cycle the slot is, not where the plant is. So no slot's tolerance
-    // is tighter than its rms departure from its own fitted line during the
-    // window (for a sinusoid that is 0.71 of the amplitude, for a sawtooth
-    // 0.58: always inside the range the slot actually covered). A slot that
-    // only drifts has no such departure and keeps its ordinary tolerance; one
-    // that merely CURVES has one of a W^2/27 for curvature a over a window W,
-    // which loosens its curvature budget by a factor W^2 / (27 x horizon x J)
-    // - nothing. HOLDING (a slot at its bound) still uses the ordinary one.
-    const baseTol = this.tolerances(s);
-    const tol = c.wanderTolerance ? baseTol.map((t, i) => Math.max(t, wander[i])) : baseTol;
+    const tol = this.tolerances(s);
     const values = new Float64Array(N);
     const lo = new Float64Array(N);
     const hi = new Float64Array(N);
@@ -970,6 +948,82 @@ export class SlowModeController {
       }
     }
 
+    // SETTLING. A jump lands every variable on its own extrapolated value,
+    // and the fast modes that tie them together (gas pressure against wall
+    // temperature, flow against head) then take a while to agree again. The
+    // fixed relaxSeconds is too short for that after a long jump: xe100-sbo
+    // needs ~90 s after a 60 s one, and a window measured through the tail
+    // fitted the decaying transient as rate and curvature, which the next
+    // jump extrapolated - every jump then missed its budget on helium
+    // inventories that, integrated normally, do not oscillate at all, and
+    // the ceiling never left 50-85 s.
+    //
+    // So the window is asked whether it is settled. Its two halves each give
+    // a rate; the fits about to be used for the jump say how much the rate
+    // should change between them (curvature x the time between the halves'
+    // centres). A change beyond that and beyond the halves' noise is
+    // curvature the fits do not explain, cu; left in, it costs cu J^2 / 2
+    // over a jump, judged like any other truncation error (tol J / horizon),
+    // which limits the jump to 2 tol / (horizon cu).
+    //  - If that is shorter than the jump otherwise allowed and LONGER than
+    //    the same figure from the window before (or there was none), the
+    //    plant is settling: this window is not used at all - not for the
+    //    jump, not to verify the last one, not as history - and another is
+    //    measured.
+    //  - If it is no longer than last time, it is not a transient dying
+    //    away but something the window does not average (an oscillation):
+    //    it is passed on as an ordinary limit, flagged as oscillating, which
+    //    lengthens the window if no jump comes of it.
+    // A window locked to a lift cycle is not asked: its halves sit at
+    // different points of the sawtooth.
+    let settleLimit = Infinity, settleKey = '', settleDetail = '';
+    const hB = B >> 1;
+    if (w1 && !lock && hB >= 2 && c.settleTest !== false) {
+      const d1 = tc - w1.tc;
+      const quadraticFit = w2 !== undefined && w1.curv !== undefined;
+      let nA = 0, tA = 0, ttA = 0, nB = 0, tB = 0, ttB = 0;
+      for (let q = 0; q < B; q++) {
+        const b = blocks[q];
+        if (q < hB) { nA += b.n; tA += b.t; ttA += b.tt; } else { nB += b.n; tB += b.t; ttB += b.tt; }
+      }
+      const SttA = ttA - tA * tA / nA, SttB = ttB - tB * tB / nB;
+      const between = tB / nB - tA / nA;   // time between the halves' centres
+      // white-noise standard error of a half's rate from the whole window's
+      const seHalfA = Math.sqrt(Stt / SttA), seHalfB = Math.sqrt(Stt / SttB);
+      for (let i = 0; i < N; i++) {
+        if (this.kinds[i] === K_PASSIVE || this.kinds[i] === K_DECAY_POOL) continue;
+        let xA = 0, xtA = 0, xB = 0, xtB = 0;
+        for (let q = 0; q < B; q++) {
+          const b = blocks[q];
+          if (q < hB) { xA += b.sx[i]; xtA += b.sxt[i]; } else { xB += b.sx[i]; xtB += b.sxt[i]; }
+        }
+        const rateA = (xtA - xA * tA / nA) / SttA;
+        const rateB = (xtB - xB * tB / nB) / SttB;
+        // curvature the jump would use, brought from where it was measured
+        // (midway between the two windows' centres) to this window's centre
+        const a = win.curv![i];
+        const aHere = quadraticFit ? a + (a - w1.curv![i]) / (0.5 * (tc - w2!.tc)) * 0.5 * d1 : a;
+        const noise = k * seSlope[i] * Math.hypot(seHalfA, seHalfB);
+        const m = Math.abs(rateB - rateA - aHere * between) - noise;
+        if (!(m > 0)) continue;
+        const cu = m / between;
+        const Js = 2 * tol[i] / (c.accuracyHorizon * cu);
+        if (Js < settleLimit) {
+          settleLimit = Js; settleKey = this.keys[i];
+          settleDetail = `rate ${rateA.toExponential(2)} -> ${rateB.toExponential(2)} across the window, ` +
+            `fits explain ${(aHere * between).toExponential(2)}, tol=${tol[i].toExponential(2)}`;
+        }
+      }
+      const allowed = Math.min(Math.max(this.jmax, c.minJumpFactor * (c.relaxSeconds + this.measure)), c.maxJump);
+      if (settleLimit < allowed && settleLimit > this.lastSettleLimit) {
+        this.lastSettleLimit = settleLimit;
+        this.status.lastHold = `still settling after the last jump: ${settleKey} would limit a jump to ` +
+          `${settleLimit.toFixed(0)} s (${settleDetail})`;
+        return { state: s };
+      }
+    }
+    this.lastSettleLimit = 0;
+
     // VERIFY the previous jump: the slope now should be what the previous
     // fits predicted for now (beyond their own noise). A slope mismatch m
     // that built up over d1 means the jump's position error was about
@@ -1026,6 +1080,10 @@ export class SlowModeController {
     const nextEvent = s.scenario && s.scenario.fired < s.scenario.events.length
       ? s.scenario.events[s.scenario.fired].time - s.time : Infinity;
     if (nextEvent < J) { J = nextEvent; limitedBy = 'next scenario event'; }
+    let settleBinds = false;
+    if (settleLimit < J) {
+      J = settleLimit; limitedBy = `${settleKey} (not settling)`; limiterDetail = settleDetail; settleBinds = true;
+    }
 
     // Rate and curvature at the end of this window. With three windows the
     // change of curvature prices a quadratic extrapolation; with two, the
@@ -1038,8 +1096,8 @@ export class SlowModeController {
     const held = new Uint8Array(N);
     const tau = new Float64Array(N);   // > 0: extrapolate as an exponential with this time constant
     const limits: { key: string; J: number; detail: string }[] = [];
-    let limiterOscillating = false;
-    let errorLimit = Infinity;   // tightest slot limit, ignoring the ceiling
+    let limiterOscillating = settleBinds;
+    let errorLimit = settleLimit;   // tightest slot limit, ignoring the ceiling
     const waterDominated = new Set<string>();
     for (const [id, node] of s.flowNodes) {
       let mol = 0;
@@ -1052,7 +1110,7 @@ export class SlowModeController {
       rates[i] = R;
       if (this.kinds[i] === K_PASSIVE || this.kinds[i] === K_DECAY_POOL || held[i]) continue;
       const T = tol[i];
-      if ((R < 0 && values[i] - lo[i] <= baseTol[i]) || (R > 0 && hi[i] - values[i] <= baseTol[i])) {
+      if ((R < 0 && values[i] - lo[i] <= tol[i]) || (R > 0 && hi[i] - values[i] <= tol[i])) {
         held[i] = 1;
         const key = this.keys[i];
         if (this.kinds[i] === K_MASS && key.endsWith('.m') && waterDominated.has(key.slice(0, -2))) {
@@ -1112,7 +1170,6 @@ export class SlowModeController {
       if (Ji < J) errorLimit = Math.min(errorLimit, Ji);
       const detail = () => `x=${values[i].toPrecision(6)} R=${R.toExponential(2)} a=${a.toExponential(2)} ` +
         `seR=${seR.toExponential(2)} seA=${seA.toExponential(2)} tol=${T.toExponential(2)}` +
-        (T > baseTol[i] ? ` (wander; ordinary ${baseTol[i].toExponential(2)})` : '') +
         (quadratic ? ` a_prev=${w1.curv![i].toExponential(2)}` : ' (linear)');
       if (c.diagnose) limits.push({ key: this.keys[i], J: Math.min(largestRoot(n3, n2, n1, T, 1e9), jTrunc(1e9)), detail: detail() });
       if (Ji < J) {

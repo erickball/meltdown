@@ -16,7 +16,7 @@ if (snapIn && snapIn !== '-') sim.state = deserializeSimulationState(JSON.parse(
 const end = parseFloat(secArg);
 const every = parseFloat(everyArg ?? '300');
 const snapAt = snapAtArg ? parseFloat(snapAtArg) : end;
-const slow = mode === 'slow' ? new SlowModeController({}) : null;
+const slow = mode === 'slow' ? new SlowModeController(process.env.SLOW_CFG ? JSON.parse(process.env.SLOW_CFG) : {}) : null;
 
 const wall0 = performance.now();
 let steps = 0, stepsAt = 0, next = sim.state.time + every, lastHold = '', snapped = false;

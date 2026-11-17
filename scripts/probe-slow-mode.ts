@@ -27,7 +27,7 @@ for (const [k, e] of [['relTol', 'SLOW_RELTOL'], ['tempTol', 'SLOW_TEMPTOL'], ['
   if (v !== undefined) cfg[k] = v;
 }
 const diagnose = process.env.SLOW_DIAG === '1';
-const slow = mode === 'slow' ? new SlowModeController({ ...cfg, diagnose, ...(process.env.SLOW_WANDER === '0' ? { wanderTolerance: false } : {}) }) : null;
+const slow = mode === 'slow' ? new SlowModeController({ ...cfg, diagnose }) : null;
 let lastLimitsPrinted: unknown = null;
 
 const wall0 = performance.now();
@@ -64,7 +64,7 @@ function line() {
 const t0 = sim.state.time;
 const end = t0 + seconds;
 let next = t0;
-while (sim.state.time < end) {
+while (sim.state.time < end - 1e-9) {   // (a rounding-sized last tick never reached `end`: the probe spun forever)
   if (sim.state.time >= next) { line(); next += every; }
   const tick = Math.min(0.5, end - sim.state.time);
   const r = slow ? slow.advance(sim.solver, sim.state, tick) : sim.solver.advance(sim.state, tick);
