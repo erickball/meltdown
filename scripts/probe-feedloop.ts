@@ -37,8 +37,8 @@ for (let t = 0; t < seconds; t += 1) {
   const ctl = s.components.controllers.get('ctl-fw-1');
   const pump = s.components.pumps.get('fw-pump-1');
   const pv = flow(s, 'flow-fw-pump-1-val-fpcv-1');
-  const wsMain = flow(s, 'flow-hx-1-turbine-1');
-  const wsB2 = flow(s, 'flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet');
+  const wsMain = flow(s, 'flow-hx-1-val-msiv-1');
+  const wsB2 = flow(s, 'flow-hx-1-val-msiv-2');
   const node = s.flowNodes.get('hx-1-tube')!;
   const lvl = nodeLiquidLevel(node);
   const trim = 4.0 - 1.0 * lvl;

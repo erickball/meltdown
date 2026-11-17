@@ -3,7 +3,7 @@
  *
  * The renderer colours a line with its donor node's fluid. Picking the donor
  * from the instantaneous flow sign strobes any line that sloshes about zero
- * net flow - the Xe-100 steam generator's stub up to its shut tube-leak
+ * net flow - the old Xe-100 steam generator's stub up to its shut tube-leak
  * valve reversed ~38 times a second. The tracker instead follows which end's
  * fluid the pipe is actually full of. These tests pin that behaviour and
  * then measure the real preset.
@@ -169,9 +169,10 @@ if (process.argv.includes('--preset')) {
       console.log(`    raw ${(n / window).toFixed(2)}/s -> displayed ` +
         `${((shownFlips.get(id) ?? 0) / window).toFixed(2)}/s  ${id}`);
     }
-    const leak = 'flow-hx-1-val-leak-1';
-    assert((rawFlips.get(leak) ?? 0) / window > 5,
-      'the tube-leak stub no longer strobes unfiltered - retune this test');
+    // Something has to strobe unfiltered for the filter to be under test here
+    // (it used to be the stub up to the old layout's shut tube-leak valve)
+    assert(worstRaw.length > 0 && worstRaw[0][1] / window > 5,
+      'no line strobes unfiltered any more - retune this test');
     for (const [id, n] of shownFlips) {
       assert(n / window < 0.5, `${id} still changes donor ${(n / window).toFixed(2)} times/s`);
     }

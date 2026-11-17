@@ -32,7 +32,7 @@ const fmt = (p: Point) => `(${p.x.toFixed(1)},${p.y.toFixed(1)})`;
 const fmtBox = (b: { left: number; right: number; top: number; bottom: number }) =>
   `[x ${b.left.toFixed(0)}..${b.right.toFixed(0)}, y ${b.top.toFixed(0)}..${b.bottom.toFixed(0)}]`;
 
-const plant = deserializePlantDesign(JSON.parse(fs.readFileSync(path.join(HERE, '../src/presets/xe100-plant.json'), 'utf8')));
+const plant = deserializePlantDesign(JSON.parse(fs.readFileSync(path.join(HERE, '../src/presets/xe100.json'), 'utf8')));
 const comp = (id: string): PlantComponent => {
   const c = plant.components.get(id);
   if (!c) throw new Error(`no component ${id}`);

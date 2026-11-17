@@ -18,15 +18,16 @@ const seconds = parseFloat(secArg ?? '1200');
 const every = parseFloat(everyArg ?? '150');
 const sim = buildSimFromFile(presetPath);
 const DRAWS = [
-  'flow-hx-1-turbine-1', 'flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet',
-  'flow-hx-1-val-bleed-1', 'flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in',
+  // Everything leaving the two bundles: the steam isolation valves (the
+  // heater bleed now comes off the turbine, downstream of these)
+  'flow-hx-1-val-msiv-1', 'flow-hx-1-val-msiv-2',
 ];
 const flow = (id: string) => sim.state.flowConnections.find(c => c.id === id)?.massFlowRate ?? NaN;
 const C = (T: number) => (T - 273.15).toFixed(1);
 
 let next = 0;
 let accT = 0, accFeed = 0, accDraw = 0, accIn = 0;
-const tubeIn = ['flow-val-fwcv-1-hx-1', 'flow-val-fwcv-1-hx-1-val-fwcv-1-out-hx-1-tube-1-b2'];
+const tubeIn = ['flow-val-fwiv-1-hx-1', 'flow-val-fwiv-2-hx-1'];
 const end = sim.state.time + seconds;
 while (sim.state.time < end) {
   sim.state = sim.solver.advance(sim.state, 0.05).state;

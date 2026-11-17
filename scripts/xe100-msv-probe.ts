@@ -55,8 +55,7 @@ console.log('   t(s)  MSV_T(C)  MSV_P(bar)  MSV_m(kg)  u_msv(kJ/kg)  ' +
 
 function line() {
   const burst = st().burstStates?.get('val-msv-1') as any;
-  const inflow = flow('flow-hx-1-val-msv-1') +
-    flow('flow-hx-1-val-msv-1-hx-1-tube-2-b2-val-msv-1-in');
+  const inflow = flow('flow-pipe-ms-1-val-msv-1');
   console.log(
     `${st().time.toFixed(0).padStart(7)} ` +
     `${T('val-msv-1').toFixed(1).padStart(9)} ` +

@@ -1,5 +1,5 @@
 /**
- * Xe-100 plant-layout preset probe (src/presets/xe100-plant.json).
+ * Xe-100 plant-layout preset probe (src/presets/xe100.json).
  *
  * Runs the preset headless and prints the design-point quantities: helium
  * flow split across the two circulators, core temperatures, primary pressure,
@@ -17,7 +17,7 @@ import type { SimulationState } from '../src/simulation/types';
 import { evaluateOtsgSections } from '../src/simulation/operators/otsg-operator';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const PRESET = process.env.PRESET ?? path.join(HERE, '..', 'src', 'presets', 'xe100-plant.json');
+const PRESET = process.env.PRESET ?? path.join(HERE, '..', 'src', 'presets', 'xe100.json');
 
 const args = process.argv.slice(2);
 const seconds = parseFloat(args[0] || '60');

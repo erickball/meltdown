@@ -7,7 +7,7 @@
  * (SG_AREA_FACTOR / SG_TUBE_COUNT there): `areaFactor` multiplies the helical
  * bundle's packing-derived tube length (hx-bundles.ts), `tubeCount` sets the
  * number of tubes that length is divided among. `circulatorSpeed` overrides the
- * helium circulator's fixed speed (pump-1), to look at the design helium flow.
+ * helium circulators' fixed speed (pump-1a/1b), to look at the design helium flow.
  *
  * Flows, powers and the solver's step statistics are AVERAGED over each
  * interval; temperatures, pressures and controller outputs are the values at
@@ -32,9 +32,11 @@ if (factorArg !== undefined && parseFloat(factorArg) !== 1) {
   hx.tubeLengthFactor = helicalLengthFactor(hx) * parseFloat(factorArg);
 }
 if (circArg !== undefined) {
-  const circ = (plant.components as Array<[string, any]>).find(([id]) => id === 'pump-1')![1];
-  circ.speed = parseFloat(circArg);
-  console.log(`Circulator pump-1 speed set to ${circ.speed}`);
+  for (const circId of ['pump-1a', 'pump-1b']) {
+    const circ = (plant.components as Array<[string, any]>).find(([id]) => id === circId)![1];
+    circ.speed = parseFloat(circArg);
+    console.log(`Circulator ${circId} speed set to ${circ.speed}`);
+  }
 }
 const tubeLen = hxTubeLength(hx);
 console.log(`SG: ${hx.tubeCount} tubes x ${tubeLen.toFixed(1)} m, OD ${(hx.tubeOD * 1e3).toFixed(0)} mm, ` +
@@ -106,13 +108,13 @@ while (sim.state.time < end) {
   console.log(
     `t=${s.time.toFixed(0)} | Q ${a('q', 1e6)} MWt | He ${a('he')} kg/s core ${C('rv-1')}->${C('cb-1')} C, ` +
     `shell ${C('hx-1-shell')} sgv ${C('tank-sg-1')} | P(bar) duct ${bar('cv-1-inner')} shell ${bar('hx-1-shell')} ` +
-    `sgv ${bar('tank-sg-1')} circ ${bar('pump-1')} rv ${bar('rv-1')} cb ${bar('cb-1')} | ` +
+    `sgv ${bar('tank-sg-1')} circ ${bar('pump-1a')}/${bar('pump-1b')} rv ${bar('rv-1')} cb ${bar('cb-1')} | ` +
     `steam ${a('steam')} bleed ${a('bleed')} feed ${a('feed')} kg/s | ${tubes.join(' ; ')} | ` +
     `feedT ${C('val-fwcv-1')} C, P(bar) fwpump ${bar('fw-pump-1')} fwcv ${bar('val-fwcv-1')} fwh-shell ${bar('fwh-1-shell')} ` +
     `turbine ${bar('turbine-1')} | gross ${a('turb', 1e6)} MWe pumps ${(acc.pump / acc.t / 1e6).toFixed(2)} MW ` +
     `rej ${a('rej', 1e6)} MW eff ${(100 * acc.turb / acc.q).toFixed(1)}% | ` +
     `ctl ${['ctl-rods-1', 'ctl-msp-1', 'ctl-fw-1', 'ctl-fwh-1', 'ctl-fwhlvl-1'].map(ctl).join(' ')} ` +
-    `speed fw=${pumpSpeed('fw-pump-1')} circ=${pumpSpeed('pump-1')} | ` +
+    `speed fw=${pumpSpeed('fw-pump-1')} circ=${pumpSpeed('pump-1a')}/${pumpSpeed('pump-1b')} | ` +
     `steps ${steps} rej ${rejected} (${(100 * rejected / Math.max(1, steps)).toFixed(1)}%) ` +
     `mean dt ${(1e3 * acc.t / Math.max(1, steps - rejected)).toFixed(2)} ms, ${wall.toFixed(0)} s wall` +
     // Running totals since the build, most frequent first

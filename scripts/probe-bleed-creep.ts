@@ -48,7 +48,7 @@ for (let i = 1; i <= Math.round(seconds / tick); i++) {
     const L = evaluateOtsgSections(state, id, n).ev.sections.map(s => (100 * s.lengthFrac).toFixed(0));
     parts.push(`${id} L=${L.join('/')}`);
   }
-  const flows = (process.env.FLOWS || 'flow-fw-pump-1-val-fpcv-1,flow-hx-1-turbine-1,flow-hx-1-val-bleed-1').split(',');
+  const flows = (process.env.FLOWS || 'flow-fw-pump-1-val-fpcv-1,flow-val-tsv-1-turbine-1,flow-turbine-1-val-bleed-1').split(',');
   parts.push(flows.map(f => `${f.replace(/^flow-/, '')}=${(state.flowConnections.find(c => c.id === f)?.massFlowRate ?? NaN).toFixed(1)}`).join(' '));
   const b = (state as any).burstStates?.get?.(COMP)
     ?? [...((state as any).burstStates?.values?.() ?? [])].find((s: any) => s.componentId === COMP);

@@ -21,7 +21,7 @@ const NP = parseInt(process.env.NP || '55', 10);
 const DU3S = (process.env.DU3 || '0').split(',').map(Number);
 
 const actions: ScenarioAction[] = [
-  { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+  { kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 },
   { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
   { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
   { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },

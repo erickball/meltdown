@@ -12,7 +12,7 @@
  *
  * Env:
  *   TRIP=circulator (default) | sbo | none | scenario
- *     circulator - trip pump-1 only; every other control keeps acting
+ *     circulator - trip the circulators (pump-1a/1b) only; every other control keeps acting
  *     sbo        - circulator + feed + condensate pumps, turbine shut (as
  *                  xe100-sbo.json does), applied by the same scenario actions
  *     scenario   - fire nothing here; the preset's own scenario block acts
@@ -41,9 +41,9 @@ console.log(`preset=${path.basename(preset)} trip=${TRIP}@${tripTime}s feed=${pr
   `nodes=${sim.state.flowNodes.size} conns=${sim.state.flowConnections.length}`);
 
 const TRIP_ACTIONS: Record<string, ScenarioAction[]> = {
-  circulator: [{ kind: 'pump', id: 'pump-1', running: false, speed: 0 }],
+  circulator: [{ kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 }],
   sbo: [
-    { kind: 'pump', id: 'pump-1', running: false, speed: 0 },
+    { kind: 'pump', id: 'pump-1a', running: false, speed: 0 }, { kind: 'pump', id: 'pump-1b', running: false, speed: 0 },
     { kind: 'pump', id: 'fw-pump-1', running: false, speed: 0 },
     { kind: 'pump', id: 'cond-pump-1', running: false, speed: 0 },
     { kind: 'controller', id: 'ctl-fw-1', mode: 'manual', manualOutput: 0 },
@@ -100,7 +100,7 @@ function otsg(id: string) {
 }
 
 function header() {
-  console.log('\n  window       x-rt  steps  rej%  dt(ms)  He(kg/s)  Pwr(MW)  Ptube(bar)  Mtube(kg)  m1(kg)  L1/2/3     T3(C)  Wfeed  Wsteam  Pprel  Pleak   Pmsv');
+  console.log('\n  window       x-rt  steps  rej%  dt(ms)  He(kg/s)  Pwr(MW)  Ptube(bar)  Mtube(kg)  m1(kg)  L1/2/3     T3(C)  Wfeed  Wsteam  Pprel   Pmsv');
 }
 function line(t0: number, t1: number) {
   const stats = sim.solver.getMetrics();
@@ -121,10 +121,9 @@ function line(t0: number, t1: number) {
     `${o.m1.toFixed(0).padStart(7)} ` +
     `${o.L.padStart(9)} ` +
     `${o.T3.toFixed(0).padStart(9)} ` +
-    `${W('flow-val-fwcv-1-hx-1').toFixed(1).padStart(6)} ` +
-    `${W('flow-pipe-ms-1-turbine-1').toFixed(1).padStart(7)} ` +
+    `${W('flow-val-fwiv-1-hx-1').toFixed(1).padStart(6)} ` +
+    `${W('flow-val-tsv-1-turbine-1').toFixed(1).padStart(7)} ` +
     `${P('val-prel-1').toFixed(1).padStart(6)} ` +
-    `${P('val-leak-1').toFixed(1).padStart(6)} ` +
     `${P('val-msv-1').toFixed(1).padStart(6)}`);
   const rd = rejectionDelta();
   if (rd.length) {

@@ -21,7 +21,7 @@ if (process.env.QUIET !== '0') { console.log = () => {}; console.warn = () => {}
 const seconds = parseFloat(process.argv[2] || '300');
 const preset = process.argv[3] || path.join(HERE, '..', 'src', 'presets', 'xe100.json');
 const conns = (process.env.CONNS ||
-  'flow-hx-1-val-bleed-1,flow-hx-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in,flow-val-bleed-1-fwh-1').split(',');
+  'flow-turbine-1-val-bleed-1,flow-turbine-1-val-bleed-1-hx-1-tube-2-b2-val-bleed-1-in,flow-val-bleed-1-fwh-1').split(',');
 
 const sim = buildSimFromFile(preset);
 run(sim, seconds, 0.1);

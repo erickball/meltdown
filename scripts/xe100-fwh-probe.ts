@@ -38,8 +38,7 @@ console.log('-'.repeat(120));
 function line() {
   const bleed = flow('flow-val-bleed-1-fwh-1');
   const drain = flow('flow-fwh-1-val-fwhdr-1');
-  const toTurb = flow('flow-hx-1-turbine-1') +
-    flow('flow-hx-1-turbine-1-hx-1-tube-2-b2-inlet');
+  const toTurb = flow('flow-val-tsv-1-turbine-1');
   console.log(
     `${st().time.toFixed(0).padStart(7)} ` +
     `${P('fwh-1-shell').toFixed(2).padStart(8)} ` +
