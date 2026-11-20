@@ -1648,8 +1648,12 @@ function init() {
       // Set random seed for deterministic mode
       const deterministicCheckbox = document.getElementById('deterministic-mode') as HTMLInputElement;
       setSimulationRandomSeed(deterministicCheckbox?.checked ? 0 : undefined);
-      const newSimState = createSimulationFromPlant(plantState);
-      gameLoop.resetState(newSimState, serializePlantState(plantState));
+      // From the design the running sim was built from, NOT plantState: the
+      // display sync has overwritten plantState's ICs (see simDesign)
+      const design = simDesign ?? serializePlantState(plantState) as Record<string, unknown>;
+      const newSimState = createSimulationFromPlant(deserializePlantDesign(design));
+      simDesign = design;
+      gameLoop.resetState(newSimState, design);
       // SCRAM is automatically cleared since we have a fresh simulation state
       gameMode?.onSimReset();
       updateScramDisplay();
@@ -1681,6 +1685,16 @@ function init() {
   const placementHintDiv = document.getElementById('placement-hint') as HTMLDivElement;
 
   let currentMode: 'construction' | 'simulation' = 'construction';
+  // The design (with its initial conditions) the running simulation was
+  // built from, serialized BEFORE syncSimulationToVisuals ran. It has to be
+  // kept apart from plantState: the per-frame sync writes DISPLAY values into
+  // the very IC fields the factory reads (total pressure into
+  // fluid.pressure, which the factory reads as the steam partial and puts
+  // the NCG on top of), so a rebuild from plantState while running fills
+  // every gas volume with about its own pressure of steam. Reset SCRAM
+  // rebuilds from this. null = no simulation belongs to the plant on screen
+  // (a different plant was loaded since), so Simulation must build one.
+  let simDesign: Record<string, unknown> | null = null;
   let constructionSubMode: 'place' | 'connect' | 'move' = 'place';
   // Live sim state saved on entering construction mode, so returning to
   // simulation mode resumes it (edited components re-initialize instead).
@@ -2627,6 +2641,8 @@ function init() {
     // a superseded snapshot rather than resuming the old plant onto this one)
     resumeSnapshot = null;
     pendingLiveEdit = null;
+    // Whatever is running belongs to the previous plant
+    simDesign = null;
     // Jobs describe parts of a plant that is about to stop existing
     buildQueue.clear();
     plantState.components.clear();
@@ -2699,6 +2715,8 @@ function init() {
       abandonLiveEdit(pendingLiveEdit);
     }
     const design = deserializePlantDesign(epoch.design as Record<string, unknown>);
+    // The restored state was built from this design
+    simDesign = epoch.design as Record<string, unknown>;
     plantState.components.clear();
     for (const [id, component] of design.components) plantState.components.set(id, component);
     plantState.connections = design.connections;
@@ -2946,7 +2964,8 @@ function init() {
         showNotification('Design loaded; the saved simulation state was skipped (simulation mode unavailable right now).', 'warning');
         return;
       }
-      gameLoop.setSimulationState(restored, serializePlantState(plantState));
+      // setMode recorded the design before its display sync overwrote the ICs
+      gameLoop.setSimulationState(restored, simDesign);
       plantCanvas.setSimState(restored);
       syncSimulationToVisuals(restored, plantState);
       updatePauseButton();
@@ -3520,7 +3539,8 @@ function init() {
     // throws while repainting the panels must NOT leave it stopped - a plant
     // frozen by a display bug is the worst possible failure of a live edit.
     try {
-      gameLoop.rebuildSimulationState(result.state, serializePlantState(plantState), what);
+      simDesign = serializePlantState(plantState) as Record<string, unknown>;
+      gameLoop.rebuildSimulationState(result.state, simDesign, what);
       gameLoop.setScramSetpoints(getScramSetpointsFromPlant(plantState));
       plantCanvas.setSimState(result.state);
       refreshDisplayAfterRestore();
@@ -3900,6 +3920,12 @@ function init() {
     // left half-installed on a map the player is about to rebuild, and the
     // clock that was paying for it has stopped.
     if (mode === 'construction') buildQueue.finishAll();
+    // Already running this plant: nothing to do. Rebuilding here used to
+    // re-initialize from plantState, whose IC fields the display sync has
+    // overwritten with display values (see simDesign) - every helium volume
+    // came back holding tonnes of steam. A plant loaded since (simDesign
+    // null) still gets its simulation built.
+    if (mode === 'simulation' && currentMode === 'simulation' && simDesign !== null) return;
     const previousMode = currentMode;
     currentMode = mode;
 
@@ -4029,10 +4055,11 @@ function init() {
 
       // A resumed simulation continues the rewind history as a new epoch
       // (the pre-visit plant stays seekable); a fresh build starts one
+      simDesign = serializePlantState(plantState) as Record<string, unknown>;
       if (resumed) {
-        gameLoop.rebuildSimulationState(newSimState, serializePlantState(plantState), 'Returned from construction mode');
+        gameLoop.rebuildSimulationState(newSimState, simDesign, 'Returned from construction mode');
       } else {
-        gameLoop.setSimulationState(newSimState, serializePlantState(plantState));
+        gameLoop.setSimulationState(newSimState, simDesign);
       }
 
       // Start paused so the user can look the plant over (and step through)
