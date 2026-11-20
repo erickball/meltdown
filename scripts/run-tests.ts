@@ -38,6 +38,7 @@ const TESTS: TestDef[] = [
   { file: 'scripts/test-display-fluid.ts', fast: true },
   { file: 'scripts/test-grid-geometry.ts', fast: true },
   { file: 'scripts/test-grid-sections.ts', fast: true },
+  { file: 'scripts/test-scene3d.ts', fast: true },
   { file: 'scripts/test-stock.ts', fast: true },
   { file: 'scripts/test-electrical.ts', fast: true },
   { file: 'scripts/test-electrical-plant.ts', fast: false },
