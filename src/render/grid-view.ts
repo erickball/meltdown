@@ -1552,7 +1552,7 @@ export class GridView {
   }
 
   private wallColor(building: BuildingComponent): { wall: string; light: string } {
-    const steelFrac = building.steelFraction || 0.1;
+    const steelFrac = building.steelFraction ?? 0.1;
     const r = Math.round(100 * steelFrac + 180 * (1 - steelFrac));
     const g = Math.round(105 * steelFrac + 175 * (1 - steelFrac));
     const b = Math.round(115 * steelFrac + 165 * (1 - steelFrac));

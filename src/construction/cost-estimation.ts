@@ -17,7 +17,7 @@
  * and regulatory compliance. We use a 3x multiplier as default.
  */
 
-import { designWallThickness, crossVesselWalls, type WallForm } from '../simulation/wall-sizing';
+import { designWallThickness, crossVesselWalls, type WallForm, buildingWalls, buildingSpecOf, type BuildingSpec } from '../simulation/wall-sizing';
 import { MATERIALS, resolveMaterial } from '../simulation/materials';
 
 /** Price of a pressure boundary's alloy relative to the steel grade an
@@ -965,98 +965,85 @@ export function estimateSwitchyardCost(props: {
 }
 
 /**
- * Estimate cost for a building/containment structure
+ * Building / containment cost, from the quantities its walls are sized to
+ * (wall-sizing.ts buildingWalls) rather than from a pressure multiplier:
  *
- * Major components:
- * - Foundation and basemat (reinforced concrete)
- * - Steel containment liner (1/4" to 3/8" thick)
- * - Reinforced concrete shell (3-4 feet thick)
- * - Penetrations (equipment hatches, personnel airlocks, piping)
- * - Containment spray/cooling systems (if applicable)
+ * - Steel, by the form it is built in:
+ *     plate - priced exactly as the plate of a welded pressure vessel (raw
+ *             plate x material factor, ASME fabrication, rigging/erection),
+ *             so a solid-steel containment costs what a vessel of that
+ *             steel would.
+ *     rebar - Grade 60 bar at ~$1/kg plus ~$1.5/kg to cut, bend, place and
+ *             splice it (US commercial rates; the nuclear premium is the
+ *             NQA-1 factor below).
+ * - Concrete in the walls and dome/roof: formwork, placement and curing,
+ *   ~$1,000/m3 installed (reinforcement priced separately above).
+ * - Basemat: 3 m of concrete under the footprint. It is not sized by the
+ *   rating here (it is set by the building's weight and seismic loads).
+ * - Penetrations (equipment hatch, airlocks, piping): scale with the
+ *   square root of the free volume.
+ * - NQA-1: the same quality-assurance factor every other component carries.
  *
- * Reference costs (2024 USD):
- * - PWR containment: $200-400M for large units
- * - Concrete: ~$200-300/yd³ installed for nuclear grade
- * - Steel liner: ~$15-25/lb installed
+ * The rating enters only through the walls it sizes - more pressure means
+ * more steel and concrete, nothing else.
  */
+const REBAR_PRICE = 1.0;          // $/kg, Grade 60 bar delivered
+const REBAR_PLACING = 1.5;        // $/kg to cut, bend, place and splice
+const CONCRETE_WALL_COST = 1000;  // $/m3, walls and dome, installed, rebar excluded
+const CONCRETE_BASEMAT_COST = 750;  // $/m3
+const BASEMAT_THICKNESS = 3;      // m
+
 export function estimateBuildingCost(props: {
-  volume: number;           // m³ - internal volume
-  height: number;           // m
-  wallThickness: number;    // m
-  steelFraction: number;    // 0-1 fraction of wall that is steel
+  spec: BuildingSpec;
   pressureRating: number;   // bar
-  shape: 'cylinder' | 'rectangle';
   nqa1: boolean;
 }): CostEstimate {
-  // Calculate surface area
-  let surfaceArea: number;  // m²
+  const { spec } = props;
+  const walls = buildingWalls(spec, props.pressureRating);
+  const steelMass = walls.steelVolume * STEEL_DENSITY;
 
-  if (props.shape === 'cylinder') {
-    // Cylinder: V = π * r² * h, solve for r
-    const radius = Math.sqrt(props.volume / (Math.PI * props.height));
-    surfaceArea = 2 * Math.PI * radius * props.height + 2 * Math.PI * radius * radius; // walls + top + bottom
+  const plate = spec.steelForm === 'plate';
+  let steelMaterial: number, steelFabrication: number, steelInstallation: number;
+  if (plate) {
+    steelMaterial = steelMass * STEEL_PRICES.carbonSteel * alloyPriceFactor(spec.material);
+    steelFabrication = steelMaterial * FABRICATION_MULTIPLIERS.pressureVessel;
+    steelInstallation = (steelMaterial + steelFabrication) * INSTALLATION_MULTIPLIERS.pressureVessel;
   } else {
-    // Assume square cross-section for simplicity
-    const sideLength = Math.sqrt(props.volume / props.height);
-    surfaceArea = 4 * sideLength * props.height + 2 * sideLength * sideLength;
+    steelMaterial = steelMass * REBAR_PRICE;
+    steelFabrication = 0;
+    steelInstallation = steelMass * REBAR_PLACING;
   }
 
-  // Steel liner cost
-  // Steel liner is typically 6-10mm thick, but we use steelFraction of wall
-  const steelThickness = props.wallThickness * props.steelFraction; // m
-  const steelVolume = surfaceArea * steelThickness; // m³
-  const steelDensity = 7850; // kg/m³
-  const steelMass = steelVolume * steelDensity; // kg
-  const steelCostPerKg = 12; // $/kg installed (nuclear grade)
-  const steelCost = steelMass * steelCostPerKg;
+  const concreteCost = walls.concreteVolume * CONCRETE_WALL_COST;
+  const footprint = spec.shape === 'rectangle'
+    ? (spec.width ?? 40) * (spec.length ?? 40)
+    : Math.PI * ((spec.diameter ?? 40) / 2) ** 2;
+  const basematCost = footprint * BASEMAT_THICKNESS * CONCRETE_BASEMAT_COST;
+  const volume = footprint * spec.height;
+  const penetrationCost = 5_000_000 * Math.sqrt(volume / 10000);
 
-  // Concrete shell cost
-  const concreteThickness = props.wallThickness * (1 - props.steelFraction);
-  const concreteVolume = surfaceArea * concreteThickness; // m³
-  // Convert to cubic yards (1 m³ = 1.308 yd³)
-  const concreteCubicYards = concreteVolume * 1.308;
-  const concreteCostPerYard = 800; // $/yd³ installed (nuclear grade with heavy rebar)
-  const concreteCost = concreteCubicYards * concreteCostPerYard;
-
-  // Foundation/basemat
-  // Basemat is typically 3-4m thick for seismic and structural loads
-  const basematThickness = 3; // m
-  const basematArea = props.volume / props.height; // footprint area in m²
-  const basematVolume = basematArea * basematThickness;
-  const basematCost = basematVolume * 1.308 * 600; // Slightly cheaper than walls
-
-  // Penetrations (equipment hatch, personnel airlocks, piping penetrations)
-  // Major cost items - scale with volume
-  const penetrationBaseCost = 5000000; // Base cost for small building
-  const penetrationScaleFactor = Math.pow(props.volume / 10000, 0.5); // Scale with sqrt of volume
-  const penetrationCost = penetrationBaseCost * penetrationScaleFactor;
-
-  // Pressure-related reinforcement
-  // Higher pressure rating requires thicker walls and more reinforcement
-  const pressureFactor = 1 + (props.pressureRating - 3) * 0.15; // 15% more per bar above 3
-
-  const materialCost = (steelCost + concreteCost + basematCost + penetrationCost) * pressureFactor;
-
-  // Installation (containment is complex to construct - use pressure vessel multiplier)
-  const installationCost = materialCost * INSTALLATION_MULTIPLIERS.pressureVessel;
-
-  const subtotal = materialCost + installationCost;
-
-  // NQA-1 is essentially required for containment
+  const materialCost = steelMaterial;
+  const fabricationCost = steelFabrication;
+  const installationCost = steelInstallation + concreteCost + basematCost + penetrationCost;
+  const subtotal = materialCost + fabricationCost + installationCost;
   const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
 
   return {
     materialCost,
-    fabricationCost: 0,
+    fabricationCost,
     installationCost,
     subtotal,
     nqa1Premium,
     total: subtotal + nqa1Premium,
     breakdown: {
-      steelCost: Math.round(steelCost),
+      steelMass: Math.round(steelMass),
+      steelCost: Math.round(steelMaterial + steelFabrication + steelInstallation),
+      concreteVolume: Math.round(walls.concreteVolume),
       concreteCost: Math.round(concreteCost),
       basematCost: Math.round(basematCost),
       penetrationCost: Math.round(penetrationCost),
+      wallThickness: walls.wall * 1000, // mm
+      roofThickness: walls.roof * 1000, // mm
     },
   };
 }
@@ -1269,21 +1256,9 @@ export function estimateComponentCost(
 
     case 'building': {
       // Calculate volume based on shape
-      const buildingHeight = props.height || 25;
-      let volume: number;
-      if (props.buildingShape === 'rectangle') {
-        volume = (props.width || 40) * (props.length || 40) * buildingHeight;
-      } else {
-        const diameter = props.diameter || 40;
-        volume = Math.PI * Math.pow(diameter / 2, 2) * buildingHeight;
-      }
       return estimateBuildingCost({
-        volume,
-        height: buildingHeight,
-        wallThickness: props.wallThickness || 1.5,
-        steelFraction: props.steelFraction || 0.1,
-        pressureRating: props.pressureRating || 4,
-        shape: props.buildingShape || 'cylinder',
+        spec: buildingSpecOf({ ...props, height: props.height || 25 }),
+        pressureRating: props.pressureRating ?? 4,
         nqa1,
       });
     }

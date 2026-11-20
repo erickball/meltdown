@@ -23,7 +23,7 @@ import type { ComponentType, StockLine } from '../types';
 import {
   designWallThickness, hxTubeWall, crossVesselWalls, type WallForm,
   maxDesignPressureBar, maxDesignPressureAnyMaterialBar,
-  buildingWallThickness, maxBuildingDesignPressureBar,
+  buildingWalls, buildingSpecOf, maxBuildingDesignPressureBar, maxBuildingDesignPressureAnyBar,
 } from '../simulation/wall-sizing';
 import { MATERIALS, DEFAULT_MATERIAL, type StructuralMaterial } from '../simulation/materials';
 
@@ -150,8 +150,16 @@ const SHELL_RATING_MAX = codeRatingMax('welded', 'inner');
 const BODY_RATING_MAX = codeRatingMax('seamless', 'inner');
 const TUBE_RATING_MAX = codeRatingMax('seamless', 'outer');
 const CROSS_VESSEL_RATING_MAX = Math.min(codeRatingMax('welded', 'outer'), BODY_RATING_MAX);
-const STEEL_FRACTION_MAX = 0.5;
-const BUILDING_RATING_MAX = Math.floor(maxBuildingDesignPressureBar(STEEL_FRACTION_MAX, 'cylinder'));
+const BUILDING_RATING_MAX = Math.floor(maxBuildingDesignPressureAnyBar());
+/** A building dialog figure from the shared wall model, or why there is none. */
+function dialogBuildingFigure(p: Record<string, any>, pick: (w: ReturnType<typeof buildingWalls>) => number, digits: number): string {
+  if (!(p.steelFraction > 0)) return 'no steel';
+  try {
+    return pick(buildingWalls(buildingSpecOf(p), p.pressureRating ?? 4)).toFixed(digits);
+  } catch {
+    return 'too high';
+  }
+}
 // The condenser's own shell formula (wallThickness below): S = 137 MPa, E = 0.85
 const CONDENSER_S_E = 137e6 * 0.85;
 const CONDENSER_RATING_MAX = Math.floor(CONDENSER_S_E / 2.6 / 1e5);
@@ -1124,18 +1132,35 @@ export const componentDefinitions: Record<string, {
       { name: 'diameter', type: 'number', label: 'Diameter', default: 40, min: 10, max: 80, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'cylinder' } },
       { name: 'width', type: 'number', label: 'Width', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
       { name: 'length', type: 'number', label: 'Length', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 4, min: 1, max: BUILDING_RATING_MAX, step: 0.5, unit: 'bar',
-        codeLimit: (p) => maxBuildingDesignPressureBar(p.steelFraction ?? 0.1, p.buildingShape),
-        help: 'Design pressure for containment (typically 3-5 bar for a large dry PWR containment). The ceiling is where the wall formula stops applying (wall thicker than half the radius); more steel and a cylindrical shape raise it.' },
-      { name: 'steelFraction', type: 'number', label: 'Steel Liner Fraction', default: 0.1, min: 0, max: STEEL_FRACTION_MAX, step: 0.05, help: 'Fraction of wall that is steel (rest is concrete)' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 4, min: 0.01, max: BUILDING_RATING_MAX, step: 0.5, unit: 'bar',
+        // No steel is reported by validatePressure with its own reason
+        codeLimit: (p) => p.steelFraction > 0 ? maxBuildingDesignPressureBar(buildingSpecOf(p)) : Infinity,
+        help: 'Design pressure (gauge) the walls are sized for. Large dry PWR containments are 3-5 bar; an ordinary building is not a pressure boundary and holds a few hundredths of a bar. ' +
+          'The ceiling is where the wall formulas stop applying: a curved wall more than half its radius thick, or a flat wall more than a quarter of its span. More steel and a cylindrical shape raise it.' },
+      { name: 'steelForm', type: 'select', label: 'Steel Form', default: 'rebar', options: [
+        { value: 'rebar', label: 'Reinforcing bar (reinforced concrete)' },
+        { value: 'plate', label: 'Welded plate (steel shell / composite)' },
+      ], help: 'How the steel in the wall is built. Concrete carries no tension, so the steel takes all of the pressure load either way. ' +
+        'Rebar (Grade 60) runs in one direction per bar, so it is split between hoop and vertical; it is designed to ASME III Division 2 (0.9 yield under 1.5x the design pressure) and is cheap per tonne. ' +
+        'Plate carries both directions at once and is sized like a pressure-vessel shell by the material and the nuclear-QA box; it costs what vessel plate costs. ' +
+        'Plate at a steel fraction of 1 is a free-standing steel containment.' },
+      { ...MATERIAL_OPTION, dependsOn: { field: 'steelForm', value: 'plate' } },
+      { name: 'steelFraction', type: 'number', label: 'Steel Fraction', default: 0.04, min: 0, max: 1, step: 0.005,
+        help: 'Share of the wall cross-section that is steel; the rest is concrete. Less steel means a thicker wall for the same pressure (the steel area needed is fixed by the pressure; the concrete just surrounds it). ' +
+          'Heavily reinforced concrete containments run a few percent; 1 is solid steel.' },
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'm',
-        calculate: (p) => {
-          // Shared with the renderer (wall-sizing.ts buildingWallThickness)
-          const span = p.buildingShape === 'rectangle'
-            ? Math.max(p.width || 40, p.length || 40)
-            : (p.diameter || 40);
-          return buildingWallThickness(p.pressureRating || 4, span, p.steelFraction ?? 0.1, p.buildingShape).toFixed(2);
-        }
+        help: 'Side walls, sized from the rating, steel form and fraction (the thickest panel, for a rectangle). This is the wall the simulation heats, draws and bursts.',
+        calculate: (p) => dialogBuildingFigure(p, w => w.wall, 3)
+      },
+      { name: 'roofThickness', type: 'calculated', label: 'Dome / Roof Thickness', default: 0, unit: 'm',
+        help: 'A cylinder is capped by a hemispherical dome (membrane, half the hoop load); a rectangle by a flat roof slab in bending.',
+        calculate: (p) => dialogBuildingFigure(p, w => w.roof, 3)
+      },
+      { name: 'steelMass', type: 'calculated', label: 'Steel in Walls and Roof', default: 0, unit: 't',
+        calculate: (p) => dialogBuildingFigure(p, w => w.steelVolume * 7.85, 0)
+      },
+      { name: 'concreteVolume', type: 'calculated', label: 'Concrete in Walls and Roof', default: 0, unit: 'm³',
+        calculate: (p) => dialogBuildingFigure(p, w => w.concreteVolume, 0)
       },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 0, min: 0, max: 50, step: 1, unit: '%', help: 'Normally 0% (dry containment)' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 1.01325, min: 0.5, max: BUILDING_RATING_MAX, step: 0.1, unit: 'bar', help: 'Normally atmospheric (1.01 bar). Cannot exceed the pressure rating.' },
@@ -1914,10 +1939,19 @@ export class ComponentDialog {
     // Function to update price estimate
     const updatePriceEstimate = () => {
       const props = this.getCurrentProperties(options);
-      const estimate = estimateComponentCost(this.currentType, props);
-
       const priceDisplay = document.getElementById('price-estimate');
       const breakdownDisplay = document.getElementById('price-breakdown');
+      // A design that cannot be sized (a building with no steel, a rating
+      // beyond any wall) has no price: say why instead of throwing mid-edit
+      let estimate: ReturnType<typeof estimateComponentCost>;
+      try {
+        estimate = estimateComponentCost(this.currentType, props);
+      } catch (e) {
+        if (priceDisplay) priceDisplay.textContent = 'n/a';
+        if (breakdownDisplay) breakdownDisplay.textContent = (e as Error).message.replace(/^\[\w+\]\s*/, '');
+        updateCalculatedFields();
+        return;
+      }
 
       if (priceDisplay) {
         priceDisplay.textContent = formatCost(estimate.total);
@@ -3021,6 +3055,10 @@ export class ComponentDialog {
     const initialPressure = properties.initialPressure;
     const pressureRating = properties.pressureRating;
 
+    if (this.currentType === 'building' && !(properties.steelFraction > 0)) {
+      return 'Steel fraction must be above 0: concrete carries no tension, so a wall with no steel cannot hold any pressure';
+    }
+
     // Only validate if both fields exist
     if (initialPressure !== undefined && pressureRating !== undefined) {
       if (initialPressure > pressureRating) {
@@ -3534,10 +3572,18 @@ export class ComponentDialog {
     // Function to update price estimate
     const updatePriceEstimate = () => {
       const props = this.getCurrentProperties(options);
-      const estimate = estimateComponentCost(this.currentType, props);
-
       const priceDisplay = document.getElementById('price-estimate');
       const breakdownDisplay = document.getElementById('price-breakdown');
+      // A design that cannot be sized (a building with no steel, a rating
+      // beyond any wall) has no price: say why instead of throwing mid-edit
+      let estimate: ReturnType<typeof estimateComponentCost>;
+      try {
+        estimate = estimateComponentCost(this.currentType, props);
+      } catch (e) {
+        if (priceDisplay) priceDisplay.textContent = 'n/a';
+        if (breakdownDisplay) breakdownDisplay.textContent = (e as Error).message.replace(/^\[\w+\]\s*/, '');
+        return;
+      }
 
       if (priceDisplay) {
         priceDisplay.textContent = formatCost(estimate.total);

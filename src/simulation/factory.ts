@@ -31,7 +31,7 @@ import {
 import { CONCRETE_DENSITY } from './operators/mcci';
 import { PEBBLE_BED_VOID_FRACTION } from './operators/pebble-spill';
 import { resolveMaterial, MATERIALS, type StructuralMaterial } from './materials';
-import { designStress, designCodeFor, jointEfficiency, componentWall, hxShellWall, hxTubeWall, crossVesselInsulation } from './wall-sizing';
+import { designStress, designCodeFor, jointEfficiency, componentWall, hxShellWall, hxTubeWall, crossVesselInsulation, buildingWalls, buildingSpecOf, buildingBurstPressure } from './wall-sizing';
 import { NBG_18, A3_3 } from './graphite';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from './triso';
 import { saturationTemperature, saturationPressure } from './water-properties';
@@ -5056,7 +5056,8 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
           const w = comp.width ?? 20, l = comp.length ?? 20, h = comp.height;
           area = 2 * (w + l) * h + 2 * w * l;
         }
-        thickness = comp.wallThickness;
+        // The wall its rating sizes (wall-sizing.ts buildingWalls)
+        thickness = buildingWalls(buildingSpecOf(comp), comp.pressureRating ?? 0).wall;
         break;
       }
       case 'tank': {
@@ -5097,11 +5098,14 @@ function createWallThermalNodes(plantState: PlantState, state: SimulationState):
     let cp: number;
     let conductivity: number;
     if (isBuilding) {
-      const steelFrac = comp.steelFraction ?? 0.05;
+      // Steel and concrete by their shares of the wall: heat capacity by
+      // mass, conductivity through the thickness as the two in series
+      const steelFrac = comp.steelFraction;
       const effThickness = Math.min(thickness, 0.1);
-      const rhoEff = steelFrac * 7850 + (1 - steelFrac) * 2300;
-      cp = steelFrac > 0.5 ? 490 : 880;
-      conductivity = 1.5; // concrete-dominated
+      const steelRho = steelFrac * 7850, concreteRho = (1 - steelFrac) * 2300;
+      const rhoEff = steelRho + concreteRho;
+      cp = (steelRho * 490 + concreteRho * 880) / rhoEff;
+      conductivity = 1 / (steelFrac / 45 + (1 - steelFrac) / 1.5);
       mass = area * effThickness * rhoEff;
     } else {
       mass = area * thickness * 7850;
@@ -5230,7 +5234,7 @@ function createRadiantSurfaceConnections(plantState: PlantState, state: Simulati
         break;
       case 'building':
         facingRadius = facingComp.shape === 'cylinder'
-          ? facingComp.diameter / 2 + (facingComp.wallThickness ?? 0)
+          ? facingComp.diameter / 2 + buildingWalls(buildingSpecOf(facingComp), facingComp.pressureRating ?? 0).wall
           : undefined;
         break;
     }
@@ -6232,9 +6236,14 @@ function initializeBurstStates(
 
       // Calculate collapse pressure from geometry
       const wall = componentWall(component, pressureRating);
-      const burstPressure = wall
+      let burstPressure = wall
         ? wallBurstPressure(wall.innerDiameter, wall.thickness, material, strengthFactor)
         : ratedWallBurst;
+      if (component.type === 'building') {
+        // Its steel at ultimate, in the form it is built in (rebar or plate)
+        const spec = buildingSpecOf(component);
+        burstPressure = buildingBurstPressure(spec, buildingWalls(spec, pressureRating), strengthFactor);
+      }
       const collapsePressure = wall
         ? calculateCollapsePressure(wall.innerDiameter, wall.thickness, strengthFactor, material, wall.length)
         : burstPressure * 0.5;  // Default: assume thin-walled, collapse at half burst pressure

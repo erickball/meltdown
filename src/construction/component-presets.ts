@@ -314,18 +314,23 @@ const builtinPresets: ComponentPreset[] = [
   // ------------------------------------------------------------- buildings
   {
     id: 'bldg-dry', type: 'building', name: 'PWR Dry Containment',
-    description: 'Large cylindrical containment with enough free volume to absorb a full primary blowdown at modest pressure.',
-    properties: { nqa1: true, buildingShape: 'cylinder', height: 60, diameter: 42, pressureRating: 4.5, steelFraction: 0.1 },
+    description: 'Large reinforced-concrete cylinder with enough free volume to absorb a full primary blowdown at modest pressure.',
+    properties: { nqa1: true, buildingShape: 'cylinder', height: 60, diameter: 42, pressureRating: 4.5, steelForm: 'rebar', steelFraction: 0.04 },
   },
   {
     id: 'bldg-suppression', type: 'building', name: 'Compact Containment (higher rating)',
     description: 'Smaller, stronger containment for compact plants — less volume, higher design pressure.',
-    properties: { nqa1: true, buildingShape: 'cylinder', height: 35, diameter: 26, pressureRating: 5.5, steelFraction: 0.15 },
+    properties: { nqa1: true, buildingShape: 'cylinder', height: 35, diameter: 26, pressureRating: 5.5, steelForm: 'rebar', steelFraction: 0.04 },
+  },
+  {
+    id: 'bldg-steel', type: 'building', name: 'Steel Containment Vessel',
+    description: 'Free-standing welded steel shell (passive-plant style): thin, strong, and cooled from outside.',
+    properties: { nqa1: true, buildingShape: 'cylinder', height: 65, diameter: 40, pressureRating: 4, steelForm: 'plate', steelFraction: 1, material: 'low-alloy-steel' },
   },
   {
     id: 'bldg-turbine', type: 'building', name: 'Turbine / Auxiliary Building',
-    description: 'Conventional industrial building: weather enclosure only, not a pressure boundary.',
-    properties: { nqa1: false, buildingShape: 'rectangle', height: 30, width: 50, length: 80, pressureRating: 1, steelFraction: 0.3 },
+    description: 'Conventional industrial building: weather enclosure only, not a pressure boundary - it holds a few hundredths of a bar before its walls give.',
+    properties: { nqa1: false, buildingShape: 'rectangle', height: 30, width: 50, length: 80, pressureRating: 0.02, steelForm: 'rebar', steelFraction: 0.01 },
   },
 
   // ------------------------------------------------------------- spent fuel pools

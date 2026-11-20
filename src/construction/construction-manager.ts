@@ -68,7 +68,7 @@ import { orientConnectionByPumpPorts } from './connection-orientation';
 import { hxIsVertical, hasPinnedPortElevations } from './component-properties';
 import { hxShellSideVolume } from '../simulation/hx-bundles';
 import { DEFAULT_TRISO_DEFECT_FRACTION } from '../simulation/triso';
-import { designWallThickness, hxTubeWall, crossVesselWalls, crossVesselInsulation } from '../simulation/wall-sizing';
+import { designWallThickness, hxTubeWall, crossVesselWalls, crossVesselInsulation, buildingWalls, buildingSpecOf } from '../simulation/wall-sizing';
 import { DEFAULT_MATERIAL } from '../simulation/materials';
 
 /**
@@ -1927,8 +1927,9 @@ export class ConstructionManager {
           diameter: shape === 'cylinder' ? diameter : undefined,
           width: shape === 'rectangle' ? buildingWidth : undefined,
           length: shape === 'rectangle' ? buildingLength : undefined,
-          wallThickness: props.wallThickness ?? 1.5,  // Default 1.5m for containment
-          steelFraction: props.steelFraction ?? 0.1,  // Default 10% steel, 90% concrete
+          wallThickness: 0,  // sized from the rating below (wall-sizing.ts buildingWalls)
+          steelFraction: props.steelFraction ?? 0.04,
+          steelForm: (props.steelForm ?? 'rebar') as 'plate' | 'rebar',
           pressureRating: props.pressureRating ?? 4,  // Default 4 bar for containment
           fillLevel: (props.initialLevel ?? 0) / 100,
           ports: buildingPorts,
@@ -1936,8 +1937,10 @@ export class ConstructionManager {
           initialNcg: defaultNcg
         };
 
-        this.plantState.components.set(id, building as any);
         (building as any).nqa1 = props.nqa1 ?? true;
+        if (props.material) (building as any).material = props.material;
+        building.wallThickness = buildingWalls(buildingSpecOf(building), building.pressureRating).wall;
+        this.plantState.components.set(id, building as any);
         console.log(`[Construction] Created building: ${shape}, ${buildingHeight}m tall, ${props.pressureRating ?? 4} bar rating`);
 
         // Capture existing components that fall within this building's footprint
@@ -4171,6 +4174,9 @@ export class ConstructionManager {
       // diameter, length and height arrive through the generic writes above
       if (properties.width !== undefined) component.width = properties.width;
       if (properties.steelFraction !== undefined) component.steelFraction = properties.steelFraction;
+      if (properties.steelForm !== undefined) component.steelForm = properties.steelForm;
+      // The stored wall follows whatever it is sized from
+      component.wallThickness = buildingWalls(buildingSpecOf(component), component.pressureRating ?? 0).wall;
       if (properties.buildingShape !== undefined || properties.diameter !== undefined ||
           properties.width !== undefined || properties.length !== undefined ||
           properties.height !== undefined) {

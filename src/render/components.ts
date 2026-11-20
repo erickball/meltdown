@@ -46,7 +46,7 @@ import {
 import { incandescentColor, incandescentIntensity, hotColor } from './incandescence';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
-import { componentWall, hxShellWall, buildingWallThickness } from '../simulation/wall-sizing';
+import { componentWall, hxShellWall, buildingWalls, buildingSpecOf } from '../simulation/wall-sizing';
 import { renderElectricalComponent } from './electrical-components';
 import type { BreakAnchor } from './break-fx';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
@@ -5823,7 +5823,7 @@ export function renderThermometers(
  */
 /** Wall color for a building: steel/concrete blend by steelFraction */
 function buildingWallColor(building: BuildingComponent): { r: number; g: number; b: number } {
-  const steelFrac = building.steelFraction || 0.1;
+  const steelFrac = building.steelFraction ?? 0.1;
   const steelColor = { r: 100, g: 105, b: 115 };
   const concreteColor = { r: 180, g: 175, b: 165 };
   return {
@@ -5834,21 +5834,22 @@ function buildingWallColor(building: BuildingComponent): { r: number; g: number;
 }
 
 /**
- * Wall thickness (m) a building actually renders with: the pressure rating
- * drives it whenever one is set, otherwise the stored thickness.
- * Rectangular buildings need thicker walls than cylindrical ones for the
- * same pressure.
+ * Wall thickness (m) a building renders with: the wall its rating sizes
+ * (wall-sizing.ts buildingWalls) - the same wall the simulation heats and
+ * bursts. A building that cannot be sized (no steel) is drawn at its stored
+ * thickness, with the reason in the console once.
  */
+const buildingSizingComplaints = new Set<string>();
 function buildingWallThicknessM(building: BuildingComponent): number {
-  const shape = building.shape || 'cylinder';
-  const innerDim = shape === 'cylinder'
-    ? (building.diameter || 40)
-    : Math.max(building.width || 40, building.length || 40);
-  if (building.pressureRating !== undefined && building.pressureRating > 0) {
-    return buildingWallThickness(
-      building.pressureRating, innerDim, building.steelFraction ?? 0.1, shape);
+  try {
+    return buildingWalls(buildingSpecOf(building), building.pressureRating ?? 0).wall;
+  } catch (e) {
+    if (!buildingSizingComplaints.has(building.id)) {
+      buildingSizingComplaints.add(building.id);
+      console.error(`[Render] ${(e as Error).message} Drawing its stored ${building.wallThickness} m wall.`);
+    }
+    return building.wallThickness;
   }
-  return building.wallThickness || 0.5;
 }
 
 /**
@@ -5993,7 +5994,7 @@ function renderBuilding(
   const height = building.height;
 
   // Wall colors - blend steel and concrete based on steelFraction
-  const steelFrac = building.steelFraction || 0.1;
+  const steelFrac = building.steelFraction ?? 0.1;
   const steelColor = { r: 100, g: 105, b: 115 };
   const concreteColor = { r: 180, g: 175, b: 165 };
   const wallColor = {

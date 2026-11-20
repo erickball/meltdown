@@ -176,39 +176,287 @@ export function maxDesignPressureAnyMaterialBar(form: WallForm, measuredOn: 'inn
 }
 
 /*
- * Containment / building walls. A composite steel + concrete shell is sized
- * with the Section VIII inside-radius formula on a blended allowable stress;
- * a rectangular building takes 1.5x the wall of a cylinder its size (flat
- * walls carry pressure in bending, not membrane tension). Floor of 0.3 m.
- * Shared by the construction dialog and the renderer so both show one wall.
+ * ---------------------------------------------------------------------------
+ * Containment / building walls
+ * ---------------------------------------------------------------------------
+ *
+ * Concrete carries no tension: once a wall under internal pressure cracks,
+ * every newton of the membrane and bending tension is carried by its steel
+ * (ASME III Division 2 / ACI 359 cracked-section design). `steelFraction` is
+ * the steel's share of the wall cross-section; the rest is concrete, which
+ * adds mass, shielding and compression capacity but no strength against
+ * pressure. A wall with no steel cannot be rated for any pressure at all.
+ *
+ * The steel comes in one of two forms:
+ *
+ *   plate  - welded steel plate (a free-standing steel containment, a liner
+ *            counted structurally, steel-concrete composite faceplates).
+ *            Plate is biaxial: one sheet carries hoop and meridional stress
+ *            together. It is sized exactly as the pressure-vessel shells
+ *            above, by the building's material and NQA-1 box (Section III
+ *            vs VIII), on the steel thickness f*t. At f = 1 the building IS
+ *            a big welded vessel with an open-air outside.
+ *   rebar  - reinforcing bar (ASTM A615 Grade 60: f_y 414 MPa, f_u 620 MPa)
+ *            in a reinforced concrete wall. Bars carry load only along their
+ *            own axis, so the steel is split between the two directions in
+ *            proportion to the demand (a cylinder's hoop needs twice its
+ *            meridional). Division 2 limits rebar to 0.9 f_y under the
+ *            factored load, and the factored load for pressure is 1.5 P_a
+ *            (CC-3422, CC-3230): 0.6 f_y = 248 MPa at the design pressure.
+ *            The membrane force is exact equilibrium (N = P R_i), with no
+ *            thick-wall correction - there is no solid wall to have a
+ *            through-thickness stress gradient.
+ *
+ * Geometry: a cylinder is a shell with a hemispherical dome (a flat roof
+ * cannot carry pressure in membrane action; real cylindrical containments
+ * all have domes; the simulated free volume does not count the dome's).
+ * A rectangular building is six flat panels with fixed edges carrying the
+ * pressure in two-way plate bending (Roark, Table 11.4 case 8, all edges
+ * fixed, max moment at the middle of a long edge) plus the in-plane tension
+ * each panel takes from the panels around it - which is why big flat walls
+ * make poor pressure boundaries.
+ *
+ * Validity: the same rule as the vessels - a curved wall at most half its
+ * inside radius - and for flat panels the plate formulas' own range, a
+ * thickness at most a quarter of the panel's shorter side (Roark).
+ *
+ * No minimum thickness: the wall is what the pressure needs.
  */
-const BUILDING_S_STEEL = 172e6;    // Pa - SA-533 Grade B
-const BUILDING_S_CONCRETE = 20e6;  // Pa - effective, reinforced concrete
 
-function buildingAllowable(steelFraction: number): number {
-  return steelFraction * BUILDING_S_STEEL + (1 - steelFraction) * BUILDING_S_CONCRETE;
+export type BuildingSteelForm = 'plate' | 'rebar';
+
+/** ASTM A615 Grade 60 reinforcing bar. */
+const REBAR_YIELD = 414e6;     // Pa
+const REBAR_ULTIMATE = 620e6;  // Pa
+/** Rebar stress at the DESIGN pressure: 0.9 f_y under 1.5x the pressure. */
+const REBAR_DESIGN_STRESS = 0.9 * REBAR_YIELD / 1.5;
+
+export interface BuildingSpec {
+  shape?: string;            // 'cylinder' (default) | 'rectangle'
+  diameter?: number;         // m, cylinder
+  width?: number;            // m, rectangle
+  length?: number;           // m, rectangle
+  height: number;            // m
+  steelFraction: number;     // 0-1 share of the wall cross-section that is steel
+  steelForm?: BuildingSteelForm;
+  material?: string;         // plate only
+  nqa1?: boolean;            // plate only: Section III vs VIII
+  label?: string;
 }
 
-function buildingShapeMultiplier(shape: string | undefined): number {
-  return shape === 'rectangle' ? 1.5 : 1.0;
+/** The building fields a component carries, as a sizing spec. Pre-model
+ *  saves have no steel form: they were concrete containments, so rebar. */
+export function buildingSpecOf(b: any): BuildingSpec {
+  return {
+    shape: b.shape ?? b.buildingShape, diameter: b.diameter, width: b.width, length: b.length,
+    height: b.height, steelFraction: b.steelFraction, steelForm: b.steelForm ?? 'rebar',
+    material: b.material, nqa1: b.nqa1, label: b.label ?? b.name ?? b.id,
+  };
 }
 
-/** Building wall thickness (m). `span` is the diameter of a cylinder or the
- *  longer side of a rectangle. */
-export function buildingWallThickness(
-  pressureBar: number, span: number, steelFraction: number, shape: string | undefined
-): number {
+interface SteelBasis { S: number; ultimate: number; c: number; plate: boolean }
+
+/** The steel's stress at design (S, already times any joint efficiency),
+ *  its ultimate, and the shell formula's thick-wall coefficient. */
+function steelBasis(spec: BuildingSpec, atUltimate: boolean): SteelBasis {
+  if ((spec.steelForm ?? 'rebar') === 'rebar') {
+    const S = atUltimate ? REBAR_ULTIMATE : REBAR_DESIGN_STRESS;
+    return { S, ultimate: REBAR_ULTIMATE, c: 0, plate: false };
+  }
+  const material = resolveMaterial(spec.material);
+  const code = designCodeFor(spec.nqa1);
+  const E = jointEfficiency(code, 'welded');
+  const ultimate = MATERIALS[material].ultimateMPa * 1e6;
+  return {
+    S: atUltimate ? ultimate * E : designStress(material, code) * E,
+    ultimate, plate: true,
+    // UG-27 0.6P / NB-3324.1 0.5P - none at ultimate (Barlow on the bore)
+    c: atUltimate ? 0 : (code === 'section-iii' ? 0.5 : 0.6),
+  };
+}
+
+function checkSteel(spec: BuildingSpec): number {
+  const f = spec.steelFraction;
+  if (!(f > 0 && f <= 1)) {
+    throw new Error(
+      `[WallSizing] building '${spec.label ?? '?'}': steel fraction ${f} - concrete carries no ` +
+      `tension, so a pressure-rated wall needs some steel (0 < fraction <= 1).`);
+  }
+  return f;
+}
+
+/** Fixed-edge rectangular plate under uniform pressure q, short side b,
+ *  long side a: Roark's max stress sigma = beta1 q b^2 / t^2 at the middle
+ *  of a long edge, i.e. a moment per unit length M = beta1 q b^2 / 6. */
+const ROARK_FIXED: Array<[number, number]> = [
+  [1.0, 0.3078], [1.2, 0.3834], [1.4, 0.4356], [1.6, 0.4680], [1.8, 0.4872], [2.0, 0.4974], [Infinity, 0.5],
+];
+function roarkBeta1(aOverB: number): number {
+  for (let i = 1; i < ROARK_FIXED.length; i++) {
+    const [r1, b1] = ROARK_FIXED[i];
+    if (aOverB <= r1) {
+      const [r0, b0] = ROARK_FIXED[i - 1];
+      if (!Number.isFinite(r1)) {
+        // 2 -> infinity: approach 0.5 as 1 - b/a vanishes
+        return b0 + (b1 - b0) * (1 - 2 / aOverB);
+      }
+      return b0 + (b1 - b0) * (aOverB - r0) / (r1 - r0);
+    }
+  }
+  return 0.5;
+}
+
+interface Panel { b: number; a: number; N: number; area: number }
+
+/** The panels of a rectangular building at pressure P (Pa): spans and the
+ *  in-plane tension (N/m) each takes from the pressure on its neighbours. */
+function rectanglePanels(spec: BuildingSpec, P: number): { walls: Panel[]; roof: Panel } {
+  const W = spec.width ?? 40, L = spec.length ?? 40, H = spec.height;
+  // Roof uplift P W L hangs on the wall perimeter; end walls pull on the
+  // side walls; wall pressure pulls the roof's edges
+  const vertical = P * W * L / (2 * (W + L));
+  const panel = (s1: number, s2: number, N: number, count: number): Panel =>
+    ({ b: Math.min(s1, s2), a: Math.max(s1, s2), N, area: count * s1 * s2 });
+  return {
+    walls: [
+      panel(H, L, Math.max(P * W / 2, vertical), 2),
+      panel(H, W, Math.max(P * L / 2, vertical), 2),
+    ],
+    roof: panel(W, L, P * H / 2, 1),
+  };
+}
+
+/** Panel thickness (m) for pressure P (Pa) on the steel basis given:
+ *  N/(phiN S t) + M/(k S t^2) = 1 with the steel in two face layers. */
+function panelThickness(panel: Panel, P: number, f: number, basis: SteelBasis): number {
+  // Rebar runs both ways: half the steel per direction
+  const phi = basis.plate ? f : f / 2;
+  const k = (phi / 2) * (1 - phi / 2);  // = 1/4 for solid plate: S t^2/4 = 1.5 S t^2/6
+  const M = roarkBeta1(panel.a / panel.b) * P * panel.b * panel.b / 6;
+  const a = panel.N / (phi * basis.S);
+  const c = M / (k * basis.S);
+  return (a + Math.sqrt(a * a + 4 * c)) / 2;
+}
+
+export interface BuildingWalls {
+  /** Side wall thickness (m) - the thickest wall panel of a rectangle. */
+  wall: number;
+  /** Dome (cylinder) or roof (rectangle) thickness, m. */
+  roof: number;
+  /** Surface areas (m2) the two thicknesses cover: dome = hemisphere. */
+  wallArea: number;
+  roofArea: number;
+  steelVolume: number;     // m3
+  concreteVolume: number;  // m3, walls and roof (basemat not included)
+}
+
+function cylinderThicknesses(spec: BuildingSpec, P: number, basis: SteelBasis, f: number): { wall: number; roof: number } {
+  const R = (spec.diameter ?? 40) / 2;
+  if (basis.plate) {
+    // The steel layer is a vessel shell; concrete adds bulk around it
+    const shellDen = basis.S - basis.c * P;
+    const domeDen = 2 * basis.S - (basis.c > 0 ? 0.2 : 0) * P;
+    if (!(shellDen > 0)) {
+      throw new Error(`[WallSizing] building '${spec.label ?? '?'}': ${P / 1e5} bar is beyond any plate thickness.`);
+    }
+    return { wall: P * R / shellDen / f, roof: P * R / domeDen / f };
+  }
+  // Rebar: hoop gets 2/3 of the steel, meridional 1/3 - both then need the
+  // same wall. Dome: half each way.
+  return { wall: P * R / ((2 / 3) * f * basis.S), roof: P * R / (f * basis.S) };
+}
+
+/** A building's walls at its design pressure (bar, gauge). */
+export function buildingWalls(spec: BuildingSpec, pressureBar: number): BuildingWalls {
+  const f = checkSteel(spec);
   const P = pressureBar * 1e5;
-  const S = buildingAllowable(steelFraction);
-  const t = buildingShapeMultiplier(shape) * P * (span / 2) / (S - 0.6 * P);
-  return Math.max(0.3, t);
+  const basis = steelBasis(spec, false);
+  let wall: number, roof: number, wallArea: number, roofArea: number;
+  if (spec.shape === 'rectangle') {
+    // All four walls are built to the thickest panel's need: one wall
+    // thickness is what heats, is drawn and bursts
+    const { walls, roof: roofPanel } = rectanglePanels(spec, P);
+    wall = Math.max(...walls.map(w => panelThickness(w, P, f, basis)));
+    roof = panelThickness(roofPanel, P, f, basis);
+    wallArea = walls.reduce((sum, w) => sum + w.area, 0);
+    roofArea = roofPanel.area;
+  } else {
+    const D = spec.diameter ?? 40;
+    ({ wall, roof } = cylinderThicknesses(spec, P, basis, f));
+    wallArea = Math.PI * D * spec.height;
+    roofArea = 2 * Math.PI * (D / 2) ** 2;
+  }
+  const total = wallArea * wall + roofArea * roof;
+  return { wall, roof, wallArea, roofArea, steelVolume: f * total, concreteVolume: (1 - f) * total };
 }
 
-/** Highest building rating (bar) its wall formula holds for: wall at most
- *  half the radius. Cylinder P = S/2.6; rectangle (1.5x wall) P = S/3.6. */
-export function maxBuildingDesignPressureBar(steelFraction: number, shape: string | undefined): number {
-  const k = buildingShapeMultiplier(shape);
-  return buildingAllowable(steelFraction) / (2 * k + 0.6) / 1e5;
+/** The highest rating (bar) the wall formulas hold for: a curved wall at
+ *  most half its radius, a flat panel at most a quarter of its short span. */
+export function maxBuildingDesignPressureBar(spec: BuildingSpec): number {
+  if (!(spec.steelFraction > 0)) return 0;
+  const f = Math.min(spec.steelFraction, 1);
+  const basis = steelBasis(spec, false);
+  if (spec.shape !== 'rectangle') {
+    // Wall governs (the dome is thinner): t = R/2
+    return (basis.plate ? f * basis.S / (2 + f * basis.c) : f * basis.S / 3) / 1e5;
+  }
+  // Thickness grows monotonically with P: bisect for the first panel to
+  // reach a quarter of its short span
+  const ok = (P: number) => {
+    const { walls, roof } = rectanglePanels(spec, P);
+    return [...walls, roof].every(p => panelThickness(p, P, f, basis) <= p.b / 4);
+  };
+  let lo = 0, hi = basis.S;
+  for (let i = 0; i < 100; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (ok(mid)) lo = mid; else hi = mid;
+  }
+  return lo / 1e5;
+}
+
+/** Static ceiling for the rating field: solid plate, best material, cylinder. */
+export function maxBuildingDesignPressureAnyBar(): number {
+  let best = 0;
+  for (const material of Object.keys(MATERIALS)) {
+    for (const nqa1 of [true, false]) {
+      best = Math.max(best, maxBuildingDesignPressureBar({
+        height: 1, diameter: 1, steelFraction: 1, steelForm: 'plate', material, nqa1,
+      }));
+    }
+  }
+  return best;
+}
+
+/**
+ * Burst pressure (Pa, gauge) of a building's walls as built: the steel at
+ * its ultimate strength (times the drawn strength factor) carrying the
+ * membrane tension (Barlow on a plate shell, exact equilibrium for rebar)
+ * or the panel's plastic bending plus tension. The weaker of walls and roof.
+ */
+export function buildingBurstPressure(spec: BuildingSpec, walls: BuildingWalls, strengthFactor: number): number {
+  const f = checkSteel(spec);
+  const u = steelBasis(spec, true);
+  const sigma = u.S * strengthFactor;
+  if (spec.shape !== 'rectangle') {
+    const R = (spec.diameter ?? 40) / 2;
+    if (u.plate) {
+      const ts = f * walls.wall, td = f * walls.roof;
+      return Math.min(sigma * ts / (R + ts), 2 * sigma * td / (R + td));
+    }
+    return Math.min((2 / 3) * f * sigma * walls.wall / R, f * sigma * walls.roof / R);
+  }
+  const basis = { ...u, S: sigma };
+  const fails = (P: number) => {
+    const { walls: wp, roof } = rectanglePanels(spec, P);
+    return wp.some(p => panelThickness(p, P, f, basis) > walls.wall) ||
+      panelThickness(roof, P, f, basis) > walls.roof;
+  };
+  let lo = 0, hi = sigma;
+  for (let i = 0; i < 100; i++) {
+    const mid = 0.5 * (lo + hi);
+    if (fails(mid)) hi = mid; else lo = mid;
+  }
+  return lo;
 }
 
 /**

@@ -744,8 +744,9 @@ export interface BuildingComponent extends ComponentBase {
   width?: number;               // meters - x dimension (rectangular buildings)
   length?: number;              // meters - y dimension (rectangular buildings)
   // Wall construction
-  wallThickness: number;        // meters - total wall thickness
-  steelFraction: number;        // 0-1 - fraction of wall that is steel (rest is concrete)
+  wallThickness: number;        // meters - side wall thickness, as sized from the rating (wall-sizing.ts buildingWalls)
+  steelFraction: number;        // 0-1 - share of the wall cross-section that is steel (rest is concrete, which carries no tension)
+  steelForm?: 'plate' | 'rebar'; // how the steel is built in; absent = rebar (pre-model saves)
   // Pressure containment
   pressureRating: number;       // bar - design pressure (typically low, ~3-5 bar for containment)
   // Initial conditions - defaults to air at atmospheric pressure
