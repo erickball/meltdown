@@ -4,7 +4,11 @@
  *  - a flow node: getFluidColor of the node's fluid, labelled the way the
  *    per-frame sync labels a component's fluid (volume, vapour space, steam
  *    partial); the shell's wall metal, when hot enough to glow, shows
- *    through as it does on a 2.5D pipe run (hotRunBody).
+ *    through as it does on a 2.5D pipe run (hotRunBody). On a part that
+ *    `showsLevel` (a vessel shell) with water standing in it under a space,
+ *    the level (the node's own liquidLevelFraction, as the 2.5D view
+ *    reads it; the design fill level while building) and the liquid's
+ *    colour, the part's own colour being the space above.
  *  - a connection: the fluid of its donor end - the end whose fluid the
  *    line is FULL of (display-flow.ts plug-flow ledger), with a separated
  *    two-phase donor giving the phase at that nozzle - exactly as canvas.ts
@@ -19,12 +23,13 @@ import type { Fluid, PlantComponent, PlantState, ReactorVesselComponent } from '
 import type { SimulationState, FlowConnection, FlowNode } from '../../simulation';
 import { getFluidColor, getFuelColor, COLORS } from '../colors';
 import { hotRunBody, incandescentIntensity, parseColor } from '../incandescence';
-import { poolRackColor } from '../components';
+import { poolRackColor, getLiquidFraction } from '../components';
+import { nodeLiquidLevelFraction } from '../../simulation/operators/control-system';
 import { PipeContentsTracker } from '../display-flow';
 import { flowPhaseAt } from '../../simulation/operators/connection-hydraulics';
 import { nodeGasVolume } from '../../simulation/mixture-properties';
 import { steamPartialPressurePa } from '../../simulation/resume';
-import type { Scene3DModel, PartColor } from './types';
+import type { Scene3DModel, PartColor, SurfacePart } from './types';
 
 /** Which end each line is full of. Display state only, advanced on every call. */
 const tracker = new PipeContentsTracker();
@@ -104,6 +109,36 @@ function fuelTemperature(c: PlantComponent | undefined, componentId: string, pla
   return undefined;
 }
 
+/**
+ * Where a water surface stands now: a pool's at its node's live level (its
+ * design fill level while building) across the pool's depth; a terrain
+ * water body's at the body's live surface (scripted seas rise and fall).
+ */
+function surfaceHeight(part: SurfacePart, comp: PlantComponent | undefined, nodeId: string, fluid: Fluid,
+                       sim: SimulationState | null): number | undefined {
+  if (part.levelRange) {
+    const node = sim?.flowNodes.get(nodeId);
+    const level = node ? nodeLiquidLevelFraction(node) : comp ? designLevel(comp, nodeId, fluid) : undefined;
+    if (level === undefined) return undefined;
+    return part.levelRange.bottom + level * (part.levelRange.top - part.levelRange.bottom);
+  }
+  if (part.waterBody) return sim?.surfaceWater?.bodies.get(part.waterBody)?.surface;
+  return undefined;
+}
+
+/**
+ * Liquid level (fraction of the height) a component shows while it is being
+ * designed: its own fill level for its main node (what the 2.5D view draws
+ * then), else what its display fluid's phase says.
+ */
+function designLevel(c: PlantComponent, nodeId: string, fluid: Fluid): number {
+  const fill = (c as { fillLevel?: number }).fillLevel;
+  if (fill !== undefined && nodeId === (c.simNodeId || c.id)) return fill;
+  if (fluid.phase === 'liquid') return 1;
+  if (fluid.phase === 'vapor') return 0;
+  return getLiquidFraction({}, fluid, false);
+}
+
 function toPartColor(css: string, glow: number): PartColor {
   const c = parseColor(css);
   return { r: c.r / 255, g: c.g / 255, b: c.b / 255, glow };
@@ -121,19 +156,42 @@ export function partColors(model: Scene3DModel, plantState: PlantState, simState
 
     if (src.kind === 'flowNode') {
       let fluid: Fluid | undefined;
+      let level: number | undefined;
       if (simState) {
         const node = simState.flowNodes.get(src.nodeId);
         if (!node) { warnMissing(`node:${src.nodeId}`, `part ${part.id}: no flow node '${src.nodeId}'`); continue; }
         fluid = nodeFluid(node);
+        if (part.showsLevel) level = nodeLiquidLevelFraction(node);
       } else {
         fluid = comp ? displayFluid(comp, src.nodeId) : undefined;
         if (!fluid) continue;
+        if (part.showsLevel) level = designLevel(comp!, src.nodeId, fluid);
       }
-      const css = getFluidColor(fluid);
+      const liquidCss = () => getFluidColor({ ...fluid, phase: 'liquid', quality: 0 });
+      if (part.shape === 'surface') {
+        // A water surface is the liquid's colour (the space above it is the
+        // sky), standing at the pool's live level or the water body's
+        const color = toPartColor(liquidCss(), 0);
+        const z = surfaceHeight(part, comp, src.nodeId, fluid, simState);
+        if (z !== undefined) color.surfaceZ = z;
+        out.set(part.id, color);
+        continue;
+      }
+      // A vessel holding a pool with a space above it shows the level, as the
+      // 2.5D view stratifies it: liquid colour below, the space's own above
+      const css = level === undefined ? getFluidColor(fluid)
+        : level >= 1 ? liquidCss()
+        : level <= 0 ? getFluidColor(fluid)
+        : getFluidColor({ ...fluid, phase: 'vapor', quality: 1 });
       const T = wallTemperature(comp, src.nodeId, simState);
-      out.set(part.id, T === undefined
+      const color = T === undefined
         ? toPartColor(css, 0)
-        : toPartColor(hotRunBody(css, COLORS.steel, T), incandescentIntensity(T)));
+        : toPartColor(hotRunBody(css, COLORS.steel, T), incandescentIntensity(T));
+      if (level !== undefined && level > 0 && level < 1) {
+        const liq = parseColor(liquidCss());
+        color.liquid = { fraction: level, r: liq.r / 255, g: liq.g / 255, b: liq.b / 255 };
+      }
+      out.set(part.id, color);
       continue;
     }
 

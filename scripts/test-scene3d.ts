@@ -355,7 +355,37 @@ checkPlant('Spent-fuel pool level, piped (terrain, sunken pool, sea tank)', '../
     Math.abs(walls.center.z + walls.size.z / 2 - (poolGround + (pool.elevation ?? 0) + pool.depth)) < 1e-9);
   const sea = model.parts.find(p => p.id === 'water:sea');
   check('the sea is a water surface coloured from the tank that is it', !!sea && sea.shape === 'surface' &&
-    sea.componentId === 'sea' && sea.color?.kind === 'flowNode');
+    sea.componentId === 'sea' && sea.color?.kind === 'flowNode' && sea.waterBody === 'sea');
+  const half = ((pool as { side?: number }).side || 12) / 2;
+  check('the ground is cut away over the sunken pool', !!model.ground.holes?.some(h =>
+    Math.abs(h.x0 - (pool.position.x - half)) < 1e-9 && Math.abs(h.y1 - (pool.position.y + half)) < 1e-9));
+  // Live heights: the pool's water at its node's level across its depth, the sea at its body's surface
+  const sim = createSimulationFromPlant(plant);
+  const colours = partColors(model, plant, sim);
+  const water = model.parts.find(p => p.id === 'pool:water');
+  const wc = colours.get('pool:water');
+  check('the pool water stands between its floor and rim', !!water && water.shape === 'surface' && !!water.levelRange &&
+    wc?.surfaceZ !== undefined && wc.surfaceZ >= water.levelRange.bottom && wc.surfaceZ <= water.levelRange.top,
+    `z ${wc?.surfaceZ}`);
+  const seaBody = sim.surfaceWater?.bodies.get('sea');
+  check('the sea surface follows its body', !!seaBody && colours.get('water:sea')?.surfaceZ === seaBody.surface);
+}
+{
+  console.log('\nBuildings and levels');
+  const plant = loadPlant('../src/presets/w4loop.json');
+  const model = buildScene3D(plant);
+  const shells = model.parts.filter(p => p.componentId && plant.components.get(p.componentId)?.type === 'building');
+  check(`every building shell is see-through and roofed (${shells.length})`, shells.length > 0 && shells.every(p =>
+    p.opacity !== undefined && p.opacity < 1 &&
+    (p.shape === 'box' ? p.roof === true : p.shape === 'cylinder' && p.capEnd === 'flat' && p.capBase === 'open')));
+  const sim = createSimulationFromPlant(plant);
+  const colours = partColors(buildScene3D(plant), plant, sim);
+  const pzr = colours.get('pzr-1:shell');
+  check('the pressurizer shell shows its level', !!pzr?.liquid && pzr.liquid.fraction > 0 && pzr.liquid.fraction < 1,
+    JSON.stringify(pzr?.liquid));
+  const flagged = model.parts.filter(p => p.showsLevel).map(p => p.id);
+  check('vessel shells show levels, pipe runs do not', flagged.includes('pzr-1:shell') &&
+    !model.parts.some(p => p.showsLevel && p.shape === 'tube'));
 }
 for (const f of fs.readdirSync(path.join(HERE, '../src/presets')).filter(f => f.endsWith('.json'))) {
   if (['xe100.json', 'pwr.json', 'w4loop.json'].includes(f)) continue;

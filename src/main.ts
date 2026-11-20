@@ -2485,28 +2485,46 @@ function init() {
   // Move mode button
   const moveModeBtn = document.getElementById('move-mode') as HTMLButtonElement;
 
-  // View mode selector: the tile grid (shown as "2D") or the 2.5D
-  // perspective. The choice is remembered across sessions; a setting saved
-  // by the retired flat plan view lands on the grid.
+  // View mode selector: the tile grid (shown as "2D"), the 2.5D
+  // perspective, or the view-only 3D view. The choice is remembered across
+  // sessions; a setting saved by the retired flat plan view lands on the grid.
   const viewModeButtons: Array<[ViewMode, string]> = [
     ['grid', 'view-mode-grid'],
     ['perspective', 'view-mode-perspective'],
+    ['3d', 'view-mode-3d'],
   ];
   const viewAngleControl = document.getElementById('view-angle-control');
+  const viewZoomControl = document.getElementById('view-zoom-control');
   const gridViewHint = document.getElementById('grid-view-hint');
-  function applyViewMode(mode: ViewMode, persist: boolean): void {
-    plantCanvas.setViewMode(mode);
+  const view3dHint = document.getElementById('view3d-hint');
+  /** Bumped per request, so a slow 3D load cannot overrule a later choice. */
+  let viewModeRequest = 0;
+  async function applyViewMode(mode: ViewMode, persist: boolean): Promise<void> {
+    const request = ++viewModeRequest;
+    try {
+      await plantCanvas.setViewMode(mode);
+    } catch (e) {
+      // The 3D renderer would not start (no WebGL, or its code failed to load): say so and stay put
+      const reason = e instanceof Error ? e.message : String(e);
+      console.error('[view] could not open the 3D view:', e);
+      showNotification(`The 3D view could not start: ${reason}`, 'error', 15000);
+      mode = plantCanvas.getViewMode();
+    }
+    if (request !== viewModeRequest) return;
     for (const [m, id] of viewModeButtons) {
       document.getElementById(id)?.classList.toggle('active', m === mode);
     }
     if (viewAngleControl) viewAngleControl.style.display = mode === 'perspective' ? '' : 'none';
+    // The 3D camera zooms with the wheel and the Zoom +/- buttons; the slider's percentage means nothing there
+    if (viewZoomControl) viewZoomControl.style.display = mode === '3d' ? 'none' : '';
     if (gridViewHint) gridViewHint.style.display = mode === 'grid' ? '' : 'none';
+    if (view3dHint) view3dHint.style.display = mode === '3d' ? '' : 'none';
     // Ground pipe is a grid affordance; leaving the grid disarms the tool
     refreshPipeTool();
     if (persist) saveSettings({ ...loadSettings(), viewMode: mode });
   }
   for (const [m, id] of viewModeButtons) {
-    document.getElementById(id)?.addEventListener('click', () => applyViewMode(m, true));
+    document.getElementById(id)?.addEventListener('click', () => { void applyViewMode(m, true); });
   }
   /**
    * Measure the floating panels that cover the canvas (the toolbar down the
@@ -2533,7 +2551,8 @@ function init() {
   }
 
   const savedViewMode = loadSettings().viewMode as string | undefined;
-  applyViewMode(savedViewMode === 'grid' || savedViewMode === '2d' ? 'grid' : 'perspective', false);
+  void applyViewMode(savedViewMode === 'grid' || savedViewMode === '2d' ? 'grid'
+    : savedViewMode === '3d' ? '3d' : 'perspective', false);
 
   // Grid view: the canvas lays pipe along the tiles itself and hands the
   // finished route here. The dialog's length field is seeded with the drawn

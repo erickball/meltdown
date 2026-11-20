@@ -22,6 +22,13 @@
  * can be inspected from a metre away, so the renderer uses a logarithmic
  * depth buffer and sets near/far every frame from the camera's distance to
  * its target.
+ *
+ * KEYS. While the view is visible, held arrow keys pan the orbit target
+ * along the ground relative to the camera's heading (Up = away from the
+ * camera), at a rate proportional to the camera's distance, integrated in
+ * render() with the real frame time. Keys aimed at a form control, or
+ * pressed while something (a dialog) covers the middle of the view, are
+ * left alone.
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -40,9 +47,12 @@ export interface Pick3D { partId: string; componentId?: string; connectionKey?: 
 
 interface MaterialLook { color: string; roughness: number; metalness: number }
 
+// Metalness kept low: with no environment map a metallic surface only
+// darkens, and most steel parts carry a live fluid colour that has to read
+// as the same colour the 2.5D view paints
 const MATERIAL_LOOKS: Record<Material3D, MaterialLook> = {
-  steel: { color: '#8a9aab', roughness: 0.45, metalness: 0.35 },
-  machinery: { color: '#6f8291', roughness: 0.55, metalness: 0.25 },
+  steel: { color: '#8a9aab', roughness: 0.5, metalness: 0.08 },
+  machinery: { color: '#6f8291', roughness: 0.55, metalness: 0.08 },
   concrete: { color: '#bdb6a8', roughness: 0.9, metalness: 0 },
   structure: { color: '#b08d4f', roughness: 0.7, metalness: 0.2 },
   electrical: { color: '#62756a', roughness: 0.6, metalness: 0.15 },
@@ -70,8 +80,10 @@ const TO_SUN_MODEL: Vec3 = (() => {
   };
 })();
 
-/** Default viewing direction (from target toward camera), model axes: from the south-south-west, about 35 degrees up. */
-const VIEW_FROM_MODEL: Vec3 = { x: -0.4, y: -1, z: 0.8 };
+/** Default viewing direction (from target toward camera), model axes: from the south-south-west, about 28 degrees up. */
+const VIEW_FROM_MODEL: Vec3 = { x: -0.4, y: -1, z: 0.57 };
+/** frameAll leaves this much room round the plant (a factor on the fitting distance). */
+const FRAME_MARGIN = 1.06;
 
 /** The ground runs out to at least this far from the plant (m), so it meets the haze rather than ending. */
 const GROUND_MIN_REACH = 5000;
@@ -87,6 +99,14 @@ const SHADOW_MAP_SIZE = 4096;
 const MIN_ORBIT_DISTANCE = 0.05;
 /** The camera's eye is kept this far above the ground under it (m). */
 const EYE_CLEARANCE = 0.05;
+/** Held arrow keys pan the orbit target this many camera-to-target distances per second. */
+const KEY_PAN_RATE = 0.8;
+/** Longest frame gap a held-key pan integrates over (s), so a stalled tab does not jump the camera. */
+const KEY_PAN_MAX_DT = 0.1;
+/** Arrow key -> pan direction: x screen-right, y away from the camera. */
+const KEY_PAN_DIRS: Record<string, { x: number; y: number }> = {
+  ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 }, ArrowUp: { x: 0, y: 1 }, ArrowDown: { x: 0, y: -1 },
+};
 
 const CYL_SEGMENTS = 48;
 const DOME_STEPS = 12;
@@ -252,17 +272,22 @@ function boxGeometry(p: BoxPart): THREE.BufferGeometry {
   let g: THREE.BufferGeometry;
   if (p.wall !== undefined) {
     const w = p.wall;
-    if (!(w > 0) || 2 * w >= sx || 2 * w >= sy || w >= sz) {
+    const slabs = p.roof ? 2 : 1;
+    if (!(w > 0) || 2 * w >= sx || 2 * w >= sy || slabs * w >= sz) {
       throw new Error(`View3D: box ${p.id} wall ${w} m does not fit its size ${JSON.stringify(p.size)}`);
     }
-    // Floor slab, two full-length walls along x, two inset walls along y. Built in model (x, y, z) about the centre.
+    // Floor slab (and roof slab), two full-length walls along x, two inset walls along y, the walls
+    // standing between the slabs. Built in model (x, y, z) about the centre.
+    const wallH = sz - slabs * w;
+    const wallZ = p.roof ? 0 : w / 2;
     const pieces: Array<[number, number, number, number, number, number]> = [
       [0, 0, -sz / 2 + w / 2, sx, sy, w],
-      [0, sy / 2 - w / 2, w / 2, sx, w, sz - w],
-      [0, -sy / 2 + w / 2, w / 2, sx, w, sz - w],
-      [sx / 2 - w / 2, 0, w / 2, w, sy - 2 * w, sz - w],
-      [-sx / 2 + w / 2, 0, w / 2, w, sy - 2 * w, sz - w],
+      [0, sy / 2 - w / 2, wallZ, sx, w, wallH],
+      [0, -sy / 2 + w / 2, wallZ, sx, w, wallH],
+      [sx / 2 - w / 2, 0, wallZ, w, sy - 2 * w, wallH],
+      [-sx / 2 + w / 2, 0, wallZ, w, sy - 2 * w, wallH],
     ];
+    if (p.roof) pieces.push([0, 0, sz / 2 - w / 2, sx, sy, w]);
     const geoms = pieces.map(([cx, cy, cz, bx, by, bz]) => {
       const b = new THREE.BoxGeometry(bx, bz, by);
       b.translate(cx, cz, -cy);
@@ -452,6 +477,32 @@ function terrainMesh(spec: TerrainSpec, reach: number): THREE.Mesh {
   return mesh;
 }
 
+/**
+ * Cut plan rectangles out of the ground (model axes): fragments over them
+ * are discarded, so a pool sunk into the ground is open to the sky with
+ * exactly its own outline, whatever the terrain's cell size.
+ */
+function installHoleShader(mat: THREE.Material, holes: Array<{ x0: number; y0: number; x1: number; y1: number }>): void {
+  // In three's axes a plan rectangle is x in [x0, x1], z in [-y1, -y0]
+  const rects = holes.map(h => {
+    if (![h.x0, h.y0, h.x1, h.y1].every(Number.isFinite) || !(h.x1 > h.x0) || !(h.y1 > h.y0)) {
+      throw new Error(`View3D: bad ground hole ${JSON.stringify(h)}`);
+    }
+    return new THREE.Vector4(h.x0, -h.y1, h.x1, -h.y0);
+  });
+  const n = rects.length;
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uHoles = { value: rects };
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec2 vHolePlan;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvHolePlan = (modelMatrix * vec4(transformed, 1.0)).xz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>\nuniform vec4 uHoles[${n}];\nvarying vec2 vHolePlan;`)
+      .replace('void main() {', `void main() {\n  for (int i = 0; i < ${n}; i++) {\n    vec4 h = uHoles[i];\n    if (vHolePlan.x > h.x && vHolePlan.x < h.z && vHolePlan.y > h.y && vHolePlan.y < h.w) discard;\n  }`);
+  };
+  mat.customProgramCacheKey = () => `scene3d-holes-${n}`;
+}
+
 // ---------------------------------------------------------------------------
 
 interface PartRecord {
@@ -460,6 +511,32 @@ interface PartRecord {
   materials: THREE.MeshStandardMaterial[];
   rest: THREE.Color;
   translucent: boolean;
+  /** A part that shows a liquid level: the level's world height and colour (shader uniforms), and the part's height span. */
+  level?: { uniforms: LevelUniforms; minY: number; maxY: number };
+}
+
+interface LevelUniforms { uLevelY: { value: number }; uLiquid: { value: THREE.Color } }
+
+/** World height that puts the level under everything: no liquid shown. */
+const NO_LEVEL = -1e30;
+
+/**
+ * Paint everything below a world-space horizontal plane in the liquid's
+ * colour: the stratified level the 2.5D view draws, on any shell shape and
+ * orientation, seen through a translucent shell or on an opaque one.
+ */
+function installLevelShader(mat: THREE.MeshStandardMaterial, u: LevelUniforms): void {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uLevelY = u.uLevelY;
+    shader.uniforms.uLiquid = u.uLiquid;
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying float vLevelWorldY;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvLevelWorldY = (modelMatrix * vec4(transformed, 1.0)).y;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nuniform float uLevelY;\nuniform vec3 uLiquid;\nvarying float vLevelWorldY;')
+      .replace('#include <color_fragment>', '#include <color_fragment>\nif (vLevelWorldY < uLevelY) diffuseColor.rgb = uLiquid;');
+  };
+  mat.customProgramCacheKey = () => 'scene3d-level';
 }
 
 export class View3D {
@@ -484,6 +561,7 @@ export class View3D {
   private radius = 1;
   private reach = GROUND_MIN_REACH;
 
+  private insets = { left: 0, top: 0, right: 0, bottom: 0 };
   private lastColors: Map<string, PartColor> | null = null;
   private highlighted = new Set<string>();
   private highlightLines: THREE.LineSegments[] = [];
@@ -492,6 +570,12 @@ export class View3D {
   private disposed = false;
   private readonly scratch = new THREE.Color();
   private readonly scratchEmissive = new THREE.Color();
+  /** Arrow keys held down (pan while held), and the time of the last render for the pan's step. */
+  private readonly keysHeld = new Set<string>();
+  private lastRenderTime: number | null = null;
+  private readonly onKeyDown = (e: KeyboardEvent) => this.keyDown(e);
+  private readonly onKeyUp = (e: KeyboardEvent) => { this.keysHeld.delete(e.key); };
+  private readonly onBlur = () => { this.keysHeld.clear(); };
 
   constructor(container: HTMLElement) {
     this.container = container;
@@ -557,6 +641,10 @@ export class View3D {
     this.scene.fog = new THREE.Fog(SKY_HORIZON, 100, 1000);
     this.scene.add(this.modelGroup);
 
+    window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
+    window.addEventListener('blur', this.onBlur);
+
     this.resize();
   }
 
@@ -617,19 +705,48 @@ export class View3D {
     this.applyColors();
   }
 
+  /**
+   * Look at the whole model from the default direction, from just far
+   * enough that every corner of its bounding box is inside the part of the
+   * view the insets leave open.
+   */
   frameAll(): void {
     if (!this.model) return;
-    const { center, radius } = this.framingSphere(this.model);
-    const fov = (this.camera.fov * Math.PI) / 180;
-    const fitFov = Math.min(fov, 2 * Math.atan(Math.tan(fov / 2) * this.camera.aspect));
-    // The bounding sphere overstates a plant (it is wide and low), so fit it to the tangent rather than the sine
-    const dist = radius / Math.tan(fitFov / 2);
+    const { center, corners } = this.framingBox(this.model);
+    const w = this.container.clientWidth, h = this.container.clientHeight;
+    const ins = this.usableInsets(w, h);
+    const tanHalf = Math.tan((this.camera.fov * Math.PI) / 360);
+    const tanV = tanHalf * (h > 0 ? (h - ins.top - ins.bottom) / h : 1);
+    const tanH = tanHalf * this.camera.aspect * (w > 0 ? (w - ins.left - ins.right) / w : 1);
     const dir = unitThree(VIEW_FROM_MODEL, 'view direction');
+    const forward = dir.clone().negate();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+    const up = new THREE.Vector3().crossVectors(right, forward);
+    let dist = MIN_ORBIT_DISTANCE * 4;
+    for (const p of corners) {
+      const q = p.clone().sub(center);
+      const along = q.dot(dir);
+      dist = Math.max(dist, along + Math.abs(q.dot(right)) / tanH, along + Math.abs(q.dot(up)) / tanV);
+    }
+    dist *= FRAME_MARGIN;
     this.controls.target.copy(center);
     this.camera.position.copy(center).addScaledVector(dir, dist);
     this.controls.maxDistance = Math.max(dist * 4, this.radius * 10);
     this.keepAboveGround();
     this.controls.update();
+  }
+
+  /**
+   * Screen edges (px) covered by the page's own panels. The picture is
+   * centred in what they leave open (a shifted projection, so orbiting and
+   * picking stay consistent), and frameAll fits the plant into it.
+   */
+  setInsets(insets: { left?: number; top?: number; right?: number; bottom?: number }): void {
+    this.insets = { left: insets.left ?? 0, top: insets.top ?? 0, right: insets.right ?? 0, bottom: insets.bottom ?? 0 };
+    for (const v of Object.values(this.insets)) {
+      if (!(v >= 0) || !Number.isFinite(v)) throw new Error(`View3D: bad inset ${JSON.stringify(insets)}`);
+    }
+    this.resize();
   }
 
   resize(): void {
@@ -639,12 +756,25 @@ export class View3D {
     if (w > 0 && h > 0) {
       this.renderer.setSize(w, h, false);
       this.camera.aspect = w / h;
+      const ins = this.usableInsets(w, h);
+      if (ins.left || ins.right || ins.top || ins.bottom) {
+        this.camera.setViewOffset(w, h, (ins.right - ins.left) / 2, (ins.bottom - ins.top) / 2, w, h);
+      } else {
+        this.camera.clearViewOffset();
+      }
       this.camera.updateProjectionMatrix();
     }
   }
 
+  /** The insets, or none when they would leave no view at all (a tiny window). */
+  private usableInsets(w: number, h: number): { left: number; top: number; right: number; bottom: number } {
+    const i = this.insets;
+    return i.left + i.right < w / 2 && i.top + i.bottom < h / 2 ? i : { left: 0, top: 0, right: 0, bottom: 0 };
+  }
+
   render(): void {
     if (!this.visible || this.disposed) return;
+    this.applyKeyPan();
     this.controls.update();
     this.keepAboveGround();
     // Near/far from how far the eye is from what it looks at; the log depth buffer keeps the range usable
@@ -676,11 +806,47 @@ export class View3D {
     this.visible = visible;
     this.canvas.style.display = visible ? 'block' : 'none';
     this.controls.enabled = visible;
+    if (!visible) this.keysHeld.clear();
+    this.lastRenderTime = null;
+  }
+
+  /** Move the eye toward (factor > 1) or away from (factor < 1) the orbit target. */
+  zoomBy(factor: number): void {
+    if (!(factor > 0) || !Number.isFinite(factor)) throw new Error(`View3D: zoom factor ${factor}`);
+    const t = this.controls.target;
+    const offset = this.camera.position.clone().sub(t).divideScalar(factor);
+    const len = offset.length();
+    const lo = this.controls.minDistance, hi = this.controls.maxDistance;
+    if (len < lo) offset.setLength(lo);
+    else if (len > hi) offset.setLength(hi);
+    this.camera.position.copy(t).add(offset);
+    this.keepAboveGround();
+    this.controls.update();
+  }
+
+  /** Eye and orbit target, model axes (x east, y north, z up). */
+  getCamera(): { eye: Vec3; target: Vec3 } {
+    const fromThree = (v: THREE.Vector3): Vec3 => ({ x: v.x, y: -v.z, z: v.y });
+    return { eye: fromThree(this.camera.position), target: fromThree(this.controls.target) };
+  }
+
+  /** Put the eye at `eye` looking at `target`, model axes. */
+  setCamera(eye: Vec3, target: Vec3): void {
+    checkFinite(eye, 'camera eye');
+    checkFinite(target, 'camera target');
+    this.camera.position.copy(toThree(eye));
+    this.controls.target.copy(toThree(target));
+    this.keepAboveGround();
+    this.controls.update();
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
+    window.removeEventListener('blur', this.onBlur);
+    this.keysHeld.clear();
     this.controls.dispose();
     this.clearHighlightLines();
     this.highlightLineMaterial.dispose();
@@ -722,10 +888,23 @@ export class View3D {
     const opacity = part.opacity ?? 1;
     if (!(opacity > 0 && opacity <= 1)) throw new Error(`View3D: part ${part.id} has opacity ${opacity}`);
     const translucent = opacity < 1;
-    const makeMat = (side: THREE.Side) => new THREE.MeshStandardMaterial({
-      color: rest, roughness: look.roughness, metalness: look.metalness, side,
-      transparent: translucent, opacity, depthWrite: !translucent,
-    });
+    let level: PartRecord['level'];
+    if (part.showsLevel) {
+      geometry.computeBoundingBox();
+      const bb = geometry.boundingBox!;
+      level = {
+        uniforms: { uLevelY: { value: NO_LEVEL }, uLiquid: { value: new THREE.Color() } },
+        minY: bb.min.y, maxY: bb.max.y,
+      };
+    }
+    const makeMat = (side: THREE.Side) => {
+      const m = new THREE.MeshStandardMaterial({
+        color: rest, roughness: look.roughness, metalness: look.metalness, side,
+        transparent: translucent, opacity, depthWrite: !translucent,
+      });
+      if (level) installLevelShader(m, level.uniforms);
+      return m;
+    };
     const meshes: THREE.Mesh[] = [];
     const materials: THREE.MeshStandardMaterial[] = [];
     if (translucent) {
@@ -751,16 +930,18 @@ export class View3D {
       meshes.push(mesh);
       materials.push(mat);
     }
-    return { part, meshes, materials, rest, translucent };
+    return { part, meshes, materials, rest, translucent, level };
   }
 
   private buildGround(ground: Ground3D, model: Scene3DModel, group: THREE.Group): void {
     const sphere = this.framingSphere(model);
     this.radius = sphere.radius;
     this.reach = Math.max(GROUND_MIN_REACH, GROUND_REACH_RADII * sphere.radius);
+    let mesh: THREE.Mesh;
     if (ground.terrain) {
       const spec = ground.terrain;
-      group.add(terrainMesh(spec, this.reach));
+      mesh = terrainMesh(spec, this.reach);
+      group.add(mesh);
       this.groundAt = (x, y) => terrainHeight(spec, x, y);
     } else if (ground.flat) {
       const f = ground.flat;
@@ -769,7 +950,7 @@ export class View3D {
       const g = new THREE.PlaneGeometry(span, span);
       g.rotateX(-Math.PI / 2);
       g.translate(cx, f.z, -cy);
-      const mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: SAND }));
+      mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ color: SAND }));
       mesh.receiveShadow = true;
       group.add(mesh);
       const z = f.z;
@@ -777,10 +958,29 @@ export class View3D {
     } else {
       throw new Error('View3D: model.ground has neither terrain nor flat');
     }
+    if (ground.holes && ground.holes.length > 0) installHoleShader(mesh.material as THREE.Material, ground.holes);
   }
 
-  /** The sphere the camera frames: the model's bounds, or with no parts, the ground's extent. */
+  /** The box the camera frames (three axes): its centre and eight corners. */
+  private framingBox(model: Scene3DModel): { center: THREE.Vector3; corners: THREE.Vector3[] } {
+    const { min, max } = this.framingBounds(model);
+    const corners: THREE.Vector3[] = [];
+    for (const x of [min.x, max.x]) for (const y of [min.y, max.y]) for (const z of [min.z, max.z]) corners.push(toThree({ x, y, z }));
+    return { center: toThree(min).add(toThree(max)).multiplyScalar(0.5), corners };
+  }
+
+  /** The sphere round the framed box (lights, haze, far plane). */
   private framingSphere(model: Scene3DModel): { center: THREE.Vector3; radius: number } {
+    const { min, max } = this.framingBounds(model);
+    const a = toThree(min), b = toThree(max);
+    const center = a.clone().add(b).multiplyScalar(0.5);
+    // A model of one point still needs a size to frame
+    const radius = Math.max(a.distanceTo(b) / 2, MIN_ORBIT_DISTANCE * 4);
+    return { center, radius };
+  }
+
+  /** What the camera frames: the model's bounds, or with no parts, the ground's extent (model axes). */
+  private framingBounds(model: Scene3DModel): { min: Vec3; max: Vec3 } {
     let min = model.bounds.min, max = model.bounds.max;
     const finite = [min.x, min.y, min.z, max.x, max.y, max.z].every(Number.isFinite) && model.parts.length > 0;
     if (!finite) {
@@ -799,11 +999,7 @@ export class View3D {
         throw new Error('View3D: model has no finite bounds and no ground to frame');
       }
     }
-    const a = toThree(min), b = toThree(max);
-    const center = a.clone().add(b).multiplyScalar(0.5);
-    // A model of one point still needs a size to frame
-    const radius = Math.max(a.distanceTo(b) / 2, MIN_ORBIT_DISTANCE * 4);
-    return { center, radius };
+    return { min, max };
   }
 
   private fitLightsAndHaze(): void {
@@ -844,6 +1040,24 @@ export class View3D {
       for (const m of rec.materials) {
         m.color.copy(col);
         m.emissive.copy(em);
+      }
+      if (rec.part.shape === 'surface') {
+        // A pool's or a sea's water standing at its live height
+        const z = c?.surfaceZ;
+        if (z !== undefined && !Number.isFinite(z)) throw new Error(`View3D: part ${id} surface height ${z}`);
+        const lift = z === undefined ? 0 : z - rec.part.outline[0].z;
+        for (const m of rec.meshes) m.position.y = lift;
+      }
+      if (rec.level) {
+        const liq = c?.liquid;
+        const u = rec.level.uniforms;
+        if (liq) {
+          if (!(liq.fraction >= 0 && liq.fraction <= 1)) throw new Error(`View3D: part ${id} liquid fraction ${liq.fraction}`);
+          u.uLevelY.value = rec.level.minY + liq.fraction * (rec.level.maxY - rec.level.minY);
+          u.uLiquid.value.setRGB(liq.r, liq.g, liq.b, THREE.SRGBColorSpace);
+        } else {
+          u.uLevelY.value = NO_LEVEL;
+        }
       }
     }
   }
@@ -889,6 +1103,57 @@ export class View3D {
       return this.chooseHit(hits, Math.min(exit, before), skip) ?? rec;
     }
     return null;
+  }
+
+  private keyDown(e: KeyboardEvent): void {
+    if (!(e.key in KEY_PAN_DIRS) || !this.visible || this.disposed) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (this.keysBlocked(e)) return;
+    this.keysHeld.add(e.key);
+    e.preventDefault();   // no page scroll
+  }
+
+  /**
+   * Arrow keys belong to whatever has them otherwise: a text field or other
+   * form control with focus, or anything standing over the middle of the
+   * view (a modal dialog and its backdrop).
+   */
+  private keysBlocked(e: KeyboardEvent): boolean {
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return true;
+    const r = this.canvas.getBoundingClientRect();
+    if (!(r.width > 0 && r.height > 0)) return true;
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    // An overlay that lets the pointer through (pointer-events: none, as the app's 2D legend canvas) is
+    // never returned by elementFromPoint, so it does not count
+    return top !== null && top !== this.canvas && !this.container.contains(top);
+  }
+
+  /** Pan the orbit target (and the eye with it) along the ground while arrow keys are held. */
+  private applyKeyPan(): void {
+    const now = performance.now();
+    const dt = this.lastRenderTime === null ? 0 : Math.min(KEY_PAN_MAX_DT, (now - this.lastRenderTime) / 1000);
+    this.lastRenderTime = now;
+    if (this.keysHeld.size === 0 || dt === 0) return;
+    let sx = 0, sy = 0;
+    for (const k of this.keysHeld) { sx += KEY_PAN_DIRS[k].x; sy += KEY_PAN_DIRS[k].y; }
+    const n = Math.hypot(sx, sy);
+    if (n === 0) return;   // opposite keys cancel
+    // Away from the camera along the ground; looking straight down, the screen's up instead
+    const forward = new THREE.Vector3();
+    this.camera.getWorldDirection(forward);
+    forward.y = 0;
+    if (forward.lengthSq() < 1e-6) {
+      forward.set(0, 1, 0).applyQuaternion(this.camera.quaternion);
+      forward.y = 0;
+    }
+    forward.normalize();
+    const right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
+    const dist = this.camera.position.distanceTo(this.controls.target);
+    const step = KEY_PAN_RATE * dist * dt / n;
+    const move = forward.multiplyScalar(sy * step).addScaledVector(right, sx * step);
+    this.controls.target.add(move);
+    this.camera.position.add(move);
   }
 
   /** Keep the orbit target on or above the ground, and the eye above the ground under it. */

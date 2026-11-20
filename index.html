@@ -206,16 +206,22 @@
                   title="Top-down tile grid, like a factory-building game: components snap to 1 m tiles and sit on foundation pads, connection points face neighbouring tiles, and pipes run along the grid. In Connect mode, press on a connection point and drag (or click, then click) to lay a pipe; Esc or right-click abandons it. Click a pipe run to see it (click again to edit it while building).">⊞ 2D</button>
           <button id="view-mode-perspective" class="view-mode-btn active"
                   title="2.5D perspective view of the site, with camera angle and elevation.">2.5D</button>
+          <button id="view-mode-3d" class="view-mode-btn"
+                  title="True 3D view of the plant, for looking only: you cannot place, move or connect anything here - switch to 2D or 2.5D to edit. Left-drag orbits, right-drag pans, the scroll wheel zooms toward the cursor, and the arrow keys pan (hold them). Click a component or pipe run to select it. Live fluid colours show while the plant runs. Loads on first use and needs WebGL.">3D</button>
         </div>
         <div id="grid-view-hint" style="display: none; font-size: 11px; color: #888; margin: 4px 0; max-width: 250px;">
           Components snap to tiles. Connect: drag from a connection point to lay pipe along the grid; release (or click) on another point to finish. Esc cancels.
+        </div>
+        <div id="view3d-hint" style="display: none; font-size: 11px; color: #888; margin: 4px 0; max-width: 220px;"
+             title="The 3D view is for looking only. Switch to 2D or 2.5D to build or edit.">
+          View only. Left-drag orbits, right-drag pans, scroll zooms, arrow keys pan. Click to select.
         </div>
         <div id="view-angle-control" class="slider-control" style="margin: 8px 0;"
              title="Camera angle above horizontal: low = looking across the site, high = looking down from above. Ctrl+scroll on the canvas also adjusts this. Does not change magnification - use Zoom for that.">
           <label for="view-elevation" style="font-size: 11px;">View Angle (ctrl+scroll wheel): <span id="view-elevation-value">30</span>°</label>
           <input type="range" id="view-elevation" min="10" max="50" value="30" style="width: 100%;" />
         </div>
-        <div class="slider-control" style="margin: 8px 0;"
+        <div id="view-zoom-control" class="slider-control" style="margin: 8px 0;"
              title="Magnify the 2.5D view without changing the camera angle. Scroll wheel on the canvas also zooms (Ctrl+scroll changes the view angle instead); the Zoom +/- buttons work too.">
           <label for="view-zoom" style="font-size: 11px;">Zoom: <span id="view-zoom-value">100</span>%</label>
           <input type="range" id="view-zoom" min="-70" max="70" value="0" style="width: 100%;" />

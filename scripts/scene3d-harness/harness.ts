@@ -155,6 +155,8 @@ const harness = {
     i.controls.update();
   },
   frameAll: () => view.frameAll(),
+  /** Eye and orbit target, model axes (the arrow keys pan the target: View3D listens for them itself). */
+  camera: () => view.getCamera(),
   pick: (x: number, y: number) => view.pick({ x, y }),
   highlight: (t: { componentId?: string; connectionKey?: string } | null) => view.setHighlight(t),
   hot() {

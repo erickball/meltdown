@@ -52,6 +52,14 @@ interface PartBase {
    * internals, a building), so what it holds can be seen. Omitted = opaque.
    */
   opacity?: number;
+  /**
+   * The part is the vessel its colour node's water stands in (a tank or
+   * vessel shell, a heat exchanger's shell, a condenser): its live colour
+   * may carry a liquid level (PartColor.liquid), drawn on it as a
+   * horizontal plane in the world - liquid colour below, the colour of the
+   * space above it over the rest.
+   */
+  showsLevel?: boolean;
 }
 
 /**
@@ -90,6 +98,8 @@ export interface BoxPart extends PartBase {
    * building) with this wall thickness. Omitted = solid.
    */
   wall?: number;
+  /** With `wall`: closed by a roof slab of the same thickness (a building), not open at the top. */
+  roof?: boolean;
 }
 
 /** A round pipe along a polyline, with mitred/elbowed turns: connection runs and pipe components. */
@@ -105,6 +115,13 @@ export interface SurfacePart extends PartBase {
   shape: 'surface';
   /** Outline, counter-clockwise seen from above; all at the same z. */
   outline: Vec3[];
+  /**
+   * A pool's water: the surface stands at bottom + level x (top - bottom),
+   * the level being its colour node's liquid level (PartColor.surfaceZ).
+   */
+  levelRange?: { bottom: number; top: number };
+  /** A terrain water body (its id): the surface follows the body's live level (PartColor.surfaceZ). */
+  waterBody?: string;
 }
 
 export type Part3D = CylinderPart | BoxPart | TubePart | SurfacePart;
@@ -115,6 +132,8 @@ export interface Ground3D {
   terrain?: TerrainSpec;
   /** With no terrain: the flat ground's z and plan extent. */
   flat?: { z: number; x0: number; y0: number; x1: number; y1: number };
+  /** Plan rectangles where the ground is cut away: what is sunk into it (a pool) is seen from above. */
+  holes?: Array<{ x0: number; y0: number; x1: number; y1: number }>;
 }
 
 export interface Scene3DModel {
@@ -131,4 +150,12 @@ export interface PartColor {
   b: number;
   /** Emissive strength 0..1 for glowing-hot parts; 0 when not incandescent. */
   glow: number;
+  /**
+   * Only on a part that `showsLevel`, holding liquid with a space above it:
+   * the liquid fills `fraction` (0..1) of the part's height from its lowest
+   * point and has this sRGB colour; r/g/b above are then the space above.
+   */
+  liquid?: { fraction: number; r: number; g: number; b: number };
+  /** Only on a surface part: the absolute height it stands at now (omitted: where the model put it). */
+  surfaceZ?: number;
 }

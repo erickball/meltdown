@@ -113,6 +113,7 @@ interface CylOpts {
   wall?: number;
   color?: ColorSource3D;
   opacity?: number;
+  showsLevel?: boolean;
 }
 
 function cyl(id: string, componentId: string, material: Material3D, base: Vec3, axis: Vec3,
@@ -124,15 +125,17 @@ function cyl(id: string, componentId: string, material: Material3D, base: Vec3, 
   if (o.wall !== undefined) p.wall = o.wall;
   if (o.color) p.color = o.color;
   if (o.opacity !== undefined) p.opacity = o.opacity;
+  if (o.showsLevel) p.showsLevel = true;
   return p;
 }
 
 function box(id: string, componentId: string, material: Material3D, center: Vec3, size: Vec3,
-             o: { wall?: number; color?: ColorSource3D; opacity?: number } = {}): BoxPart {
+             o: { wall?: number; color?: ColorSource3D; opacity?: number; showsLevel?: boolean } = {}): BoxPart {
   const p: BoxPart = { id, componentId, material, shape: 'box', center, size };
   if (o.wall !== undefined) p.wall = o.wall;
   if (o.color) p.color = o.color;
   if (o.opacity !== undefined) p.opacity = o.opacity;
+  if (o.showsLevel) p.showsLevel = true;
   return p;
 }
 
@@ -209,7 +212,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
         return;
       }
       add(ctx, cyl(`${id}:shell`, id, 'steel', { x: cx, y: cy, z: z0 }, UP, H, size.width / 2,
-        { color: flowNode(nodeId(c)), opacity: shellOpacity }), true);
+        { color: flowNode(nodeId(c)), opacity: shellOpacity, showsLevel: true }), true);
       return;
     }
 
@@ -219,7 +222,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
       const d = domedLength(c, H, R, !!v.hasDome, !!v.hasBottom);
       add(ctx, cyl(`${id}:shell`, id, 'steel', { x: cx, y: cy, z: z0 + (d.bottom ? R / 2 : 0) }, UP, d.length, R, {
         capBase: d.bottom ? 'dome' : 'flat', capEnd: d.top ? 'dome' : 'flat',
-        color: flowNode(nodeId(c)), opacity: shellOpacity,
+        color: flowNode(nodeId(c)), opacity: shellOpacity, showsLevel: true,
       }), true);
       return;
     }
@@ -234,6 +237,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
         capBase: d.bottom ? 'dome' : 'flat', capEnd: d.top ? 'dome' : 'flat',
         color: flowNode(nodeId(c)),
         opacity: shellOpacity ?? (rv.coreBarrelId ? VESSEL_SHELL_OPACITY : undefined),
+        showsLevel: true,
       }), true);
       if (!barrelDrawnApart) {
         // No core-barrel component of its own to draw: the barrel the
@@ -307,7 +311,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
       if (!horizontal) {
         // Upright shell; a U-tube's bend bulges out of the top
         add(ctx, cyl(`${id}:shell`, id, 'steel', { x: cx, y: cy, z: z0 }, UP, h, w / 2, {
-          capEnd: hxType === 'utube' ? 'dome' : 'flat', color: shellColor, opacity: shellOpacity,
+          capEnd: hxType === 'utube' ? 'dome' : 'flat', color: shellColor, opacity: shellOpacity, showsLevel: true,
         }), true);
         if (L > 0) {
           const rp = w / 2 / nb;
@@ -324,7 +328,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
       } else {
         const zAxis = z0 + h / 2;
         add(ctx, cyl(`${id}:shell`, id, 'steel', { x: cx - w / 2, y: cy, z: zAxis }, EAST, w, h / 2, {
-          capEnd: hxType === 'utube' ? 'dome' : 'flat', color: shellColor, opacity: shellOpacity,
+          capEnd: hxType === 'utube' ? 'dome' : 'flat', color: shellColor, opacity: shellOpacity, showsLevel: true,
         }), true);
         if (L > 0) {
           const rp = h / 2 / nb;
@@ -376,7 +380,7 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
     case 'condenser': {
       const w = size.width, h = size.height;
       add(ctx, box(`${id}:shell`, id, 'steel', { x: cx, y: cy, z: z0 + h / 2 }, { x: w, y: Math.min(w, h), z: h },
-        { color: flowNode(nodeId(c)), opacity: shellOpacity }), true);
+        { color: flowNode(nodeId(c)), opacity: shellOpacity, showsLevel: true }), true);
       return;
     }
 
@@ -413,16 +417,22 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
     case 'building': {
       // Drawn from the ground plane up whatever its elevation field says, as
       // both other views draw it
+      // A closed shell (walls and a flat roof, the shape both other views
+      // draw and the volume the physics has), always see-through: a
+      // building is drawn to show what stands in it, and plants often put
+      // equipment inside one's footprint without declaring it contained
       const b = c as BuildingComponent;
-      const opacity = ctx.containers.has(id) ? BUILDING_SHELL_OPACITY : undefined;
       if (b.shape === 'cylinder') {
         add(ctx, cyl(`${id}:shell`, id, 'concrete', { x: cx, y: cy, z: G }, UP, b.height, (b.diameter || 40) / 2, {
-          capEnd: 'open', wall: b.wallThickness, color: flowNode(nodeId(c)), opacity,
+          capBase: 'open', capEnd: 'flat', wall: b.wallThickness, color: flowNode(nodeId(c)), opacity: BUILDING_SHELL_OPACITY,
+          showsLevel: true,
         }), true);
       } else {
-        add(ctx, box(`${id}:shell`, id, 'concrete', { x: cx, y: cy, z: G + b.height / 2 },
+        const shell = box(`${id}:shell`, id, 'concrete', { x: cx, y: cy, z: G + b.height / 2 },
           { x: b.width || 40, y: b.length || 40, z: b.height },
-          { wall: b.wallThickness, color: flowNode(nodeId(c)), opacity }), true);
+          { wall: b.wallThickness, color: flowNode(nodeId(c)), opacity: BUILDING_SHELL_OPACITY, showsLevel: true });
+        shell.roof = true;
+        add(ctx, shell, true);
       }
       return;
     }
@@ -451,9 +461,10 @@ function addComponent(ctx: Ctx, c: PlantComponent): void {
       const inner = side - 2 * t;
       const floor = z0 + t;
       const zw = floor + (p.fillLevel ?? 0) * (D - t);
+      // Laid at the design fill level; the live level moves it (levelRange)
       add(ctx, {
         id: `${id}:water`, componentId: id, material: 'water', shape: 'surface', color: flowNode(nodeId(c)),
-        outline: square(cx, cy, inner / 2, zw),
+        outline: square(cx, cy, inner / 2, zw), levelRange: { bottom: floor, top: z0 + D },
       } as SurfacePart, false);
       const rackH = p.rackHeight || 3.66;
       add(ctx, box(`${id}:racks`, id, 'fuel', { x: cx, y: cy, z: floor + (p.rackBottomElevation ?? 0.5) + rackH / 2 },
@@ -531,7 +542,7 @@ function addTerrainWater(ctx: Ctx): void {
     const z = basin.water.surface;
     const owner = claimed.get(basin.water.id);
     const part: SurfacePart = {
-      id: `water:${basin.water.id}`, material: 'water', shape: 'surface',
+      id: `water:${basin.water.id}`, material: 'water', shape: 'surface', waterBody: basin.water.id,
       outline: [{ x: x0, y: y0, z }, { x: x1, y: y0, z }, { x: x1, y: y1, z }, { x: x0, y: y1, z }],
     };
     if (owner) {
@@ -893,6 +904,15 @@ export function buildScene3D(plantState: PlantState): Scene3DModel {
     const m = Math.max(FLAT_MARGIN_MIN_M, FLAT_MARGIN_FRACTION * span);
     ground = { flat: { z: 0, x0: bounds.min.x - m, y0: bounds.min.y - m, x1: bounds.max.x + m, y1: bounds.max.y + m } };
   }
+  // A pool sunk into the ground is open to the sky: the ground over its
+  // footprint is cut away (the 2.5D view draws it as a cut-away pit)
+  const holes: NonNullable<Ground3D['holes']> = [];
+  for (const c of components) {
+    if (c.type !== 'pool' || !(baseZ(ctx, c) < groundAt(ctx, c.position))) continue;
+    const half = ((c as PoolComponent).side || 12) / 2;
+    holes.push({ x0: c.position.x - half, y0: c.position.y - half, x1: c.position.x + half, y1: c.position.y + half });
+  }
+  if (holes.length > 0) ground.holes = holes;
   return { parts: ctx.parts, ground, bounds };
 }
 

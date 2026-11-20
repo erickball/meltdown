@@ -30,9 +30,13 @@ import { wireRuns, drawTwistedPair, TWIST_PITCH_M } from './wires';
 import { unpoweredParts, drawNoPowerBadge, NO_POWER_BADGE_RADIUS } from './power-badge';
 import { TerrainScene, TerrainView, buildTerrainScene, viewDatum, basinSurfaces, renderTerrain3D, pickGround, visibleSurfaceAt, waterBodyAt } from './terrain-3d';
 import { terrainHeightAt } from '../simulation/terrain';
+import { Scene3DController } from './scene3d/controller';
 
-/** Which projection draws the plant: the 2.5D perspective or the tile grid (shown as "2D"). */
-export type ViewMode = 'perspective' | 'grid';
+/**
+ * Which projection draws the plant: the 2.5D perspective, the tile grid
+ * (shown as "2D"), or the view-only three.js view ("3D", scene3d/).
+ */
+export type ViewMode = 'perspective' | 'grid' | '3d';
 
 /** How faint a part that is not built yet (or is going away) is drawn. */
 const GHOST_ALPHA = 0.42;
@@ -87,7 +91,15 @@ export class PlantCanvas {
   // projection, hit testing and the plant layers to GridView. (The flat 2D
   // plan view this class used to draw was retired in favour of the grid.)
   private viewMode: ViewMode = 'perspective';
+  /** Counts setViewMode calls, so a slow 3D load does not overrule a later choice. */
+  private viewModeSerial = 0;
   private grid = new GridView();
+  /**
+   * The 3D view (view-only). Its renderer is loaded on first use; while it
+   * is showing it draws the plant in a layer under this canvas, which only
+   * keeps the colour legend and lets the pointer through.
+   */
+  public readonly scene3d: Scene3DController;
   /**
    * Every pipe run's plan route this frame (the grid view's laned layout),
    * which the 2.5D view lifts into 3D to draw its piping.
@@ -202,6 +214,21 @@ export class PlantCanvas {
 
     this.plantState = plantState;
 
+    if (!canvas.parentElement) throw new Error('PlantCanvas: the canvas must be in the document (the 3D view layers under it)');
+    this.scene3d = new Scene3DController(canvas.parentElement);
+    this.scene3d.onPick = (hit) => {
+      if (hit.kind === 'component') {
+        this.selectComponent(hit.componentId);
+      } else if (hit.kind === 'connection') {
+        const again = hit.connection === this.selectedConnection;
+        this.selectedComponentId = null;
+        this.onComponentSelect?.(null);
+        this.selectConnection(hit.connection, again);
+      } else {
+        this.clearSelection();
+      }
+    };
+
     // Initialize view centered on canvas, shifted up and left to show reactor better
     this.view = {
       offsetX: canvas.width / 2 + 200, // Shift left to center on plant
@@ -253,6 +280,8 @@ export class PlantCanvas {
   }
 
   private handleKeyDown(e: KeyboardEvent): void {
+    // The 3D view pans with the arrow keys itself (view3d.ts)
+    if (this.viewMode === '3d') return;
     // Don't steal arrow keys from text fields (e.g. Jack's chat box) or
     // focused controls like the view sliders
     const target = e.target as HTMLElement | null;
@@ -298,6 +327,8 @@ export class PlantCanvas {
   private activePointers: Map<number, Point> = new Map();
 
   private handlePointerDown(e: PointerEvent): void {
+    // In 3D this canvas lets the pointer through to the 3D view (and is view-only)
+    if (this.viewMode === '3d') return;
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
@@ -390,6 +421,7 @@ export class PlantCanvas {
   }
 
   private handlePointerMove(e: PointerEvent): void {
+    if (this.viewMode === '3d') return;
     const rect = this.canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
@@ -471,6 +503,11 @@ export class PlantCanvas {
     if (this.activePointers.size < 2) {
       this.lastPinchDist = 0;
     }
+    if (this.viewMode === '3d') {
+      this.isDragging = false;
+      this.isMovingComponent = false;
+      return;
+    }
     if (this.viewMode === 'grid' && this.grid.routing?.dragging && e.isPrimary) {
       // End of a sweep: released on a port finishes the pipe, released on
       // open ground leaves it waiting for a click on one. A release where
@@ -513,6 +550,7 @@ export class PlantCanvas {
 
   private handleWheel(e: WheelEvent): void {
     e.preventDefault();
+    if (this.viewMode === '3d') return;   // the 3D view's own controls zoom
 
     if (this.viewMode === 'grid') {
       // Zoom about the cursor, the way a map does
@@ -581,6 +619,10 @@ export class PlantCanvas {
 
   public getComponentAtScreen(screenPos: Point): PlantComponent | null {
     if (this.viewMode === 'grid') return this.grid.componentAt(screenPos, this.plantState);
+    if (this.viewMode === '3d') {
+      const hit = this.scene3d.hitAt(screenPos);
+      return hit.kind === 'component' ? this.plantState.components.get(hit.componentId) ?? null : null;
+    }
     // Check components in reverse order (top-most first, closest to camera)
     // Filter out hydraulic-only components (they're not rendered, so shouldn't be clickable)
     const components = Array.from(this.plantState.components.values())
@@ -902,6 +944,7 @@ export class PlantCanvas {
 
   public getComponentScreenBounds(component: PlantComponent): { topCenter: Point; scale: number; width?: number; height?: number } | null {
     if (this.viewMode === 'grid') return this.grid.componentScreenBounds(component);
+    this.assertNot3D('getComponentScreenBounds');
 
     // The terrain's sea has no drawn body: hang its gauges off the nozzle,
     // where the player's pipe meets the water (as the grid does)
@@ -1086,6 +1129,7 @@ export class PlantCanvas {
   }
 
   public getPortAtScreen(screenPos: Point): { component: PlantComponent, port: any, worldPos: Point } | null {
+    if (this.viewMode === '3d') return null;   // view-only: no connection points to press
     if (this.viewMode === 'grid') {
       const hit = this.grid.portAt(screenPos, this.plantState);
       return hit ? { component: hit.component, port: hit.port, worldPos: hit.anchor.point } : null;
@@ -1286,6 +1330,7 @@ export class PlantCanvas {
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
     this.grid.setViewportSize(rect.width, rect.height);
+    this.scene3d.resize();
   }
 
   // Perspective projection constants
@@ -1573,6 +1618,7 @@ export class PlantCanvas {
    * is instead a fixed-anchor magnification applied inside the projection.
    */
   private applyIsoZoom(newZoom: number): void {
+    if (this.viewMode === '3d') return;   // the 3D camera zooms itself (zoomIn/zoomOut, wheel)
     if (this.viewMode === 'grid') {
       this.grid.setZoomFactor(newZoom);
       this.syncIsoZoomUI();
@@ -1603,6 +1649,7 @@ export class PlantCanvas {
     if (this.viewMode === 'grid') {
       return this.grid.screenToWorld(screenPos);
     }
+    this.assertNot3D('getWorldPositionFromScreen');
     return this.screenToWorldPerspective(screenPos);
   }
 
@@ -1612,7 +1659,19 @@ export class PlantCanvas {
     if (this.viewMode === 'grid') {
       return this.grid.worldToScreen(worldPos);
     }
+    this.assertNot3D('getScreenPositionFromWorld');
     return this.worldToScreenPerspective(worldPos, elevation).pos;
+  }
+
+  /**
+   * The 2D/2.5D screen geometry has no meaning while the 3D view is showing
+   * (nothing of the plant is drawn on this canvas then). The 3D view's
+   * pointer input never reaches this canvas, so a call here in 3D is a bug.
+   */
+  private assertNot3D(what: string): void {
+    if (this.viewMode === '3d') {
+      throw new Error(`PlantCanvas.${what}: no 2D screen geometry in the 3D view`);
+    }
   }
 
   // Get the screen Y coordinate for ground level (elevation 0) at a given world position
@@ -1621,6 +1680,7 @@ export class PlantCanvas {
     if (this.viewMode === 'grid') {
       return this.grid.worldToScreen(worldPos).y;
     }
+    this.assertNot3D('getGroundY');
     const result = this.worldToScreenPerspective(worldPos, 0);
     if (result.scale <= 0) return null;
     return result.pos.y;
@@ -1652,6 +1712,7 @@ export class PlantCanvas {
    */
   private updateEdgePan(dtSeconds: number): void {
     if (!this.edgePanEnabled) return;
+    if (this.viewMode === '3d') return;
     if (!this.mouseOverCanvas) return;
     if (this.isDragging || this.isMovingComponent) return; // don't fight an active drag
 
@@ -1757,6 +1818,18 @@ export class PlantCanvas {
     const dtSeconds = this.lastFrameTime === null ? 0 : Math.min(0.1, (now - this.lastFrameTime) / 1000);
     this.lastFrameTime = now;
     this.updateEdgePan(dtSeconds);
+
+    if (this.viewMode === '3d') {
+      // The plant is drawn by the 3D view under this canvas; only the legend stays here
+      ctx.clearRect(0, 0, rect.width, rect.height);
+      // Designing: the components' own display fluids, as the 2.5D view draws them then
+      this.scene3d.renderFrame(this.plantState, this.constructionMode ? null : this.simState,
+        { componentId: this.selectedComponentId, connection: this.selectedConnection });
+      this.lastFrameMs = this.scene3d.lastFrameMs;
+      renderColorLegend(ctx, rect.width, rect.height);
+      this.frameAborted = false;
+      return;
+    }
 
     if (this.viewMode === 'grid') {
       this.renderGridFrame(ctx, rect.width, rect.height);
@@ -4034,17 +4107,42 @@ export class PlantCanvas {
     return { ...this.view };
   }
 
-  public setViewMode(mode: ViewMode): void {
+  /**
+   * Switch views. Entering 3D the first time loads the 3D renderer (and
+   * three.js); if that fails - the module will not load, or the browser has
+   * no WebGL - the promise rejects with the reason and the view stays as it
+   * was. The other views switch at once.
+   */
+  public async setViewMode(mode: ViewMode): Promise<void> {
+    const serial = ++this.viewModeSerial;
     if (this.viewMode === mode) return;
+    if (mode === '3d') {
+      await this.scene3d.load(this.canvas);
+      if (serial !== this.viewModeSerial) return;   // another view was chosen while the 3D view loaded
+    }
+    const leaving3D = this.viewMode === '3d';
     this.viewMode = mode;
     this.cancelRouting();
+    this.isDragging = false;
+    this.isMovingComponent = false;
+    this.activePointers.clear();
+
+    // In 3D this canvas is a transparent overlay (the legend) over the 3D
+    // view and lets the pointer through to it
+    if (mode === '3d') {
+      Object.assign(this.canvas.style, { position: 'relative', background: 'transparent', pointerEvents: 'none' });
+      this.scene3d.setVisible(true);
+    } else if (leaving3D) {
+      Object.assign(this.canvas.style, { position: '', background: '', pointerEvents: '' });
+      this.scene3d.setVisible(false);
+    }
 
     // Adjust view when switching modes to keep components visible
     const rect = this.canvas.getBoundingClientRect();
     if (mode === 'perspective') {
       // Switching to 2.5D: reset camera depth
       this.cameraDepth = 0;
-    } else {
+    } else if (mode === 'grid') {
       this.grid.setViewportSize(rect.width, rect.height);
       this.grid.centerOn(this.plantState);
     }
@@ -4147,6 +4245,8 @@ export class PlantCanvas {
   /** Grid view: bring the plant to the middle of the screen (after loading one, for instance). */
   public centerOnPlant(): void {
     if (this.viewMode === 'grid') this.grid.centerOn(this.plantState);
+    // The 3D camera frames the plant on its next frame - now if it is showing, else on entering 3D
+    this.scene3d.requestFrameAll();
   }
 
   /**
@@ -4159,13 +4259,16 @@ export class PlantCanvas {
       left: insets.left ?? 0, top: insets.top ?? 0,
       right: insets.right ?? 0, bottom: insets.bottom ?? 0,
     };
+    this.scene3d.setInsets(this.grid.insets);
   }
 
   public zoomIn(): void {
+    if (this.viewMode === '3d') { this.scene3d.zoomBy(1.2); return; }
     this.applyIsoZoom(this.currentZoomFactor() * 1.2);
   }
 
   public zoomOut(): void {
+    if (this.viewMode === '3d') { this.scene3d.zoomBy(1 / 1.2); return; }
     this.applyIsoZoom(this.currentZoomFactor() / 1.2);
   }
 
@@ -4182,6 +4285,7 @@ export class PlantCanvas {
       this.grid.cam.ppm = GridView.DEFAULT_PPM;
       this.grid.centerOn(this.plantState);
     }
+    if (this.viewMode === '3d') this.scene3d.requestFrameAll();
     this.syncIsoZoomUI();
   }
 
@@ -4211,6 +4315,10 @@ export class PlantCanvas {
    * 2.5D view's curves as last drawn.
    */
   public getConnectionAtScreen(screenPos: Point): Connection | null {
+    if (this.viewMode === '3d') {
+      const hit = this.scene3d.hitAt(screenPos);
+      return hit.kind === 'connection' ? hit.connection : null;
+    }
     const arrow = this.arrowAt(screenPos);
     if (arrow) return arrow;
     if (this.viewMode === 'grid') return this.grid.connectionAt(screenPos, this.plantState);
@@ -4355,6 +4463,7 @@ export class PlantCanvas {
 
   /** Every port's on-screen position in the current view (test and assistant hook). */
   public listPortScreenPositions(): Array<{ componentId: string; portId: string; x: number; y: number }> {
+    this.assertNot3D('listPortScreenPositions');
     const out: Array<{ componentId: string; portId: string; x: number; y: number }> = [];
     for (const component of this.plantState.components.values()) {
       if (!component.ports || (component as any).isHydraulicOnly) continue;
