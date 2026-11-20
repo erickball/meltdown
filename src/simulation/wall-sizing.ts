@@ -136,6 +136,82 @@ export function designWallThickness(spec: WallSpec): number {
 }
 
 /**
+ * The highest design pressure (bar, gauge) the shell formulas above can be
+ * trusted for with this material, code and wall form. They are thin-shell
+ * formulas: the codes allow them only while the wall is no more than half
+ * the inside radius - UG-27(c)(1) states it as t <= R/2 or P <= 0.385 SE.
+ * Past that the hoop stress is no longer close to uniform through the wall
+ * and a thick-wall (Lame) design is needed, which this model does not do.
+ *
+ * Setting t = R_i/2 in each formula:
+ *   Section VIII, inside or outside radius   P = S E / 2.6
+ *   Section III shell on its inside radius    P = S_m / 2.5
+ *   Section III pipe/tube on its outside      P = S_m / 2.6
+ *
+ * Well below the point where the denominators run out (designWallThickness
+ * only throws there), so a rating above this still sizes a wall - just not
+ * one the code would accept.
+ */
+export function maxDesignPressureBar(spec: {
+  material?: string; nqa1?: boolean; form: WallForm; measuredOn: 'inner' | 'outer';
+}): number {
+  const material = resolveMaterial(spec.material);
+  const code = designCodeFor(spec.nqa1);
+  const SE = designStress(material, code) * jointEfficiency(code, spec.form);
+  const divisor = code === 'section-iii' && spec.measuredOn === 'inner' ? 2.5 : 2.6;
+  return SE / divisor / 1e5;
+}
+
+/** The most any material/code combination allows for this kind of wall -
+ *  the static ceiling a dialog field can offer before the per-material
+ *  check (maxDesignPressureBar) applies. */
+export function maxDesignPressureAnyMaterialBar(form: WallForm, measuredOn: 'inner' | 'outer'): number {
+  let best = 0;
+  for (const material of Object.keys(MATERIALS)) {
+    for (const nqa1 of [true, false]) {
+      best = Math.max(best, maxDesignPressureBar({ material, nqa1, form, measuredOn }));
+    }
+  }
+  return best;
+}
+
+/*
+ * Containment / building walls. A composite steel + concrete shell is sized
+ * with the Section VIII inside-radius formula on a blended allowable stress;
+ * a rectangular building takes 1.5x the wall of a cylinder its size (flat
+ * walls carry pressure in bending, not membrane tension). Floor of 0.3 m.
+ * Shared by the construction dialog and the renderer so both show one wall.
+ */
+const BUILDING_S_STEEL = 172e6;    // Pa - SA-533 Grade B
+const BUILDING_S_CONCRETE = 20e6;  // Pa - effective, reinforced concrete
+
+function buildingAllowable(steelFraction: number): number {
+  return steelFraction * BUILDING_S_STEEL + (1 - steelFraction) * BUILDING_S_CONCRETE;
+}
+
+function buildingShapeMultiplier(shape: string | undefined): number {
+  return shape === 'rectangle' ? 1.5 : 1.0;
+}
+
+/** Building wall thickness (m). `span` is the diameter of a cylinder or the
+ *  longer side of a rectangle. */
+export function buildingWallThickness(
+  pressureBar: number, span: number, steelFraction: number, shape: string | undefined
+): number {
+  const P = pressureBar * 1e5;
+  const S = buildingAllowable(steelFraction);
+  const t = buildingShapeMultiplier(shape) * P * (span / 2) / (S - 0.6 * P);
+  return Math.max(0.3, t);
+}
+
+/** Highest building rating (bar) its wall formula holds for: wall at most
+ *  half the radius. Cylinder P = S/2.6; rectangle (1.5x wall) P = S/3.6. */
+export function maxBuildingDesignPressureBar(steelFraction: number, shape: string | undefined): number {
+  const k = buildingShapeMultiplier(shape);
+  return buildingAllowable(steelFraction) / (2 * k + 0.6) / 1e5;
+}
+
+/**
  * The wall a component has (inner diameter and thickness, m), or null when
  * it is not described as a cylinder at all (turbine casings, condensers...).
  *

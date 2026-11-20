@@ -46,7 +46,7 @@ import {
 import { incandescentColor, incandescentIntensity, hotColor } from './incandescence';
 import { evaluateFlammability, FlammabilityStatus, totalMass as ncgTotalMass } from '../simulation/gas-properties';
 import { readoutScale } from './readout-scale';
-import { componentWall, hxShellWall } from '../simulation/wall-sizing';
+import { componentWall, hxShellWall, buildingWallThickness } from '../simulation/wall-sizing';
 import { renderElectricalComponent } from './electrical-components';
 import type { BreakAnchor } from './break-fx';
 import { describeControllerSignal, primaryControllerSignal } from '../simulation/operators/control-system';
@@ -5815,45 +5815,6 @@ export function renderThermometers(
   }
 }
 
-/**
- * Calculate wall thickness for containment buildings.
- * Accounts for composite steel + concrete construction.
- * Steel is stronger (higher allowable stress), so more steel = thinner wall.
- * Steel fraction abstracts both rebar reinforcement and steel liner.
- *
- * For pure steel: uses SA-516 Grade 70 allowable stress (~138 MPa)
- * For pure concrete: uses ~30 MPa for reinforced concrete
- * Blends based on steelFraction.
- */
-function calculateBuildingWallThickness(
-  pressureBar: number,
-  innerDiameterM: number,
-  steelFraction: number,
-  shape: 'cylinder' | 'rectangle' = 'cylinder'
-): number {
-  const P = pressureBar * 1e5; // bar to Pa
-  const R = innerDiameterM / 2; // radius in meters
-
-  // Allowable stresses - must match component-config.ts building calculation
-  const S_steel = 172e6;     // Pa - SA-533 Grade B
-  const S_concrete = 20e6;   // Pa - typical concrete
-
-  // Blend allowable stress based on steel fraction
-  // More steel = higher allowable stress = thinner wall
-  const S_effective = S_steel * steelFraction + S_concrete * (1 - steelFraction);
-  const E = 1.0; // Joint efficiency
-
-  // Cylindrical shells are more efficient than rectangular
-  // Rectangular walls need ~1.5x thicker for the same pressure
-  // (flat plates bend, cylinders carry load in membrane tension)
-  const shapeMultiplier = shape === 'rectangle' ? 1.5 : 1.0;
-
-  // ASME-style formula for cylindrical shells (adapted for rectangular)
-  const thickness = shapeMultiplier * P * R / (S_effective * E - 0.6 * P);
-
-  // Minimum 0.3m (300mm) for containment buildings
-  return Math.max(0.3, thickness);
-}
 
 /**
  * Render a building/containment component.
@@ -5884,8 +5845,8 @@ function buildingWallThicknessM(building: BuildingComponent): number {
     ? (building.diameter || 40)
     : Math.max(building.width || 40, building.length || 40);
   if (building.pressureRating !== undefined && building.pressureRating > 0) {
-    return calculateBuildingWallThickness(
-      building.pressureRating, innerDim, building.steelFraction || 0.1, shape);
+    return buildingWallThickness(
+      building.pressureRating, innerDim, building.steelFraction ?? 0.1, shape);
   }
   return building.wallThickness || 0.5;
 }

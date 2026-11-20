@@ -22,6 +22,8 @@ import {
 import type { ComponentType, StockLine } from '../types';
 import {
   designWallThickness, hxTubeWall, crossVesselWalls, type WallForm,
+  maxDesignPressureBar, maxDesignPressureAnyMaterialBar,
+  buildingWallThickness, maxBuildingDesignPressureBar,
 } from '../simulation/wall-sizing';
 import { MATERIALS, DEFAULT_MATERIAL, type StructuralMaterial } from '../simulation/materials';
 
@@ -132,6 +134,30 @@ function dialogWallMm(
   }
 }
 
+/**
+ * A pressure-rating field's ceiling: where the code's thin-shell wall
+ * formula stops being valid (wall over half the inside radius,
+ * wall-sizing.ts maxDesignPressureBar). The field's static `max` is the best
+ * any material allows; `codeLimit` then checks the material and code picked.
+ */
+function codeRatingMax(form: WallForm, measuredOn: 'inner' | 'outer'): number {
+  return Math.floor(maxDesignPressureAnyMaterialBar(form, measuredOn));
+}
+function codeRatingLimit(form: WallForm, measuredOn: 'inner' | 'outer'): (p: Record<string, any>) => number {
+  return (p) => maxDesignPressureBar({ material: p.material, nqa1: p.nqa1, form, measuredOn });
+}
+const SHELL_RATING_MAX = codeRatingMax('welded', 'inner');
+const BODY_RATING_MAX = codeRatingMax('seamless', 'inner');
+const TUBE_RATING_MAX = codeRatingMax('seamless', 'outer');
+const CROSS_VESSEL_RATING_MAX = Math.min(codeRatingMax('welded', 'outer'), BODY_RATING_MAX);
+const STEEL_FRACTION_MAX = 0.5;
+const BUILDING_RATING_MAX = Math.floor(maxBuildingDesignPressureBar(STEEL_FRACTION_MAX, 'cylinder'));
+// The condenser's own shell formula (wallThickness below): S = 137 MPa, E = 0.85
+const CONDENSER_S_E = 137e6 * 0.85;
+const CONDENSER_RATING_MAX = Math.floor(CONDENSER_S_E / 2.6 / 1e5);
+const CODE_LIMIT_HELP = ' The ceiling is where the wall-thickness formula stops applying (wall thicker than half the inside radius); ' +
+  'it depends on the material and on the nuclear-QA box (Section III vs VIII).';
+
 export const YARD_FIXED_DESIGN_TOOLTIP =
   'This part comes from the supply yard as-is: it is already built to this ' +
   'design, so only its name and where you put it are yours to set.';
@@ -190,6 +216,9 @@ export interface ComponentOption {
   options?: Array<{ value: any; label: string }>;
   unit?: string;
   help?: string;
+  // For pressure ratings: the highest value (same unit) the wall formula
+  // holds for with the current material/code/geometry. Checked on submit.
+  codeLimit?: (props: Record<string, any>) => number;
   // For calculated fields: function that computes value from other properties
   calculate?: (props: Record<string, any>) => string;
   // For conditional visibility: show/hide based on another field's value
@@ -221,7 +250,7 @@ export const componentDefinitions: Record<string, {
       { name: 'volume', type: 'number', label: 'Volume', default: 10, min: 0.1, max: 5000, step: 0.1, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 1.78, min: 0.05, max: 60, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical tank. Coupled to volume: editing either one recalculates the other from the height.' },
       { name: 'height', type: 'number', label: 'Height', default: 4, min: 0.5, max: 50, step: 0.5, unit: 'm', help: 'Changing height keeps the volume and recalculates the diameter' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 0.1, max: 600, step: 10, unit: 'bar', help: 'Must be at least enough to hold the hydrostatic head of water' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 0.1, max: SHELL_RATING_MAX, step: 10, unit: 'bar', codeLimit: codeRatingLimit('welded', 'inner'), help: 'Must be at least enough to hold the hydrostatic head of water.' + CODE_LIMIT_HELP },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 50, min: 0, max: 100, step: 5, unit: '%', help: 'For 0-100%, fluid is two-phase at saturation' },
       { name: 'initialPressure', type: 'number', label: 'Steam Pressure', default: 150, min: 0.01, max: 221, step: 1, unit: 'bar', help: 'Steam partial pressure (NCG adds to total). For two-phase, determines saturation temperature.' },
       { name: 'initialTemperature', type: 'number', label: 'Initial Temperature', default: 300, min: 20, max: 374, step: 5, unit: '°C', help: 'For two-phase, calculated from saturation pressure' },
@@ -274,7 +303,7 @@ export const componentDefinitions: Record<string, {
       { name: 'volume', type: 'number', label: 'Volume', default: 40, min: 5, max: 100, step: 5, unit: 'm³', help: 'Coupled to diameter: editing either one recalculates the other from the height' },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 2.06, min: 0.05, max: 10, step: 0.05, unit: 'm', help: 'Inner diameter of the cylindrical shell. Coupled to volume: editing either one recalculates the other from the height.' },
       { name: 'height', type: 'number', label: 'Height', default: 12, min: 5, max: 20, step: 1, unit: 'm', help: 'Changing height keeps the volume and recalculates the diameter' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 175, min: 0.1, max: 600, step: 5, unit: 'bar', help: 'PWR pressurizers typically run ~172 bar. Anything goes - wall thickness, cost, and the burst point follow the rating you pick.' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 175, min: 0.1, max: SHELL_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('welded', 'inner'), help: 'PWR pressurizers typically run ~172 bar. Wall thickness, cost, and the burst point follow the rating you pick.' + CODE_LIMIT_HELP },
       { name: 'heaterPower', type: 'number', label: 'Heater Power', default: 2, min: 0, max: 10, step: 0.5, unit: 'MW' },
       { name: 'sprayFlow', type: 'number', label: 'Max Spray Flow', default: 50, min: 0, max: 200, step: 10, unit: 'kg/s' },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 60, min: 0, max: 100, step: 5, unit: '%', help: 'Pressurizers are always two-phase at saturation' },
@@ -301,7 +330,7 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm' },
       { name: 'innerDiameter', type: 'number', label: 'Vessel Inner Diameter', default: 4.4, min: 2, max: 8, step: 0.1, unit: 'm' },
       { name: 'height', type: 'number', label: 'Vessel Inner Height', default: 12, min: 5, max: 20, step: 0.5, unit: 'm', help: 'Total internal cavity height (including domes)' },
-      { name: 'pressureRating', type: 'number', label: 'Design Pressure', default: 175, min: 0.1, max: 600, step: 5, unit: 'bar', help: 'PWR vessels typically run 160-175 bar, BWRs ~85. Anything goes - wall thickness, cost, and the burst point follow the rating you pick.' },
+      { name: 'pressureRating', type: 'number', label: 'Design Pressure', default: 175, min: 0.1, max: SHELL_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('welded', 'inner'), help: 'PWR vessels typically run 160-175 bar, BWRs ~85. Wall thickness, cost, and the burst point follow the rating you pick.' + CODE_LIMIT_HELP },
       { name: 'barrelDiameter', type: 'number', label: 'Core Barrel Dia (mid-wall)', default: 3.4, min: 1.5, max: 6, step: 0.1, unit: 'm', help: 'Diameter to center of barrel wall' },
       { name: 'barrelThickness', type: 'number', label: 'Barrel Wall Thickness', default: 0.05, min: 0.002, max: 0.3, step: 0.01, unit: 'm', help: 'Typical ~0.05 m. Thin barrels are allowed; they just carry less thermal mass and less strength.' },
       { name: 'barrelBottomGap', type: 'number', label: 'Barrel Bottom Gap', default: 1.0, min: 0, max: 3, step: 0.1, unit: 'm', help: 'Distance from lower head to barrel bottom' },
@@ -365,7 +394,7 @@ export const componentDefinitions: Record<string, {
       // so a typed length is only a request, not the stored value
       { name: 'length', type: 'number', label: 'Length', default: 10, min: 1, max: 100, step: 1, unit: 'm', help: 'Distance between the two ends. Typing a length slides the End point along the pipe; moving either end changes the length. When editing, it is recalculated from the endpoints.', syncExempt: true },
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.5, min: 0.05, max: 2, step: 0.05, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 300, step: 5, unit: 'bar' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Pipe design pressure - wall thickness, cost and the burst point follow it.' + CODE_LIMIT_HELP },
       // Start endpoint (inlet)
       { name: 'startX', type: 'number', label: 'Start X', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World X position of inlet end (a new pipe starts where you clicked)' },
       { name: 'startY', type: 'number', label: 'Start Y', default: 0, min: -200, max: 200, step: 0.5, unit: 'm', help: 'World Y position of inlet end (a new pipe starts where you clicked)' },
@@ -413,7 +442,7 @@ export const componentDefinitions: Record<string, {
         { value: 'butterfly', label: 'Butterfly Valve' }
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest pressure the valve will see in service.' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest pressure the valve will see in service.' + CODE_LIMIT_HELP },
       { name: 'initialPosition', type: 'number', label: 'Initial Position', default: 100, min: 0, max: 100, step: 5, unit: '%', help: '0% = closed, 100% = open' },
       { name: 'matchUpstream', type: 'checkbox', label: 'Match upstream conditions', default: true, help: 'Automatically set initial P/T from connected upstream component' },
       { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 10, min: 0.01, max: 250, step: 0.1, unit: 'bar', dependsOn: { field: 'matchUpstream', value: false } },
@@ -451,7 +480,7 @@ export const componentDefinitions: Record<string, {
         { value: 'tilting-disc', label: 'Tilting Disc' }
       ]},
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.3, min: 0.05, max: 2, step: 0.05, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest (usually downstream) pressure the valve holds.' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 155, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Body design pressure - the burst point and cost follow the rating you pick. Rate for the highest (usually downstream) pressure the valve holds.' + CODE_LIMIT_HELP },
       { name: 'crackingPressure', type: 'number', label: 'Cracking Pressure', default: 0.1, min: 0.01, max: 5, step: 0.01, unit: 'bar', help: 'Minimum ΔP to open valve' },
       // Cv calculated from diameter and check valve type
       { name: 'cv', type: 'calculated', label: 'Flow Coefficient (Cv)', default: 0,
@@ -479,8 +508,8 @@ export const componentDefinitions: Record<string, {
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
       MATERIAL_OPTION,
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.15, min: 0.025, max: 0.5, step: 0.025, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the set pressure. Burst point and cost follow the rating.' },
-      { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Body design pressure - should comfortably exceed the set pressure. Burst point and cost follow the rating.' + CODE_LIMIT_HELP },
+      { name: 'setpoint', type: 'number', label: 'Set Pressure', default: 170, min: 1, max: BODY_RATING_MAX, step: 1, unit: 'bar', help: 'Pressure at which valve opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 5, min: 1, max: 20, step: 1, unit: '%', help: 'Pressure drop before reseating (% of setpoint)' },
       // Capacity calculated using critical (choked) flow for steam
       // For critical flow: m_dot = Cd * A * P * sqrt(k * M / (R * T)) * (2/(k+1))^((k+1)/(2*(k-1)))
@@ -509,8 +538,8 @@ export const componentDefinitions: Record<string, {
       { name: 'nqa1', type: 'checkbox', label: 'Use nuclear quality assurance standard', default: true, help: NQA1_HELP },
       MATERIAL_OPTION,
       { name: 'diameter', type: 'number', label: 'Diameter', default: 0.1, min: 0.025, max: 0.3, step: 0.025, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: 600, step: 5, unit: 'bar', help: 'Body design pressure - should comfortably exceed the auto-open pressure. Burst point and cost follow the rating.' },
-      { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: 300, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 200, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Body design pressure - should comfortably exceed the auto-open pressure. Burst point and cost follow the rating.' + CODE_LIMIT_HELP },
+      { name: 'setpoint', type: 'number', label: 'Auto-Open Pressure', default: 165, min: 1, max: BODY_RATING_MAX, step: 1, unit: 'bar', help: 'Pressure at which valve auto-opens' },
       { name: 'blowdown', type: 'number', label: 'Blowdown', default: 3, min: 1, max: 10, step: 1, unit: '%', help: 'Pressure drop before auto-reseating (% of setpoint)' },
       { name: 'initialPosition', type: 'select', label: 'Initial State', default: 'auto', options: [
         { value: 'auto', label: 'Auto (pressure-controlled)' },
@@ -550,7 +579,7 @@ export const componentDefinitions: Record<string, {
       ]},
       { name: 'ratedFlow', type: 'number', label: 'Rated Flow', default: 1000, min: 10, max: 10000, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 100, min: 10, max: 2000, step: 10, unit: 'm', help: 'Charging/HPSI service needs ~1300-1600 m to overcome full primary pressure' },
-      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
+      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' + CODE_LIMIT_HELP },
       { name: 'ratedRpm', type: 'number', label: 'Rated Speed', default: 1800, min: 900, max: 3600, step: 100, unit: 'RPM', help: "Motor speed at 100%. Informational: the rated flow and head above are what the pump does at 100% speed. The running speed is set from the pump's panel once it is built." },
       { name: 'efficiency', type: 'number', label: 'Efficiency', default: 85, min: 50, max: 95, step: 5, unit: '%' },
       { name: 'npshRequired', type: 'number', label: 'NPSH Required', default: 5, min: 1, max: 30, step: 0.5, unit: 'm', help: "Net positive suction head the impeller needs: (suction pressure - vapour pressure) as metres of liquid. Below it the pump cavitates and loses head. A pump lifting from below has only the atmosphere's ~10 m to spend, less the lift and the friction, so a high-NPSHr pump must stand near or below its source." },
@@ -632,8 +661,8 @@ export const componentDefinitions: Record<string, {
       { name: 'plenumLength', type: 'number', label: 'Plenum Length', default: 0.8, min: 0.1, max: 5, step: 0.1, unit: 'm', help: 'Length of tube-side plenums (semi-ellipsoid caps). Capped to shell radius.' },
       { name: 'tubeCount', type: 'number', label: 'Number of Tubes', default: 3000, min: 10, max: 20000, step: 100 },
       { name: 'tubeOD', type: 'number', label: 'Tube Outer Diameter', default: 19, min: 6, max: 50, step: 1, unit: 'mm' },
-      { name: 'tubePressure', type: 'number', label: 'Tube-Side Pressure Rating', default: 150, min: 1, max: 300, step: 10, unit: 'bar', help: 'Design pressure for tube side (determines tube wall thickness)' },
-      { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure Rating', default: 60, min: 1, max: 100, step: 5, unit: 'bar', help: 'Design pressure for shell side (determines shell and plenum wall thickness)' },
+      { name: 'tubePressure', type: 'number', label: 'Tube-Side Pressure Rating', default: 150, min: 1, max: TUBE_RATING_MAX, step: 10, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'outer'), help: 'Design pressure for tube side (determines tube wall thickness).' + CODE_LIMIT_HELP },
+      { name: 'shellPressure', type: 'number', label: 'Shell-Side Pressure Rating', default: 60, min: 1, max: SHELL_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('welded', 'inner'), help: 'Design pressure for shell side (determines shell and plenum wall thickness).' + CODE_LIMIT_HELP },
       // Calculated fields - displayed but not editable
       { name: 'tubeWallThickness', type: 'calculated', label: 'Tube Wall Thickness', default: 0, unit: 'mm', help: WALL_HELP,
         calculate: (p) => (hxTubeWall({ tubePressureRating: p.tubePressure || 150, nqa1: p.nqa1 ?? true, material: p.material },
@@ -665,7 +694,7 @@ export const componentDefinitions: Record<string, {
       { name: 'elevation', type: 'number', label: 'Elevation (Bottom)', default: 0, min: -10, max: 50, step: 0.5, unit: 'm', help: 'Height above ground level (typically at ground level)' },
       { name: 'volume', type: 'number', label: 'Volume', default: 100, min: 10, max: 1000, step: 10, unit: 'm³' },
       { name: 'height', type: 'number', label: 'Height', default: 3, min: 1, max: 10, step: 0.5, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 1.1, min: 0.5, max: 10, step: 0.1, unit: 'bar', help: 'Design pressure (condensers operate under vacuum but must withstand external atmospheric pressure)' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 1.1, min: 0.5, max: CONDENSER_RATING_MAX, step: 0.1, unit: 'bar', help: 'Design pressure (condensers operate under vacuum but must withstand external atmospheric pressure). The ceiling is where the shell formula stops applying (wall thicker than half the half-width).' },
       { name: 'coolingCapacity', type: 'number', label: 'Cooling Capacity', default: 2000, min: 100, max: 5000, step: 100, unit: 'MW' },
       { name: 'operatingPressure', type: 'number', label: 'Operating Pressure', default: 0.05, min: 0.01, max: 1, step: 0.01, unit: 'bar' },
       { name: 'coolingWaterTemp', type: 'number', label: 'Cooling Water Temp', default: 20, min: 5, max: 40, step: 5, unit: '°C' },
@@ -693,9 +722,7 @@ export const componentDefinitions: Record<string, {
           const vol = p.volume || 100;
           const h = p.height || 3;
           const R = Math.sqrt(vol / h) / 2; // Half-width as radius
-          const S = 137e6; // Pa
-          const E = 0.85;
-          const t = P * R / (S * E - 0.6 * P);
+          const t = P * R / (CONDENSER_S_E - 0.6 * P);
           // Minimum practical thickness for large vacuum vessels
           const minThickness = 6; // mm
           return Math.max(t * 1000, minThickness).toFixed(1);
@@ -715,7 +742,7 @@ export const componentDefinitions: Record<string, {
       ]},
       { name: 'stages', type: 'number', label: 'Number of Stages', default: 3, min: 1, max: 5, step: 1 },
       { name: 'ratedPower', type: 'number', label: 'Rated Power', default: 1000, min: 100, max: 2000, step: 100, unit: 'MW' },
-      { name: 'inletPressure', type: 'number', label: 'Inlet Pressure', default: 60, min: 10, max: 100, step: 5, unit: 'bar', help: 'Steam supply (throttle) pressure the machine is built for - sets the rated steam flow and the design point below. The casing itself starts at exhaust pressure (a machine before steam admission holds condenser-side steam, not live steam). After a simulation has run, this shows the CURRENT casing condition (it becomes the restart condition if you edit the turbine).' },
+      { name: 'inletPressure', type: 'number', label: 'Inlet Pressure', default: 60, min: 10, max: 250, step: 5, unit: 'bar', help: 'Steam supply (throttle) pressure the machine is built for - sets the rated steam flow and the design point below. The casing itself starts at exhaust pressure (a machine before steam admission holds condenser-side steam, not live steam). After a simulation has run, this shows the CURRENT casing condition (it becomes the restart condition if you edit the turbine).' },
       { name: 'designInletPressure', type: 'number', label: 'Design Inlet Pressure', default: 0, min: 0, max: 250, step: 5, unit: 'bar', help: 'Design point for the swallowing capacity (Stodola cone law, with Rated Steam Flow). 0 = freeze automatically at the inlet pressure when the simulation first starts; it does not move on mode-switch resumes.' },
       { name: 'exhaustPressure', type: 'number', label: 'Exhaust Pressure', default: 0.05, min: 0.01, max: 1, step: 0.01, unit: 'bar' },
       { name: 'turbineEfficiency', type: 'number', label: 'Turbine Isentropic Eff.', default: 85, min: 70, max: 95, step: 5, unit: '%' },
@@ -795,7 +822,7 @@ export const componentDefinitions: Record<string, {
       // Pump properties
       { name: 'ratedPumpFlow', type: 'number', label: 'Rated Pump Flow', default: 50, min: 10, max: 500, step: 10, unit: 'kg/s' },
       { name: 'ratedHead', type: 'number', label: 'Rated Head', default: 500, min: 50, max: 2000, step: 50, unit: 'm' },
-      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: 600, step: 5, unit: 'bar', help: 'Pump casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' },
+      { name: 'pressureRating', type: 'number', label: 'Casing Pressure Rating', default: 150, min: 1, max: BODY_RATING_MAX, step: 5, unit: 'bar', codeLimit: codeRatingLimit('seamless', 'inner'), help: 'Pump casing design pressure - rate for suction pressure plus shutoff head. Burst point and cost follow the rating.' + CODE_LIMIT_HELP },
       { name: 'pumpEfficiency', type: 'number', label: 'Pump Efficiency', default: 75, min: 50, max: 90, step: 5, unit: '%' },
       // Turbine properties
       { name: 'inletPressure', type: 'number', label: 'Steam Inlet Pressure', default: 60, min: 5, max: 100, step: 5, unit: 'bar' },
@@ -1097,34 +1124,21 @@ export const componentDefinitions: Record<string, {
       { name: 'diameter', type: 'number', label: 'Diameter', default: 40, min: 10, max: 80, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'cylinder' } },
       { name: 'width', type: 'number', label: 'Width', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
       { name: 'length', type: 'number', label: 'Length', default: 40, min: 10, max: 100, step: 1, unit: 'm', dependsOn: { field: 'buildingShape', value: 'rectangle' } },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 4, min: 1, max: 10, step: 0.5, unit: 'bar', help: 'Design pressure for containment (typically 3-5 bar for PWR)' },
-      { name: 'steelFraction', type: 'number', label: 'Steel Liner Fraction', default: 0.1, min: 0, max: 0.5, step: 0.05, help: 'Fraction of wall that is steel (rest is concrete)' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 4, min: 1, max: BUILDING_RATING_MAX, step: 0.5, unit: 'bar',
+        codeLimit: (p) => maxBuildingDesignPressureBar(p.steelFraction ?? 0.1, p.buildingShape),
+        help: 'Design pressure for containment (typically 3-5 bar for a large dry PWR containment). The ceiling is where the wall formula stops applying (wall thicker than half the radius); more steel and a cylindrical shape raise it.' },
+      { name: 'steelFraction', type: 'number', label: 'Steel Liner Fraction', default: 0.1, min: 0, max: STEEL_FRACTION_MAX, step: 0.05, help: 'Fraction of wall that is steel (rest is concrete)' },
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'm',
         calculate: (p) => {
-          // ASME formula with shape factor: t = shapeMultiplier * P*R / (S*E - 0.6*P)
-          // For containment, blend steel (172 MPa) and concrete (~20 MPa) based on steelFraction
-          const P = (p.pressureRating || 4) * 1e5; // bar to Pa
-          const steelFrac = p.steelFraction || 0.1;
-          const S_steel = 172e6; // Pa - SA-533 Grade B
-          const S_concrete = 20e6; // Pa - typical concrete
-          const S_effective = steelFrac * S_steel + (1 - steelFrac) * S_concrete;
-          const E = 1.0;
-          // Get radius based on shape
-          let R: number;
-          if (p.buildingShape === 'rectangle') {
-            // For rectangle, use half of the larger dimension
-            R = Math.max(p.width || 40, p.length || 40) / 2;
-          } else {
-            R = (p.diameter || 40) / 2;
-          }
-          // Shape multiplier: cylindrical is more efficient than rectangular
-          const shapeMultiplier = p.buildingShape === 'rectangle' ? 1.5 : 1.0;
-          const t = shapeMultiplier * P * R / (S_effective * E - 0.6 * P);
-          return Math.max(0.3, t).toFixed(2); // Minimum 0.3m
+          // Shared with the renderer (wall-sizing.ts buildingWallThickness)
+          const span = p.buildingShape === 'rectangle'
+            ? Math.max(p.width || 40, p.length || 40)
+            : (p.diameter || 40);
+          return buildingWallThickness(p.pressureRating || 4, span, p.steelFraction ?? 0.1, p.buildingShape).toFixed(2);
         }
       },
       { name: 'initialLevel', type: 'number', label: 'Initial Water Level', default: 0, min: 0, max: 50, step: 1, unit: '%', help: 'Normally 0% (dry containment)' },
-      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 1.01325, min: 0.5, max: 5, step: 0.1, unit: 'bar', help: 'Normally atmospheric (1.01 bar)' },
+      { name: 'initialPressure', type: 'number', label: 'Initial Pressure', default: 1.01325, min: 0.5, max: BUILDING_RATING_MAX, step: 0.1, unit: 'bar', help: 'Normally atmospheric (1.01 bar). Cannot exceed the pressure rating.' },
       { name: 'initialNcg', type: 'ncg', label: 'Atmosphere Gases', default: { N2: 0.78, O2: 0.21, Ar: 0.009 }, help: 'Containment atmosphere composition (default: air)' },
       // Calculated fields
       { name: 'volume', type: 'calculated', label: 'Free Volume', default: 0, unit: 'm³',
@@ -1232,7 +1246,9 @@ export const componentDefinitions: Record<string, {
       { name: 'outerDiameter', type: 'number', label: 'Outer Diameter', default: 1.0, min: 0.3, max: 3.0, step: 0.1, unit: 'm', help: 'Diameter of the outer shell (annulus boundary)' },
       { name: 'innerDiameter', type: 'number', label: 'Inner Pipe Diameter', default: 0.5, min: 0.1, max: 2.0, step: 0.05, unit: 'm', help: 'Diameter of the inner hot leg pipe' },
       { name: 'length', type: 'number', label: 'Length', default: 3.0, min: 0.5, max: 15.0, step: 0.5, unit: 'm', help: 'Will auto-adjust when annulus ports are connected' },
-      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 170, min: 50, max: 250, step: 5, unit: 'bar', help: 'Should match connected vessel' },
+      { name: 'pressureRating', type: 'number', label: 'Pressure Rating', default: 170, min: 1, max: CROSS_VESSEL_RATING_MAX, step: 5, unit: 'bar',
+        codeLimit: (p) => Math.min(codeRatingLimit('welded', 'outer')(p), codeRatingLimit('seamless', 'inner')(p)),
+        help: 'Should match connected vessel.' + CODE_LIMIT_HELP },
       { name: 'elevation', type: 'number', label: 'Elevation', default: 5, min: 0, max: 50, step: 0.5, unit: 'm', help: 'Height above ground' },
       { name: 'wallThickness', type: 'calculated', label: 'Outer Wall Thickness', default: 0, unit: 'm', help: WALL_HELP,
         calculate: (p) => crossVesselWalls(p.pressureRating || 170, p.outerDiameter || 1.0,
@@ -3105,6 +3121,17 @@ export class ComponentDialog {
       const label = option.label + (option.unit ? ` (${option.unit})` : '');
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         return `${label}: '${input.value}' is not a number`;
+      }
+
+      // Checked even when the field itself is untouched: changing the
+      // material, the QA box or the geometry moves this ceiling
+      if (option.codeLimit) {
+        const limit = option.codeLimit(properties);
+        if (value > limit) {
+          return `${label}: ${value} is beyond what the wall-thickness formula covers for this ` +
+            `material and design code (up to ${Math.floor(limit)}; past that the wall would be ` +
+            `thicker than half its radius and needs a thick-wall design this model does not do)`;
+        }
       }
 
       const untouched = input.dataset.initialValue !== undefined &&
