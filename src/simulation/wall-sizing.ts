@@ -35,6 +35,10 @@
  */
 
 import { MATERIALS, StructuralMaterial, resolveMaterial } from './materials';
+import {
+  buildingPlatePrice, REBAR_PRICE, REBAR_PLACING, CONCRETE_WALL_COST, FRAME_STEEL_PRICE,
+  FRAME_MEMBER_COST, STEEL_DENSITY,
+} from '../construction/cost-rates';
 
 export type DesignCode = 'section-iii' | 'section-viii';
 
@@ -210,11 +214,12 @@ export function maxDesignPressureAnyMaterialBar(form: WallForm, measuredOn: 'inn
  * Geometry: a cylinder is a shell with a hemispherical dome (a flat roof
  * cannot carry pressure in membrane action; real cylindrical containments
  * all have domes; the simulated free volume does not count the dome's).
- * A rectangular building is six flat panels with fixed edges carrying the
+ * A rectangular building is a steel frame with flat panels spanning
+ * between its members, each panel fixed at its edges and carrying the
  * pressure in two-way plate bending (Roark, Table 11.4 case 8, all edges
  * fixed, max moment at the middle of a long edge) plus the in-plane tension
- * each panel takes from the panels around it - which is why big flat walls
- * make poor pressure boundaries.
+ * it takes from the panels around it. The frame spacing is chosen as the
+ * cheapest that carries the rating (see the frame notes further down).
  *
  * Validity: the same rule as the vessels - a curved wall at most half its
  * inside radius - and for flat panels the plate formulas' own range, a
@@ -306,25 +311,7 @@ function roarkBeta1(aOverB: number): number {
   return 0.5;
 }
 
-interface Panel { b: number; a: number; N: number; area: number }
-
-/** The panels of a rectangular building at pressure P (Pa): spans and the
- *  in-plane tension (N/m) each takes from the pressure on its neighbours. */
-function rectanglePanels(spec: BuildingSpec, P: number): { walls: Panel[]; roof: Panel } {
-  const W = spec.width ?? 40, L = spec.length ?? 40, H = spec.height;
-  // Roof uplift P W L hangs on the wall perimeter; end walls pull on the
-  // side walls; wall pressure pulls the roof's edges
-  const vertical = P * W * L / (2 * (W + L));
-  const panel = (s1: number, s2: number, N: number, count: number): Panel =>
-    ({ b: Math.min(s1, s2), a: Math.max(s1, s2), N, area: count * s1 * s2 });
-  return {
-    walls: [
-      panel(H, L, Math.max(P * W / 2, vertical), 2),
-      panel(H, W, Math.max(P * L / 2, vertical), 2),
-    ],
-    roof: panel(W, L, P * H / 2, 1),
-  };
-}
+interface Panel { b: number; a: number; N: number }
 
 /** Panel thickness (m) for pressure P (Pa) on the steel basis given:
  *  N/(phiN S t) + M/(k S t^2) = 1 with the steel in two face layers. */
@@ -338,6 +325,163 @@ function panelThickness(panel: Panel, P: number, f: number, basis: SteelBasis): 
   return (a + Math.sqrt(a * a + 4 * c)) / 2;
 }
 
+/*
+ * Rectangular buildings are framed. Flat walls carry pressure in bending,
+ * and a panel's bending moment grows with the square of its span, so a
+ * real one is a frame of steel members with the wall panels spanning
+ * between them: vertical columns along every wall (fixed at the basemat and
+ * at the roof) and roof beams across the roof's shorter dimension, landing
+ * on the columns of the two long walls. One bay spacing runs through all of
+ * it (roof beams sit on columns).
+ *
+ * The spacing is not a design input: it is whatever carries the rating at
+ * the lowest cost. The panels get thinner as the bays shrink, while the
+ * frame's tonnage barely changes (each member carries its tributary width,
+ * and there are proportionally more of them) - what stops the bays from
+ * shrinking forever is the cost of each member's lift and end connections
+ * (cost-rates.ts FRAME_MEMBER_COST). An unframed box (one bay per wall) is
+ * one of the candidates, so a building that needs no frame gets none.
+ *
+ * Members are I-sections, fixed at both ends under their tributary
+ * pressure (M = w l^2/12, V = w l/2), at a depth of 1/20 of their span (the
+ * usual deflection-governed proportion for steel beams): two flanges for
+ * the moment, a web for the shear (von Mises, S/sqrt 3), plus area for the
+ * axial pull a column takes from the roof beams it holds down. Frame steel
+ * is the building's own plate steel in a plate building (stiffeners welded
+ * to the shell) and A992 structural steel (F_y 345, F_u 450 MPa, AISC ASD
+ * 0.6 F_y) in a reinforced concrete one.
+ */
+const A992_ALLOWABLE = 0.6 * 345e6;
+const A992_ULTIMATE = 450e6;
+const FRAME_SPAN_TO_DEPTH = 20;
+/** The most bays the spacing search tries along the long wall. */
+const MAX_BAYS = 1000;
+
+function frameStress(spec: BuildingSpec): { S: number; ultimate: number } {
+  if ((spec.steelForm ?? 'rebar') === 'rebar') return { S: A992_ALLOWABLE, ultimate: A992_ULTIMATE };
+  const material = resolveMaterial(spec.material);
+  return { S: designStress(material, designCodeFor(spec.nqa1)), ultimate: MATERIALS[material].ultimateMPa * 1e6 };
+}
+
+/** Cross-section area (m2) of a fixed-ended frame member of this span
+ *  carrying w N/m of pressure load and an axial pull N (N). */
+function memberArea(span: number, w: number, N: number, S: number): number {
+  const M = w * span * span / 12;
+  const V = w * span / 2;
+  const d = span / FRAME_SPAN_TO_DEPTH;
+  return 2 * M / (S * d) + Math.sqrt(3) * V / S + N / S;
+}
+
+interface RectLayout {
+  W: number; L: number; H: number;
+  /** Roof beams span the roof's short side Wr, spaced along its long side Lr */
+  Wr: number; Lr: number;
+}
+function rectLayout(spec: BuildingSpec): RectLayout {
+  const W = spec.width ?? 40, L = spec.length ?? 40;
+  return { W, L, H: spec.height, Wr: Math.min(W, L), Lr: Math.max(W, L) };
+}
+
+/** Bays on a wall of this length at the target spacing (ceil so no bay is
+ *  wider than the target), and the bay width that results. */
+function bays(length: number, spacing: number): { n: number; bay: number } {
+  const n = Math.max(1, Math.ceil(length / spacing - 1e-9));
+  return { n, bay: length / n };
+}
+
+interface RectDesign {
+  wall: number; roof: number;
+  wallArea: number; roofArea: number;
+  panelVolume: number;
+  frameVolume: number;   // m3 of frame steel
+  members: number;
+  spacing: number;       // bay spacing along the long wall (= its length: unframed)
+  valid: boolean;        // every panel within the plate formulas' range
+  panels: Array<{ panel: Panel; isRoof: boolean }>;
+}
+
+/** The framed design at pressure P (Pa) with this bay spacing (m). */
+function rectDesign(spec: BuildingSpec, P: number, spacing: number, f: number, basis: SteelBasis,
+                    frameS: number): RectDesign {
+  const g = rectLayout(spec);
+  const panels: RectDesign['panels'] = [];
+  let wall = 0, frameVolume = 0, members = 0, valid = true;
+  // The roof's uplift on the wall tops, per metre of wall
+  const vertical = P * g.W * g.L / (2 * (g.W + g.L));
+  // Two walls of each length; the end walls pull on the long walls and back
+  for (const [length, other] of [[g.L, g.W], [g.W, g.L]] as const) {
+    const { n, bay } = bays(length, spacing);
+    const panel: Panel = { b: Math.min(bay, g.H), a: Math.max(bay, g.H), N: Math.max(P * other / 2, vertical) };
+    const t = panelThickness(panel, P, f, basis);
+    wall = Math.max(wall, t);
+    valid = valid && t <= panel.b / 4;
+    panels.push({ panel, isRoof: false });
+    // Interior columns: tributary one bay; those on the long walls hold the
+    // roof beams down (half a beam's load each)
+    const columns = n - 1;
+    if (columns > 0) {
+      const pull = length === g.Lr ? P * bay * g.Wr / 2 : 0;
+      frameVolume += 2 * columns * memberArea(g.H, P * bay, pull, frameS) * g.H;
+      members += 2 * columns;
+    }
+  }
+  // Roof: beams across Wr at the long wall's bay spacing
+  const { n: nr, bay: bayR } = bays(g.Lr, spacing);
+  const roofPanel: Panel = { b: Math.min(bayR, g.Wr), a: Math.max(bayR, g.Wr), N: P * g.H / 2 };
+  const roof = panelThickness(roofPanel, P, f, basis);
+  valid = valid && roof <= roofPanel.b / 4;
+  panels.push({ panel: roofPanel, isRoof: true });
+  if (nr - 1 > 0) {
+    frameVolume += (nr - 1) * memberArea(g.Wr, P * bayR, 0, frameS) * g.Wr;
+    members += nr - 1;
+  }
+  // All walls are built to the thickest panel's need: one wall thickness
+  // is what heats, is drawn and bursts
+  const wallArea = 2 * (g.W + g.L) * g.H;
+  const roofArea = g.W * g.L;
+  return {
+    wall, roof, wallArea, roofArea, panelVolume: wallArea * wall + roofArea * roof,
+    frameVolume, members, spacing: bays(g.Lr, spacing).bay, valid, panels,
+  };
+}
+
+/** Installed cost of a design's walls, roof and frame (no basemat,
+ *  penetrations or QA factor - those do not depend on the spacing). */
+function rectDesignCost(spec: BuildingSpec, d: RectDesign, f: number): number {
+  const plate = (spec.steelForm ?? 'rebar') === 'plate';
+  const platePrice = buildingPlatePrice(spec.material);
+  const panelSteelPrice = plate ? platePrice : REBAR_PRICE + REBAR_PLACING;
+  const frameSteelPrice = plate ? platePrice : FRAME_STEEL_PRICE;
+  return f * d.panelVolume * STEEL_DENSITY * panelSteelPrice +
+    (1 - f) * d.panelVolume * CONCRETE_WALL_COST +
+    d.frameVolume * STEEL_DENSITY * frameSteelPrice +
+    d.members * FRAME_MEMBER_COST;
+}
+
+/** The cheapest valid framed design at P (Pa), or null when no spacing
+ *  keeps the panels within the plate formulas (that limit does not depend
+ *  on the span: t/b is set by P/(fS) alone). Memoized - the renderer asks
+ *  every frame. */
+const rectCache = new Map<string, RectDesign | null>();
+function bestRectDesign(spec: BuildingSpec, P: number, basis: SteelBasis, frameS: number): RectDesign | null {
+  const f = spec.steelFraction;
+  const key = [spec.width, spec.length, spec.height, f, spec.steelForm, spec.material, !!spec.nqa1,
+    P, basis.S, frameS].join('|');
+  const hit = rectCache.get(key);
+  if (hit !== undefined) return hit;
+  const Lr = rectLayout(spec).Lr;
+  let best: RectDesign | null = null, bestCost = Infinity;
+  for (let k = 1; k <= MAX_BAYS; k++) {
+    const d = rectDesign(spec, P, Lr / k, f, basis, frameS);
+    if (!d.valid) continue;
+    const cost = rectDesignCost(spec, d, f);
+    if (cost < bestCost) { bestCost = cost; best = d; }
+  }
+  if (rectCache.size > 2000) rectCache.clear();
+  rectCache.set(key, best);
+  return best;
+}
+
 export interface BuildingWalls {
   /** Side wall thickness (m) - the thickest wall panel of a rectangle. */
   wall: number;
@@ -346,8 +490,12 @@ export interface BuildingWalls {
   /** Surface areas (m2) the two thicknesses cover: dome = hemisphere. */
   wallArea: number;
   roofArea: number;
-  steelVolume: number;     // m3
+  steelVolume: number;     // m3 in the walls and roof (frame not included)
   concreteVolume: number;  // m3, walls and roof (basemat not included)
+  /** Rectangular buildings: the frame the spacing search chose. */
+  frame?: { spacing: number; members: number; steelVolume: number };
+  /** The rating (Pa) these walls were sized for. */
+  designPressure?: number;
 }
 
 function cylinderThicknesses(spec: BuildingSpec, P: number, basis: SteelBasis, f: number): { wall: number; roof: number } {
@@ -371,23 +519,26 @@ export function buildingWalls(spec: BuildingSpec, pressureBar: number): Building
   const f = checkSteel(spec);
   const P = pressureBar * 1e5;
   const basis = steelBasis(spec, false);
-  let wall: number, roof: number, wallArea: number, roofArea: number;
   if (spec.shape === 'rectangle') {
-    // All four walls are built to the thickest panel's need: one wall
-    // thickness is what heats, is drawn and bursts
-    const { walls, roof: roofPanel } = rectanglePanels(spec, P);
-    wall = Math.max(...walls.map(w => panelThickness(w, P, f, basis)));
-    roof = panelThickness(roofPanel, P, f, basis);
-    wallArea = walls.reduce((sum, w) => sum + w.area, 0);
-    roofArea = roofPanel.area;
-  } else {
-    const D = spec.diameter ?? 40;
-    ({ wall, roof } = cylinderThicknesses(spec, P, basis, f));
-    wallArea = Math.PI * D * spec.height;
-    roofArea = 2 * Math.PI * (D / 2) ** 2;
+    const d = bestRectDesign(spec, P, basis, frameStress(spec).S);
+    if (!d) {
+      throw new Error(
+        `[WallSizing] building '${spec.label ?? '?'}': ${pressureBar} bar needs flat panels thicker than ` +
+        `a quarter of their span, beyond the plate formulas - more steel, or a cylinder.`);
+    }
+    return {
+      wall: d.wall, roof: d.roof, wallArea: d.wallArea, roofArea: d.roofArea,
+      steelVolume: f * d.panelVolume, concreteVolume: (1 - f) * d.panelVolume,
+      frame: { spacing: d.spacing, members: d.members, steelVolume: d.frameVolume },
+      designPressure: P,
+    };
   }
+  const D = spec.diameter ?? 40;
+  const { wall, roof } = cylinderThicknesses(spec, P, basis, f);
+  const wallArea = Math.PI * D * spec.height;
+  const roofArea = 2 * Math.PI * (D / 2) ** 2;
   const total = wallArea * wall + roofArea * roof;
-  return { wall, roof, wallArea, roofArea, steelVolume: f * total, concreteVolume: (1 - f) * total };
+  return { wall, roof, wallArea, roofArea, steelVolume: f * total, concreteVolume: (1 - f) * total, designPressure: P };
 }
 
 /** The highest rating (bar) the wall formulas hold for: a curved wall at
@@ -400,16 +551,14 @@ export function maxBuildingDesignPressureBar(spec: BuildingSpec): number {
     // Wall governs (the dome is thinner): t = R/2
     return (basis.plate ? f * basis.S / (2 + f * basis.c) : f * basis.S / 3) / 1e5;
   }
-  // Thickness grows monotonically with P: bisect for the first panel to
-  // reach a quarter of its short span
-  const ok = (P: number) => {
-    const { walls, roof } = rectanglePanels(spec, P);
-    return [...walls, roof].every(p => panelThickness(p, P, f, basis) <= p.b / 4);
-  };
+  // t/b grows monotonically with P and does not depend on the span, so the
+  // unframed layout finds the same ceiling as any other: bisect on it
+  const g = rectLayout(spec);
+  const frameS = frameStress(spec).S;
   let lo = 0, hi = basis.S;
   for (let i = 0; i < 100; i++) {
     const mid = 0.5 * (lo + hi);
-    if (ok(mid)) lo = mid; else hi = mid;
+    if (rectDesign(spec, mid, g.Lr, f, basis, frameS).valid) lo = mid; else hi = mid;
   }
   return lo / 1e5;
 }
@@ -431,7 +580,8 @@ export function maxBuildingDesignPressureAnyBar(): number {
  * Burst pressure (Pa, gauge) of a building's walls as built: the steel at
  * its ultimate strength (times the drawn strength factor) carrying the
  * membrane tension (Barlow on a plate shell, exact equilibrium for rebar)
- * or the panel's plastic bending plus tension. The weaker of walls and roof.
+ * or the panel's plastic bending plus tension; for a framed rectangle also
+ * its frame members, whose demand is linear in the pressure. The weakest.
  */
 export function buildingBurstPressure(spec: BuildingSpec, walls: BuildingWalls, strengthFactor: number): number {
   const f = checkSteel(spec);
@@ -446,15 +596,21 @@ export function buildingBurstPressure(spec: BuildingSpec, walls: BuildingWalls, 
     return Math.min((2 / 3) * f * sigma * walls.wall / R, f * sigma * walls.roof / R);
   }
   const basis = { ...u, S: sigma };
-  const fails = (P: number) => {
-    const { walls: wp, roof } = rectanglePanels(spec, P);
-    return wp.some(p => panelThickness(p, P, f, basis) > walls.wall) ||
-      panelThickness(roof, P, f, basis) > walls.roof;
-  };
+  const fs = frameStress(spec);
+  const spacing = walls.frame?.spacing ?? rectLayout(spec).Lr;
+  // Panels as built (spans from the chosen spacing; the layout's panel
+  // spans and tensions scale with P the same way at any pressure)
+  const fails = (P: number) => rectDesign(spec, P, spacing, f, basis, fs.S).panels
+    .some(({ panel, isRoof }) => panelThickness(panel, P, f, basis) > (isRoof ? walls.roof : walls.wall));
   let lo = 0, hi = sigma;
   for (let i = 0; i < 100; i++) {
     const mid = 0.5 * (lo + hi);
     if (fails(mid)) hi = mid; else lo = mid;
+  }
+  // Frame members were sized at the design stress for the rating; every
+  // load on them is proportional to pressure
+  if ((walls.frame?.members ?? 0) > 0 && walls.designPressure !== undefined) {
+    lo = Math.min(lo, walls.designPressure * (fs.ultimate * strengthFactor) / fs.S);
   }
   return lo;
 }

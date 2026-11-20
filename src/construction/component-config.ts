@@ -1149,12 +1149,26 @@ export const componentDefinitions: Record<string, {
         help: 'Share of the wall cross-section that is steel; the rest is concrete. Less steel means a thicker wall for the same pressure (the steel area needed is fixed by the pressure; the concrete just surrounds it). ' +
           'Heavily reinforced concrete containments run a few percent; 1 is solid steel.' },
       { name: 'wallThickness', type: 'calculated', label: 'Wall Thickness', default: 0, unit: 'm',
-        help: 'Side walls, sized from the rating, steel form and fraction (the thickest panel, for a rectangle). This is the wall the simulation heats, draws and bursts.',
+        help: 'Side walls, sized from the rating, steel form and fraction (for a rectangle, the thickest panel between frame members). This is the wall the simulation heats, draws and bursts.',
         calculate: (p) => dialogBuildingFigure(p, w => w.wall, 3)
       },
       { name: 'roofThickness', type: 'calculated', label: 'Dome / Roof Thickness', default: 0, unit: 'm',
-        help: 'A cylinder is capped by a hemispherical dome (membrane, half the hoop load); a rectangle by a flat roof slab in bending.',
+        help: 'A cylinder is capped by a hemispherical dome (membrane, half the hoop load); a rectangle by a flat roof slab in bending between roof beams.',
         calculate: (p) => dialogBuildingFigure(p, w => w.roof, 3)
+      },
+      { name: 'frameSpacing', type: 'calculated', label: 'Frame Spacing', default: 0, unit: 'm',
+        dependsOn: { field: 'buildingShape', value: 'rectangle' },
+        help: 'Flat walls carry pressure in bending, which grows with the square of the span, so a rectangular building is a steel frame (columns along the walls, beams across the roof) with the panels spanning between members. ' +
+          'The spacing is chosen automatically as the cheapest that carries the rating: closer members mean thinner panels but more pieces to lift and connect. Equal to the long wall\'s length when no frame is worth having.',
+        calculate: (p) => dialogBuildingFigure(p, w => w.frame?.spacing ?? NaN, 2)
+      },
+      { name: 'frameMembers', type: 'calculated', label: 'Frame Members', default: 0,
+        dependsOn: { field: 'buildingShape', value: 'rectangle' },
+        calculate: (p) => dialogBuildingFigure(p, w => w.frame?.members ?? NaN, 0)
+      },
+      { name: 'frameSteel', type: 'calculated', label: 'Frame Steel', default: 0, unit: 't',
+        dependsOn: { field: 'buildingShape', value: 'rectangle' },
+        calculate: (p) => dialogBuildingFigure(p, w => (w.frame?.steelVolume ?? NaN) * 7.85, 0)
       },
       { name: 'steelMass', type: 'calculated', label: 'Steel in Walls and Roof', default: 0, unit: 't',
         calculate: (p) => dialogBuildingFigure(p, w => w.steelVolume * 7.85, 0)

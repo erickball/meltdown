@@ -18,52 +18,11 @@
  */
 
 import { designWallThickness, crossVesselWalls, type WallForm, buildingWalls, buildingSpecOf, type BuildingSpec } from '../simulation/wall-sizing';
-import { MATERIALS, resolveMaterial } from '../simulation/materials';
-
-/** Price of a pressure boundary's alloy relative to the steel grade an
- *  estimator assumes for low-alloy steel (materials.ts costFactor). */
-function alloyPriceFactor(material: string | undefined): number {
-  return MATERIALS[resolveMaterial(material)].costFactor;
-}
-
-// Steel prices ($/kg) for different grades
-const STEEL_PRICES = {
-  carbonSteel: 2.5,           // SA-516 Gr 70, general purpose
-  lowAlloySteel: 4.0,         // SA-533 Grade B, reactor vessels
-  stainlessSteel: 8.0,        // 304/316 SS
-};
-
-// Fabrication cost multipliers (vs raw material cost)
-const FABRICATION_MULTIPLIERS = {
-  simpleTank: 3.0,            // Basic cylindrical vessel
-  pressureVessel: 5.0,        // ASME code vessel with heads
-  reactorVessel: 8.0,         // Complex forging, cladding
-  heatExchanger: 6.0,         // Tube bundle assembly
-  piping: 4.0,                // Including fittings, supports
-  pump: 1.0,                  // (base cost includes fabrication)
-  valve: 1.0,                 // (base cost includes fabrication)
-  turbine: 1.0,               // (base cost includes fabrication)
-};
-
-// Installation cost multipliers (vs equipment cost)
-const INSTALLATION_MULTIPLIERS = {
-  simpleTank: 0.5,            // Basic rigging and setting
-  pressureVessel: 0.8,        // Complex rigging, alignment
-  reactorVessel: 1.5,         // Specialized heavy lift, internals
-  heatExchanger: 0.7,         // Tube bundle insertion
-  piping: 1.2,                // Welding, supports, hangers
-  pump: 0.6,                  // Foundation, alignment, piping
-  valve: 0.3,                 // Inline installation
-  turbine: 1.0,               // Foundation, alignment, auxiliary systems
-  condenser: 0.6,             // Placement, circulating water piping
-  electrical: 0.4,            // Generator connections
-};
-
-// NQA-1 multiplier for nuclear quality components
-const NQA1_MULTIPLIER = 5.0;
-
-// Steel density (kg/m³)
-const STEEL_DENSITY = 7850;
+import {
+  alloyPriceFactor, STEEL_PRICES, FABRICATION_MULTIPLIERS, INSTALLATION_MULTIPLIERS,
+  NQA1_MULTIPLIER, STEEL_DENSITY, REBAR_PRICE, REBAR_PLACING, CONCRETE_WALL_COST,
+  buildingPlatePrice, FRAME_STEEL_PRICE, FRAME_MEMBER_COST,
+} from './cost-rates';
 
 /**
  * Calculate the mass of steel for a cylindrical pressure vessel
@@ -987,9 +946,6 @@ export function estimateSwitchyardCost(props: {
  * The rating enters only through the walls it sizes - more pressure means
  * more steel and concrete, nothing else.
  */
-const REBAR_PRICE = 1.0;          // $/kg, Grade 60 bar delivered
-const REBAR_PLACING = 1.5;        // $/kg to cut, bend, place and splice
-const CONCRETE_WALL_COST = 1000;  // $/m3, walls and dome, installed, rebar excluded
 const CONCRETE_BASEMAT_COST = 750;  // $/m3
 const BASEMAT_THICKNESS = 3;      // m
 
@@ -1005,6 +961,7 @@ export function estimateBuildingCost(props: {
   const plate = spec.steelForm === 'plate';
   let steelMaterial: number, steelFabrication: number, steelInstallation: number;
   if (plate) {
+    // Split of buildingPlatePrice into its material / fabrication / rigging parts
     steelMaterial = steelMass * STEEL_PRICES.carbonSteel * alloyPriceFactor(spec.material);
     steelFabrication = steelMaterial * FABRICATION_MULTIPLIERS.pressureVessel;
     steelInstallation = (steelMaterial + steelFabrication) * INSTALLATION_MULTIPLIERS.pressureVessel;
@@ -1013,6 +970,11 @@ export function estimateBuildingCost(props: {
     steelFabrication = 0;
     steelInstallation = steelMass * REBAR_PLACING;
   }
+  // Rectangular buildings: the frame the sizing chose (wall-sizing.ts)
+  const frameMass = (walls.frame?.steelVolume ?? 0) * STEEL_DENSITY;
+  const frameMembers = walls.frame?.members ?? 0;
+  const frameCost = frameMass * (plate ? buildingPlatePrice(spec.material) : FRAME_STEEL_PRICE) +
+    frameMembers * FRAME_MEMBER_COST;
 
   const concreteCost = walls.concreteVolume * CONCRETE_WALL_COST;
   const footprint = spec.shape === 'rectangle'
@@ -1023,7 +985,7 @@ export function estimateBuildingCost(props: {
   const penetrationCost = 5_000_000 * Math.sqrt(volume / 10000);
 
   const materialCost = steelMaterial;
-  const fabricationCost = steelFabrication;
+  const fabricationCost = steelFabrication + frameCost;
   const installationCost = steelInstallation + concreteCost + basematCost + penetrationCost;
   const subtotal = materialCost + fabricationCost + installationCost;
   const nqa1Premium = props.nqa1 ? subtotal * (NQA1_MULTIPLIER - 1) : 0;
@@ -1042,6 +1004,9 @@ export function estimateBuildingCost(props: {
       concreteCost: Math.round(concreteCost),
       basematCost: Math.round(basematCost),
       penetrationCost: Math.round(penetrationCost),
+      frameMass: Math.round(frameMass),
+      frameMembers,
+      frameCost: Math.round(frameCost),
       wallThickness: walls.wall * 1000, // mm
       roofThickness: walls.roof * 1000, // mm
     },

@@ -107,6 +107,13 @@ function perturbedProps(defKey: string): Record<string, any> {
   }
   // Bundle count is rounded to an integer by the write path
   if (props.bundleCount !== undefined) props.bundleCount = 2;
+  // Ratings the dialog would refuse for the perturbed material/geometry
+  // (the wall formulas' ceiling, ComponentOption.codeLimit) stay under it
+  for (const o of editableOptions(defKey)) {
+    if (!o.codeLimit) continue;
+    const limit = o.codeLimit(props);
+    if (props[o.name] > limit) props[o.name] = +(0.9 * limit).toPrecision(4);
+  }
   return props;
 }
 
